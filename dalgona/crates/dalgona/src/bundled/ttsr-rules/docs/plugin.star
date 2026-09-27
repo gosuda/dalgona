@@ -1,0 +1,1 @@
+dal.plugin(name = "docs", version = "0.1.0", inject = [])

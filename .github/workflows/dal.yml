@@ -1,0 +1,92 @@
+name: dal
+on:
+  push:
+    paths:
+      - "dal/**"
+      - ".github/workflows/dal.yml"
+      - "rust-toolchain.toml"
+      - ".gitignore"
+      - "LICENSE"
+      - "AGENTS.md"
+      - "README.md"
+  pull_request:
+    paths:
+      - "dal/**"
+      - ".github/workflows/dal.yml"
+      - "rust-toolchain.toml"
+      - ".gitignore"
+      - "LICENSE"
+      - "AGENTS.md"
+      - "README.md"
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fmt:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: dal
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - run: cargo fmt --check --all
+
+  gates:
+    needs: fmt
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: macos-15-intel, target: x86_64-apple-darwin }
+          - { os: macos-15, target: aarch64-apple-darwin }
+          - { os: windows-2022, target: x86_64-pc-windows-msvc }
+          - { os: windows-11-arm, target: aarch64-pc-windows-msvc }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: dal
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo check --locked --no-default-features --workspace
+      - run: cargo test --workspace --all-features --locked
+
+  msrv:
+    needs: fmt
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: dal
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - run: rustup toolchain install 1.98.1 --profile minimal
+      - run: cargo +1.98.1 check --workspace --all-features --locked
+
+  deny:
+    needs: [gates, msrv]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: taiki-e/install-action@v2.87.21
+        with:
+          tool: cargo-deny@0.20.2
+      - run: cargo deny --locked check
+        working-directory: dal

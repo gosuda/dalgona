@@ -1,0 +1,20 @@
+[package]
+name = "dal-ext"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+repository.workspace = true
+description = "Built-in extension composition and rendering for dal"
+
+[dependencies]
+png.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+unicode-width.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

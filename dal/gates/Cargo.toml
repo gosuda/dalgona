@@ -1,0 +1,17 @@
+[package]
+name = "gates"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+repository.workspace = true
+publish = false
+autobins = false
+autoexamples = false
+autobenches = false
+autotests = false
+
+[lib]
+
+[lints]
+workspace = true

@@ -1,0 +1,38 @@
+[workspace]
+resolver = "3"
+members = ["gates"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98.1"
+license-file = "../LICENSE"
+repository = "https://github.com/gosuda/dalgona"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unsafe_op_in_unsafe_fn = "deny"
+rust_2018_idioms = { level = "deny", priority = -1 }
+missing_docs = "deny"
+missing_debug_implementations = "deny"
+unused_lifetimes = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"
+
+[workspace.lints.clippy]
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "deny", priority = -1 }
+complexity = { level = "deny", priority = -1 }
+perf = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "warn"
+panic = "warn"
+str_to_string = "deny"
+create_dir = "deny"
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+exit = "deny"
+disallowed_methods = "deny"

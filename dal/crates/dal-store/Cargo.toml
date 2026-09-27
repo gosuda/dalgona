@@ -1,0 +1,22 @@
+[package]
+name = "dal-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+repository.workspace = true
+description = "Durable session journals, blobs, and locks for dal"
+publish = false
+
+[dependencies]
+blake3.workspace = true
+dal-core = { path = "../dal-core" }
+jiff.workspace = true
+sonic-rs.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+unicode-segmentation = { version = "=1.12.0", default-features = false }
+uuid.workspace = true
+
+[lints]
+workspace = true
