@@ -85,17 +85,33 @@ def parse_cost(record: JSONValue) -> tuple[float | None, float | None, float | N
     )
 
 
-def _provider_rows(provider: str, entry: JSONValue, seen: set[str]) -> list[PriceRow]:
+def _provider_rows(
+    provider: str,
+    entry: JSONValue,
+    seen: set[str],
+) -> tuple[list[PriceRow], list[tuple[str, str]]]:
     if not isinstance(entry, dict):
         raise UpdatePricesError(CATALOG_MESSAGE)
     models: JSONValue = entry.get("models")
     if models is None:
-        return []
+        return [], []
     if not isinstance(models, dict):
         raise UpdatePricesError(CATALOG_MESSAGE)
     rows: list[PriceRow] = []
+    temperature_rows: list[tuple[str, str]] = []
     for model, record in models.items():
+        if not isinstance(record, dict):
+            raise UpdatePricesError(CATALOG_MESSAGE)
         rates = parse_cost(record)
+        if "temperature" in record:
+            temperature = record["temperature"]
+            if not isinstance(temperature, bool):
+                raise UpdatePricesError(CATALOG_MESSAGE)
+            if temperature:
+                key = f"{provider}/{model}"
+                if any(0xD800 <= ord(ch) <= 0xDFFF for ch in key):
+                    raise UpdatePricesError(CATALOG_MESSAGE)
+                temperature_rows.append((provider, model))
         if all(rate is None for rate in rates):
             continue
         key = f"{provider}/{model}"
@@ -103,14 +119,14 @@ def _provider_rows(provider: str, entry: JSONValue, seen: set[str]) -> list[Pric
             raise UpdatePricesError(CATALOG_MESSAGE)
         seen.add(key)
         rows.append(PriceRow(key, *rates))
-    return rows
+    return rows, temperature_rows
 
 
 def _reject_json_constant(value: str) -> NoReturn:
     raise ValueError(f"non-finite JSON constant {value!r} is not valid JSON")
 
 
-def load_rows(path: Path) -> list[PriceRow]:
+def load_catalog(path: Path) -> tuple[list[PriceRow], list[tuple[str, str]]]:
     try:
         catalog: JSONValue = json.loads(
             path.read_text(encoding="utf-8"),
@@ -122,13 +138,17 @@ def load_rows(path: Path) -> list[PriceRow]:
     if not isinstance(catalog, dict):
         raise UpdatePricesError(CATALOG_MESSAGE)
     rows: list[PriceRow] = []
+    temperature_rows: list[tuple[str, str]] = []
     seen: set[str] = set()
     for provider, entry in catalog.items():
-        rows.extend(_provider_rows(provider, entry, seen))
+        provider_rows, provider_temperature_rows = _provider_rows(provider, entry, seen)
+        rows.extend(provider_rows)
+        temperature_rows.extend(provider_temperature_rows)
     if not rows:
         raise UpdatePricesError(NO_PRICED_MESSAGE)
     rows.sort(key=lambda row: row.model)
-    return rows
+    temperature_rows.sort()
+    return rows, temperature_rows
 
 
 def load_fetched_at(path: Path) -> str:
@@ -181,11 +201,16 @@ def render_rate(value: float | None) -> str:
     return f"Some({f64_literal(value)})"
 
 
-def render(fetched_at: str, rows: Sequence[PriceRow]) -> str:
+def render(
+    fetched_at: str,
+    rows: Sequence[PriceRow],
+    temperature_rows: Sequence[tuple[str, str]],
+) -> str:
     lines: list[str] = [
         f'pub(crate) const PRICE_SOURCE: &str = "{PRICE_SOURCE}";',
         f'pub(crate) const PRICE_SOURCE_URL: &str = "{PRICE_SOURCE_URL}";',
         f'pub(crate) const PRICE_FETCHED_AT: &str = "{fetched_at}";',
+        '#[expect(clippy::unreadable_literal, reason = "generated price literals preserve the snapshot\'s decimal values")]',
         "pub(crate) const PRICE_ROWS: &[PriceRow] = &[",
     ]
     for row in rows:
@@ -200,6 +225,9 @@ def render(fetched_at: str, rows: Sequence[PriceRow]) -> str:
                 "    },",
             ]
         )
+    lines.extend(["];", "pub(crate) const TEMPERATURE_ROWS: &[(&str, &str)] = &["])
+    for provider, model in temperature_rows:
+        lines.append(f"    ({rust_string(provider)}, {rust_string(model)}),")
     lines.append("];")
     return chr(10).join(lines) + chr(10)
 
@@ -213,12 +241,12 @@ def main(argv: Sequence[str]) -> int:
         return 2
     root = Path(__file__).resolve().parent.parent
     try:
-        rows = load_rows(root / SNAPSHOT_PATH)
+        rows, temperature_rows = load_catalog(root / SNAPSHOT_PATH)
         fetched_at = load_fetched_at(root / FETCHED_AT_PATH)
     except UpdatePricesError as err:
         print(str(err), file=sys.stderr)
         return 1
-    generated = render(fetched_at, rows).encode("utf-8")
+    generated = render(fetched_at, rows, temperature_rows).encode("utf-8")
     target = root / GENERATED_PATH
     if check:
         if not target.is_file() or target.read_bytes() != generated:

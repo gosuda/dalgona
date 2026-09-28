@@ -48,20 +48,23 @@ pub struct SessionInfo {
     pub id: SessionId,
     /// Its optional display name.
     pub name: Option<Box<str>>,
-    /// A short preview of the session's latest content.
+    /// A short preview of the session's first user message.
     pub preview: Box<str>,
     /// The absolute workspace associated with the session.
     pub workspace: Workspace,
     /// The session's latest update time.
     #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub updated_at: jiff::Timestamp,
-    /// The session's creation time.
-    #[cfg_attr(feature = "schema", schemars(with = "String"))]
-    pub created_at: jiff::Timestamp,
-    /// Whether the session is archived.
-    pub archived: bool,
-    /// The last journal sequence associated with the session.
-    pub last_seq: Seq,
+    /// The session's creation time, when its header can be read.
+    #[serde(default)]
+    #[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
+    pub created_at: Option<jiff::Timestamp>,
+    /// Whether the session is archived, when its journal can be read.
+    #[serde(default)]
+    pub archived: Option<bool>,
+    /// The last journal sequence, when known by the active session.
+    #[serde(default)]
+    pub last_seq: Option<Seq>,
 }
 
 /// The current lifecycle state of a session turn.
@@ -156,11 +159,11 @@ pub enum PageReqError {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
-pub struct Page<T> {
+pub struct Page<T, Cursor = EntryId> {
     /// Values in chronological page order.
     pub items: Vec<T>,
     /// The exclusive cursor for the next older page, when one exists.
-    pub next_before: Option<EntryId>,
+    pub next_before: Option<Cursor>,
 }
 
 /// An entry in the session's visible history.
@@ -361,9 +364,9 @@ mod tests {
             preview: "latest content".into(),
             workspace: Workspace::new(std::env::temp_dir())?,
             updated_at: jiff::Timestamp::UNIX_EPOCH,
-            created_at: jiff::Timestamp::UNIX_EPOCH,
-            archived: false,
-            last_seq: Seq::new(NonZeroU64::MIN),
+            created_at: Some(jiff::Timestamp::UNIX_EPOCH),
+            archived: Some(false),
+            last_seq: Some(Seq::new(NonZeroU64::MIN)),
         };
         let encoded = sonic_rs::to_string(&session)?;
         let decoded: SessionInfo = sonic_rs::from_str(&encoded)?;
@@ -398,9 +401,9 @@ mod tests {
             preview: "latest content".into(),
             workspace: Workspace::new(std::env::temp_dir())?,
             updated_at: jiff::Timestamp::UNIX_EPOCH,
-            created_at: jiff::Timestamp::UNIX_EPOCH,
-            archived: false,
-            last_seq: Seq::new(NonZeroU64::new(4).expect("4 is nonzero")),
+            created_at: Some(jiff::Timestamp::UNIX_EPOCH),
+            archived: Some(false),
+            last_seq: Some(Seq::new(NonZeroU64::new(4).expect("4 is nonzero"))),
         };
         let view = View {
             r#gen: Gen::new(NonZeroU64::new(2).expect("2 is nonzero")),
@@ -459,7 +462,33 @@ mod tests {
         assert_eq!(consumer.entries.next_before, Some(next_before));
         assert_eq!(consumer.session.updated_at, jiff::Timestamp::UNIX_EPOCH);
         assert_eq!(consumer.session.created_at, jiff::Timestamp::UNIX_EPOCH);
-        assert_eq!(consumer.session.last_seq, view.session.last_seq);
+        assert_eq!(
+            consumer.session.last_seq,
+            view.session
+                .last_seq
+                .expect("healthy session has a journal sequence")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn damaged_session_info_serializes_unknown_metadata_as_null() -> TestResult {
+        let session = SessionInfo {
+            id: SessionId::new_v7(),
+            name: None,
+            preview: "(damaged session file)".into(),
+            workspace: Workspace::new(std::env::temp_dir())?,
+            updated_at: jiff::Timestamp::UNIX_EPOCH,
+            created_at: None,
+            archived: None,
+            last_seq: None,
+        };
+        let encoded = sonic_rs::to_string(&session)?;
+        assert!(encoded.contains("\"createdAt\":null"));
+        assert!(encoded.contains("\"archived\":null"));
+        assert!(encoded.contains("\"lastSeq\":null"));
+        let decoded: SessionInfo = sonic_rs::from_str(&encoded)?;
+        assert_eq!(decoded, session);
         Ok(())
     }
 }

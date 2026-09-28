@@ -3,15 +3,16 @@
 //! Each variant's display text is the product text. Callers match the
 //! variant; front ends print [`std::error::Error::to_string`].
 
-use std::path::PathBuf;
+use std::{io, path::PathBuf};
 
-use dal_core::EntryId;
+use dal_core::{EntryId, SessionId};
 
 /// A session operation failed.
-#[derive(Clone, Debug, PartialEq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum StoreError {
     /// Another process holds the session lock.
-    #[error("{}", locked_text(.session, .pid))]
+    #[error("{}", locked_text(.session, *.pid))]
     Locked {
         /// The session that is open elsewhere.
         session: Box<str>,
@@ -20,13 +21,13 @@ pub enum StoreError {
     },
     /// The journal names a format this build does not read.
     #[error(
-        "session file {path} uses journal format {found}; this dalgon reads format 1. Update dal to open it."
+        "session file {path} uses journal format {found}; this dalgon reads format 1. Update dalgon to open it."
     )]
     UnknownVersion {
         /// The journal path.
         path: PathBuf,
         /// The version found.
-    found: u64,
+        found: u64,
     },
     /// No journal exists at the path.
     #[error("no session file at {}", .path.display())]
@@ -36,7 +37,7 @@ pub enum StoreError {
     },
     /// The journal failed structure checks. The file was not changed.
     #[error(
-        "session file {path} is damaged at byte {offset}: {reason}. dal did not change it. Move the file aside, or truncate it at byte {offset} to keep the earlier records."
+        "session file {path} is damaged at byte {offset}: {reason}. dalgon did not change it. Move the file aside, or truncate it at byte {offset} to keep the earlier records."
     )]
     Damaged {
         /// The journal path.
@@ -48,7 +49,7 @@ pub enum StoreError {
     },
     /// A batch write failed and the partial bytes were removed.
     #[error(
-        "could not write session {id}: {cause}. dal removed the partial record. Remove the cause, then resume the session."
+        "could not write session {id}: {cause}. dalgon removed the partial record. Remove the cause, then resume the session."
     )]
     WriteFailed {
         /// The session identifier.
@@ -76,7 +77,7 @@ pub enum StoreError {
         /// The path of the failed call.
         path: PathBuf,
         /// The operating-system error.
-        source: Box<str>,
+        source: Box<io::Error>,
     },
     /// `--resume` was given an empty argument.
     #[error("--resume needs a session id or name")]
@@ -148,7 +149,7 @@ pub enum StoreError {
     Blob(#[from] BlobError),
 }
 
-fn locked_text(session: &str, pid: &Option<u32>) -> String {
+fn locked_text(session: &str, pid: Option<u32>) -> String {
     match pid {
         Some(pid) => format!("session {session} is open in process {pid}"),
         None => format!("session {session} is open in another process"),
@@ -156,7 +157,8 @@ fn locked_text(session: &str, pid: &Option<u32>) -> String {
 }
 
 /// A journal file operation failed.
-#[derive(Clone, Debug, PartialEq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum JournalError {
     /// A named file operation failed.
     #[error("{op} {}: {source}", .path.display())]
@@ -166,7 +168,7 @@ pub enum JournalError {
         /// The path of the failed call.
         path: PathBuf,
         /// The operating-system or injected error.
-        source: Box<str>,
+        source: Box<io::Error>,
     },
     /// A line exceeds the record byte limit.
     #[error("{path}: the record at byte {offset} is longer than 67108864 bytes")]
@@ -186,10 +188,22 @@ pub enum JournalError {
         /// The rollback failure.
         cause: Box<str>,
     },
+    /// The worker that owns this session's journal has stopped.
+    #[error("journal worker for session {session} is closed")]
+    ShardClosed {
+        /// The session whose worker stopped.
+        session: SessionId,
+    },
+    /// A previous batch has not been settled after its waiter was cancelled.
+    #[error("journal batch for session {session} must settle before another append")]
+    BatchPending {
+        /// The session whose earlier batch still owns the append slot.
+        session: SessionId,
+    },
 }
 
 /// A blob read or write failed.
-#[derive(Clone, Debug, PartialEq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum BlobError {
     /// The digest file is absent and the session directory is present.
     #[error("blob {hex} is not in this session")]
@@ -210,19 +224,19 @@ pub enum BlobError {
     #[error("blob store: {source}")]
     Io {
         /// The operating-system error.
-        source: Box<str>,
+        source: Box<io::Error>,
     },
 }
 
 /// Facts the store returns when open repairs a file. The agent prints them.
 #[derive(Clone, Debug, PartialEq)]
 pub struct OpenReport {
+    /// The boot generation written by this open.
+    pub r#gen: dal_core::Gen,
     /// A torn tail that was moved aside, when one was present.
     pub torn: Option<TornTail>,
     /// An open turn that recovery closed, when one was present.
     pub aborted: Option<AbortedTurn>,
-    /// The boot generation written by this open.
-    pub gen: u64,
 }
 
 /// A torn tail quarantined at open.
@@ -254,9 +268,9 @@ pub struct AbortedTurn {
     /// The turn that was open.
     pub turn: dal_core::TurnId,
     /// Unfinished calls that had a `tool_start`.
-    pub interrupted: u64,
+    pub interrupted: u32,
     /// Unfinished calls that had no `tool_start`.
-    pub not_run: u64,
+    pub not_run: u32,
 }
 
 impl AbortedTurn {
@@ -283,8 +297,7 @@ pub const NO_EARLIER_SESSION: &str =
 pub const INTERRUPTED_CALL: &str = "dalgon stopped while this tool call ran. The outcome is unknown. Inspect the workspace before you run it again.";
 
 /// Text of a tool result written for a call that had not started.
-pub const NOT_RUN_CALL: &str =
-    "dalgon stopped before this tool call started. It did not run.";
+pub const NOT_RUN_CALL: &str = "dalgon stopped before this tool call started. It did not run.";
 
 /// Projection-only text for a tool call with no result on the visible branch.
 pub const MISSING_ON_BRANCH: &str = "This tool call has no result on this branch.";

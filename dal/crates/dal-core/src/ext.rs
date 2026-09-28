@@ -577,6 +577,7 @@ pub enum RepeatMode {
     /// Apply only once.
     Once,
     /// Apply again after its configured gap.
+    #[serde(rename = "after-gap")]
     AfterGap,
 }
 
@@ -900,6 +901,191 @@ pub const STAR_EVENTS: [&str; 9] = [
 
 /// The event name reserved for Rust-only stream watchers.
 pub const RUST_STREAM_EVENT: &str = "output_stream";
+
+/// The identity of one of the nine hook events, in [`STAR_EVENTS`] order.
+///
+/// Serializes as the matching [`STAR_EVENTS`] literal. The Rust-only
+/// [`RUST_STREAM_EVENT`] watcher is outside this set: it answers each delta
+/// with a [`StreamVerdict`], and no [`HookVerdict`] stands for it.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum HookEvent {
+    /// Observe-only; payload [`SessionStart`].
+    SessionStart,
+    /// Observe-only; payload [`SessionEnd`].
+    SessionEnd,
+    /// Guarding; payload [`InputEvent`], verdict [`InputVerdict`].
+    Input,
+    /// Guarding; payload [`BeforeTurn`], verdict optional added text.
+    BeforeTurn,
+    /// Guarding; payload [`BeforeRequest`], verdict optional [`RequestParams`].
+    BeforeRequest,
+    /// Guarding; payload [`ToolCallEvent`], verdict [`ToolCallVerdict`].
+    ToolCall,
+    /// Observe-only; payload [`ToolResultEvent`].
+    ToolResult,
+    /// Observe-only; payload [`TurnEnd`].
+    TurnEnd,
+    /// Observe-only; payload [`Settled`].
+    Settled,
+}
+
+impl HookEvent {
+    /// Every hook event, in the order of [`STAR_EVENTS`].
+    pub const ALL: [Self; 9] = [
+        Self::SessionStart,
+        Self::SessionEnd,
+        Self::Input,
+        Self::BeforeTurn,
+        Self::BeforeRequest,
+        Self::ToolCall,
+        Self::ToolResult,
+        Self::TurnEnd,
+        Self::Settled,
+    ];
+
+    /// Returns the event's [`STAR_EVENTS`] literal.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SessionStart => STAR_EVENTS[0],
+            Self::SessionEnd => STAR_EVENTS[1],
+            Self::Input => STAR_EVENTS[2],
+            Self::BeforeTurn => STAR_EVENTS[3],
+            Self::BeforeRequest => STAR_EVENTS[4],
+            Self::ToolCall => STAR_EVENTS[5],
+            Self::ToolResult => STAR_EVENTS[6],
+            Self::TurnEnd => STAR_EVENTS[7],
+            Self::Settled => STAR_EVENTS[8],
+        }
+    }
+
+    /// Whether hooks for this event return a [`HookVerdict`].
+    ///
+    /// Observe-only events return `()`; no verdict exists for them.
+    #[must_use]
+    pub const fn is_guarding(self) -> bool {
+        matches!(
+            self,
+            Self::Input | Self::BeforeTurn | Self::BeforeRequest | Self::ToolCall
+        )
+    }
+}
+
+impl fmt::Display for HookEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// The final result of one guarding hook chain.
+///
+/// Each variant answers exactly one guarding [`HookEvent`], given by
+/// [`HookVerdict::event`]. Observe-only events have no variant, so no
+/// value here can stand for an observer's approval.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum HookVerdict {
+    /// The `input` result.
+    Input(InputVerdict),
+    /// The `before_turn` result; `None` adds no text.
+    BeforeTurn(Option<Box<str>>),
+    /// The `before_request` result; `None` leaves the parameters unchanged.
+    BeforeRequest(Option<RequestParams>),
+    /// The `tool_call` result.
+    ToolCall(ToolCallVerdict),
+}
+
+impl HookVerdict {
+    /// Returns the one guarding event this verdict answers.
+    #[must_use]
+    pub const fn event(&self) -> HookEvent {
+        match self {
+            Self::Input(_) => HookEvent::Input,
+            Self::BeforeTurn(_) => HookEvent::BeforeTurn,
+            Self::BeforeRequest(_) => HookEvent::BeforeRequest,
+            Self::ToolCall(_) => HookEvent::ToolCall,
+        }
+    }
+}
+
+/// A guarding hook verdict checked against the event it answers.
+///
+/// The only constructor is [`HookOutcome::new`], so holding one proves the
+/// pair is valid: the event is guarding and the verdict answers it. An
+/// observe-only event can never produce an outcome.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HookOutcome {
+    verdict: HookVerdict,
+}
+
+impl HookOutcome {
+    /// Pairs `verdict` with `event` when the verdict answers that event.
+    ///
+    /// # Errors
+    /// Returns [`HookMismatch::Observer`] when `event` is observe-only and
+    /// [`HookMismatch::WrongEvent`] when the verdict answers another event.
+    pub fn new(event: HookEvent, verdict: HookVerdict) -> Result<Self, HookMismatch> {
+        let answered = verdict.event();
+        if answered == event {
+            return Ok(Self { verdict });
+        }
+        if event.is_guarding() {
+            return Err(HookMismatch::WrongEvent {
+                event,
+                verdict: answered,
+            });
+        }
+        Err(HookMismatch::Observer {
+            event,
+            verdict: answered,
+        })
+    }
+
+    /// Returns the guarding event this outcome answers.
+    #[must_use]
+    pub const fn event(&self) -> HookEvent {
+        self.verdict.event()
+    }
+
+    /// Borrows the checked verdict.
+    #[must_use]
+    pub const fn verdict(&self) -> &HookVerdict {
+        &self.verdict
+    }
+
+    /// Returns the checked verdict.
+    #[must_use]
+    pub fn into_verdict(self) -> HookVerdict {
+        self.verdict
+    }
+}
+
+/// A hook verdict was paired with an event it does not answer.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum HookMismatch {
+    /// The event is observe-only and has no verdict.
+    #[error("observe-only hook event {event} returns no verdict; got the {verdict} verdict")]
+    Observer {
+        /// The observe-only event.
+        event: HookEvent,
+        /// The event the supplied verdict answers.
+        verdict: HookEvent,
+    },
+    /// The verdict answers a different guarding event.
+    #[error("hook event {event} cannot take the {verdict} verdict")]
+    WrongEvent {
+        /// The guarding event.
+        event: HookEvent,
+        /// The event the supplied verdict answers.
+        verdict: HookEvent,
+    },
+}
 
 /// The error policy for a fan-out scope.
 #[non_exhaustive]
@@ -1396,7 +1582,12 @@ pub enum AgentsReply {
     /// The receipt for a mailbox send.
     Delivered(Receipt),
     /// Messages read from a mailbox.
-    Received(Vec<Mail>),
+    Received {
+        /// The mailbox messages returned after the requested cursor.
+        mail: Vec<Mail>,
+        /// The cursor to use for the next mailbox read.
+        next: Option<EntryId>,
+    },
 }
 
 /// The result of a background-job operation.
@@ -1635,6 +1826,14 @@ mod tests {
                 .to_string(),
             "rule \"rule\" repeat_gap must be within 1..=1000"
         );
+
+        assert_eq!(sonic_rs::to_string(&RepeatMode::Once)?, "\"once\"");
+        assert_eq!(sonic_rs::to_string(&RepeatMode::AfterGap)?, "\"after-gap\"");
+        assert_eq!(
+            sonic_rs::from_str::<RepeatMode>("\"after-gap\"")?,
+            RepeatMode::AfterGap
+        );
+        assert!(sonic_rs::from_str::<RepeatMode>("\"after_gap\"").is_err());
         Ok(())
     }
 
@@ -1661,6 +1860,16 @@ mod tests {
         assert_eq!(spec.validate(500), Ok(()));
         assert_eq!(spec.validate(501), Ok(()));
         assert!(spec.budget.usd.is_none());
+
+        let unpriced = sonic_rs::from_str::<ScopeUsage>(
+            r#"{"requests":1,"inputTokens":10,"outputTokens":5}"#,
+        )?;
+        assert_eq!(unpriced.cost_usd, None);
+        let free = ScopeUsage {
+            cost_usd: Some(0.0),
+            ..unpriced
+        };
+        assert_ne!(sonic_rs::to_string(&unpriced)?, sonic_rs::to_string(&free)?);
 
         spec.budget.usd = Some(f64::NAN);
         assert_eq!(spec.validate(500), Err(ScopeSpecError::InvalidBudget));
@@ -1723,6 +1932,19 @@ mod tests {
         };
         let encoded = sonic_rs::to_string(&recv)?;
         assert_eq!(sonic_rs::from_str::<AgentsOp>(&encoded)?, recv);
+        let reply = AgentsReply::Received {
+            mail: vec![Mail {
+                from,
+                to,
+                mode: MailMode::NextTurn,
+                text: "next turn".into(),
+                reply_to: None,
+            }],
+            next: Some(cursor),
+        };
+        let encoded = sonic_rs::to_string(&reply)?;
+        assert_eq!(sonic_rs::from_str::<AgentsReply>(&encoded)?, reply);
+
         Ok(())
     }
 
@@ -1828,6 +2050,76 @@ mod tests {
             assert!(sonic_rs::from_str::<JobsOp>(&op).is_ok());
         }
         assert!(sonic_rs::from_str::<JobsOp>(r#"{"type":"pause","id":"x"}"#).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn hook_events_round_trip_and_verdicts_answer_only_their_event() -> TestResult {
+        for (event, name) in HookEvent::ALL.into_iter().zip(STAR_EVENTS) {
+            assert_eq!(event.as_str(), name);
+            let encoded = sonic_rs::to_string(&event)?;
+            assert_eq!(encoded, format!("\"{name}\""));
+            assert_eq!(sonic_rs::from_str::<HookEvent>(&encoded)?, event);
+        }
+        assert!(sonic_rs::from_str::<HookEvent>("\"output_stream\"").is_err());
+
+        let verdicts = [
+            HookVerdict::Input(InputVerdict::Continue),
+            HookVerdict::BeforeTurn(Some("note".into())),
+            HookVerdict::BeforeRequest(None),
+            HookVerdict::ToolCall(ToolCallVerdict::Rewrite {
+                args: RawJson::parse(r#"{"path": "a"}"#)?,
+            }),
+        ];
+        for verdict in verdicts {
+            let answered = verdict.event();
+            assert!(answered.is_guarding());
+            let encoded = sonic_rs::to_string(&verdict)?;
+            assert_eq!(sonic_rs::from_str::<HookVerdict>(&encoded)?, verdict);
+            for event in HookEvent::ALL {
+                let expected = if event == answered {
+                    Ok(event)
+                } else if event.is_guarding() {
+                    Err(HookMismatch::WrongEvent {
+                        event,
+                        verdict: answered,
+                    })
+                } else {
+                    Err(HookMismatch::Observer {
+                        event,
+                        verdict: answered,
+                    })
+                };
+                let paired =
+                    HookOutcome::new(event, verdict.clone()).map(|outcome| outcome.event());
+                assert_eq!(paired, expected);
+            }
+        }
+        let observed = HookEvent::ALL
+            .into_iter()
+            .filter(|event| !event.is_guarding())
+            .map(HookEvent::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            observed,
+            [
+                "session_start",
+                "session_end",
+                "tool_result",
+                "turn_end",
+                "settled"
+            ]
+        );
+        assert_eq!(
+            HookOutcome::new(
+                HookEvent::Settled,
+                HookVerdict::Input(InputVerdict::Handled)
+            )
+            .err()
+            .ok_or("observer verdict was accepted")?
+            .to_string(),
+            "observe-only hook event settled returns no verdict; got the input verdict"
+        );
         Ok(())
     }
 }

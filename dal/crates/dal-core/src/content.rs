@@ -25,6 +25,8 @@ pub enum Part {
         blob_id: BlobId,
         /// The stored content's media type.
         mime: Box<str>,
+        /// The stored content's byte length, as reported when the blob was published.
+        bytes: u64,
     },
 }
 
@@ -100,9 +102,39 @@ mod tests {
         assert_eq!(
             ContentLimits::validate(&Part::Blob {
                 blob_id: BlobId::from_bytes(text.as_bytes()),
-                mime: "text/plain".into()
+                mime: "text/plain".into(),
+                bytes: u64::try_from(text.len()).expect("test length fits in u64"),
             }),
             Ok(())
         );
+    }
+
+    #[test]
+    fn blob_part_serializes_its_stored_length_at_both_boundaries() {
+        // The store's publish cap (dal-store `MAX_BLOB`); 64 MiB exceeds the inline bound
+        // and must still validate, since the declared length is not inline content.
+        const MAX_BLOB: u64 = 64 * 1024 * 1024;
+        let blob_id = BlobId::from_bytes(b"stored");
+        for bytes in [0, MAX_BLOB] {
+            let part = Part::Blob {
+                blob_id,
+                mime: "image/png".into(),
+                bytes,
+            };
+            assert_eq!(ContentLimits::validate(&part), Ok(()));
+            let encoded = sonic_rs::to_string(&part).expect("serialize blob part");
+            assert_eq!(
+                encoded,
+                format!(
+                    r#"{{"type":"blob","blob_id":"{blob_id}","mime":"image/png","bytes":{bytes}}}"#
+                )
+            );
+            assert_eq!(
+                sonic_rs::from_str::<Part>(&encoded).expect("deserialize blob part"),
+                part
+            );
+        }
+        let missing = format!(r#"{{"type":"blob","blob_id":"{blob_id}","mime":"image/png"}}"#);
+        assert!(sonic_rs::from_str::<Part>(&missing).is_err());
     }
 }

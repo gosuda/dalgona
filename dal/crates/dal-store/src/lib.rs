@@ -1,26 +1,26 @@
-//! Probe: can another crate construct a journal record?
+//! Durable journal and content-addressed blob primitives.
 
-use std::num::NonZeroU64;
+mod blob;
+mod error;
+mod journal;
+mod layout;
+mod list;
+mod lock;
+mod shard;
+mod sidecar;
+mod store;
+mod util;
 
-use dal_core::{Gen, Header, Product, Record, SessionId, Workspace};
-
-/// Builds one boot record. Compile failure here means the vocabulary is closed.
-pub fn probe() -> Record {
-    let workspace = Workspace::new(std::path::PathBuf::from("/tmp/probe")).expect("absolute");
-    Record::Boot {
-        at: jiff::Timestamp::UNIX_EPOCH,
-        r#gen: Gen::new(NonZeroU64::MIN),
-        version: "0.1.0".into(),
-    }
-}
-
-#[allow(dead_code)]
-fn header_probe() -> Header {
-    Header {
-        id: SessionId::new_v7(),
-        at: jiff::Timestamp::UNIX_EPOCH,
-        workspace: Workspace::new(std::path::PathBuf::from("/ws")).expect("absolute"),
-        product: Product::Dal,
-        from: None,
-    }
-}
+pub use blob::{
+    INLINE_LIMIT, MAX_BLOB, decode_base64, named_blobs, put, read, share, spill_record,
+};
+pub use error::{
+    AbortedTurn, BlobError, INTERRUPTED_CALL, JournalError, MISSING_ON_BRANCH, NO_EARLIER_SESSION,
+    NOT_RUN_CALL, OpenReport, StoreError, TornTail,
+};
+pub use journal::Receipt;
+pub use layout::Locator;
+pub use lock::LockGuard;
+pub use sidecar::Sidecar;
+pub use store::{AppendOutcome, Journal, Store};
+pub use util::{FileMode, normalize_name, workspace_key, write_atomic, write_atomic_new};

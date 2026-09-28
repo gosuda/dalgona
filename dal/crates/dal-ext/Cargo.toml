@@ -8,13 +8,17 @@ repository.workspace = true
 description = "Built-in extension composition and rendering for dal"
 
 [dependencies]
+dal-core = { path = "../dal-core" }
+globset.workspace = true
 png.workspace = true
+regex-automata.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 unicode-width.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+regex.workspace = true
 
 [lints]
 workspace = true

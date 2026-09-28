@@ -1,26 +1,44 @@
 //! Path keys, atomic publication, and session-name checks.
 
 use std::{
+    ffi::OsString,
     fs::{self, File, OpenOptions},
     io::{self, Write},
-    path::{Path, PathBuf},
+    path::Path,
 };
 
+use tempfile::TempPath;
 use unicode_segmentation::UnicodeSegmentation;
+use uuid::Uuid;
 
 use crate::error::StoreError;
 
 /// Mode of journal, lock, info, and sidecar files.
 pub(crate) const MODE_FILE: u32 = 0o600;
-/// Mode of session, blob, and sidecar directories.
-pub(crate) const MODE_DIR: u32 = 0o700;
+/// Permission mode used by private journal, lock, cache, and sidecar files.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FileMode {
+    /// Owner read and write only on Unix.
+    Mode0600,
+}
+
+impl FileMode {
+    const fn bits(self) -> u32 {
+        match self {
+            Self::Mode0600 => MODE_FILE,
+        }
+    }
+}
+
 /// Maximum session-name length in grapheme clusters.
 const NAME_MAX: usize = 64;
 
 /// The workspace directory name: cleaned base, cut to 32 bytes, plus 12 hex digits.
 #[must_use]
 pub fn workspace_key(path: &Path) -> String {
-    let base = path.file_name().map_or(&b""[..], |name| name.as_encoded_bytes());
+    let base = path
+        .file_name()
+        .map_or(&b""[..], |name| name.as_encoded_bytes());
     let mut cleaned = String::new();
     for byte in base {
         if cleaned.len() == 32 {
@@ -41,25 +59,6 @@ pub fn workspace_key(path: &Path) -> String {
     format!("{cleaned}-{}", &hex[..12])
 }
 
-pub(crate) fn create_dir(path: &Path) -> Result<(), StoreError> {
-    fs::create_dir_all(path).map_err(|source| io_err(path, source))?;
-    set_mode(path, MODE_DIR)
-}
-
-pub(crate) fn set_mode(path: &Path, mode: u32) -> Result<(), StoreError> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(mode))
-            .map_err(|source| io_err(path, source))?;
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (path, mode);
-    }
-    Ok(())
-}
-
 pub(crate) fn open_options() -> OpenOptions {
     OpenOptions::new()
 }
@@ -78,43 +77,93 @@ pub(crate) fn with_mode(options: &mut OpenOptions, mode: u32) {
 /// Writes `bytes` to a temp file, syncs it, renames it over `path`, and syncs the directory.
 ///
 /// # Errors
-/// Returns [`StoreError::Io`] when a step fails. A failed attempt leaves the target unchanged.
-pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<(), StoreError> {
-    publish(path, bytes, mode, false)
+/// Returns [`StoreError::Io`] when a step fails. Errors before publication leave the previous
+/// target unchanged; a directory-sync error can occur after publication.
+pub fn write_atomic(path: &Path, bytes: &[u8], mode: FileMode) -> Result<(), StoreError> {
+    write_with_temp(path, bytes, mode, Publication::Replace)
 }
 
-/// Like [`write_atomic`], but fails when `path` already exists.
+/// Like [`write_atomic`], but atomically publishes only when `path` does not exist, by a
+/// no-replace rename (hard link when the platform lacks one), so a concurrent creator is never
+/// overwritten.
 ///
 /// # Errors
-/// Returns [`StoreError::Io`] when the target exists or a step fails.
-pub fn write_atomic_new(path: &Path, bytes: &[u8], mode: u32) -> Result<(), StoreError> {
-    publish(path, bytes, mode, true)
+/// Returns [`StoreError::Io`] when the target exists or a step fails. A directory-sync error can
+/// occur after publication.
+pub fn write_atomic_new(path: &Path, bytes: &[u8], mode: FileMode) -> Result<(), StoreError> {
+    write_with_temp(path, bytes, mode, Publication::NoReplace)
 }
 
-fn publish(path: &Path, bytes: &[u8], mode: u32, exclusive: bool) -> Result<(), StoreError> {
-    if exclusive && path.exists() {
+#[derive(Clone, Copy)]
+enum Publication {
+    Replace,
+    NoReplace,
+}
+
+fn write_with_temp(
+    path: &Path,
+    bytes: &[u8],
+    mode: FileMode,
+    publication: Publication,
+) -> Result<(), StoreError> {
+    let Some(name) = path.file_name() else {
         return Err(io_err(
             path,
-            io::Error::new(io::ErrorKind::AlreadyExists, "target exists"),
+            io::Error::new(io::ErrorKind::InvalidInput, "target path has no file name"),
         ));
-    }
-    let dir = path.parent().unwrap_or(Path::new("."));
-    let name = path.file_name().unwrap_or_default().to_string_lossy();
-    let tmp = dir.join(format!(".{name}.tmp-{}", random_hex(8)?));
-    let write_result = (|| {
-        let mut options = open_options();
-        options.write(true).create(true).truncate(true);
-        with_mode(&mut options, mode);
-        let mut file = options.open(&tmp).map_err(|source| io_err(&tmp, source))?;
-        file.write_all(bytes).map_err(|source| io_err(&tmp, source))?;
-        file.sync_all().map_err(|source| io_err(&tmp, source))?;
-        fs::rename(&tmp, path).map_err(|source| io_err(path, source))?;
+    };
+    let dir = containing_dir(path);
+    let mut temp_name = OsString::from(".");
+    temp_name.push(name);
+    temp_name.push(format!(".tmp-{}", random_hex()));
+    let temp = dir.join(temp_name);
+    publish_temp(&temp, path, bytes, mode, publication)
+}
+
+fn containing_dir(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."))
+}
+
+fn publish_temp(
+    temp: &Path,
+    target: &Path,
+    bytes: &[u8],
+    mode: FileMode,
+    publication: Publication,
+) -> Result<(), StoreError> {
+    let dir = containing_dir(target);
+    let mut options = open_options();
+    options.write(true).create_new(true);
+    with_mode(&mut options, mode.bits());
+    let mut file = options.open(temp).map_err(|source| io_err(temp, source))?;
+
+    let result = (|| {
+        file.write_all(bytes)
+            .map_err(|source| io_err(temp, source))?;
+        file.sync_all().map_err(|source| io_err(temp, source))?;
+        drop(file);
+        rename_temp(temp, target, publication)?;
         sync_dir(dir)
     })();
-    if write_result.is_err() {
-        let _ = fs::remove_file(&tmp);
+    if result.is_err() {
+        let _ = fs::remove_file(temp);
     }
-    write_result
+    result
+}
+
+/// Moves the complete, synced `temp` to `target`. `NoReplace` fails with `AlreadyExists` rather
+/// than overwrite a target, including one created concurrently.
+fn rename_temp(temp: &Path, target: &Path, publication: Publication) -> Result<(), StoreError> {
+    match publication {
+        Publication::Replace => fs::rename(temp, target).map_err(|source| io_err(target, source)),
+        Publication::NoReplace => TempPath::try_from_path(temp)
+            .map_err(|source| io_err(temp, source))?
+            .persist_noclobber(target)
+            // The error owns the unpublished temp; dropping it removes the file.
+            .map_err(|failed| io_err(target, failed.error)),
+    }
 }
 
 pub(crate) fn sync_dir(dir: &Path) -> Result<(), StoreError> {
@@ -131,12 +180,9 @@ pub(crate) fn sync_dir(dir: &Path) -> Result<(), StoreError> {
     }
 }
 
-pub(crate) fn random_hex(nbytes: usize) -> Result<String, StoreError> {
-    let mut file = File::open("/dev/urandom").map_err(|source| io_err(Path::new("/dev/urandom"), source))?;
-    let mut bytes = vec![0_u8; nbytes];
-    io::Read::read_exact(&mut file, &mut bytes)
-        .map_err(|source| io_err(Path::new("/dev/urandom"), source))?;
-    Ok(hex_encode(&bytes))
+pub(crate) fn random_hex() -> String {
+    let uuid = Uuid::new_v4();
+    hex_encode(&uuid.as_bytes()[..8])
 }
 
 pub(crate) fn hex_encode(bytes: &[u8]) -> String {
@@ -152,7 +198,7 @@ pub(crate) fn hex_encode(bytes: &[u8]) -> String {
 pub(crate) fn io_err(path: &Path, source: io::Error) -> StoreError {
     StoreError::Io {
         path: path.to_path_buf(),
-        source: format!("{source}").into(),
+        source: Box::new(source),
     }
 }
 
@@ -177,29 +223,277 @@ pub fn normalize_name(raw: &str) -> Result<Box<str>, StoreError> {
         }
     }
     let clusters = out.graphemes(true).count();
-    let id_only = !out.is_empty() && out.bytes().all(|byte| byte.is_ascii_hexdigit() || byte == b'-');
+    let id_only = !out.is_empty()
+        && out
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f' | b'-'));
     if !(1..=NAME_MAX).contains(&clusters) || out.chars().any(char::is_control) || id_only {
         return Err(StoreError::InvalidName);
     }
     Ok(out.into())
 }
 
-pub(crate) fn stamp(ts: jiff::Timestamp) -> String {
-    let text = format!("{ts:.3}");
-    if text.len() >= 16 {
-        format!("{} {}", &text[..10], &text[11..16])
-    } else {
-        text
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs, io,
+        path::{Path, PathBuf},
+        sync::{Arc, Barrier},
+        thread,
+    };
+
+    use super::*;
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "dal-store-util-{}-{}",
+                std::process::id(),
+                random_hex()
+            ));
+            fs::create_dir(&path).expect("create test directory");
+            Self(path)
+        }
     }
-}
 
-pub(crate) fn millis(ts: jiff::Timestamp) -> String {
-    format!("{ts:.3}")
-}
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
 
-pub(crate) fn temp_tests(label: &str) -> PathBuf {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/store-tests");
-    let path = root.join(format!("{label}-{}", uuid::Uuid::now_v7()));
-    let _ = fs::create_dir_all(&path);
-    path
+    fn assert_no_temporary_files(dir: &Path) {
+        let entries = fs::read_dir(dir)
+            .expect("read test directory")
+            .map(|entry| entry.expect("read directory entry").file_name())
+            .collect::<Vec<_>>();
+        assert!(
+            entries
+                .iter()
+                .all(|name| !name.to_string_lossy().contains(".tmp-"))
+        );
+    }
+
+    #[test]
+    fn atomic_replace_writes_complete_bytes_and_private_mode() {
+        let dir = TempDir::new();
+        let target = dir.0.join("cache");
+
+        write_atomic(&target, b"first", FileMode::Mode0600).expect("write first value");
+        assert_eq!(fs::read(&target).expect("read first value"), b"first");
+        write_atomic(&target, b"second value", FileMode::Mode0600)
+            .expect("replace with second value");
+        assert_eq!(
+            fs::read(&target).expect("read second value"),
+            b"second value"
+        );
+        assert_no_temporary_files(&dir.0);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&target)
+                .expect("stat target")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+    }
+
+    #[test]
+    fn atomic_new_preserves_existing_bytes_and_cleans_its_temp() {
+        let dir = TempDir::new();
+        let target = dir.0.join("created-once");
+
+        write_atomic_new(&target, b"original", FileMode::Mode0600).expect("publish first value");
+        let error =
+            write_atomic_new(&target, b"replacement", FileMode::Mode0600).expect_err("must fail");
+        assert!(matches!(
+            error,
+            StoreError::Io { source, .. } if source.kind() == io::ErrorKind::AlreadyExists
+        ));
+        assert_eq!(fs::read(&target).expect("read winner"), b"original");
+        assert_no_temporary_files(&dir.0);
+    }
+
+    #[test]
+    fn failed_temp_creation_preserves_target_and_existing_temp() {
+        let dir = TempDir::new();
+        let target = dir.0.join("cache");
+        let temp = dir.0.join(".cache.tmp-fixed");
+        fs::write(&target, b"previous bytes").expect("write prior target");
+        fs::write(&temp, b"other temp bytes").expect("write existing temp");
+
+        let error = publish_temp(
+            &temp,
+            &target,
+            b"replacement",
+            FileMode::Mode0600,
+            Publication::Replace,
+        )
+        .expect_err("exclusive temp creation must fail");
+        assert!(matches!(
+            error,
+            StoreError::Io { source, .. } if source.kind() == io::ErrorKind::AlreadyExists
+        ));
+        assert_eq!(
+            fs::read(&target).expect("read prior target"),
+            b"previous bytes"
+        );
+        assert_eq!(
+            fs::read(&temp).expect("read existing temp"),
+            b"other temp bytes"
+        );
+    }
+
+    #[test]
+    fn failed_replace_preserves_target_and_removes_temp() {
+        let dir = TempDir::new();
+        let target = dir.0.join("directory-target");
+        fs::create_dir(&target).expect("create directory target");
+
+        assert!(write_atomic(&target, b"not a directory", FileMode::Mode0600).is_err());
+        assert!(target.is_dir());
+        assert_no_temporary_files(&dir.0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_preserves_non_utf8_target_name() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = TempDir::new();
+        let target = dir.0.join(std::ffi::OsStr::from_bytes(b"cache-\xff"));
+        write_atomic(&target, b"opaque path", FileMode::Mode0600)
+            .expect("write through non-UTF-8 target");
+        assert_eq!(fs::read(&target).expect("read target"), b"opaque path");
+        assert_no_temporary_files(&dir.0);
+    }
+
+    #[test]
+    fn concurrent_atomic_new_has_one_complete_winner() {
+        const WRITERS: usize = 8;
+        let dir = TempDir::new();
+        let target = dir.0.join("race");
+        let barrier = Arc::new(Barrier::new(WRITERS));
+        let workers = (0..WRITERS)
+            .map(|index| {
+                let target = target.clone();
+                let barrier = Arc::clone(&barrier);
+                let payload = vec![u8::try_from(index).expect("small writer index"); 128];
+                thread::spawn(move || {
+                    barrier.wait();
+                    let result = write_atomic_new(&target, &payload, FileMode::Mode0600);
+                    (payload, result)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let mut winner = None;
+        for worker in workers {
+            let (payload, result) = worker.join().expect("join writer");
+            match result {
+                Ok(()) => {
+                    assert!(winner.replace(payload).is_none());
+                }
+                Err(error) => assert!(matches!(
+                    error,
+                    StoreError::Io { source, .. } if source.kind() == io::ErrorKind::AlreadyExists
+                )),
+            }
+        }
+        let winner = winner.expect("one writer publishes");
+        assert_eq!(fs::read(&target).expect("read published value"), winner);
+        assert_no_temporary_files(&dir.0);
+    }
+
+    #[test]
+    fn random_suffix_is_sixteen_lowercase_hex_digits() {
+        let value = random_hex();
+        assert_eq!(value.len(), 16);
+        assert!(
+            value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        );
+    }
+
+    #[test]
+    fn workspace_key_is_sanitized_bounded_and_path_scoped() {
+        let key = workspace_key(Path::new("/home/user/Repo With !"));
+        assert!(key.starts_with("Repo_With__-"));
+        let (_, suffix) = key.rsplit_once('-').expect("key has a separator");
+        assert_eq!(suffix.len(), 12);
+        assert!(
+            suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        );
+        assert_eq!(
+            workspace_key(Path::new("/one/shared")),
+            workspace_key(Path::new("/one/shared"))
+        );
+        assert_ne!(
+            workspace_key(Path::new("/one/shared")),
+            workspace_key(Path::new("/two/shared"))
+        );
+        assert!(workspace_key(Path::new("/root/ABC")).starts_with("ABC-"));
+        assert!(workspace_key(Path::new("/")).starts_with("root-"));
+
+        let long = format!("/root/{}", "g".repeat(40));
+        let long_key = workspace_key(Path::new(&long));
+        assert!(long_key.starts_with(&"g".repeat(32)));
+        assert_eq!(long_key.len(), 45);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_key_replaces_non_utf8_basename_bytes() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let path = Path::new(std::ffi::OsStr::from_bytes(b"/work/a\xffb"));
+        assert!(workspace_key(path).starts_with("a_b-"));
+    }
+
+    #[test]
+    fn normalized_names_cannot_match_lowercase_id_prefixes() {
+        assert!(matches!(
+            normalize_name("cafe"),
+            Err(StoreError::InvalidName)
+        ));
+        assert!(matches!(
+            normalize_name("0192-abcd"),
+            Err(StoreError::InvalidName)
+        ));
+        assert_eq!(normalize_name(" CAFE ").expect("uppercase name"), "CAFE");
+        assert_eq!(normalize_name("Cafe").expect("mixed-case name"), "Cafe");
+        assert_eq!(normalize_name("café").expect("non-ASCII name"), "café");
+        assert_eq!(
+            normalize_name("  a\r\n\nb  ").expect("collapsed line-break run"),
+            "a b"
+        );
+        assert!(matches!(
+            normalize_name(" \t "),
+            Err(StoreError::InvalidName)
+        ));
+        assert!(matches!(
+            normalize_name("na\u{7}me"),
+            Err(StoreError::InvalidName)
+        ));
+        assert!(normalize_name(&"g".repeat(64)).is_ok());
+        assert!(matches!(
+            normalize_name(&"g".repeat(65)),
+            Err(StoreError::InvalidName)
+        ));
+        let exactly_64_clusters = format!("{}e\u{301}", "g".repeat(63));
+        let too_many_clusters = format!("{}e\u{301}", "g".repeat(64));
+        assert!(normalize_name(&exactly_64_clusters).is_ok());
+        assert!(matches!(
+            normalize_name(&too_many_clusters),
+            Err(StoreError::InvalidName)
+        ));
+    }
 }

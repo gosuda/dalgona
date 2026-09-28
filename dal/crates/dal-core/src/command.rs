@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize, de};
 
 use crate::raw::Tagged;
 
+use crate::approval::DenyReason;
 use crate::config::ApprovalMode;
 use crate::content::Part;
 use crate::id::{EntryId, JobId, SessionId, TurnId};
@@ -508,6 +509,26 @@ pub enum Rejection {
         /// The session's actual turn state.
         actual: crate::view::TurnState,
     },
+    /// The session no longer accepts commands.
+    #[error("session is closed")]
+    SessionClosed,
+    /// A command that requires an idle session was submitted during a turn.
+    #[error("command requires an idle session; a turn is running")]
+    BusyTurn,
+    /// A prompt was submitted while compaction was in progress.
+    #[error(
+        "Cannot submit a prompt while compaction is in progress. Wait for compaction to finish and retry."
+    )]
+    Compacting,
+    /// A steer could not be queued because the bounded queue is full.
+    #[error("steer queue is full (16); wait for the next step or cancel.")]
+    SteerFull,
+    /// A command was denied by its approval or availability policy.
+    #[error("command denied: {reason:?}")]
+    Denied {
+        /// The reason the command was denied.
+        reason: DenyReason,
+    },
     /// A command failed a validation or availability check.
     #[error("invalid command: {reason}")]
     Invalid {
@@ -522,7 +543,8 @@ mod tests {
 
     use serde::Deserialize;
 
-    use super::{CancelScope, Command, Expect};
+    use super::{CancelScope, Command, Expect, Rejection};
+    use crate::approval::DenyReason;
     use crate::config::ApprovalMode;
     use crate::content::Part;
     use crate::id::{EntryId, JobId, TurnId};
@@ -727,5 +749,48 @@ mod tests {
             r#"{"type":"cancel","scope":{"type":"turn","turn":1}}"#
         );
         Ok(())
+    }
+
+    #[test]
+    fn new_rejections_have_meaningful_display_text() {
+        let cases = [
+            (Rejection::SessionClosed, "session is closed"),
+            (
+                Rejection::BusyTurn,
+                "command requires an idle session; a turn is running",
+            ),
+            (
+                Rejection::Compacting,
+                "Cannot submit a prompt while compaction is in progress. Wait for compaction to finish and retry.",
+            ),
+            (
+                Rejection::SteerFull,
+                "steer queue is full (16); wait for the next step or cancel.",
+            ),
+        ];
+
+        for (rejection, expected) in cases {
+            assert_eq!(rejection.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn denied_rejections_preserve_the_typed_approval_reason() {
+        let wake_limit = Rejection::Denied {
+            reason: DenyReason::WakeLimit,
+        };
+        assert_eq!(wake_limit.to_string(), "command denied: WakeLimit");
+        assert_eq!(
+            wake_limit,
+            Rejection::Denied {
+                reason: DenyReason::WakeLimit,
+            }
+        );
+
+        let no_front_end = Rejection::Denied {
+            reason: DenyReason::NoFrontEnd,
+        };
+        assert_eq!(no_front_end.to_string(), "command denied: NoFrontEnd");
+        assert_ne!(no_front_end, Rejection::SessionClosed);
     }
 }

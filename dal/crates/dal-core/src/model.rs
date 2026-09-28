@@ -5,6 +5,7 @@
 //! is authoritative, while absent or unusable prices remain unknown.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
@@ -30,6 +31,39 @@ pub enum Family {
     /// Anthropic Messages.
     #[serde(rename = "anthropic")]
     Anthropic,
+}
+
+/// The provider API family and exact model that produced an assistant message.
+///
+/// Replay adapters use this source to decide whether opaque reasoning payloads
+/// can be sent to the current provider route.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ReplaySource {
+    /// Provider API family that produced the message.
+    pub family: Family,
+    /// Provider-native model name that produced the message; never empty.
+    #[cfg_attr(feature = "schema", schemars(length(min = 1)))]
+    pub model: Box<str>,
+}
+
+#[derive(Deserialize)]
+struct ReplaySourceFields {
+    family: Family,
+    model: Box<str>,
+}
+
+impl<'de> Deserialize<'de> for ReplaySource {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let fields = ReplaySourceFields::deserialize(deserializer)?;
+        if fields.model.is_empty() {
+            return Err(de::Error::custom("replay source model must not be empty"));
+        }
+        Ok(Self {
+            family: fields.family,
+            model: fields.model,
+        })
+    }
 }
 
 /// Requested reasoning intensity.
@@ -231,8 +265,8 @@ pub fn check_synthetic_chain(chain: &[ModelRoute]) -> Result<(), InferFailure> {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Caps {
-    /// Maximum context size in tokens.
-    pub context_window: u32,
+    /// Known maximum context size in tokens; `None` means the source did not provide one.
+    pub context_window: Option<u32>,
     /// Supported reasoning levels.
     pub thinking: Box<[ThinkingLevel]>,
     /// Whether tools are supported.
@@ -304,6 +338,8 @@ pub enum ContextItem {
     },
     /// A previously produced assistant message.
     Assistant {
+        /// The producing provider family and model for every part in this message.
+        source: ReplaySource,
         /// Text, reasoning, and tool calls in document order.
         parts: Vec<AssistantPart>,
     },
@@ -326,6 +362,7 @@ struct UserFields {
 }
 #[derive(Deserialize)]
 struct AssistantFields {
+    source: ReplaySource,
     parts: Vec<AssistantPart>,
 }
 #[derive(Deserialize)]
@@ -351,6 +388,7 @@ impl<'de> Deserialize<'de> for ContextItem {
                 let fields: AssistantFields =
                     sonic_rs::from_str(tagged.raw()).map_err(de::Error::custom)?;
                 Ok(Self::Assistant {
+                    source: fields.source,
                     parts: fields.parts,
                 })
             }
@@ -490,6 +528,11 @@ pub enum StreamEvent {
         /// Unmodified tool arguments JSON.
         args: RawJson,
     },
+    /// An opaque provider reasoning payload for replay, kept byte for byte.
+    ThinkingReplay {
+        /// Unmodified provider replay JSON.
+        payload: RawJson,
+    },
     /// A usage measurement, with fields inline in the event object.
     Usage(Usage),
     /// A stop reason, encoded as a unit-variant member beside the tag.
@@ -500,6 +543,11 @@ pub enum StreamEvent {
 struct DeltaFields {
     channel: StreamChannel,
     text: Box<str>,
+}
+
+#[derive(Deserialize)]
+struct ThinkingReplayFields {
+    payload: RawJson,
 }
 
 fn decode_stop_member<E: de::Error>(raw: &str) -> Result<Stop, E> {
@@ -531,7 +579,7 @@ impl<'de> Deserialize<'de> for StreamEvent {
         let tagged = Tagged::decode(
             deserializer,
             "type",
-            &["delta", "tool_call", "usage", "stop"],
+            &["delta", "tool_call", "thinking_replay", "usage", "stop"],
         )?;
         match tagged.kind() {
             "delta" => {
@@ -549,6 +597,13 @@ impl<'de> Deserialize<'de> for StreamEvent {
                     call: fields.call,
                     name: fields.name,
                     args: fields.args,
+                })
+            }
+            "thinking_replay" => {
+                let fields: ThinkingReplayFields =
+                    sonic_rs::from_str(tagged.raw()).map_err(de::Error::custom)?;
+                Ok(Self::ThinkingReplay {
+                    payload: fields.payload,
                 })
             }
             "usage" => sonic_rs::from_str(tagged.raw())
@@ -695,18 +750,44 @@ pub struct Inference {
     pub events: Vec<StreamEvent>,
 }
 
-/// A failed or rejected inference.
+/// A failed or rejected inference, classified for the fold.
+///
+/// The fold decides the overflow path from [`InferFailure::Overflow`] and
+/// leaves the retry table to the actor for [`InferFailure::Retryable`];
+/// [`InferFailure::Fatal`] ends the turn. Each provider-classified variant
+/// displays exactly its `message`: the provider layer's final rendered text,
+/// which never carries a token, a key, or an authorization header value.
 #[non_exhaustive]
-#[derive(Clone, Debug, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, thiserror::Error)]
 pub enum InferFailure {
     /// Caller cancelled inference.
     #[error("inference was cancelled")]
     Cancelled,
-    /// The provider or runtime failed.
-    #[error("inference failed: {message}")]
-    Failed {
-        /// Failure description.
+    /// The provider reported, by a typed error code, that the request
+    /// exceeds the model's context window. Never retried as-is: the fold
+    /// compacts once and resends.
+    #[error("{message}")]
+    Overflow {
+        /// The provider error code that identified the overflow.
+        code: Box<str>,
+        /// The rendered failure text.
         message: Box<str>,
+    },
+    /// A transient provider failure the actor's retry table may resend.
+    #[error("{message}")]
+    Retryable {
+        /// The wait the provider asked for, when it stated one.
+        hint: Option<Duration>,
+        /// The rendered failure text.
+        message: Box<str>,
+    },
+    /// A failure that no resend of the same request can fix.
+    #[error("{message}")]
+    Fatal {
+        /// The rendered failure text.
+        message: Box<str>,
+        /// The one next-action sentence, when the provider layer has one.
+        fix: Option<Box<str>>,
     },
     /// A synthetic route appeared twice on the same expansion path.
     #[error("synthetic model cycle: {chain:?}")]
@@ -856,6 +937,35 @@ mod tests {
     }
 
     #[test]
+    fn model_info_context_window_roundtrips_unknown_zero_and_known() -> TestResult {
+        let model_with_context = |context_window| ModelInfo {
+            route: ModelRoute::Api {
+                family: Family::Responses,
+                model: "gpt-5".into(),
+            },
+            name: "GPT-5".into(),
+            caps: Caps {
+                context_window,
+                thinking: Vec::new().into_boxed_slice(),
+                tool_use: true,
+                image_input: false,
+            },
+        };
+        let known = model_with_context(Some(128_000));
+        let unknown = model_with_context(None);
+        let measured_zero = model_with_context(Some(0));
+        let unknown_json = sonic_rs::to_string(&unknown)?;
+        let zero_json = sonic_rs::to_string(&measured_zero)?;
+
+        for model in [known, unknown, measured_zero] {
+            let encoded = sonic_rs::to_string(&model)?;
+            assert_eq!(sonic_rs::from_str::<ModelInfo>(&encoded)?, model);
+        }
+        assert_ne!(unknown_json, zero_json);
+        Ok(())
+    }
+
+    #[test]
     fn routes_validate_id_grammars_and_wire_names() -> TestResult {
         for (family, wire) in [
             (Family::Chat, "\"openai_chat\""),
@@ -931,6 +1041,32 @@ mod tests {
     }
 
     #[test]
+    fn classified_failures_display_the_rendered_text_verbatim() {
+        let text = "openai error 503: unavailable";
+        let failures = [
+            InferFailure::Overflow {
+                code: "context_length_exceeded".into(),
+                message: text.into(),
+            },
+            InferFailure::Retryable {
+                hint: Some(Duration::from_secs(2)),
+                message: text.into(),
+            },
+            InferFailure::Fatal {
+                message: text.into(),
+                fix: Some("Run dalgon login p1.".into()),
+            },
+        ];
+        for failure in failures {
+            assert_eq!(failure.to_string(), text);
+        }
+        assert_eq!(
+            InferFailure::Cancelled.to_string(),
+            "inference was cancelled"
+        );
+    }
+
+    #[test]
     fn native_tags_preserve_raw_args_and_nested_replay() -> TestResult {
         let arg_json = r#"{"b":2, "a":1e+02}"#;
         let event_json =
@@ -945,7 +1081,7 @@ mod tests {
         assert_eq!(sonic_rs::from_str::<StreamEvent>(&encoded)?, event);
 
         let nested_json = format!(
-            r#"{{"role":"assistant","parts":[{{"type":"thinking","text":"plan","replay":{arg_json}}},{{"type":"tool_call","call":"c1","name":"run","args":{arg_json}}}]}}"#
+            r#"{{"role":"assistant","source":{{"family":"openai_responses","model":"gpt-5"}},"parts":[{{"type":"thinking","text":"plan","replay":{arg_json}}},{{"type":"tool_call","call":"c1","name":"run","args":{arg_json}}}]}}"#
         );
         let context: ContextItem = sonic_rs::from_str(&nested_json)?;
         let encoded = sonic_rs::to_string(&context)?;
@@ -955,6 +1091,13 @@ mod tests {
             "raw nested values changed: {encoded}"
         );
         assert_eq!(sonic_rs::from_str::<ContextItem>(&encoded)?, context);
+        let thinking_at = encoded
+            .find(r#""type":"thinking""#)
+            .expect("thinking part was serialized");
+        let tool_call_at = encoded
+            .find(r#""type":"tool_call""#)
+            .expect("tool-call part was serialized");
+        assert!(thinking_at < tool_call_at, "assistant part order changed");
 
         let spec_json =
             format!(r#"{{"name":"run","description":"a tool","parameters":{arg_json}}}"#);
@@ -992,6 +1135,21 @@ mod tests {
     }
 
     #[test]
+    fn assistant_context_requires_a_valid_replay_source() {
+        for text in [
+            r#"{"role":"assistant","parts":[]}"#,
+            r#"{"role":"assistant","source":{"family":"alien","model":"gpt-5"},"parts":[]}"#,
+            r#"{"role":"assistant","source":{"family":"openai_responses"},"parts":[]}"#,
+            r#"{"role":"assistant","source":{"family":"openai_responses","model":""},"parts":[]}"#,
+        ] {
+            assert!(
+                sonic_rs::from_str::<ContextItem>(text).is_err(),
+                "accepted {text}"
+            );
+        }
+    }
+
+    #[test]
     fn malformed_model_discriminators_and_stop_reasons_fail() {
         for text in [
             r#"{"type":"tool_call","call":"c1","name":"run","args":{},"type":"delta"}"#,
@@ -1001,6 +1159,11 @@ mod tests {
             r#"{"type":"stop","end_turn":1}"#,
             r#"{"type":"stop","end_turn":null,"length":null}"#,
             r#"{"type":"delta"}"#,
+            r#"{"type":"thinking_replay"}"#,
+            r#"{"type":"thinking_replay","payload":{},"payload":{}}"#,
+            r#"{"type":"thinking_replay","payload":{"a":}}"#,
+            r#"{"type":"thinking_replay","type":"delta","payload":{}}"#,
+            r#"{"type":"thinking-replay","payload":{}}"#,
         ] {
             assert!(
                 sonic_rs::from_str::<StreamEvent>(text).is_err(),
@@ -1051,6 +1214,10 @@ mod tests {
                 parameters: RawJson::parse(r#"{"z":1e+02, "a":2}"#)?,
             }]),
             context: Arc::from([ContextItem::Assistant {
+                source: ReplaySource {
+                    family: Family::Responses,
+                    model: "gpt-5".into(),
+                },
                 parts: vec![AssistantPart::Thinking {
                     text: "plan".into(),
                     replay: Some(RawJson::parse(r#"{"z":1e+02, "a":2}"#)?),
@@ -1079,6 +1246,36 @@ mod tests {
             sonic_rs::from_str::<Inference>(&sonic_rs::to_string(&inference)?)?,
             inference
         );
+        Ok(())
+    }
+
+    #[test]
+    fn thinking_replay_event_preserves_raw_payload_after_delta() -> TestResult {
+        let payload = r#"{"z":1e+02, "a":[2.50,"x"]}"#;
+        let text = format!(
+            r#"{{"events":[{{"type":"delta","channel":{{"type":"thinking"}},"text":"plan"}},{{"payload":{payload},"type":"thinking_replay"}}]}}"#
+        );
+        let inference: Inference = sonic_rs::from_str(&text)?;
+        assert_eq!(
+            inference.events,
+            vec![
+                StreamEvent::Delta {
+                    channel: StreamChannel::Thinking,
+                    text: "plan".into(),
+                },
+                StreamEvent::ThinkingReplay {
+                    payload: RawJson::parse(payload)?,
+                },
+            ]
+        );
+        let encoded = sonic_rs::to_string(&inference)?;
+        assert!(
+            encoded.contains(&format!(
+                r#"{{"type":"thinking_replay","payload":{payload}}}"#
+            )),
+            "replay payload changed: {encoded}"
+        );
+        assert_eq!(sonic_rs::from_str::<Inference>(&encoded)?, inference);
         Ok(())
     }
 }

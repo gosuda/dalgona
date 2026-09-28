@@ -7,7 +7,7 @@ on:
       - ".github/workflows/dalgona.yml"
       - "rust-toolchain.toml"
       - ".gitignore"
-      - "LICENSE"
+      - "LICENSE.md"
       - "AGENTS.md"
       - "README.md"
   pull_request:
@@ -17,7 +17,7 @@ on:
       - ".github/workflows/dalgona.yml"
       - "rust-toolchain.toml"
       - ".gitignore"
-      - "LICENSE"
+      - "LICENSE.md"
       - "AGENTS.md"
       - "README.md"
 permissions:

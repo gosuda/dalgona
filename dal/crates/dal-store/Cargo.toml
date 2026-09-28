@@ -12,11 +12,14 @@ publish = false
 blake3.workspace = true
 dal-core = { path = "../dal-core" }
 jiff.workspace = true
+serde.workspace = true
 sonic-rs.workspace = true
 thiserror.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
 tracing.workspace = true
 unicode-segmentation = { version = "=1.12.0", default-features = false }
-uuid.workspace = true
+uuid = { workspace = true, features = ["v4"] }
 
 [lints]
 workspace = true

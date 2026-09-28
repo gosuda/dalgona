@@ -6,7 +6,7 @@ on:
       - ".github/workflows/dal.yml"
       - "rust-toolchain.toml"
       - ".gitignore"
-      - "LICENSE"
+      - "LICENSE.md"
       - "AGENTS.md"
       - "README.md"
   pull_request:
@@ -15,7 +15,7 @@ on:
       - ".github/workflows/dal.yml"
       - "rust-toolchain.toml"
       - ".gitignore"
-      - "LICENSE"
+      - "LICENSE.md"
       - "AGENTS.md"
       - "README.md"
 permissions:

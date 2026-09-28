@@ -8,11 +8,18 @@
 //! failures an outer loop may replay after delivery. No text produced here
 //! carries a token, a key, or an authorization header value.
 
-use std::{error::Error, fmt, path::PathBuf};
+use std::{error::Error, fmt, path::PathBuf, time::Duration};
 
-use dal_core::Family;
+use dal_core::{Family, InferFailure};
 
 const MESSAGE_LINE_LIMIT: usize = 300;
+const THINKING_LEVEL_NAMES: &str = "off, minimal, low, medium, high, xhigh, max";
+
+/// Provider error codes that mean the request exceeds the model's context
+/// window: `context_length_exceeded` (`OpenAI` Chat and Responses) and
+/// `context_window_exceeded` (Codex). Anthropic reports an oversized prompt as
+/// a plain `invalid_request_error`, so no Anthropic code is listed.
+const CONTEXT_OVERFLOW_CODES: [&str; 2] = ["context_length_exceeded", "context_window_exceeded"];
 
 fn family_label(family: Family) -> &'static str {
     match family {
@@ -38,7 +45,7 @@ fn capped_message_line(message: &str) -> &str {
 /// A failure of one provider request, credential file, sign-in flow, or model
 /// resolution, with the exact text the caller may show.
 ///
-/// The family and provider fields keep the identifiers the request used.
+/// Where present, family and provider fields keep the identifiers the request used.
 /// Messages are stored verbatim; only rendering truncates them.
 #[non_exhaustive]
 #[derive(Debug)]
@@ -64,10 +71,28 @@ pub enum ProviderError {
         /// The server message.
         message: String,
     },
+    /// The provider rejected the request, by a typed error code, because it
+    /// exceeds the model's context window.
+    ContextOverflow {
+        /// The provider API family of the request.
+        family: Family,
+        /// The provider error code, one of the known overflow codes.
+        code: String,
+        /// The server message, stored verbatim.
+        message: String,
+    },
+    /// The requested thinking-level spelling is not supported.
+    InvalidThinkingLevel {
+        /// The spelling that was rejected.
+        spelling: String,
+    },
     /// The provider rate-limited the request and the wait budget ran out.
     RateLimited {
         /// The server message.
         message: String,
+        /// The wait the final 429's `Retry-After` asked for, within the 60 s
+        /// budget; `None` when that response named no usable wait.
+        retry_after: Option<Duration>,
     },
     /// The requested wait is over the 60 s budget.
     RetryAfterTooLong {
@@ -118,6 +143,12 @@ pub enum ProviderError {
     PlainHttp {
         /// The host the request targeted.
         host: String,
+    },
+    /// A blob part of the request was not read from the session store before
+    /// the request was built. Raised locally; no request is sent.
+    UnresolvedBlob {
+        /// The identity of the unread blob.
+        blob_id: dal_core::BlobId,
     },
     /// Remote compaction returned no compaction item or block.
     CompactionMissing {
@@ -224,9 +255,29 @@ pub enum ProviderError {
         /// Why the usage read failed.
         reason: UsageCheckReason,
     },
+    /// The scripted provider cannot serve the operation: its script is
+    /// exhausted, the next step is for another operation, or the script
+    /// breaks the stream grammar.
+    Script(crate::scripted::ScriptError),
 }
 
 impl ProviderError {
+    /// The typed overflow error for a provider error `code`, or `None` when
+    /// `code` is not a context-overflow code.
+    ///
+    /// Matching is exact on the code; the message is never inspected, so an
+    /// ordinary invalid request is never mistaken for an overflow.
+    #[must_use]
+    pub fn context_overflow(family: Family, code: &str, message: &str) -> Option<Self> {
+        CONTEXT_OVERFLOW_CODES
+            .contains(&code)
+            .then(|| Self::ContextOverflow {
+                family,
+                code: String::from(code),
+                message: String::from(message),
+            })
+    }
+
     /// The one next-action sentence for this failure, when one exists.
     #[must_use]
     pub fn fix(&self) -> Option<String> {
@@ -296,7 +347,21 @@ impl fmt::Display for ProviderError {
                 capped_message_line(message)
             ),
             Self::InvalidRequest { message } => write!(f, "invalid request: {message}"),
-            Self::RateLimited { message } => write!(f, "rate limited: {message}"),
+            Self::ContextOverflow {
+                family,
+                code,
+                message,
+            } => write!(
+                f,
+                "{} context window exceeded ({code}): {}",
+                family_label(*family),
+                capped_message_line(message)
+            ),
+            Self::InvalidThinkingLevel { spelling } => write!(
+                f,
+                "unknown thinking level \"{spelling}\"; use one of {THINKING_LEVEL_NAMES}."
+            ),
+            Self::RateLimited { message, .. } => write!(f, "rate limited: {message}"),
             Self::RetryAfterTooLong { seconds, message } => write!(
                 f,
                 "rate limited for {seconds} s, which is over the 60 s wait limit: {message}"
@@ -399,11 +464,84 @@ impl fmt::Display for ProviderError {
             }
             Self::LoginCancelled => f.write_str("sign-in cancelled."),
             Self::UsageCheck { reason } => write!(f, "usage failed: {reason}"),
+            Self::UnresolvedBlob { blob_id } => write!(
+                f,
+                "blob {blob_id} was not read from the session store before the request; no request was sent."
+            ),
+            Self::Script(error) => write!(f, "{error}"),
         }
     }
 }
 
 impl Error for ProviderError {}
+
+/// Classifies a final provider failure for the fold.
+///
+/// [`ProviderError::ContextOverflow`] becomes [`InferFailure::Overflow`] with
+/// its code. Rate limits, overload, stream cuts (idle stalls included),
+/// WebSocket closes, and transport failures (read timeouts included) become
+/// [`InferFailure::Retryable`]. Only a rate limit carries a hint: the wait
+/// its final 429 asked for; every other retryable failure has none. A refused
+/// `Retry-After` over 60 s ([`ProviderError::RetryAfterTooLong`]) fails at
+/// once and is [`InferFailure::Fatal`], like every other failure, with its
+/// fix. Each message is the error's display text.
+impl From<ProviderError> for InferFailure {
+    fn from(error: ProviderError) -> Self {
+        use ProviderError as E;
+
+        let message = error.to_string().into_boxed_str();
+        let fix = error.fix().map(String::into_boxed_str);
+        // Exhaustive on purpose: a new variant must choose its class here.
+        match error {
+            E::ContextOverflow { code, .. } => Self::Overflow {
+                code: code.into_boxed_str(),
+                message,
+            },
+            E::RetryAfterTooLong { .. } => Self::Fatal { message, fix },
+            E::RateLimited { retry_after, .. } => Self::Retryable {
+                hint: retry_after,
+                message,
+            },
+            E::Overloaded | E::StreamCut | E::WsClosed { .. } | E::Transport { .. } => {
+                Self::Retryable {
+                    hint: None,
+                    message,
+                }
+            }
+            E::Status { .. }
+            | E::InvalidRequest { .. }
+            | E::InvalidThinkingLevel { .. }
+            | E::Quota { .. }
+            | E::AuthRejected { .. }
+            | E::SignInExpired { .. }
+            | E::NoCredentials { .. }
+            | E::Protocol { .. }
+            | E::Limit(_)
+            | E::PlainHttp { .. }
+            | E::CompactionMissing { .. }
+            | E::CompactionForeign { .. }
+            | E::UsageLimit { .. }
+            | E::UsageNotIncluded { .. }
+            | E::ReserveUnavailable { .. }
+            | E::UnknownModel { .. }
+            | E::AmbiguousModel { .. }
+            | E::AuthFilePerms { .. }
+            | E::AuthFileSymlink { .. }
+            | E::AuthFileInvalid { .. }
+            | E::AuthWrite { .. }
+            | E::CallbackBind { .. }
+            | E::StateMismatch
+            | E::LoginTimeout
+            | E::TokenExchange { .. }
+            | E::DeviceCode { .. }
+            | E::NoAccountId
+            | E::LoginCancelled
+            | E::UsageCheck { .. }
+            | E::UnresolvedBlob { .. }
+            | E::Script(_) => Self::Fatal { message, fix },
+        }
+    }
+}
 
 /// A protocol or body size limit that was exceeded.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -445,6 +583,13 @@ pub enum UsageCheckReason {
         /// The server message, stored verbatim.
         message: String,
     },
+    /// The usage request failed before a complete reply: a connect, TLS, or
+    /// I/O failure, a body over the size limit, or the request task was
+    /// cancelled. The reason never carries a token or an authorization value.
+    Transport {
+        /// The redacted transport failure.
+        reason: String,
+    },
 }
 
 impl fmt::Display for UsageCheckReason {
@@ -455,6 +600,7 @@ impl fmt::Display for UsageCheckReason {
             Self::Status { status, message } => {
                 write!(f, "{status} {}", capped_message_line(message))
             }
+            Self::Transport { reason } => f.write_str(capped_message_line(reason)),
         }
     }
 }
@@ -550,8 +696,16 @@ mod tests {
                 None,
             ),
             (
+                ProviderError::InvalidThinkingLevel {
+                    spelling: String::from("Ultra"),
+                },
+                "unknown thinking level \"Ultra\"; use one of off, minimal, low, medium, high, xhigh, max.",
+                None,
+            ),
+            (
                 ProviderError::RateLimited {
                     message: String::from("try later"),
+                    retry_after: Some(Duration::from_secs(3)),
                 },
                 "rate limited: try later",
                 None,
@@ -801,6 +955,15 @@ mod tests {
                 "usage failed: 401 denied",
                 None,
             ),
+            (
+                ProviderError::ContextOverflow {
+                    family: Family::Responses,
+                    code: String::from("context_length_exceeded"),
+                    message: String::from("input exceeds the window\ndetail"),
+                },
+                "openai context window exceeded (context_length_exceeded): input exceeds the window",
+                None,
+            ),
         ];
         for (error, display, fix) in cases {
             assert_eq!(error.to_string(), *display);
@@ -947,8 +1110,12 @@ mod tests {
             ProviderError::InvalidRequest {
                 message: String::from("bad"),
             },
+            ProviderError::InvalidThinkingLevel {
+                spelling: String::from("ultra"),
+            },
             ProviderError::RateLimited {
                 message: String::from("busy"),
+                retry_after: None,
             },
             ProviderError::Quota {
                 message: String::from("empty"),
@@ -961,6 +1128,173 @@ mod tests {
         for error in terminal {
             assert!(!error.retryable_by_loop(), "{error}");
         }
+    }
+
+    #[test]
+    fn context_overflow_is_typed_by_code_never_by_message() {
+        for (family, code) in [
+            (Family::Chat, "context_length_exceeded"),
+            (Family::Codex, "context_window_exceeded"),
+        ] {
+            let error = ProviderError::context_overflow(family, code, "too long");
+            assert!(
+                matches!(&error, Some(ProviderError::ContextOverflow { family: f, code: c, message })
+                    if *f == family && c == code && message == "too long"),
+                "{error:?}"
+            );
+        }
+        for code in ["invalid_request_error", "Context_Length_Exceeded", ""] {
+            assert!(
+                ProviderError::context_overflow(
+                    Family::Anthropic,
+                    code,
+                    "prompt is too long: context window exceeded"
+                )
+                .is_none(),
+                "{code}"
+            );
+        }
+    }
+
+    #[test]
+    fn infer_failure_separates_overflow_from_an_ordinary_bad_request() {
+        let overflow = ProviderError::context_overflow(
+            Family::Chat,
+            "context_length_exceeded",
+            "maximum context length is 8192 tokens",
+        )
+        .map(InferFailure::from);
+        assert!(matches!(
+            &overflow,
+            Some(InferFailure::Overflow { code, message })
+                if &**code == "context_length_exceeded"
+                    && &**message == "openai context window exceeded (context_length_exceeded): maximum context length is 8192 tokens"
+        ));
+        let ordinary = InferFailure::from(ProviderError::InvalidRequest {
+            message: String::from("maximum context length is 8192 tokens"),
+        });
+        assert!(matches!(
+            &ordinary,
+            InferFailure::Fatal { message, fix: None }
+                if &**message == "invalid request: maximum context length is 8192 tokens"
+        ));
+        assert_eq!(
+            ordinary.to_string(),
+            "invalid request: maximum context length is 8192 tokens"
+        );
+    }
+
+    #[test]
+    fn infer_failure_retries_only_transient_provider_failures() {
+        let transient = [
+            ProviderError::RateLimited {
+                message: String::from("slow down"),
+                retry_after: None,
+            },
+            ProviderError::Overloaded,
+            ProviderError::StreamCut,
+            ProviderError::WsClosed {
+                code: Some((1011, String::from("busy"))),
+            },
+            ProviderError::Transport {
+                family: Family::Anthropic,
+                reason: String::from("connection reset"),
+            },
+        ];
+        for error in transient {
+            let text = error.to_string();
+            let failure = InferFailure::from(error);
+            assert!(
+                matches!(&failure, InferFailure::Retryable { hint: None, message } if **message == *text),
+                "{failure:?}"
+            );
+            assert_eq!(failure.to_string(), text);
+        }
+    }
+
+    #[test]
+    fn infer_failure_hints_only_the_rate_limit_wait() {
+        let limited = ProviderError::RateLimited {
+            message: String::from("slow down"),
+            retry_after: Some(Duration::from_millis(2_500)),
+        };
+        let failure = InferFailure::from(limited);
+        assert!(
+            matches!(
+                &failure,
+                InferFailure::Retryable { hint: Some(hint), message }
+                    if *hint == Duration::from_millis(2_500) && &**message == "rate limited: slow down"
+            ),
+            "{failure:?}"
+        );
+    }
+
+    #[test]
+    fn infer_failure_ends_auth_quota_and_exhausted_status_with_their_fix() {
+        let cases = [
+            (
+                ProviderError::AuthRejected {
+                    provider: String::from("p1"),
+                },
+                "p1 rejected the API key.",
+                Some("Run dalgon login p1."),
+            ),
+            (
+                ProviderError::SignInExpired {
+                    provider: String::from("openai-codex"),
+                },
+                "openai-codex sign-in expired: the refresh token was rejected.",
+                Some("Run dalgon login openai-codex."),
+            ),
+            (
+                ProviderError::Quota {
+                    message: String::from("out of credit"),
+                },
+                "quota exhausted: out of credit",
+                None,
+            ),
+            (
+                ProviderError::Status {
+                    family: Family::Responses,
+                    status: 503,
+                    message: String::from("unavailable"),
+                },
+                "openai error 503: unavailable",
+                None,
+            ),
+            (
+                ProviderError::RetryAfterTooLong {
+                    seconds: u64::MAX,
+                    message: String::from("later"),
+                },
+                "rate limited for 18446744073709551615 s, which is over the 60 s wait limit: later",
+                None,
+            ),
+        ];
+        for (error, text, expected_fix) in cases {
+            let failure = InferFailure::from(error);
+            assert!(
+                matches!(&failure, InferFailure::Fatal { message, fix }
+                    if &**message == text && fix.as_deref() == expected_fix),
+                "{failure:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unresolved_blob_is_a_local_terminal_failure_naming_the_blob() {
+        let blob_id = dal_core::BlobId::from_bytes(b"image bytes");
+        let error = ProviderError::UnresolvedBlob { blob_id };
+        let text = format!(
+            "blob {blob_id} was not read from the session store before the request; no request was sent."
+        );
+        assert_eq!(error.to_string(), text);
+        assert_eq!(error.fix(), None);
+        assert!(!error.retryable_by_loop());
+        assert!(matches!(
+            InferFailure::from(error),
+            InferFailure::Fatal { message, fix: None } if *message == *text
+        ));
     }
 
     #[test]
@@ -978,6 +1312,10 @@ mod tests {
             message: format!("{}\u{e9}tail\nnext", "m".repeat(299)),
         };
         assert_eq!(long.to_string(), format!("401 {}", "m".repeat(299)));
+        let transport = UsageCheckReason::Transport {
+            reason: String::from("connection refused\nsecond line"),
+        };
+        assert_eq!(transport.to_string(), "connection refused");
     }
 
     #[test]

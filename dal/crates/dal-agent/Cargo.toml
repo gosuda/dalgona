@@ -1,0 +1,20 @@
+[package]
+name = "dal-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+repository.workspace = true
+description = "Session ownership and execution for dal"
+
+[dependencies]
+dal-core = { path = "../dal-core" }
+dal-store = { path = "../dal-store" }
+sonic-rs.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

@@ -29,7 +29,7 @@ use sonic_rs::{JsonValueTrait, LazyValue};
 use crate::config::ApprovalMode;
 use crate::ext::MailMode;
 use crate::id::{CallId, ClientId, EntryId, Gen, JobId, RequestId, SessionId, TurnId};
-use crate::model::{Family, ThinkingLevel, Usage};
+use crate::model::{Family, ModelRoute, RouteError, ThinkingLevel, Usage};
 use crate::raw::{RawJson, Tagged};
 use crate::request::{Answer, Owner};
 use crate::view::FileChange;
@@ -108,6 +108,16 @@ pub enum JournalPart {
     /// An image stored under its digest.
     ImageBlob {
         /// The image media type.
+        mime: Box<str>,
+        /// The 64-hex BLAKE3 digest.
+        blob: Box<str>,
+        /// The stored byte length.
+        bytes: u64,
+    },
+    /// Non-text, non-image content stored under its digest, such as a
+    /// PDF attachment.
+    Blob {
+        /// The media type.
         mime: Box<str>,
         /// The 64-hex BLAKE3 digest.
         blob: Box<str>,
@@ -211,6 +221,8 @@ pub enum AssistantStop {
     Done,
     /// The model hit its length limit.
     Length,
+    /// A provider content filter stopped the response.
+    Filter,
     /// The model asked for tool execution.
     ToolUse,
     /// The response was cancelled.
@@ -229,6 +241,12 @@ pub enum AssistantStop {
 pub enum TurnEndStop {
     /// The turn completed.
     Done,
+    /// The final response hit the model's length limit.
+    Length,
+    /// A provider content filter stopped the final response.
+    Filter,
+    /// The turn reached the `loop.max_steps` tool-round limit.
+    MaxSteps,
     /// The user cancelled the turn.
     Cancelled,
     /// The turn aborted because the process stopped.
@@ -284,11 +302,13 @@ pub enum EntryKind {
         text: Box<str>,
     },
     /// The active model changed.
+    ///
+    /// A [`ModelRoute::Api`] route journals as the format-1 `api` and
+    /// `model` members; a synthetic or harness route journals as one
+    /// externally tagged `route` member instead.
     Model {
-        /// The provider API family.
-        api: Family,
-        /// The model identifier.
-        model: Box<str>,
+        /// The route now selected.
+        route: ModelRoute,
     },
     /// The thinking level changed.
     Thinking {
@@ -353,8 +373,7 @@ struct ReminderEntryFields {
 
 #[derive(Deserialize)]
 struct ModelEntryFields {
-    api: Family,
-    model: Box<str>,
+    route: ModelRoute,
 }
 
 #[derive(Deserialize)]
@@ -408,6 +427,11 @@ impl<'de> Deserialize<'de> for EntryKind {
             "assistant" => {
                 let wire: AssistantEntryFields =
                     sonic_rs::from_str(tagged.raw()).map_err(serde::de::Error::custom)?;
+                if wire.model.is_empty() {
+                    return Err(serde::de::Error::custom(
+                        "assistant `model` must not be empty",
+                    ));
+                }
                 Ok(Self::Assistant {
                     api: wire.api,
                     model: wire.model,
@@ -438,10 +462,12 @@ impl<'de> Deserialize<'de> for EntryKind {
             "model" => {
                 let wire: ModelEntryFields =
                     sonic_rs::from_str(tagged.raw()).map_err(serde::de::Error::custom)?;
-                Ok(Self::Model {
-                    api: wire.api,
-                    model: wire.model,
-                })
+                if matches!(&wire.route, ModelRoute::Api { model, .. } if model.is_empty()) {
+                    return Err(serde::de::Error::custom(
+                        "model route `model` must not be empty",
+                    ));
+                }
+                Ok(Self::Model { route: wire.route })
             }
             "thinking" => {
                 let wire: ThinkingEntryFields =
@@ -492,6 +518,20 @@ pub struct Entry {
     pub at: jiff::Timestamp,
     /// The entry kind and payload.
     pub kind: EntryKind,
+}
+
+/// The operation owned by a durable job.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum JobKind {
+    /// A detached process.
+    Exec,
+    /// A child session.
+    Child,
+    /// A manual compaction request.
+    Compaction,
 }
 
 /// A lifecycle event recorded against a durable job.
@@ -868,6 +908,18 @@ pub enum EncodeError {
     /// is a caller bug the codec reports rather than encodes wrong.
     #[error("record variant does not match its entry kind")]
     MismatchedKind,
+    /// A synthetic or harness route id breaks its closed grammar.
+    ///
+    /// The decoder rejects such an id, so writing it would leave a line
+    /// no reader accepts.
+    #[error("cannot encode model route: {0}")]
+    InvalidRoute(RouteError),
+    /// An assistant or API model record names an empty model id.
+    ///
+    /// The decoder rejects an empty `model`, and no provider route can
+    /// replay one, so the record is refused instead of written.
+    #[error("cannot encode an empty model id")]
+    EmptyModel,
 }
 
 /// The fixed prefix of a tree record, read without allocation.
@@ -1178,6 +1230,7 @@ impl Serialize for AssistantStopWire<'_> {
         match self.0 {
             AssistantStop::Done => serializer.serialize_str("done"),
             AssistantStop::Length => serializer.serialize_str("length"),
+            AssistantStop::Filter => serializer.serialize_str("filter"),
             AssistantStop::ToolUse => serializer.serialize_str("tool_use"),
             AssistantStop::Cancelled => serializer.serialize_str("cancelled"),
             AssistantStop::Failed { message } => {
@@ -1201,6 +1254,9 @@ impl Serialize for TurnEndStopWire<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self.0 {
             TurnEndStop::Done => serializer.serialize_str("done"),
+            TurnEndStop::Length => serializer.serialize_str("length"),
+            TurnEndStop::Filter => serializer.serialize_str("filter"),
+            TurnEndStop::MaxSteps => serializer.serialize_str("max_steps"),
             TurnEndStop::Cancelled => serializer.serialize_str("cancelled"),
             TurnEndStop::Aborted => serializer.serialize_str("aborted"),
             TurnEndStop::Failed { message } => {
@@ -1305,21 +1361,32 @@ impl Serialize for JournalPartWire<'_> {
                 .serialize(serializer)
             }
             JournalPart::ImageBlob { mime, blob, bytes } => {
-                #[derive(Serialize)]
-                struct ImageBlobMember<'a> {
-                    r#type: &'static str,
-                    mime: &'a str,
-                    blob: &'a str,
-                    bytes: u64,
-                }
-                ImageBlobMember {
-                    r#type: "image",
-                    mime: mime.as_ref(),
-                    blob: blob.as_ref(),
-                    bytes: *bytes,
-                }
-                .serialize(serializer)
+                StoredBlobMember::new("image", mime, blob, *bytes).serialize(serializer)
             }
+            JournalPart::Blob { mime, blob, bytes } => {
+                StoredBlobMember::new("blob", mime, blob, *bytes).serialize(serializer)
+            }
+        }
+    }
+}
+
+/// The shared member order of the digest-backed parts that carry a MIME
+/// type: `image` blobs and generic `blob` parts.
+#[derive(Serialize)]
+struct StoredBlobMember<'a> {
+    r#type: &'static str,
+    mime: &'a str,
+    blob: &'a str,
+    bytes: u64,
+}
+
+impl<'a> StoredBlobMember<'a> {
+    const fn new(r#type: &'static str, mime: &'a str, blob: &'a str, bytes: u64) -> Self {
+        Self {
+            r#type,
+            mime,
+            blob,
+            bytes,
         }
     }
 }
@@ -1471,6 +1538,25 @@ struct ModelWire<'a> {
     at: TsWire<'a>,
     api: Family,
     model: &'a str,
+}
+
+#[derive(Serialize)]
+struct ModelRouteWire<'a> {
+    r#type: &'static str,
+    id: EntryId,
+    parent: Option<EntryId>,
+    at: TsWire<'a>,
+    route: RouteWire<'a>,
+}
+
+/// The journal `route` member of a non-API model record:
+/// `{"synthetic":{"id":..}}` or `{"harness":{"id":..}}`. API routes keep
+/// the format-1 `api` and `model` members, so no family is invented here.
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RouteWire<'a> {
+    Synthetic { id: &'a str },
+    Harness { id: &'a str },
 }
 
 #[derive(Serialize)]
@@ -1729,9 +1815,10 @@ struct InferredWire<'a> {
 /// # Errors
 /// Returns [`EncodeError::Json`] when a member fails to serialize,
 /// [`EncodeError::InvalidCost`] when a usage member carries a reported
-/// cost no integer micro-dollar count can hold, and
-/// [`EncodeError::MismatchedKind`] when a tree record's variant does not
-/// match its entry kind.
+/// cost no integer micro-dollar count can hold,
+/// [`EncodeError::InvalidRoute`] when a model record's synthetic or
+/// harness id breaks its grammar, and [`EncodeError::MismatchedKind`]
+/// when a tree record's variant does not match its entry kind.
 pub fn encode(record: &Record) -> Result<Vec<u8>, EncodeError> {
     let body = encode_body(record)?;
     let mut line = Vec::with_capacity(body.len() + 8);
@@ -1787,6 +1874,9 @@ fn encode_body(record: &Record) -> Result<Vec<u8>, EncodeError> {
             else {
                 return Err(EncodeError::MismatchedKind);
             };
+            if model.is_empty() {
+                return Err(EncodeError::EmptyModel);
+            }
             encode_json(&AssistantWire {
                 r#type: "assistant",
                 id: entry.id,
@@ -1836,17 +1926,10 @@ fn encode_body(record: &Record) -> Result<Vec<u8>, EncodeError> {
             })
         }
         Record::Model(entry) => {
-            let EntryKind::Model { api, model } = &entry.kind else {
+            let EntryKind::Model { route } = &entry.kind else {
                 return Err(EncodeError::MismatchedKind);
             };
-            encode_json(&ModelWire {
-                r#type: "model",
-                id: entry.id,
-                parent: entry.parent,
-                at: TsWire(&entry.at),
-                api: *api,
-                model: model.as_ref(),
-            })
+            encode_model(entry, route)
         }
         Record::Thinking(entry) => {
             let EntryKind::Thinking { level } = &entry.kind else {
@@ -2112,10 +2195,51 @@ fn encode_body(record: &Record) -> Result<Vec<u8>, EncodeError> {
     }
 }
 
+/// Writes a model record. An API route keeps the byte-exact format-1
+/// `api`, `model` members; a synthetic or harness route writes one
+/// `route` member after its id passes the same grammar the decoder checks.
+fn encode_model(entry: &Entry, route: &ModelRoute) -> Result<Vec<u8>, EncodeError> {
+    let route = match route {
+        ModelRoute::Api { model, .. } if model.is_empty() => {
+            return Err(EncodeError::EmptyModel);
+        }
+        ModelRoute::Api { family, model } => {
+            return encode_json(&ModelWire {
+                r#type: "model",
+                id: entry.id,
+                parent: entry.parent,
+                at: TsWire(&entry.at),
+                api: *family,
+                model: model.as_ref(),
+            });
+        }
+        ModelRoute::Synthetic { id } => {
+            if !ModelRoute::is_valid_synthetic_id(id) {
+                return Err(EncodeError::InvalidRoute(RouteError::InvalidSyntheticId {
+                    id: id.clone(),
+                }));
+            }
+            RouteWire::Synthetic { id }
+        }
+        ModelRoute::Harness { id } => {
+            ModelRoute::harness(&**id).map_err(EncodeError::InvalidRoute)?;
+            RouteWire::Harness { id }
+        }
+    };
+    encode_json(&ModelRouteWire {
+        r#type: "model",
+        id: entry.id,
+        parent: entry.parent,
+        at: TsWire(&entry.at),
+        route,
+    })
+}
+
 // Decode side: one member scan, `"v"` before `"type"`. Record members a
 // format-1 record does not declare are dropped; the closed nested
 // payloads (`usage`, parts, blocks, `who`, `purpose`, `answer`, `from`,
-// `outcome`, `stop`) are scanned member by member and stay strict.
+// `outcome`, `stop`, `route`) are scanned member by member and stay
+// strict.
 
 /// One raw member map: member name to byte offset and its lazy value.
 /// The lazy value must be stored whole: its accessors borrow `self`, so
@@ -2307,6 +2431,15 @@ fn decode_part(value: &LazyValue<'_>, offset: usize) -> Result<JournalPart, Deco
             blob: blob.ok_or_else(|| invalid(offset, "an image blob part needs `blob`"))?,
             bytes: bytes.ok_or_else(|| invalid(offset, "an image blob part needs `bytes`"))?,
         }),
+        ("blob", _) if text.is_some() || base64.is_some() => Err(invalid(
+            offset,
+            "a blob part accepts only `mime`, `blob`, and `bytes`",
+        )),
+        ("blob", _) => Ok(JournalPart::Blob {
+            mime: mime.ok_or_else(|| invalid(offset, "a blob part needs `mime`"))?,
+            blob: blob.ok_or_else(|| invalid(offset, "a blob part needs `blob`"))?,
+            bytes: bytes.ok_or_else(|| invalid(offset, "a blob part needs `bytes`"))?,
+        }),
         (kind, _) => Err(invalid(offset, format!("unknown part type `{kind}`"))),
     }
 }
@@ -2472,6 +2605,61 @@ fn purpose_member(member: (usize, LazyValue<'_>)) -> Result<InferredPurpose, Dec
     Ok(InferredPurpose::Synthetic { id })
 }
 
+/// Reads a model record's route: either the format-1 `api` and `model`
+/// pair or one `route` member, never both.
+fn model_route_members(members: &mut Members<'_>) -> Result<ModelRoute, DecodeError> {
+    let route = want(members, "route");
+    let api = want(members, "api");
+    let model = want(members, "model");
+    match (route, api, model) {
+        (None, Some(api), Some(model)) => Ok(ModelRoute::Api {
+            family: json_member(api)?,
+            model: model_id_member(model)?,
+        }),
+        (Some(route), None, None) => route_member(route),
+        (Some((offset, _)), _, _) => Err(invalid(
+            offset,
+            "member `route` cannot appear with `api` or `model`",
+        )),
+        (None, None, _) => Err(invalid(0, "missing member `api`")),
+        (None, Some(_), None) => Err(invalid(0, "missing member `model`")),
+    }
+}
+
+/// Reads a `model` id member; an empty id cannot name a provider model.
+fn model_id_member(member: (usize, LazyValue<'_>)) -> Result<Box<str>, DecodeError> {
+    let offset = member.0;
+    let model = text_member(member, "model")?;
+    if model.is_empty() {
+        return Err(invalid(offset, "member `model` must not be empty"));
+    }
+    Ok(model)
+}
+
+/// Reads `{"synthetic":{"id":..}}` or `{"harness":{"id":..}}` and checks
+/// the id against the route's closed grammar.
+fn route_member(member: (usize, LazyValue<'_>)) -> Result<ModelRoute, DecodeError> {
+    let (offset, raw) = member;
+    let outer = object_members(raw.as_raw_str(), offset, &["synthetic", "harness"])?;
+    let mut tags = outer.into_iter();
+    let (Some((tag, (body_offset, body))), None) = (tags.next(), tags.next()) else {
+        return Err(invalid(
+            offset,
+            "a `route` object needs exactly one `synthetic` or `harness` member",
+        ));
+    };
+    let mut fields = object_members(body.as_raw_str(), body_offset, &["id"])?;
+    let (id_offset, id_raw) = want(&mut fields, "id")
+        .ok_or_else(|| invalid(body_offset, format!("route.{tag} needs `id`")))?;
+    let id = text_member((id_offset, id_raw), "id")?;
+    let route = if tag.as_ref() == "synthetic" {
+        ModelRoute::synthetic(id)
+    } else {
+        ModelRoute::harness(id)
+    };
+    route.map_err(|error| invalid(id_offset, error.to_string()))
+}
+
 fn answer_member(member: (usize, LazyValue<'_>)) -> Result<Answer, DecodeError> {
     let (offset, raw) = member;
     if let Some(literal) = raw.as_str() {
@@ -2497,6 +2685,7 @@ fn assistant_stop_member(member: (usize, LazyValue<'_>)) -> Result<AssistantStop
         return match literal {
             "done" => Ok(AssistantStop::Done),
             "length" => Ok(AssistantStop::Length),
+            "filter" => Ok(AssistantStop::Filter),
             "tool_use" => Ok(AssistantStop::ToolUse),
             "cancelled" => Ok(AssistantStop::Cancelled),
             other => Err(invalid(
@@ -2518,6 +2707,9 @@ fn turn_end_stop_member(member: (usize, LazyValue<'_>)) -> Result<TurnEndStop, D
     if let Some(literal) = raw.as_str() {
         return match literal {
             "done" => Ok(TurnEndStop::Done),
+            "length" => Ok(TurnEndStop::Length),
+            "filter" => Ok(TurnEndStop::Filter),
+            "max_steps" => Ok(TurnEndStop::MaxSteps),
             "cancelled" => Ok(TurnEndStop::Cancelled),
             "aborted" => Ok(TurnEndStop::Aborted),
             other => Err(invalid(
@@ -2959,7 +3151,7 @@ fn decode_entry_kind(kind: &str, members: &mut Members<'_>) -> Result<EntryKind,
         },
         "assistant" => EntryKind::Assistant {
             api: json_member(need(members, "api")?)?,
-            model: text_member(need(members, "model")?, "model")?,
+            model: model_id_member(need(members, "model")?)?,
             content: blocks_member(need(members, "content")?)?,
             usage: usage_member(need(members, "usage")?)?
                 .ok_or_else(|| invalid(0, "member `usage` must be an object"))?,
@@ -2977,8 +3169,7 @@ fn decode_entry_kind(kind: &str, members: &mut Members<'_>) -> Result<EntryKind,
             text: text_member(need(members, "text")?, "text")?,
         },
         "model" => EntryKind::Model {
-            api: json_member(need(members, "api")?)?,
-            model: text_member(need(members, "model")?, "model")?,
+            route: model_route_members(members)?,
         },
         "thinking" => EntryKind::Thinking {
             level: json_member(need(members, "level")?)?,
@@ -3460,6 +3651,289 @@ mod tests {
         assert!(
             std::str::from_utf8(&encoded).is_ok_and(|line| line.contains("\"cost_micro_usd\":0"))
         );
+        Ok(())
+    }
+
+    fn model_line(tail: &str) -> String {
+        format!(
+            "{{\"v\":1,\"type\":\"model\",\"id\":1,\"parent\":null,\"at\":\"2026-09-25T10:15:30.125Z\",{tail}}}\n"
+        )
+    }
+
+    fn decoded_route(line: &str) -> Result<ModelRoute, Box<dyn std::error::Error>> {
+        let Record::Model(Entry {
+            kind: EntryKind::Model { route },
+            ..
+        }) = decode(line.as_bytes())?.record
+        else {
+            return Err("expected a model record".into());
+        };
+        Ok(route)
+    }
+
+    #[test]
+    fn model_record_keeps_format1_api_bytes() -> Result<(), Box<dyn std::error::Error>> {
+        let line = model_line(r#""api":"openai_responses","model":"gpt-6-luna""#);
+        let decoded = decode(line.as_bytes())?;
+        let Record::Model(entry) = &decoded.record else {
+            return Err("expected a model record".into());
+        };
+        assert_eq!(
+            entry.kind,
+            EntryKind::Model {
+                route: ModelRoute::Api {
+                    family: Family::Responses,
+                    model: "gpt-6-luna".into(),
+                },
+            }
+        );
+        assert_eq!(encode(&decoded.record)?.as_slice(), line.as_bytes());
+        Ok(())
+    }
+
+    #[test]
+    fn model_record_round_trips_synthetic_and_harness_routes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let cases = [
+            (
+                r#""route":{"synthetic":{"id":"dalgona/fusion-2.1_x"}}"#,
+                ModelRoute::Synthetic {
+                    id: "dalgona/fusion-2.1_x".into(),
+                },
+            ),
+            (
+                r#""route":{"harness":{"id":"dalgon/eval-first"}}"#,
+                ModelRoute::Harness {
+                    id: "dalgon/eval-first".into(),
+                },
+            ),
+        ];
+        for (tail, expected) in cases {
+            let line = model_line(tail);
+            assert_eq!(decoded_route(&line)?, expected, "{line}");
+            assert_eq!(
+                encode(&decode(line.as_bytes())?.record)?.as_slice(),
+                line.as_bytes()
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn model_record_rejects_bad_route_shapes() {
+        let cases = [
+            // Both spellings at once.
+            r#""route":{"synthetic":{"id":"a/b"}},"api":"anthropic","model":"m""#,
+            r#""model":"m","route":{"harness":{"id":"dalgon/normal"}}"#,
+            // Neither spelling, or half of the API pair.
+            r#""name":"m""#,
+            r#""model":"m""#,
+            r#""api":"anthropic""#,
+            // An unknown family stays rejected.
+            r#""api":"openai_other","model":"m""#,
+            // No tag, two tags, an API tag, or a non-object route.
+            r#""route":{}"#,
+            r#""route":{"synthetic":{"id":"a/b"},"harness":{"id":"dalgon/normal"}}"#,
+            r#""route":{"api":{"family":"anthropic","model":"m"}}"#,
+            r#""route":"dalgon/normal""#,
+            // Missing, unknown, duplicate, or non-string fields.
+            r#""route":{"synthetic":{}}"#,
+            r#""route":{"synthetic":{"id":"a/b","family":"anthropic"}}"#,
+            r#""route":{"harness":{"id":"dalgon/normal","id":"dalgon/eval-only"}}"#,
+            r#""route":{"synthetic":{"id":1}}"#,
+            // A duplicate record member.
+            r#""route":{"harness":{"id":"dalgon/normal"}},"route":{"harness":{"id":"dalgon/normal"}}"#,
+            // Ids outside the closed grammars.
+            r#""route":{"synthetic":{"id":"Upper/x"}}"#,
+            r#""route":{"synthetic":{"id":"no-slash"}}"#,
+            r#""route":{"harness":{"id":"dalgon/fast"}}"#,
+            r#""route":{"harness":{"id":"dalgona/fusion"}}"#,
+        ];
+        for tail in cases {
+            let line = model_line(tail);
+            assert!(
+                matches!(decode(line.as_bytes()), Err(DecodeError::Invalid { .. })),
+                "{line}"
+            );
+        }
+        let line = model_line(r#""route":{"harness":{"id":"dalgon/fast"}}"#);
+        let expected = line.find("\"dalgon/fast\"").unwrap_or(usize::MAX);
+        assert!(matches!(
+            decode(line.as_bytes()),
+            Err(DecodeError::Invalid { offset, .. }) if offset == expected
+        ));
+    }
+
+    #[test]
+    fn encode_rejects_non_api_route_the_decoder_would_reject() {
+        let entry = |route: ModelRoute| {
+            Record::Model(Entry {
+                id: EntryId::new(nz(1)),
+                parent: None,
+                at: jiff::Timestamp::UNIX_EPOCH,
+                kind: EntryKind::Model { route },
+            })
+        };
+        assert!(matches!(
+            encode(&entry(ModelRoute::Synthetic { id: "bad".into() })),
+            Err(EncodeError::InvalidRoute(
+                RouteError::InvalidSyntheticId { .. }
+            ))
+        ));
+        assert!(matches!(
+            encode(&entry(ModelRoute::Harness {
+                id: "dalgon/fast".into()
+            })),
+            Err(EncodeError::InvalidRoute(
+                RouteError::InvalidHarnessId { .. }
+            ))
+        ));
+    }
+
+    #[test]
+    fn empty_model_id_is_rejected_both_ways() -> Result<(), Box<dyn std::error::Error>> {
+        let assistant = "{\"v\":1,\"type\":\"assistant\",\"id\":1,\"parent\":null,\"at\":\"2026-09-25T10:15:35.410Z\",\"api\":\"anthropic\",\"model\":\"m\",\"content\":[],\"usage\":{\"input\":1,\"output\":1,\"cache_read\":0,\"cache_write\":0,\"reasoning\":null,\"cost_micro_usd\":null},\"stop\":\"done\"}\n";
+        let empty = assistant.replace("\"model\":\"m\"", "\"model\":\"\"");
+        let expected = empty.find("\"model\":\"\"").map(|at| at + 8);
+        assert!(matches!(
+            decode(empty.as_bytes()),
+            Err(DecodeError::Invalid { offset, .. }) if Some(offset) == expected
+        ));
+        assert!(matches!(
+            decode(model_line(r#""api":"anthropic","model":"""#).as_bytes()),
+            Err(DecodeError::Invalid { .. })
+        ));
+        let mut record = decode(assistant.as_bytes())?.record;
+        assert_eq!(encode(&record)?.as_slice(), assistant.as_bytes());
+        if let Record::Assistant(Entry {
+            kind: EntryKind::Assistant { model, .. },
+            ..
+        }) = &mut record
+        {
+            *model = "".into();
+        }
+        // The serde path (views, updates) refuses the same empty id: the
+        // derived spelling of this record differs from the valid one only
+        // in `model`, and the valid one decodes.
+        let Record::Assistant(entry) = &record else {
+            return Err("expected an assistant record".into());
+        };
+        let serde_text = sonic_rs::to_string(&entry.kind)?;
+        assert!(sonic_rs::from_str::<EntryKind>(&serde_text).is_err());
+        let valid = serde_text.replace("\"model\":\"\"", "\"model\":\"m\"");
+        sonic_rs::from_str::<EntryKind>(&valid)?;
+        assert!(matches!(encode(&record), Err(EncodeError::EmptyModel)));
+        let api = Record::Model(Entry {
+            id: EntryId::new(nz(1)),
+            parent: None,
+            at: jiff::Timestamp::UNIX_EPOCH,
+            kind: EntryKind::Model {
+                route: ModelRoute::Api {
+                    family: Family::Anthropic,
+                    model: "".into(),
+                },
+            },
+        });
+        assert!(matches!(encode(&api), Err(EncodeError::EmptyModel)));
+        let Record::Model(entry) = &api else {
+            return Err("expected a model record".into());
+        };
+        let serde_text = sonic_rs::to_string(&entry.kind)?;
+        assert!(sonic_rs::from_str::<EntryKind>(&serde_text).is_err());
+        let valid = serde_text.replace("\"model\":\"\"", "\"model\":\"m\"");
+        sonic_rs::from_str::<EntryKind>(&valid)?;
+        Ok(())
+    }
+
+    #[test]
+    fn generic_blob_part_round_trips_and_stays_strict() -> Result<(), Box<dyn std::error::Error>> {
+        let user_line = |part: &str| {
+            format!(
+                "{{\"v\":1,\"type\":\"user\",\"id\":1,\"parent\":null,\"at\":\"2026-09-25T10:15:30.000Z\",\"parts\":[{part}]}}\n"
+            )
+        };
+        let digest = "0123456789abcdef".repeat(4);
+        let line = user_line(&format!(
+            r#"{{"type":"blob","mime":"application/pdf","blob":"{digest}","bytes":9}}"#
+        ));
+        let decoded = decode(line.as_bytes())?;
+        let Record::User(Entry {
+            kind: EntryKind::User { parts },
+            ..
+        }) = &decoded.record
+        else {
+            return Err("expected a user record".into());
+        };
+        assert_eq!(
+            parts.as_slice(),
+            &[JournalPart::Blob {
+                mime: "application/pdf".into(),
+                blob: digest.as_str().into(),
+                bytes: 9,
+            }]
+        );
+        assert_eq!(encode(&decoded.record)?.as_slice(), line.as_bytes());
+
+        for part in [
+            r#"{"type":"blob","blob":"ab12","bytes":9}"#,
+            r#"{"type":"blob","mime":"application/pdf","bytes":9}"#,
+            r#"{"type":"blob","mime":"application/pdf","blob":"ab12"}"#,
+            r#"{"type":"blob","mime":"a/b","mime":"a/c","blob":"ab12","bytes":9}"#,
+            r#"{"type":"blob","mime":"a/b","blob":"ab12","bytes":9,"text":"x"}"#,
+            r#"{"type":"blob","mime":"a/b","blob":"ab12","bytes":9,"base64":"eA=="}"#,
+            r#"{"type":"blob","mime":"a/b","blob":"ab12","bytes":9,"future":1}"#,
+        ] {
+            let line = user_line(part);
+            assert!(
+                matches!(decode(line.as_bytes()), Err(DecodeError::Invalid { .. })),
+                "{line}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn new_stop_literals_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+        let turn_end = |stop: &str| {
+            format!(
+                "{{\"v\":1,\"type\":\"turn_end\",\"at\":\"2026-09-25T10:20:00.000Z\",\"turn\":2,\"stop\":\"{stop}\",\"usage\":null,\"changes\":[]}}\n"
+            )
+        };
+        let turn_cases = [
+            ("length", TurnEndStop::Length),
+            ("filter", TurnEndStop::Filter),
+            ("max_steps", TurnEndStop::MaxSteps),
+            ("aborted", TurnEndStop::Aborted),
+        ];
+        for (literal, expected) in turn_cases {
+            let line = turn_end(literal);
+            let decoded = decode(line.as_bytes())?;
+            let Record::TurnEnd { stop, .. } = &decoded.record else {
+                return Err("expected a turn_end record".into());
+            };
+            assert_eq!(*stop, expected);
+            assert_eq!(encode(&decoded.record)?.as_slice(), line.as_bytes());
+        }
+        assert!(matches!(
+            decode(turn_end("tool_use").as_bytes()),
+            Err(DecodeError::Invalid { .. })
+        ));
+
+        let line = "{\"v\":1,\"type\":\"assistant\",\"id\":1,\"parent\":null,\"at\":\"2026-09-25T10:15:35.410Z\",\"api\":\"anthropic\",\"model\":\"m\",\"content\":[],\"usage\":{\"input\":1,\"output\":1,\"cache_read\":0,\"cache_write\":0,\"reasoning\":null,\"cost_micro_usd\":null},\"stop\":\"filter\"}\n";
+        let decoded = decode(line.as_bytes())?;
+        let Record::Assistant(Entry {
+            kind: EntryKind::Assistant { stop, .. },
+            ..
+        }) = &decoded.record
+        else {
+            return Err("expected an assistant record".into());
+        };
+        assert_eq!(*stop, AssistantStop::Filter);
+        assert_eq!(encode(&decoded.record)?.as_slice(), line.as_bytes());
+        assert!(matches!(
+            decode(line.replace("\"filter\"", "\"max_steps\"").as_bytes()),
+            Err(DecodeError::Invalid { .. })
+        ));
         Ok(())
     }
 

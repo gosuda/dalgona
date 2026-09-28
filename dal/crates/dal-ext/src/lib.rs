@@ -2,10 +2,13 @@
 
 mod letter;
 mod prompt;
+mod skills;
+pub mod ttsr;
 
 pub use letter::{
-    DOUBLE_W, DrawError, DrawOutcome, Font, GLYPH_H, Glyph, GlyphError, Glyphs, Image, LINE_H,
-    MARGIN, MAX_DESC_CHARS, SINGLE_W, TAB_STOP, WRAP_CELLS, draw,
+    BYTE_BUDGET, DOUBLE_W, DrawError, DrawOutcome, FallbackReason, Font, GLYPH_H, Glyph,
+    GlyphError, Glyphs, IMAGE_BUDGET, Image, LINE_H, LetterAssembly, LetterChunk, LetterFallback,
+    MARGIN, MAX_DESC_CHARS, SINGLE_W, TAB_STOP, WRAP_CELLS, draw, image_parts, letters,
 };
 pub use prompt::instructions::{
     FileReader, InstructionFile, InstructionReadError, MAX_FILE_BYTES, MAX_TOTAL_BYTES,
@@ -14,4 +17,8 @@ pub use prompt::instructions::{
 };
 pub use prompt::{
     D2_PREFERENCE_LINE, DEFAULT_DOCS_LINE, PromptInput, build as build_prompt, prefix_bytes,
+};
+pub use skills::{
+    BodyInput, MAX_BODY_BYTES, MAX_DESCRIPTION_CHARS, PluginRejection, RegisteredSkill,
+    SkillConflict, SkillError, SkillRegistration, SkillRegistry, validate_registration,
 };

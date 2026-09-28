@@ -33,6 +33,12 @@ pub struct RawJsonError {
 }
 
 impl RawJson {
+    /// Returns the JSON `null` value for a required empty replay payload.
+    #[must_use]
+    pub fn null() -> Self {
+        Self("null".into())
+    }
+
     /// Validates the text as one JSON value and retains it verbatim.
     ///
     /// Surrounding JSON whitespace is dropped; spelling, member order,
