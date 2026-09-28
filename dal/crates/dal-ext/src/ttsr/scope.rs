@@ -23,7 +23,7 @@ pub struct ScopeInput<'a> {
     /// A named tool absent from a supplied inventory remains in the scope
     /// and produces a Note problem.
     pub known_tools: Option<&'a [&'a str]>,
-    /// Additional condition-derived scope tokens, such as D-07 glob shorthand.
+    /// Additional condition-derived scope tokens, such as glob shorthand.
     pub extra_tokens: &'a [String],
 }
 

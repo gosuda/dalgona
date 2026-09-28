@@ -147,8 +147,7 @@ impl Compiled {
     }
 }
 
-/// Compiles one condition in the dal dialect under the D-07 and D-25
-/// budgets.
+/// Compiles one condition in the dal dialect under the pattern and DFA budgets.
 ///
 /// The dialect is Rust regex syntax over bytes with Unicode classes off and
 /// the ASCII `\b`; only a leading `(?i)`, `(?m)`, `(?s)` group (or their
@@ -183,25 +182,7 @@ pub fn compile(src: &str, index: usize) -> Result<Compiled, Skip> {
     if scan.inline_flags {
         return Err(fail(SkipReason::Syntax));
     }
-    let nfa = thompson::Compiler::new()
-        .syntax(syntax::Config::new().unicode(false).utf8(false))
-        .configure(
-            thompson::Config::new()
-                .utf8(false)
-                .which_captures(thompson::WhichCaptures::None)
-                .nfa_size_limit(Some(NFA_BYTES_BACKSTOP)),
-        )
-        .build(src)
-        .map_err(|err| {
-            fail(if err.size_limit().is_some() {
-                SkipReason::NodeLimit
-            } else {
-                SkipReason::Syntax
-            })
-        })?;
-    if nfa.states().len() > NODE_LIMIT {
-        return Err(fail(SkipReason::NodeLimit));
-    }
+    let nfa = bounded_nfa(src).map_err(fail)?;
     let dfa = dense::Builder::new()
         .configure(
             dense::Config::new()
@@ -231,6 +212,30 @@ pub fn compile(src: &str, index: usize) -> Result<Compiled, Skip> {
         src: src.into(),
         matches_empty,
     })
+}
+
+/// Enforces the pattern-expansion budget before the more expensive determinization.
+fn bounded_nfa(src: &str) -> Result<thompson::NFA, SkipReason> {
+    let nfa = thompson::Compiler::new()
+        .syntax(syntax::Config::new().unicode(false).utf8(false))
+        .configure(
+            thompson::Config::new()
+                .utf8(false)
+                .which_captures(thompson::WhichCaptures::None)
+                .nfa_size_limit(Some(NFA_BYTES_BACKSTOP)),
+        )
+        .build(src)
+        .map_err(|error| {
+            if error.size_limit().is_some() {
+                SkipReason::NodeLimit
+            } else {
+                SkipReason::Syntax
+            }
+        })?;
+    if nfa.states().len() > NODE_LIMIT {
+        return Err(SkipReason::NodeLimit);
+    }
+    Ok(nfa)
 }
 
 /// Returns the letters and the full text of a leading `(?letters)` or
@@ -316,7 +321,7 @@ fn skip_class_open(bytes: &[u8], mut i: usize) -> usize {
     i
 }
 
-/// Reports whether `src` is the glob shorthand of D-07: none of
+/// Reports whether `src` is glob shorthand: none of
 /// `\ ^ $ + | ( )`, at least one of `? * [ ] { }`, and either a `/` or the
 /// shape `*.<ext>` with no whitespace.
 #[must_use]
@@ -959,8 +964,8 @@ mod tests {
 
         #[test]
         fn node_limit_boundary(n in 1_usize..200, m in 1_usize..200) {
-            let result = compile(&format!("(a{{{n}}}){{{m}}}"), 0);
-            let node = matches!(&result, Err(s) if s.reason == SkipReason::NodeLimit);
+            let result = bounded_nfa(&format!("(a{{{n}}}){{{m}}}"));
+            let node = matches!(result, Err(SkipReason::NodeLimit));
             if n * m > NODE_LIMIT {
                 prop_assert!(node);
             } else if n * m < NODE_LIMIT - 100 {

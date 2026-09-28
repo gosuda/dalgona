@@ -1,9 +1,9 @@
 //! Rule files: the hand-written front matter parser and the rule-file door.
 //!
 //! The front matter is a strict YAML subset with named errors and exact line
-//! numbers (decision D-04 of the ttsr behavior part); no YAML crate. [`split`]
-//! only reads the block, and [`parse_rulefile`] validates the keys of
-//! decision D-05 read-only. Regular expressions are never compiled here; the
+//! numbers; no YAML crate. [`split`] only reads the block, and
+//! [`parse_rulefile`] validates the supported keys without changing the input.
+//! Regular expressions are never compiled here; the
 //! set build compiles the kept conditions.
 
 use std::fmt;
@@ -27,7 +27,7 @@ const REPEAT_GAP_MAX: u16 = 1000;
 /// The delimiter line that opens and closes the front matter.
 const FENCE: &str = "---";
 
-/// The keys of decision D-05, camelCase.
+/// Supported rule-file keys, in camelCase.
 const KNOWN_KEYS: [&str; 11] = [
     "description",
     "condition",
@@ -418,7 +418,7 @@ fn camel_case(key: &str) -> String {
     out
 }
 
-/// Returns the note reason of a key that D-05 does not read.
+/// Returns the diagnostic for an unsupported or unknown key.
 fn key_note(key: &str) -> Option<String> {
     if KNOWN_KEYS.contains(&key) {
         None

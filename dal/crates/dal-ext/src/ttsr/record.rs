@@ -1,4 +1,4 @@
-//! The `dal.rule` record door (decision D-16 of the ttsr behavior part).
+//! Validation of the `dal.rule` registration record.
 //!
 //! A record is checked once, in a fixed order, and the first failed check is
 //! the registration error `rule <name>: <reason>`; the Starlark adapter adds
@@ -12,7 +12,7 @@
 //! three bools, the two enums, and `scope`, `globs`, and `agents`, so their
 //! type and enum-value checks belong to the adapter that builds the record.
 //! The `judge` question arrives as plain text and the record carries no
-//! question kind, so this door cannot raise the D-17 reason `the judge
+//! question kind, so this validation cannot raise the error `the judge
 //! question must be a bool question`: the Starlark adapter must reject a
 //! `dal.choice` or `dal.score` value before it builds the [`RuleRecord`].
 
@@ -82,7 +82,7 @@ pub struct RecordSource {
 ///
 /// Checks run in this order: name grammar; 1 to 16 patterns, each at most
 /// 1024 bytes; a non-blank `text`; `repeat_gap` in `1..=1000`. The glob
-/// shorthand of decision D-07 applies to the patterns as it does to file
+/// shorthand applies to the patterns as it does to file
 /// conditions. On success the problems are the Skipped glob and scope
 /// remarks, which do not reject the record, and the unknown-tool notes.
 ///

@@ -250,13 +250,13 @@ pub fn fire_description(rule: &Rule) -> &str {
     })
 }
 
-/// Renders the D-14 interrupt prompt, without adding a trailing newline.
+/// Renders the interrupt prompt, without adding a trailing newline.
 #[must_use]
 pub fn render_interrupt_text(rule: &Rule) -> String {
     InterruptText(rule).to_string()
 }
 
-/// Renders the D-14 reminder prompt, without adding a trailing newline.
+/// Renders the reminder prompt, without adding a trailing newline.
 #[must_use]
 pub fn render_reminder_text(rule: &Rule, subject: RuleSubject<'_>) -> String {
     ReminderText { rule, subject }.to_string()

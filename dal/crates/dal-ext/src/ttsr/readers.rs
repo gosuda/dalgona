@@ -1487,7 +1487,7 @@ mod tests {
         assert_chunked(&tool("exec", EditStyle::Anchor), pair, &expected);
     }
 
-    /// Drives the D-19 path gating over reader events: a match waits for its
+    /// Drives path gating over reader events: a match waits for its
     /// item's path, fires once the path is admitted, and is dropped at item
     /// end. Returns the event index at which the fire lands.
     fn gated_fire(events: &[ReaderEvent], scope_text: &str) -> Option<usize> {
