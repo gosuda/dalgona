@@ -534,6 +534,18 @@ pub struct Settings {
     pub mode: Mode,
 }
 
+impl Settings {
+    const fn initial() -> Self {
+        Self {
+            model: None,
+            thinking: ThinkingLevel::Off,
+            approval: ApprovalMode::Ask,
+            name: None,
+            mode: Mode::Normal,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 enum QueuedInput {
     Steer(Vec<Part>),
@@ -652,6 +664,17 @@ impl Replay {
     }
 
     fn record(&mut self, record: &Record) -> Result<(), ReplayError> {
+        if let Some(entry) = record.entry() {
+            if entry.id.get() <= self.max_entry {
+                return Err(contradiction("entry ids must increase strictly"));
+            }
+            if entry
+                .parent
+                .is_some_and(|parent| !self.session.tree.entries.contains_key(&parent))
+            {
+                return Err(contradiction("entry parent must name an earlier entry"));
+            }
+        }
         if let Record::Session(header) = record {
             if self.saw_record {
                 return Err(contradiction(
@@ -1017,8 +1040,48 @@ impl Session {
         replay.finish(now)
     }
 
+    /// Restores an already booted and recovered journal without emitting effects.
+    ///
+    /// The store must finish crash recovery before calling this method. Unlike
+    /// [`Self::replay`], restoration preserves the current boot generation.
+    ///
+    /// # Errors
+    /// Returns a contradiction for a missing header or boot, unfinished work,
+    /// invalid record order, or exhausted identifiers.
+    pub fn restore(records: impl IntoIterator<Item = Record>) -> Result<Self, ReplayError> {
+        let mut replay = Replay::new();
+        for record in records {
+            replay.record(&record)?;
+        }
+        if replay.session.id.is_none() || replay.session.generation.is_none() {
+            return Err(contradiction(
+                "restoration needs a session header and boot record",
+            ));
+        }
+        replay.calls.retain(|call| !call.settled);
+        if replay.active_turn.is_some()
+            || !replay.calls.is_empty()
+            || !replay.started_jobs.is_empty()
+        {
+            return Err(contradiction(
+                "session requires recovery before restoration",
+            ));
+        }
+        replay.reserve_counters()?;
+        replay.session.restore_branch_state()?;
+        replay.session.phase = Phase::Idle;
+        Ok(replay.session)
+    }
+
+    /// Borrows the settings reconstructed from the current journal branch.
+    #[must_use]
+    pub const fn settings(&self) -> &Settings {
+        &self.settings
+    }
+
     fn restore_branch_state(&mut self) -> Result<(), ReplayError> {
         let branch = self.tree.ancestors(self.tree.leaf);
+        self.restore_branch_settings(&branch);
         let is_compaction = |id: &EntryId| {
             self.tree
                 .entries
@@ -1054,6 +1117,22 @@ impl Session {
         });
         self.compactions = compactions;
         Ok(())
+    }
+
+    fn restore_branch_settings(&mut self, branch: &[EntryId]) {
+        let mut settings = Settings::initial();
+        settings.name.clone_from(&self.settings.name);
+        settings.mode = self.settings.mode;
+        for entry in branch.iter().filter_map(|id| self.tree.entries.get(id)) {
+            match &entry.kind {
+                EntryKind::Model { route } => settings.model = Some(route.clone()),
+                EntryKind::Thinking { level } => settings.thinking = *level,
+                EntryKind::Approval { mode } => settings.approval = *mode,
+                _ => {}
+            }
+        }
+        self.request_params.thinking = settings.thinking;
+        self.settings = settings;
     }
 
     fn next_generation(&self) -> Result<Gen, ReplayError> {
@@ -1334,13 +1413,7 @@ impl Session {
             next_entry: Some(EntryId::new(NonZeroU64::MIN)),
             last_turn: 0,
             tree: Tree::new(),
-            settings: Settings {
-                model: None,
-                thinking: ThinkingLevel::Off,
-                approval: ApprovalMode::Ask,
-                name: None,
-                mode: Mode::Normal,
-            },
+            settings: Settings::initial(),
             request_params: RequestParams {
                 thinking: ThinkingLevel::Off,
                 effort: None,
@@ -1872,6 +1945,8 @@ impl Session {
             }
             Command::MoveLeaf(id) => {
                 self.tree.leaf = Some(id);
+                let branch = self.tree.ancestors(Some(id));
+                self.restore_branch_settings(&branch);
                 self.projected_bytes = self.projected_bytes_on_branch();
                 emit.records.push(Record::Leaf {
                     at: now,
@@ -1881,6 +1956,8 @@ impl Session {
                     added: Vec::new(),
                     leaf: Some(id),
                 }));
+                emit.updates
+                    .push(UpdateKind::Settings(self.settings_view()));
                 effects.push(Effect::Reply(Ok(Reply::Done)));
             }
             Command::Compact { focus } => self.manual_compact(focus, emit, effects),
@@ -3709,6 +3786,128 @@ mod tests {
     fn session() -> Session {
         Session::replay([], stamp()).unwrap().0
     }
+
+    #[test]
+    fn restore_preserves_boot_and_rejects_unrecovered_work() {
+        let session_id = crate::SessionId::new_v7();
+        let generation = Gen::new(NonZeroU64::MIN);
+        let records = vec![
+            Record::Session(crate::Header {
+                id: session_id,
+                at: stamp(),
+                workspace: crate::Workspace::new(PathBuf::from(env!("CARGO_MANIFEST_DIR")))
+                    .unwrap(),
+                product: crate::Product::Dal,
+                from: None,
+            }),
+            Record::Boot {
+                at: stamp(),
+                r#gen: generation,
+                version: PRODUCT_VERSION.into(),
+            },
+        ];
+        let restored = Session::restore(records.clone()).unwrap();
+        assert_eq!(restored.id, Some(session_id));
+        assert_eq!(restored.generation, Some(generation));
+        assert_eq!(restored.phase(), &Phase::Idle);
+        assert_eq!(restored.settings(), session().settings());
+        assert!(matches!(
+            Session::restore([]),
+            Err(ReplayError::Contradiction { .. })
+        ));
+        assert!(matches!(
+            Session::restore(records[..1].iter().cloned()),
+            Err(ReplayError::Contradiction { .. })
+        ));
+
+        let mut unfinished = records.clone();
+        unfinished.push(Record::TurnStart {
+            at: stamp(),
+            turn: id(1),
+        });
+        assert!(matches!(
+            Session::restore(unfinished),
+            Err(ReplayError::Contradiction { .. })
+        ));
+        let (reopened, _) = Session::replay(records, stamp()).unwrap();
+        assert_eq!(reopened.generation.unwrap().get(), 2);
+    }
+    #[test]
+    fn replay_rejects_missing_parents_and_reused_entries() {
+        let setting = |value, parent| {
+            Record::Thinking(Entry {
+                id: entry(value),
+                parent,
+                at: stamp(),
+                kind: EntryKind::Thinking {
+                    level: ThinkingLevel::Low,
+                },
+            })
+        };
+        for records in [
+            vec![setting(2, Some(entry(1)))],
+            vec![setting(1, Some(entry(1)))],
+            vec![setting(1, None), setting(1, None)],
+            vec![setting(2, None), setting(1, Some(entry(2)))],
+        ] {
+            assert!(matches!(
+                Session::replay(records, stamp()),
+                Err(ReplayError::Contradiction { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn moving_leaf_restores_branch_settings_before_publish() {
+        let mut session = session();
+        let mut records = Vec::new();
+        for cmd in [
+            Command::SetModel(route()),
+            Command::SetThinking(ThinkingLevel::Low),
+            Command::SetApproval(ApprovalMode::Edits),
+        ] {
+            append_emitted(
+                &send(&mut session, Event::Command { cmd, by: client() }).unwrap(),
+                &mut records,
+            );
+        }
+        let anchor = session.tree.leaf.unwrap();
+        let mut expected = session.settings().clone();
+        expected.name = Some("named session".into());
+        for cmd in [
+            Command::SetModel(ModelRoute::Api {
+                family: Family::Responses,
+                model: "other-model".into(),
+            }),
+            Command::SetThinking(ThinkingLevel::High),
+            Command::SetApproval(ApprovalMode::All),
+            Command::Rename("named session".into()),
+        ] {
+            append_emitted(
+                &send(&mut session, Event::Command { cmd, by: client() }).unwrap(),
+                &mut records,
+            );
+        }
+        let moved = send(
+            &mut session,
+            Event::Command {
+                cmd: Command::MoveLeaf(anchor),
+                by: client(),
+            },
+        )
+        .unwrap();
+        assert_eq!(session.settings(), &expected);
+        assert_eq!(session.request_params.thinking, ThinkingLevel::Low);
+        assert!(moved.iter().any(|effect| {
+            matches!(effect, Effect::Emit(emit) if emit.updates.iter().any(|update| {
+                matches!(update, UpdateKind::Settings(settings) if *settings == session.settings_view())
+            }))
+        }));
+        append_emitted(&moved, &mut records);
+        let replayed = Session::replay(records, stamp()).unwrap().0;
+        assert_eq!(replayed.settings(), &expected);
+    }
+
     fn client() -> ClientId {
         ClientId::new("test")
     }
