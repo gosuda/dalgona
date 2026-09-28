@@ -30,10 +30,8 @@ pub struct View {
     /// The current session settings.
     pub settings: SettingsView,
     /// Requests awaiting a client answer.
-    #[serde(rename = "openRequests")]
     pub open: Vec<crate::request::Request>,
     /// File changes represented in the view.
-    #[serde(rename = "fileChanges")]
     pub changes: Vec<FileChange>,
     /// The latest token usage projection.
     pub usage: UsageView,
@@ -171,7 +169,6 @@ pub struct Page<T> {
 #[serde(rename_all = "camelCase")]
 pub struct EntryView {
     /// The entry's identity.
-    #[serde(rename = "entryId")]
     pub id: EntryId,
     /// The parent entry, when this is not a root entry.
     pub parent: Option<EntryId>,
@@ -299,12 +296,51 @@ pub struct TreeDelta {
 #[cfg(test)]
 mod tests {
     use std::num::{NonZeroU32, NonZeroU64};
+    use std::time::Duration;
 
-    use super::{PageReq, PageReqError, SessionInfo};
-    use crate::id::{Seq, SessionId};
+    use serde::Deserialize;
+
+    use super::{
+        AutoCompaction, EntryView, FileChange, Page, PageReq, PageReqError, SessionInfo,
+        SettingsView, Stats, TreeOutline, TurnState, UsageView, View,
+    };
+    use crate::config::{ApprovalMode, Mode};
+    use crate::id::{EntryId, Gen, RequestId, Seq, SessionId, TurnId};
+    use crate::journal::EntryKind;
+    use crate::model::{ThinkingLevel, Usage};
+    use crate::request::{Answer, Owner, Question, Request};
     use crate::workspace::Workspace;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ConsumerView {
+        open: Vec<Request>,
+        changes: Vec<FileChange>,
+        entries: ConsumerPage,
+        session: ConsumerSession,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ConsumerPage {
+        items: Vec<ConsumerEntry>,
+        next_before: Option<EntryId>,
+    }
+
+    #[derive(Deserialize)]
+    struct ConsumerEntry {
+        id: EntryId,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ConsumerSession {
+        updated_at: jiff::Timestamp,
+        created_at: jiff::Timestamp,
+        last_seq: Seq,
+    }
 
     #[test]
     fn view_pages_keep_bounds_and_session_identity() -> TestResult {
@@ -332,6 +368,98 @@ mod tests {
         let encoded = sonic_rs::to_string(&session)?;
         let decoded: SessionInfo = sonic_rs::from_str(&encoded)?;
         assert_eq!(decoded, session);
+        Ok(())
+    }
+
+    #[test]
+    fn view_round_trips_declared_camel_case_fields() -> TestResult {
+        let entry_id = EntryId::new(NonZeroU64::new(11).expect("11 is nonzero"));
+        let next_before = EntryId::new(NonZeroU64::new(10).expect("10 is nonzero"));
+        let turn_id = TurnId::new(NonZeroU64::new(3).expect("3 is nonzero"));
+        let open = vec![Request {
+            id: RequestId::new_v7(),
+            turn: Some(turn_id),
+            owner: Owner::Core,
+            question: Question::Text {
+                prompt: "Continue?".into(),
+                placeholder: Some("Answer".into()),
+            },
+            timeout: Duration::from_secs(30),
+            default: Answer::Cancel,
+        }];
+        let changes = vec![FileChange {
+            path: "src/main.rs".into(),
+            added: 2,
+            removed: 1,
+        }];
+        let session = SessionInfo {
+            id: SessionId::new_v7(),
+            name: Some("session".into()),
+            preview: "latest content".into(),
+            workspace: Workspace::new(std::env::temp_dir())?,
+            updated_at: jiff::Timestamp::UNIX_EPOCH,
+            created_at: jiff::Timestamp::UNIX_EPOCH,
+            archived: false,
+            last_seq: Seq::new(NonZeroU64::new(4).expect("4 is nonzero")),
+        };
+        let view = View {
+            r#gen: Gen::new(NonZeroU64::new(2).expect("2 is nonzero")),
+            seq: Seq::new(NonZeroU64::new(4).expect("4 is nonzero")),
+            session,
+            turn: TurnState::Running { turn: turn_id },
+            entries: Page {
+                items: vec![EntryView {
+                    id: entry_id,
+                    parent: None,
+                    kind: EntryKind::User { parts: Vec::new() },
+                }],
+                next_before: Some(next_before),
+            },
+            tree: TreeOutline {
+                branches: Vec::new(),
+            },
+            settings: SettingsView {
+                model: None,
+                thinking: ThinkingLevel::Off,
+                approval: ApprovalMode::Ask,
+                mode: Mode::Normal,
+                name: None,
+            },
+            open,
+            changes,
+            usage: UsageView {
+                usage: Usage {
+                    input_tokens: 12,
+                    cached_input_tokens: 4,
+                    output_tokens: 5,
+                    reasoning_tokens: None,
+                    cache_write_tokens: 0,
+                    cost_usd: None,
+                },
+                context_tokens: 17,
+                context_window: 128_000,
+            },
+            stats: Stats {
+                steers_queued: 0,
+                follow_ups_queued: 0,
+                retries: 0,
+                dropped_observations: 0,
+                auto_compaction: AutoCompaction::Off,
+            },
+        };
+
+        let encoded = sonic_rs::to_string(&view)?;
+        let decoded: View = sonic_rs::from_str(&encoded)?;
+        assert_eq!(decoded, view);
+
+        let consumer: ConsumerView = sonic_rs::from_str(&encoded)?;
+        assert_eq!(consumer.open, view.open);
+        assert_eq!(consumer.changes, view.changes);
+        assert_eq!(consumer.entries.items[0].id, entry_id);
+        assert_eq!(consumer.entries.next_before, Some(next_before));
+        assert_eq!(consumer.session.updated_at, jiff::Timestamp::UNIX_EPOCH);
+        assert_eq!(consumer.session.created_at, jiff::Timestamp::UNIX_EPOCH);
+        assert_eq!(consumer.session.last_seq, view.session.last_seq);
         Ok(())
     }
 }

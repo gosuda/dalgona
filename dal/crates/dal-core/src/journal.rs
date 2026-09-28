@@ -1126,19 +1126,22 @@ fn micro_cost(usage: &Usage) -> Result<Option<u64>, EncodeError> {
     let Some(cost) = usage.cost_usd else {
         return Ok(None);
     };
-    if !cost.is_finite() || cost < 0.0 || cost >= 1.8e13 {
+    if !cost.is_finite() || cost < 0.0 {
         return Err(EncodeError::InvalidCost);
     }
-    // `as` after the range check is exact-to-nearest: the round has
-    // already produced an integral f64 below u64::MAX as f64.
     let micros = cost.mul_add(1e6, 0.0).round();
-    if micros >= 1.8e19 {
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "u64::MAX rounds to 2^64 as f64, the exclusive conversion bound"
+    )]
+    let upper_bound = u64::MAX as f64;
+    if !micros.is_finite() || micros < 0.0 || micros >= upper_bound {
         return Err(EncodeError::InvalidCost);
     }
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
-        reason = "range-checked above; the value is finite, positive, integral, and below u64::MAX"
+        reason = "range-checked above; the rounded value is finite, nonnegative, and below 2^64"
     )]
     Ok(Some(micros as u64))
 }
@@ -2229,13 +2232,20 @@ fn opt_raw_json_member(
 
 /// Collects a raw object into the member map. `seen` names the members
 /// this object accepts; any other member is rejected at its offset.
-fn object_members<'a>(raw: &'a str, seen: &[&str]) -> Result<Members<'a>, DecodeError> {
+fn object_members<'a>(
+    raw: &'a str,
+    base_offset: usize,
+    seen: &[&str],
+) -> Result<Members<'a>, DecodeError> {
     let mut members = Members::new();
     for member in sonic_rs::to_object_iter(raw) {
-        let (name, value) = member.map_err(|error| invalid(0, error.to_string()))?;
-        let offset = value.as_raw_str().as_ptr() as usize - raw.as_ptr() as usize;
+        let (name, value) = member.map_err(|error| invalid(base_offset, error.to_string()))?;
+        let offset = base_offset + (value.as_raw_str().as_ptr() as usize - raw.as_ptr() as usize);
         if !seen.contains(&name.as_ref()) {
             return Err(invalid(offset, format!("unknown member `{name}`")));
+        }
+        if members.contains_key(name.as_ref()) {
+            return Err(invalid(offset, format!("duplicate member `{name}`")));
         }
         members.insert(name.as_ref().into(), (offset, value));
     }
@@ -2247,7 +2257,9 @@ fn parts_member(member: (usize, LazyValue<'_>)) -> Result<Vec<JournalPart>, Deco
     let mut parts = Vec::new();
     for item in sonic_rs::to_array_iter(raw.as_raw_str()) {
         let item = item.map_err(|error| invalid(offset, error.to_string()))?;
-        parts.push(decode_part(&item, offset)?);
+        let item_offset =
+            offset + (item.as_raw_str().as_ptr() as usize - raw.as_raw_str().as_ptr() as usize);
+        parts.push(decode_part(&item, item_offset)?);
     }
     Ok(parts)
 }
@@ -2255,6 +2267,7 @@ fn parts_member(member: (usize, LazyValue<'_>)) -> Result<Vec<JournalPart>, Deco
 fn decode_part(value: &LazyValue<'_>, offset: usize) -> Result<JournalPart, DecodeError> {
     let mut members = object_members(
         value.as_raw_str(),
+        offset,
         &["type", "text", "mime", "base64", "blob", "bytes"],
     )?;
     let ty = want(&mut members, "type")
@@ -2303,7 +2316,9 @@ fn blocks_member(member: (usize, LazyValue<'_>)) -> Result<Vec<Block>, DecodeErr
     let mut blocks = Vec::new();
     for item in sonic_rs::to_array_iter(raw.as_raw_str()) {
         let item = item.map_err(|error| invalid(offset, error.to_string()))?;
-        blocks.push(decode_block(&item, offset)?);
+        let item_offset =
+            offset + (item.as_raw_str().as_ptr() as usize - raw.as_raw_str().as_ptr() as usize);
+        blocks.push(decode_block(&item, item_offset)?);
     }
     Ok(blocks)
 }
@@ -2311,6 +2326,7 @@ fn blocks_member(member: (usize, LazyValue<'_>)) -> Result<Vec<Block>, DecodeErr
 fn decode_block(value: &LazyValue<'_>, offset: usize) -> Result<Block, DecodeError> {
     let mut members = object_members(
         value.as_raw_str(),
+        offset,
         &["type", "text", "replay", "id", "name", "input"],
     )?;
     let ty = want(&mut members, "type")
@@ -2364,6 +2380,7 @@ fn usage_member(member: (usize, LazyValue<'_>)) -> Result<Option<Usage>, DecodeE
     let (offset, raw) = member;
     let mut members = object_members(
         raw.as_raw_str(),
+        offset,
         &[
             "input",
             "output",
@@ -2427,10 +2444,10 @@ fn owner_member(member: (usize, LazyValue<'_>)) -> Result<Owner, DecodeError> {
             other => Err(invalid(offset, format!("unknown owner literal `{other}`"))),
         };
     }
-    let mut inner = object_members(raw.as_raw_str(), &["extension"])?;
+    let mut inner = object_members(raw.as_raw_str(), offset, &["extension"])?;
     let extension = want(&mut inner, "extension")
         .ok_or_else(|| invalid(offset, "a `who` object needs an `extension` member"))?;
-    let mut fields = object_members(extension.1.as_raw_str(), &["name", "origin"])?;
+    let mut fields = object_members(extension.1.as_raw_str(), extension.0, &["name", "origin"])?;
     let name = want(&mut fields, "name")
         .map(|member| text_member(member, "name"))
         .transpose()?
@@ -2444,10 +2461,10 @@ fn owner_member(member: (usize, LazyValue<'_>)) -> Result<Owner, DecodeError> {
 
 fn purpose_member(member: (usize, LazyValue<'_>)) -> Result<InferredPurpose, DecodeError> {
     let (offset, raw) = member;
-    let mut outer = object_members(raw.as_raw_str(), &["synthetic"])?;
+    let mut outer = object_members(raw.as_raw_str(), offset, &["synthetic"])?;
     let synthetic = want(&mut outer, "synthetic")
         .ok_or_else(|| invalid(offset, "a `purpose` object needs a `synthetic` member"))?;
-    let mut fields = object_members(synthetic.1.as_raw_str(), &["id"])?;
+    let mut fields = object_members(synthetic.1.as_raw_str(), synthetic.0, &["id"])?;
     let id = want(&mut fields, "id")
         .map(|member| text_member(member, "id"))
         .transpose()?
@@ -2466,7 +2483,7 @@ fn answer_member(member: (usize, LazyValue<'_>)) -> Result<Answer, DecodeError> 
             other => Err(invalid(offset, format!("unknown answer literal `{other}`"))),
         };
     }
-    let mut inner = object_members(raw.as_raw_str(), &["value"])?;
+    let mut inner = object_members(raw.as_raw_str(), offset, &["value"])?;
     let value = want(&mut inner, "value")
         .ok_or_else(|| invalid(offset, "an `answer` object needs a `value` member"))?;
     let json = RawJson::parse(value.1.as_raw_str())
@@ -2488,7 +2505,7 @@ fn assistant_stop_member(member: (usize, LazyValue<'_>)) -> Result<AssistantStop
             )),
         };
     }
-    let mut inner = object_members(raw.as_raw_str(), &["failed"])?;
+    let mut inner = object_members(raw.as_raw_str(), offset, &["failed"])?;
     let failed = want(&mut inner, "failed")
         .map(|member| text_member(member, "failed"))
         .transpose()?
@@ -2509,7 +2526,7 @@ fn turn_end_stop_member(member: (usize, LazyValue<'_>)) -> Result<TurnEndStop, D
             )),
         };
     }
-    let mut inner = object_members(raw.as_raw_str(), &["failed"])?;
+    let mut inner = object_members(raw.as_raw_str(), offset, &["failed"])?;
     let failed = want(&mut inner, "failed")
         .map(|member| text_member(member, "failed"))
         .transpose()?
@@ -2529,7 +2546,7 @@ fn job_outcome_member(member: (usize, LazyValue<'_>)) -> Result<JobOutcome, Deco
             )),
         };
     }
-    let mut inner = object_members(raw.as_raw_str(), &["exited", "failed"])?;
+    let mut inner = object_members(raw.as_raw_str(), offset, &["exited", "failed"])?;
     if let Some(exited) = want(&mut inner, "exited") {
         return Ok(JobOutcome::Exited {
             code: i32_member(exited, "exited")?,
@@ -2603,7 +2620,7 @@ fn source_member(member: (usize, LazyValue<'_>)) -> Result<Option<Source>, Decod
     if raw.is_null() {
         return Ok(None);
     }
-    let mut inner = object_members(raw.as_raw_str(), &["session", "entry"])?;
+    let mut inner = object_members(raw.as_raw_str(), offset, &["session", "entry"])?;
     let session = want(&mut inner, "session")
         .map(json_member::<SessionId>)
         .transpose()?
@@ -2701,14 +2718,33 @@ pub fn decode(line: &[u8]) -> Result<Decoded, DecodeError> {
     let mut members = Members::new();
     let mut version_member: Option<(usize, LazyValue<'_>)> = None;
     let mut type_member: Option<(usize, LazyValue<'_>)> = None;
+    let mut duplicate_member: Option<DecodeError> = None;
     for member in sonic_rs::to_object_iter(text) {
         let (name, value) = member.map_err(|error| invalid(0, error.to_string()))?;
         let offset = value.as_raw_str().as_ptr() as usize - text.as_ptr() as usize;
         match name.as_ref() {
-            "v" => version_member = Some((offset, value)),
-            "type" => type_member = Some((offset, value)),
+            "v" => {
+                if version_member.is_some() {
+                    return Err(invalid(offset, "duplicate member `v`"));
+                }
+                version_member = Some((offset, value));
+            }
+            "type" => {
+                if type_member.is_some() {
+                    duplicate_member
+                        .get_or_insert_with(|| invalid(offset, "duplicate member `type`"));
+                } else {
+                    type_member = Some((offset, value));
+                }
+            }
             other => {
-                members.insert(other.into(), (offset, value));
+                if members.contains_key(other) {
+                    duplicate_member.get_or_insert_with(|| {
+                        invalid(offset, format!("duplicate member `{other}`"))
+                    });
+                } else {
+                    members.insert(other.into(), (offset, value));
+                }
             }
         }
     }
@@ -2720,6 +2756,9 @@ pub fn decode(line: &[u8]) -> Result<Decoded, DecodeError> {
         .ok_or_else(|| invalid(version_offset, "member `v` must be an unsigned integer"))?;
     if version != u64::from(VERSION) {
         return Err(DecodeError::UnsupportedVersion { found: version });
+    }
+    if let Some(error) = duplicate_member {
+        return Err(error);
     }
     let Some((type_offset, type_raw)) = type_member else {
         return Err(invalid(0, "a record needs a `type` member"));
@@ -3001,7 +3040,7 @@ pub enum BranchError {
     NoEntries,
     /// The anchor is not a user entry.
     #[error("entry {entry} is not a user message; /fork starts from a user message")]
-    NotUserMessage {
+    NotUserEntry {
         /// The offending entry.
         entry: EntryId,
     },
@@ -3026,7 +3065,7 @@ pub enum BranchError {
 /// # Errors
 /// Returns [`BranchError::NoEntries`] when nothing can be cloned,
 /// [`BranchError::UnknownEntry`] for a missing anchor, and
-/// [`BranchError::NotUserMessage`] for a non-user anchor.
+/// [`BranchError::NotUserEntry`] for a non-user anchor.
 pub fn branch(
     records: &[Record],
     leaf: Option<EntryId>,
@@ -3050,7 +3089,7 @@ pub fn branch(
         BranchMode::Fork { .. } => match &anchor_entry.kind {
             EntryKind::User { parts } => (anchor_entry.parent, parts.clone()),
             _ => {
-                return Err(BranchError::NotUserMessage {
+                return Err(BranchError::NotUserEntry {
                     entry: anchor_entry.id,
                 });
             }
@@ -3233,6 +3272,227 @@ mod tests {
             decode(b"{\"v\":1,\"type\":\"session\",\"id\":\"01927f3a-8c2e-7b4d-9f10-3a5b6c7d8e9f\",\"at\":\"2026-09-25T10:15:30.123Z\",\"workspace\":\"/w\",\"product\":\"dal\",\"from\":{\"session\":\"01927f3a-8c2e-7b4d-9f10-3a5b6c7d8e9f\"}}"),
             Err(DecodeError::Invalid { .. })
         ));
+    }
+
+    #[test]
+    fn decode_rejects_duplicate_version_type_and_record_members_at_second_value() {
+        let cases = [
+            (
+                "{\"v\":1,\"v\":2,\"type\":\"leaf\",\"at\":\"2026-09-25T14:05:00.000Z\",\"to\":41}",
+                "\"v\":2",
+                4,
+            ),
+            (
+                "{\"v\":1,\"type\":\"leaf\",\"type\":\"name\",\"at\":\"2026-09-25T14:05:00.000Z\",\"to\":41}",
+                "\"type\":\"name\"",
+                7,
+            ),
+            (
+                "{\"v\":1,\"type\":\"leaf\",\"at\":\"2026-09-25T14:05:00.000Z\",\"to\":41,\"to\":42}",
+                "\"to\":42",
+                5,
+            ),
+        ];
+        for (line, marker, value_offset) in cases {
+            let expected_offset = line.find(marker).unwrap() + value_offset;
+            assert!(matches!(
+                decode(line.as_bytes()),
+                Err(DecodeError::Invalid { offset, .. }) if offset == expected_offset
+            ));
+        }
+    }
+
+    #[test]
+    fn decode_rejects_duplicate_nested_members_at_second_value() {
+        let line = "{\"v\":1,\"type\":\"turn_end\",\"at\":\"2026-09-25T10:16:02.000Z\",\"turn\":1,\"stop\":\"done\",\"usage\":{\"input\":1,\"input\":2,\"output\":1,\"cache_read\":0,\"cache_write\":0,\"reasoning\":null,\"cost_micro_usd\":0},\"changes\":[]}";
+        let expected_offset = line.find("\"input\":2").unwrap() + 8;
+        assert!(matches!(
+            decode(line.as_bytes()),
+            Err(DecodeError::Invalid { offset, .. }) if offset == expected_offset
+        ));
+    }
+
+    #[test]
+    fn decode_reports_absolute_nested_member_offsets() {
+        let cases = [
+            (
+                "{\"v\":1,\"type\":\"turn_end\",\"at\":\"2026-09-25T10:16:02.000Z\",\"turn\":1,\"stop\":\"done\",\"usage\":{\"input\":1,\"input\":2,\"output\":1,\"cache_read\":0,\"cache_write\":0,\"reasoning\":null,\"cost_micro_usd\":0},\"changes\":[]}",
+                "\"input\":",
+                1,
+                8,
+            ),
+            (
+                "{\"v\":1,\"type\":\"user\",\"id\":1,\"parent\":null,\"at\":\"2026-09-25T10:15:30.000Z\",\"parts\":[{\"type\":\"text\",\"text\":\"a\",\"text\":\"b\"}]}",
+                "\"text\":",
+                1,
+                7,
+            ),
+            (
+                "{\"v\":1,\"type\":\"assistant\",\"id\":1,\"parent\":null,\"at\":\"2026-09-25T10:15:35.410Z\",\"api\":\"anthropic\",\"model\":\"m\",\"content\":[{\"type\":\"text\",\"text\":\"a\",\"text\":\"b\"}],\"usage\":{\"input\":1,\"output\":1,\"cache_read\":0,\"cache_write\":0,\"reasoning\":null,\"cost_micro_usd\":null},\"stop\":\"done\"}",
+                "\"text\":",
+                1,
+                7,
+            ),
+            (
+                "{\"v\":1,\"type\":\"inferred\",\"at\":\"2026-09-26T10:15:31.123Z\",\"who\":{\"extension\":{\"name\":\"x\",\"name\":\"y\",\"origin\":\"bundled\"}},\"purpose\":{\"synthetic\":{\"id\":\"m\"}},\"usage\":{\"input\":1,\"output\":1,\"cache_read\":0,\"cache_write\":0,\"reasoning\":null,\"cost_micro_usd\":null}}",
+                "\"name\":",
+                1,
+                7,
+            ),
+            (
+                "{\"v\":1,\"type\":\"inferred\",\"at\":\"2026-09-26T10:15:31.123Z\",\"who\":\"core\",\"purpose\":{\"synthetic\":{\"id\":\"x\",\"id\":\"y\"}},\"usage\":{\"input\":1,\"output\":1,\"cache_read\":0,\"cache_write\":0,\"reasoning\":null,\"cost_micro_usd\":null}}",
+                "\"id\":",
+                1,
+                5,
+            ),
+            (
+                "{\"v\":1,\"type\":\"turn_end\",\"at\":\"2026-09-25T10:16:02.000Z\",\"turn\":1,\"stop\":\"done\",\"usage\":{\"input\":1,\"future\":2},\"changes\":[]}",
+                "\"future\":",
+                0,
+                9,
+            ),
+            (
+                "{\"v\":1,\"type\":\"user\",\"id\":1,\"parent\":null,\"at\":\"2026-09-25T10:15:30.000Z\",\"parts\":[{\"type\":\"text\",\"future\":1}]}",
+                "\"future\":",
+                0,
+                9,
+            ),
+            (
+                "{\"v\":1,\"type\":\"assistant\",\"id\":1,\"parent\":null,\"at\":\"2026-09-25T10:15:35.410Z\",\"api\":\"anthropic\",\"model\":\"m\",\"content\":[{\"type\":\"text\",\"future\":1}],\"usage\":{\"input\":1,\"output\":1,\"cache_read\":0,\"cache_write\":0,\"reasoning\":null,\"cost_micro_usd\":null},\"stop\":\"done\"}",
+                "\"future\":",
+                0,
+                9,
+            ),
+            (
+                "{\"v\":1,\"type\":\"inferred\",\"at\":\"2026-09-26T10:15:31.123Z\",\"who\":{\"extension\":{\"name\":\"x\",\"origin\":\"bundled\",\"future\":1}},\"purpose\":{\"synthetic\":{\"id\":\"m\"}},\"usage\":{\"input\":1,\"output\":1,\"cache_read\":0,\"cache_write\":0,\"reasoning\":null,\"cost_micro_usd\":null}}",
+                "\"future\":",
+                0,
+                9,
+            ),
+            (
+                "{\"v\":1,\"type\":\"inferred\",\"at\":\"2026-09-26T10:15:31.123Z\",\"who\":\"core\",\"purpose\":{\"synthetic\":{\"id\":\"m\",\"future\":1}},\"usage\":{\"input\":1,\"output\":1,\"cache_read\":0,\"cache_write\":0,\"reasoning\":null,\"cost_micro_usd\":null}}",
+                "\"future\":",
+                0,
+                9,
+            ),
+        ];
+        for (line, marker, occurrence, value_offset) in cases {
+            let marker_at = line.match_indices(marker).nth(occurrence).unwrap().0;
+            let expected_offset = marker_at + value_offset;
+            assert!(matches!(
+                decode(line.as_bytes()),
+                Err(DecodeError::Invalid { offset, .. }) if offset == expected_offset
+            ));
+        }
+    }
+
+    #[test]
+    fn unsupported_version_precedes_duplicate_type_and_payload() {
+        for line in [
+            "{\"v\":2,\"type\":\"leaf\",\"type\":\"other\",\"at\":\"x\",\"to\":1}",
+            "{\"type\":\"leaf\",\"to\":1,\"to\":2,\"v\":2}",
+            "{\"to\":1,\"v\":2,\"type\":\"leaf\",\"to\":2}",
+        ] {
+            assert!(matches!(
+                decode(line.as_bytes()),
+                Err(DecodeError::UnsupportedVersion { found: 2 })
+            ));
+        }
+    }
+
+    fn turn_end_with_cost(cost_usd: f64) -> Record {
+        Record::TurnEnd {
+            at: "2026-09-25T10:16:02.000Z"
+                .parse()
+                .unwrap_or(jiff::Timestamp::UNIX_EPOCH),
+            turn: TurnId::new(nz(1)),
+            stop: TurnEndStop::Done,
+            usage: Some(Usage {
+                input_tokens: 1,
+                cached_input_tokens: 0,
+                output_tokens: 1,
+                reasoning_tokens: None,
+                cache_write_tokens: 0,
+                cost_usd: Some(cost_usd),
+            }),
+            changes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn encode_preserves_representable_high_micro_dollar_cost() -> Result<(), EncodeError> {
+        let encoded = encode(&turn_end_with_cost(18_000_000_000_000.0))?;
+        assert!(
+            std::str::from_utf8(&encoded)
+                .is_ok_and(|line| line.contains("\"cost_micro_usd\":18000000000000000000"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn encode_rejects_cost_rounding_to_u64_overflow() {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "u64::MAX rounds to 2^64 as f64, the exclusive micro-dollar bound"
+        )]
+        let cost_usd = (u64::MAX as f64) / 1_000_000.0;
+        assert!(matches!(
+            encode(&turn_end_with_cost(cost_usd)),
+            Err(EncodeError::InvalidCost)
+        ));
+    }
+
+    #[test]
+    fn encode_rejects_negative_and_infinite_costs() {
+        assert!(matches!(
+            encode(&turn_end_with_cost(-0.000_001)),
+            Err(EncodeError::InvalidCost)
+        ));
+        assert!(matches!(
+            encode(&turn_end_with_cost(f64::INFINITY)),
+            Err(EncodeError::InvalidCost)
+        ));
+    }
+
+    #[test]
+    fn encode_keeps_explicit_zero_cost() -> Result<(), EncodeError> {
+        let encoded = encode(&turn_end_with_cost(0.0))?;
+        assert!(
+            std::str::from_utf8(&encoded).is_ok_and(|line| line.contains("\"cost_micro_usd\":0"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn fork_rejects_non_user_anchor_as_not_user_entry() -> Result<(), Box<dyn std::error::Error>> {
+        let header = Header {
+            id: SessionId::new_v7(),
+            at: "2026-09-25T10:15:30.000Z".parse()?,
+            workspace: Workspace::new("/w".into())?,
+            product: Product::Dal,
+            from: None,
+        };
+        let entry = Entry {
+            id: EntryId::new(nz(7)),
+            parent: None,
+            at: "2026-09-25T10:15:30.000Z".parse()?,
+            kind: EntryKind::Reminder {
+                source: "rule:test".into(),
+                text: "Reminder".into(),
+            },
+        };
+        assert!(matches!(
+            branch(
+                &[Record::Reminder(entry)],
+                None,
+                BranchMode::Fork {
+                    at: EntryId::new(nz(7))
+                },
+                &header
+            ),
+            Err(BranchError::NotUserEntry { entry }) if entry.get() == 7
+        ));
+        Ok(())
     }
 
     #[test]

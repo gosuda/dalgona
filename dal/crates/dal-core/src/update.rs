@@ -391,7 +391,7 @@ mod tests {
         // A nested EntryView drives EntryKind -> Block -> RawJson three
         // tag seams deep; buffering at any one of them once failed.
         let tree: Update = sonic_rs::from_str(
-            r#"{"gen":1,"seq":4,"kind":{"type":"tree","added":[{"entryId":1,"parent":null,"kind":{"type":"assistant","api":"anthropic","model":"m","content":[{"type":"reasoning","text":"t","replay":{"sig":"abc"}}],"usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1,"reasoning_tokens":null,"cache_write_tokens":0,"cost_usd":null},"stop":{"type":"done"}}}],"leaf":1}}"#,
+            r#"{"gen":1,"seq":4,"kind":{"type":"tree","added":[{"id":1,"parent":null,"kind":{"type":"assistant","api":"anthropic","model":"m","content":[{"type":"reasoning","text":"t","replay":{"sig":"abc"}}],"usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1,"reasoning_tokens":null,"cache_write_tokens":0,"cost_usd":null},"stop":{"type":"done"}}}],"leaf":1}}"#,
         )?;
         let UpdateKind::Tree(TreeDelta { added, leaf }) = tree.kind else {
             panic!("expected tree, got {:?}", tree.kind);

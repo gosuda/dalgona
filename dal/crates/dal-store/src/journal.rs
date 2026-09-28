@@ -654,7 +654,7 @@ pub fn branch_error(error: &BranchError) -> crate::error::StoreError {
         BranchError::NoEntries => crate::error::StoreError::NothingToClone {
             id: String::new().into(),
         },
-        BranchError::NotUserMessage { entry } => crate::error::StoreError::NotUserMessage { entry: *entry },
+        BranchError::NotUserEntry { entry } => crate::error::StoreError::NotUserMessage { entry: *entry },
         BranchError::UnknownEntry { entry } => crate::error::StoreError::UnknownEntry {
             id: String::new().into(),
             entry: *entry,

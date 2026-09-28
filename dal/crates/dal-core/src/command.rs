@@ -94,17 +94,14 @@ pub enum Command {
 enum CommandShape<'a> {
     Prompt {
         expect: &'a Expect,
-        #[serde(rename = "parts")]
         content: &'a [Part],
     },
     Steer {
         turn: &'a TurnId,
-        #[serde(rename = "parts")]
         content: &'a [Part],
     },
     FollowUp {
         turn: &'a TurnId,
-        #[serde(rename = "parts")]
         content: &'a [Part],
     },
     Cancel {
@@ -120,7 +117,6 @@ enum CommandShape<'a> {
         mode: &'a ApprovalMode,
     },
     Compact {
-        #[serde(rename = "instructions", skip_serializing_if = "Option::is_none")]
         focus: Option<&'a str>,
     },
     MoveLeaf {
@@ -157,17 +153,14 @@ enum CommandFields {
     Prompt {
         #[serde(default)]
         expect: Expect,
-        #[serde(rename = "parts")]
         content: Vec<Part>,
     },
     Steer {
         turn: TurnId,
-        #[serde(rename = "parts")]
         content: Vec<Part>,
     },
     FollowUp {
         turn: TurnId,
-        #[serde(rename = "parts")]
         content: Vec<Part>,
     },
     Cancel {
@@ -183,7 +176,6 @@ enum CommandFields {
         mode: ApprovalMode,
     },
     Compact {
-        #[serde(rename = "instructions")]
         focus: Option<Box<str>>,
     },
     MoveLeaf {
@@ -233,14 +225,12 @@ impl Serialize for Command {
 struct PromptCommandFields {
     #[serde(default)]
     expect: Expect,
-    #[serde(rename = "parts")]
     content: Vec<Part>,
 }
 
 #[derive(Deserialize)]
 struct TurnCommandFields {
     turn: TurnId,
-    #[serde(rename = "parts")]
     content: Vec<Part>,
 }
 
@@ -266,7 +256,6 @@ struct ModeCommandFields {
 
 #[derive(Deserialize)]
 struct CompactCommandFields {
-    #[serde(rename = "instructions")]
     focus: Option<Box<str>>,
 }
 
@@ -531,6 +520,8 @@ pub enum Rejection {
 mod tests {
     use std::num::NonZeroU64;
 
+    use serde::Deserialize;
+
     use super::{CancelScope, Command, Expect};
     use crate::config::ApprovalMode;
     use crate::content::Part;
@@ -538,6 +529,139 @@ mod tests {
     use crate::model::{ModelRoute, ThinkingLevel};
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    fn text_content() -> Vec<Part> {
+        vec![Part::Text {
+            text: "hello".into(),
+        }]
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ContentCommandWire {
+        #[serde(rename = "type")]
+        kind: Box<str>,
+        expect: Option<Expect>,
+        turn: Option<TurnId>,
+        content: Vec<Part>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct CompactCommandWire {
+        #[serde(rename = "type")]
+        kind: Box<str>,
+        focus: Box<str>,
+    }
+
+    #[test]
+    fn content_commands_encode_under_content() -> TestResult {
+        let turn = TurnId::new(NonZeroU64::MIN);
+        let commands = [
+            (
+                Command::Prompt {
+                    expect: Expect::Idle,
+                    content: text_content(),
+                },
+                "prompt",
+            ),
+            (
+                Command::Steer {
+                    turn,
+                    content: text_content(),
+                },
+                "steer",
+            ),
+            (
+                Command::FollowUp {
+                    turn,
+                    content: text_content(),
+                },
+                "follow_up",
+            ),
+        ];
+
+        for (command, expected_kind) in commands {
+            let encoded = sonic_rs::to_string(&command)?;
+            let wire: ContentCommandWire = sonic_rs::from_str(&encoded)?;
+            assert_eq!(wire.kind.as_ref(), expected_kind);
+            if expected_kind == "prompt" {
+                assert_eq!(wire.expect, Some(Expect::Idle));
+            } else {
+                assert_eq!(wire.turn, Some(turn));
+            }
+            assert_eq!(wire.content, text_content());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn content_commands_decode_from_content() -> TestResult {
+        let turn = TurnId::new(NonZeroU64::MIN);
+        let commands = [
+            (
+                r#"{"type":"prompt","expect":"idle","content":[{"type":"text","text":"hello"}]}"#,
+                Command::Prompt {
+                    expect: Expect::Idle,
+                    content: text_content(),
+                },
+            ),
+            (
+                r#"{"type":"steer","turn":1,"content":[{"type":"text","text":"hello"}]}"#,
+                Command::Steer {
+                    turn,
+                    content: text_content(),
+                },
+            ),
+            (
+                r#"{"type":"follow_up","turn":1,"content":[{"type":"text","text":"hello"}]}"#,
+                Command::FollowUp {
+                    turn,
+                    content: text_content(),
+                },
+            ),
+        ];
+
+        for (encoded, expected) in commands {
+            let decoded: Command = sonic_rs::from_str(encoded)?;
+            assert_eq!(decoded, expected);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn prompt_parts_is_not_a_content_alias() {
+        assert!(
+            sonic_rs::from_str::<Command>(
+                r#"{"type":"prompt","expect":"idle","parts":[{"type":"text","text":"hello"}]}"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn compact_focus_encodes_and_decodes_under_focus() -> TestResult {
+        let command = Command::Compact {
+            focus: Some("preserve the API".into()),
+        };
+        let encoded = sonic_rs::to_string(&command)?;
+        let wire: CompactCommandWire = sonic_rs::from_str(&encoded)?;
+        assert_eq!(wire.kind.as_ref(), "compact");
+        assert_eq!(wire.focus.as_ref(), "preserve the API");
+
+        let decoded: Command =
+            sonic_rs::from_str(r#"{"type":"compact","focus":"preserve the API"}"#)?;
+        assert_eq!(decoded, command);
+        Ok(())
+    }
+
+    #[test]
+    fn compact_instructions_is_not_a_focus_alias() -> TestResult {
+        let decoded: Command =
+            sonic_rs::from_str(r#"{"type":"compact","instructions":"preserve the API"}"#)?;
+        assert_eq!(decoded, Command::Compact { focus: None });
+        Ok(())
+    }
 
     #[test]
     fn command_variants_round_trip_with_wire_fields() -> TestResult {
