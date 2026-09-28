@@ -114,7 +114,9 @@ mod tests {
                 std::process::id(),
                 NEXT_DIR.fetch_add(1, Ordering::Relaxed)
             ));
-            fs::create_dir(&path).expect("create lock test directory");
+            fs::DirBuilder::new()
+                .create(&path)
+                .expect("create lock test directory");
             Self(path)
         }
     }
@@ -153,15 +155,14 @@ mod tests {
         let path = dir.0.join("lock");
         let before = fs::read(&path).expect("read owner pid");
 
-        let error = match LockGuard::acquire(&dir.0, id) {
-            Err(error) => error,
-            Ok(_) => panic!("second acquisition must fail"),
+        let Err(error) = LockGuard::acquire(&dir.0, id) else {
+            panic!("second acquisition must fail");
         };
 
         assert!(matches!(
             error,
             StoreError::Locked { session, pid: Some(pid) }
-                if session == id.to_string() && pid == std::process::id()
+                if session.as_ref() == id.to_string() && pid == std::process::id()
         ));
         assert_eq!(fs::read(path).expect("read unchanged owner pid"), before);
     }

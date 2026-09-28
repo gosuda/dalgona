@@ -112,15 +112,18 @@ impl Listing {
         &self,
         workspace_dir: &Path,
         workspace: &Workspace,
-        query: &ListQuery,
+        query: ListQuery,
     ) -> Result<Page<SessionInfo, Box<str>>, StoreError> {
         let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
         if !(1..=500).contains(&limit) {
             return Err(StoreError::ListLimit);
         }
         let limit = usize::try_from(limit).map_err(|_| StoreError::ListLimit)?;
-        let cursor = query.cursor.as_deref().map(parse_cursor).transpose()?;
-        let Some(search) = query.search.as_deref() else {
+        let cursor = query
+            .cursor
+            .map(|cursor| parse_cursor(&cursor))
+            .transpose()?;
+        let Some(search) = query.search else {
             let mut candidates = Self::read_candidates(workspace_dir)?;
             if let Some(cursor) = cursor {
                 candidates.retain(|candidate| {
@@ -207,7 +210,7 @@ impl Listing {
             .filter(|session| session.info.name.as_deref() == Some(arg))
             .collect();
         if !exact.is_empty() {
-            return unique_match(arg, exact);
+            return unique_match(arg, &exact);
         }
 
         if (4..=36).contains(&arg.len())
@@ -220,7 +223,7 @@ impl Listing {
                 .filter(|session| session.id_text.starts_with(arg))
                 .collect();
             if !prefixed.is_empty() {
-                return unique_match(arg, prefixed);
+                return unique_match(arg, &prefixed);
             }
         }
 
@@ -267,7 +270,7 @@ impl Listing {
             && facts.id == id
             && facts.workspace == *workspace
         {
-            return Ok(to_session_info(facts, journal_mtime)?);
+            return to_session_info(facts, journal_mtime);
         }
 
         let facts = match read_cache(&session_dir.join("info.json"), id, workspace, journal_bytes) {
@@ -281,7 +284,7 @@ impl Listing {
                 // The durable cache has no update sequence; only the active session knows it.
                 last_seq: None,
             },
-            None => scan_journal(&journal_path, id, workspace)?,
+            None => scan_journal(&journal_path, id, workspace),
         };
         self.remember(&journal_path, journal_bytes, journal_mtime, facts.clone());
         to_session_info(facts, journal_mtime)
@@ -515,7 +518,7 @@ fn read_cache(
         .then_some(info)
 }
 
-fn scan_journal(path: &Path, id: SessionId, workspace: &Workspace) -> Result<Facts, StoreError> {
+fn scan_journal(path: &Path, id: SessionId, workspace: &Workspace) -> Facts {
     let mut facts = None;
     let mut first_user_seen = false;
     let mut header_matches = false;
@@ -557,12 +560,12 @@ fn scan_journal(path: &Path, id: SessionId, workspace: &Workspace) -> Result<Fac
         _ => {}
     });
     if scan.is_err() || !header_matches {
-        return Ok(damaged_facts(id, workspace));
+        return damaged_facts(id, workspace);
     }
     let Some(facts) = facts else {
-        return Ok(damaged_facts(id, workspace));
+        return damaged_facts(id, workspace);
     };
-    Ok(facts)
+    facts
 }
 
 fn user_preview(path: &Path, parts: &[JournalPart]) -> String {
@@ -643,7 +646,7 @@ fn parse_cursor(value: &str) -> Result<(i64, String), StoreError> {
     Ok((millis, id.to_string()))
 }
 
-fn unique_match(arg: &str, matches: Vec<&Listed>) -> Result<SessionId, StoreError> {
+fn unique_match(arg: &str, matches: &[&Listed]) -> Result<SessionId, StoreError> {
     if matches.len() == 1 {
         return Ok(matches[0].info.id);
     }
@@ -804,7 +807,7 @@ mod tests {
 
         let listing = Listing::new();
         let page = listing
-            .list(&workspace_dir, &workspace, &query(10, None, Some("FIX")))
+            .list(&workspace_dir, &workspace, query(10, None, Some("FIX")))
             .expect("list changed journal");
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].name.as_deref(), Some("current"));
@@ -826,7 +829,7 @@ mod tests {
         .expect("append rename");
         drop(file);
         let refreshed = listing
-            .list(&workspace_dir, &workspace, &query(10, None, None))
+            .list(&workspace_dir, &workspace, query(10, None, None))
             .expect("rescan resized journal");
         assert_eq!(refreshed.items[0].name.as_deref(), Some("renamed"));
     }
@@ -877,7 +880,7 @@ mod tests {
         drop(file);
 
         let page = Listing::new()
-            .list(&workspace_dir, &workspace, &query(10, None, None))
+            .list(&workspace_dir, &workspace, query(10, None, None))
             .expect("list text-blob session");
         assert_eq!(
             page.items[0].preview.as_bytes(),
@@ -906,7 +909,7 @@ mod tests {
         fs::create_dir_all(empty).expect("create directory without a journal");
 
         let page = Listing::new()
-            .list(&workspace_dir, &workspace, &query(10, None, None))
+            .list(&workspace_dir, &workspace, query(10, None, None))
             .expect("list damaged session");
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].preview.as_ref(), "(damaged session file)");
@@ -950,7 +953,7 @@ mod tests {
             .expect("read mtime before listing");
 
         let page = Listing::new()
-            .list(&workspace_dir, &workspace, &query(10, None, None))
+            .list(&workspace_dir, &workspace, query(10, None, None))
             .expect("list torn-tail session");
         let session = &page.items[0];
         assert_eq!(session.name.as_deref(), Some("prefix name"));
@@ -998,10 +1001,10 @@ mod tests {
         );
         let listing = Listing::new();
         let first = listing
-            .list(&first_dir, &first_workspace, &query(10, None, None))
+            .list(&first_dir, &first_workspace, query(10, None, None))
             .expect("list first workspace");
         let second = listing
-            .list(&second_dir, &second_workspace, &query(10, None, None))
+            .list(&second_dir, &second_workspace, query(10, None, None))
             .expect("list second workspace");
         assert_eq!(first.items[0].name.as_deref(), Some("one"));
         assert_eq!(second.items[0].name.as_deref(), Some("two"));
@@ -1030,14 +1033,14 @@ mod tests {
         }
         let listing = Listing::new();
         let first = listing
-            .list(&workspace_dir, &workspace, &query(1, None, None))
+            .list(&workspace_dir, &workspace, query(1, None, None))
             .expect("first page");
         assert_eq!(first.items[0].id, ids[2]);
         let second = listing
             .list(
                 &workspace_dir,
                 &workspace,
-                &query(1, first.next_before.as_deref(), None),
+                query(1, first.next_before.as_deref(), None),
             )
             .expect("second page");
         assert_eq!(second.items[0].id, ids[1]);
@@ -1045,7 +1048,7 @@ mod tests {
             .list(
                 &workspace_dir,
                 &workspace,
-                &query(1, second.next_before.as_deref(), None),
+                query(1, second.next_before.as_deref(), None),
             )
             .expect("third page");
         assert_eq!(third.items[0].id, ids[0]);
@@ -1179,7 +1182,7 @@ mod tests {
         fs::write(dir.join("journal.jsonl"), b"{}\n").expect("write invalid header");
 
         let page = Listing::new()
-            .list(&workspace_dir, &workspace, &query(10, None, None))
+            .list(&workspace_dir, &workspace, query(10, None, None))
             .expect("list damaged session");
         let session = &page.items[0];
         assert_eq!(session.created_at, None);
@@ -1194,18 +1197,18 @@ mod tests {
         let workspace = workspace(root.path());
         let listing = Listing::new();
         assert!(matches!(
-            listing.list(root.path(), &workspace, &query(0, None, None)),
+            listing.list(root.path(), &workspace, query(0, None, None)),
             Err(StoreError::ListLimit)
         ));
         assert!(matches!(
-            listing.list(root.path(), &workspace, &query(501, None, None)),
+            listing.list(root.path(), &workspace, query(501, None, None)),
             Err(StoreError::ListLimit)
         ));
         assert!(matches!(
             listing.list(
                 root.path(),
                 &workspace,
-                &query(1, Some("not-a-cursor"), None)
+                query(1, Some("not-a-cursor"), None)
             ),
             Err(StoreError::MalformedCursor)
         ));

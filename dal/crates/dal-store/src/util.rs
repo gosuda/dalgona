@@ -253,7 +253,9 @@ mod tests {
                 std::process::id(),
                 random_hex()
             ));
-            fs::create_dir(&path).expect("create test directory");
+            fs::DirBuilder::new()
+                .create(&path)
+                .expect("create test directory");
             Self(path)
         }
     }
@@ -353,7 +355,9 @@ mod tests {
     fn failed_replace_preserves_target_and_removes_temp() {
         let dir = TempDir::new();
         let target = dir.0.join("directory-target");
-        fs::create_dir(&target).expect("create directory target");
+        fs::DirBuilder::new()
+            .create(&target)
+            .expect("create directory target");
 
         assert!(write_atomic(&target, b"not a directory", FileMode::Mode0600).is_err());
         assert!(target.is_dir());
@@ -468,11 +472,22 @@ mod tests {
             normalize_name("0192-abcd"),
             Err(StoreError::InvalidName)
         ));
-        assert_eq!(normalize_name(" CAFE ").expect("uppercase name"), "CAFE");
-        assert_eq!(normalize_name("Cafe").expect("mixed-case name"), "Cafe");
-        assert_eq!(normalize_name("café").expect("non-ASCII name"), "café");
         assert_eq!(
-            normalize_name("  a\r\n\nb  ").expect("collapsed line-break run"),
+            normalize_name(" CAFE ").expect("uppercase name").as_ref(),
+            "CAFE"
+        );
+        assert_eq!(
+            normalize_name("Cafe").expect("mixed-case name").as_ref(),
+            "Cafe"
+        );
+        assert_eq!(
+            normalize_name("café").expect("non-ASCII name").as_ref(),
+            "café"
+        );
+        assert_eq!(
+            normalize_name("  a\r\n\nb  ")
+                .expect("collapsed line-break run")
+                .as_ref(),
             "a b"
         );
         assert!(matches!(

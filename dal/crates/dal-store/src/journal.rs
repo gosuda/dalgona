@@ -2,7 +2,7 @@
 //! structure validation, and rollback on failure.
 //!
 //! The journal speaks bytes; its caller encodes records and publishes blobs
-//! before the first byte of a batch is written (D-09).
+//! before the first byte of a batch is written.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -12,37 +12,44 @@ use std::{
 };
 
 use dal_core::{
-    BranchError, DecodeError, EntryId, Gen, Header, JobEvent, JobId, Record, TurnEndStop, TurnId,
-    Usage, decode,
+    DecodeError, EntryId, Gen, Header, JobEvent, JobId, Record, TurnEndStop, TurnId, Usage, decode,
 };
 
 use crate::error::{AbortedTurn, JournalError, OpenReport, TornTail};
 
-/// The largest one record may be, in bytes (D-08).
+/// The largest one record may be, in bytes.
 pub(crate) const MAX_RECORD: u64 = 67_108_864;
 const SCAN_BUFFER: usize = 1_048_576;
-/// The backward read window for torn-tail repair (D-14).
+/// The backward read window for torn-tail repair.
 const READ_WINDOW: u64 = 65_536;
 
-/// A durability fault, injected by tests at a named point (D-41).
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct FaultSwitch(bool);
+
+impl FaultSwitch {
+    #[cfg(test)]
+    pub(crate) const ON: Self = Self(true);
+
+    fn is_on(self) -> bool {
+        self.0
+    }
+}
+
+/// A durability fault injected by tests at a named point.
 ///
 /// Production code passes [`Faults::default`]; every field `None` or `false`.
 #[derive(Clone, Debug, Default)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "these independent switches are the fixed durability fault-injection configuration"
-)]
-pub struct Faults {
+pub(crate) struct Faults {
     /// Fail the batch write after this many bytes land.
-    pub fail_write_after: Option<usize>,
+    pub write_after: Option<usize>,
     /// Fail the file sync after a successful write.
-    pub fail_sync: bool,
+    pub sync: FaultSwitch,
     /// Fail the truncate-back after a failed batch.
-    pub fail_truncate: bool,
+    pub truncate: FaultSwitch,
     /// Fail the torn-tail side-file write at open.
-    pub fail_quarantine: bool,
+    pub quarantine: FaultSwitch,
     /// Fail the session-directory sync after writing the torn-tail sidefile.
-    pub fail_dir_sync: bool,
+    pub dir_sync: FaultSwitch,
 }
 
 /// Proof that one batch is durable. Nothing publishes before this exists.
@@ -56,7 +63,7 @@ pub struct Receipt {
 
 /// The state of an opened journal: decoded records plus recovery facts.
 #[derive(Debug)]
-pub struct Opened {
+pub(crate) struct Opened {
     /// The session header; the file's first record.
     pub header: Header,
     /// Every record with its byte offset, in file order.
@@ -65,9 +72,9 @@ pub struct Opened {
     pub leaf: Option<EntryId>,
     /// The generation this open will assign to its boot record.
     pub r#gen: Gen,
-    /// Repairs to append in one batch with the boot record (D-15).
+    /// Repairs to append in one batch with the boot record.
     pub repair: Vec<Record>,
-    /// Facts for the agent's notices (D-39).
+    /// Facts for the agent's notices.
     pub report: OpenReport,
     /// The same writable file handle validated by this open.
     pub(crate) journal: Journal,
@@ -85,7 +92,7 @@ enum Health {
 
 /// One open journal file. Neither `Clone` nor `Sync`; one writer per file.
 #[derive(Debug)]
-pub struct Journal {
+pub(crate) struct Journal {
     file: File,
     path: PathBuf,
     end: u64,
@@ -99,7 +106,7 @@ impl Journal {
     /// # Errors
     /// Returns [`JournalError::Io`] when creation or syncing fails, and
     /// [`JournalError::Damaged`] when a failed create cannot be removed durably.
-    pub fn create(path: &Path, lines: &[u8], faults: &Faults) -> Result<Self, JournalError> {
+    pub(crate) fn create(path: &Path, lines: &[u8], faults: &Faults) -> Result<Self, JournalError> {
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -134,7 +141,7 @@ impl Journal {
     /// Returns [`JournalError`] for a failed read or repair step, a failed
     /// structure check (as [`crate::error::StoreError::Damaged`] via the caller),
     /// or an unsupported version (as [`crate::error::StoreError::UnknownVersion`]).
-    pub fn open(path: &Path, faults: &Faults) -> Result<Opened, OpenFailure> {
+    pub(crate) fn open(path: &Path, faults: &Faults) -> Result<Opened, OpenFailure> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -205,12 +212,12 @@ impl Journal {
     /// Appends one batch: one write at the tracked end offset, one sync.
     ///
     /// On failure the file truncates back to the old end and syncs again;
-    /// if that repair fails the journal is `Damaged` until reopen (D-13).
+    /// if that repair fails the journal is `Damaged` until reopen.
     ///
     /// # Errors
     /// Returns [`JournalError::Io`] for the write or sync failure, and
     /// [`JournalError::Damaged`] when rollback failed.
-    pub fn append(&mut self, lines: &[u8]) -> Result<Receipt, JournalError> {
+    pub(crate) fn append(&mut self, lines: &[u8]) -> Result<Receipt, JournalError> {
         if let Health::Damaged = self.health {
             return Err(JournalError::Damaged {
                 path: self.path.clone(),
@@ -227,7 +234,7 @@ impl Journal {
                 })
             }
             Err(error) => {
-                if self.faults.fail_truncate || self.truncate_back(offset).is_err() {
+                if self.faults.truncate.is_on() || self.truncate_back(offset).is_err() {
                     self.health = Health::Damaged;
                     return Err(JournalError::Damaged {
                         path: self.path.clone(),
@@ -241,12 +248,11 @@ impl Journal {
 
     /// The tracked end offset: the next batch starts here.
     #[must_use]
-    pub fn end(&self) -> u64 {
+    pub(crate) fn end(&self) -> u64 {
         self.end
     }
 
     /// Replaces injected durability faults in tests.
-    #[cfg(test)]
     pub(crate) fn set_faults(&mut self, faults: Faults) {
         self.faults = faults;
     }
@@ -264,7 +270,7 @@ impl Journal {
         self.file
             .seek(SeekFrom::Start(self.end))
             .map_err(|source| jio("write", &self.path, source))?;
-        match self.faults.fail_write_after {
+        match self.faults.write_after {
             Some(limit) => {
                 let cut = limit.min(bytes.len());
                 self.file
@@ -283,7 +289,7 @@ impl Journal {
                 .write_all(bytes)
                 .map_err(|source| jio("write", &self.path, source))?,
         }
-        if self.faults.fail_sync {
+        if self.faults.sync.is_on() {
             return Err(jio(
                 "sync",
                 &self.path,
@@ -298,7 +304,7 @@ impl Journal {
 
 /// Why an open failed: a hard version refusal or a journal error.
 #[derive(Debug)]
-pub enum OpenFailure {
+pub(crate) enum OpenFailure {
     /// The file names a format this build does not read. Nothing was written.
     UnknownVersion(u64),
     /// A repair, read, or validation failure.
@@ -348,7 +354,7 @@ fn repair_torn_tail(
     if tail_start == file_len {
         return Ok(None);
     }
-    if faults.fail_quarantine {
+    if faults.quarantine.is_on() {
         return Err(jio(
             "quarantine",
             path,
@@ -429,7 +435,7 @@ fn write_side_file(
         .sync_all()
         .map_err(|source| jio("quarantine", journal_path, source))?;
     #[cfg(not(windows))]
-    if faults.fail_dir_sync {
+    if faults.dir_sync.is_on() {
         return Err(jio(
             "quarantine",
             journal_path,
@@ -638,14 +644,6 @@ impl Validator {
         self.boot_count = delta.boot_count;
     }
 
-    /// Validates and applies one record at its byte offset.
-    pub(crate) fn record(&mut self, record: &Record, offset: u64) -> Result<(), OpenFailure> {
-        let mut delta = self.begin_batch();
-        self.stage_record(&mut delta, record, offset)?;
-        self.commit(delta);
-        Ok(())
-    }
-
     /// Applies one record to batch-local state.
     pub(crate) fn stage_record(
         &self,
@@ -653,12 +651,7 @@ impl Validator {
         record: &Record,
         offset: u64,
     ) -> Result<(), OpenFailure> {
-        if delta.record_count == 0 && !matches!(record, Record::Session(_)) {
-            return Err(damaged(offset, "the first record is not a session header"));
-        }
-        if delta.record_count > 0 && matches!(record, Record::Session(_)) {
-            return Err(damaged(offset, "a second session header"));
-        }
+        validate_session_header(delta.record_count, record, offset)?;
         match record {
             Record::User(entry)
             | Record::Assistant(entry)
@@ -818,33 +811,42 @@ impl Validator {
         event: &JobEvent,
         offset: u64,
     ) -> Result<(), OpenFailure> {
-        match event {
-            JobEvent::Started { .. } => {
-                if self.jobs.contains_key(&job) || delta.jobs.contains_key(&job) {
-                    return Err(damaged(offset, format!("job {job} starts more than once")));
-                }
-                delta.jobs.insert(job, false);
+        if let JobEvent::Started { .. } = event {
+            if self.jobs.contains_key(&job) || delta.jobs.contains_key(&job) {
+                return Err(damaged(offset, format!("job {job} starts more than once")));
             }
-            _ => {
-                let terminal = delta
-                    .jobs
-                    .get(&job)
-                    .or_else(|| self.jobs.get(&job))
-                    .copied()
-                    .ok_or_else(|| {
-                        damaged(offset, format!("job {job} ends but it did not start"))
-                    })?;
-                if terminal {
-                    return Err(damaged(
-                        offset,
-                        format!("job {job} has more than one terminal event"),
-                    ));
-                }
-                delta.jobs.insert(job, true);
+            delta.jobs.insert(job, false);
+        } else {
+            let terminal = delta
+                .jobs
+                .get(&job)
+                .or_else(|| self.jobs.get(&job))
+                .copied()
+                .ok_or_else(|| damaged(offset, format!("job {job} ends but it did not start")))?;
+            if terminal {
+                return Err(damaged(
+                    offset,
+                    format!("job {job} has more than one terminal event"),
+                ));
             }
+            delta.jobs.insert(job, true);
         }
         Ok(())
     }
+}
+
+fn validate_session_header(
+    record_count: usize,
+    record: &Record,
+    offset: u64,
+) -> Result<(), OpenFailure> {
+    if record_count == 0 && !matches!(record, Record::Session(_)) {
+        return Err(damaged(offset, "the first record is not a session header"));
+    }
+    if record_count > 0 && matches!(record, Record::Session(_)) {
+        return Err(damaged(offset, "a second session header"));
+    }
+    Ok(())
 }
 
 fn damaged(offset: u64, reason: impl Into<Box<str>>) -> OpenFailure {
@@ -1336,23 +1338,6 @@ fn tool_result(
     })
 }
 
-/// Maps a branch projection failure onto the store error vocabulary (D-31).
-#[must_use]
-pub fn branch_error(error: &BranchError) -> crate::error::StoreError {
-    match error {
-        BranchError::NoEntries => crate::error::StoreError::NothingToClone {
-            id: String::new().into(),
-        },
-        BranchError::NotUserEntry { entry } => {
-            crate::error::StoreError::NotUserMessage { entry: *entry }
-        }
-        BranchError::UnknownEntry { entry } => crate::error::StoreError::UnknownEntry {
-            id: String::new().into(),
-            entry: *entry,
-        },
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
@@ -1362,11 +1347,11 @@ mod tests {
         sync::atomic::{AtomicU64, Ordering},
     };
 
+    use crate::error::{INTERRUPTED_CALL, NOT_RUN_CALL};
     use dal_core::{
         AssistantStop, Block, CallId, ClientId, Entry, EntryKind, FileChange, Header, JobEvent,
         JobId, JournalPart, Product, RawJson, SessionId, TurnEndStop, TurnId, Usage, Workspace,
     };
-    use crate::error::{INTERRUPTED_CALL, NOT_RUN_CALL};
 
     use super::*;
 
@@ -1667,7 +1652,7 @@ mod tests {
         let failure = Journal::open(
             &path,
             &Faults {
-                fail_quarantine: true,
+                quarantine: FaultSwitch::ON,
                 ..Faults::default()
             },
         )
@@ -1697,7 +1682,7 @@ mod tests {
         let failure = Journal::open(
             &path,
             &Faults {
-                fail_dir_sync: true,
+                dir_sync: FaultSwitch::ON,
                 ..Faults::default()
             },
         )
@@ -1722,7 +1707,7 @@ mod tests {
             &path,
             b"complete batch",
             &Faults {
-                fail_write_after: Some(1),
+                write_after: Some(1),
                 ..Faults::default()
             },
         )
@@ -1808,60 +1793,7 @@ mod tests {
     #[test]
     fn recovery_uses_latest_open_turn_unique_ids_and_actual_totals() {
         let directory = TestDirectory::new();
-        let records = vec![
-            session_record(),
-            boot_record(1),
-            Record::TurnStart {
-                at: timestamp(),
-                turn: turn_id(1),
-            },
-            assistant_record(1, None, &[("closed", "echo")], 100),
-            Record::ToolStart {
-                at: timestamp(),
-                turn: turn_id(1),
-                call: CallId::new("closed"),
-            },
-            tool_result_entry(2, Some(entry_id(1)), "closed", "src/old.rs", 100, 100),
-            Record::TurnEnd {
-                at: timestamp(),
-                turn: turn_id(1),
-                stop: TurnEndStop::Done,
-                usage: Some(usage(100)),
-                changes: Vec::new(),
-            },
-            Record::TurnStart {
-                at: timestamp(),
-                turn: turn_id(2),
-            },
-            assistant_record(
-                3,
-                Some(entry_id(2)),
-                &[
-                    ("done-one", "read"),
-                    ("pending", "write"),
-                    ("not-run", "delete"),
-                    ("done-two", "edit"),
-                ],
-                11,
-            ),
-            Record::ToolStart {
-                at: timestamp(),
-                turn: turn_id(2),
-                call: CallId::new("done-one"),
-            },
-            tool_result_entry(4, Some(entry_id(3)), "done-one", "src/current.rs", 2, 1),
-            Record::ToolStart {
-                at: timestamp(),
-                turn: turn_id(2),
-                call: CallId::new("done-two"),
-            },
-            tool_result_entry(5, Some(entry_id(4)), "done-two", "src/current.rs", 3, 4),
-            Record::ToolStart {
-                at: timestamp(),
-                turn: turn_id(2),
-                call: CallId::new("pending"),
-            },
-        ];
+        let records = open_turn_recovery_records();
         let original = encode_records(&records);
         let path = directory.journal(&original);
         let mut opened = Journal::open(&path, &Faults::default()).expect("recover open turn");
@@ -1931,6 +1863,63 @@ mod tests {
             &reopened.repair[0],
             Record::Boot { r#gen, .. } if r#gen.get() == 3
         ));
+    }
+
+    fn open_turn_recovery_records() -> Vec<Record> {
+        vec![
+            session_record(),
+            boot_record(1),
+            Record::TurnStart {
+                at: timestamp(),
+                turn: turn_id(1),
+            },
+            assistant_record(1, None, &[("closed", "echo")], 100),
+            Record::ToolStart {
+                at: timestamp(),
+                turn: turn_id(1),
+                call: CallId::new("closed"),
+            },
+            tool_result_entry(2, Some(entry_id(1)), "closed", "src/old.rs", 100, 100),
+            Record::TurnEnd {
+                at: timestamp(),
+                turn: turn_id(1),
+                stop: TurnEndStop::Done,
+                usage: Some(usage(100)),
+                changes: Vec::new(),
+            },
+            Record::TurnStart {
+                at: timestamp(),
+                turn: turn_id(2),
+            },
+            assistant_record(
+                3,
+                Some(entry_id(2)),
+                &[
+                    ("done-one", "read"),
+                    ("pending", "write"),
+                    ("not-run", "delete"),
+                    ("done-two", "edit"),
+                ],
+                11,
+            ),
+            Record::ToolStart {
+                at: timestamp(),
+                turn: turn_id(2),
+                call: CallId::new("done-one"),
+            },
+            tool_result_entry(4, Some(entry_id(3)), "done-one", "src/current.rs", 2, 1),
+            Record::ToolStart {
+                at: timestamp(),
+                turn: turn_id(2),
+                call: CallId::new("done-two"),
+            },
+            tool_result_entry(5, Some(entry_id(4)), "done-two", "src/current.rs", 3, 4),
+            Record::ToolStart {
+                at: timestamp(),
+                turn: turn_id(2),
+                call: CallId::new("pending"),
+            },
+        ]
     }
 
     #[test]

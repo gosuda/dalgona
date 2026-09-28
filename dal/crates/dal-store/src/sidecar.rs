@@ -82,7 +82,9 @@ mod tests {
                 std::process::id(),
                 util::random_hex()
             ));
-            fs::create_dir(&path).expect("create sidecar test directory");
+            fs::DirBuilder::new()
+                .create(&path)
+                .expect("create sidecar test directory");
             Self(path)
         }
     }
@@ -178,7 +180,7 @@ mod tests {
     #[test]
     fn missing_read_returns_typed_not_found_with_sidecar_path() {
         let (_root, paths, sidecar) = sidecar();
-        let expected_path = paths.sidecar("missing");
+        let expected_path = paths.directory().join("missing");
 
         let error = sidecar.read("missing").expect_err("sidecar is absent");
 
@@ -198,7 +200,7 @@ mod tests {
             .write("private", b"secret")
             .expect("write private sidecar");
 
-        let mode = fs::metadata(paths.sidecar("private"))
+        let mode = fs::metadata(paths.directory().join("private"))
             .expect("stat sidecar")
             .permissions()
             .mode()

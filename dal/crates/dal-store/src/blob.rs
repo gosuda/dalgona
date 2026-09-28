@@ -64,7 +64,8 @@ pub fn put(dir: &Path, bytes: &[u8]) -> Result<BlobId, BlobError> {
 /// # Errors
 /// Returns [`BlobError::TooLarge`] above the cap or [`BlobError::Io`] on a failed publish.
 pub(crate) fn put_prepared(dir: &Path, pending: PendingBlob) -> Result<(), BlobError> {
-    publish_with_id(dir, pending.id(), pending.bytes())
+    let (id, bytes) = pending.into_parts();
+    publish_with_id(dir, id, &bytes)
 }
 
 fn publish_with_id(dir: &Path, id: BlobId, bytes: &[u8]) -> Result<(), BlobError> {
@@ -93,7 +94,7 @@ fn create_temp(dir: &Path) -> Result<(PathBuf, File), BlobError> {
         util::with_mode(&mut options, MODE_FILE);
         match options.open(&tmp) {
             Ok(file) => return Ok((tmp, file)),
-            Err(source) if source.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {}
             Err(source) => return Err(io_blob(source)),
         }
     }
@@ -120,8 +121,8 @@ fn existing_blob(path: &Path) -> Result<bool, BlobError> {
 
 /// Publishes a complete, synced temp at `dest` without replacing an existing file.
 /// A valid blob already at `dest` wins and `tmp` is removed.
-fn publish_temp(tmp: &Path, dest: &Path, dir: &Path) -> Result<(), BlobError> {
-    let mut temp = TempPath::try_from_path(tmp).map_err(io_blob)?;
+fn publish_temp(staged: &Path, dest: &Path, dir: &Path) -> Result<(), BlobError> {
+    let mut temp = TempPath::try_from_path(staged).map_err(io_blob)?;
     let removed = loop {
         let PathPersistError { error, path } = match temp.persist_noclobber(dest) {
             Ok(()) => break Ok(()),
@@ -389,9 +390,8 @@ pub fn spill_record(record: &mut dal_core::Record, dir: &Path) -> Result<(), Blo
 }
 
 fn record_parts_mut(record: &mut dal_core::Record) -> Option<&mut [dal_core::JournalPart]> {
-    let entry = match record {
-        dal_core::Record::User(entry) | dal_core::Record::ToolResult(entry) => entry,
-        _ => return None,
+    let (dal_core::Record::User(entry) | dal_core::Record::ToolResult(entry)) = record else {
+        return None;
     };
     match &mut entry.kind {
         dal_core::EntryKind::User { parts } | dal_core::EntryKind::ToolResult { parts, .. } => {
@@ -542,9 +542,9 @@ mod tests {
                     process::id(),
                     util::random_hex()
                 ));
-                match fs::create_dir(&path) {
+                match fs::DirBuilder::new().create(&path) {
                     Ok(()) => return Self(path),
-                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
                     Err(error) => panic!("create test directory: {error}"),
                 }
             }
@@ -552,7 +552,9 @@ mod tests {
 
         fn blobs(&self) -> PathBuf {
             let path = self.0.join("blobs");
-            fs::create_dir(&path).expect("create blobs directory");
+            fs::DirBuilder::new()
+                .create(&path)
+                .expect("create blobs directory");
             path
         }
     }
@@ -709,15 +711,15 @@ mod tests {
         let dest = blobs.join(id.to_string());
         let winner = b"racing writer's bytes";
         fs::write(&dest, winner).expect("seed racing winner");
-        let (tmp, mut file) = create_temp(&blobs).expect("create copy temp");
+        let (staged, mut file) = create_temp(&blobs).expect("create copy temp");
         file.write_all(b"copied bytes").expect("write copy temp");
         file.sync_all().expect("sync copy temp");
         drop(file);
 
-        publish_temp(&tmp, &dest, &blobs).expect("existing digest counts as published");
+        publish_temp(&staged, &dest, &blobs).expect("existing digest counts as published");
 
         assert_eq!(fs::read(&dest).expect("read winner"), winner);
-        assert!(!tmp.exists());
+        assert!(!staged.exists());
         assert_eq!(fs::read_dir(&blobs).expect("read blobs").count(), 1);
     }
 
@@ -757,8 +759,12 @@ mod tests {
         let session = temp.0.join("source-session");
         let from = session.join("blobs");
         let to = temp.0.join("to");
-        fs::create_dir(&session).expect("create source session");
-        fs::create_dir(&to).expect("create target directory");
+        fs::DirBuilder::new()
+            .create(&session)
+            .expect("create source session");
+        fs::DirBuilder::new()
+            .create(&to)
+            .expect("create target directory");
         let id = BlobId::from_bytes(b"missing");
 
         let result = share(&from, &to, [id]);
@@ -775,7 +781,9 @@ mod tests {
         let temp = TestDir::new();
         let from = temp.0.join("deleted-session").join("blobs");
         let to = temp.0.join("to");
-        fs::create_dir(&to).expect("create target directory");
+        fs::DirBuilder::new()
+            .create(&to)
+            .expect("create target directory");
         let id = BlobId::from_bytes(b"missing");
 
         assert!(matches!(share(&from, &to, [id]), Err(BlobError::Gone)));
@@ -965,7 +973,8 @@ mod tests {
         let second = "b".repeat(INLINE_LIMIT);
         let first_id = BlobId::from_bytes(first.as_bytes());
         let second_id = BlobId::from_bytes(second.as_bytes());
-        fs::create_dir(blobs.join(second_id.to_string()))
+        fs::DirBuilder::new()
+            .create(blobs.join(second_id.to_string()))
             .expect("block publication of the second digest");
         let mut record = user_record(vec![text_part(first.clone()), text_part(second)]);
 

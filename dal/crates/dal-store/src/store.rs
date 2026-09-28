@@ -59,7 +59,6 @@ struct StoreInner {
     workspace_key: Box<str>,
     listing: crate::list::Listing,
     shards: Mutex<Option<Arc<Shards>>>,
-    #[cfg(test)]
     faults: Mutex<Faults>,
 }
 
@@ -76,7 +75,6 @@ impl Store {
                 workspace_key,
                 listing: crate::list::Listing::new(),
                 shards: Mutex::new(None),
-                #[cfg(test)]
                 faults: Mutex::new(Faults::default()),
             }),
         }
@@ -84,13 +82,11 @@ impl Store {
 
     /// Creates a session whose header, boot record, records, and blobs remain buffered until its
     /// first user entry is appended.
-    #[must_use]
     pub fn create_session(&self, id: SessionId) -> Journal {
         Journal::lazy(Arc::clone(&self.inner), id, None)
     }
 
     /// Creates an in-memory session that never writes under the store's data root.
-    #[must_use]
     pub fn ephemeral_session(&self, id: SessionId) -> Journal {
         Journal::memory(Arc::clone(&self.inner), id, None)
     }
@@ -135,13 +131,17 @@ impl Store {
             .map_err(|failure| map_open_failure(&journal_path, failure))?;
         let mut records = opened
             .records
-            .iter()
-            .map(|(_, record)| record.clone())
+            .into_iter()
+            .map(|(_, record)| record)
             .collect::<Vec<_>>();
-        let header = opened.header.clone();
+        let header = opened.header;
         let generation = opened.r#gen;
-        let report = opened.report.clone();
-        let mut index = AppendIndex::from_open(&records);
+        let report = opened.report;
+        // Recovery closes any open turn before this handle is published.
+        let index = AppendIndex {
+            leaf: opened.leaf,
+            turn_records_start: None,
+        };
         let repair = opened.repair;
         let repair_delta = opened.repair_delta;
         let mut journal_bytes = opened.journal.end();
@@ -153,7 +153,7 @@ impl Store {
             let bytes = encode_records(&repair)?;
             let receipt = lane.append(bytes, Vec::new()).await?;
             journal_bytes = receipt.offset.saturating_add(receipt.len);
-            journal_bytes_add(&mut records, &mut index, repair);
+            records.extend(repair);
         }
         validator.commit(repair_delta);
 
@@ -164,7 +164,7 @@ impl Store {
             generation,
             records,
             index,
-            journal_bytes,
+            durable_bytes: journal_bytes,
             paths,
             state: State::File { lane, lock },
             pending: None,
@@ -184,7 +184,7 @@ impl Store {
     pub fn list(&self, query: ListQuery) -> Result<Page<SessionInfo, Box<str>>, StoreError> {
         self.inner
             .listing
-            .list(&self.workspace_dir(), &self.inner.workspace, &query)
+            .list(&self.workspace_dir(), &self.inner.workspace, query)
     }
 
     /// Resolves a name or identifier in `workspace`.
@@ -326,7 +326,7 @@ impl Store {
         } else {
             Journal::lazy_with_header(Arc::clone(&self.inner), header)
         };
-        self.share_branch_blobs(source, &mut destination, &records)?;
+        Self::share_branch_blobs(source, &mut destination, &records)?;
         if !records.is_empty() {
             destination.append(records).await?;
         }
@@ -334,7 +334,6 @@ impl Store {
     }
 
     fn share_branch_blobs(
-        &self,
         source: &Journal,
         destination: &mut Journal,
         records: &[Record],
@@ -359,8 +358,8 @@ impl Store {
         let lock = LockGuard::acquire(destination.paths.directory(), destination.id)?;
         let blob_dir = destination.paths.directory().join("blobs");
         fs::create_dir_all(&blob_dir).map_err(|source| util::io_err(&blob_dir, source))?;
-        let jobs = destination.paths.jobs();
-        fs::create_dir_all(&jobs).map_err(|source| util::io_err(&jobs, source))?;
+        let jobs_dir = destination.paths.jobs();
+        fs::create_dir_all(&jobs_dir).map_err(|source| util::io_err(&jobs_dir, source))?;
         let source_has_file_blobs = !source.ephemeral
             && source.paths.directory().join("blobs").is_dir()
             && matches!(
@@ -414,24 +413,16 @@ impl Store {
         Ok(shards)
     }
     fn faults(&self) -> Result<Faults, StoreError> {
-        #[cfg(test)]
-        {
-            return self
-                .inner
-                .faults
-                .lock()
-                .map(|faults| faults.clone())
-                .map_err(|_| {
-                    util::io_err(
-                        &self.inner.data_root,
-                        io::Error::other("journal fault setter mutex is poisoned"),
-                    )
-                });
-        }
-        #[cfg(not(test))]
-        {
-            Ok(Faults::default())
-        }
+        self.inner
+            .faults
+            .lock()
+            .map(|faults| faults.clone())
+            .map_err(|_| {
+                util::io_err(
+                    &self.inner.data_root,
+                    io::Error::other("journal fault setter mutex is poisoned"),
+                )
+            })
     }
 }
 
@@ -444,7 +435,7 @@ pub struct Journal {
     generation: Gen,
     records: Vec<Record>,
     index: AppendIndex,
-    journal_bytes: u64,
+    durable_bytes: u64,
     paths: SessionPaths,
     state: State,
     pending: Option<PendingAppend>,
@@ -469,8 +460,8 @@ impl std::fmt::Debug for Journal {
             .field("ephemeral", &self.ephemeral)
             .field("state", &state)
             .field("record_count", &self.records.len())
-            .field("journal_bytes", &self.journal_bytes)
-            .finish()
+            .field("journal_bytes", &self.durable_bytes)
+            .finish_non_exhaustive()
     }
 }
 
@@ -497,6 +488,13 @@ struct PendingAppend {
     generation: Gen,
     validation: journal::ValidationDelta,
     refresh_info: bool,
+}
+
+struct FirstUserStorage {
+    blobs: Vec<PendingBlob>,
+    blob_dir: PathBuf,
+    lock: LockGuard,
+    shards: Arc<Shards>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -592,7 +590,7 @@ impl Journal {
             generation,
             records,
             index,
-            journal_bytes: 0,
+            durable_bytes: 0,
             paths,
             state: State::Lazy { blobs: Vec::new() },
             pending: None,
@@ -627,6 +625,15 @@ impl Journal {
     #[must_use]
     pub const fn generation(&self) -> Gen {
         self.generation
+    }
+
+    /// Borrows accepted records without exposing a pending append.
+    ///
+    /// Lazy and ephemeral journals include their accepted in-memory records;
+    /// file-backed records become visible only after the append receipt.
+    #[must_use]
+    pub fn records(&self) -> &[Record] {
+        &self.records
     }
 
     /// Returns whether this journal is in-memory and has no filesystem representation.
@@ -714,7 +721,7 @@ impl Journal {
             .inner
             .data_root
             .join("sessions")
-            .join(self.inner.workspace_key.as_ref());
+            .join(std::path::Path::new(&*self.inner.workspace_key));
         for record in records {
             let Record::Name { name, .. } = record else {
                 continue;
@@ -761,14 +768,14 @@ impl Journal {
             .ok_or_else(|| invalid_record("session validator is unavailable"))?
             .prepare_batch(&records)
             .map_err(validation_error)?;
-        let had_user = self
+        let materialized = self
             .records
             .iter()
             .any(|record| matches!(record, Record::User(_)));
         let has_user = records
             .iter()
             .any(|record| matches!(record, Record::User(_)));
-        let refresh_info = (!had_user && has_user)
+        let refresh_info = (!materialized && has_user)
             || records
                 .iter()
                 .any(|record| matches!(record, Record::Name { .. } | Record::Archive { .. }));
@@ -835,10 +842,6 @@ impl Journal {
         validation: journal::ValidationDelta,
         refresh_info: bool,
     ) -> Result<AppendOutcome, StoreError> {
-        if let Err(error) = validate_record_values(&records) {
-            self.state = State::Lazy { blobs };
-            return Err(error);
-        }
         let bytes = match encode_records(self.records.iter().chain(records.iter())) {
             Ok(bytes) => bytes,
             Err(error) => {
@@ -846,77 +849,18 @@ impl Journal {
                 return Err(error);
             }
         };
-        let byte_len = match u64::try_from(bytes.len()) {
-            Ok(byte_len) => byte_len,
-            Err(_) => {
-                self.state = State::Lazy { blobs };
-                return Err(StoreError::Invalid {
-                    reason: "journal batch length exceeds the byte counter".into(),
-                });
-            }
-        };
-        let blob_dir = self.paths.directory().join("blobs");
-        let jobs_dir = self.paths.jobs();
-        if let Err(source) = fs::create_dir_all(self.paths.directory()) {
+        let Ok(byte_len) = u64::try_from(bytes.len()) else {
             self.state = State::Lazy { blobs };
-            return Err(util::io_err(self.paths.directory(), source));
-        }
-        let lock = match self.prelocked.take() {
-            Some(lock) => lock,
-            None => match LockGuard::acquire(self.paths.directory(), self.id) {
-                Ok(lock) => lock,
-                Err(error) => {
-                    self.state = State::Lazy { blobs };
-                    return Err(error);
-                }
-            },
+            return Err(StoreError::Invalid {
+                reason: "journal batch length exceeds the byte counter".into(),
+            });
         };
-        let directory_setup = (|| {
-            fs::create_dir_all(&blob_dir).map_err(|source| util::io_err(&blob_dir, source))?;
-            fs::create_dir_all(&jobs_dir).map_err(|source| util::io_err(&jobs_dir, source))?;
-            Ok::<(), StoreError>(())
-        })();
-        if let Err(error) = directory_setup {
-            self.prelocked = Some(lock);
-            self.state = State::Lazy { blobs };
-            return Err(error);
-        }
-        if !self.ephemeral {
-            let mut current_name = None;
-            for record in self.records.iter().chain(records.iter()) {
-                if let Record::Name { name, .. } = record {
-                    current_name = name.as_deref();
-                }
-            }
-            if let Some(name) = current_name {
-                let workspace_dir = self
-                    .inner
-                    .data_root
-                    .join("sessions")
-                    .join(self.inner.workspace_key.as_ref());
-                if let Err(error) = self.inner.listing.normalize_name(
-                    &workspace_dir,
-                    &self.inner.workspace,
-                    Some(name),
-                    Some(self.id),
-                ) {
-                    self.prelocked = Some(lock);
-                    self.state = State::Lazy { blobs };
-                    return Err(error);
-                }
-            }
-        }
-        let store = Store {
-            inner: Arc::clone(&self.inner),
-        };
-        let shards = match store.shards() {
-            Ok(shards) => shards,
-            Err(error) => {
-                self.prelocked = Some(lock);
-                self.state = State::Lazy { blobs };
-                return Err(error);
-            }
-        };
+        let FirstUserStorage {
+            blobs,
+            blob_dir,
+            lock,
+            shards,
+        } = self.prepare_first_user_storage(&records, blobs)?;
         self.state = State::Broken {
             lane: None,
             lock: Some(lock),
@@ -925,8 +869,12 @@ impl Journal {
             blob::put_prepared(&blob_dir, blob)?;
         }
 
+        let store = Store {
+            inner: Arc::clone(&self.inner),
+        };
         let journal_path = self.paths.journal();
-        let file_journal = match FileJournal::create(&journal_path, &bytes, &Faults::default()) {
+        let mut file_journal = match FileJournal::create(&journal_path, &bytes, &Faults::default())
+        {
             Ok(journal) => journal,
             Err(error) => {
                 if !journal_path.exists() {
@@ -942,12 +890,7 @@ impl Journal {
                 return Err(error.into());
             }
         };
-        #[cfg(test)]
-        let file_journal = {
-            let mut file_journal = file_journal;
-            file_journal.set_faults(store.faults()?);
-            file_journal
-        };
+        file_journal.set_faults(store.faults()?);
         self.pending = Some(PendingAppend {
             records,
             index,
@@ -964,10 +907,7 @@ impl Journal {
             )
             .await?;
         let lock = match &mut self.state {
-            State::Broken {
-                lane: None,
-                lock,
-            } => lock.take(),
+            State::Broken { lane: None, lock } => lock.take(),
             _ => None,
         }
         .ok_or_else(|| StoreError::Broken {
@@ -980,6 +920,82 @@ impl Journal {
         };
         self.apply_pending(receipt)?;
         Ok(AppendOutcome::Durable(receipt))
+    }
+
+    fn prepare_first_user_storage(
+        &mut self,
+        records: &[Record],
+        blobs: Vec<PendingBlob>,
+    ) -> Result<FirstUserStorage, StoreError> {
+        if let Err(source) = fs::create_dir_all(self.paths.directory()) {
+            self.state = State::Lazy { blobs };
+            return Err(util::io_err(self.paths.directory(), source));
+        }
+        let lock = match self.prelocked.take() {
+            Some(lock) => lock,
+            None => match LockGuard::acquire(self.paths.directory(), self.id) {
+                Ok(lock) => lock,
+                Err(error) => {
+                    self.state = State::Lazy { blobs };
+                    return Err(error);
+                }
+            },
+        };
+        let blob_dir = self.paths.directory().join("blobs");
+        let prepared = (|| {
+            fs::create_dir_all(&blob_dir).map_err(|source| util::io_err(&blob_dir, source))?;
+            let jobs_dir = self.paths.jobs();
+            fs::create_dir_all(&jobs_dir).map_err(|source| util::io_err(&jobs_dir, source))?;
+            self.normalize_first_user_name(records)?;
+            Store {
+                inner: Arc::clone(&self.inner),
+            }
+            .shards()
+        })();
+        match prepared {
+            Ok(shards) => Ok(FirstUserStorage {
+                blobs,
+                blob_dir,
+                lock,
+                shards,
+            }),
+            Err(error) => {
+                self.prelocked = Some(lock);
+                self.state = State::Lazy { blobs };
+                Err(error)
+            }
+        }
+    }
+
+    fn normalize_first_user_name(&self, records: &[Record]) -> Result<(), StoreError> {
+        if self.ephemeral {
+            return Ok(());
+        }
+        let current_name = self
+            .records
+            .iter()
+            .chain(records)
+            .rev()
+            .find_map(|record| match record {
+                Record::Name { name, .. } => Some(name.as_deref()),
+                _ => None,
+            })
+            .flatten();
+        let Some(name) = current_name else {
+            return Ok(());
+        };
+        let workspace_dir = self
+            .inner
+            .data_root
+            .join("sessions")
+            .join(std::path::Path::new(&*self.inner.workspace_key));
+        self.inner.listing.normalize_name(
+            &workspace_dir,
+            &self.inner.workspace,
+            Some(name),
+            Some(self.id),
+        )?;
+        Ok(())
     }
 
     async fn append_file(
@@ -996,7 +1012,7 @@ impl Journal {
             reason: "journal batch length exceeds the byte counter".into(),
         })?;
         let end = self
-            .journal_bytes
+            .durable_bytes
             .checked_add(byte_len)
             .ok_or_else(|| StoreError::Invalid {
                 reason: "journal byte counter is exhausted".into(),
@@ -1066,8 +1082,8 @@ impl Journal {
                 reason: "a journal receipt has no staged append".into(),
             });
         };
-        let expected_len = pending.journal_bytes.saturating_sub(self.journal_bytes);
-        if receipt.offset != self.journal_bytes || receipt.len != expected_len {
+        let expected_len = pending.journal_bytes.saturating_sub(self.durable_bytes);
+        if receipt.offset != self.durable_bytes || receipt.len != expected_len {
             self.mark_broken();
             return Err(StoreError::Invalid {
                 reason: "journal receipt does not match its staged batch".into(),
@@ -1088,7 +1104,7 @@ impl Journal {
         self.records.extend(records);
         self.index = index;
         self.generation = generation;
-        self.journal_bytes = journal_bytes;
+        self.durable_bytes = journal_bytes;
         if refresh_info {
             self.refresh_info_cache();
         }
@@ -1102,7 +1118,6 @@ impl Journal {
                 lane: Some(lane),
                 lock: Some(lock),
             },
-            other @ State::Broken { .. } => other,
             other => other,
         };
     }
@@ -1172,8 +1187,8 @@ impl Journal {
         let settled = self.settle_pending().await;
         let file_backed = matches!(&self.state, State::File { .. });
         match &mut self.state {
-            State::File { lane, .. } => lane.close().await?,
-            State::Broken {
+            State::File { lane, .. }
+            | State::Broken {
                 lane: Some(lane), ..
             } => lane.close().await?,
             State::Lazy { .. }
@@ -1213,7 +1228,7 @@ impl Journal {
             self.paths.directory(),
             self.id,
             &self.inner.workspace,
-            self.journal_bytes,
+            self.durable_bytes,
             modified,
         ) {
             Ok(info) => info,
@@ -1225,7 +1240,7 @@ impl Journal {
         if let Err(error) =
             self.inner
                 .listing
-                .write_info(self.paths.directory(), &info, self.journal_bytes)
+                .write_info(self.paths.directory(), &info, self.durable_bytes)
         {
             tracing::warn!(target: "dalgon.store", %error, "could not write session info cache");
         }
@@ -1275,19 +1290,6 @@ fn map_open_failure(path: &Path, failure: journal::OpenFailure) -> StoreError {
     }
 }
 
-fn journal_bytes_add(records: &mut Vec<Record>, index: &mut AppendIndex, additions: Vec<Record>) {
-    for record in additions {
-        match &record {
-            Record::TurnStart { .. } => {
-                index.turn_records_start = Some(records.len().saturating_add(1));
-            }
-            Record::TurnEnd { .. } => index.turn_records_start = None,
-            _ => {}
-        }
-        index.observe(&record);
-        records.push(record);
-    }
-}
 fn invalid_record(reason: impl Into<Box<str>>) -> StoreError {
     StoreError::Invalid {
         reason: reason.into(),
@@ -1440,21 +1442,19 @@ mod tests {
         future::Future,
         num::NonZeroU64,
         path::{Path, PathBuf},
-        sync::{
-            Arc,
-            atomic::{AtomicU64, Ordering},
-        },
-        task::{Context, Poll, Wake, Waker},
+        sync::atomic::{AtomicU64, Ordering},
+        task::{Context, Poll, Waker},
         time::{SystemTime, UNIX_EPOCH},
     };
 
+    use crate::blob::INLINE_LIMIT;
     use dal_core::{
         AssistantStop, Block, CallId, Entry, EntryId, EntryKind, Family, JournalPart, ListQuery,
         Product, RawJson, Record, SessionId, TurnEndStop, TurnId, Usage, Workspace,
     };
-    use crate::blob::INLINE_LIMIT;
 
     use super::*;
+    use crate::journal::FaultSwitch;
 
     struct TempDir(PathBuf);
 
@@ -1590,8 +1590,76 @@ mod tests {
         assert!(matches!(&records[1], Record::Boot { .. }));
         assert!(matches!(&records[2], Record::Name { .. }));
         assert!(matches!(&records[3], Record::User(_)));
-        assert!(journal.paths.info().is_file());
+        assert!(journal.paths.directory().join("info.json").is_file());
         journal.close().await.expect("close file session");
+    }
+
+    #[tokio::test]
+    async fn restore_uses_the_store_boot_without_recovery_effects() {
+        let temp = TempDir::new();
+        let store = store(&temp);
+        let id = SessionId::new_v7();
+        let mut journal = store.create_session(id);
+        let initial = dal_core::Session::restore(journal.records().iter().cloned())
+            .expect("restore lazy boot");
+        assert!(matches!(initial.phase(), dal_core::Phase::Idle));
+        assert_eq!(journal.generation().get(), 1);
+
+        let turn = TurnId::new(NonZeroU64::MIN);
+        journal
+            .append(vec![
+                Record::TurnStart {
+                    at: timestamp(),
+                    turn,
+                },
+                user(1, "first turn"),
+                Record::TurnEnd {
+                    at: timestamp(),
+                    turn,
+                    stop: TurnEndStop::Done,
+                    usage: None,
+                    changes: Vec::new(),
+                },
+            ])
+            .await
+            .expect("persist completed turn");
+        journal.close().await.expect("close original session");
+
+        let (mut reopened, _) = store.open_session(id).await.expect("reopen session");
+        assert_eq!(reopened.generation().get(), 2);
+        let mut session = dal_core::Session::restore(reopened.records().iter().cloned())
+            .expect("restore already recovered session");
+        let mut effects = Vec::new();
+        session
+            .step(
+                dal_core::Event::Command {
+                    cmd: dal_core::Command::Prompt {
+                        expect: dal_core::Expect::Idle,
+                        content: vec![dal_core::Part::Text {
+                            text: "next turn".into(),
+                        }],
+                    },
+                    by: dal_core::ClientId::new("test"),
+                },
+                timestamp(),
+                &mut effects,
+            )
+            .expect("next prompt");
+        assert!(
+            matches!(session.phase(), dal_core::Phase::Opening { turn, .. } if turn.get() == 2)
+        );
+        assert_eq!(
+            reopened
+                .records()
+                .iter()
+                .filter(|record| matches!(record, Record::Boot { .. }))
+                .count(),
+            2
+        );
+        assert!(!effects.iter().any(|effect| matches!(effect,
+            dal_core::Effect::Emit(emit) if emit.records.iter().any(|record| matches!(record, Record::Boot { .. }))
+        )));
+        reopened.close().await.expect("close restored session");
     }
 
     #[tokio::test]
@@ -1843,12 +1911,7 @@ mod tests {
             .expect("wait task")
             .expect("worker started hold");
 
-        struct NoopWake;
-        impl Wake for NoopWake {
-            fn wake(self: Arc<Self>) {}
-        }
-        let waker = Waker::from(Arc::new(NoopWake));
-        let mut context = Context::from_waker(&waker);
+        let mut context = Context::from_waker(Waker::noop());
         let future = journal.append(vec![Record::Name {
             at: timestamp(),
             name: Some("settled before next".into()),
@@ -1918,8 +1981,8 @@ mod tests {
         let store = store(&temp);
         store
             .set_faults_for_test(Faults {
-                fail_write_after: Some(1),
-                fail_truncate: true,
+                write_after: Some(1),
+                truncate: FaultSwitch::ON,
                 ..Faults::default()
             })
             .expect("configure append failpoint");

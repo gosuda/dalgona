@@ -224,7 +224,7 @@ impl Future for Enqueue {
 
         if let Some((_, waker)) = state.waiters.iter_mut().find(|(id, _)| *id == waiter) {
             if !waker.will_wake(context.waker()) {
-                *waker = context.waker().clone();
+                waker.clone_from(context.waker());
             }
         } else {
             state.waiters.push_back((waiter, context.waker().clone()));
@@ -328,7 +328,7 @@ impl Shards {
                 .name(format!("dal-journal-{index}"))
                 .spawn(move || {
                     let _stopped = WorkerStopped(Arc::clone(&worker_queue));
-                    run(worker_queue);
+                    run(&worker_queue);
                 }) {
                 Ok(thread) => thread,
                 Err(source) => {
@@ -584,7 +584,7 @@ impl Drop for WorkerStopped {
 }
 
 /// The worker-local slot table is the sole owner of this shard's journals.
-fn run(queue: Arc<Queue>) {
+fn run(queue: &Arc<Queue>) {
     let mut journals: Vec<Option<(Journal, Option<PathBuf>)>> = Vec::new();
     let mut free = Vec::new();
     while let Some(job) = queue.pop() {
@@ -671,13 +671,13 @@ mod tests {
     };
 
     use dal_core::{Entry, EntryId, EntryKind, JournalPart, Record, SessionId};
-    use tokio::task::yield_now;
+    use tokio::task::{JoinSet, yield_now};
 
     use super::{Job, Lane, PendingBlob, QUEUE_CAPACITY, SHARD_COUNT, Shards, pin};
     use crate::{
         blob::INLINE_LIMIT,
         error::{BlobError, JournalError, StoreError},
-        journal::{Faults, Journal},
+        journal::{FaultSwitch, Faults, Journal},
     };
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
@@ -866,7 +866,7 @@ mod tests {
             session,
             &path,
             &Faults {
-                fail_write_after: Some(1),
+                write_after: Some(1),
                 ..Faults::default()
             },
         )
@@ -891,7 +891,7 @@ mod tests {
         let path = temp.file(0);
         let mut journal = journal(&path, &Faults::default());
         journal.set_faults(Faults {
-            fail_sync: true,
+            sync: FaultSwitch::ON,
             ..Faults::default()
         });
         let mut lane = shards
@@ -929,12 +929,12 @@ mod tests {
         })));
         started_rx.recv().unwrap();
 
-        let mut in_flight = Vec::with_capacity(QUEUE_CAPACITY);
+        let mut in_flight = JoinSet::new();
         for (index, mut lane) in lanes.drain(..QUEUE_CAPACITY).enumerate() {
-            in_flight.push(tokio::spawn(async move {
+            in_flight.spawn(async move {
                 let receipt = lane.append(b"x\n".to_vec(), Vec::new()).await.unwrap();
                 (index, receipt)
-            }));
+            });
         }
         for _ in 0..1_000 {
             if queue.request_count() == QUEUE_CAPACITY {
@@ -963,8 +963,8 @@ mod tests {
         .await;
         assert_eq!(queue.request_count(), QUEUE_CAPACITY);
         let _ = release_tx.send(());
-        for task in in_flight {
-            let (index, receipt) = task.await.unwrap();
+        while let Some(task) = in_flight.join_next().await {
+            let (index, receipt) = task.unwrap();
             assert_eq!(receipt.offset, 0);
             assert_eq!(fs::read(temp.file(index)).unwrap(), b"x\n");
         }

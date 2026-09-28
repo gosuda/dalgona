@@ -45,23 +45,8 @@ impl SessionPaths {
     }
 
     #[must_use]
-    pub(crate) fn lock(&self) -> PathBuf {
-        self.directory.join("lock")
-    }
-
-    #[must_use]
-    pub(crate) fn info(&self) -> PathBuf {
-        self.directory.join("info.json")
-    }
-
-    #[must_use]
     pub(crate) fn jobs(&self) -> PathBuf {
         self.directory.join("jobs")
-    }
-
-    #[must_use]
-    pub(crate) fn sidecar(&self, name: &str) -> PathBuf {
-        self.directory.join(name)
     }
 }
 
@@ -86,10 +71,7 @@ mod tests {
 
         assert_eq!(paths.directory(), expected);
         assert_eq!(paths.journal(), expected.join("journal.jsonl"));
-        assert_eq!(paths.lock(), expected.join("lock"));
-        assert_eq!(paths.info(), expected.join("info.json"));
         assert_eq!(paths.jobs(), expected.join("jobs"));
-        assert_eq!(paths.sidecar("serve.token"), expected.join("serve.token"));
     }
 
     #[test]
