@@ -27,9 +27,12 @@ use starlark::{
 };
 
 /// Reserved `FailureCode` names a script may not mint through `dal.err`.
+/// Mirrors `dal_agent::ext::script::outcome::FailureCode::as_str` (the
+/// canonical list lives above this crate's dependency direction); the
+/// `reserved_codes` parity test below pins each spelling.
 const RESERVED_CODES: &[&str] = &[
     "failed",
-    "exit_non_zero",
+    "exit_nonzero",
     "unavailable",
     "conflict",
     "busy",
@@ -308,4 +311,37 @@ impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for OutputValueGen<V>
 where
     Self: ProvidesStaticType<'v>,
 {
+}
+
+
+#[cfg(test)]
+mod tests {
+    use dal_agent::ext::script::FailureCode;
+
+    use super::is_reserved_code;
+
+    #[test]
+    fn reserved_codes_match_the_host_failure_codes() {
+        for code in [
+            FailureCode::Failed,
+            FailureCode::ExitNonZero,
+            FailureCode::Unavailable,
+            FailureCode::Conflict,
+            FailureCode::Busy,
+            FailureCode::Cancelled,
+            FailureCode::ObservationUnavailable,
+            FailureCode::InvocationMismatch,
+            FailureCode::Indeterminate,
+        ] {
+            assert!(
+                is_reserved_code(code.as_str()),
+                "host code `{}` must be reserved",
+                code.as_str()
+            );
+        }
+        assert!(
+            !is_reserved_code(FailureCode::Domain("custom".into()).as_str()),
+            "domain codes are the script-mintable set"
+        );
+    }
 }
