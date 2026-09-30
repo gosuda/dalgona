@@ -31,14 +31,13 @@ jobs:
       run:
         working-directory: dal
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 1
           persist-credentials: false
       - run: cargo fmt --check --all
 
   gates:
-    needs: fmt
     strategy:
       fail-fast: false
       matrix:
@@ -54,38 +53,36 @@ jobs:
       run:
         working-directory: dal
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 1
           persist-credentials: false
-      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo clippy --all-targets --all-features --locked -- -D warnings
+      - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo check --locked --no-default-features --workspace
-      - run: cargo test --workspace --all-features --locked
+      - run: cargo test --all-features --locked
 
   msrv:
-    needs: fmt
     runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: dal
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 1
           persist-credentials: false
-      - run: rustup toolchain install 1.98.1 --profile minimal
-      - run: cargo +1.98.1 check --workspace --all-features --locked
+      - run: rustup toolchain install 1.90.0 --profile minimal
+      - run: cargo +1.90.0 check --workspace --all-features --locked
 
   deny:
-    needs: [gates, msrv]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 1
           persist-credentials: false
-      - uses: taiki-e/install-action@v2.87.21
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
         with:
           tool: cargo-deny@0.20.2
       - run: cargo deny --locked check

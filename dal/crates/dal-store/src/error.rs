@@ -5,7 +5,7 @@
 
 use std::{io, path::PathBuf};
 
-use dal_core::{EntryId, SessionId};
+use dal_core::{BlobId, EntryId, SessionId};
 
 /// A session operation failed.
 #[derive(Debug, thiserror::Error)]
@@ -15,7 +15,7 @@ pub enum StoreError {
     #[error("{}", locked_text(.session, *.pid))]
     Locked {
         /// The session that is open elsewhere.
-        session: Box<str>,
+        session: SessionId,
         /// The pid text from the lock file, when it parses.
         pid: Option<u32>,
     },
@@ -53,9 +53,10 @@ pub enum StoreError {
     )]
     WriteFailed {
         /// The session identifier.
-        id: Box<str>,
-        /// The write failure.
-        cause: Box<str>,
+        id: SessionId,
+        /// The write failure, including the journal operation and path.
+        #[source]
+        cause: Box<JournalError>,
     },
     /// A later mutation after a failed rollback.
     #[error(
@@ -63,7 +64,7 @@ pub enum StoreError {
     )]
     Broken {
         /// The session identifier.
-        id: Box<str>,
+        id: SessionId,
     },
     /// The caller asked for a record the store will not write.
     #[error("{reason}")]
@@ -113,13 +114,13 @@ pub enum StoreError {
         /// The contested name.
         name: Box<str>,
         /// The session that holds it.
-        id: Box<str>,
+        id: SessionId,
     },
     /// The entry is not in the session.
     #[error("session {id} has no entry {entry}")]
     UnknownEntry {
         /// The session identifier.
-        id: Box<str>,
+        id: SessionId,
         /// The missing entry.
         entry: EntryId,
     },
@@ -133,7 +134,7 @@ pub enum StoreError {
     #[error("session {id} has no entries to clone")]
     NothingToClone {
         /// The session identifier.
-        id: Box<str>,
+        id: SessionId,
     },
     /// `list` was given a limit outside 1..=500.
     #[error("Store.list: limit must be 1 to 500")]
@@ -149,7 +150,7 @@ pub enum StoreError {
     Blob(#[from] BlobError),
 }
 
-fn locked_text(session: &str, pid: Option<u32>) -> String {
+fn locked_text(session: &SessionId, pid: Option<u32>) -> String {
     match pid {
         Some(pid) => format!("session {session} is open in process {pid}"),
         None => format!("session {session} is open in another process"),
@@ -206,10 +207,10 @@ pub enum JournalError {
 #[derive(Debug, thiserror::Error)]
 pub enum BlobError {
     /// The digest file is absent and the session directory is present.
-    #[error("blob {hex} is not in this session")]
+    #[error("blob {id} is not in this session")]
     NotFound {
-        /// The 64-hex digest.
-        hex: Box<str>,
+        /// The missing digest.
+        id: BlobId,
     },
     /// The session directory is absent.
     #[error("the session was deleted, so its blobs are gone")]
@@ -282,7 +283,7 @@ impl AbortedTurn {
             format!("Turn {} did not finish because dalgon stopped.", self.turn)
         } else {
             format!(
-                "Turn {} did not finish because dalgon stopped. dal marked {marked} unfinished tool calls.",
+                "Turn {} did not finish because dalgon stopped. dalgon marked {marked} unfinished tool calls.",
                 self.turn
             )
         }
@@ -291,7 +292,7 @@ impl AbortedTurn {
 
 /// The notice printed when `-c` finds no earlier session.
 pub const NO_EARLIER_SESSION: &str =
-    "No earlier session in this workspace. dal started a new session.";
+    "No earlier session in this workspace. dalgon started a new session.";
 
 /// Text of a tool result written for a call that had started.
 pub const INTERRUPTED_CALL: &str = "dalgon stopped while this tool call ran. The outcome is unknown. Inspect the workspace before you run it again.";

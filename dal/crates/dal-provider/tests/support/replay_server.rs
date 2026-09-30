@@ -34,8 +34,8 @@ use hyper::{
     HeaderMap, Method, Request, Response, StatusCode, Uri,
     body::{Body, Bytes, Frame, Incoming, SizeHint},
     header::{
-        CONNECTION, CONTENT_TYPE, HeaderName, HeaderValue, SEC_WEBSOCKET_ACCEPT,
-        SEC_WEBSOCKET_KEY, SEC_WEBSOCKET_VERSION, UPGRADE,
+        CONNECTION, CONTENT_TYPE, HeaderName, HeaderValue, SEC_WEBSOCKET_ACCEPT, SEC_WEBSOCKET_KEY,
+        SEC_WEBSOCKET_VERSION, UPGRADE,
     },
     http::request::Parts,
     server::conn::http1,
@@ -278,10 +278,12 @@ impl ReplayReservation {
 
     /// Starts listening on the reserved port and serving the fixture.
     pub(crate) fn listen(self) -> Result<ReplayServer, ReplayError> {
-        let listener = self
-            .socket
-            .listen(1024)
-            .map_err(|error| fail(format!("replay server cannot listen on {}: {error}", self.addr)))?;
+        let listener = self.socket.listen(1024).map_err(|error| {
+            fail(format!(
+                "replay server cannot listen on {}: {error}",
+                self.addr
+            ))
+        })?;
         ReplayServer::launch(listener, self.fixture)
     }
 }
@@ -460,8 +462,10 @@ impl Fixture {
     fn load(case: &Path) -> Result<Self, ReplayError> {
         let file = case.join("exchange.toml");
         let at = file.display();
-        let text = std::fs::read_to_string(&file).map_err(|error| fail(format!("{at}: {error}")))?;
-        let wire: FileWire = toml::from_str(&text).map_err(|error| fail(format!("{at}: {error}")))?;
+        let text =
+            std::fs::read_to_string(&file).map_err(|error| fail(format!("{at}: {error}")))?;
+        let wire: FileWire =
+            toml::from_str(&text).map_err(|error| fail(format!("{at}: {error}")))?;
         let exchanges = wire
             .exchange
             .into_iter()
@@ -569,7 +573,7 @@ fn parse_http_reply(case: &Path, wire: ResponseWire) -> Result<HttpReply, Replay
     let (end, limit) = match (wire.stall_after, wire.close_after) {
         (None, None) => (End::Finish, body.len()),
         (Some(stall), Some(close)) if stall <= close => (End::Stall, stall),
-        (Some(_), Some(close)) | (None, Some(close)) => (End::Close, close),
+        (_, Some(close)) => (End::Close, close),
         (Some(stall), None) => (End::Stall, stall),
     };
     if limit > body.len() {
@@ -843,7 +847,9 @@ async fn serve(
     let (parts, body) = request.into_parts();
     let body = read_body(body).await;
     let Some(exchange) = shared.exchanges.get(index) else {
-        let got = show(&redact(format!("{} {}", parts.method, path_of(&parts.uri)).as_bytes()));
+        let got = show(&redact(
+            format!("{} {}", parts.method, path_of(&parts.uri)).as_bytes(),
+        ));
         return Ok(shared.refuse(index, &Miss::new("exchange", "end of fixture", got), guard));
     };
     let kind = if upgrade { Kind::Websocket } else { Kind::Http };
@@ -921,7 +927,11 @@ fn check(
 ) -> Result<(), Miss> {
     // `kind` is what the request is: an upgrade is a websocket handshake.
     if kind != exchange.kind {
-        return Err(Miss::new("kind", exchange.kind.to_string(), kind.to_string()));
+        return Err(Miss::new(
+            "kind",
+            exchange.kind.to_string(),
+            kind.to_string(),
+        ));
     }
     let want = &exchange.request;
     if parts.method != want.method {
@@ -970,7 +980,11 @@ fn check_header(headers: &HeaderMap, name: &HeaderName, want: &str) -> Result<()
     if values.is_empty() {
         return Err(Miss::new(field, expected, "<missing>"));
     }
-    if want == REDACTED || values.iter().any(|value| value.as_bytes() == want.as_bytes()) {
+    if want == REDACTED
+        || values
+            .iter()
+            .any(|value| value.as_bytes() == want.as_bytes())
+    {
         return Ok(());
     }
     let got = if SECRET_HEADERS.contains(&name.as_str()) {
@@ -1178,7 +1192,10 @@ async fn play(shared: &Shared, index: usize, steps: &[WsStep], socket: &mut Sock
                 ) =>
                 {
                     let got = describe(Some(&Err(error)));
-                    shared.record(index, &Miss::new(format!("frame {number}"), step.describe(), got));
+                    shared.record(
+                        index,
+                        &Miss::new(format!("frame {number}"), step.describe(), got),
+                    );
                     return;
                 }
                 None | Some(Err(_) | Ok(Message::Close(_))) => return,
@@ -1298,7 +1315,11 @@ fn body_diff(expected: &[u8], got: &[u8]) -> (String, String) {
     let from = at.saturating_sub(CONTEXT);
     let lead = if from > 0 { "…" } else { "" };
     (
-        format!("{} bytes {lead}{}", expected.len(), show(&expected_text[from..])),
+        format!(
+            "{} bytes {lead}{}",
+            expected.len(),
+            show(&expected_text[from..])
+        ),
         format!("{} bytes {lead}{}", got.len(), show(&got_text[from..])),
     )
 }

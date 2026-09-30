@@ -1,0 +1,57 @@
+[package]
+name = "dalgon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+repository.workspace = true
+description = "The dal command-line and process edge"
+publish = true
+
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/dalgon-v{ version }/{ name }-{ target }.tar.xz"
+pkg-fmt = "txz"
+bin-dir = "{ name }-{ target }/{ bin }"
+
+[package.metadata.binstall.overrides.'cfg(windows)']
+pkg-url = "{ repo }/releases/download/dalgon-v{ version }/{ name }-{ target }.zip"
+pkg-fmt = "zip"
+bin-dir = "{ bin }"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = ["tui"]
+tui = ["dep:dal-tui"]
+
+[dependencies]
+clap = { version = "=4.6.7", features = ["derive", "string"] }
+clap_complete = "=4.6.11"
+dal-agent = { path = "../dal-agent", version = "=0.1.0" }
+dal-core = { path = "../dal-core", version = "=0.1.0" }
+dal-ext = { path = "../dal-ext", version = "=0.1.0" }
+dal-provider = { path = "../dal-provider", version = "=0.1.0" }
+dal-star = { path = "../dal-star", version = "=0.1.0" }
+dal-store = { path = "../dal-store", version = "=0.1.0" }
+dal-tools = { path = "../dal-tools", version = "=0.1.0", features = ["symbols"] }
+dal-wire = { path = "../dal-wire", version = "=0.1.0" }
+thiserror.workspace = true
+jiff.workspace = true
+serde.workspace = true
+sonic-rs.workspace = true
+tokio = { workspace = true, features = ["fs", "io-std", "io-util", "macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util.workspace = true
+url.workspace = true
+crossterm = "=0.29.0"
+dal-tui = { path = "../dal-tui", version = "=0.1.0", optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock.workspace = true
+
+[dev-dependencies]
+clap_mangen = "=0.3.3"
+tempfile.workspace = true
+
+[lints]
+workspace = true

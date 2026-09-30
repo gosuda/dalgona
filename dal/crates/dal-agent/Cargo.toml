@@ -10,11 +10,26 @@ description = "Session ownership and execution for dal"
 [dependencies]
 dal-core = { path = "../dal-core" }
 dal-store = { path = "../dal-store" }
+dal-provider = { path = "../dal-provider" }
+base64.workspace = true
+blake3.workspace = true
+futures.workspace = true
+jiff.workspace = true
+process-wrap.workspace = true
+rustix = { workspace = true, features = ["fs"] }
+serde.workspace = true
 sonic-rs.workspace = true
 thiserror.workspace = true
+reqwest.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
+tokio-util = { workspace = true, features = ["rt"] }
+
+[features]
+test-support = []
 
 [dev-dependencies]
 proptest.workspace = true
-
+tokio = { workspace = true, features = ["test-util"] }
+tempfile.workspace = true
 [lints]
 workspace = true

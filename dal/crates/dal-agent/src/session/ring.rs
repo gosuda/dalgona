@@ -9,8 +9,7 @@
 //! updates follow a client cursor, or that the client must resync.
 
 use std::cmp::Ordering;
-use std::collections::VecDeque;
-use std::collections::vec_deque;
+use std::collections::{VecDeque, vec_deque};
 use std::fmt;
 use std::sync::Arc;
 
@@ -193,9 +192,7 @@ impl ReplayRing {
                 false
             }
         };
-        let bytes = sonic_rs::to_vec(&*update)
-            .map_err(PushError::Encode)?
-            .len();
+        let bytes = sonic_rs::to_vec(&*update).map_err(PushError::Encode)?.len();
         if switch {
             self.entries.clear();
             self.bytes = 0;
@@ -305,8 +302,8 @@ mod tests {
         }
     }
 
-    fn cursor(generation: u64, seq: u64) -> Option<(Gen, Seq)> {
-        Some((g(generation), s(seq)))
+    fn cursor(generation: u64, seq: u64) -> (Gen, Seq) {
+        (g(generation), s(seq))
     }
 
     #[test]
@@ -317,7 +314,7 @@ mod tests {
         }
         assert_eq!(ring.entries.len(), 4096);
         assert_eq!(
-            outcome(ring.replay(cursor(1, 1))),
+            outcome(ring.replay(Some(cursor(1, 1)))),
             Ok(Some((2..=4096).collect()))
         );
 
@@ -326,23 +323,34 @@ mod tests {
         assert_eq!(ring.entries.len(), 4096);
         // Seq 2 was evicted, so a client that saw only seq 1 lost data.
         assert_eq!(
-            outcome(ring.replay(cursor(1, 1))),
+            outcome(ring.replay(Some(cursor(1, 1)))),
             Err(at(1, Some(4098)))
         );
         // A client that saw seq 2 gets the whole ring, first entry included.
         assert_eq!(
-            outcome(ring.replay(cursor(1, 2))),
+            outcome(ring.replay(Some(cursor(1, 2)))),
             Ok(Some((3..=4098).collect()))
         );
-        assert_eq!(outcome(ring.replay(cursor(1, 4097))), Ok(Some(vec![4098])));
-        assert_eq!(outcome(ring.replay(cursor(1, 4098))), Ok(None));
-        assert_eq!(outcome(ring.replay(cursor(1, 4099))), Err(at(1, Some(4098))));
+        assert_eq!(
+            outcome(ring.replay(Some(cursor(1, 4097)))),
+            Ok(Some(vec![4098]))
+        );
+        assert_eq!(outcome(ring.replay(Some(cursor(1, 4098)))), Ok(None));
+        assert_eq!(
+            outcome(ring.replay(Some(cursor(1, 4099)))),
+            Err(at(1, Some(4098)))
+        );
         assert_eq!(outcome(ring.replay(None)), Ok(None));
     }
 
     #[test]
     fn byte_cap_evicts_oldest_until_serialized_total_fits() {
-        let updates = [delta(1, 1, 10), delta(1, 2, 20), delta(1, 3, 30), delta(1, 4, 40)];
+        let updates = [
+            delta(1, 1, 10),
+            delta(1, 2, 20),
+            delta(1, 3, 30),
+            delta(1, 4, 40),
+        ];
         let sizes: Vec<usize> = updates.iter().map(|update| size(update)).collect();
         let cap = sizes[0] + sizes[1] + sizes[2];
         let mut ring = ReplayRing::new(
@@ -358,14 +366,23 @@ mod tests {
         }
         // Exactly at the cap retains everything.
         assert_eq!(ring.bytes, cap);
-        assert_eq!(outcome(ring.replay(cursor(1, 1))), Ok(Some(vec![2, 3])));
+        assert_eq!(
+            outcome(ring.replay(Some(cursor(1, 1)))),
+            Ok(Some(vec![2, 3]))
+        );
 
         ring.push(Arc::clone(&updates[3])).unwrap();
         // Dropping seq 1 alone leaves 2+3+4 over the cap, so seq 2 goes too.
         assert!(sizes[1] + sizes[2] + sizes[3] > cap);
         assert_eq!(ring.bytes, sizes[2] + sizes[3]);
-        assert_eq!(outcome(ring.replay(cursor(1, 2))), Ok(Some(vec![3, 4])));
-        assert_eq!(outcome(ring.replay(cursor(1, 1))), Err(at(1, Some(4))));
+        assert_eq!(
+            outcome(ring.replay(Some(cursor(1, 2)))),
+            Ok(Some(vec![3, 4]))
+        );
+        assert_eq!(
+            outcome(ring.replay(Some(cursor(1, 1)))),
+            Err(at(1, Some(4)))
+        );
         let retained: Vec<_> = ring.entries.iter().map(|entry| &entry.update).collect();
         assert!(Arc::ptr_eq(retained[0], &updates[2]));
         assert!(Arc::ptr_eq(retained[1], &updates[3]));
@@ -381,8 +398,11 @@ mod tests {
         // 400 KiB + 700 KiB exceeds 1 MiB, so both older updates go.
         ring.push(delta(1, 3, 700 << 10)).unwrap();
         assert_eq!(ring.entries.len(), 1);
-        assert_eq!(outcome(ring.replay(cursor(1, 1))), Err(at(1, Some(3))));
-        assert_eq!(outcome(ring.replay(cursor(1, 2))), Ok(Some(vec![3])));
+        assert_eq!(
+            outcome(ring.replay(Some(cursor(1, 1)))),
+            Err(at(1, Some(3)))
+        );
+        assert_eq!(outcome(ring.replay(Some(cursor(1, 2)))), Ok(Some(vec![3])));
     }
 
     #[test]
@@ -392,28 +412,46 @@ mod tests {
         ring.push(delta(1, 12, 2 << 20)).unwrap();
         assert_eq!(ring.entries.len(), 1);
         assert!(ring.bytes > RingCaps::TOP_LEVEL.bytes);
-        assert_eq!(outcome(ring.replay(cursor(1, 11))), Ok(Some(vec![12])));
-        assert_eq!(outcome(ring.replay(cursor(1, 10))), Err(at(1, Some(12))));
+        assert_eq!(
+            outcome(ring.replay(Some(cursor(1, 11)))),
+            Ok(Some(vec![12]))
+        );
+        assert_eq!(
+            outcome(ring.replay(Some(cursor(1, 10)))),
+            Err(at(1, Some(12)))
+        );
 
         ring.push(delta(1, 13, 16)).unwrap();
         assert_eq!(ring.entries.len(), 1);
         assert_eq!(ring.bytes, size(&delta(1, 13, 16)));
-        assert_eq!(outcome(ring.replay(cursor(1, 11))), Err(at(1, Some(13))));
+        assert_eq!(
+            outcome(ring.replay(Some(cursor(1, 11)))),
+            Err(at(1, Some(13)))
+        );
     }
 
     #[test]
     fn open_head_replays_first_pushed_update_and_resyncs_lost_history() {
         let mut ring = ReplayRing::new(RingCaps::CHILD, g(3), Some(s(5)));
-        assert_eq!(outcome(ring.replay(cursor(3, 5))), Ok(None));
-        assert_eq!(outcome(ring.replay(cursor(3, 4))), Err(at(3, Some(5))));
+        assert_eq!(outcome(ring.replay(Some(cursor(3, 5)))), Ok(None));
+        assert_eq!(
+            outcome(ring.replay(Some(cursor(3, 4)))),
+            Err(at(3, Some(5)))
+        );
         ring.push(delta(3, 6, 1)).unwrap();
         ring.push(delta(3, 7, 1)).unwrap();
-        assert_eq!(outcome(ring.replay(cursor(3, 5))), Ok(Some(vec![6, 7])));
-        assert_eq!(outcome(ring.replay(cursor(3, 4))), Err(at(3, Some(7))));
+        assert_eq!(
+            outcome(ring.replay(Some(cursor(3, 5)))),
+            Ok(Some(vec![6, 7]))
+        );
+        assert_eq!(
+            outcome(ring.replay(Some(cursor(3, 4)))),
+            Err(at(3, Some(7)))
+        );
 
         let empty = ReplayRing::new(RingCaps::CHILD, g(1), None);
         assert_eq!(outcome(empty.replay(None)), Ok(None));
-        assert_eq!(outcome(empty.replay(cursor(1, 1))), Err(at(1, None)));
+        assert_eq!(outcome(empty.replay(Some(cursor(1, 1)))), Err(at(1, None)));
     }
 
     #[test]
@@ -425,7 +463,10 @@ mod tests {
             ring.push(delta(2, 3, 1)),
             Err(PushError::Gap { after, got }) if after == s(1) && got == s(3)
         ));
-        assert!(matches!(ring.push(delta(2, 1, 1)), Err(PushError::Gap { .. })));
+        assert!(matches!(
+            ring.push(delta(2, 1, 1)),
+            Err(PushError::Gap { .. })
+        ));
         assert!(matches!(
             ring.push(delta(1, 2, 1)),
             Err(PushError::StaleGeneration { current, got }) if current == g(2) && got == g(1)
@@ -434,7 +475,7 @@ mod tests {
         assert_eq!(ring.entries.len(), 1);
         assert_eq!(ring.bytes, before);
         ring.push(delta(2, 2, 1)).unwrap();
-        assert_eq!(outcome(ring.replay(cursor(2, 1))), Ok(Some(vec![2])));
+        assert_eq!(outcome(ring.replay(Some(cursor(2, 1)))), Ok(Some(vec![2])));
     }
 
     #[test]
@@ -446,14 +487,29 @@ mod tests {
         ring.push(delta(2, 1, 1)).unwrap();
         assert_eq!(ring.entries.len(), 1);
         assert_eq!(ring.bytes, size(&delta(2, 1, 1)));
-        assert_eq!(outcome(ring.replay(cursor(1, 3))), Err(at(2, Some(1))));
-        assert_eq!(outcome(ring.replay(cursor(1, 1))), Err(at(2, Some(1))));
-        assert_eq!(outcome(ring.replay(cursor(3, 1))), Err(at(2, Some(1))));
-        assert_eq!(outcome(ring.replay(cursor(2, 1))), Ok(None));
-        assert_eq!(outcome(ring.replay(cursor(2, 5))), Err(at(2, Some(1))));
+        assert_eq!(
+            outcome(ring.replay(Some(cursor(1, 3)))),
+            Err(at(2, Some(1)))
+        );
+        assert_eq!(
+            outcome(ring.replay(Some(cursor(1, 1)))),
+            Err(at(2, Some(1)))
+        );
+        assert_eq!(
+            outcome(ring.replay(Some(cursor(3, 1)))),
+            Err(at(2, Some(1)))
+        );
+        assert_eq!(outcome(ring.replay(Some(cursor(2, 1)))), Ok(None));
+        assert_eq!(
+            outcome(ring.replay(Some(cursor(2, 5)))),
+            Err(at(2, Some(1)))
+        );
         ring.push(delta(2, 2, 1)).unwrap();
-        assert_eq!(outcome(ring.replay(cursor(2, 1))), Ok(Some(vec![2])));
-        assert!(matches!(ring.push(delta(2, 2, 1)), Err(PushError::Gap { .. })));
+        assert_eq!(outcome(ring.replay(Some(cursor(2, 1)))), Ok(Some(vec![2])));
+        assert!(matches!(
+            ring.push(delta(2, 2, 1)),
+            Err(PushError::Gap { .. })
+        ));
     }
 
     struct Rng(u64);
@@ -530,7 +586,7 @@ mod tests {
                 Some((first, _)) if seen + 1 >= first.seq.get() => Ok(Some(
                     window
                         .iter()
-                        .map(|(update, _)| update.seq.get())
+                        .map(|(entry, _)| entry.seq.get())
                         .filter(|seq| *seq > seen)
                         .collect(),
                 )),
@@ -539,7 +595,7 @@ mod tests {
         }
     }
 
-    fn check(ring: &ReplayRing, oracle: &Oracle, rng: &mut Rng) {
+    fn check(ring: &ReplayRing, oracle: &Oracle, random: &mut Rng) {
         let caps = ring.caps;
         let window = &oracle.pushed[oracle.window(caps)..];
         assert_eq!(ring.entries.len(), window.len());
@@ -557,12 +613,14 @@ mod tests {
 
         let head = oracle.head().unwrap_or(0);
         for _ in 0..8 {
-            let after = match rng.below(6) {
+            let after = match random.below(6) {
                 0 => None,
-                1 => Some((oracle.generation + 1, 1 + rng.below(head + 2))),
-                2 if oracle.generation > 1 => Some((oracle.generation - 1, 1 + rng.below(head + 2))),
+                1 => Some((oracle.generation + 1, 1 + random.below(head + 2))),
+                2 if oracle.generation > 1 => {
+                    Some((oracle.generation - 1, 1 + random.below(head + 2)))
+                }
                 3 => Some((oracle.generation, head.max(1))),
-                _ => Some((oracle.generation, 1 + rng.below(head + 2))),
+                _ => Some((oracle.generation, 1 + random.below(head + 2))),
             };
             let replay = ring.replay(after.map(|(generation, seq)| (g(generation), s(seq))));
             let expected = oracle.expected(caps, after);
@@ -584,47 +642,47 @@ mod tests {
 
     #[test]
     fn replay_ring_property() {
-        let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+        let mut random = Rng(0x9e37_79b9_7f4a_7c15);
         for case in 0..12 {
             let caps = match case % 3 {
                 0 => RingCaps::TOP_LEVEL,
                 1 => RingCaps::CHILD,
                 _ => RingCaps {
-                    updates: 1 + rng.below_usize(64),
-                    bytes: 200 + rng.below_usize(4000),
+                    updates: 1 + random.below_usize(64),
+                    bytes: 200 + random.below_usize(4000),
                 },
             };
-            let length = rng.below(10_001);
-            let start = if rng.below(3) == 0 {
+            let length = random.below(10_001);
+            let start = if random.below(3) == 0 {
                 None
             } else {
-                Some(1 + rng.below(1000))
+                Some(1 + random.below(1000))
             };
             let mut oracle = Oracle {
-                generation: 1 + rng.below(3),
+                generation: 1 + random.below(3),
                 start,
                 pushed: Vec::new(),
             };
             let mut ring = ReplayRing::new(caps, g(oracle.generation), start.map(s));
-            check(&ring, &oracle, &mut rng);
+            check(&ring, &oracle, &mut random);
             for step in 0..length {
-                if rng.below(2000) == 0 {
-                    let next_start = oracle.head();
+                if random.below(2000) == 0 {
+                    let restart = oracle.head();
                     oracle = Oracle {
                         generation: oracle.generation + 1,
                         start: None,
                         pushed: Vec::new(),
                     };
                     // A new generation may restart or continue the counter.
-                    if rng.below(2) == 0 {
-                        oracle.start = next_start;
+                    if random.below(2) == 0 {
+                        oracle.start = restart;
                     }
                 }
-                let seq = oracle.head().map_or(1 + rng.below(5), |head| head + 1);
-                let text_len = if rng.below(500) == 0 {
-                    (64 << 10) + rng.below_usize(1 << 20)
+                let seq = oracle.head().map_or(1 + random.below(5), |head| head + 1);
+                let text_len = if random.below(500) == 0 {
+                    (64 << 10) + random.below_usize(1 << 20)
                 } else {
-                    rng.below_usize(700)
+                    random.below_usize(700)
                 };
                 let update = delta(oracle.generation, seq, text_len);
                 let bytes = size(&update);
@@ -635,7 +693,7 @@ mod tests {
                 }
                 oracle.pushed.push((update, bytes));
                 if step % 97 == 0 || step + 1 == length {
-                    check(&ring, &oracle, &mut rng);
+                    check(&ring, &oracle, &mut random);
                 }
             }
         }

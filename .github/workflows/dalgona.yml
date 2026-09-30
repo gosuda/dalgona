@@ -3,7 +3,6 @@ on:
   push:
     paths:
       - "dalgona/**"
-      - "dal/**"
       - ".github/workflows/dalgona.yml"
       - "rust-toolchain.toml"
       - ".gitignore"
@@ -13,7 +12,6 @@ on:
   pull_request:
     paths:
       - "dalgona/**"
-      - "dal/**"
       - ".github/workflows/dalgona.yml"
       - "rust-toolchain.toml"
       - ".gitignore"
@@ -33,14 +31,13 @@ jobs:
       run:
         working-directory: dalgona
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 1
           persist-credentials: false
       - run: cargo fmt --check --all
 
   gates:
-    needs: fmt
     strategy:
       fail-fast: false
       matrix:
@@ -56,38 +53,88 @@ jobs:
       run:
         working-directory: dalgona
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 1
           persist-credentials: false
-      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo clippy --all-targets --all-features --locked -- -D warnings
+      - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo check --locked --no-default-features --workspace
-      - run: cargo test --workspace --all-features --locked
+      - run: cargo test --all-features --locked
 
   msrv:
-    needs: fmt
     runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: dalgona
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 1
           persist-credentials: false
-      - run: rustup toolchain install 1.98.1 --profile minimal
-      - run: cargo +1.98.1 check --workspace --all-features --locked
+      - run: rustup toolchain install 1.90.0 --profile minimal
+      - run: cargo +1.90.0 check --workspace --all-features --locked
 
   deny:
-    needs: [gates, msrv]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 1
           persist-credentials: false
-      - uses: taiki-e/install-action@v2.87.21
+      - name: Check released dal dependencies
+        shell: bash
+        working-directory: dalgona
+        run: |
+          set -euo pipefail
+          test ! -e .cargo/config.toml
+          if git -C .. grep -n -E 'path[[:space:]]*=[[:space:]]*"[^"]*/dal/' -- 'dalgona/**/Cargo.toml'; then
+            echo "dalgona manifests must not point into dal/" >&2
+            exit 1
+          fi
+          if git -C .. grep -n -E '^\[patch' -- 'dalgona/**/Cargo.toml'; then
+            echo "dalgona manifests must not contain a patch section" >&2
+            exit 1
+          fi
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          import subprocess
+          import tomllib
+
+          def fail(message):
+              raise SystemExit(message)
+
+          def check_dependencies(table, manifest):
+              for name, value in table.items():
+                  if name != "dal" and not name.startswith("dal-"):
+                      continue
+                  spec = value if isinstance(value, str) else value.get("version")
+                  if not isinstance(spec, str) or not spec.startswith("="):
+                      fail(f"{manifest}: {name} must use an exact = version")
+                  if isinstance(value, dict) and "path" in value:
+                      fail(f"{manifest}: {name} must not use a path dependency")
+
+          for manifest in Path(".").rglob("Cargo.toml"):
+              data = tomllib.loads(manifest.read_text())
+              if "patch" in data:
+                  fail(f"{manifest}: patch sections are forbidden")
+              for key in ("dependencies", "dev-dependencies", "build-dependencies"):
+                  check_dependencies(data.get(key, {}), manifest)
+              for target in data.get("target", {}).values():
+                  for key in ("dependencies", "dev-dependencies", "build-dependencies"):
+                      check_dependencies(target.get(key, {}), manifest)
+              check_dependencies(data.get("workspace", {}).get("dependencies", {}), manifest)
+
+          tree = subprocess.run(
+              ["cargo", "tree", "--workspace", "--prefix", "none"],
+              check=True, text=True, capture_output=True,
+          ).stdout
+          for line in tree.splitlines():
+              if re.search(r"\bdal(?:-[^\s]+)? v[^\s]+ \([^)]*/dal/", line):
+                  fail(f"path-sourced dal crate is forbidden: {line}")
+          PY
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
         with:
           tool: cargo-deny@0.20.2
       - run: cargo deny --locked check

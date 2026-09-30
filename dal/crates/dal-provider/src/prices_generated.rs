@@ -1,7 +1,7 @@
 pub(crate) const PRICE_SOURCE: &str = "models.dev";
 pub(crate) const PRICE_SOURCE_URL: &str = "https://models.dev/api.json";
 pub(crate) const PRICE_FETCHED_AT: &str = "2026-09-27";
-#[expect(clippy::unreadable_literal, reason = "generated price literals preserve the snapshot's decimal values")]
+#[expect(clippy::unreadable_literal, clippy::approx_constant, reason = "generated price literals preserve the snapshot's decimal values; 0.318 is an exact price, not FRAC_1_PI")]
 pub(crate) const PRICE_ROWS: &[PriceRow] = &[
     PriceRow {
         model: "302ai/MiniMax-M1",

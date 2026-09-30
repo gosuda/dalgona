@@ -12,8 +12,7 @@
   subscribes to DECRPM 2031, falls back to `COLORFGBG`, then to terminal-palette mode.
   Never guess a contrast you cannot compute. Shipped set: exactly the nine built-ins
   `flexoki-dark`, `flexoki-light`, `github-dark`, `github-light`, `kanagawa-wave`,
-  `catppuccin-mocha`, `rose-pine`, `ayu-mirage`, `catppuccin-latte`. A theme ships only
-  after the contrast gate passes in CI: each of `text`, `dim`, `accent`, `success`,
+  `catppuccin-mocha`, `rose-pine`, `ayu-mirage`, `catppuccin-latte`. A theme ships only after the contrast gate passes in CI: each of `text`, `dim`, `accent`, `success`,
   `warning`, `error` at least 4.5 against each of `canvas`, `surface`, `selected`;
   `faint` at least 3.0 against `canvas`. A failing theme is excluded or gets a same-
   theme role override. 256-color maps to the nearest Euclidean RGB match. 16-color maps

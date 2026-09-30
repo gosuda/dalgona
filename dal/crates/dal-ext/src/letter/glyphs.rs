@@ -288,7 +288,7 @@ mod tests {
     #[test]
     fn glyph_parse_boundaries() {
         let zeros = "0".repeat(32);
-        // A valid narrow glyph left-aligns its byte: row 0x00FF becomes 0xFF00.
+        // A valid narrow glyph left-aligns its byte: 0x00FF in the hex line paints as 0xFF00.
         let narrow = format!("0041:FF{}\n", "0".repeat(30));
         let table = Glyphs::from_hex(narrow.as_bytes()).unwrap();
         let glyph: Glyph = table.find(u32::from('A')).unwrap();

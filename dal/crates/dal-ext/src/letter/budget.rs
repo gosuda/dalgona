@@ -199,6 +199,7 @@ mod tests {
             description: description.into(),
             body: Arc::from("body"),
             letter2image,
+            mcp: None,
         }
     }
 

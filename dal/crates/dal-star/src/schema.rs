@@ -6,14 +6,15 @@
 //! coercion, no truthy-to-boolean conversion. Defaults live in the schema so
 //! a documented default and an enforced default can never diverge.
 
-use std::fmt;
+use std::fmt::{self, Write as _};
 
+use allocative::Allocative;
 use dal_core::RawJson;
 
 use crate::value::Value;
 
 /// A normalized field type.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Allocative)]
 pub(crate) enum Schema {
     /// UTF-8 text with optional length bounds (in characters).
     Str {
@@ -54,7 +55,7 @@ pub(crate) enum Schema {
 }
 
 /// One object field: name, type and presence rule.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Allocative)]
 pub(crate) struct Field {
     /// The field name; a valid Starlark identifier, never `_`-prefixed.
     pub(crate) name: Box<str>,
@@ -65,7 +66,7 @@ pub(crate) struct Field {
 }
 
 /// How an absent field is treated at validation.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Allocative)]
 pub(crate) enum Presence {
     /// The field must be present.
     Required,
@@ -119,8 +120,8 @@ impl SchemaError {
 /// Starlark keywords that cannot name a field (spec §P04: identifiers that
 /// collide with the language are unreachable through `args.<name>`).
 const ST_KEYWORDS: &[&str] = &[
-    "False", "None", "True", "and", "break", "continue", "def", "elif",
-    "else", "for", "if", "in", "lambda", "load", "not", "or", "pass", "return",
+    "False", "None", "True", "and", "break", "continue", "def", "elif", "else", "for", "if", "in",
+    "lambda", "load", "not", "or", "pass", "return",
 ];
 
 /// True for a valid Starlark identifier `[A-Za-z_][A-Za-z0-9_]*` that is not
@@ -152,8 +153,7 @@ impl Field {
             ));
         }
         self.ty.check(&here)?;
-        if let Presence::Default(default) | Presence::NullableDefault(default) = &self.presence
-        {
+        if let Presence::Default(default) | Presence::NullableDefault(default) = &self.presence {
             let valid = if matches!(default, Value::Null) {
                 matches!(self.presence, Presence::NullableDefault(_))
             } else {
@@ -175,33 +175,33 @@ impl Schema {
     pub(crate) fn check(&self, path: &str) -> Result<(), SchemaError> {
         match self {
             Self::Str { min_len, max_len } => {
-                if let (Some(min), Some(max)) = (min_len, max_len) {
-                    if min > max {
-                        return Err(SchemaError::schema(
-                            path,
-                            format!("min_len {min} exceeds max_len {max}"),
-                        ));
-                    }
+                if let (Some(min), Some(max)) = (min_len, max_len)
+                    && min > max
+                {
+                    return Err(SchemaError::schema(
+                        path,
+                        format!("min_len {min} exceeds max_len {max}"),
+                    ));
                 }
             }
             Self::Int { min, max } => {
-                if let (Some(min), Some(max)) = (min, max) {
-                    if min > max {
-                        return Err(SchemaError::schema(
-                            path,
-                            format!("min {min} exceeds max {max}"),
-                        ));
-                    }
+                if let (Some(min), Some(max)) = (min, max)
+                    && min > max
+                {
+                    return Err(SchemaError::schema(
+                        path,
+                        format!("min {min} exceeds max {max}"),
+                    ));
                 }
             }
             Self::Num { min, max } => {
-                if let (Some(min), Some(max)) = (min, max) {
-                    if min > max {
-                        return Err(SchemaError::schema(
-                            path,
-                            format!("min {min} exceeds max {max}"),
-                        ));
-                    }
+                if let (Some(min), Some(max)) = (min, max)
+                    && min > max
+                {
+                    return Err(SchemaError::schema(
+                        path,
+                        format!("min {min} exceeds max {max}"),
+                    ));
                 }
             }
             Self::Enum(values) => {
@@ -209,7 +209,7 @@ impl Schema {
                     return Err(SchemaError::schema(path, "enum needs at least one value"));
                 }
                 let mut seen = std::collections::BTreeSet::new();
-                for value in values.iter() {
+                for value in values {
                     if !seen.insert(value.as_ref()) {
                         return Err(SchemaError::schema(
                             path,
@@ -223,19 +223,19 @@ impl Schema {
                 min_len,
                 max_len,
             } => {
-                if let (Some(min), Some(max)) = (min_len, max_len) {
-                    if min > max {
-                        return Err(SchemaError::schema(
-                            path,
-                            format!("min_len {min} exceeds max_len {max}"),
-                        ));
-                    }
+                if let (Some(min), Some(max)) = (min_len, max_len)
+                    && min > max
+                {
+                    return Err(SchemaError::schema(
+                        path,
+                        format!("min_len {min} exceeds max_len {max}"),
+                    ));
                 }
                 item.check(&format!("{path}[]"))?;
             }
             Self::Object(fields) => {
                 let mut seen = std::collections::BTreeSet::new();
-                for field in fields.iter() {
+                for field in fields {
                     if !seen.insert(field.name.as_ref()) {
                         return Err(SchemaError::schema(
                             path,
@@ -250,6 +250,16 @@ impl Schema {
         Ok(())
     }
 
+    /// Whether the type accepts scalar command tokens (`--f=v`, `--f v`,
+    /// `--f`/`--no-f` for booleans, verbatim strings and enum literals);
+    /// object and list are container forms bound through JSON per §P04.
+    pub(crate) fn is_scalar(&self) -> bool {
+        matches!(
+            self,
+            Self::Str { .. } | Self::Int { .. } | Self::Num { .. } | Self::Bool | Self::Enum(_)
+        )
+    }
+
     /// Validates `value`, applying defaults, and returns the normalized form.
     ///
     /// Missing optional fields stay absent in the returned object; the
@@ -258,77 +268,16 @@ impl Schema {
     pub(crate) fn validate(&self, value: &Value, path: &str) -> Result<Value, SchemaError> {
         match (self, value) {
             (Self::Str { min_len, max_len }, Value::Str(text)) => {
-                let len = text.chars().count();
-                if let Some(min) = min_len {
-                    if len < *min {
-                        return Err(SchemaError::argument(
-                            path,
-                            format!("string length {len} below min_len {min}"),
-                        ));
-                    }
-                }
-                if let Some(max) = max_len {
-                    if len > *max {
-                        return Err(SchemaError::argument(
-                            path,
-                            format!("string length {len} above max_len {max}"),
-                        ));
-                    }
-                }
-                Ok(value.clone())
+                Self::validate_string(text, min_len.as_ref(), max_len.as_ref(), path)
             }
             (Self::Int { min, max }, Value::Int(number)) => {
-                if let Some(min) = min {
-                    if number < min {
-                        return Err(SchemaError::argument(
-                            path,
-                            format!("{number} below min {min}"),
-                        ));
-                    }
-                }
-                if let Some(max) = max {
-                    if number > max {
-                        return Err(SchemaError::argument(
-                            path,
-                            format!("{number} above max {max}"),
-                        ));
-                    }
-                }
-                Ok(value.clone())
+                Self::validate_integer(*number, min.as_ref(), max.as_ref(), path)
             }
             (Self::Num { min, max }, Value::Num(number)) => {
-                if !number.is_finite() {
-                    return Err(SchemaError::argument(path, "non-finite number"));
-                }
-                if let Some(min) = min {
-                    if number < min {
-                        return Err(SchemaError::argument(
-                            path,
-                            format!("{number} below min {min}"),
-                        ));
-                    }
-                }
-                if let Some(max) = max {
-                    if number > max {
-                        return Err(SchemaError::argument(
-                            path,
-                            format!("{number} above max {max}"),
-                        ));
-                    }
-                }
-                Ok(value.clone())
+                Self::validate_number(*number, min.as_ref(), max.as_ref(), path)
             }
-            (Self::Bool, Value::Bool(_)) => Ok(value.clone()),
-            (Self::Enum(values), Value::Str(text)) => {
-                if values.iter().any(|v| v.as_ref() == text.as_ref()) {
-                    Ok(value.clone())
-                } else {
-                    Err(SchemaError::argument(
-                        path,
-                        format!("`{text}` is not one of {}", values.join(", ")),
-                    ))
-                }
-            }
+            (Self::Bool, Value::Bool(flag)) => Ok(Value::Bool(*flag)),
+            (Self::Enum(values), Value::Str(text)) => Self::validate_enum(values, text, path),
             (
                 Self::List {
                     item,
@@ -336,78 +285,9 @@ impl Schema {
                     max_len,
                 },
                 Value::List(items),
-            ) => {
-                if let Some(min) = min_len {
-                    if items.len() < *min {
-                        return Err(SchemaError::argument(
-                            path,
-                            format!("list length {} below min_len {min}", items.len()),
-                        ));
-                    }
-                }
-                if let Some(max) = max_len {
-                    if items.len() > *max {
-                        return Err(SchemaError::argument(
-                            path,
-                            format!("list length {} above max_len {max}", items.len()),
-                        ));
-                    }
-                }
-                let mut out = Vec::with_capacity(items.len());
-                for (index, element) in items.iter().enumerate() {
-                    out.push(item.validate(element, &format!("{path}[{index}]"))?);
-                }
-                Ok(Value::List(out.into_boxed_slice()))
-            }
+            ) => Self::validate_list(item, min_len.as_ref(), max_len.as_ref(), items, path),
             (Self::Object(schema_fields), Value::Object(given)) => {
-                let mut out: Vec<(Box<str>, Value)> = Vec::with_capacity(schema_fields.len());
-                for field in schema_fields.iter() {
-                    let found = given.iter().find(|(name, _)| name.as_ref() == field.name.as_ref());
-                    let field_path = if path.is_empty() {
-                        field.name.to_string()
-                    } else {
-                        format!("{path}.{}", field.name)
-                    };
-                    match (found, &field.presence) {
-                        (Some((_, v)), _) => {
-                            let normalized = match &field.presence {
-                                Presence::Nullable | Presence::NullableDefault(_)
-                                    if matches!(v, Value::Null) =>
-                                {
-                                    Value::Null
-                                }
-                                _ => field.ty.validate(v, &field_path)?,
-                            };
-                            out.push((field.name.clone(), normalized));
-                        }
-                        (None, Presence::Required) => {
-                            return Err(SchemaError::argument(
-                                &field_path,
-                                "required field is missing",
-                            ));
-                        }
-                        (None, Presence::Default(default))
-                        | (None, Presence::NullableDefault(default)) => {
-                            out.push((field.name.clone(), default.clone()));
-                        }
-                        (None, Presence::Optional) => {}
-                        (None, Presence::Nullable) => {
-                            return Err(SchemaError::argument(
-                                &field_path,
-                                "nullable field must be present (use None explicitly)",
-                            ));
-                        }
-                    }
-                }
-                for (name, _) in given.iter() {
-                    if !schema_fields.iter().any(|f| f.name.as_ref() == name.as_ref()) {
-                        return Err(SchemaError::argument(
-                            path,
-                            format!("unknown field `{name}`"),
-                        ));
-                    }
-                }
-                Ok(Value::Object(out.into_boxed_slice()))
+                Self::validate_object(schema_fields, given, path)
             }
             (_, Value::Null) => Err(SchemaError::argument(
                 path,
@@ -418,6 +298,185 @@ impl Schema {
                 format!("expected {}, got {}", expected.kind(), kind_of(got)),
             )),
         }
+    }
+
+    fn validate_string(
+        text: &str,
+        min_len: Option<&usize>,
+        max_len: Option<&usize>,
+        path: &str,
+    ) -> Result<Value, SchemaError> {
+        let len = text.chars().count();
+        if let Some(min) = min_len
+            && len < *min
+        {
+            return Err(SchemaError::argument(
+                path,
+                format!("string length {len} below min_len {min}"),
+            ));
+        }
+        if let Some(max) = max_len
+            && len > *max
+        {
+            return Err(SchemaError::argument(
+                path,
+                format!("string length {len} above max_len {max}"),
+            ));
+        }
+        Ok(Value::Str(text.into()))
+    }
+
+    fn validate_integer(
+        number: i64,
+        min: Option<&i64>,
+        max: Option<&i64>,
+        path: &str,
+    ) -> Result<Value, SchemaError> {
+        if let Some(min) = min
+            && number < *min
+        {
+            return Err(SchemaError::argument(
+                path,
+                format!("{number} below min {min}"),
+            ));
+        }
+        if let Some(max) = max
+            && number > *max
+        {
+            return Err(SchemaError::argument(
+                path,
+                format!("{number} above max {max}"),
+            ));
+        }
+        Ok(Value::Int(number))
+    }
+
+    fn validate_number(
+        number: f64,
+        min: Option<&f64>,
+        max: Option<&f64>,
+        path: &str,
+    ) -> Result<Value, SchemaError> {
+        if !number.is_finite() {
+            return Err(SchemaError::argument(path, "non-finite number"));
+        }
+        if let Some(min) = min
+            && number < *min
+        {
+            return Err(SchemaError::argument(
+                path,
+                format!("{number} below min {min}"),
+            ));
+        }
+        if let Some(max) = max
+            && number > *max
+        {
+            return Err(SchemaError::argument(
+                path,
+                format!("{number} above max {max}"),
+            ));
+        }
+        Ok(Value::Num(number))
+    }
+
+    fn validate_enum(values: &[Box<str>], text: &str, path: &str) -> Result<Value, SchemaError> {
+        if values.iter().any(|value| value.as_ref() == text) {
+            Ok(Value::Str(text.into()))
+        } else {
+            Err(SchemaError::argument(
+                path,
+                format!("`{text}` is not one of {}", values.join(", ")),
+            ))
+        }
+    }
+
+    fn validate_list(
+        item: &Schema,
+        min_len: Option<&usize>,
+        max_len: Option<&usize>,
+        items: &[Value],
+        path: &str,
+    ) -> Result<Value, SchemaError> {
+        if let Some(min) = min_len
+            && items.len() < *min
+        {
+            return Err(SchemaError::argument(
+                path,
+                format!("list length {} below min_len {min}", items.len()),
+            ));
+        }
+        if let Some(max) = max_len
+            && items.len() > *max
+        {
+            return Err(SchemaError::argument(
+                path,
+                format!("list length {} above max_len {max}", items.len()),
+            ));
+        }
+        let mut out = Vec::with_capacity(items.len());
+        for (index, element) in items.iter().enumerate() {
+            out.push(item.validate(element, &format!("{path}[{index}]"))?);
+        }
+        Ok(Value::List(out.into_boxed_slice()))
+    }
+
+    fn validate_object(
+        schema_fields: &[Field],
+        given: &[(Box<str>, Value)],
+        path: &str,
+    ) -> Result<Value, SchemaError> {
+        let mut out: Vec<(Box<str>, Value)> = Vec::with_capacity(schema_fields.len());
+        for field in schema_fields {
+            let found = given
+                .iter()
+                .find(|(name, _)| name.as_ref() == field.name.as_ref());
+            let field_path = if path.is_empty() {
+                field.name.to_string()
+            } else {
+                format!("{path}.{}", field.name)
+            };
+            match (found, &field.presence) {
+                (Some((_, value)), _) => {
+                    let normalized = match &field.presence {
+                        Presence::Nullable | Presence::NullableDefault(_)
+                            if matches!(value, Value::Null) =>
+                        {
+                            Value::Null
+                        }
+                        _ => field.ty.validate(value, &field_path)?,
+                    };
+                    out.push((field.name.clone(), normalized));
+                }
+                (None, Presence::Required) => {
+                    return Err(SchemaError::argument(
+                        &field_path,
+                        "required field is missing",
+                    ));
+                }
+                (None, Presence::Default(default) | Presence::NullableDefault(default)) => {
+                    out.push((field.name.clone(), default.clone()));
+                }
+                (None, Presence::Optional) => {}
+                (None, Presence::Nullable) => {
+                    return Err(SchemaError::argument(
+                        &field_path,
+                        "nullable field must be present (use None explicitly)",
+                    ));
+                }
+            }
+        }
+        for (name, _) in given {
+            if !schema_fields
+                .iter()
+                .any(|field| field.name.as_ref() == name.as_ref())
+            {
+                return Err(SchemaError::argument(
+                    path,
+                    format!("unknown field `{name}`"),
+                ));
+            }
+        }
+        Ok(Value::Object(out.into_boxed_slice()))
     }
 
     /// The plain-English type name for error text.
@@ -441,9 +500,8 @@ impl Schema {
     pub(crate) fn to_json_schema(&self) -> Result<RawJson, SchemaError> {
         let mut out = String::new();
         self.write_json_schema(&mut out);
-        RawJson::parse(&out).map_err(|_| {
-            SchemaError::schema("", "internal: emitted invalid JSON schema")
-        })
+        RawJson::parse(&out)
+            .map_err(|_| SchemaError::schema("", "internal: emitted invalid JSON schema"))
     }
 
     fn write_json_schema(&self, out: &mut String) {
@@ -451,30 +509,30 @@ impl Schema {
             Self::Str { min_len, max_len } => {
                 out.push_str("{\"type\":\"string\"");
                 if let Some(min) = min_len {
-                    out.push_str(&format!(",\"minLength\":{min}"));
+                    let _ = write!(out, ",\"minLength\":{min}");
                 }
                 if let Some(max) = max_len {
-                    out.push_str(&format!(",\"maxLength\":{max}"));
+                    let _ = write!(out, ",\"maxLength\":{max}");
                 }
                 out.push('}');
             }
             Self::Int { min, max } => {
                 out.push_str("{\"type\":\"integer\"");
                 if let Some(min) = min {
-                    out.push_str(&format!(",\"minimum\":{min}"));
+                    let _ = write!(out, ",\"minimum\":{min}");
                 }
                 if let Some(max) = max {
-                    out.push_str(&format!(",\"maximum\":{max}"));
+                    let _ = write!(out, ",\"maximum\":{max}");
                 }
                 out.push('}');
             }
             Self::Num { min, max } => {
                 out.push_str("{\"type\":\"number\"");
                 if let Some(min) = min {
-                    out.push_str(&format!(",\"minimum\":{min}"));
+                    let _ = write!(out, ",\"minimum\":{min}");
                 }
                 if let Some(max) = max {
-                    out.push_str(&format!(",\"maximum\":{max}"));
+                    let _ = write!(out, ",\"maximum\":{max}");
                 }
                 out.push('}');
             }
@@ -497,10 +555,10 @@ impl Schema {
                 out.push_str("{\"type\":\"array\",\"items\":");
                 item.write_json_schema(out);
                 if let Some(min) = min_len {
-                    out.push_str(&format!(",\"minItems\":{min}"));
+                    let _ = write!(out, ",\"minItems\":{min}");
                 }
                 if let Some(max) = max_len {
-                    out.push_str(&format!(",\"maxItems\":{max}"));
+                    let _ = write!(out, ",\"maxItems\":{max}");
                 }
                 out.push('}');
             }
@@ -522,7 +580,7 @@ impl Schema {
                     if nullable {
                         // Strip the outer braces to wrap in anyOf.
                         let inner = ty.trim_start_matches('{').trim_end_matches('}');
-                        out.push_str(&format!("{{\"anyOf\":[{{{inner}}},{{\"type\":\"null\"}}]}}"));
+                        let _ = write!(out, "{{\"anyOf\":[{{{inner}}},{{\"type\":\"null\"}}]}}");
                     } else {
                         out.push_str(&ty);
                     }
@@ -542,7 +600,6 @@ impl Schema {
         }
     }
 }
-
 
 fn kind_of(value: &Value) -> &'static str {
     match value {
@@ -568,10 +625,9 @@ impl fmt::Display for Presence {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
-    use super::{Field, Presence, Schema, SchemaError};
+    use super::{Field, Presence, Schema};
     use crate::value::Value;
 
     fn int_list(items: Vec<Value>) -> Value {
@@ -579,42 +635,51 @@ mod tests {
     }
 
     #[test]
-    fn list_elements_are_validated_against_the_item_schema()
-    -> Result<(), SchemaError> {
+    fn list_elements_are_validated_against_the_item_schema() {
         let schema = Schema::List {
-            item: Box::new(Schema::Int { min: None, max: None }),
+            item: Box::new(Schema::Int {
+                min: None,
+                max: None,
+            }),
             min_len: None,
             max_len: None,
         };
-        schema.check("")?;
+        assert!(schema.check("").is_ok(), "the list schema itself is valid");
         let error = schema
             .validate(&int_list(vec![Value::Int(1), Value::Str("bad".into())]), "")
             .expect_err("a string element must fail an Int list");
         let text = error.to_string();
-        assert!(text.contains("[1]"), "error must name the element index: {text}");
-        Ok(())
+        assert!(
+            text.contains("[1]"),
+            "error must name the element index: {text}"
+        );
     }
 
     #[test]
-    fn object_defaults_must_satisfy_their_field_schema() -> Result<(), SchemaError> {
+    fn object_defaults_must_satisfy_their_field_schema() {
         let schema = Schema::Object(Box::new([Field {
             name: "count".into(),
-            ty: Schema::Int { min: Some(0), max: None },
+            ty: Schema::Int {
+                min: Some(0),
+                max: None,
+            },
             presence: Presence::Default(Value::Int(-1)),
         }]));
-        let error = schema.check("").expect_err("a default below min is malformed");
+        let error = schema
+            .check("")
+            .expect_err("a default below min is malformed");
         assert!(error.to_string().contains("default"), "got: {error}");
-        Ok(())
     }
 
     #[test]
-    fn keyword_names_are_rejected_in_object_fields() -> Result<(), SchemaError> {
+    fn keyword_names_are_rejected_in_object_fields() {
         let schema = Schema::Object(Box::new([Field {
             name: "if".into(),
             ty: Schema::Bool,
             presence: Presence::Optional,
         }]));
-        schema.check("").expect_err("`if` is not a usable field name");
-        Ok(())
+        schema
+            .check("")
+            .expect_err("`if` is not a usable field name");
     }
 }

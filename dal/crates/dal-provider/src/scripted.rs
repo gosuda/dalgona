@@ -34,13 +34,14 @@ use std::{
     vec,
 };
 
-use dal_core::Usage;
+use dal_core::{Family, RawJson, Usage};
 use futures::stream;
+use serde::Deserialize;
 
 use crate::{
     compact::CompactOutcome,
     error::ProviderError,
-    stream::{EventStream, StreamEvent},
+    stream::{EventStream, StopReason, StreamEvent, ToolArgs, ToolCall},
 };
 
 /// One step of a [`Script`].
@@ -105,7 +106,7 @@ impl fmt::Display for Operation {
 }
 
 /// A script that cannot be built or cannot serve an operation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ScriptError {
     /// An events step breaks the stream grammar.
     #[error("script step {step}: {detail}")]
@@ -131,6 +132,328 @@ pub enum ScriptError {
         /// The kind of the step found.
         found: StepKind,
     },
+    /// A JSONL replay fixture line is not one typed provider step.
+    #[error("script replay line {line}: {detail}")]
+    ReplayFormat {
+        /// The one-based line containing the invalid record.
+        line: usize,
+        /// A fixed message that never includes fixture values.
+        detail: &'static str,
+    },
+    /// The configured replay fixture could not be read.
+    #[error("script fixture {path} could not be read")]
+    FixtureRead {
+        /// The absolute fixture path.
+        path: std::path::PathBuf,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplayStepWire {
+    kind: String,
+    #[serde(default)]
+    events: Option<Vec<RawJson>>,
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(default)]
+    usage: Option<Usage>,
+    #[serde(default)]
+    outcome: Option<RawJson>,
+}
+
+#[derive(Deserialize)]
+struct ReplayEventTag {
+    #[serde(rename = "type")]
+    kind: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplayTextWire {
+    #[serde(rename = "type")]
+    kind: String,
+    text: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplayCallStartWire {
+    #[serde(rename = "type")]
+    kind: String,
+    id: String,
+    name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplayArgsDeltaWire {
+    #[serde(rename = "type")]
+    kind: String,
+    id: String,
+    fragment: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplayPayloadWire {
+    family: Family,
+    model: Box<str>,
+    item: RawJson,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplayReplayWire {
+    #[serde(rename = "type")]
+    kind: String,
+    payload: ReplayPayloadWire,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplayToolCallsWire {
+    #[serde(rename = "type")]
+    kind: String,
+    calls: Vec<ReplayToolCallWire>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplayToolCallWire {
+    id: String,
+    name: String,
+    args: ReplayToolArgsWire,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplayToolArgsWire {
+    kind: String,
+    #[serde(default)]
+    value: Option<RawJson>,
+    #[serde(default)]
+    message: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplayUsageWire {
+    #[serde(rename = "type")]
+    kind: String,
+    usage: Usage,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplayStopWire {
+    #[serde(rename = "type")]
+    kind: String,
+    reason: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplayCompactWire {
+    kind: String,
+    #[serde(default)]
+    family: Option<Family>,
+    #[serde(default)]
+    model: Option<Box<str>>,
+    #[serde(default)]
+    items: Option<Vec<RawJson>>,
+}
+
+fn replay_error(line: usize, detail: &'static str) -> ScriptError {
+    ScriptError::ReplayFormat { line, detail }
+}
+
+fn decode_replay_step(wire: ReplayStepWire, line: usize) -> Result<ScriptStep, ScriptError> {
+    match wire.kind.as_str() {
+        "events" if wire.message.is_none() && wire.usage.is_none() && wire.outcome.is_none() => {
+            let events = wire
+                .events
+                .ok_or_else(|| replay_error(line, "events is required"))?;
+            let events = events
+                .iter()
+                .map(|event| decode_replay_event(event, line))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(ScriptStep::Events(events))
+        }
+        "fail" if wire.events.is_none() && wire.usage.is_none() && wire.outcome.is_none() => {
+            let message = wire
+                .message
+                .ok_or_else(|| replay_error(line, "message is required"))?;
+            Ok(ScriptStep::Fail(ProviderError::InvalidRequest { message }))
+        }
+        "usage" if wire.events.is_none() && wire.message.is_none() && wire.outcome.is_none() => {
+            let usage = wire
+                .usage
+                .ok_or_else(|| replay_error(line, "usage is required"))?;
+            Ok(ScriptStep::Usage(usage))
+        }
+        "compact" if wire.events.is_none() && wire.message.is_none() && wire.usage.is_none() => {
+            let outcome = wire
+                .outcome
+                .ok_or_else(|| replay_error(line, "outcome is required"))?
+                .decode_as::<ReplayCompactWire>()
+                .map_err(|_| replay_error(line, "invalid compact outcome"))?;
+            let outcome = match (
+                outcome.kind.as_str(),
+                outcome.family,
+                outcome.model,
+                outcome.items,
+            ) {
+                ("unsupported", None, None, None) => CompactOutcome::Unsupported,
+                ("compacted", Some(family), Some(model), Some(items)) => {
+                    CompactOutcome::Compacted(crate::compact::CompactedHistory {
+                        family,
+                        model,
+                        items,
+                    })
+                }
+                _ => return Err(replay_error(line, "invalid compact outcome")),
+            };
+            Ok(ScriptStep::Compact(outcome))
+        }
+        _ => Err(replay_error(line, "unknown or malformed step")),
+    }
+}
+
+fn decode_replay_event(raw: &RawJson, line: usize) -> Result<StreamEvent, ScriptError> {
+    let tag = raw
+        .decode_as::<ReplayEventTag>()
+        .map_err(|_| replay_error(line, "invalid event"))?;
+    match tag.kind.as_str() {
+        "text_delta" => decode_text_delta(raw, line, "text_delta"),
+        "reasoning_delta" => decode_text_delta(raw, line, "reasoning_delta"),
+        "tool_call_started" => decode_call_started(raw, line),
+        "tool_args_delta" => decode_args_delta(raw, line),
+        "replay" => decode_replay_payload(raw, line),
+        "tool_calls_done" => decode_calls_done(raw, line),
+        "usage" => decode_usage_event(raw, line),
+        "stop" => decode_stop_event(raw, line),
+        _ => Err(replay_error(line, "unknown event type")),
+    }
+}
+
+fn decode_text_delta(raw: &RawJson, line: usize, kind: &str) -> Result<StreamEvent, ScriptError> {
+    let detail = if kind == "text_delta" {
+        "invalid text delta"
+    } else {
+        "invalid reasoning delta"
+    };
+    let wire = raw
+        .decode_as::<ReplayTextWire>()
+        .map_err(|_| replay_error(line, detail))?;
+    if wire.kind.as_str() != kind {
+        return Err(replay_error(line, detail));
+    }
+    let event = if kind == "text_delta" {
+        StreamEvent::TextDelta { text: wire.text }
+    } else {
+        StreamEvent::ReasoningDelta { text: wire.text }
+    };
+    Ok(event)
+}
+
+fn decode_call_started(raw: &RawJson, line: usize) -> Result<StreamEvent, ScriptError> {
+    let wire = raw
+        .decode_as::<ReplayCallStartWire>()
+        .map_err(|_| replay_error(line, "invalid tool call start"))?;
+    if wire.kind.as_str() != "tool_call_started" {
+        return Err(replay_error(line, "invalid tool call start"));
+    }
+    Ok(StreamEvent::ToolCallStarted {
+        id: wire.id,
+        name: wire.name,
+    })
+}
+
+fn decode_args_delta(raw: &RawJson, line: usize) -> Result<StreamEvent, ScriptError> {
+    let wire = raw
+        .decode_as::<ReplayArgsDeltaWire>()
+        .map_err(|_| replay_error(line, "invalid tool argument delta"))?;
+    if wire.kind.as_str() != "tool_args_delta" {
+        return Err(replay_error(line, "invalid tool argument delta"));
+    }
+    Ok(StreamEvent::ToolArgsDelta {
+        id: wire.id,
+        fragment: wire.fragment.into_bytes(),
+    })
+}
+
+fn decode_replay_payload(raw: &RawJson, line: usize) -> Result<StreamEvent, ScriptError> {
+    let wire = raw
+        .decode_as::<ReplayReplayWire>()
+        .map_err(|_| replay_error(line, "invalid replay payload"))?;
+    if wire.kind.as_str() != "replay" {
+        return Err(replay_error(line, "invalid replay payload"));
+    }
+    Ok(StreamEvent::Replay {
+        payload: crate::stream::ReplayPayload {
+            family: wire.payload.family,
+            model: wire.payload.model,
+            item: wire.payload.item,
+        },
+    })
+}
+
+fn decode_calls_done(raw: &RawJson, line: usize) -> Result<StreamEvent, ScriptError> {
+    let wire = raw
+        .decode_as::<ReplayToolCallsWire>()
+        .map_err(|_| replay_error(line, "invalid completed tool calls"))?;
+    if wire.kind.as_str() != "tool_calls_done" {
+        return Err(replay_error(line, "invalid completed tool calls"));
+    }
+    let calls = wire
+        .calls
+        .into_iter()
+        .map(|call| decode_replay_tool_call(call, line))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(StreamEvent::ToolCallsDone { calls })
+}
+
+fn decode_usage_event(raw: &RawJson, line: usize) -> Result<StreamEvent, ScriptError> {
+    let wire = raw
+        .decode_as::<ReplayUsageWire>()
+        .map_err(|_| replay_error(line, "invalid usage event"))?;
+    if wire.kind.as_str() != "usage" {
+        return Err(replay_error(line, "invalid usage event"));
+    }
+    Ok(StreamEvent::Usage { usage: wire.usage })
+}
+
+fn decode_stop_event(raw: &RawJson, line: usize) -> Result<StreamEvent, ScriptError> {
+    let wire = raw
+        .decode_as::<ReplayStopWire>()
+        .map_err(|_| replay_error(line, "invalid stop event"))?;
+    if wire.kind.as_str() != "stop" {
+        return Err(replay_error(line, "invalid stop event"));
+    }
+    let reason = match wire.reason.as_str() {
+        "end_turn" => StopReason::EndTurn,
+        "tool_use" => StopReason::ToolUse,
+        "max_tokens" => StopReason::MaxTokens,
+        "refusal" => StopReason::Refusal,
+        "paused" => StopReason::Paused,
+        _ => StopReason::Other(wire.reason),
+    };
+    Ok(StreamEvent::Stop { reason })
+}
+
+fn decode_replay_tool_call(wire: ReplayToolCallWire, line: usize) -> Result<ToolCall, ScriptError> {
+    let args = match (wire.args.kind.as_str(), wire.args.value, wire.args.message) {
+        ("parsed", Some(value), None) => ToolArgs::Parsed(value),
+        ("invalid", None, Some(message)) => ToolArgs::Invalid { message },
+        ("truncated", None, None) => ToolArgs::Truncated,
+        _ => return Err(replay_error(line, "invalid tool arguments")),
+    };
+    Ok(ToolCall {
+        id: wire.id,
+        name: wire.name,
+        args,
+    })
 }
 
 /// A queued step after the build-time grammar check.
@@ -167,10 +490,12 @@ struct Queued {
 /// A deterministic provider that serves its steps in order.
 ///
 /// It needs no credential, network, or clock. Hooks, notices, and the turn
-/// cancellation token do not change what it serves.
-#[derive(Debug)]
+/// cancellation token do not change what it serves. Clones share one step
+/// queue, so every provider built from the same fixture continues the same
+/// script instead of restarting it.
+#[derive(Clone, Debug)]
 pub struct Script {
-    queue: Mutex<VecDeque<Queued>>,
+    queue: Arc<Mutex<VecDeque<Queued>>>,
     /// Streams that ended in an error or were dropped before their terminal.
     aborted: Arc<AtomicUsize>,
 }
@@ -189,7 +514,8 @@ impl Script {
         while let Some((step, item)) = steps.next() {
             let entry = match item {
                 ScriptStep::Events(events) => {
-                    let ending = shape(&events).map_err(|detail| ScriptError::Grammar { step, detail })?;
+                    let ending =
+                        shape(&events).map_err(|detail| ScriptError::Grammar { step, detail })?;
                     let failure = match ending {
                         Shape::Complete => None,
                         Shape::Prefix => Some(bound_failure(&mut steps, step)?),
@@ -203,9 +529,57 @@ impl Script {
             queue.push_back(Queued { step, entry });
         }
         Ok(Self {
-            queue: Mutex::new(queue),
+            queue: Arc::new(Mutex::new(queue)),
             aborted: Arc::new(AtomicUsize::new(0)),
         })
+    }
+
+    /// Decodes one JSON object per nonblank line into a scripted provider.
+    ///
+    /// Each line has one `kind`: `events`, `fail`, `usage`, or `compact`.
+    /// Event records use `type` names in snake case; raw replay and tool-arg
+    /// values remain raw JSON. A `fail` record becomes an `InvalidRequest`.
+    ///
+    /// # Errors
+    /// Returns [`ScriptError::ReplayFormat`] for invalid UTF-8 or any line
+    /// that is not a typed record, or [`ScriptError::Grammar`] when decoded
+    /// events violate the terminal grammar.
+    pub fn from_replay(bytes: &[u8]) -> Result<Self, ScriptError> {
+        let text = std::str::from_utf8(bytes).map_err(|_| ScriptError::ReplayFormat {
+            line: 1,
+            detail: "fixture is not UTF-8",
+        })?;
+        let mut steps = Vec::new();
+        for (index, line) in text.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let step = sonic_rs::from_str::<ReplayStepWire>(line).map_err(|_| {
+                ScriptError::ReplayFormat {
+                    line: index + 1,
+                    detail: "expected one typed JSON step",
+                }
+            })?;
+            steps.push(decode_replay_step(step, index + 1)?);
+        }
+        Self::new(steps)
+    }
+
+    /// Loads one replay fixture file into a scripted provider.
+    ///
+    /// The path is used as given; resolving a configured relative fixture
+    /// against the data directory is the provider set's job. The file
+    /// content follows [`Script::from_replay`].
+    ///
+    /// # Errors
+    /// Returns [`ScriptError::FixtureRead`] naming the path when the file
+    /// cannot be read, or the [`Script::from_replay`] error for a malformed
+    /// fixture.
+    pub fn from_replay_file(path: &std::path::Path) -> Result<Self, ScriptError> {
+        let bytes = std::fs::read(path).map_err(|_| ScriptError::FixtureRead {
+            path: path.to_path_buf(),
+        })?;
+        Self::from_replay(&bytes)
     }
 
     /// The number of operations the script can still serve.
@@ -372,456 +746,4 @@ fn shape(events: &[StreamEvent]) -> Result<Shape, &'static str> {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::thread;
-
-    use dal_core::{Family, RawJson};
-    use futures::executor::block_on;
-
-    use super::*;
-    use crate::{
-        compact::CompactedHistory,
-        stream::{ReplayPayload, StopReason, ToolArgs, ToolCall},
-    };
-
-    fn text(text: &str) -> StreamEvent {
-        StreamEvent::TextDelta { text: text.into() }
-    }
-
-    fn done() -> StreamEvent {
-        StreamEvent::ToolCallsDone { calls: Vec::new() }
-    }
-
-    fn tokens(input_tokens: u64, output_tokens: u64) -> Usage {
-        Usage {
-            input_tokens,
-            cached_input_tokens: 0,
-            output_tokens,
-            reasoning_tokens: None,
-            cache_write_tokens: 0,
-            cost_usd: None,
-        }
-    }
-
-    fn usage_event() -> StreamEvent {
-        StreamEvent::Usage {
-            usage: tokens(10, 5),
-        }
-    }
-
-    fn stop() -> StreamEvent {
-        StreamEvent::Stop {
-            reason: StopReason::EndTurn,
-        }
-    }
-
-    fn reply(words: &str) -> ScriptStep {
-        ScriptStep::Events(vec![text(words), done(), usage_event(), stop()])
-    }
-
-    fn drain(stream: &mut EventStream) -> Vec<Result<StreamEvent, ProviderError>> {
-        block_on(async {
-            let mut seen = Vec::new();
-            while let Some(item) = stream.next().await {
-                seen.push(item);
-            }
-            seen
-        })
-    }
-
-    fn script_error(error: ProviderError) -> ScriptError {
-        match error {
-            ProviderError::Script(error) => error,
-            other => panic!("expected a script error, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn text_and_tool_turn_is_served_verbatim_through_event_stream() {
-        // Argument fragments split a JSON token and keep odd spacing; the
-        // assembled call keeps the exact bytes, never re-encoded.
-        let args = br#"{"path": "a.rs" ,"n":1.50}"#;
-        let replay = ReplayPayload {
-            family: Family::Responses,
-            model: "gpt-6-luna".into(),
-            item: RawJson::parse(r#"{"type":"reasoning","encrypted_content":"x"}"#).unwrap(),
-        };
-        let turn = vec![
-            StreamEvent::ReasoningDelta {
-                text: "think".into(),
-            },
-            text("Hel"),
-            text("lo"),
-            StreamEvent::Replay { payload: replay },
-            StreamEvent::ToolCallStarted {
-                id: "call_1".into(),
-                name: "read".into(),
-            },
-            StreamEvent::ToolArgsDelta {
-                id: "call_1".into(),
-                fragment: args[..4].to_vec(),
-            },
-            StreamEvent::ToolArgsDelta {
-                id: "call_1".into(),
-                fragment: args[4..].to_vec(),
-            },
-            StreamEvent::ToolCallsDone {
-                calls: vec![ToolCall {
-                    id: "call_1".into(),
-                    name: "read".into(),
-                    args: ToolArgs::from_bytes(args),
-                }],
-            },
-            usage_event(),
-            StreamEvent::Stop {
-                reason: StopReason::ToolUse,
-            },
-        ];
-        let script = Script::new(vec![ScriptStep::Events(turn.clone())]).unwrap();
-        let mut stream = script.open().unwrap();
-        let seen = drain(&mut stream)
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        assert_eq!(seen, turn);
-        let StreamEvent::ToolCallsDone { calls } = &seen[7] else {
-            panic!("tool calls done moved: {seen:?}");
-        };
-        let ToolArgs::Parsed(raw) = &calls[0].args else {
-            panic!("arguments did not parse: {calls:?}");
-        };
-        assert_eq!(raw.as_str(), r#"{"path": "a.rs" ,"n":1.50}"#);
-        drop(stream);
-        assert_eq!(script.aborted_streams(), 0);
-        assert_eq!(script.remaining(), 0);
-        assert_eq!(
-            script_error(script.open().unwrap_err()),
-            ScriptError::Exhausted {
-                operation: Operation::Open,
-            }
-        );
-    }
-
-    #[test]
-    fn fail_alone_fails_open_and_fail_after_events_is_the_stream_terminal() {
-        let script = Script::new(vec![
-            ScriptStep::Fail(ProviderError::Overloaded),
-            ScriptStep::Events(vec![text("par"), text("tial")]),
-            ScriptStep::Fail(ProviderError::StreamCut),
-            reply("after"),
-        ])
-        .unwrap();
-        assert_eq!(script.remaining(), 3);
-        assert!(matches!(script.open(), Err(ProviderError::Overloaded)));
-
-        let mut stream = script.open().unwrap();
-        let seen = drain(&mut stream);
-        assert_eq!(seen.len(), 3);
-        assert_eq!(seen[0].as_ref().unwrap(), &text("par"));
-        assert_eq!(seen[1].as_ref().unwrap(), &text("tial"));
-        assert!(matches!(seen[2], Err(ProviderError::StreamCut)));
-        assert_eq!(script.aborted_streams(), 1);
-        drop(stream);
-        assert_eq!(script.aborted_streams(), 1);
-
-        // The pair was consumed by one open; the next open gets the reply.
-        let mut stream = script.open().unwrap();
-        assert_eq!(drain(&mut stream).len(), 4);
-        assert_eq!(script.remaining(), 0);
-    }
-
-    #[test]
-    fn empty_events_before_fail_opens_then_fails_without_events() {
-        let script = Script::new(vec![
-            ScriptStep::Events(Vec::new()),
-            ScriptStep::Fail(ProviderError::Overloaded),
-        ])
-        .unwrap();
-        let mut stream = script.open().unwrap();
-        let seen = drain(&mut stream);
-        assert!(matches!(seen.as_slice(), [Err(ProviderError::Overloaded)]));
-    }
-
-    #[test]
-    fn usage_steps_serve_counters_or_failures_in_order() {
-        let script = Script::new(vec![
-            ScriptStep::Usage(tokens(10, 5)),
-            ScriptStep::Fail(ProviderError::Overloaded),
-            ScriptStep::Usage(tokens(3, 4)),
-        ])
-        .unwrap();
-        assert_eq!(script.usage().unwrap(), tokens(10, 5));
-        assert!(matches!(script.usage(), Err(ProviderError::Overloaded)));
-        assert_eq!(script.usage().unwrap(), tokens(3, 4));
-        assert_eq!(
-            script_error(script.usage().unwrap_err()),
-            ScriptError::Exhausted {
-                operation: Operation::Usage,
-            }
-        );
-    }
-
-    #[test]
-    fn compact_steps_return_bound_raw_history_and_unsupported() {
-        let item = r#"{"type":"compaction","encrypted_content":"e30=" , "id":"cmp_1"}"#;
-        let history = CompactedHistory::new(
-            Family::Codex,
-            "gpt-6-luna",
-            vec![RawJson::parse(item).unwrap()],
-        );
-        let script = Script::new(vec![
-            ScriptStep::Compact(CompactOutcome::Compacted(history.clone())),
-            ScriptStep::Compact(CompactOutcome::Unsupported),
-            ScriptStep::Fail(ProviderError::CompactionMissing {
-                family: Family::Anthropic,
-                noun: "block",
-            }),
-        ])
-        .unwrap();
-        let CompactOutcome::Compacted(served) = script.compact().unwrap() else {
-            panic!("compacted history was not served");
-        };
-        assert_eq!(served, history);
-        let items = served.items_for(Family::Codex, "gpt-6-luna").unwrap();
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].as_str(), item);
-        assert!(matches!(
-            served.items_for(Family::Codex, "gpt-5.6-luna"),
-            Err(ProviderError::CompactionForeign { .. })
-        ));
-        assert_eq!(script.compact().unwrap(), CompactOutcome::Unsupported);
-        assert!(matches!(
-            script.compact(),
-            Err(ProviderError::CompactionMissing {
-                family: Family::Anthropic,
-                noun: "block",
-            })
-        ));
-    }
-
-    #[test]
-    fn wrong_step_is_a_typed_error_and_stays_in_place() {
-        let script = Script::new(vec![reply("hi"), ScriptStep::Usage(tokens(1, 1))]).unwrap();
-        let error = script_error(script.usage().unwrap_err());
-        assert_eq!(
-            error,
-            ScriptError::Mismatch {
-                step: 0,
-                operation: Operation::Usage,
-                found: StepKind::Events,
-            }
-        );
-        assert_eq!(error.to_string(), "script step 0 is events, not a step for usage");
-        let failure = ProviderError::Script(error);
-        assert_eq!(failure.to_string(), "script step 0 is events, not a step for usage");
-        assert!(!failure.retryable_by_loop());
-        assert!(failure.fix().is_none());
-        assert!(matches!(
-            dal_core::InferFailure::from(failure),
-            dal_core::InferFailure::Fatal { fix: None, .. }
-        ));
-        assert_eq!(
-            script_error(script.compact().unwrap_err()),
-            ScriptError::Mismatch {
-                step: 0,
-                operation: Operation::Compact,
-                found: StepKind::Events,
-            }
-        );
-        assert_eq!(script.remaining(), 2);
-
-        let mut stream = script.open().unwrap();
-        assert_eq!(drain(&mut stream).len(), 4);
-        assert_eq!(
-            script_error(script.open().unwrap_err()),
-            ScriptError::Mismatch {
-                step: 1,
-                operation: Operation::Open,
-                found: StepKind::Usage,
-            }
-        );
-        assert_eq!(script.usage().unwrap(), tokens(1, 1));
-        assert_eq!(
-            ScriptError::Exhausted {
-                operation: Operation::Compact
-            }
-            .to_string(),
-            "script exhausted: no step left for compact"
-        );
-    }
-
-    #[test]
-    fn grammar_violations_are_rejected_at_build_naming_the_step() {
-        let cases: Vec<(Vec<ScriptStep>, usize, &'static str)> = vec![
-            (
-                vec![ScriptStep::Events(vec![done(), usage_event(), stop(), text("late")])],
-                0,
-                "an event follows stop",
-            ),
-            (
-                vec![ScriptStep::Events(vec![done(), usage_event(), stop(), stop()])],
-                0,
-                "an event follows stop",
-            ),
-            (
-                vec![ScriptStep::Events(vec![usage_event(), done(), stop()])],
-                0,
-                "usage before tool calls done",
-            ),
-            (
-                vec![ScriptStep::Events(vec![text("a"), stop()])],
-                0,
-                "stop before tool calls done",
-            ),
-            (
-                vec![ScriptStep::Events(vec![done(), done(), usage_event(), stop()])],
-                0,
-                "a second tool calls done",
-            ),
-            (
-                vec![ScriptStep::Events(vec![done(), stop()])],
-                0,
-                "stop before usage",
-            ),
-            (
-                vec![ScriptStep::Events(vec![done(), text("a"), usage_event(), stop()])],
-                0,
-                "a delta or replay after tool calls done",
-            ),
-            (
-                vec![ScriptStep::Events(vec![done(), usage_event(), usage_event(), stop()])],
-                0,
-                "a second usage",
-            ),
-            (
-                vec![ScriptStep::Events(vec![done(), usage_event(), text("a"), stop()])],
-                0,
-                "an event between usage and stop",
-            ),
-            (
-                vec![reply("ok"), ScriptStep::Events(vec![text("cut")])],
-                1,
-                "events without stop must be followed by a fail step",
-            ),
-            (
-                vec![
-                    ScriptStep::Events(vec![text("cut")]),
-                    ScriptStep::Usage(tokens(1, 1)),
-                ],
-                0,
-                "events without stop must be followed by a fail step",
-            ),
-        ];
-        for (steps, step, detail) in cases {
-            assert_eq!(
-                Script::new(steps).unwrap_err(),
-                ScriptError::Grammar { step, detail },
-                "{detail}"
-            );
-        }
-    }
-
-    #[test]
-    fn step_indices_count_the_bound_fail_step() {
-        let script = Script::new(vec![
-            ScriptStep::Events(vec![text("cut")]),
-            ScriptStep::Fail(ProviderError::StreamCut),
-            ScriptStep::Usage(tokens(1, 1)),
-        ])
-        .unwrap();
-        let mut stream = script.open().unwrap();
-        assert_eq!(drain(&mut stream).len(), 2);
-        assert_eq!(
-            script_error(script.open().unwrap_err()),
-            ScriptError::Mismatch {
-                step: 2,
-                operation: Operation::Open,
-                found: StepKind::Usage,
-            }
-        );
-    }
-
-    #[test]
-    fn simultaneous_opens_take_each_step_once_in_script_order() {
-        const THREADS: usize = 8;
-        const PER_THREAD: usize = 16;
-        let steps = (0..THREADS * PER_THREAD)
-            .map(|index| reply(&index.to_string()))
-            .collect();
-        let script = Arc::new(Script::new(steps).unwrap());
-        let workers = (0..THREADS)
-            .map(|_| {
-                let script = Arc::clone(&script);
-                thread::spawn(move || {
-                    (0..PER_THREAD)
-                        .map(|_| {
-                            let mut stream = script.open().unwrap();
-                            let first = block_on(stream.next()).unwrap().unwrap();
-                            // Each served stream still ends in exactly one Stop.
-                            let rest = drain(&mut stream);
-                            assert_eq!(rest.len(), 3);
-                            assert!(matches!(rest[2], Ok(StreamEvent::Stop { .. })));
-                            let StreamEvent::TextDelta { text } = first else {
-                                panic!("first event moved: {first:?}");
-                            };
-                            text.parse::<usize>().unwrap()
-                        })
-                        .collect::<Vec<_>>()
-                })
-            })
-            .collect::<Vec<_>>();
-        let mut all = Vec::new();
-        for worker in workers {
-            let taken = worker.join().unwrap();
-            // One caller's consecutive opens see steps in script order.
-            assert!(taken.windows(2).all(|pair| pair[0] < pair[1]), "{taken:?}");
-            all.extend(taken);
-        }
-        all.sort_unstable();
-        assert_eq!(all, (0..THREADS * PER_THREAD).collect::<Vec<_>>());
-        assert_eq!(script.remaining(), 0);
-        assert_eq!(script.aborted_streams(), 0);
-    }
-
-    #[test]
-    fn interleaved_calls_are_served_in_call_order() {
-        let script = Script::new(vec![
-            reply("first"),
-            reply("second"),
-            ScriptStep::Usage(tokens(2, 2)),
-        ])
-        .unwrap();
-        // Both streams are taken before either is read.
-        let mut first = script.open().unwrap();
-        let mut second = script.open().unwrap();
-        assert_eq!(script.usage().unwrap(), tokens(2, 2));
-        assert_eq!(drain(&mut second)[0].as_ref().unwrap(), &text("second"));
-        assert_eq!(drain(&mut first)[0].as_ref().unwrap(), &text("first"));
-    }
-
-    #[test]
-    fn early_drop_cancels_once_and_stop_is_delivered_once() {
-        let script = Script::new(vec![reply("dropped"), reply("finished")]).unwrap();
-
-        let mut dropped = script.open().unwrap();
-        assert_eq!(
-            block_on(dropped.next()).unwrap().unwrap(),
-            text("dropped")
-        );
-        drop(dropped);
-        assert_eq!(script.aborted_streams(), 1);
-
-        let mut finished = script.open().unwrap();
-        let seen = drain(&mut finished);
-        let stops = seen
-            .iter()
-            .filter(|item| matches!(item, Ok(StreamEvent::Stop { .. })))
-            .count();
-        assert_eq!(stops, 1);
-        assert!(matches!(seen.last(), Some(Ok(StreamEvent::Stop { .. }))));
-        assert!(block_on(finished.next()).is_none());
-        assert!(block_on(finished.next()).is_none());
-        drop(finished);
-        assert_eq!(script.aborted_streams(), 1);
-    }
-}
+mod tests;

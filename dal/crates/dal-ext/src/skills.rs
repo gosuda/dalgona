@@ -4,8 +4,10 @@
 //! Every check runs at the input boundary in [`validate_registration`]: a
 //! [`RegisteredSkill`] only exists for a well-formed name, a trimmed and
 //! bounded description, a contained body path, and a complete UTF-8 body.
-//! Nothing here touches the disk, parses frontmatter, or evaluates a plugin;
-//! the caller hands in the bytes it read, and those bytes are the body.
+//! Nothing here touches the disk or evaluates a plugin; the caller hands in
+//! the bytes it read, and those bytes are the body. The one front matter
+//! read is the strict `mcp` object ([`dal_core::ext::decode_skill_mcp`]); the
+//! body keeps every byte of the file, front matter included.
 //! [`SkillRegistry::merge`] then settles name claims once, in plugin
 //! directory-name order, and the result never changes for the life of the
 //! process.
@@ -15,7 +17,15 @@ use std::fmt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
-use crate::letter::LetterAssembly;
+use dal_agent::error::SchemeError;
+use dal_agent::ext::{
+    BoxFuture, Doc, Extension, ExtensionBuilder, PromptOrder, PromptSection, SchemeCx,
+    SchemeResolver, SectionCx, SectionFn,
+};
+use dal_core::ext::{McpBlock, SkillFrontError, decode_skill_mcp};
+use dal_core::{RegistrationError, ServiceSet};
+
+use crate::letter::{Font, LetterAssembly};
 
 /// Largest accepted skill body, in bytes.
 pub const MAX_BODY_BYTES: usize = 131_072;
@@ -65,6 +75,8 @@ pub struct RegisteredSkill {
     pub body: Arc<str>,
     /// Whether the skill opts into letter-to-image handling.
     pub letter2image: bool,
+    /// The MCP servers the front matter declares, if any.
+    pub mcp: Option<McpBlock>,
 }
 
 /// A registration rejected by [`validate_registration`].
@@ -115,6 +127,9 @@ pub enum SkillError {
         /// The body location below the plugin directory.
         path: PathBuf,
     },
+    /// The front matter `mcp` object is malformed, at `path:line:col`.
+    #[error(transparent)]
+    Front(#[from] SkillFrontError),
 }
 
 /// Validates one registration and its body bytes into a [`RegisteredSkill`].
@@ -174,12 +189,14 @@ pub fn validate_registration(
             path: plugin_dir.join(path),
         });
     };
+    let mcp = decode_skill_mcp(&plugin_dir.join(path), text)?;
     Ok(RegisteredSkill {
         plugin: plugin.into(),
         name: name.into(),
         description: description.into(),
         body: Arc::from(text),
         letter2image,
+        mcp,
     })
 }
 
@@ -286,6 +303,17 @@ pub struct SkillRegistry {
 }
 
 impl SkillRegistry {
+    /// An empty registry: no skills, so no section.
+    ///
+    /// Extension constructors start here; the host builds loaded registries
+    /// through [`SkillRegistry::merge`].
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            skills: Box::new([]),
+            names: Box::new([]),
+        }
+    }
     /// Merges validated skills from every plugin into one registry.
     ///
     /// Plugins merge in bytewise plugin-name order, the directory-name order
@@ -413,409 +441,103 @@ impl SkillRegistry {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::letter::{FallbackReason, LetterChunk, LetterFallback};
+/// Renders the skills prompt section for the current letter assembly.
+///
+/// The registry and assembly share one immutable view so admitted images
+/// appear by name and every other description remains text.
+#[must_use]
+pub fn section(registry: &SkillRegistry, assembly: &LetterAssembly) -> Option<Box<str>> {
+    registry.section(assembly)
+}
 
-    const HEAD: &str =
-        "# Skills\nLoad a skill body before you follow it with the read tool at skill://NAME.";
+/// Reads skill bodies from the immutable registry: `skill://<name>`.
+///
+/// Bodies are served byte-exact from load time; the resolver never reads the
+/// disk again. The host builds loaded registries through
+/// [`SkillRegistry::merge`]; [`extension`] registers this resolver with an
+/// empty registry as its structural starting point.
+#[derive(Debug)]
+pub struct SkillResolver {
+    registry: Arc<SkillRegistry>,
+}
 
-    fn dir(plugin: &str) -> PathBuf {
-        Path::new("/plugins").join(plugin)
-    }
-
-    fn register(
-        plugin: &str,
-        name: &str,
-        description: &str,
-        path: &str,
-        body: BodyInput<'_>,
-    ) -> Result<RegisteredSkill, SkillError> {
-        validate_registration(
-            plugin,
-            &dir(plugin),
-            SkillRegistration {
-                name,
-                description,
-                path: Path::new(path),
-                letter2image: false,
-            },
-            body,
-        )
-    }
-
-    fn skill(plugin: &str, name: &str, description: &str, marked: bool) -> RegisteredSkill {
-        let body = format!("body of {name}");
-        let mut skill = register(
-            plugin,
-            name,
-            description,
-            "SKILL.md",
-            BodyInput::Bytes(body.as_bytes()),
-        )
-        .unwrap();
-        skill.letter2image = marked;
-        skill
-    }
-
-    fn empty() -> LetterAssembly {
-        LetterAssembly {
-            chunks: Vec::new(),
-            fallbacks: Vec::new(),
-        }
-    }
-
-    fn chunk(id: &str, skill: &RegisteredSkill) -> LetterChunk {
-        LetterChunk {
-            id: id.into(),
-            skill: skill.name.clone(),
-            plugin: skill.plugin.clone(),
-            source_text: Arc::from(&*skill.description),
-            png: Arc::from(&b"\x89PNG"[..]),
-            width: 8,
-            height: 16,
-            cell: [8, 16],
-        }
-    }
-
-    fn fallback(skill: &RegisteredSkill, reason: FallbackReason) -> LetterFallback {
-        LetterFallback {
-            skill: skill.name.clone(),
-            plugin: skill.plugin.clone(),
-            source_text: Arc::from(&*skill.description),
-            first_undrawable: None,
-            reason,
-        }
-    }
-
-    #[test]
-    fn skill_name_grammar() {
-        let long = "a".repeat(65);
-        for name in [
-            "Focus",
-            "-bad",
-            "a b",
-            long.as_str(),
-            "",
-            "a_b",
-            "caf\u{e9}",
-        ] {
-            let err = register("p", name, "d", "SKILL.md", BodyInput::Bytes(b"x")).unwrap_err();
-            assert_eq!(
-                err.to_string(),
-                format!(
-                    "skill name '{name}' is invalid: use 1 to 64 characters of a-z, 0-9, and '-', starting with a letter or digit"
-                )
-            );
-        }
-        let max = "9".repeat(64);
-        for name in ["ok-name", "0", "a-", max.as_str(), "read", "patch"] {
-            let ok = register("p", name, "d", "SKILL.md", BodyInput::Bytes(b"x")).unwrap();
-            assert_eq!(&*ok.name, name);
-        }
-    }
-
-    #[test]
-    fn description_validation_errors() {
-        let over = "\u{ac00}".repeat(MAX_DESCRIPTION_CHARS + 1);
-        let cases = [
-            ("", "skill description is empty"),
-            (" \t\u{3000}\n", "skill description is empty"),
-            (over.as_str(), "skill description exceeds 4096 characters"),
-            (
-                "ring\u{7}bell",
-                "skill description contains control character U+0007",
-            ),
-            (
-                "next\u{85}line",
-                "skill description contains control character U+0085",
-            ),
-        ];
-        for (description, expected) in cases {
-            let err =
-                register("p", "s", description, "SKILL.md", BodyInput::Bytes(b"x")).unwrap_err();
-            assert_eq!(err.to_string(), expected);
-        }
-
-        let at_limit = format!("  {}\n", "\u{ac00}".repeat(MAX_DESCRIPTION_CHARS));
-        let ok = register("p", "s", &at_limit, "SKILL.md", BodyInput::Bytes(b"x")).unwrap();
-        assert_eq!(ok.description.chars().count(), MAX_DESCRIPTION_CHARS);
-        assert_eq!(&*ok.description, at_limit.trim());
-    }
-
-    #[test]
-    fn body_file_errors() {
-        for path in [
-            "../SKILL.md",
-            "a/../../SKILL.md",
-            "a/../SKILL.md",
-            "/etc/passwd",
-            "",
-            ".",
-        ] {
-            let err = register("p", "s", "d", path, BodyInput::Bytes(b"x")).unwrap_err();
-            assert_eq!(
-                err.to_string(),
-                format!("skill body path '{path}' must be relative to the plugin directory")
-            );
-        }
-        // An escaping path is rejected before the body is consulted.
-        let err = register("p", "s", "d", "../x", BodyInput::Missing).unwrap_err();
-        assert!(matches!(err, SkillError::PathEscape { .. }));
-
-        let at = dir("p").join("skills/SKILL.md");
-        let at = at.display();
-        let err = register("p", "s", "d", "skills/SKILL.md", BodyInput::Missing).unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            format!("skill body at '{at}' does not exist")
-        );
-
-        let err = register(
-            "p",
-            "s",
-            "d",
-            "skills/SKILL.md",
-            BodyInput::Bytes(b"ok\xff\xfe"),
-        )
-        .unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            format!("skill body at '{at}' is not valid UTF-8")
-        );
-
-        // A multi-byte scalar cut at the end is invalid, not silently dropped.
-        let err = register(
-            "p",
-            "s",
-            "d",
-            "skills/SKILL.md",
-            BodyInput::Bytes(b"\xea\xb0"),
-        )
-        .unwrap_err();
-        assert!(matches!(err, SkillError::BodyNotUtf8 { .. }));
-
-        let over = vec![b'a'; MAX_BODY_BYTES + 1];
-        let err = register("p", "s", "d", "skills/SKILL.md", BodyInput::Bytes(&over)).unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            format!("skill body at '{at}' exceeds 131072 bytes")
-        );
-
-        let limit = vec![b'a'; MAX_BODY_BYTES];
-        let ok = register("p", "s", "d", "./skills/SKILL.md", BodyInput::Bytes(&limit)).unwrap();
-        assert_eq!(ok.body.len(), MAX_BODY_BYTES);
-    }
-
-    #[test]
-    fn body_served_byte_exact_after_source_edit() {
-        let mut source =
-            b"\xef\xbb\xbf---\r\nname: not-frontmatter\r\n---\r\n\t# Body \xea\xb0\x80  \n\n"
-                .to_vec();
-        let original = source.clone();
-        let loaded = register("p", "s", "d", "SKILL.md", BodyInput::Bytes(&source)).unwrap();
-        let registry = SkillRegistry::merge(&[("p", vec![loaded])]).unwrap();
-
-        source.clear();
-        source.extend_from_slice(b"edited on disk");
-
-        assert_eq!(registry.body("s").unwrap().as_bytes(), original.as_slice());
-        assert_eq!(registry.body("t"), None);
-    }
-
-    #[test]
-    fn skill_name_collisions() {
-        let first = skill("alpha", "focus", "alpha focus", false);
-        let later = skill("zeta", "focus", "zeta focus", false);
-        let later_other = skill("zeta", "other", "zeta other", false);
-        let twice = [
-            skill("mid", "focus", "one", false),
-            skill("mid", "focus", "two", false),
-        ];
-        let mid_other = skill("mid", "solo", "mid solo", false);
-        let clean = skill("omega", "clean", "omega clean", false);
-
-        // Slice order is not merge order: `alpha` still merges first.
-        let Err(conflict) = SkillRegistry::merge(&[
-            ("zeta", vec![later_other, later]),
-            ("omega", vec![clean]),
-            ("mid", vec![mid_other, twice[0].clone(), twice[1].clone()]),
-            ("alpha", vec![first]),
-        ]) else {
-            panic!("conflicting claims merged cleanly");
-        };
-
-        let messages: Vec<String> = conflict
-            .rejections
-            .iter()
-            .map(ToString::to_string)
-            .collect();
-        assert_eq!(
-            messages,
-            [
-                "skill 'focus' is registered twice in plugin 'mid'",
-                "skill 'focus' is already registered by plugin 'alpha'",
-            ]
-        );
-        assert_eq!(
-            conflict.to_string(),
-            "skill 'focus' is registered twice in plugin 'mid'; skill 'focus' is already registered by plugin 'alpha'"
-        );
-        assert_eq!(conflict.rejections[1].plugin(), "zeta");
-
-        let registry = conflict.registry;
-        let names: Vec<&str> = registry.names().iter().map(|name| &**name).collect();
-        assert_eq!(names, ["clean", "focus"]);
-        let owners: Vec<(&str, &str)> = registry.iter().map(|s| (&*s.name, &*s.plugin)).collect();
-        assert_eq!(owners, [("clean", "omega"), ("focus", "alpha")]);
-        assert_eq!(&*registry.body("focus").unwrap(), "body of focus");
-        // Rejected plugins leak none of their other records.
-        assert_eq!(registry.body("other"), None);
-        assert_eq!(registry.body("solo"), None);
-    }
-
-    #[test]
-    fn shared_body_does_not_excuse_duplicate_name() {
-        let body: Arc<str> = Arc::from("shared");
-        let mut a = skill("p", "a", "d", false);
-        let mut b = skill("p", "a", "e", false);
-        a.body = Arc::clone(&body);
-        b.body = body;
-        let Err(conflict) = SkillRegistry::merge(&[("p", vec![a, b])]) else {
-            panic!("duplicate name merged");
-        };
-        assert!(conflict.registry.names().is_empty());
-        assert!(conflict.registry.section(&empty()).is_none());
-    }
-
-    #[test]
-    fn foreign_record_rejects_submitting_plugin() {
-        let stolen = skill("alpha", "focus", "d", false);
-        let Err(conflict) = SkillRegistry::merge(&[("beta", vec![stolen])]) else {
-            panic!("foreign record merged");
-        };
-        assert_eq!(
-            conflict.to_string(),
-            "skill 'focus' was validated for plugin 'alpha', not 'beta'"
-        );
-        assert!(conflict.registry.names().is_empty());
-    }
-
-    #[test]
-    fn zero_skills_remove_section() {
-        let registry = SkillRegistry::merge(&[("p", Vec::new())]).unwrap();
-        assert_eq!(registry.section(&empty()), None);
-        assert!(registry.names().is_empty());
-    }
-
-    #[test]
-    fn section_forms_follow_byte_order_and_admission() {
-        let image = skill("p", "b-image", "drawn text", true);
-        let over = skill("p", "a-over", "over budget text", true);
-        let plain = skill("q", "0-plain", "plain text", false);
-        let upper = skill("q", "b", "sorts before b-image", false);
-        let registry = SkillRegistry::merge(&[
-            ("q", vec![upper, plain]),
-            ("p", vec![image.clone(), over.clone()]),
-        ])
-        .unwrap();
-
-        let names: Vec<&str> = registry.names().iter().map(|name| &**name).collect();
-        assert_eq!(names, ["0-plain", "a-over", "b", "b-image"]);
-        let iterated: Vec<&str> = registry.iter().map(|s| &*s.name).collect();
-        assert_eq!(iterated, names);
-
-        let plain_all = format!(
-            "{HEAD}\n- 0-plain: plain text\n- a-over: over budget text\n- b: sorts before b-image\n- b-image: drawn text"
-        );
-        assert_eq!(
-            registry.section(&empty()).as_deref(),
-            Some(plain_all.as_str())
-        );
-
-        let assembly = LetterAssembly {
-            chunks: vec![chunk("1", &image)],
-            fallbacks: vec![fallback(&over, FallbackReason::OverBudget)],
-        };
-        let mixed = format!(
-            "{HEAD}\n- 0-plain: plain text\n- a-over: over budget text\n- b: sorts before b-image\n- b-image"
-        );
-        let section = registry.section(&assembly).unwrap();
-        assert_eq!(&*section, mixed);
-        assert!(!section.ends_with('\n'));
-
-        // A chunk naming the right skill under another plugin is not this
-        // skill's image, so the description stays visible.
-        let mut stranger = chunk("1", &image);
-        stranger.plugin = "q".into();
-        let assembly = LetterAssembly {
-            chunks: vec![stranger],
-            fallbacks: Vec::new(),
-        };
-        assert_eq!(
-            registry.section(&assembly).as_deref(),
-            Some(plain_all.as_str())
-        );
-    }
-
-    #[test]
-    fn section_call_stability() {
-        let records = || {
-            vec![
-                (
-                    "x",
-                    vec![
-                        skill("x", "zed", "last", true),
-                        skill("x", "alpha", "first", false),
-                    ],
-                ),
-                ("w", vec![skill("w", "mid", "middle", true)]),
-            ]
-        };
-        let registry = SkillRegistry::merge(&records()).unwrap();
-        let mid = registry.iter().find(|s| &*s.name == "mid").unwrap().clone();
-        let assembly = LetterAssembly {
-            chunks: vec![chunk("1", &mid)],
-            fallbacks: Vec::new(),
-        };
-        let first = registry.section(&assembly).unwrap();
-        let second = registry.section(&assembly).unwrap();
-        let rebuilt = SkillRegistry::merge(&records()).unwrap();
-        let third = rebuilt.section(&assembly).unwrap();
-        assert_eq!(first, second);
-        assert_eq!(first, third);
-        assert_eq!(
-            &*first,
-            format!("{HEAD}\n- alpha: first\n- mid\n- zed: last")
-        );
-        let names: Vec<&str> = rebuilt.names().iter().map(|name| &**name).collect();
-        let mut sorted = names.clone();
-        sorted.sort_unstable_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
-        assert_eq!(names, sorted);
-    }
-
-    #[test]
-    fn skill_capture_skip_rules() {
-        let unmarked = skill("p", "plain", "unmarked text", false);
-        let marked_empty = validate_registration(
-            "p",
-            &dir("p"),
-            SkillRegistration {
-                name: "marked",
-                description: "   ",
-                path: Path::new("SKILL.md"),
-                letter2image: true,
-            },
-            BodyInput::Bytes(b"body"),
-        );
-        assert_eq!(marked_empty, Err(SkillError::EmptyDescription));
-
-        let registry = SkillRegistry::merge(&[("p", vec![unmarked])]).unwrap();
-        assert_eq!(registry.names().len(), 1);
-        assert_eq!(
-            registry.section(&empty()).as_deref(),
-            Some(format!("{HEAD}\n- plain: unmarked text").as_str())
-        );
+impl SkillResolver {
+    /// Builds a resolver over one immutable registry.
+    #[must_use]
+    pub fn new(registry: Arc<SkillRegistry>) -> Self {
+        Self { registry }
     }
 }
+
+impl SchemeResolver for SkillResolver {
+    fn read<'a>(
+        &'a self,
+        path: &'a str,
+        _cx: &'a SchemeCx<'a>,
+    ) -> BoxFuture<'a, Result<Doc, SchemeError>> {
+        Box::pin(async move {
+            if let Some(body) = self.registry.body(path) {
+                return Ok(Doc::new(format!("skill://{path}"), body.to_string()));
+            }
+            let names = self.registry.names();
+            let message = if names.is_empty() {
+                format!("skill {path} does not exist; no skills are loaded")
+            } else {
+                let list = names
+                    .iter()
+                    .map(std::convert::AsRef::as_ref)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("skill {path} does not exist; known skills: {list}")
+            };
+            Err(SchemeError::Failed {
+                message: message.into(),
+            })
+        })
+    }
+}
+
+/// Dynamic `skills` prompt section over one immutable registry.
+///
+/// Renders [`section`] against the letter assembly drawn from the captured
+/// font; returns `None` when no skill is loaded or the font fails to parse.
+/// The host composes the first prompt through the same pure seams with its
+/// loaded registry.
+#[derive(Debug, Clone)]
+struct SkillsSectionFn {
+    registry: Arc<SkillRegistry>,
+    font: Arc<Font>,
+}
+
+impl SectionFn for SkillsSectionFn {
+    fn render(&self, _cx: &SectionCx<'_>) -> Option<String> {
+        let assembly = crate::letter::letters(&self.registry, &self.font).ok()?;
+        section(&self.registry, &assembly).map(str::into_string)
+    }
+}
+
+/// Builds the `skills` extension: one dynamic skill prompt section plus the
+/// `skill` scheme. Bodies stay available only through `skill://<name>`.
+///
+/// # Errors
+///
+/// Returns the runtime's typed build error when the builder rejects the
+/// registration.
+pub fn extension() -> Result<Extension, RegistrationError> {
+    let registry = Arc::new(SkillRegistry::empty());
+    let resolver = SkillResolver::new(Arc::clone(&registry));
+    let section = PromptSection::session(
+        PromptOrder::Skills,
+        Arc::new(SkillsSectionFn {
+            registry,
+            font: Arc::new(Font::embedded()),
+        }),
+    );
+    ExtensionBuilder::new("skills", "0.1.0", ServiceSet::EMPTY)?
+        .prompt_section(section)
+        .scheme("skill", Arc::new(resolver))
+        .build()
+}
+
+#[cfg(test)]
+mod tests;

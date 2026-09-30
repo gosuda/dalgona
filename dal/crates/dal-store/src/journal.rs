@@ -12,8 +12,7 @@ use std::{
 };
 
 use dal_core::{
-    BranchError, DecodeError, EntryId, Gen, Header, JobEvent, JobId, Record, TurnEndStop, TurnId,
-    Usage, decode,
+    DecodeError, EntryId, Gen, Header, JobEvent, JobId, Record, TurnEndStop, TurnId, Usage, decode,
 };
 
 use crate::error::{AbortedTurn, JournalError, OpenReport, TornTail};
@@ -32,17 +31,17 @@ const READ_WINDOW: u64 = 65_536;
     clippy::struct_excessive_bools,
     reason = "these independent switches are the fixed durability fault-injection configuration"
 )]
-pub struct Faults {
+pub(crate) struct Faults {
     /// Fail the batch write after this many bytes land.
-    pub fail_write_after: Option<usize>,
+    pub(crate) write_after_bytes: Option<usize>,
     /// Fail the file sync after a successful write.
-    pub fail_sync: bool,
+    pub(crate) sync_error: bool,
     /// Fail the truncate-back after a failed batch.
-    pub fail_truncate: bool,
+    pub(crate) truncate_error: bool,
     /// Fail the torn-tail side-file write at open.
-    pub fail_quarantine: bool,
+    pub(crate) quarantine_error: bool,
     /// Fail the session-directory sync after writing the torn-tail sidefile.
-    pub fail_dir_sync: bool,
+    pub(crate) directory_sync_error: bool,
 }
 
 /// Proof that one batch is durable. Nothing publishes before this exists.
@@ -56,19 +55,17 @@ pub struct Receipt {
 
 /// The state of an opened journal: decoded records plus recovery facts.
 #[derive(Debug)]
-pub struct Opened {
+pub(crate) struct Opened {
     /// The session header; the file's first record.
-    pub header: Header,
+    pub(crate) header: Header,
     /// Every record with its byte offset, in file order.
-    pub records: Vec<(u64, Record)>,
-    /// The leaf after the recovery batch is durably appended.
-    pub leaf: Option<EntryId>,
+    pub(crate) records: Vec<(u64, Record)>,
     /// The generation this open will assign to its boot record.
-    pub r#gen: Gen,
+    pub(crate) r#gen: Gen,
     /// Repairs to append in one batch with the boot record (D-15).
-    pub repair: Vec<Record>,
+    pub(crate) repair: Vec<Record>,
     /// Facts for the agent's notices (D-39).
-    pub report: OpenReport,
+    pub(crate) report: OpenReport,
     /// The same writable file handle validated by this open.
     pub(crate) journal: Journal,
     /// Structural state for the durable prefix, before planned recovery.
@@ -85,7 +82,7 @@ enum Health {
 
 /// One open journal file. Neither `Clone` nor `Sync`; one writer per file.
 #[derive(Debug)]
-pub struct Journal {
+pub(crate) struct Journal {
     file: File,
     path: PathBuf,
     end: u64,
@@ -99,7 +96,7 @@ impl Journal {
     /// # Errors
     /// Returns [`JournalError::Io`] when creation or syncing fails, and
     /// [`JournalError::Damaged`] when a failed create cannot be removed durably.
-    pub fn create(path: &Path, lines: &[u8], faults: &Faults) -> Result<Self, JournalError> {
+    pub(crate) fn create(path: &Path, lines: &[u8], faults: &Faults) -> Result<Self, JournalError> {
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -134,7 +131,7 @@ impl Journal {
     /// Returns [`JournalError`] for a failed read or repair step, a failed
     /// structure check (as [`crate::error::StoreError::Damaged`] via the caller),
     /// or an unsupported version (as [`crate::error::StoreError::UnknownVersion`]).
-    pub fn open(path: &Path, faults: &Faults) -> Result<Opened, OpenFailure> {
+    pub(crate) fn open(path: &Path, faults: &Faults) -> Result<Opened, OpenFailure> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -184,11 +181,9 @@ impl Journal {
         )
         .map_err(OpenFailure::Journal)?;
         journal.end = complete_end;
-        let leaf = repair_delta.leaf();
         Ok(Opened {
             header,
             records,
-            leaf,
             r#gen,
             repair,
             report: OpenReport {
@@ -210,7 +205,7 @@ impl Journal {
     /// # Errors
     /// Returns [`JournalError::Io`] for the write or sync failure, and
     /// [`JournalError::Damaged`] when rollback failed.
-    pub fn append(&mut self, lines: &[u8]) -> Result<Receipt, JournalError> {
+    pub(crate) fn append(&mut self, lines: &[u8]) -> Result<Receipt, JournalError> {
         if let Health::Damaged = self.health {
             return Err(JournalError::Damaged {
                 path: self.path.clone(),
@@ -227,7 +222,7 @@ impl Journal {
                 })
             }
             Err(error) => {
-                if self.faults.fail_truncate || self.truncate_back(offset).is_err() {
+                if self.faults.truncate_error || self.truncate_back(offset).is_err() {
                     self.health = Health::Damaged;
                     return Err(JournalError::Damaged {
                         path: self.path.clone(),
@@ -241,7 +236,7 @@ impl Journal {
 
     /// The tracked end offset: the next batch starts here.
     #[must_use]
-    pub fn end(&self) -> u64 {
+    pub(crate) fn end(&self) -> u64 {
         self.end
     }
 
@@ -264,7 +259,7 @@ impl Journal {
         self.file
             .seek(SeekFrom::Start(self.end))
             .map_err(|source| jio("write", &self.path, source))?;
-        match self.faults.fail_write_after {
+        match self.faults.write_after_bytes {
             Some(limit) => {
                 let cut = limit.min(bytes.len());
                 self.file
@@ -283,7 +278,7 @@ impl Journal {
                 .write_all(bytes)
                 .map_err(|source| jio("write", &self.path, source))?,
         }
-        if self.faults.fail_sync {
+        if self.faults.sync_error {
             return Err(jio(
                 "sync",
                 &self.path,
@@ -298,7 +293,7 @@ impl Journal {
 
 /// Why an open failed: a hard version refusal or a journal error.
 #[derive(Debug)]
-pub enum OpenFailure {
+pub(crate) enum OpenFailure {
     /// The file names a format this build does not read. Nothing was written.
     UnknownVersion(u64),
     /// A repair, read, or validation failure.
@@ -348,7 +343,7 @@ fn repair_torn_tail(
     if tail_start == file_len {
         return Ok(None);
     }
-    if faults.fail_quarantine {
+    if faults.quarantine_error {
         return Err(jio(
             "quarantine",
             path,
@@ -429,7 +424,7 @@ fn write_side_file(
         .sync_all()
         .map_err(|source| jio("quarantine", journal_path, source))?;
     #[cfg(not(windows))]
-    if faults.fail_dir_sync {
+    if faults.directory_sync_error {
         return Err(jio(
             "quarantine",
             journal_path,
@@ -562,13 +557,6 @@ pub(crate) struct ValidationDelta {
     boot_count: u64,
 }
 
-impl ValidationDelta {
-    /// Returns the tree leaf after this batch.
-    pub(crate) fn leaf(&self) -> Option<EntryId> {
-        self.leaf
-    }
-}
-
 impl Validator {
     /// Creates an empty validator for a new session.
     pub(crate) fn new() -> Self {
@@ -638,18 +626,20 @@ impl Validator {
         self.boot_count = delta.boot_count;
     }
 
-    /// Validates and applies one record at its byte offset.
-    pub(crate) fn record(&mut self, record: &Record, offset: u64) -> Result<(), OpenFailure> {
-        let mut delta = self.begin_batch();
-        self.stage_record(&mut delta, record, offset)?;
-        self.commit(delta);
-        Ok(())
-    }
-
     /// Applies one record to batch-local state.
     pub(crate) fn stage_record(
         &self,
         delta: &mut ValidationDelta,
+        record: &Record,
+        offset: u64,
+    ) -> Result<(), OpenFailure> {
+        Self::validate_record_position(delta, record, offset)?;
+        self.stage_record_body(delta, record, offset)?;
+        Self::finish_record(delta, record, offset)
+    }
+
+    fn validate_record_position(
+        delta: &ValidationDelta,
         record: &Record,
         offset: u64,
     ) -> Result<(), OpenFailure> {
@@ -659,6 +649,15 @@ impl Validator {
         if delta.record_count > 0 && matches!(record, Record::Session(_)) {
             return Err(damaged(offset, "a second session header"));
         }
+        Ok(())
+    }
+
+    fn stage_record_body(
+        &self,
+        delta: &mut ValidationDelta,
+        record: &Record,
+        offset: u64,
+    ) -> Result<(), OpenFailure> {
         match record {
             Record::User(entry)
             | Record::Assistant(entry)
@@ -667,6 +666,7 @@ impl Validator {
             | Record::Model(entry)
             | Record::Thinking(entry)
             | Record::Approval(entry)
+            | Record::Mode(entry)
             | Record::Compaction(entry)
             | Record::BranchSummary(entry) => self.stage_entry(delta, entry, offset)?,
             Record::Leaf { to: Some(to), .. } | Record::Label { entry: to, .. } => {
@@ -741,6 +741,14 @@ impl Validator {
             }
             _ => {}
         }
+        Ok(())
+    }
+
+    fn finish_record(
+        delta: &mut ValidationDelta,
+        record: &Record,
+        offset: u64,
+    ) -> Result<(), OpenFailure> {
         match record {
             Record::Leaf { to, .. } => delta.leaf = *to,
             _ => {
@@ -818,31 +826,27 @@ impl Validator {
         event: &JobEvent,
         offset: u64,
     ) -> Result<(), OpenFailure> {
-        match event {
-            JobEvent::Started { .. } => {
-                if self.jobs.contains_key(&job) || delta.jobs.contains_key(&job) {
-                    return Err(damaged(offset, format!("job {job} starts more than once")));
-                }
-                delta.jobs.insert(job, false);
+        if let JobEvent::Started { .. } = event {
+            if self.jobs.contains_key(&job) || delta.jobs.contains_key(&job) {
+                return Err(damaged(offset, format!("job {job} starts more than once")));
             }
-            _ => {
-                let terminal = delta
-                    .jobs
-                    .get(&job)
-                    .or_else(|| self.jobs.get(&job))
-                    .copied()
-                    .ok_or_else(|| {
-                        damaged(offset, format!("job {job} ends but it did not start"))
-                    })?;
-                if terminal {
-                    return Err(damaged(
-                        offset,
-                        format!("job {job} has more than one terminal event"),
-                    ));
-                }
-                delta.jobs.insert(job, true);
-            }
+            delta.jobs.insert(job, false);
+            return Ok(());
         }
+
+        let terminal = delta
+            .jobs
+            .get(&job)
+            .or_else(|| self.jobs.get(&job))
+            .copied()
+            .ok_or_else(|| damaged(offset, format!("job {job} ends but it did not start")))?;
+        if terminal {
+            return Err(damaged(
+                offset,
+                format!("job {job} has more than one terminal event"),
+            ));
+        }
+        delta.jobs.insert(job, true);
         Ok(())
     }
 }
@@ -1336,23 +1340,6 @@ fn tool_result(
     })
 }
 
-/// Maps a branch projection failure onto the store error vocabulary (D-31).
-#[must_use]
-pub fn branch_error(error: &BranchError) -> crate::error::StoreError {
-    match error {
-        BranchError::NoEntries => crate::error::StoreError::NothingToClone {
-            id: String::new().into(),
-        },
-        BranchError::NotUserEntry { entry } => {
-            crate::error::StoreError::NotUserMessage { entry: *entry }
-        }
-        BranchError::UnknownEntry { entry } => crate::error::StoreError::UnknownEntry {
-            id: String::new().into(),
-            entry: *entry,
-        },
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
@@ -1362,11 +1349,11 @@ mod tests {
         sync::atomic::{AtomicU64, Ordering},
     };
 
+    use crate::error::{INTERRUPTED_CALL, NOT_RUN_CALL};
     use dal_core::{
         AssistantStop, Block, CallId, ClientId, Entry, EntryKind, FileChange, Header, JobEvent,
         JobId, JournalPart, Product, RawJson, SessionId, TurnEndStop, TurnId, Usage, Workspace,
     };
-    use crate::error::{INTERRUPTED_CALL, NOT_RUN_CALL};
 
     use super::*;
 
@@ -1667,7 +1654,7 @@ mod tests {
         let failure = Journal::open(
             &path,
             &Faults {
-                fail_quarantine: true,
+                quarantine_error: true,
                 ..Faults::default()
             },
         )
@@ -1697,7 +1684,7 @@ mod tests {
         let failure = Journal::open(
             &path,
             &Faults {
-                fail_dir_sync: true,
+                directory_sync_error: true,
                 ..Faults::default()
             },
         )
@@ -1722,7 +1709,7 @@ mod tests {
             &path,
             b"complete batch",
             &Faults {
-                fail_write_after: Some(1),
+                write_after_bytes: Some(1),
                 ..Faults::default()
             },
         )
@@ -1777,7 +1764,7 @@ mod tests {
             .collect();
 
         assert_eq!(ids, vec![3, 7]);
-        assert_eq!(opened.leaf, Some(entry_id(7)));
+        assert_eq!(opened.repair_delta.leaf, Some(entry_id(7)));
         assert_eq!(opened.validator.next_entry_id(), Some(8));
     }
 
@@ -1805,6 +1792,10 @@ mod tests {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "recovery coverage builds a full open turn with jobs and grants in one test"
+    )]
     #[test]
     fn recovery_uses_latest_open_turn_unique_ids_and_actual_totals() {
         let directory = TestDirectory::new();
@@ -1914,7 +1905,7 @@ mod tests {
         );
 
         assert_eq!(opened.validator.next_entry_id(), Some(6));
-        assert_eq!(opened.leaf, Some(entry_id(7)));
+        assert_eq!(opened.repair_delta.leaf, Some(entry_id(7)));
 
         let repair_bytes = encode_records(&opened.repair);
         opened

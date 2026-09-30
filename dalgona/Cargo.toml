@@ -9,6 +9,10 @@ rust-version = "1.90"
 license-file = "../LICENSE.md"
 repository = "https://github.com/gosuda/dalgona"
 
+[workspace.dependencies]
+blake3 = "=1.8.2"
+toml = "=1.1.6"
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"
@@ -28,3 +32,22 @@ allow_attributes = "deny"
 allow_attributes_without_reason = "deny"
 exit = "deny"
 disallowed_methods = "deny"
+# Fast feedback: line tables keep backtraces readable while compiling much
+# faster than full debug info; the few runtime-heavy dependencies stay
+# optimized so test execution stays fast.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package.sonic-rs]
+opt-level = 3
+[profile.dev.package.blake3]
+opt-level = 3
+[profile.dev.package.regex]
+opt-level = 2
+[profile.dev.package.ratatui]
+opt-level = 2
+[profile.dev.package.proptest]
+opt-level = 2
+
+[profile.dist]
+inherits = "release"

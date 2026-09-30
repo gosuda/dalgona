@@ -1,4 +1,8 @@
-#![expect(unsafe_code, reason = "starlark custom-value derives emit unsafe impl for Trace/Freeze/ProvidesStaticType; required by spec R05/P02")]
+#![expect(unsafe_code, reason = "starlark value derives")]
+#![expect(
+    clippy::unnecessary_wraps,
+    reason = "the starlark_module macro requires registered functions to return Result"
+)]
 
 //! The `dal` SDK namespace and the virtual `@dal/v1` module (spec §P01, §P02).
 //!
@@ -19,19 +23,20 @@ use allocative::Allocative;
 use starlark::{
     collections::SmallMap,
     environment::{Methods, MethodsBuilder, Module},
+    eval::Evaluator,
     starlark_module, starlark_simple_value,
     values::{
-        Heap, NoSerialize, ProvidesStaticType, StarlarkValue, Value, ValueLike,
-        float::UnpackFloat, list::UnpackList,
+        NoSerialize, ProvidesStaticType, StarlarkValue, Value, ValueLike, float::UnpackFloat,
+        list::UnpackList,
     },
 };
 
 use crate::{
     descriptor::{
-        CommandValue, CommandValueGen, DomainOutcome, DomainOutcomeGen,
-        HookValue, HookValueGen, ModelValue, ModelValueGen, OutputValue,
-        OutputValueGen, PluginValue, PluginValueGen, RuleValue, RuleValueGen,
-        SkillValue, ToolValue, ToolValueGen, is_reserved_code,
+        CommandValue, CommandValueGen, DomainErr, DomainErrGen, DomainOk, DomainOkGen, HookValue,
+        HookValueGen, ModelValue, ModelValueGen, OutputValue, OutputValueGen, PluginValue,
+        PluginValueGen, RuleValue, RuleValueGen, SkillValue, ToolValue, ToolValueGen,
+        is_reserved_code,
     },
     record::Missing,
     schema::{Field, Presence, Schema},
@@ -63,6 +68,10 @@ impl std::fmt::Display for FieldSpecValue {
 }
 
 #[starlark::values::starlark_value(type = "field_spec")]
+#[expect(
+    clippy::elidable_lifetime_names,
+    reason = "StarlarkValue requires implementations for every value lifetime"
+)]
 impl<'v> StarlarkValue<'v> for FieldSpecValue {}
 
 /// A complete `dal.schema(...)` object schema as a Starlark value.
@@ -81,6 +90,10 @@ impl std::fmt::Display for SchemaValue {
 }
 
 #[starlark::values::starlark_value(type = "schema")]
+#[expect(
+    clippy::elidable_lifetime_names,
+    reason = "StarlarkValue requires implementations for every value lifetime"
+)]
 impl<'v> StarlarkValue<'v> for SchemaValue {}
 
 /// True when `value` downcasts to `SchemaValue`, frozen or not.
@@ -105,6 +118,10 @@ impl std::fmt::Display for DalNamespace {
 }
 
 #[starlark::values::starlark_value(type = "dal")]
+#[expect(
+    clippy::elidable_lifetime_names,
+    reason = "StarlarkValue requires implementations for every value lifetime"
+)]
 impl<'v> StarlarkValue<'v> for DalNamespace {
     fn get_methods() -> Option<&'static Methods> {
         Some(DAL_METHODS.methods())
@@ -113,18 +130,7 @@ impl<'v> StarlarkValue<'v> for DalNamespace {
 
 starlark::methods_static!(DAL_METHODS = dal_methods);
 
-fn api_error(message: impl Into<String>) -> starlark::Error {
-    starlark::Error::new_other(dal_error(message.into()))
-}
-
-fn dal_error(message: String) -> crate::error::LoadError {
-    crate::error::LoadError::Registration {
-        path: std::path::PathBuf::from("<sdk>"),
-        line: 0,
-        col: 0,
-        message: message.into(),
-    }
-}
+use crate::error::api_error;
 
 /// Decodes a `default =` argument into the transport form.
 fn default_value(
@@ -135,9 +141,8 @@ fn default_value(
     let Some(raw) = default else {
         return Ok(Presence::Required);
     };
-    let transport = Transport::from_starlark(raw).map_err(|error| {
-        api_error(format!("{name}: default is not transport data: {error}"))
-    })?;
+    let transport = Transport::from_starlark(raw)
+        .map_err(|error| api_error(format!("{name}: default is not transport data: {error}")))?;
     if ty.validate(&transport, name).is_err() {
         return Err(api_error(format!(
             "{name}: default does not satisfy its type"
@@ -171,14 +176,15 @@ const HOOK_EVENTS: &[&str] = &[
     "settled",
 ];
 
-const VISIBILITIES: &[&str] = &["model", "command_only", "private"];
-
+#[expect(
+    clippy::too_many_arguments,
+    reason = "starlark_module generates one dispatcher argument per exported method"
+)]
 #[starlark_module]
 fn dal_methods(builder: &mut MethodsBuilder) {
     /// `dal.MISSING`: the native omission sentinel for `optional` fields.
     #[starlark(attribute)]
-    #[allow(non_snake_case, reason = "the spec names the sentinel MISSING")]
-    fn MISSING<'v>(this: &DalNamespace, _heap: Heap<'v>) -> starlark::Result<Missing> {
+    fn MISSING(this: &DalNamespace) -> starlark::Result<Missing> {
         Ok(Missing)
     }
 
@@ -188,7 +194,7 @@ fn dal_methods(builder: &mut MethodsBuilder) {
         #[starlark(kwargs)] fields: SmallMap<String, Value<'v>>,
     ) -> starlark::Result<SchemaValue> {
         let mut compiled = Vec::with_capacity(fields.len());
-        for (name, value) in fields.iter() {
+        for (name, value) in &fields {
             let (ty, presence) = field_spec_of(*value)?;
             compiled.push(Field {
                 name: name.as_str().into(),
@@ -197,7 +203,9 @@ fn dal_methods(builder: &mut MethodsBuilder) {
             });
         }
         let schema = Schema::Object(compiled.into_boxed_slice());
-        schema.check("").map_err(|error| api_error(error.to_string()))?;
+        schema
+            .check("")
+            .map_err(|error| api_error(error.to_string()))?;
         Ok(SchemaValue { schema })
     }
 
@@ -209,9 +217,7 @@ fn dal_methods(builder: &mut MethodsBuilder) {
         #[starlark(require = named)] default: Option<Value<'v>>,
     ) -> starlark::Result<FieldSpecValue> {
         let to_len = |n: i64, role: &str| -> starlark::Result<usize> {
-            usize::try_from(n).map_err(|_| {
-                api_error(format!("string: {role} {n} is negative"))
-            })
+            usize::try_from(n).map_err(|_| api_error(format!("string: {role} {n} is negative")))
         };
         let (min_len, max_len) = match (min_len, max_len) {
             (None, None) => (None, None),
@@ -268,7 +274,13 @@ fn dal_methods(builder: &mut MethodsBuilder) {
         values: UnpackList<String>,
         #[starlark(require = named)] default: Option<Value<'v>>,
     ) -> starlark::Result<FieldSpecValue> {
-        let ty = Schema::Enum(values.items.into_iter().map(String::into_boxed_str).collect());
+        let ty = Schema::Enum(
+            values
+                .items
+                .into_iter()
+                .map(String::into_boxed_str)
+                .collect(),
+        );
         let presence = default_value("enum", &ty, default)?;
         Ok(FieldSpecValue { ty, presence })
     }
@@ -287,9 +299,7 @@ fn dal_methods(builder: &mut MethodsBuilder) {
             ));
         }
         let to_len = |n: i64, role: &str| -> starlark::Result<usize> {
-            usize::try_from(n).map_err(|_| {
-                api_error(format!("list: {role} {n} is negative"))
-            })
+            usize::try_from(n).map_err(|_| api_error(format!("list: {role} {n} is negative")))
         };
         let ty = Schema::List {
             item: Box::new(item_ty),
@@ -339,13 +349,14 @@ fn dal_methods(builder: &mut MethodsBuilder) {
         }
     }
 
-
     /// `dal.plugin(name, version, ...)`: the published descriptor root.
     #[expect(clippy::too_many_arguments, reason = "spec P02 names ten keywords")]
     fn plugin<'v>(
         #[starlark(this)] _this: &DalNamespace,
+        eval: &mut Evaluator<'v, '_, '_>,
         #[starlark(require = named)] name: String,
         #[starlark(require = named)] version: String,
+        #[starlark(require = named)] inject: Option<UnpackList<String>>,
         #[starlark(require = named)] config: Option<Value<'v>>,
         #[starlark(require = named)] state_version: Option<i64>,
         #[starlark(require = named)] tools: Option<SmallMap<String, Value<'v>>>,
@@ -356,15 +367,24 @@ fn dal_methods(builder: &mut MethodsBuilder) {
         #[starlark(require = named)] models: Option<SmallMap<String, Value<'v>>>,
         #[starlark(require = named)] prompt: Option<String>,
     ) -> starlark::Result<PluginValue<'v>> {
-        let state_version = u32::try_from(state_version.unwrap_or(1)).map_err(|_| {
-            api_error("plugin: state_version must be a positive integer")
-        })?;
+        let state_version = u32::try_from(state_version.unwrap_or(1))
+            .map_err(|_| api_error("plugin: state_version must be a positive integer"))?;
         if state_version == 0 {
             return Err(api_error("plugin: state_version must be nonzero"));
         }
+        let site = eval.call_stack_top_location().map(|span| {
+            let position = span.as_ref().resolve_span().begin;
+            (
+                span.file.filename().to_owned(),
+                u32::try_from(position.line + 1).unwrap_or(u32::MAX),
+                u32::try_from(position.column + 1).unwrap_or(u32::MAX),
+            )
+        });
         Ok(PluginValueGen {
             name,
             version,
+            site,
+            inject: inject.unwrap_or_default().items,
             state_version,
             config: config.unwrap_or_else(Value::new_none),
             tools: tools.unwrap_or_default(),
@@ -391,11 +411,10 @@ fn dal_methods(builder: &mut MethodsBuilder) {
             return Err(api_error("tool: input must be a dal.schema value"));
         }
         let visibility = visibility.unwrap_or_else(|| "model".to_owned());
-        if !VISIBILITIES.contains(&visibility.as_str()) {
-            return Err(api_error(format!(
-                "tool: visibility must be one of {}",
-                VISIBILITIES.join(", ")
-            )));
+        if dal_core::Visibility::parse(&visibility).is_err() {
+            return Err(api_error(
+                "tool: visibility must be one of model, deferred, eval_only",
+            ));
         }
         Ok(ToolValueGen {
             description,
@@ -455,28 +474,58 @@ fn dal_methods(builder: &mut MethodsBuilder) {
         })
     }
 
-    /// `dal.rule(pattern, text, judge=None)`.
+    /// `dal.rule(text, pattern=None, judge=None, always_apply=False,
+    /// scope=None, interrupt_mode=None, repeat_mode=None, repeat_gap=None)`;
+    /// a rule needs a pattern unless it always applies.
     fn rule<'v>(
         #[starlark(this)] _this: &DalNamespace,
-        #[starlark(require = named)] pattern: String,
+        #[starlark(require = named)] pattern: Option<String>,
         #[starlark(require = named)] text: String,
         #[starlark(require = named)] judge: Option<Value<'v>>,
+        #[starlark(require = named)] always_apply: Option<bool>,
+        #[starlark(require = named)] scope: Option<UnpackList<String>>,
+        #[starlark(require = named)] interrupt_mode: Option<String>,
+        #[starlark(require = named)] repeat_mode: Option<String>,
+        #[starlark(require = named)] repeat_gap: Option<u32>,
     ) -> starlark::Result<RuleValue<'v>> {
+        let always_apply = always_apply.unwrap_or(false);
+        if pattern.is_none() && !always_apply {
+            return Err(api_error(
+                "rule: give a pattern, or set always_apply = True",
+            ));
+        }
         Ok(RuleValueGen {
             pattern,
             text,
             judge: judge.unwrap_or_else(Value::new_none),
+            always_apply,
+            scope: scope.map(|scope| scope.items),
+            interrupt_mode,
+            repeat_mode,
+            repeat_gap,
         })
     }
 
-    /// `dal.model(caps, run, uses=[...])`.
+    /// `dal.model(id, caps, run, uses=[...])`.
     fn model<'v>(
         #[starlark(this)] _this: &DalNamespace,
+        eval: &mut Evaluator<'v, '_, '_>,
+        #[starlark(require = named)] id: String,
         #[starlark(require = named)] caps: Value<'v>,
         #[starlark(require = named)] run: Value<'v>,
         #[starlark(require = named)] uses: Option<UnpackList<String>>,
     ) -> starlark::Result<ModelValue<'v>> {
+        let site = eval.call_stack_top_location().map(|span| {
+            let position = span.as_ref().resolve_span().begin;
+            (
+                span.file.filename().to_owned(),
+                u32::try_from(position.line + 1).unwrap_or(u32::MAX),
+                u32::try_from(position.column + 1).unwrap_or(u32::MAX),
+            )
+        });
         Ok(ModelValueGen {
+            id,
+            site,
             caps,
             run,
             uses: uses.unwrap_or_default().items,
@@ -484,14 +533,11 @@ fn dal_methods(builder: &mut MethodsBuilder) {
     }
 
     /// `dal.ok(value)`: an explicit domain success.
-    fn ok<'v>(#[starlark(this)] _this: &DalNamespace, value: Value<'v>) -> starlark::Result<DomainOutcome<'v>> {
-        Ok(DomainOutcomeGen {
-            ok: true,
-            value,
-            code: None,
-            message: None,
-            details: Value::new_none(),
-        })
+    fn ok<'v>(
+        #[starlark(this)] _this: &DalNamespace,
+        value: Value<'v>,
+    ) -> starlark::Result<DomainOk<'v>> {
+        Ok(DomainOkGen { value })
     }
 
     /// `dal.err(code, message, details)`: an explicit domain failure.
@@ -500,17 +546,15 @@ fn dal_methods(builder: &mut MethodsBuilder) {
         code: String,
         message: String,
         details: Option<Value<'v>>,
-    ) -> starlark::Result<DomainOutcome<'v>> {
+    ) -> starlark::Result<DomainErr<'v>> {
         if is_reserved_code(&code) {
             return Err(api_error(format!(
                 "err: `{code}` is a reserved host failure code"
             )));
         }
-        Ok(DomainOutcomeGen {
-            ok: false,
-            value: Value::new_none(),
-            code: Some(code),
-            message: Some(message),
+        Ok(DomainErrGen {
+            code,
+            message,
             details: details.unwrap_or_else(Value::new_none),
         })
     }
@@ -525,8 +569,7 @@ fn dal_methods(builder: &mut MethodsBuilder) {
     }
 }
 
-static DAL_V1_MODULE: OnceLock<FreezeResult<starlark::environment::FrozenModule>> =
-    OnceLock::new();
+static DAL_V1_MODULE: OnceLock<FreezeResult<starlark::environment::FrozenModule>> = OnceLock::new();
 
 use starlark::values::FreezeResult;
 
@@ -534,7 +577,8 @@ use starlark::values::FreezeResult;
 ///
 /// Built once per process; every evaluation shares the same frozen heap, so
 /// SDK descriptors created in one module cannot leak into another.
-pub(crate) fn dal_v1_module() -> Result<&'static starlark::environment::FrozenModule, crate::error::LoadError> {
+pub(crate) fn dal_v1_module()
+-> Result<&'static starlark::environment::FrozenModule, crate::error::LoadError> {
     let result = DAL_V1_MODULE.get_or_init(|| {
         Module::with_temp_heap(|module| {
             let namespace = module.heap().alloc(DalNamespace);
@@ -580,8 +624,7 @@ mod tests {
     }
 
     #[test]
-    fn dal_v1_module_loads_and_constructs_descriptors()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn dal_v1_module_loads_and_constructs_descriptors() -> Result<(), Box<dyn std::error::Error>> {
         let sdk = dal_v1_module()?;
         let source = r#"
 load("@dal/v1", "dal")
@@ -609,11 +652,13 @@ plugin = dal.plugin(
         Module::with_temp_heap(|module| {
             let mut evaluator = Evaluator::new(&module);
             evaluator.set_loader(&loader);
-            evaluator.eval_module(ast, &globals()).map_err(|e| e.to_string())?;
+            evaluator
+                .eval_module(ast, &globals())
+                .map_err(|e| e.to_string())?;
             let plugin = module.get("plugin").expect("plugin export");
-            let descriptor = ValueLike::downcast_ref::<super::PluginValueGen<
-                starlark::values::Value,
-            >>(plugin.to_value())
+            let descriptor = ValueLike::downcast_ref::<
+                super::PluginValueGen<starlark::values::Value>,
+            >(plugin.to_value())
             .expect("plugin must be a PluginValue");
             assert_eq!(descriptor.name, "quality");
             assert_eq!(descriptor.version, "0.1.0");

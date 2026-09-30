@@ -1,0 +1,8 @@
+# Gate plugin lane — COMPLETE (correction filed)
+- All three targets PASS (run46): loop-plugin-11/12/13 = 3 passed/0 failed.
+- CLEANUP NOW VERIFIED: models.rs diagnostic branch REMOVED (lines 153-155 = original `return results[0].value`); grep confirms no `if results[0].ok`/`failed.*results[0]` markers; the remaining `ctx.try_call` (line 173) is the ORIGINAL second-forward test (present in the session's first read of the file). host_for has no price block. chmod 644 done. Probe files (scope_probe.rs, settle_probe.rs) confirmed deleted.
+- models.rs remains untracked (??) with SyntheticModels as owner — flagged to them to diff against their editor copy.
+- Duplicate-tool concern (qwen) assessed: no duplicate observed in any run; the adapter binds via request.tools naming and private_loop appends only the explicit private list. If the live wire duplicates, that's SyntheticModels' adapter/private_loop seam, not the fixture.
+- Non-gate files changed by me: fusion.star (full Fusion model per plan), dal-star/src/scope.rs (HostTerminal import + 2 collect error chains), dal-star/src/adapter.rs (spawn hoist). Gate files: loop-plugin-11/12/13 + stanzas 11/12 (13 by parent).
+- Root causes fixed: bare-key [prices] rows; unanswered RequestOpened grant (now answered narrowly); request.tools + [...] invalid on record Array.
+- No commits (lane rule). Nothing left on my lane.

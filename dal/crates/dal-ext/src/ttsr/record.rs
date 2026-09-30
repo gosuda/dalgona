@@ -1,20 +1,16 @@
-//! The `dal.rule` record door (decision D-16 of the ttsr behavior part).
+//! The `dal.rule` record validation boundary.
 //!
 //! A record is checked once, in a fixed order, and the first failed check is
 //! the registration error `rule <name>: <reason>`; the Starlark adapter adds
-//! `path:line:col`. Regular expressions are never compiled here: a malformed
-//! pattern becomes a Skipped remark at set build, never a dead plugin. A
-//! record never gets a description, so it never enters the Rulebook bucket;
-//! a record without a usable condition and without `always_apply` is dropped
-//! by the set build, not here.
+//! `path:line:col`. Regular expressions are not compiled here: a malformed
+//! pattern becomes a Skipped problem at set build, not a plugin-load failure.
+//! A record has no description and cannot enter the Rulebook bucket; a record
+//! without a usable condition and without `always_apply` is dropped at build.
 //!
-//! The typed [`RuleRecord`] already fixes the Starlark types of `text`, the
-//! three bools, the two enums, and `scope`, `globs`, and `agents`, so their
-//! type and enum-value checks belong to the adapter that builds the record.
-//! The `judge` question arrives as plain text and the record carries no
-//! question kind, so this door cannot raise the D-17 reason `the judge
-//! question must be a bool question`: the Starlark adapter must reject a
-//! `dal.choice` or `dal.score` value before it builds the [`RuleRecord`].
+//! `RuleRecord` fixes the Starlark types of its body, flags, enums, and scope.
+//! The adapter validates those inputs before constructing a record. The judge
+//! question carries no question kind here, so the adapter rejects non-boolean
+//! questions before building the `RuleRecord`.
 
 use std::fmt;
 
@@ -81,10 +77,10 @@ pub struct RecordSource {
 /// [`Origin::Record`] for its plugin; serves registration and set build.
 ///
 /// Checks run in this order: name grammar; 1 to 16 patterns, each at most
-/// 1024 bytes; a non-blank `text`; `repeat_gap` in `1..=1000`. The glob
-/// shorthand of decision D-07 applies to the patterns as it does to file
-/// conditions. On success the problems are the Skipped glob and scope
-/// remarks, which do not reject the record, and the unknown-tool notes.
+/// 1024 bytes; a non-blank `text`; and `repeat_gap` in `1..=1000`. The same
+/// glob shorthand conversion is used for file conditions and record patterns.
+/// On success the problems are the Skipped glob and scope remarks that do not
+/// reject the record, plus notes for unknown tools.
 ///
 /// `known_tools` is the product's tool inventory: registration passes `None`
 /// before the inventory exists, and the set build passes `Some`, so a named
@@ -101,9 +97,9 @@ pub fn validate_record(
     let raw_name = rec.name.as_str();
     let fail = |reason: &str| RecordError::new(raw_name, reason);
     let name = check_name(raw_name).map_err(|reason| fail(&reason))?;
-    if rec.patterns.is_empty() {
+    if rec.patterns.is_empty() && !rec.always_apply {
         return Err(fail(
-            "\"pattern\" must be a string or a list of 1 to 16 strings",
+            "\"pattern\" must be a string or a list of 1 to 16 strings, or set alwaysApply",
         ));
     }
     if rec.patterns.len() > PATTERNS_MAX {
@@ -356,7 +352,7 @@ mod tests {
     fn condition_count_and_length() {
         assert_eq!(
             reason(record(&[])),
-            "rule no-sleep: \"pattern\" must be a string or a list of 1 to 16 strings"
+            "rule no-sleep: \"pattern\" must be a string or a list of 1 to 16 strings, or set alwaysApply"
         );
         let many = ["a"; 17];
         assert_eq!(
@@ -364,6 +360,11 @@ mod tests {
             "rule no-sleep: the rule has more than 16 conditions"
         );
         assert!(check(record(&["a"; 16])).is_ok());
+        let unconditional = RuleRecord {
+            always_apply: true,
+            ..record(&[])
+        };
+        assert!(check(unconditional).is_ok());
         let long = "a".repeat(CONDITION_MAX_BYTES + 1);
         assert_eq!(
             reason(record(&["a", long.as_str()])),
@@ -395,7 +396,7 @@ mod tests {
         };
         assert_eq!(
             reason(both),
-            "rule no-sleep: \"pattern\" must be a string or a list of 1 to 16 strings"
+            "rule no-sleep: \"pattern\" must be a string or a list of 1 to 16 strings, or set alwaysApply"
         );
         for gap in [0, 1001] {
             let rec = RuleRecord {

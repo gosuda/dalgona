@@ -15,9 +15,9 @@ use crate::{
 };
 
 /// Bytes at or above this length leave the journal and become a blob.
-pub const INLINE_LIMIT: usize = 16_384;
+pub(crate) const INLINE_LIMIT: usize = 16_384;
 /// A blob larger than this is rejected.
-pub const MAX_BLOB: u64 = 67_108_864;
+pub(crate) const MAX_BLOB: u64 = 67_108_864;
 /// A validated blob awaiting durable file publication or in-memory storage.
 ///
 /// The fields stay private so the digest always matches the owned bytes.
@@ -30,6 +30,12 @@ impl PendingBlob {
     fn new(bytes: Vec<u8>) -> Self {
         let id = BlobId::from_bytes(&bytes);
         Self { id, bytes }
+    }
+
+    /// Validates one direct blob write and binds its digest to the bytes.
+    pub(crate) fn prepare_put(bytes: Vec<u8>) -> Result<Self, BlobError> {
+        check_blob_size(bytes.len())?;
+        Ok(Self::new(bytes))
     }
 
     /// Returns the content digest.
@@ -52,7 +58,7 @@ impl PendingBlob {
 ///
 /// # Errors
 /// Returns [`BlobError::TooLarge`] above the cap, and [`BlobError::Io`] on a failed publish.
-pub fn put(dir: &Path, bytes: &[u8]) -> Result<BlobId, BlobError> {
+pub(crate) fn put(dir: &Path, bytes: &[u8]) -> Result<BlobId, BlobError> {
     check_blob_size(bytes.len())?;
     let id = BlobId::from_bytes(bytes);
     publish_with_id(dir, id, bytes)?;
@@ -64,7 +70,8 @@ pub fn put(dir: &Path, bytes: &[u8]) -> Result<BlobId, BlobError> {
 /// # Errors
 /// Returns [`BlobError::TooLarge`] above the cap or [`BlobError::Io`] on a failed publish.
 pub(crate) fn put_prepared(dir: &Path, pending: PendingBlob) -> Result<(), BlobError> {
-    publish_with_id(dir, pending.id(), pending.bytes())
+    let (id, bytes) = pending.into_parts();
+    publish_with_id(dir, id, &bytes)
 }
 
 fn publish_with_id(dir: &Path, id: BlobId, bytes: &[u8]) -> Result<(), BlobError> {
@@ -93,7 +100,7 @@ fn create_temp(dir: &Path) -> Result<(PathBuf, File), BlobError> {
         util::with_mode(&mut options, MODE_FILE);
         match options.open(&tmp) {
             Ok(file) => return Ok((tmp, file)),
-            Err(source) if source.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {}
             Err(source) => return Err(io_blob(source)),
         }
     }
@@ -120,10 +127,10 @@ fn existing_blob(path: &Path) -> Result<bool, BlobError> {
 
 /// Publishes a complete, synced temp at `dest` without replacing an existing file.
 /// A valid blob already at `dest` wins and `tmp` is removed.
-fn publish_temp(tmp: &Path, dest: &Path, dir: &Path) -> Result<(), BlobError> {
-    let mut temp = TempPath::try_from_path(tmp).map_err(io_blob)?;
+fn publish_temp(staged_path: &Path, dest: &Path, dir: &Path) -> Result<(), BlobError> {
+    let mut temp_guard = TempPath::try_from_path(staged_path).map_err(io_blob)?;
     let removed = loop {
-        let PathPersistError { error, path } = match temp.persist_noclobber(dest) {
+        let PathPersistError { error, path } = match temp_guard.persist_noclobber(dest) {
             Ok(()) => break Ok(()),
             Err(failed) => failed,
         };
@@ -133,7 +140,7 @@ fn publish_temp(tmp: &Path, dest: &Path, dir: &Path) -> Result<(), BlobError> {
         if existing_blob(dest)? {
             break path.close().map_err(io_blob);
         }
-        temp = path;
+        temp_guard = path;
     };
     sync_dir(dir)?;
     removed
@@ -157,15 +164,13 @@ fn sync_dir(dir: &Path) -> Result<(), BlobError> {
 ///
 /// # Errors
 /// Returns [`BlobError::Gone`], [`BlobError::NotFound`], or [`BlobError::Io`].
-pub fn read(session_dir: &Path, id: &BlobId) -> Result<Vec<u8>, BlobError> {
+pub(crate) fn read(session_dir: &Path, id: &BlobId) -> Result<Vec<u8>, BlobError> {
     let path = session_dir.join("blobs").join(id.to_string());
     match fs::read(&path) {
         Ok(bytes) => Ok(bytes),
         Err(source) if source.kind() == io::ErrorKind::NotFound => {
             match fs::metadata(session_dir) {
-                Ok(_) => Err(BlobError::NotFound {
-                    hex: id.to_string().into(),
-                }),
+                Ok(_) => Err(BlobError::NotFound { id: *id }),
                 Err(session) if session.kind() == io::ErrorKind::NotFound => Err(BlobError::Gone),
                 Err(session) => Err(io_blob(session)),
             }
@@ -182,7 +187,7 @@ pub fn read(session_dir: &Path, id: &BlobId) -> Result<Vec<u8>, BlobError> {
 /// Returns [`BlobError::NotFound`] for a missing digest, [`BlobError::Gone`]
 /// when the source session is absent, [`BlobError::TooLarge`] above the cap,
 /// or [`BlobError::Io`] when a filesystem operation fails.
-pub fn share(
+pub(crate) fn share(
     from: &Path,
     to: &Path,
     ids: impl IntoIterator<Item = BlobId>,
@@ -250,9 +255,7 @@ fn missing_source(from: &Path, id: &BlobId, source: io::Error) -> BlobError {
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     match fs::metadata(session_dir) {
-        Ok(_) => BlobError::NotFound {
-            hex: id.to_string().into(),
-        },
+        Ok(_) => BlobError::NotFound { id: *id },
         Err(session) if session.kind() == io::ErrorKind::NotFound => BlobError::Gone,
         Err(session) => io_blob(session),
     }
@@ -266,7 +269,8 @@ pub(crate) fn io_blob(source: io::Error) -> BlobError {
 
 /// Decodes standard base64, ignoring ASCII whitespace. `None` when the alphabet is wrong.
 #[must_use]
-pub fn decode_base64(text: &str) -> Option<Vec<u8>> {
+#[cfg(test)]
+pub(crate) fn decode_base64(text: &str) -> Option<Vec<u8>> {
     decode_base64_inner(text, Base64Validation::Compatible)
 }
 
@@ -276,6 +280,7 @@ fn decode_base64_strict(text: &str) -> Option<Vec<u8>> {
 
 #[derive(Clone, Copy)]
 enum Base64Validation {
+    #[cfg(test)]
     Compatible,
     Strict,
 }
@@ -332,13 +337,15 @@ fn decode_base64_inner(text: &str, validation: Base64Validation) -> Option<Vec<u
 
 /// Collects blob digests named by a record's parts.
 #[must_use]
-pub fn named_blobs(record: &dal_core::Record) -> Vec<BlobId> {
+pub(crate) fn named_blobs(record: &dal_core::Record) -> Vec<BlobId> {
     let mut ids = Vec::new();
     let Some(entry) = record.entry() else {
         return ids;
     };
     match &entry.kind {
-        dal_core::EntryKind::User { parts } | dal_core::EntryKind::ToolResult { parts, .. } => {
+        dal_core::EntryKind::User { parts }
+        | dal_core::EntryKind::ToolResult { parts, .. }
+        | dal_core::EntryKind::Compaction { parts, .. } => {
             for part in parts {
                 push_part(part, &mut ids);
             }
@@ -374,11 +381,12 @@ pub(crate) fn prepare_record(record: &mut dal_core::Record) -> Result<Vec<Pendin
     Ok(prepare_parts(parts, images))
 }
 
+#[cfg(test)]
 /// Replaces inline parts at or above [`INLINE_LIMIT`] with blob parts, publishing first.
 ///
 /// # Errors
 /// Returns [`BlobError`] when a spilled value is over the cap or the publish fails.
-pub fn spill_record(record: &mut dal_core::Record, dir: &Path) -> Result<(), BlobError> {
+pub(crate) fn spill_record(record: &mut dal_core::Record, dir: &Path) -> Result<(), BlobError> {
     let Some(parts) = record_parts_mut(record) else {
         return Ok(());
     };
@@ -391,6 +399,12 @@ pub fn spill_record(record: &mut dal_core::Record, dir: &Path) -> Result<(), Blo
 fn record_parts_mut(record: &mut dal_core::Record) -> Option<&mut [dal_core::JournalPart]> {
     let entry = match record {
         dal_core::Record::User(entry) | dal_core::Record::ToolResult(entry) => entry,
+        dal_core::Record::Compaction(entry) => {
+            return match &mut entry.kind {
+                dal_core::EntryKind::Compaction { parts, .. } => Some(parts.as_mut_slice()),
+                _ => None,
+            };
+        }
         _ => return None,
     };
     match &mut entry.kind {
@@ -458,6 +472,7 @@ fn prepare_parts(
     pending
 }
 
+#[cfg(test)]
 fn spill_part(part: &mut dal_core::JournalPart, dir: &Path) -> Result<(), BlobError> {
     let (id, length) = match part {
         dal_core::JournalPart::Text { text } => {
@@ -544,7 +559,7 @@ mod tests {
                 ));
                 match fs::create_dir(&path) {
                     Ok(()) => return Self(path),
-                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
                     Err(error) => panic!("create test directory: {error}"),
                 }
             }
@@ -709,15 +724,15 @@ mod tests {
         let dest = blobs.join(id.to_string());
         let winner = b"racing writer's bytes";
         fs::write(&dest, winner).expect("seed racing winner");
-        let (tmp, mut file) = create_temp(&blobs).expect("create copy temp");
+        let (staged_file, mut file) = create_temp(&blobs).expect("create copy temp");
         file.write_all(b"copied bytes").expect("write copy temp");
         file.sync_all().expect("sync copy temp");
         drop(file);
 
-        publish_temp(&tmp, &dest, &blobs).expect("existing digest counts as published");
+        publish_temp(&staged_file, &dest, &blobs).expect("existing digest counts as published");
 
         assert_eq!(fs::read(&dest).expect("read winner"), winner);
-        assert!(!tmp.exists());
+        assert!(!staged_file.exists());
         assert_eq!(fs::read_dir(&blobs).expect("read blobs").count(), 1);
     }
 
@@ -765,7 +780,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(BlobError::NotFound { hex }) if hex.as_ref() == id.to_string()
+            Err(BlobError::NotFound { id: found }) if found == id
         ));
         assert_eq!(fs::read_dir(&to).expect("read target").count(), 0);
     }
@@ -791,7 +806,7 @@ mod tests {
 
         assert!(matches!(
             read(&session, &id),
-            Err(BlobError::NotFound { hex }) if hex.as_ref() == id.to_string()
+            Err(BlobError::NotFound { id: found }) if found == id
         ));
         fs::remove_dir_all(&session).expect("delete session");
         assert!(matches!(read(&session, &id), Err(BlobError::Gone)));
@@ -951,7 +966,7 @@ mod tests {
         fs::remove_file(to.join(id.to_string())).expect("remove shared pdf");
         assert!(matches!(
             read(&target_session, &id),
-            Err(BlobError::NotFound { hex }) if hex.as_ref() == id.to_string()
+            Err(BlobError::NotFound { id: found }) if found == id
         ));
         fs::remove_dir_all(&target_session).expect("delete target session");
         assert!(matches!(read(&target_session, &id), Err(BlobError::Gone)));

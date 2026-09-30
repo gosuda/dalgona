@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     error::StoreError,
+    layout::SessionPaths,
     util::{self, FileMode},
 };
 
@@ -207,7 +208,7 @@ impl Listing {
             .filter(|session| session.info.name.as_deref() == Some(arg))
             .collect();
         if !exact.is_empty() {
-            return unique_match(arg, exact);
+            return unique_match(arg, &exact);
         }
 
         if (4..=36).contains(&arg.len())
@@ -220,7 +221,7 @@ impl Listing {
                 .filter(|session| session.id_text.starts_with(arg))
                 .collect();
             if !prefixed.is_empty() {
-                return unique_match(arg, prefixed);
+                return unique_match(arg, &prefixed);
             }
         }
 
@@ -267,7 +268,7 @@ impl Listing {
             && facts.id == id
             && facts.workspace == *workspace
         {
-            return Ok(to_session_info(facts, journal_mtime)?);
+            return to_session_info(facts, journal_mtime);
         }
 
         let facts = match read_cache(&session_dir.join("info.json"), id, workspace, journal_bytes) {
@@ -281,10 +282,49 @@ impl Listing {
                 // The durable cache has no update sequence; only the active session knows it.
                 last_seq: None,
             },
-            None => scan_journal(&journal_path, id, workspace)?,
+            None => scan_journal(&journal_path, id, workspace),
         };
         self.remember(&journal_path, journal_bytes, journal_mtime, facts.clone());
         to_session_info(facts, journal_mtime)
+    }
+
+    /// Publishes the info cache from already-decoded open records without rescanning the file.
+    ///
+    /// The open pass decoded every record once; folding the same facts from that result keeps
+    /// one decode per open. Callers without decoded records keep using `read_info`.
+    pub(crate) fn refresh_from_records(
+        &self,
+        paths: &SessionPaths,
+        id: SessionId,
+        workspace: &Workspace,
+        records: &[Record],
+        journal_bytes: u64,
+    ) {
+        let journal_path = paths.journal();
+        let mut fold = FactFold::new();
+        for record in records {
+            fold.observe(record, id, workspace, &journal_path);
+        }
+        let facts = fold.finish(id, workspace);
+        let mtime = match fs::metadata(&journal_path).and_then(|metadata| metadata.modified()) {
+            Ok(mtime) => mtime,
+            Err(error) => {
+                tracing::warn!(target: "dalgon.store", %error, "could not stat journal for info cache");
+                return;
+            }
+        };
+        let info = match to_session_info(facts.clone(), mtime) {
+            Ok(info) => info,
+            Err(error) => {
+                tracing::warn!(target: "dalgon.store", %error, "could not read session info for cache update");
+                return;
+            }
+        };
+        if let Err(error) = self.write_info(paths, &info, journal_bytes) {
+            tracing::warn!(target: "dalgon.store", %error, "could not write session info cache");
+            return;
+        }
+        self.remember(&journal_path, journal_bytes, mtime, facts);
     }
 
     /// Writes the exact durable info-cache shape and updates this instance's cache.
@@ -296,11 +336,11 @@ impl Listing {
     /// an I/O error if the journal cannot be statted or `info.json` cannot be published.
     pub(crate) fn write_info(
         &self,
-        session_dir: &Path,
+        paths: &SessionPaths,
         info: &SessionInfo,
         journal_bytes: u64,
     ) -> Result<(), StoreError> {
-        let journal_path = session_dir.join("journal.jsonl");
+        let journal_path = paths.journal();
         let metadata =
             fs::metadata(&journal_path).map_err(|source| util::io_err(&journal_path, source))?;
         if metadata.len() != journal_bytes {
@@ -330,7 +370,7 @@ impl Listing {
                 reason: format!("could not encode session info cache: {error}").into(),
             })?
             .into_bytes();
-        let info_path = session_dir.join("info.json");
+        let info_path = paths.info();
         util::write_atomic(&info_path, &bytes, FileMode::Mode0600)?;
         let facts = Facts {
             id: info.id,
@@ -369,7 +409,7 @@ impl Listing {
             {
                 return Err(StoreError::NameTaken {
                     name: normalized,
-                    id: session.info.id.to_string().into(),
+                    id: session.info.id,
                 });
             }
         }
@@ -515,54 +555,85 @@ fn read_cache(
         .then_some(info)
 }
 
-fn scan_journal(path: &Path, id: SessionId, workspace: &Workspace) -> Result<Facts, StoreError> {
-    let mut facts = None;
-    let mut first_user_seen = false;
-    let mut header_matches = false;
-    let scan = crate::journal::scan_prefix(path, |_, record| match record {
-        Record::Session(header) => {
-            if header.id != id || header.workspace != *workspace {
-                return;
-            }
-            header_matches = true;
-            facts = Some(Facts {
-                id,
-                workspace: header.workspace,
-                name: None,
-                preview: String::new().into_boxed_str(),
-                created_at: Some(header.at),
-                archived: Some(false),
-                last_seq: None,
-            });
+/// Fold of the listing facts shared by the file scan and the in-memory open path.
+struct FactFold {
+    facts: Option<Facts>,
+    first_user_seen: bool,
+    header_matches: bool,
+}
+
+impl FactFold {
+    fn new() -> Self {
+        Self {
+            facts: None,
+            first_user_seen: false,
+            header_matches: false,
         }
-        Record::Name { name, .. } => {
-            if let Some(facts) = &mut facts {
-                facts.name = name;
-            }
-        }
-        Record::Archive { archived, .. } => {
-            if let Some(facts) = &mut facts {
-                facts.archived = Some(archived);
-            }
-        }
-        Record::User(Entry {
-            kind: EntryKind::User { parts },
-            ..
-        }) if !first_user_seen => {
-            first_user_seen = true;
-            if let Some(facts) = &mut facts {
-                facts.preview = user_preview(path, &parts).into_boxed_str();
-            }
-        }
-        _ => {}
-    });
-    if scan.is_err() || !header_matches {
-        return Ok(damaged_facts(id, workspace));
     }
-    let Some(facts) = facts else {
-        return Ok(damaged_facts(id, workspace));
-    };
-    Ok(facts)
+
+    fn observe(
+        &mut self,
+        record: &Record,
+        id: SessionId,
+        workspace: &Workspace,
+        journal_path: &Path,
+    ) {
+        match record {
+            Record::Session(header) => {
+                if header.id != id || header.workspace != *workspace {
+                    return;
+                }
+                self.header_matches = true;
+                self.facts = Some(Facts {
+                    id,
+                    workspace: header.workspace.clone(),
+                    name: None,
+                    preview: String::new().into_boxed_str(),
+                    created_at: Some(header.at),
+                    archived: Some(false),
+                    last_seq: None,
+                });
+            }
+            Record::Name { name, .. } => {
+                if let Some(facts) = &mut self.facts {
+                    facts.name.clone_from(name);
+                }
+            }
+            Record::Archive { archived, .. } => {
+                if let Some(facts) = &mut self.facts {
+                    facts.archived = Some(*archived);
+                }
+            }
+            Record::User(Entry {
+                kind: EntryKind::User { parts },
+                ..
+            }) if !self.first_user_seen => {
+                self.first_user_seen = true;
+                if let Some(facts) = &mut self.facts {
+                    facts.preview = user_preview(journal_path, parts).into_boxed_str();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn finish(self, id: SessionId, workspace: &Workspace) -> Facts {
+        match self.facts {
+            Some(facts) if self.header_matches => facts,
+            _ => damaged_facts(id, workspace),
+        }
+    }
+}
+
+fn scan_journal(path: &Path, id: SessionId, workspace: &Workspace) -> Facts {
+    let mut fold = FactFold::new();
+    let scan = crate::journal::scan_prefix(path, |_, record| {
+        fold.observe(&record, id, workspace, path);
+    });
+    if scan.is_err() {
+        return damaged_facts(id, workspace);
+    }
+    fold.finish(id, workspace)
 }
 
 fn user_preview(path: &Path, parts: &[JournalPart]) -> String {
@@ -643,7 +714,7 @@ fn parse_cursor(value: &str) -> Result<(i64, String), StoreError> {
     Ok((millis, id.to_string()))
 }
 
-fn unique_match(arg: &str, matches: Vec<&Listed>) -> Result<SessionId, StoreError> {
+fn unique_match(arg: &str, matches: &[&Listed]) -> Result<SessionId, StoreError> {
     if matches.len() == 1 {
         return Ok(matches[0].info.id);
     }

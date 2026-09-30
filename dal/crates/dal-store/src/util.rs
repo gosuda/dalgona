@@ -35,7 +35,7 @@ const NAME_MAX: usize = 64;
 
 /// The workspace directory name: cleaned base, cut to 32 bytes, plus 12 hex digits.
 #[must_use]
-pub fn workspace_key(path: &Path) -> String {
+pub(crate) fn workspace_key(path: &Path) -> String {
     let base = path
         .file_name()
         .map_or(&b""[..], |name| name.as_encoded_bytes());
@@ -72,6 +72,23 @@ pub(crate) fn with_mode(options: &mut OpenOptions, mode: u32) {
 #[cfg(not(unix))]
 pub(crate) fn with_mode(options: &mut OpenOptions, mode: u32) {
     let _ = (options, mode);
+}
+/// Creates `path` and its parents with owner-only permissions on Unix.
+///
+/// Existing directories are left unchanged. On other platforms, directory permissions follow
+/// the platform defaults.
+///
+/// # Errors
+/// Returns an I/O error when a directory cannot be created.
+pub fn create_private_dir_all(path: &Path) -> io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        let _ = builder.mode(0o700);
+    }
+    builder.create(path)
 }
 
 /// Writes `bytes` to a temp file, syncs it, renames it over `path`, and syncs the directory.
@@ -207,7 +224,7 @@ pub(crate) fn io_err(path: &Path, source: io::Error) -> StoreError {
 /// # Errors
 /// Returns [`StoreError::InvalidName`] when the normalized name is empty, too
 /// long, contains a control character, or is only `0-9a-f-`.
-pub fn normalize_name(raw: &str) -> Result<Box<str>, StoreError> {
+pub(crate) fn normalize_name(raw: &str) -> Result<Box<str>, StoreError> {
     let trimmed = raw.trim();
     let mut out = String::new();
     let mut breaking = false;
@@ -273,6 +290,26 @@ mod tests {
             entries
                 .iter()
                 .all(|name| !name.to_string_lossy().contains(".tmp-"))
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn directory_tree_is_created_with_private_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new();
+        let path = temp.0.join("sessions").join("workspace").join("session");
+
+        create_private_dir_all(&path).expect("create private session tree");
+
+        assert!(path.is_dir());
+        assert_eq!(
+            fs::metadata(path)
+                .expect("stat session directory")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
         );
     }
 
@@ -468,11 +505,22 @@ mod tests {
             normalize_name("0192-abcd"),
             Err(StoreError::InvalidName)
         ));
-        assert_eq!(normalize_name(" CAFE ").expect("uppercase name"), "CAFE");
-        assert_eq!(normalize_name("Cafe").expect("mixed-case name"), "Cafe");
-        assert_eq!(normalize_name("café").expect("non-ASCII name"), "café");
         assert_eq!(
-            normalize_name("  a\r\n\nb  ").expect("collapsed line-break run"),
+            normalize_name(" CAFE ").expect("uppercase name").as_ref(),
+            "CAFE"
+        );
+        assert_eq!(
+            normalize_name("Cafe").expect("mixed-case name").as_ref(),
+            "Cafe"
+        );
+        assert_eq!(
+            normalize_name("café").expect("non-ASCII name").as_ref(),
+            "café"
+        );
+        assert_eq!(
+            normalize_name("  a\r\n\nb  ")
+                .expect("collapsed line-break run")
+                .as_ref(),
             "a b"
         );
         assert!(matches!(

@@ -1,17 +1,254 @@
 [package]
-name = "dalgona-gates"
+name = "gates"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license-file.workspace = true
 repository.workspace = true
+description = "Unpublished success-criterion tests for Dalgona."
 publish = false
 autobins = false
 autoexamples = false
 autobenches = false
 autotests = false
 
-[lib]
+[dev-dependencies]
+dalgon = "=0.1.0"
+dalgona = { path = "../crates/dalgona" }
+dalgona-batteries = { path = "../crates/dalgona-batteries" }
+dal-agent = "=0.1.0"
+dal-core = "=0.1.0"
+dal-provider = "=0.1.0"
+dal-tui = "=0.1.0"
+dal-wire = "=0.1.0"
+tokio = { version = "=1.53.1", features = ["macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+uuid = { version = "=1.26.1", features = ["v7"] }
+proptest = "=1.11.0"
+
+
+[[test]]
+name = "dalgona-release-01"
+path = "tests/dalgona-release-01.rs"
+
+[[test]]
+name = "dalgona-release-02"
+path = "tests/dalgona-release-02.rs"
+
+[[test]]
+name = "dalgona-release-03"
+path = "tests/dalgona-release-03.rs"
+
+[[test]]
+name = "dalgona-release-04"
+path = "tests/dalgona-release-04.rs"
+
+[[test]]
+name = "dalgona-release-05"
+path = "tests/dalgona-release-05.rs"
+
+[[test]]
+name = "dalgona-boot-01"
+path = "tests/dalgona-boot-01.rs"
+
+[[test]]
+name = "dalgona-boot-02"
+path = "tests/dalgona-boot-02.rs"
+
+[[test]]
+name = "dalgona-boot-03"
+path = "tests/dalgona-boot-03.rs"
+
+[[test]]
+name = "dalgona-boot-04"
+path = "tests/dalgona-boot-04.rs"
+
+[[test]]
+name = "dalgona-boot-05"
+path = "tests/dalgona-boot-05.rs"
+
+[[test]]
+name = "dalgona-boot-06"
+path = "tests/dalgona-boot-06.rs"
+
+[[test]]
+name = "dalgona-boot-07"
+path = "tests/dalgona-boot-07.rs"
+
+[[test]]
+name = "dalgona-boot-08"
+path = "tests/dalgona-boot-08.rs"
+
+[[test]]
+name = "dalgona-boot-09"
+path = "tests/dalgona-boot-09.rs"
+
+[[test]]
+name = "dalgona-boot-10"
+path = "tests/dalgona-boot-10.rs"
+
+[[test]]
+name = "dalgona-boot-11"
+path = "tests/dalgona-boot-11.rs"
+
+[[test]]
+name = "dalgona-batteries-17"
+path = "tests/dalgona-batteries-17.rs"
+
+[[test]]
+name = "dalgona-batteries-18"
+path = "tests/dalgona-batteries-18.rs"
+
+[[test]]
+name = "dalgona-batteries-01"
+path = "tests/dalgona-batteries-01.rs"
+
+[[test]]
+name = "dalgona-batteries-02"
+path = "tests/dalgona-batteries-02.rs"
+
+[[test]]
+name = "dalgona-batteries-03"
+path = "tests/dalgona-batteries-03.rs"
+
+[[test]]
+name = "dalgona-batteries-04"
+path = "tests/dalgona-batteries-04.rs"
+
+[[test]]
+name = "dalgona-batteries-05"
+path = "tests/dalgona-batteries-05.rs"
+
+[[test]]
+name = "dalgona-batteries-06"
+path = "tests/dalgona-batteries-06.rs"
+
+[[test]]
+name = "dalgona-batteries-07"
+path = "tests/dalgona-batteries-07.rs"
+
+[[test]]
+name = "dalgona-batteries-08"
+path = "tests/dalgona-batteries-08.rs"
+
+[[test]]
+name = "dalgona-batteries-09"
+path = "tests/dalgona-batteries-09.rs"
+
+[[test]]
+name = "dalgona-batteries-10"
+path = "tests/dalgona-batteries-10.rs"
+
+[[test]]
+name = "dalgona-batteries-11"
+path = "tests/dalgona-batteries-11.rs"
+
+[[test]]
+name = "dalgona-batteries-12"
+path = "tests/dalgona-batteries-12.rs"
+
+[[test]]
+name = "dalgona-batteries-13"
+path = "tests/dalgona-batteries-13.rs"
+
+[[test]]
+name = "dalgona-batteries-14"
+path = "tests/dalgona-batteries-14.rs"
+
+[[test]]
+name = "dalgona-batteries-15"
+path = "tests/dalgona-batteries-15.rs"
+
+[[test]]
+name = "dalgona-batteries-16"
+path = "tests/dalgona-batteries-16.rs"
+
+[[test]]
+name = "dalgona-release-06"
+path = "tests/dalgona-release-06.rs"
+
+[[test]]
+name = "dalgona-release-07"
+path = "tests/dalgona-release-07.rs"
+
+[[test]]
+name = "dalgona-release-08"
+path = "tests/dalgona-release-08.rs"
+
+[[test]]
+name = "dalgona-release-09"
+path = "tests/dalgona-release-09.rs"
+
+[[test]]
+name = "dalgona-release-10"
+path = "tests/dalgona-release-10.rs"
+
+[[test]]
+name = "dalgona-release-11"
+path = "tests/dalgona-release-11.rs"
+
+[[test]]
+name = "dalgona-release-12"
+path = "tests/dalgona-release-12.rs"
+
+[[test]]
+name = "dalgona-release-13"
+path = "tests/dalgona-release-13.rs"
+
+[[test]]
+name = "dalgona-release-14"
+path = "tests/dalgona-release-14.rs"
+
+[[test]]
+name = "dalgona-release-15"
+path = "tests/dalgona-release-15.rs"
+
+[[test]]
+name = "dalgona-release-16"
+path = "tests/dalgona-release-16.rs"
+
+[[test]]
+name = "dalgona-release-17"
+path = "tests/dalgona-release-17.rs"
+
+[[test]]
+name = "dalgona-release-18"
+path = "tests/dalgona-release-18.rs"
+
+[[test]]
+name = "dalgona-release-19"
+path = "tests/dalgona-release-19.rs"
+
+[[test]]
+name = "dalgona-release-20"
+path = "tests/dalgona-release-20.rs"
+[[test]]
+name = "dalgona-orchestration-01"
+path = "tests/dalgona-orchestration-01.rs"
+
+[[test]]
+name = "dalgona-orchestration-02"
+path = "tests/dalgona-orchestration-02.rs"
+
+[[test]]
+name = "dalgona-orchestration-03"
+path = "tests/dalgona-orchestration-03.rs"
+
+[[test]]
+name = "dalgona-orchestration-04"
+path = "tests/dalgona-orchestration-04.rs"
+
+[[test]]
+name = "dalgona-orchestration-05"
+path = "tests/dalgona-orchestration-05.rs"
+
+[[test]]
+name = "dalgona-orchestration-06"
+path = "tests/dalgona-orchestration-06.rs"
+
+[[test]]
+name = "dalgona-orchestration-07"
+path = "tests/dalgona-orchestration-07.rs"
+
 
 [lints]
 workspace = true

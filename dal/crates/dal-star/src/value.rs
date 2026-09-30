@@ -13,10 +13,12 @@ use std::collections::BTreeSet;
 
 use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use starlark::values::{
-    dict::DictRef, list::ListRef, tuple::TupleRef, Heap, Value as StarlarkValue, ValueLike,
+    Heap, Value as StarlarkValue, ValueLike, dict::DictRef, list::ListRef, tuple::TupleRef,
 };
 
-use crate::record::{is_missing, revision_of, Array, Record};
+use allocative::Allocative;
+
+use crate::record::{Array, Record, is_missing, revision_of};
 
 /// Maximum container nesting accepted on either direction of the codec.
 pub(crate) const MAX_VALUE_DEPTH: usize = 64;
@@ -30,7 +32,7 @@ const INT_LIMIT: i64 = (1 << 53) - 1;
 /// Integer values keep machine precision (signed 53-bit), objects preserve
 /// document order with unique keys, and nothing host-side appears here: no
 /// functions, records-as-host-types, or provider handles cross as data.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Allocative)]
 pub(crate) enum Value {
     /// `NoneType`.
     Null,
@@ -63,6 +65,17 @@ pub(crate) enum CodecError {
 }
 
 impl Value {
+    /// Builds an object from named fields in order; the names must be
+    /// distinct.
+    pub(crate) fn object(fields: impl IntoIterator<Item = (&'static str, Value)>) -> Self {
+        Self::Object(
+            fields
+                .into_iter()
+                .map(|(key, item)| (Box::from(key), item))
+                .collect(),
+        )
+    }
+
     /// Decodes JSON text into the transport form under §R05 bounds.
     pub(crate) fn decode(text: &str) -> Result<Self, CodecError> {
         if text.len() > MAX_DATA {
@@ -70,8 +83,7 @@ impl Value {
                 "payload exceeds {MAX_DATA} bytes"
             )));
         }
-        let value: Value =
-            sonic_rs::from_str(text).map_err(|e| CodecError::Json(e.to_string()))?;
+        let value: Value = sonic_rs::from_str(text).map_err(|e| CodecError::Json(e.to_string()))?;
         value.check_depth(0)?;
         Ok(value)
     }
@@ -89,14 +101,14 @@ impl Value {
         let children: &[Value] = match self {
             Self::List(items) => items,
             Self::Object(fields) => {
-                for (_, item) in fields.iter() {
+                for (_, item) in fields {
                     item.check_depth(depth + 1)?;
                 }
                 return Ok(());
             }
             _ => return Ok(()),
         };
-        for item in children.iter() {
+        for item in children {
             item.check_depth(depth + 1)?;
         }
         Ok(())
@@ -129,7 +141,7 @@ impl Value {
             Self::Bool(flag) => out.push_str(if *flag { "true" } else { "false" }),
             Self::Int(number) => out.push_str(&number.to_string()),
             Self::Num(number) => {
-                out.push_str(&sonic_rs::to_string(number).unwrap_or_default())
+                out.push_str(&sonic_rs::to_string(number).unwrap_or_default());
             }
             Self::Str(text) => out.push_str(&sonic_rs::to_string(text).unwrap_or_default()),
             Self::List(items) => {
@@ -158,14 +170,11 @@ impl Value {
     }
 
     /// Allocates the transport form onto `heap` as immutable records/arrays.
-    pub(crate) fn into_starlark<'v>(
-        self,
-        heap: Heap<'v>,
-    ) -> Result<StarlarkValue<'v>, CodecError> {
+    pub(crate) fn into_starlark(self, heap: Heap<'_>) -> Result<StarlarkValue<'_>, CodecError> {
         self.alloc(heap, 0)
     }
 
-    fn alloc<'v>(self, heap: Heap<'v>, depth: usize) -> Result<StarlarkValue<'v>, CodecError> {
+    fn alloc(self, heap: Heap<'_>, depth: usize) -> Result<StarlarkValue<'_>, CodecError> {
         if depth > MAX_VALUE_DEPTH {
             return Err(CodecError::Invalid(format!(
                 "value nests deeper than {MAX_VALUE_DEPTH}"
@@ -182,15 +191,14 @@ impl Value {
                 for item in items.into_vec() {
                     values.push(item.alloc(heap, depth + 1)?);
                 }
-                Ok(Array::new(heap, values))
+                Ok(Array::alloc(heap, values))
             }
             Self::Object(fields) => {
                 let mut pairs = Vec::with_capacity(fields.len());
                 for (key, item) in fields.into_vec() {
                     pairs.push((key.into_string(), item.alloc(heap, depth + 1)?));
                 }
-                Record::new(heap, pairs)
-                    .map_err(|e| CodecError::Invalid(e.to_string()))
+                Record::alloc(heap, pairs).map_err(|e| CodecError::Invalid(e.to_string()))
             }
         }
     }
@@ -228,9 +236,9 @@ impl Value {
                 return Ok(Self::Int(i64::from(small)));
             }
             let text = value.to_str();
-            let number = text.parse::<i64>().map_err(|_| {
-                CodecError::Invalid("integer out of i64 range".into())
-            })?;
+            let number = text
+                .parse::<i64>()
+                .map_err(|_| CodecError::Invalid("integer out of i64 range".into()))?;
             return Self::integer(number);
         }
         if let Some(float) =
@@ -282,10 +290,7 @@ impl Value {
             let mut fields = Vec::with_capacity(dict.len());
             for (key, item) in dict.iter() {
                 let name = key.unpack_str().ok_or_else(|| {
-                    CodecError::UnsupportedType(format!(
-                        "dict key of type {}",
-                        key.get_type()
-                    ))
+                    CodecError::UnsupportedType(format!("dict key of type {}", key.get_type()))
                 })?;
                 fields.push((name.into(), Self::encode(item, depth + 1)?));
             }
@@ -319,8 +324,8 @@ impl<'de> Visitor<'de> for ValueVisitor {
     where
         E: de::Error,
     {
-        let signed = i64::try_from(number)
-            .map_err(|_| E::custom("integer exceeds signed 53-bit range"))?;
+        let signed =
+            i64::try_from(number).map_err(|_| E::custom("integer exceeds signed 53-bit range"))?;
         Value::integer(signed).map_err(|e| E::custom(e.to_string()))
     }
 

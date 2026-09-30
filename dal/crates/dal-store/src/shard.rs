@@ -224,7 +224,7 @@ impl Future for Enqueue {
 
         if let Some((_, waker)) = state.waiters.iter_mut().find(|(id, _)| *id == waiter) {
             if !waker.will_wake(context.waker()) {
-                *waker = context.waker().clone();
+                waker.clone_from(context.waker());
             }
         } else {
             state.waiters.push_back((waiter, context.waker().clone()));
@@ -584,6 +584,10 @@ impl Drop for WorkerStopped {
 }
 
 /// The worker-local slot table is the sole owner of this shard's journals.
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "the shard thread owns its queue for its lifetime"
+)]
 fn run(queue: Arc<Queue>) {
     let mut journals: Vec<Option<(Journal, Option<PathBuf>)>> = Vec::new();
     let mut free = Vec::new();
@@ -866,7 +870,7 @@ mod tests {
             session,
             &path,
             &Faults {
-                fail_write_after: Some(1),
+                write_after_bytes: Some(1),
                 ..Faults::default()
             },
         )
@@ -891,7 +895,7 @@ mod tests {
         let path = temp.file(0);
         let mut journal = journal(&path, &Faults::default());
         journal.set_faults(Faults {
-            fail_sync: true,
+            sync_error: true,
             ..Faults::default()
         });
         let mut lane = shards
@@ -910,6 +914,10 @@ mod tests {
         assert!(fs::read(path).unwrap().is_empty());
     }
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the backpressure test joins every spawned append before asserting"
+    )]
     #[tokio::test]
     async fn cancelled_admission_is_not_queued_and_queued_batch_can_settle() {
         let temp = TempDir::new();
@@ -931,7 +939,7 @@ mod tests {
 
         let mut in_flight = Vec::with_capacity(QUEUE_CAPACITY);
         for (index, mut lane) in lanes.drain(..QUEUE_CAPACITY).enumerate() {
-            in_flight.push(tokio::spawn(async move {
+            in_flight.push(tokio::task::spawn(async move {
                 let receipt = lane.append(b"x\n".to_vec(), Vec::new()).await.unwrap();
                 (index, receipt)
             }));

@@ -30,6 +30,14 @@ pub const MAX_DESC_CHARS: usize = 4096;
 /// TAB advance quantum in glyph cells.
 pub const TAB_STOP: u32 = 4;
 
+/// Whether `ch` occupies no terminal columns in the pinned Unicode width table.
+///
+/// This is the shared zero-cell classification for glyph and history layout.
+#[must_use]
+pub fn is_zero_width(ch: char) -> bool {
+    UnicodeWidthChar::width(ch) == Some(0)
+}
+
 /// A rendered image: deterministic PNG bytes plus its geometry.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Image {
@@ -517,13 +525,21 @@ mod tests {
     use proptest::prelude::*;
 
     use super::oracle::{decode_png, embedded_font};
-    use super::{DrawOutcome, draw};
+    use super::{DrawOutcome, draw, is_zero_width};
 
     fn is_white(bits: &[u8], width: u32, x: u32, y: u32) -> bool {
         let row_bytes = usize::try_from(width.div_ceil(8)).unwrap();
         let index = usize::try_from(y).unwrap() * row_bytes + usize::try_from(x).unwrap() / 8;
         let byte = bits.get(index).copied().unwrap_or(0xFF);
         byte & (0x80 >> (x % 8)) != 0
+    }
+
+    #[test]
+    fn zero_width_classifier_handles_combining_and_format_characters() {
+        assert_eq!(
+            ['\u{0301}', '\u{200D}', '\u{FE0F}', 'A'].map(is_zero_width),
+            [true, true, true, false]
+        );
     }
 
     #[test]

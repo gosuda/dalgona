@@ -15,3 +15,231 @@ autotests = false
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+dal-core = { path = "../crates/dal-core" }
+dal-store = { path = "../crates/dal-store" }
+dal-provider = { path = "../crates/dal-provider" }
+dal-agent = { path = "../crates/dal-agent" }
+dal-tools = { path = "../crates/dal-tools", features = ["symbols"] }
+dal-ext = { path = "../crates/dal-ext" }
+dal-star = { path = "../crates/dal-star" }
+dal-tui = { path = "../crates/dal-tui" }
+dal-wire = { path = "../crates/dal-wire" }
+dalgon = { path = "../crates/dalgon", default-features = false }
+futures = { workspace = true }
+insta = "=1.48.0"
+proptest = { workspace = true }
+ratatui = "=0.30.2"
+shuttle = "=0.9.4"
+serde = { workspace = true }
+tempfile = { workspace = true }
+sonic-rs = { workspace = true }
+tokio = { workspace = true, features = ["macros", "net", "process", "rt-multi-thread", "sync", "test-util", "time"] }
+tokio-tungstenite = { workspace = true }
+tokio-util = { workspace = true }
+rustix = { workspace = true, features = ["pty", "termios"] }
+unicode-width = { workspace = true }
+
+[[test]]
+name = "loop-headless-01"
+path = "tests/loop-headless-01.rs"
+
+[[test]]
+name = "loop-headless-02"
+path = "tests/loop-headless-02.rs"
+
+[[test]]
+name = "loop-headless-03"
+path = "tests/loop-headless-03.rs"
+
+[[test]]
+name = "loop-headless-04"
+path = "tests/loop-headless-04.rs"
+
+[[test]]
+name = "loop-headless-05"
+path = "tests/loop-headless-05.rs"
+
+[[test]]
+name = "loop-headless-06"
+path = "tests/loop-headless-06.rs"
+
+[[test]]
+name = "loop-headless-07"
+path = "tests/loop-headless-07.rs"
+
+[[test]]
+name = "loop-headless-08"
+path = "tests/loop-headless-08.rs"
+
+[[test]]
+name = "loop-headless-09"
+path = "tests/loop-headless-09.rs"
+
+[[test]]
+name = "loop-tui-01"
+path = "tests/loop-tui-01.rs"
+
+[[test]]
+name = "loop-tui-02"
+path = "tests/loop-tui-02.rs"
+
+[[test]]
+name = "loop-tui-03"
+path = "tests/loop-tui-03.rs"
+
+[[test]]
+name = "loop-tui-04"
+path = "tests/loop-tui-04.rs"
+
+[[test]]
+name = "loop-tui-05"
+path = "tests/loop-tui-05.rs"
+
+[[test]]
+name = "loop-tui-06"
+path = "tests/loop-tui-06.rs"
+
+[[test]]
+name = "loop-tui-07"
+path = "tests/loop-tui-07.rs"
+
+[[test]]
+name = "loop-plugin-01"
+path = "tests/loop-plugin-01.rs"
+
+[[test]]
+name = "loop-plugin-02"
+path = "tests/loop-plugin-02.rs"
+
+[[test]]
+name = "loop-plugin-03"
+path = "tests/loop-plugin-03.rs"
+
+[[test]]
+name = "loop-plugin-04"
+path = "tests/loop-plugin-04.rs"
+
+[[test]]
+name = "loop-plugin-05"
+path = "tests/loop-plugin-05.rs"
+
+[[test]]
+name = "loop-plugin-06"
+path = "tests/loop-plugin-06.rs"
+
+[[test]]
+name = "loop-plugin-07"
+path = "tests/loop-plugin-07.rs"
+
+[[test]]
+name = "loop-plugin-08"
+path = "tests/loop-plugin-08.rs"
+
+[[test]]
+name = "loop-plugin-09"
+path = "tests/loop-plugin-09.rs"
+
+[[test]]
+name = "loop-plugin-10"
+path = "tests/loop-plugin-10.rs"
+
+[[test]]
+name = "loop-plugin-11"
+path = "tests/loop-plugin-11.rs"
+
+[[test]]
+name = "loop-plugin-12"
+path = "tests/loop-plugin-12.rs"
+
+[[test]]
+name = "loop-plugin-13"
+path = "tests/loop-plugin-13.rs"
+
+[[test]]
+name = "wires-01"
+path = "tests/wires-01.rs"
+
+[[test]]
+name = "wires-02"
+path = "tests/wires-02.rs"
+
+[[test]]
+name = "wires-03"
+path = "tests/wires-03.rs"
+
+[[test]]
+name = "wires-04"
+path = "tests/wires-04.rs"
+
+[[test]]
+name = "wires-05"
+path = "tests/wires-05.rs"
+
+[[test]]
+name = "wires-06"
+path = "tests/wires-06.rs"
+
+[[test]]
+name = "wires-07"
+path = "tests/wires-07.rs"
+
+[[test]]
+name = "wires-08"
+path = "tests/wires-08.rs"
+
+[[test]]
+name = "dal-full-02"
+path = "tests/dal-full-02.rs"
+
+[[test]]
+name = "dal-full-03"
+path = "tests/dal-full-03.rs"
+
+[[test]]
+name = "dal-full-04"
+path = "tests/dal-full-04.rs"
+
+[[test]]
+name = "dal-full-05"
+path = "tests/dal-full-05.rs"
+
+[[test]]
+name = "dal-full-06"
+path = "tests/dal-full-06.rs"
+
+[[test]]
+name = "dal-full-07"
+path = "tests/dal-full-07.rs"
+
+[[test]]
+name = "dal-full-08"
+path = "tests/dal-full-08.rs"
+
+[[test]]
+name = "dal-full-09"
+path = "tests/dal-full-09.rs"
+
+[[test]]
+name = "release_publish_order"
+path = "tests/release_publish_order.rs"
+
+[[test]]
+name = "release_guards"
+path = "tests/release_guards.rs"
+
+[[test]]
+name = "release_semver"
+path = "tests/release_semver.rs"
+
+[[test]]
+name = "release_dist"
+path = "tests/release_dist.rs"
+[[test]]
+name = "loop-tui-08"
+path = "tests/loop-tui-08.rs"
+
+[[test]]
+name = "dal-full-01"
+path = "tests/dal-full-01.rs"

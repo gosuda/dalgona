@@ -67,6 +67,22 @@ pub struct SessionInfo {
     pub last_seq: Option<Seq>,
 }
 
+/// One row of a session listing: identity plus picker counts.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSummary {
+    /// The session's identity.
+    pub id: SessionId,
+    /// Its optional display name.
+    pub name: Option<Box<str>>,
+    /// The number of messages on the visible leaf path.
+    pub message_count: u64,
+    /// The session's latest update time.
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
+    pub updated_at: jiff::Timestamp,
+}
+
 /// The current lifecycle state of a session turn.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

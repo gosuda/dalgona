@@ -35,7 +35,7 @@ pub struct RepeatCfg {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct Fire {
     turn: TurnId,
-    entry: EntryId,
+    entry: Option<EntryId>,
 }
 
 /// Per-session record of each rule's newest visible reminder.
@@ -84,7 +84,7 @@ impl Gate {
             return true;
         };
         if cfg.mode != RepeatMode::AfterGap {
-            return false;
+            return last.entry.is_none() && last.turn != turn;
         }
 
         turn.get()
@@ -94,17 +94,38 @@ impl Gate {
 
     /// Records a durably journaled reminder as visible for `name` in `turn`.
     ///
-    /// Record a committed judged fire even when its judgement passes: the gate
-    /// follows reminder visibility, not the judge verdict. Recording an older
-    /// event cannot replace a newer fire restored from the session snapshot.
+    /// Recording an older event cannot replace a newer fire restored from the
+    /// session snapshot.
     pub fn record(&mut self, name: &str, turn: TurnId, entry: EntryId) {
-        let fire = Fire { turn, entry };
-        if let Some(previous) = self.fires.get_mut(name) {
-            if (fire.turn, fire.entry) > (previous.turn, previous.entry) {
-                *previous = fire;
-            }
-        } else {
+        self.record_fire(
+            name,
+            Fire {
+                turn,
+                entry: Some(entry),
+            },
+        );
+    }
+
+    /// Remembers a report or judged pass for the current turn without claiming
+    /// a visible reminder entry.
+    pub(crate) fn record_turn(&mut self, name: &str, turn: TurnId) {
+        self.record_fire(name, Fire { turn, entry: None });
+    }
+
+    fn record_fire(&mut self, name: &str, fire: Fire) {
+        let Some(previous) = self.fires.get_mut(name) else {
             self.fires.insert(Box::<str>::from(name), fire);
+            return;
+        };
+
+        if fire.turn > previous.turn {
+            previous.turn = fire.turn;
+            if fire.entry.is_some() {
+                previous.entry = fire.entry;
+            }
+        } else if fire.turn == previous.turn && fire.entry.is_some() && fire.entry > previous.entry
+        {
+            previous.entry = fire.entry;
         }
     }
 }
@@ -264,7 +285,7 @@ mod tests {
         let reversed = Gate::restore(&rows.iter().rev().cloned().collect::<Vec<_>>());
         let newest = Fire {
             turn: turn(8),
-            entry: entry(30),
+            entry: Some(entry(30)),
         };
 
         assert_eq!(gate.fires.get("r"), Some(&newest));
@@ -300,6 +321,29 @@ mod tests {
         assert!(!restored.eligible(&rule, turn(5), &once));
     }
 
+    #[test]
+    fn nonvisible_fires_count_for_gap_without_erasing_visible_reminders() {
+        let rule = rule("r", None, None);
+        let once = RepeatCfg {
+            mode: RepeatMode::Once,
+            gap: 2,
+        };
+        let after_gap = RepeatCfg {
+            mode: RepeatMode::AfterGap,
+            gap: 2,
+        };
+        let mut gate = Gate::default();
+        gate.record_turn("r", turn(4));
+
+        assert!(!gate.eligible(&rule, turn(4), &once));
+        assert!(gate.eligible(&rule, turn(5), &once));
+        assert!(!gate.eligible(&rule, turn(5), &after_gap));
+        assert!(gate.eligible(&rule, turn(6), &after_gap));
+
+        gate.record("r", turn(7), entry(12));
+        gate.record_turn("r", turn(8));
+        assert!(!gate.eligible(&rule, turn(9), &once));
+    }
     #[test]
     fn after_gap_is_safe_at_large_turn_ids() {
         let rule = rule("r", None, None);

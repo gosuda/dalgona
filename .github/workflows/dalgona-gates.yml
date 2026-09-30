@@ -1,0 +1,64 @@
+name: dalgona-gates
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  functional:
+    if: github.event_name != 'schedule'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: macos-15-intel, target: x86_64-apple-darwin }
+          - { os: macos-15, target: aarch64-apple-darwin }
+          - { os: windows-2022, target: x86_64-pc-windows-msvc }
+          - { os: windows-11-arm, target: aarch64-pc-windows-msvc }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: dalgona
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - run: cargo test --locked -p gates --test dalgona-boot-01 --test dalgona-boot-02 --test dalgona-boot-03 --test dalgona-boot-04 --test dalgona-boot-05 --test dalgona-boot-06 --test dalgona-boot-07 --test dalgona-boot-08 --test dalgona-boot-09 --test dalgona-boot-10 --test dalgona-boot-11
+      - run: cargo test --locked -p gates --release --test dalgona-orchestration-01 --test dalgona-orchestration-02 --test dalgona-orchestration-03 --test dalgona-orchestration-04 --test dalgona-orchestration-05 --test dalgona-orchestration-06 --test dalgona-orchestration-07
+      - run: cargo test --locked -p gates --test dalgona-batteries-01 --test dalgona-batteries-02 --test dalgona-batteries-03 --test dalgona-batteries-04 --test dalgona-batteries-05 --test dalgona-batteries-06 --test dalgona-batteries-07 --test dalgona-batteries-08 --test dalgona-batteries-09 --test dalgona-batteries-10 --test dalgona-batteries-11 --test dalgona-batteries-12 --test dalgona-batteries-13 --test dalgona-batteries-14 --test dalgona-batteries-15 --test dalgona-batteries-16 --test dalgona-batteries-17 --test dalgona-batteries-18
+      - run: cargo test --locked -p gates --test dalgona-release-01 --test dalgona-release-02 --test dalgona-release-03 --test dalgona-release-04 --test dalgona-release-05 --test dalgona-release-06 --test dalgona-release-07 --test dalgona-release-08 --test dalgona-release-09 --test dalgona-release-10 --test dalgona-release-11 --test dalgona-release-12 --test dalgona-release-13 --test dalgona-release-14 --test dalgona-release-15 --test dalgona-release-16 --test dalgona-release-17 --test dalgona-release-18 --test dalgona-release-19 --test dalgona-release-20
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29
+        with:
+          tool: cargo-deny@0.20.2
+      - run: cargo deny --locked check
+  stress-budgets:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: macos-15-intel, target: x86_64-apple-darwin }
+          - { os: macos-15, target: aarch64-apple-darwin }
+          - { os: windows-2022, target: x86_64-pc-windows-msvc }
+          - { os: windows-11-arm, target: aarch64-pc-windows-msvc }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: dalgona
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - run: cargo test --locked -p gates --release -- stress_ -- --ignored

@@ -5,14 +5,15 @@
 //! [`std::error::Error::to_string`]. Typed failures from lower layers stay
 //! typed: store failures keep their [`StoreError`] and its source chain.
 
-use std::{fmt, io, path::PathBuf};
-
-use dal_core::{
-    Answer, ClientId, Expect, JobId, Question, RequestId, Service, SessionId, TurnId,
-};
-use dal_store::{BlobError, StoreError};
+use std::path::PathBuf;
+use std::{fmt, io};
 
 pub use dal_core::DenyReason;
+use dal_core::{
+    Answer, BlobId, ClientId, ErrorTriple, Expect, JobId, Question, RequestId, Service, SessionId,
+    TurnId,
+};
+use dal_store::{BlobError, StoreError};
 
 /// The number of wake-started turns in a row the core accepts before it
 /// refuses the next wake with [`DenyReason::WakeLimit`].
@@ -262,12 +263,10 @@ impl From<StoreError> for HostError {
     /// Maps a lock held by another process to [`HostError::SessionBusy`] and
     /// keeps every other store failure typed.
     fn from(error: StoreError) -> Self {
-        if let StoreError::Locked { session, pid } = &error
-            && let Ok(id) = SessionId::parse(session)
-        {
-            return Self::SessionBusy { id, pid: *pid };
+        match error {
+            StoreError::Locked { session, pid } => Self::SessionBusy { id: session, pid },
+            error => Self::Store(error),
         }
-        Self::Store(error)
     }
 }
 
@@ -317,6 +316,20 @@ pub enum AgentError {
         /// The closed session.
         id: SessionId,
     },
+    /// A blob digest is absent from the session (`blob.not_found`).
+    #[error("blob {id} was not found in session {session}.")]
+    BlobNotFound {
+        /// The missing digest.
+        id: BlobId,
+        /// The session that was read.
+        session: SessionId,
+    },
+    /// The session directory is gone, so its blobs are unreadable (`session.gone`).
+    #[error("session {session} was deleted.")]
+    SessionGone {
+        /// The deleted session.
+        session: SessionId,
+    },
 }
 
 /// A host service call failed.
@@ -340,6 +353,34 @@ pub enum ServiceError {
         /// The product text.
         message: Box<str>,
     },
+    /// A command handler failed with a typed triple; the dispatcher renders
+    /// it unchanged as the `error { what, why, fix }` reply.
+    #[error("{}: {} ({})", .0.what, .0.why, .0.fix)]
+    Command(ErrorTriple),
+    /// A session tool names a tool that is already registered.
+    #[error("tool \"{name}\" is already registered by \"{held_by}\"")]
+    ToolNameInUse {
+        /// The rejected tool name.
+        name: Box<str>,
+        /// The extension holding the name, or the registering extension when
+        /// the batch repeats it.
+        held_by: Box<str>,
+    },
+    /// An overlay tool names a declaring extension, skill, or server that
+    /// is absent from the current generation.
+    #[error(
+        "tool \"{tool}\" has an invalid MCP declaration for extension \"{plugin}\" skill \"{skill}\": {reason}"
+    )]
+    McpToolDeclaration {
+        /// The rejected mapped tool name.
+        tool: Box<str>,
+        /// The declaring plugin name.
+        plugin: Box<str>,
+        /// The declaring skill name.
+        skill: Box<str>,
+        /// The missing or malformed declaration component.
+        reason: &'static str,
+    },
 }
 
 impl ServiceError {
@@ -355,7 +396,10 @@ impl ServiceError {
     /// A turn operation needs a running turn (`turn.not_running`).
     #[must_use]
     pub fn turn_not_running() -> Self {
-        Self::failed(Some(Service::Turn), "no turn is running; use wake to start one.")
+        Self::failed(
+            Some(Service::Turn),
+            "no turn is running; use wake to start one.",
+        )
     }
 
     /// A sidecar name fails the name rule (`sidecar.bad_name`).
@@ -393,6 +437,17 @@ impl ServiceError {
 /// Renders a [`DenyReason`] from its owned data.
 struct DenyText<'a>(&'a DenyReason);
 
+/// Renders a denial reason as product text for command rejection.
+///
+/// Approval denials minted by the session dispatcher carry complete
+/// `Permission denied ...` text in `OutOfScope.what` and render verbatim;
+/// every other out-of-scope denial keeps the legacy coverture. The core
+/// `DenyReason` vocabulary has no approval-denied variant, so the prefix
+/// is the dispatcher's marker until one lands.
+pub(crate) fn deny_text(reason: &DenyReason) -> String {
+    DenyText(reason).to_string()
+}
+
 impl fmt::Display for DenyText<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.0 {
@@ -405,7 +460,11 @@ impl fmt::Display for DenyText<'_> {
             DenyReason::NoFrontEnd => formatter.write_str("denied: no front end can answer"),
             DenyReason::Unavailable { what } => write!(formatter, "denied: {what} is unavailable"),
             DenyReason::OutOfScope { what } => {
-                write!(formatter, "denied: {what} is outside the approved scope")
+                if what.starts_with("Permission denied") {
+                    formatter.write_str(what)
+                } else {
+                    write!(formatter, "denied: {what} is outside the approved scope")
+                }
             }
             DenyReason::WakeLimit => write!(
                 formatter,
@@ -431,6 +490,15 @@ pub enum SchemeError {
     NotFound {
         /// The full URI.
         uri: Box<str>,
+    },
+    /// The resolver knows the scheme but has no document at the URI, and a
+    /// nearby URI exists for did-you-mean hints.
+    #[error("no document at {uri}")]
+    Near {
+        /// The full URI.
+        uri: Box<str>,
+        /// The nearby URI.
+        nearest: Box<str>,
     },
     /// The resolver failed. The message is the complete product text.
     #[error("{message}")]
@@ -476,14 +544,30 @@ pub enum ToolError {
     /// A scheme read failed.
     #[error(transparent)]
     Scheme(#[from] SchemeError),
+    /// A tool or handler returned exact user-facing error text.
+    #[error("{message}")]
+    Message {
+        /// The exact text to show.
+        message: Box<str>,
+    },
     /// The tool's own operation failed. The display text is the tool's text.
     #[error(transparent)]
     Failed(Box<dyn std::error::Error + Send + Sync + 'static>),
 }
+impl ToolError {
+    /// Creates a tool error with exact model-visible text.
+    #[must_use]
+    pub fn message(message: impl Into<Box<str>>) -> Self {
+        Self::Message {
+            message: message.into(),
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
-    use std::{error::Error as _, num::NonZeroU64};
+    use std::error::Error as _;
+    use std::num::NonZeroU64;
 
     use super::*;
 
@@ -622,7 +706,7 @@ mod tests {
     fn store_lock_becomes_session_busy_and_other_failures_stay_typed() {
         let id = SessionId::new_v7();
         let locked = HostError::from(StoreError::Locked {
-            session: id.to_string().into(),
+            session: id,
             pid: Some(7),
         });
         assert!(matches!(
@@ -668,14 +752,31 @@ mod tests {
     #[test]
     fn scheme_errors_keep_store_text_and_type() {
         let blob = SchemeError::from(BlobError::Gone);
-        assert!(matches!(blob, SchemeError::Store(StoreError::Blob(BlobError::Gone))));
-        assert_eq!(blob.to_string(), "the session was deleted, so its blobs are gone");
+        assert!(matches!(
+            blob,
+            SchemeError::Store(StoreError::Blob(BlobError::Gone))
+        ));
+        assert_eq!(
+            blob.to_string(),
+            "the session was deleted, so its blobs are gone"
+        );
 
         let tool = ToolError::from(SchemeError::Unknown {
             scheme: "foo".into(),
         });
         assert_eq!(tool.to_string(), "unknown scheme foo");
-        assert!(matches!(tool, ToolError::Scheme(SchemeError::Unknown { .. })));
+        assert!(matches!(
+            tool,
+            ToolError::Scheme(SchemeError::Unknown { .. })
+        ));
+    }
+
+    #[test]
+    fn tool_message_preserves_exact_handler_text() {
+        assert_eq!(
+            ToolError::message("tool failed: exact").to_string(),
+            "tool failed: exact"
+        );
     }
 
     #[test]
@@ -691,6 +792,9 @@ mod tests {
             denied,
             ToolError::Denied(DenyReason::OutOfScope { .. })
         ));
-        assert_eq!(ToolError::Cancelled.to_string(), "Tool call interrupted by user.");
+        assert_eq!(
+            ToolError::Cancelled.to_string(),
+            "Tool call interrupted by user."
+        );
     }
 }

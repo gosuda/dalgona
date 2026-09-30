@@ -10,15 +10,13 @@ use crate::{
 
 /// Reads and atomically writes private files within one file-backed session.
 #[derive(Debug)]
-pub struct Sidecar {
-    session_dir: PathBuf,
+pub struct Sidecar<'session> {
+    paths: &'session SessionPaths,
 }
 
-impl Sidecar {
-    pub(crate) fn new(paths: &SessionPaths) -> Self {
-        Self {
-            session_dir: paths.directory().to_path_buf(),
-        }
+impl<'session> Sidecar<'session> {
+    pub(crate) fn new(paths: &'session SessionPaths) -> Self {
+        Self { paths }
     }
 
     /// Atomically replaces the named sidecar with `bytes`, using mode 0600.
@@ -61,7 +59,7 @@ impl Sidecar {
                 reason: "sidecar name must be 1 to 64 ASCII alphanumeric, '.', '_', or '-' characters and must not start with '.'".into(),
             });
         }
-        Ok(self.session_dir.join(name))
+        Ok(self.paths.sidecar(name))
     }
 }
 
@@ -93,19 +91,19 @@ mod tests {
         }
     }
 
-    fn sidecar() -> (TempDir, SessionPaths, Sidecar) {
+    fn sidecar() -> (TempDir, SessionPaths) {
         let root = TempDir::new();
         let session =
             SessionId::parse("0192aa00-0000-7000-8000-000000000001").expect("valid UUIDv7");
         let paths = SessionPaths::new(&root.0, "workspace-key", session);
         fs::create_dir_all(paths.directory()).expect("create session directory");
-        let sidecar = Sidecar::new(&paths);
-        (root, paths, sidecar)
+        (root, paths)
     }
 
     #[test]
     fn reads_and_writes_names_at_grammar_boundaries() {
-        let (_root, _paths, sidecar) = sidecar();
+        let (_root, paths) = sidecar();
+        let sidecar = Sidecar::new(&paths);
         let maximum = "x".repeat(64);
 
         sidecar
@@ -134,7 +132,8 @@ mod tests {
 
     #[test]
     fn rejects_names_outside_the_sidecar_grammar_without_path_escape() {
-        let (_root, paths, sidecar) = sidecar();
+        let (_root, paths) = sidecar();
+        let sidecar = Sidecar::new(&paths);
         let too_long = "x".repeat(65);
         let invalid_names = [
             "",
@@ -164,7 +163,8 @@ mod tests {
 
     #[test]
     fn write_replaces_an_existing_sidecar() {
-        let (_root, _paths, sidecar) = sidecar();
+        let (_root, paths) = sidecar();
+        let sidecar = Sidecar::new(&paths);
 
         sidecar.write("state", b"old").expect("write initial value");
         sidecar.write("state", b"new value").expect("replace value");
@@ -177,7 +177,8 @@ mod tests {
 
     #[test]
     fn missing_read_returns_typed_not_found_with_sidecar_path() {
-        let (_root, paths, sidecar) = sidecar();
+        let (_root, paths) = sidecar();
+        let sidecar = Sidecar::new(&paths);
         let expected_path = paths.sidecar("missing");
 
         let error = sidecar.read("missing").expect_err("sidecar is absent");
@@ -193,7 +194,8 @@ mod tests {
     fn write_uses_private_mode_on_unix() {
         use std::os::unix::fs::PermissionsExt;
 
-        let (_root, paths, sidecar) = sidecar();
+        let (_root, paths) = sidecar();
+        let sidecar = Sidecar::new(&paths);
         sidecar
             .write("private", b"secret")
             .expect("write private sidecar");

@@ -210,7 +210,7 @@ def render(
         f'pub(crate) const PRICE_SOURCE: &str = "{PRICE_SOURCE}";',
         f'pub(crate) const PRICE_SOURCE_URL: &str = "{PRICE_SOURCE_URL}";',
         f'pub(crate) const PRICE_FETCHED_AT: &str = "{fetched_at}";',
-        '#[expect(clippy::unreadable_literal, reason = "generated price literals preserve the snapshot\'s decimal values")]',
+        '#[expect(clippy::unreadable_literal, clippy::approx_constant, reason = "generated price literals preserve the snapshot\'s decimal values; 0.318 is an exact price, not FRAC_1_PI")]',
         "pub(crate) const PRICE_ROWS: &[PriceRow] = &[",
     ]
     for row in rows:

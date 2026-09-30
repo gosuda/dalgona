@@ -1,0 +1,12 @@
+[[exchange]]
+kind = "http"
+
+[exchange.request]
+method = "POST"
+path = "/chat/completions"
+headers = { "content-type" = "application/json" }
+
+[exchange.response]
+status = 200
+headers = { "content-type" = "text/event-stream" }
+body = "response.sse"

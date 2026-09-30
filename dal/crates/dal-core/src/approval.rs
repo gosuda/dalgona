@@ -1,10 +1,18 @@
 //! Approval classes, decisions, and the rule-1+ call plan.
 
+use serde::{Deserialize, Serialize};
+
 use crate::{config::ApprovalMode, ext::Name, id::CallId};
 use std::{collections::BTreeSet, path::PathBuf};
 
 /// The class a tool computes from its arguments.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(
+    tag = "type",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum ToolClass {
     /// A read operation.
     Read,
@@ -22,12 +30,15 @@ pub enum ToolClass {
         /// Whether evaluation is pure.
         pure: bool,
     },
-    /// A tool whose effects are governed by Services rather than this approval ladder.
+    /// A tool whose effects are not classified as reads or patches.
+    /// It is dispatched serially and follows the execution approval rung.
     Other,
 }
 
 /// The argv prefix and roots proposed for a job grant.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
 pub struct GrantSpec {
     /// The command-line prefix covered by the grant.
     pub argv_prefix: Box<str>,
@@ -54,8 +65,9 @@ pub fn gate(class: &ToolClass) -> Gate {
     match class {
         ToolClass::Read | ToolClass::Eval { pure: true } => Gate::ReadOnly,
         ToolClass::Patch => Gate::Mutate,
-        ToolClass::Exec { .. } | ToolClass::Eval { pure: false } => Gate::Execute,
-        ToolClass::Other => Gate::None,
+        ToolClass::Exec { .. } | ToolClass::Eval { pure: false } | ToolClass::Other => {
+            Gate::Execute
+        }
     }
 }
 
@@ -281,7 +293,10 @@ mod tests {
                     policy.decide(&name("pure_eval"), &pure_eval),
                     Decision::Allow
                 );
-                assert_eq!(policy.decide(&name("other"), &other), Decision::Allow);
+                assert_eq!(
+                    policy.decide(&name("other"), &other),
+                    expected(execution_asks)
+                );
                 assert_eq!(policy.decide(&name("patch"), &patch), expected(patch_asks));
                 assert_eq!(
                     policy.decide(&name("execute"), &execute),
@@ -298,7 +313,7 @@ mod tests {
     #[test]
     fn headless_asks_are_denied_without_leaking_grants() {
         let grant = GrantSpec {
-            argv_prefix: Box::from("git"),
+            argv_prefix: Box::<str>::from("git"),
             roots: vec![PathBuf::from("/repo")],
         };
         let ask_policy = policy(ApprovalMode::Ask, false);
@@ -341,7 +356,7 @@ mod tests {
         let mut policy = policy(ApprovalMode::Ask, false);
         policy.allow_always.insert(name("command"));
         let grant = GrantSpec {
-            argv_prefix: Box::from("git"),
+            argv_prefix: Box::<str>::from("git"),
             roots: vec![PathBuf::from("/repo")],
         };
 
@@ -354,7 +369,7 @@ mod tests {
     #[test]
     fn ask_carries_exec_grant_only_for_user_approval() {
         let grant = GrantSpec {
-            argv_prefix: Box::from("git"),
+            argv_prefix: Box::<str>::from("git"),
             roots: vec![PathBuf::from("/repo")],
         };
         let policy = policy(ApprovalMode::Ask, true);

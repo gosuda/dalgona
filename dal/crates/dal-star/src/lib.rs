@@ -1,34 +1,31 @@
-//! Starlark adapters for dal's extension API.
+//! Starlark adapters for dal's extension API (Plugin & Eval v1).
 
-mod ctx;
-mod declare;
+mod adapter;
+pub(crate) mod command;
+pub(crate) mod context;
+mod convert;
+pub(crate) mod descriptor;
 pub mod engine;
 pub mod error;
 mod eval;
-pub mod eval_extension;
+pub(crate) mod evidence;
 mod hooks;
-mod invoke;
+pub(crate) mod invoke;
 pub mod load;
-pub mod names;
-pub mod records;
-mod rule_files;
-pub mod source;
-pub mod system;
-mod tool;
-mod value;
-
-pub(crate) mod command;
-pub(crate) mod descriptor;
+mod model;
+pub(crate) mod outcome;
 pub(crate) mod record;
 pub(crate) mod schema;
+pub(crate) mod scope;
+pub(crate) mod sdk;
+pub mod system;
+mod tool;
+pub(crate) mod validate;
+pub(crate) mod value;
 
-pub mod plugins;
-
+pub use dal_core::ext::PluginSource;
 pub use engine::{CELL_LIMITS, HANDLER_LIMITS, LOAD_LIMITS, Limits, dialect};
 pub use error::LoadError;
-pub use eval::Eval;
-pub use eval_extension::eval_extension;
+pub use eval::eval_extension;
 pub use load::{BundledPlugin, LoadRoots, PluginsConfig, load};
-pub use plugins::{extensions_from_generation, load_extensions, plugins_extension};
-pub use source::PluginSource;
-pub use system::{PluginEntry, PluginGeneration, PluginSystem};
+pub use system::{PluginGeneration, PluginSystem};

@@ -18,6 +18,7 @@ use crate::{
     error::ProviderError,
     http,
     provider::{Provider, ProviderConfig, ProviderEntry},
+    scripted::Script,
     usage::UsageChecker,
     ws::WsSessions,
 };
@@ -65,6 +66,7 @@ pub(super) struct ProviderSetInner {
     pub(super) notices: Mutex<HashMap<SessionId, crate::thinking::SessionNotices>>,
     pub(super) refresher: Arc<Refresher>,
     pub(super) usage: HashMap<Box<str>, Arc<UsageChecker>>,
+    pub(super) scripted: Option<Script>,
 }
 
 pub(super) struct ProviderSlot {
@@ -122,12 +124,11 @@ impl ProviderSet {
                 .clone();
             let concurrency = usize::try_from(provider.max_concurrent_requests)
                 .ok()
-                .filter(|limit| (1..=(super::config::MAX_CONCURRENT_REQUESTS as usize)).contains(limit))
+                .filter(|limit| {
+                    (1..=(super::config::MAX_CONCURRENT_REQUESTS as usize)).contains(limit)
+                })
                 .ok_or_else(|| ProviderError::InvalidRequest {
-                    message: format!(
-                        "provider {} has an invalid concurrency limit",
-                        provider.id
-                    ),
+                    message: format!("provider {} has an invalid concurrency limit", provider.id),
                 })?;
             if providers
                 .insert(
@@ -144,22 +145,20 @@ impl ProviderSet {
                     message: format!("provider {} is configured more than once", provider.id),
                 });
             }
-            if provider.family == dal_core::Family::Codex {
-                if usage
+            if provider.family == dal_core::Family::Codex
+                && usage
                     .insert(
                         provider.id.clone(),
-                        Arc::new(UsageChecker::new(
-                            client,
-                            &provider.base_url,
-                            &user_agent,
-                        )?),
+                        Arc::new(UsageChecker::new(client, &provider.base_url, &user_agent)?),
                     )
                     .is_some()
-                {
-                    return Err(ProviderError::InvalidRequest {
-                        message: format!("Codex provider {} is configured more than once", provider.id),
-                    });
-                }
+            {
+                return Err(ProviderError::InvalidRequest {
+                    message: format!(
+                        "Codex provider {} is configured more than once",
+                        provider.id
+                    ),
+                });
             }
         }
 
@@ -168,6 +167,18 @@ impl ProviderSet {
             data_dir.join("auth.json"),
             endpoints,
         ));
+        let scripted = match &config.scripted {
+            None => None,
+            Some(selection) => {
+                let path = std::path::Path::new(selection.fixture.as_ref());
+                let path = if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    data_dir.join(path)
+                };
+                Some(Script::from_replay_file(&path).map_err(ProviderError::Script)?)
+            }
+        };
         Ok(Self {
             inner: Arc::new(ProviderSetInner {
                 config: config.clone(),
@@ -182,20 +193,25 @@ impl ProviderSet {
                 notices: Mutex::new(HashMap::new()),
                 refresher,
                 usage,
+                scripted,
             }),
         })
     }
 
     /// Resolves one provider's credential from auth.json and the captured
     /// environment snapshot. The process environment is never read here.
+    ///
+    /// # Errors
+    /// Returns `InvalidRequest` if `provider_id` names no configured
+    /// provider, and auth-store or credential errors otherwise.
     pub fn credential(&self, provider_id: &str) -> Result<Credential, ProviderError> {
-        let slot = self
-            .inner
-            .providers
-            .get(provider_id)
-            .ok_or_else(|| ProviderError::InvalidRequest {
-                message: format!("provider {provider_id} is not configured"),
-            })?;
+        let slot =
+            self.inner
+                .providers
+                .get(provider_id)
+                .ok_or_else(|| ProviderError::InvalidRequest {
+                    message: format!("provider {provider_id} is not configured"),
+                })?;
         let store = credential::AuthStore::load(self.inner.data_dir.join("auth.json"))?;
         credential::resolve(&slot.entry, &store, &self.inner.env)
     }
@@ -207,6 +223,9 @@ impl ProviderSet {
     /// Returns `InvalidRequest` if the resolved route names no configured
     /// provider, and auth or provider-construction errors otherwise.
     pub fn provider(&self, resolved: ResolvedModel) -> Result<Provider, ProviderError> {
+        if let Some(script) = self.scripted_provider() {
+            return Ok(script);
+        }
         let slot = self
             .inner
             .providers
@@ -215,13 +234,16 @@ impl ProviderSet {
                 message: format!("provider {} is not configured", resolved.provider),
             })?;
         let credential = self.credential(&resolved.provider)?;
-        Provider::new(
-            resolved,
-            slot.entry.clone(),
-            credential,
-            &slot.client,
-            self,
-        )
+        Provider::new(resolved, slot.entry.clone(), credential, &slot.client, self)
+    }
+
+    /// Returns the shared replay script when `[providers.scripted]` is set.
+    ///
+    /// Clones share one step queue, so every provider built from the same
+    /// set continues the same fixture instead of restarting it.
+    #[must_use]
+    pub fn scripted_provider(&self) -> Option<Provider> {
+        self.inner.scripted.clone().map(Provider::Scripted)
     }
 
     /// Loads one source-aware catalog over every configured provider.
@@ -229,55 +251,85 @@ impl ProviderSet {
     /// Live rows are preferred, then each provider's cache, then typed-id
     /// fallback. Credential absence is preserved as a typed fallback rather
     /// than causing a request with invented authentication.
+    ///
+    /// # Errors
+    /// Returns `InvalidRequest` if a provider is not initialized, and
+    /// transport or credential-refresh errors otherwise.
     pub async fn catalog(&self) -> Result<crate::catalog::Catalog, ProviderError> {
         let mut sources = Vec::with_capacity(self.inner.config.providers.len());
         let mut entries = Vec::new();
         for provider in &self.inner.config.providers {
-            let slot = self
-                .inner
-                .providers
-                .get(&provider.id)
-                .ok_or_else(|| ProviderError::InvalidRequest {
+            let loaded = self.load_models(&provider.id).await?;
+            let slot = self.inner.providers.get(&provider.id).ok_or_else(|| {
+                ProviderError::InvalidRequest {
                     message: format!("provider {} is not initialized", provider.id),
-                })?;
-            let credential = match self.credential(&provider.id) {
-                Ok(credential) => credential,
-                Err(ProviderError::NoCredentials { .. }) => Credential::None,
-                Err(error) => return Err(error),
-            };
-            let permit = Arc::clone(&slot.permits)
-                .acquire_owned()
-                .await
-                .map_err(|_| ProviderError::Transport {
-                    family: slot.entry.family,
-                    reason: String::from("provider model-list admission is closed"),
-                })?;
-            let refresh_cancel = tokio_util::sync::CancellationToken::new();
-            let credential = super::refresh_expiring(
-                &self.inner.refresher,
-                &provider.id,
-                provider.family,
-                &credential,
-                &refresh_cancel,
-            )
-            .await?;
-            let fetch = crate::catalog::ModelFetch {
-                client: &slot.client,
-                provider: &slot.entry,
-                credential: &credential,
-                cache_dir: &self.inner.cache_dir,
-                user_agent: &self.inner.user_agent,
-                version: &self.inner.identity.version,
-            };
-            let loaded = crate::catalog::load_models(&fetch, tokio::time::sleep).await;
-            drop(permit);
+                }
+            })?;
             sources.push((slot.entry.clone(), loaded.source));
             entries.extend(loaded.entries);
         }
         Ok(crate::catalog::Catalog::with_sources(sources, entries))
     }
 
+    /// Refreshes one provider's model list and reports how it was obtained.
+    ///
+    /// The outcome carries the live-request error and any cache failure, so a
+    /// caller can tell a fresh list from a cached one. A provider with no
+    /// credential is asked with none, which falls back to its cache.
+    ///
+    /// # Errors
+    /// Returns `InvalidRequest` if `provider_id` is not configured, and
+    /// credential-file, admission, or credential-refresh errors otherwise.
+    pub async fn load_models(
+        &self,
+        provider_id: &str,
+    ) -> Result<crate::catalog::CatalogFetch, ProviderError> {
+        let slot =
+            self.inner
+                .providers
+                .get(provider_id)
+                .ok_or_else(|| ProviderError::InvalidRequest {
+                    message: format!("provider {provider_id} is not initialized"),
+                })?;
+        let credential = match self.credential(provider_id) {
+            Ok(credential) => credential,
+            Err(ProviderError::NoCredentials { .. }) => Credential::None,
+            Err(error) => return Err(error),
+        };
+        let permit = Arc::clone(&slot.permits)
+            .acquire_owned()
+            .await
+            .map_err(|_| ProviderError::Transport {
+                family: slot.entry.family,
+                reason: String::from("provider model-list admission is closed"),
+            })?;
+        let refresh_cancel = tokio_util::sync::CancellationToken::new();
+        let credential = super::transport::refresh_expiring(
+            &self.inner.refresher,
+            provider_id,
+            slot.entry.family,
+            &credential,
+            &refresh_cancel,
+        )
+        .await?;
+        let fetch = crate::catalog::ModelFetch {
+            client: &slot.client,
+            provider: &slot.entry,
+            credential: &credential,
+            cache_dir: &self.inner.cache_dir,
+            user_agent: &self.inner.user_agent,
+            version: &self.inner.identity.version,
+        };
+        let loaded = crate::catalog::load_models(&fetch, tokio::time::sleep).await;
+        drop(permit);
+        Ok(loaded)
+    }
+
     /// Resolves a reference through a source-aware catalog and configured aliases.
+    ///
+    /// # Errors
+    /// Returns `NoDefault` when `reference` is empty and no default model is
+    /// configured, and the catalog resolution error otherwise.
     pub fn resolve(
         &self,
         catalog: &crate::catalog::Catalog,
@@ -324,10 +376,11 @@ fn origin_key(base: &str, family: dal_core::Family) -> Result<Box<str>, Provider
         family,
         reason: String::from("provider base URL has no host"),
     })?;
-    let port = url.port_or_known_default().ok_or_else(|| ProviderError::Transport {
-        family,
-        reason: String::from("provider base URL has no port"),
-    })?;
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| ProviderError::Transport {
+            family,
+            reason: String::from("provider base URL has no port"),
+        })?;
     Ok(format!("{}://{host}:{port}", url.scheme()).into_boxed_str())
 }
-

@@ -1,4 +1,4 @@
-#![expect(unsafe_code, reason = "starlark custom-value derives emit unsafe impl for Trace/Freeze/ProvidesStaticType; required by spec R05/P02")]
+#![expect(unsafe_code, reason = "starlark value derives")]
 
 //! v1 descriptor values: the objects `dal.*` constructors return (spec §P01,
 //! §P02, §R02).
@@ -17,12 +17,11 @@
 
 use allocative::Allocative;
 use starlark::{
-    collections::SmallMap,
     coerce::Coerce,
+    collections::SmallMap,
     starlark_complex_value, starlark_simple_value,
     values::{
-        Freeze, NoSerialize, ProvidesStaticType, StarlarkValue, Trace,
-        ValueLifetimeless, ValueLike,
+        Freeze, NoSerialize, ProvidesStaticType, StarlarkValue, Trace, ValueLifetimeless, ValueLike,
     },
 };
 
@@ -53,8 +52,12 @@ pub(crate) fn is_reserved_code(code: &str) -> bool {
 pub(crate) struct PluginValueGen<V: ValueLifetimeless> {
     /// Plugin name (`[a-z][a-z0-9_-]{0,63}`).
     pub(crate) name: String,
-    /// SemVer string.
+    /// `SemVer` string.
     pub(crate) version: String,
+    /// The plugin constructor call site.
+    pub(crate) site: Option<(String, u32, u32)>,
+    /// Requested host services.
+    pub(crate) inject: Vec<String>,
     /// State schema version; nonzero.
     pub(crate) state_version: u32,
     /// The `dal.schema(...)` value for `[plugin.<name>]`, or `None`.
@@ -79,16 +82,17 @@ starlark_complex_value!(pub(crate) PluginValue);
 
 impl<'v, V: ValueLike<'v>> std::fmt::Display for PluginValueGen<V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "dal.plugin(name={:?}, version={:?})", self.name, self.version)
+        write!(
+            f,
+            "dal.plugin(name={:?}, version={:?})",
+            self.name, self.version
+        )
     }
 }
 
 #[starlark::values::starlark_value(type = "plugin")]
-impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for PluginValueGen<V>
-where
-    Self: ProvidesStaticType<'v>,
-{
-}
+impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for PluginValueGen<V> where Self: ProvidesStaticType<'v>
+{}
 
 /// `dal.tool(...)`: a model-visible operation.
 #[repr(C)]
@@ -117,11 +121,7 @@ impl<'v, V: ValueLike<'v>> std::fmt::Display for ToolValueGen<V> {
 }
 
 #[starlark::values::starlark_value(type = "tool")]
-impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for ToolValueGen<V>
-where
-    Self: ProvidesStaticType<'v>,
-{
-}
+impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for ToolValueGen<V> where Self: ProvidesStaticType<'v> {}
 
 /// `dal.command(...)`: a slash-command binding over a tool descriptor.
 #[repr(C)]
@@ -144,9 +144,8 @@ impl<'v, V: ValueLike<'v>> std::fmt::Display for CommandValueGen<V> {
 }
 
 #[starlark::values::starlark_value(type = "command")]
-impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for CommandValueGen<V>
-where
-    Self: ProvidesStaticType<'v>,
+impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for CommandValueGen<V> where
+    Self: ProvidesStaticType<'v>
 {
 }
 
@@ -171,11 +170,7 @@ impl<'v, V: ValueLike<'v>> std::fmt::Display for HookValueGen<V> {
 }
 
 #[starlark::values::starlark_value(type = "hook")]
-impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for HookValueGen<V>
-where
-    Self: ProvidesStaticType<'v>,
-{
-}
+impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for HookValueGen<V> where Self: ProvidesStaticType<'v> {}
 
 /// `dal.skill(description, path, letter2image=False)`.
 #[derive(Debug, Clone, ProvidesStaticType, NoSerialize, Allocative)]
@@ -197,18 +192,32 @@ impl std::fmt::Display for SkillValue {
 }
 
 #[starlark::values::starlark_value(type = "skill")]
+#[expect(
+    clippy::elidable_lifetime_names,
+    reason = "StarlarkValue implementations must cover every value lifetime"
+)]
 impl<'v> StarlarkValue<'v> for SkillValue {}
 
-/// `dal.rule(pattern, text, judge=None)`.
+/// `dal.rule(...)`; scoping fields stay as written until validation.
 #[repr(C)]
 #[derive(Debug, Trace, Coerce, Freeze, ProvidesStaticType, NoSerialize, Allocative)]
 pub(crate) struct RuleValueGen<V: ValueLifetimeless> {
-    /// The compiled trigger pattern source.
-    pub(crate) pattern: String,
+    /// The trigger pattern source; absent only for an always-apply rule.
+    pub(crate) pattern: Option<String>,
     /// The rule text.
     pub(crate) text: String,
     /// Optional judge callable, or `None`.
     pub(crate) judge: V,
+    /// Whether the rule applies without a match report.
+    pub(crate) always_apply: bool,
+    /// Scope tokens: `text`, `thinking`, `tool`, or `tool:<name>`.
+    pub(crate) scope: Option<Vec<String>>,
+    /// Interrupt mode word: `always`, `prose-only`, `tool-only`, `never`.
+    pub(crate) interrupt_mode: Option<String>,
+    /// Repeat mode word: `once` or `after-gap`.
+    pub(crate) repeat_mode: Option<String>,
+    /// Deltas between repeated applications.
+    pub(crate) repeat_gap: Option<u32>,
 }
 
 starlark_complex_value!(pub(crate) RuleValue);
@@ -220,16 +229,16 @@ impl<'v, V: ValueLike<'v>> std::fmt::Display for RuleValueGen<V> {
 }
 
 #[starlark::values::starlark_value(type = "rule")]
-impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for RuleValueGen<V>
-where
-    Self: ProvidesStaticType<'v>,
-{
-}
+impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for RuleValueGen<V> where Self: ProvidesStaticType<'v> {}
 
 /// `dal.model(caps, run, uses=[...])`.
 #[repr(C)]
 #[derive(Debug, Trace, Coerce, Freeze, ProvidesStaticType, NoSerialize, Allocative)]
 pub(crate) struct ModelValueGen<V: ValueLifetimeless> {
+    /// The public synthetic model identifier.
+    pub(crate) id: String,
+    /// The source call site, when Starlark supplied one.
+    pub(crate) site: Option<(String, u32, u32)>,
     /// Model capabilities snapshot (the core record value).
     pub(crate) caps: V,
     /// The inference callable.
@@ -247,46 +256,49 @@ impl<'v, V: ValueLike<'v>> std::fmt::Display for ModelValueGen<V> {
 }
 
 #[starlark::values::starlark_value(type = "model_descriptor")]
-impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for ModelValueGen<V>
-where
-    Self: ProvidesStaticType<'v>,
-{
-}
+impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for ModelValueGen<V> where Self: ProvidesStaticType<'v> {}
 
-/// `dal.ok(value)` / `dal.err(code, message, details)` marker.
+/// `dal.ok(value)`: an explicit domain success.
 #[repr(C)]
 #[derive(Debug, Trace, Coerce, Freeze, ProvidesStaticType, NoSerialize, Allocative)]
-pub(crate) struct DomainOutcomeGen<V: ValueLifetimeless> {
-    /// `true` for `dal.ok`, `false` for `dal.err`.
-    pub(crate) ok: bool,
-    /// The payload value for `dal.ok`; unused for `dal.err`.
+pub(crate) struct DomainOkGen<V: ValueLifetimeless> {
+    /// The payload value.
     pub(crate) value: V,
-    /// `dal.err` code (domain namespace only; host codes are rejected).
-    pub(crate) code: Option<String>,
-    /// `dal.err` message.
-    pub(crate) message: Option<String>,
-    /// `dal.err` structured details, or `None`.
-    pub(crate) details: V,
 }
 
-starlark_complex_value!(pub(crate) DomainOutcome);
+starlark_complex_value!(pub(crate) DomainOk);
 
-impl<'v, V: ValueLike<'v>> std::fmt::Display for DomainOutcomeGen<V> {
+impl<'v, V: ValueLike<'v>> std::fmt::Display for DomainOkGen<V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.ok {
-            f.write_str("dal.ok(...)")
-        } else {
-            write!(f, "dal.err({:?})", self.code.as_deref().unwrap_or(""))
-        }
+        f.write_str("dal.ok(...)")
     }
 }
 
-#[starlark::values::starlark_value(type = "outcome")]
-impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for DomainOutcomeGen<V>
-where
-    Self: ProvidesStaticType<'v>,
-{
+#[starlark::values::starlark_value(type = "ok")]
+impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for DomainOkGen<V> where Self: ProvidesStaticType<'v> {}
+
+/// `dal.err(code, message, details)`: an explicit domain failure.
+#[repr(C)]
+#[derive(Debug, Trace, Coerce, Freeze, ProvidesStaticType, NoSerialize, Allocative)]
+pub(crate) struct DomainErrGen<V: ValueLifetimeless> {
+    /// The domain code; the constructor rejects reserved host codes.
+    pub(crate) code: String,
+    /// The failure message.
+    pub(crate) message: String,
+    /// Structured details, or `None`.
+    pub(crate) details: V,
 }
+
+starlark_complex_value!(pub(crate) DomainErr);
+
+impl<'v, V: ValueLike<'v>> std::fmt::Display for DomainErrGen<V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "dal.err({:?})", self.code)
+    }
+}
+
+#[starlark::values::starlark_value(type = "err")]
+impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for DomainErrGen<V> where Self: ProvidesStaticType<'v> {}
 
 /// `dal.output(value, view)` — a value plus a safe display tree.
 #[repr(C)]
@@ -307,12 +319,8 @@ impl<'v, V: ValueLike<'v>> std::fmt::Display for OutputValueGen<V> {
 }
 
 #[starlark::values::starlark_value(type = "output")]
-impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for OutputValueGen<V>
-where
-    Self: ProvidesStaticType<'v>,
-{
-}
-
+impl<'v, V: ValueLike<'v>> StarlarkValue<'v> for OutputValueGen<V> where Self: ProvidesStaticType<'v>
+{}
 
 #[cfg(test)]
 mod tests {

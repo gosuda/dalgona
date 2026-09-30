@@ -1,6 +1,6 @@
 //! Strict decoding of the provider layer's effective TOML configuration.
 
-use dal_core::{Family, ThinkingLevel};
+use dal_core::{Config, Family, ThinkingLevel};
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -37,6 +37,8 @@ pub struct ProviderConfig {
     pub stream_max_retries: u32,
     /// Built-in providers followed by configured named providers.
     pub providers: Vec<ProviderEntry>,
+    /// The global replay-fixture override from `[providers.scripted]`, if set.
+    pub scripted: Option<ScriptedSelection>,
 }
 
 /// One configured provider route and its connection defaults.
@@ -56,6 +58,18 @@ pub struct ProviderEntry {
     pub auth: AuthStyle,
     /// The maximum number of simultaneous requests for this provider.
     pub max_concurrent_requests: u32,
+}
+/// The global replay-fixture override decoded from `[providers.scripted]`.
+///
+/// When present, [`crate::provider::ProviderSet::provider`] serves one shared
+/// replay [`crate::scripted::Script`] loaded from `fixture` for every resolved
+/// route instead of building an HTTP provider. It is a test and headless-gate
+/// override, never a model route: `scripted` is a reserved provider id and is
+/// not resolvable through the catalog.
+#[derive(Clone, Debug)]
+pub struct ScriptedSelection {
+    /// The replay-JSONL fixture path, as configured.
+    pub fixture: Box<str>,
 }
 
 /// An error while decoding or validating provider configuration.
@@ -116,17 +130,18 @@ pub enum ProviderConfigError {
 }
 
 impl ProviderConfig {
-    /// Decode provider settings from the already-merged effective TOML value.
+    /// Decode provider settings from the merged host configuration.
     ///
-    /// Only `[models]`, `[retry]`, and `[providers]` are read here. Other root
-    /// keys belong to the core configuration layer and are intentionally left
-    /// untouched.
-    pub fn from_toml(value: &toml::Value) -> Result<Self, ProviderConfigError> {
-        let root = value.as_table().ok_or_else(|| invalid("config must be a table"))?;
-        let (default_model, thinking, aliases) = decode_models(root.get("models"))?;
-        let (request_max_retries, stream_max_retries) = decode_retry(root.get("retry"))?;
-        let providers = decode_providers(root.get("providers"))?;
-
+    /// Reads the `models`, `retry`, and `providers` sections through
+    /// [`Config::section`], so the host never touches raw TOML. A section
+    /// absent from the configuration decodes as its defaults.
+    ///
+    /// # Errors
+    /// Returns a `ProviderConfigError` when a present section fails to decode.
+    pub fn from_config(config: &Config) -> Result<Self, ProviderConfigError> {
+        let (default_model, thinking, aliases) = decode_models(config.section("models"))?;
+        let (request_max_retries, stream_max_retries) = decode_retry(config.section("retry"))?;
+        let (providers, scripted) = decode_providers(config.section("providers"))?;
         Ok(Self {
             default_model,
             thinking,
@@ -134,6 +149,7 @@ impl ProviderConfig {
             request_max_retries,
             stream_max_retries,
             providers,
+            scripted,
         })
     }
 }
@@ -196,9 +212,10 @@ fn string_field<'a>(
         .ok_or_else(|| invalid(format!("{path}.{key} must be a string")))
 }
 
-fn decode_models(
-    value: Option<&toml::Value>,
-) -> Result<(Option<Box<str>>, ThinkingLevel, Vec<(Box<str>, Box<str>)>), ProviderConfigError> {
+/// The decoded `[models]` table: default model, thinking level, and aliases.
+type ModelSettings = (Option<Box<str>>, ThinkingLevel, Vec<(Box<str>, Box<str>)>);
+
+fn decode_models(value: Option<&toml::Value>) -> Result<ModelSettings, ProviderConfigError> {
     let Some(table) = optional_table(value, "models")? else {
         return Ok((None, ThinkingLevel::Medium, Vec::new()));
     };
@@ -216,9 +233,9 @@ fn decode_models(
 
     let thinking = match string_field(Some(table), "thinking", "models")? {
         None => ThinkingLevel::Medium,
-        Some(value) => ThinkingLevel::deserialize(
-            serde::de::value::StrDeserializer::<serde::de::value::Error>::new(value),
-        )
+        Some(value) => ThinkingLevel::deserialize(serde::de::value::StrDeserializer::<
+            serde::de::value::Error,
+        >::new(value))
         .map_err(|_| invalid(format!("models.thinking has unsupported value {value:?}")))?,
     };
 
@@ -232,7 +249,10 @@ fn decode_models(
             let Some(target) = target.as_str() else {
                 return Err(invalid(format!("models.aliases.{name} must be a string")));
             };
-            aliases.push((name.to_owned().into_boxed_str(), target.to_owned().into_boxed_str()));
+            aliases.push((
+                name.to_owned().into_boxed_str(),
+                target.to_owned().into_boxed_str(),
+            ));
         }
     }
 
@@ -267,10 +287,15 @@ fn retry_limit(
     u32::try_from(value).map_err(|_| invalid(format!("retry.{key} must fit in u32")))
 }
 
-fn decode_providers(value: Option<&toml::Value>) -> Result<Vec<ProviderEntry>, ProviderConfigError> {
+fn decode_providers(
+    value: Option<&toml::Value>,
+) -> Result<(Vec<ProviderEntry>, Option<ScriptedSelection>), ProviderConfigError> {
     let table = optional_table(value, "providers")?;
-    let mut providers = Vec::with_capacity(3 + table.map_or(0, |table| table.len()));
-
+    let mut providers = Vec::with_capacity(3 + table.map_or(0, toml::map::Map::len));
+    let scripted = table
+        .and_then(|table| table.get("scripted"))
+        .map(decode_scripted)
+        .transpose()?;
     providers.push(decode_builtin(
         table.and_then(|table| table.get("openai")),
         "openai",
@@ -298,7 +323,10 @@ fn decode_providers(value: Option<&toml::Value>) -> Result<Vec<ProviderEntry>, P
 
     if let Some(table) = table {
         for (name, value) in table {
-            if matches!(name.as_str(), "openai" | "openai-codex" | "anthropic") {
+            if matches!(
+                name.as_str(),
+                "openai" | "openai-codex" | "anthropic" | "scripted"
+            ) {
                 continue;
             }
             if name == "dal" {
@@ -310,7 +338,31 @@ fn decode_providers(value: Option<&toml::Value>) -> Result<Vec<ProviderEntry>, P
         }
     }
 
-    Ok(providers)
+    Ok((providers, scripted))
+}
+
+const SCRIPTED_KEYS: &[&str] = &["fixture"];
+
+fn decode_scripted(value: &toml::Value) -> Result<ScriptedSelection, ProviderConfigError> {
+    let path = "providers.scripted";
+    let Some(table) = value.as_table() else {
+        return Err(invalid(format!("{path} must be a table")));
+    };
+    reject_unknown_keys(table, path, SCRIPTED_KEYS)?;
+    let Some(fixture) = string_field(Some(table), "fixture", path)? else {
+        return Err(ProviderConfigError::MissingKey {
+            name: "scripted".into(),
+            key: "fixture",
+        });
+    };
+    if fixture.is_empty() {
+        return Err(invalid(format!(
+            "{path}.fixture must be a non-empty string"
+        )));
+    }
+    Ok(ScriptedSelection {
+        fixture: fixture.to_owned().into_boxed_str(),
+    })
 }
 
 fn decode_builtin(
@@ -342,7 +394,9 @@ fn decode_builtin(
         Some("openai_codex") if name == "openai-codex" => default_family,
         Some("anthropic") if name == "anthropic" => default_family,
         Some(_) => {
-            return Err(invalid(format!("{path}.api conflicts with its fixed family")));
+            return Err(invalid(format!(
+                "{path}.api conflicts with its fixed family"
+            )));
         }
     };
 
@@ -380,22 +434,25 @@ fn decode_named(name: &str, value: &toml::Value) -> Result<ProviderEntry, Provid
     };
     reject_unknown_keys(table, &path, PROVIDER_KEYS)?;
 
-    let api = string_field(Some(table), "api", &path)?
-        .ok_or_else(|| ProviderConfigError::MissingKey {
+    let api = string_field(Some(table), "api", &path)?.ok_or_else(|| {
+        ProviderConfigError::MissingKey {
             name: name.to_owned().into_boxed_str(),
             key: "api",
-        })?;
+        }
+    })?;
     let family = parse_api(name, api)?;
-    let base_url = string_field(Some(table), "base_url", &path)?
-        .ok_or_else(|| ProviderConfigError::MissingKey {
+    let base_url = string_field(Some(table), "base_url", &path)?.ok_or_else(|| {
+        ProviderConfigError::MissingKey {
             name: name.to_owned().into_boxed_str(),
             key: "base_url",
-        })?;
-    let key_env = string_field(Some(table), "key_env", &path)?
-        .ok_or_else(|| ProviderConfigError::MissingKey {
+        }
+    })?;
+    let key_env = string_field(Some(table), "key_env", &path)?.ok_or_else(|| {
+        ProviderConfigError::MissingKey {
             name: name.to_owned().into_boxed_str(),
             key: "key_env",
-        })?;
+        }
+    })?;
 
     let transport = parse_transport(
         string_field(Some(table), "transport", &path)?,
@@ -407,7 +464,11 @@ fn decode_named(name: &str, value: &toml::Value) -> Result<ProviderEntry, Provid
     } else {
         AuthStyle::Bearer
     };
-    let auth = parse_auth(string_field(Some(table), "auth", &path)?, default_auth, name)?;
+    let auth = parse_auth(
+        string_field(Some(table), "auth", &path)?,
+        default_auth,
+        name,
+    )?;
     let max_concurrent_requests = concurrency_limit(Some(table), name)?;
     validate_transport(name, family, transport)?;
 
@@ -464,10 +525,7 @@ fn parse_auth(
     }
 }
 
-fn concurrency_limit(
-    table: Option<&toml::Table>,
-    name: &str,
-) -> Result<u32, ProviderConfigError> {
+fn concurrency_limit(table: Option<&toml::Table>, name: &str) -> Result<u32, ProviderConfigError> {
     let Some(value) = table.and_then(|table| table.get("max_concurrent_requests")) else {
         return Ok(4);
     };
@@ -506,216 +564,4 @@ fn validate_transport(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn parse(input: &str) -> Result<ProviderConfig, ProviderConfigError> {
-        let value: toml::Value = toml::from_str(input).expect("test input is valid TOML");
-        ProviderConfig::from_toml(&value)
-    }
-
-    #[test]
-    fn defaults_return_builtin_providers_in_fixed_order() {
-        let config = parse("").expect("empty config uses defaults");
-        let ids: Vec<&str> = config.providers.iter().map(|provider| &*provider.id).collect();
-        assert_eq!(ids, ["openai", "openai-codex", "anthropic"]);
-    }
-
-    #[test]
-    fn builtin_endpoints_and_family_defaults_are_stable() {
-        let config = parse("").expect("empty config uses defaults");
-        let openai = &config.providers[0];
-        let codex = &config.providers[1];
-        let anthropic = &config.providers[2];
-        assert_eq!(
-            (&*openai.base_url, openai.family, openai.transport),
-            (OPENAI_URL, Family::Responses, Transport::Https)
-        );
-        assert_eq!(
-            (&*codex.base_url, codex.family, codex.transport),
-            (CODEX_URL, Family::Codex, Transport::Websocket)
-        );
-        assert_eq!(
-            (&*anthropic.base_url, anthropic.family, anthropic.auth),
-            (ANTHROPIC_URL, Family::Anthropic, AuthStyle::XApiKey)
-        );
-    }
-
-    #[test]
-    fn aliases_keep_toml_insertion_order() {
-        let config = parse(
-            "[models.aliases]\nzeta = 'openai/gpt-5'\nalpha = 'anthropic/claude-sonnet-5'\n",
-        )
-        .expect("aliases are valid");
-        let names: Vec<&str> = config.aliases.iter().map(|(name, _)| &**name).collect();
-        assert_eq!(names, ["zeta", "alpha"]);
-    }
-    #[test]
-    fn openai_builtin_can_select_the_chat_family() {
-        let config = parse("[providers.openai]\napi = 'openai_chat'\n")
-            .expect("OpenAI Chat is a supported built-in family");
-        assert_eq!(config.providers[0].family, Family::Chat);
-    }
-    #[test]
-    fn configured_codex_api_must_match_its_builtin_family() {
-        let config = parse("[providers.openai-codex]\napi = 'openai_codex'\n")
-            .expect("the explicit fixed Codex family is accepted");
-        assert_eq!(config.providers[1].family, Family::Codex);
-
-        let error = parse("[providers.openai-codex]\napi = 'openai_responses'\n").unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "providers.openai-codex.api conflicts with its fixed family"
-        );
-    }
-
-    #[test]
-    fn unknown_nested_provider_keys_are_rejected_with_their_path() {
-        let error = parse(
-            "[providers.zenmux]\napi = 'openai_chat'\nbase_url = 'https://example.test'\nkey_env = 'ZENMUX_API_KEY'\nunknown = true\n",
-        )
-        .unwrap_err();
-        assert_eq!(error.to_string(), "providers.zenmux.unknown: unknown key");
-    }
-
-    #[test]
-    fn invalid_provider_field_types_return_a_config_error() {
-        let error = parse("[providers.zenmux]\napi = 1\n").unwrap_err();
-        assert_eq!(error.to_string(), "providers.zenmux.api must be a string");
-    }
-
-    #[test]
-    fn unknown_model_keys_are_rejected() {
-        let error = parse("[models]\nunknown = true\n").unwrap_err();
-        assert_eq!(error.to_string(), "models.unknown: unknown key");
-    }
-
-    #[test]
-    fn retry_table_rejects_unknown_keys() {
-        let error = parse("[retry]\nretries = 3\n").unwrap_err();
-        assert_eq!(error.to_string(), "retry.retries: unknown key");
-    }
-
-    #[test]
-    fn defaults_apply_to_models_retries_and_concurrency() {
-        let config = parse("").expect("empty config uses defaults");
-        assert_eq!(config.default_model, None);
-        assert_eq!(config.thinking, ThinkingLevel::Medium);
-        assert_eq!(config.request_max_retries, 4);
-        assert_eq!(config.stream_max_retries, 5);
-        assert!(config.providers.iter().all(|provider| {
-            provider.max_concurrent_requests == 4 && provider.key_env.is_none()
-        }));
-    }
-
-    #[test]
-    fn named_provider_requires_a_key_environment_name() {
-        let error = parse(
-            "[providers.zenmux]\napi = 'openai_chat'\nbase_url = 'https://example.test'\n",
-        )
-        .unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "providers.zenmux: missing key key_env."
-        );
-    }
-
-    #[test]
-    fn dal_provider_id_is_reserved_before_named_fields_are_decoded() {
-        let error = parse("[providers.dal]\n").unwrap_err();
-        assert_eq!(error.to_string(), "providers.dal: the name is reserved.");
-    }
-
-    #[test]
-    fn websocket_requires_responses_for_named_providers() {
-        let error = parse(
-            "[providers.zenmux]\napi = 'openai_chat'\nbase_url = 'https://example.test'\nkey_env = 'ZENMUX_API_KEY'\ntransport = 'websocket'\n",
-        )
-        .unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "providers.zenmux: transport websocket needs api openai_responses."
-        );
-    }
-
-    #[test]
-    fn unknown_provider_api_uses_the_exact_config_error() {
-        let error = parse(
-            "[providers.zenmux]\napi = 'unknown'\nbase_url = 'https://example.test'\nkey_env = 'ZENMUX_API_KEY'\n",
-        )
-        .unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "providers.zenmux: unknown api \"unknown\"; use openai_chat, openai_responses, or anthropic."
-        );
-    }
-
-    #[test]
-    fn request_retry_limit_rejects_values_above_the_bound() {
-        let error = parse("[retry]\nrequest_max_retries = 101\n").unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "retry.request_max_retries: 101 is outside 0..=100."
-        );
-    }
-
-    #[test]
-    fn stream_retry_limit_rejects_values_below_the_bound() {
-        let error = parse("[retry]\nstream_max_retries = -1\n").unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "retry.stream_max_retries: -1 is outside 0..=100."
-        );
-    }
-
-    #[test]
-    fn provider_concurrency_rejects_zero_and_values_above_the_bound() {
-        for (configured, expected) in [
-            (0, "providers.zenmux.max_concurrent_requests: 0 is outside 1..=64."),
-            (65, "providers.zenmux.max_concurrent_requests: 65 is outside 1..=64."),
-        ] {
-            let input = format!(
-                "[providers.zenmux]\napi = 'openai_chat'\nbase_url = 'https://example.test'\nkey_env = 'ZENMUX_API_KEY'\nmax_concurrent_requests = {configured}\n"
-            );
-            let error = parse(&input).unwrap_err();
-            assert_eq!(error.to_string(), expected);
-        }
-    }
-
-    #[test]
-    fn empty_default_model_is_rejected() {
-        let error = parse("[models]\ndefault = ''\n").unwrap_err();
-        assert_eq!(error.to_string(), "models.default must be a non-empty string");
-    }
-
-    #[test]
-    fn named_anthropic_defaults_to_x_api_key_auth() {
-        let config = parse(
-            "[providers.zenmux-anthropic]\napi = 'anthropic'\nbase_url = 'https://example.test'\nkey_env = 'ZENMUX_API_KEY'\n",
-        )
-        .expect("named Anthropic config is valid");
-        assert_eq!(config.providers[3].auth, AuthStyle::XApiKey);
-    }
-    #[test]
-    fn openai_chat_websocket_reports_the_exact_transport_error() {
-        let error = parse("[providers.openai]\napi = 'openai_chat'\ntransport = 'websocket'\n")
-            .unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "providers.openai: transport websocket needs api openai_responses."
-        );
-    }
-
-    #[test]
-    fn named_providers_keep_toml_insertion_order() {
-        let config = parse(
-            "[providers.zeta]\napi = 'openai_chat'\nbase_url = 'https://zeta.test'\nkey_env = 'ZETA_KEY'\n\n[providers.alpha]\napi = 'anthropic'\nbase_url = 'https://alpha.test'\nkey_env = 'ALPHA_KEY'\n",
-        )
-        .expect("named providers are valid");
-        let ids: Vec<&str> = config.providers[3..]
-            .iter()
-            .map(|provider| &*provider.id)
-            .collect();
-        assert_eq!(ids, ["zeta", "alpha"]);
-    }
-}
+mod tests;

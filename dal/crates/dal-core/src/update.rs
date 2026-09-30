@@ -133,6 +133,12 @@ pub enum UpdateKind {
         /// The usage projection.
         UsageView,
     ),
+    /// An extension's transient status changed; this update is not journaled
+    /// and is not restored by session replay.
+    ExtStatus(
+        /// The extension's current status.
+        ExtStatus,
+    ),
     /// An unrecognized update kind with no retained payload.
     #[serde(other)]
     Unknown,
@@ -200,6 +206,29 @@ struct RuleFiredFields {
 struct TurnEndedFields {
     turn: TurnId,
     stop: Stop,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExtStatusFields {
+    ext: Box<str>,
+    state: Box<str>,
+    #[serde(default)]
+    text: Option<Box<str>>,
+}
+
+fn decode_ext_status<E: serde::de::Error>(raw: &str) -> Result<UpdateKind, E> {
+    let fields: ExtStatusFields = sonic_rs::from_str(raw).map_err(serde::de::Error::custom)?;
+    let state = match fields.state.as_ref() {
+        "busy" => ExtState::Busy,
+        "quiet" => ExtState::Quiet,
+        _ => return Ok(UpdateKind::Unknown),
+    };
+    Ok(UpdateKind::ExtStatus(ExtStatus {
+        ext: fields.ext,
+        state,
+        text: fields.text,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -303,6 +332,7 @@ impl<'de> Deserialize<'de> for UpdateKind {
             "usage" => {
                 Self::Usage(sonic_rs::from_str(tagged.raw()).map_err(serde::de::Error::custom)?)
             }
+            "ext_status" => decode_ext_status::<D::Error>(tagged.raw())?,
             _ => Self::Unknown,
         })
     }
@@ -334,6 +364,53 @@ pub struct ToolOutcomeView {
     pub images: Vec<BlobId>,
 }
 
+/// Whether an extension's status source is still working.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum ExtState {
+    /// The extension has work in flight.
+    Busy,
+    /// The extension has nothing in flight.
+    Quiet,
+}
+
+/// The current transient status of one extension's status kind.
+///
+/// Status values are live observations, not durable session state; clients
+/// must not expect them to survive restart or appear in a replayed view.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ExtStatus {
+    /// The extension owning the status kind.
+    pub ext: Box<str>,
+    /// Whether the extension is busy or quiet.
+    pub state: ExtState,
+    /// The status text, when the extension supplies one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<Box<str>>,
+}
+
+impl std::fmt::Display for ExtStatus {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match (&self.text, self.state) {
+            (Some(text), _) => write!(formatter, "{}: {text}", self.ext),
+            (None, ExtState::Busy) => write!(formatter, "{}: busy", self.ext),
+            (None, ExtState::Quiet) => write!(formatter, "{}: quiet", self.ext),
+        }
+    }
+}
+
+impl ExtStatus {
+    /// Reports whether the extension has nothing in flight.
+    #[must_use]
+    pub const fn is_quiet(&self) -> bool {
+        matches!(self.state, ExtState::Quiet)
+    }
+}
+
 /// A notice emitted to clients.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -349,9 +426,39 @@ pub struct Notice {
 
 #[cfg(test)]
 mod tests {
-    use super::{TurnCause, Update, UpdateKind};
+    use super::{ExtState, TurnCause, Update, UpdateKind};
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    #[test]
+    fn ext_status_round_trips_and_ignores_unknown_state() -> TestResult {
+        let wire = r#"{"gen":1,"seq":5,"kind":{"type":"ext_status","ext":"focus","state":"busy","text":"indexing","future":1}}"#;
+        let update: Update = sonic_rs::from_str(wire)?;
+        let UpdateKind::ExtStatus(status) = &update.kind else {
+            panic!("expected ext_status, got {:?}", update.kind);
+        };
+        assert_eq!(status.ext.as_ref(), "focus");
+        assert_eq!(status.state, ExtState::Busy);
+        assert_eq!(status.text.as_deref(), Some("indexing"));
+        assert!(!status.is_quiet());
+
+        let quiet = UpdateKind::ExtStatus(super::ExtStatus {
+            ext: "focus".into(),
+            state: ExtState::Quiet,
+            text: None,
+        });
+        let text = sonic_rs::to_string(&quiet)?;
+        assert_eq!(
+            text,
+            r#"{"type":"ext_status","ext":"focus","state":"quiet"}"#
+        );
+
+        let bad =
+            r#"{"gen":1,"seq":6,"kind":{"type":"ext_status","ext":"focus","state":"dozing"}}"#;
+        let unknown: Update = sonic_rs::from_str(bad)?;
+        assert!(matches!(unknown.kind, UpdateKind::Unknown));
+        Ok(())
+    }
 
     #[test]
     fn update_ignores_unknown_fields_and_unknown_kind() -> TestResult {

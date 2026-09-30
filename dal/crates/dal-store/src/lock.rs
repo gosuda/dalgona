@@ -24,44 +24,40 @@ const PID_POLL: Duration = Duration::from_millis(5);
 /// it releases the lock; the lock file remains in the session directory.
 #[derive(Debug)]
 #[must_use = "keep the guard alive while the journal is open"]
-pub struct LockGuard {
+pub(crate) struct LockGuard {
     _file: File,
 }
 
 impl LockGuard {
-    /// Opens and exclusively locks `<session_dir>/lock` without waiting.
+    /// Opens and exclusively locks `path` without waiting.
     ///
     /// # Errors
     /// Returns [`StoreError::Locked`] when another process owns the lock, with
     /// its pid when the lock file contains a parseable current pid. Returns
     /// [`StoreError::Io`] when opening or updating the lock file fails.
-    pub fn acquire(session_dir: &Path, session: SessionId) -> Result<Self, StoreError> {
-        let path = session_dir.join("lock");
+    pub(crate) fn acquire(path: &Path, session: SessionId) -> Result<Self, StoreError> {
         let mut options = util::open_options();
         options.read(true).write(true).create(true);
         util::with_mode(&mut options, MODE_FILE);
         let mut file = options
-            .open(&path)
-            .map_err(|source| util::io_err(&path, source))?;
+            .open(path)
+            .map_err(|source| util::io_err(path, source))?;
 
         match file.try_lock() {
             Ok(()) => {
                 file.set_len(0)
-                    .map_err(|source| util::io_err(&path, source))?;
+                    .map_err(|source| util::io_err(path, source))?;
                 file.seek(SeekFrom::Start(0))
-                    .map_err(|source| util::io_err(&path, source))?;
+                    .map_err(|source| util::io_err(path, source))?;
                 writeln!(file, "{}", std::process::id())
-                    .map_err(|source| util::io_err(&path, source))?;
+                    .map_err(|source| util::io_err(path, source))?;
                 Ok(Self { _file: file })
             }
             Err(TryLockError::WouldBlock) => {
-                let pid = read_pid_until(&path)?;
-                Err(StoreError::Locked {
-                    session: session.to_string().into_boxed_str(),
-                    pid,
-                })
+                let pid = read_pid_until(path)?;
+                Err(StoreError::Locked { session, pid })
             }
-            Err(TryLockError::Error(source)) => Err(util::io_err(&path, source)),
+            Err(TryLockError::Error(source)) => Err(util::io_err(path, source)),
         }
     }
 }
@@ -70,7 +66,11 @@ fn read_pid_until(path: &Path) -> Result<Option<u32>, StoreError> {
     let deadline = Instant::now() + PID_WAIT;
     let mut previous = None;
     loop {
-        let bytes = fs::read(path).map_err(|source| util::io_err(path, source))?;
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => return Err(util::io_err(path, source)),
+        };
         let current = parse_pid(&bytes);
         if current.is_some() && current == previous {
             return Ok(current);
@@ -149,21 +149,50 @@ mod tests {
     fn concurrent_acquire_reports_owner_pid_without_changing_lock_file() {
         let dir = TestDir::new();
         let id = SessionId::new_v7();
-        let _owner = LockGuard::acquire(&dir.0, id).expect("first lock acquisition");
+        let Ok(_owner) = LockGuard::acquire(&dir.0.join("lock"), id) else {
+            panic!("first lock acquisition must succeed")
+        };
         let path = dir.0.join("lock");
         let before = fs::read(&path).expect("read owner pid");
 
-        let error = match LockGuard::acquire(&dir.0, id) {
-            Err(error) => error,
-            Ok(_) => panic!("second acquisition must fail"),
+        let Err(error) = LockGuard::acquire(&dir.0.join("lock"), id) else {
+            panic!("second acquisition must fail")
         };
 
+        assert_eq!(
+            error.to_string(),
+            format!("session {id} is open in process {}", std::process::id())
+        );
         assert!(matches!(
-            error,
+            &error,
             StoreError::Locked { session, pid: Some(pid) }
-                if session == id.to_string() && pid == std::process::id()
+                if *session == id && *pid == std::process::id()
         ));
         assert_eq!(fs::read(path).expect("read unchanged owner pid"), before);
+    }
+
+    #[test]
+    fn contended_lock_without_pid_reports_unknown_process() {
+        let dir = TestDir::new();
+        let id = SessionId::new_v7();
+        let path = dir.0.join("lock");
+        let _owner = LockGuard::acquire(&path, id).expect("first lock acquisition");
+        fs::write(&path, b"").expect("erase lock owner text");
+        let before = fs::read(&path).expect("read empty lock text");
+
+        let Err(error) = LockGuard::acquire(&path, id) else {
+            panic!("second acquisition must fail")
+        };
+
+        assert_eq!(
+            error.to_string(),
+            format!("session {id} is open in another process")
+        );
+        assert!(matches!(
+            error,
+            StoreError::Locked { session, pid: None } if session == id
+        ));
+        assert_eq!(fs::read(path).expect("read unchanged lock text"), before);
     }
 
     #[test]
@@ -172,11 +201,13 @@ mod tests {
         let id = SessionId::new_v7();
         let path = dir.0.join("lock");
         {
-            let _guard = LockGuard::acquire(&dir.0, id).expect("first lock acquisition");
+            let _guard =
+                LockGuard::acquire(&dir.0.join("lock"), id).expect("first lock acquisition");
         }
         let stale_pid = fs::read(&path).expect("lock file remains");
 
-        let _next = LockGuard::acquire(&dir.0, id).expect("lock released after guard drop");
+        let _next =
+            LockGuard::acquire(&dir.0.join("lock"), id).expect("lock released after guard drop");
 
         assert!(path.exists());
         assert_eq!(

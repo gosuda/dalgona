@@ -56,7 +56,7 @@ struct StoreInner {
     data_root: PathBuf,
     workspace: Workspace,
     product: Product,
-    workspace_key: Box<str>,
+    workspace_key: String,
     listing: crate::list::Listing,
     shards: Mutex<Option<Arc<Shards>>>,
     #[cfg(test)]
@@ -67,7 +67,7 @@ impl Store {
     /// Creates a store without creating or modifying any filesystem path.
     #[must_use]
     pub fn new(data_root: PathBuf, workspace: Workspace, product: Product) -> Self {
-        let workspace_key: Box<str> = util::workspace_key(workspace.as_path()).into();
+        let workspace_key = util::workspace_key(workspace.as_path());
         Self {
             inner: Arc::new(StoreInner {
                 data_root,
@@ -84,13 +84,11 @@ impl Store {
 
     /// Creates a session whose header, boot record, records, and blobs remain buffered until its
     /// first user entry is appended.
-    #[must_use]
     pub fn create_session(&self, id: SessionId) -> Journal {
         Journal::lazy(Arc::clone(&self.inner), id, None)
     }
 
     /// Creates an in-memory session that never writes under the store's data root.
-    #[must_use]
     pub fn ephemeral_session(&self, id: SessionId) -> Journal {
         Journal::memory(Arc::clone(&self.inner), id, None)
     }
@@ -112,7 +110,7 @@ impl Store {
     /// Returns the typed store, journal, or decode error without changing an invalid complete
     /// record prefix.
     pub async fn open_session(&self, id: SessionId) -> Result<(Journal, OpenReport), StoreError> {
-        self.open_with_faults(id, self.faults()?).await
+        self.open_with_faults(id, self.faults()).await
     }
 
     async fn open_with_faults(
@@ -129,14 +127,14 @@ impl Store {
             }
             Err(source) => return Err(util::io_err(&journal_path, source)),
         }
-        let lock = LockGuard::acquire(paths.directory(), id)?;
+        let lock = LockGuard::acquire(&paths.lock(), id)?;
         let shards = self.shards()?;
         let opened = FileJournal::open(&journal_path, &faults)
             .map_err(|failure| map_open_failure(&journal_path, failure))?;
         let mut records = opened
             .records
-            .iter()
-            .map(|(_, record)| record.clone())
+            .into_iter()
+            .map(|(_, record)| record)
             .collect::<Vec<_>>();
         let header = opened.header.clone();
         let generation = opened.r#gen;
@@ -151,7 +149,10 @@ impl Store {
         let mut lane = shards.attach(id, physical, Some(blob_dir)).await?;
         if !repair.is_empty() {
             let bytes = encode_records(&repair)?;
-            let receipt = lane.append(bytes, Vec::new()).await?;
+            let receipt = lane
+                .append(bytes, Vec::new())
+                .await
+                .map_err(|error| write_failure(id, error))?;
             journal_bytes = receipt.offset.saturating_add(receipt.len);
             journal_bytes_add(&mut records, &mut index, repair);
         }
@@ -173,7 +174,7 @@ impl Store {
             memory_blobs: HashMap::new(),
             validator: Some(validator),
         };
-        journal.refresh_info_cache();
+        journal.refresh_from_records();
         Ok((journal, report))
     }
 
@@ -181,6 +182,10 @@ impl Store {
     ///
     /// # Errors
     /// Returns [`StoreError`] when the query or selected workspace cannot be read.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "the plan specifies Store::list takes ListQuery by value"
+    )]
     pub fn list(&self, query: ListQuery) -> Result<Page<SessionInfo, Box<str>>, StoreError> {
         self.inner
             .listing
@@ -207,6 +212,22 @@ impl Store {
             .newest(&self.workspace_dir(), &self.inner.workspace)
     }
 
+    /// Returns the journal file path for a session without touching the filesystem.
+    ///
+    /// Ephemeral sessions have no durable path; the caller maps those to `None`.
+    #[must_use]
+    pub fn session_file(&self, id: SessionId) -> PathBuf {
+        self.paths(id).journal()
+    }
+
+    /// Returns the jobs directory path for a session without touching the filesystem.
+    ///
+    /// Ephemeral sessions have no durable path; the caller maps those to `None`.
+    #[must_use]
+    pub fn session_jobs_dir(&self, id: SessionId) -> PathBuf {
+        self.paths(id).jobs()
+    }
+
     /// Reads one digest from a file-backed session without acquiring its lock.
     ///
     /// # Errors
@@ -215,6 +236,17 @@ impl Store {
     pub fn read_blob(&self, id: SessionId, blob_id: BlobId) -> Result<Vec<u8>, BlobError> {
         let paths = self.paths(id);
         blob::read(paths.directory(), &blob_id)
+    }
+
+    /// Publishes `bytes` durably into the session's content-addressed blob
+    /// directory and returns the digest.
+    ///
+    /// # Errors
+    /// Returns [`BlobError::TooLarge`] above the cap, or [`BlobError::Io`] on a
+    /// failed publish.
+    pub fn write_blob(&self, id: SessionId, bytes: &[u8]) -> Result<BlobId, BlobError> {
+        let dir = self.paths(id).directory().join("blobs");
+        blob::put(&dir, bytes)
     }
 
     /// Deletes a session tree after obtaining its nonblocking session lock.
@@ -232,7 +264,7 @@ impl Store {
             }
             Err(source) => return Err(util::io_err(paths.directory(), source)),
         }
-        let _lock = LockGuard::acquire(paths.directory(), id)?;
+        let _lock = LockGuard::acquire(&paths.lock(), id)?;
         match fs::metadata(&journal) {
             Ok(metadata) if metadata.is_file() => {}
             Ok(_) => return Err(StoreError::NotFound { path: journal }),
@@ -262,11 +294,12 @@ impl Store {
             &source.header,
         )
         .map_err(|error| match error {
-            dal_core::BranchError::NoEntries => StoreError::NothingToClone {
-                id: source.id.to_string().into(),
+            dal_core::BranchError::NoEntries => StoreError::UnknownEntry {
+                id: source.id,
+                entry: at,
             },
             dal_core::BranchError::UnknownEntry { entry } => StoreError::UnknownEntry {
-                id: source.id.to_string().into(),
+                id: source.id,
                 entry,
             },
             dal_core::BranchError::NotUserEntry { entry } => StoreError::NotUserMessage { entry },
@@ -298,11 +331,9 @@ impl Store {
             &source.header,
         )
         .map_err(|error| match error {
-            dal_core::BranchError::NoEntries => StoreError::NothingToClone {
-                id: source.id.to_string().into(),
-            },
+            dal_core::BranchError::NoEntries => StoreError::NothingToClone { id: source.id },
             dal_core::BranchError::UnknownEntry { entry } => StoreError::UnknownEntry {
-                id: source.id.to_string().into(),
+                id: source.id,
                 entry,
             },
             dal_core::BranchError::NotUserEntry { entry } => StoreError::NotUserMessage { entry },
@@ -326,7 +357,7 @@ impl Store {
         } else {
             Journal::lazy_with_header(Arc::clone(&self.inner), header)
         };
-        self.share_branch_blobs(source, &mut destination, &records)?;
+        Self::share_branch_blobs(source, &mut destination, &records)?;
         if !records.is_empty() {
             destination.append(records).await?;
         }
@@ -334,7 +365,6 @@ impl Store {
     }
 
     fn share_branch_blobs(
-        &self,
         source: &Journal,
         destination: &mut Journal,
         records: &[Record],
@@ -354,13 +384,14 @@ impl Store {
             return Ok(());
         }
 
-        fs::create_dir_all(destination.paths.directory())
+        util::create_private_dir_all(destination.paths.directory())
             .map_err(|source| util::io_err(destination.paths.directory(), source))?;
-        let lock = LockGuard::acquire(destination.paths.directory(), destination.id)?;
+        let lock = LockGuard::acquire(&destination.paths.lock(), destination.id)?;
         let blob_dir = destination.paths.directory().join("blobs");
-        fs::create_dir_all(&blob_dir).map_err(|source| util::io_err(&blob_dir, source))?;
+        util::create_private_dir_all(&blob_dir)
+            .map_err(|source| util::io_err(&blob_dir, source))?;
         let jobs = destination.paths.jobs();
-        fs::create_dir_all(&jobs).map_err(|source| util::io_err(&jobs, source))?;
+        util::create_private_dir_all(&jobs).map_err(|source| util::io_err(&jobs, source))?;
         let source_has_file_blobs = !source.ephemeral
             && source.paths.directory().join("blobs").is_dir()
             && matches!(
@@ -389,7 +420,10 @@ impl Store {
     }
 
     fn workspace_dir(&self) -> PathBuf {
-        self.workspace_dir_for(&self.inner.workspace)
+        self.inner
+            .data_root
+            .join("sessions")
+            .join(&self.inner.workspace_key)
     }
 
     fn workspace_dir_for(&self, workspace: &Workspace) -> PathBuf {
@@ -413,29 +447,32 @@ impl Store {
         *shared = Some(Arc::clone(&shards));
         Ok(shards)
     }
-    fn faults(&self) -> Result<Faults, StoreError> {
-        #[cfg(test)]
-        {
-            return self
-                .inner
-                .faults
-                .lock()
-                .map(|faults| faults.clone())
-                .map_err(|_| {
-                    util::io_err(
-                        &self.inner.data_root,
-                        io::Error::other("journal fault setter mutex is poisoned"),
-                    )
-                });
-        }
-        #[cfg(not(test))]
-        {
-            Ok(Faults::default())
-        }
+    #[cfg(test)]
+    fn faults(&self) -> Faults {
+        use std::sync::PoisonError;
+
+        self.inner
+            .faults
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    #[cfg(not(test))]
+    #[expect(
+        clippy::unused_self,
+        reason = "the test build reads faults from the store; the non-test build has none"
+    )]
+    fn faults(&self) -> Faults {
+        Faults::default()
     }
 }
 
 /// One actor-owned logical journal.
+#[expect(
+    clippy::struct_field_names,
+    reason = "journal_bytes names the durable journal size shared with the info cache"
+)]
 #[must_use = "a logical journal owns its session lock until close or drop"]
 pub struct Journal {
     inner: Arc<StoreInner>,
@@ -453,6 +490,10 @@ pub struct Journal {
     memory_blobs: HashMap<BlobId, Vec<u8>>,
     validator: Option<journal::Validator>,
 }
+#[expect(
+    clippy::missing_fields_in_debug,
+    reason = "the journal Debug view summarizes actor-visible state, not storage fields"
+)]
 impl std::fmt::Debug for Journal {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let state = match &self.state {
@@ -561,6 +602,7 @@ fn entry_mut(record: &mut Record) -> Option<&mut dal_core::Entry> {
         | Record::Model(entry)
         | Record::Thinking(entry)
         | Record::Approval(entry)
+        | Record::Mode(entry)
         | Record::Compaction(entry)
         | Record::BranchSummary(entry) => Some(entry),
         _ => None,
@@ -629,6 +671,14 @@ impl Journal {
         self.generation
     }
 
+    /// Returns the post-recovery in-memory record prefix, ending with the
+    /// boot record this open appended, whose generation matches the open
+    /// report.
+    #[must_use]
+    pub fn records(&self) -> &[Record] {
+        &self.records
+    }
+
     /// Returns whether this journal is in-memory and has no filesystem representation.
     #[must_use]
     pub const fn is_ephemeral(&self) -> bool {
@@ -637,7 +687,7 @@ impl Journal {
 
     /// Returns a sidecar handle while a file-backed journal is open.
     #[must_use]
-    pub fn sidecar(&self) -> Option<Sidecar> {
+    pub fn sidecar(&self) -> Option<Sidecar<'_>> {
         match &self.state {
             State::File { .. } => Some(Sidecar::new(&self.paths)),
             State::Lazy { .. } | State::Memory | State::Broken { .. } | State::Closed => None,
@@ -655,29 +705,53 @@ impl Journal {
                 .memory_blobs
                 .get(&blob_id)
                 .cloned()
-                .ok_or_else(|| BlobError::NotFound {
-                    hex: blob_id.to_string().into(),
-                });
+                .ok_or(BlobError::NotFound { id: blob_id });
         }
         match &self.state {
             State::Lazy { blobs } => blobs
                 .iter()
                 .find(|blob| blob.id() == blob_id)
                 .map(|blob| blob.bytes().to_vec())
-                .ok_or_else(|| BlobError::NotFound {
-                    hex: blob_id.to_string().into(),
-                }),
+                .ok_or(BlobError::NotFound { id: blob_id }),
             State::File { .. } | State::Broken { .. } | State::Closed => {
                 blob::read(self.paths.directory(), &blob_id)
             }
+            State::Memory => self
+                .memory_blobs
+                .get(&blob_id)
+                .cloned()
+                .ok_or(BlobError::NotFound { id: blob_id }),
+        }
+    }
+
+    /// Publishes one content-addressed blob through this journal's storage mode.
+    ///
+    /// # Errors
+    /// Returns a store or blob error when the session cannot durably publish the bytes.
+    pub fn put_blob(&mut self, bytes: Vec<u8>) -> Result<BlobId, StoreError> {
+        if matches!(&self.state, State::Lazy { .. }) {
+            return Err(StoreError::Invalid {
+                reason: "a blob cannot be published before the first user entry".into(),
+            });
+        }
+        let pending = PendingBlob::prepare_put(bytes)?;
+        let id = pending.id();
+        match &self.state {
             State::Memory => {
-                self.memory_blobs
-                    .get(&blob_id)
-                    .cloned()
-                    .ok_or_else(|| BlobError::NotFound {
-                        hex: blob_id.to_string().into(),
-                    })
+                let (id, bytes) = pending.into_parts();
+                self.memory_blobs.entry(id).or_insert(bytes);
+                Ok(id)
             }
+            State::File { .. } => {
+                let dir = self.paths.directory().join("blobs");
+                blob::put(&dir, pending.bytes())?;
+                Ok(id)
+            }
+            State::Broken { .. } => Err(self.broken_error()),
+            State::Closed => Err(StoreError::Invalid {
+                reason: "session is closed".into(),
+            }),
+            State::Lazy { .. } => Err(invalid_record("session entered lazy state unexpectedly")),
         }
     }
 
@@ -714,7 +788,7 @@ impl Journal {
             .inner
             .data_root
             .join("sessions")
-            .join(self.inner.workspace_key.as_ref());
+            .join(&self.inner.workspace_key);
         for record in records {
             let Record::Name { name, .. } = record else {
                 continue;
@@ -761,21 +835,21 @@ impl Journal {
             .ok_or_else(|| invalid_record("session validator is unavailable"))?
             .prepare_batch(&records)
             .map_err(validation_error)?;
-        let had_user = self
+        let had_user_entry = self
             .records
             .iter()
             .any(|record| matches!(record, Record::User(_)));
-        let has_user = records
+        let has_user_in_batch = records
             .iter()
             .any(|record| matches!(record, Record::User(_)));
-        let refresh_info = (!had_user && has_user)
+        let refresh_info = (!had_user_entry && has_user_in_batch)
             || records
                 .iter()
                 .any(|record| matches!(record, Record::Name { .. } | Record::Archive { .. }));
         let generation = generation_after(self.generation, &records);
 
         if matches!(&self.state, State::Lazy { .. }) {
-            if !has_user {
+            if !has_user_in_batch {
                 let State::Lazy { blobs } = &mut self.state else {
                     unreachable!("lazy state was checked above");
                 };
@@ -826,6 +900,10 @@ impl Journal {
         .await
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "first-user materialization sequences lock, blobs, journal, and cache in one place"
+    )]
     async fn append_first_user(
         &mut self,
         records: Vec<Record>,
@@ -846,24 +924,21 @@ impl Journal {
                 return Err(error);
             }
         };
-        let byte_len = match u64::try_from(bytes.len()) {
-            Ok(byte_len) => byte_len,
-            Err(_) => {
-                self.state = State::Lazy { blobs };
-                return Err(StoreError::Invalid {
-                    reason: "journal batch length exceeds the byte counter".into(),
-                });
-            }
+        let Ok(byte_len) = u64::try_from(bytes.len()) else {
+            self.state = State::Lazy { blobs };
+            return Err(StoreError::Invalid {
+                reason: "journal batch length exceeds the byte counter".into(),
+            });
         };
         let blob_dir = self.paths.directory().join("blobs");
         let jobs_dir = self.paths.jobs();
-        if let Err(source) = fs::create_dir_all(self.paths.directory()) {
+        if let Err(source) = util::create_private_dir_all(self.paths.directory()) {
             self.state = State::Lazy { blobs };
             return Err(util::io_err(self.paths.directory(), source));
         }
         let lock = match self.prelocked.take() {
             Some(lock) => lock,
-            None => match LockGuard::acquire(self.paths.directory(), self.id) {
+            None => match LockGuard::acquire(&self.paths.lock(), self.id) {
                 Ok(lock) => lock,
                 Err(error) => {
                     self.state = State::Lazy { blobs };
@@ -872,8 +947,10 @@ impl Journal {
             },
         };
         let directory_setup = (|| {
-            fs::create_dir_all(&blob_dir).map_err(|source| util::io_err(&blob_dir, source))?;
-            fs::create_dir_all(&jobs_dir).map_err(|source| util::io_err(&jobs_dir, source))?;
+            util::create_private_dir_all(&blob_dir)
+                .map_err(|source| util::io_err(&blob_dir, source))?;
+            util::create_private_dir_all(&jobs_dir)
+                .map_err(|source| util::io_err(&jobs_dir, source))?;
             Ok::<(), StoreError>(())
         })();
         if let Err(error) = directory_setup {
@@ -893,7 +970,7 @@ impl Journal {
                     .inner
                     .data_root
                     .join("sessions")
-                    .join(self.inner.workspace_key.as_ref());
+                    .join(&self.inner.workspace_key);
                 if let Err(error) = self.inner.listing.normalize_name(
                     &workspace_dir,
                     &self.inner.workspace,
@@ -939,13 +1016,13 @@ impl Journal {
                     }
                     self.state = State::Lazy { blobs: Vec::new() };
                 }
-                return Err(error.into());
+                return Err(write_failure(self.id, error.into()));
             }
         };
         #[cfg(test)]
         let file_journal = {
             let mut file_journal = file_journal;
-            file_journal.set_faults(store.faults()?);
+            file_journal.set_faults(store.faults());
             file_journal
         };
         self.pending = Some(PendingAppend {
@@ -964,15 +1041,10 @@ impl Journal {
             )
             .await?;
         let lock = match &mut self.state {
-            State::Broken {
-                lane: None,
-                lock,
-            } => lock.take(),
+            State::Broken { lane: None, lock } => lock.take(),
             _ => None,
         }
-        .ok_or_else(|| StoreError::Broken {
-            id: self.id.to_string().into(),
-        })?;
+        .ok_or(StoreError::Broken { id: self.id })?;
         self.state = State::File { lane, lock };
         let receipt = Receipt {
             offset: 0,
@@ -1023,6 +1095,7 @@ impl Journal {
                 Ok(AppendOutcome::Durable(receipt))
             }
             Err(error) => {
+                let error = write_failure(self.id, error);
                 self.pending = None;
                 if is_irreversible(&error) {
                     self.mark_broken();
@@ -1046,6 +1119,7 @@ impl Journal {
         match result {
             Some(Ok(receipt)) => self.apply_pending(receipt),
             Some(Err(error)) => {
+                let error = write_failure(self.id, error);
                 self.pending = None;
                 if is_irreversible(&error) {
                     self.mark_broken();
@@ -1090,7 +1164,7 @@ impl Journal {
         self.generation = generation;
         self.journal_bytes = journal_bytes;
         if refresh_info {
-            self.refresh_info_cache();
+            self.refresh_from_records();
         }
         Ok(())
     }
@@ -1102,15 +1176,12 @@ impl Journal {
                 lane: Some(lane),
                 lock: Some(lock),
             },
-            other @ State::Broken { .. } => other,
             other => other,
         };
     }
 
     fn broken_error(&self) -> StoreError {
-        StoreError::Broken {
-            id: self.id.to_string().into(),
-        }
+        StoreError::Broken { id: self.id }
     }
 
     /// Closes the journal and releases its file worker and cross-process lock.
@@ -1172,8 +1243,8 @@ impl Journal {
         let settled = self.settle_pending().await;
         let file_backed = matches!(&self.state, State::File { .. });
         match &mut self.state {
-            State::File { lane, .. } => lane.close().await?,
-            State::Broken {
+            State::File { lane, .. }
+            | State::Broken {
                 lane: Some(lane), ..
             } => lane.close().await?,
             State::Lazy { .. }
@@ -1182,7 +1253,7 @@ impl Journal {
             | State::Closed => {}
         }
         if file_backed {
-            self.refresh_info_cache();
+            self.refresh_from_records();
         }
         self.state = State::Closed;
         self.prelocked = None;
@@ -1190,45 +1261,17 @@ impl Journal {
         settled
     }
 
-    fn refresh_info_cache(&self) {
+    fn refresh_from_records(&self) {
         if !matches!(&self.state, State::File { .. } | State::Broken { .. }) {
             return;
         }
-        let path = self.paths.journal();
-        let metadata = match fs::metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(error) => {
-                tracing::warn!(target: "dalgon.store", %error, "could not stat journal for info cache");
-                return;
-            }
-        };
-        let modified = match metadata.modified() {
-            Ok(modified) => modified,
-            Err(error) => {
-                tracing::warn!(target: "dalgon.store", %error, "could not read journal mtime for info cache");
-                return;
-            }
-        };
-        let info = match self.inner.listing.read_info(
-            self.paths.directory(),
+        self.inner.listing.refresh_from_records(
+            &self.paths,
             self.id,
             &self.inner.workspace,
+            &self.records,
             self.journal_bytes,
-            modified,
-        ) {
-            Ok(info) => info,
-            Err(error) => {
-                tracing::warn!(target: "dalgon.store", %error, "could not read session info for cache update");
-                return;
-            }
-        };
-        if let Err(error) =
-            self.inner
-                .listing
-                .write_info(self.paths.directory(), &info, self.journal_bytes)
-        {
-            tracing::warn!(target: "dalgon.store", %error, "could not write session info cache");
-        }
+        );
     }
 }
 fn boot_record(generation: Gen) -> Record {
@@ -1432,534 +1475,20 @@ fn is_irreversible(error: &StoreError) -> bool {
             )
     )
 }
-
-#[cfg(test)]
-mod tests {
-    use std::{
-        fs,
-        future::Future,
-        num::NonZeroU64,
-        path::{Path, PathBuf},
-        sync::{
-            Arc,
-            atomic::{AtomicU64, Ordering},
-        },
-        task::{Context, Poll, Wake, Waker},
-        time::{SystemTime, UNIX_EPOCH},
-    };
-
-    use dal_core::{
-        AssistantStop, Block, CallId, Entry, EntryId, EntryKind, Family, JournalPart, ListQuery,
-        Product, RawJson, Record, SessionId, TurnEndStop, TurnId, Usage, Workspace,
-    };
-    use crate::blob::INLINE_LIMIT;
-
-    use super::*;
-
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new() -> Self {
-            static NEXT: AtomicU64 = AtomicU64::new(1);
-            let time = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos();
-            let path = std::env::temp_dir().join(format!(
-                "dal-store-{}-{time}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ));
-            fs::create_dir_all(&path).expect("create store test directory");
-            Self(path)
-        }
-
-        fn path(&self) -> &Path {
-            &self.0
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
-    fn store(temp: &TempDir) -> Store {
-        let workspace = Workspace::new(temp.path().join("workspace"))
-            .expect("temporary workspace path is absolute");
-        Store::new(temp.path().join("data"), workspace, Product::Dalgona)
-    }
-
-    fn entry_id(value: u64) -> EntryId {
-        EntryId::new(NonZeroU64::new(value).unwrap_or(NonZeroU64::MIN))
-    }
-
-    fn timestamp() -> jiff::Timestamp {
-        jiff::Timestamp::now()
-    }
-
-    fn user(id: u64, text: impl Into<Box<str>>) -> Record {
-        Record::User(Entry {
-            id: entry_id(id),
-            parent: None,
-            at: timestamp(),
-            kind: EntryKind::User {
-                parts: vec![JournalPart::Text { text: text.into() }],
-            },
-        })
-    }
-
-    fn usage() -> Usage {
-        Usage {
-            input_tokens: 0,
-            cached_input_tokens: 0,
-            output_tokens: 0,
-            reasoning_tokens: None,
-            cache_write_tokens: 0,
-            cost_usd: None,
-        }
-    }
-
-    fn assistant_with_calls(id: u64, calls: &[&str]) -> Record {
-        let input = RawJson::parse("{}").expect("valid tool input");
-        let content = calls
-            .iter()
-            .map(|call| Block::ToolCall {
-                id: CallId::new(*call),
-                name: "read_file".into(),
-                input: input.clone(),
-            })
-            .collect();
-        Record::Assistant(Entry {
-            id: entry_id(id),
-            parent: None,
-            at: timestamp(),
-            kind: EntryKind::Assistant {
-                api: Family::Chat,
-                model: "test-model".into(),
-                content,
-                usage: usage(),
-                stop: AssistantStop::ToolUse,
-            },
-        })
-    }
-
-    #[tokio::test]
-    async fn lazy_first_user_writes_one_durable_header_boot_and_user_batch() {
-        let temp = TempDir::new();
-        let store = store(&temp);
-        let data_root = store.inner.data_root.clone();
-        let id = SessionId::new_v7();
-        assert!(!data_root.exists());
-        let mut journal = store.create_session(id);
-
-        assert_eq!(
-            journal
-                .append(vec![Record::Name {
-                    at: timestamp(),
-                    name: Some("parser fix".into()),
-                }])
-                .await
-                .expect("buffer name"),
-            AppendOutcome::Buffered
-        );
-        assert!(!data_root.exists());
-
-        let receipt = match journal
-            .append(vec![user(1, "first message")])
-            .await
-            .expect("durable first user")
-        {
-            AppendOutcome::Durable(receipt) => receipt,
-            other => panic!("expected a durable receipt, got {other:?}"),
-        };
-        let bytes = fs::read(journal.paths.journal()).expect("read journal");
-        assert_eq!(receipt.offset, 0);
-        assert_eq!(
-            receipt.len,
-            u64::try_from(bytes.len()).expect("file length fits u64")
-        );
-        let records = bytes
-            .split(|byte| *byte == b'\n')
-            .filter(|line| !line.is_empty())
-            .map(|line| dal_core::decode(line).expect("decode complete line").record)
-            .collect::<Vec<_>>();
-        assert_eq!(records.len(), 4);
-        assert!(matches!(&records[0], Record::Session(_)));
-        assert!(matches!(&records[1], Record::Boot { .. }));
-        assert!(matches!(&records[2], Record::Name { .. }));
-        assert!(matches!(&records[3], Record::User(_)));
-        assert!(journal.paths.info().is_file());
-        journal.close().await.expect("close file session");
-    }
-
-    #[tokio::test]
-    async fn ephemeral_blobs_and_records_leave_no_files_before_or_after_close() {
-        let temp = TempDir::new();
-        let store = store(&temp);
-        let data_root = store.inner.data_root.clone();
-        let mut journal = store.ephemeral_session(SessionId::new_v7());
-        let text = "x".repeat(INLINE_LIMIT);
-        let expected = text.as_bytes().to_vec();
-
-        assert_eq!(
-            journal
-                .append(vec![user(1, text)])
-                .await
-                .expect("append in memory"),
-            AppendOutcome::Memory
-        );
-        assert!(journal.is_ephemeral());
-        assert!(journal.sidecar().is_none());
-        let user_record = journal
-            .records
-            .iter()
-            .find(|record| matches!(record, Record::User(_)))
-            .expect("user record");
-        let blob_ids = blob::named_blobs(user_record);
-        let [blob_id] = blob_ids.as_slice() else {
-            panic!("threshold-sized user text names one blob");
-        };
-        assert_eq!(
-            journal.read_blob(*blob_id).expect("read memory blob"),
-            expected
-        );
-        assert!(!data_root.exists());
-        assert!(
-            store
-                .list(ListQuery {
-                    limit: None,
-                    cursor: None,
-                    search: None,
-                })
-                .expect("list empty workspace")
-                .items
-                .is_empty()
-        );
-
-        journal.close().await.expect("close memory session");
-        assert_eq!(
-            journal
-                .read_blob(*blob_id)
-                .expect("memory blob survives close"),
-            expected
-        );
-        assert!(!data_root.exists());
-    }
-
-    #[tokio::test]
-    async fn locked_session_cannot_be_opened_or_deleted_until_close() {
-        let temp = TempDir::new();
-        let store = store(&temp);
-        let id = SessionId::new_v7();
-        let mut journal = store.create_session(id);
-        let text = "b".repeat(INLINE_LIMIT);
-        let blob_id = BlobId::from_bytes(text.as_bytes());
-        journal
-            .append(vec![user(1, text)])
-            .await
-            .expect("create file session");
-
-        assert!(matches!(
-            store.open_session(id).await,
-            Err(StoreError::Locked { .. })
-        ));
-        assert!(matches!(store.delete(id), Err(StoreError::Locked { .. })));
-
-        journal.close().await.expect("release session lock");
-        store.delete(id).expect("delete closed session");
-        assert!(matches!(store.read_blob(id, blob_id), Err(BlobError::Gone)));
-    }
-
-    #[tokio::test]
-    async fn recovery_aborts_calls_once_with_started_and_not_run_outcomes() {
-        let temp = TempDir::new();
-        let store = store(&temp);
-        let id = SessionId::new_v7();
-        let mut journal = store.create_session(id);
-        journal
-            .append(vec![user(1, "run the tools")])
-            .await
-            .expect("create session");
-        let turn = TurnId::new(NonZeroU64::MIN);
-        journal
-            .append(vec![
-                Record::TurnStart {
-                    at: timestamp(),
-                    turn,
-                },
-                assistant_with_calls(2, &["started", "not-started"]),
-            ])
-            .await
-            .expect("start unfinished turn");
-        journal
-            .append(vec![Record::ToolStart {
-                at: timestamp(),
-                turn,
-                call: CallId::new("started"),
-            }])
-            .await
-            .expect("start first call");
-        journal.close().await.expect("close interrupted session");
-
-        let (mut reopened, report) = store
-            .open_session(id)
-            .await
-            .expect("repair interrupted session");
-        let aborted = report.aborted.as_ref().expect("aborted turn fact");
-        assert_eq!(aborted.turn, turn);
-        assert_eq!(aborted.interrupted, 1);
-        assert_eq!(aborted.not_run, 1);
-        let mut interrupted_text = false;
-        let mut not_run_text = false;
-        for record in &reopened.records {
-            let Record::ToolResult(entry) = record else {
-                continue;
-            };
-            let EntryKind::ToolResult { parts, .. } = &entry.kind else {
-                continue;
-            };
-            for part in parts {
-                if let JournalPart::Text { text } = part {
-                    interrupted_text |= text.as_ref() == crate::error::INTERRUPTED_CALL;
-                    not_run_text |= text.as_ref() == crate::error::NOT_RUN_CALL;
-                }
-            }
-        }
-        assert!(interrupted_text);
-        assert!(not_run_text);
-        assert_eq!(
-            reopened
-                .records
-                .iter()
-                .filter(|record| matches!(
-                    record,
-                    Record::TurnEnd {
-                        stop: TurnEndStop::Aborted,
-                        ..
-                    }
-                ))
-                .count(),
-            1
-        );
-        reopened.close().await.expect("close repaired session");
-
-        let (mut second, second_report) = store
-            .open_session(id)
-            .await
-            .expect("reopen repaired session");
-        assert!(second_report.aborted.is_none());
-        second.close().await.expect("close second open");
-    }
-
-    #[tokio::test]
-    async fn fork_is_lazy_and_clone_shares_blobs_before_publishing_journal() {
-        let temp = TempDir::new();
-        let store = store(&temp);
-        let source_id = SessionId::new_v7();
-        let mut source = store.create_session(source_id);
-        let text = "c".repeat(INLINE_LIMIT);
-        let bytes = text.as_bytes().to_vec();
-        let blob_id = BlobId::from_bytes(&bytes);
-        source
-            .append(vec![user(1, text.clone())])
-            .await
-            .expect("create source session");
-
-        let (mut fork, restart_text) = store
-            .fork(&mut source, entry_id(1))
-            .await
-            .expect("fork first user entry");
-        assert_eq!(restart_text, text);
-        assert!(matches!(&fork.state, State::Lazy { .. }));
-        assert!(!fork.paths.directory().exists());
-
-        let mut clone = store
-            .clone_session(&mut source)
-            .await
-            .expect("clone active path");
-        let copied_user = clone
-            .records
-            .iter()
-            .find_map(|record| record.entry())
-            .expect("copied tree entry");
-        assert_eq!(copied_user.id, entry_id(1));
-        #[cfg(unix)]
-        let source_blob = source
-            .paths
-            .directory()
-            .join("blobs")
-            .join(blob_id.to_string());
-        let clone_blob = clone
-            .paths
-            .directory()
-            .join("blobs")
-            .join(blob_id.to_string());
-        assert_eq!(
-            fs::read(&clone_blob).expect("read shared clone blob"),
-            bytes
-        );
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            assert_eq!(
-                fs::metadata(&source_blob)
-                    .expect("source blob metadata")
-                    .ino(),
-                fs::metadata(&clone_blob)
-                    .expect("clone blob metadata")
-                    .ino()
-            );
-        }
-        if let Record::Session(header) = &clone.records[0] {
-            let from = header.from.as_ref().expect("clone provenance");
-            assert_eq!(from.session, source_id);
-            assert_eq!(from.entry, Some(entry_id(1)));
-        } else {
-            panic!("clone starts with a session header");
-        }
-
-        fork.close().await.expect("close lazy fork");
-        clone.close().await.expect("close clone");
-        source.close().await.expect("close source");
-    }
-
-    #[tokio::test]
-    async fn cancelled_admitted_append_settles_before_the_next_append() {
-        let temp = TempDir::new();
-        let store = store(&temp);
-        let id = SessionId::new_v7();
-        let mut journal = store.create_session(id);
-        journal
-            .append(vec![user(1, "cancel test")])
-            .await
-            .expect("create file session");
-
-        let shards = store.shards().expect("start shard workers");
-        let (started, release) = shards.hold_worker_for_test(id).expect("queue worker hold");
-        tokio::task::spawn_blocking(move || started.recv())
-            .await
-            .expect("wait task")
-            .expect("worker started hold");
-
-        struct NoopWake;
-        impl Wake for NoopWake {
-            fn wake(self: Arc<Self>) {}
-        }
-        let waker = Waker::from(Arc::new(NoopWake));
-        let mut context = Context::from_waker(&waker);
-        let future = journal.append(vec![Record::Name {
-            at: timestamp(),
-            name: Some("settled before next".into()),
-        }]);
-        let mut future = Box::pin(future);
-        assert!(matches!(future.as_mut().poll(&mut context), Poll::Pending));
-        drop(future);
-        release.send(()).expect("release held shard");
-
-        journal
-            .append(vec![Record::Archive {
-                at: timestamp(),
-                archived: false,
-            }])
-            .await
-            .expect("next append settles and follows prior append");
-        assert!(journal.records.iter().any(|record| matches!(
-            record,
-            Record::Name {
-                name: Some(name),
+fn write_failure(id: SessionId, error: StoreError) -> StoreError {
+    match error {
+        StoreError::Journal(
+            error @ crate::error::JournalError::Io {
+                op: "write" | "sync",
                 ..
-            } if name.as_ref() == "settled before next"
-        )));
-        journal.close().await.expect("close after settlement");
-    }
-
-    #[tokio::test]
-    async fn blob_publish_failure_keeps_record_unpublished_and_marks_broken() {
-        let temp = TempDir::new();
-        let store = store(&temp);
-        let id = SessionId::new_v7();
-        let mut journal = store.create_session(id);
-        journal
-            .append(vec![user(1, "existing record")])
-            .await
-            .expect("create file session");
-        let before = fs::read(journal.paths.journal()).expect("read acknowledged bytes");
-        let blob_dir = journal.paths.directory().join("blobs");
-        fs::remove_dir(&blob_dir).expect("remove empty blob directory");
-        fs::write(&blob_dir, b"not a directory").expect("block blob publication");
-
-        let error = journal
-            .append(vec![user(2, "d".repeat(INLINE_LIMIT))])
-            .await
-            .expect_err("blob publication fails");
-        assert!(matches!(error, StoreError::Blob(BlobError::Io { .. })));
-        assert_eq!(
-            fs::read(journal.paths.journal()).expect("read journal after blob failure"),
-            before
-        );
-        assert_eq!(journal.records.len(), 3);
-        assert!(matches!(
-            journal
-                .append(vec![Record::Archive {
-                    at: timestamp(),
-                    archived: false,
-                }])
-                .await,
-            Err(StoreError::Broken { .. })
-        ));
-        journal.close().await.expect("close broken journal");
-    }
-
-    #[tokio::test]
-    async fn failed_rollback_marks_broken_until_reopen_repairs_tail() {
-        let temp = TempDir::new();
-        let store = store(&temp);
-        store
-            .set_faults_for_test(Faults {
-                fail_write_after: Some(1),
-                fail_truncate: true,
-                ..Faults::default()
-            })
-            .expect("configure append failpoint");
-        let id = SessionId::new_v7();
-        let mut journal = store.create_session(id);
-        journal
-            .append(vec![user(1, "durable prefix")])
-            .await
-            .expect("create durable file before enabling writer fault");
-
-        let error = journal
-            .append(vec![Record::Name {
-                at: timestamp(),
-                name: Some("will not commit".into()),
-            }])
-            .await
-            .expect_err("partial write and rollback fail");
-        assert!(matches!(
-            error,
-            StoreError::Journal(crate::error::JournalError::Damaged { .. })
-        ));
-        assert!(matches!(
-            journal
-                .append(vec![Record::Archive {
-                    at: timestamp(),
-                    archived: false,
-                }])
-                .await,
-            Err(StoreError::Broken { .. })
-        ));
-        journal.close().await.expect("close broken writer");
-
-        store
-            .set_faults_for_test(Faults::default())
-            .expect("clear append failpoint");
-        let (mut reopened, report) = store.open_session(id).await.expect("reopen and repair");
-        assert!(report.torn.is_some());
-        assert!(reopened.records.iter().all(|record| {
-            !matches!(record, Record::Name { name: Some(name), .. } if name.as_ref() == "will not commit")
-        }));
-        reopened.close().await.expect("close repaired writer");
+            },
+        ) => StoreError::WriteFailed {
+            id,
+            cause: Box::new(error),
+        },
+        error => error,
     }
 }
+
+#[cfg(test)]
+mod tests;

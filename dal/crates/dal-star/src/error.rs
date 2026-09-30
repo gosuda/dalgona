@@ -2,8 +2,33 @@
 
 use std::{io, path::PathBuf};
 
+use thiserror::Error;
+
+/// An API-usage error a script committed (§R07 category).
+///
+/// Wrong argument shapes, foreign handles, unknown attributes resolved to a
+/// call, and provider-side arity violations surface as this type; it is
+/// never a service failure and never terminal. Downcast checks at bridge
+/// boundaries keep it distinct from [`crate::outcome::ScriptFailure`] and
+/// `HostTerminal`.
+#[derive(Debug)]
+pub(crate) struct ApiError(pub(crate) Box<str>);
+
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ApiError {}
+
+/// Wraps `message` in a `starlark::Error` tagged as [`ApiError`].
+pub(crate) fn api_error(message: impl Into<String>) -> starlark::Error {
+    starlark::Error::new_other(ApiError(message.into().into_boxed_str()))
+}
+
 /// A plugin could not be scanned, evaluated, or registered.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Error)]
 pub enum LoadError {
     /// Starlark parsing or evaluation failed at a source location.
     #[error("{path}:{line}:{col}: {message}")]
@@ -29,12 +54,65 @@ pub enum LoadError {
         /// The declaration validation message.
         message: Box<str>,
     },
-    /// A plugin source did not declare its identity.
-    #[error("no dal.plugin(...) call in {path}")]
-    MissingPluginCall {
+    /// The entry module binds `plugin` more than once.
+    #[error("{path}:{line}:{col}: `plugin` is bound again; bind the plugin value exactly once")]
+    PluginRebound {
+        /// The entry file.
+        path: PathBuf,
+        /// One-based line of the second binding.
+        line: u32,
+        /// One-based column of the second binding.
+        col: u32,
+    },
+    /// A plugin source did not export the one `plugin` value v1 requires.
+    #[error("{path} does not export a `plugin` value; only the @dal/v1 contract is supported")]
+    UnsupportedEntry {
         /// Absolute `plugin.star` path.
         path: PathBuf,
     },
+    /// The exported `plugin` value failed validation (spec §P03).
+    #[error("{path}: plugin descriptor is invalid: {message}")]
+    InvalidPlugin {
+        /// Absolute `plugin.star` path.
+        path: PathBuf,
+        /// What the descriptor got wrong.
+        message: Box<str>,
+    },
+    /// A `uses` list failed to parse or violated a phase ceiling.
+    #[error("{path}:{line}:{col}: uses {id}: {message}")]
+    Uses {
+        /// Absolute source path.
+        path: PathBuf,
+        /// One-based source line.
+        line: u32,
+        /// One-based source column.
+        col: u32,
+        /// The rejected operation id.
+        id: Box<str>,
+        /// Why it was rejected.
+        message: Box<str>,
+    },
+    /// A declared schema or config failed validation.
+    #[error("{path}: {message}")]
+    Schema {
+        /// Absolute source path.
+        path: PathBuf,
+        /// The schema validation message.
+        message: Box<str>,
+    },
+    /// A plugin asset (skill body) is missing, escaped, or over budget.
+    #[error("{path}: asset {asset}: {message}")]
+    Asset {
+        /// Absolute `plugin.star` path.
+        path: PathBuf,
+        /// The plugin-relative asset path.
+        asset: Box<str>,
+        /// What failed.
+        message: Box<str>,
+    },
+    /// A skill body's front matter `mcp` object is malformed, at `path:line:col`.
+    #[error(transparent)]
+    SkillFront(#[from] dal_core::ext::SkillFrontError),
     /// A plugin declared a different name from its directory.
     #[error("plugin directory \"{dir}\" declares name \"{declared}\"")]
     NameMismatch {
@@ -97,12 +175,11 @@ pub enum LoadError {
         /// What went wrong.
         message: Box<str>,
     },
-    /// The module does not export the single `plugin` value the v1 contract
-    /// requires (ambient-registration style is unsupported).
-    #[error("{path} does not export `plugin`; only the @dal/v1 contract is supported")]
-    UnsupportedEntry {
-        /// Absolute `plugin.star` path.
-        path: PathBuf,
+    /// The generation lock was poisoned by a panic in another task.
+    #[error("the {what} lock is poisoned")]
+    Poisoned {
+        /// Which state is unrecoverable.
+        what: Box<str>,
     },
     /// An embedded plugin file cannot be interpreted as UTF-8 text.
     #[error("plugin file \"{path}\" is not UTF-8")]
