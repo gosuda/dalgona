@@ -130,7 +130,7 @@ impl Caller {
     /// Reports whether this caller is an approved eval cell.
     ///
     /// A cell the ladder approved may run its nested host operations
-    /// without asking again (plan row 99: one ask per capability cell).
+    /// without asking again: one ask per capability cell.
     #[must_use]
     pub(crate) fn cell_approved(&self) -> bool {
         matches!(self.kind, CallerKind::Cell { approved: true })
