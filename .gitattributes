@@ -1,0 +1,3 @@
+# Assets embedded with include_bytes! must check out byte-identically on every
+# platform; Windows line-ending conversion corrupts the line-strict hex grammar.
+dal/crates/dal-ext/assets/*.hex -text
