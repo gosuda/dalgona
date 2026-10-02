@@ -5,6 +5,10 @@
 
 //! Undeclared operations and headless process approvals fail closed.
 
+#[expect(
+    dead_code,
+    reason = "gate helpers are shared across integration targets"
+)]
 mod support;
 
 use std::{collections::BTreeMap, error::Error, fs, process::Command};
