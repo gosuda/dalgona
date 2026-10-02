@@ -1,6 +1,9 @@
-#![expect(
-    clippy::disallowed_methods,
-    reason = "SC release gate runs the publish script and reads PATH"
+#![cfg_attr(
+    unix,
+    expect(
+        clippy::disallowed_methods,
+        reason = "SC release gate runs the publish script and reads PATH"
+    )
 )]
 //! Release presence, lockstep, and path-dependency guards.
 #[path = "release_support/mod.rs"]

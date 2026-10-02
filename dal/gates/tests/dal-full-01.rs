@@ -1,4 +1,4 @@
-#![expect(clippy::unwrap_used, reason = "SC test")]
+#![cfg_attr(unix, expect(clippy::unwrap_used, reason = "SC test"))]
 #![expect(clippy::expect_used, reason = "SC test")]
 #![expect(
     clippy::disallowed_methods,

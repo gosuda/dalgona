@@ -1003,9 +1003,16 @@ impl Journal {
         }
 
         let journal_path = self.paths.journal();
-        let file_journal = match FileJournal::create(&journal_path, &bytes, &Faults::default()) {
-            Ok(journal) => journal,
-            Err(error) => {
+        // Journal creation writes and syncs; running it on the async worker
+        // stalls every task sharing the thread under create bursts, so the
+        // blocking pool owns the fsync storm (R-perf).
+        let creation = tokio::task::spawn_blocking({
+            let journal_path = journal_path.clone();
+            move || FileJournal::create(&journal_path, &bytes, &Faults::default())
+        });
+        let file_journal = match creation.await {
+            Ok(Ok(journal)) => journal,
+            Ok(Err(error)) => {
                 if !journal_path.exists() {
                     let state = std::mem::replace(&mut self.state, State::Closed);
                     if let State::Broken {
@@ -1017,6 +1024,21 @@ impl Journal {
                     self.state = State::Lazy { blobs: Vec::new() };
                 }
                 return Err(write_failure(self.id, error.into()));
+            }
+            Err(join) => {
+                if !journal_path.exists() {
+                    let state = std::mem::replace(&mut self.state, State::Closed);
+                    if let State::Broken {
+                        lock: Some(lock), ..
+                    } = state
+                    {
+                        self.prelocked = Some(lock);
+                    }
+                    self.state = State::Lazy { blobs: Vec::new() };
+                }
+                return Err(StoreError::Invalid {
+                    reason: format!("journal create task failed to join: {join}").into(),
+                });
             }
         };
         #[cfg(test)]

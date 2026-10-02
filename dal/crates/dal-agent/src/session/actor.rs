@@ -528,6 +528,10 @@ impl Actor {
             }
             ActorRequest::Services { services } => {
                 self.services = Some(services);
+                // A submit that outran service attachment parked the fold in
+                // `Phase::Opening` (`drive_opening` bails without services);
+                // re-drive now that hooks can resolve.
+                self.execute(Vec::new(), None).await;
             }
             ActorRequest::ExtRecord { req } => {
                 self.on_ext_record(req).await;

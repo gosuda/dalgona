@@ -4,7 +4,6 @@ mod support;
 
 use std::{
     error::Error,
-    fs,
     io::{Read, Write},
     net::TcpListener,
     thread,
@@ -115,9 +114,9 @@ fn insecure_auth_permissions_keep_the_auth_repair_diagnostic() -> Result<(), Box
     let fixture = CliFixture::new()?;
     fixture.write_auth(r#"{"openai":{"kind":"api_key","key":"secret-model-token"}}"#)?;
     let path = fixture.auth_file();
-    let mut permissions = fs::metadata(&path)?.permissions();
+    let mut permissions = std::fs::metadata(&path)?.permissions();
     permissions.set_mode(0o644);
-    fs::set_permissions(&path, permissions)?;
+    std::fs::set_permissions(&path, permissions)?;
 
     let output = fixture.output(&["models"])?;
 

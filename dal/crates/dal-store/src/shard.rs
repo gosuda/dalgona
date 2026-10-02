@@ -35,6 +35,9 @@ pub(crate) const SHARD_COUNT: usize = 4;
 const _: () = assert!(SHARD_COUNT == 4);
 /// The maximum queued requests per shard, excluding the request being run.
 pub(crate) const QUEUE_CAPACITY: usize = 256;
+/// Queue admission bound: a saturated shard fails the append loudly instead
+/// of parking a turn invisibly.
+const ENQUEUE_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 
 enum Job {
     Register {
@@ -368,14 +371,17 @@ impl Shards {
     ) -> Result<Lane, JournalError> {
         let queue = Arc::clone(&self.shards[pin(session)].queue);
         let (done, reply) = oneshot::channel();
-        queue
-            .enqueue(Job::Register {
+        tokio::time::timeout(
+            ENQUEUE_WAIT,
+            queue.enqueue(Job::Register {
                 journal,
                 blob_dir,
                 done,
-            })
-            .await
-            .map_err(|()| journal_closed(session))?;
+            }),
+        )
+        .await
+        .map_err(|_| enqueue_timeout(session))?
+        .map_err(|()| journal_closed(session))?;
         let mut registration = RegistrationReply {
             queue: Arc::clone(&queue),
             receiver: Some(reply),
@@ -505,16 +511,19 @@ impl Lane {
         }
 
         let (done, reply) = oneshot::channel();
-        self.queue
-            .enqueue(Job::Append {
+        tokio::time::timeout(
+            ENQUEUE_WAIT,
+            self.queue.enqueue(Job::Append {
                 session: self.session,
                 slot: self.slot,
                 batch,
                 blobs,
                 done,
-            })
-            .await
-            .map_err(|()| closed(self.session))?;
+            }),
+        )
+        .await
+        .map_err(|_| enqueue_timeout(self.session))?
+        .map_err(|()| closed(self.session))?;
         self.pending = Some(reply);
         self.settle()
             .await
@@ -654,6 +663,18 @@ fn publish(blobs: Vec<PendingBlob>, blob_dir: Option<&std::path::Path>) -> Resul
 
 fn closed(session: SessionId) -> StoreError {
     journal_closed(session).into()
+}
+
+fn enqueue_timeout(session: SessionId) -> JournalError {
+    JournalError::Io {
+        op: "admit",
+        path: PathBuf::from(format!("shard-queue/{session}")),
+        source: std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "journal shard queue admission timed out",
+        )
+        .into(),
+    }
 }
 
 fn journal_closed(session: SessionId) -> JournalError {
