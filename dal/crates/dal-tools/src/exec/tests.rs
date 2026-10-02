@@ -13,7 +13,7 @@ fn decode_error_literals() {
             "exec: unknown argument \"extra\"",
         ),
         (r#"{"command":1}"#, "exec: command must be a string"),
-        (r#"{}"#, "exec: command must be a string"),
+        (r"{}", "exec: command must be a string"),
         ("[]", "exec: command must be a string"),
         (
             r#"{"command":"x","timeout_seconds":"1"}"#,
@@ -190,15 +190,12 @@ fn exec_job_transitions_match_the_table() {
                 (ExecState::Running, ExecEvent::TimeoutFire) => {
                     Some(ExecTransition::Ladder(ExecOutcome::TimedOut))
                 }
-                (ExecState::Running, ExecEvent::Cancel) => {
+                (ExecState::Running | ExecState::Detached, ExecEvent::Cancel) => {
                     Some(ExecTransition::Ladder(ExecOutcome::Aborted))
                 }
                 (ExecState::Running, ExecEvent::BudgetFire) => Some(ExecTransition::Detach),
                 (ExecState::Detached, ExecEvent::Exit(outcome)) => {
                     Some(ExecTransition::NoticeAndDone(outcome))
-                }
-                (ExecState::Detached, ExecEvent::Cancel) => {
-                    Some(ExecTransition::Ladder(ExecOutcome::Aborted))
                 }
                 (ExecState::LadderPending, ExecEvent::LadderComplete(outcome)) => {
                     Some(ExecTransition::FinishAfterLadder(outcome))

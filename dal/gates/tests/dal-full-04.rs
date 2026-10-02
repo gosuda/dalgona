@@ -130,7 +130,7 @@ async fn rpc_probe(host: dal_agent::Host) -> Result<(), Box<dyn Error + Send + S
             response
                 .get("result")
                 .and_then(|result| result.get("protocolVersion"))
-                .and_then(|value| value.as_i64()),
+                .and_then(sonic_rs::JsonValueTrait::as_i64),
             Some(1),
             "{response}"
         );

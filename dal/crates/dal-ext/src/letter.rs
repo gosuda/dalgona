@@ -376,6 +376,10 @@ impl Hook<InputEvent, InputVerdict> for FirstInputHook {
 ///
 /// Returns [`HookError::Cancelled`] when the turn is cancelled and
 /// [`HookError::Failed`] when the font table fails to parse.
+#[expect(
+    clippy::unused_async,
+    reason = "hook boundary keeps the async shape of sibling handlers"
+)]
 pub async fn handle_first_input(
     session: SessionId,
     user_parts: Vec<Part>,

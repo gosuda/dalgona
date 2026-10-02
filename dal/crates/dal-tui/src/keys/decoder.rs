@@ -217,9 +217,7 @@ fn parse_escape(bytes: &[u8]) -> EscapeParse {
             None => EscapeParse::Partial,
         },
         b'[' => parse_csi(bytes),
-        byte if byte == 0x7f => {
-            EscapeParse::Key(Key::new(KeyCode::Backspace, KeyModifiers::ALT), 2)
-        }
+        0x7f => EscapeParse::Key(Key::new(KeyCode::Backspace, KeyModifiers::ALT), 2),
         byte if byte.is_ascii() => EscapeParse::Key(
             Key::new(KeyCode::Char(char::from(byte)), KeyModifiers::ALT),
             2,

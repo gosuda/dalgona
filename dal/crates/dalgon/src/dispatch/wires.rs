@@ -102,7 +102,7 @@ async fn stdio(wire: Wire, startup: Startup, product: Product) -> ExitCode {
     let outcome = super::drive(&stop, async {
         let result = tokio::select! {
             biased;
-            _ = stop.cancelled() => Ok(()),
+            () = stop.cancelled() => Ok(()),
             result = wire.serve(host.clone(), transport) => result,
         };
         let _ = host.shutdown(HOST_GRACE).await;
@@ -148,7 +148,7 @@ async fn local_socket(socket: Option<PathBuf>, startup: Startup, product: Produc
     let outcome = super::drive(&stop, async {
         let result = tokio::select! {
             biased;
-            _ = stop.cancelled() => Ok(()),
+            () = stop.cancelled() => Ok(()),
             result = serve_local(
                 &path,
                 default_root,

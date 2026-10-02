@@ -26,6 +26,8 @@ enum ExitDialog {
     DiscardDraft,
 }
 
+const RESOLUTION_POLL_INTERVAL: Duration = Duration::from_millis(250);
+
 /// Local composer and exit state; transport to `Agent::submit` lands with `Host::open`.
 #[derive(Debug, Default)]
 struct Session {
@@ -127,7 +129,6 @@ impl Session {
                 Vec::new()
             }
             Reply::Queued => vec!["Message queued.".to_owned()],
-            Reply::Done(Output::Nothing) => Vec::new(),
             Reply::Done(Output::Text(text) | Output::Markdown(text)) => {
                 text.lines().map(crate::width::escape).collect()
             }
@@ -140,7 +141,6 @@ impl Session {
                         .join("  ")
                 })
                 .collect(),
-            Reply::Choose { .. } => Vec::new(),
             Reply::Front(FrontAction::Quit) => {
                 if self.composer.trim().is_empty() {
                     self.quit = true;
@@ -159,10 +159,14 @@ impl Session {
         }
     }
 }
+#[expect(
+    clippy::too_many_lines,
+    reason = "one lifecycle walk owns setup, the loop, and teardown in place"
+)]
 pub(super) fn run<H, M, S>(
-    host: H,
-    opts: TuiOptions,
-    io: impl TermIo,
+    host: &H,
+    opts: &TuiOptions,
+    io: &impl TermIo,
     model_source: M,
     save_diagrams: S,
 ) -> Result<TuiExit, TuiError>
@@ -198,7 +202,7 @@ where
         eprintln!("[t0] subscribe {}ms", debug_start.elapsed().as_millis());
     }
     let commands = opts.rt.block_on(host.commands())?;
-    let mut pump = Pump::spawn(&opts, subscription);
+    let mut pump = Pump::spawn(opts, subscription);
     let state = Arc::new(Mutex::new(TermState::new()));
     let hook = PanicHookGuard::install(Arc::clone(&state));
     io.enable_raw()
@@ -209,8 +213,8 @@ where
         .set_raw(true);
 
     let outcome = run_loop(
-        &io,
-        &opts,
+        io,
+        opts,
         &state,
         &agent,
         &mut pump,
@@ -339,6 +343,14 @@ impl Drop for PanicHookGuard {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the loop's inputs are the run's own locals; grouping adds a shell"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one event loop owns input, delivery, and render in place"
+)]
 fn run_loop<A, M, S>(
     io: &dyn TermIo,
     opts: &TuiOptions,
@@ -498,7 +510,6 @@ where
     }
 
     let mut resolution_poll = Instant::now();
-    const RESOLUTION_POLL_INTERVAL: Duration = Duration::from_millis(250);
     loop {
         if io.shutdown_code().is_some() {
             break;
@@ -532,14 +543,14 @@ where
             if let Command::Cancel { .. } = command {
                 session.cancelling = None;
             }
-            let reply = match opts.rt.block_on(agent.submit(command)) {
-                Ok(reply) => reply,
+            let submit_reply = match opts.rt.block_on(agent.submit(command)) {
+                Ok(submit_reply) => submit_reply,
                 Err(error) => {
                     live.notice(error.to_string());
                     continue;
                 }
             };
-            let rows = match reply {
+            let reply_rows = match submit_reply {
                 Reply::Choose { chooser, filter } => {
                     session.picker = None;
                     let picker = match chooser {
@@ -548,13 +559,14 @@ where
                             let entries = fork_entries(opts, agent)?;
                             Some(crate::picker::fork_picker(&entries, &filter))
                         }
-                        Chooser::Model => match model_source() {
-                            Ok(models) => Some(crate::picker::model_picker(&models, &filter)),
-                            Err(_) => {
+                        Chooser::Model => {
+                            if let Ok(models) = model_source() {
+                                Some(crate::picker::model_picker(&models, &filter))
+                            } else {
                                 live.notice(crate::copy::ids::MODEL_PICKER_FAIL.to_owned());
                                 None
                             }
-                        },
+                        }
                         Chooser::Settings => Some(crate::picker::settings_picker(
                             diagram_settings.enabled,
                             &filter,
@@ -569,9 +581,9 @@ where
                 }
                 other => session.accept_reply(other),
             };
-            if !rows.is_empty() {
+            if !reply_rows.is_empty() {
                 session.command_seq = session.command_seq.saturating_add(1);
-                transcript.commit(&format!("command-{}", session.command_seq), &rows);
+                transcript.commit(&format!("command-{}", session.command_seq), &reply_rows);
             }
         }
         for (enabled, save) in std::mem::take(&mut session.pending_diagram_settings) {
@@ -646,7 +658,8 @@ where
                 });
                 session.quit = false;
                 session.cancelling = Some(turn);
-                session.cancel_deadline = Some(std::time::Instant::now() + std::time::Duration::from_secs(3));
+                session.cancel_deadline =
+                    Some(std::time::Instant::now() + std::time::Duration::from_secs(3));
             } else {
                 break;
             }
@@ -704,14 +717,14 @@ fn wait_for_cancelled<S: TuiSubscription>(
             .recv_timeout(remaining.min(Duration::from_millis(50)))
         {
             Ok(Ok(TuiDelivery::Update(update))) => {
-                if let UpdateKind::TurnEnded { turn: ended, stop } = &update.kind {
-                    if *ended == turn {
-                        return *stop == Stop::Cancelled;
-                    }
+                if let UpdateKind::TurnEnded { turn: ended, stop } = &update.kind
+                    && *ended == turn
+                {
+                    return *stop == Stop::Cancelled;
                 }
             }
-            Ok(Ok(TuiDelivery::Resync(_))) | Ok(Err(_)) => return false,
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return false,
+            Ok(Ok(TuiDelivery::Resync(_)) | Err(_))
+            | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return false,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
         }
     }
@@ -741,17 +754,17 @@ impl<S: TuiSubscription> Pump<S> {
         let worker = std::thread::Builder::new()
             .name("dal-tui-delivery-pump".to_owned())
             .spawn({
-                let rt = opts.rt.clone();
-                let stop = std::sync::Arc::clone(&stop);
+                let runtime = opts.rt.clone();
+                let stop_flag = std::sync::Arc::clone(&stop);
                 move || {
-                    while !stop.load(Ordering::SeqCst) {
-                        let tick = rt.block_on(async {
+                    while !stop_flag.load(Ordering::SeqCst) {
+                        let tick = runtime.block_on(async {
                             tokio::time::timeout(Duration::from_millis(50), subscription.next())
                                 .await
                         });
                         match tick {
                             // Idle tick: poll again until asked to stop.
-                            Err(_) => continue,
+                            Err(_) => {}
                             // Closed or lagged latches `None`; later calls
                             // return at once, so exit instead of spinning.
                             Ok(Ok(None)) => break,
@@ -795,6 +808,10 @@ impl<S: TuiSubscription> Drop for Pump<S> {
 }
 
 /// Applies every queued delivery; resubscribes with a fresh pump on resync.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one drain carries every live surface it must touch"
+)]
 fn drain_deliveries<A: TuiAgent>(
     opts: &TuiOptions,
     agent: &A,
@@ -974,8 +991,8 @@ fn fork_entries<A: TuiAgent>(
     let mut pages = Vec::new();
     let mut before = None;
     loop {
-        let request = PageReq::new(limit, before.clone())
-            .map_err(|error| TuiError::Terminal(error.to_string()))?;
+        let request =
+            PageReq::new(limit, before).map_err(|error| TuiError::Terminal(error.to_string()))?;
         let page = opts.rt.block_on(agent.view(request))?;
         let next = page.entries.next_before;
         if next.is_some() && next == before {
@@ -1032,6 +1049,10 @@ fn read_probe(io: &dyn TermIo) -> Result<(crate::term::Probe, Vec<u8>), TuiError
     Ok((probe, replay))
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one input map walks every action in place"
+)]
 fn apply_event(session: &mut Session, dialog: &mut DialogUi, event: InputEvent, kitty: bool) {
     use crossterm::event::{KeyCode, KeyModifiers};
 
@@ -1055,7 +1076,7 @@ fn apply_event(session: &mut Session, dialog: &mut DialogUi, event: InputEvent, 
     if let Some(ExitDialog::DiscardDraft) = session.dialog {
         match key.code {
             KeyCode::Char(choice) if key.modifiers == KeyModifiers::NONE => {
-                session.answer_dialog(choice)
+                session.answer_dialog(choice);
             }
             KeyCode::Esc => session.dialog = None,
             _ => {}
@@ -1124,7 +1145,7 @@ fn apply_event(session: &mut Session, dialog: &mut DialogUi, event: InputEvent, 
             let line = session.composer.clone();
             session.submit_line(&line);
         }
-        Some(Action::CloseOverlayOrInterrupt) | Some(Action::Interrupt) => session.interrupt(),
+        Some(Action::CloseOverlayOrInterrupt | Action::Interrupt) => session.interrupt(),
         Some(Action::Newline) => session.composer.push('\n'),
         Some(Action::TranscriptOverlay) => session.overlay = !session.overlay,
         Some(Action::AcceptCycleCompletion) => {
@@ -1139,7 +1160,6 @@ fn apply_event(session: &mut Session, dialog: &mut DialogUi, event: InputEvent, 
             args: "".into(),
             expected: None,
         }),
-        Some(Action::ClearRegion) => {}
         None if key.code == KeyCode::Backspace => {
             session.composer.pop();
         }
@@ -1179,29 +1199,31 @@ mod tests {
         use crate::picker::{PickerAction, PickerOption, PickerUi};
         use crossterm::event::{KeyCode, KeyModifiers};
 
-        let mut session = Session::default();
-        session.picker = Some(PickerUi::new(
-            "Pick a model",
-            "",
-            vec![
-                PickerOption {
-                    label: "first".to_owned(),
-                    action: PickerAction::Command(dal_core::Command::Run {
-                        name: "model".into(),
-                        args: "openai/first".into(),
-                        expected: None,
-                    }),
-                },
-                PickerOption {
-                    label: "second".to_owned(),
-                    action: PickerAction::Command(dal_core::Command::Run {
-                        name: "model".into(),
-                        args: "openai/second".into(),
-                        expected: None,
-                    }),
-                },
-            ],
-        ));
+        let mut session = Session {
+            picker: Some(PickerUi::new(
+                "Pick a model",
+                "",
+                vec![
+                    PickerOption {
+                        label: "first".to_owned(),
+                        action: PickerAction::Command(dal_core::Command::Run {
+                            name: "model".into(),
+                            args: "openai/first".into(),
+                            expected: None,
+                        }),
+                    },
+                    PickerOption {
+                        label: "second".to_owned(),
+                        action: PickerAction::Command(dal_core::Command::Run {
+                            name: "model".into(),
+                            args: "openai/second".into(),
+                            expected: None,
+                        }),
+                    },
+                ],
+            )),
+            ..Session::default()
+        };
         apply_event(
             &mut session,
             &mut DialogUi::default(),
@@ -1247,8 +1269,10 @@ mod tests {
         use crate::keys::{InputEvent, Key};
         use crossterm::event::{KeyCode, KeyModifiers};
 
-        let mut session = Session::default();
-        session.picker = Some(crate::picker::settings_picker(false, ""));
+        let mut session = Session {
+            picker: Some(crate::picker::settings_picker(false, "")),
+            ..Session::default()
+        };
         apply_event(
             &mut session,
             &mut DialogUi::default(),
@@ -1284,8 +1308,10 @@ mod tests {
 
     #[test]
     fn quit_with_draft_requires_confirmation() {
-        let mut session = Session::default();
-        session.composer = "rewrite the query".to_owned();
+        let mut session = Session {
+            composer: "rewrite the query".to_owned(),
+            ..Session::default()
+        };
         session.accept_reply(dal_core::Reply::Front(dal_core::FrontAction::Quit));
         assert_eq!(session.dialog, Some(ExitDialog::DiscardDraft));
         assert!(!session.quit);
@@ -1322,7 +1348,7 @@ mod tests {
             dal_core::Command::Prompt { .. }
         ));
         if let dal_core::Command::Prompt { expect, content } = &session.pending_commands[0] {
-            assert_eq!(*expect, dal_core::Expect::Idle);
+            assert_eq!(expect, &dal_core::Expect::Idle);
             assert_eq!(content.len(), 1);
         }
         assert!(session.composer.is_empty());

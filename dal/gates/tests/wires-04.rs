@@ -58,16 +58,12 @@ async fn advertisement_websocket(
     loop {
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for entry in entries.flatten() {
-                if entry.path().extension().is_some_and(|ext| ext == "json") {
-                    if let Ok(bytes) = std::fs::read(entry.path()) {
-                        if let Ok(value) = sonic_rs::from_slice::<sonic_rs::Value>(&bytes) {
-                            if let Some(url) =
-                                value.get("websocket").and_then(sonic_rs::Value::as_str)
-                            {
-                                return Ok(url.to_owned());
-                            }
-                        }
-                    }
+                if entry.path().extension().is_some_and(|ext| ext == "json")
+                    && let Ok(bytes) = std::fs::read(entry.path())
+                    && let Ok(value) = sonic_rs::from_slice::<sonic_rs::Value>(&bytes)
+                    && let Some(url) = value.get("websocket").and_then(sonic_rs::Value::as_str)
+                {
+                    return Ok(url.to_owned());
                 }
             }
         }

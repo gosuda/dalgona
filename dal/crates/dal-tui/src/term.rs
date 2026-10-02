@@ -18,14 +18,26 @@ pub use probe::{
 /// I/O boundary for terminal setup, probes, and the input byte stream.
 pub trait TermIo: Send {
     /// Enables raw terminal input.
+    ///
+    /// # Errors
+    /// Returns the terminal I/O error when raw mode cannot be entered.
     fn enable_raw(&self) -> io::Result<()>;
     /// Disables raw terminal input without returning an error.
     fn disable_raw(&self);
     /// Returns terminal rows and columns.
+    ///
+    /// # Errors
+    /// Returns the terminal I/O error when the size cannot be read.
     fn size(&self) -> io::Result<(u16, u16)>;
     /// Writes one complete logical output and flushes it once.
+    ///
+    /// # Errors
+    /// Returns the terminal I/O error when the write or flush fails.
     fn write(&self, bytes: &[u8]) -> io::Result<()>;
     /// Reads input for at most `timeout`.
+    ///
+    /// # Errors
+    /// Returns the terminal I/O error when the read fails.
     fn read(&self, timeout: Duration) -> io::Result<Vec<u8>>;
     /// Raises `SIGTSTP` on POSIX; does nothing on Windows.
     fn raise_tstp(&self);
@@ -41,6 +53,10 @@ pub trait TermIo: Send {
 
 /// Terminal modes captured for idempotent cleanup.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent terminal modes; a bitset loses legibility"
+)]
 pub struct TermState {
     raw: bool,
     paste: bool,
@@ -403,7 +419,9 @@ impl TermIo for ScriptedTermIo {
 }
 
 /// Resolves an `auto` or named theme request from a probe result and captured environment.
-#[must_use]
+///
+/// # Errors
+/// Returns [`TuiError`] when the request names a theme the palette does not carry.
 pub fn resolve_theme_request(
     request: &ThemeRequest,
     probe: &Probe,
@@ -456,10 +474,11 @@ mod tests {
     fn osc11_parses_short_and_long_color_channels() {
         assert!(
             parse_osc11(b"\x1b]11;rgb:0000/0000/0000\x07")
-                .is_some_and(|luminance| luminance == 0.0)
+                .is_some_and(|luminance| luminance.abs() < 1e-6)
         );
         assert!(
-            parse_osc11(b"\x1b]11;#ffffffffffff\x1b\\").is_some_and(|luminance| luminance == 1.0)
+            parse_osc11(b"\x1b]11;#ffffffffffff\x1b\\")
+                .is_some_and(|luminance| (luminance - 1.0).abs() < 1e-6)
         );
     }
 

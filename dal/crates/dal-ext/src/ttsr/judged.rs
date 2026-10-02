@@ -70,7 +70,10 @@ pub const JUDGE_ON_WITHOUT_CREDENTIALS: &str =
 ///
 /// `judge_ready` is the judge handle's readiness at session start;
 /// `judged_count` is the number of judged rules in the set.
-#[must_use]
+///
+/// # Errors
+///
+/// Returns [`JudgeGateError`] when `judge = "on"` has no usable judge.
 pub fn gate_mode(
     mode: JudgeMode,
     judge_ready: bool,
@@ -78,9 +81,8 @@ pub fn gate_mode(
 ) -> Result<JudgeGate, JudgeGateError> {
     match (mode, judge_ready) {
         (JudgeMode::Off, _) => Ok(JudgeGate::Disabled { note: None }),
-        (JudgeMode::On, true) => Ok(JudgeGate::Enabled),
+        (JudgeMode::On | JudgeMode::Auto, true) => Ok(JudgeGate::Enabled),
         (JudgeMode::On, false) => Err(JudgeGateError),
-        (JudgeMode::Auto, true) => Ok(JudgeGate::Enabled),
         (JudgeMode::Auto, false) => Ok(JudgeGate::Disabled {
             note: Some(judge_auto_off_note(judged_count)),
         }),

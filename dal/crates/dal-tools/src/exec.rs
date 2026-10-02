@@ -1,5 +1,6 @@
 //! Shell execution tool contracts, state mapping, and user-facing results.
 
+/// Read-only command classification for preview and guard seams.
 pub mod classify;
 pub(crate) mod shell;
 
@@ -253,10 +254,20 @@ pub(crate) enum ExecOutcome {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the event alphabet fixes the machine's contract; some edges only exist for tests"
+    )
+)]
 pub(crate) enum ExecEvent {
     Spawned { at: Instant },
     Exit(ExecOutcome),
+    TimeoutFire,
+    Cancel,
     BudgetFire,
+    LadderComplete(ExecOutcome),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -319,7 +330,7 @@ impl ExecJob {
                 self.state = LadderPending;
                 Some(ExecTransition::Ladder(ExecOutcome::TimedOut))
             }
-            (Running, ExecEvent::Cancel) => {
+            (Running | Detached, ExecEvent::Cancel) => {
                 self.state = LadderPending;
                 Some(ExecTransition::Ladder(ExecOutcome::Aborted))
             }
@@ -330,10 +341,6 @@ impl ExecJob {
             (Detached, ExecEvent::Exit(outcome)) => {
                 self.state = ExecState::Done;
                 Some(ExecTransition::NoticeAndDone(outcome))
-            }
-            (Detached, ExecEvent::Cancel) => {
-                self.state = LadderPending;
-                Some(ExecTransition::Ladder(ExecOutcome::Aborted))
             }
             (LadderPending, ExecEvent::LadderComplete(outcome)) => {
                 self.state = ExecState::Done;
@@ -407,6 +414,11 @@ pub(crate) struct ExecTool {
     spec: Arc<ToolSpec>,
 }
 
+enum Decision {
+    Waited(Result<ProcResult, ToolError>),
+    Budget,
+}
+
 impl ExecTool {
     fn new(cfg: ExecConfig) -> Result<Self, RegistrationError> {
         let name = Name::parse("exec")?;
@@ -421,6 +433,10 @@ impl ExecTool {
         Ok(Self { cfg, name, spec })
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one drive walks decode, authorize, spawn, and wait in place"
+    )]
     async fn drive<'a>(&'a self, call: ToolCall, mut cx: ToolCx<'a>) -> ToolOutcome {
         let args = match decode(call.args.as_str()) {
             Ok(args) => args,
@@ -455,7 +471,7 @@ impl ExecTool {
             Ok(approved) => approved,
             Err(reason) => return ToolOutcome::Err(ToolError::Denied(reason)),
         };
-        let argv = [
+        let spawn_argv = [
             OsString::from(shell.program.as_os_str()),
             OsString::from("-c"),
             OsString::from(&validated.command),
@@ -465,7 +481,7 @@ impl ExecTool {
             timeout: validated.timeout,
             env: Vec::new(),
         };
-        let mut proc = match cx.spawn(&argv, opts, approved) {
+        let mut proc = match cx.spawn(&spawn_argv, opts, approved) {
             Ok(proc) => proc,
             Err(ToolError::Spawn { source, .. }) => {
                 return ToolOutcome::Err(ToolError::message(format!(
@@ -484,16 +500,12 @@ impl ExecTool {
         let budget = validated
             .foreground
             .unwrap_or(Duration::from_secs(foreground_seconds));
-        enum Decision {
-            Waited(Result<ProcResult, ToolError>),
-            Budget,
-        }
-        let decision = tokio::select! {
+        let wait = tokio::select! {
             biased;
             waited = proc.wait(cx.cancel()) => Decision::Waited(waited),
             () = tokio::time::sleep(budget) => Decision::Budget,
         };
-        match decision {
+        match wait {
             Decision::Budget => {
                 job.on(ExecEvent::BudgetFire);
                 ToolOutcome::Detached(cx.detach(proc))

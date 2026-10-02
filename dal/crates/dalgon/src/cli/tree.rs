@@ -213,6 +213,10 @@ pub(crate) struct ServeTokenArgs {
 #[derive(Clone, Debug, Args)]
 pub(crate) struct RpcArgs {
     #[arg(long, value_name = "FILE", num_args = 0..=1, help = texts::RPC_SOCKET_HELP)]
+    #[expect(
+        clippy::option_option,
+        reason = "Some(None) passes the default socket; None omits the flag"
+    )]
     pub(crate) socket: Option<Option<PathBuf>>,
 }
 

@@ -286,7 +286,7 @@ pub(crate) async fn plugin(args: cli::PluginArgs, startup: Startup, product: Pro
 }
 
 /// Renders one rules-command failure with its exit status.
-fn rules_error(error: rules_cmd::RulesCommandError) -> ExitCode {
+fn rules_error(error: &rules_cmd::RulesCommandError) -> ExitCode {
     let code = error.exit_code();
     let _ = writeln!(std::io::stderr().lock(), "{error}");
     code
@@ -352,14 +352,14 @@ pub(crate) async fn rules(args: cli::RulesArgs, startup: Startup, product: Produ
         &input,
         &startup.data_root,
         &startup.workspace_path,
-        &startup.config.rules(),
+        startup.config.rules(),
         &mut rules_stdin(),
         &mut out,
     )
     .await
     {
         Ok(code) => code,
-        Err(error) => rules_error(error),
+        Err(error) => rules_error(&error),
     }
 }
 

@@ -399,6 +399,8 @@ pub(crate) fn id8(id: &str) -> String {
 }
 
 pub(crate) fn comma_group(mut n: u64) -> String {
+    use std::fmt::Write as _;
+
     let mut groups = [0_u64; 7];
     let mut group_count = 0;
     while n >= 1_000 {
@@ -406,8 +408,6 @@ pub(crate) fn comma_group(mut n: u64) -> String {
         group_count += 1;
         n /= 1_000;
     }
-
-    use std::fmt::Write as _;
     let mut result = String::with_capacity(26);
     let _ = write!(result, "{n}");
     for group in groups[..group_count].iter().rev() {
@@ -454,8 +454,8 @@ fn distance_at_most_one(left: &str, right: &str) -> Option<usize> {
     for (row, cell) in table.iter_mut().enumerate() {
         cell[0] = row;
     }
-    for column in 0..=right.len() {
-        table[0][column] = column;
+    for (column, cell) in table[0].iter_mut().enumerate() {
+        *cell = column;
     }
     for row in 1..=left.len() {
         for column in 1..=right.len() {
@@ -597,6 +597,11 @@ pub(super) fn error_triple(
 /// other parse failure is `Lex`; a second word or any tail where none is
 /// allowed is `Arity`. The idle gate runs before this check, so a gated tail
 /// during a turn is busy, never arity.
+///
+/// # Errors
+///
+/// Returns [`CommandError::Lex`] on an unparseable tail and
+/// [`CommandError::Arity`] on a tail the record does not accept.
 pub fn check_arity(
     cmd: &str,
     arity: Arity,
@@ -672,7 +677,7 @@ pub trait PluginReload: Send + Sync + 'static {
 ///
 /// Returns the builder's registration error for an invalid identity.
 pub fn extension(
-    reload: std::sync::Arc<dyn PluginReload>,
+    reload: &std::sync::Arc<dyn PluginReload>,
 ) -> Result<dal_agent::ext::Extension, dal_core::RegistrationError> {
     let mut builder = dal_agent::ext::ExtensionBuilder::new(
         "commands",
@@ -727,6 +732,10 @@ impl dal_agent::ext::CommandHandler for BuiltinHandler {
 /// and lifts handler triples into the service error path the dispatcher
 /// renders as the `error { what, why, fix }` reply. Unknown names render
 /// through the shared unknown pair; the idle gate runs before this call.
+///
+/// # Errors
+///
+/// Returns the handler's [`ErrorTriple`] when the command fails or is gated.
 pub async fn dispatch<'a>(
     name: &str,
     cx: dal_agent::ext::command::CommandCx<'a>,
@@ -755,21 +764,21 @@ pub async fn dispatch<'a>(
     match record.name {
         "settings" => Ok(model::settings()),
         "model" => model::model(&cx, word).await,
-        "tree" => tree::tree(&cx).await,
+        "tree" => tree::tree(&cx),
         "thinking" => model::thinking(&cx, word).await,
         "scoped-models" => model::scoped_models(&cx),
         "export" => session::export(&cx, word),
         "import" => session::import(&cx, text),
-        "share" => misc::share(),
-        "bug" => misc::bug(),
+        "share" => Ok(misc::share()),
+        "bug" => Ok(misc::bug()),
         "copy" => session::copy(&cx),
         "name" => session::name(&cx, text).await,
         "session" => Ok(session::details(&cx)),
         "changelog" => Ok(session::changelog(&cx)),
         "hotkeys" => Ok(session::hotkeys()),
-        "fork" => tree::fork(&cx).await,
-        "clone" => tree::clone(&cx).await,
-        "trust" => misc::trust(&cx),
+        "fork" => tree::fork(&cx),
+        "clone" => tree::clone(&cx),
+        "trust" => Ok(misc::trust(&cx)),
         "login" => model::login(word),
         "logout" => model::logout(word),
         "new" => Ok(session::new_session()),

@@ -1,3 +1,8 @@
+//! Runtime adapter tests: tool calls, env reads, scopes, budgets, and eval.
+
+#![expect(clippy::expect_used, reason = "SC test")]
+#![expect(clippy::panic, reason = "SC test")]
+
 #[path = "support/host.rs"]
 mod host;
 mod support;
@@ -31,8 +36,10 @@ fn named_tool(extension: &Extension, name: &str) -> Arc<dyn Tool> {
         .tools()
         .iter()
         .find(|(tool, _)| tool.name().as_str() == name)
-        .map(|(tool, _)| Arc::clone(tool))
-        .unwrap_or_else(|| panic!("tool {name:?} is registered"))
+        .map_or_else(
+            || panic!("tool {name:?} is registered"),
+            |(tool, _)| Arc::clone(tool),
+        )
 }
 
 fn output_text(outcome: &ToolOutcome) -> &str {

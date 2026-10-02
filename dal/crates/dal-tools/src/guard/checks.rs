@@ -50,9 +50,6 @@ static COMMENT_RUST: LazyLock<Result<Regex, regex::Error>> = LazyLock::new(|| {
 pub(super) struct Rejection(pub(super) String);
 
 pub(super) fn placeholder(added: &str) -> Option<Rejection> {
-    if added.is_empty() {
-        return None;
-    }
     const PHRASES: [&str; 6] = [
         "rest of methods",
         "implementation omitted",
@@ -159,7 +156,7 @@ pub(super) fn parse_gate<'a>(
     let Some(post_parsed) = post_parsed.filter(|parsed| parsed.lang == language) else {
         return GateOutcome::Skipped;
     };
-    let pre_error = if pre == None {
+    let pre_error = if pre.is_none() {
         false
     } else {
         let Some(pre_parsed) = pre_parsed.filter(|parsed| parsed.lang == language) else {
@@ -211,17 +208,25 @@ fn first_syntax_error(tree: &Tree) -> Option<Node<'_>> {
     None
 }
 
+/// A guard check identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Rule {
+    /// The guard-wrap check.
     GuardWrap,
+    /// The broad-handler check.
     BroadHandler,
+    /// The helper check.
     Helper,
+    /// The new-warning check.
     NewWarning,
+    /// The commented-out-code check.
     CommentedOutCode,
+    /// A stream-class check carrying its G8 rule.
     Stream(G8Rule),
 }
 
 impl Rule {
+    /// Returns the rule's canonical check name.
     #[must_use]
     pub fn name(self) -> &'static str {
         match self {
@@ -235,27 +240,42 @@ impl Rule {
     }
 }
 
+/// One located finding: rule, span, and matched line text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Finding {
+    /// The rule that fired.
     pub rule: Rule,
+    /// The 1-based line the finding starts on.
     pub line: u32,
+    /// The 1-based line the finding ends on.
     pub line_end: u32,
+    /// Whether the finding spans the whole line.
     pub whole_line: bool,
+    /// The matched line text.
     pub text: Box<str>,
 }
 
+/// A file's per-rule outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
+    /// No findings.
     Clean,
+    /// At least one finding.
     Findings,
+    /// The file was not checked.
     Skipped,
 }
 
+/// One file's verdict, findings, and metrics.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FileFindings {
+    /// The checked path.
     pub path: Box<str>,
+    /// The file's outcome.
     pub verdict: Verdict,
+    /// Located findings in the file.
     pub items: Vec<Finding>,
+    /// Metrics collected for the file, when measured.
     pub metrics: Option<metrics::FileMetrics>,
 }
 

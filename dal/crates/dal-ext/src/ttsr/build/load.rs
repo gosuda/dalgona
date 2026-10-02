@@ -108,7 +108,11 @@ pub(super) fn add_plugin_rule_files(files: &[&RuleFile], builder: &mut BuildCont
 
 fn plugin_rule_directory(path: &str) -> Option<&str> {
     let (directory, file) = path.rsplit_once('/')?;
-    (directory.rsplit('/').next() == Some("rules") && file.ends_with(".md")).then_some(directory)
+    (directory.rsplit('/').next() == Some("rules")
+        && std::path::Path::new(file)
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("md")))
+    .then_some(directory)
 }
 
 fn plugin_directory_cap_problem(file: &RuleFile, directory: &str) -> Problem {

@@ -15,9 +15,8 @@ impl crate::patch::EditObserver for Engine {
         if !self.cfg.enabled {
             return Vec::new();
         }
-        let mut state = match self.state.lock() {
-            Ok(state) => state,
-            Err(_) => return Vec::new(),
+        let Ok(mut state) = self.state.lock() else {
+            return Vec::new();
         };
         let Some(session) = state.sessions.get_mut(&batch.session) else {
             return Vec::new();
@@ -106,7 +105,10 @@ fn pre_line_count(before: &[u8]) -> u64 {
     if before.is_empty() {
         return 0;
     }
-    let newlines = before.iter().filter(|byte| **byte == b'\n').count() as u64;
+    let newlines = before
+        .split(|byte| *byte == b'\n')
+        .count()
+        .saturating_sub(1) as u64;
     if before.last() == Some(&b'\n') {
         newlines
     } else {
@@ -129,9 +131,13 @@ pub(super) fn hunk_counts(hunks: &[crate::patch::DiffHunk]) -> (u64, u64) {
     (added, deleted)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one inspection walks every staged file in place"
+)]
 fn record_file(
     ctx: &mut Ctx<'_>,
-    path: &Box<str>,
+    path: &str,
     file: &crate::patch::StagedFile<'_>,
     post: &[u8],
     hunks: &[checks::Hunk],
@@ -140,21 +146,21 @@ fn record_file(
     let (added, deleted) = hunk_counts(file.hunks);
     ctx.turn.added = ctx.turn.added.saturating_add(added);
     ctx.turn.deleted = ctx.turn.deleted.saturating_add(deleted);
-    ctx.turn.files.insert(path.clone());
+    ctx.turn.files.insert(path.into());
     if file.before.is_none() {
-        ctx.turn.new_files.insert(path.clone());
+        ctx.turn.new_files.insert(path.into());
     }
     ctx.turn
         .deletions
-        .entry(path.clone())
+        .entry(path.into())
         .and_modify(|total| *total = total.saturating_add(deleted))
         .or_insert(deleted);
-    ctx.turn.touch(path.clone());
+    ctx.turn.touch(path.into());
     let Some(parsed) = parsed else {
         ctx.turn.findings.insert(
-            path.clone(),
+            path.into(),
             FileFindings {
-                path: path.clone(),
+                path: path.into(),
                 verdict: Verdict::Clean,
                 items: Vec::new(),
                 metrics: None,
@@ -172,9 +178,9 @@ fn record_file(
         }
         *ctx.displayed = ctx.displayed.saturating_add(1);
         ctx.turn.findings.insert(
-            path.clone(),
+            path.into(),
             FileFindings {
-                path: path.clone(),
+                path: path.into(),
                 verdict: Verdict::Skipped,
                 items: Vec::new(),
                 metrics: None,
@@ -184,9 +190,9 @@ fn record_file(
     }
     let Ok(post_text) = std::str::from_utf8(post) else {
         ctx.turn.findings.insert(
-            path.clone(),
+            path.into(),
             FileFindings {
-                path: path.clone(),
+                path: path.into(),
                 verdict: Verdict::Skipped,
                 items: Vec::new(),
                 metrics: None,
@@ -203,7 +209,7 @@ fn record_file(
     let post_metrics = metrics::measure(language, &parsed.tree, post);
     if !ctx.turn.first_pre.contains_key(path) {
         ctx.turn.first_pre.insert(
-            path.clone(),
+            path.into(),
             pre_metrics
                 .clone()
                 .map_or_else(Vec::new, |metrics| metrics.functions),
@@ -211,7 +217,7 @@ fn record_file(
     }
     ctx.turn
         .last_post
-        .insert(path.clone(), post_metrics.functions.clone());
+        .insert(path.into(), post_metrics.functions.clone());
     let mut items = Vec::new();
     if let Some(finding) = checks::guard_wrap(hunks)
         && ctx.cfg.guard_wrap
@@ -291,7 +297,7 @@ fn record_file(
         if matches!(
             finding.rule,
             Rule::GuardWrap | Rule::BroadHandler | Rule::Helper
-        ) && ctx.turn.notices.insert((finding.rule, path.clone()))
+        ) && ctx.turn.notices.insert((finding.rule, path.into()))
         {
             ctx.out.push(EditFinding {
                 rule: finding.rule.name().into(),
@@ -301,9 +307,9 @@ fn record_file(
         }
     }
     ctx.turn.findings.insert(
-        path.clone(),
+        path.into(),
         FileFindings {
-            path: path.clone(),
+            path: path.into(),
             verdict: if items.is_empty() {
                 Verdict::Clean
             } else {
@@ -315,19 +321,19 @@ fn record_file(
     );
 }
 
-fn record_unmeasured(turn: &mut TurnState, path: &Box<str>, file: &crate::patch::StagedFile<'_>) {
+fn record_unmeasured(turn: &mut TurnState, path: &str, file: &crate::patch::StagedFile<'_>) {
     let (added, deleted) = hunk_counts(file.hunks);
     turn.added = turn.added.saturating_add(added);
     turn.deleted = turn.deleted.saturating_add(deleted);
-    turn.files.insert(path.clone());
+    turn.files.insert(path.into());
     if file.before.is_none() {
-        turn.new_files.insert(path.clone());
+        turn.new_files.insert(path.into());
     }
-    turn.touch(path.clone());
+    turn.touch(path.into());
     turn.findings.insert(
-        path.clone(),
+        path.into(),
         FileFindings {
-            path: path.clone(),
+            path: path.into(),
             verdict: Verdict::Skipped,
             items: Vec::new(),
             metrics: None,

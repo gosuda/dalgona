@@ -146,17 +146,15 @@ pub fn run_test(
     let _ = match flags.source {
         TestSource::Text => watch.feed(SourceKind::Text, &flags.text),
         TestSource::Thinking => watch.feed(SourceKind::Thinking, &flags.text),
-        TestSource::Tool => {
-            watch.feed_added(&flags.tool, flags.path.as_deref(), &flags.text)
-        }
+        TestSource::Tool => watch.feed_added(&flags.tool, flags.path.as_deref(), &flags.text),
     };
     let _ = watch.finish();
     let mut text = String::new();
     for fire in watch.fires() {
         // A `String` never fails on write.
-        let _ = write!(
+        let _ = writeln!(
             text,
-            "fired: {} ({}). The {} matched /{}/.\n",
+            "fired: {} ({}). The {} matched /{}/.",
             fire.rule.as_str(),
             fire.action.as_str(),
             fire.subject.as_ref(),
@@ -165,9 +163,9 @@ pub fn run_test(
     }
     if watch.fires().is_empty() {
         // A `String` never fails on write.
-        let _ = write!(
+        let _ = writeln!(
             text,
-            "No rule fired. Checked {} stream rules.\n",
+            "No rule fired. Checked {} stream rules.",
             set.stream.len()
         );
         return Ok(TestReport { text, exit: 1 });
@@ -193,25 +191,25 @@ fn render_stream(text: &mut String, set: &RuleSet, cfg: &RulesConfig) {
         return;
     }
     // A `String` never fails on write.
-    let _ = write!(text, "stream ({})\n", set.stream.len());
+    let _ = writeln!(text, "stream ({})", set.stream.len());
     for rule in &set.stream {
-        let _ = write!(
+        let _ = writeln!(
             text,
-            "  {}  {}\n",
+            "  {}  {}",
             rule.name.as_str(),
             rule.origin.source_label()
         );
-        let _ = write!(
+        let _ = writeln!(
             text,
-            "    interrupt {}, {}{}\n",
+            "    interrupt {}, {}{}",
             interrupt_literal(rule.interrupt_mode.unwrap_or(cfg.interrupt)),
             repeat_text(rule, cfg),
             extra_text(rule)
         );
         for condition in kept_conditions(set, rule) {
-            let _ = write!(text, "    condition: {condition}\n");
+            let _ = writeln!(text, "    condition: {condition}");
         }
-        let _ = write!(text, "    scope: {}\n", scope_tokens(rule).join(", "));
+        let _ = writeln!(text, "    scope: {}", scope_tokens(rule).join(", "));
     }
 }
 
@@ -219,11 +217,11 @@ fn render_always(text: &mut String, set: &RuleSet) {
     if set.always.is_empty() {
         return;
     }
-    let _ = write!(text, "always-apply ({})\n", set.always.len());
+    let _ = writeln!(text, "always-apply ({})", set.always.len());
     for rule in &set.always {
-        let _ = write!(
+        let _ = writeln!(
             text,
-            "  {}  {}\n",
+            "  {}  {}",
             rule.name.as_str(),
             rule.origin.source_label()
         );
@@ -234,15 +232,19 @@ fn render_rulebook(text: &mut String, set: &RuleSet) {
     if set.rulebook.is_empty() {
         return;
     }
-    let _ = write!(text, "rulebook ({})\n", set.rulebook.len());
+    let _ = writeln!(text, "rulebook ({})", set.rulebook.len());
     for rule in &set.rulebook {
-        let _ = write!(
+        let _ = writeln!(
             text,
-            "  {}  {}\n",
+            "  {}  {}",
             rule.name.as_str(),
             rule.origin.source_label()
         );
-        let _ = writeln!(text, "    {}", rule.description.as_deref().unwrap_or_default());
+        let _ = writeln!(
+            text,
+            "    {}",
+            rule.description.as_deref().unwrap_or_default()
+        );
     }
 }
 
@@ -252,14 +254,14 @@ fn render_problems(text: &mut String, set: &RuleSet) -> i32 {
     if set.problems.is_empty() {
         return exit;
     }
-    let _ = write!(text, "problems ({})\n", set.problems.len());
+    let _ = writeln!(text, "problems ({})", set.problems.len());
     for problem in &set.problems {
         let entry = problem_text(problem);
         if problem.severity == Severity::Note {
-            let _ = write!(text, "  note: {}: {entry}\n", problem.origin.source_label());
+            let _ = writeln!(text, "  note: {}: {entry}", problem.origin.source_label());
         } else {
             exit = 1;
-            let _ = write!(text, "  {}: {entry}\n", problem.origin.source_label());
+            let _ = writeln!(text, "  {}: {entry}", problem.origin.source_label());
         }
     }
     exit
@@ -279,7 +281,6 @@ fn interrupt_literal(mode: InterruptMode) -> &'static str {
 fn repeat_text(rule: &Rule, cfg: &RulesConfig) -> String {
     let resolved = resolve_cfg(rule, cfg);
     match resolved.mode {
-        RepeatMode::Once => "repeat once".to_owned(),
         RepeatMode::AfterGap => format!("repeat every {} turns", resolved.gap),
         // The core enum is non-exhaustive; an unknown future mode repeats
         // like `once`.

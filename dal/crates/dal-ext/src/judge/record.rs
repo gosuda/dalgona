@@ -25,6 +25,10 @@ pub(super) struct JudgeRow {
 }
 
 impl JudgeRow {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one row carries every ledger column"
+    )]
     pub(super) fn new(
         call: u64,
         turn: Option<TurnId>,
@@ -64,7 +68,7 @@ impl JudgeRow {
                 ),
             })?;
             if serialized.len() <= MAX_ROW_BYTES {
-                return RawJson::parse(&serialized).map_err(raw_error);
+                return RawJson::parse(&serialized).map_err(|error| raw_error(&error));
             }
             if self.cause.is_empty() {
                 return Err(JudgeError::Provider {
@@ -104,7 +108,7 @@ fn bounded_text(value: &str, input_limit: usize, output_limit: usize) -> Box<str
     output.into_boxed_str()
 }
 
-fn raw_error(error: RawJsonError) -> JudgeError {
+fn raw_error(error: &RawJsonError) -> JudgeError {
     JudgeError::Provider {
         message: bounded_text(&error.to_string(), CAUSE_MAX_BYTES, CAUSE_MAX_BYTES),
     }

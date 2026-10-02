@@ -955,9 +955,13 @@ void Widget::paint() {}
     async fn expired_budget_is_unusable_and_uncached() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("big.c");
-        let src: String = (0..8_000)
-            .map(|n| format!("int f{n}(int x) {{ return x + {n}; }}\n"))
-            .collect();
+        let mut src = String::new();
+        for n in 0..8_000 {
+            let _ = std::fmt::Write::write_fmt(
+                &mut src,
+                format_args!("int f{n}(int x) {{ return x + {n}; }}\n"),
+            );
+        }
         hooks::set_budget(&path, Duration::ZERO);
         assert_eq!(
             definitions(&path, src.as_bytes()).await,

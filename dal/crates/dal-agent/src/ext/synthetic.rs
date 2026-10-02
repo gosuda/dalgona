@@ -285,6 +285,10 @@ fn scoped(inner: EventStream, lineage: Lineage, guard: DropGuard) -> EventStream
 }
 
 /// Runs one registered model for `request` and returns its stream.
+#[expect(
+    clippy::too_many_lines,
+    reason = "cohesive stream-opening state machine; extraction would split one invariant"
+)]
 pub(crate) async fn open(
     deps: &RequestDeps,
     found: Found,
@@ -565,11 +569,8 @@ fn private_loop(
     lineage: Lineage,
 ) -> EventStream {
     let tools: Vec<Arc<dyn Tool>> = private.iter().map(|tool| Arc::clone(&tool.0)).collect();
-    let declared: std::collections::HashSet<Box<str>> = request
-        .tools
-        .iter()
-        .map(|spec| spec.name.clone())
-        .collect();
+    let declared: std::collections::HashSet<Box<str>> =
+        request.tools.iter().map(|spec| spec.name.clone()).collect();
     // The adapter binds an export as private exactly when `request.tools`
     // names its wire name, so a private spec already named there is bound
     // by the handler, not a shadow. A private tool never named in

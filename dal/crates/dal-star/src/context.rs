@@ -395,6 +395,10 @@ fn parse_export_key(group: FacadeGroup, key: &str) -> starlark::Result<OpId> {
 }
 
 /// Allocates one facade value bound to `inv`; `scope` makes it scheduled.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the facade binds the full script context; grouping would split one invariant"
+)]
 pub(crate) fn facade<'v>(
     heap: Heap<'v>,
     group: FacadeGroup,
@@ -575,7 +579,7 @@ fn scope_budget(fields: Option<Value<'_>>, usd: Option<Value<'_>>) -> starlark::
         let value::Value::Object(fields) = fields else {
             return Err(api_error("ctx.scope: budget must be an object"));
         };
-        for (name, value) in fields.iter() {
+        for (name, value) in &fields {
             match name.as_ref() {
                 "requests" => budget.requests = Some(scope_budget_count(value, name)?),
                 "input_tokens" => budget.input_tokens = Some(scope_budget_count(value, name)?),
@@ -620,6 +624,10 @@ fn scope_budget_count(value: &value::Value, field: &str) -> starlark::Result<u64
         .map_err(|_| api_error(format!("ctx.scope: `{field}` must be non-negative")))
 }
 
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "budget magnitudes far below 2^53 make the conversion exact in practice"
+)]
 fn scope_budget_usd(value: &value::Value) -> starlark::Result<f64> {
     let number = match value {
         value::Value::Int(value) => *value as f64,
@@ -632,6 +640,10 @@ fn scope_budget_usd(value: &value::Value) -> starlark::Result<f64> {
     Ok(number)
 }
 
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "wall-clock seconds far below 2^53 make the conversion exact in practice"
+)]
 fn scope_budget_duration(value: &value::Value) -> starlark::Result<std::time::Duration> {
     let seconds = match value {
         value::Value::Int(value) => *value as f64,

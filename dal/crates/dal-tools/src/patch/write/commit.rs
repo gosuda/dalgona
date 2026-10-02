@@ -17,6 +17,10 @@ fn lock_table()
     TABLE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one commit walks apply, observe, and report in place"
+)]
 pub(crate) async fn apply_files(
     session: &PatchSession,
     plan: &Plan,
@@ -351,12 +355,12 @@ pub(crate) async fn apply_files(
     }
     let mut text = String::from("Success. Updated the following files:");
     for change in &changes {
-        text.push_str(&format!("\nM {}", change.path));
+        let _ = std::fmt::Write::write_fmt(&mut text, format_args!("\nM {}", change.path));
     }
     // Append observer report findings after patch notes.
     for finding in &plan.findings {
         if finding.severity == FindingSeverity::Report {
-            text.push_str(&format!("\n{}", finding.text));
+            let _ = std::fmt::Write::write_fmt(&mut text, format_args!("\n{}", finding.text));
         }
     }
     Ok(Output {
@@ -382,8 +386,8 @@ fn count_lines(before: Option<&[u8]>, after: Option<&[u8]>) -> (u64, u64) {
             if bytes.is_empty() {
                 0
             } else {
-                bytes.iter().filter(|byte| **byte == b'\n').count() as u64
-                    + u64::from(!bytes.ends_with(b"\n"))
+                bytes.split(|byte| *byte == b'\n').count() as u64
+                    - u64::from(bytes.ends_with(b"\n"))
             }
         })
     };

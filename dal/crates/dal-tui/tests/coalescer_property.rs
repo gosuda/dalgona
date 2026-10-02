@@ -27,7 +27,7 @@ proptest! {
             queue.push_update(update(index as u64 + 1, UpdateKind::Delta {
                 turn: turn(),
                 channel: StreamChannel::Text,
-                text: text.to_string().into_boxed_str(),
+                text: text.clone().into_boxed_str(),
             }));
         }
         let drained = queue.take_updates();
@@ -52,6 +52,6 @@ proptest! {
         }
         let shed = queue.take_shed_count();
         prop_assert!(shed > 0);
-        prop_assert_eq!(queue.take_updates().len(), 4_096 - shed as usize);
+        prop_assert_eq!(queue.take_updates().len(), 4_096 - usize::try_from(shed).unwrap_or(0));
     }
 }

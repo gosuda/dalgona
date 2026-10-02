@@ -172,8 +172,8 @@ impl Live {
             .ext_busy
             .values()
             .take(shown)
-            .map(|status| match &status.text {
-                Some(text) => {
+            .map(|status| {
+                if let Some(text) = &status.text {
                     let ext = crate::width::escape(&status.ext);
                     let text = crate::width::escape(&one_line(text));
                     crate::copy::render(
@@ -181,8 +181,7 @@ impl Live {
                         &[("ext", ext.as_str()), ("text", text.as_str())],
                         1,
                     )
-                }
-                None => {
+                } else {
                     let ext = crate::width::escape(&status.ext);
                     crate::copy::render(crate::copy::ids::EXT_BUSY, &[("ext", ext.as_str())], 1)
                 }
@@ -333,10 +332,9 @@ impl Live {
 
 fn turn_end_line(stop: Stop) -> Option<String> {
     match stop {
-        Stop::EndTurn | Stop::Cancelled => None,
         Stop::Length => Some(crate::copy::ids::TURN_LENGTH.to_owned()),
         Stop::Filter => Some(crate::copy::ids::TURN_FILTER.to_owned()),
-        Stop::MaxSteps | Stop::Failed => None,
+        _ => None,
     }
 }
 

@@ -2,6 +2,10 @@
 
 /// Terminal capabilities learned from the startup probe.
 #[derive(Debug, Clone, Default, PartialEq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent advertised capabilities; a bitset loses legibility"
+)]
 pub struct Probe {
     /// DECRPM 2026 synchronized updates are supported.
     pub sync_update: bool,
@@ -154,19 +158,19 @@ impl ReplyParser {
                     let Some(end) = find_csi_end(&self.pending, cursor + 2) else {
                         break;
                     };
-                    let reply = &self.pending[start..=end];
-                    if is_decrpm_reply(reply) {
-                        probe.sync_update |= decrpm_status(reply, 2026)
+                    let packet = &self.pending[start..=end];
+                    if is_decrpm_reply(packet) {
+                        probe.sync_update |= decrpm_status(packet, 2026)
                             .is_some_and(|status| matches!(status, 1..=3));
-                        probe.grapheme_mode |= decrpm_status(reply, 2027)
+                        probe.grapheme_mode |= decrpm_status(packet, 2027)
                             .is_some_and(|status| matches!(status, 1..=3));
-                    } else if parse_kitty_keyboard(reply) {
+                    } else if parse_kitty_keyboard(packet) {
                         probe.kitty_keyboard = true;
-                    } else if is_da1_reply(reply) {
+                    } else if is_da1_reply(packet) {
                         probe.da1 = true;
-                        probe.sixel |= parse_da1(reply);
+                        probe.sixel |= parse_da1(packet);
                     } else {
-                        replay.extend_from_slice(reply);
+                        replay.extend_from_slice(packet);
                     }
                     cursor = end + 1;
                 }
@@ -174,11 +178,11 @@ impl ReplyParser {
                     let Some(end) = find_osc_end(&self.pending, cursor + 2) else {
                         break;
                     };
-                    let reply = &self.pending[start..end];
-                    if reply.starts_with(b"\x1b]11;") {
-                        probe.background_luminance = parse_osc11(reply);
+                    let packet = &self.pending[start..end];
+                    if packet.starts_with(b"\x1b]11;") {
+                        probe.background_luminance = parse_osc11(packet);
                     } else {
-                        replay.extend_from_slice(reply);
+                        replay.extend_from_slice(packet);
                     }
                     cursor = end;
                 }
@@ -186,11 +190,11 @@ impl ReplyParser {
                     let Some(end) = find_st_end(&self.pending, cursor + 2) else {
                         break;
                     };
-                    let reply = &self.pending[start..end + 2];
-                    if reply.starts_with(b"\x1b_Gi=31;") {
-                        probe.kitty_graphics |= reply.windows(2).any(|pair| pair == b"OK");
+                    let packet = &self.pending[start..end + 2];
+                    if packet.starts_with(b"\x1b_Gi=31;") {
+                        probe.kitty_graphics |= packet.windows(2).any(|pair| pair == b"OK");
                     } else {
-                        replay.extend_from_slice(reply);
+                        replay.extend_from_slice(packet);
                     }
                     cursor = end + 2;
                 }

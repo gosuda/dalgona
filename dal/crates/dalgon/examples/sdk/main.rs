@@ -7,6 +7,10 @@ use dal_core::{
 use std::{collections::BTreeMap, io, path::PathBuf, time::Duration};
 
 #[tokio::main(flavor = "multi_thread")]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the example resolves the workspace from the caller's cwd"
+)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cwd = std::env::current_dir()?;
     let workspace = Workspace::new(cwd.clone())?;

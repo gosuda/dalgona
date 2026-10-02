@@ -756,8 +756,8 @@ fn palette_rgb(index: usize) -> [i32; 3] {
         return BASIC[index];
     }
     if index < 232 {
-        let value = index - 16;
         const LEVELS: [i32; 6] = [0, 95, 135, 175, 215, 255];
+        let value = index - 16;
         return [
             LEVELS[value / 36],
             LEVELS[(value / 6) % 6],

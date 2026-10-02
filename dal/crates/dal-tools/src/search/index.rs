@@ -139,7 +139,7 @@ impl Index {
     pub(crate) fn dirty(&self, workspace: &Path, path: &Path) {
         debug_assert!(!path.as_os_str().is_empty(), "dirty names the written path");
         let canonical = fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
-        self.register(canonical)
+        self.register(&canonical)
             .generation
             .fetch_add(1, Ordering::SeqCst);
     }
@@ -249,10 +249,10 @@ impl Index {
         let canonical = tokio::task::spawn_blocking(move || fs::canonicalize(&given))
             .await
             .map_err(|error| IndexError::Build(error.to_string()))??;
-        Ok(self.register(canonical))
+        Ok(self.register(&canonical))
     }
 
-    fn register(&self, canonical: PathBuf) -> Arc<WorkspaceIndex> {
+    fn register(&self, canonical: &Path) -> Arc<WorkspaceIndex> {
         let dir = self.root.as_ref().map(|root| {
             let key = crate::digest32(canonical.as_os_str().as_encoded_bytes());
             let mut name = String::with_capacity(16);
@@ -263,7 +263,7 @@ impl Index {
             root.join(name)
         });
         let mut map = lock(&self.workspaces);
-        map.entry(canonical.clone())
+        map.entry(canonical.to_path_buf())
             .or_insert_with_key(|key| {
                 Arc::new(WorkspaceIndex {
                     canonical: key.clone(),
@@ -282,7 +282,7 @@ impl Index {
     #[must_use]
     pub(crate) fn freshness(&self, workspace: &Path) -> FreshnessToken {
         let canonical = fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
-        let ws = self.register(canonical);
+        let ws = self.register(&canonical);
         let generation = ws.generation.load(Ordering::SeqCst);
         let epoch = self.exec_epoch.load(Ordering::SeqCst);
         FreshnessToken {

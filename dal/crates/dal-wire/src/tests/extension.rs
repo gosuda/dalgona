@@ -302,6 +302,10 @@ fn a2a_scenario() {
     );
 }
 
+#[expect(
+    clippy::large_futures,
+    reason = "one scenario drives every router surface in one future"
+)]
 async fn router_scenario(rig: &Rig, gauge: &Arc<Gauge>) {
     let mut host_updates = rig.host.subscribe();
     let request = async |addr: std::net::SocketAddr| {

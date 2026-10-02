@@ -197,6 +197,10 @@ async fn seen_key(abs: &Path) -> String {
 
 /// Runs symbol mode after the pattern and the gate have passed. The reveal row
 /// is returned, not recorded: the caller records it only for the served result.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one symbol lookup walks pattern, gate, and reveal in place"
+)]
 pub(crate) async fn run(
     search: &Search,
     args: &SearchArgs,
@@ -456,7 +460,10 @@ fn reveal(target: &Target, bytes: &[u8], def: &Def) -> Option<(String, u64, u64)
     let mut text = format!("{} tag {}", row(&target.shown, def), tag8("def", span));
     for (number, line) in (def.first..).zip(lines) {
         let line = line.strip_suffix(b"\r").unwrap_or(line);
-        text.push_str(&format!("\n{number}:{}", String::from_utf8_lossy(line)));
+        let _ = std::fmt::Write::write_fmt(
+            &mut text,
+            format_args!("\n{number}:{}", String::from_utf8_lossy(line)),
+        );
     }
     Some((text, u64::from(def.first), u64::from(def.last)))
 }
@@ -572,8 +579,10 @@ mod tests {
         let digest = blake3::hash(&[b"def:".as_slice(), span].concat());
         digest.as_bytes()[..4]
             .iter()
-            .map(|byte| format!("{byte:02X}"))
-            .collect()
+            .fold(String::new(), |mut out, byte| {
+                let _ = std::fmt::Write::write_fmt(&mut out, format_args!("{byte:02X}"));
+                out
+            })
     }
 
     #[test]
@@ -781,9 +790,10 @@ mod tests {
         let mut source = String::from("int target_fn(void) { return 0; }\n");
         let mut index = 0;
         while source.len() < 4 << 20 {
-            source.push_str(&format!(
-                "int filler_{index}(int a, int b) {{ return a * b + {index}; }}\n"
-            ));
+            let _ = std::fmt::Write::write_fmt(
+                &mut source,
+                format_args!("int filler_{index}(int a, int b) {{ return a * b + {index}; }}\n"),
+            );
             index += 1;
         }
         write(dir.path(), "big.c", source.as_bytes());
@@ -1017,7 +1027,10 @@ mod tests {
         #[test]
         fn symbol_ordinal_soundness(names in proptest::collection::vec(0_usize..3, 1..12), pick in 0_usize..3, k in 1_u32..6) {
             let words = ["alpha_fn", "beta_fn", "gamma_fn"];
-            let source: String = names.iter().map(|&name| format!("fn {}() {{}}\n", words[name])).collect();
+            let source: String = names.iter().fold(String::new(), |mut source, &name| {
+                let _ = std::fmt::Write::write_fmt(&mut source, format_args!("fn {}() {{}}\n", words[name]));
+                source
+            });
             let lines: Vec<usize> = names
                 .iter()
                 .enumerate()

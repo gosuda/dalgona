@@ -40,7 +40,7 @@ fn load_rule(rule: &str) -> Result<Result<RuleRecord, LoadError>, Box<dyn std::e
     let extensions = PluginSystem::new(generation, roots, config).extensions()?;
     let rule = extensions
         .iter()
-        .flat_map(|extension| extension.rules())
+        .flat_map(dal_agent::ext::Extension::rules)
         .next()
         .cloned()
         .ok_or("the plugin registered no rule")?;
@@ -50,7 +50,7 @@ fn load_rule(rule: &str) -> Result<Result<RuleRecord, LoadError>, Box<dyn std::e
 fn load_error(rule: &str) -> Result<String, Box<dyn std::error::Error>> {
     match load_rule(rule)? {
         Ok(record) => Err(format!("the rule loaded: {record:?}").into()),
-        Err(error) => Ok(error.render().to_string()),
+        Err(error) => Ok(error.render().clone()),
     }
 }
 
@@ -95,7 +95,7 @@ fn unwritten_scoping_keeps_the_rules_defaults() -> Result<(), Box<dyn std::error
 fn invalid_scoping_fails_the_load_with_the_fix() -> Result<(), Box<dyn std::error::Error>> {
     let cases = [
         (
-            r#"scope = []"#,
+            r"scope = []",
             "rule `no-force-push`: scope needs one or more of text, thinking, tool, or tool:<name>",
         ),
         (
@@ -111,15 +111,15 @@ fn invalid_scoping_fails_the_load_with_the_fix() -> Result<(), Box<dyn std::erro
             "rule `no-force-push`: repeat_mode \"after_gap\" is invalid; use once or after-gap",
         ),
         (
-            r#"repeat_gap = 0"#,
+            r"repeat_gap = 0",
             "rule `no-force-push`: repeat_gap 0 is invalid; use a whole number from 1 to 1000",
         ),
         (
-            r#"repeat_gap = 1001"#,
+            r"repeat_gap = 1001",
             "rule `no-force-push`: repeat_gap 1001 is invalid; use a whole number from 1 to 1000",
         ),
         (
-            r#"repeat_gap = 65537"#,
+            r"repeat_gap = 65537",
             "rule `no-force-push`: repeat_gap 65537 is invalid; use a whole number from 1 to 1000",
         ),
     ];

@@ -232,7 +232,7 @@ pub(crate) fn tree_picker(view: &View, filter: &str) -> PickerUi {
             };
             PickerOption {
                 label,
-                action: PickerAction::Command(Command::MoveLeaf(branch.leaf.clone())),
+                action: PickerAction::Command(Command::MoveLeaf(branch.leaf)),
             }
         })
         .collect();
@@ -249,12 +249,13 @@ pub(crate) fn fork_picker(entries: &[EntryView], filter: &str) -> PickerUi {
             };
             let preview = parts
                 .iter()
-                .find_map(|part| match part {
-                    JournalPart::Text { text } => Some(text.as_ref()),
-                    JournalPart::TextBlob { .. } => Some("stored text"),
-                    JournalPart::Image { .. } | JournalPart::ImageBlob { .. } => Some("image"),
-                    JournalPart::Blob { .. } => Some("attachment"),
+                .map(|part| match part {
+                    JournalPart::Text { text } => text.as_ref(),
+                    JournalPart::TextBlob { .. } => "stored text",
+                    JournalPart::Image { .. } | JournalPart::ImageBlob { .. } => "image",
+                    JournalPart::Blob { .. } => "attachment",
                 })
+                .next()
                 .unwrap_or("user message");
             let preview = preview.lines().next().unwrap_or("");
             Some(PickerOption {
@@ -263,7 +264,7 @@ pub(crate) fn fork_picker(entries: &[EntryView], filter: &str) -> PickerUi {
                     entry.id,
                     crate::width::take_cells(preview, 56, crate::width::WidthMode::Narrow)
                 ),
-                action: PickerAction::Command(Command::Fork(entry.id.clone())),
+                action: PickerAction::Command(Command::Fork(entry.id)),
             })
         })
         .collect();
@@ -353,7 +354,7 @@ mod tests {
     fn model_filter_matches_case_insensitively_in_order() {
         let models = vec!["gpt-reserve".to_owned(), "opus-4".to_owned()];
         assert_eq!(filter_models(&models, "GPT"), ["gpt-reserve"]);
-        assert_eq!(model_title(2, "acme").contains("acme"), true);
+        assert!(model_title(2, "acme").contains("acme"));
     }
 
     #[test]
@@ -367,7 +368,7 @@ mod tests {
         );
         assert_eq!(offer.notice(Some("luna_reserve")), None);
         assert_eq!(offer.notice(None), None);
-        assert_eq!(resume_row("fix", "today", 1, "/w").contains("/w"), true);
+        assert!(resume_row("fix", "today", 1, "/w").contains("/w"));
     }
 }
 
@@ -417,7 +418,7 @@ mod picker_tests {
         let target = dal_core::EntryId::new(NonZeroU64::MIN);
         let entries = vec![
             dal_core::EntryView {
-                id: target.clone(),
+                id: target,
                 parent: None,
                 kind: dal_core::EntryKind::User {
                     parts: vec![dal_core::JournalPart::Text {

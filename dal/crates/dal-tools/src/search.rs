@@ -206,6 +206,10 @@ impl Scope {
     }
 
     /// The index scope argument: `None` outside the workspace, `Some(None)` for the root.
+    #[expect(
+        clippy::option_option,
+        reason = "outer None means out of scope; inner None means the scope root"
+    )]
     pub(crate) fn index_scope(&self) -> Option<Option<&Path>> {
         let rel = self.ws_rel.as_deref()?;
         Some((!rel.as_os_str().is_empty()).then_some(rel))

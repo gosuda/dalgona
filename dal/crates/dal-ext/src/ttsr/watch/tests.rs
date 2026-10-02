@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use dal_agent::ext::{StreamWatch, TurnInfo, WatchFactory};
+use dal_agent::ext::{TurnInfo, WatchFactory};
 use dal_core::ext::Channel;
 use dal_core::{EntryId, RulesConfig, SessionId, TurnId};
 
@@ -149,6 +149,10 @@ fn finish_after_interrupt_is_idempotent() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one table test walks every resolution row"
+)]
 fn action_resolution_table() {
     let fixture = fixture(&[
         (
@@ -329,7 +333,10 @@ fn action_resolution_table() {
         assert_eq!(tool_watch.fires().len(), 1);
         assert_eq!(tool_watch.fires()[0].action, *action);
         assert_eq!(tool_watch.fires()[0].rule.as_str(), *rule);
-        assert!(tool_watch.fires()[0].inject.is_some() != (*action == RuleAction::Report));
+        assert_ne!(
+            tool_watch.fires()[0].inject.is_some(),
+            (*action == RuleAction::Report)
+        );
     }
 }
 
@@ -627,8 +634,10 @@ fn interrupt_mode_default_follows_config() {
     let data = temp.0.join("data");
     let workspace = temp.0.join("workspace");
     write_rule(&data.join("rules"), "r", "condition: MARK\n", "Body.");
-    let mut cfg = RulesConfig::default();
-    cfg.interrupt = InterruptMode::Never;
+    let cfg = RulesConfig {
+        interrupt: InterruptMode::Never,
+        ..RulesConfig::default()
+    };
     let input = RuleBuildInput {
         records: &[],
         plugin_rules: &[],

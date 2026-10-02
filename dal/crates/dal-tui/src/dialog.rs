@@ -171,9 +171,8 @@ pub fn dialog_title(question: &Question) -> String {
             ],
             1,
         ),
-        Question::Select { prompt, .. } => prompt.to_string(),
+        Question::Select { prompt, .. } | Question::Text { prompt, .. } => prompt.to_string(),
         Question::Confirm { text } => text.to_string(),
-        Question::Text { prompt, .. } => prompt.to_string(),
         _ => "This question type is not supported here. Answer it from another client.".to_owned(),
     }
 }
@@ -265,6 +264,10 @@ impl DialogUi {
     }
 
     /// Maps a key into an answer; an answered request disables its keys until resolution.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one key map walks every dialog kind in place"
+    )]
     pub fn key(&mut self, key: crate::keys::Key) -> Option<(dal_core::RequestId, Answer)> {
         use crossterm::event::{KeyCode, KeyModifiers};
         let (request, _) = self.queue.shown()?;
@@ -401,12 +404,13 @@ impl DialogUi {
         settings: DiagramSettings,
         cache: &RenderCache,
     ) -> Vec<RenderRow> {
-        let Some((request, more)) = self.queue.shown() else {
+        let Some((request, waiting)) = self.queue.shown() else {
             return Vec::new();
         };
         let mut title = dialog_title(&request.question);
-        if more > 0 {
-            title.push_str(&format!(" · {more} more waiting"));
+        if waiting > 0 {
+            use std::fmt::Write as _;
+            let _ = write!(title, " · {waiting} more waiting");
         }
         let mut rows = vec![RenderRow::new(title, Role::Accent)];
         let mut body = self.body(&request.question, width, mode, settings, cache);

@@ -2,6 +2,10 @@ use std::collections::HashSet;
 
 use super::{FunctionMetrics, GuardConfig, TurnState, metrics, report};
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one summary walks every finding shape in place"
+)]
 pub(super) fn build(
     cfg: &GuardConfig,
     reset_due: &mut bool,

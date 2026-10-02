@@ -108,6 +108,10 @@ pub enum PluginCommandError {
 /// # Errors
 /// Returns a stream-I/O error or the backing grant store's typed error. A
 /// request for an unconfigured plugin fails without changing the store.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one plugin command walks list, install, and reload in place"
+)]
 pub async fn run(
     command: PluginCommand,
     plugins: &[ConfiguredPlugin],

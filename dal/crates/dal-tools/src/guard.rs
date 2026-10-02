@@ -42,6 +42,10 @@ use dal_core::{
 /// `dal_core::GuardSection` (node02Core); until then tests build this
 /// struct literally.
 #[derive(Debug, Clone)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent guard toggles; a bitset loses legibility"
+)]
 pub struct GuardConfig {
     enabled: bool,
     cognitive_band: u32,
@@ -86,6 +90,10 @@ impl GuardConfig {
     /// [`GuardConfigError::Uncalibrated`]. `guard_wrap` and `broad_handler`
     /// report in both modes; `BlockAfterCalibration` adds the rule name to
     /// `cannot_block`. `helper` follows `g4_enabled`.
+    ///
+    /// # Errors
+    /// Returns [`GuardConfigError::UnknownRule`] for an unparseable rule name
+    /// and [`GuardConfigError::Uncalibrated`] for a rule without sample data.
     pub fn from_section(
         section: &GuardSection,
         calibration: &Calibration,
@@ -134,20 +142,28 @@ impl GuardConfig {
 /// `dal_core::GuardSection` lands.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum GuardConfigError {
+    /// A `g8_calibrated_rules` name that does not parse as a rule.
     #[error("unknown guard g8 rule {0}")]
     UnknownRule(String),
+    /// A calibrated rule without the required labeled sample set.
     #[error("rule {0} lacks a labeled sample set (50 required, precision >= 0.95)")]
     Uncalibrated(&'static str),
 }
 
 /// The built guard: the extension, the patch observer, and the findings handle.
 pub struct GuardParts {
+    /// The guard's registered extension.
     pub extension: Extension,
+    /// The patch observer watching edits for findings.
     pub observer: Arc<dyn crate::patch::EditObserver>,
+    /// The read-only findings handle.
     pub findings: FindingsHandle,
 }
 
 /// Builds the guard extension, observer, and findings handle from `cfg`.
+///
+/// # Errors
+/// Returns [`RegistrationError`] when the service injection or builder rejects.
 pub fn guard_extension(cfg: GuardConfig) -> Result<GuardParts, RegistrationError> {
     let engine = Arc::new(Engine::new(cfg));
     let extension = ExtensionBuilder::new(
@@ -179,11 +195,17 @@ pub fn guard_extension(cfg: GuardConfig) -> Result<GuardParts, RegistrationError
 /// Per-turn guard findings: files, warnings, stream counts, strikes, report.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GuardFindings {
+    /// The turn these findings belong to.
     pub turn: TurnId,
+    /// Per-file findings recorded this turn.
     pub files: Vec<FileFindings>,
+    /// New warnings introduced, as `(file, line, message)` rows.
     pub warnings: Vec<(Box<str>, u32, Box<str>)>,
+    /// Stream-rule hits as `(rule, count)` pairs.
     pub stream: Vec<(G8Rule, u32)>,
+    /// Turn strikes accumulated so far.
     pub strikes: u8,
+    /// The rendered guard report, when the turn produced one.
     pub report: Option<Arc<str>>,
 }
 

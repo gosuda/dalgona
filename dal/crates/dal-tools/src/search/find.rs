@@ -107,7 +107,10 @@ impl FindResult {
         let mut text = self.paths.join("\n");
         let more = self.total - self.paths.len();
         if more > 0 {
-            text.push_str(&format!("\n[Truncated: {more} more paths]"));
+            let _ = std::fmt::Write::write_fmt(
+                &mut text,
+                format_args!("\n[Truncated: {more} more paths]"),
+            );
         }
         text
     }
@@ -126,6 +129,7 @@ pub(crate) fn walk(root: &Path) -> Result<Vec<Entry>, SearchError> {
 }
 
 /// Find paths under `root` whose relative path matches `pattern`.
+#[cfg(test)]
 pub(crate) fn find(root: &Path, pattern: &str, limit: usize) -> Result<FindResult, SearchError> {
     find_with(root, &FindGlob::new(pattern)?, limit)
 }

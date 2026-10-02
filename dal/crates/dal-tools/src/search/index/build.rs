@@ -374,11 +374,11 @@ pub(super) fn merge(mut runs: Vec<Run<'_>>, writer: &mut PostingsWriter) -> io::
     let mut heads = Vec::with_capacity(runs.len());
     let mut heap = BinaryHeap::with_capacity(runs.len());
     for (at, run) in runs.iter_mut().enumerate() {
-        let head = run.next()?;
-        if let Some(posting) = head {
+        let first = run.next()?;
+        if let Some(posting) = first {
             heap.push(Reverse((posting.key(), at)));
         }
-        heads.push(head);
+        heads.push(first);
     }
     while let Some(Reverse((_, at))) = heap.pop() {
         if let Some(posting) = heads[at].take() {

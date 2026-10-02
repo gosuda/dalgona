@@ -88,6 +88,10 @@ impl RenderRow {
 }
 
 /// Renders the bottom stack in inline mode or the whole screen in fullscreen mode.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one row walk renders every entry kind in place"
+)]
 pub(crate) fn frame_rows(input: FrameInput<'_>, width: u16, height: u16) -> Vec<RenderRow> {
     let w = usize::from(width);
     let h = usize::from(height);
@@ -99,14 +103,13 @@ pub(crate) fn frame_rows(input: FrameInput<'_>, width: u16, height: u16) -> Vec<
         .as_ref()
         .map(|model| escape(model.id()));
     let path = escape(&input.view.session.workspace.as_path().display().to_string());
-    let context = if input.view.usage.context_window > 0 {
-        Some(format!(
-            "ctx {}%",
-            input.view.usage.context_tokens.saturating_mul(100) / input.view.usage.context_window
-        ))
-    } else {
-        None
-    };
+    let context = input
+        .view
+        .usage
+        .context_tokens
+        .saturating_mul(100)
+        .checked_div(input.view.usage.context_window)
+        .map(|percent| format!("ctx {percent}%"));
     let waiting = input.dialog.is_open();
     let running = matches!(
         input.view.turn,
@@ -378,7 +381,7 @@ pub(crate) fn entry_rows(
             for block in content {
                 match block {
                     Block::Text { text } => {
-                        rows.extend(text_rows(text, cap, mode, diagram_settings, diagram_cache))
+                        rows.extend(text_rows(text, cap, mode, diagram_settings, diagram_cache));
                     }
                     Block::Reasoning { .. } => rows.push(RenderRow::new(
                         "Thinking · ctrl+o to show reasoning",
@@ -397,11 +400,10 @@ pub(crate) fn entry_rows(
         } => {
             let text = parts
                 .iter()
-                .filter_map(|part| match part {
+                .find_map(|part| match part {
                     JournalPart::Text { text } => Some(text.as_ref()),
                     _ => None,
                 })
-                .next()
                 .unwrap_or("");
             let word = if *error { "failed" } else { "ok" };
             vec![RenderRow::new(
@@ -417,7 +419,6 @@ pub(crate) fn entry_rows(
                 Role::Text,
             )]
         }
-        EntryKind::Reminder { .. } => Vec::new(),
         _ => Vec::new(),
     }
 }
@@ -528,9 +529,8 @@ fn art_row(cells: &[crate::diagram::ArtCell]) -> RenderRow {
         let role = match cell.role {
             ArtRole::Border => Role::Dim,
             ArtRole::Text => Role::Text,
-            ArtRole::Edge => Role::Accent,
+            ArtRole::Edge | ArtRole::Title => Role::Accent,
             ArtRole::EdgeLabel => Role::Warning,
-            ArtRole::Title => Role::Accent,
         };
         if let Some(span) = row.spans.last_mut()
             && span.role == role
@@ -559,6 +559,16 @@ fn safe_prose(text: &str, cap: usize, mode: WidthMode) -> Vec<String> {
     text.split('\n')
         .flat_map(|line| crate::markdown::render_prose(&escape(line), cap, mode))
         .collect()
+}
+
+fn prose_cap(width: usize) -> usize {
+    match width {
+        120.. => 100,
+        80..=119 => width.saturating_sub(8),
+        60..=79 => width.saturating_sub(6),
+        40..=59 => width.saturating_sub(4),
+        _ => width.saturating_sub(2).max(1),
+    }
 }
 
 #[cfg(test)]
@@ -623,15 +633,5 @@ mod tests {
                 .is_some_and(|(_, spans)| !spans.is_empty())
         );
         assert_eq!(on_cache.renders(), 1);
-    }
-}
-
-fn prose_cap(width: usize) -> usize {
-    match width {
-        120.. => 100,
-        80..=119 => width.saturating_sub(8),
-        60..=79 => width.saturating_sub(6),
-        40..=59 => width.saturating_sub(4),
-        _ => width.saturating_sub(2).max(1),
     }
 }

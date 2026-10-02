@@ -11,7 +11,7 @@ use dal_core::command::{Chooser, Command, ErrorTriple, Reply};
 /// # Errors
 ///
 /// Returns the empty-session pair when there is nothing to move to.
-pub(super) async fn tree(cx: &CommandCx<'_>) -> Result<Reply, ErrorTriple> {
+pub(super) fn tree(cx: &CommandCx<'_>) -> Result<Reply, ErrorTriple> {
     if cx.leaf_entries().is_empty() {
         return Err(empty_session());
     }
@@ -35,7 +35,7 @@ pub(super) fn empty_session() -> ErrorTriple {
 /// # Errors
 ///
 /// Returns the no-message pair when the leaf path holds no user message.
-pub(super) async fn fork(cx: &CommandCx<'_>) -> Result<Reply, ErrorTriple> {
+pub(super) fn fork(cx: &CommandCx<'_>) -> Result<Reply, ErrorTriple> {
     let has_user = cx
         .leaf_entries()
         .iter()
@@ -63,7 +63,7 @@ pub(super) fn no_fork_message() -> ErrorTriple {
 /// # Errors
 ///
 /// Returns the empty-session pair when there is nothing to clone.
-pub(super) async fn clone(cx: &CommandCx<'_>) -> Result<Reply, ErrorTriple> {
+pub(super) fn clone(cx: &CommandCx<'_>) -> Result<Reply, ErrorTriple> {
     if cx.leaf_entries().is_empty() {
         return Err(nothing_to_clone());
     }

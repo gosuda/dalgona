@@ -4,7 +4,7 @@
     dead_code,
     reason = "gate support exposes helpers shared across independent targets"
 )]
-//! TestBackend snapshots for the inline and fullscreen TUI screens.
+//! `TestBackend` snapshots for the inline and fullscreen TUI screens.
 
 mod support;
 

@@ -74,8 +74,7 @@ async fn headless_tools_preserve_call_order_and_see_patch()
                 let name = started
                     .iter()
                     .find(|(started_call, _)| started_call == &call.as_str().to_owned())
-                    .map(|(_, name)| name.as_str())
-                    .unwrap_or("missing-start");
+                    .map_or("missing-start", |(_, name)| name.as_str());
                 settled.push(name.to_owned());
                 if name == "read" {
                     read_results.push(sonic_rs::to_string(outcome)?);

@@ -15,7 +15,7 @@ use std::{
     time::Duration,
 };
 
-use sonic_rs::{JsonContainerTrait, JsonValueMutTrait, JsonValueTrait};
+use sonic_rs::{JsonValueMutTrait, JsonValueTrait};
 use support::{TestDir, dalgon_binary};
 
 struct ChildGuard(Option<Child>);

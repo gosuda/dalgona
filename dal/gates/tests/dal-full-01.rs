@@ -796,7 +796,7 @@ async fn start_process_jobs(
             .await?;
         assert!(matches!(model, Reply::Done(_)));
         let view = agent.view(PageReq::default())?;
-        let mut updates = agent.subscribe(Some((view.r#gen, view.seq)))?;
+        let updates = agent.subscribe(Some((view.r#gen, view.seq)))?;
         let reply = agent
             .submit(Command::Prompt {
                 expect: Expect::Idle,
@@ -1196,8 +1196,7 @@ async fn full_load_scenario() -> Result<(), TestError> {
     let handles = open_handle_count()?;
     assert!(
         rss < RESOURCE_LIMIT_BYTES,
-        "resident memory was {} bytes",
-        rss
+        "resident memory was {rss} bytes"
     );
     assert!(handles < HANDLE_LIMIT, "open handle count was {handles}");
     let loaded_samples = cancel_jobs(&mut process_jobs, CANCELLATIONS).await?;
@@ -1410,7 +1409,7 @@ fn replay_matches_model(
         source
             .iter()
             .filter_map(|record| match record {
-                Record::TurnEnd { turn, stop, .. } => Some((turn.clone(), stop.clone())),
+                Record::TurnEnd { turn, stop, .. } => Some((*turn, stop.clone())),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -1428,11 +1427,7 @@ fn replay_matches_model(
         ));
     }
 
-    let active_turns = if matches!(model, PhaseModel::Idle) {
-        0
-    } else {
-        1
-    };
+    let active_turns = usize::from(!matches!(model, PhaseModel::Idle));
     if turns_completed.checked_add(active_turns) != usize::try_from(turns_allocated).ok() {
         return Err(format!(
             "model counts disagree: allocated={turns_allocated}, completed={turns_completed}, active={active_turns}"
@@ -1466,9 +1461,10 @@ fn replay_matches_model(
     }
     if !matches!(
         (model, replayed.phase()),
-        (PhaseModel::Idle, Phase::Idle)
-            | (PhaseModel::Opening(_), Phase::Idle)
-            | (PhaseModel::Running(_), Phase::Idle)
+        (
+            PhaseModel::Idle | PhaseModel::Opening(_) | PhaseModel::Running(_),
+            Phase::Idle
+        )
     ) {
         return Err(format!(
             "replay phase {:?} disagrees with recovery of model phase",
@@ -1530,8 +1526,8 @@ proptest! {
                         std::num::NonZeroU64::new(next_turn).expect("nonzero model turn"),
                     ),
                 ),
-                (1, PhaseModel::Opening(turn)) => GeneratedStep::Guard(turn.clone()),
-                (2, PhaseModel::Running(turn)) => GeneratedStep::Cancel(turn.clone()),
+                (1, PhaseModel::Opening(turn)) => GeneratedStep::Guard(*turn),
+                (2, PhaseModel::Running(turn)) => GeneratedStep::Cancel(*turn),
                 _ => GeneratedStep::Reject,
             };
             let event = match &step {
@@ -1545,7 +1541,7 @@ proptest! {
                     by: ClientId::new("property"),
                 },
                 GeneratedStep::Guard(turn) => Event::Guard {
-                    turn: turn.clone(),
+                    turn: *turn,
                     call: None,
                     extension: None,
                     outcome: HookOutcome::new(
@@ -1554,7 +1550,7 @@ proptest! {
                     ).expect("before-turn verdict matches"),
                 },
                 GeneratedStep::Cancel(turn) => Event::Cancel {
-                    scope: CancelScope::Turn(turn.clone()),
+                    scope: CancelScope::Turn(*turn),
                     partial: None,
                 },
                 GeneratedStep::Reject => Event::Command {
@@ -1789,7 +1785,7 @@ fn shuttle_actor_schedule() {
         .records()
         .iter()
         .filter_map(|record| match record {
-            Record::TurnEnd { turn, .. } if *turn == actor.turn => Some(turn.clone()),
+            Record::TurnEnd { turn, .. } if *turn == actor.turn => Some(*turn),
             _ => None,
         })
         .collect();
@@ -1852,7 +1848,7 @@ fn shuttle_actor_state() -> ShuttleActorState {
     session
         .step(
             Event::Guard {
-                turn: turn.clone(),
+                turn,
                 call: None,
                 extension: None,
                 outcome: HookOutcome::new(HookEvent::BeforeTurn, HookVerdict::BeforeTurn(None))
@@ -1910,7 +1906,7 @@ async fn shuttle_cancel_task(actor: ShuttleActor) {
         return;
     }
     let mut effects = Vec::new();
-    let turn = actor.turn.clone();
+    let turn = actor.turn;
     let result = actor.session.step(
         Event::Cancel {
             scope: CancelScope::Turn(turn),
@@ -1934,7 +1930,7 @@ async fn shuttle_shutdown_task(actor: ShuttleActor) {
     actor.shutting_down = true;
     if actor.turn_open {
         let mut effects = Vec::new();
-        let turn = actor.turn.clone();
+        let turn = actor.turn;
         let result = actor.session.step(
             Event::Cancel {
                 scope: CancelScope::Turn(turn),

@@ -339,7 +339,9 @@ fn uri_scheme(path: &str) -> Option<&str> {
 /// Splits a `<path>:<a>-<b>[,<c>[-<d>]]` selector off `path`. A suffix after
 /// the last colon is a selector attempt only when it starts with a digit;
 /// the returned intervals are sorted and merged.
-fn parse_selector(path: &str) -> Result<(PathBuf, Option<Vec<(u64, u64)>>), ReadError> {
+type Selection = (PathBuf, Option<Vec<(u64, u64)>>);
+
+fn parse_selector(path: &str) -> Result<Selection, ReadError> {
     let Some((base, suffix)) = path.rsplit_once(':') else {
         return Ok((PathBuf::from(path), None));
     };
@@ -603,7 +605,7 @@ fn count_lines(file: &mut File) -> io::Result<u64> {
             Err(error) => return Err(error),
         };
         let chunk = &buffer[..read];
-        total += chunk.iter().filter(|&&byte| byte == b'\n').count() as u64;
+        total += chunk.split(|byte| *byte == b'\n').count().saturating_sub(1) as u64;
         last = chunk.last().copied();
     }
     if last.is_some_and(|byte| byte != b'\n') {
@@ -626,6 +628,10 @@ mod tests {
     };
     use crate::{Seen, tag8};
 
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "the page-callback seam takes an owned uri"
+    )]
     fn no_pages(uri: String) -> Ready<Result<String, ToolError>> {
         std::future::ready(Err(ToolError::Scheme(SchemeError::Failed {
             message: format!("unexpected page request {uri}").into(),
@@ -664,7 +670,10 @@ mod tests {
     #[tokio::test]
     async fn read_window_tiling() {
         let dir = tempfile::tempdir().unwrap();
-        let body: String = (1..=3500).map(|n| format!("line {n}\n")).collect();
+        let body: String = (1..=3500).fold(String::new(), |mut body, n| {
+            let _ = std::fmt::Write::write_fmt(&mut body, format_args!("line {n}\n"));
+            body
+        });
         fs::write(dir.path().join("big.txt"), &body).unwrap();
         let mut offset = 1_u64;
         let mut numbers = Vec::new();
@@ -718,7 +727,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bytes = b"alpha\r\nbeta\r\ngamma";
         fs::write(dir.path().join("crlf.txt"), bytes).unwrap();
-        let newlines = bytes.iter().filter(|&&b| b == b'\n').count() as u64;
+        let newlines = bytes.split(|b| *b == b'\n').count().saturating_sub(1) as u64;
         let expected_total = newlines + 1;
         let first = read(dir.path(), r#"{"path":"crlf.txt","limit":1}"#)
             .await
@@ -1026,7 +1035,10 @@ mod tests {
     #[tokio::test]
     async fn read_line_selector() {
         let dir = tempfile::tempdir().unwrap();
-        let body: String = (1..=12).map(|n| format!("l{n}\n")).collect();
+        let body: String = (1..=12).fold(String::new(), |mut body, n| {
+            let _ = std::fmt::Write::write_fmt(&mut body, format_args!("l{n}\n"));
+            body
+        });
         fs::write(dir.path().join("a.rs"), &body).unwrap();
 
         let partial = read(dir.path(), &args("a.rs:4-6,10")).await.unwrap();
@@ -1045,7 +1057,10 @@ mod tests {
         );
 
         let whole = read(dir.path(), &args("a.rs:7-12,1-6")).await.unwrap();
-        let expected: String = (1..=12).map(|n| format!("{n}\tl{n}\n")).collect();
+        let expected: String = (1..=12).fold(String::new(), |mut expected, n| {
+            let _ = std::fmt::Write::write_fmt(&mut expected, format_args!("{n}\tl{n}\n"));
+            expected
+        });
         assert_eq!(
             text(&whole),
             format!("{expected}{}", whole_tag("a.rs", body.as_bytes()))

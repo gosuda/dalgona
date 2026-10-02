@@ -71,6 +71,10 @@ pub enum ColorMode {
 
 /// Environment facts captured once by the process edge.
 #[derive(Debug, Clone, Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent terminal environment flags; a bitset loses legibility"
+)]
 pub struct EnvFacts {
     /// Whether standard input was a terminal at the process edge.
     pub stdin_tty: bool,
@@ -177,7 +181,7 @@ impl fmt::Display for Screen {
 /// # Errors
 /// Returns [`TuiError::Host`] when the host rejects session access, or
 /// [`TuiError::Terminal`] when terminal setup or rendering fails.
-pub fn run(host: Host, opts: TuiOptions, io: impl term::TermIo) -> Result<TuiExit, TuiError> {
+pub fn run(host: &Host, opts: &TuiOptions, io: &impl term::TermIo) -> Result<TuiExit, TuiError> {
     let model_host = host.clone();
     let rt = opts.rt.clone();
     run_backend(host, opts, io, move || {
@@ -192,11 +196,10 @@ pub fn run(host: Host, opts: TuiOptions, io: impl term::TermIo) -> Result<TuiExi
 ///
 /// # Errors
 /// Returns [`TuiError`] when the host, model source, session, or terminal operation fails.
-#[must_use]
 pub fn run_backend<H, M>(
-    host: H,
-    opts: TuiOptions,
-    io: impl term::TermIo,
+    host: &H,
+    opts: &TuiOptions,
+    io: &impl term::TermIo,
     models: M,
 ) -> Result<TuiExit, TuiError>
 where
@@ -216,11 +219,10 @@ where
 /// Returns [`TuiError`] when the host, model source, session, or terminal operation fails.
 /// A settings-writer error is shown in the TUI and leaves the session-local
 /// setting active.
-#[must_use]
 pub fn run_backend_with_settings_save<H, M, S>(
-    host: H,
-    opts: TuiOptions,
-    io: impl term::TermIo,
+    host: &H,
+    opts: &TuiOptions,
+    io: &impl term::TermIo,
     models: M,
     save_diagrams: S,
 ) -> Result<TuiExit, TuiError>

@@ -266,8 +266,6 @@ impl Data {
 /// The validated `postings.bin` buffer.
 pub(super) struct Postings {
     pub(super) bytes: Arc<[u8]>,
-    /// Posting count; any valid file id stays below it.
-    pub(super) postings: usize,
     pub(super) grams: usize,
     pub(super) table_at: usize,
 }
@@ -279,7 +277,6 @@ impl Postings {
         bytes.extend_from_slice(&0_u64.to_le_bytes());
         Self {
             bytes: bytes.into(),
-            postings: 0,
             grams: 0,
             table_at: HEADER_LEN,
         }
@@ -300,7 +297,6 @@ impl Postings {
         }
         let postings = Self {
             bytes,
-            postings: count,
             grams,
             table_at,
         };
@@ -319,6 +315,10 @@ impl Postings {
 
     /// The ids of one used posting list, checked to ascend strictly and name a
     /// file of the path table; `None` marks the section corrupt.
+    #[expect(
+        clippy::option_option,
+        reason = "outer None marks corruption; inner None marks an unused list"
+    )]
     pub(super) fn checked_list(&self, gram: u32, files: usize) -> Option<Option<(usize, usize)>> {
         let Some((start, len)) = self.list(gram) else {
             return Some(None);

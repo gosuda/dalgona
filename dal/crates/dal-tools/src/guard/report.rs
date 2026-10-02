@@ -5,8 +5,10 @@ pub(super) const PLACEHOLDER_REJECT: &str = "PATCH REJECTED. The replacement con
 pub(super) const GUARD_WRAP_NOTICE: &str = "GUARD-WRAP NOTICE. This edit adds a guard or fallback around unchanged code without removing behavior. Confirm that the guard is required; do not add a wrapper merely to avoid the failure.";
 pub(super) const HELPER_NOTICE: &str = "ABSTRACTION NOTICE. This new helper is small and has one same-file use. Keep it if it names a real boundary; otherwise inline it. No change was made.";
 pub(super) const BASELINES_RESET: &str = "guard: baselines reset (session start)";
+#[cfg(test)]
 pub(super) const FS_READ_DENIED: &str =
     "guard: fs.read denied; warning router disabled this session";
+#[cfg(test)]
 pub(super) const TURN_DENIED: &str = "guard: turn service denied; strike stop-downgrade active";
 pub(super) const HUMAN_BASELINE: &str = " (human baseline 0.34±0.22)";
 pub(super) const MINIMALISM_RULE: &str = "Minimalism rule: make the smallest change that meets the request. Add no guard, fallback, helper, or comment that the request does not need.";
@@ -31,6 +33,7 @@ pub(super) fn strike_notice(n: u8, effect: &str, cause: &str, evidence: &str) ->
     )
 }
 
+#[cfg(test)]
 pub(super) fn exhaustion(key: &str, cause: &str, paths: &str) -> String {
     format!(
         "Guard stopped this turn after 3 strikes. No pending retry was run. Repeated target: {key}. Last failure: {cause}. Persistent changes in this turn: {paths}."
@@ -171,6 +174,10 @@ pub(super) fn turn_report(summary: &TurnSummary) -> Option<String> {
         if summary.reduction_ask {
             let total = summary.added + summary.deleted;
             if total > 0 {
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "edit counts stay far below 2^53"
+                )]
                 lines.push(deletion_share(summary.deleted as f64 / total as f64));
             }
             lines.extend(

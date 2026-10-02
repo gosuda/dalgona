@@ -31,7 +31,7 @@ pub(super) fn export(cx: &CommandCx<'_>, path: Option<&str>) -> Result<Reply, Er
     } else {
         let name = cx.view().settings.name.clone();
         let id = cx.view().session.id.to_string();
-        let target = default_export_path(&workspace, name.as_deref(), &id, jiff::Zoned::now());
+        let target = default_export_path(&workspace, name.as_deref(), &id, &jiff::Zoned::now());
         (target, dal_core::command::ExportFormat::Markdown)
     };
     Ok(Reply::Started(cx.start_job(Command::Export {
@@ -71,7 +71,7 @@ pub(super) fn default_export_path(
     workspace: &dal_core::Workspace,
     name: Option<&str>,
     id: &str,
-    at: jiff::Zoned,
+    at: &jiff::Zoned,
 ) -> std::path::PathBuf {
     let slug = slug(name.unwrap_or(""), id);
     let stamp = at.strftime("%Y%m%d-%H%M%S").to_string();

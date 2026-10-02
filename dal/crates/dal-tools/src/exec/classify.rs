@@ -226,7 +226,6 @@ fn has_shell_expansion_or_glob(raw: &str) -> bool {
         match (quote, byte) {
             (b'\'', b'\'') | (b'"', b'"') => quote = 0,
             (0, b'\'' | b'"') => quote = byte,
-            (b'\'', _) => {}
             (0 | b'"', b'$' | b'`' | b'*' | b'?' | b'[' | b'{' | b'}' | b'~') => return true,
             _ => {}
         }
@@ -380,9 +379,8 @@ mod guards {
     }
 
     fn stash_ok(tokens: &mut super::Tokens<'_>) -> bool {
-        let first = match tokens.next() {
-            Ok(Some(first)) => first,
-            Ok(None) | Err(_) => return false,
+        let Ok(Some(first)) = tokens.next() else {
+            return false;
         };
         if !GIT_STASH_WORDS.contains(&first) {
             return false;

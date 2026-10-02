@@ -19,6 +19,10 @@ pub(crate) struct Painter {
     sync: bool,
     initialized: bool,
     overlay: bool,
+    #[expect(
+        clippy::option_option,
+        reason = "outer None records unset, inner None records the default theme"
+    )]
     theme_name: Option<Option<&'static str>>,
     image_rung: Option<Rung>,
     image_picker: Option<ratatui_image::picker::Picker>,
@@ -148,6 +152,10 @@ impl Painter {
         result
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one paint pass carries every inline render input"
+    )]
     fn inline_bytes(
         &mut self,
         out: &mut Vec<u8>,
@@ -360,7 +368,7 @@ fn write_styled_text(
         for span in spans {
             if span.range.start > offset {
                 out.extend_from_slice(crate::status::role_sgr(theme, fallback).as_bytes());
-                out.extend_from_slice(text[offset..span.range.start].as_bytes());
+                out.extend_from_slice(&text.as_bytes()[offset..span.range.start]);
             }
             out.extend_from_slice(crate::status::role_sgr(theme, span.role).as_bytes());
             out.extend_from_slice(text[span.range.clone()].as_bytes());
@@ -368,7 +376,7 @@ fn write_styled_text(
         }
         if offset < text.len() {
             out.extend_from_slice(crate::status::role_sgr(theme, fallback).as_bytes());
-            out.extend_from_slice(text[offset..].as_bytes());
+            out.extend_from_slice(&text.as_bytes()[offset..]);
         }
     }
     out.extend_from_slice(b"\x1b[0m");

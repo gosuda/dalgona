@@ -23,9 +23,9 @@ use dal_agent::{
 };
 use dal_core::ext::Mail;
 use dal_core::{
-    AgentStart, AgentsOp, AgentsReply, CallId, CancelScope, ClientId, Command, CommandName,
-    CommandSpec, Config, ConfigProduct, Expect, MailMode, Output, PageReq, Part, Receipt, Reply,
-    RequestParams, Service, ServiceSet, Workspace,
+    AgentStart, AgentsOp, AgentsReply, CallId, ClientId, Command, CommandName, CommandSpec, Config,
+    ConfigProduct, MailMode, Output, PageReq, Receipt, Reply, RequestParams, Service, ServiceSet,
+    Workspace,
 };
 use support::{TestDir, scripted_session};
 use tokio::sync::watch;

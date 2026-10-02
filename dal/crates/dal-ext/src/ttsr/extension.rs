@@ -10,6 +10,10 @@ use dal_agent::ext::{Extension, ExtensionBuilder};
 use dal_core::{RegistrationError, ServiceSet};
 
 /// Builds the thin `ttsr` extension record: name registration only.
+///
+/// # Errors
+///
+/// Returns the builder's registration error for an invalid identity.
 pub fn extension() -> Result<Extension, RegistrationError> {
     ExtensionBuilder::new("ttsr", "0.1.0", ServiceSet::EMPTY)?.build()
 }

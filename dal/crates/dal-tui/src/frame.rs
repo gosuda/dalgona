@@ -173,7 +173,7 @@ impl Default for Coalescer {
 impl Coalescer {
     /// Enqueues an update, merging adjacent text deltas and replacing progress by call id.
     pub fn push_update(&mut self, update: Update) {
-        if coalesce_update(&mut self.updates, update.clone()) {
+        if coalesce_update(&mut self.updates, &update) {
             return;
         }
         let incoming_class = classify(&update.kind);
@@ -225,7 +225,7 @@ fn classify(kind: &UpdateKind) -> QueueClass {
     }
 }
 
-fn coalesce_update(queue: &mut VecDeque<Update>, incoming: Update) -> bool {
+fn coalesce_update(queue: &mut VecDeque<Update>, incoming: &Update) -> bool {
     let UpdateKind::Delta {
         turn,
         channel,

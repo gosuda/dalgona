@@ -420,7 +420,7 @@ fn report_text_uses_the_child_journal_entry_uri() {
         session,
         entry: entry(7),
     };
-    let uri = report_uri(&session, &entry(7));
+    let uri = report_uri(&session, entry(7));
     let expected = format!(
         "{}\n[report truncated at 50000 characters; full report: {uri}]\nnext_step: Read the full report with the read tool at {uri}.",
         "a".repeat(MAX_REPORT_CHARS)

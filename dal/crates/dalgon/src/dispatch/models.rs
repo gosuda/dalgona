@@ -46,7 +46,7 @@ pub(crate) async fn run(args: cli::ModelsArgs, startup: Startup) -> ExitCode {
             Err(error) => {
                 return super::login::provider_error(
                     "models",
-                    error,
+                    &error,
                     &startup.data_root.join("auth.json"),
                 );
             }
@@ -61,7 +61,7 @@ pub(crate) async fn run(args: cli::ModelsArgs, startup: Startup) -> ExitCode {
             ) => {
                 return super::login::provider_error(
                     "models",
-                    error,
+                    &error,
                     &startup.data_root.join("auth.json"),
                 );
             }

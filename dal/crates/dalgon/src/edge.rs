@@ -43,6 +43,10 @@ pub(crate) struct TerminalSnapshot {
 }
 
 #[derive(Debug, Error)]
+#[cfg_attr(
+    not(windows),
+    expect(dead_code, reason = "the whoami variants construct only on windows")
+)]
 pub(crate) enum SidError {
     #[error("SystemRoot is not set to an absolute directory")]
     SystemRoot,
@@ -357,6 +361,13 @@ pub(crate) fn resolve_color(
     }
 }
 
+#[cfg_attr(
+    not(windows),
+    expect(
+        clippy::unnecessary_wraps,
+        reason = "the windows twin reports real errors; the signature must match"
+    )
+)]
 pub(crate) fn current_user_sid(
     vars: &BTreeMap<OsString, OsString>,
 ) -> Result<Option<CurrentUserSid>, SidError> {
@@ -398,6 +409,11 @@ fn run_whoami(executable: &Path) -> io::Result<std::process::Output> {
         .output()
 }
 
+#[cfg(any(windows, test))]
+#[expect(
+    clippy::match_same_arms,
+    reason = "quoted and unquoted fields share the append step"
+)]
 fn parse_csv_row(row: &str) -> Result<Vec<String>, SidError> {
     let mut fields = Vec::with_capacity(2);
     let mut field = String::new();
@@ -434,6 +450,7 @@ fn parse_csv_row(row: &str) -> Result<Vec<String>, SidError> {
     Ok(fields)
 }
 
+#[cfg(any(windows, test))]
 fn parse_sid(value: &str) -> Result<CurrentUserSid, SidError> {
     let Some(tail) = value.strip_prefix("S-1-") else {
         return Err(SidError::InvalidSid);
@@ -458,6 +475,7 @@ fn parse_sid(value: &str) -> Result<CurrentUserSid, SidError> {
     Ok(CurrentUserSid(value.into()))
 }
 
+#[cfg(any(windows, test))]
 fn decimal_field(value: &str) -> bool {
     !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
 }

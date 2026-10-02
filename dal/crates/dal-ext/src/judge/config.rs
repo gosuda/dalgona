@@ -326,7 +326,7 @@ mod tests {
     }
 
     #[test]
-    fn non_table_judge_section_uses_table_remedy() -> TestResult {
+    fn non_table_judge_section_uses_table_remedy() {
         // Core rejects a non-table `judge` while loading, before decode
         // runs: the plan remedy text must survive that load boundary.
         let error = load(Some("judge = 3\n")).expect_err("non-table judge fails");
@@ -340,6 +340,5 @@ mod tests {
             ),
             "unexpected non-table judge error: {error:?}"
         );
-        Ok(())
     }
 }

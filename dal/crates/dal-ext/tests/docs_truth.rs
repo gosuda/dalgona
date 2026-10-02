@@ -4,12 +4,15 @@
     reason = "integration fixture failures must fail at their specific setup boundary"
 )]
 
+use dal_core::{Config, ConfigProduct};
 use dal_ext::docs::{
     DocsSnapshot, Lookup, Manual, Miss, listing, lookup, miss_lines, nearest, page_valid,
     prompt_line, read_miss_line, render_index, scheme_valid, snapshot as live_snapshot, wire_error,
 };
 use dal_ext::docsgen::{GenArgs, Scheme, generate};
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 fn repo_root() -> PathBuf {
@@ -58,7 +61,7 @@ fn fixture(names: &[(&str, &str)]) -> (tempfile_guard::Guard, GenArgs) {
         std::fs::write(dir.join(format!("{name}.md")), text).unwrap();
     }
     for (name, _) in names {
-        list.push_str(&format!("{name} user docs 100\n"));
+        let _ = writeln!(list, "{name} user docs 100");
     }
     std::fs::write(dir.join("pages"), list).unwrap();
     let scan = dir.clone();
@@ -74,11 +77,11 @@ fn fixture(names: &[(&str, &str)]) -> (tempfile_guard::Guard, GenArgs) {
 
 mod tempfile_guard {
     use std::path::PathBuf;
-    pub struct Guard {
+    pub(crate) struct Guard {
         dir: PathBuf,
     }
     impl Guard {
-        pub fn new() -> Self {
+        pub(crate) fn new() -> Self {
             let dir = std::env::temp_dir().join(format!(
                 "dal-docs-{}-{}",
                 std::process::id(),
@@ -90,7 +93,7 @@ mod tempfile_guard {
             std::fs::create_dir_all(&dir).unwrap();
             Self { dir }
         }
-        pub fn dir(&self) -> &PathBuf {
+        pub(crate) fn dir(&self) -> &PathBuf {
             &self.dir
         }
     }
@@ -237,7 +240,7 @@ fn generator_link_errors() {
     std::fs::write(dir.join("pages"), "a user docs 100\n").unwrap();
     std::fs::write(
         dir.join("a.md"),
-        format!("# Aye\n\nSee {}://missing-page.\n", SCHEME),
+        format!("# Aye\n\nSee {SCHEME}://missing-page.\n"),
     )
     .unwrap();
     let args = GenArgs {
@@ -425,7 +428,7 @@ fn resolver_grammar_edges() {
 fn prop_index_column() {
     let snap = snapshot();
     for manual in &snap.manuals {
-        let text = render_index(&manual);
+        let text = render_index(manual);
         let mut columns = std::collections::HashSet::new();
         for line in text.lines().skip(1) {
             let title_start = line.find(|c: char| c != ' ').unwrap_or(line.len());
@@ -482,7 +485,7 @@ fn prop_nearest_minimal() {
     // Bare page names, sorted per the contract; production pairs full URIs
     // with pages itself in `lookup`.
     let candidates = ["cli", "config", "context"];
-    let borrowed: Vec<&str> = candidates.iter().copied().collect();
+    let borrowed: Vec<&str> = candidates.to_vec();
     assert_eq!(nearest(&borrowed, "config"), Some("config".to_owned()));
     assert_eq!(nearest(&borrowed, "zzz"), None);
 }
@@ -546,7 +549,7 @@ fn truth_config_page() {
     let pages = load_manual();
     let config = pages.get("config").expect("config page");
     let mut scalar_toml = String::new();
-    let mut sections: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    let mut sections: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut rows = 0;
     for line in config.lines().filter(|line| line.starts_with("| `")) {
         let cells: Vec<&str> = line.split('|').map(str::trim).collect();
@@ -572,7 +575,9 @@ fn truth_config_page() {
             value.to_owned()
         };
         match name.split_once('.') {
-            None => scalar_toml.push_str(&format!("{name} = {literal}\n")),
+            None => {
+                let _ = writeln!(scalar_toml, "{name} = {literal}");
+            }
             Some((section, rest)) => sections
                 .entry(section.to_owned())
                 .or_default()
@@ -582,9 +587,8 @@ fn truth_config_page() {
     assert!(rows > 40, "every known key has a row");
     let mut document = scalar_toml;
     for (section, entries) in &sections {
-        document.push_str(&format!("[{section}]\n{}\n", entries.join("\n")));
+        let _ = writeln!(document, "[{section}]\n{}", entries.join("\n"));
     }
-    use dal_core::{Config, ConfigProduct};
     let dir = std::env::temp_dir().join("dal-docs-config");
     let _ = std::fs::create_dir_all(&dir);
     let loaded =
@@ -725,7 +729,7 @@ fn truth_readme_philosophy() {
         "philosophy has grounding marker"
     );
     let body = philosophy.split(marker).next().unwrap();
-    let body_without_title = body.split_once('\n').map(|(_, rest)| rest).unwrap_or("");
+    let body_without_title = body.split_once('\n').map_or("", |(_, rest)| rest);
     assert!(
         readme.contains(body_without_title.trim()),
         "README carries the philosophy body"
@@ -821,7 +825,7 @@ fn truth_cross_manual_links() {
     for manual in &dg_snap.manuals {
         for (_, text) in &manual.pages {
             for page in extract_links(text, "dal") {
-                let uri = format!("{}://{page}", SCHEME);
+                let uri = format!("{SCHEME}://{page}");
                 match lookup(&dal_snap, &uri) {
                     Lookup::Page { .. } | Lookup::Index { .. } => {}
                     Lookup::Miss(miss) => panic!("{uri} resolves: {miss:?}"),
@@ -869,7 +873,7 @@ fn reload_wording_has_no_stale_text() {
     let mut files = vec![repo_root().join("README.md")];
     let push_md = |dir: &PathBuf, out: &mut Vec<PathBuf>| {
         let entries = std::fs::read_dir(dir).unwrap();
-        for entry in entries.filter_map(|entry| entry.ok()) {
+        for entry in entries.filter_map(std::result::Result::ok) {
             let path = entry.path();
             if path.extension().and_then(|extension| extension.to_str()) == Some("md") {
                 out.push(path);
@@ -880,7 +884,7 @@ fn reload_wording_has_no_stale_text() {
     push_md(&repo_root().join("dalgona/docs"), &mut files);
     for entry in std::fs::read_dir(examples_dir())
         .unwrap()
-        .filter_map(|entry| entry.ok())
+        .filter_map(std::result::Result::ok)
     {
         if entry.file_type().unwrap().is_dir() {
             push_md(&entry.path(), &mut files);
@@ -917,11 +921,11 @@ fn docs_door_rendering() {
         .iter()
         .map(|(page, _)| page.as_str())
         .collect();
-    uris.sort();
+    uris.sort_unstable();
     let mut lines = listed.lines();
     assert_eq!(lines.next(), Some("# dal://"));
     for (line, page) in lines.zip(uris.iter()) {
-        assert!(line.starts_with(&format!("{}://{page}", SCHEME)), "{line}");
+        assert!(line.starts_with(&format!("{SCHEME}://{page}")), "{line}");
     }
     match lookup(&snap, "dal://config") {
         Lookup::Page { title, .. } => assert_eq!(title, "Settings in dal.toml"),
@@ -969,7 +973,6 @@ fn miss_write_error_is_reported() {
     let snap = snapshot();
     let text = listing(&snap);
     let mut sink = Failing;
-    use std::io::Write as _;
     assert!(sink.write_all(text.as_bytes()).is_err());
     assert!(!text.is_empty());
 }
@@ -1089,7 +1092,7 @@ fn walk(current: &Path, out: &mut Vec<String>) {
     let Ok(entries) = std::fs::read_dir(current) else {
         return;
     };
-    for entry in entries.filter_map(|e| e.ok()) {
+    for entry in entries.filter_map(std::result::Result::ok) {
         let path = entry.path();
         if path.is_symlink() {
             continue;
@@ -1103,10 +1106,9 @@ fn walk(current: &Path, out: &mut Vec<String>) {
         } else if matches!(
             path.extension().and_then(|e| e.to_str()),
             Some("rs" | "md" | "star")
-        ) {
-            if let Ok(text) = std::fs::read_to_string(&path) {
-                out.push(text.replace("\r\n", "\n"));
-            }
+        ) && let Ok(text) = std::fs::read_to_string(&path)
+        {
+            out.push(text.replace("\r\n", "\n"));
         }
     }
 }

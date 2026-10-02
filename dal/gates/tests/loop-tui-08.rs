@@ -280,7 +280,7 @@ impl TcpProxy {
             .messages
             .iter()
             .filter_map(|message| update_cursor(message))
-            .last()
+            .next_back()
     }
 }
 

@@ -60,17 +60,17 @@ async fn unknown_update_variant_maps_to_fallback_and_turn_continues()
     assert!(matches!(reply, Reply::Accepted { .. }));
     let mut ended = false;
     while let Some(delivery) = subscription.next().await {
-        if let Delivery::Update(update) = delivery {
-            if matches!(
+        if let Delivery::Update(update) = delivery
+            && matches!(
                 update.kind,
                 UpdateKind::TurnEnded {
                     stop: Stop::EndTurn,
                     ..
                 }
-            ) {
-                ended = true;
-                break;
-            }
+            )
+        {
+            ended = true;
+            break;
         }
     }
     assert!(ended);

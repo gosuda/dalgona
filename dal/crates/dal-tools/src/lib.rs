@@ -39,12 +39,12 @@ pub fn digest32(bytes: &[u8]) -> [u8; 32] {
 pub fn tag8(domain: &str, bytes: &[u8]) -> String {
     // Hash sequential chunks without concatenating an intermediate buffer.
     // https://docs.rs/blake3/1.8.7/blake3/struct.Hasher.html
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut hasher = blake3::Hasher::new();
     hasher.update(domain.as_bytes());
     hasher.update(b":");
     hasher.update(bytes);
     let digest = hasher.finalize();
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut tag = String::with_capacity(8);
     for byte in &digest.as_bytes()[..4] {
         tag.push(char::from(HEX[usize::from(*byte >> 4)]));
@@ -143,15 +143,17 @@ impl Default for ToolsConfig {
 
 impl fmt::Debug for ToolsConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ToolsConfig")
+        let mut debug = formatter.debug_struct("ToolsConfig");
+        debug
             .field("search_symbols", &self.search_symbols)
             .field("index_root", &self.index_root)
             .field("rerank_configured", &self.rerank.is_some())
             .field("edit_style", &self.edit_style)
             .field("observer_configured", &self.observer.is_some())
-            .field("exec", &self.exec)
-            .finish()
+            .field("exec", &self.exec);
+        #[cfg(feature = "symbols")]
+        debug.field("guard", &self.guard);
+        debug.finish()
     }
 }
 
@@ -177,7 +179,7 @@ pub fn extension(cfg: ToolsConfig) -> Result<Extension, RegistrationError> {
         cfg.rerank.clone(),
     )?;
     let patch_tool = patch::tool(
-        cfg.edit_style.clone(),
+        &cfg.edit_style,
         index.clone(),
         seen,
         snapshots,
@@ -325,6 +327,7 @@ impl Seen {
     }
 
     /// Returns the merged intervals recorded for the exact session, path, and digest.
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn intervals(
         &self,

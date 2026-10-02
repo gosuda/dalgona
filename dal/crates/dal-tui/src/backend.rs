@@ -75,7 +75,7 @@ impl TuiHost for Host {
     }
 
     async fn commands(&self) -> Result<Arc<[CommandSpec]>, TuiError> {
-        Ok(self.commands())
+        Ok(async { self.commands() }.await)
     }
 
     async fn close(&self, id: SessionId) -> Result<(), TuiError> {
@@ -87,11 +87,11 @@ impl TuiAgent for Agent {
     type Subscription = Subscription;
 
     async fn view(&self, page: PageReq) -> Result<View, TuiError> {
-        Ok(self.view(page)?)
+        async { Ok(self.view(page)?) }.await
     }
 
     async fn subscribe(&self, after: Option<(Gen, Seq)>) -> Result<Subscription, TuiError> {
-        Ok(self.subscribe(after)?)
+        async { Ok(self.subscribe(after)?) }.await
     }
 
     async fn submit(&self, command: Command) -> Result<Reply, TuiError> {

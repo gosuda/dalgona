@@ -263,6 +263,10 @@ pub(crate) async fn run_print(
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one print run walks every output mode in place"
+)]
 async fn run_print_inner(
     agent: Agent,
     opts: PrintOptions,

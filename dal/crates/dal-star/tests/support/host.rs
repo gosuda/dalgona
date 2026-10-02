@@ -1,3 +1,7 @@
+//! A deterministic `ScriptHost` recording every adapter call for assertions.
+
+#![expect(clippy::expect_used, reason = "SC test")]
+
 use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,8 +25,14 @@ use dal_core::{
     RunOutput, RunRequest, ScopeSpec, SidecarOp, TurnOp, TurnOpReply,
 };
 
+/// Recorded host events; fields are kept for failure diagnosis even when a
+/// given run only matches on the variant.
 #[derive(Clone, Debug)]
-pub enum HostRecord {
+#[expect(
+    dead_code,
+    reason = "recorded for diagnosis; not every field is asserted"
+)]
+pub(crate) enum HostRecord {
     Begin {
         parent: Option<InvocationId>,
         entry: Entry,
@@ -60,7 +70,7 @@ pub enum HostRecord {
 }
 
 /// A deterministic host for exercising Starlark adapters at `ScriptHost`.
-pub struct RecordingHost {
+pub(crate) struct RecordingHost {
     environment: Arc<EvalEnvironment>,
     catalog: Catalog,
     replies: Mutex<HashMap<OpId, OpOutcome>>,
@@ -71,7 +81,7 @@ pub struct RecordingHost {
 }
 
 impl RecordingHost {
-    pub fn new(
+    pub(crate) fn new(
         extensions: &[Extension],
         allowed: OpSet,
         replies: impl IntoIterator<Item = (OpId, OpOutcome)>,
@@ -79,7 +89,7 @@ impl RecordingHost {
         Self::with_budget(extensions, allowed, replies, Duration::from_secs(60))
     }
 
-    pub fn with_budget(
+    pub(crate) fn with_budget(
         extensions: &[Extension],
         allowed: OpSet,
         replies: impl IntoIterator<Item = (OpId, OpOutcome)>,
@@ -99,7 +109,7 @@ impl RecordingHost {
         })
     }
 
-    pub fn script_cx(self: &Arc<Self>) -> ScriptCx {
+    pub(crate) fn script_cx(self: &Arc<Self>) -> ScriptCx {
         ScriptCx::new(
             Arc::clone(self) as Arc<dyn ScriptHost>,
             Arc::clone(&self.environment),
@@ -107,7 +117,7 @@ impl RecordingHost {
         )
     }
 
-    pub fn records(&self) -> Vec<HostRecord> {
+    pub(crate) fn records(&self) -> Vec<HostRecord> {
         self.records.lock().expect("host records lock").clone()
     }
 
@@ -257,7 +267,7 @@ fn allocate_id(counter: &AtomicU64, what: &'static str) -> Result<NonZeroU64, Ho
         .ok_or(HostTerminal::LimitExceeded { what })
 }
 
-pub fn failed(op: OpId, code: FailureCode, message: &str) -> OpOutcome {
+pub(crate) fn failed(op: OpId, code: FailureCode, message: &str) -> OpOutcome {
     OpOutcome::Failed {
         failure: OpFailure {
             code,
@@ -272,11 +282,11 @@ pub fn failed(op: OpId, code: FailureCode, message: &str) -> OpOutcome {
     }
 }
 
-pub fn native_op(op: NativeOp) -> OpId {
+pub(crate) fn native_op(op: NativeOp) -> OpId {
     OpId::Native(op)
 }
 
-pub fn test_services() -> Arc<dyn Services> {
+pub(crate) fn test_services() -> Arc<dyn Services> {
     Arc::new(NoServices)
 }
 
@@ -388,11 +398,11 @@ impl Services for NoServices {
     }
 }
 
-pub fn tool_cx(script: ScriptCx) -> ToolCx<'static> {
+pub(crate) fn tool_cx(script: ScriptCx) -> ToolCx<'static> {
     ToolCx::for_test(test_services()).with_script(script)
 }
 
-pub fn eval_args(code: &str) -> String {
+pub(crate) fn eval_args(code: &str) -> String {
     format!(
         "{{\"code\":{}}}",
         sonic_rs::to_string(code).expect("string JSON")

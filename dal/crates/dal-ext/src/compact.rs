@@ -18,6 +18,10 @@ pub(super) fn usage_of(inference: &Inference) -> Option<Usage> {
 }
 
 /// Registers dal's native-first, text-summary compaction chain.
+///
+/// # Errors
+///
+/// Returns the builder's registration error for an invalid identity.
 pub fn extension() -> Result<Extension, RegistrationError> {
     ExtensionBuilder::new("compact", env!("CARGO_PKG_VERSION"), ServiceSet::default())?
         .compactor("remote", Arc::new(remote::Remote))

@@ -19,6 +19,10 @@ mod remote;
 mod signal;
 
 /// Starts the interactive client after the process edge has resolved all inputs.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one interactive dispatch walks setup, loop, and shutdown in place"
+)]
 pub(crate) async fn interactive(cli: &cli::Cli, startup: Startup, product: Product) -> ExitCode {
     let t0 = std::time::Instant::now();
     let snapshot = edge::terminal_snapshot();
@@ -170,7 +174,8 @@ pub(crate) async fn interactive(cli: &cli::Cli, startup: Startup, product: Produ
         )
         .await;
     }
-    if vars.contains_key(OsStr::new("DAL_DEBUG")) {
+    let dal_debug = vars.contains_key(OsStr::new("DAL_DEBUG"));
+    if dal_debug {
         eprintln!("[t1] pre-host {}ms", t0.elapsed().as_millis());
     }
     let host = match Host::start(
@@ -194,7 +199,7 @@ pub(crate) async fn interactive(cli: &cli::Cli, startup: Startup, product: Produ
         let models = model_rt.block_on(model_host.models(None))?;
         Ok(dal_tui::picker::model_options(models))
     };
-    if vars.contains_key(OsStr::new("DAL_DEBUG")) {
+    if dal_debug {
         eprintln!("[t1] host started {}ms", t0.elapsed().as_millis());
     }
     let code = run_blocking(host, opts, model_source, save_diagrams).await;
@@ -227,7 +232,7 @@ where
     )]
     let io = signals.terminal(std::io::stdin());
     let result = tokio::task::spawn_blocking(move || {
-        dal_tui::run_backend_with_settings_save(host, opts, io, model_source, save_diagrams)
+        dal_tui::run_backend_with_settings_save(&host, &opts, &io, model_source, save_diagrams)
     })
     .await;
     let signal = signals.exit_status();

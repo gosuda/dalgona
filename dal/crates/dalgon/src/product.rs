@@ -56,12 +56,14 @@ pub fn parts(cx: &BuildCx<'_>) -> Result<Parts, BuildError> {
         })?;
     let guard = guard_extension(guard_config)?;
 
-    let mut tools = ToolsConfig::default();
-    tools.search_symbols = Arc::new(AtomicBool::new(cx.config.search_symbols()));
-    tools.index_root = Some(cx.data_root.join("index"));
-    tools.edit_style = cx.config.edit_style().clone();
+    let mut tools = ToolsConfig {
+        search_symbols: Arc::new(AtomicBool::new(cx.config.search_symbols())),
+        index_root: Some(cx.data_root.join("index")),
+        edit_style: cx.config.edit_style().clone(),
+        observer: Some(Arc::clone(&guard.observer)),
+        ..ToolsConfig::default()
+    };
     tools.exec.sandbox_on = cx.config.sandbox();
-    tools.observer = Some(Arc::clone(&guard.observer));
 
     Ok(Parts {
         tools,
@@ -98,7 +100,7 @@ impl dal_ext::commands::PluginReload for ReloadPlugins {
                 })?;
             cx.publish_plugins(set)
                 .await
-                .map_err(dal_ext::commands::misc::publish_failure)
+                .map_err(|error| dal_ext::commands::misc::publish_failure(&error))
         })
     }
 }
@@ -142,6 +144,8 @@ pub fn assemble(cx: &BuildCx<'_>, parts: Parts) -> Result<Product, BuildError> {
         source: Box::new(source),
     })?;
     let system = Arc::new(dal_star::PluginSystem::new(generation, roots, plugincfg));
+    let reload: Arc<dyn dal_ext::commands::PluginReload> =
+        Arc::new(ReloadPlugins(Arc::clone(&system)));
     let mut extensions = vec![
         dal_tools::extension(parts.tools)?,
         parts.guard,
@@ -150,7 +154,7 @@ pub fn assemble(cx: &BuildCx<'_>, parts: Parts) -> Result<Product, BuildError> {
         dal_ext::letter::extension()?,
         dal_ext::ttsr::extension()?,
         dal_ext::compact::extension()?,
-        dal_ext::commands::extension(Arc::new(ReloadPlugins(Arc::clone(&system))))?,
+        dal_ext::commands::extension(&reload)?,
         dal_ext::docs::extension()?,
         dal_ext::subagent::extension()?,
     ];
@@ -289,7 +293,7 @@ mod tests {
                     )
                 })
                 .count();
-            assert_eq!(occurrences, if enabled { 1 } else { 0 });
+            assert_eq!(occurrences, usize::from(enabled));
         }
     }
 

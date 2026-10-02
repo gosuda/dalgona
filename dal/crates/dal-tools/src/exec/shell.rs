@@ -41,6 +41,10 @@ pub(crate) fn resolve(
 }
 
 #[cfg(unix)]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the windows twin reports real errors; the signature must match"
+)]
 fn default_ladder(_environment: &BTreeMap<OsString, OsString>) -> Result<ResolvedShell, ExecError> {
     const CANDIDATES: [&str; 4] = [
         "/bin/bash",
@@ -128,7 +132,7 @@ fn is_executable_file(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, ffi::OsString, fs, path::Path};
+    use std::{collections::BTreeMap, fs, path::Path};
 
     use super::resolve;
 

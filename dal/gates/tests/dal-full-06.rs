@@ -21,7 +21,7 @@ use dal_agent::{
 use dal_core::{
     Budget, Caps, Command, Config, ConfigProduct, ContextItem, Expect, ModelId, ModelRequest,
     ModelRoute, OnError, Part, Purpose, Reply, RequestParams, ScopeSpec, ServiceSet, Stop,
-    ThinkingLevel, UpdateKind, Usage, Workspace,
+    UpdateKind, Usage, Workspace,
 };
 use dal_provider::{StopReason, StreamEvent as ProviderEvent};
 use futures::stream;
@@ -251,17 +251,12 @@ impl ModelHandler for OwnerModel {
     }
 }
 
-fn wait_for_started<'a>(
-    started: &'a mut watch::Receiver<usize>,
-    target: usize,
-) -> impl std::future::Future<Output = ()> + 'a {
-    async move {
-        while *started.borrow_and_update() < target {
-            tokio::time::timeout(Duration::from_secs(30), started.changed())
-                .await
-                .expect("scope members start in time")
-                .expect("scope member tracker stays connected");
-        }
+async fn wait_for_started<'a>(started: &'a mut watch::Receiver<usize>, target: usize) {
+    while *started.borrow_and_update() < target {
+        tokio::time::timeout(Duration::from_secs(30), started.changed())
+            .await
+            .expect("scope members start in time")
+            .expect("scope member tracker stays connected");
     }
 }
 

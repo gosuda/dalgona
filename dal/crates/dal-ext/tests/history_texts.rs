@@ -173,6 +173,10 @@ async fn prompt(agent: &dal_agent::Agent, text: &str) {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario drives setup, resume, and assertions in place"
+)]
 async fn resumed_session_sees_prior_assistant_texts_and_fresh_sees_none() {
     let scratch = Scratch::new();
     let log = Arc::new(Mutex::new(Vec::new()));

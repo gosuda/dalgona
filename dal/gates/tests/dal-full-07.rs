@@ -25,7 +25,7 @@ use dal_agent::{
 use dal_core::{
     Budget, CancelScope, Caps, Command, Config, ConfigProduct, ContextItem, Expect, ModelId,
     ModelRequest, ModelRoute, OnError, Part, Purpose, Reply, RequestParams, ScopeSpec, ServiceSet,
-    Stop, ThinkingLevel, UpdateKind, Workspace,
+    Stop, UpdateKind, Workspace,
 };
 use support::{TestDir, scripted_session};
 use tokio::{sync::watch, time::Instant};

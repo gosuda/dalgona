@@ -367,7 +367,10 @@ async fn run_tool_with_approval(
                 } => {
                     requests.push(GrantRequest {
                         extension: ext.to_string(),
-                        capabilities: capabilities.iter().map(|value| value.to_string()).collect(),
+                        capabilities: capabilities
+                            .iter()
+                            .map(std::string::ToString::to_string)
+                            .collect(),
                     });
                     harness
                         .agent

@@ -104,7 +104,7 @@ async fn response(
     write_request(input, id, method, params).await?;
     loop {
         let frame = read_frame(output).await?;
-        if frame.get("id").and_then(|value| value.as_i64()) == Some(id) {
+        if frame.get("id").and_then(sonic_rs::JsonValueTrait::as_i64) == Some(id) {
             return Ok(frame);
         }
     }
@@ -112,7 +112,11 @@ async fn response(
 
 fn tool_error_text(update: &Value) -> Option<String> {
     let outcome = update.get("outcome")?;
-    if outcome.get("isError").and_then(|value| value.as_bool()) != Some(true) {
+    if outcome
+        .get("isError")
+        .and_then(sonic_rs::JsonValueTrait::as_bool)
+        != Some(true)
+    {
         return None;
     }
     outcome
@@ -197,12 +201,12 @@ async fn run_sandbox_probe() -> Result<(String, bool), Box<dyn Error + Send + Sy
         .ok_or_else(|| io::Error::other("RPC session/open omitted sessionId"))?;
     let generation = result
         .get("gen")
-        .and_then(|value| value.as_u64())
+        .and_then(sonic_rs::JsonValueTrait::as_u64)
         .ok_or_else(|| io::Error::other("RPC session/open omitted generation"))?;
     let sequence = result
         .get("view")
         .and_then(|view| view.get("seq"))
-        .and_then(|value| value.as_u64())
+        .and_then(sonic_rs::JsonValueTrait::as_u64)
         .ok_or_else(|| io::Error::other("RPC session/open omitted sequence"))?;
     let subscription = response(
         &mut input,
@@ -233,7 +237,7 @@ async fn run_sandbox_probe() -> Result<(String, bool), Box<dyn Error + Send + Sy
     let mut error_text = None;
     loop {
         let frame = read_frame(&mut output).await?;
-        if frame.get("id").and_then(|value| value.as_i64()) == Some(4) {
+        if frame.get("id").and_then(sonic_rs::JsonValueTrait::as_i64) == Some(4) {
             if frame.get("result").is_none() {
                 return Err(io::Error::other(format!("session/submit failed: {frame}")).into());
             }

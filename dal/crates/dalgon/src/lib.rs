@@ -232,6 +232,11 @@ async fn run_command(
 }
 
 /// Runs one headless prompt turn over the host agent.
+#[expect(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "one headless run carries cli, vars, paths, and host state"
+)]
 async fn run_headless(
     cli: &cli::Cli,
     vars: VarsMap,
@@ -546,7 +551,9 @@ fn capture_process() -> Result<(VarsMap, PathBuf), ExitCode> {
     if edge::parse_log_level(&vars).is_err() {
         let value = vars
             .get(std::ffi::OsStr::new("DAL_LOG"))
-            .map_or_default(|value| value.to_string_lossy().into_owned());
+            .map_or_else(String::default, |value| {
+                value.to_string_lossy().into_owned()
+            });
         return Err(two_lines(
             [
                 format!("dalgon: DAL_LOG \"{value}\" is invalid"),
@@ -559,6 +566,10 @@ fn capture_process() -> Result<(VarsMap, PathBuf), ExitCode> {
 }
 
 /// Resolves roots, the workspace, and the layered configuration.
+#[expect(
+    clippy::too_many_lines,
+    reason = "startup assembly walks every layered input in place"
+)]
 fn assemble_startup(
     factory: &ProductFactory,
     cli: &cli::Cli,

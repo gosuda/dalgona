@@ -189,7 +189,7 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 }
 
 fn has_row_number(bytes: &[u8]) -> bool {
-    let prefix = [b'r', b'o', b'w', b' '];
+    let prefix = *b"row ";
     for (index, window) in bytes.windows(prefix.len()).enumerate() {
         if window != prefix {
             continue;

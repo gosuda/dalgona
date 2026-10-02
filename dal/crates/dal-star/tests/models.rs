@@ -1,5 +1,8 @@
 //! Scripted model registrations through the host model context.
 
+#![expect(clippy::expect_used, reason = "SC test")]
+#![expect(clippy::panic, reason = "SC test")]
+
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::time::Duration;
@@ -9,7 +12,6 @@ use dal_core::{
     Command, Config, ConfigProduct, Expect, PageReq, Part, Stop, UpdateKind, Workspace,
 };
 
-#[path = "support.rs"]
 mod support;
 
 use support::system_with_plugin;

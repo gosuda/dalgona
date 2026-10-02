@@ -6,17 +6,25 @@ use regex::RegexSet;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, LazyLock};
 
+/// A stream-class check the calibrated gate can fire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum G8Rule {
+    /// Placeholder text left in added code.
     Placeholder,
+    /// A bare TODO marker.
     BareTodo,
+    /// An empty or filler comment.
     EmptyComment,
+    /// A `== true` comparison.
     EqTrue,
+    /// A leftover debug print.
     DebugPrint,
+    /// A decorative section divider.
     SectionDivider,
 }
 
 impl G8Rule {
+    /// Every stream rule in check order.
     pub const ALL: [G8Rule; 6] = [
         Self::Placeholder,
         Self::BareTodo,
@@ -26,6 +34,7 @@ impl G8Rule {
         Self::SectionDivider,
     ];
 
+    /// Returns the rule's config name.
     #[must_use]
     pub fn name(self) -> &'static str {
         match self {
@@ -38,6 +47,7 @@ impl G8Rule {
         }
     }
 
+    /// Parses a config name back into its rule.
     #[must_use]
     pub fn parse(name: &str) -> Option<G8Rule> {
         match name {
@@ -70,23 +80,31 @@ impl G8Rule {
     }
 }
 
+/// One labeled sample line.
 #[derive(Debug, Clone)]
 pub struct Sample {
+    /// The sample text.
     pub text: Box<str>,
+    /// Whether the sample is a positive instance.
     pub positive: bool,
 }
 
+/// Labeled samples for one rule.
 #[derive(Debug, Clone, Default)]
 pub struct SampleSet {
+    /// The collected samples.
     pub samples: Vec<Sample>,
 }
 
+/// Per-rule labeled sample sets.
 #[derive(Debug, Clone, Default)]
 pub struct Calibration {
+    /// The sets keyed by rule.
     pub sets: BTreeMap<G8Rule, SampleSet>,
 }
 
 impl Calibration {
+    /// Returns an empty calibration.
     #[must_use]
     pub fn none() -> Calibration {
         Self::default()
@@ -216,9 +234,8 @@ impl Watch {
     }
 
     fn check_line(&mut self, line: &str) -> Option<StreamVerdict> {
-        let regexes = match REGEXES.as_ref() {
-            Ok(regexes) => regexes,
-            Err(_) => return None,
+        let Ok(regexes) = REGEXES.as_ref() else {
+            return None;
         };
         let matches = regexes.matches(line);
         for rule in G8Rule::ALL {

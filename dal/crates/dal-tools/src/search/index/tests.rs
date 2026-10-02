@@ -353,11 +353,14 @@ async fn build_budgets() {
             state ^= state << 13;
             state ^= state >> 7;
             state ^= state << 17;
-            body.push_str(&format!(
-                "let ident_{:x} = call_{}();\n",
-                state & 0xFFFF_FF,
-                state % 997
-            ));
+            let _ = std::fmt::Write::write_fmt(
+                &mut body,
+                format_args!(
+                    "let ident_{:x} = call_{}();\n",
+                    state & 0x00FF_FFFF,
+                    state % 997
+                ),
+            );
         }
         fs::write(dir.join(format!("f{n}.rs")), body).unwrap();
     }

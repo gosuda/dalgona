@@ -158,7 +158,7 @@ impl Judge {
                 tracing::debug!(reason = %message, "judge role resolved off");
                 (Gate::Off, Box::from(""))
             }
-            Err(error) => return Err(provider_error(error)),
+            Err(error) => return Err(provider_error(&error)),
         };
 
         let inner = Arc::new(JudgeInner {
@@ -290,6 +290,10 @@ impl Judge {
         Ok(())
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one judge call carries the request shape end to end"
+    )]
     async fn call<T, Render, Parse>(
         &self,
         feature: &str,
@@ -357,7 +361,7 @@ impl Judge {
                 drop(permit);
                 match inference {
                     Err(_) => (Err(JudgeError::Timeout { ms: timeout_ms }), 0, 0),
-                    Ok(Err(error)) => (Err(provider_error(error)), 0, 0),
+                    Ok(Err(error)) => (Err(provider_error(&error)), 0, 0),
                     Ok(Ok(inference)) => {
                         let (response, input_tokens, output_tokens) = split_inference(inference);
                         (parse(&response), input_tokens, output_tokens)
@@ -477,7 +481,7 @@ fn inference_text(inference: Inference) -> String {
     split_inference(inference).0
 }
 
-fn provider_error(error: ServiceError) -> JudgeError {
+fn provider_error(error: &ServiceError) -> JudgeError {
     JudgeError::Provider {
         message: reply_detail(&error.to_string()),
     }
@@ -496,7 +500,6 @@ fn error_status(error: &JudgeError) -> &'static str {
     match error {
         JudgeError::Timeout { .. } => "timeout",
         JudgeError::Parse { .. } => "parse",
-        JudgeError::Provider { .. } => "provider",
         _ => "provider",
     }
 }

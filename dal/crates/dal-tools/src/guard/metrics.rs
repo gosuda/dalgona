@@ -107,6 +107,10 @@ enum WalkEvent<'tree> {
     FinishFunction,
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one walk measures every node kind in place"
+)]
 pub(super) fn measure(language: Language, tree: &Tree, source: &[u8]) -> FileMetrics {
     let kinds = table(language);
     let mut comments = Vec::new();
@@ -387,9 +391,9 @@ fn node_text<'source>(node: Node<'_>, source: &'source [u8]) -> &'source str {
 
 fn code_line_prefix(source: &[u8], comments: &[(usize, usize)]) -> Vec<u32> {
     let line_count = source
-        .iter()
-        .filter(|byte| **byte == b'\n')
+        .split(|byte| *byte == b'\n')
         .count()
+        .saturating_sub(1)
         .saturating_add(1);
     let mut has_code = vec![false; line_count];
     let mut comment_index = 0;
@@ -474,6 +478,10 @@ pub(super) struct Crossing {
     pub delta_mass: f64,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one crossing check carries both metric sets and both bands"
+)]
 pub(super) fn crossings(
     path: &str,
     pre: Option<&FileMetrics>,

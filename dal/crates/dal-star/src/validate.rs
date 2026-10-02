@@ -630,7 +630,7 @@ fn decode_model_caps(site: &Site, local: &str, value: Value<'_>) -> Result<Caps,
             format!("model `{local}` caps must be an object"),
         ));
     };
-    for (name, _) in fields.iter() {
+    for (name, _) in fields {
         if !matches!(
             name.as_ref(),
             "context_window" | "thinking" | "tool_use" | "image_input" | "custom_grammar"

@@ -14,6 +14,7 @@ pub(super) fn call_key(tool: &str, args: &Value) -> [u8; 16] {
     key
 }
 
+#[cfg(test)]
 pub(super) fn display_key(tool: &str, key: &[u8; 16]) -> String {
     format!(
         "{tool} {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
@@ -21,6 +22,7 @@ pub(super) fn display_key(tool: &str, key: &[u8; 16]) -> String {
     )
 }
 
+#[cfg(test)]
 pub(super) fn canonical(value: &Value) -> String {
     let mut output = String::new();
     write_canonical(value, &mut output);

@@ -51,6 +51,9 @@ pub struct PatchSession {
 ///
 /// The returned plan owns complete before/after bytes; observers run on it
 /// before any authorization decision.
+///
+/// # Errors
+/// Returns [`EngineError`] when decoding, proving, or staging the payload fails.
 pub async fn plan(
     session: &PatchSession,
     style: super::ir::DialectId,

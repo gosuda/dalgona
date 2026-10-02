@@ -716,12 +716,14 @@ async fn apply_replacement_blocking_observer_prevents_write() {
     );
 }
 
-struct RecordingObserver(Arc<Mutex<Vec<(Vec<u8>, Vec<String>)>>>);
+type Recorded = (Vec<u8>, Vec<String>);
+
+struct RecordingObserver(Arc<Mutex<Vec<Recorded>>>);
 
 impl EditObserver for RecordingObserver {
     fn inspect(&self, batch: &StagedBatch<'_>) -> Vec<EditFinding> {
         if let Some(file) = batch.files.first() {
-            let after = file.after.map_or_else(Vec::new, |after| after.to_vec());
+            let after = file.after.map_or_else(Vec::new, <[u8]>::to_vec);
             let added = file
                 .hunks
                 .iter()
@@ -753,8 +755,8 @@ async fn replacement_plan_commit_applies_exact_bytes_and_observes() {
     let plan = super::write::plan_replacement(&session, "test.txt", b"needle", b"new\r\nbytes", 2)
         .await
         .expect("replacement plan");
-    let observed = Arc::new(Mutex::new(Vec::new()));
-    let observer = RecordingObserver(Arc::clone(&observed));
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let observer = RecordingObserver(Arc::clone(&recorded));
     let output = commit(&session, plan, &[Arc::new(observer)]).await;
     assert!(output.error_class.is_none(), "{}", output.text);
     assert_eq!(
@@ -762,7 +764,7 @@ async fn replacement_plan_commit_applies_exact_bytes_and_observes() {
         b"alpha\nnew\r\nbytes\nomega\n"
     );
     assert_eq!(
-        observed
+        recorded
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_slice(),

@@ -73,17 +73,13 @@ pub(crate) async fn run(args: cli::LoginArgs, startup: Startup) -> ExitCode {
     }
     match provider {
         "openai" => login_openai_key(startup, provider).await,
-        "anthropic" if edge::terminal_snapshot().stdin_tty => {
-            login_oauth(startup, provider, OAuthMethod::Browser).await
-        }
         "openai-codex" if args.device_auth => {
             login_oauth(startup, provider, OAuthMethod::Device).await
         }
-        "openai-codex" if edge::terminal_snapshot().stdin_tty => {
+        "anthropic" | "openai-codex" if edge::terminal_snapshot().stdin_tty => {
             login_oauth(startup, provider, OAuthMethod::Browser).await
         }
-        "openai-codex" => no_terminal(),
-        "anthropic" => no_terminal(),
+        "openai-codex" | "anthropic" => no_terminal(),
         _ => exit::code(exit::ExitKind::Usage),
     }
 }
@@ -217,7 +213,7 @@ async fn store_api_key(startup: Startup, provider: &str, key: String) -> ExitCod
             let _ = writeln!(std::io::stdout().lock(), "{message}");
             exit::code(exit::ExitKind::Success)
         }
-        Err(error) => provider_error("login", error, &path),
+        Err(error) => provider_error("login", &error, &path),
     }
 }
 
@@ -225,7 +221,7 @@ async fn login_oauth(startup: Startup, provider: &str, method: OAuthMethod) -> E
     let auth_path = startup.data_root.join("auth.json");
     let mut store = match AuthStore::load(&auth_path) {
         Ok(store) => store,
-        Err(error) => return provider_error("login", error, &auth_path),
+        Err(error) => return provider_error("login", &error, &auth_path),
     };
     let user_agent = dal_provider::user_agent(
         env!("CARGO_PKG_VERSION"),
@@ -246,7 +242,7 @@ async fn login_oauth(startup: Startup, provider: &str, method: OAuthMethod) -> E
             OAuthMethod::Browser => flow,
             OAuthMethod::Device => flow.with_device_auth(),
         },
-        Err(error) => return provider_error("login", error, &auth_path),
+        Err(error) => return provider_error("login", &error, &auth_path),
     };
     let paste_sender = flow.take_paste_sender();
     let _raw_mode = if paste_sender.is_some() {
@@ -255,7 +251,7 @@ async fn login_oauth(startup: Startup, provider: &str, method: OAuthMethod) -> E
             Err(error) => {
                 return provider_error(
                     "login",
-                    ProviderError::AuthWrite {
+                    &ProviderError::AuthWrite {
                         reason: error.to_string(),
                     },
                     &auth_path,
@@ -281,7 +277,7 @@ async fn login_oauth(startup: Startup, provider: &str, method: OAuthMethod) -> E
             let _ = writeln!(std::io::stdout().lock(), "{message}");
             exit::code(exit::ExitKind::Success)
         }
-        Ok(Err(error)) => provider_error("login", error, &auth_path),
+        Ok(Err(error)) => provider_error("login", &error, &auth_path),
     }
 }
 
@@ -368,10 +364,8 @@ async fn read_masked_value() -> io::Result<String> {
                         value.push(character);
                         write!(std::io::stderr().lock(), "•")?;
                     }
-                    KeyCode::Backspace => {
-                        if value.pop().is_some() {
-                            write!(std::io::stderr().lock(), "\u{8} \u{8}")?;
-                        }
+                    KeyCode::Backspace if value.pop().is_some() => {
+                        write!(std::io::stderr().lock(), "\u{8} \u{8}")?;
                     }
                     _ => {}
                 },
@@ -427,7 +421,7 @@ fn status(data_root: &Path, vars: &crate::VarsMap) -> ExitCode {
     let path = data_root.join("auth.json");
     let store = match AuthStore::load(&path) {
         Ok(store) => store,
-        Err(error) => return provider_error("login status", error, &path),
+        Err(error) => return provider_error("login status", &error, &path),
     };
     let mut ready = false;
     let mut first_missing = None;
@@ -443,13 +437,22 @@ fn status(data_root: &Path, vars: &crate::VarsMap) -> ExitCode {
         .is_some_and(|key| !key.is_empty());
         if let Some(kind) = kind {
             ready = true;
-            output.push_str(&format!("{provider:<14}{:<15}{kind}\n", "ready"));
+            let _ = std::fmt::Write::write_fmt(
+                &mut output,
+                format_args!("{provider:<14}{:<15}{kind}\n", "ready"),
+            );
         } else if environment_key {
             ready = true;
-            output.push_str(&format!("{provider:<14}{:<15}api_key\n", "ready"));
+            let _ = std::fmt::Write::write_fmt(
+                &mut output,
+                format_args!("{provider:<14}{:<15}api_key\n", "ready"),
+            );
         } else {
             first_missing.get_or_insert(provider);
-            output.push_str(&format!("{provider:<14}not configured\n"));
+            let _ = std::fmt::Write::write_fmt(
+                &mut output,
+                format_args!("{provider:<14}not configured\n"),
+            );
         }
     }
     let _ = write!(std::io::stdout().lock(), "{output}");
@@ -468,16 +471,16 @@ fn stored_kind(store: &AuthStore, provider: &str) -> Option<String> {
     match store.credential(provider)? {
         Credential::ApiKey { .. } => Some("api_key".to_owned()),
         Credential::OAuth(credential) => Some(match credential.expires_at {
-            Some(seconds) => jiff::Timestamp::from_second(seconds)
-                .ok()
-                .map(|timestamp| {
+            Some(seconds) => jiff::Timestamp::from_second(seconds).ok().map_or_else(
+                || "oauth".to_owned(),
+                |timestamp| {
                     let date = timestamp
                         .to_zoned(jiff::tz::TimeZone::UTC)
                         .strftime("%Y-%m-%d")
                         .to_string();
                     format!("oauth, expires {date}")
-                })
-                .unwrap_or_else(|| "oauth".to_owned()),
+                },
+            ),
             None => "oauth".to_owned(),
         }),
         Credential::None => None,
@@ -494,7 +497,7 @@ fn no_terminal() -> ExitCode {
     )
 }
 
-pub(super) fn provider_error(module: &str, error: ProviderError, path: &Path) -> ExitCode {
+pub(super) fn provider_error(module: &str, error: &ProviderError, path: &Path) -> ExitCode {
     let (what, hint) = match &error {
         ProviderError::AuthFileInvalid { message, .. } => (
             format!("dalgon: auth.json is not valid JSON: {message}"),

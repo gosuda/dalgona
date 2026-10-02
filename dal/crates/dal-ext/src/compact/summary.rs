@@ -21,7 +21,6 @@ impl Compactor for Summary {
             let context = input.covered_context();
             let params = input.compact_params();
             let session = input.session;
-            let _span = input.span;
             let caller = input.caller;
             let instructions = input.instructions;
             let from_entry = input.from_entry();

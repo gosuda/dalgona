@@ -189,15 +189,30 @@ pub(crate) fn render(window: &ReadWindow, path: &str) -> String {
         window.lines.first(),
         window.lines.last(),
     ) {
-        (Some(next), Some(first), Some(last)) => out.push_str(&format!(
-            "[Showing lines {}-{} of {}. Use :{next} to continue.]",
-            first.number, last.number, window.total_lines
-        )),
-        (Some(next), None, None) => out.push_str(&format!(
-            "[No lines at or after {next}; file has {} lines.]",
-            window.total_lines
-        )),
-        _ => out.push_str(&format!("[{path}#{}]", tag8("whole", &window.bytes))),
+        (Some(next), Some(first), Some(last)) => {
+            let _ = std::fmt::Write::write_fmt(
+                &mut out,
+                format_args!(
+                    "[Showing lines {}-{} of {}. Use :{next} to continue.]",
+                    first.number, last.number, window.total_lines
+                ),
+            );
+        }
+        (Some(next), None, None) => {
+            let _ = std::fmt::Write::write_fmt(
+                &mut out,
+                format_args!(
+                    "[No lines at or after {next}; file has {} lines.]",
+                    window.total_lines
+                ),
+            );
+        }
+        _ => {
+            let _ = std::fmt::Write::write_fmt(
+                &mut out,
+                format_args!("[{path}#{}]", tag8("whole", &window.bytes)),
+            );
+        }
     }
     out
 }

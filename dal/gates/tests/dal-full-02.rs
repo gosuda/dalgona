@@ -176,8 +176,7 @@ async fn run_edit(
     let findings = guard.findings.last(&session_id);
     let actual = fs::read_to_string(workspace.path().join("src/lib.rs"))?;
     assert_eq!(
-        actual,
-        AFTER,
+        actual, AFTER,
         "patch settled with: {edit_text}\nACTUAL: {actual:?}"
     );
     let report = tokio::time::timeout(

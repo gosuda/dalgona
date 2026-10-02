@@ -6,7 +6,9 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::process::ExitCode;
 
+#[cfg(test)]
 const DENIAL_NOTE: &str = "dalgon sandbox: a \"Permission denied\" or \"Operation not permitted\" error can come from the sandbox; if the path should be writable, add it to sandbox_writable in dal.toml.";
+#[expect(dead_code, reason = "kept for the SDK embedder seam")]
 const HELPER_ERROR: &str = "sandbox: no sandbox helper. SDK embedders must pass a helper path; the dalgon binary provides dalgon __sandbox.";
 #[cfg(any(windows, not(any(target_os = "linux", target_os = "macos", windows))))]
 const WINDOWS_ERROR: &str = "sandbox = \"on\" is not supported on Windows. Set sandbox = \"off\" in dal.toml, or run dalgon inside WSL 2.";
@@ -14,6 +16,7 @@ const MALFORMED_ARGS: &str = "dalgon sandbox: malformed launcher arguments";
 
 #[non_exhaustive]
 #[derive(Debug)]
+#[expect(dead_code, reason = "helper-path errors exist for SDK embedders")]
 pub(crate) enum SandboxError {
     HelperPath(io::Error),
     Landlock(String),
@@ -40,6 +43,10 @@ impl std::error::Error for SandboxError {
     }
 }
 
+#[expect(
+    dead_code,
+    reason = "SDK embedders resolve the helper; the binary passes dalgon __sandbox"
+)]
 pub(crate) fn helper_path() -> Result<PathBuf, SandboxError> {
     std::env::current_exe().map_err(SandboxError::HelperPath)
 }
@@ -72,6 +79,7 @@ pub(crate) fn run(argv: &[OsString]) -> ExitCode {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn denial_note(output: &str) -> Option<&'static str> {
     (output.contains("Permission denied") || output.contains("Operation not permitted"))
         .then_some(DENIAL_NOTE)
@@ -113,7 +121,7 @@ fn run_linux(argv: &[OsString]) -> ExitCode {
             }
         }
         Some(mode) if mode == OsStr::new("--allow") => {
-            let Some((roots, executable, args)) = parse_allow_args(argv) else {
+            let Some((roots, executable, run_args)) = parse_allow_args(argv) else {
                 return malformed();
             };
             let abi = linux_abi();
@@ -133,7 +141,7 @@ fn run_linux(argv: &[OsString]) -> ExitCode {
                 clippy::disallowed_methods,
                 reason = "R4 edge: the sandbox helper execs the target in place, replacing the trampoline process"
             )]
-            let error = Command::new(executable).args(args).exec();
+            let error = Command::new(executable).args(run_args).exec();
             exec_error(executable, &error)
         }
         _ => malformed(),

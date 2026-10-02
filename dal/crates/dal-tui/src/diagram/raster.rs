@@ -10,6 +10,11 @@ const AXIS_CAP: f32 = 16_384.0;
 
 /// Renders SVG bytes to PNG pixels with hardening caps.
 #[must_use]
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "dims are finiteness- and cap-checked; a saturating cast falls to the pixmap cap"
+)]
 pub fn render_svg(svg: &[u8], kind: super::DiagramKind) -> DiagramOutcome {
     if svg.len() > PNG_CAP {
         return fallback("too large");
@@ -27,7 +32,7 @@ pub fn render_svg(svg: &[u8], kind: super::DiagramKind) -> DiagramOutcome {
     }
     let pixels = size.width() * size.height();
     // Widening float comparison against the pixel cap; NaN and infinity fall out here.
-    if !pixels.is_finite() || pixels > f64::from(PIXEL_CAP) as f32 {
+    if !pixels.is_finite() || f64::from(pixels) > f64::from(PIXEL_CAP) {
         return fallback("too large");
     }
     let width = size.width().ceil() as u32;
@@ -39,7 +44,7 @@ pub fn render_svg(svg: &[u8], kind: super::DiagramKind) -> DiagramOutcome {
         return fallback("too large");
     };
     resvg::render(&tree, tiny_skia::Transform::default(), &mut pixmap.as_mut());
-    let Some(bytes) = encode_png(pixmap) else {
+    let Some(bytes) = encode_png(&pixmap) else {
         return fallback("too large");
     };
     if bytes.len() > PNG_CAP {
@@ -127,7 +132,7 @@ fn ceil_div(numerator: u128, denominator: u128) -> u128 {
     numerator.div_ceil(denominator)
 }
 
-fn encode_png(pixmap: tiny_skia::Pixmap) -> Option<Vec<u8>> {
+fn encode_png(pixmap: &tiny_skia::Pixmap) -> Option<Vec<u8>> {
     let mut bytes = Vec::new();
     let mut encoder = png::Encoder::new(&mut bytes, pixmap.width(), pixmap.height());
     encoder.set_color(png::ColorType::Rgba);
@@ -154,14 +159,11 @@ mod tests {
     #[test]
     fn image_hrefs_never_reach_the_raster() {
         let with_href = SVG.replace("<rect", "<image href=\"file:///etc/nowhere\"/><rect");
-        match (
+        if let (DiagramOutcome::Pixels(left), DiagramOutcome::Pixels(right)) = (
             render_svg(SVG.as_bytes(), DiagramKind::D2),
             render_svg(with_href.as_bytes(), DiagramKind::D2),
         ) {
-            (DiagramOutcome::Pixels(left), DiagramOutcome::Pixels(right)) => {
-                assert_eq!(left, right)
-            }
-            _ => {}
+            assert_eq!(left, right);
         }
     }
 
@@ -176,14 +178,11 @@ mod tests {
 
     #[test]
     fn same_source_rasterizes_to_same_bytes() {
-        match (
+        if let (DiagramOutcome::Pixels(left), DiagramOutcome::Pixels(right)) = (
             render_svg(SVG.as_bytes(), DiagramKind::D2),
             render_svg(SVG.as_bytes(), DiagramKind::D2),
         ) {
-            (DiagramOutcome::Pixels(left), DiagramOutcome::Pixels(right)) => {
-                assert_eq!(left, right)
-            }
-            _ => {}
+            assert_eq!(left, right);
         }
     }
 

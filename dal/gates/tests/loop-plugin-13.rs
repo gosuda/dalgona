@@ -115,9 +115,8 @@ impl ModelHandler for CycleHandler {
         Box::pin(async move {
             let mut repeated = request;
             repeated.model = ModelRoute::from_id("gate/cycle");
-            match cx.forward(repeated, &[]).await {
-                Err(error) => lock(&self.state).cycle = Some(error),
-                Ok(_) => {}
+            if let Err(error) = cx.forward(repeated, &[]).await {
+                lock(&self.state).cycle = Some(error)
             }
             Ok(text_stream("cycle checked"))
         })

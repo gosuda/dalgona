@@ -75,6 +75,10 @@ pub enum ServeCommandError {
 /// # Errors
 /// Returns an I/O or wire-token error when the token cannot be written or
 /// either output stream fails.
+#[expect(
+    clippy::unused_async,
+    reason = "the async seam keeps the command surface uniform"
+)]
 pub async fn create_token(
     token_file: &Path,
     force: bool,
@@ -127,6 +131,10 @@ pub async fn create_token(
 /// # Errors
 /// Returns a typed wire, store, or stream-I/O error. User-correctable startup
 /// refusals are written to `stderr` and return exit code 1.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one server carries host, listener, store, and stream surfaces"
+)]
 pub async fn run(
     host: Host,
     args: ServeArgs,
@@ -449,6 +457,10 @@ fn listen_details(public: bool, token_file: &Path, local_addr: SocketAddr) -> St
     format!("token required, token from {}", token_file.display())
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "one failure renders its fixed two-line payload"
+)]
 fn write_failure(
     stderr: &mut impl Write,
     lines: [String; 2],

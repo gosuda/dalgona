@@ -1160,15 +1160,16 @@ pub(crate) async fn direct_call_seeded(backend: &Backend, seed: NestedCall) -> T
         )));
     };
     let answering = backend.answerer_context();
-    let (broker, shared, attached) = answering
-        .map(|(broker, shared)| (broker, shared, true))
-        .unwrap_or_else(|| {
+    let (broker, shared, attached) = answering.map_or_else(
+        || {
             (
                 broker.unwrap_or_else(|| Arc::clone(backend.broker())),
                 shared.unwrap_or_else(|| Arc::clone(backend.shared())),
                 attached.unwrap_or_else(|| backend.shared().attached()),
             )
-        });
+        },
+        |(broker, shared)| (broker, shared, true),
+    );
     let approved_cell = caller.cell_approved();
     let tool = Arc::clone(tool);
     let reports = Arc::new(Mutex::new(Vec::new()));

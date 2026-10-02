@@ -2,6 +2,7 @@
 
 /// Built-in commands that report and manage the active session.
 pub mod commands;
+/// Context compaction over the active session's transcript.
 pub mod compact;
 pub mod docs;
 pub mod docsgen;

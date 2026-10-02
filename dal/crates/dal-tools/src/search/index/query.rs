@@ -36,13 +36,11 @@ impl Postings {
         let mut masks = vec![(0_u8, 0_u8); lists.len()];
         let mut out = Vec::new();
         for at in start..start + len {
-            let Some((file, _, _)) = self.record(at) else {
-                return None;
-            };
+            let (file, _, _) = self.record(at)?;
             let mut present = true;
             for (list, slot) in lists.iter().zip(masks.iter_mut()) {
                 if let Some(found) = self.masks(*list, file) {
-                    *slot = found
+                    *slot = found;
                 } else {
                     present = false;
                     break;

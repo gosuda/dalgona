@@ -112,7 +112,7 @@ pub async fn run(
                 path: args.path,
                 text,
             };
-            let result = report::run_test(input, data_root, workspace, config, flags)?;
+            let result = report::run_test(input, data_root, workspace, config, &flags)?;
             stdout.write_all(result.text.as_bytes())?;
             Ok(status(result.exit))
         }
@@ -122,7 +122,6 @@ pub async fn run(
 fn status(code: i32) -> ExitCode {
     match code {
         0 => ExitCode::SUCCESS,
-        1 => ExitCode::FAILURE,
         2 => ExitCode::from(124),
         _ => ExitCode::FAILURE,
     }
