@@ -59,6 +59,10 @@ struct StoreInner {
     workspace_key: String,
     listing: crate::list::Listing,
     shards: Mutex<Option<Arc<Shards>>>,
+    /// First-append journal creation is a write plus syncs; admissions are
+    /// bounded to shard width so a create burst cannot flood the
+    /// filesystem's sync queue faster than workers can drain it.
+    create_permits: tokio::sync::Semaphore,
     #[cfg(test)]
     faults: Mutex<Faults>,
 }
@@ -76,6 +80,7 @@ impl Store {
                 workspace_key,
                 listing: crate::list::Listing::new(),
                 shards: Mutex::new(None),
+                create_permits: tokio::sync::Semaphore::new(crate::shard::SHARD_COUNT),
                 #[cfg(test)]
                 faults: Mutex::new(Faults::default()),
             }),
@@ -994,6 +999,16 @@ impl Journal {
                 return Err(error);
             }
         };
+        let create_permit = match self.inner.create_permits.acquire().await {
+            Ok(permit) => permit,
+            Err(_closed) => {
+                self.prelocked = Some(lock);
+                self.state = State::Lazy { blobs };
+                return Err(StoreError::Invalid {
+                    reason: "journal create permits are closed".into(),
+                });
+            }
+        };
         self.state = State::Broken {
             lane: None,
             lock: Some(lock),
@@ -1005,7 +1020,8 @@ impl Journal {
         let journal_path = self.paths.journal();
         // Journal creation writes and syncs; running it on the async worker
         // stalls every task sharing the thread under create bursts, so the
-        // blocking pool owns the fsync storm (R-perf).
+        // blocking pool owns the fsync work — bounded to shard width by
+        // `create_permits` (R-perf).
         let creation = tokio::task::spawn_blocking({
             let journal_path = journal_path.clone();
             move || FileJournal::create(&journal_path, &bytes, &Faults::default())
@@ -1041,6 +1057,7 @@ impl Journal {
                 });
             }
         };
+        drop(create_permit);
         #[cfg(test)]
         let file_journal = {
             let mut file_journal = file_journal;
