@@ -64,7 +64,7 @@ async fn public_serve_requires_owner_only_token_and_force_to_replace()
     assert_eq!(fs::metadata(&token)?.permissions().mode() & 0o777, 0o600);
     #[cfg(windows)]
     {
-        let acl_check = r#"
+        let acl_check = r"
 $acl = Get-Acl -LiteralPath $env:DALGON_TOKEN_PATH
 if (-not $acl.AreAccessRulesProtected) { exit 10 }
 $owner = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
@@ -74,7 +74,7 @@ $allowed = @($acl.Access |
 $privileged = @($owner, 'S-1-5-18', 'S-1-5-32-544')
 if (-not $allowed.Contains($owner)) { exit 11 }
 if (@($allowed | Where-Object { $_ -notin $privileged }).Count -ne 0) { exit 12 }
-"#;
+";
         let result = Command::new("powershell")
             .args(["-NoProfile", "-NonInteractive", "-Command", acl_check])
             .env("DALGON_TOKEN_PATH", &token)
