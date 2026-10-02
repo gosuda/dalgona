@@ -11,8 +11,10 @@ use std::{
     ffi::{OsStr, OsString},
     fmt::{self, Display},
     path::{Path, PathBuf},
-    process::Command,
 };
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+use std::process::Command;
 
 use dal_core::JobId;
 

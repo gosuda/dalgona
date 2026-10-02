@@ -272,6 +272,9 @@ impl Proc {
     /// Records live descendants for the post-exit `setsid` sweep.
     #[cfg(not(target_os = "linux"))]
     fn recorded_descendants(&mut self) -> std::future::Ready<Vec<u32>> {
+        // Non-Linux platforms have no /proc descendant source; the leader
+        // pid stays read so the field contract matches the Linux arm.
+        let _ = self.leader_pid;
         std::future::ready(Vec::new())
     }
 
