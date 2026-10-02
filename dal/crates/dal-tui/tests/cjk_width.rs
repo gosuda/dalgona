@@ -129,22 +129,130 @@ fn cjk_locale_selects_wide_ambiguous_measurement() {
 
 #[test]
 fn grapheme_aware_text_stays_valid_through_wrap_and_take() {
-    // Every emitted row must re-parse as valid UTF-8 with all clusters whole.
+    use unicode_segmentation::UnicodeSegmentation;
     for text in [
         "日本語でお願いします",
         "한국어 테스트입니다",
         "👨‍👩‍👧‍👦 family 🇯🇵 flag 漢字",
         "a\u{301}\u{65e5}·\u{fe0f}",
+        "\u{1112}\u{1161}\u{11ab}\u{1100}\u{116e}\u{11a8}\u{110b}\u{1165}",
     ] {
-        for row in wrap(text, 3, N) {
-            assert!(row.is_char_boundary(row.len()), "{row:?}");
-            assert_eq!(
-                unicode_segmentation::UnicodeSegmentation::graphemes(row.as_str(), true)
-                    .collect::<String>(),
-                row
-            );
+        let original: Vec<&str> = text.graphemes(true).collect();
+        let wrapped = wrap(text, 3, N);
+        // Rows lose nothing and reorder nothing: their concatenation is the
+        // original text, and every row boundary lands on an original cluster
+        // boundary — a cluster split across rows fails the pairwise check.
+        assert_eq!(wrapped.concat(), text);
+        let mut offset = 0_usize;
+        for cluster in wrapped.iter().flat_map(|row| row.graphemes(true)) {
+            assert_eq!(cluster, original[offset], "row split an original cluster");
+            offset += 1;
         }
+        assert_eq!(offset, original.len());
+        // `take_cells` returns the exact concatenation of a prefix of the
+        // original clusters — byte-identical, never a partial grapheme.
         let taken = take_cells(text, 3, N);
-        assert!(taken.is_char_boundary(taken.len()));
+        let mut prefix = String::new();
+        for cluster in &original {
+            if prefix.len() + cluster.len() > taken.len() {
+                break;
+            }
+            prefix.push_str(cluster);
+        }
+        assert_eq!(prefix, taken, "{text:?} truncated mid-cluster");
     }
+}
+
+#[test]
+fn decomposed_hangul_measures_like_precomposed() {
+    // NFD jamo and the equivalent NFC syllable are the same two-cell glyph.
+    assert_eq!(width("한", N), 2);
+    assert_eq!(width("\u{1112}\u{1161}\u{11ab}", N), 2);
+    // LV syllables (no final) decompose identically.
+    assert_eq!(width("\u{1112}\u{1161}", N), width("하", N));
+    // A mixed NFD/NFC document counts cells per syllable, not per codepoint.
+    assert_eq!(width("\u{1112}\u{1161}\u{11ab}국어", N), width("한국어", N));
+    assert_eq!(width("\u{1112}\u{1161}\u{11ab}국어", N), 6);
+}
+
+/// The wrap layout of `text`: one `(row width, cluster count)` pair per row.
+/// Decomposed and precomposed spellings must produce identical layouts even
+/// though their emitted bytes differ.
+fn layout(text: &str, cap: usize) -> Vec<(usize, usize)> {
+    wrap(text, cap, N)
+        .iter()
+        .map(|row| {
+            (
+                width(row, N),
+                unicode_segmentation::UnicodeSegmentation::graphemes(row.as_str(), true).count(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn conjoining_jamo_chains_wrap_whole_syllables() {
+    // 한국어 fully decomposed: three three-jamo clusters.
+    let decomposed = "\u{1112}\u{1161}\u{11ab}\u{1100}\u{116e}\u{11a8}\u{110b}\u{1165}";
+    // Decomposed input must wrap and truncate with the identical cell layout
+    // as the precomposed spelling.
+    assert_eq!(layout(decomposed, 4), layout("한국어", 4));
+    assert_eq!(
+        width(&take_cells(decomposed, 5, N), N),
+        width(&take_cells("한국어", 5, N), N)
+    );
+    // Never return half a syllable.
+    assert_eq!(take_cells(decomposed, 3, N), "\u{1112}\u{1161}\u{11ab}");
+    assert_eq!(take_cells(decomposed, 1, N), "");
+    // A sentence keeps whole-syllable rows: decomposed and composed agree.
+    let sentence = "\u{1112}\u{1161}\u{11ab}\u{1100}\u{116e}\u{11a8}\u{110b}\u{1165}\u{1105}\u{1169} \u{1106}\u{1161}\u{11af}\u{1112}\u{1162}\u{110b}\u{116d}";
+    assert_eq!(layout(sentence, 5), layout("한국어로 말해요", 5));
+}
+
+#[test]
+fn jamo_fragments_fillers_and_archaic_blocks_compose() {
+    // Illegal-but-joined jamo sequences stay one cluster (UAX #29 L × L, and
+    // filler/arae-a chains): a wrap must move each whole or not at all.
+    for cluster in ["\u{1100}\u{1100}", "\u{115f}\u{1161}", "\u{1100}\u{119e}"] {
+        let rows = wrap(&format!("x{cluster}"), 2, N);
+        assert_eq!(rows.concat(), format!("x{cluster}"));
+        assert!(
+            rows.iter().any(|row| row.contains(cluster)),
+            "the joined jamo sequence must survive as one cluster: {rows:?}"
+        );
+        // The cluster measures two cells (one syllable glyph or stacked jamo).
+        assert_eq!(width(cluster, N), 2, "{cluster:?}");
+    }
+    // Extended-B jungseong in an old-orthography chain composes identically.
+    assert_eq!(width("\u{1105}\u{d7b2}", N), 2);
+    // A lone jamo is wide on its own (EAW=W across the jamo blocks).
+    assert_eq!(width("\u{1100}", N), 2);
+    assert_eq!(width("\u{d7b2}", N), 2);
+}
+
+#[test]
+fn compatibility_and_halfwidth_jamo_follow_their_widths() {
+    // Hangul compatibility jamo (U+3130–318F) are wide letters.
+    assert_eq!(width("\u{3131}\u{3134}\u{3137}", N), 6);
+    // Halfwidth jamo (U+FFA0–FFDC) stay one cell each.
+    assert_eq!(width("\u{ffa1}\u{ffa2}", N), 2);
+    assert_eq!(
+        wrap("\u{ffa1}\u{ffa2}\u{ffa3}", 2, N),
+        ["\u{ffa1}\u{ffa2}", "\u{ffa3}"]
+    );
+    // Mixed halfwidth + syllable: the margin rule still moves a wide cluster whole.
+    assert_eq!(wrap("\u{ffa1}한\u{ffa2}", 3, N), ["\u{ffa1}한", "\u{ffa2}"]);
+}
+
+#[test]
+fn korean_wraps_syllable_clusters_at_the_margin() {
+    // 5-cell cap: two syllables fit, a third moves whole; the trailing space
+    // stays with its row.
+    assert_eq!(
+        wrap("한국어로 말해요", 5, N),
+        ["한국", "어로 ", "말해", "요"]
+    );
+    // take_cells stops at a syllable boundary.
+    assert_eq!(take_cells("한국어", 5, N), "한국");
+    assert_eq!(take_cells("한국어", 3, N), "한");
 }

@@ -218,6 +218,10 @@ mod tests {
         // The decomposed é is one cluster: base and mark leave together.
         pop_grapheme(&mut text);
         assert_eq!(text, "");
+        // A decomposed 한 is three jamo in one cluster: one pop clears it.
+        let mut text = String::from("x\u{1112}\u{1161}\u{11ab}");
+        pop_grapheme(&mut text);
+        assert_eq!(text, "x");
         let mut text = String::new();
         pop_grapheme(&mut text);
         assert_eq!(text, "");
