@@ -555,7 +555,7 @@ mod tests {
         std::fs::write(&fixture, FIXTURE).expect("fixture");
         let user = format!(
             "model = \"openai/gpt-6-luna\"\n\n[providers.scripted]\nfixture = \"{}\"\n",
-            fixture.display()
+            fixture.to_string_lossy().replace('\\', "\\\\")
         );
         let config =
             Config::load(ConfigProduct::Dalgon, &data, "", Some(user.as_str())).expect("config");

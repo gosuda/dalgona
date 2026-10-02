@@ -71,7 +71,7 @@ async fn hook_parent_is_root_in_subagents_and_absent_at_root() {
     std::fs::write(&fixture, format!("{STEP_END}{STEP_END}")).expect("fixture");
     let user = format!(
         "model = \"openai/gpt-6-luna\"\n\n[providers.scripted]\nfixture = \"{}\"\n",
-        fixture.display()
+        fixture.to_string_lossy().replace('\\', "\\\\")
     );
     let config =
         Config::load(ConfigProduct::Dalgon, &data, "", Some(user.as_str())).expect("config");

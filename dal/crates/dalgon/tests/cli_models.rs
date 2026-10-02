@@ -34,6 +34,10 @@ fn json_models_fetches_from_loopback_and_filters_catalog() -> Result<(), Box<dyn
                 Err(error) => return Err(error),
             }
         };
+        // Accepted sockets inherit O_NONBLOCK on BSD/macOS; the reads below
+        // must block or the request poll can surface EAGAIN before the
+        // client's bytes arrive.
+        stream.set_nonblocking(false)?;
         let mut request = [0_u8; 4096];
         let count = stream.read(&mut request)?;
         let recorded = String::from_utf8_lossy(&request[..count]).into_owned();
