@@ -1,13 +1,19 @@
-use std::{ffi::OsString, path::PathBuf, time::Duration};
+#[cfg(unix)]
+use std::time::Duration;
+use std::{ffi::OsString, path::PathBuf};
 
-use dal_core::{CallId, JobId, Workspace};
+#[cfg(unix)]
+use dal_core::JobId;
+use dal_core::{CallId, Workspace};
 use tokio::sync::Semaphore;
+#[cfg(unix)]
 use tokio_util::sync::CancellationToken;
 
+#[cfg(unix)]
 use super::{
-    COMPLETION_TAIL_BYTES, Launcher, PREVIEW_BYTES, ProcStatus, SpawnOpts, StopReason, last_lines,
-    launch, spawn_process, tail_preview,
+    COMPLETION_TAIL_BYTES, PREVIEW_BYTES, ProcStatus, StopReason, last_lines, launch, tail_preview,
 };
+use super::{Launcher, SpawnOpts, spawn_process};
 use crate::error::{DenyReason, ToolError};
 use crate::ext::tool::Approved;
 
