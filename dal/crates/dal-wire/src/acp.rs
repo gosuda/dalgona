@@ -95,13 +95,9 @@ pub async fn serve_acp(host: Host, mut transport: Transport) -> Result<(), WireE
         FuturesUnordered::new();
 
     loop {
-        if pending.len() >= crate::rpc::MAX_IN_FLIGHT {
-            pending.next().await;
-            continue;
-        }
         tokio::select! {
             biased;
-            frame = transport.read_frame() => {
+            frame = transport.read_frame(), if pending.len() < crate::rpc::MAX_IN_FLIGHT => {
                 let ended = matches!(
                     frame,
                     Err(ReadFrameError::EndOfInput
@@ -118,6 +114,13 @@ pub async fn serve_acp(host: Host, mut transport: Transport) -> Result<(), WireE
                     break;
                 }
             }
+            frame = writer.next_queued_frame() => {
+                if let Some(text) = frame
+                    && let Err(error) = writer.write_frame(&text).await
+                {
+                    tracing::debug!(%error, "acp frame write failed");
+                }
+            }
             _ = pending.next(), if !pending.is_empty() => {}
         }
     }
@@ -128,6 +131,9 @@ pub async fn serve_acp(host: Host, mut transport: Transport) -> Result<(), WireE
             while pending.next().await.is_some() {}
         })
         .await;
+    }
+    while let Some(text) = writer.take_queued_frame() {
+        let _ = writer.write_frame(&text).await;
     }
     Ok(())
 }
@@ -298,7 +304,7 @@ async fn on_batch(
                 batch_item(&host, &state, &writer, &stop, &item, &mut replies).await;
             }
             let frame = format!("[{}]", replies.join(","));
-            if writer.write_frame(&frame).await.is_err() {
+            if writer.enqueue_frame(frame).is_err() {
                 tracing::debug!("batch reply write failed");
             }
         }

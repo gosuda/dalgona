@@ -20,7 +20,7 @@ use std::{
 
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
-    sync::Mutex,
+    sync::{Mutex, mpsc},
 };
 
 use crate::error::WireError;
@@ -120,19 +120,30 @@ impl Transport {
 }
 
 /// A cloneable, serialized writer for concurrent protocol replies.
+///
+/// [`FrameWriter::enqueue_frame`] hands a frame to the serving task's
+/// outbound queue instead of writing it, so callers that only ever run
+/// inside the serve loop's futures never suspend on the writer lock: a
+/// queued write cannot deadlock the loop that is their only driver.
 #[derive(Clone)]
 pub struct FrameWriter(Arc<WriterInner>);
 
 struct WriterInner {
     writer: Mutex<BoxWrite>,
     closed: Arc<AtomicBool>,
+    /// Frames queued by producers; the serving task drains them.
+    outbox_tx: mpsc::UnboundedSender<String>,
+    outbox_rx: Mutex<mpsc::UnboundedReceiver<String>>,
 }
 
 impl FrameWriter {
     fn new(writer: BoxWrite, closed: Arc<AtomicBool>) -> Self {
+        let (outbox_tx, outbox_rx) = mpsc::unbounded_channel();
         Self(Arc::new(WriterInner {
             writer: Mutex::new(writer),
             closed,
+            outbox_tx,
+            outbox_rx: Mutex::new(outbox_rx),
         }))
     }
 
@@ -144,6 +155,29 @@ impl FrameWriter {
     /// Shuts the underlying writer down for transports that close by code.
     pub(crate) async fn shutdown_sink(&self) {
         self.close().await;
+    }
+
+    /// Queues one frame for the serving task to write; producers never block.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WireError`] when the transport is closed.
+    pub(crate) fn enqueue_frame(&self, frame: String) -> Result<(), WireError> {
+        if self.0.closed.load(Ordering::Acquire) || self.0.outbox_tx.send(frame).is_err() {
+            return Err(closed_error());
+        }
+        Ok(())
+    }
+
+    /// Waits for the next queued frame; resolved by producers' enqueues.
+    /// Only the serving task calls this, so it is the sole lock waiter.
+    pub(crate) async fn next_queued_frame(&self) -> Option<String> {
+        self.0.outbox_rx.lock().await.recv().await
+    }
+
+    /// Takes one queued frame without waiting, for end-of-loop flushing.
+    pub(crate) fn take_queued_frame(&self) -> Option<String> {
+        self.0.outbox_rx.try_lock().ok()?.try_recv().ok()
     }
 
     /// Writes one frame and its LF delimiter under a single per-transport lock.

@@ -61,7 +61,7 @@ pub(super) async fn initialize(
         Id::Null => "null".to_owned(),
     };
     let frame = format!("{{\"jsonrpc\":\"2.0\",\"id\":{id_text},\"result\":{body}}}");
-    if writer.write_frame(&frame).await.is_err() {
+    if writer.enqueue_frame(frame).is_err() {
         tracing::debug!("initialize reply write failed");
     }
     None
