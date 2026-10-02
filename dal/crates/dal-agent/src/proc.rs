@@ -612,6 +612,10 @@ fn launcher_argv(
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    windows,
+    expect(dead_code, reason = "only the unix-gated spawn tests read log tails")
+)]
 pub(crate) fn tail_preview(log_path: &Path, max_bytes: usize) -> Result<Box<[u8]>, ToolError> {
     use std::io::{Read, Seek, SeekFrom};
     let mut file = fs::File::open(log_path).map_err(|source| ToolError::Spawn {

@@ -179,7 +179,7 @@ async fn fixture(delay: Duration) -> Fixture {
     std::fs::write(&fixture_path, fixture_source).expect("fixture");
     let user = format!(
         "model = \"openai/gpt-6-luna\"\n\n[providers.scripted]\nfixture = \"{}\"\n",
-        fixture_path.display()
+        fixture_path.to_string_lossy().replace('\\', "\\\\")
     );
     let config =
         Config::load(ConfigProduct::Dalgon, &data, "", Some(user.as_str())).expect("config");

@@ -13,6 +13,13 @@ fn entry(value: u64) -> EntryId {
 fn stamp() -> jiff::Timestamp {
     jiff::Timestamp::UNIX_EPOCH
 }
+fn workspace_root() -> crate::workspace::Workspace {
+    #[cfg(unix)]
+    let root = PathBuf::from("/");
+    #[cfg(windows)]
+    let root = PathBuf::from("C:\\");
+    crate::workspace::Workspace::new(root).unwrap()
+}
 fn session() -> Session {
     Session::replay([], stamp()).unwrap().0
 }
@@ -875,7 +882,7 @@ fn replay_repairs_aborted_turn() {
     let header = crate::journal::Header {
         id: session_id,
         at: stamp(),
-        workspace: crate::workspace::Workspace::new(PathBuf::from("/")).unwrap(),
+        workspace: workspace_root(),
         product: crate::journal::Product::Dal,
         from: None,
     };
@@ -1525,7 +1532,7 @@ fn cloned_entries_without_turn_records_replay() {
     let header = crate::journal::Header {
         id: crate::id::SessionId::parse("01890f47-36b0-7cc4-8000-000000000001").unwrap(),
         at: stamp(),
-        workspace: crate::workspace::Workspace::new(PathBuf::from("/")).unwrap(),
+        workspace: workspace_root(),
         product: crate::journal::Product::Dal,
         from: None,
     };

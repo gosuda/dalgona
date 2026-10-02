@@ -1,4 +1,4 @@
-#![expect(clippy::unwrap_used, reason = "SC test")]
+#![cfg_attr(unix, expect(clippy::unwrap_used, reason = "SC test"))]
 #![expect(clippy::expect_used, reason = "SC test")]
 #![expect(
     clippy::disallowed_methods,
@@ -13,7 +13,7 @@
 mod support;
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap},
     error::Error,
     fs, io,
     path::{Path, PathBuf},
@@ -841,14 +841,71 @@ async fn start_process_jobs(
 
 fn read_pid(path: &Path) -> Result<Option<u32>, TestError> {
     match fs::read_to_string(path) {
+        Ok(text) if text.trim().is_empty() => Ok(None),
         Ok(text) => Ok(Some(text.trim().parse()?)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
     }
 }
 
-async fn wait_for_process_pids(jobs: &mut [ProcessJob]) -> Result<Vec<u32>, TestError> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+fn journal_bytes(data_root: &Path, id: SessionId) -> Option<u64> {
+    let sessions = data_root.join("sessions");
+    for workspace_dir in fs::read_dir(&sessions).ok()?.flatten() {
+        let journal = workspace_dir
+            .path()
+            .join(id.to_string())
+            .join("journal.jsonl");
+        if let Ok(metadata) = fs::metadata(&journal) {
+            return Some(metadata.len());
+        }
+    }
+    None
+}
+
+fn job_state_digest(job: &ProcessJob, data_root: &Path) -> String {
+    job.agent.view(PageReq::default()).map_or_else(
+        |error| format!("view failed: {error}"),
+        |view| {
+            let mut tools = 0usize;
+            let mut first_error = String::new();
+            for entry in &view.entries.items {
+                if let EntryKind::ToolResult { error, parts, .. } = &entry.kind {
+                    tools += 1;
+                    if *error && first_error.is_empty() {
+                        first_error = format!("{parts:?}");
+                    }
+                }
+            }
+            let entries = view.entries.items.len();
+            let journal = journal_bytes(data_root, view.session.id)
+                .map_or_else(|| "missing".to_string(), |bytes| bytes.to_string());
+            let mut text = format!(
+                "turn={:?} entries={entries} tools={tools} journal={journal}",
+                view.turn
+            );
+            if !first_error.is_empty() {
+                text.push_str(" err=");
+                text.push_str(&first_error);
+            }
+            text
+        },
+    )
+}
+
+async fn wait_for_process_pids(
+    jobs: &mut [ProcessJob],
+    data_root: &Path,
+) -> Result<Vec<u32>, TestError> {
+    // Liveness wait, not a timing claim: 200 process spawns on a loaded shared
+    // runner can far outrun the local constant, so bound generously. Hosted
+    // macOS storage syncs orders of magnitude slower under create bursts, so
+    // the bound is wider there for the same liveness purpose.
+    const PID_WAIT: Duration = if cfg!(target_os = "macos") {
+        Duration::from_secs(360)
+    } else {
+        Duration::from_secs(120)
+    };
+    let deadline = tokio::time::Instant::now() + PID_WAIT;
     loop {
         let mut ready = true;
         for job in jobs.iter_mut() {
@@ -867,7 +924,20 @@ async fn wait_for_process_pids(jobs: &mut [ProcessJob]) -> Result<Vec<u32>, Test
                 .collect();
         }
         if tokio::time::Instant::now() >= deadline {
-            return Err(io::Error::other("not every process wrote its child pid").into());
+            let missing: Vec<String> = jobs
+                .iter()
+                .enumerate()
+                .filter(|(_, job)| job.pid.is_none())
+                .take(5)
+                .map(|(index, job)| format!("{index}: {}", job_state_digest(job, data_root)))
+                .collect();
+            let total = jobs.iter().filter(|job| job.pid.is_none()).count();
+            return Err(io::Error::other(format!(
+                "not every process wrote its child pid ({total} missing of {}; first: {})",
+                jobs.len(),
+                missing.join(", ")
+            ))
+            .into());
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
@@ -1221,7 +1291,7 @@ async fn full_load_scenario() -> Result<(), TestError> {
         assert!(idle_p99 < CANCEL_P99, "idle cancel p99 was {idle_p99:?}");
     }
     let mut process_jobs = start_process_jobs(&host, &workspace).await?;
-    let pids = wait_for_process_pids(&mut process_jobs).await?;
+    let pids = wait_for_process_pids(&mut process_jobs, data.path()).await?;
     let web_dir = TestDir::new()?;
     let (server, websocket_url, token) = spawn_websocket_server(&web_dir).await?;
     let web_sockets = connect_websocket_clients(&websocket_url, &token).await?;
@@ -1640,17 +1710,12 @@ proptest! {
     }
 }
 
+#[cfg(not(all(windows, target_arch = "aarch64")))]
+use std::collections::HashSet;
+
 #[test]
 fn stress_shuttle_schedules_preserve_actor_invariants() {
-    const DEFAULT_SHUTTLE_SEED: u64 = 0x5eed_01a7_0c70_5e5d;
     let _serial = TEST_LOCK.blocking_lock();
-    // Keep one real actor smoke run beside the pure scheduler run. The smoke
-    // run proves the public actor path; the scheduler run is deliberately
-    // limited to Shuttle-aware futures and the in-memory journal.
-    let seed = std::env::var("SHUTTLE_RANDOM_SEED")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(DEFAULT_SHUTTLE_SEED);
     let data = TestDir::new().expect("actor smoke data directory");
     let data_root = data.path().to_path_buf();
     fs::create_dir_all(data_root.join("workspace")).expect("actor smoke workspace directory");
@@ -1659,7 +1724,17 @@ fn stress_shuttle_schedules_preserve_actor_invariants() {
     // Shuttle controls every task poll in this half. No Tokio runtime, file
     // shard, process, or network handle crosses the Shuttle continuation.
     #[cfg(not(all(windows, target_arch = "aarch64")))]
-    shuttle::check_random_with_seed(shuttle_actor_schedule, seed, 32);
+    {
+        const DEFAULT_SHUTTLE_SEED: u64 = 0x5eed_01a7_0c70_5e5d;
+        // Keep one real actor smoke run beside the pure scheduler run. The
+        // scheduler run is deliberately limited to Shuttle-aware futures and
+        // the in-memory journal.
+        let seed = std::env::var("SHUTTLE_RANDOM_SEED")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_SHUTTLE_SEED);
+        shuttle::check_random_with_seed(shuttle_actor_schedule, seed, 32);
+    }
 }
 
 /// Public-API smoke for the actual actor. This intentionally runs outside

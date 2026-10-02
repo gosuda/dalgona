@@ -408,7 +408,9 @@ mod tests {
         assert_no_temporary_files(&dir.0);
     }
 
-    #[cfg(unix)]
+    /// APFS rejects non-UTF-8 filenames at create/open (EILSEQ), so the
+    /// preservation claim is only exercisable on byte-name filesystems.
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn atomic_write_preserves_non_utf8_target_name() {
         use std::os::unix::ffi::OsStrExt;

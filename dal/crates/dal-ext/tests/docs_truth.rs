@@ -82,13 +82,19 @@ mod tempfile_guard {
     }
     impl Guard {
         pub(crate) fn new() -> Self {
+            // Clock resolution alone can collide on hosts whose timer is
+            // coarser than as_nanos implies (two tests in the same tick
+            // would share a dir and cross-write pages), so a per-process
+            // counter keeps every guard unique.
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let dir = std::env::temp_dir().join(format!(
-                "dal-docs-{}-{}",
+                "dal-docs-{}-{}-{}",
                 std::process::id(),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
-                    .as_nanos()
+                    .as_nanos(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             ));
             std::fs::create_dir_all(&dir).unwrap();
             Self { dir }

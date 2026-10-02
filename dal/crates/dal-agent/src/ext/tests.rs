@@ -238,7 +238,7 @@ fn builder_rejects_reserved_doc_scheme_with_call_site() {
             "{text}"
         );
         assert!(
-            text.contains("ext/tests.rs:"),
+            text.contains("tests.rs:"),
             "error carries path:line:col: {text}"
         );
         assert!(matches!(err, RegistrationError::DocSchemeReserved { .. }));
