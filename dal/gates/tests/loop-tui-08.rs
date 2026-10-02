@@ -339,11 +339,13 @@ fn proxy_loop(
         let first_finished = finished_sender.clone();
         let client_capture = Arc::clone(&capture);
         let server_capture = Arc::clone(&capture);
+        let serve_port = target.port();
         let client_to_upstream = thread::spawn(move || {
             forward(
                 client_reader,
                 upstream_writer,
                 Some((client_capture, TraceDirection::ClientToServer)),
+                Some(serve_port),
             );
             let _ = first_finished.send(());
         });
@@ -352,6 +354,7 @@ fn proxy_loop(
                 upstream_reader,
                 client_writer,
                 Some((server_capture, TraceDirection::ServerToClient)),
+                None,
             );
             let _ = finished_sender.send(());
         });
@@ -498,12 +501,34 @@ fn update_cursor(message: &str) -> Option<(u64, u64)> {
     Some((params.get("gen")?.as_u64()?, params.get("seq")?.as_u64()?))
 }
 
+/// Presents the serve port in the `Host` header of the upgrade request: the
+/// client dialed the proxy port, but the loopback host guard only accepts a
+/// host header that names the serve port.
+fn rewrite_host_header(request: &[u8], serve_port: u16) -> Vec<u8> {
+    let text = String::from_utf8_lossy(request);
+    let mut out = String::with_capacity(text.len());
+    for line in text.split_inclusive("\r\n") {
+        if line
+            .get(..5)
+            .is_some_and(|head| head.eq_ignore_ascii_case("host:"))
+        {
+            out.push_str(&format!("Host: 127.0.0.1:{serve_port}\r\n"));
+        } else {
+            out.push_str(line);
+        }
+    }
+    out.into_bytes()
+}
+
 fn forward(
     mut reader: TcpStream,
     mut writer: TcpStream,
     capture: Option<(Arc<Mutex<FrameCapture>>, TraceDirection)>,
+    serve_port: Option<u16>,
 ) {
     let mut buffer = [0_u8; 8192];
+    let mut pending: Vec<u8> = Vec::new();
+    let mut upgrading = serve_port.is_some();
     loop {
         let length = match reader.read(&mut buffer) {
             Ok(0) => break,
@@ -520,9 +545,27 @@ fn forward(
                 TraceDirection::ServerToClient => capture.push_server(&buffer[..length]),
             }
         }
-        if writer.write_all(&buffer[..length]).is_err() {
+        let chunk = if upgrading {
+            pending.extend_from_slice(&buffer[..length]);
+            let Some(header_end) = pending.windows(4).position(|window| window == b"\r\n\r\n")
+            else {
+                continue;
+            };
+            let mut rewritten =
+                rewrite_host_header(&pending[..header_end + 4], serve_port.unwrap_or(0));
+            rewritten.extend_from_slice(&pending[header_end + 4..]);
+            pending.clear();
+            upgrading = false;
+            rewritten
+        } else {
+            buffer[..length].to_vec()
+        };
+        if writer.write_all(&chunk).is_err() {
             break;
         }
+    }
+    if upgrading && !pending.is_empty() {
+        let _ = writer.write_all(&pending);
     }
     let _ = writer.shutdown(Shutdown::Write);
 }

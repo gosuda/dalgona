@@ -136,10 +136,16 @@ fn render_buffer(
         while let Some(offset) = text[search..].find(prefix) {
             let start = search + offset;
             let rest = &text[start + prefix.len()..];
-            let digits = rest
+            let mut matched = rest
                 .find(|ch: char| !ch.is_ascii_digit())
                 .unwrap_or(rest.len());
-            text.replace_range(start..start + prefix.len() + digits, "[root]");
+            if let Some(suffix) = rest[matched..].strip_prefix('-') {
+                let id_digits = suffix
+                    .find(|ch: char| !ch.is_ascii_digit())
+                    .unwrap_or(suffix.len());
+                matched += 1 + id_digits;
+            }
+            text.replace_range(start..start + prefix.len() + matched, "[root]");
             search = start + "[root]".len();
         }
     }
