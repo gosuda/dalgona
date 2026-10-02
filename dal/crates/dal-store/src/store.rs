@@ -945,6 +945,14 @@ impl Journal {
         let store = Store {
             inner: Arc::clone(&self.inner),
         };
+        let mut mark = std::time::Instant::now();
+        let lap = |step: &str, mark: &mut std::time::Instant| {
+            let taken = mark.elapsed();
+            if taken > std::time::Duration::from_millis(250) {
+                eprintln!("[dal-store] first-append {step} took {taken:?}");
+            }
+            *mark = std::time::Instant::now();
+        };
         let shards = match store.shards() {
             Ok(shards) => shards,
             Err(error) => {
@@ -952,6 +960,7 @@ impl Journal {
                 return Err(error);
             }
         };
+        lap("shards-init", &mut mark);
         let create_permit = match self.inner.create_permits.acquire().await {
             Ok(permit) => permit,
             Err(_closed) => {
@@ -961,6 +970,7 @@ impl Journal {
                 });
             }
         };
+        lap("create-permit", &mut mark);
         self.state = State::Broken {
             lane: None,
             lock: None,
@@ -1063,6 +1073,7 @@ impl Journal {
             validation,
             refresh_info,
         });
+        lap("create-join", &mut mark);
         let lane = shards
             .attach(
                 self.id,
@@ -1070,6 +1081,7 @@ impl Journal {
                 Some(self.paths.directory().join("blobs")),
             )
             .await?;
+        lap("attach", &mut mark);
         let lock = match &mut self.state {
             State::Broken { lane: None, lock } => lock.take(),
             _ => None,
@@ -1536,6 +1548,14 @@ async fn open_locked_journal(
     const RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
     const RETRY_POLL: std::time::Duration = std::time::Duration::from_millis(25);
     let deadline = tokio::time::Instant::now() + RETRY_BUDGET;
+    let mut mark = std::time::Instant::now();
+    let lap = |step: &str, mark: &mut std::time::Instant| {
+        let taken = mark.elapsed();
+        if taken > std::time::Duration::from_millis(250) {
+            eprintln!("[dal-store] open-locked-journal {step} took {taken:?}");
+        }
+        *mark = std::time::Instant::now();
+    };
     loop {
         let journal_path = paths.journal();
         let lock_path = paths.lock();
@@ -1547,6 +1567,7 @@ async fn open_locked_journal(
             Ok::<_, StoreError>((lock, opened))
         })
         .await;
+        lap("acquire-open", &mut mark);
         match attempt {
             Ok(Ok(pair)) => return Ok(pair),
             Ok(Err(StoreError::Locked { pid: Some(pid), .. }))
