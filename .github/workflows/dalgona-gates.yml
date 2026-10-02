@@ -11,8 +11,24 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  dal-released:
+    runs-on: ubuntu-24.04
+    outputs:
+      ready: ${{ steps.probe.outputs.ready }}
+    steps:
+      - id: probe
+        shell: bash
+        run: |
+          if curl -fsSL "https://index.crates.io/da/l-/dal-agent" | grep -q '"vers":"0.1.0"'; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::dal-* 0.1.0 is not on crates.io yet; dalgona gates are do-not-execute until dal publishes"
+          fi
+
   functional:
-    if: github.event_name != 'schedule'
+    needs: dal-released
+    if: github.event_name != 'schedule' && needs.dal-released.outputs.ready == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -41,7 +57,8 @@ jobs:
           tool: cargo-deny@0.20.2
       - run: cargo deny --locked check
   stress-budgets:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    needs: dal-released
+    if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && needs.dal-released.outputs.ready == 'true'
     strategy:
       fail-fast: false
       matrix:

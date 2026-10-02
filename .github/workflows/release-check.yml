@@ -16,7 +16,17 @@ jobs:
       - run: cargo install cargo-dist --version 0.32.0 --locked
       - working-directory: dal
         run: dist plan
+      - id: dalgona-released
+        shell: bash
+        run: |
+          if curl -fsSL "https://index.crates.io/da/l-/dal-agent" | grep -q '"vers":"0.1.0"'; then
+            echo "released=true" >> "$GITHUB_ENV"
+          else
+            echo "released=false" >> "$GITHUB_ENV"
+            echo "::notice::dal-* 0.1.0 is not on crates.io yet; skipping the dalgona dist plan leg"
+          fi
       - working-directory: dalgona
+        if: env.released == 'true'
         run: dist plan
   semver-gate:
     runs-on: ubuntu-latest

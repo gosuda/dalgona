@@ -25,6 +25,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  dal-released:
+    runs-on: ubuntu-24.04
+    outputs:
+      ready: ${{ steps.probe.outputs.ready }}
+    steps:
+      - id: probe
+        shell: bash
+        run: |
+          if curl -fsSL "https://index.crates.io/da/l-/dal-agent" | grep -q '"vers":"0.1.0"'; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::dal-* 0.1.0 is not on crates.io yet; dalgona jobs are do-not-execute until dal publishes"
+          fi
+
   fmt:
     runs-on: ubuntu-24.04
     defaults:
@@ -38,6 +53,8 @@ jobs:
       - run: cargo fmt --check --all
 
   gates:
+    needs: dal-released
+    if: needs.dal-released.outputs.ready == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -63,6 +80,8 @@ jobs:
       - run: cargo test --all-features --locked
 
   msrv:
+    needs: dal-released
+    if: needs.dal-released.outputs.ready == 'true'
     runs-on: ubuntu-24.04
     defaults:
       run:
