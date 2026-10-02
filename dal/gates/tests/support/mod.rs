@@ -104,20 +104,20 @@ pub(crate) async fn scripted_session(
 }
 
 /// Probes whether `pid` still runs, portable across gate platforms.
-pub(crate) fn process_alive(pid: u32) -> io::Result<bool> {
+pub(crate) fn process_alive(pid: u32) -> bool {
     #[cfg(target_os = "linux")]
     let alive = PathBuf::from(format!("/proc/{pid}")).exists();
     #[cfg(target_os = "macos")]
     let alive = Command::new("/bin/kill")
         .args(["-0", &pid.to_string()])
-        .status()?
-        .success();
+        .status()
+        .is_ok_and(|status| status.success());
     #[cfg(windows)]
     let alive = Command::new("powershell.exe")
         .args(["-NoProfile", "-Command", &format!("Get-Process -Id {pid}")])
-        .status()?
-        .success();
-    Ok(alive)
+        .status()
+        .is_ok_and(|status| status.success());
+    alive
 }
 
 pub(crate) struct TestDir {
