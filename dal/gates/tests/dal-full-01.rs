@@ -847,6 +847,31 @@ fn read_pid(path: &Path) -> Result<Option<u32>, TestError> {
     }
 }
 
+fn job_state_digest(job: &ProcessJob) -> String {
+    job.agent.view(PageReq::default()).map_or_else(
+        |error| format!("view failed: {error}"),
+        |view| {
+            let mut tools = 0usize;
+            let mut first_error = String::new();
+            for entry in &view.entries.items {
+                if let EntryKind::ToolResult { error, parts, .. } = &entry.kind {
+                    tools += 1;
+                    if *error && first_error.is_empty() {
+                        first_error = format!("{parts:?}");
+                    }
+                }
+            }
+            let entries = view.entries.items.len();
+            let mut text = format!("turn={:?} entries={entries} tools={tools}", view.turn);
+            if !first_error.is_empty() {
+                text.push_str(" err=");
+                text.push_str(&first_error);
+            }
+            text
+        },
+    )
+}
+
 async fn wait_for_process_pids(jobs: &mut [ProcessJob]) -> Result<Vec<u32>, TestError> {
     // Liveness wait, not a timing claim: 200 process spawns on a loaded shared
     // runner can far outrun the local constant, so bound generously.
@@ -874,13 +899,7 @@ async fn wait_for_process_pids(jobs: &mut [ProcessJob]) -> Result<Vec<u32>, Test
                 .enumerate()
                 .filter(|(_, job)| job.pid.is_none())
                 .take(5)
-                .map(|(index, job)| {
-                    let turn = job.agent.view(PageReq::default()).map_or_else(
-                        |error| format!("view failed: {error}"),
-                        |view| format!("{:?}", view.turn),
-                    );
-                    format!("{index}: {turn}")
-                })
+                .map(|(index, job)| format!("{index}: {}", job_state_digest(job)))
                 .collect();
             let total = jobs.iter().filter(|job| job.pid.is_none()).count();
             return Err(io::Error::other(format!(
