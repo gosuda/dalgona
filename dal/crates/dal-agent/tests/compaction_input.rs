@@ -156,7 +156,7 @@ async fn compact_fixture() -> (
     std::fs::write(&fixture, FIXTURE).expect("write provider fixture");
     let config_text = format!(
         "approval = \"all\"\nmodel = \"openai/gpt-6-luna\"\n\n[providers.scripted]\nfixture = \"{}\"\n",
-        fixture.display()
+        fixture.to_string_lossy().replace('\\', "\\\\")
     );
     let config =
         Config::load(ConfigProduct::Dalgon, &data, "", Some(&config_text)).expect("config");

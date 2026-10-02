@@ -33,6 +33,10 @@ fn shell_argv(command: &str) -> Vec<OsString> {
     ]
 }
 
+// These spawn real processes through a POSIX shell and rely on Unix
+// process-group semantics (stop-ladder signals, grandchild sweeps); the
+// Windows launcher path does not exist yet.
+#[cfg(unix)]
 #[tokio::test]
 async fn proc_spawns_captures_output_and_reports_bounded_env() {
     let temp = tempfile::tempdir().expect("temp workspace");
@@ -93,6 +97,7 @@ async fn proc_spawns_captures_output_and_reports_bounded_env() {
     assert_eq!(last_lines(b"a\nb\nc", 2), "b\nc");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn proc_timeout_uses_stop_ladder_and_reports_timed_out() {
     let temp = tempfile::tempdir().expect("temp workspace");
@@ -125,6 +130,7 @@ async fn proc_timeout_uses_stop_ladder_and_reports_timed_out() {
     assert_eq!(result.status, ProcStatus::TimedOut);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn proc_cancellation_kills_tree_and_settles_once() {
     let temp = tempfile::tempdir().expect("temp workspace");
@@ -162,6 +168,7 @@ async fn proc_cancellation_kills_tree_and_settles_once() {
     assert_eq!(again.preview.as_ref(), result.preview.as_ref());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn proc_wait_sweeps_grandchild_holding_pipe_before_capture_join() {
     let temp = tempfile::tempdir().expect("temp workspace");
@@ -217,6 +224,7 @@ fn denied_out_of_scope(result: &Result<super::Proc, ToolError>) -> bool {
     )
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn approved_scope_allows_matching_call_digest_and_roots() {
     let temp = tempfile::tempdir().expect("temp workspace");

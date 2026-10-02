@@ -989,16 +989,27 @@ impl Journal {
         let creation = tokio::task::spawn_blocking({
             let journal_path = journal_path.clone();
             move || -> Result<(LockGuard, FileJournal), StoreError> {
+                let lap = |step: &str, since: std::time::Instant| {
+                    let taken = since.elapsed();
+                    if taken > std::time::Duration::from_millis(250) {
+                        eprintln!("[dal-store] first-append {step} took {taken:?}");
+                    }
+                    std::time::Instant::now()
+                };
+                let mut mark = std::time::Instant::now();
                 util::create_private_dir_all(&directory)
                     .map_err(|source| util::io_err(&directory, source))?;
+                mark = lap("session-dirs", mark);
                 let lock = match prelocked {
                     Some(lock) => lock,
                     None => LockGuard::acquire(&lock_path, id)?,
                 };
+                mark = lap("lock", mark);
                 util::create_private_dir_all(&blob_dir)
                     .map_err(|source| util::io_err(&blob_dir, source))?;
                 util::create_private_dir_all(&jobs_dir)
                     .map_err(|source| util::io_err(&jobs_dir, source))?;
+                mark = lap("sub-dirs", mark);
                 if let Some(name) = current_name.as_deref() {
                     inner.listing.normalize_name(
                         &workspace_dir,
@@ -1007,10 +1018,13 @@ impl Journal {
                         Some(id),
                     )?;
                 }
+                mark = lap("names", mark);
                 for blob in blobs {
                     blob::put_prepared(&blob_dir, blob)?;
                 }
+                mark = lap("blobs", mark);
                 let journal = FileJournal::create(&journal_path, &bytes, &Faults::default())?;
+                lap("journal-create", mark);
                 Ok((lock, journal))
             }
         });

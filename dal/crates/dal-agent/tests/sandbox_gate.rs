@@ -103,7 +103,7 @@ async fn run_probe_turn(
     std::fs::write(&fixture, format!("{STEP_CALL}{STEP_END}"))?;
     let mut user = format!(
         "approval = \"all\"\nmodel = \"openai/gpt-6-luna\"\n\n[providers.scripted]\nfixture = \"{}\"\n",
-        fixture.display()
+        fixture.to_string_lossy().replace('\\', "\\\\")
     );
     if sandbox {
         user = format!("sandbox = true\n{user}");

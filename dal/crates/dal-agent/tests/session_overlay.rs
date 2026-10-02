@@ -160,7 +160,7 @@ async fn session_tool_runs_through_hooks_and_first_success_is_journaled_as_promo
     std::fs::write(&fixture, format!("{STEP_CALL}{STEP_END}")).expect("script fixture");
     let config_text = format!(
         "approval = \"all\"\nmodel = \"openai/gpt-6-luna\"\n\n[providers.scripted]\nfixture = \"{}\"\n",
-        fixture.display()
+        fixture.to_string_lossy().replace('\\', "\\\\")
     );
     let config =
         Config::load(ConfigProduct::Dalgon, &data, "", Some(config_text.as_str())).expect("config");

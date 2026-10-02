@@ -317,7 +317,7 @@ async fn rig(steps: &[String], model: &str) -> Rig {
     std::fs::write(&fixture, steps.join("\n")).expect("fixture");
     let user = format!(
         "model = \"{model}\"\n\n[providers.scripted]\nfixture = \"{}\"\n",
-        fixture.display()
+        fixture.to_string_lossy().replace('\\', "\\\\")
     );
     let config =
         Config::load(ConfigProduct::Dalgon, &data, "", Some(user.as_str())).expect("config");
