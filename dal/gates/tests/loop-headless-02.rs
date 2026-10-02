@@ -100,19 +100,27 @@ async fn cancel_mid_exec_kills_grandchild_and_ends_once() -> Result<(), Box<dyn 
     #[cfg(target_os = "linux")]
     assert!(!PathBuf::from(format!("/proc/{pid}")).exists());
     #[cfg(target_os = "macos")]
-    assert!(
-        !std::process::Command::new("/bin/kill")
-            .args(["-0", &pid.to_string()])
-            .status()?
-            .success()
-    );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "gate edge: liveness probing shells out to /bin/kill -0"
+    )]
+    let killed = std::process::Command::new("/bin/kill")
+        .args(["-0", &pid.to_string()])
+        .status()?
+        .success();
+    #[cfg(target_os = "macos")]
+    assert!(!killed);
     #[cfg(windows)]
-    assert!(
-        !std::process::Command::new("powershell.exe")
-            .args(["-NoProfile", "-Command", &format!("Get-Process -Id {pid}")])
-            .status()?
-            .success()
-    );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "gate edge: liveness probing shells out to Get-Process"
+    )]
+    let killed = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-Command", &format!("Get-Process -Id {pid}")])
+        .status()?
+        .success();
+    #[cfg(windows)]
+    assert!(!killed);
     let _ = harness.host.shutdown(Duration::from_secs(1)).await;
     Ok(())
 }
