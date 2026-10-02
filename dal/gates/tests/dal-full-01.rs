@@ -848,7 +848,9 @@ fn read_pid(path: &Path) -> Result<Option<u32>, TestError> {
 }
 
 async fn wait_for_process_pids(jobs: &mut [ProcessJob]) -> Result<Vec<u32>, TestError> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    // Liveness wait, not a timing claim: 200 process spawns on a loaded shared
+    // runner can far outrun the local constant, so bound generously.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
     loop {
         let mut ready = true;
         for job in jobs.iter_mut() {
