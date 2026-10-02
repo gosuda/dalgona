@@ -1,5 +1,11 @@
-#![expect(clippy::expect_used, reason = "integration tests fail loudly")]
-#![expect(clippy::disallowed_methods, reason = "integration tests fail loudly")]
+#![cfg_attr(
+    unix,
+    expect(clippy::expect_used, reason = "integration tests fail loudly")
+)]
+#![cfg_attr(
+    unix,
+    expect(clippy::disallowed_methods, reason = "integration tests fail loudly")
+)]
 //! Kill recovery: SIGKILL at random points never loses an acknowledged batch.
 
 #![cfg(unix)]

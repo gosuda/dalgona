@@ -60,6 +60,9 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: false
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with:
+          tool: cargo-semver-checks@0.50.0
       - run: cargo clippy --all-targets --all-features --locked -- -D warnings
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo check --locked --no-default-features --workspace

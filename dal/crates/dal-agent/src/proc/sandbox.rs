@@ -339,9 +339,9 @@ pub(crate) fn seatbelt_profile(roots: &[PathBuf]) -> String {
     use std::fmt::Write as _;
     let mut profile = String::from("(version 1)\n(allow default)\n(deny file-write*)\n");
     for root in roots {
-        let _ = write!(
+        let _ = writeln!(
             profile,
-            "(allow file-write* (subpath \"{}\"))\n",
+            "(allow file-write* (subpath \"{}\"))",
             escape_sbpl(root),
         );
     }
