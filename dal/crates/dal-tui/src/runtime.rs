@@ -1161,7 +1161,7 @@ fn apply_event(session: &mut Session, dialog: &mut DialogUi, event: InputEvent, 
             expected: None,
         }),
         None if key.code == KeyCode::Backspace => {
-            session.composer.pop();
+            crate::composer::pop_grapheme(&mut session.composer);
         }
         None if key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT => {
             if let KeyCode::Char(character) = key.code {

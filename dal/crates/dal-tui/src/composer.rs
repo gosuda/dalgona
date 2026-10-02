@@ -126,6 +126,18 @@ impl Composer {
         }
     }
 }
+/// Removes the trailing grapheme cluster from `text`, if any.
+///
+/// `String::pop` removes one `char`, which splits flags, ZWJ emoji, and
+/// combining sequences and leaves a dangling joiner or a lone regional
+/// indicator behind. Backspace in a terminal composer must delete the
+/// whole cluster the user sees as one glyph.
+pub(crate) fn pop_grapheme(text: &mut String) {
+    if let Some((byte, _)) = text.grapheme_indices(true).next_back() {
+        text.truncate(byte);
+    }
+}
+
 /// The slash command and partial argument under the cursor.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SlashCompletion {
@@ -190,7 +202,26 @@ fn fallback_prefix(tail: &str, error: dal_core::command::LexError) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Composer, SlashCompletion, slash_completion};
+    use super::{Composer, SlashCompletion, pop_grapheme, slash_completion};
+
+    #[test]
+    fn pop_grapheme_removes_whole_clusters() {
+        let mut text = String::from("ab🇯🇵");
+        pop_grapheme(&mut text);
+        assert_eq!(text, "ab");
+        let mut text = String::from("ab👨‍👩‍👧");
+        pop_grapheme(&mut text);
+        assert_eq!(text, "ab");
+        let mut text = String::from("a\u{301}漢");
+        pop_grapheme(&mut text);
+        assert_eq!(text, "a\u{301}");
+        // The decomposed é is one cluster: base and mark leave together.
+        pop_grapheme(&mut text);
+        assert_eq!(text, "");
+        let mut text = String::new();
+        pop_grapheme(&mut text);
+        assert_eq!(text, "");
+    }
 
     #[test]
     fn cursor_never_sits_inside_a_grapheme() {

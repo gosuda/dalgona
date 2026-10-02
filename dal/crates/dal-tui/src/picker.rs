@@ -130,7 +130,7 @@ impl PickerUi {
     }
 
     pub(crate) fn remove_filter_char(&mut self) {
-        self.filter.pop();
+        crate::composer::pop_grapheme(&mut self.filter);
         self.refilter();
     }
 

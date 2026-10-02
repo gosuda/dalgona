@@ -359,7 +359,7 @@ impl DialogUi {
                     None
                 }
                 KeyCode::Backspace => {
-                    self.input.pop();
+                    crate::composer::pop_grapheme(&mut self.input);
                     None
                 }
                 KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {

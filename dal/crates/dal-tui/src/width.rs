@@ -64,7 +64,10 @@ fn cluster_width(cluster: &str, mode: WidthMode) -> usize {
     }
 
     if regional_indicators > 0 {
-        return regional_indicators * 2;
+        // A cluster carries at most two indicators, and a paired flag is
+        // one two-cell glyph — counting them per-codepoint reports 4
+        // cells for what every terminal draws in 2.
+        return 2;
     }
     if has_zwj || has_vs16 || has_keycap || jamo >= 2 {
         return 2;
@@ -175,7 +178,7 @@ mod tests {
         assert_eq!(width("❤", narrow), 1);
         assert_eq!(width("❤\u{fe0f}", narrow), 2);
         assert_eq!(width("❤\u{fe0e}", narrow), 1);
-        assert_eq!(width("🇫🇷", narrow), 4);
+        assert_eq!(width("🇫🇷", narrow), 2);
         assert_eq!(width("🇫", narrow), 2);
         assert_eq!(width("·±", narrow), 2);
         assert_eq!(width("·±", WidthMode::Cjk), 4);
