@@ -16,8 +16,8 @@ mod view;
 mod workspace;
 
 pub use approval::{
-    Decision, DenyReason, Gate, GrantSpec, PlannedCall, Policy, Rung, ToolClass, Unit, gate, plan,
-    rung,
+    Decision, DenyReason, Gate, GrantSpec, PlannedCall, Policy, Rung, ToolClass, Unit, gate,
+    headless_denial_text, parse_headless_denial, plan, rung,
 };
 pub use command::{
     BusyState, CancelScope, Chooser, Classify, Command, CommandError, Completion, ErrorTriple,

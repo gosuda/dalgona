@@ -616,9 +616,7 @@ impl CallRuntime {
     ) -> Result<Approved, dal_core::DenyReason> {
         use dal_core::DenyReason;
         if call != &self.call {
-            return Err(DenyReason::OutOfScope {
-                what: format!("call {}", call.as_str()).into(),
-            });
+            return Err(DenyReason::out_of_scope(format!("call {}", call.as_str())));
         }
         let class = self.approval_class()?;
         if let Some(grant) = self.ledger.lock().await.covers(&self.tool, preview.digest) {
@@ -650,9 +648,7 @@ impl CallRuntime {
                 reason => reason,
             }),
             dal_core::Decision::Ask { grant } => self.ask(call, preview, grant, cancel).await,
-            _ => Err(dal_core::DenyReason::OutOfScope {
-                what: self.tool.as_str().into(),
-            }),
+            _ => Err(dal_core::DenyReason::out_of_scope(self.tool.as_str())),
         }
     }
 
@@ -660,31 +656,20 @@ impl CallRuntime {
     fn approval_class(&self) -> Result<ToolClass, dal_core::DenyReason> {
         use dal_core::DenyReason;
         let Some((tool, _)) = self.tools.tool(&self.generation, &self.tool) else {
-            return Err(DenyReason::OutOfScope {
-                what: self.tool.as_str().into(),
-            });
+            return Err(DenyReason::out_of_scope(self.tool.as_str()));
         };
         tool.classify(&self.args, &self.workspace)
-            .map_err(|_| DenyReason::OutOfScope {
-                what: self.tool.as_str().into(),
-            })
+            .map_err(|_| DenyReason::out_of_scope(self.tool.as_str()))
     }
 
     /// The model-visible denial for a gated call with no one to ask. The
     /// front end owns the matching stderr note and its rerun hint names the
     /// approval rung the call needed.
     fn headless_denial(&self, class: &ToolClass) -> dal_core::DenyReason {
-        let rung = match dal_core::rung(class) {
-            dal_core::Rung::Edits => "edits",
-            dal_core::Rung::All => "all",
-        };
-        dal_core::DenyReason::OutOfScope {
-            what: format!(
-                "Permission denied: {} needs approval, and this run has no one to ask. Continue without it and report what needs the user. (The user can rerun with --approval {rung}.)",
-                self.tool.as_str()
-            )
-            .into(),
-        }
+        dal_core::DenyReason::out_of_scope(dal_core::headless_denial_text(
+            self.tool.as_str(),
+            dal_core::rung(class),
+        ))
     }
 
     async fn finish_approval(
@@ -811,28 +796,25 @@ impl CallRuntime {
                 self.finish_approval(preview.digest, Box::new([]), roots, None, &class, cancel)
                     .await
             }
-            Answer::Decline => Err(DenyReason::OutOfScope {
-                what: if by.as_str() == "core" {
-                    format!(
-                        "Permission denied {} needed approval and no one answered within {secs} s.",
-                        self.tool.as_str()
-                    )
-                    .into()
-                } else {
-                    format!(
-                        "Permission denied: {} was declined by {}.",
-                        self.tool.as_str(),
-                        by.as_str()
-                    )
-                    .into()
-                },
-            }),
+            Answer::Decline => Err(DenyReason::out_of_scope(if by.as_str() == "core" {
+                format!(
+                    "Permission denied {} needed approval and no one answered within {secs} s.",
+                    self.tool.as_str()
+                )
+            } else {
+                format!(
+                    "Permission denied: {} was declined by {}.",
+                    self.tool.as_str(),
+                    by.as_str()
+                )
+            })),
             Answer::Cancel => Err(DenyReason::Unavailable {
                 what: "approval cancelled".into(),
             }),
-            _ => Err(DenyReason::OutOfScope {
-                what: format!("Permission denied: {}.", self.tool.as_str()).into(),
-            }),
+            _ => Err(DenyReason::out_of_scope(format!(
+                "Permission denied: {}.",
+                self.tool.as_str()
+            ))),
         }
     }
 
@@ -935,9 +917,9 @@ impl ToolCxRuntime for CallRuntime {
         };
         let bound = proof.digest;
         if !approved.prefix().is_empty() && !grant_covers(&approved, argv, &opts.cwd) {
-            return Err(ToolError::Denied(dal_core::DenyReason::OutOfScope {
-                what: self.tool.as_str().into(),
-            }));
+            return Err(ToolError::Denied(dal_core::DenyReason::out_of_scope(
+                self.tool.as_str(),
+            )));
         }
         let permit = match self.permit.try_lock() {
             Ok(mut guard) => guard.take(),

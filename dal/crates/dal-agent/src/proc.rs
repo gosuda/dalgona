@@ -450,9 +450,10 @@ pub(crate) fn spawn_process_with_capture(
         || approved.digest() != preview_digest
         || !cwd_in_roots(&opts.cwd, approved.roots())
     {
-        return Err(ToolError::Denied(DenyReason::OutOfScope {
-            what: format!("call {}", call.as_str()).into(),
-        }));
+        return Err(ToolError::Denied(DenyReason::out_of_scope(format!(
+            "call {}",
+            call.as_str()
+        ))));
     }
     launch(
         argv,

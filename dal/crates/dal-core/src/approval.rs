@@ -89,6 +89,47 @@ pub fn rung(class: &ToolClass) -> Rung {
     }
 }
 
+impl Rung {
+    /// The rung's flag name on `--approval`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Rung::Edits => "edits",
+            Rung::All => "all",
+        }
+    }
+}
+
+/// The spec's model-visible denial for a gated call with nobody to ask
+/// (`approval.denied_headless`). Front ends parse the same text back for the
+/// matching user-facing note, so the format and its parser live together.
+#[must_use]
+pub fn headless_denial_text(tool: &str, rung: Rung) -> String {
+    format!(
+        "Permission denied: {tool} needs approval, and this run has no one to ask. Continue without it and report what needs the user. (The user can rerun with --approval {}.)",
+        rung.as_str()
+    )
+}
+
+/// Reads the tool name and needed rung back out of a [`headless_denial_text`]
+/// denial; returns `None` when the text is some other denial.
+#[must_use]
+pub fn parse_headless_denial(text: &str) -> Option<(&str, Rung)> {
+    let rest = text
+        .strip_prefix("Permission denied: ")?
+        .split_once(" needs approval, and this run has no one to ask.")?;
+    let tool = rest.0;
+    let rung = match rest
+        .1
+        .rsplit_once("--approval ")
+        .and_then(|(_, tail)| tail.strip_suffix(".)"))
+    {
+        Some("edits") => Rung::Edits,
+        _ => Rung::All,
+    };
+    Some((tool, rung))
+}
+
 /// Why an approval request cannot proceed.
 #[non_exhaustive]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -111,6 +152,14 @@ pub enum DenyReason {
     },
     /// The operation exceeded its wake limit.
     WakeLimit,
+}
+
+impl DenyReason {
+    /// Denies because `what` is outside the allowed scope.
+    #[must_use]
+    pub fn out_of_scope(what: impl Into<Box<str>>) -> Self {
+        DenyReason::OutOfScope { what: what.into() }
+    }
 }
 
 /// The result of applying an approval policy to a tool call.
