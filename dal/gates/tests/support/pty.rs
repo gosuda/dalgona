@@ -25,6 +25,10 @@ use rustix::{
 pub struct PtyProcess {
     child: Child,
     master: File,
+    /// Kept open so the line discipline never sees the last slave close:
+    /// without it the kernel discards buffered output the instant the
+    /// child exits, and masters reads return EIO before the drain.
+    slave: File,
     output: Vec<u8>,
 }
 
@@ -59,6 +63,7 @@ impl PtyProcess {
         Ok(Self {
             child,
             master,
+            slave,
             output: Vec::new(),
         })
     }
@@ -114,7 +119,12 @@ impl PtyProcess {
                 return Ok(());
             }
             if let Some(status) = self.child.try_wait()? {
+                // The kernel keeps buffered output readable while we hold
+                // a slave fd, so drain once more before reporting the miss.
                 self.read_available()?;
+                if contains(&self.output, needle) {
+                    return Ok(());
+                }
                 return Err(io::Error::other(format!(
                     "PTY child exited with {status} before output {:?}",
                     String::from_utf8_lossy(needle)
@@ -148,7 +158,12 @@ impl PtyProcess {
                 return Ok(());
             }
             if let Some(status) = self.child.try_wait()? {
+                // See wait_for: buffered output survives while the slave
+                // fd stays open, so drain once more before the verdict.
                 self.read_available()?;
+                if occurrences(&self.output, needle) >= count {
+                    return Ok(());
+                }
                 return Err(io::Error::other(format!(
                     "PTY child exited with {status} before {count} occurrences of {:?}",
                     String::from_utf8_lossy(needle)
