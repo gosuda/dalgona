@@ -54,6 +54,18 @@ impl ControlCell {
         Ok(())
     }
 
+    /// Clones the running turn's token when `turn` holds the session.
+    ///
+    /// The driver's per-turn state binds this token so `cancel` preempts a
+    /// live stream out-of-band — `Effect::Stop` only ever reaches the driver
+    /// after `infer` returns, so a queued effect can never interrupt it.
+    pub(crate) fn token(&self, turn: TurnId) -> Option<CancellationToken> {
+        self.running
+            .as_ref()
+            .filter(|running| running.turn == turn)
+            .map(|running| running.token.clone())
+    }
+
     /// Ends the running turn when it is the one named.
     pub(crate) fn end_turn(&mut self, turn: TurnId) {
         if self.running.as_ref().is_some_and(|r| r.turn == turn) {

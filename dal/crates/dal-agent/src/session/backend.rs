@@ -665,6 +665,13 @@ impl Backend {
             .workspace
             .clone()
             .unwrap_or_else(|| self.workspace.clone());
+        // An explicit child model the catalog cannot route refuses the
+        // start; silently inheriting the caller's model would run a
+        // different program than the one requested.
+        let model = self.resolve_child_model(start.model.as_deref()).await;
+        if start.model.is_some() && model.is_none() {
+            return AgentsReply::Cancelled { id: self.session };
+        }
         let host = self.host();
         let Ok(child) = host
             .open(
@@ -684,7 +691,7 @@ impl Backend {
         if let Some(system) = start.system.as_ref().or(start.role.as_ref()) {
             prompt = format!("System: {system}\n\n{prompt}");
         }
-        if let Some(model) = self.resolve_child_model(start.model.as_deref()).await {
+        if let Some(model) = model {
             let _ = child
                 .submit(dal_core::Command::SetModel {
                     model,
@@ -706,6 +713,9 @@ impl Backend {
     /// Resolves a child model reference; unresolvable keeps the default.
     async fn resolve_child_model(&self, reference: Option<&str>) -> Option<dal_core::ModelRoute> {
         let reference = reference?;
+        if let Some(found) = crate::ext::synthetic::find(&self.host.shared, reference) {
+            return Some(found.route());
+        }
         let catalog = self.host.shared.providers.catalog().await.ok()?;
         let aliases: Vec<(Box<str>, Box<str>)> = self
             .host
@@ -801,7 +811,10 @@ impl Backend {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         sessions
             .iter()
-            .filter(|(_, entry)| entry.depth > 0)
+            // Only the caller's own children: an unscoped list lets one
+            // session's session-end sweep cancel siblings' subtrees, which
+            // compounds to O(n²) closes across a shutdown cascade.
+            .filter(|(_, entry)| entry.parent == Some(self.session))
             .map(|(id, entry)| {
                 let name = entry
                     .shared

@@ -40,6 +40,7 @@ use crate::session::context::{
     DeferredTool, StreamCall, api_family, context_items, model_info_for, resolve_calls,
     system_prompt, tool_list,
 };
+use crate::session::control::ControlCell;
 use crate::session::dispatch::{DispatchCtx, GrantLedger, ReadyCall, plan_units, run_unit};
 use crate::session::projection::SnapshotArgs;
 use crate::session::shared::Shared;
@@ -138,10 +139,14 @@ struct Driver {
     scoped: Option<Vec<Box<str>>>,
     last_model: Option<(ModelRoute, Family)>,
     last_catalog_entry: Option<dal_provider::CatalogEntry>,
+    /// The actor's turn-bypass cell shared over `DriverPorts`; `cancel` there
+    /// preempts a live `infer` stream — a queued `Effect::Stop` can't.
+    control: Arc<std::sync::Mutex<ControlCell>>,
 }
 
 /// Spawns the session driver task consuming `ports`.
 pub(crate) fn spawn(ports: DriverPorts, deps: DriverDeps) -> JoinHandle<()> {
+    let control = ports.control.clone();
     #[expect(
         clippy::disallowed_methods,
         reason = "session-owned driver task: the host stores the handle and aborts it on close"
@@ -153,6 +158,7 @@ pub(crate) fn spawn(ports: DriverPorts, deps: DriverDeps) -> JoinHandle<()> {
             scoped: None,
             last_model: None,
             last_catalog_entry: None,
+            control,
         }
         .run(ports),
     )
@@ -246,8 +252,19 @@ impl Driver {
     }
 
     /// Returns the turn state, creating it on first touch of the turn.
+    ///
+    /// The turn binds the bypass-cell token when the actor already opened
+    /// it (`TurnStarted` is journaled before any driver effect), so an
+    /// out-of-band `cancel` stops the stream; a late/stale turn falls back
+    /// to a standalone token exactly as before.
     fn turn(&mut self, turn: TurnId) -> &mut TurnState {
         let deps = &self.deps;
+        let cancel = self
+            .control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .token(turn)
+            .unwrap_or_default();
         self.turns.entry(turn).or_insert_with(|| {
             let generation = deps.host.shared.generation.borrow().clone();
             let tools = deps.overlay.publish(&generation, deps.shared.promoted());
@@ -258,7 +275,7 @@ impl Driver {
                 Arc::clone(&generation),
             );
             TurnState {
-                cancel: CancellationToken::new(),
+                cancel,
                 script,
                 generation,
                 tools,
@@ -392,7 +409,16 @@ impl Driver {
         let mut converter = StreamConverter::new();
         let mut events: Vec<StreamEvent> = Vec::new();
         let mut failed: Option<InferFailure> = None;
-        while let Some(item) = stream.next().await {
+        // A turn cancel is the bypass: it fires this token out-of-band while
+        // `stream.next()` may wait forever, so the loop must race them — a
+        // queued `Effect::Stop` could never reach a blocked poll otherwise.
+        loop {
+            let item = tokio::select! {
+                biased;
+                item = stream.next() => item,
+                () = cancel.cancelled() => return,
+            };
+            let Some(item) = item else { break };
             let event = match item {
                 Ok(event) => event,
                 Err(error) => {

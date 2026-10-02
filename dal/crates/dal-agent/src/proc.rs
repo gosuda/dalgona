@@ -35,7 +35,7 @@ mod windows;
 use capture::{CaptureResult, run_capture};
 use stop::{
     hard_kill, outcome_for, process_exit_status, process_failure, soft_kill, status_for,
-    sweep_process_group,
+    sweep_process_group, sweep_recorded,
 };
 
 /// Maximum size of one read from a child output pipe.
@@ -234,6 +234,11 @@ impl Proc {
             return self.finish(process_exit_status(status)).await;
         }
 
+        // Snapshot the lineage before signaling: a `setsid` grandchild
+        // escapes the process group, and reparents to init the instant its
+        // bridge exits — the post-exit `/proc` sweep can no longer find it,
+        // so the only reachable point for detached descendants is now.
+        let doomed = self.recorded_descendants().await;
         soft_kill(&mut self.child)?;
         let status = if let Ok(waited) = time::timeout(KILL_GRACE, self.child.wait()).await {
             let _ = waited.map_err(|error| process_failure(&error))?;
@@ -249,7 +254,23 @@ impl Proc {
             self.sweep_after_exit().await;
             status_for(reason)
         };
+        sweep_recorded(&doomed);
         self.finish(status).await
+    }
+
+    /// Records live descendants for the post-exit `setsid` sweep.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(clippy::unused_async, reason = "the /proc walk await is linux-only")
+    )]
+    async fn recorded_descendants(&mut self) -> Vec<u32> {
+        #[cfg(target_os = "linux")]
+        if let Some(pid) = self.leader_pid {
+            return tokio::task::spawn_blocking(move || stop::proc_descendants(pid))
+                .await
+                .unwrap_or_default();
+        }
+        Vec::new()
     }
 
     /// Returns the currently retained tail without reading the full log.

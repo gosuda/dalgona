@@ -167,6 +167,14 @@ impl Session {
         self.active_model.as_ref()
     }
 
+    /// Returns the route the caller selected with `Command::SetModel`, if
+    /// any. This is the requested route for new rounds; `active_model` is
+    /// only the route that answered the live stream.
+    #[must_use]
+    pub fn requested_model(&self) -> Option<&ModelRoute> {
+        self.settings.model.as_ref()
+    }
+
     /// Returns the model family of the live turn, if any.
     #[must_use]
     pub fn active_family(&self) -> Option<Family> {

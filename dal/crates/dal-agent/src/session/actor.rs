@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::num::NonZeroU64;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use dal_core::ext::{
@@ -45,7 +45,7 @@ pub(crate) struct TurnBatch {
     pub(crate) asks: Vec<(Request, AnswerWait)>,
     /// The fold approval policy snapshot for this batch.
     pub(crate) policy: Policy,
-    /// The active model route snapshot for this batch.
+    /// The requested model route snapshot for this batch.
     pub(crate) model: Option<ModelRoute>,
     /// The active provider family snapshot for this batch.
     pub(crate) family: Option<Family>,
@@ -55,6 +55,10 @@ pub(crate) struct TurnBatch {
 pub(crate) struct DriverPorts {
     /// Effect batches for the driver, with the ask waiters they may await.
     pub(crate) ops_rx: mpsc::Receiver<TurnBatch>,
+    /// The shared turn-bypass cell: the driver binds each turn's stream to the
+    /// token `ControlCell::cancel` fires, so a cancel preempts a live `infer`
+    /// out-of-band (a queued `Effect::Stop` could never reach it mid-stream).
+    pub(crate) control: Arc<Mutex<ControlCell>>,
 }
 
 /// Work the Step-3 driver reports back to the actor.
@@ -214,7 +218,7 @@ pub(crate) struct Actor {
     fold: Session,
     broker: Arc<Broker>,
     shared: Arc<Shared>,
-    control: ControlCell,
+    control: Arc<Mutex<ControlCell>>,
     workspace: Workspace,
     sidecar: HashMap<dal_core::Name, Vec<u8>>,
     /// The child depth, zero for top-level sessions.
@@ -299,13 +303,14 @@ fn reminder_entry(effects: &[Effect]) -> Option<dal_core::EntryId> {
 pub(crate) fn spawn(deps: ActorDeps) -> (SessionHandle, DriverPorts, tokio::task::JoinHandle<()>) {
     let (tx, rx) = mpsc::channel(COMMAND_CHANNEL);
     let (driver_tx, ops_rx) = mpsc::channel(DRIVER_CHANNEL);
+    let control = Arc::new(Mutex::new(ControlCell::new()));
     let actor = Actor {
         session: deps.session,
         journal: deps.journal,
         fold: deps.fold,
         broker: deps.broker,
         shared: deps.shared,
-        control: ControlCell::new(),
+        control: Arc::clone(&control),
         workspace: deps.workspace,
         sidecar: HashMap::new(),
         depth: deps.depth,
@@ -328,7 +333,7 @@ pub(crate) fn spawn(deps: ActorDeps) -> (SessionHandle, DriverPorts, tokio::task
         reason = "session-owned actor task: the host stores the handle and awaits it on close"
     )]
     let task = tokio::spawn(actor.into_run(deps.pending));
-    (handle, DriverPorts { ops_rx }, task)
+    (handle, DriverPorts { ops_rx, control }, task)
 }
 
 /// Borrows the content parts carried by one opening source.
@@ -396,7 +401,11 @@ impl Actor {
             effects,
             asks,
             policy: self.fold.policy(self.answerer_attached()),
-            model: self.fold.active_model().cloned(),
+            model: self
+                .fold
+                .requested_model()
+                .cloned()
+                .or_else(|| self.fold.active_model().cloned()),
             family: self.fold.active_family(),
         }
     }
@@ -404,6 +413,11 @@ impl Actor {
     /// Reports whether a frontend can answer approval questions.
     fn answerer_attached(&self) -> bool {
         self.shared.attached()
+    }
+
+    /// Locks the shared turn-bypass cell.
+    fn control(&self) -> MutexGuard<'_, ControlCell> {
+        self.control.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     async fn run(mut self) {
@@ -791,7 +805,7 @@ impl Actor {
         );
         match stepped {
             Err(rejection) => {
-                let error = map_rejection(rejection, self.session, &self.control);
+                let error = map_rejection(rejection, self.session, &self.control());
                 let _ = reply.send(Err(error));
             }
             Ok(()) => self.execute(effects, Some(reply)).await,
@@ -803,7 +817,7 @@ impl Actor {
         if let Command::Cancel { scope } = command
             && let dal_core::CancelScope::Turn(turn) = scope
         {
-            let _ = self.control.cancel(*turn);
+            let _ = self.control().cancel(*turn);
         }
     }
 
@@ -834,7 +848,7 @@ impl Actor {
                         }
                         if let Some(tx) = reply.take() {
                             let _ = tx.send(result.map_err(|rejection| {
-                                map_rejection(rejection, self.session, &self.control)
+                                map_rejection(rejection, self.session, &self.control())
                             }));
                         }
                     }
@@ -868,9 +882,8 @@ impl Actor {
                     self.broken = Some("the turn driver is gone.".into());
                 }
             }
-            let Some(more) = self.drive_opening().await else {
-                break;
-            };
+            let more = self.drive_opening().await;
+            let Some(more) = more else { break };
             queue.extend(more);
         }
     }
@@ -1040,10 +1053,10 @@ impl Actor {
     fn observe(&mut self, kind: UpdateKind, queue: &mut VecDeque<Effect>) {
         match &kind {
             UpdateKind::TurnStarted { turn, .. } => {
-                self.control.begin_turn(*turn);
+                self.control().begin_turn(*turn);
             }
             UpdateKind::TurnEnded { turn, .. } => {
-                self.control.end_turn(*turn);
+                self.control().end_turn(*turn);
                 let resolved = self
                     .broker
                     .resolve_turn(*turn, Answer::Cancel, core_client());
@@ -1242,8 +1255,9 @@ impl Actor {
             }
         };
         let steer = matches!(mail.mode, MailMode::Steer);
+        let running = self.control().running();
         let receipt = match mail.mode {
-            MailMode::Steer => match self.control.running() {
+            MailMode::Steer => match running {
                 // The fold owns the text once the steer lands in the
                 // running turn; a full steer queue refuses the message.
                 Some(turn) => {
@@ -1298,8 +1312,9 @@ impl Actor {
     /// operation answers `Unavailable` instead of fabricating job state.
     /// Runs one turn operation against the control cell and fold.
     async fn on_turn(&mut self, req: super::TurnRequest) {
+        let running = self.control().running();
         let reply = match req.op {
-            TurnOp::Cancel => match self.control.running() {
+            TurnOp::Cancel => match running {
                 Some(turn) => {
                     let command = dal_core::Command::Cancel {
                         scope: dal_core::CancelScope::Turn(turn),
@@ -1321,7 +1336,7 @@ impl Actor {
                 }
                 None => TurnOpReply::Idle(true),
             },
-            TurnOp::Steer { text } => match self.control.running() {
+            TurnOp::Steer { text } => match running {
                 Some(turn) => {
                     let mut effects = Vec::new();
                     let stepped =
@@ -1358,7 +1373,7 @@ impl Actor {
                     TurnOpReply::Idle(true)
                 }
             }
-            _ => TurnOpReply::Idle(self.control.running().is_none()),
+            _ => TurnOpReply::Idle(running.is_none()),
         };
         let _ = req.reply.send(reply);
     }

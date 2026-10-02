@@ -317,6 +317,13 @@ impl Session {
             &stop,
             TurnEndStop::Done | TurnEndStop::Length | TurnEndStop::Filter | TurnEndStop::MaxSteps
         );
+        if let TurnEndStop::Failed { message } = &stop {
+            emit.updates.push(UpdateKind::Notice(Notice {
+                turn: Some(turn),
+                kind: "turn.failed".into(),
+                text: message.clone(),
+            }));
+        }
         emit.records.push(Record::TurnEnd {
             at: now,
             turn,
