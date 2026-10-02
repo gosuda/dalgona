@@ -49,7 +49,11 @@ fn build(user_toml: &str) -> Result<Product, Box<dyn Error>> {
 }
 
 fn names(product: &Product) -> BTreeSet<&str> {
-    product.extensions.iter().map(|extension| extension.name()).collect()
+    product
+        .extensions
+        .iter()
+        .map(|extension| extension.name())
+        .collect()
 }
 
 fn failure(user_toml: &str) -> Result<String, Box<dyn Error>> {
@@ -170,7 +174,10 @@ fn a_bad_section_fails_the_build_and_names_the_bad_key() -> Result<(), Box<dyn E
         ("[plugin.ttsr-rules]\nmisspelled = true\n", "misspelled"),
         ("[plugin.work]\nenabled = true\n", "plugin.plan"),
         ("[plugin.web]\nbogus = 1\n", "bogus"),
-        ("[plugin.review]\nmax_rounds = 11\n", "plugin.review.max_rounds"),
+        (
+            "[plugin.review]\nmax_rounds = 11\n",
+            "plugin.review.max_rounds",
+        ),
         ("[plugin.history]\nshare = 0.9\n", "share"),
         ("[plugin.judged]\nthinkin = true\n", "thinkin"),
         ("[plugin.mcp]\nservers = 1\n", "servers"),

@@ -607,9 +607,7 @@ mod host_tests {
         host.plan_command("on");
         host.services.script([Scripted::Label("Approve")]);
 
-        let result = host
-            .plan(&plan_args("# Plan\n\nDo it", "Ship it")?)
-            .await;
+        let result = host.plan(&plan_args("# Plan\n\nDo it", "Ship it")?).await;
 
         assert_eq!(result, "Plan approved. Plan mode is off.");
         let Some(Question::Select {
@@ -652,8 +650,10 @@ mod host_tests {
     async fn plan_revise() -> TestResult {
         let host = ScriptedWorkHost::open();
         host.plan_command("on");
-        host.services
-            .script([Scripted::Label("Revise"), Scripted::Label("rename the tables")]);
+        host.services.script([
+            Scripted::Label("Revise"),
+            Scripted::Label("rename the tables"),
+        ]);
 
         let result = host.plan(&plan_args("# Plan", "Ship it")?).await;
 
@@ -673,7 +673,10 @@ mod host_tests {
             ]
         );
         assert_eq!(host.state.phase(host.session), Phase::Planning);
-        assert_eq!(host.guard("patch", ToolClass::Patch).await?, blocked("patch"));
+        assert_eq!(
+            host.guard("patch", ToolClass::Patch).await?,
+            blocked("patch")
+        );
         Ok(())
     }
 
@@ -781,9 +784,15 @@ mod host_tests {
         let host = ScriptedWorkHost::open();
         host.plan_command("on");
         let cases = [
-            (plan_args(&"x".repeat(16_385), "s")?, "plan is 16385 bytes; the cap is 16384"),
+            (
+                plan_args(&"x".repeat(16_385), "s")?,
+                "plan is 16385 bytes; the cap is 16384",
+            ),
             (plan_args("", "s")?, "plan is 0 bytes; the cap is 16384"),
-            (plan_args("p", &"s".repeat(201))?, "summary is 201 bytes; the cap is 200"),
+            (
+                plan_args("p", &"s".repeat(201))?,
+                "summary is 201 bytes; the cap is 200",
+            ),
             (plan_args("p", "")?, "summary is 0 bytes; the cap is 200"),
         ];
         for (args, expected) in cases {
@@ -795,7 +804,10 @@ mod host_tests {
 
         host.services.script([Scripted::Label("Approve")]);
         let boundary = plan_args(&"x".repeat(16_384), &"s".repeat(200))?;
-        assert_eq!(host.plan(&boundary).await, "Plan approved. Plan mode is off.");
+        assert_eq!(
+            host.plan(&boundary).await,
+            "Plan approved. Plan mode is off."
+        );
         assert_eq!(host.services.asked_count(), 1);
         Ok(())
     }

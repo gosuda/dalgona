@@ -32,7 +32,10 @@ fn load_member(name: &str, member: &Value, input: Option<&str>) -> Result<Workfl
     if member.as_object().is_none() {
         return Err("the workflow must be an object with steps.".to_owned());
     }
-    match member.as_object().and_then(|object| object.get(&"description")) {
+    match member
+        .as_object()
+        .and_then(|object| object.get(&"description"))
+    {
         None => {}
         Some(description) if description.is_null() => {}
         Some(description) => match description.as_str() {

@@ -3,9 +3,9 @@
 //! `get_goal`, `/goal`, `/continuation` replies, and the `/goal clear`
 //! recovery document.
 
-use std::fmt::Write as _;
 use dal_core::Timestamp;
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
+use std::fmt::Write as _;
 
 use super::super::monitor::InflightCounts;
 use super::super::{ControllerMode, GoalStatus};

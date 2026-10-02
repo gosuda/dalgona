@@ -5,7 +5,6 @@ use std::num::NonZeroU64;
 
 use dal_core::EntryId;
 
-
 /// Selects image candidates oldest-plus-newest under one cap.
 ///
 /// Keeps the oldest candidate when it fits, then walks newest to oldest while

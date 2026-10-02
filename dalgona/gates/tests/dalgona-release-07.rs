@@ -4,7 +4,10 @@ mod support;
 
 use std::process::Command;
 
-fn run_semver(current: &std::path::Path, baseline: &std::path::Path) -> support::TestResult<std::process::Output> {
+fn run_semver(
+    current: &std::path::Path,
+    baseline: &std::path::Path,
+) -> support::TestResult<std::process::Output> {
     let root = support::repo_root();
     Ok(support::run_command(
         Command::new("bash")
@@ -27,6 +30,10 @@ fn semver_gate_rejects_patch_and_accepts_minor() -> support::TestResult<()> {
         "semver violation in semver-fixture; fix the change or bump the minor\n"
     );
     let minor = run_semver(&root.join("semver-minor"), &baseline)?;
-    assert!(minor.status.success(), "{}", String::from_utf8_lossy(&minor.stderr));
+    assert!(
+        minor.status.success(),
+        "{}",
+        String::from_utf8_lossy(&minor.stderr)
+    );
     Ok(())
 }

@@ -198,8 +198,9 @@ pub(crate) fn parse_config(
                     .map_err(|_| MonitorConfigError::range("max_lines", 1, 200))?;
             }
             "max_chars" => {
-                config.max_chars = usize::try_from(checked_integer(value, "max_chars", 512, 16_384)?)
-                    .map_err(|_| MonitorConfigError::range("max_chars", 512, 16_384))?;
+                config.max_chars =
+                    usize::try_from(checked_integer(value, "max_chars", 512, 16_384)?)
+                        .map_err(|_| MonitorConfigError::range("max_chars", 512, 16_384))?;
             }
             "wake_budget" => {
                 config.wake_budget = u16::try_from(checked_integer(value, "wake_budget", 1, 100)?)

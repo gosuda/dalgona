@@ -10,8 +10,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use dal_agent::ext::{BoxFuture, CompactError, Compaction, CoveredEntry};
 pub(crate) use dal_agent::ext::ImageProfile;
+use dal_agent::ext::{BoxFuture, CompactError, Compaction, CoveredEntry};
 use dal_core::{EntryId, SessionId};
 use dal_ext::Font;
 use thiserror::Error;
@@ -181,10 +181,13 @@ impl Request {
             ordinal,
             budget,
             carried: None,
-            user_turns: covered.iter().filter(|entry| entry.starts_user_turn).count(),
-            text_tokens: covered
+            user_turns: covered
                 .iter()
-                .fold(0_u64, |sum, entry| sum.saturating_add(entry.estimated_tokens)),
+                .filter(|entry| entry.starts_user_turn)
+                .count(),
+            text_tokens: covered.iter().fold(0_u64, |sum, entry| {
+                sum.saturating_add(entry.estimated_tokens)
+            }),
             pieces: pieces.into(),
             source,
         }
@@ -386,9 +389,7 @@ impl Engine {
             return Err(Decline::NothingToDraw.into());
         }
         let window = request.budget.window_tokens.ok_or(Decline::UnknownWindow)?;
-        let mut candidates = self
-            .render(&request, &profile, Arc::clone(&permit))
-            .await?;
+        let mut candidates = self.render(&request, &profile, Arc::clone(&permit)).await?;
         let pool = drawable(&candidates);
         if pool.is_empty() {
             return Err(Decline::NothingToDraw.into());
@@ -598,7 +599,12 @@ fn assemble(
     candidates: &mut [Candidate],
     selected: &[usize],
 ) -> Result<Drawn, Decline> {
-    let next_value = request.span.1.get().checked_add(1).ok_or(Decline::Inconsistent)?;
+    let next_value = request
+        .span
+        .1
+        .get()
+        .checked_add(1)
+        .ok_or(Decline::Inconsistent)?;
     let next = entry_id(next_value).ok_or(Decline::Inconsistent)?;
     let mut slots = vec![Slot::Text(Box::from(HISTORY_HEADER))];
     if let Some(carried) = &request.carried {

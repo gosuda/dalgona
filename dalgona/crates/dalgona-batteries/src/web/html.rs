@@ -14,8 +14,7 @@ pub(crate) enum MediaKind {
 /// the part before the first `;` counts. `None` is an unknown media type.
 pub(crate) fn classify_media_type(content_type: &str) -> Option<MediaKind> {
     let mime = content_type.split(';').next()?.trim();
-    if mime.eq_ignore_ascii_case("text/html")
-        || mime.eq_ignore_ascii_case("application/xhtml+xml")
+    if mime.eq_ignore_ascii_case("text/html") || mime.eq_ignore_ascii_case("application/xhtml+xml")
     {
         Some(MediaKind::Convert)
     } else if mime.eq_ignore_ascii_case("application/json")
@@ -71,7 +70,11 @@ mod tests {
             ("", None),
         ];
         for (content_type, expected) in cases {
-            assert_eq!(classify_media_type(content_type), expected, "{content_type:?}");
+            assert_eq!(
+                classify_media_type(content_type),
+                expected,
+                "{content_type:?}"
+            );
         }
     }
 

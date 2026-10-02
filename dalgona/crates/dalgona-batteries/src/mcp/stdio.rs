@@ -14,14 +14,14 @@ use sonic_rs::JsonValueTrait;
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     process::{ChildStderr, ChildStdin, ChildStdout, Command},
-    sync::{mpsc, Mutex},
+    sync::{Mutex, mpsc},
     time::timeout,
 };
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 
 use crate::mcp::{
-    tools::{resolve_executable, Key, ServerDecl},
-    Budgets, McpError, TransportError, STDERR_RING,
+    Budgets, McpError, STDERR_RING, TransportError,
+    tools::{Key, ServerDecl, resolve_executable},
 };
 
 const LINE_MAX: usize = 1_048_576;
@@ -82,8 +82,15 @@ impl StdioTransport {
             cause: format!("command {program:?} was not found on PATH"),
         })?;
 
-        let program_args = command.iter().skip(1).map(|arg| OsString::from(arg.as_ref())).collect::<Vec<_>>();
-        let declarations = env.iter().map(|(key, value)| (OsString::from(key.as_ref()), OsString::from(value.as_ref()))).collect::<Vec<_>>();
+        let program_args = command
+            .iter()
+            .skip(1)
+            .map(|arg| OsString::from(arg.as_ref()))
+            .collect::<Vec<_>>();
+        let declarations = env
+            .iter()
+            .map(|(key, value)| (OsString::from(key.as_ref()), OsString::from(value.as_ref())))
+            .collect::<Vec<_>>();
         let path = environment.path.clone();
         let home = environment.home.clone();
         let tmpdir = environment.tmpdir.clone();
@@ -146,7 +153,10 @@ impl StdioTransport {
         let pending = Arc::new(Mutex::new(HashMap::new()));
         let stderr_tail = Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_RING)));
         let cancel = CancellationToken::new();
-        #[expect(clippy::disallowed_methods, reason = "stdio server owns the abort-on-drop reader task")]
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "stdio server owns the abort-on-drop reader task"
+        )]
         let reader_task = AbortOnDropHandle::new(tokio::spawn(read_stdout(
             stdout,
             Arc::clone(&child),
@@ -155,8 +165,12 @@ impl StdioTransport {
             key.clone(),
             cancel.clone(),
         )));
-        #[expect(clippy::disallowed_methods, reason = "stdio server owns the abort-on-drop stderr drain")]
-        let stderr_task = AbortOnDropHandle::new(tokio::spawn(read_stderr(stderr, Arc::clone(&stderr_tail))));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "stdio server owns the abort-on-drop stderr drain"
+        )]
+        let stderr_task =
+            AbortOnDropHandle::new(tokio::spawn(read_stderr(stderr, Arc::clone(&stderr_tail))));
 
         Ok(Self {
             key,
@@ -283,20 +297,34 @@ impl StdioTransport {
     }
 
     /// Sends an MCP notification without allocating a response slot.
-    pub(crate) async fn notify(&self, body: &RawJson, cancel: &CancellationToken) -> Result<(), TransportError> {
+    pub(crate) async fn notify(
+        &self,
+        body: &RawJson,
+        cancel: &CancellationToken,
+    ) -> Result<(), TransportError> {
         let write = async {
             let mut stdin = self.stdin.lock().await;
             let Some(stdin) = stdin.as_mut() else {
                 return Err(TransportError::Mcp(McpError::Exited {
-                    key: self.key.display(), code: process_status(&self.child).await,
+                    key: self.key.display(),
+                    code: process_status(&self.child).await,
                 }));
             };
-            stdin.write_all(body.as_str().as_bytes()).await.map_err(|error| TransportError::Mcp(McpError::Start {
-                key: self.key.display(), cause: error.to_string(),
-            }))?;
-            stdin.write_all(b"\n").await.map_err(|error| TransportError::Mcp(McpError::Start {
-                key: self.key.display(), cause: error.to_string(),
-            }))
+            stdin
+                .write_all(body.as_str().as_bytes())
+                .await
+                .map_err(|error| {
+                    TransportError::Mcp(McpError::Start {
+                        key: self.key.display(),
+                        cause: error.to_string(),
+                    })
+                })?;
+            stdin.write_all(b"\n").await.map_err(|error| {
+                TransportError::Mcp(McpError::Start {
+                    key: self.key.display(),
+                    cause: error.to_string(),
+                })
+            })
         };
         tokio::select! {
             () = cancel.cancelled() => Err(TransportError::Cancelled),
@@ -307,7 +335,9 @@ impl StdioTransport {
 
     /// Notifies the server that one correlated request no longer has a waiting caller.
     pub(crate) async fn cancel_request(&self, id: u64, _version: &str, cancel: &CancellationToken) {
-        let body = format!(r#"{{"jsonrpc":"2.0","method":"notifications/cancelled","params":{{"requestId":{id}}}}}"#);
+        let body = format!(
+            r#"{{"jsonrpc":"2.0","method":"notifications/cancelled","params":{{"requestId":{id}}}}}"#
+        );
         if let Ok(body) = RawJson::parse(&body) {
             let _ = self.notify(&body, cancel).await;
         }
@@ -337,12 +367,7 @@ fn exit_code(status: std::process::ExitStatus) -> i32 {
 
 async fn process_status(child: &Arc<Mutex<Box<dyn ChildWrapper>>>) -> i32 {
     let mut child = child.lock().await;
-    child
-        .try_wait()
-        .ok()
-        .flatten()
-        .map(exit_code)
-        .unwrap_or(-1)
+    child.try_wait().ok().flatten().map(exit_code).unwrap_or(-1)
 }
 
 async fn read_stdout(
@@ -390,7 +415,9 @@ async fn read_stdout(
             return;
         };
         let id_value = value.get("id");
-        let method = value.get("method").and_then(sonic_rs::JsonValueTrait::as_str);
+        let method = value
+            .get("method")
+            .and_then(sonic_rs::JsonValueTrait::as_str);
         if id_value.is_some() && method.is_some() {
             if method == Some("elicitation/create") {
                 let token = value
@@ -494,12 +521,10 @@ fn parse_progress_id(token: &str) -> Option<u64> {
 }
 
 fn unsupported_request(value: &sonic_rs::Value) -> Result<String, McpError> {
-    let id = value
-        .get("id")
-        .ok_or_else(|| McpError::Protocol {
-            code: -32600,
-            message: "server request has no id".to_owned(),
-        })?;
+    let id = value.get("id").ok_or_else(|| McpError::Protocol {
+        code: -32600,
+        message: "server request has no id".to_owned(),
+    })?;
     let id = sonic_rs::to_string(id).map_err(|error| McpError::Protocol {
         code: -32600,
         message: format!("invalid server request id: {error}"),

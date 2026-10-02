@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use dal_agent::error::{SchemeError, ServiceError};
 use dal_agent::ext::{
-    ArgError, BoxFuture, Caller, CommandCx, CommandHandler, Doc, Extension, ExtensionBuilder,
-    Hook, HookCx, HookError, ObserveHook, RawValue, SchemeCx, SchemeResolver, Services, StatusCx,
+    ArgError, BoxFuture, Caller, CommandCx, CommandHandler, Doc, Extension, ExtensionBuilder, Hook,
+    HookCx, HookError, ObserveHook, RawValue, SchemeCx, SchemeResolver, Services, StatusCx,
     StatusPoll, StatusSnapshot, Tool, ToolCall, ToolCx, ToolOutcome, ToolOutput,
 };
 use dal_core::ext::{
@@ -22,8 +22,8 @@ mod plan;
 mod support;
 mod todo;
 
-pub(crate) use todo::{TodoItem, load as load_todos, open_todos, todo_all_terminal};
 pub use plan::PlanArgs;
+pub(crate) use todo::{TodoItem, load as load_todos, open_todos, todo_all_terminal};
 
 const EXTENSION_NAME: &str = "work";
 const TODO_TOOL: &str = "todo";
@@ -127,8 +127,8 @@ async fn append<T: serde::Serialize>(
 ) -> Result<(), ServiceError> {
     let encoded = sonic_rs::to_string(record)
         .map_err(|error| ServiceError::failed(None, error.to_string()))?;
-    let body = RawJson::parse(&encoded)
-        .map_err(|error| ServiceError::failed(None, error.to_string()))?;
+    let body =
+        RawJson::parse(&encoded).map_err(|error| ServiceError::failed(None, error.to_string()))?;
     services
         .append_record(caller, kind, Box::new(body))
         .await
@@ -139,7 +139,8 @@ fn tool_spec<P: schemars::JsonSchema>(
     name: &str,
     description: &str,
 ) -> Result<(Name, Arc<ToolSpec>), RegistrationError> {
-    let name = Name::parse(name).map_err(|_| RegistrationError::InvalidName { name: name.into() })?;
+    let name =
+        Name::parse(name).map_err(|_| RegistrationError::InvalidName { name: name.into() })?;
     let schema = sonic_rs::to_string(&schemars::schema_for!(P))
         .map_err(|_| RegistrationError::InvalidParameters)?;
     let parameters = RawJson::parse(&schema).map_err(|_| RegistrationError::InvalidParameters)?;
@@ -303,7 +304,10 @@ struct PlanStatus {
 
 impl StatusPoll for PlanStatus {
     fn snapshot(&self, cx: &StatusCx) -> StatusSnapshot {
-        let bodies = cx.records(todo::TODO_KIND).iter().map(|record| &record.body);
+        let bodies = cx
+            .records(todo::TODO_KIND)
+            .iter()
+            .map(|record| &record.body);
         let items = todo::fold_bodies(bodies);
         status_snapshot(self.state.phase(cx.session), &items)
     }
@@ -321,11 +325,7 @@ struct SessionOpen {
 }
 
 impl ObserveHook<SessionStart> for SessionOpen {
-    fn call(
-        &self,
-        input: SessionStart,
-        _cx: HookCx,
-    ) -> BoxFuture<'static, Result<(), HookError>> {
+    fn call(&self, input: SessionStart, _cx: HookCx) -> BoxFuture<'static, Result<(), HookError>> {
         self.state.session_start(input.session);
         Box::pin(async { Ok(()) })
     }
@@ -373,7 +373,11 @@ impl Hook<ToolCallEvent, ToolCallVerdict> for ToolGuard {
         event: ToolCallEvent,
         cx: HookCx,
     ) -> BoxFuture<'static, Result<ToolCallVerdict, HookError>> {
-        let verdict = plan::verdict(self.state.phase(cx.session), &event.class, event.tool.as_str());
+        let verdict = plan::verdict(
+            self.state.phase(cx.session),
+            &event.class,
+            event.tool.as_str(),
+        );
         Box::pin(async move { Ok(verdict) })
     }
 }
@@ -496,10 +500,7 @@ pub(crate) fn status_quiet(phase: plan::Phase) -> bool {
     phase != plan::Phase::Awaiting
 }
 
-pub(crate) fn status_json(
-    phase: plan::Phase,
-    items: &[TodoItem],
-) -> Result<String, StatusError> {
+pub(crate) fn status_json(phase: plan::Phase, items: &[TodoItem]) -> Result<String, StatusError> {
     let full = encode_status(phase, items, todo::MAX_SUBJECT_BYTES)?;
     if full.len() <= STATUS_LIMIT {
         return Ok(full);
@@ -560,8 +561,8 @@ fn status_subject(subject: &str, budget: usize) -> std::borrow::Cow<'_, str> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::todo::TodoState;
+    use super::*;
 
     #[derive(serde::Deserialize)]
     struct TerminalOutput {
@@ -722,8 +723,8 @@ mod tests {
 
     #[test]
     fn plan_status_truncation_boundary() -> Result<(), Box<dyn std::error::Error>> {
-        let base = encode_status(plan::Phase::Off, &padded_items(0), todo::MAX_SUBJECT_BYTES)?
-            .len();
+        let base =
+            encode_status(plan::Phase::Off, &padded_items(0), todo::MAX_SUBJECT_BYTES)?.len();
         let padding = STATUS_LIMIT - base;
 
         let exact = status_json(plan::Phase::Off, &padded_items(padding))?;
@@ -756,9 +757,8 @@ mod tests {
         let status = status_json(plan::Phase::Planning, &items);
 
         assert!(status.as_ref().is_ok_and(|text| text.len() <= STATUS_LIMIT));
-        let decoded = status.and_then(|text| {
-            sonic_rs::from_str::<StatusOutput>(&text).map_err(StatusError::from)
-        });
+        let decoded = status
+            .and_then(|text| sonic_rs::from_str::<StatusOutput>(&text).map_err(StatusError::from));
         assert!(decoded.is_ok_and(|output| {
             output
                 .todos
@@ -834,10 +834,7 @@ mod tests {
         assert!(!open.all_terminal);
         assert_eq!((open.open, open.total), (4, 5));
         assert_eq!(open.first_titles, ["one", "two", "three"]);
-        assert_eq!(
-            host.scheme("current").await?,
-            host.todos_command("").await?
-        );
+        assert_eq!(host.scheme("current").await?, host.todos_command("").await?);
 
         host.services.set_leaf(Some(0));
         let moved = terminal(host.scheme("terminal").await?)?;
@@ -901,7 +898,10 @@ mod tests {
         let args = RawJson::parse("{}")?;
         for (tool, visibility) in extension.tools() {
             assert_eq!(*visibility, Visibility::Model);
-            assert!(matches!(tool.classify(&args, &workspace), Ok(ToolClass::Read)));
+            assert!(matches!(
+                tool.classify(&args, &workspace),
+                Ok(ToolClass::Read)
+            ));
         }
         let commands: Vec<String> = extension
             .commands()

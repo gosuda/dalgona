@@ -6,7 +6,11 @@ use std::{collections::BTreeSet, io, time::Duration};
 
 use dal_core::Origin;
 
-const SKILLS: [&str; 3] = ["delegate-with-contracts", "find-anything", "initializer-and-sprints"];
+const SKILLS: [&str; 3] = [
+    "delegate-with-contracts",
+    "find-anything",
+    "initializer-and-sprints",
+];
 
 fn skills(product: &dalgon::Product) -> support::TestResult<Vec<dal_core::ext::SkillRecord>> {
     let extension = product
@@ -15,7 +19,10 @@ fn skills(product: &dalgon::Product) -> support::TestResult<Vec<dal_core::ext::S
         .find(|extension| extension.name() == "skills")
         .ok_or_else(|| io::Error::other("the product has no skills extension"))?;
     assert_eq!(extension.origin(), Origin::Bundled);
-    assert!(extension.inject().is_empty(), "a skill pack declares no service");
+    assert!(
+        extension.inject().is_empty(),
+        "a skill pack declares no service"
+    );
     assert!(extension.tools().is_empty() && extension.commands().is_empty());
     Ok(extension.skills().to_vec())
 }
@@ -34,10 +41,18 @@ fn skills_and_search_defaults_gate() -> support::TestResult<()> {
         assert!(!skill.letter2image, "{}", skill.name);
         assert!(!skill.body.starts_with('\u{feff}'), "{}", skill.name);
         assert!(!skill.body.contains('\r'), "{}", skill.name);
-        assert!(skill.body.ends_with('\n') && !skill.body.ends_with("\n\n"), "{}", skill.name);
+        assert!(
+            skill.body.ends_with('\n') && !skill.body.ends_with("\n\n"),
+            "{}",
+            skill.name
+        );
         assert!(skill.body.lines().count() <= 200, "{}", skill.name);
         for forbidden in ["dal.tool", "dal.on", "ctx.", "credential"] {
-            assert!(!skill.body.contains(forbidden), "{} contains {forbidden}", skill.name);
+            assert!(
+                !skill.body.contains(forbidden),
+                "{} contains {forbidden}",
+                skill.name
+            );
         }
     }
 
@@ -47,7 +62,9 @@ fn skills_and_search_defaults_gate() -> support::TestResult<()> {
     )?;
     assert_eq!(skills(&overridden)?, records);
 
-    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
     runtime.block_on(async {
         let host = support::start_dalgona(data_root).await?;
         let body = records

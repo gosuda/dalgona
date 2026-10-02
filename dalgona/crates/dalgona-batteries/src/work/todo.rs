@@ -807,7 +807,9 @@ mod host_tests {
         let bodies = host.services.all_bodies("todo");
         assert_eq!(
             bodies,
-            [r#"{"list":[{"subject":"Fix the parser","description":"","state":"in_progress"},{"subject":"Add tests","description":"cover fold","state":"pending"},{"subject":"Write the plan","description":"","state":"done"}]}"#]
+            [
+                r#"{"list":[{"subject":"Fix the parser","description":"","state":"in_progress"},{"subject":"Add tests","description":"cover fold","state":"pending"},{"subject":"Write the plan","description":"","state":"done"}]}"#
+            ]
         );
 
         let read = host.tool("todo", r#"{"action":"read"}"#).await?;
@@ -887,7 +889,8 @@ mod host_tests {
         assert_eq!(host.todos_command("").await?, "No todo list.");
 
         host.services.set_leaf(Some(0));
-        host.todo_tool(&write_args(&[("branch", "", "done")])?).await;
+        host.todo_tool(&write_args(&[("branch", "", "done")])?)
+            .await;
         assert_eq!(host.todos_command("").await?, "- [x] branch");
 
         host.services.set_leaf(Some(1));

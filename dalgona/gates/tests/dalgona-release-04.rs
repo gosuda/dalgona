@@ -2,7 +2,10 @@
 #[path = "support/mod.rs"]
 mod support;
 
-use std::{io::Write, process::{Command, Stdio}};
+use std::{
+    io::Write,
+    process::{Command, Stdio},
+};
 
 fn check_presence(response: &str) -> support::TestResult<std::process::Output> {
     let root = support::repo_root();
@@ -24,7 +27,11 @@ fn check_presence(response: &str) -> support::TestResult<std::process::Output> {
 #[test]
 fn dalgona_presence_gate_accepts_and_rejects_dal_versions() -> support::TestResult<()> {
     let matching = check_presence("{\"vers\":\"0.1.0\"}\n")?;
-    assert!(matching.status.success(), "{}", String::from_utf8_lossy(&matching.stderr));
+    assert!(
+        matching.status.success(),
+        "{}",
+        String::from_utf8_lossy(&matching.stderr)
+    );
 
     let mismatching = check_presence("{\"vers\":\"0.2.0\"}\n")?;
     assert_eq!(mismatching.status.code(), Some(3));

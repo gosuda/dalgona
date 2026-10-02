@@ -124,9 +124,7 @@ pub fn parse_config(section: Option<&toml::Value>) -> Result<WebConfig, WebConfi
         .clone()
         .try_into()
         .map_err(WebConfigError::from_source)?;
-    config
-        .validate()
-        .map_err(WebConfigError::from_source)?;
+    config.validate().map_err(WebConfigError::from_source)?;
     Ok(config)
 }
 
@@ -221,10 +219,7 @@ pub(crate) enum WebError {
 
 /// Maps a service failure. Denials and cancellation keep their distinct
 /// outcomes; other failures become a `Network` error with a bounded cause.
-pub(crate) fn service_error(
-    tool: ToolLabel,
-    error: dal_agent::error::ServiceError,
-) -> WebError {
+pub(crate) fn service_error(tool: ToolLabel, error: dal_agent::error::ServiceError) -> WebError {
     match error {
         dal_agent::error::ServiceError::Cancelled => WebError::Cancelled,
         denial @ dal_agent::error::ServiceError::Denied(_) => WebError::Denied(Box::new(denial)),
@@ -243,13 +238,11 @@ pub(crate) fn tool_outcome(error: WebError) -> dal_agent::ext::ToolOutcome {
             dal_agent::error::ServiceError::Denied(reason) => {
                 dal_agent::ext::ToolOutcome::Err(dal_agent::ToolError::Denied(reason))
             }
-            other => dal_agent::ext::ToolOutcome::Err(dal_agent::ToolError::message(
-                other.to_string(),
-            )),
+            other => {
+                dal_agent::ext::ToolOutcome::Err(dal_agent::ToolError::message(other.to_string()))
+            }
         },
-        error => dal_agent::ext::ToolOutcome::Err(dal_agent::ToolError::message(
-            error.to_string(),
-        )),
+        error => dal_agent::ext::ToolOutcome::Err(dal_agent::ToolError::message(error.to_string())),
     }
 }
 
@@ -279,7 +272,8 @@ pub(crate) fn tool_spec(
     name: &str,
     description: &str,
     schema: &schemars::Schema,
-) -> Result<(dal_core::Name, std::sync::Arc<dal_core::ToolSpec>), dal_core::ext::RegistrationError> {
+) -> Result<(dal_core::Name, std::sync::Arc<dal_core::ToolSpec>), dal_core::ext::RegistrationError>
+{
     let name = dal_core::Name::parse(name)?;
     let parameters = sonic_rs::to_string(schema)
         .ok()
@@ -322,23 +316,18 @@ pub fn web(
     use std::sync::Arc;
 
     let inject = dal_core::ext::ServiceSet::from_names(["net", "env"])?;
-    dal_agent::ext::ExtensionBuilder::new(
-        EXTENSION_NAME,
-        env!("CARGO_PKG_VERSION"),
-        inject,
-    )?
-    .with_origin(dal_core::Origin::Bundled, None)
-    .tool(
-        Arc::new(fetch::FetchTool::new(config.clone())?),
-        dal_core::ext::Visibility::Model,
-    )
-    .tool(
-        Arc::new(search::SearchTool::new(config)?),
-        dal_core::ext::Visibility::Model,
-    )
-    .build()
+    dal_agent::ext::ExtensionBuilder::new(EXTENSION_NAME, env!("CARGO_PKG_VERSION"), inject)?
+        .with_origin(dal_core::Origin::Bundled, None)
+        .tool(
+            Arc::new(fetch::FetchTool::new(config.clone())?),
+            dal_core::ext::Visibility::Model,
+        )
+        .tool(
+            Arc::new(search::SearchTool::new(config)?),
+            dal_core::ext::Visibility::Model,
+        )
+        .build()
 }
-
 
 #[cfg(test)]
 pub(crate) fn test_config() -> WebConfig {
@@ -481,9 +470,7 @@ mod tests {
         use super::{ToolLabel, service_error};
         let denied = service_error(
             ToolLabel::Search,
-            dal_agent::error::ServiceError::Denied(
-                dal_agent::error::DenyReason::NotInjected,
-            ),
+            dal_agent::error::ServiceError::Denied(dal_agent::error::DenyReason::NotInjected),
         );
         assert!(matches!(denied, super::WebError::Denied(_)));
 
@@ -493,8 +480,6 @@ mod tests {
         );
         assert_eq!(failed.to_string(), "web_search failed: boom");
     }
-
-
 }
 
 #[cfg(test)]
@@ -514,8 +499,9 @@ pub(crate) mod replay {
     };
 
     use hyper::{
-        Request, Response, body::{Body, Bytes, Frame, Incoming},
-        header::{CONTENT_LENGTH, CONTENT_TYPE, CONNECTION, LOCATION},
+        Request, Response,
+        body::{Body, Bytes, Frame, Incoming},
+        header::{CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, LOCATION},
         server::conn::http1,
         service::service_fn,
     };
@@ -654,10 +640,7 @@ pub(crate) mod replay {
         }
     }
 
-    fn record_request(
-        requests: &Mutex<Vec<RecordedRequest>>,
-        request: &Request<Incoming>,
-    ) {
+    fn record_request(requests: &Mutex<Vec<RecordedRequest>>, request: &Request<Incoming>) {
         let recorded = RecordedRequest {
             method: request.method().as_str().to_owned(),
             path: request.uri().path().to_owned(),
@@ -684,10 +667,7 @@ pub(crate) mod replay {
         bytes_served: Arc<AtomicUsize>,
     ) -> Result<Response<ReplayBody>, hyper::http::Error> {
         let (body, content_length) = match fixture.stream_len {
-            Some(stream_len) => (
-                Bytes::from(vec![b'a'; stream_len]),
-                STREAM_CONTENT_LENGTH,
-            ),
+            Some(stream_len) => (Bytes::from(vec![b'a'; stream_len]), STREAM_CONTENT_LENGTH),
             None => (Bytes::clone(&fixture.body), fixture.body.len()),
         };
         let mut builder = Response::builder()
@@ -752,32 +732,25 @@ pub(crate) mod replay {
             }])
             .await;
             let addr = replay.addr;
-            let (server, client) = tokio::join!(
-                replay.serve_requests(1),
-                async move {
-                    let mut stream = tokio::net::TcpStream::connect(addr)
-                        .await
-                        .expect("connect to replay");
-                    stream
-                        .write_all(b"GET /hello HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
-                        .await
-                        .expect("send request");
-                    let mut raw = Vec::new();
-                    stream
-                        .read_to_end(&mut raw)
-                        .await
-                        .expect("read response");
-                    raw
-                }
-            );
+            let (server, client) = tokio::join!(replay.serve_requests(1), async move {
+                let mut stream = tokio::net::TcpStream::connect(addr)
+                    .await
+                    .expect("connect to replay");
+                stream
+                    .write_all(
+                        b"GET /hello HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+                    )
+                    .await
+                    .expect("send request");
+                let mut raw = Vec::new();
+                stream.read_to_end(&mut raw).await.expect("read response");
+                raw
+            });
             server.expect("serve one request");
             let text = String::from_utf8_lossy(&client).into_owned();
             assert!(text.starts_with("HTTP/1.1 200"), "{text}");
             assert!(text.contains("<h1>Hello</h1>"), "{text}");
-            let requests = replay
-                .requests
-                .lock()
-                .expect("request log is not poisoned");
+            let requests = replay.requests.lock().expect("request log is not poisoned");
             assert_eq!(requests.len(), 1);
             assert_eq!(requests[0].method, "GET");
             assert_eq!(requests[0].path, "/hello");

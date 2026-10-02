@@ -9,14 +9,14 @@ pub(crate) mod delivery;
 pub(crate) mod goal;
 pub(crate) mod monitor;
 pub(crate) mod pool;
-pub(crate) mod stuck;
-pub(crate) mod types;
-mod tools;
-pub(crate) mod workflow;
-pub(crate) mod worktree;
 mod runtime;
+pub(crate) mod stuck;
 #[cfg(test)]
 mod tests;
+mod tools;
+pub(crate) mod types;
+pub(crate) mod workflow;
+pub(crate) mod worktree;
 
 pub(crate) use types::{ControllerMode, GoalStatus, JobsView, StopKind};
 
@@ -260,8 +260,7 @@ pub fn orchestration(config: OrchestrationConfig) -> Result<Extension, Registrat
         || config.arbiter.enabled
         || config.agents.enabled
         || config.isolation.enabled;
-    let input_enabled =
-        config.loop_guard.enabled || config.goal.enabled || config.arbiter.enabled;
+    let input_enabled = config.loop_guard.enabled || config.goal.enabled || config.arbiter.enabled;
     let tool_hook_enabled = config.loop_guard.enabled
         || config.sleep.enabled
         || config.goal.enabled
@@ -280,8 +279,8 @@ pub fn orchestration(config: OrchestrationConfig) -> Result<Extension, Registrat
     let tool_result_enabled = config.goal.enabled || config.monitor.enabled;
     let runtime = runtime::Runtime::new(config)?;
     let inject = ServiceSet::from_names(["agents", "jobs", "turn", "sidecar", "run", "ask"])?;
-    let mut builder = ExtensionBuilder::new("orchestration", "0.1.0", inject)?
-        .with_origin(Origin::Bundled, None);
+    let mut builder =
+        ExtensionBuilder::new("orchestration", "0.1.0", inject)?.with_origin(Origin::Bundled, None);
     builder = tools::register(builder, &runtime)?;
     builder = commands::register(builder, &runtime)?;
     if needs_owner {

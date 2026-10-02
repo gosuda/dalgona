@@ -9,12 +9,14 @@ use dal_core::EntryId;
 use super::config::{HistoryConfig, HistoryConfigError, parse_config};
 use super::draw::{Grid, draw, paginate};
 use super::dream::{
-    DreamEvent, DreamFileError, DreamPhase, DreamState, check_dream_file,
-    decode_dream_file, transition,
+    DreamEvent, DreamFileError, DreamPhase, DreamState, check_dream_file, decode_dream_file,
+    transition,
 };
 use super::records::{LetterRecord, RecordError};
 use super::selection::{LetterVisibility, history_index_line, select_oldest_plus_newest};
-use super::spans::{CompactPiece, HistoryError, Item, Role, SourceError, Span, items, retained_segments};
+use super::spans::{
+    CompactPiece, HistoryError, Item, Role, SourceError, Span, items, retained_segments,
+};
 
 fn entry_id(value: u64) -> Option<EntryId> {
     NonZeroU64::new(value).map(EntryId::new)
@@ -268,8 +270,6 @@ fn dream_neutral_events_keep_streaks() {
     assert_eq!(state.transient_streak, 2);
 }
 
-
-
 #[test]
 fn dream_file_decode_names_unknown_members() {
     let valid = decode_dream_file(&dream_file_body("", "")).expect("canonical body decodes");
@@ -432,8 +432,7 @@ fn selection_keeps_oldest_plus_newest() {
 #[test]
 fn history_index_lines_distinguish_visibility_states() {
     let drawn = history_index_line("history/2.3", 4, 7, LetterVisibility::Drawn);
-    let shown_as_text =
-        history_index_line("history/2.3", 4, 7, LetterVisibility::ShownAsText);
+    let shown_as_text = history_index_line("history/2.3", 4, 7, LetterVisibility::ShownAsText);
     let not_drawn = history_index_line("history/2.3", 4, 7, LetterVisibility::NotDrawn);
     assert!(drawn.starts_with("letter://history/2.3  "));
     assert!(drawn.ends_with("entries 4-7"));

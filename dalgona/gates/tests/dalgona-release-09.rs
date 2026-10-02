@@ -13,7 +13,11 @@ fn dalgona_linux_archive_has_only_binaries_metadata_and_man_pages() -> support::
             .args(["build", "--target=x86_64-unknown-linux-gnu"])
             .current_dir(&workspace),
     )?;
-    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
     let target = std::env::var_os("CARGO_TARGET_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| workspace.join("target"));
@@ -24,7 +28,11 @@ fn dalgona_linux_archive_has_only_binaries_metadata_and_man_pages() -> support::
         .find(|path| path.extension().is_some_and(|extension| extension == "xz"))
         .ok_or("cargo-dist produced no Linux tar.xz archive")?;
     let listing = support::run_command(Command::new("tar").arg("-tf").arg(&archive))?;
-    assert!(listing.status.success(), "{}", String::from_utf8_lossy(&listing.stderr));
+    assert!(
+        listing.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listing.stderr)
+    );
     let listed = String::from_utf8(listing.stdout)?;
     let members: BTreeSet<_> = listed
         .lines()
@@ -41,7 +49,12 @@ fn dalgona_linux_archive_has_only_binaries_metadata_and_man_pages() -> support::
     for entry in fs::read_dir(workspace.join("crates/dalgona/man"))? {
         let path = entry?.path();
         if path.extension().is_some_and(|extension| extension == "1") {
-            expected.insert(format!("man/{}", path.file_name().ok_or("man page has no filename")?.to_string_lossy()));
+            expected.insert(format!(
+                "man/{}",
+                path.file_name()
+                    .ok_or("man page has no filename")?
+                    .to_string_lossy()
+            ));
         }
     }
     assert_eq!(members, expected);

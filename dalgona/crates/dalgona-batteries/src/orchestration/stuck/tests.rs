@@ -6,10 +6,10 @@ use std::error::Error;
 use dal_core::{RawJson, Timestamp};
 use sonic_rs::{JsonValueTrait, Value};
 
-use super::guard::{canonical_args, on_tool_call, reset, GuardEffects, GuardState, GuardVerdict};
+use super::guard::{GuardEffects, GuardState, GuardVerdict, canonical_args, on_tool_call, reset};
 use super::rewrite::rewrite_exec_args;
 use super::sleep::{SleepClassifier, SleepRule, SleepWait};
-use super::{silence_suffix, LOOP_HARD_STOP_REASON};
+use super::{LOOP_HARD_STOP_REASON, silence_suffix};
 
 fn raw(value: &str) -> Result<RawJson, Box<dyn Error>> {
     Ok(RawJson::parse(value)?)

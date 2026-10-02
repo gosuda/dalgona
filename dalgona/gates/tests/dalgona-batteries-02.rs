@@ -7,7 +7,9 @@ use std::time::Duration;
 #[test]
 fn guard_is_on_by_default_and_reports_the_four_measurements() -> support::TestResult<()> {
     let scratch = support::Scratch::new("guard-measurements")?;
-    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
     runtime.block_on(async {
         let host = support::start_dalgona(scratch.path().to_path_buf()).await?;
         let doc = host.doc("dalgona://quality")?;

@@ -28,7 +28,10 @@ impl fmt::Debug for TokenRecord {
             .debug_struct("TokenRecord")
             .field("client_id", &self.client_id)
             .field("access_token", &"<redacted>")
-            .field("refresh_token", &self.refresh_token.as_ref().map(|_| "<redacted>"))
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "<redacted>"),
+            )
             .field("scopes", &self.scopes)
             .finish()
     }
@@ -90,7 +93,10 @@ pub(crate) fn persist_token(
 pub(crate) fn canonical_resource(url: &Url) -> String {
     let scheme = url.scheme().to_ascii_lowercase();
     let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
-    let port = url.port().map(|port| format!(":{port}")).unwrap_or_default();
+    let port = url
+        .port()
+        .map(|port| format!(":{port}"))
+        .unwrap_or_default();
     let path = url.path().trim_end_matches('/').to_owned();
     format!("{scheme}://{host}{port}{path}")
 }
@@ -104,7 +110,8 @@ pub(crate) fn challenge_param(challenge: &str, name: &str) -> Option<String> {
     loop {
         while chars.next_if(|&c| matches!(c, ' ' | '\t' | ',')).is_some() {}
         let key: String =
-            std::iter::from_fn(|| chars.next_if(|&c| !matches!(c, ' ' | '\t' | ',' | '='))).collect();
+            std::iter::from_fn(|| chars.next_if(|&c| !matches!(c, ' ' | '\t' | ',' | '=')))
+                .collect();
         if key.is_empty() && chars.peek().is_none() {
             return None;
         }
@@ -137,7 +144,7 @@ fn quoted_value(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> String 
 
 /// Computes the PKCE S256 code challenge for a verifier.
 pub(crate) fn pkce_challenge(verifier: &str) -> String {
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     URL_SAFE_NO_PAD.encode(sha256(verifier.as_bytes()))
 }
 
@@ -243,7 +250,9 @@ mod tests {
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
         assert_eq!(
-            hex(sha256(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")),
+            hex(sha256(
+                b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
+            )),
             "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
         );
     }
@@ -277,7 +286,10 @@ mod tests {
             challenge_param(challenge, "error"),
             Some("insufficient_scope".to_owned())
         );
-        assert_eq!(challenge_param(challenge, "realm"), Some("plain".to_owned()));
+        assert_eq!(
+            challenge_param(challenge, "realm"),
+            Some("plain".to_owned())
+        );
         assert_eq!(challenge_param("Bearer", "scope"), None);
         assert_eq!(challenge_param(r#"Bearer scope="""#, "scope"), None);
     }
@@ -292,25 +304,39 @@ mod tests {
 
     #[test]
     fn persisted_token_file_is_mode_0600_and_resource_bound() {
-        let path = std::env::temp_dir().join(format!(
-            "dalgona-mcp-tokens-{}.json",
-            uuid::Uuid::new_v4()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("dalgona-mcp-tokens-{}.json", uuid::Uuid::new_v4()));
         let record = TokenRecord {
             client_id: "client".to_owned(),
             access_token: "access".to_owned(),
             refresh_token: Some("refresh".to_owned()),
             scopes: vec!["read".to_owned()],
         };
-        persist_token(&path, "https://issuer.example", "https://server.example/mcp", record)
-            .expect("persist token");
+        persist_token(
+            &path,
+            "https://issuer.example",
+            "https://server.example/mcp",
+            record,
+        )
+        .expect("persist token");
         let loaded = read_tokens(&path);
         assert_eq!(
-            record_for(&loaded, "https://issuer.example", "https://server.example/mcp")
-                .map(|record| record.client_id.as_str()),
+            record_for(
+                &loaded,
+                "https://issuer.example",
+                "https://server.example/mcp"
+            )
+            .map(|record| record.client_id.as_str()),
             Some("client")
         );
-        assert!(record_for(&loaded, "https://other.example", "https://server.example/mcp").is_none());
+        assert!(
+            record_for(
+                &loaded,
+                "https://other.example",
+                "https://server.example/mcp"
+            )
+            .is_none()
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
 //! Streamable-HTTP JSON-RPC codec: envelopes, headers, and tolerant replies.
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use dal_core::RawJson;
 use reqwest::{
-    header::{HeaderMap, HeaderName, HeaderValue},
     Response,
+    header::{HeaderMap, HeaderName, HeaderValue},
 };
 use sonic_rs::{JsonValueTrait, Value};
 
@@ -52,7 +52,9 @@ pub(crate) fn request_body(
     );
     let trimmed = params.trim();
     if !trimmed.starts_with('{') || !trimmed.ends_with('}') {
-        return Err(protocol_error("MCP params must be a JSON object".to_owned()));
+        return Err(protocol_error(
+            "MCP params must be a JSON object".to_owned(),
+        ));
     }
     let inner = trimmed[1..trimmed.len() - 1].trim();
     let merged = if inner.is_empty() {

@@ -16,7 +16,10 @@ fn every_battery_is_a_bundled_rust_extension_and_disabling_one_removes_only_it()
     let scratch = support::Scratch::new("battery-inventory")?;
     let root = scratch.path().to_path_buf();
     let product = support::build_product(root.clone(), None)?;
-    assert!(product.bundled.is_empty(), "no Starlark source ships in the product");
+    assert!(
+        product.bundled.is_empty(),
+        "no Starlark source ships in the product"
+    );
     let full = support::battery_names(&product);
     assert_eq!(full.len(), support::BATTERIES.len());
     for extension in &product.extensions {
@@ -32,9 +35,16 @@ fn every_battery_is_a_bundled_rust_extension_and_disabling_one_removes_only_it()
         let reduced = support::build_product(root.clone(), Some(&toml))?;
         let mut expected = full.clone();
         expected.remove(battery);
-        assert_eq!(support::battery_names(&reduced), expected, "disabling {battery}");
+        assert_eq!(
+            support::battery_names(&reduced),
+            expected,
+            "disabling {battery}"
+        );
         assert!(
-            reduced.extensions.iter().any(|extension| extension.name() == "dalgona"),
+            reduced
+                .extensions
+                .iter()
+                .any(|extension| extension.name() == "dalgona"),
             "the manual stays when {battery} is disabled"
         );
     }
@@ -54,8 +64,7 @@ impl CommandHandler for Handler {
 }
 
 #[tokio::test]
-async fn plan_command_clash_is_a_load_error_naming_both_owners()
--> support::TestResult<()> {
+async fn plan_command_clash_is_a_load_error_naming_both_owners() -> support::TestResult<()> {
     let scratch = support::Scratch::new("plan-command-clash")?;
     let root = scratch.path().to_path_buf();
     let factory = dalgona::product();

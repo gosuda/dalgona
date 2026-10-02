@@ -10,9 +10,7 @@ use dal_agent::ext::{
 use dal_core::{ModelInfo, Name, RegistrationError, ToolClass, ToolSpec, Visibility, Workspace};
 use sonic_rs::JsonContainerTrait;
 
-use super::agents_tool::{
-    AGENTS_DESCRIPTION, AGENTS_SCHEMA, REPORT_DESCRIPTION, REPORT_SCHEMA,
-};
+use super::agents_tool::{AGENTS_DESCRIPTION, AGENTS_SCHEMA, REPORT_DESCRIPTION, REPORT_SCHEMA};
 use super::goal::ops::{
     CREATE_GOAL_DESCRIPTION, CREATE_GOAL_SCHEMA, GET_GOAL_DESCRIPTION, GET_GOAL_SCHEMA,
     UPDATE_GOAL_DESCRIPTION, UPDATE_GOAL_SCHEMA,
@@ -42,7 +40,8 @@ impl Tool for OrchestrationTool {
         let parsed: sonic_rs::Value = sonic_rs::from_str(args.as_str())
             .map_err(|error| ArgError::message(error.to_string()))?;
         let action = parsed
-            .as_object().and_then(|object| object.get(&"action"))
+            .as_object()
+            .and_then(|object| object.get(&"action"))
             .and_then(sonic_rs::JsonValueTrait::as_str)
             .unwrap_or_default();
         Ok(if action == "run" {
@@ -89,7 +88,8 @@ fn build_tool(
     description: &str,
     schema: &str,
 ) -> Result<Arc<dyn Tool>, RegistrationError> {
-    let name = Name::parse(name).map_err(|_| RegistrationError::InvalidName { name: name.into() })?;
+    let name =
+        Name::parse(name).map_err(|_| RegistrationError::InvalidName { name: name.into() })?;
     let parameters = RawValue::parse(schema).map_err(|_| RegistrationError::InvalidParameters)?;
     if !dal_core::valid_tool_parameters(&parameters) {
         return Err(RegistrationError::InvalidParameters);
@@ -120,8 +120,13 @@ fn add_tool(
     ))
 }
 
-pub(crate) fn report_tool(runtime: &Runtime) -> Result<(Arc<dyn Tool>, Visibility), RegistrationError> {
-    Ok((build_tool(runtime, "report", REPORT_DESCRIPTION, REPORT_SCHEMA)?, Visibility::Model))
+pub(crate) fn report_tool(
+    runtime: &Runtime,
+) -> Result<(Arc<dyn Tool>, Visibility), RegistrationError> {
+    Ok((
+        build_tool(runtime, "report", REPORT_DESCRIPTION, REPORT_SCHEMA)?,
+        Visibility::Model,
+    ))
 }
 
 pub(crate) fn register(

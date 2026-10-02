@@ -5,9 +5,14 @@ mod support;
 use std::{fs, io, path::Path, time::Duration};
 
 fn body_after_heading(document: &str, expected_heading: &str) -> support::TestResult<&str> {
-    let (heading, body) = document.split_once('\n').ok_or_else(|| io::Error::other("document has no body"))?;
+    let (heading, body) = document
+        .split_once('\n')
+        .ok_or_else(|| io::Error::other("document has no body"))?;
     if heading != expected_heading {
-        return Err(io::Error::other(format!("expected heading {expected_heading:?}, got {heading:?}")).into());
+        return Err(io::Error::other(format!(
+            "expected heading {expected_heading:?}, got {heading:?}"
+        ))
+        .into());
     }
     Ok(body)
 }
@@ -22,7 +27,9 @@ fn readme_philosophy_and_served_page_are_byte_equal() -> support::TestResult<()>
     assert_eq!(readme_body.as_bytes(), page_body.as_bytes());
 
     let scratch = support::Scratch::new("philosophy-page")?;
-    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
     runtime.block_on(async {
         let host = support::start_dalgona(scratch.path().to_path_buf()).await?;
         let served = host.doc("dalgona://philosophy")?;

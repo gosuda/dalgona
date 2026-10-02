@@ -30,21 +30,86 @@ const RULES: [&str; 19] = [
 ];
 
 const SCOPED: [(&str, &[&str], InterruptMode, u16); 15] = [
-    ("atlas-v2-no-workaround", &["text"], InterruptMode::ProseOnly, 10),
-    ("compact-cite-files", &["text"], InterruptMode::ProseOnly, 10),
-    ("compact-no-context-loss", &["text"], InterruptMode::ProseOnly, 5),
-    ("docs-contract-markers", &["tool:patch"], InterruptMode::Never, 10),
-    ("git-commit-no-force-push", &["tool:exec"], InterruptMode::ToolOnly, 1),
-    ("git-commit-no-placeholder-message", &["tool:exec"], InterruptMode::ToolOnly, 1),
-    ("git-commit-no-secrets", &["tool:patch"], InterruptMode::ToolOnly, 1),
-    ("project-workflow-slice-first", &["text"], InterruptMode::ProseOnly, 10),
-    ("project-workflow-write-it-down", &["text"], InterruptMode::ProseOnly, 5),
-    ("steer-no-apologies", &["text"], InterruptMode::ProseOnly, 10),
+    (
+        "atlas-v2-no-workaround",
+        &["text"],
+        InterruptMode::ProseOnly,
+        10,
+    ),
+    (
+        "compact-cite-files",
+        &["text"],
+        InterruptMode::ProseOnly,
+        10,
+    ),
+    (
+        "compact-no-context-loss",
+        &["text"],
+        InterruptMode::ProseOnly,
+        5,
+    ),
+    (
+        "docs-contract-markers",
+        &["tool:patch"],
+        InterruptMode::Never,
+        10,
+    ),
+    (
+        "git-commit-no-force-push",
+        &["tool:exec"],
+        InterruptMode::ToolOnly,
+        1,
+    ),
+    (
+        "git-commit-no-placeholder-message",
+        &["tool:exec"],
+        InterruptMode::ToolOnly,
+        1,
+    ),
+    (
+        "git-commit-no-secrets",
+        &["tool:patch"],
+        InterruptMode::ToolOnly,
+        1,
+    ),
+    (
+        "project-workflow-slice-first",
+        &["text"],
+        InterruptMode::ProseOnly,
+        10,
+    ),
+    (
+        "project-workflow-write-it-down",
+        &["text"],
+        InterruptMode::ProseOnly,
+        5,
+    ),
+    (
+        "steer-no-apologies",
+        &["text"],
+        InterruptMode::ProseOnly,
+        10,
+    ),
     ("steer-no-meta", &["text"], InterruptMode::ProseOnly, 10),
     ("steer-no-restate", &["text"], InterruptMode::ProseOnly, 10),
-    ("stop-act-dont-offer", &["text"], InterruptMode::ProseOnly, 5),
-    ("stop-evidence-before-done", &["text"], InterruptMode::ProseOnly, 5),
-    ("stop-finish-the-work", &["text"], InterruptMode::ProseOnly, 10),
+    (
+        "stop-act-dont-offer",
+        &["text"],
+        InterruptMode::ProseOnly,
+        5,
+    ),
+    (
+        "stop-evidence-before-done",
+        &["text"],
+        InterruptMode::ProseOnly,
+        5,
+    ),
+    (
+        "stop-finish-the-work",
+        &["text"],
+        InterruptMode::ProseOnly,
+        10,
+    ),
 ];
 
 const ALWAYS: [&str; 4] = [
@@ -95,8 +160,15 @@ fn bundled_rule_sets_gate() -> support::TestResult<()> {
             .ok_or_else(|| io::Error::other(format!("{name} scope was not registered")))?;
         assert_eq!(scope.text, tokens.contains(&"text"), "{name}");
         assert!(!scope.thinking, "{name}");
-        assert_eq!(scope.tool, tokens.iter().any(|token| token.starts_with("tool")), "{name}");
-        let named: Vec<&str> = tokens.iter().filter_map(|token| token.strip_prefix("tool:")).collect();
+        assert_eq!(
+            scope.tool,
+            tokens.iter().any(|token| token.starts_with("tool")),
+            "{name}"
+        );
+        let named: Vec<&str> = tokens
+            .iter()
+            .filter_map(|token| token.strip_prefix("tool:"))
+            .collect();
         let actual: Vec<&str> = scope.named_tools.iter().map(|tool| tool.as_str()).collect();
         assert_eq!(actual, named, "{name}");
         assert_eq!(record.mode, Some(mode), "{name}");

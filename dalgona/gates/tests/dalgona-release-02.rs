@@ -15,7 +15,11 @@ fn publish_order_diamond_is_topological_and_stable() -> support::TestResult<()> 
             .arg(fixture)
             .current_dir(&root),
     )?;
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(
         String::from_utf8(output.stdout)?,
         "cargo publish -p base\ncargo publish -p left\ncargo publish -p right\ncargo publish -p top\n"

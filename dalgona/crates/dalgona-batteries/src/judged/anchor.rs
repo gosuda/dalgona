@@ -18,7 +18,9 @@ fn is_explicit(raw: &str) -> bool {
     let Ok(args) = sonic_rs::from_str::<sonic_rs::Value>(raw) else {
         return false;
     };
-    args.get("explicit").and_then(sonic_rs::JsonValueTrait::as_bool) == Some(true)
+    args.get("explicit")
+        .and_then(sonic_rs::JsonValueTrait::as_bool)
+        == Some(true)
 }
 
 /// Classifies only `ask` calls that do not carry an explicit user request.

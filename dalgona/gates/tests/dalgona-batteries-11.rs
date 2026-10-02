@@ -24,7 +24,10 @@ fn defaults_reach_patch_search_and_guard() -> support::TestResult<()> {
             .map(|extension| extension.name().to_owned())
             .collect()
     };
-    assert_eq!(extension_names(&default_product), extension_names(&overridden));
+    assert_eq!(
+        extension_names(&default_product),
+        extension_names(&overridden)
+    );
     let factory = dalgona::product();
     assert!(factory.defaults.contains("edit_style = \"hashline\""));
     assert!(

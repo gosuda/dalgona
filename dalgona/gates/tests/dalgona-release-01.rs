@@ -24,7 +24,12 @@ fn dalgona_dist_plan_lists_the_six_target_archives() -> support::TestResult<()> 
     ] {
         assert!(plan.contains(target), "dist plan omits {target}");
     }
-    for artifact in ["dalgona-installer.sh", "dalgona-installer.ps1", "sha256", "CHANGELOG.md"] {
+    for artifact in [
+        "dalgona-installer.sh",
+        "dalgona-installer.ps1",
+        "sha256",
+        "CHANGELOG.md",
+    ] {
         assert!(plan.contains(artifact), "dist plan omits {artifact}");
     }
     Ok(())

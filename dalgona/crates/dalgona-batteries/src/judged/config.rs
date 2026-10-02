@@ -137,8 +137,8 @@ fn edit_distance_at_most_2(left: &str, right: &str) -> Option<u32> {
         current[0] = row + 1;
         let mut row_min = current[0];
         for (column, right_byte) in right.iter().enumerate() {
-            let substitution = previous[column]
-                + usize::from(!left_byte.eq_ignore_ascii_case(right_byte));
+            let substitution =
+                previous[column] + usize::from(!left_byte.eq_ignore_ascii_case(right_byte));
             let deletion = previous[column + 1] + 1;
             let insertion = current[column] + 1;
             let distance = substitution.min(deletion).min(insertion);

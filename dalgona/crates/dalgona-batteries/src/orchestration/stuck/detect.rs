@@ -294,7 +294,10 @@ fn detect_similar(
 
 /// Reads the single target field the similar detector understands.
 pub(super) fn read_path(value: &Value) -> Option<&str> {
-    value.as_object().and_then(|object| object.get(&"path")).and_then(|path| path.as_str())
+    value
+        .as_object()
+        .and_then(|object| object.get(&"path"))
+        .and_then(|path| path.as_str())
 }
 
 /// Dice score over multisets of adjacent Unicode scalar-value bigrams.

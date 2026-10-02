@@ -13,7 +13,11 @@ fn version_query_does_not_create_runtime_resources() -> support::TestResult<()> 
             .args(["--version"])
             .env("XDG_DATA_HOME", &data_home),
     )?;
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(String::from_utf8(output.stdout)?, "dalgona 0.1.0\n");
     assert!(!data_home.exists());
     Ok(())
