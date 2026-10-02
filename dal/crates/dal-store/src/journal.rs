@@ -41,6 +41,8 @@ pub(crate) struct Faults {
     /// Fail the torn-tail side-file write at open.
     pub(crate) quarantine_error: bool,
     /// Fail the session-directory sync after writing the torn-tail sidefile.
+    /// Windows has no directory-sync door, so the fault is never injected there.
+    #[cfg_attr(windows, expect(dead_code, reason = "directory sync is POSIX-only"))]
     pub(crate) directory_sync_error: bool,
 }
 
@@ -385,6 +387,8 @@ fn write_side_file(
     journal_path: &Path,
     faults: &Faults,
 ) -> Result<(), JournalError> {
+    #[cfg(windows)]
+    let _ = faults;
     let mut options = OpenOptions::new();
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -438,6 +442,14 @@ fn write_side_file(
     Ok(())
 }
 
+/// Windows has no directory-sync door; the `Result` is load-bearing on POSIX.
+#[cfg_attr(
+    windows,
+    expect(
+        clippy::unnecessary_wraps,
+        reason = "directory sync fails only on POSIX"
+    )
+)]
 fn sync_parent_directory(path: &Path, operation: &'static str) -> Result<(), JournalError> {
     #[cfg(windows)]
     {

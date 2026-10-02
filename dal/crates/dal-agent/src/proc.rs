@@ -261,7 +261,10 @@ impl Proc {
     /// Records live descendants for the post-exit `setsid` sweep.
     #[cfg_attr(
         not(target_os = "linux"),
-        expect(clippy::unused_async, reason = "the /proc walk await is linux-only")
+        expect(
+            clippy::unused_async_trait_impl,
+            reason = "the /proc walk await is linux-only"
+        )
     )]
     async fn recorded_descendants(&mut self) -> Vec<u32> {
         #[cfg(target_os = "linux")]
@@ -343,7 +346,10 @@ impl Proc {
 
     #[cfg_attr(
         not(target_os = "linux"),
-        expect(clippy::unused_async, reason = "the /proc walk await is linux-only")
+        expect(
+            clippy::unused_async_trait_impl,
+            reason = "the /proc walk await is linux-only"
+        )
     )]
     async fn sweep_after_exit(&mut self) {
         #[cfg(windows)]

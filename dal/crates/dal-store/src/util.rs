@@ -2,10 +2,13 @@
 
 use std::{
     ffi::OsString,
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     io::{self, Write},
     path::Path,
 };
+
+#[cfg(not(windows))]
+use std::fs::File;
 
 use tempfile::TempPath;
 use unicode_segmentation::UnicodeSegmentation;
@@ -183,11 +186,19 @@ fn rename_temp(temp: &Path, target: &Path, publication: Publication) -> Result<(
     }
 }
 
+/// Windows has no directory-sync door; the `Result` is load-bearing on POSIX.
+#[cfg_attr(
+    windows,
+    expect(
+        clippy::unnecessary_wraps,
+        reason = "directory sync fails only on POSIX"
+    )
+)]
 pub(crate) fn sync_dir(dir: &Path) -> Result<(), StoreError> {
     #[cfg(windows)]
     {
         let _ = dir;
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(windows))]
     {
