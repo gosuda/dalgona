@@ -304,6 +304,10 @@ async fn run_headless(
                 );
             }
         };
+    // Print mode runs without a terminal: under `ask` the run cannot answer
+    // approval requests, so it emits the once-per-run headless notice and
+    // denies gated calls instead of waiting out the broker timeout.
+    let headless_approval = config.approval() == dal_core::ApprovalMode::Ask;
     let session = session_ref(cli, workspace);
     let host = match Host::start(
         product,
@@ -333,6 +337,7 @@ async fn run_headless(
         output_last_message: cli.output_last_message.clone(),
         prompt: parts,
         stderr_is_tty: snapshot.stderr_tty,
+        headless_approval,
         stop: stop.clone(),
         quiet_wait: (!cli.json).then_some(print::QUIET_WAIT),
     };
@@ -358,7 +363,10 @@ async fn run_headless(
         Ok(Ok(print::PrintOutcome::Completed)) => exit::code(exit::ExitKind::Success),
         Ok(Ok(print::PrintOutcome::Interrupted)) => exit::code(exit::ExitKind::Signal(2)),
         Ok(Err(error)) if error.is_broken_pipe() => exit::code(exit::ExitKind::Signal(13)),
-        Ok(Err(_)) => exit::code(exit::ExitKind::RequestedFailure),
+        // A headless denial is a requested failure like a tool error.
+        Ok(Ok(print::PrintOutcome::Denied) | Err(_)) => {
+            exit::code(exit::ExitKind::RequestedFailure)
+        }
         Err(code) => ExitCode::from(code),
     }
 }
@@ -699,6 +707,16 @@ fn build_once(
         Err(BuildError::Registration(error)) => Err(two_lines(
             cli::texts::internal_error("product", &error.to_string()),
             exit::ExitKind::Internal,
+        )),
+        Err(BuildError::Section {
+            ref section,
+            ref source,
+        }) if section.as_ref() == "plugins" => Err(two_lines(
+            [
+                format!("plugin load failed: {source}"),
+                cli::texts::CONFIG_FIX_HINT.into(),
+            ],
+            exit::ExitKind::RequestedFailure,
         )),
         Err(error) => Err(two_lines(
             [

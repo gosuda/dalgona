@@ -157,6 +157,11 @@ pub fn assemble(cx: &BuildCx<'_>, parts: Parts) -> Result<Product, BuildError> {
         dal_ext::commands::extension(&reload)?,
         dal_ext::docs::extension()?,
         dal_ext::subagent::extension()?,
+        crate::sandbox::extension(
+            cx.config.sandbox(),
+            cx.config.sandbox_writable().into(),
+            Arc::new([cx.data_root.clone()]),
+        )?,
     ];
     if cx.config.tui().diagrams {
         extensions.push(diagrams_prompt_extension()?);
@@ -253,7 +258,7 @@ mod tests {
             names,
             [
                 "tools", "guard", "prompt", "skills", "letter", "ttsr", "compact", "commands",
-                "dal", "subagent", "eval",
+                "dal", "subagent", "sandbox", "eval",
             ]
         );
 
@@ -324,7 +329,7 @@ mod tests {
             names,
             [
                 "tools", "guard", "prompt", "skills", "letter", "ttsr", "compact", "commands",
-                "dal", "subagent", "eval", "focus",
+                "dal", "subagent", "sandbox", "eval", "focus",
             ]
         );
     }
@@ -368,7 +373,7 @@ mod tests {
             names,
             [
                 "tools", "guard", "prompt", "skills", "letter", "ttsr", "compact", "commands",
-                "dal", "subagent", "eval", "battery", "focus",
+                "dal", "subagent", "sandbox", "eval", "battery", "focus",
             ]
         );
     }

@@ -137,6 +137,43 @@ pub(crate) fn session_launcher(
     })
 }
 
+/// Resolves this session's canonical writable roots and renders the
+/// structured session-start notice; `None` when the sandbox is off or the
+/// roots cannot resolve — the launcher reports the same failure on spawn.
+#[must_use]
+pub fn sandbox_notice(
+    on: bool,
+    vars: &BTreeMap<OsString, OsString>,
+    workspace_root: &Path,
+    writable: &[Box<str>],
+    protected_roots: &[PathBuf],
+) -> Option<Box<str>> {
+    if !on {
+        return None;
+    }
+    let home = platform_home(vars)?;
+    let cache = platform_cache(vars, &home);
+    let roots = resolve_roots(&SandboxInputs {
+        sandbox_on: true,
+        workspace_root,
+        home: &home,
+        cache: &cache,
+        sandbox_writable: writable,
+        protected_roots,
+        helper: None,
+    })
+    .ok()?;
+    let mut text = String::from("Sandbox on. Commands can write only under: ");
+    for (index, root) in roots.iter().enumerate() {
+        if index > 0 {
+            text.push_str(", ");
+        }
+        text.push_str(&root.display().to_string());
+    }
+    text.push('.');
+    Some(text.into())
+}
+
 /// Resolves canonical roots in plan order: workspace, temp, cache, then
 /// `sandbox_writable` entries. Duplicates keep the first occurrence; a
 /// missing path is never created.
@@ -150,8 +187,15 @@ pub(crate) fn resolve_roots(inputs: &SandboxInputs<'_>) -> Result<Vec<PathBuf>, 
     let workspace = std::fs::canonicalize(inputs.workspace_root)
         .map_err(|source| cannot_open(&inputs.workspace_root.to_string_lossy(), &source))?;
     push_unique(workspace, &mut roots);
-    push_unique(canonical_or_raw(&std::env::temp_dir()), &mut roots);
-    push_unique(canonical_or_raw(inputs.cache), &mut roots);
+    // Automatic roots that do not exist are skipped: a missing path is
+    // never created, and omitting it denies it like a raw path would while
+    // the Linux helper can still open every root it is handed.
+    if let Ok(temp) = std::fs::canonicalize(std::env::temp_dir()) {
+        push_unique(temp, &mut roots);
+    }
+    if let Ok(cache) = std::fs::canonicalize(inputs.cache) {
+        push_unique(cache, &mut roots);
+    }
     let home = canonical_or_raw(inputs.home);
     for raw in inputs.sandbox_writable {
         let expanded = expand_writable(raw, &home)?;

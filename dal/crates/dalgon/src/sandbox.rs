@@ -1,10 +1,15 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::process::Command;
 use std::process::ExitCode;
+use std::sync::Arc;
+
+use dal_agent::ext::{BoxFuture, Extension, ExtensionBuilder, HookCx, HookError, ObserveHook};
+use dal_core::ext::SessionStart;
+use dal_core::{Notice, RegistrationError, ServiceSet};
 
 #[cfg(test)]
 const DENIAL_NOTE: &str = "dalgon sandbox: a \"Permission denied\" or \"Operation not permitted\" error can come from the sandbox; if the path should be writable, add it to sandbox_writable in dal.toml.";
@@ -49,6 +54,67 @@ impl std::error::Error for SandboxError {
 )]
 pub(crate) fn helper_path() -> Result<PathBuf, SandboxError> {
     std::env::current_exe().map_err(SandboxError::HelperPath)
+}
+
+/// Builds the `sandbox` extension: an observe-only session-start hook that
+/// publishes the canonical writable-roots notice when `sandbox = "on"`. The
+/// launcher itself lives in the session backend, so removing this extension
+/// never changes what commands may write.
+///
+/// # Errors
+/// Returns [`RegistrationError`] when the builder rejects registration.
+pub(crate) fn extension(
+    on: bool,
+    writable: Arc<[Box<str>]>,
+    protected: Arc<[PathBuf]>,
+) -> Result<Extension, RegistrationError> {
+    ExtensionBuilder::new("sandbox", env!("CARGO_PKG_VERSION"), ServiceSet::EMPTY)?
+        .on_session_start(NoticeHook {
+            on,
+            writable,
+            protected,
+        })
+        .build()
+}
+
+/// Emits `Sandbox on. Commands can write only under: <roots>.` at session
+/// start; silent when the sandbox is off or roots cannot resolve.
+struct NoticeHook {
+    on: bool,
+    writable: Arc<[Box<str>]>,
+    protected: Arc<[PathBuf]>,
+}
+
+impl ObserveHook<SessionStart> for NoticeHook {
+    fn call(&self, input: SessionStart, cx: HookCx) -> BoxFuture<'static, Result<(), HookError>> {
+        let on = self.on;
+        let writable = Arc::clone(&self.writable);
+        let protected = Arc::clone(&self.protected);
+        Box::pin(async move {
+            let env = cx.process_env();
+            if let Some(text) = dal_agent::sandbox_notice(
+                on,
+                &env.vars,
+                workspace_path(&input),
+                &writable,
+                &protected,
+            ) {
+                cx.services.notify(
+                    &cx.caller,
+                    Notice {
+                        turn: None,
+                        kind: "sandbox".into(),
+                        text,
+                    },
+                );
+            }
+            Ok(())
+        })
+    }
+}
+
+fn workspace_path(input: &SessionStart) -> &Path {
+    input.workspace.as_path()
 }
 
 pub(crate) fn run(argv: &[OsString]) -> ExitCode {

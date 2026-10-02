@@ -298,6 +298,7 @@ impl Host {
             broker: Arc::clone(&entry.broker),
             workspace: entry.workspace.clone(),
             generation: entry.generation,
+            control: Arc::clone(&entry.control),
         })
     }
 
@@ -311,6 +312,7 @@ impl Host {
                 broker: Arc::clone(&ports.broker),
                 workspace: ports.workspace.clone(),
                 generation: ports.generation,
+                control: Arc::clone(&ports.control),
                 created_at: None,
                 archived: None,
             }),
@@ -326,6 +328,7 @@ struct SessionPorts {
     broker: Arc<Broker>,
     workspace: Workspace,
     generation: dal_core::Gen,
+    control: Arc<std::sync::Mutex<crate::session::control::ControlCell>>,
 }
 
 /// A resolved session reference awaiting spawn.
@@ -337,12 +340,13 @@ struct ResolvedRef {
     resumed: bool,
     child: bool,
     parent: Option<SessionId>,
+    name: Option<Box<str>>,
 }
 
 impl Host {
     fn resolve_ref(&self, session: &SessionRef) -> Result<ResolvedRef, HostError> {
         match session {
-            SessionRef::New { workspace, .. } => Ok(ResolvedRef {
+            SessionRef::New { workspace, name } => Ok(ResolvedRef {
                 id: SessionId::new_v7(),
                 workspace: workspace.clone(),
                 depth: 0,
@@ -350,6 +354,7 @@ impl Host {
                 resumed: false,
                 child: false,
                 parent: None,
+                name: name.clone(),
             }),
             SessionRef::Ephemeral { workspace } => Ok(ResolvedRef {
                 id: SessionId::new_v7(),
@@ -359,6 +364,7 @@ impl Host {
                 resumed: false,
                 child: false,
                 parent: None,
+                name: None,
             }),
             SessionRef::Resume { key, workspace } => {
                 let store = self.store_for(workspace);
@@ -371,6 +377,7 @@ impl Host {
                     resumed: true,
                     child: false,
                     parent: None,
+                    name: None,
                 })
             }
             SessionRef::Continue { workspace } => {
@@ -387,6 +394,7 @@ impl Host {
                     resumed,
                     child: false,
                     parent: None,
+                    name: None,
                 })
             }
             SessionRef::Child {
@@ -404,6 +412,7 @@ impl Host {
                     resumed: false,
                     child: true,
                     parent: Some(*parent),
+                    name: None,
                 })
             }
         }
@@ -430,6 +439,9 @@ impl Host {
                 Err(error) => return Err(error.into()),
             },
         };
+        if let Some(name) = resolved.name.as_deref() {
+            journal.set_name(Some(name)).await?;
+        }
         let generation = journal.generation();
         let thinking = self.state.shared.config.thinking();
         let approval = self.state.shared.config.approval();
@@ -579,18 +591,20 @@ impl Host {
         )
         .attach(None);
         let observer_process_env = Arc::clone(&self.state.shared.env);
-        tasks.spawn(async move {
-            observe_session_start(
-                &observer_generation,
-                &observer_services,
-                &observer_cancel,
-                observer_parent,
-                &observer_process_env,
-                observer_script,
-                &start_event,
-            )
-            .await;
-        });
+        // Delivered before the Agent is bound: a `before_turn` hook on the
+        // first prompt must already see the state a `session_start`
+        // observer just inserted.
+        observe_session_start(
+            &observer_generation,
+            &observer_services,
+            &observer_cancel,
+            observer_parent,
+            &observer_process_env,
+            observer_script,
+            &start_event,
+        )
+        .await;
+        let control = ports.control.clone();
         let driver = crate::session::driver::spawn(
             ports,
             crate::session::driver::DriverDeps {
@@ -618,6 +632,7 @@ impl Host {
             broker,
             workspace: resolved.workspace.clone(),
             generation,
+            control: Arc::clone(&control),
         };
         let agent = Self::bind(&ports, id, by);
         self.state
@@ -638,9 +653,11 @@ impl Host {
                     generation: ports.generation,
                     driver,
                     task,
+                    control: ports.control,
                     cancel,
                     backend: Arc::clone(&backend),
                     overlay,
+                    reported: std::sync::atomic::AtomicBool::new(false),
                 },
             );
         if let Some(parent) = resolved.parent {
@@ -676,6 +693,7 @@ impl Host {
             resumed: false,
             child: true,
             parent: Some(parent),
+            name: None,
         };
         self.spawn_session(resolved, by, Some(journal)).await?;
         Ok(id)
@@ -777,6 +795,7 @@ impl Host {
                         broker: Arc::clone(&entry.broker),
                         workspace: entry.workspace.clone(),
                         generation: entry.generation,
+                        control: Arc::clone(&entry.control),
                     },
                 )
             })

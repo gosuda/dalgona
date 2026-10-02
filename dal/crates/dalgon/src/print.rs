@@ -147,6 +147,9 @@ pub(crate) struct PrintOptions {
     pub output_last_message: Option<PathBuf>,
     pub prompt: Vec<dal_core::Part>,
     pub stderr_is_tty: bool,
+    /// Approval mode `ask` with no terminal: the run emits the once-per-run
+    /// headless notice before the first denial note.
+    pub headless_approval: bool,
     pub stop: CancellationToken,
     pub quiet_wait: Option<Duration>,
 }
@@ -154,6 +157,8 @@ pub(crate) struct PrintOptions {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PrintOutcome {
     Completed,
+    /// The run completed but one or more gated calls were denied.
+    Denied,
     Interrupted,
 }
 
@@ -263,6 +268,26 @@ pub(crate) async fn run_print(
     }
 }
 
+/// Whether a settled tool text is the spec's headless denial: the exact
+/// model-visible wording pins the match (`approval.denied_headless`).
+fn headless_denial(text: &str) -> bool {
+    text.starts_with("Permission denied: ")
+        && text.contains(" needs approval, and this run has no one to ask.")
+}
+
+/// The tool name and approval rung out of a headless denial text.
+fn denial_fields(text: &str) -> (&str, &str) {
+    let tool = text
+        .strip_prefix("Permission denied: ")
+        .and_then(|rest| rest.split_once(" needs approval,").map(|(tool, _)| tool))
+        .unwrap_or("tool");
+    let rung = text
+        .rsplit_once("--approval ")
+        .and_then(|(_, tail)| tail.strip_suffix(".)"))
+        .unwrap_or("all");
+    (tool, rung)
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "one print run walks every output mode in place"
@@ -277,7 +302,10 @@ async fn run_print_inner(
         stdout.flush().await.map_err(PrintError::Io)?;
         return Ok(PrintOutcome::Interrupted);
     }
-    let mut subscription = agent.subscribe(None)?;
+    // Listen-only: print mode can never answer an approval request, so it
+    // must not count as an attached answerer. Only-answerer bookkeeping turns
+    // asks into the spec's headless denial instead of a broker timeout.
+    let mut subscription = agent.subscribe_listen(None)?;
     let reply = agent
         .submit(Command::Prompt {
             expect: Expect::Idle,
@@ -288,10 +316,18 @@ async fn run_print_inner(
         return Err(PrintError::UnexpectedReply);
     };
 
+    // The once-per-run headless notice precedes any per-call denial note.
+    if opts.headless_approval && !opts.json {
+        stderr
+            .write_all(dal_texts::HEADLESS_APPROVAL.as_bytes())
+            .await
+            .map_err(PrintError::Io)?;
+        stderr.write_all(b"\n").await.map_err(PrintError::Io)?;
+    }
+
     let mut assistant = String::new();
     let mut last_notice = None;
     let mut denial_count = 0_usize;
-    let mut first_denial_notice = false;
     let stop = loop {
         let delivery = tokio::select! {
             biased;
@@ -332,23 +368,21 @@ async fn run_print_inner(
                     .await
                     .map_err(PrintError::Io)?;
             }
+            UpdateKind::ToolSettled { outcome, .. }
+                if !opts.json && headless_denial(&outcome.text) =>
+            {
+                let (tool, rung) = denial_fields(&outcome.text);
+                let note = dal_texts::approval_denied_note(tool, rung);
+                stderr
+                    .write_all(note.as_bytes())
+                    .await
+                    .map_err(PrintError::Io)?;
+                stderr.write_all(b"\n").await.map_err(PrintError::Io)?;
+                denial_count += 1;
+            }
             UpdateKind::Notice(notice) => {
                 last_notice = Some(notice.text.clone());
                 if !opts.json {
-                    if notice.text.as_ref() == dal_texts::HEADLESS_APPROVAL {
-                        first_denial_notice = true;
-                    }
-                    if notice.text.starts_with("dalgon: denied:") {
-                        if !first_denial_notice {
-                            stderr
-                                .write_all(dal_texts::HEADLESS_APPROVAL.as_bytes())
-                                .await
-                                .map_err(PrintError::Io)?;
-                            stderr.write_all(b"\n").await.map_err(PrintError::Io)?;
-                            first_denial_notice = true;
-                        }
-                        denial_count += 1;
-                    }
                     stderr
                         .write_all(notice.text.as_bytes())
                         .await
@@ -371,17 +405,14 @@ async fn run_print_inner(
         QuietEnd::TimedOut(busy) => Some(busy),
     };
 
-    if denial_count > 0 && !opts.json {
-        let plural = if denial_count == 1 { "" } else { "s" };
-        let summary = format!("dalgon: {denial_count} call{plural} denied by approval mode.\n");
-        stderr
-            .write_all(summary.as_bytes())
-            .await
-            .map_err(PrintError::Io)?;
-    }
-
     if stop == Stop::Failed {
         return Err(last_notice.map_or(PrintError::FailedWithoutMessage, PrintError::TurnFailed));
+    }
+
+    // One exact note per denied call; no summary sentence. A denied run is a
+    // completed run with nothing to show: exit non-zero.
+    if denial_count > 0 && !opts.json {
+        return Ok(PrintOutcome::Denied);
     }
 
     if let Some(path) = opts.output_last_message
@@ -583,6 +614,7 @@ mod tests {
             stderr_is_tty: false,
             stop: stop.clone(),
             quiet_wait,
+            headless_approval: false,
         }
     }
 

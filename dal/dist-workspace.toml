@@ -7,6 +7,9 @@ members = ["cargo:."]
 cargo-dist-version = "0.32.0"
 # CI backends to support
 ci = "github"
+# The release workflow is hand-edited to run dist inside this workspace
+# directory, so dist's generated-CI self-check cannot match it byte for byte.
+allow-dirty = ["ci"]
 # The installers to generate for each app
 installers = ["shell", "powershell"]
 # A prefix git tags must include for dist to care about them

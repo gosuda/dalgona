@@ -276,11 +276,8 @@ impl PatchTool {
         // Preview carries paths, operations, before/after digests, hunks,
         // and findings so approval shows what the user will change.
         let preview = preview_for_plan(&plan);
-        // No-ask fast path in tests uses for_test (denies); real hosts ask here.
-        // For this integration, attempt authorize; on denial without frontend,
-        // proceed only when the plan has no destructive content? No: fail closed.
-        // Tests drive plan/commit directly, so run() failing closed on
-        // for_test is correct; gate fixtures use plan/commit, not run().
+        // Denials fail closed as the model-visible denial text; tests drive
+        // plan/commit directly, not this run() path.
         match cx.authorize(preview).await {
             Ok(_approved) => {
                 let output = write::commit(&session, plan, &observers).await;
@@ -289,7 +286,7 @@ impl PatchTool {
                 // owner supplies the exact dirty handle once its public API lands).
                 ToolOutcome::Ok(ToolOutput::from_text(text.as_str()))
             }
-            Err(deny) => ToolOutcome::Ok(ToolOutput::from_text(format!("patch denied: {deny:?}"))),
+            Err(deny) => ToolOutcome::Err(dal_agent::ToolError::Denied(deny)),
         }
     }
 

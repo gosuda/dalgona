@@ -223,7 +223,9 @@ async fn no_controller_denies_plugin_exec_without_opening_request()
         workspace: Workspace::new(workspace.path().to_path_buf())?,
     };
     let harness = scripted_session(product, config, env, session).await?;
-    let mut subscription = harness.agent.subscribe(None)?;
+    // Listen-only: with nobody attached to answer, `ask` must deny the
+    // gated plugin call without ever opening a request.
+    let mut subscription = harness.agent.subscribe_listen(None)?;
     let prompt_reply = harness
         .agent
         .submit(AgentCommand::Prompt {
@@ -250,8 +252,13 @@ async fn no_controller_denies_plugin_exec_without_opening_request()
         }
     }
     let exec_outcome = exec_outcome.ok_or_else(|| std::io::Error::other("missing exec outcome"))?;
+    assert!(exec_outcome.contains("\"isError\":true"), "{exec_outcome}");
     assert!(
-        exec_outcome.contains("\"text\":\"denied: no front end can answer\""),
+        exec_outcome.contains("needs approval, and this run has no one to ask."),
+        "{exec_outcome}"
+    );
+    assert!(
+        exec_outcome.contains("rerun with --approval all"),
         "{exec_outcome}"
     );
     assert_eq!(opened_requests, 0);

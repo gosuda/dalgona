@@ -22,6 +22,7 @@ pub use ext::grants::{GrantKey, GrantStore, GrantStoreError, PersistentGrant};
 pub use host::{
     DocEntry, Env, Host, HostSubscription, HostUpdate, Product, SessionRef, ShutdownReport,
 };
+pub use proc::sandbox::sandbox_notice;
 pub use proc::{
     FULL_OUTPUT_PREFIX, OUTPUT_FILE_CAP_BYTES, PREVIEW_BYTES, PROGRESS_LINES, PROGRESS_PERIOD,
     Proc, ProcResult, ProcStatus, SpawnOpts, StopReason, TRUNCATION_MARKER,

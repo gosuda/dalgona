@@ -90,8 +90,15 @@ pub(crate) enum TurnWork {
         /// Receipt: the persisted reminder entry.
         reply: oneshot::Sender<Option<dal_core::EntryId>>,
     },
-    /// The driver confirmed cancellation.
-    Cancelled,
+    /// The driver confirmed a turn's stop: the batch queue is ordered, so an
+    /// in-flight call's kill ladder already finished; this is the earliest
+    /// point a cancelled turn's `TurnEnded` may reach subscribers.
+    Cancelled {
+        /// The stopped turn.
+        turn: TurnId,
+        /// The stop the turn ended with.
+        stop: dal_core::Stop,
+    },
     /// The driver task failed.
     TaskFailed {
         /// The failed turn, when known.
@@ -233,8 +240,7 @@ pub(crate) struct Actor {
     broken: Option<Box<str>>,
     /// Capability-scoped services for hook dispatch, attached after spawn.
     services: Option<Arc<dyn Services>>,
-    /// Cancellation for an in-flight opening-hook drive.
-    drive_cancel: Option<tokio_util::sync::CancellationToken>,
+
     /// The session data-plane cell backing scripted hook entries; filled
     /// right after the actor spawns.
     backend: Arc<std::sync::OnceLock<Arc<crate::session::backend::Backend>>>,
@@ -284,6 +290,39 @@ fn mailbox_page(
     (mail, next)
 }
 
+/// Maps a fold rejection onto the typed wake refusal reasons.
+fn wake_refusal(rejection: &Rejection) -> dal_core::ext::WakeError {
+    match rejection {
+        Rejection::Denied {
+            reason: dal_core::DenyReason::WakeLimit,
+        } => dal_core::ext::WakeError::Limit,
+        Rejection::BusyTurn => dal_core::ext::WakeError::Busy,
+        other => dal_core::ext::WakeError::Journal {
+            message: other.to_string().into(),
+        },
+    }
+}
+
+/// Undelivered mail bound for this session.
+///
+/// A `NextTurn` message always waits for a following turn, so its record
+/// counts as undelivered; `Aside` and delivered `Steer` records do not.
+fn undelivered_mail(session: SessionId, records: &[Record]) -> usize {
+    records
+        .iter()
+        .filter(|record| {
+            matches!(
+                record,
+                Record::Mail(record)
+                    if record.to == session && record.mode == MailMode::NextTurn
+            )
+        })
+        .count()
+}
+
+/// Waiting-mail capacity per recipient (the spec's 100-message bound).
+const MAILBOX_WAITING_LIMIT: usize = 100;
+
 /// Finds the reminder entry the fold emitted in one effect batch.
 fn reminder_entry(effects: &[Effect]) -> Option<dal_core::EntryId> {
     effects.iter().find_map(|effect| {
@@ -323,7 +362,6 @@ pub(crate) fn spawn(deps: ActorDeps) -> (SessionHandle, DriverPorts, tokio::task
         closing: false,
         broken: None,
         services: None,
-        drive_cancel: None,
         backend: deps.backend,
         tasks: deps.tasks,
     };
@@ -669,7 +707,14 @@ impl Actor {
                     let _ = reply.send(None);
                 }
             }
-            TurnWork::Cancelled => {}
+            TurnWork::Cancelled { turn, stop } => {
+                // Cancelled turns defer their `TurnEnded` to this driver
+                // confirmation — the kill ladder of an in-flight call has
+                // completed by now; other stops already published at `Emit`.
+                if stop == dal_core::Stop::Cancelled {
+                    self.publish(UpdateKind::TurnEnded { turn, stop });
+                }
+            }
             TurnWork::TaskFailed { turn, message } => {
                 self.publish(UpdateKind::Notice(dal_core::Notice {
                     turn,
@@ -777,9 +822,7 @@ impl Actor {
 
     /// Flushes the journal, closes subscriber queues, and stops the loop.
     async fn on_shutdown(&mut self) {
-        if let Some(cancel) = self.drive_cancel.take() {
-            cancel.cancel();
-        }
+        self.control().cancel_opening();
         self.tasks.stop().await;
 
         let _ = self.journal.close().await;
@@ -920,8 +963,7 @@ impl Actor {
         };
         let (turn, content) = (*turn, content);
         let services = self.services.clone()?;
-        let cancel = tokio_util::sync::CancellationToken::new();
-        self.drive_cancel = Some(cancel.clone());
+        let cancel = self.control().begin_opening(turn);
         let generation = self.host.shared.generation.borrow().clone();
         let deadline = Instant::now() + Self::OPENING_HOOK_DEADLINE;
         let mut content = content;
@@ -992,7 +1034,7 @@ impl Actor {
                 self.notice(turn, "hook.before_turn", &notice);
             }
         }
-        self.drive_cancel = None;
+        self.control().end_opening(turn);
         let add = join_before_turn(&texts).map(Into::into);
         let Ok(outcome) = HookOutcome::new(HookEvent::BeforeTurn, HookVerdict::BeforeTurn(add))
         else {
@@ -1055,13 +1097,20 @@ impl Actor {
             UpdateKind::TurnStarted { turn, .. } => {
                 self.control().begin_turn(*turn);
             }
-            UpdateKind::TurnEnded { turn, .. } => {
+            UpdateKind::TurnEnded { turn, stop } => {
                 self.control().end_turn(*turn);
                 let resolved = self
                     .broker
                     .resolve_turn(*turn, Answer::Cancel, core_client());
                 for item in resolved {
                     self.queue_resolved(&item, queue);
+                }
+                // A cancelled turn holds `TurnEnded` until the driver
+                // confirms: `Effect::Stop` lands after the in-flight call's
+                // kill ladder in the ordered batch queue, so subscribers only
+                // observe the end once the process tree is dead.
+                if *stop == dal_core::Stop::Cancelled {
+                    return;
                 }
             }
             _ => {}
@@ -1254,7 +1303,6 @@ impl Actor {
                 return;
             }
         };
-        let steer = matches!(mail.mode, MailMode::Steer);
         let running = self.control().running();
         let receipt = match mail.mode {
             MailMode::Steer => match running {
@@ -1279,20 +1327,19 @@ impl Actor {
                         Err(_) => Receipt::Buffered,
                     }
                 }
-                None => Receipt::Buffered,
+                None => self.buffered_mail_receipt(),
             },
             MailMode::Aside => Receipt::Delivered,
-            MailMode::NextTurn => Receipt::Buffered,
+            MailMode::NextTurn => self.buffered_mail_receipt(),
             // `MailMode` is `#[non_exhaustive]`; every known variant has
             // an explicit arm above. An unknown future mode stores like
             // a deferred message until it gains an explicit arm.
             _ => {
                 debug_assert!(false, "unmapped mail mode; add an explicit arm");
-                Receipt::Buffered
+                self.buffered_mail_receipt()
             }
         };
-        let delivered_to_turn = steer && receipt == Receipt::Delivered;
-        if receipt != Receipt::Full && !delivered_to_turn {
+        if receipt != Receipt::Full {
             let record = Record::Mail(dal_core::Mail {
                 at: jiff::Timestamp::now(),
                 from: mail.from,
@@ -1304,6 +1351,16 @@ impl Actor {
             let _ = self.journal.append(vec![record]).await;
         }
         let _ = reply.send(Some(receipt));
+    }
+
+    /// Receipt for a message that waits in the journal; a full mailbox
+    /// refuses with `Full` instead of silently accepting the message.
+    fn buffered_mail_receipt(&self) -> Receipt {
+        if undelivered_mail(self.session, self.journal.records()) >= MAILBOX_WAITING_LIMIT {
+            Receipt::Full
+        } else {
+            Receipt::Buffered
+        }
     }
 
     /// Runs one background-job operation against the session table.
@@ -1366,11 +1423,12 @@ impl Actor {
                     Timestamp::now(),
                     &mut effects,
                 );
-                if stepped.is_ok() {
-                    self.execute(effects, None).await;
-                    TurnOpReply::Woken
-                } else {
-                    TurnOpReply::Idle(true)
+                match stepped {
+                    Ok(()) => {
+                        self.execute(effects, None).await;
+                        TurnOpReply::Woken
+                    }
+                    Err(rejection) => TurnOpReply::WakeRefused(wake_refusal(&rejection)),
                 }
             }
             _ => TurnOpReply::Idle(running.is_none()),

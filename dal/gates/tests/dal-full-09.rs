@@ -37,6 +37,9 @@ const INVENTORIES: [(&str, &[&str]); 5] = [
             "loop-tui-06",
             "loop-tui-07",
             "loop-tui-08",
+            "loop-tui-09",
+            "loop-tui-10",
+            "loop-tui-11",
         ],
     ),
     (
@@ -190,6 +193,11 @@ fn has_row_number(bytes: &[u8]) -> bool {
     let prefix = *b"row ";
     for (index, window) in bytes.windows(prefix.len()).enumerate() {
         if window != prefix {
+            continue;
+        }
+        // A citation token cannot start inside a longer word: model names
+        // such as "Arrow X.Y" carry the prefix plus a digit inside them.
+        if index > 0 && bytes[index - 1].is_ascii_alphanumeric() {
             continue;
         }
         let start = index + prefix.len();

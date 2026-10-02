@@ -27,7 +27,7 @@ async fn cancel_mid_exec_kills_grandchild_and_ends_once() -> Result<(), Box<dyn 
     let replay = fixtures.join("replay/loop-headless.jsonl");
     let factory = dalgon::product();
     let user = format!(
-        "model = \"openai-responses/gpt-6\"\n[providers.scripted]\nfixture = {:?}\n",
+        "model = \"openai-responses/gpt-6\"\napproval = \"all\"\n[providers.scripted]\nfixture = {:?}\n",
         replay.to_string_lossy()
     );
     let config = Config::load(

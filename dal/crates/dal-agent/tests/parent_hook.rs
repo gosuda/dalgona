@@ -129,15 +129,15 @@ async fn hook_parent_is_root_in_subagents_and_absent_at_root() {
         .expect("open child");
     run_prompt(&child).await.expect("child prompt");
     let seen = seen.lock().expect("seen lock").clone();
-    // Each turn mints the hook twice: the opening drive and the driver
-    // dispatch before the provider round.
-    assert_eq!(seen.len(), 4, "two fires per turn: seen={seen:?}");
+    // `before_turn` mints once per turn at the Opening phase; one prompt on
+    // each session is two fires total.
+    assert_eq!(seen.len(), 2, "one fire per turn: seen={seen:?}");
     assert!(
-        seen[..2].iter().all(Option::is_none),
+        seen[..1].iter().all(Option::is_none),
         "root turn sees no parent: seen={seen:?}"
     );
     assert!(
-        seen[2..].iter().all(|parent| *parent == Some(root_id)),
+        seen[1..].iter().all(|parent| *parent == Some(root_id)),
         "subagent turn sees the root as parent: seen={seen:?}"
     );
 }
