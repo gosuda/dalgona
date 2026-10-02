@@ -3,10 +3,13 @@
 //!
 //! A session is pinned by its UUID to one shard. The actor-facing [`Lane`]
 //! carries only a slot token. A queued append moves one complete batch to that
-//! shard, where [`Journal::append`] performs one write, one sync, and rollback.
-//! Its oneshot reply carries a receipt only after the sync succeeds. One lane
-//! admits at most one unacknowledged batch, so cancellation cannot lose a
-//! receipt or reorder a session's appends.
+//! shard, where the worker performs one write with rollback, then hands a dup
+//! handle to the per-shard syncer thread for the durability sync. Its oneshot
+//! reply still carries a receipt only after the sync succeeds — but a slow
+//! filesystem now stalls only that syncer, never the worker's FIFO, so one
+//! convoyed `fsync` cannot starve unrelated lanes (R-perf). One lane admits
+//! at most one unacknowledged batch, so cancellation cannot lose a receipt or
+//! reorder a session's appends.
 
 use std::{
     cell::Cell,
@@ -56,6 +59,9 @@ enum Job {
         slot: usize,
         done: Option<oneshot::Sender<()>>,
     },
+    /// A staged durability sync failed off-thread: the bytes it covered can
+    /// no longer be rolled back in place, so the journal is marked damaged.
+    Damaged { slot: usize },
     #[cfg(test)]
     Hold(Box<dyn FnOnce() + Send>),
 }
@@ -288,6 +294,37 @@ fn wake_all(wakers: Vec<Waker>) {
 struct Shard {
     queue: Arc<Queue>,
     thread: Option<JoinHandle<()>>,
+    syncer: Option<JoinHandle<()>>,
+}
+
+/// One staged durability sync: a dup handle to a journal whose batch already
+/// wrote on the worker, resolved once `sync_all` lands (or fails).
+struct SyncJob {
+    file: std::fs::File,
+    path: PathBuf,
+    receipt: Receipt,
+    slot: usize,
+    queue: Arc<Queue>,
+    done: oneshot::Sender<Result<Receipt, StoreError>>,
+}
+
+fn run_syncer(inbox: &std::sync::mpsc::Receiver<SyncJob>) {
+    while let Ok(job) = inbox.recv() {
+        let result = job.file.sync_all().map(|()| job.receipt).map_err(|source| {
+            StoreError::Journal(JournalError::Io {
+                op: "sync",
+                path: job.path.clone(),
+                source: Box::new(source),
+            })
+        });
+        if result.is_err() {
+            // FIFO-ordered behind every append queued so far: the mark lands
+            // before later appends run, so they fail instead of writing onto
+            // bytes whose durability can no longer be trusted.
+            let _ = job.queue.push_control(Job::Damaged { slot: job.slot });
+        }
+        let _ = job.done.send(result);
+    }
 }
 struct RegistrationReply {
     queue: Arc<Queue>,
@@ -326,14 +363,22 @@ impl Shards {
         let mut shards: Vec<Shard> = Vec::with_capacity(SHARD_COUNT);
         for index in 0..SHARD_COUNT {
             let queue = Arc::new(Queue::new());
+            let (sync_outbox, sync_inbox) = std::sync::mpsc::channel::<SyncJob>();
             let worker_queue = Arc::clone(&queue);
-            let thread = match thread::Builder::new()
-                .name(format!("dal-journal-{index}"))
-                .spawn(move || {
-                    let _stopped = WorkerStopped(Arc::clone(&worker_queue));
-                    run(worker_queue);
-                }) {
-                Ok(thread) => thread,
+            let spawned = (|| {
+                let thread = thread::Builder::new()
+                    .name(format!("dal-journal-{index}"))
+                    .spawn(move || {
+                        let _stopped = WorkerStopped(Arc::clone(&worker_queue));
+                        run(worker_queue, sync_outbox);
+                    })?;
+                let syncer = thread::Builder::new()
+                    .name(format!("dal-journal-sync-{index}"))
+                    .spawn(move || run_syncer(&sync_inbox))?;
+                Ok::<_, std::io::Error>((thread, syncer))
+            })();
+            let (thread, syncer) = match spawned {
+                Ok(pair) => pair,
                 Err(source) => {
                     for shard in &shards {
                         shard.queue.close();
@@ -341,6 +386,9 @@ impl Shards {
                     for shard in &mut shards {
                         if let Some(thread) = shard.thread.take() {
                             drop(thread.join());
+                        }
+                        if let Some(syncer) = shard.syncer.take() {
+                            drop(syncer.join());
                         }
                     }
                     return Err(JournalError::Io {
@@ -353,6 +401,7 @@ impl Shards {
             shards.push(Shard {
                 queue,
                 thread: Some(thread),
+                syncer: Some(syncer),
             });
         }
         Ok(Self { shards })
@@ -425,8 +474,13 @@ impl Drop for Shards {
             shard.queue.close();
         }
         for shard in &mut self.shards {
+            // Joining the worker drops its sync outbox, which ends the
+            // syncer's recv loop after every staged sync resolves.
             if let Some(thread) = shard.thread.take() {
                 drop(thread.join());
+            }
+            if let Some(syncer) = shard.syncer.take() {
+                drop(syncer.join());
             }
         }
     }
@@ -597,7 +651,7 @@ impl Drop for WorkerStopped {
     clippy::needless_pass_by_value,
     reason = "the shard thread owns its queue for its lifetime"
 )]
-fn run(queue: Arc<Queue>) {
+fn run(queue: Arc<Queue>, sync: std::sync::mpsc::Sender<SyncJob>) {
     let mut journals: Vec<Option<(Journal, Option<PathBuf>)>> = Vec::new();
     let mut free = Vec::new();
     while let Some(job) = queue.pop() {
@@ -624,12 +678,67 @@ fn run(queue: Arc<Queue>) {
                 blobs,
                 done,
             } => {
-                let result = match journals.get_mut(slot).and_then(Option::as_mut) {
+                let staged = match journals.get_mut(slot).and_then(Option::as_mut) {
                     Some((journal, blob_dir)) => publish(blobs, blob_dir.as_deref())
-                        .and_then(|()| journal.append(&batch).map_err(StoreError::from)),
+                        .and_then(|()| journal.append_unsynced(&batch).map_err(StoreError::from))
+                        .and_then(|receipt| {
+                            match journal.stage_sync(receipt) {
+                                Ok(staged) => Ok(staged),
+                                Err(failure) => {
+                                    // The sync never left the worker: roll
+                                    // the batch back exactly as
+                                    // `Journal::append` would have on a
+                                    // failed sync.
+                                    let repair = journal.roll_back(receipt).err().map_or_else(
+                                        || StoreError::from(failure),
+                                        StoreError::from,
+                                    );
+                                    Err(repair)
+                                }
+                            }
+                        }),
                     None => Err(closed(session)),
                 };
-                let _ = done.send(result);
+                match staged {
+                    Ok((file, path, receipt)) => {
+                        let job = SyncJob {
+                            file,
+                            path,
+                            receipt,
+                            slot,
+                            queue: Arc::clone(&queue),
+                            done,
+                        };
+                        if let Err(unsent) = sync.send(job) {
+                            // The syncer died: resolve the receipt inline so
+                            // the lane still learns the durable outcome.
+                            let job = unsent.0;
+                            let result =
+                                job.file.sync_all().map(|()| job.receipt).map_err(|source| {
+                                    StoreError::Journal(JournalError::Io {
+                                        op: "sync",
+                                        path: job.path.clone(),
+                                        source: Box::new(source),
+                                    })
+                                });
+                            if result.is_err()
+                                && let Some((journal, _)) =
+                                    journals.get_mut(slot).and_then(Option::as_mut)
+                            {
+                                journal.mark_damaged();
+                            }
+                            let _ = job.done.send(result);
+                        }
+                    }
+                    Err(failure) => {
+                        let _ = done.send(Err(failure));
+                    }
+                }
+            }
+            Job::Damaged { slot } => {
+                if let Some((journal, _)) = journals.get_mut(slot).and_then(Option::as_mut) {
+                    journal.mark_damaged();
+                }
             }
             Job::Retire { slot, done } => {
                 if let Some((journal, _)) = journals.get_mut(slot).and_then(Option::take) {

@@ -4,6 +4,9 @@ use super::*;
 /// `req_0142`/`job_0091` lines are shorthand the document uses for
 /// readability; the typed members are `UUIDv7` text, so those shapes
 /// round-trip in `resolved_and_job_records_round_trip` with real ids.
+/// POSIX-only: the vectors carry POSIX workspace paths (see the round-trip
+/// test for why).
+#[cfg(unix)]
 const VECTORS: &[&str] = &[
     "{\"v\":1,\"type\":\"session\",\"id\":\"01927f3a-8c2e-7b4d-9f10-3a5b6c7d8e9f\",\"at\":\"2026-09-25T10:15:30.123Z\",\"workspace\":\"/home/alpha/harness/reed\",\"product\":\"dal\",\"from\":null}\n",
     "{\"v\":1,\"type\":\"session\",\"id\":\"01927f40-0000-7000-8000-000000000001\",\"at\":\"2026-09-25T11:00:00.000Z\",\"workspace\":\"/home/alpha/harness/reed\",\"product\":\"dal\",\"from\":{\"session\":\"01927f3a-8c2e-7b4d-9f10-3a5b6c7d8e9f\",\"entry\":41}}\n",
@@ -59,6 +62,19 @@ fn user_entry(id: u64, parent: Option<u64>, text: &str) -> Entry {
     }
 }
 
+/// A host-absolute workspace for tests that only need one that parses.
+fn harness_workspace() -> Result<Workspace, Box<dyn std::error::Error>> {
+    #[cfg(unix)]
+    const ROOT: &str = "/home/alpha/harness/reed";
+    #[cfg(windows)]
+    const ROOT: &str = "C:\\home\\alpha\\harness\\reed";
+    Ok(Workspace::new(ROOT.into())?)
+}
+
+// The canonical vectors carry POSIX workspace paths; decode-side workspace
+// validation is host-coupled, so the byte-for-byte contract only runs where
+// those paths parse as absolute.
+#[cfg(unix)]
 #[test]
 fn canonical_vectors_round_trip_byte_for_byte() -> Result<(), Box<dyn std::error::Error>> {
     for line in VECTORS {
@@ -648,7 +664,7 @@ fn fork_rejects_non_user_anchor_as_not_user_entry() -> Result<(), Box<dyn std::e
     let header = Header {
         id: SessionId::new_v7(),
         at: "2026-09-25T10:15:30.000Z".parse()?,
-        workspace: Workspace::new("/w".into())?,
+        workspace: harness_workspace()?,
         product: Product::Dal,
         from: None,
     };
@@ -712,7 +728,7 @@ fn branch_copies_path_and_labels() -> Result<(), Box<dyn std::error::Error>> {
     let header = Header {
         id: SessionId::new_v7(),
         at: "2026-09-25T10:15:30.000Z".parse()?,
-        workspace: Workspace::new("/home/alpha/harness/reed".into())?,
+        workspace: harness_workspace()?,
         product: Product::Dal,
         from: None,
     };
