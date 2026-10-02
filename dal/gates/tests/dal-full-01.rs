@@ -841,6 +841,7 @@ async fn start_process_jobs(
 
 fn read_pid(path: &Path) -> Result<Option<u32>, TestError> {
     match fs::read_to_string(path) {
+        Ok(text) if text.trim().is_empty() => Ok(None),
         Ok(text) => Ok(Some(text.trim().parse()?)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
@@ -896,8 +897,15 @@ async fn wait_for_process_pids(
     data_root: &Path,
 ) -> Result<Vec<u32>, TestError> {
     // Liveness wait, not a timing claim: 200 process spawns on a loaded shared
-    // runner can far outrun the local constant, so bound generously.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    // runner can far outrun the local constant, so bound generously. Hosted
+    // macOS storage syncs orders of magnitude slower under create bursts, so
+    // the bound is wider there for the same liveness purpose.
+    const PID_WAIT: Duration = if cfg!(target_os = "macos") {
+        Duration::from_secs(360)
+    } else {
+        Duration::from_secs(120)
+    };
+    let deadline = tokio::time::Instant::now() + PID_WAIT;
     loop {
         let mut ready = true;
         for job in jobs.iter_mut() {

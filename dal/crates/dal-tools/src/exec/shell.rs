@@ -135,6 +135,9 @@ fn is_executable_file(path: &Path) -> bool {
 mod tests {
     use std::{collections::BTreeMap, fs, path::Path};
 
+    #[cfg(windows)]
+    use std::ffi::OsString;
+
     use super::resolve;
 
     #[test]

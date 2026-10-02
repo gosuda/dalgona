@@ -132,10 +132,8 @@ impl Store {
             }
             Err(source) => return Err(util::io_err(&journal_path, source)),
         }
-        let lock = LockGuard::acquire(&paths.lock(), id)?;
+        let (lock, opened) = open_locked_journal(&paths, id, faults).await?;
         let shards = self.shards()?;
-        let opened = FileJournal::open(&journal_path, &faults)
-            .map_err(|failure| map_open_failure(&journal_path, failure))?;
         let mut records = opened
             .records
             .into_iter()
@@ -935,66 +933,21 @@ impl Journal {
                 reason: "journal batch length exceeds the byte counter".into(),
             });
         };
-        let blob_dir = self.paths.directory().join("blobs");
-        let jobs_dir = self.paths.jobs();
-        if let Err(source) = util::create_private_dir_all(self.paths.directory()) {
-            self.state = State::Lazy { blobs };
-            return Err(util::io_err(self.paths.directory(), source));
-        }
-        let lock = match self.prelocked.take() {
-            Some(lock) => lock,
-            None => match LockGuard::acquire(&self.paths.lock(), self.id) {
-                Ok(lock) => lock,
-                Err(error) => {
-                    self.state = State::Lazy { blobs };
-                    return Err(error);
-                }
-            },
-        };
-        let directory_setup = (|| {
-            util::create_private_dir_all(&blob_dir)
-                .map_err(|source| util::io_err(&blob_dir, source))?;
-            util::create_private_dir_all(&jobs_dir)
-                .map_err(|source| util::io_err(&jobs_dir, source))?;
-            Ok::<(), StoreError>(())
-        })();
-        if let Err(error) = directory_setup {
-            self.prelocked = Some(lock);
-            self.state = State::Lazy { blobs };
-            return Err(error);
-        }
+        let mut current_name = None;
         if !self.ephemeral {
-            let mut current_name = None;
             for record in self.records.iter().chain(records.iter()) {
                 if let Record::Name { name, .. } = record {
                     current_name = name.as_deref();
                 }
             }
-            if let Some(name) = current_name {
-                let workspace_dir = self
-                    .inner
-                    .data_root
-                    .join("sessions")
-                    .join(&self.inner.workspace_key);
-                if let Err(error) = self.inner.listing.normalize_name(
-                    &workspace_dir,
-                    &self.inner.workspace,
-                    Some(name),
-                    Some(self.id),
-                ) {
-                    self.prelocked = Some(lock);
-                    self.state = State::Lazy { blobs };
-                    return Err(error);
-                }
-            }
         }
+        let current_name = current_name.map(str::to_owned);
         let store = Store {
             inner: Arc::clone(&self.inner),
         };
         let shards = match store.shards() {
             Ok(shards) => shards,
             Err(error) => {
-                self.prelocked = Some(lock);
                 self.state = State::Lazy { blobs };
                 return Err(error);
             }
@@ -1002,7 +955,6 @@ impl Journal {
         let create_permit = match self.inner.create_permits.acquire().await {
             Ok(permit) => permit,
             Err(_closed) => {
-                self.prelocked = Some(lock);
                 self.state = State::Lazy { blobs };
                 return Err(StoreError::Invalid {
                     reason: "journal create permits are closed".into(),
@@ -1011,45 +963,67 @@ impl Journal {
         };
         self.state = State::Broken {
             lane: None,
-            lock: Some(lock),
+            lock: None,
         };
-        for blob in blobs {
-            blob::put_prepared(&blob_dir, blob)?;
-        }
 
+        // First-append setup is mkdirs, a lock acquire, name and blob
+        // publishes, and the journal create — every step writes and syncs.
+        // Running them on the async worker monopolizes a single-threaded
+        // executor under slow storage, serializing every session's first
+        // append behind one task's fsyncs; the blocking pool owns all of it,
+        // bounded to shard width by `create_permits` (R-perf).
+        let directory = self.paths.directory().to_path_buf();
+        let blob_dir = directory.join("blobs");
+        let jobs_dir = self.paths.jobs();
+        let lock_path = self.paths.lock();
         let journal_path = self.paths.journal();
-        // Journal creation writes and syncs; running it on the async worker
-        // stalls every task sharing the thread under create bursts, so the
-        // blocking pool owns the fsync work — bounded to shard width by
-        // `create_permits` (R-perf).
+        let workspace_dir = self
+            .inner
+            .data_root
+            .join("sessions")
+            .join(&self.inner.workspace_key);
+        let workspace = self.inner.workspace.clone();
+        let inner = Arc::clone(&self.inner);
+        let id = self.id;
+        let prelocked = self.prelocked.take();
         let creation = tokio::task::spawn_blocking({
             let journal_path = journal_path.clone();
-            move || FileJournal::create(&journal_path, &bytes, &Faults::default())
+            move || -> Result<(LockGuard, FileJournal), StoreError> {
+                util::create_private_dir_all(&directory)
+                    .map_err(|source| util::io_err(&directory, source))?;
+                let lock = match prelocked {
+                    Some(lock) => lock,
+                    None => LockGuard::acquire(&lock_path, id)?,
+                };
+                util::create_private_dir_all(&blob_dir)
+                    .map_err(|source| util::io_err(&blob_dir, source))?;
+                util::create_private_dir_all(&jobs_dir)
+                    .map_err(|source| util::io_err(&jobs_dir, source))?;
+                if let Some(name) = current_name.as_deref() {
+                    inner.listing.normalize_name(
+                        &workspace_dir,
+                        &workspace,
+                        Some(name),
+                        Some(id),
+                    )?;
+                }
+                for blob in blobs {
+                    blob::put_prepared(&blob_dir, blob)?;
+                }
+                let journal = FileJournal::create(&journal_path, &bytes, &Faults::default())?;
+                Ok((lock, journal))
+            }
         });
-        let file_journal = match creation.await {
-            Ok(Ok(journal)) => journal,
+        let (lock, file_journal) = match creation.await {
+            Ok(Ok(pair)) => pair,
             Ok(Err(error)) => {
                 if !journal_path.exists() {
-                    let state = std::mem::replace(&mut self.state, State::Closed);
-                    if let State::Broken {
-                        lock: Some(lock), ..
-                    } = state
-                    {
-                        self.prelocked = Some(lock);
-                    }
                     self.state = State::Lazy { blobs: Vec::new() };
                 }
-                return Err(write_failure(self.id, error.into()));
+                return Err(write_failure(self.id, error));
             }
             Err(join) => {
                 if !journal_path.exists() {
-                    let state = std::mem::replace(&mut self.state, State::Closed);
-                    if let State::Broken {
-                        lock: Some(lock), ..
-                    } = state
-                    {
-                        self.prelocked = Some(lock);
-                    }
                     self.state = State::Lazy { blobs: Vec::new() };
                 }
                 return Err(StoreError::Invalid {
@@ -1057,6 +1031,9 @@ impl Journal {
                 });
             }
         };
+        if let State::Broken { lock: slot, .. } = &mut self.state {
+            *slot = Some(lock);
+        }
         drop(create_permit);
         #[cfg(test)]
         let file_journal = {
@@ -1526,6 +1503,50 @@ fn write_failure(id: SessionId, error: StoreError) -> StoreError {
             cause: Box::new(error),
         },
         error => error,
+    }
+}
+
+/// Acquires the session lock and opens the journal on the blocking pool.
+///
+/// The lock acquire and the scan/repair open both write and sync, so they
+/// run off the executor (R-perf). A lock held by this same process is
+/// retried briefly: it always signals another journal object inside the
+/// process — an owner still draining a first append or a shutdown still
+/// releasing handles — never a foreign process, so a bounded wait resolves
+/// the contention instead of reporting `Locked` for our own ownership.
+async fn open_locked_journal(
+    paths: &SessionPaths,
+    id: SessionId,
+    faults: Faults,
+) -> Result<(LockGuard, journal::Opened), StoreError> {
+    const RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+    const RETRY_POLL: std::time::Duration = std::time::Duration::from_millis(25);
+    let deadline = tokio::time::Instant::now() + RETRY_BUDGET;
+    loop {
+        let journal_path = paths.journal();
+        let lock_path = paths.lock();
+        let faults = faults.clone();
+        let attempt = tokio::task::spawn_blocking(move || {
+            let lock = LockGuard::acquire(&lock_path, id)?;
+            let opened = FileJournal::open(&journal_path, &faults)
+                .map_err(|failure| map_open_failure(&journal_path, failure))?;
+            Ok::<_, StoreError>((lock, opened))
+        })
+        .await;
+        match attempt {
+            Ok(Ok(pair)) => return Ok(pair),
+            Ok(Err(StoreError::Locked { pid: Some(pid), .. }))
+                if pid == std::process::id() && tokio::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(RETRY_POLL).await;
+            }
+            Ok(Err(error)) => return Err(error),
+            Err(join) => {
+                return Err(StoreError::Invalid {
+                    reason: format!("journal open task failed to join: {join}").into(),
+                });
+            }
+        }
     }
 }
 
