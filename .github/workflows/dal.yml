@@ -79,7 +79,10 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
       - run: rustup toolchain install 1.90.0 --profile minimal
-      - run: cargo +1.90.0 check --workspace --all-features --locked
+      # Deps may declare a higher rust_version than their code needs
+      # (mermaid-text 0.57 declares 1.92 but compiles on 1.90); the MSRV
+      # gate measures compilation, not metadata.
+      - run: cargo +1.90.0 check --workspace --all-features --locked --ignore-rust-version
 
   deny:
     runs-on: ubuntu-24.04
