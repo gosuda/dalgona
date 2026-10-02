@@ -442,6 +442,10 @@ struct Inner {
 impl Drop for Inner {
     fn drop(&mut self) {
         self.shared.ledger.cancel.cancel();
+        self.tasks
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .detach_all();
     }
 }
 

@@ -91,6 +91,24 @@ fn write_isolation_artifact(
         .map_err(|error| std::io::Error::other(error.to_string()))
 }
 
+/// Maps a typed wake refusal onto the service error the caller sees.
+fn wake_service_error(reason: dal_core::ext::WakeError) -> ServiceError {
+    match reason {
+        dal_core::ext::WakeError::Limit => ServiceError::Denied(dal_core::DenyReason::WakeLimit),
+        dal_core::ext::WakeError::Busy => ServiceError::failed(
+            Some(dal_core::Service::Turn),
+            "the session is busy: a turn or compaction is running",
+        ),
+        dal_core::ext::WakeError::Journal { message } => {
+            ServiceError::failed(Some(dal_core::Service::Turn), message)
+        }
+        other => ServiceError::failed(
+            Some(dal_core::Service::Turn),
+            format!("the wake was refused: {other}"),
+        ),
+    }
+}
+
 fn session_root(
     sessions: &std::collections::HashMap<SessionId, crate::host::SessionEntry>,
     start: SessionId,
@@ -493,7 +511,12 @@ impl SessionBackend for Backend {
     }
 
     fn turn(&self, op: TurnOp) -> ServiceFuture<'_, TurnOpReply> {
-        Box::pin(async move { Ok(self.turn_op(op).await) })
+        Box::pin(async move {
+            match self.turn_op(op).await {
+                TurnOpReply::WakeRefused(reason) => Err(wake_service_error(reason)),
+                reply => Ok(reply),
+            }
+        })
     }
 
     fn append_record(&self, ext: &Name, kind: &str, body: RawValue) -> ServiceFuture<'_, EntryId> {
@@ -757,7 +780,20 @@ impl Backend {
                 return AgentsReply::Cancelled { id };
             };
             if matches!(view.turn, dal_core::TurnState::Idle) {
-                return Self::child_report(id, &view);
+                let report = Self::child_report(id, &view);
+                if matches!(report, AgentsReply::Await { .. })
+                    && let Some(entry) = self
+                        .host
+                        .sessions
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .get(&id)
+                {
+                    entry
+                        .reported
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                return report;
             }
             if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
                 return AgentsReply::Pending { id };
@@ -865,7 +901,10 @@ impl Backend {
             if sender_root.is_none() || sender_root != recipient_root {
                 return AgentsReply::Delivered(dal_core::ext::Receipt::Gone);
             }
-            sessions.get(&to).map(|entry| entry.handle.clone())
+            sessions
+                .get(&to)
+                .filter(|entry| !entry.reported.load(std::sync::atomic::Ordering::SeqCst))
+                .map(|entry| entry.handle.clone())
         };
         let Some(handle) = handle else {
             return AgentsReply::Delivered(dal_core::ext::Receipt::Gone);

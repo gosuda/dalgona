@@ -54,6 +54,7 @@ fn engine_with_turn(cfg: GuardConfig) -> (Arc<Engine>, SessionId, TurnId) {
             turn: Some(TurnState {
                 id: turn,
                 reduction_ask: false,
+                counted: std::collections::HashSet::default(),
                 added: 0,
                 deleted: 0,
                 files: BTreeSet::new(),

@@ -281,6 +281,7 @@ struct Session {
 pub(super) struct TurnState {
     id: TurnId,
     reduction_ask: bool,
+    counted: HashSet<CallId>,
     added: u64,
     deleted: u64,
     files: BTreeSet<Box<str>>,

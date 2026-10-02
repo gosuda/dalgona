@@ -208,17 +208,25 @@ impl Shared {
         let view = inner.projection.snapshot(args);
         (view, entries)
     }
-    /// Reports whether a live subscriber watches this session.
+    /// Reports whether a live answering subscriber watches this session.
+    /// Listen-only subscribers observe updates but cannot resolve approval
+    /// requests, so they never count here.
     pub(crate) fn attached(&self) -> bool {
         self.inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .subscribers
             .iter()
-            .any(|slot| Subscriber::upgrade(slot).is_some())
+            .any(|slot| {
+                Subscriber::upgrade(slot).is_some_and(|shared| Subscriber::answers(&shared))
+            })
     }
 
-    pub(crate) fn subscribe(self: &Arc<Self>, after: Option<(Gen, Seq)>) -> Arc<SubscriberShared> {
+    pub(crate) fn subscribe(
+        self: &Arc<Self>,
+        after: Option<(Gen, Seq)>,
+        answers: bool,
+    ) -> Arc<SubscriberShared> {
         let mut inner = self
             .inner
             .lock()
@@ -246,7 +254,7 @@ impl Shared {
             position.r#gen,
             position.seq.unwrap_or(Seq::new(NonZeroU64::MIN)),
         );
-        let subscriber = Subscriber::with_backlog(backlog, current);
+        let subscriber = Subscriber::with_backlog(backlog, current, answers);
         let port = subscriber.port();
         inner.subscribers.push(subscriber.downgrade());
         port

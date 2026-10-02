@@ -92,6 +92,7 @@ impl Hook<BeforeTurn, Option<String>> for BeforeTurnHook {
             session.turn = Some(TurnState {
                 id: input.turn,
                 reduction_ask,
+                counted: HashSet::new(),
                 added: 0,
                 deleted: 0,
                 files: BTreeSet::new(),

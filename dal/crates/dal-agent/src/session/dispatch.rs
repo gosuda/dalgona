@@ -645,7 +645,10 @@ impl CallRuntime {
                 )
                 .await
             }
-            dal_core::Decision::Deny { reason } => Err(reason),
+            dal_core::Decision::Deny { reason } => Err(match reason {
+                DenyReason::NoFrontEnd => self.headless_denial(&class),
+                reason => reason,
+            }),
             dal_core::Decision::Ask { grant } => self.ask(call, preview, grant, cancel).await,
             _ => Err(dal_core::DenyReason::OutOfScope {
                 what: self.tool.as_str().into(),
@@ -665,6 +668,23 @@ impl CallRuntime {
             .map_err(|_| DenyReason::OutOfScope {
                 what: self.tool.as_str().into(),
             })
+    }
+
+    /// The model-visible denial for a gated call with no one to ask. The
+    /// front end owns the matching stderr note and its rerun hint names the
+    /// approval rung the call needed.
+    fn headless_denial(&self, class: &ToolClass) -> dal_core::DenyReason {
+        let rung = match dal_core::rung(class) {
+            dal_core::Rung::Edits => "edits",
+            dal_core::Rung::All => "all",
+        };
+        dal_core::DenyReason::OutOfScope {
+            what: format!(
+                "Permission denied: {} needs approval, and this run has no one to ask. Continue without it and report what needs the user. (The user can rerun with --approval {rung}.)",
+                self.tool.as_str()
+            )
+            .into(),
+        }
     }
 
     async fn finish_approval(
@@ -741,7 +761,8 @@ impl CallRuntime {
     ) -> Result<Approved, dal_core::DenyReason> {
         use dal_core::DenyReason;
         let Some(turn) = self.turn else {
-            return Err(DenyReason::NoFrontEnd);
+            let class = self.approval_class().unwrap_or(ToolClass::Other);
+            return Err(self.headless_denial(&class));
         };
         let question = Question::Approval {
             tool: self.tool.as_str().into(),

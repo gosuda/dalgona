@@ -30,7 +30,7 @@ async fn headless_tools_preserve_call_order_and_see_patch()
     let replay_fixture = fixtures.join("replay/loop-headless.jsonl");
     let factory = dalgon::product();
     let user = format!(
-        "model = \"openai-responses/gpt-6\"\nedit_style = \"replace\"\n[providers.scripted]\nfixture = {:?}\n",
+        "model = \"openai-responses/gpt-6\"\napproval = \"all\"\nedit_style = \"replace\"\n[providers.scripted]\nfixture = {:?}\n",
         replay_fixture.to_string_lossy()
     );
     let config = Config::load(

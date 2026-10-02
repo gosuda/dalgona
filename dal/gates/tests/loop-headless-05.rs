@@ -13,7 +13,7 @@ mod support;
 use std::{collections::BTreeMap, error::Error, fs, process::Command};
 
 use dal_agent::{Env, Host, SessionRef};
-use dal_core::{Config, ConfigProduct, PageReq, Workspace};
+use dal_core::{Config, ConfigProduct, Expect, PageReq, Part, Workspace};
 use support::TestDir;
 
 #[tokio::test]
@@ -57,6 +57,17 @@ async fn second_process_reports_current_session_lock_holder()
             dal_core::ClientId::new("core"),
         )
         .await?;
+    // A lazy session journals nothing until its first user entry; prompt so
+    // the store materializes and holds the cross-process lock the second
+    // process must contend with.
+    let _ = agent
+        .submit(dal_core::Command::Prompt {
+            expect: Expect::Idle,
+            content: vec![Part::Text {
+                text: "Materialize this session.".into(),
+            }],
+        })
+        .await;
     let session_id = agent.view(PageReq::default())?.session.id.to_string();
 
     let output = Command::new(support::dalgon_binary("dalgon")?)
