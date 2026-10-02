@@ -1,9 +1,3 @@
-#![expect(clippy::unwrap_used, reason = "SC test")]
-#![expect(clippy::expect_used, reason = "SC test")]
-#![expect(
-    dead_code,
-    reason = "gate support exposes helpers shared across independent targets"
-)]
 #![cfg(unix)]
 #![expect(
     clippy::disallowed_methods,
@@ -17,6 +11,10 @@
 )]
 #[path = "support/pty.rs"]
 mod pty;
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
 use std::{error::Error, time::Duration};

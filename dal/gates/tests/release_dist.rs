@@ -1,3 +1,8 @@
+#![expect(
+    clippy::disallowed_methods,
+    reason = "SC release gate runs cargo-dist and tar as real processes"
+)]
+//! Distribution layout gate: packaged binaries and manifest artifacts.
 use std::{
     collections::{BTreeMap, HashSet},
     error::Error,
@@ -10,7 +15,7 @@ use serde::Deserialize;
 
 #[derive(Deserialize)]
 struct DistManifest {
-    artifacts: BTreeMap<String, serde::de::IgnoredAny>,
+    artifacts: BTreeMap<String, sonic_rs::Value>,
 }
 
 #[derive(Deserialize)]

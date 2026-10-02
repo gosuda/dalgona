@@ -161,7 +161,7 @@ async fn websocket_auth_never_logs_token_values() -> Result<(), Box<dyn Error + 
     ] {
         match std::fs::read_to_string(&path) {
             Ok(text) => logged.push_str(&text),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
     }

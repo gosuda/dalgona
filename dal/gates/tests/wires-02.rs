@@ -1,10 +1,13 @@
-#![expect(clippy::unwrap_used, reason = "SC test")]
-#![expect(clippy::expect_used, reason = "SC test")]
 #![expect(
     clippy::disallowed_methods,
     reason = "SC test exercises real server commands"
 )]
 
+//! Public serve requires the owner token and `force` to replace sessions.
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
 use std::{error::Error, fs, process::Command};

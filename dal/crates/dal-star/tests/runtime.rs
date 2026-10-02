@@ -15,7 +15,7 @@ use dal_agent::ext::tool::{Tool, ToolOutcome};
 use dal_core::ext::{NativeOp, OpSet, Service, ToolData, ViewNode};
 use dal_core::{Part, RawJson};
 use dal_star::{CELL_LIMITS, Limits, eval_extension};
-use host::{HostRecord, RecordingHost, eval_args, failed, native_op, tool_cx};
+use host::{HostRecord, RecordingHost, eval_args, failed, native_op, tool_cx_approved};
 use support::{system_with_plugin, write_plugin};
 
 async fn run_tool(
@@ -26,7 +26,7 @@ async fn run_tool(
     let args = RawJson::parse(arguments).expect("tool arguments are JSON");
     tool.run(
         dal_agent::ext::tool::ToolCall::new("test-call", args),
-        tool_cx(script),
+        tool_cx_approved(script),
     )
     .await
 }

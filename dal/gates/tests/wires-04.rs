@@ -1,10 +1,13 @@
-#![expect(clippy::unwrap_used, reason = "SC test")]
-#![expect(clippy::expect_used, reason = "SC test")]
 #![expect(
     clippy::disallowed_methods,
     reason = "SC test exercises real websocket server"
 )]
 
+//! Serve failure surfaces and websocket request handling.
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
 use std::{
@@ -75,6 +78,10 @@ async fn advertisement_websocket(
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "SC websocket contract is one long script"
+)]
 async fn websocket_auth_origin_frame_keepalive_and_disconnect_contract()
 -> Result<(), Box<dyn Error + Send + Sync>> {
     let dir = TestDir::new()?;

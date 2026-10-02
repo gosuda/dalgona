@@ -1,9 +1,3 @@
-#![expect(clippy::unwrap_used, reason = "SC test")]
-#![expect(clippy::expect_used, reason = "SC test")]
-#![expect(
-    dead_code,
-    reason = "gate support exposes helpers shared across independent targets"
-)]
 #![cfg(unix)]
 #![expect(
     clippy::disallowed_methods,
@@ -12,7 +6,15 @@
 //! Verifies settled transcript rows stay frozen in the real terminal.
 
 #[path = "support/pty.rs"]
+#[expect(
+    dead_code,
+    reason = "PTY support helpers are shared across TUI gate targets"
+)]
 mod pty;
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 #[path = "support/vt.rs"]
 mod vt;

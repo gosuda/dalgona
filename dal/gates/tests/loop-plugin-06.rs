@@ -1,7 +1,9 @@
-#![expect(clippy::unwrap_used, reason = "SC test")]
-#![expect(clippy::expect_used, reason = "SC test")]
 //! Exercises Starlark TTSR rules against replayed model streams.
 
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
 use std::{
@@ -48,6 +50,7 @@ const REPLAY: &str = concat!(
     "{\"kind\":\"events\",\"events\":[{\"type\":\"text_delta\",\"text\":\"final answer after the retry cap: TRIPWIRE\"},{\"type\":\"tool_calls_done\",\"calls\":[]},{\"type\":\"usage\",\"usage\":{\"input_tokens\":1,\"cached_input_tokens\":0,\"output_tokens\":1,\"reasoning_tokens\":null,\"cache_write_tokens\":0,\"cost_usd\":null}},{\"type\":\"stop\",\"reason\":\"end_turn\"}]}\n",
 );
 
+#[expect(clippy::too_many_lines, reason = "SC ttsr scenario is one long script")]
 #[tokio::test]
 async fn ttsr_replay_interrupts_injects_and_retries_at_most_three_times()
 -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -56,12 +59,12 @@ async fn ttsr_replay_interrupts_injects_and_retries_at_most_three_times()
     let plugin_dir = data.path().join("plugins/gate-ttsr");
     fs::create_dir_all(&plugin_dir)?;
     fs::write(plugin_dir.join("plugin.star"), RULE_PLUGIN)?;
-    let replay = data.path().join("ttsr-scripted.jsonl");
-    fs::write(&replay, REPLAY)?;
+    let replay_fixture = data.path().join("ttsr-scripted.jsonl");
+    fs::write(&replay_fixture, REPLAY)?;
     let factory = dalgon::product();
     let user = format!(
         "model = \"openai/gpt-6\"\nplugins = [\"gate-ttsr\"]\n[providers.scripted]\nfixture = {:?}\n",
-        replay.to_string_lossy()
+        replay_fixture.to_string_lossy()
     );
     let config = Config::load(
         ConfigProduct::Dalgon,

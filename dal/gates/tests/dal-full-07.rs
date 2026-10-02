@@ -1,7 +1,10 @@
-#![expect(clippy::unwrap_used, reason = "SC test")]
 #![expect(clippy::expect_used, reason = "SC test")]
 #![expect(missing_docs, reason = "SC test")]
 
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
 use std::{
@@ -258,6 +261,10 @@ fn assert_cancelled(handles: &[ScopeHandle]) {
     );
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "SC hook deadline scenario is one long script"
+)]
 #[tokio::test(start_paused = true)]
 async fn hook_deadline_ends_scope_and_cancels_handles() -> Result<(), Box<dyn Error + Send + Sync>>
 {
@@ -366,11 +373,13 @@ async fn hook_deadline_ends_scope_and_cancels_handles() -> Result<(), Box<dyn Er
     assert_cancelled(groups.get(1).unwrap());
     assert_eq!(state.active.load(Ordering::SeqCst), 0);
     assert_eq!(state.dropped.load(Ordering::SeqCst), 2 * MEMBER_COUNT);
-    let starts = state.hook_started.lock().expect("hook start mutex");
-    let ends = state.hook_finished.lock().expect("hook finish mutex");
-    assert_eq!(starts.len(), 2);
-    assert_eq!(ends.len(), 2);
-    assert!(ends[1].duration_since(starts[1]) < Duration::from_secs(5));
+    {
+        let starts = state.hook_started.lock().expect("hook start mutex");
+        let ends = state.hook_finished.lock().expect("hook finish mutex");
+        assert_eq!(starts.len(), 2);
+        assert_eq!(ends.len(), 2);
+        assert!(ends[1].duration_since(starts[1]) < Duration::from_secs(5));
+    }
     let _ = harness.host.shutdown(Duration::from_secs(1)).await;
     Ok(())
 }

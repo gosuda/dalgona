@@ -41,17 +41,40 @@ proptest! {
     }
 
     #[test]
-    fn lossless_events_survive_overflow(count in 4_100usize..4_200) {
+    fn lossless_events_survive_overflow(
+        lossless in 1usize..64,
+        replaceable in 4_096usize..4_200,
+    ) {
         let mut queue = Coalescer::default();
-        for index in 0..count {
-            queue.push_update(update(index as u64 + 1, UpdateKind::Delta {
-                turn: turn(),
-                channel: StreamChannel::Text,
-                text: "x".into(),
+        let mut seq = 0u64;
+        for _ in 0..lossless {
+            seq += 1;
+            queue.push_update(update(seq, UpdateKind::Notice(dal_core::Notice {
+                turn: Some(turn()),
+                kind: "test.notice".into(),
+                text: "lossless".into(),
+            })));
+        }
+        for index in 0..replaceable {
+            seq += 1;
+            queue.push_update(update(seq, UpdateKind::ToolProgress {
+                call: dal_core::CallId::new(format!("call-{index}")),
+                tail: format!("progress {index}").into_boxed_str(),
             }));
         }
         let shed = queue.take_shed_count();
-        prop_assert!(shed > 0);
-        prop_assert_eq!(queue.take_updates().len(), 4_096 - usize::try_from(shed).unwrap_or(0));
+        prop_assert_eq!(
+            usize::try_from(shed).unwrap_or(usize::MAX),
+            lossless + replaceable - 4_096
+        );
+        let drained = queue.take_updates();
+        prop_assert_eq!(drained.len(), 4_096);
+        prop_assert_eq!(
+            drained
+                .iter()
+                .filter(|item| matches!(item.kind, UpdateKind::Notice(_)))
+                .count(),
+            lossless
+        );
     }
 }

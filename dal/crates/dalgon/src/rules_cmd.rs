@@ -297,7 +297,7 @@ mod tests {
         let input = RuleBuildInput {
             records: &[],
             plugin_rules: &[],
-            known_tools: &[],
+            known_tools: &["exec"],
             agent: "test",
         };
         let result = run(
@@ -320,7 +320,7 @@ mod tests {
         assert_eq!(result, ExitCode::SUCCESS);
         assert_eq!(
             stdout,
-            b"fired: no-auto-commit (interrupt). The exec call matched /git commit -m/.\n"
+            b"fired: no-auto-commit (interrupt). The `exec` call matched /git commit -m/.\n"
         );
     }
 
@@ -359,7 +359,7 @@ mod tests {
         let input = RuleBuildInput {
             records: &[],
             plugin_rules: &[],
-            known_tools: &[],
+            known_tools: &["exec"],
             agent: "test",
         };
         let result = run(

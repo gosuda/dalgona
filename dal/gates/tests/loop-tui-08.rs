@@ -1,9 +1,3 @@
-#![expect(clippy::unwrap_used, reason = "SC test")]
-#![expect(clippy::expect_used, reason = "SC test")]
-#![expect(
-    dead_code,
-    reason = "gate support exposes helpers shared across independent targets"
-)]
 #![cfg(unix)]
 #![expect(
     clippy::disallowed_methods,
@@ -11,12 +5,21 @@
 )]
 //! Reattaches the real TUI after its server-side WebSocket connection drops.
 
+#[expect(
+    dead_code,
+    reason = "PTY support helpers are shared across TUI gate targets"
+)]
 #[path = "support/pty.rs"]
 mod pty;
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
 use std::{
     error::Error,
+    fmt::Write as _,
     io::{self, Read, Write},
     net::{Shutdown, SocketAddr, TcpListener, TcpStream},
     process::{Child, Stdio},
@@ -294,6 +297,10 @@ impl Drop for TcpProxy {
     }
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "arguments are moved into the spawned proxy thread"
+)]
 fn proxy_loop(
     listener: TcpListener,
     target: SocketAddr,
@@ -415,10 +422,7 @@ impl WebSocketStream {
             self.frame_start = Some(end + 4);
         }
         let mut cursor = self.frame_start.unwrap_or(0);
-        loop {
-            let Some(first) = self.bytes.get(cursor).copied() else {
-                break;
-            };
+        while let Some(first) = self.bytes.get(cursor).copied() {
             let Some(second) = self.bytes.get(cursor + 1).copied() else {
                 break;
             };
@@ -512,7 +516,7 @@ fn rewrite_host_header(request: &[u8], serve_port: u16) -> Vec<u8> {
             .get(..5)
             .is_some_and(|head| head.eq_ignore_ascii_case("host:"))
         {
-            out.push_str(&format!("Host: 127.0.0.1:{serve_port}\r\n"));
+            let _ = write!(out, "Host: 127.0.0.1:{serve_port}\r\n");
         } else {
             out.push_str(line);
         }
@@ -520,6 +524,10 @@ fn rewrite_host_header(request: &[u8], serve_port: u16) -> Vec<u8> {
     out.into_bytes()
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "arguments are moved into the spawned relay thread"
+)]
 fn forward(
     mut reader: TcpStream,
     mut writer: TcpStream,

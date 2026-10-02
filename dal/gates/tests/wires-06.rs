@@ -1,10 +1,13 @@
-#![expect(clippy::unwrap_used, reason = "SC test")]
-#![expect(clippy::expect_used, reason = "SC test")]
 #![expect(
     clippy::disallowed_methods,
     reason = "SC test drives real app-server stdio"
 )]
 
+//! Wire server helpers: process drop and captured server lines.
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
 use std::{
@@ -58,6 +61,7 @@ fn read_response(lines: &ServerLines) -> Result<sonic_rs::Value, Box<dyn Error +
 }
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "SC codex smoke is one long script")]
 fn codex_app_server_smoke_uses_pinned_core_subset() -> Result<(), Box<dyn Error + Send + Sync>> {
     let dir = TestDir::new()?;
     let home = dir.path().join("home");
@@ -193,9 +197,8 @@ fn codex_app_server_smoke_uses_pinned_core_subset() -> Result<(), Box<dyn Error 
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while std::time::Instant::now() < deadline {
         let timeout = deadline.saturating_duration_since(std::time::Instant::now());
-        let line = match lines.recv_timeout(timeout) {
-            Ok(Ok(line)) => line,
-            _ => break,
+        let Ok(Ok(line)) = lines.recv_timeout(timeout) else {
+            break;
         };
         if line.contains("-32601") {
             saw_32601 = true;

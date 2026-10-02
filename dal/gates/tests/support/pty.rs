@@ -5,6 +5,7 @@
 )]
 
 use std::{
+    fmt::Write as _,
     fs::{File, OpenOptions},
     io::{self, Read, Write},
     path::Path,
@@ -63,8 +64,32 @@ impl PtyProcess {
     }
 
     /// Writes key or paste bytes to the real terminal input stream.
+    ///
+    /// Large pastes exceed the kernel PTY input queue, so partial writes
+    /// retry on `WouldBlock` while draining child output; a full queue for
+    /// more than ~10 seconds is reported as a hang.
     pub fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
-        self.master.write_all(bytes)
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut offset = 0;
+        while offset < bytes.len() {
+            match self.master.write(&bytes[offset..]) {
+                Ok(0) => return Err(io::Error::other("PTY write returned 0 bytes")),
+                Ok(written) => offset += written,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "PTY input queue stayed full for 10 seconds",
+                        ));
+                    }
+                    self.read_available()?;
+                    thread::sleep(Duration::from_millis(2));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
     }
 
     /// Captures available output for at most `duration`.
@@ -144,6 +169,20 @@ impl PtyProcess {
         }
     }
 
+    /// Resizes the slave side of the terminal and signals the child.
+    pub fn resize(&mut self, columns: u16, rows: u16) -> io::Result<()> {
+        tcsetwinsize(
+            &self.master,
+            Winsize {
+                ws_row: rows,
+                ws_col: columns,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            },
+        )
+        .map_err(io::Error::from)
+    }
+
     /// Returns every byte read from the pseudoterminal master so far.
     #[must_use]
     pub fn output(&self) -> &[u8] {
@@ -168,19 +207,25 @@ impl PtyProcess {
         }
     }
 
+    /// Drains the master until it would block; one `read` call can split a
+    /// message across the kernel buffer, so callers must loop.
     fn read_available(&mut self) -> io::Result<usize> {
-        let mut buffer = [0_u8; 8192];
-        match self.master.read(&mut buffer) {
-            Ok(0) => Ok(0),
-            Ok(length) => {
-                self.output.extend_from_slice(&buffer[..length]);
-                Ok(length)
+        let mut total = 0;
+        loop {
+            let mut buffer = [0_u8; 8192];
+            match self.master.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(length) => {
+                    self.output.extend_from_slice(&buffer[..length]);
+                    total += length;
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(_error) if self.child.try_wait()?.is_some() => break,
+                Err(error) => return Err(error),
             }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(0),
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => Ok(0),
-            Err(_error) if self.child.try_wait()?.is_some() => Ok(0),
-            Err(error) => Err(error),
         }
+        Ok(total)
     }
 }
 
@@ -197,10 +242,12 @@ impl Drop for PtyProcess {
 pub fn dalgon_command(home: &Path, replies: &[&str]) -> io::Result<Command> {
     let mut contents = String::new();
     for reply in replies {
-        contents.push_str(&format!(
-            "{{\"kind\":\"events\",\"events\":[{{\"type\":\"text_delta\",\"text\":{}}},{{\"type\":\"tool_calls_done\",\"calls\":[]}},{{\"type\":\"usage\",\"usage\":{{\"input_tokens\":12,\"cached_input_tokens\":0,\"output_tokens\":5,\"reasoning_tokens\":null,\"cache_write_tokens\":0,\"cost_usd\":null}}}},{{\"type\":\"stop\",\"reason\":\"end_turn\"}}]}}\n",
+        writeln!(
+            &mut contents,
+            "{{\"kind\":\"events\",\"events\":[{{\"type\":\"text_delta\",\"text\":{}}},{{\"type\":\"tool_calls_done\",\"calls\":[]}},{{\"type\":\"usage\",\"usage\":{{\"input_tokens\":12,\"cached_input_tokens\":0,\"output_tokens\":5,\"reasoning_tokens\":null,\"cache_write_tokens\":0,\"cost_usd\":null}}}},{{\"type\":\"stop\",\"reason\":\"end_turn\"}}]}}",
             sonic_rs::to_string(reply).map_err(io::Error::other)?
-        ));
+        )
+        .map_err(io::Error::other)?;
     }
     dalgon_command_with_fixture(home, &contents)
 }

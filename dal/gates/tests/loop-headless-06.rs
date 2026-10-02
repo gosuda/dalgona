@@ -1,6 +1,8 @@
-#![expect(clippy::unwrap_used, reason = "SC test")]
-#![expect(clippy::expect_used, reason = "SC test")]
-
+//! An empty extension list still produces a text-only turn.
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
 use std::{collections::BTreeMap, error::Error, path::PathBuf, time::Duration};

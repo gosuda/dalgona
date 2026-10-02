@@ -1,7 +1,12 @@
+//! Publish-order gate: crates publish in dependency order.
 #[path = "release_support/mod.rs"]
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
-use std::{collections::HashMap, error::Error, fs, path::PathBuf};
+use std::{collections::HashMap, error::Error, fmt::Write as _, fs, path::PathBuf};
 
 use proptest::prelude::*;
 
@@ -51,9 +56,9 @@ fn materialize_workspace(
         .collect();
     let mut root_manifest = String::from("[workspace]\nresolver = \"3\"\nmembers = [\n");
     for name in &names {
-        root_manifest.push_str(&format!("    \"{name}\",\n"));
+        let _ = writeln!(root_manifest, "    \"{name}\",");
     }
-    root_manifest.push_str("]\n\n[workspace.package]\nversion = \"0.1.0\"\nedition = \"2024\"\n");
+    root_manifest += "]\n\n[workspace.package]\nversion = \"0.1.0\"\nedition = \"2024\"\n";
     fs::write(workspace.path().join("Cargo.toml"), root_manifest)?;
     for (index, name) in names.iter().enumerate() {
         let crate_root = workspace.path().join(name);
@@ -66,11 +71,12 @@ fn materialize_workspace(
             .filter_map(|(dependent, dependency)| (*dependent == index).then_some(*dependency))
             .collect();
         if !dependencies.is_empty() {
-            manifest.push_str("\n[dependencies]\n");
+            manifest += "\n[dependencies]\n";
             for dependency in dependencies {
-                manifest.push_str(&format!(
-                    "crate{dependency} = {{ path = \"../crate{dependency}\" }}\n"
-                ));
+                let _ = writeln!(
+                    manifest,
+                    "crate{dependency} = {{ path = \"../crate{dependency}\" }}"
+                );
             }
         }
         fs::write(crate_root.join("Cargo.toml"), manifest)?;

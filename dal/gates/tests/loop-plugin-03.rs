@@ -1,5 +1,9 @@
 //! A failed plugin reload leaves the validated generation callable.
 
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
 use std::{collections::BTreeMap, error::Error, fs, path::PathBuf};

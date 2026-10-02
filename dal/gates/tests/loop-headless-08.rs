@@ -1,6 +1,8 @@
-#![expect(clippy::unwrap_used, reason = "SC test")]
-#![expect(clippy::expect_used, reason = "SC test")]
-
+//! Headless wake-loop bounds: twenty wakes, then rejection and reset.
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
 use std::{collections::BTreeMap, error::Error, path::PathBuf, sync::Arc};
@@ -57,6 +59,10 @@ async fn wake_once(
         .await
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "SC wake-limit scenario is one long script"
+)]
 #[tokio::test]
 async fn wake_limit_allows_twenty_then_rejects_and_resets()
 -> Result<(), Box<dyn Error + Send + Sync>> {

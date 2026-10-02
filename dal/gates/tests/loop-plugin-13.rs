@@ -1,13 +1,17 @@
-#![expect(clippy::unwrap_used, reason = "SC test")]
 #![expect(clippy::expect_used, reason = "SC test")]
 
 //! Synthetic model recursion, private rounds, and USD admission expose typed failures.
 
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
 use std::{
     collections::BTreeMap,
     error::Error,
+    io,
     sync::{
         Arc, Mutex, MutexGuard, PoisonError,
         atomic::{AtomicUsize, Ordering},
@@ -46,6 +50,7 @@ struct ProbeHandler {
 }
 
 impl ModelHandler for ProbeHandler {
+    #[expect(clippy::panic, reason = "SC model aborts on impossible scope results")]
     fn run<'a>(
         &'a self,
         request: ModelRequest,
@@ -64,7 +69,7 @@ impl ModelHandler for ProbeHandler {
                 .expect("cycle probe is admitted");
             let cycle_result = cycle.result().await.expect("cycle probe completes");
             let ScopeValue::Inference(_) = cycle_result else {
-                panic!("cycle probe returned a member report");
+                panic!("cycle probe returned a member report")
             };
             let depth = scope
                 .infer(model_request("gate/depth-0"))
@@ -116,7 +121,7 @@ impl ModelHandler for CycleHandler {
             let mut repeated = request;
             repeated.model = ModelRoute::from_id("gate/cycle");
             if let Err(error) = cx.forward(repeated, &[]).await {
-                lock(&self.state).cycle = Some(error)
+                lock(&self.state).cycle = Some(error);
             }
             Ok(text_stream("cycle checked"))
         })
@@ -354,6 +359,10 @@ fn model_product(data: &TestDir) -> Result<(Config, Product), Box<dyn Error + Se
     Ok((config, product))
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "SC synthetic-probe scenario is one long script"
+)]
 #[tokio::test]
 async fn synthetic_cycle_depth_round_and_unpriced_errors_are_typed()
 -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -440,47 +449,48 @@ async fn synthetic_cycle_depth_round_and_unpriced_errors_are_typed()
             _ => {}
         }
     }
-    let mut observed = lock(&state);
-    let cycle = observed.cycle.take().unwrap();
-    let ModelError::SyntheticCycle { chain } = cycle else {
-        panic!("cycle probe did not return SyntheticCycle");
-    };
-    assert_eq!(
-        chain.iter().map(ModelId::as_str).collect::<Vec<_>>(),
-        ["gate/probe", "gate/cycle", "gate/cycle"]
-    );
-    let depth = observed.depth.take().unwrap();
-    let ModelError::SyntheticDepth { chain } = depth else {
-        panic!("depth probe did not return SyntheticDepth");
-    };
-    assert_eq!(
-        chain.iter().map(ModelId::as_str).collect::<Vec<_>>(),
-        [
-            "gate/probe",
-            "gate/depth-0",
-            "gate/depth-1",
-            "gate/depth-2",
-            "gate/depth-3",
-        ]
-    );
-    let unpriced = observed.unpriced.take().unwrap();
-    assert!(matches!(
-        unpriced,
-        ScopeError::UnpricedModel { model } if model.as_ref() == "gate/no-price"
-    ));
-    let private_failure = observed.private_rounds.take().unwrap();
-    let expected_private_rounds = ModelError::PrivateRounds.to_string();
-    assert!(matches!(
-        private_failure,
-        ProviderError::Synthetic(InferFailure::Fatal { message, fix })
-            if message.as_ref() == expected_private_rounds.as_str() && fix.is_none()
-    ));
-    assert_eq!(calls.load(Ordering::SeqCst), 9);
-    assert_eq!(private_calls.load(Ordering::SeqCst), 8);
-    assert_eq!(max_private_results.load(Ordering::SeqCst), 8);
-    assert!(session_calls.is_empty());
-    assert_eq!(assistant_text, "synthetic probes complete");
-    drop(observed);
+    {
+        let mut observed = lock(&state);
+        let cycle = observed.cycle.take().unwrap();
+        let ModelError::SyntheticCycle { chain } = cycle else {
+            return Err(io::Error::other("cycle probe did not return SyntheticCycle").into());
+        };
+        assert_eq!(
+            chain.iter().map(ModelId::as_str).collect::<Vec<_>>(),
+            ["gate/probe", "gate/cycle", "gate/cycle"]
+        );
+        let depth = observed.depth.take().unwrap();
+        let ModelError::SyntheticDepth { chain } = depth else {
+            return Err(io::Error::other("depth probe did not return SyntheticDepth").into());
+        };
+        assert_eq!(
+            chain.iter().map(ModelId::as_str).collect::<Vec<_>>(),
+            [
+                "gate/probe",
+                "gate/depth-0",
+                "gate/depth-1",
+                "gate/depth-2",
+                "gate/depth-3",
+            ]
+        );
+        let unpriced = observed.unpriced.take().unwrap();
+        assert!(matches!(
+            unpriced,
+            ScopeError::UnpricedModel { model } if model.as_ref() == "gate/no-price"
+        ));
+        let private_failure = observed.private_rounds.take().unwrap();
+        let expected_private_rounds = ModelError::PrivateRounds.to_string();
+        assert!(matches!(
+            private_failure,
+            ProviderError::Synthetic(InferFailure::Fatal { message, fix })
+                if message.as_ref() == expected_private_rounds.as_str() && fix.is_none()
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 9);
+        assert_eq!(private_calls.load(Ordering::SeqCst), 8);
+        assert_eq!(max_private_results.load(Ordering::SeqCst), 8);
+        assert!(session_calls.is_empty());
+        assert_eq!(assistant_text, "synthetic probes complete");
+    }
     let _ = harness.host.shutdown(Duration::from_secs(1)).await;
     Ok(())
 }

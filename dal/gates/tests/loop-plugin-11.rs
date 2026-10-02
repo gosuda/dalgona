@@ -1,8 +1,9 @@
-#![expect(clippy::unwrap_used, reason = "SC test")]
-#![expect(clippy::expect_used, reason = "SC test")]
-
 //! The Starlark Fusion model runs its panels and preserves session calls.
 
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
 use std::{collections::BTreeMap, error::Error, fs, path::PathBuf, time::Duration};
@@ -13,6 +14,10 @@ use dal_core::{
 };
 use support::{TestDir, scripted_session};
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "SC fusion scenario is one long script"
+)]
 #[tokio::test]
 async fn scripted_fusion_model_runs_panel_and_forwards_session_call()
 -> Result<(), Box<dyn Error + Send + Sync>> {

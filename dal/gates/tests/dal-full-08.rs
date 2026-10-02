@@ -1,7 +1,10 @@
-#![expect(clippy::unwrap_used, reason = "SC test")]
 #![expect(clippy::expect_used, reason = "SC test")]
 #![expect(missing_docs, reason = "SC test")]
 
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
 use std::{
@@ -161,6 +164,7 @@ impl Hook<dal_core::ext::BeforeRequest, Option<RequestParams>> for MailboxHook {
     }
 }
 
+#[expect(clippy::too_many_lines, reason = "SC mailbox probe is one long script")]
 async fn run_mailbox_probe(
     state: &MailboxState,
     services: &Arc<dyn Services>,
@@ -493,13 +497,15 @@ fn hook_failure(message: impl Into<Box<str>>) -> HookError {
 
 const fn expected_receipt(mode: MailMode) -> Receipt {
     match mode {
-        MailMode::Aside => Receipt::Delivered,
-        MailMode::Steer => Receipt::Delivered,
-        MailMode::NextTurn => Receipt::Buffered,
+        MailMode::Aside | MailMode::Steer => Receipt::Delivered,
         _ => Receipt::Buffered,
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "SC mailbox scenario is one long script"
+)]
 #[tokio::test]
 async fn mailbox_is_fifo_cursor_read_and_reports_full_or_gone()
 -> Result<(), Box<dyn Error + Send + Sync>> {

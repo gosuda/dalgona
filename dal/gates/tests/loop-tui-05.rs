@@ -1,5 +1,3 @@
-#![expect(clippy::unwrap_used, reason = "SC test")]
-#![expect(clippy::expect_used, reason = "SC test")]
 //! Verifies queued TUI requests render and answer exactly once.
 
 use std::time::{Duration, Instant};

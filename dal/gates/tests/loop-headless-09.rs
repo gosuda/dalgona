@@ -1,6 +1,8 @@
-#![expect(clippy::unwrap_used, reason = "SC test")]
-#![expect(clippy::expect_used, reason = "SC test")]
-
+//! Headless shutdown waits for registered extension status to go quiet.
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
 use std::{
@@ -32,13 +34,17 @@ impl StatusPoll for GateStatus {
     }
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "SC test races the shutdown call outside the actor's task set"
+)]
 #[tokio::test]
 async fn headless_shutdown_waits_for_registered_status_quiet()
 -> Result<(), Box<dyn Error + Send + Sync>> {
     let poll = Arc::new(GateStatus {
         quiet: AtomicBool::new(false),
     });
-    let extension = ExtensionBuilder::new("gate-status", "0.1.0", Default::default())?
+    let extension = ExtensionBuilder::new("gate-status", "0.1.0", dal_core::ServiceSet::default())?
         .status_kind("gate-status", poll.clone())
         .build()?;
     let (kind, _) = extension.status().expect("status kind must be registered");

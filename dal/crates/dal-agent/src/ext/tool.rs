@@ -395,6 +395,7 @@ impl PrivateCx {
             Arc::new(ForTestRuntime {
                 workspace: self.workspace.clone(),
                 cancel: self.cancel.clone(),
+                approve: false,
             }),
             CallSnapshot {
                 generation: self.generation,
@@ -488,6 +489,47 @@ impl ToolCx<'_> {
             Arc::new(ForTestRuntime {
                 workspace,
                 cancel: CancellationToken::new(),
+                approve: false,
+            }),
+            CallSnapshot {
+                generation: GenerationId::new(std::num::NonZeroU64::MIN),
+                cutoff: None,
+                env,
+            },
+        )
+    }
+
+    /// Mints a test context whose authorization always approves.
+    ///
+    /// The approval grants no argv prefix and no writable roots, so
+    /// spawning still denies and no scheme resolves; the ladder itself is
+    /// the only difference. Foreign test batteries drive approval-gated
+    /// tools through this context without standing up a front end.
+    #[must_use]
+    pub fn for_test_approved(services: Arc<dyn Services>) -> ToolCx<'static> {
+        let caller = Caller::new(
+            Name::test(),
+            Origin::Builtin,
+            ServiceSet::EMPTY,
+            CallerKind::Tool,
+            None,
+        );
+        let workspace = test_workspace();
+        let env = Arc::new(Env {
+            vars: std::collections::BTreeMap::new(),
+            cwd: workspace.as_path().to_path_buf(),
+            sandbox_helper: None,
+        });
+        ToolCx::new(
+            caller,
+            CallId::new("test"),
+            SessionId::new_v7(),
+            None,
+            services,
+            Arc::new(ForTestRuntime {
+                workspace,
+                cancel: CancellationToken::new(),
+                approve: true,
             }),
             CallSnapshot {
                 generation: GenerationId::new(std::num::NonZeroU64::MIN),
@@ -643,20 +685,33 @@ impl ToolCx<'_> {
 /// Nothing is granted here: authorization has no frontend, spawning is
 /// denied, schemes resolve nothing, and detaching returns an untracked
 /// identity. Tests drive tools through this context; they never drive the
-/// host.
+/// host. `for_test_approved` flips `approve` so the ladder alone passes.
 struct ForTestRuntime {
     workspace: Workspace,
     cancel: CancellationToken,
+    approve: bool,
 }
 
 impl ToolCxRuntime for ForTestRuntime {
     fn authorize(
         &self,
-        _call: &CallId,
-        _preview: Preview,
+        call: &CallId,
+        preview: Preview,
         _cancel: &CancellationToken,
     ) -> BoxFuture<'_, Result<Approved, DenyReason>> {
-        Box::pin(async { Err(DenyReason::NoFrontEnd) })
+        let digest = preview.digest;
+        let proof = if self.approve {
+            Ok(Approved::new(
+                call.clone(),
+                digest,
+                Box::new([]),
+                Box::new([]),
+                None,
+            ))
+        } else {
+            Err(DenyReason::NoFrontEnd)
+        };
+        Box::pin(async move { proof })
     }
 
     fn spawn(

@@ -1,7 +1,10 @@
-#![expect(clippy::unwrap_used, reason = "SC test")]
 #![expect(clippy::expect_used, reason = "SC test")]
 //! Exercises Deferred promotion persistence across durable session resume.
 
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
 use std::{collections::BTreeMap, error::Error, fs, io, path::Path, sync::Arc, time::Duration};

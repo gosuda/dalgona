@@ -1,3 +1,7 @@
+#![expect(
+    clippy::disallowed_methods,
+    reason = "release support runs the publish and semver shell scripts"
+)]
 use std::{
     error::Error,
     io::{self, Write},

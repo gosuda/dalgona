@@ -531,6 +531,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let token_file = dir.path().join("serve.token");
         fs::write(&token_file, b"not-a-token\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&token_file, fs::Permissions::from_mode(0o600)).unwrap();
+        }
         assert!(matches!(
             validate_public_token(&token_file),
             Err(TokenFileError::Invalid)

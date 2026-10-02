@@ -1,10 +1,10 @@
 #![expect(clippy::unwrap_used, reason = "SC test")]
-#![expect(clippy::expect_used, reason = "SC test")]
 #![expect(
     clippy::disallowed_methods,
     reason = "SC test inspects tracked public content"
 )]
 
+//! Gate ledgers: manifest test names match public targets and pending state.
 use std::{
     error::Error,
     path::{Path, PathBuf},
@@ -143,6 +143,7 @@ fn manifest_test_names(manifest: &str) -> std::collections::BTreeSet<&str> {
 }
 
 fn assert_public_content_is_private_free(path: &[u8], display_path: &Path, content: &[u8]) {
+    let display_path = display_path.display();
     let local_prefix = ["local:", "/"].concat();
     let planning_files = [
         ["dalgon-v0-", "plan.md"].concat(),
@@ -155,29 +156,26 @@ fn assert_public_content_is_private_free(path: &[u8], display_path: &Path, conte
 
     assert!(
         !contains(path, local_prefix.as_bytes()),
-        "private path in {display_path:?}"
+        "private path in {display_path}"
     );
     assert!(
         !contains(content, local_prefix.as_bytes()),
-        "private path in {display_path:?}"
+        "private path in {display_path}"
     );
     for filename in planning_files {
         assert!(
             !contains(path, filename.as_bytes()),
-            "planning filename in {display_path:?}"
+            "planning filename in {display_path}"
         );
         assert!(
             !contains(content, filename.as_bytes()),
-            "planning filename in {display_path:?}"
+            "planning filename in {display_path}"
         );
     }
-    assert!(
-        !has_row_number(path),
-        "planning citation in {display_path:?}"
-    );
+    assert!(!has_row_number(path), "planning citation in {display_path}");
     assert!(
         !has_row_number(content),
-        "planning citation in {display_path:?}"
+        "planning citation in {display_path}"
     );
 }
 

@@ -1,10 +1,13 @@
-#![expect(clippy::unwrap_used, reason = "SC test")]
-#![expect(clippy::expect_used, reason = "SC test")]
 #![expect(
     clippy::disallowed_methods,
     reason = "SC test invokes the real CLI boundary"
 )]
 
+//! Print mode refuses `ask` approval and names the flag.
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
 use std::{error::Error, fs, path::PathBuf, process::Command};

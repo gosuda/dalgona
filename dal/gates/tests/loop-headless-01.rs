@@ -1,6 +1,8 @@
-#![expect(clippy::unwrap_used, reason = "SC test")]
-#![expect(clippy::expect_used, reason = "SC test")]
-
+//! Headless tool calls preserve order and see the applied patch.
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
 use std::{collections::BTreeMap, error::Error, fs, path::PathBuf};
@@ -9,6 +11,10 @@ use dal_agent::{Delivery, Env, SessionRef};
 use dal_core::{Command, Config, ConfigProduct, Expect, Part, Reply, Stop, UpdateKind, Workspace};
 use support::{TestDir, scripted_session};
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "SC headless scenario is one long script"
+)]
 #[tokio::test]
 async fn headless_tools_preserve_call_order_and_see_patch()
 -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -21,11 +27,11 @@ async fn headless_tools_preserve_call_order_and_see_patch()
         fixtures.join("process/grandchild.sh"),
         workspace.path().join("grandchild.sh"),
     )?;
-    let replay = fixtures.join("replay/loop-headless.jsonl");
+    let replay_fixture = fixtures.join("replay/loop-headless.jsonl");
     let factory = dalgon::product();
     let user = format!(
         "model = \"openai-responses/gpt-6\"\nedit_style = \"replace\"\n[providers.scripted]\nfixture = {:?}\n",
-        replay.to_string_lossy()
+        replay_fixture.to_string_lossy()
     );
     let config = Config::load(
         ConfigProduct::Dalgon,

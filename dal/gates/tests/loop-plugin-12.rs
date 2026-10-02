@@ -1,8 +1,11 @@
-#![expect(clippy::unwrap_used, reason = "SC test")]
 #![expect(clippy::expect_used, reason = "SC test")]
 
 //! Private tools and scope results stay inside the synthetic handler boundary.
 
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
 use std::{
@@ -40,6 +43,7 @@ struct BoundaryHandler {
 }
 
 impl ModelHandler for BoundaryHandler {
+    #[expect(clippy::panic, reason = "SC model aborts on impossible scope results")]
     fn run<'a>(
         &'a self,
         request: ModelRequest,
@@ -309,6 +313,10 @@ fn model_product(
     Ok((config, product))
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "SC private-tools scenario is one long script"
+)]
 #[tokio::test]
 async fn synthetic_private_tools_and_forward_have_one_boundary()
 -> Result<(), Box<dyn Error + Send + Sync>> {

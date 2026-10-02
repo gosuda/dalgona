@@ -1,10 +1,8 @@
-#![expect(clippy::unwrap_used, reason = "SC test")]
-#![expect(clippy::expect_used, reason = "SC test")]
-#![expect(
-    clippy::disallowed_methods,
-    reason = "SC test checks a real descendant process"
+//! Cancelling mid-exec kills the process tree and ends exactly once.
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
 )]
-
 mod support;
 
 use std::{collections::BTreeMap, error::Error, fs, path::PathBuf, time::Duration};

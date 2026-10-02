@@ -2,6 +2,10 @@
 #![expect(clippy::expect_used, reason = "SC test")]
 //! Exercises eval cell service injection and `EvalOnly` tool visibility.
 
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
 use std::{collections::BTreeMap, error::Error, ffi::OsString, fs, io, time::Duration};
@@ -147,6 +151,10 @@ fn shell_environment() -> BTreeMap<OsString, OsString> {
         .collect()
 }
 
+#[expect(
+    clippy::panic,
+    reason = "SC test aborts when the eval result is missing"
+)]
 fn assert_eval_completed(view: &View) {
     let Some((error, text)) = last_tool_result(&view.entries.items, "eval") else {
         panic!("the latest eval cell must have a journaled tool result");

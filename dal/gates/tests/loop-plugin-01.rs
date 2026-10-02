@@ -5,6 +5,10 @@
 
 //! The v1 focus fixture loads, and invalid tool keys name their source file.
 
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
 use std::{error::Error, fs, path::PathBuf, process::Command};

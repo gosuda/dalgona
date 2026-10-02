@@ -5,6 +5,11 @@
     reason = "SC test launches the real dalgon sandbox boundary"
 )]
 
+//! `rm` tool request fixtures and scripted file-removal turns.
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
 use std::{error::Error, fs, io, path::Path, time::Duration};
@@ -125,6 +130,10 @@ fn tool_error_text(update: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "SC sandbox probes are single long scripts"
+)]
 async fn run_sandbox_probe() -> Result<(String, bool), Box<dyn Error + Send + Sync>> {
     let dir = TestDir::new()?;
     let home = dir.path().join("home");

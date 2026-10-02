@@ -1,9 +1,14 @@
 #![expect(clippy::unwrap_used, reason = "SC test")]
 #![expect(clippy::expect_used, reason = "SC test")]
 
+//! Headless and TUI probes against the built product binaries.
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
-use std::{error::Error, fs, io, path::PathBuf, time::Duration};
+use std::{collections::BTreeMap, error::Error, fs, io, path::PathBuf, time::Duration};
 
 use dal_agent::{Agent, Delivery, Env, SessionRef};
 use dal_core::{
@@ -194,7 +199,7 @@ async fn probe_without(extension_name: &str) -> Result<(), Box<dyn Error + Send 
         .retain(|extension| extension.name() != extension_name);
     assert_eq!(product.extensions.len() + 1, original_len);
     let env = Env {
-        vars: Default::default(),
+        vars: BTreeMap::default(),
         cwd: workspace.path().to_path_buf(),
         sandbox_helper: None,
     };

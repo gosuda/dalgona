@@ -1,6 +1,4 @@
-#![expect(clippy::unwrap_used, reason = "SC test")]
-#![expect(clippy::expect_used, reason = "SC test")]
-
+//! Codex schema fixtures match the supported method surface.
 use sonic_rs::JsonValueTrait;
 
 const SCHEMA: &str =

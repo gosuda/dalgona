@@ -1,11 +1,14 @@
-#![expect(clippy::unwrap_used, reason = "SC test")]
 #![expect(clippy::expect_used, reason = "SC test")]
 #![expect(missing_docs, reason = "SC test")]
 
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     error::Error,
     sync::{Arc, Mutex},
     time::Duration,
@@ -110,6 +113,10 @@ struct OwnerModel {
 }
 
 impl ModelHandler for OwnerModel {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "SC model stages the whole scope scenario in one run"
+    )]
     fn run<'a>(
         &'a self,
         _request: ModelRequest,
@@ -183,9 +190,9 @@ impl ModelHandler for OwnerModel {
                 assert!(matches!(result, ScopeValue::Inference(_)));
             }
 
-            for index in 1..ADMITTED {
-                control.releases[index].send_replace(true);
-                let result = tokio::time::timeout(Duration::from_secs(30), handles[index].result())
+            for (release, handle) in control.releases.iter().zip(handles.iter()).skip(1) {
+                release.send_replace(true);
+                let result = tokio::time::timeout(Duration::from_secs(30), handle.result())
                     .await
                     .expect("remaining admitted inference finishes")
                     .expect("remaining admitted inference succeeds");
@@ -251,7 +258,7 @@ impl ModelHandler for OwnerModel {
     }
 }
 
-async fn wait_for_started<'a>(started: &'a mut watch::Receiver<usize>, target: usize) {
+async fn wait_for_started(started: &mut watch::Receiver<usize>, target: usize) {
     while *started.borrow_and_update() < target {
         tokio::time::timeout(Duration::from_secs(30), started.changed())
             .await
@@ -316,6 +323,7 @@ fn scripted_fixture() -> String {
     fixture
 }
 
+#[expect(clippy::too_many_lines, reason = "SC gate is one long scope scenario")]
 #[tokio::test]
 async fn scope_500_members_admits_fifo_and_stays_within_budget()
 -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -359,7 +367,7 @@ async fn scope_500_members_admits_fifo_and_stays_within_budget()
     })?;
     product.extensions.push(extension);
     let env = Env {
-        vars: Default::default(),
+        vars: BTreeMap::default(),
         cwd: workspace.path().to_path_buf(),
         sandbox_helper: None,
     };

@@ -1,4 +1,3 @@
-#![expect(clippy::unwrap_used, reason = "SC test")]
 #![expect(clippy::expect_used, reason = "SC test")]
 #![expect(
     clippy::disallowed_methods,
@@ -7,6 +6,10 @@
 
 //! Call grants stay bound to the approved argv, roots, and detached job.
 
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
 use std::{
@@ -351,10 +354,9 @@ struct ApprovalObservation {
 
 struct RunningHarness {
     _data: TestDir,
-    _workspace: TestDir,
+    workspace: TestDir,
     harness: GateHarness,
     state: Arc<RunState>,
-    marker: PathBuf,
 }
 
 fn tool_call_response(id: &str) -> String {
@@ -457,10 +459,9 @@ async fn start_session(
     let harness = scripted_session(product, config, env, session).await?;
     Ok(RunningHarness {
         _data: data,
-        _workspace: workspace,
+        workspace,
         harness,
         state,
-        marker,
     })
 }
 
@@ -557,7 +558,7 @@ async fn call_grant_is_limited_to_argv_roots_and_job() -> Result<(), Box<dyn Err
         grant.argv_prefix.as_ref(),
         std::env::current_exe()?.to_string_lossy().as_ref()
     );
-    assert_eq!(grant.roots, [harness._workspace.path().to_path_buf()]);
+    assert_eq!(grant.roots, [harness.workspace.path().to_path_buf()]);
     assert_eq!(results.len(), 5);
     assert_eq!(results.first().unwrap(), &CallResult::Detached);
     assert_eq!(results[1], CallResult::InRootExited);

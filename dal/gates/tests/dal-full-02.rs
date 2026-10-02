@@ -1,9 +1,11 @@
-#![expect(clippy::unwrap_used, reason = "SC test")]
-#![expect(clippy::expect_used, reason = "SC test")]
-
+//! Scripted session turns against the in-process harness.
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
-use std::{error::Error, fs, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, error::Error, fs, sync::Arc, time::Duration};
 
 use dal_agent::{Delivery, Env, SessionRef};
 use dal_core::{
@@ -64,6 +66,10 @@ fn scripted_edit_fixture() -> Result<String, Box<dyn Error + Send + Sync>> {
     ))
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "SC edit scenarios are single long scripts"
+)]
 async fn run_edit(
     enabled: bool,
 ) -> Result<(String, Option<Arc<GuardFindings>>), Box<dyn Error + Send + Sync>> {
@@ -98,7 +104,7 @@ async fn run_edit(
     parts.guard = guard.extension;
     let product = dalgon::assemble(&cx, parts)?;
     let env = Env {
-        vars: Default::default(),
+        vars: BTreeMap::default(),
         cwd: workspace.path().to_path_buf(),
         sandbox_helper: None,
     };

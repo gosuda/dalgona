@@ -13,6 +13,8 @@ use unicode_width::UnicodeWidthChar;
 ///
 /// The model uses xterm cursor and scroll-region semantics, disables reflow, and
 /// processes UTF-8 and escape sequences incrementally across arbitrary read chunks.
+type AlternateScreen = Option<(Vec<Vec<String>>, usize, usize, usize, usize)>;
+
 #[derive(Debug)]
 pub struct VtRecorder {
     columns: usize,
@@ -25,7 +27,7 @@ pub struct VtRecorder {
     scroll_top: usize,
     scroll_bottom: usize,
     wrap_pending: bool,
-    alternate: Option<(Vec<Vec<String>>, usize, usize, usize, usize)>,
+    alternate: AlternateScreen,
     pending: Vec<u8>,
     sync_open: bool,
     sync_pairs: usize,
@@ -492,7 +494,6 @@ fn blank_row(columns: usize) -> Vec<String> {
 
 fn utf8_width(first: u8) -> usize {
     match first {
-        0x00..=0x7f => 1,
         0xc2..=0xdf => 2,
         0xe0..=0xef => 3,
         0xf0..=0xf4 => 4,

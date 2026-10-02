@@ -398,8 +398,8 @@ impl Services for NoServices {
     }
 }
 
-pub(crate) fn tool_cx(script: ScriptCx) -> ToolCx<'static> {
-    ToolCx::for_test(test_services()).with_script(script)
+pub(crate) fn tool_cx_approved(script: ScriptCx) -> ToolCx<'static> {
+    ToolCx::for_test_approved(test_services()).with_script(script)
 }
 
 pub(crate) fn eval_args(code: &str) -> String {
