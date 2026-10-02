@@ -12,7 +12,9 @@ use super::decode::{cursor, host_update, protocol_error, session_update};
 use super::{RemoteEndpoint, RemoteHostUpdate, backoff};
 use crate::error::WireError;
 use crate::jsonrpc::{Id, Message, decode_jsonrpc, encode_jsonrpc};
-use crate::transport::{FrameWriter, LocalTransport, ReadFrameError, Transport};
+#[cfg(unix)]
+use crate::transport::LocalTransport;
+use crate::transport::{FrameWriter, ReadFrameError, Transport};
 
 /// One subscription to renew after a reconnect: session, fence, and cursor.
 type Resubscribe = (SessionId, u64, Option<(Gen, Seq)>);

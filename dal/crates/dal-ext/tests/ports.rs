@@ -232,10 +232,7 @@ fn ports_load_and_run() {
 #[cfg(not(unix))]
 fn copy_dir(source: &Path, target: &Path) {
     std::fs::create_dir_all(target).unwrap();
-    for entry in std::fs::read_dir(source)
-        .unwrap()
-        .filter_map(|entry| entry.ok())
-    {
+    for entry in std::fs::read_dir(source).unwrap().filter_map(Result::ok) {
         let to = target.join(entry.file_name());
         if entry.file_type().unwrap().is_dir() {
             copy_dir(&entry.path(), &to);

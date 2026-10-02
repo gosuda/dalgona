@@ -56,7 +56,7 @@ use interprocess::os::windows::{
 use tokio::io::split;
 
 #[cfg(windows)]
-use crate::{error::WireError, transport::Transport};
+use crate::error::WireError;
 
 #[cfg(windows)]
 use super::{ConnectionFuture, LocalTransport};
