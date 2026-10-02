@@ -559,9 +559,9 @@ async fn open_local(path: &std::path::Path) -> Result<Transport, WireError> {
 
 /// Opens one local-socket client transport (unsupported outside unix).
 #[cfg(not(unix))]
-async fn open_local(path: &std::path::Path) -> Result<Transport, WireError> {
-    Err(WireError::Transport(format!(
+fn open_local(path: &std::path::Path) -> std::future::Ready<Result<Transport, WireError>> {
+    std::future::ready(Err(WireError::Transport(format!(
         "local socket clients are not supported on this platform: {}",
         path.display()
-    )))
+    ))))
 }

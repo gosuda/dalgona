@@ -213,6 +213,7 @@ async fn run_probe_turn(
 }
 
 /// One probe turn with the sandbox configured on and no helper.
+#[cfg(all(not(windows), not(target_os = "macos")))]
 async fn sandbox_on_turn()
 -> Result<(dal_core::View, std::path::PathBuf, tempfile::TempDir), Box<dyn std::error::Error>> {
     run_probe_turn(true).await
@@ -224,6 +225,10 @@ async fn sandbox_off_turn()
     run_probe_turn(false).await
 }
 
+/// The helper-less refusal is the Linux contract: macOS enforces through
+/// Seatbelt (always present on a macOS host) and Windows refuses every
+/// sandboxed spawn with its own setup text.
+#[cfg(all(not(windows), not(target_os = "macos")))]
 #[tokio::test]
 async fn sandbox_on_without_helper_refuses_and_never_spawns() {
     let (view, workspace_dir, _guard) = sandbox_on_turn().await.expect("sandbox-on turn");

@@ -48,6 +48,7 @@ use dal_provider::{EventStream, StopReason, StreamEvent, ToolArgs, ToolCall};
 use dal_store::Store;
 use futures::{SinkExt, StreamExt, future::join_all, stream};
 use proptest::prelude::*;
+#[cfg(not(all(windows, target_arch = "aarch64")))]
 use shuttle::{future as shuttle_future, sync::Mutex as ShuttleMutex};
 use sonic_rs::JsonValueTrait;
 use support::TestDir;
@@ -1657,6 +1658,7 @@ fn stress_shuttle_schedules_preserve_actor_invariants() {
 
     // Shuttle controls every task poll in this half. No Tokio runtime, file
     // shard, process, or network handle crosses the Shuttle continuation.
+    #[cfg(not(all(windows, target_arch = "aarch64")))]
     shuttle::check_random_with_seed(shuttle_actor_schedule, seed, 32);
 }
 
@@ -1746,6 +1748,7 @@ fn actor_schedule(data_root: &Path) {
     drop(workspace);
 }
 
+#[cfg(not(all(windows, target_arch = "aarch64")))]
 struct ShuttleActorState {
     session: Session,
     journal: StoreJournal,
@@ -1759,9 +1762,12 @@ struct ShuttleActorState {
     tracked_tasks: usize,
 }
 
+#[cfg(not(all(windows, target_arch = "aarch64")))]
 type StoreJournal = dal_store::Journal;
+#[cfg(not(all(windows, target_arch = "aarch64")))]
 type ShuttleActor = Arc<ShuttleMutex<ShuttleActorState>>;
 
+#[cfg(not(all(windows, target_arch = "aarch64")))]
 fn shuttle_actor_schedule() {
     // The futures below deliberately overlap all four gate races: turn
     // cancellation with a journal receipt, mailbox delivery with shutdown,
@@ -1862,6 +1868,7 @@ fn shuttle_actor_schedule() {
     shuttle_future::block_on(actor.child_journal.close()).expect("Shuttle child journal closes");
 }
 
+#[cfg(not(all(windows, target_arch = "aarch64")))]
 fn shuttle_actor_state() -> ShuttleActorState {
     let workspace = Workspace::new(PathBuf::from("/shuttle-workspace")).expect("Shuttle workspace");
     let store = Store::new(PathBuf::from("/shuttle-data"), workspace, StoreProduct::Dal);
@@ -1919,11 +1926,13 @@ fn shuttle_actor_state() -> ShuttleActorState {
     }
 }
 
+#[cfg(not(all(windows, target_arch = "aarch64")))]
 async fn shuttle_mail_task(actor: ShuttleActor, text: &'static str) {
     shuttle_future::yield_now().await;
     shuttle_record_mail(&actor, text);
 }
 
+#[cfg(not(all(windows, target_arch = "aarch64")))]
 fn shuttle_record_mail(actor: &ShuttleActor, text: &str) {
     let mut actor = actor.lock().expect("Shuttle actor state lock");
     if actor.shutting_down {
@@ -1944,6 +1953,7 @@ fn shuttle_record_mail(actor: &ShuttleActor, text: &str) {
         .push((text.to_owned(), dal_core::Receipt::Delivered));
 }
 
+#[cfg(not(all(windows, target_arch = "aarch64")))]
 async fn shuttle_cancel_task(actor: ShuttleActor) {
     shuttle_future::yield_now().await;
     let mut actor = actor.lock().expect("Shuttle actor state lock");
@@ -1969,6 +1979,7 @@ async fn shuttle_cancel_task(actor: ShuttleActor) {
     }
 }
 
+#[cfg(not(all(windows, target_arch = "aarch64")))]
 async fn shuttle_shutdown_task(actor: ShuttleActor) {
     shuttle_future::yield_now().await;
     let mut actor = actor.lock().expect("Shuttle actor state lock");
@@ -1994,6 +2005,7 @@ async fn shuttle_shutdown_task(actor: ShuttleActor) {
     }
 }
 
+#[cfg(not(all(windows, target_arch = "aarch64")))]
 async fn shuttle_tracked_task(actor: ShuttleActor) {
     shuttle_future::yield_now().await;
     let mut actor = actor.lock().expect("Shuttle actor state lock");

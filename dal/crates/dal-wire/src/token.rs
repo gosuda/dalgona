@@ -370,6 +370,10 @@ fn check_connect_file_mode(path: &Path, metadata: &fs::Metadata) -> Result<(), T
 }
 
 #[cfg(not(unix))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "unix checks the mode bits; other platforms accept the file unchanged"
+)]
 fn check_connect_file_mode(_path: &Path, _metadata: &fs::Metadata) -> Result<(), TokenError> {
     Ok(())
 }

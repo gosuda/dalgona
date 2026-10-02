@@ -1081,7 +1081,6 @@ dependencies = [
  "proptest",
  "schemars",
  "serde",
- "shuttle",
  "sonic-rs",
  "tempfile",
  "thiserror 2.0.21",
