@@ -102,6 +102,13 @@ pub(crate) enum ExecError {
     NoBash,
     /// The host process door could not start the resolved shell.
     #[cfg(windows)]
+    #[cfg_attr(
+        windows,
+        expect(
+            dead_code,
+            reason = "windows host-door spawn errors are reported through this variant once the door lands"
+        )
+    )]
     #[error("exec: cannot start {shell}: {reason}")]
     CannotStart {
         /// The resolved shell program.
