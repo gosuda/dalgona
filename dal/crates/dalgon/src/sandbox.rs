@@ -11,7 +11,7 @@ use dal_agent::ext::{BoxFuture, Extension, ExtensionBuilder, HookCx, HookError, 
 use dal_core::ext::SessionStart;
 use dal_core::{Notice, RegistrationError, ServiceSet};
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 const DENIAL_NOTE: &str = "dalgon sandbox: a \"Permission denied\" or \"Operation not permitted\" error can come from the sandbox; if the path should be writable, add it to sandbox_writable in dal.toml.";
 #[expect(dead_code, reason = "kept for the SDK embedder seam")]
 const HELPER_ERROR: &str = "sandbox: no sandbox helper. SDK embedders must pass a helper path; the dalgon binary provides dalgon __sandbox.";
@@ -145,7 +145,7 @@ pub(crate) fn run(argv: &[OsString]) -> ExitCode {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 pub(crate) fn denial_note(output: &str) -> Option<&'static str> {
     (output.contains("Permission denied") || output.contains("Operation not permitted"))
         .then_some(DENIAL_NOTE)

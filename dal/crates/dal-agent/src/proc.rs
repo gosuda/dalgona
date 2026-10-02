@@ -131,6 +131,10 @@ pub(crate) enum Launcher {
     /// Run the target directly.
     Direct,
     /// Run the target through the prepared sandbox helper.
+    #[cfg_attr(
+        windows,
+        expect(dead_code, reason = "Windows never constructs a sandbox launcher")
+    )]
     Sandbox {
         /// The helper executable, when the platform requires one.
         helper: Option<PathBuf>,

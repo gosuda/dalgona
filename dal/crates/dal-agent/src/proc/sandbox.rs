@@ -39,7 +39,7 @@ pub(crate) struct SandboxInputs<'a> {
     /// The Linux helper path; `None` fails closed when sandboxing is on.
     /// macOS's Seatbelt path never reads it.
     #[cfg_attr(
-        target_os = "macos",
+        any(windows, target_os = "macos"),
         expect(
             dead_code,
             reason = "only the Linux Landlock probe reads the helper path"
@@ -82,9 +82,9 @@ pub(crate) fn resolve_launcher(inputs: &SandboxInputs<'_>) -> Result<Launcher, S
     }
     #[cfg(windows)]
     {
-        return Err(SandboxSetupError::new(
+        Err(SandboxSetupError::new(
             "sandbox = \"on\" is not supported on Windows. Set sandbox = \"off\" in config.toml, or run dalgon inside WSL 2.",
-        ));
+        ))
     }
     #[cfg(not(windows))]
     {
@@ -405,9 +405,9 @@ pub(crate) fn sandbox_argv(
     #[cfg(windows)]
     {
         let _ = (target, target_args, job, helper, roots);
-        return Err(ToolError::message(
+        Err(ToolError::message(
             "sandbox = \"on\" is not supported on Windows. Set sandbox = \"off\" in config.toml, or run dalgon inside WSL 2.",
-        ));
+        ))
     }
     #[cfg(target_os = "macos")]
     {
