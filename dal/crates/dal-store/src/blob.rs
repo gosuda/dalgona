@@ -128,8 +128,15 @@ fn existing_blob(path: &Path) -> Result<bool, BlobError> {
 /// Publishes a complete, synced temp at `dest` without replacing an existing file.
 /// A valid blob already at `dest` wins and `tmp` is removed.
 fn publish_temp(staged_path: &Path, dest: &Path, dir: &Path) -> Result<(), BlobError> {
-    let mut temp_guard = TempPath::try_from_path(staged_path).map_err(io_blob)?;
-    let removed = loop {
+    let temp_guard = TempPath::try_from_path(staged_path).map_err(io_blob)?;
+    persist_temp(temp_guard, dest)?;
+    sync_dir(dir)
+}
+
+/// Persists `temp_guard` at `dest` without replacing an existing file. A valid
+/// blob already at `dest` wins and the temp is removed.
+fn persist_temp(mut temp_guard: TempPath, dest: &Path) -> Result<(), BlobError> {
+    loop {
         let PathPersistError { error, path } = match temp_guard.persist_noclobber(dest) {
             Ok(()) => break Ok(()),
             Err(failed) => failed,
@@ -141,9 +148,76 @@ fn publish_temp(staged_path: &Path, dest: &Path, dir: &Path) -> Result<(), BlobE
             break path.close().map_err(io_blob);
         }
         temp_guard = path;
-    };
-    sync_dir(dir)?;
-    removed
+    }
+}
+
+/// A blob publication staged on the shard worker: its bytes already wrote to
+/// an exclusive temp, or the digest already exists on disk. The per-shard
+/// syncer finishes it with [`finish_staged`] so a slow filesystem stalls only
+/// that syncer, never the worker's FIFO.
+pub(crate) enum StagedPublish {
+    /// The digest is already published; only the directory sync is owed.
+    Present { dir: PathBuf },
+    /// A fresh temp awaits its sync, publish, and directory sync. Only the
+    /// path is retained: one open handle per staged blob would scale an
+    /// append's descriptor use with its spilled part count (R-perf).
+    Pending {
+        temp: TempPath,
+        dest: PathBuf,
+        dir: PathBuf,
+    },
+}
+
+/// Writes `pending` into an exclusive temp under `dir` without syncing and
+/// returns the staged publish. An existing digest stages only the owed
+/// directory sync.
+///
+/// # Errors
+/// Returns [`BlobError::TooLarge`] above the cap or [`BlobError::Io`] on a
+/// failed write.
+pub(crate) fn stage_prepared(dir: &Path, pending: PendingBlob) -> Result<StagedPublish, BlobError> {
+    let (id, bytes) = pending.into_parts();
+    check_blob_size(bytes.len())?;
+    let dest = dir.join(id.to_string());
+    if existing_blob(&dest)? {
+        return Ok(StagedPublish::Present {
+            dir: dir.to_path_buf(),
+        });
+    }
+    let (tmp_path, mut staged_file) = create_temp(dir)?;
+    if let Err(error) = io::copy(&mut &bytes[..], &mut staged_file) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(io_blob(error));
+    }
+    drop(staged_file);
+    let temp = TempPath::try_from_path(tmp_path).map_err(io_blob)?;
+    Ok(StagedPublish::Pending {
+        temp,
+        dest,
+        dir: dir.to_path_buf(),
+    })
+}
+
+/// Completes one staged publish in durability order: sync the temp bytes,
+/// persist the temp without replacement, then sync the directory. A staged
+/// digest that already exists only owes the directory sync.
+///
+/// # Errors
+/// Returns [`BlobError::Io`] on a failed sync or publish.
+pub(crate) fn finish_staged(staged: StagedPublish) -> Result<(), BlobError> {
+    match staged {
+        StagedPublish::Present { dir } => sync_dir(&dir),
+        StagedPublish::Pending { temp, dest, dir } => {
+            let mut options = util::open_options();
+            options.write(true);
+            options
+                .open(&temp)
+                .and_then(|file| file.sync_all())
+                .map_err(io_blob)?;
+            persist_temp(temp, &dest)?;
+            sync_dir(&dir)
+        }
+    }
 }
 
 /// Windows has no directory-sync door; the `Result` is load-bearing on POSIX.
