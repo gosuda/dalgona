@@ -869,7 +869,26 @@ async fn wait_for_process_pids(jobs: &mut [ProcessJob]) -> Result<Vec<u32>, Test
                 .collect();
         }
         if tokio::time::Instant::now() >= deadline {
-            return Err(io::Error::other("not every process wrote its child pid").into());
+            let missing: Vec<String> = jobs
+                .iter()
+                .enumerate()
+                .filter(|(_, job)| job.pid.is_none())
+                .take(5)
+                .map(|(index, job)| {
+                    let turn = job.agent.view(PageReq::default()).map_or_else(
+                        |error| format!("view failed: {error}"),
+                        |view| format!("{:?}", view.turn),
+                    );
+                    format!("{index}: {turn}")
+                })
+                .collect();
+            let total = jobs.iter().filter(|job| job.pid.is_none()).count();
+            return Err(io::Error::other(format!(
+                "not every process wrote its child pid ({total} missing of {}; first: {})",
+                jobs.len(),
+                missing.join(", ")
+            ))
+            .into());
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }

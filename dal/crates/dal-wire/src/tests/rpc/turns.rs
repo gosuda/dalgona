@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use dal_agent::SessionRef;
 use dal_core::{BlobId, ClientId, Command, Expect, Part, Stop, TurnId, UpdateKind};
 use sonic_rs::{JsonContainerTrait, JsonValueTrait};
@@ -310,12 +312,22 @@ async fn disconnect_keeps_turn() {
         )
         .await
         .expect("session stays open after disconnect");
-    let head = agent.view(dal_core::PageReq::default()).expect("view");
-    assert!(
-        matches!(head.turn, dal_core::TurnState::Running { .. }),
-        "disconnect cancelled the turn: {:?}",
-        head.turn
-    );
+    // The accepted prompt dispatches the turn asynchronously, so the first
+    // view can still read Idle before the actor starts it; wait for Running
+    // rather than asserting on the first snapshot.
+    let deadline = tokio::time::Instant::now() + WAIT;
+    let head = loop {
+        let head = agent.view(dal_core::PageReq::default()).expect("view");
+        if matches!(head.turn, dal_core::TurnState::Running { .. }) {
+            break head;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "disconnect cancelled the turn: {:?}",
+            head.turn
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
     let mut subscription = agent
         .subscribe(Some((head.r#gen, head.seq)))
         .expect("subscribe");
