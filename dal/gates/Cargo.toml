@@ -245,5 +245,9 @@ name = "loop-tui-09"
 path = "tests/loop-tui-09.rs"
 
 [[test]]
+name = "loop-tui-10"
+path = "tests/loop-tui-10.rs"
+
+[[test]]
 name = "dal-full-01"
 path = "tests/dal-full-01.rs"
