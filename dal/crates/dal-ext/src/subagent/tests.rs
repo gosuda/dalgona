@@ -40,7 +40,7 @@ fn model() -> dal_core::ModelInfo {
 }
 
 fn workspace() -> dal_core::Workspace {
-    dal_core::Workspace::new(std::path::PathBuf::from("/tmp")).expect("absolute workspace")
+    dal_core::Workspace::new(std::env::temp_dir()).expect("absolute workspace")
 }
 
 /// Scripted `Services` double: queued agents replies plus a notify log.
