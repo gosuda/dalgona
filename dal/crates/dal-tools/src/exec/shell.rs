@@ -4,6 +4,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[cfg(windows)]
+use std::ffi::OsStr;
+
 use super::ExecError;
 
 #[derive(Debug)]

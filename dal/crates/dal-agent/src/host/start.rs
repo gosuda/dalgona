@@ -86,10 +86,18 @@ impl Host {
 }
 
 /// Reads the process fd soft limit without touching other process state.
+#[cfg(unix)]
 fn fd_soft_limit() -> u64 {
     rustix::process::getrlimit(rustix::process::Resource::Nofile)
         .current
         .unwrap_or(1024)
+}
+
+/// Returns the conservative fallback: Windows has no `getrlimit`, so the
+/// admission budget uses the same floor the unix reader applies on error.
+#[cfg(windows)]
+fn fd_soft_limit() -> u64 {
+    1024
 }
 
 /// Builds the provider set from the typed provider configuration.

@@ -116,11 +116,26 @@ impl Fixture {
             .expect("pump reads updates");
     }
 
+    /// Reads one peer frame while draining the writer's outbound queue: the
+    /// pump under test enqueues replies for a serving task this fixture
+    /// replaces, so this loop writes them through like `serve_acp` would.
     async fn frame(&mut self) -> Value {
-        let frame = tokio::time::timeout(Duration::from_secs(5), self.peer.read_frame())
-            .await
-            .expect("frame in time")
-            .expect("open transport");
+        let writer = self.transport.writer();
+        let frame = tokio::time::timeout(Duration::from_secs(5), async {
+            let drain = async {
+                while let Some(text) = writer.next_queued_frame().await {
+                    let _ = writer.write_frame(&text).await;
+                }
+            };
+            tokio::pin!(drain);
+            tokio::select! {
+                frame = self.peer.read_frame() => frame,
+                () = drain => unreachable!("the writer outlives the drain"),
+            }
+        })
+        .await
+        .expect("frame in time")
+        .expect("open transport");
         sonic_rs::from_str(&frame).expect("frame is JSON")
     }
 

@@ -308,9 +308,7 @@ impl SessionScriptHost {
             .export(id)
             .cloned()
             .ok_or_else(|| HostTerminal::Denied {
-                reason: DenyReason::OutOfScope {
-                    what: OpId::Export(id.clone()).to_string().into(),
-                },
+                reason: DenyReason::out_of_scope(OpId::Export(id.clone()).to_string()),
             })
     }
 
@@ -321,9 +319,7 @@ impl SessionScriptHost {
                 .model_export(id)
                 .map(|model| model.uses.clone())
                 .ok_or_else(|| HostTerminal::Denied {
-                    reason: DenyReason::OutOfScope {
-                        what: OpId::Export(id.clone()).to_string().into(),
-                    },
+                    reason: DenyReason::out_of_scope(OpId::Export(id.clone()).to_string()),
                 });
         }
         Self::export_spec(generation, id).map(|spec| spec.uses)
@@ -430,18 +426,14 @@ impl SessionScriptHost {
         }
         if !inv.allows(&req.op) {
             return OpOutcome::Terminal(HostTerminal::Denied {
-                reason: DenyReason::OutOfScope {
-                    what: req.op.to_string().into(),
-                },
+                reason: DenyReason::out_of_scope(req.op.to_string()),
             });
         }
         let generation = self.generation();
         if let OpId::Export(id) = &req.op {
             let Ok(spec) = Self::export_spec(&generation, id) else {
                 return OpOutcome::Terminal(HostTerminal::Denied {
-                    reason: DenyReason::OutOfScope {
-                        what: OpId::Export(id.clone()).to_string().into(),
-                    },
+                    reason: DenyReason::out_of_scope(OpId::Export(id.clone()).to_string()),
                 });
             };
             let missing = ops_outside(&spec.uses, inv.ceiling()).unwrap_or_default();
@@ -815,9 +807,7 @@ impl SessionScriptHost {
             };
             if members.iter().any(|task| table.call_id(*task).is_none()) {
                 return Err(HostTerminal::Denied {
-                    reason: DenyReason::OutOfScope {
-                        what: "task of another invocation".into(),
-                    },
+                    reason: DenyReason::out_of_scope("task of another invocation"),
                 });
             }
         }
@@ -979,18 +969,14 @@ fn ops_outside(set: &OpSet, ceiling: &OpSet) -> Result<OpSet, HostTerminal> {
 /// The refusal for a scope handle outside the calling invocation (E05).
 fn scope_refused(_: crate::session::tasks::ScopeError) -> HostTerminal {
     HostTerminal::Denied {
-        reason: DenyReason::OutOfScope {
-            what: "scope".into(),
-        },
+        reason: DenyReason::out_of_scope("scope"),
     }
 }
 
 /// The refusal for an invocation that holds no script state here.
 fn unknown_invocation() -> HostTerminal {
     HostTerminal::Denied {
-        reason: DenyReason::OutOfScope {
-            what: "invocation".into(),
-        },
+        reason: DenyReason::out_of_scope("invocation"),
     }
 }
 
@@ -1211,9 +1197,7 @@ impl ScriptHost for SessionScriptHost {
         }
         if !inv.allows(&req.op) {
             return Submit::Terminal(HostTerminal::Denied {
-                reason: DenyReason::OutOfScope {
-                    what: req.op.to_string().into(),
-                },
+                reason: DenyReason::out_of_scope(req.op.to_string()),
             });
         }
         let mut tables = self

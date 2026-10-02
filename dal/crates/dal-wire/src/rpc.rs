@@ -95,13 +95,9 @@ pub async fn serve_rpc(host: Host, mut transport: Transport) -> Result<(), WireE
     let mut pending: FuturesUnordered<Pending> = FuturesUnordered::new();
 
     loop {
-        if pending.len() >= MAX_IN_FLIGHT {
-            pending.next().await;
-            continue;
-        }
         tokio::select! {
             biased;
-            frame = transport.read_frame() => {
+            frame = transport.read_frame(), if pending.len() < MAX_IN_FLIGHT => {
                 let ended = matches!(
                     frame,
                     Err(ReadFrameError::EndOfInput
@@ -118,6 +114,13 @@ pub async fn serve_rpc(host: Host, mut transport: Transport) -> Result<(), WireE
                     break;
                 }
             }
+            frame = writer.next_queued_frame() => {
+                if let Some(text) = frame
+                    && let Err(error) = writer.write_frame(&text).await
+                {
+                    tracing::debug!(%error, "frame write failed");
+                }
+            }
             _ = pending.next(), if !pending.is_empty() => {}
         }
     }
@@ -129,6 +132,9 @@ pub async fn serve_rpc(host: Host, mut transport: Transport) -> Result<(), WireE
         .await;
     }
     cancel_all(&state).await;
+    while let Some(text) = writer.take_queued_frame() {
+        let _ = writer.write_frame(&text).await;
+    }
     Ok(())
 }
 
@@ -314,16 +320,19 @@ async fn cancel_all(state: &Arc<Mutex<Conn>>) {
     }
 }
 
-/// Sends one message; a failed write only logs, the loop observes closure.
-pub(crate) async fn send(writer: &FrameWriter, message: &Message) {
+/// Queues one message for the serving task to write; producers never block
+/// on the writer lock, so the returned future is already resolved. A failed
+/// enqueue only logs, the read loop observes closure.
+pub(crate) fn send(writer: &FrameWriter, message: &Message) -> std::future::Ready<()> {
     match encode_jsonrpc(message) {
         Ok(frame) => {
-            if let Err(error) = writer.write_frame(&frame).await {
+            if let Err(error) = writer.enqueue_frame(frame) {
                 tracing::debug!(%error, "reply write failed");
             }
         }
         Err(error) => tracing::error!(%error, "reply encoding failed"),
     }
+    std::future::ready(())
 }
 
 /// Dispatches one request to its handler.

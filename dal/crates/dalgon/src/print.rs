@@ -6,7 +6,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use dal_agent::{Agent, AgentError, Delivery};
-use dal_core::{CancelScope, Command, Expect, Part, Reply, Stop, StreamChannel, UpdateKind};
+use dal_core::{
+    CancelScope, Command, Expect, Part, Reply, Stop, StreamChannel, UpdateKind,
+    parse_headless_denial,
+};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
@@ -268,26 +271,6 @@ pub(crate) async fn run_print(
     }
 }
 
-/// Whether a settled tool text is the spec's headless denial: the exact
-/// model-visible wording pins the match (`approval.denied_headless`).
-fn headless_denial(text: &str) -> bool {
-    text.starts_with("Permission denied: ")
-        && text.contains(" needs approval, and this run has no one to ask.")
-}
-
-/// The tool name and approval rung out of a headless denial text.
-fn denial_fields(text: &str) -> (&str, &str) {
-    let tool = text
-        .strip_prefix("Permission denied: ")
-        .and_then(|rest| rest.split_once(" needs approval,").map(|(tool, _)| tool))
-        .unwrap_or("tool");
-    let rung = text
-        .rsplit_once("--approval ")
-        .and_then(|(_, tail)| tail.strip_suffix(".)"))
-        .unwrap_or("all");
-    (tool, rung)
-}
-
 #[expect(
     clippy::too_many_lines,
     reason = "one print run walks every output mode in place"
@@ -368,11 +351,11 @@ async fn run_print_inner(
                     .await
                     .map_err(PrintError::Io)?;
             }
-            UpdateKind::ToolSettled { outcome, .. }
-                if !opts.json && headless_denial(&outcome.text) =>
-            {
-                let (tool, rung) = denial_fields(&outcome.text);
-                let note = dal_texts::approval_denied_note(tool, rung);
+            UpdateKind::ToolSettled { outcome, .. } if !opts.json => {
+                let Some((tool, rung)) = parse_headless_denial(&outcome.text) else {
+                    continue;
+                };
+                let note = dal_texts::approval_denied_note(tool, rung.as_str());
                 stderr
                     .write_all(note.as_bytes())
                     .await

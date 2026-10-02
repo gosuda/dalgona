@@ -146,6 +146,14 @@ fn publish_temp(staged_path: &Path, dest: &Path, dir: &Path) -> Result<(), BlobE
     removed
 }
 
+/// Windows has no directory-sync door; the `Result` is load-bearing on POSIX.
+#[cfg_attr(
+    windows,
+    expect(
+        clippy::unnecessary_wraps,
+        reason = "directory sync fails only on POSIX"
+    )
+)]
 fn sync_dir(dir: &Path) -> Result<(), BlobError> {
     #[cfg(windows)]
     {

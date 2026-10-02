@@ -218,9 +218,7 @@ impl ToolCxRuntime for SessionRt {
                 }
                 dal_core::Decision::Deny { reason } => Err(reason),
                 dal_core::Decision::Ask { .. } => Err(DenyReason::NoFrontEnd),
-                _ => Err(DenyReason::OutOfScope {
-                    what: tool.as_str().into(),
-                }),
+                _ => Err(DenyReason::out_of_scope(tool.as_str())),
             }
         })
     }
@@ -244,9 +242,9 @@ impl ToolCxRuntime for SessionRt {
             Err(setup) => return Err(setup.tool_error()),
         };
         if !approved.prefix().is_empty() && !grant_covers(&approved, argv, &opts.cwd) {
-            return Err(ToolError::Denied(DenyReason::OutOfScope {
-                what: service_tool().as_str().into(),
-            }));
+            return Err(ToolError::Denied(DenyReason::out_of_scope(
+                service_tool().as_str(),
+            )));
         }
         spawn_process(
             argv,

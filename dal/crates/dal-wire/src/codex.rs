@@ -42,22 +42,19 @@ type Outcome = Result<Value, ErrorObject>;
 ///
 /// Returns [`WireError`] when the transport fails.
 pub async fn serve_codex(host: Host, mut transport: Transport) -> Result<(), WireError> {
+    let writer = transport.writer();
     let ctx = Ctx {
         host,
         state: Arc::new(Mutex::new(Conn::default())),
-        writer: transport.writer(),
+        writer: writer.clone(),
         stop: CancellationToken::new(),
     };
     let mut pending: FuturesUnordered<futures::future::BoxFuture<'static, ()>> =
         FuturesUnordered::new();
     loop {
-        if pending.len() >= MAX_IN_FLIGHT {
-            pending.next().await;
-            continue;
-        }
         tokio::select! {
             biased;
-            frame = transport.read_frame() => {
+            frame = transport.read_frame(), if pending.len() < MAX_IN_FLIGHT => {
                 let ended = matches!(
                     frame,
                     Err(ReadFrameError::EndOfInput
@@ -73,6 +70,13 @@ pub async fn serve_codex(host: Host, mut transport: Transport) -> Result<(), Wir
                     break;
                 }
             }
+            frame = writer.next_queued_frame() => {
+                if let Some(text) = frame
+                    && let Err(error) = writer.write_frame(&text).await
+                {
+                    tracing::debug!(%error, "codex frame write failed");
+                }
+            }
             _ = pending.next(), if !pending.is_empty() => {}
         }
     }
@@ -82,6 +86,9 @@ pub async fn serve_codex(host: Host, mut transport: Transport) -> Result<(), Wir
             while pending.next().await.is_some() {}
         })
         .await;
+    }
+    while let Some(text) = writer.take_queued_frame() {
+        let _ = writer.write_frame(&text).await;
     }
     Ok(())
 }
@@ -312,16 +319,19 @@ impl Ctx {
         self.send(&frame).await;
     }
 
-    /// Writes one frame; failures only log, the read loop observes closure.
-    async fn send(&self, frame: &Value) {
+    /// Queues one frame for the serving task to write; producers never block
+    /// on the writer lock, so the returned future is already resolved.
+    /// A failed enqueue only logs, the read loop observes closure.
+    fn send(&self, frame: &Value) -> std::future::Ready<()> {
         match sonic_rs::to_string(frame) {
             Ok(text) => {
-                if let Err(error) = self.writer.write_frame(&text).await {
+                if let Err(error) = self.writer.enqueue_frame(text) {
                     tracing::debug!(%error, "codex frame write failed");
                 }
             }
             Err(error) => tracing::error!(%error, "codex frame encoding failed"),
         }
+        std::future::ready(())
     }
 }
 

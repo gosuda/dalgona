@@ -14,6 +14,10 @@
 )]
 #[path = "support/pty.rs"]
 mod pty;
+#[expect(
+    dead_code,
+    reason = "gate helpers are shared across integration targets"
+)]
 mod support;
 
 use std::{collections::BTreeMap, error::Error, time::Duration};

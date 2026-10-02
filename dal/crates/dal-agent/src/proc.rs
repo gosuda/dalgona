@@ -131,6 +131,10 @@ pub(crate) enum Launcher {
     /// Run the target directly.
     Direct,
     /// Run the target through the prepared sandbox helper.
+    #[cfg_attr(
+        windows,
+        expect(dead_code, reason = "Windows never constructs a sandbox launcher")
+    )]
     Sandbox {
         /// The helper executable, when the platform requires one.
         helper: Option<PathBuf>,
@@ -259,18 +263,23 @@ impl Proc {
     }
 
     /// Records live descendants for the post-exit `setsid` sweep.
-    #[cfg_attr(
-        not(target_os = "linux"),
-        expect(clippy::unused_async, reason = "the /proc walk await is linux-only")
-    )]
+    #[cfg(target_os = "linux")]
     async fn recorded_descendants(&mut self) -> Vec<u32> {
-        #[cfg(target_os = "linux")]
         if let Some(pid) = self.leader_pid {
             return tokio::task::spawn_blocking(move || stop::proc_descendants(pid))
                 .await
                 .unwrap_or_default();
         }
         Vec::new()
+    }
+
+    /// Records live descendants for the post-exit `setsid` sweep.
+    #[cfg(not(target_os = "linux"))]
+    fn recorded_descendants(&mut self) -> std::future::Ready<Vec<u32>> {
+        // Non-Linux platforms have no /proc descendant source; the leader
+        // pid stays read so the field contract matches the Linux arm.
+        let _ = self.leader_pid;
+        std::future::ready(Vec::new())
     }
 
     /// Returns the currently retained tail without reading the full log.
@@ -341,26 +350,27 @@ impl Proc {
         Ok(result)
     }
 
-    #[cfg_attr(
-        not(target_os = "linux"),
-        expect(clippy::unused_async, reason = "the /proc walk await is linux-only")
-    )]
+    /// Reaps descendants the exited leader may have left running.
+    #[cfg(target_os = "linux")]
     async fn sweep_after_exit(&mut self) {
-        #[cfg(windows)]
-        {
-            // TerminateJobObject at once: the leader already exited, so this
-            // only reaps descendants still holding pipes open.
-            let _ = self.child.start_kill();
-            return;
-        }
         let Some(pid) = self.leader_pid else {
             return;
         };
         sweep_process_group(pid);
-        #[cfg(target_os = "linux")]
-        {
-            let _ = tokio::task::spawn_blocking(move || stop::sweep_proc_descendants(pid)).await;
+        let _ = tokio::task::spawn_blocking(move || stop::sweep_proc_descendants(pid)).await;
+    }
+
+    /// Reaps descendants the exited leader may have left running.
+    #[cfg(not(target_os = "linux"))]
+    fn sweep_after_exit(&mut self) -> std::future::Ready<()> {
+        #[cfg(windows)]
+        // TerminateJobObject at once: the leader already exited, so this
+        // only reaps descendants still holding pipes open.
+        let _ = self.child.start_kill();
+        if let Some(pid) = self.leader_pid {
+            sweep_process_group(pid);
         }
+        std::future::ready(())
     }
 }
 
@@ -450,9 +460,10 @@ pub(crate) fn spawn_process_with_capture(
         || approved.digest() != preview_digest
         || !cwd_in_roots(&opts.cwd, approved.roots())
     {
-        return Err(ToolError::Denied(DenyReason::OutOfScope {
-            what: format!("call {}", call.as_str()).into(),
-        }));
+        return Err(ToolError::Denied(DenyReason::out_of_scope(format!(
+            "call {}",
+            call.as_str()
+        ))));
     }
     launch(
         argv,

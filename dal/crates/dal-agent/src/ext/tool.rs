@@ -562,13 +562,10 @@ impl ToolCx<'_> {
         approved: Approved,
     ) -> Result<Proc, ToolError> {
         if approved.call() != &self.call {
-            return Err(ToolError::Denied(DenyReason::OutOfScope {
-                what: format!(
-                    "approval for call {} cannot spawn this call",
-                    approved.call().as_str()
-                )
-                .into(),
-            }));
+            return Err(ToolError::Denied(DenyReason::out_of_scope(format!(
+                "approval for call {} cannot spawn this call",
+                approved.call().as_str()
+            ))));
         }
         self.rt.spawn(argv, opts, approved)
     }

@@ -231,6 +231,13 @@ pub struct CrosstermTermIo {
 impl CrosstermTermIo {
     /// Builds the adapter with standard input captured by the process edge.
     #[must_use]
+    #[cfg_attr(
+        not(unix),
+        expect(
+            clippy::needless_pass_by_value,
+            reason = "the uniform constructor captures Stdin; only unix stores it"
+        )
+    )]
     pub fn new(stdin: io::Stdin) -> Self {
         #[cfg(not(unix))]
         let _ = stdin;

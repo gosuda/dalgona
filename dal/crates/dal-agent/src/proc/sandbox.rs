@@ -11,8 +11,10 @@ use std::{
     ffi::{OsStr, OsString},
     fmt::{self, Display},
     path::{Path, PathBuf},
-    process::Command,
 };
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+use std::process::Command;
 
 use dal_core::JobId;
 
@@ -35,6 +37,14 @@ pub(crate) struct SandboxInputs<'a> {
     /// dal/dalgona config and data roots a writable path must not overlap.
     pub protected_roots: &'a [PathBuf],
     /// The Linux helper path; `None` fails closed when sandboxing is on.
+    /// macOS's Seatbelt path never reads it.
+    #[cfg_attr(
+        any(windows, target_os = "macos"),
+        expect(
+            dead_code,
+            reason = "only the Linux Landlock probe reads the helper path"
+        )
+    )]
     pub helper: Option<&'a Path>,
 }
 
@@ -72,38 +82,41 @@ pub(crate) fn resolve_launcher(inputs: &SandboxInputs<'_>) -> Result<Launcher, S
     }
     #[cfg(windows)]
     {
-        return Err(SandboxSetupError::new(
+        Err(SandboxSetupError::new(
             "sandbox = \"on\" is not supported on Windows. Set sandbox = \"off\" in config.toml, or run dalgon inside WSL 2.",
-        ));
+        ))
     }
-    let roots = resolve_roots(inputs)?;
-    #[cfg(target_os = "macos")]
+    #[cfg(not(windows))]
     {
-        if !Path::new("/usr/bin/sandbox-exec").exists() {
-            return Err(SandboxSetupError::new(
-                "sandbox = \"on\" needs /usr/bin/sandbox-exec, and it is missing. Set sandbox = \"off\" in config.toml.",
-            ));
+        let roots = resolve_roots(inputs)?;
+        #[cfg(target_os = "macos")]
+        {
+            if !Path::new("/usr/bin/sandbox-exec").exists() {
+                return Err(SandboxSetupError::new(
+                    "sandbox = \"on\" needs /usr/bin/sandbox-exec, and it is missing. Set sandbox = \"off\" in config.toml.",
+                ));
+            }
+            Ok(Launcher::Sandbox {
+                helper: None,
+                roots: roots.into_boxed_slice(),
+            })
         }
-        return Ok(Launcher::Sandbox {
-            helper: None,
-            roots: roots.into_boxed_slice(),
-        });
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let helper = inputs.helper.ok_or_else(|| {
-            SandboxSetupError::new(
-                "sandbox: no sandbox helper. SDK embedders must pass a helper path; the dalgon binary provides dalgon __sandbox.",
-            )
-        })?;
-        let abi = probe_landlock_abi(helper)?;
-        if abi < 3 {
-            return Err(abi_error(abi));
+        #[cfg(not(target_os = "macos"))]
+        {
+            let helper = inputs.helper.ok_or_else(|| {
+                SandboxSetupError::new(
+                    "sandbox: no sandbox helper. SDK embedders must pass a helper path; the dalgon binary provides dalgon __sandbox.",
+                )
+            })?;
+            let abi = probe_landlock_abi(helper)?;
+            if abi < 3 {
+                return Err(abi_error(abi));
+            }
+            Ok(Launcher::Sandbox {
+                helper: Some(helper.to_path_buf()),
+                roots: roots.into_boxed_slice(),
+            })
         }
-        Ok(Launcher::Sandbox {
-            helper: Some(helper.to_path_buf()),
-            roots: roots.into_boxed_slice(),
-        })
     }
 }
 
@@ -251,6 +264,7 @@ fn cannot_open(path: &str, source: &std::io::Error) -> SandboxSetupError {
     SandboxSetupError::new(format!("sandbox: cannot open root {path}: {source}"))
 }
 
+#[cfg(all(not(windows), not(target_os = "macos")))]
 fn abi_error(number: impl Display) -> SandboxSetupError {
     SandboxSetupError::new(format!(
         "sandbox = \"on\" needs Landlock ABI 3 (Linux 6.1 or newer); this kernel reports ABI {number}."
@@ -260,6 +274,7 @@ fn abi_error(number: impl Display) -> SandboxSetupError {
 /// Probes the helper; it must print one decimal ABI followed by `\n`.
 /// One transient spawn failure is retried once; a second failure still
 /// refuses with the unknown-ABI text, so the probe keeps failing closed.
+#[cfg(all(not(windows), not(target_os = "macos")))]
 #[expect(
     clippy::disallowed_methods,
     reason = "the ABI probe is a synchronous startup diagnostic of the host-provided helper binary, not a tool child; the checked async spawn door cannot serve it"
@@ -326,12 +341,14 @@ pub(crate) fn platform_cache(vars: &BTreeMap<OsString, OsString>, home: &Path) -
 /// one escaped root rule per canonical root.
 #[cfg(target_os = "macos")]
 pub(crate) fn seatbelt_profile(roots: &[PathBuf]) -> String {
+    use std::fmt::Write as _;
     let mut profile = String::from("(version 1)\n(allow default)\n(deny file-write*)\n");
     for root in roots {
-        profile.push_str(&format!(
-            "(allow file-write* (subpath \"{}\"))\n",
+        let _ = writeln!(
+            profile,
+            "(allow file-write* (subpath \"{}\"))",
             escape_sbpl(root),
-        ));
+        );
     }
     profile
 }
@@ -346,7 +363,7 @@ fn escape_sbpl(path: &Path) -> String {
 
 /// Builds the exact-text error for a Seatbelt profile write failure.
 #[cfg(target_os = "macos")]
-fn seatbelt_write_error(path: &Path, source: std::io::Error) -> ToolError {
+fn seatbelt_write_error(path: &Path, source: &std::io::Error) -> ToolError {
     ToolError::Failed(Box::new(std::io::Error::new(
         source.kind(),
         format!(
@@ -370,9 +387,9 @@ pub(crate) fn write_seatbelt_profile(job: &JobId, roots: &[PathBuf]) -> Result<P
         .truncate(true)
         .mode(0o600)
         .open(&path)
-        .map_err(|source| seatbelt_write_error(&path, source))?;
+        .map_err(|source| seatbelt_write_error(&path, &source))?;
     file.write_all(seatbelt_profile(roots).as_bytes())
-        .map_err(|source| seatbelt_write_error(&path, source))?;
+        .map_err(|source| seatbelt_write_error(&path, &source))?;
     Ok(path)
 }
 
@@ -388,9 +405,9 @@ pub(crate) fn sandbox_argv(
     #[cfg(windows)]
     {
         let _ = (target, target_args, job, helper, roots);
-        return Err(ToolError::message(
+        Err(ToolError::message(
             "sandbox = \"on\" is not supported on Windows. Set sandbox = \"off\" in config.toml, or run dalgon inside WSL 2.",
-        ));
+        ))
     }
     #[cfg(target_os = "macos")]
     {
@@ -403,7 +420,7 @@ pub(crate) fn sandbox_argv(
             target.clone(),
         ];
         args.extend(target_args.iter().cloned());
-        return Ok((OsString::from("/usr/bin/sandbox-exec"), args, Some(profile)));
+        Ok((OsString::from("/usr/bin/sandbox-exec"), args, Some(profile)))
     }
     #[cfg(all(not(windows), not(target_os = "macos")))]
     {
