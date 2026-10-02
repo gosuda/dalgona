@@ -84,34 +84,37 @@ pub(crate) fn resolve_launcher(inputs: &SandboxInputs<'_>) -> Result<Launcher, S
             "sandbox = \"on\" is not supported on Windows. Set sandbox = \"off\" in config.toml, or run dalgon inside WSL 2.",
         ));
     }
-    let roots = resolve_roots(inputs)?;
-    #[cfg(target_os = "macos")]
+    #[cfg(not(windows))]
     {
-        if !Path::new("/usr/bin/sandbox-exec").exists() {
-            return Err(SandboxSetupError::new(
-                "sandbox = \"on\" needs /usr/bin/sandbox-exec, and it is missing. Set sandbox = \"off\" in config.toml.",
-            ));
+        let roots = resolve_roots(inputs)?;
+        #[cfg(target_os = "macos")]
+        {
+            if !Path::new("/usr/bin/sandbox-exec").exists() {
+                return Err(SandboxSetupError::new(
+                    "sandbox = \"on\" needs /usr/bin/sandbox-exec, and it is missing. Set sandbox = \"off\" in config.toml.",
+                ));
+            }
+            Ok(Launcher::Sandbox {
+                helper: None,
+                roots: roots.into_boxed_slice(),
+            })
         }
-        Ok(Launcher::Sandbox {
-            helper: None,
-            roots: roots.into_boxed_slice(),
-        })
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let helper = inputs.helper.ok_or_else(|| {
-            SandboxSetupError::new(
-                "sandbox: no sandbox helper. SDK embedders must pass a helper path; the dalgon binary provides dalgon __sandbox.",
-            )
-        })?;
-        let abi = probe_landlock_abi(helper)?;
-        if abi < 3 {
-            return Err(abi_error(abi));
+        #[cfg(not(target_os = "macos"))]
+        {
+            let helper = inputs.helper.ok_or_else(|| {
+                SandboxSetupError::new(
+                    "sandbox: no sandbox helper. SDK embedders must pass a helper path; the dalgon binary provides dalgon __sandbox.",
+                )
+            })?;
+            let abi = probe_landlock_abi(helper)?;
+            if abi < 3 {
+                return Err(abi_error(abi));
+            }
+            Ok(Launcher::Sandbox {
+                helper: Some(helper.to_path_buf()),
+                roots: roots.into_boxed_slice(),
+            })
         }
-        Ok(Launcher::Sandbox {
-            helper: Some(helper.to_path_buf()),
-            roots: roots.into_boxed_slice(),
-        })
     }
 }
 
@@ -259,7 +262,7 @@ fn cannot_open(path: &str, source: &std::io::Error) -> SandboxSetupError {
     SandboxSetupError::new(format!("sandbox: cannot open root {path}: {source}"))
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(windows), not(target_os = "macos")))]
 fn abi_error(number: impl Display) -> SandboxSetupError {
     SandboxSetupError::new(format!(
         "sandbox = \"on\" needs Landlock ABI 3 (Linux 6.1 or newer); this kernel reports ABI {number}."
@@ -269,7 +272,7 @@ fn abi_error(number: impl Display) -> SandboxSetupError {
 /// Probes the helper; it must print one decimal ABI followed by `\n`.
 /// One transient spawn failure is retried once; a second failure still
 /// refuses with the unknown-ABI text, so the probe keeps failing closed.
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(windows), not(target_os = "macos")))]
 #[expect(
     clippy::disallowed_methods,
     reason = "the ABI probe is a synchronous startup diagnostic of the host-provided helper binary, not a tool child; the checked async spawn door cannot serve it"

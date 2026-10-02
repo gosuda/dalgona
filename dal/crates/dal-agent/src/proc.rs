@@ -259,18 +259,20 @@ impl Proc {
     }
 
     /// Records live descendants for the post-exit `setsid` sweep.
-    #[cfg_attr(
-        not(target_os = "linux"),
-        allow(clippy::unused_async, clippy::unused_async_trait_impl)
-    )]
+    #[cfg(target_os = "linux")]
     async fn recorded_descendants(&mut self) -> Vec<u32> {
-        #[cfg(target_os = "linux")]
         if let Some(pid) = self.leader_pid {
             return tokio::task::spawn_blocking(move || stop::proc_descendants(pid))
                 .await
                 .unwrap_or_default();
         }
         Vec::new()
+    }
+
+    /// Records live descendants for the post-exit `setsid` sweep.
+    #[cfg(not(target_os = "linux"))]
+    fn recorded_descendants(&mut self) -> std::future::Ready<Vec<u32>> {
+        std::future::ready(Vec::new())
     }
 
     /// Returns the currently retained tail without reading the full log.
@@ -341,26 +343,27 @@ impl Proc {
         Ok(result)
     }
 
-    #[cfg_attr(
-        not(target_os = "linux"),
-        allow(clippy::unused_async, clippy::unused_async_trait_impl)
-    )]
+    /// Reaps descendants the exited leader may have left running.
+    #[cfg(target_os = "linux")]
     async fn sweep_after_exit(&mut self) {
-        #[cfg(windows)]
-        {
-            // TerminateJobObject at once: the leader already exited, so this
-            // only reaps descendants still holding pipes open.
-            let _ = self.child.start_kill();
-            return;
-        }
         let Some(pid) = self.leader_pid else {
             return;
         };
         sweep_process_group(pid);
-        #[cfg(target_os = "linux")]
-        {
-            let _ = tokio::task::spawn_blocking(move || stop::sweep_proc_descendants(pid)).await;
+        let _ = tokio::task::spawn_blocking(move || stop::sweep_proc_descendants(pid)).await;
+    }
+
+    /// Reaps descendants the exited leader may have left running.
+    #[cfg(not(target_os = "linux"))]
+    fn sweep_after_exit(&mut self) -> std::future::Ready<()> {
+        #[cfg(windows)]
+        // TerminateJobObject at once: the leader already exited, so this
+        // only reaps descendants still holding pipes open.
+        let _ = self.child.start_kill();
+        if let Some(pid) = self.leader_pid {
+            sweep_process_group(pid);
         }
+        std::future::ready(())
     }
 }
 
