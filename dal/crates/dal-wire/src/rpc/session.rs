@@ -73,7 +73,7 @@ pub(crate) async fn open(
         .get("ref")
         .and_then(|reference| reference.get("workspace"))
         && let Some(path) = workspace.as_str()
-        && !path.starts_with('/')
+        && !std::path::Path::new(path).is_absolute()
     {
         return Err(invalid_params(
             "session/open",

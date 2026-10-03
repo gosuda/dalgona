@@ -133,7 +133,7 @@ pub(crate) async fn open_workspace(
     state: &Arc<Mutex<AcpConn>>,
     workspace: &str,
 ) -> Result<(SessionId, Agent), ErrorObject> {
-    if !workspace.starts_with('/') {
+    if !std::path::Path::new(workspace).is_absolute() {
         return Err(crate::rpc::invalid_params(
             "session/new",
             "cwd must be an absolute path",

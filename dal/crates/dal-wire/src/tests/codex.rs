@@ -277,7 +277,7 @@ fn thread_started_matches_pinned_schema() {
         id: SessionId::new_v7(),
         name: Some("demo".into()),
         preview: "hi".into(),
-        workspace: Workspace::new("/w".into()).expect("absolute"),
+        workspace: Workspace::new(std::env::temp_dir().join("w")).expect("absolute"),
         updated_at: Timestamp::now(),
         created_at: None,
         archived: None,
