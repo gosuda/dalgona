@@ -45,7 +45,8 @@ fn session_id() -> SessionId {
 }
 
 fn workspace() -> Workspace {
-    Workspace::new("/tmp/dal-store-record-corpus".into()).expect("absolute test workspace")
+    Workspace::new(std::env::temp_dir().join("dal-store-record-corpus"))
+        .expect("absolute test workspace")
 }
 
 fn usage() -> Usage {
