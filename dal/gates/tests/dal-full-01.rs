@@ -15,7 +15,8 @@ mod support;
 use std::{
     collections::{BTreeMap, HashMap},
     error::Error,
-    fs, io,
+    fs::{self, File},
+    io,
     path::{Path, PathBuf},
     process::{Child, Command as ProcessCommand, Stdio},
     sync::{
@@ -1020,6 +1021,7 @@ async fn spawn_websocket_server(
         return Err(io::Error::other("could not create WebSocket test token").into());
     }
     let token = String::from_utf8(token_output.stdout)?.trim().to_owned();
+    let serve_log = dir.path().join("serve.log");
     let child = ProcessCommand::new(binary)
         .current_dir(&workspace)
         .env_clear()
@@ -1028,10 +1030,15 @@ async fn spawn_websocket_server(
         .env("XDG_DATA_HOME", &data_home)
         .args(["serve", "--bind", "127.0.0.1", "--port", "0"])
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::from(File::create(&serve_log)?))
         .spawn()?;
     let server = ServerProcess(Some(child));
-    let url = advertised_websocket(&data_root).await?;
+    let url = advertised_websocket(&data_root)
+        .await
+        .map_err(|error| -> TestError {
+            let log = fs::read_to_string(&serve_log).unwrap_or_default();
+            format!("{error}\nserve stderr:\n{log}").into()
+        })?;
     Ok((server, url, token))
 }
 
