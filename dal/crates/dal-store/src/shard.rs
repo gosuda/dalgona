@@ -43,6 +43,8 @@ pub(crate) const QUEUE_CAPACITY: usize = 256;
 /// Queue admission bound: a saturated shard fails the append loudly instead
 /// of parking a turn invisibly.
 const ENQUEUE_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+/// How long an admitted append may wait for its receipt before it reports.
+const SETTLE_REPORT: std::time::Duration = std::time::Duration::from_secs(30);
 
 enum Job {
     Register {
@@ -86,6 +88,18 @@ struct AppendCall {
 impl Job {
     fn is_request(&self) -> bool {
         matches!(self, Self::Register { .. } | Self::Append { .. })
+    }
+
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Register { .. } => "register",
+            Self::Append { .. } => "append",
+            Self::BlobsPublished(_) => "published",
+            Self::Retire { .. } => "retire",
+            Self::Damaged { .. } => "damaged",
+            #[cfg(test)]
+            Self::Hold(_) => "hold",
+        }
     }
 }
 
@@ -387,10 +401,16 @@ fn finish_steps(steps: Vec<SyncStep>) -> Result<(), StoreError> {
 fn run_syncer(inbox: &std::sync::mpsc::Receiver<SyncJob>) {
     while let Ok(job) = inbox.recv() {
         let waited = job.born.elapsed();
-        if waited > std::time::Duration::from_millis(250) {
-            eprintln!("[dal-store] sync job waited {waited:?}");
-        }
+        let kind = match &job.then {
+            Then::Resolve { .. } => "resolve",
+            Then::Journalize(_) => "journalize",
+        };
+        let mark = std::time::Instant::now();
         let result = finish_steps(job.steps);
+        eprintln!(
+            "[dal-store] sync {kind} waited {waited:?} took {:?}",
+            mark.elapsed()
+        );
         match job.then {
             Then::Resolve {
                 slot,
@@ -615,7 +635,10 @@ pub(crate) struct Lane {
     queue: Arc<Queue>,
     session: SessionId,
     slot: usize,
-    pending: Option<oneshot::Receiver<Result<Receipt, StoreError>>>,
+    pending: Option<(
+        std::time::Instant,
+        oneshot::Receiver<Result<Receipt, StoreError>>,
+    )>,
     retiring: bool,
     retired: Option<oneshot::Receiver<()>>,
     // Cell is Send but not Sync, so the lane cannot be shared between actors.
@@ -662,6 +685,7 @@ impl Lane {
         }
 
         let (done, reply) = oneshot::channel();
+        let born = std::time::Instant::now();
         tokio::time::timeout(
             ENQUEUE_WAIT,
             self.queue.enqueue(Job::Append {
@@ -675,7 +699,7 @@ impl Lane {
         .await
         .map_err(|_| enqueue_timeout(self.session))?
         .map_err(|()| closed(self.session))?;
-        self.pending = Some(reply);
+        self.pending = Some((born, reply));
         self.settle()
             .await
             .unwrap_or_else(|| Err(closed(self.session)))
@@ -685,8 +709,19 @@ impl Lane {
     /// `append` future was cancelled. Returns `None` if no append is pending;
     /// the pending result is consumed exactly once.
     pub(crate) async fn settle(&mut self) -> Option<Result<Receipt, StoreError>> {
-        let pending = self.pending.as_mut()?;
-        let result = pending.await.unwrap_or_else(|_| Err(closed(self.session)));
+        let (born, pending) = self.pending.as_mut()?;
+        let result = loop {
+            match tokio::time::timeout(SETTLE_REPORT, &mut *pending).await {
+                Ok(result) => break result.unwrap_or_else(|_| Err(closed(self.session))),
+                // A receipt this late means the admitted job is parked
+                // somewhere in the worker/syncer chain; name it.
+                Err(_) => eprintln!(
+                    "[dal-store] session {:?} append receipt outstanding {:?}",
+                    self.session,
+                    born.elapsed()
+                ),
+            }
+        };
         self.pending = None;
         Some(result)
     }
@@ -752,6 +787,7 @@ fn run(queue: Arc<Queue>, sync: std::sync::mpsc::Sender<SyncJob>) {
     let mut journals: Vec<Option<(Journal, Option<PathBuf>)>> = Vec::new();
     let mut free = Vec::new();
     while let Some(job) = queue.pop() {
+        eprintln!("[dal-store] worker {}", job.kind());
         match job {
             Job::Register {
                 journal,

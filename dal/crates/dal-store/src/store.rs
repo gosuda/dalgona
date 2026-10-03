@@ -1575,8 +1575,8 @@ async fn open_locked_journal(
         lap("acquire-open", &mut mark);
         match attempt {
             Ok(Ok(pair)) => return Ok(pair),
-            Ok(Err(StoreError::Locked { pid: Some(pid), .. }))
-                if pid == std::process::id() && tokio::time::Instant::now() < deadline =>
+            Ok(Err(StoreError::Locked { pid, .. }))
+                if lock_might_be_ours(pid) && tokio::time::Instant::now() < deadline =>
             {
                 tokio::time::sleep(RETRY_POLL).await;
             }
@@ -1587,6 +1587,16 @@ async fn open_locked_journal(
                 });
             }
         }
+    }
+}
+
+/// POSIX lets a contended acquirer read the owner pid, so only a lock held by
+/// this process is worth waiting out. Windows cannot read a held lock file at
+/// all, so any contended acquire could be ours and earns the bounded wait.
+fn lock_might_be_ours(pid: Option<u32>) -> bool {
+    match pid {
+        Some(pid) => pid == std::process::id(),
+        None => cfg!(windows),
     }
 }
 
