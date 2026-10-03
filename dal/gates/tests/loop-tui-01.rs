@@ -129,6 +129,16 @@ fn render_buffer(
             text = text.replace(name, "[root]");
         }
     }
+    // The status row truncates the workspace path to its leading cells, so a
+    // temp-dir spelling deeper than that never reaches the path masks above.
+    // Fold every head the truncation can leave back to the same root token.
+    if let Some(temp) = std::env::temp_dir().to_str().map(str::to_owned) {
+        for head in (8..=temp.len()).rev() {
+            if temp.is_char_boundary(head) {
+                text = text.replace(&temp[..head], "[root]");
+            }
+        }
+    }
     for prefix in ["/tmp/dalgon-gates-", "dalgon-gates-"] {
         let mut search = 0;
         while let Some(offset) = text[search..].find(prefix) {
