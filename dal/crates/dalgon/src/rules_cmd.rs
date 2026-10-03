@@ -284,7 +284,7 @@ mod tests {
     async fn tool_source_reports_match_without_running_tool() {
         let data = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
-        let rules = workspace.path().join(".dal/rules");
+        let rules = workspace.path().join(".dal").join("rules");
         tokio::fs::create_dir_all(&rules).await.unwrap();
         tokio::fs::write(
             rules.join("no-auto-commit.md"),
@@ -330,8 +330,8 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let unrelated = tempfile::tempdir().unwrap();
         let user_rules = data.path().join("rules");
-        let project_rules = workspace.path().join(".dal/rules");
-        let unrelated_rules = unrelated.path().join(".dal/rules");
+        let project_rules = workspace.path().join(".dal").join("rules");
+        let unrelated_rules = unrelated.path().join(".dal").join("rules");
         tokio::fs::create_dir_all(&user_rules).await.unwrap();
         tokio::fs::create_dir_all(&project_rules).await.unwrap();
         tokio::fs::create_dir_all(&unrelated_rules).await.unwrap();
