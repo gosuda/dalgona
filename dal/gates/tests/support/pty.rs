@@ -125,8 +125,12 @@ impl PtyProcess {
                 if contains(&self.output, needle) {
                     return Ok(());
                 }
+                let captured = String::from_utf8_lossy(&self.output);
+                let tail = captured
+                    .get(captured.len().saturating_sub(4096)..)
+                    .unwrap_or(&captured);
                 return Err(io::Error::other(format!(
-                    "PTY child exited with {status} before output {:?}",
+                    "PTY child exited with {status} before output {:?}\ncaptured tail:\n{tail}",
                     String::from_utf8_lossy(needle)
                 )));
             }
