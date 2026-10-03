@@ -868,9 +868,13 @@ fn job_state_digest(job: &ProcessJob, data_root: &Path) -> String {
         |view| {
             let mut tools = 0usize;
             let mut first_error = String::new();
+            let mut first_result = String::new();
             for entry in &view.entries.items {
                 if let EntryKind::ToolResult { error, parts, .. } = &entry.kind {
                     tools += 1;
+                    if first_result.is_empty() {
+                        first_result = format!("{parts:?}");
+                    }
                     if *error && first_error.is_empty() {
                         first_error = format!("{parts:?}");
                     }
@@ -886,6 +890,10 @@ fn job_state_digest(job: &ProcessJob, data_root: &Path) -> String {
             if !first_error.is_empty() {
                 text.push_str(" err=");
                 text.push_str(&first_error);
+            }
+            if !first_result.is_empty() {
+                text.push_str(" res=");
+                text.push_str(&first_result);
             }
             text
         },
