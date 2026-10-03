@@ -32,6 +32,7 @@ fn cold_plugin_error_reports_path_line_col() -> Result<(), Box<dyn Error + Send 
     let output = Command::new(dalgon_binary("dalgon")?)
         .current_dir(&workspace)
         .env_clear()
+        .envs(support::captured_shell_vars())
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("XDG_DATA_HOME", home.join(".local/share"))

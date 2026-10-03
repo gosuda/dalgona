@@ -1012,6 +1012,7 @@ async fn spawn_websocket_server(
     let token_output = ProcessCommand::new(binary)
         .current_dir(&workspace)
         .env_clear()
+        .envs(support::captured_shell_vars())
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("XDG_DATA_HOME", &data_home)
@@ -1026,6 +1027,7 @@ async fn spawn_websocket_server(
     serve
         .current_dir(&workspace)
         .env_clear()
+        .envs(support::captured_shell_vars())
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("XDG_DATA_HOME", &data_home)

@@ -169,6 +169,7 @@ fn headless_print_denies_exec_without_prompt() -> Result<(), Box<dyn Error + Sen
     let output = Command::new(dalgon_binary("dalgon")?)
         .current_dir(print.path())
         .env_clear()
+        .envs(support::captured_shell_vars())
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("XDG_DATA_HOME", &data_home)

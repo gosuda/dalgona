@@ -40,6 +40,7 @@ fn stdio_request(
     let mut child = Command::new(binary)
         .current_dir(workspace)
         .env_clear()
+        .envs(support::captured_shell_vars())
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("XDG_DATA_HOME", data_home)
@@ -77,6 +78,7 @@ fn spawn_rpc(
     command
         .current_dir(workspace)
         .env_clear()
+        .envs(support::captured_shell_vars())
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("XDG_DATA_HOME", data_home)
