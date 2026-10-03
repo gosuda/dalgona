@@ -459,12 +459,14 @@ mod tests {
             if kind.is_symlink() {
                 continue;
             }
+            // The reference oracle must speak the tool's `/`-separated rel
+            // paths on every platform, or nested names never match a glob.
             let rel = item
                 .path()
                 .strip_prefix(root)
                 .unwrap()
                 .to_string_lossy()
-                .into_owned();
+                .replace(std::path::MAIN_SEPARATOR, "/");
             if excluded(&rel, kind.is_dir()) {
                 continue;
             }
