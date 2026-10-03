@@ -72,6 +72,14 @@ impl Resp {
     }
 }
 
+/// How long an early-rejected body is drained before the socket closes.
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Bytes a rejected body may still consume while draining: enough for the
+/// rest of any body at the declared limit. A still-sending client keeps
+/// writing after this point and the close resets instead — best effort.
+const DRAIN_LIMIT: usize = BODY_LIMIT;
+
 /// Reads one bounded request body with its timeout.
 pub(super) async fn read_body(req: Request<hyper::body::Incoming>) -> Result<Bytes, Resp> {
     let (_parts, mut body) = req.into_parts();
@@ -81,10 +89,14 @@ pub(super) async fn read_body(req: Request<hyper::body::Incoming>) -> Result<Byt
         while let Some(frame) =
             futures::future::poll_fn(|cx| std::pin::Pin::new(&mut body).poll_frame(cx)).await
         {
-            let frame = frame.map_err(|_| Resp::text(400, "request body is not valid"))?;
+            let Ok(frame) = frame else {
+                drain_body(&mut body).await;
+                return Err(Resp::text(400, "request body is not valid"));
+            };
             if let Some(data) = frame.data_ref() {
                 collected += data.len();
                 if collected > BODY_LIMIT {
+                    drain_body(&mut body).await;
                     return Err(Resp::text(
                         413,
                         &format!("request body exceeds {BODY_LIMIT} bytes"),
@@ -107,6 +119,28 @@ pub(super) async fn read_body(req: Request<hyper::body::Incoming>) -> Result<Byt
         out.extend_from_slice(&chunk);
     }
     Ok(Bytes::from(out))
+}
+
+/// Empties a rejected request body so the socket closes with no unread
+/// input: closing mid-stream resets the connection on BSD-family systems
+/// and the client loses the rejection response entirely.
+async fn drain_body(body: &mut hyper::body::Incoming) {
+    let mut remaining = DRAIN_LIMIT;
+    let drain = async {
+        while remaining > 0 {
+            let frame =
+                futures::future::poll_fn(|cx| std::pin::Pin::new(&mut *body).poll_frame(cx)).await;
+            match frame {
+                Some(Ok(frame)) => {
+                    if let Some(data) = frame.data_ref() {
+                        remaining = remaining.saturating_sub(data.len());
+                    }
+                }
+                Some(Err(_)) | None => break,
+            }
+        }
+    };
+    let _ = tokio::time::timeout(DRAIN_TIMEOUT, drain).await;
 }
 
 /// Converts one wire response into its hyper response.
