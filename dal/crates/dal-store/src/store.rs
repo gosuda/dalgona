@@ -961,13 +961,24 @@ impl Journal {
             }
         };
         lap("shards-init", &mut mark);
-        let create_permit = match self.inner.create_permits.acquire().await {
-            Ok(permit) => permit,
-            Err(_closed) => {
-                self.state = State::Lazy { blobs };
-                return Err(StoreError::Invalid {
-                    reason: "journal create permits are closed".into(),
-                });
+        let create_permit = {
+            // A permit wait has no timeout: holder starvation would park
+            // every later create in silence, so report long waits.
+            let mut waiting = Box::pin(self.inner.create_permits.acquire());
+            loop {
+                match tokio::time::timeout(std::time::Duration::from_secs(30), &mut waiting).await {
+                    Ok(Ok(permit)) => break permit,
+                    Ok(Err(_closed)) => {
+                        self.state = State::Lazy { blobs };
+                        return Err(StoreError::Invalid {
+                            reason: "journal create permits are closed".into(),
+                        });
+                    }
+                    Err(_elapsed) => eprintln!(
+                        "[dal-store] session {:?} create permit outstanding",
+                        self.id
+                    ),
+                }
             }
         };
         lap("create-permit", &mut mark);
@@ -1043,7 +1054,19 @@ impl Journal {
                 Ok((lock, journal))
             }
         });
-        let (lock, file_journal) = match creation.await {
+        let mut creation = Box::pin(creation);
+        let outcome = loop {
+            // The join has no timeout either: a pooled blocking task that
+            // never schedules parks the permit and every later create.
+            match tokio::time::timeout(std::time::Duration::from_secs(30), &mut creation).await {
+                Ok(outcome) => break outcome,
+                Err(_elapsed) => eprintln!(
+                    "[dal-store] session {:?} journal create task outstanding",
+                    self.id
+                ),
+            }
+        };
+        let (lock, file_journal) = match outcome {
             Ok(Ok(pair)) => pair,
             Ok(Err(error)) => {
                 if !journal_path.exists() {

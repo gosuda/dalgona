@@ -122,6 +122,12 @@ fn raise_fd_soft_limit() {
         }
         target /= 2;
     }
+    let after = rustix::process::getrlimit(rustix::process::Resource::Nofile)
+        .current
+        .unwrap_or(soft);
+    if after != soft {
+        eprintln!("[dal-agent] fd soft limit {soft} -> {after}");
+    }
 }
 
 /// Windows has no `getrlimit`; the process edge does no fd lifting there.
