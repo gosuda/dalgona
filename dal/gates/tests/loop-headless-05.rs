@@ -10,7 +10,7 @@
 )]
 mod support;
 
-use std::{collections::BTreeMap, error::Error, fs, process::Command};
+use std::{error::Error, fs, process::Command};
 
 use dal_agent::{Env, Host, SessionRef};
 use dal_core::{Config, ConfigProduct, Expect, PageReq, Part, Workspace};
@@ -42,7 +42,7 @@ async fn second_process_reports_current_session_lock_holder()
         config: &config,
     })?;
     let env = Env {
-        vars: BTreeMap::new(),
+        vars: support::captured_shell_vars(),
         cwd: workspace.clone(),
         sandbox_helper: None,
     };

@@ -9,7 +9,6 @@
 mod support;
 
 use std::{
-    collections::BTreeMap,
     error::Error,
     io,
     sync::{
@@ -408,7 +407,7 @@ async fn synthetic_cycle_depth_round_and_unpriced_errors_are_typed()
     )?);
     product.extensions.push(builder.build()?);
     let env = Env {
-        vars: BTreeMap::new(),
+        vars: support::captured_shell_vars(),
         cwd: workspace.path().to_path_buf(),
         sandbox_helper: None,
     };

@@ -9,7 +9,6 @@
 mod support;
 
 use std::{
-    collections::BTreeMap,
     error::Error,
     fs,
     sync::{
@@ -362,7 +361,7 @@ async fn synthetic_private_tools_and_forward_have_one_boundary()
         .build()?;
     product.extensions.push(extension);
     let env = Env {
-        vars: BTreeMap::new(),
+        vars: support::captured_shell_vars(),
         cwd: workspace.path().to_path_buf(),
         sandbox_helper: None,
     };

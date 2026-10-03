@@ -5,7 +5,7 @@
 )]
 mod support;
 
-use std::{collections::BTreeMap, error::Error, path::PathBuf, sync::Arc};
+use std::{error::Error, path::PathBuf, sync::Arc};
 
 use dal_agent::{
     Env, SessionRef,
@@ -99,7 +99,7 @@ async fn wake_limit_allows_twenty_then_rejects_and_resets()
         .build()?;
     product.extensions.push(wake_ext);
     let env = Env {
-        vars: BTreeMap::new(),
+        vars: support::captured_shell_vars(),
         cwd: workspace.path().to_path_buf(),
         sandbox_helper: None,
     };

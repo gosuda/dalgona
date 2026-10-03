@@ -13,7 +13,7 @@
 mod support;
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::HashMap,
     error::Error,
     fs::{self, File},
     io,
@@ -1160,20 +1160,6 @@ fn resident_set_bytes() -> io::Result<u64> {
 }
 
 /// Captures the variables the Windows shell ladder and spawned tools need;
-/// other platforms keep an empty snapshot. Windows console tools read
-/// `SystemRoot`, TEMP, COMSPEC, and `PSModulePath` during startup, so the
-/// snapshot carries the whole runner environment.
-fn captured_shell_vars() -> BTreeMap<std::ffi::OsString, std::ffi::OsString> {
-    #[cfg(windows)]
-    {
-        std::env::vars_os().collect()
-    }
-    #[cfg(not(windows))]
-    {
-        BTreeMap::default()
-    }
-}
-
 // tokio keeps two kinds of kernel objects alive for the runtime's
 // whole life: blocking-pool threads never exit (no idle timeout, 512
 // cap), and its driver parks a small fixed set of events and ports once
@@ -1369,7 +1355,7 @@ async fn full_load_scenario() -> Result<(), TestError> {
     let pre_run_handles = open_handle_count()?;
     let pre_run_threads = open_thread_count()?;
     let env = Env {
-        vars: captured_shell_vars(),
+        vars: support::captured_shell_vars(),
         cwd: workspace.as_path().to_path_buf(),
         sandbox_helper: None,
     };
@@ -1630,7 +1616,7 @@ async fn full_setup_for_actor_smoke(
         product,
         config,
         Env {
-            vars: captured_shell_vars(),
+            vars: support::captured_shell_vars(),
             cwd: workspace_dir,
             sandbox_helper: None,
         },

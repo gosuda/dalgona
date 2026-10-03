@@ -7,7 +7,6 @@
 mod support;
 
 use std::{
-    collections::BTreeMap,
     error::Error,
     path::{Path, PathBuf},
 };
@@ -43,7 +42,7 @@ async fn tui_backend_snapshots_inline_and_fullscreen() -> Result<(), Box<dyn Err
         config: &config,
     })?;
     let env = Env {
-        vars: BTreeMap::new(),
+        vars: support::captured_shell_vars(),
         cwd: workspace.path().to_path_buf(),
         sandbox_helper: None,
     };
