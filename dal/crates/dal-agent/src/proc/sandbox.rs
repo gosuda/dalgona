@@ -133,12 +133,21 @@ pub(crate) fn session_launcher(
     if !config.sandbox() {
         return Ok(Launcher::Direct);
     }
-    let home = platform_home(vars).ok_or_else(|| {
-        SandboxSetupError::new(
-            "sandbox: HOME is not set, so the sandbox cannot resolve its writable roots. Set HOME, or set sandbox = \"off\" in config.toml.",
-        )
-    })?;
-    let cache = platform_cache(vars, &home);
+    #[cfg(windows)]
+    let (home, cache) = {
+        // Windows never resolves roots: the launcher rejects below.
+        let _ = vars;
+        (PathBuf::new(), PathBuf::new())
+    };
+    #[cfg(not(windows))]
+    let (home, cache) = {
+        let home = platform_home(vars).ok_or_else(|| {
+            SandboxSetupError::new(
+                "sandbox: HOME is not set, so the sandbox cannot resolve its writable roots. Set HOME, or set sandbox = \"off\" in config.toml.",
+            )
+        })?;
+        (home.clone(), platform_cache(vars, &home))
+    };
     resolve_launcher(&SandboxInputs {
         sandbox_on: true,
         workspace_root,
