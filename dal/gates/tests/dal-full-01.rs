@@ -1174,6 +1174,12 @@ fn captured_shell_vars() -> BTreeMap<std::ffi::OsString, std::ffi::OsString> {
     }
 }
 
+// tokio keeps two kinds of kernel objects alive for the runtime's
+// whole life: blocking-pool threads never exit (no idle timeout, 512
+// cap), and its driver parks a small fixed set of events and ports once
+// work saturates it. Handle growth beyond those is a product leak.
+const RUNTIME_HANDLE_SLACK: usize = 64;
+
 fn live_proc_count() -> usize {
     #[cfg(windows)]
     {
@@ -1504,12 +1510,11 @@ async fn full_load_scenario() -> Result<(), TestError> {
     // whole life: blocking-pool threads never exit (no idle timeout, 512
     // cap), and its driver parks a small fixed set of events/ports once
     // work saturates it. Only growth beyond those is a product leak.
-    const RUNTIME_SLACK: usize = 64;
     let mut after_handles = open_handle_count()?;
     let mut after_threads = open_thread_count()?;
     let settled = |handles: usize, threads: usize| {
         handles.saturating_sub(pre_run_handles)
-            <= threads.saturating_sub(pre_run_threads) + RUNTIME_SLACK
+            <= threads.saturating_sub(pre_run_threads) + RUNTIME_HANDLE_SLACK
     };
     let settle_deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     while !settled(after_handles, after_threads) && tokio::time::Instant::now() < settle_deadline {
@@ -1521,7 +1526,7 @@ async fn full_load_scenario() -> Result<(), TestError> {
     let growth = after_handles.saturating_sub(pre_run_handles);
     let thread_growth = after_threads.saturating_sub(pre_run_threads);
     assert!(
-        growth <= thread_growth + RUNTIME_SLACK,
+        growth <= thread_growth + RUNTIME_HANDLE_SLACK,
         "non-thread kernel handles did not return to baseline \
          (handles={after_handles} baseline={pre_run_handles} \
          threads={after_threads} baseline-threads={pre_run_threads} \
