@@ -261,13 +261,16 @@ pub(crate) async fn list_shared(
         search: None,
     };
     let page = host.sessions(query).map_err(crate::rpc::host_error)?;
+    // Session workspaces are recorded in the store's canonical spelling; the
+    // caller's cwd canonicalizes to the same form before comparing.
     let sessions: Vec<Value> = page
         .items
         .into_iter()
         .filter(|info| {
-            filter
-                .as_deref()
-                .is_none_or(|cwd| info.workspace.as_path() == std::path::Path::new(cwd))
+            filter.as_deref().is_none_or(|cwd| {
+                info.workspace.as_path()
+                    == dal_store::canonical_path(std::path::Path::new(cwd)).as_path()
+            })
         })
         .map(|info| {
             sonic_rs::json!({

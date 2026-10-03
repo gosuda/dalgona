@@ -4,7 +4,7 @@ use std::{
     ffi::OsString,
     fs::{self, OpenOptions},
     io::{self, Write},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 #[cfg(not(windows))]
@@ -35,6 +35,38 @@ impl FileMode {
 
 /// Maximum session-name length in grapheme clusters.
 const NAME_MAX: usize = 64;
+
+/// The spelling a path carries for durable identity: every symlink resolved,
+/// with a Windows verbatim local root folded back to the drive spelling so
+/// stored and displayed paths stay readable. A path that cannot be resolved
+/// keeps its given form, so callers stay total.
+#[must_use]
+pub fn canonical_path(path: &Path) -> PathBuf {
+    simplify_verbatim(std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()))
+}
+
+/// Folds `\\?\C:\...` back to `C:\...`; verbatim UNC and device roots stay
+/// verbatim because they have no plain spelling.
+#[cfg(windows)]
+fn simplify_verbatim(path: PathBuf) -> PathBuf {
+    use std::path::{Component, Prefix};
+
+    let mut components = path.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return path;
+    };
+    let Prefix::VerbatimDisk(letter) = prefix.kind() else {
+        return path;
+    };
+    let mut simplified = PathBuf::from(format!("{}:\\", char::from(letter)));
+    simplified.extend(components);
+    simplified
+}
+
+#[cfg(not(windows))]
+fn simplify_verbatim(path: PathBuf) -> PathBuf {
+    path
+}
 
 /// The workspace directory name: cleaned base, cut to 32 bytes, plus 12 hex digits.
 #[must_use]

@@ -80,8 +80,16 @@ impl StoreInner {
 
 impl Store {
     /// Creates a store without creating or modifying any filesystem path.
+    ///
+    /// The workspace keeps one canonical spelling for every durable identity:
+    /// the sessions directory key, the recorded session workspace, and the
+    /// reference lookups compare against. A symlinked spelling like `/var/...`
+    /// and its canonical `/private/var/...` target must resolve to the same
+    /// sessions or one workspace splits into two.
     #[must_use]
     pub fn new(data_root: PathBuf, workspace: Workspace, product: Product) -> Self {
+        let workspace =
+            Workspace::new(util::canonical_path(workspace.as_path())).unwrap_or(workspace);
         let workspace_key = util::workspace_key(workspace.as_path());
         Self {
             inner: Arc::new(StoreInner {
@@ -209,12 +217,17 @@ impl Store {
 
     /// Resolves a name or identifier in `workspace`.
     ///
+    /// The argument workspace canonicalizes the same way [`Store::new`] does,
+    /// so a lookup from a symlinked or canonical cwd sees the same sessions.
+    ///
     /// # Errors
     /// Returns [`StoreError`] when the reference is empty, missing, or ambiguous.
     pub fn resolve(&self, workspace: &Workspace, arg: &str) -> Result<SessionId, StoreError> {
+        let canonical = Workspace::new(util::canonical_path(workspace.as_path()))
+            .unwrap_or_else(|_| workspace.clone());
         self.inner
             .listing
-            .resolve(&self.workspace_dir_for(workspace), workspace, arg)
+            .resolve(&self.workspace_dir_for(&canonical), &canonical, arg)
     }
 
     /// Returns the newest unarchived session in the configured workspace.
