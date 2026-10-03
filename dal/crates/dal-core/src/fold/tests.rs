@@ -2472,3 +2472,15 @@ fn crash_repair_writes_accumulated_totals() {
         .expect("repair ends the open turn");
     assert_eq!(end, &Some(usage(10)));
 }
+
+#[test]
+fn replay_rejects_out_of_order_turn_ids() {
+    // The live fold allocates turn ids strictly increasing, so a journal that
+    // restarts an older id is torn or forged.
+    assert!(contradicts(vec![
+        turn_start_record(3),
+        turn_end_record(3),
+        turn_start_record(2),
+        turn_end_record(2),
+    ]));
+}
