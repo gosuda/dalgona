@@ -1185,6 +1185,30 @@ fn live_proc_count() -> usize {
     }
 }
 
+/// Threads live in this process. Windows `HandleCount` covers thread
+/// handles while unix `/dev/fd` never did, so the Windows check subtracts
+/// thread growth instead of comparing raw totals.
+fn open_thread_count() -> io::Result<usize> {
+    #[cfg(windows)]
+    {
+        let command = format!(
+            "(Get-Process -Id {} | Select-Object -ExpandProperty Threads).Count",
+            std::process::id()
+        );
+        let output = ProcessCommand::new("powershell.exe")
+            .args(["-NoProfile", "-Command", &command])
+            .output()?;
+        String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse::<usize>()
+            .map_err(io::Error::other)
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(0)
+    }
+}
+
 fn open_handle_count() -> io::Result<usize> {
     #[cfg(unix)]
     {
@@ -1330,6 +1354,7 @@ async fn full_load_scenario() -> Result<(), TestError> {
         fs::Permissions::from_mode(0o755),
     )?;
     let pre_run_handles = open_handle_count()?;
+    let pre_run_threads = open_thread_count()?;
     let env = Env {
         vars: captured_shell_vars(),
         cwd: workspace.as_path().to_path_buf(),
@@ -1469,19 +1494,33 @@ async fn full_load_scenario() -> Result<(), TestError> {
     drop(idle_updates);
     drop(root);
     let mut after_handles = open_handle_count()?;
+    let mut after_threads = open_thread_count()?;
     // Kernel handle closes are synchronous when CloseHandle runs, but a
     // burst of teardown can lag the assert by a beat; give the count a
-    // short settle window before calling the residual a leak.
+    // short settle window before calling the residual a leak. On Windows
+    // `HandleCount` includes thread handles and tokio's blocking pool
+    // never shrinks while the runtime lives, so the bound tolerates the
+    // threads spawned during the run while requiring every other kernel
+    // object — files, job objects, events — to close.
     let settle_deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-    while after_handles > pre_run_handles && tokio::time::Instant::now() < settle_deadline {
+    while tokio::time::Instant::now() < settle_deadline {
+        let growth = after_handles.saturating_sub(pre_run_handles);
+        if growth <= after_threads.saturating_sub(pre_run_threads) {
+            break;
+        }
         tokio::time::sleep(Duration::from_millis(500)).await;
         after_handles = open_handle_count()?;
+        after_threads = open_thread_count()?;
     }
     let live = live_proc_count();
-    assert_eq!(
-        after_handles, pre_run_handles,
-        "open handles did not return to baseline \
-         (spawn={after_jobs_spawn} first-cancel={after_first_cancel} \
+    let growth = after_handles.saturating_sub(pre_run_handles);
+    let thread_growth = after_threads.saturating_sub(pre_run_threads);
+    assert!(
+        growth <= thread_growth,
+        "non-thread kernel handles did not return to baseline \
+         (handles={after_handles} baseline={pre_run_handles} \
+         threads={after_threads} baseline-threads={pre_run_threads} \
+         spawn={after_jobs_spawn} first-cancel={after_first_cancel} \
          jobs-exit={after_jobs_exit} shutdown={after_shutdown} live-procs={live})"
     );
     Ok(())
