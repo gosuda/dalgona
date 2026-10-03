@@ -949,7 +949,10 @@ impl Journal {
         let lap = |step: &str, mark: &mut std::time::Instant| {
             let taken = mark.elapsed();
             if taken > std::time::Duration::from_millis(250) {
-                eprintln!("[dal-store] first-append {step} took {taken:?}");
+                eprintln!(
+                    "[dal-store] session {:?} first-append {step} took {taken:?}",
+                    self.id
+                );
             }
             *mark = std::time::Instant::now();
         };

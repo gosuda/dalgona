@@ -1083,6 +1083,10 @@ impl Actor {
     ) -> Result<(), AgentError> {
         let updates = emit.updates;
         if let Err(error) = self.journal.append(emit.records).await {
+            eprintln!(
+                "[dal-agent] session {:?} journal append failed: {error}",
+                self.session
+            );
             let message: Box<str> = format!("journal write failed: {error}").into();
             if breaks_session(&error) {
                 self.broken = Some(message.clone());
