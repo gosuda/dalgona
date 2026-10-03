@@ -1378,6 +1378,7 @@ async fn full_load_scenario() -> Result<(), TestError> {
     let web_sockets = connect_websocket_clients(&websocket_url, &token).await?;
     let mut process_jobs = start_process_jobs(&host, &workspace).await?;
     let pids = wait_for_process_pids(&mut process_jobs, data.path()).await?;
+    let after_jobs_spawn = open_handle_count()?;
     let rss = resident_set_bytes()?;
     let handles = open_handle_count()?;
     if budgets {
@@ -1396,6 +1397,7 @@ async fn full_load_scenario() -> Result<(), TestError> {
         );
     }
     wait_for_processes_to_exit(&pids[..CANCELLATIONS]).await?;
+    let after_first_cancel = open_handle_count()?;
     let remaining_samples = cancel_jobs(
         &mut process_jobs[CANCELLATIONS..],
         PROCESS_JOBS - CANCELLATIONS,
@@ -1403,10 +1405,12 @@ async fn full_load_scenario() -> Result<(), TestError> {
     .await?;
     assert_eq!(remaining_samples.len(), PROCESS_JOBS - CANCELLATIONS);
     wait_for_processes_to_exit(&pids).await?;
+    let after_jobs_exit = open_handle_count()?;
     let expected_root_turns = idle_samples.len() + 1;
     drop(web_sockets);
     drop(server);
     let report = host.shutdown(Duration::from_secs(30)).await;
+    let after_shutdown = open_handle_count()?;
     // The root's session-end sweep cascade-closes the children before the
     // shutdown loop reaches them, so `sessions_closed` only ever counts the
     // top-level sessions plus the children the loop got to first — every
@@ -1453,10 +1457,20 @@ async fn full_load_scenario() -> Result<(), TestError> {
     drop(process_jobs);
     drop(idle_updates);
     drop(root);
-    let after_handles = open_handle_count()?;
+    let mut after_handles = open_handle_count()?;
+    // Kernel handle closes are synchronous when CloseHandle runs, but a
+    // burst of teardown can lag the assert by a beat; give the count a
+    // short settle window before calling the residual a leak.
+    let settle_deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while after_handles > pre_run_handles && tokio::time::Instant::now() < settle_deadline {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        after_handles = open_handle_count()?;
+    }
     assert_eq!(
         after_handles, pre_run_handles,
-        "open handles did not return to baseline"
+        "open handles did not return to baseline \
+         (spawn={after_jobs_spawn} first-cancel={after_first_cancel} \
+         jobs-exit={after_jobs_exit} shutdown={after_shutdown})"
     );
     Ok(())
 }
