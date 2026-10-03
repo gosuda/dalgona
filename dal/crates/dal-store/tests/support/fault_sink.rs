@@ -105,7 +105,8 @@ impl FaultSink {
         }
         let side = journal.with_extension(format!("torn-{offset}.jsonl"));
         fs::write(&side, tail)?;
-        File::open(&side)?.sync_all()?;
+        // Windows denies FlushFileBuffers on a read-only handle.
+        File::options().write(true).open(&side)?.sync_all()?;
         Ok(side)
     }
 
