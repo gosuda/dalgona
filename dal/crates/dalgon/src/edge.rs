@@ -523,10 +523,7 @@ mod tests {
             ("XDG_DATA_HOME", TEST_DATA),
         ]);
         let roots = resolve_roots(&vars, "dalgon").unwrap();
-        assert_eq!(
-            roots.config,
-            PathBuf::from(TEST_HOME).join(".config/dal")
-        );
+        assert_eq!(roots.config, PathBuf::from(TEST_HOME).join(".config/dal"));
         assert_eq!(roots.data, PathBuf::from(TEST_DATA).join("dal"));
     }
 
@@ -540,10 +537,7 @@ mod tests {
             super::select_home(&vars).unwrap(),
             PathBuf::from("C:\\Users\\alice")
         );
-        let vars = env(&[
-            ("HOME", "relative"),
-            ("USERPROFILE", "C:\\Users\\bob"),
-        ]);
+        let vars = env(&[("HOME", "relative"), ("USERPROFILE", "C:\\Users\\bob")]);
         assert_eq!(
             super::select_home(&vars).unwrap(),
             PathBuf::from("C:\\Users\\bob")
