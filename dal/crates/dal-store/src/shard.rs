@@ -89,18 +89,6 @@ impl Job {
     fn is_request(&self) -> bool {
         matches!(self, Self::Register { .. } | Self::Append { .. })
     }
-
-    fn kind(&self) -> &'static str {
-        match self {
-            Self::Register { .. } => "register",
-            Self::Append { .. } => "append",
-            Self::BlobsPublished(_) => "published",
-            Self::Retire { .. } => "retire",
-            Self::Damaged { .. } => "damaged",
-            #[cfg(test)]
-            Self::Hold(_) => "hold",
-        }
-    }
 }
 
 struct QueueState {
@@ -400,17 +388,19 @@ fn finish_steps(steps: Vec<SyncStep>) -> Result<(), StoreError> {
 
 fn run_syncer(inbox: &std::sync::mpsc::Receiver<SyncJob>) {
     while let Ok(job) = inbox.recv() {
-        let waited = job.born.elapsed();
-        let kind = match &job.then {
-            Then::Resolve { .. } => "resolve",
-            Then::Journalize(_) => "journalize",
-        };
         let mark = std::time::Instant::now();
         let result = finish_steps(job.steps);
-        eprintln!(
-            "[dal-store] sync {kind} waited {waited:?} took {:?}",
-            mark.elapsed()
-        );
+        // Only slow batches report: an unconditional line per batch would
+        // flood stderr on child processes and can stall their writers.
+        let taken = mark.elapsed();
+        if job.born.elapsed() > std::time::Duration::from_millis(250)
+            || taken > std::time::Duration::from_millis(250)
+        {
+            eprintln!(
+                "[dal-store] sync waited {:?} took {taken:?}",
+                job.born.elapsed()
+            );
+        }
         match job.then {
             Then::Resolve {
                 slot,
@@ -787,7 +777,6 @@ fn run(queue: Arc<Queue>, sync: std::sync::mpsc::Sender<SyncJob>) {
     let mut journals: Vec<Option<(Journal, Option<PathBuf>)>> = Vec::new();
     let mut free = Vec::new();
     while let Some(job) = queue.pop() {
-        eprintln!("[dal-store] worker {}", job.kind());
         match job {
             Job::Register {
                 journal,
