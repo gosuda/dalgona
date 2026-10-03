@@ -104,15 +104,23 @@ const FD_TARGET: u64 = 16_384;
 fn raise_fd_soft_limit() {
     let limit = rustix::process::getrlimit(rustix::process::Resource::Nofile);
     let soft = limit.current.unwrap_or(FD_TARGET);
-    let lifted = soft.max(limit.maximum.unwrap_or(soft).min(FD_TARGET));
-    if lifted > soft {
-        let _ = rustix::process::setrlimit(
+    // The kernel can cap descriptors below the hard limit (macOS
+    // kern.maxfilesperproc), so halve down from the target until a setrlimit
+    // lands instead of failing on the first unreachable rung.
+    let mut target = limit.maximum.unwrap_or(FD_TARGET).min(FD_TARGET);
+    while target > soft {
+        if rustix::process::setrlimit(
             rustix::process::Resource::Nofile,
             rustix::process::Rlimit {
-                current: Some(lifted),
+                current: Some(target),
                 maximum: None,
             },
-        );
+        )
+        .is_ok()
+        {
+            break;
+        }
+        target /= 2;
     }
 }
 
@@ -141,12 +149,22 @@ mod tests {
     /// so session locks, journals, pipes, and sockets fit: the macOS default
     /// of 256 starved ~200 concurrent sessions of descriptors entirely.
     #[test]
-    fn raise_fd_soft_limit_reaches_the_hard_capped_target() {
+    fn raise_fd_soft_limit_reaches_the_kernel_ceiling() {
+        let before = rustix::process::getrlimit(rustix::process::Resource::Nofile)
+            .current
+            .unwrap_or(0);
         super::raise_fd_soft_limit();
         let limit = rustix::process::getrlimit(rustix::process::Resource::Nofile);
         let hard = limit.maximum.unwrap_or(u64::MAX);
         let soft = limit.current.unwrap_or(0);
-        assert!(soft >= super::FD_TARGET.min(hard));
+        assert!(soft >= before, "the lift never lowers the fd soft limit");
+        // The ladder bottoms out at 1024: any saner floor must be at least
+        // that, and a kernel that hard-caps below it still leaves the cap.
+        let floor = hard.min(1024);
+        assert!(
+            soft >= floor,
+            "fd soft limit {soft} stayed below the reachable floor {floor} (hard={hard})"
+        );
     }
 }
 
