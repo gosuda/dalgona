@@ -120,6 +120,22 @@ pub(crate) fn process_alive(pid: u32) -> bool {
     alive
 }
 
+/// The fixed environment snapshot for a test session. Windows console
+/// tools read `SystemRoot`, TEMP, `COMSPEC`, and `PSModulePath` during
+/// startup and the shell ladder needs the runner PATH to find Git Bash,
+/// so the snapshot carries the whole runner environment on Windows; other
+/// platforms keep an empty snapshot.
+pub(crate) fn captured_shell_vars() -> BTreeMap<std::ffi::OsString, std::ffi::OsString> {
+    #[cfg(windows)]
+    {
+        std::env::vars_os().collect()
+    }
+    #[cfg(not(windows))]
+    {
+        BTreeMap::default()
+    }
+}
+
 pub(crate) struct TestDir {
     path: PathBuf,
 }
