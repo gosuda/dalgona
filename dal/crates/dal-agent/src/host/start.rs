@@ -163,6 +163,7 @@ mod tests {
         let limit = rustix::process::getrlimit(rustix::process::Resource::Nofile);
         let hard = limit.maximum.unwrap_or(u64::MAX);
         let soft = limit.current.unwrap_or(0);
+        eprintln!("[dal-agent] fd limits before={before} soft={soft} hard={hard}");
         assert!(soft >= before, "the lift never lowers the fd soft limit");
         // The ladder bottoms out at 1024: any saner floor must be at least
         // that, and a kernel that hard-caps below it still leaves the cap.
