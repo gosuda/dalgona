@@ -82,12 +82,14 @@ fn read_pid_until(path: &Path) -> Result<Option<u32>, StoreError> {
     let deadline = Instant::now() + PID_WAIT;
     let mut previous = None;
     loop {
-        let bytes = match fs::read(path) {
-            Ok(bytes) => bytes,
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        let current = match fs::read(path) {
+            Ok(bytes) => parse_pid(&bytes),
+            // A contender can read between the holder's lock acquire and its
+            // owner-sidecar write; a missing sidecar is a transient state like
+            // unparsable content, so keep polling until the deadline.
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => None,
             Err(source) => return Err(util::io_err(path, source)),
         };
-        let current = parse_pid(&bytes);
         if current.is_some() && current == previous {
             return Ok(current);
         }
