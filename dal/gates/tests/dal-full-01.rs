@@ -1174,6 +1174,17 @@ fn captured_shell_vars() -> BTreeMap<std::ffi::OsString, std::ffi::OsString> {
     }
 }
 
+fn live_proc_count() -> usize {
+    #[cfg(windows)]
+    {
+        dal_agent::live_procs()
+    }
+    #[cfg(not(windows))]
+    {
+        0
+    }
+}
+
 fn open_handle_count() -> io::Result<usize> {
     #[cfg(unix)]
     {
@@ -1466,11 +1477,12 @@ async fn full_load_scenario() -> Result<(), TestError> {
         tokio::time::sleep(Duration::from_millis(500)).await;
         after_handles = open_handle_count()?;
     }
+    let live = live_proc_count();
     assert_eq!(
         after_handles, pre_run_handles,
         "open handles did not return to baseline \
          (spawn={after_jobs_spawn} first-cancel={after_first_cancel} \
-         jobs-exit={after_jobs_exit} shutdown={after_shutdown})"
+         jobs-exit={after_jobs_exit} shutdown={after_shutdown} live-procs={live})"
     );
     Ok(())
 }
