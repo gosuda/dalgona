@@ -326,6 +326,11 @@ fn proxy_loop(
             }
             Err(_) => return,
         };
+        // BSD accepts inherit the listener's O_NONBLOCK; the relays block on
+        // reads and must not see the flag.
+        if client.set_nonblocking(false).is_err() {
+            continue;
+        }
         let Ok(upstream) = TcpStream::connect(target) else {
             continue;
         };
