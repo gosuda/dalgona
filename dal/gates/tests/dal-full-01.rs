@@ -1363,11 +1363,14 @@ async fn full_load_scenario() -> Result<(), TestError> {
     if budgets {
         assert!(idle_p99 < CANCEL_P99, "idle cancel p99 was {idle_p99:?}");
     }
-    let mut process_jobs = start_process_jobs(&host, &workspace).await?;
-    let pids = wait_for_process_pids(&mut process_jobs, data.path()).await?;
+    // Bind and attach the WebSocket clients before the process storm;
+    // the assertions exercise live clients under load, and Windows
+    // WSAStartup transiently fails when a spawn lands at peak procs.
     let web_dir = TestDir::new()?;
     let (server, websocket_url, token) = spawn_websocket_server(&web_dir).await?;
     let web_sockets = connect_websocket_clients(&websocket_url, &token).await?;
+    let mut process_jobs = start_process_jobs(&host, &workspace).await?;
+    let pids = wait_for_process_pids(&mut process_jobs, data.path()).await?;
     let rss = resident_set_bytes()?;
     let handles = open_handle_count()?;
     if budgets {
