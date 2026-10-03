@@ -1188,6 +1188,13 @@ fn live_proc_count() -> usize {
 /// Threads live in this process. Windows `HandleCount` covers thread
 /// handles while unix `/dev/fd` never did, so the Windows check subtracts
 /// thread growth instead of comparing raw totals.
+#[cfg_attr(
+    not(windows),
+    expect(
+        clippy::unnecessary_wraps,
+        reason = "the Windows arm shells out to powershell and can fail"
+    )
+)]
 fn open_thread_count() -> io::Result<usize> {
     #[cfg(windows)]
     {
