@@ -1590,14 +1590,12 @@ async fn open_locked_journal(
     }
 }
 
-/// POSIX lets a contended acquirer read the owner pid, so only a lock held by
-/// this process is worth waiting out. Windows cannot read a held lock file at
-/// all, so any contended acquire could be ours and earns the bounded wait.
+/// The owner sidecar keeps the holder pid readable even while a lock seal
+/// blocks reads of the lock file itself, so only a lock held by this process
+/// is worth waiting out. An absent pid is never ours: our own acquisitions
+/// publish the sidecar before contention can read it.
 fn lock_might_be_ours(pid: Option<u32>) -> bool {
-    match pid {
-        Some(pid) => pid == std::process::id(),
-        None => cfg!(windows),
-    }
+    pid == Some(std::process::id())
 }
 
 #[cfg(test)]
