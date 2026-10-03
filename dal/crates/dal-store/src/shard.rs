@@ -543,7 +543,17 @@ impl Shards {
             receiver: Some(reply),
         };
         let response = match registration.receiver.as_mut() {
-            Some(receiver) => receiver.await,
+            // The register receipt has no deadline: a dead or convoyed
+            // worker parks the attach in silence, so report long waits.
+            Some(receiver) => loop {
+                match tokio::time::timeout(std::time::Duration::from_secs(30), &mut *receiver).await
+                {
+                    Ok(response) => break response,
+                    Err(_elapsed) => {
+                        eprintln!("[dal-store] session {session:?} lane register outstanding");
+                    }
+                }
+            },
             None => return Err(journal_closed(session)),
         };
         registration.receiver = None;
