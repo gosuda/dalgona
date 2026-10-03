@@ -460,6 +460,35 @@ pub(crate) struct Shards {
     shards: Vec<Shard>,
 }
 
+/// The process-wide shard set every store lazily shares.
+static SHARED: Mutex<Option<Arc<Shards>>> = Mutex::new(None);
+
+/// Returns the process-wide shard set, starting it on first use.
+///
+/// A `Store` is minted per session, so a per-store shard set multiplies
+/// threads by session count and the OS thread budget becomes the session
+/// budget. One shared set keeps thread ownership at four workers plus four
+/// syncers no matter how many sessions are open.
+///
+/// # Errors
+/// Returns [`JournalError::Io`] when the worker threads cannot spawn or the
+/// shared-owner mutex is poisoned.
+pub(crate) fn shared() -> Result<Arc<Shards>, JournalError> {
+    let mut cache = SHARED.lock().map_err(|_| JournalError::Io {
+        op: "open",
+        path: PathBuf::from("dal-journal"),
+        source: Box::new(std::io::Error::other(
+            "journal shard owner mutex is poisoned",
+        )),
+    })?;
+    if let Some(shards) = cache.as_ref() {
+        return Ok(Arc::clone(shards));
+    }
+    let shards = Arc::new(Shards::start()?);
+    *cache = Some(Arc::clone(&shards));
+    Ok(shards)
+}
+
 impl Shards {
     /// Starts exactly four standard-thread journal workers.
     ///

@@ -479,7 +479,7 @@ async fn cancelled_admitted_append_settles_before_the_next_append() {
         .await
         .expect("create file session");
 
-    let shards = store.shards().expect("start shard workers");
+    let shards = crate::shard::shared().expect("start shard workers");
     let (started, release) = shards.hold_worker_for_test(id).expect("queue worker hold");
     tokio::task::spawn_blocking(move || started.recv())
         .await

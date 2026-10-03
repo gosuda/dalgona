@@ -7,7 +7,7 @@ use std::{
     collections::HashMap,
     fs, io,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 
 use dal_core::{
@@ -21,7 +21,7 @@ use crate::{
     journal::{self, Faults, Journal as FileJournal, Receipt},
     layout::SessionPaths,
     lock::LockGuard,
-    shard::{Lane, Shards},
+    shard::Lane,
     sidecar::Sidecar,
     util,
 };
@@ -58,13 +58,24 @@ struct StoreInner {
     product: Product,
     workspace_key: String,
     listing: crate::list::Listing,
-    shards: Mutex<Option<Arc<Shards>>>,
     /// First-append journal creation is a write plus syncs; admissions are
     /// bounded to shard width so a create burst cannot flood the
     /// filesystem's sync queue faster than workers can drain it.
     create_permits: tokio::sync::Semaphore,
     #[cfg(test)]
-    faults: Mutex<Faults>,
+    faults: std::sync::Mutex<Faults>,
+}
+
+#[cfg(test)]
+impl StoreInner {
+    fn faults(&self) -> Faults {
+        use std::sync::PoisonError;
+
+        self.faults
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
 }
 
 impl Store {
@@ -79,10 +90,9 @@ impl Store {
                 product,
                 workspace_key,
                 listing: crate::list::Listing::new(),
-                shards: Mutex::new(None),
                 create_permits: tokio::sync::Semaphore::new(crate::shard::SHARD_COUNT),
                 #[cfg(test)]
-                faults: Mutex::new(Faults::default()),
+                faults: std::sync::Mutex::new(Faults::default()),
             }),
         }
     }
@@ -133,7 +143,9 @@ impl Store {
             Err(source) => return Err(util::io_err(&journal_path, source)),
         }
         let (lock, opened) = open_locked_journal(&paths, id, faults).await?;
-        let shards = self.shards()?;
+        // The shard set is process-wide: a Store is minted per session, so a
+        // per-store owner would multiply journal threads by session count.
+        let shards = crate::shard::shared()?;
         let mut records = opened
             .records
             .into_iter()
@@ -436,29 +448,9 @@ impl Store {
             .join(util::workspace_key(workspace.as_path()))
     }
 
-    fn shards(&self) -> Result<Arc<Shards>, StoreError> {
-        let mut shared = self.inner.shards.lock().map_err(|_| {
-            util::io_err(
-                &self.inner.data_root,
-                io::Error::other("journal shard owner mutex is poisoned"),
-            )
-        })?;
-        if let Some(shards) = shared.as_ref() {
-            return Ok(Arc::clone(shards));
-        }
-        let shards = Arc::new(Shards::start()?);
-        *shared = Some(Arc::clone(&shards));
-        Ok(shards)
-    }
     #[cfg(test)]
     fn faults(&self) -> Faults {
-        use std::sync::PoisonError;
-
-        self.inner
-            .faults
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.inner.faults()
     }
 
     #[cfg(not(test))]
@@ -942,9 +934,6 @@ impl Journal {
             }
         }
         let current_name = current_name.map(str::to_owned);
-        let store = Store {
-            inner: Arc::clone(&self.inner),
-        };
         let mut mark = std::time::Instant::now();
         let lap = |step: &str, mark: &mut std::time::Instant| {
             let taken = mark.elapsed();
@@ -956,11 +945,11 @@ impl Journal {
             }
             *mark = std::time::Instant::now();
         };
-        let shards = match store.shards() {
+        let shards = match crate::shard::shared() {
             Ok(shards) => shards,
             Err(error) => {
                 self.state = State::Lazy { blobs };
-                return Err(error);
+                return Err(error.into());
             }
         };
         lap("shards-init", &mut mark);
@@ -1093,7 +1082,7 @@ impl Journal {
         #[cfg(test)]
         let file_journal = {
             let mut file_journal = file_journal;
-            file_journal.set_faults(store.faults());
+            file_journal.set_faults(self.inner.faults());
             file_journal
         };
         self.pending = Some(PendingAppend {
