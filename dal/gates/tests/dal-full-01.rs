@@ -1147,7 +1147,7 @@ fn resident_set_bytes() -> io::Result<u64> {
 
 /// Captures the variables the Windows shell ladder and spawned tools need;
 /// other platforms keep an empty snapshot. Windows console tools read
-/// SystemRoot, TEMP, COMSPEC, and PSModulePath during startup, so the
+/// `SystemRoot`, TEMP, COMSPEC, and `PSModulePath` during startup, so the
 /// snapshot carries the whole runner environment.
 fn captured_shell_vars() -> BTreeMap<std::ffi::OsString, std::ffi::OsString> {
     #[cfg(windows)]
