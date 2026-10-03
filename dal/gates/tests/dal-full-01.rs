@@ -849,17 +849,41 @@ fn read_pid(path: &Path) -> Result<Option<u32>, TestError> {
 }
 
 fn journal_bytes(data_root: &Path, id: SessionId) -> Option<u64> {
+    session_dir(data_root, id)
+        .and_then(|dir| fs::metadata(dir.join("journal.jsonl")).ok())
+        .map(|metadata| metadata.len())
+}
+
+fn session_dir(data_root: &Path, id: SessionId) -> Option<PathBuf> {
     let sessions = data_root.join("sessions");
     for workspace_dir in fs::read_dir(&sessions).ok()?.flatten() {
-        let journal = workspace_dir
-            .path()
-            .join(id.to_string())
-            .join("journal.jsonl");
-        if let Ok(metadata) = fs::metadata(&journal) {
-            return Some(metadata.len());
+        let dir = workspace_dir.path().join(id.to_string());
+        if dir.is_dir() {
+            return Some(dir);
         }
     }
     None
+}
+
+/// Returns the tail of the detached exec job's captured log, when the job
+/// produced output. The log names what the spawned chain actually did.
+fn job_log_tail(data_root: &Path, id: SessionId, call: &str) -> String {
+    let Some(log) =
+        session_dir(data_root, id).map(|dir| dir.join("jobs").join(format!("{call}.log")))
+    else {
+        return "no session dir".to_string();
+    };
+    match fs::read(&log) {
+        Ok(bytes) => {
+            let tail = if bytes.len() > 2048 {
+                &bytes[bytes.len() - 2048..]
+            } else {
+                &bytes[..]
+            };
+            format!("{tail:?}", tail = String::from_utf8_lossy(tail))
+        }
+        Err(error) => format!("unreadable: {error}"),
+    }
 }
 
 fn job_state_digest(job: &ProcessJob, data_root: &Path) -> String {
@@ -894,6 +918,22 @@ fn job_state_digest(job: &ProcessJob, data_root: &Path) -> String {
             if !first_result.is_empty() {
                 text.push_str(" res=");
                 text.push_str(&first_result);
+            }
+            if let Some(index) = job
+                .pid_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| {
+                    name.strip_prefix("child-")
+                        .and_then(|name| name.strip_suffix(".pid"))
+                })
+            {
+                text.push_str(" log=");
+                text.push_str(&job_log_tail(
+                    data_root,
+                    view.session.id,
+                    &format!("process-{index}"),
+                ));
             }
             text
         },
