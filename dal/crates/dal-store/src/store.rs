@@ -1029,9 +1029,14 @@ impl Journal {
                     )?;
                 }
                 mark = lap("names", mark);
+                // Stage and finish every blob before one shared directory
+                // sync: same durability order, a fraction of the fsyncs on
+                // slow shared storage.
+                let mut dirs = Vec::new();
                 for blob in blobs {
-                    blob::put_prepared(&blob_dir, blob)?;
+                    blob::finish_staged(blob::stage_prepared(&blob_dir, blob)?, &mut dirs)?;
                 }
+                blob::sync_dirs(&mut dirs)?;
                 mark = lap("blobs", mark);
                 let journal = FileJournal::create(&journal_path, &bytes, &Faults::default())?;
                 lap("journal-create", mark);

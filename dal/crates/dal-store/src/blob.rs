@@ -69,9 +69,12 @@ pub(crate) fn put(dir: &Path, bytes: &[u8]) -> Result<BlobId, BlobError> {
 ///
 /// # Errors
 /// Returns [`BlobError::TooLarge`] above the cap or [`BlobError::Io`] on a failed publish.
+#[cfg(test)]
 pub(crate) fn put_prepared(dir: &Path, pending: PendingBlob) -> Result<(), BlobError> {
-    let (id, bytes) = pending.into_parts();
-    publish_with_id(dir, id, &bytes)
+    let staged = stage_prepared(dir, pending)?;
+    let mut dirs = Vec::new();
+    finish_staged(staged, &mut dirs)?;
+    sync_dirs(&mut dirs)
 }
 
 fn publish_with_id(dir: &Path, id: BlobId, bytes: &[u8]) -> Result<(), BlobError> {
@@ -198,15 +201,25 @@ pub(crate) fn stage_prepared(dir: &Path, pending: PendingBlob) -> Result<StagedP
     })
 }
 
-/// Completes one staged publish in durability order: sync the temp bytes,
-/// persist the temp without replacement, then sync the directory. A staged
-/// digest that already exists only owes the directory sync.
+/// Completes one staged publish's per-file durability: sync the temp bytes,
+/// then persist the temp without replacement. The directory that must still
+/// be synced before the persist survives a crash lands in `dirs`, deduplicated,
+/// so one batch's repeated publishes into the same directory pay one
+/// directory sync instead of one per blob. Callers finish the batch with
+/// [`sync_dirs`], which keeps every persist before its directory sync.
 ///
 /// # Errors
 /// Returns [`BlobError::Io`] on a failed sync or publish.
-pub(crate) fn finish_staged(staged: StagedPublish) -> Result<(), BlobError> {
+pub(crate) fn finish_staged(
+    staged: StagedPublish,
+    dirs: &mut Vec<PathBuf>,
+) -> Result<(), BlobError> {
     match staged {
-        StagedPublish::Present { dir } => sync_dir(&dir),
+        StagedPublish::Present { dir } => {
+            if !dirs.contains(&dir) {
+                dirs.push(dir);
+            }
+        }
         StagedPublish::Pending { temp, dest, dir } => {
             let mut options = util::open_options();
             options.write(true);
@@ -215,9 +228,25 @@ pub(crate) fn finish_staged(staged: StagedPublish) -> Result<(), BlobError> {
                 .and_then(|file| file.sync_all())
                 .map_err(io_blob)?;
             persist_temp(temp, &dest)?;
-            sync_dir(&dir)
+            if !dirs.contains(&dir) {
+                dirs.push(dir);
+            }
         }
     }
+    Ok(())
+}
+
+/// Syncs each directory in `dirs` once and drains the list. A directory sync
+/// after every persist into it is the same durability contract as one sync
+/// per publish, at a fraction of the fsyncs.
+///
+/// # Errors
+/// Returns [`BlobError::Io`] on the first failed directory sync.
+pub(crate) fn sync_dirs(dirs: &mut Vec<PathBuf>) -> Result<(), BlobError> {
+    for dir in dirs.drain(..) {
+        sync_dir(&dir)?;
+    }
+    Ok(())
 }
 
 /// Windows has no directory-sync door; the `Result` is load-bearing on POSIX.

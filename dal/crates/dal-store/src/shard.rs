@@ -340,31 +340,56 @@ enum Then {
 }
 
 /// One append's staged durability work: the writes already happened on the
-/// worker; `then` decides how the completion resolves.
+/// worker; `then` decides how the completion resolves. `born` feeds the
+/// contention probe: a slow filesystem shows up as queue wait here first.
 struct SyncJob {
+    born: std::time::Instant,
     steps: Vec<SyncStep>,
     then: Then,
     queue: Arc<Queue>,
 }
 
 fn finish_steps(steps: Vec<SyncStep>) -> Result<(), StoreError> {
+    // Every persist into a directory owes that directory one sync before the
+    // batch resolves; paying it once per distinct directory instead of once
+    // per step keeps the ordering contract while collapsing the fsync convoy
+    // that stalls a shared-storage runner.
+    let mut dirs = Vec::new();
+    let mut first_error = None;
     for step in steps {
-        match step {
-            SyncStep::Publish(staged) => blob::finish_staged(staged)?,
+        let result = match step {
+            SyncStep::Publish(staged) => {
+                blob::finish_staged(staged, &mut dirs).map_err(StoreError::from)
+            }
             SyncStep::Journal { file, path } => file.sync_all().map_err(|source| {
                 StoreError::Journal(JournalError::Io {
                     op: "sync",
                     path,
                     source: Box::new(source),
                 })
-            })?,
+            }),
+        };
+        if let Err(error) = result
+            && first_error.is_none()
+        {
+            first_error = Some(error);
         }
     }
-    Ok(())
+    // Publishes that persisted before the first failure still earn their
+    // directory sync; durable orphans are harmless where lost ones would lie.
+    let synced = blob::sync_dirs(&mut dirs).map_err(StoreError::from);
+    match (first_error, synced) {
+        (Some(failure), _) | (None, Err(failure)) => Err(failure),
+        (None, Ok(())) => Ok(()),
+    }
 }
 
 fn run_syncer(inbox: &std::sync::mpsc::Receiver<SyncJob>) {
     while let Ok(job) = inbox.recv() {
+        let waited = job.born.elapsed();
+        if waited > std::time::Duration::from_millis(250) {
+            eprintln!("[dal-store] sync job waited {waited:?}");
+        }
         let result = finish_steps(job.steps);
         match job.then {
             Then::Resolve {
@@ -773,6 +798,7 @@ fn run(queue: Arc<Queue>, sync: std::sync::mpsc::Sender<SyncJob>) {
                 match staged {
                     Ok(()) => {
                         let job = SyncJob {
+                            born: std::time::Instant::now(),
                             steps,
                             then: Then::Journalize(call),
                             queue: Arc::clone(&queue),
@@ -856,6 +882,7 @@ fn journalize(
     match staged {
         Ok((file, path, receipt)) => {
             let job = SyncJob {
+                born: std::time::Instant::now(),
                 steps: vec![SyncStep::Journal { file, path }],
                 then: Then::Resolve {
                     slot,
