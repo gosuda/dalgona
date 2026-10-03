@@ -1022,7 +1022,8 @@ async fn spawn_websocket_server(
     }
     let token = String::from_utf8(token_output.stdout)?.trim().to_owned();
     let serve_log = dir.path().join("serve.log");
-    let child = ProcessCommand::new(binary)
+    let mut serve = ProcessCommand::new(binary);
+    serve
         .current_dir(&workspace)
         .env_clear()
         .env("HOME", &home)
@@ -1030,8 +1031,14 @@ async fn spawn_websocket_server(
         .env("XDG_DATA_HOME", &data_home)
         .args(["serve", "--bind", "127.0.0.1", "--port", "0"])
         .stdout(Stdio::null())
-        .stderr(Stdio::from(File::create(&serve_log)?))
-        .spawn()?;
+        .stderr(Stdio::from(File::create(&serve_log)?));
+    // Winsock resolves its provider DLLs through SystemRoot; a cleared
+    // environment leaves WSAStartup unable to initialize (os error 10106).
+    #[cfg(windows)]
+    if let Some(root) = std::env::var_os("SystemRoot") {
+        serve.env("SystemRoot", root);
+    }
+    let child = serve.spawn()?;
     let server = ServerProcess(Some(child));
     let url = advertised_websocket(&data_root)
         .await
