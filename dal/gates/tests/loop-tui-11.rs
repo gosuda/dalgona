@@ -76,17 +76,32 @@ fn prompt_and_remember(
     terminal.write(b"\r")?;
     terminal.wait_for(reply.as_bytes(), SPAWN)?;
     let deadline = Instant::now() + SPAWN;
+    // Busy markers can scroll off before the live block clears, so also
+    // require the output stream to go quiet: three consecutive polls with
+    // no new bytes and no busy status mean the frame is settled.
+    let mut last_len = 0usize;
+    let mut stable = 0usize;
     loop {
+        terminal.collect_for(Duration::from_millis(60))?;
+        let output = terminal.output();
         let mut probe = VtRecorder::new(100, 30);
-        probe.feed(terminal.output());
+        probe.feed(output);
         let busy = probe.screen_rows().iter().any(|row| {
             let row = row.trim_start();
             row.starts_with("* ") || row.contains(dal_tui::copy::ids::STATE_WAITING)
         });
-        if !busy || Instant::now() >= deadline {
+        if !busy && output.len() == last_len {
+            stable += 1;
+            if stable >= 3 {
+                return Ok(probe);
+            }
+        } else {
+            stable = 0;
+            last_len = output.len();
+        }
+        if Instant::now() >= deadline {
             return Ok(probe);
         }
-        terminal.collect_for(Duration::from_millis(25))?;
     }
 }
 
