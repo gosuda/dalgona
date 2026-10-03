@@ -1573,12 +1573,13 @@ fn write_failure(id: SessionId, error: StoreError) -> StoreError {
 /// process — an owner still draining a first append or a shutdown still
 /// releasing handles — never a foreign process, so a bounded wait resolves
 /// the contention instead of reporting `Locked` for our own ownership.
+/// The budget spans a convoyed first-append queue on slow filesystems.
 async fn open_locked_journal(
     paths: &SessionPaths,
     id: SessionId,
     faults: Faults,
 ) -> Result<(LockGuard, journal::Opened), StoreError> {
-    const RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+    const RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
     const RETRY_POLL: std::time::Duration = std::time::Duration::from_millis(25);
     let deadline = tokio::time::Instant::now() + RETRY_BUDGET;
     let mut mark = std::time::Instant::now();
