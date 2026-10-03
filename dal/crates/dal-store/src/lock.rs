@@ -163,7 +163,7 @@ mod tests {
         };
         let path = dir.0.join("lock");
 
-        let Err(error) = LockGuard::acquire(&dir.0.join("lock"), id) else {
+        let Err(error) = LockGuard::acquire(&path, id) else {
             panic!("second acquisition must fail")
         };
 
@@ -233,25 +233,24 @@ mod tests {
         }
         let stale_pid = fs::read(&path).expect("lock file remains");
 
-        let _next =
-            LockGuard::acquire(&dir.0.join("lock"), id).expect("lock released after guard drop");
-
-        assert!(path.exists());
-        #[cfg(unix)]
-        assert_eq!(
-            fs::read(path).expect("new owner pid"),
-            format!("{}\n", std::process::id()).as_bytes()
-        );
-        #[cfg(windows)]
         {
-            // The held lock file is unreadable on Windows; the pid text is
-            // verifiable once the new guard also drops.
-            drop(_next);
+            let _next = LockGuard::acquire(&dir.0.join("lock"), id)
+                .expect("lock released after guard drop");
+
+            assert!(path.exists());
+            // The held lock file is unreadable on Windows; POSIX advisory
+            // locks still allow reading the new owner while it is held.
+            #[cfg(unix)]
             assert_eq!(
-                fs::read(&path).expect("new owner pid"),
+                fs::read(path).expect("new owner pid"),
                 format!("{}\n", std::process::id()).as_bytes()
             );
         }
+        #[cfg(windows)]
+        assert_eq!(
+            fs::read(&path).expect("new owner pid"),
+            format!("{}\n", std::process::id()).as_bytes()
+        );
         assert!(!stale_pid.is_empty());
     }
 }
