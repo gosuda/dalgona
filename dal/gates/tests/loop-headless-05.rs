@@ -85,7 +85,12 @@ async fn second_process_reports_current_session_lock_holder()
         std::process::id()
     );
     assert!(!output.status.success());
-    assert!(String::from_utf8(output.stderr)?.contains(&expected));
+    let stderr = String::from_utf8(output.stderr)?;
+    let stdout = String::from_utf8(output.stdout)?;
+    assert!(
+        stderr.contains(&expected),
+        "second process stderr must name the holder pid; stderr:\n{stderr}\nstdout:\n{stdout}"
+    );
     let report = host.shutdown(std::time::Duration::from_secs(1)).await;
     assert_eq!(report.sessions_closed, 1);
     Ok(())

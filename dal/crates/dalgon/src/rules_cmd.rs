@@ -376,9 +376,21 @@ mod tests {
 
         assert_eq!(result, ExitCode::FAILURE);
         let output = String::from_utf8(stdout).unwrap();
-        assert!(output.contains(project.to_string_lossy().as_ref()));
-        assert!(output.contains(broken.to_string_lossy().as_ref()));
-        assert!(!output.contains("foreign-rule"));
-        assert!(output.contains("problems (1)\n"));
+        assert!(
+            output.contains(project.to_string_lossy().as_ref()),
+            "report must list the workspace rule path; report:\n{output}"
+        );
+        assert!(
+            output.contains(broken.to_string_lossy().as_ref()),
+            "report must list the skipped user rule path; report:\n{output}"
+        );
+        assert!(
+            !output.contains("foreign-rule"),
+            "report must not read rules outside the two roots; report:\n{output}"
+        );
+        assert!(
+            output.contains("problems (1)\n"),
+            "report must hold exactly the skipped-file problem; report:\n{output}"
+        );
     }
 }
