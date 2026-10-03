@@ -898,13 +898,16 @@ async fn wait_for_process_pids(
 ) -> Result<Vec<u32>, TestError> {
     // Liveness wait, not a timing claim: 200 process spawns on a loaded shared
     // runner can far outrun the local constant, so bound generously. Hosted
-    // macOS storage syncs orders of magnitude slower under create bursts, so
-    // the bound is wider there for the same liveness purpose.
-    const PID_WAIT: Duration = if cfg!(target_os = "macos") {
-        Duration::from_secs(360)
-    } else {
-        Duration::from_secs(120)
-    };
+    // macOS storage syncs orders of magnitude slower under create bursts, and
+    // the arm64 Windows runner emulates the bash and PowerShell chain a
+    // process at a time, so those bounds are wider for the same liveness
+    // purpose.
+    const PID_WAIT: Duration =
+        if cfg!(target_os = "macos") || cfg!(all(windows, target_arch = "aarch64")) {
+            Duration::from_secs(360)
+        } else {
+            Duration::from_secs(120)
+        };
     let deadline = tokio::time::Instant::now() + PID_WAIT;
     loop {
         let mut ready = true;
