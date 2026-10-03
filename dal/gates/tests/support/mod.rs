@@ -126,8 +126,15 @@ pub(crate) struct TestDir {
 
 impl TestDir {
     pub(crate) fn new() -> io::Result<Self> {
+        Self::new_in(&std::env::temp_dir())
+    }
+
+    /// Creates the test directory under `root`: unix socket paths under the
+    /// platform temp root can exceed `SUN_LEN` on BSD, so socket tests need
+    /// a bounded base path.
+    pub(crate) fn new_in(root: &Path) -> io::Result<Self> {
         let id = NEXT_TEST_DIR.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("dalgon-gates-{}-{id}", std::process::id()));
+        let path = root.join(format!("dalgon-gates-{}-{id}", std::process::id()));
         std::fs::create_dir(&path)?;
         Ok(Self { path })
     }

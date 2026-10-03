@@ -124,7 +124,9 @@ async fn rpc_initialize(
 #[tokio::test]
 async fn rpc_bare_socket_flag_serves_the_default_local_endpoint()
 -> Result<(), Box<dyn Error + Send + Sync>> {
-    let dir = TestDir::new()?;
+    // The default socket lives under the data root; the deep BSD temp root
+    // would push the endpoint past SUN_LEN.
+    let dir = TestDir::new_in(std::path::Path::new("/tmp"))?;
     let home = dir.path().join("home");
     let workspace = dir.path().join("workspace");
     let data_home = home.join(".local/share");
@@ -166,7 +168,9 @@ async fn rpc_bare_socket_flag_serves_the_default_local_endpoint()
 #[cfg(unix)]
 #[tokio::test]
 async fn rpc_explicit_relative_socket_path_is_served() -> Result<(), Box<dyn Error + Send + Sync>> {
-    let dir = TestDir::new()?;
+    // The resolved socket path must stay under SUN_LEN; the deep BSD temp
+    // root pushes workspace/private/rpc.sock past it.
+    let dir = TestDir::new_in(std::path::Path::new("/tmp"))?;
     let home = dir.path().join("home");
     let workspace = dir.path().join("workspace");
     let data_home = home.join(".local/share");
