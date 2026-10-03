@@ -13,9 +13,10 @@
 mod support;
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::HashMap,
     error::Error,
-    fs, io,
+    fs::{self, File},
+    io,
     path::{Path, PathBuf},
     process::{Child, Command as ProcessCommand, Stdio},
     sync::{
@@ -849,17 +850,41 @@ fn read_pid(path: &Path) -> Result<Option<u32>, TestError> {
 }
 
 fn journal_bytes(data_root: &Path, id: SessionId) -> Option<u64> {
+    session_dir(data_root, id)
+        .and_then(|dir| fs::metadata(dir.join("journal.jsonl")).ok())
+        .map(|metadata| metadata.len())
+}
+
+fn session_dir(data_root: &Path, id: SessionId) -> Option<PathBuf> {
     let sessions = data_root.join("sessions");
     for workspace_dir in fs::read_dir(&sessions).ok()?.flatten() {
-        let journal = workspace_dir
-            .path()
-            .join(id.to_string())
-            .join("journal.jsonl");
-        if let Ok(metadata) = fs::metadata(&journal) {
-            return Some(metadata.len());
+        let dir = workspace_dir.path().join(id.to_string());
+        if dir.is_dir() {
+            return Some(dir);
         }
     }
     None
+}
+
+/// Returns the tail of the detached exec job's captured log, when the job
+/// produced output. The log names what the spawned chain actually did.
+fn job_log_tail(data_root: &Path, id: SessionId, call: &str) -> String {
+    let Some(log) =
+        session_dir(data_root, id).map(|dir| dir.join("jobs").join(format!("{call}.log")))
+    else {
+        return "no session dir".to_string();
+    };
+    match fs::read(&log) {
+        Ok(bytes) => {
+            let tail = if bytes.len() > 2048 {
+                &bytes[bytes.len() - 2048..]
+            } else {
+                &bytes[..]
+            };
+            format!("{tail:?}", tail = String::from_utf8_lossy(tail))
+        }
+        Err(error) => format!("unreadable: {error}"),
+    }
 }
 
 fn job_state_digest(job: &ProcessJob, data_root: &Path) -> String {
@@ -868,9 +893,13 @@ fn job_state_digest(job: &ProcessJob, data_root: &Path) -> String {
         |view| {
             let mut tools = 0usize;
             let mut first_error = String::new();
+            let mut first_result = String::new();
             for entry in &view.entries.items {
                 if let EntryKind::ToolResult { error, parts, .. } = &entry.kind {
                     tools += 1;
+                    if first_result.is_empty() {
+                        first_result = format!("{parts:?}");
+                    }
                     if *error && first_error.is_empty() {
                         first_error = format!("{parts:?}");
                     }
@@ -887,6 +916,26 @@ fn job_state_digest(job: &ProcessJob, data_root: &Path) -> String {
                 text.push_str(" err=");
                 text.push_str(&first_error);
             }
+            if !first_result.is_empty() {
+                text.push_str(" res=");
+                text.push_str(&first_result);
+            }
+            if let Some(index) = job
+                .pid_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| {
+                    name.strip_prefix("child-")
+                        .and_then(|name| name.strip_suffix(".pid"))
+                })
+            {
+                text.push_str(" log=");
+                text.push_str(&job_log_tail(
+                    data_root,
+                    view.session.id,
+                    &format!("process-{index}"),
+                ));
+            }
             text
         },
     )
@@ -898,13 +947,16 @@ async fn wait_for_process_pids(
 ) -> Result<Vec<u32>, TestError> {
     // Liveness wait, not a timing claim: 200 process spawns on a loaded shared
     // runner can far outrun the local constant, so bound generously. Hosted
-    // macOS storage syncs orders of magnitude slower under create bursts, so
-    // the bound is wider there for the same liveness purpose.
-    const PID_WAIT: Duration = if cfg!(target_os = "macos") {
-        Duration::from_secs(360)
-    } else {
-        Duration::from_secs(120)
-    };
+    // macOS storage syncs orders of magnitude slower under create bursts, and
+    // the arm64 Windows runner emulates the bash and PowerShell chain a
+    // process at a time, so those bounds are wider for the same liveness
+    // purpose.
+    const PID_WAIT: Duration =
+        if cfg!(target_os = "macos") || cfg!(all(windows, target_arch = "aarch64")) {
+            Duration::from_secs(360)
+        } else {
+            Duration::from_secs(120)
+        };
     let deadline = tokio::time::Instant::now() + PID_WAIT;
     loop {
         let mut ready = true;
@@ -960,6 +1012,7 @@ async fn spawn_websocket_server(
     let token_output = ProcessCommand::new(binary)
         .current_dir(&workspace)
         .env_clear()
+        .envs(support::captured_shell_vars())
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("XDG_DATA_HOME", &data_home)
@@ -969,18 +1022,32 @@ async fn spawn_websocket_server(
         return Err(io::Error::other("could not create WebSocket test token").into());
     }
     let token = String::from_utf8(token_output.stdout)?.trim().to_owned();
-    let child = ProcessCommand::new(binary)
+    let serve_log = dir.path().join("serve.log");
+    let mut serve = ProcessCommand::new(binary);
+    serve
         .current_dir(&workspace)
         .env_clear()
+        .envs(support::captured_shell_vars())
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("XDG_DATA_HOME", &data_home)
         .args(["serve", "--bind", "127.0.0.1", "--port", "0"])
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
+        .stderr(Stdio::from(File::create(&serve_log)?));
+    // Winsock resolves its provider DLLs through SystemRoot; a cleared
+    // environment leaves WSAStartup unable to initialize (os error 10106).
+    #[cfg(windows)]
+    if let Some(root) = std::env::var_os("SystemRoot") {
+        serve.env("SystemRoot", root);
+    }
+    let child = serve.spawn()?;
     let server = ServerProcess(Some(child));
-    let url = advertised_websocket(&data_root).await?;
+    let url = advertised_websocket(&data_root)
+        .await
+        .map_err(|error| -> TestError {
+            let log = fs::read_to_string(&serve_log).unwrap_or_default();
+            format!("{error}\nserve stderr:\n{log}").into()
+        })?;
     Ok((server, url, token))
 }
 
@@ -1091,6 +1158,55 @@ fn resident_set_bytes() -> io::Result<u64> {
             .trim()
             .parse::<u64>()
             .map_err(io::Error::other)
+    }
+}
+
+/// Captures the variables the Windows shell ladder and spawned tools need;
+// tokio keeps two kinds of kernel objects alive for the runtime's
+// whole life: blocking-pool threads never exit (no idle timeout, 512
+// cap), and its driver parks a small fixed set of events and ports once
+// work saturates it. Handle growth beyond those is a product leak.
+const RUNTIME_HANDLE_SLACK: usize = 64;
+
+fn live_proc_count() -> usize {
+    #[cfg(windows)]
+    {
+        dal_agent::live_procs()
+    }
+    #[cfg(not(windows))]
+    {
+        0
+    }
+}
+
+/// Threads live in this process. Windows `HandleCount` covers thread
+/// handles while unix `/dev/fd` never did, so the Windows check subtracts
+/// thread growth instead of comparing raw totals.
+#[cfg_attr(
+    not(windows),
+    expect(
+        clippy::unnecessary_wraps,
+        reason = "the Windows arm shells out to powershell and can fail"
+    )
+)]
+fn open_thread_count() -> io::Result<usize> {
+    #[cfg(windows)]
+    {
+        let command = format!(
+            "(Get-Process -Id {} | Select-Object -ExpandProperty Threads).Count",
+            std::process::id()
+        );
+        let output = ProcessCommand::new("powershell.exe")
+            .args(["-NoProfile", "-Command", &command])
+            .output()?;
+        String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse::<usize>()
+            .map_err(io::Error::other)
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(0)
     }
 }
 
@@ -1239,8 +1355,9 @@ async fn full_load_scenario() -> Result<(), TestError> {
         fs::Permissions::from_mode(0o755),
     )?;
     let pre_run_handles = open_handle_count()?;
+    let pre_run_threads = open_thread_count()?;
     let env = Env {
-        vars: BTreeMap::default(),
+        vars: support::captured_shell_vars(),
         cwd: workspace.as_path().to_path_buf(),
         sandbox_helper: None,
     };
@@ -1290,11 +1407,15 @@ async fn full_load_scenario() -> Result<(), TestError> {
     if budgets {
         assert!(idle_p99 < CANCEL_P99, "idle cancel p99 was {idle_p99:?}");
     }
-    let mut process_jobs = start_process_jobs(&host, &workspace).await?;
-    let pids = wait_for_process_pids(&mut process_jobs, data.path()).await?;
+    // Bind and attach the WebSocket clients before the process storm;
+    // the assertions exercise live clients under load, and Windows
+    // WSAStartup transiently fails when a spawn lands at peak procs.
     let web_dir = TestDir::new()?;
     let (server, websocket_url, token) = spawn_websocket_server(&web_dir).await?;
     let web_sockets = connect_websocket_clients(&websocket_url, &token).await?;
+    let mut process_jobs = start_process_jobs(&host, &workspace).await?;
+    let pids = wait_for_process_pids(&mut process_jobs, data.path()).await?;
+    let after_jobs_spawn = open_handle_count()?;
     let rss = resident_set_bytes()?;
     let handles = open_handle_count()?;
     if budgets {
@@ -1313,6 +1434,7 @@ async fn full_load_scenario() -> Result<(), TestError> {
         );
     }
     wait_for_processes_to_exit(&pids[..CANCELLATIONS]).await?;
+    let after_first_cancel = open_handle_count()?;
     let remaining_samples = cancel_jobs(
         &mut process_jobs[CANCELLATIONS..],
         PROCESS_JOBS - CANCELLATIONS,
@@ -1320,10 +1442,12 @@ async fn full_load_scenario() -> Result<(), TestError> {
     .await?;
     assert_eq!(remaining_samples.len(), PROCESS_JOBS - CANCELLATIONS);
     wait_for_processes_to_exit(&pids).await?;
+    let after_jobs_exit = open_handle_count()?;
     let expected_root_turns = idle_samples.len() + 1;
     drop(web_sockets);
     drop(server);
     let report = host.shutdown(Duration::from_secs(30)).await;
+    let after_shutdown = open_handle_count()?;
     // The root's session-end sweep cascade-closes the children before the
     // shutdown loop reaches them, so `sessions_closed` only ever counts the
     // top-level sessions plus the children the loop got to first — every
@@ -1370,10 +1494,32 @@ async fn full_load_scenario() -> Result<(), TestError> {
     drop(process_jobs);
     drop(idle_updates);
     drop(root);
-    let after_handles = open_handle_count()?;
-    assert_eq!(
-        after_handles, pre_run_handles,
-        "open handles did not return to baseline"
+    // tokio keeps two kinds of kernel objects alive for the runtime's
+    // whole life: blocking-pool threads never exit (no idle timeout, 512
+    // cap), and its driver parks a small fixed set of events/ports once
+    // work saturates it. Only growth beyond those is a product leak.
+    let mut after_handles = open_handle_count()?;
+    let mut after_threads = open_thread_count()?;
+    let settled = |handles: usize, threads: usize| {
+        handles.saturating_sub(pre_run_handles)
+            <= threads.saturating_sub(pre_run_threads) + RUNTIME_HANDLE_SLACK
+    };
+    let settle_deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while !settled(after_handles, after_threads) && tokio::time::Instant::now() < settle_deadline {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        after_handles = open_handle_count()?;
+        after_threads = open_thread_count()?;
+    }
+    let live = live_proc_count();
+    let growth = after_handles.saturating_sub(pre_run_handles);
+    let thread_growth = after_threads.saturating_sub(pre_run_threads);
+    assert!(
+        growth <= thread_growth + RUNTIME_HANDLE_SLACK,
+        "non-thread kernel handles did not return to baseline \
+         (handles={after_handles} baseline={pre_run_handles} \
+         threads={after_threads} baseline-threads={pre_run_threads} \
+         spawn={after_jobs_spawn} first-cancel={after_first_cancel} \
+         jobs-exit={after_jobs_exit} shutdown={after_shutdown} live-procs={live})"
     );
     Ok(())
 }
@@ -1472,7 +1618,7 @@ async fn full_setup_for_actor_smoke(
         product,
         config,
         Env {
-            vars: BTreeMap::default(),
+            vars: support::captured_shell_vars(),
             cwd: workspace_dir,
             sandbox_helper: None,
         },
@@ -1945,7 +2091,12 @@ fn shuttle_actor_schedule() {
 
 #[cfg(not(all(windows, target_arch = "aarch64")))]
 fn shuttle_actor_state() -> ShuttleActorState {
-    let workspace = Workspace::new(PathBuf::from("/shuttle-workspace")).expect("Shuttle workspace");
+    let workspace = Workspace::new(if cfg!(windows) {
+        PathBuf::from("C:/shuttle-workspace")
+    } else {
+        PathBuf::from("/shuttle-workspace")
+    })
+    .expect("Shuttle workspace");
     let store = Store::new(PathBuf::from("/shuttle-data"), workspace, StoreProduct::Dal);
     let parent = SessionId::new_v7();
     let child = SessionId::new_v7();

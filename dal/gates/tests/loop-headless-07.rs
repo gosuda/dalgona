@@ -35,6 +35,7 @@ fn json_mode_emits_one_result_or_one_error() -> Result<(), Box<dyn Error + Send 
     let output = Command::new(dalgon_binary("dalgon")?)
         .current_dir(&home)
         .env_clear()
+        .envs(support::captured_shell_vars())
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("XDG_DATA_HOME", home.join(".local/share"))

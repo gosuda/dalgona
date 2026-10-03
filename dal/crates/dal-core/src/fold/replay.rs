@@ -69,7 +69,6 @@ pub(super) struct Replay {
     pub(super) session: Session,
     pub(super) active_turn: Option<TurnId>,
     pub(super) calls: Vec<ReplayCall>,
-    pub(super) seen_turns: Vec<TurnId>,
     pub(super) started_jobs: Vec<(JobId, Option<JobKind>)>,
     pub(super) max_turn: u64,
     pub(super) last_completed_turn: u64,
@@ -83,7 +82,6 @@ impl Replay {
             session: Session::empty(),
             active_turn: None,
             calls: Vec::new(),
-            seen_turns: Vec::new(),
             started_jobs: Vec::new(),
             max_turn: 0,
             last_completed_turn: 0,
@@ -174,10 +172,9 @@ impl Replay {
         if self.active_turn.is_some() {
             return Err(contradiction("a turn started before the prior turn ended"));
         }
-        if self.seen_turns.contains(&turn) {
-            return Err(contradiction("turn id was reused"));
+        if turn.get() <= self.last_completed_turn {
+            return Err(contradiction("turn ids are not strictly increasing"));
         }
-        self.seen_turns.push(turn);
         self.active_turn = Some(turn);
         self.session.turn_totals.reset();
         if self

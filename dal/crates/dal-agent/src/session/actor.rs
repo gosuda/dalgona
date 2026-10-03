@@ -925,11 +925,36 @@ impl Actor {
             self.refresh_stats();
             if !driver_effects.is_empty() || !asks.is_empty() {
                 let batch = self.batch(driver_effects, asks);
-                if self.driver_tx.send(batch).await.is_err() {
+                // A bounded send can park behind a convoyed driver; report
+                // long waits instead of stalling the loop in silence.
+                let session = self.session;
+                let mut sending = Box::pin(self.driver_tx.send(batch));
+                let sent = loop {
+                    match tokio::time::timeout(Duration::from_secs(30), &mut sending).await {
+                        Ok(sent) => break sent,
+                        Err(_elapsed) => {
+                            eprintln!("[dal-agent] session {session:?} driver batch outstanding");
+                        }
+                    }
+                };
+                if sent.is_err() {
                     self.broken = Some("the turn driver is gone.".into());
                 }
             }
-            let more = self.drive_opening().await;
+            let more = {
+                // A turn opening has no deadline of its own: report long
+                // drives so a stalled hook chain is visible in the log.
+                let session = self.session;
+                let mut opening = Box::pin(self.drive_opening());
+                loop {
+                    match tokio::time::timeout(Duration::from_secs(30), &mut opening).await {
+                        Ok(more) => break more,
+                        Err(_elapsed) => {
+                            eprintln!("[dal-agent] session {session:?} turn opening outstanding");
+                        }
+                    }
+                }
+            };
             let Some(more) = more else { break };
             queue.extend(more);
         }
@@ -1083,6 +1108,10 @@ impl Actor {
     ) -> Result<(), AgentError> {
         let updates = emit.updates;
         if let Err(error) = self.journal.append(emit.records).await {
+            eprintln!(
+                "[dal-agent] session {:?} journal append failed: {error}",
+                self.session
+            );
             let message: Box<str> = format!("journal write failed: {error}").into();
             if breaks_session(&error) {
                 self.broken = Some(message.clone());

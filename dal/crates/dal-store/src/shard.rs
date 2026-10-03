@@ -3,13 +3,16 @@
 //!
 //! A session is pinned by its UUID to one shard. The actor-facing [`Lane`]
 //! carries only a slot token. A queued append moves one complete batch to that
-//! shard, where the worker performs one write with rollback, then hands a dup
-//! handle to the per-shard syncer thread for the durability sync. Its oneshot
-//! reply still carries a receipt only after the sync succeeds — but a slow
-//! filesystem now stalls only that syncer, never the worker's FIFO, so one
+//! shard in two durability phases: the worker writes each blob temp and hands
+//! the ordered publish steps to the shard's syncer pool, and only once every
+//! blob the batch references is durable does a FIFO control job bring the
+//! batch back so the worker can write it and stage the journal sync. Journal
+//! bytes therefore never precede the blobs they name, while a slow filesystem
+//! still stalls only one syncer lane, never the worker's FIFO, so one
 //! convoyed `fsync` cannot starve unrelated lanes (R-perf). One lane admits
-//! at most one unacknowledged batch, so cancellation cannot lose a receipt or
-//! reorder a session's appends.
+//! at most one unacknowledged batch, so cancellation cannot lose a receipt
+//! or reorder a session's appends, and same-journal sync jobs are always
+//! sequential whichever syncer lane they take.
 
 use std::{
     cell::Cell,
@@ -36,11 +39,20 @@ use crate::{
 /// The number of process-owned journal shard threads.
 pub(crate) const SHARD_COUNT: usize = 4;
 const _: () = assert!(SHARD_COUNT == 4);
+/// Syncer threads per shard. Filesystem sync latency is the throughput cap
+/// on a slow volume, so the shard set widens here instead of widening the
+/// worker count: a lane never has two staged jobs in flight, which makes
+/// same-journal ordering free at any pool width, and the total thread count
+/// stays a constant `4 + 4 * SYNCERS_PER_SHARD` no matter how many sessions
+/// are open.
+const SYNCERS_PER_SHARD: usize = 8;
 /// The maximum queued requests per shard, excluding the request being run.
 pub(crate) const QUEUE_CAPACITY: usize = 256;
 /// Queue admission bound: a saturated shard fails the append loudly instead
 /// of parking a turn invisibly.
 const ENQUEUE_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+/// How long an admitted append may wait for its receipt before it reports.
+const SETTLE_REPORT: std::time::Duration = std::time::Duration::from_secs(30);
 
 enum Job {
     Register {
@@ -55,6 +67,12 @@ enum Job {
         blobs: Vec<PendingBlob>,
         done: oneshot::Sender<Result<Receipt, StoreError>>,
     },
+    /// Phase two of a blobbed append: every staged publish landed durable, so
+    /// the worker may now write the batch. Journal bytes must never exist
+    /// before the blobs they reference — a crash between the journal write
+    /// and a pending publish would leave a durable record naming a blob that
+    /// never reached disk.
+    BlobsPublished(AppendCall),
     Retire {
         slot: usize,
         done: Option<oneshot::Sender<()>>,
@@ -64,6 +82,15 @@ enum Job {
     Damaged { slot: usize },
     #[cfg(test)]
     Hold(Box<dyn FnOnce() + Send>),
+}
+
+/// The caller-owned half of an append, carried through both durability
+/// phases.
+struct AppendCall {
+    session: SessionId,
+    slot: usize,
+    batch: Vec<u8>,
+    done: oneshot::Sender<Result<Receipt, StoreError>>,
 }
 
 impl Job {
@@ -294,36 +321,124 @@ fn wake_all(wakers: Vec<Waker>) {
 struct Shard {
     queue: Arc<Queue>,
     thread: Option<JoinHandle<()>>,
-    syncer: Option<JoinHandle<()>>,
+    syncers: Vec<JoinHandle<()>>,
 }
 
-/// One staged durability sync: a dup handle to a journal whose batch already
-/// wrote on the worker, resolved once `sync_all` lands (or fails).
+/// One staged durable operation finished on a shard syncer. Steps run in
+/// queue order so the journal fsync lands after every blob publish its
+/// batch references.
+enum SyncStep {
+    /// A staged blob publish: temp sync, rename, and directory sync.
+    Publish(blob::StagedPublish),
+    /// A dup handle to a journal whose batch already wrote on the worker.
+    Journal { file: std::fs::File, path: PathBuf },
+}
+
+/// What the syncer does once the staged steps finish.
+enum Then {
+    /// The journal batch already wrote on the worker (its blobs were durable
+    /// beforehand); resolve the receipt.
+    Resolve {
+        slot: usize,
+        receipt: Receipt,
+        done: oneshot::Sender<Result<Receipt, StoreError>>,
+    },
+    /// Blob publishes landed (or failed): hand the journal write back to the
+    /// worker as a FIFO-ordered control job, or fail the caller without
+    /// touching the journal.
+    Journalize(AppendCall),
+}
+
+/// One append's staged durability work: the writes already happened on the
+/// worker; `then` decides how the completion resolves. `born` feeds the
+/// contention probe: a slow filesystem shows up as queue wait here first.
 struct SyncJob {
-    file: std::fs::File,
-    path: PathBuf,
-    receipt: Receipt,
-    slot: usize,
+    born: std::time::Instant,
+    steps: Vec<SyncStep>,
+    then: Then,
     queue: Arc<Queue>,
-    done: oneshot::Sender<Result<Receipt, StoreError>>,
+}
+
+fn finish_steps(steps: Vec<SyncStep>) -> Result<(), StoreError> {
+    // Every persist into a directory owes that directory one sync before the
+    // batch resolves; paying it once per distinct directory instead of once
+    // per step keeps the ordering contract while collapsing the fsync convoy
+    // that stalls a shared-storage runner.
+    let mut dirs = Vec::new();
+    let mut first_error = None;
+    for step in steps {
+        let result = match step {
+            SyncStep::Publish(staged) => {
+                blob::finish_staged(staged, &mut dirs).map_err(StoreError::from)
+            }
+            SyncStep::Journal { file, path } => file.sync_all().map_err(|source| {
+                StoreError::Journal(JournalError::Io {
+                    op: "sync",
+                    path,
+                    source: Box::new(source),
+                })
+            }),
+        };
+        if let Err(error) = result
+            && first_error.is_none()
+        {
+            first_error = Some(error);
+        }
+    }
+    // Publishes that persisted before the first failure still earn their
+    // directory sync; durable orphans are harmless where lost ones would lie.
+    let synced = blob::sync_dirs(&mut dirs).map_err(StoreError::from);
+    match (first_error, synced) {
+        (Some(failure), _) | (None, Err(failure)) => Err(failure),
+        (None, Ok(())) => Ok(()),
+    }
 }
 
 fn run_syncer(inbox: &std::sync::mpsc::Receiver<SyncJob>) {
     while let Ok(job) = inbox.recv() {
-        let result = job.file.sync_all().map(|()| job.receipt).map_err(|source| {
-            StoreError::Journal(JournalError::Io {
-                op: "sync",
-                path: job.path.clone(),
-                source: Box::new(source),
-            })
-        });
-        if result.is_err() {
-            // FIFO-ordered behind every append queued so far: the mark lands
-            // before later appends run, so they fail instead of writing onto
-            // bytes whose durability can no longer be trusted.
-            let _ = job.queue.push_control(Job::Damaged { slot: job.slot });
+        let mark = std::time::Instant::now();
+        let result = finish_steps(job.steps);
+        // Only slow batches report: an unconditional line per batch would
+        // flood stderr on child processes and can stall their writers.
+        let taken = mark.elapsed();
+        if job.born.elapsed() > std::time::Duration::from_millis(250)
+            || taken > std::time::Duration::from_millis(250)
+        {
+            eprintln!(
+                "[dal-store] sync waited {:?} took {taken:?}",
+                job.born.elapsed()
+            );
         }
-        let _ = job.done.send(result);
+        match job.then {
+            Then::Resolve {
+                slot,
+                receipt,
+                done,
+            } => {
+                if result.is_err() {
+                    // FIFO-ordered behind every append queued so far: the mark
+                    // lands before later appends run, so they fail instead of
+                    // writing onto bytes whose durability is no longer trusted.
+                    let _ = job.queue.push_control(Job::Damaged { slot });
+                }
+                let _ = done.send(result.map(|()| receipt));
+            }
+            Then::Journalize(call) => match result {
+                Ok(()) => {
+                    // FIFO-ordered behind every append queued so far. The
+                    // lane's one-in-flight rule keeps this journal's appends
+                    // serial, so interleaving other lanes' jobs is safe. If the
+                    // worker already stopped, the dropped reply resolves the
+                    // caller as closed.
+                    let _ = job.queue.push_control(Job::BlobsPublished(call));
+                }
+                // The journal never got bytes: it stays healthy and the
+                // caller simply learns the publication failed.
+                Err(failure) => {
+                    let _ = call.done.send(Err(failure));
+                }
+            },
+        }
     }
 }
 struct RegistrationReply {
@@ -343,18 +458,48 @@ impl Drop for RegistrationReply {
     }
 }
 
-/// Owner of exactly four journal shard threads.
+/// Owner of the journal shard workers and their syncer pools.
 ///
 /// Each worker owns its assigned physical journals. Dropping this owner closes
-/// admission, drains accepted requests, and joins all four threads. Lanes that
+/// admission, drains accepted requests, and joins every thread. Lanes that
 /// outlive it receive a wrapped [`JournalError::ShardClosed`].
 #[must_use]
 pub(crate) struct Shards {
     shards: Vec<Shard>,
 }
 
+/// The process-wide shard set every store lazily shares.
+static SHARED: Mutex<Option<Arc<Shards>>> = Mutex::new(None);
+
+/// Returns the process-wide shard set, starting it on first use.
+///
+/// A `Store` is minted per session, so a per-store shard set multiplies
+/// threads by session count and the OS thread budget becomes the session
+/// budget. One shared set keeps thread ownership constant — four workers
+/// plus their bounded syncer pools — no matter how many sessions are open.
+///
+/// # Errors
+/// Returns [`JournalError::Io`] when the worker threads cannot spawn or the
+/// shared-owner mutex is poisoned.
+pub(crate) fn shared() -> Result<Arc<Shards>, JournalError> {
+    let mut cache = SHARED.lock().map_err(|_| JournalError::Io {
+        op: "open",
+        path: PathBuf::from("dal-journal"),
+        source: Box::new(std::io::Error::other(
+            "journal shard owner mutex is poisoned",
+        )),
+    })?;
+    if let Some(shards) = cache.as_ref() {
+        return Ok(Arc::clone(shards));
+    }
+    let shards = Arc::new(Shards::start()?);
+    *cache = Some(Arc::clone(&shards));
+    Ok(shards)
+}
+
 impl Shards {
-    /// Starts exactly four standard-thread journal workers.
+    /// Starts exactly four standard-thread journal workers and each shard's
+    /// syncer pool.
     ///
     /// # Errors
     /// Returns [`JournalError::Io`] if the operating system refuses a worker
@@ -363,21 +508,33 @@ impl Shards {
         let mut shards: Vec<Shard> = Vec::with_capacity(SHARD_COUNT);
         for index in 0..SHARD_COUNT {
             let queue = Arc::new(Queue::new());
-            let (sync_outbox, sync_inbox) = std::sync::mpsc::channel::<SyncJob>();
+            let mut outboxes = Vec::with_capacity(SYNCERS_PER_SHARD);
+            let mut sync_inboxes = Vec::with_capacity(SYNCERS_PER_SHARD);
+            for _lane in 0..SYNCERS_PER_SHARD {
+                let (outbox, inbox) = std::sync::mpsc::channel::<SyncJob>();
+                outboxes.push(outbox);
+                sync_inboxes.push(inbox);
+            }
+            let sync = SyncFan { outboxes };
             let worker_queue = Arc::clone(&queue);
             let spawned = (|| {
                 let thread = thread::Builder::new()
                     .name(format!("dal-journal-{index}"))
                     .spawn(move || {
                         let _stopped = WorkerStopped(Arc::clone(&worker_queue));
-                        run(worker_queue, sync_outbox);
+                        run(&worker_queue, &sync);
                     })?;
-                let syncer = thread::Builder::new()
-                    .name(format!("dal-journal-sync-{index}"))
-                    .spawn(move || run_syncer(&sync_inbox))?;
-                Ok::<_, std::io::Error>((thread, syncer))
+                let mut syncers = Vec::with_capacity(SYNCERS_PER_SHARD);
+                for (lane, inbox) in sync_inboxes.into_iter().enumerate() {
+                    syncers.push(
+                        thread::Builder::new()
+                            .name(format!("dal-journal-sync-{index}-{lane}"))
+                            .spawn(move || run_syncer(&inbox))?,
+                    );
+                }
+                Ok::<_, std::io::Error>((thread, syncers))
             })();
-            let (thread, syncer) = match spawned {
+            let (thread, syncers) = match spawned {
                 Ok(pair) => pair,
                 Err(source) => {
                     for shard in &shards {
@@ -387,7 +544,7 @@ impl Shards {
                         if let Some(thread) = shard.thread.take() {
                             drop(thread.join());
                         }
-                        if let Some(syncer) = shard.syncer.take() {
+                        for syncer in shard.syncers.drain(..) {
                             drop(syncer.join());
                         }
                     }
@@ -401,7 +558,7 @@ impl Shards {
             shards.push(Shard {
                 queue,
                 thread: Some(thread),
-                syncer: Some(syncer),
+                syncers,
             });
         }
         Ok(Self { shards })
@@ -436,7 +593,17 @@ impl Shards {
             receiver: Some(reply),
         };
         let response = match registration.receiver.as_mut() {
-            Some(receiver) => receiver.await,
+            // The register receipt has no deadline: a dead or convoyed
+            // worker parks the attach in silence, so report long waits.
+            Some(receiver) => loop {
+                match tokio::time::timeout(std::time::Duration::from_secs(30), &mut *receiver).await
+                {
+                    Ok(response) => break response,
+                    Err(_elapsed) => {
+                        eprintln!("[dal-store] session {session:?} lane register outstanding");
+                    }
+                }
+            },
             None => return Err(journal_closed(session)),
         };
         registration.receiver = None;
@@ -474,12 +641,12 @@ impl Drop for Shards {
             shard.queue.close();
         }
         for shard in &mut self.shards {
-            // Joining the worker drops its sync outbox, which ends the
-            // syncer's recv loop after every staged sync resolves.
+            // Joining the worker drops its sync outboxes, which ends every
+            // syncer's recv loop after its staged syncs resolve.
             if let Some(thread) = shard.thread.take() {
                 drop(thread.join());
             }
-            if let Some(syncer) = shard.syncer.take() {
+            for syncer in shard.syncers.drain(..) {
                 drop(syncer.join());
             }
         }
@@ -518,7 +685,10 @@ pub(crate) struct Lane {
     queue: Arc<Queue>,
     session: SessionId,
     slot: usize,
-    pending: Option<oneshot::Receiver<Result<Receipt, StoreError>>>,
+    pending: Option<(
+        std::time::Instant,
+        oneshot::Receiver<Result<Receipt, StoreError>>,
+    )>,
     retiring: bool,
     retired: Option<oneshot::Receiver<()>>,
     // Cell is Send but not Sync, so the lane cannot be shared between actors.
@@ -565,6 +735,7 @@ impl Lane {
         }
 
         let (done, reply) = oneshot::channel();
+        let born = std::time::Instant::now();
         tokio::time::timeout(
             ENQUEUE_WAIT,
             self.queue.enqueue(Job::Append {
@@ -578,7 +749,7 @@ impl Lane {
         .await
         .map_err(|_| enqueue_timeout(self.session))?
         .map_err(|()| closed(self.session))?;
-        self.pending = Some(reply);
+        self.pending = Some((born, reply));
         self.settle()
             .await
             .unwrap_or_else(|| Err(closed(self.session)))
@@ -588,8 +759,19 @@ impl Lane {
     /// `append` future was cancelled. Returns `None` if no append is pending;
     /// the pending result is consumed exactly once.
     pub(crate) async fn settle(&mut self) -> Option<Result<Receipt, StoreError>> {
-        let pending = self.pending.as_mut()?;
-        let result = pending.await.unwrap_or_else(|_| Err(closed(self.session)));
+        let (born, pending) = self.pending.as_mut()?;
+        let result = loop {
+            match tokio::time::timeout(SETTLE_REPORT, &mut *pending).await {
+                Ok(result) => break result.unwrap_or_else(|_| Err(closed(self.session))),
+                // A receipt this late means the admitted job is parked
+                // somewhere in the worker/syncer chain; name it.
+                Err(_) => eprintln!(
+                    "[dal-store] session {:?} append receipt outstanding {:?}",
+                    self.session,
+                    born.elapsed()
+                ),
+            }
+        };
         self.pending = None;
         Some(result)
     }
@@ -646,12 +828,20 @@ impl Drop for WorkerStopped {
     }
 }
 
+/// Fan-out across one shard's syncer pool. Jobs for one journal always take
+/// the same lane, which keeps their FIFO order without a second queue.
+struct SyncFan {
+    outboxes: Vec<std::sync::mpsc::Sender<SyncJob>>,
+}
+
+impl SyncFan {
+    fn send(&self, slot: usize, job: SyncJob) -> Result<(), std::sync::mpsc::SendError<SyncJob>> {
+        self.outboxes[slot % self.outboxes.len()].send(job)
+    }
+}
+
 /// The worker-local slot table is the sole owner of this shard's journals.
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "the shard thread owns its queue for its lifetime"
-)]
-fn run(queue: Arc<Queue>, sync: std::sync::mpsc::Sender<SyncJob>) {
+fn run(queue: &Arc<Queue>, sync: &SyncFan) {
     let mut journals: Vec<Option<(Journal, Option<PathBuf>)>> = Vec::new();
     let mut free = Vec::new();
     while let Some(job) = queue.pop() {
@@ -678,63 +868,56 @@ fn run(queue: Arc<Queue>, sync: std::sync::mpsc::Sender<SyncJob>) {
                 blobs,
                 done,
             } => {
+                let call = AppendCall {
+                    session,
+                    slot,
+                    batch,
+                    done,
+                };
+                if blobs.is_empty() {
+                    // Nothing to publish: the batch can write immediately.
+                    journalize(&mut journals, queue, sync, call);
+                    continue;
+                }
+                // Phase one: write blob temps on the worker and hand the
+                // ordered publish steps to the syncer. The journal write waits
+                // for `BlobsPublished` so bytes can never exist before the
+                // blobs they reference are durable.
+                let mut steps = Vec::new();
                 let staged = match journals.get_mut(slot).and_then(Option::as_mut) {
-                    Some((journal, blob_dir)) => publish(blobs, blob_dir.as_deref())
-                        .and_then(|()| journal.append_unsynced(&batch).map_err(StoreError::from))
-                        .and_then(|receipt| {
-                            match journal.stage_sync(receipt) {
-                                Ok(staged) => Ok(staged),
-                                Err(failure) => {
-                                    // The sync never left the worker: roll
-                                    // the batch back exactly as
-                                    // `Journal::append` would have on a
-                                    // failed sync.
-                                    let repair = journal.roll_back(receipt).err().map_or_else(
-                                        || StoreError::from(failure),
-                                        StoreError::from,
-                                    );
-                                    Err(repair)
-                                }
-                            }
-                        }),
-                    None => Err(closed(session)),
+                    Some((_, blob_dir)) => publish(blobs, blob_dir.as_deref(), &mut steps),
+                    None => Err(closed(call.session)),
                 };
                 match staged {
-                    Ok((file, path, receipt)) => {
+                    Ok(()) => {
                         let job = SyncJob {
-                            file,
-                            path,
-                            receipt,
-                            slot,
-                            queue: Arc::clone(&queue),
-                            done,
+                            born: std::time::Instant::now(),
+                            steps,
+                            then: Then::Journalize(call),
+                            queue: Arc::clone(queue),
                         };
-                        if let Err(unsent) = sync.send(job) {
-                            // The syncer died: resolve the receipt inline so
-                            // the lane still learns the durable outcome.
+                        if let Err(unsent) = sync.send(slot, job) {
+                            // The syncer died: finish the publishes inline,
+                            // then the journal write, on the worker.
                             let job = unsent.0;
-                            let result =
-                                job.file.sync_all().map(|()| job.receipt).map_err(|source| {
-                                    StoreError::Journal(JournalError::Io {
-                                        op: "sync",
-                                        path: job.path.clone(),
-                                        source: Box::new(source),
-                                    })
-                                });
-                            if result.is_err()
-                                && let Some((journal, _)) =
-                                    journals.get_mut(slot).and_then(Option::as_mut)
-                            {
-                                journal.mark_damaged();
+                            let Then::Journalize(call) = job.then else {
+                                debug_assert!(false, "only Journalize jobs reach this arm");
+                                continue;
+                            };
+                            match finish_steps(job.steps) {
+                                Ok(()) => journalize(&mut journals, queue, sync, call),
+                                Err(failure) => {
+                                    let _ = call.done.send(Err(failure));
+                                }
                             }
-                            let _ = job.done.send(result);
                         }
                     }
                     Err(failure) => {
-                        let _ = done.send(Err(failure));
+                        let _ = call.done.send(Err(failure));
                     }
                 }
             }
+            Job::BlobsPublished(call) => journalize(&mut journals, queue, sync, call),
             Job::Damaged { slot } => {
                 if let Some((journal, _)) = journals.get_mut(slot).and_then(Option::as_mut) {
                     journal.mark_damaged();
@@ -755,7 +938,88 @@ fn run(queue: Arc<Queue>, sync: std::sync::mpsc::Sender<SyncJob>) {
     }
 }
 
-fn publish(blobs: Vec<PendingBlob>, blob_dir: Option<&std::path::Path>) -> Result<(), StoreError> {
+/// Writes `batch` on the worker and stages its durability sync for the
+/// syncer. Reached only once every blob the batch references is durable:
+/// immediately for a blob-less append, or through [`Job::BlobsPublished`]
+/// after the publish steps landed.
+fn journalize(
+    journals: &mut [Option<(Journal, Option<PathBuf>)>],
+    queue: &Arc<Queue>,
+    sync: &SyncFan,
+    call: AppendCall,
+) {
+    let AppendCall {
+        session,
+        slot,
+        batch,
+        done,
+    } = call;
+    let staged = match journals.get_mut(slot).and_then(Option::as_mut) {
+        Some((journal, _)) => journal
+            .append_unsynced(&batch)
+            .map_err(StoreError::from)
+            .and_then(|receipt| match journal.stage_sync(receipt) {
+                Ok(staged) => Ok(staged),
+                Err(failure) => {
+                    // The sync never left the worker: roll the batch back
+                    // exactly as `Journal::append` would have on a failed sync.
+                    let repair = journal
+                        .roll_back(receipt)
+                        .err()
+                        .map_or_else(|| StoreError::from(failure), StoreError::from);
+                    Err(repair)
+                }
+            }),
+        None => Err(closed(session)),
+    };
+    match staged {
+        Ok((file, path, receipt)) => {
+            let job = SyncJob {
+                born: std::time::Instant::now(),
+                steps: vec![SyncStep::Journal { file, path }],
+                then: Then::Resolve {
+                    slot,
+                    receipt,
+                    done,
+                },
+                queue: Arc::clone(queue),
+            };
+            if let Err(unsent) = sync.send(slot, job) {
+                // The syncer died: resolve the receipt inline so the lane
+                // still learns the durable outcome.
+                let job = unsent.0;
+                let Then::Resolve {
+                    slot,
+                    receipt,
+                    done,
+                } = job.then
+                else {
+                    debug_assert!(false, "journalize stages only Resolve jobs");
+                    return;
+                };
+                let result = finish_steps(job.steps).map(|()| receipt);
+                if result.is_err()
+                    && let Some((journal, _)) = journals.get_mut(slot).and_then(Option::as_mut)
+                {
+                    journal.mark_damaged();
+                }
+                let _ = done.send(result);
+            }
+        }
+        Err(failure) => {
+            let _ = done.send(Err(failure));
+        }
+    }
+}
+
+/// Writes each blob's temp on the worker and stages its finish steps. Actual
+/// digest files appear only when the syncer runs the staged publishes, which
+/// keeps blob syncs off the FIFO worker the same way journal syncs stay off.
+fn publish(
+    blobs: Vec<PendingBlob>,
+    blob_dir: Option<&std::path::Path>,
+    steps: &mut Vec<SyncStep>,
+) -> Result<(), StoreError> {
     if blobs.is_empty() {
         return Ok(());
     }
@@ -764,8 +1028,23 @@ fn publish(blobs: Vec<PendingBlob>, blob_dir: Option<&std::path::Path>) -> Resul
             reason: "prepared blobs supplied without a session blob directory".into(),
         });
     };
+    let mut present = false;
+    let mut wrote = false;
     for pending in blobs {
-        blob::put_prepared(dir, pending)?;
+        match blob::stage_prepared(dir, pending)? {
+            blob::StagedPublish::Present { .. } => present = true,
+            staged @ blob::StagedPublish::Pending { .. } => {
+                wrote = true;
+                steps.push(SyncStep::Publish(staged));
+            }
+        }
+    }
+    // A staged publish already syncs the directory on its finish; only a set
+    // where every digest already existed still owes one.
+    if present && !wrote {
+        steps.push(SyncStep::Publish(blob::StagedPublish::Present {
+            dir: dir.to_path_buf(),
+        }));
     }
     Ok(())
 }

@@ -376,6 +376,8 @@ impl Proc {
 
 impl Drop for Proc {
     fn drop(&mut self) {
+        #[cfg(windows)]
+        super::LIVE_PROCS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         // JoinSet aborts its tasks on drop; no detached capture survives the session.
         self.capture.take();
         if let Some(profile) = self.launcher_profile.take() {
@@ -566,6 +568,8 @@ fn launch(
         progress,
     ));
 
+    #[cfg(windows)]
+    super::LIVE_PROCS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     Ok(Proc {
         child,
         call,

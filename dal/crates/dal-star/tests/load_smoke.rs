@@ -310,7 +310,7 @@ fn skill_front_matter_unknown_key_is_a_load_error_at_file_line_col()
         "---\nmcp:\n  servers:\n    web:\n      url: https://docs.example/mcp\n      retries: 3\n---\n",
     )?;
     let error = load_all(data.path()).expect_err("an unknown server key must fail the load");
-    let skill_path = data.path().join("plugins/docs/SKILL.md");
+    let skill_path = data.path().join("plugins").join("docs").join("SKILL.md");
     assert_eq!(
         error.render(),
         format!(

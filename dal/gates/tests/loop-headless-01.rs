@@ -5,7 +5,7 @@
 )]
 mod support;
 
-use std::{collections::BTreeMap, error::Error, fs, path::PathBuf};
+use std::{error::Error, fs, path::PathBuf};
 
 use dal_agent::{Delivery, Env, SessionRef};
 use dal_core::{Command, Config, ConfigProduct, Expect, Part, Reply, Stop, UpdateKind, Workspace};
@@ -44,7 +44,7 @@ async fn headless_tools_preserve_call_order_and_see_patch()
         config: &config,
     })?;
     let env = Env {
-        vars: BTreeMap::new(),
+        vars: support::captured_shell_vars(),
         cwd: workspace.path().to_path_buf(),
         sandbox_helper: None,
     };

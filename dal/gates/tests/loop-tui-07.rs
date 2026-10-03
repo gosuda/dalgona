@@ -20,7 +20,7 @@ mod pty;
 )]
 mod support;
 
-use std::{collections::BTreeMap, error::Error, time::Duration};
+use std::{error::Error, time::Duration};
 
 use dal_agent::{Delivery, Env, SessionRef};
 use dal_core::{
@@ -51,7 +51,7 @@ async fn tui_resync_recovers_lagging_subscriber() -> Result<(), Box<dyn Error + 
         config: &config,
     })?;
     let env = Env {
-        vars: BTreeMap::new(),
+        vars: support::captured_shell_vars(),
         cwd: workspace.path().to_path_buf(),
         sandbox_helper: None,
     };

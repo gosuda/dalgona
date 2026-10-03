@@ -6,7 +6,6 @@
 mod support;
 
 use std::{
-    collections::BTreeMap,
     error::Error,
     path::PathBuf,
     sync::{
@@ -71,7 +70,7 @@ async fn headless_shutdown_waits_for_registered_status_quiet()
     })?;
     product.extensions.push(extension);
     let env = Env {
-        vars: BTreeMap::new(),
+        vars: support::captured_shell_vars(),
         cwd: workspace.path().to_path_buf(),
         sandbox_helper: None,
     };

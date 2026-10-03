@@ -7,7 +7,6 @@
 mod support;
 
 use std::{
-    collections::BTreeMap,
     error::Error,
     fs,
     sync::{Arc, Mutex},
@@ -135,7 +134,7 @@ async fn ttsr_replay_interrupts_injects_and_retries_at_most_three_times()
         .build()?;
     product.extensions.push(watcher_extension);
     let env = Env {
-        vars: BTreeMap::new(),
+        vars: support::captured_shell_vars(),
         cwd: workspace.path().to_path_buf(),
         sandbox_helper: None,
     };

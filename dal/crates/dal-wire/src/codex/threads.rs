@@ -133,6 +133,12 @@ pub(super) async fn list(ctx: &Ctx, params: &Value) -> Outcome {
         })
         .map_err(host_error)?;
     let state = ctx.state.lock().await;
+    // Sessions carry the store's canonical workspace spelling; a client cwd
+    // canonicalizes to the same form so a symlinked path still matches.
+    let cwd: Vec<std::path::PathBuf> = cwd
+        .iter()
+        .map(|path| dal_store::canonical_path(path))
+        .collect();
     let mut data = Vec::new();
     for info in &page.items {
         if !cwd.is_empty() && !cwd.iter().any(|path| path == info.workspace.as_path()) {

@@ -25,6 +25,7 @@ impl Host {
         reason = "the public startup API is awaited by callers across the workspace; startup validation stays async for one composition shape"
     )]
     pub async fn start(product: Product, config: Config, env: Env) -> Result<Self, HostError> {
+        raise_fd_soft_limit();
         let attaches: Vec<crate::ext::Attach> = product
             .extensions
             .iter()
@@ -85,6 +86,54 @@ impl Host {
     }
 }
 
+/// The fd ceiling a host lifts its inherited soft limit toward when the
+/// environment grants a higher hard limit.
+#[cfg(unix)]
+const FD_TARGET: u64 = 16_384;
+
+/// Lifts the process fd soft limit before admission is sized.
+///
+/// Every live session holds a lock and a journal descriptor, every job needs
+/// pipes, and transports hold sockets, so an inherited default like macOS's
+/// 256 starves the whole host at once; opens then fail EMFILE in paths the
+/// fd admission gate never measured. The soft limit can always rise to the
+/// hard ceiling without privilege, so the host claims the headroom its
+/// environment already grants. Best effort: a denied setrlimit leaves the
+/// inherited limit, which the budget still defends.
+#[cfg(unix)]
+fn raise_fd_soft_limit() {
+    let limit = rustix::process::getrlimit(rustix::process::Resource::Nofile);
+    let soft = limit.current.unwrap_or(FD_TARGET);
+    // The kernel can cap descriptors below the hard limit (macOS
+    // kern.maxfilesperproc), so halve down from the target until a setrlimit
+    // lands instead of failing on the first unreachable rung.
+    let mut target = limit.maximum.unwrap_or(FD_TARGET).min(FD_TARGET);
+    while target > soft {
+        if rustix::process::setrlimit(
+            rustix::process::Resource::Nofile,
+            rustix::process::Rlimit {
+                current: Some(target),
+                maximum: None,
+            },
+        )
+        .is_ok()
+        {
+            break;
+        }
+        target /= 2;
+    }
+    let after = rustix::process::getrlimit(rustix::process::Resource::Nofile)
+        .current
+        .unwrap_or(soft);
+    if after != soft {
+        eprintln!("[dal-agent] fd soft limit {soft} -> {after}");
+    }
+}
+
+/// Windows has no `getrlimit`; the process edge does no fd lifting there.
+#[cfg(windows)]
+fn raise_fd_soft_limit() {}
+
 /// Reads the process fd soft limit without touching other process state.
 #[cfg(unix)]
 fn fd_soft_limit() -> u64 {
@@ -98,6 +147,32 @@ fn fd_soft_limit() -> u64 {
 #[cfg(windows)]
 fn fd_soft_limit() -> u64 {
     1024
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    /// The lift must leave the soft limit at least at the hard-capped target
+    /// so session locks, journals, pipes, and sockets fit: the macOS default
+    /// of 256 starved ~200 concurrent sessions of descriptors entirely.
+    #[test]
+    fn raise_fd_soft_limit_reaches_the_kernel_ceiling() {
+        let before = rustix::process::getrlimit(rustix::process::Resource::Nofile)
+            .current
+            .unwrap_or(0);
+        super::raise_fd_soft_limit();
+        let limit = rustix::process::getrlimit(rustix::process::Resource::Nofile);
+        let hard = limit.maximum.unwrap_or(u64::MAX);
+        let soft = limit.current.unwrap_or(0);
+        eprintln!("[dal-agent] fd limits before={before} soft={soft} hard={hard}");
+        assert!(soft >= before, "the lift never lowers the fd soft limit");
+        // The ladder bottoms out at 1024: any saner floor must be at least
+        // that, and a kernel that hard-caps below it still leaves the cap.
+        let floor = hard.min(1024);
+        assert!(
+            soft >= floor,
+            "fd soft limit {soft} stayed below the reachable floor {floor} (hard={hard})"
+        );
+    }
 }
 
 /// Builds the provider set from the typed provider configuration.

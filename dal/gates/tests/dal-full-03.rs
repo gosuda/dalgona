@@ -161,6 +161,7 @@ async fn run_sandbox_probe() -> Result<(String, bool), Box<dyn Error + Send + Sy
     let mut child = Command::new(dalgon_binary("dalgon")?)
         .args(["rpc"])
         .env_clear()
+        .envs(support::captured_shell_vars())
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("XDG_DATA_HOME", &data_home)

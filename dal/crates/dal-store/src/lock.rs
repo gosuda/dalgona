@@ -51,10 +51,19 @@ impl LockGuard {
                     .map_err(|source| util::io_err(path, source))?;
                 writeln!(file, "{}", std::process::id())
                     .map_err(|source| util::io_err(path, source))?;
+                // The owner sidecar repeats the pid outside the locked file:
+                // `LockFileEx` makes the held file unreadable to every other
+                // handle on Windows, so a contended acquirer reads the pid
+                // from the sidecar that the lock never seals.
+                fs::write(
+                    owner_path(path),
+                    format!("{}\n", std::process::id()).as_bytes(),
+                )
+                .map_err(|source| util::io_err(path, source))?;
                 Ok(Self { _file: file })
             }
             Err(TryLockError::WouldBlock) => {
-                let pid = read_pid_until(path)?;
+                let pid = read_pid_until(&owner_path(path))?;
                 Err(StoreError::Locked { session, pid })
             }
             Err(TryLockError::Error(source)) => Err(util::io_err(path, source)),
@@ -62,16 +71,25 @@ impl LockGuard {
     }
 }
 
+/// The unlocked sibling that carries the holder's pid text, `<lock>.owner`.
+fn owner_path(path: &Path) -> std::path::PathBuf {
+    let mut text = path.as_os_str().to_os_string();
+    text.push(".owner");
+    text.into()
+}
+
 fn read_pid_until(path: &Path) -> Result<Option<u32>, StoreError> {
     let deadline = Instant::now() + PID_WAIT;
     let mut previous = None;
     loop {
-        let bytes = match fs::read(path) {
-            Ok(bytes) => bytes,
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        let current = match fs::read(path) {
+            Ok(bytes) => parse_pid(&bytes),
+            // A contender can read between the holder's lock acquire and its
+            // owner-sidecar write; a missing sidecar is a transient state like
+            // unparsable content, so keep polling until the deadline.
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => None,
             Err(source) => return Err(util::io_err(path, source)),
         };
-        let current = parse_pid(&bytes);
         if current.is_some() && current == previous {
             return Ok(current);
         }
@@ -153,9 +171,8 @@ mod tests {
             panic!("first lock acquisition must succeed")
         };
         let path = dir.0.join("lock");
-        let before = fs::read(&path).expect("read owner pid");
 
-        let Err(error) = LockGuard::acquire(&dir.0.join("lock"), id) else {
+        let Err(error) = LockGuard::acquire(&path, id) else {
             panic!("second acquisition must fail")
         };
 
@@ -168,7 +185,14 @@ mod tests {
             StoreError::Locked { session, pid: Some(pid) }
                 if *session == id && *pid == std::process::id()
         ));
-        assert_eq!(fs::read(path).expect("read unchanged owner pid"), before);
+        // The lock file itself stays sealed to other handles while held on
+        // Windows; the owner sidecar carries the readable pid everywhere.
+        #[cfg(unix)]
+        {
+            let before = fs::read(&path).expect("read owner pid");
+            assert!(!before.is_empty());
+            assert_eq!(fs::read(&path).expect("read unchanged owner pid"), before);
+        }
     }
 
     #[test]
@@ -176,9 +200,10 @@ mod tests {
         let dir = TestDir::new();
         let id = SessionId::new_v7();
         let path = dir.0.join("lock");
+        let owner = super::owner_path(&path);
         let _owner = LockGuard::acquire(&path, id).expect("first lock acquisition");
-        fs::write(&path, b"").expect("erase lock owner text");
-        let before = fs::read(&path).expect("read empty lock text");
+        fs::write(&owner, b"").expect("erase lock owner text");
+        let before = fs::read(&owner).expect("read empty owner text");
 
         let Err(error) = LockGuard::acquire(&path, id) else {
             panic!("second acquisition must fail")
@@ -192,7 +217,7 @@ mod tests {
             error,
             StoreError::Locked { session, pid: None } if session == id
         ));
-        assert_eq!(fs::read(path).expect("read unchanged lock text"), before);
+        assert_eq!(fs::read(owner).expect("read unchanged owner text"), before);
     }
 
     #[test]
@@ -206,12 +231,22 @@ mod tests {
         }
         let stale_pid = fs::read(&path).expect("lock file remains");
 
-        let _next =
-            LockGuard::acquire(&dir.0.join("lock"), id).expect("lock released after guard drop");
+        {
+            let _next = LockGuard::acquire(&dir.0.join("lock"), id)
+                .expect("lock released after guard drop");
 
-        assert!(path.exists());
+            assert!(path.exists());
+            // The held lock file is unreadable on Windows; POSIX advisory
+            // locks still allow reading the new owner while it is held.
+            #[cfg(unix)]
+            assert_eq!(
+                fs::read(path).expect("new owner pid"),
+                format!("{}\n", std::process::id()).as_bytes()
+            );
+        }
+        #[cfg(windows)]
         assert_eq!(
-            fs::read(path).expect("new owner pid"),
+            fs::read(&path).expect("new owner pid"),
             format!("{}\n", std::process::id()).as_bytes()
         );
         assert!(!stale_pid.is_empty());

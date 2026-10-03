@@ -930,6 +930,9 @@ mod tests {
     async fn read_scheme_resolution() {
         let dir = tempfile::tempdir().unwrap();
         // Disk decoys: a scheme read that fell through to the filesystem would return these.
+        // Windows forbids `:` in file names, so there is nothing to plant; a
+        // fallthrough would fail with InvalidFilename instead of reading DISK.
+        #[cfg(unix)]
         for decoy in ["letter:/7", "letter:/nope", "dalgon:/config"] {
             let path = dir.path().join(decoy);
             fs::create_dir_all(path.parent().unwrap()).unwrap();

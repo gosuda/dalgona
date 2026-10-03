@@ -7,7 +7,7 @@ use std::{
     collections::HashMap,
     fs, io,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 
 use dal_core::{
@@ -21,7 +21,7 @@ use crate::{
     journal::{self, Faults, Journal as FileJournal, Receipt},
     layout::SessionPaths,
     lock::LockGuard,
-    shard::{Lane, Shards},
+    shard::Lane,
     sidecar::Sidecar,
     util,
 };
@@ -58,19 +58,38 @@ struct StoreInner {
     product: Product,
     workspace_key: String,
     listing: crate::list::Listing,
-    shards: Mutex<Option<Arc<Shards>>>,
     /// First-append journal creation is a write plus syncs; admissions are
     /// bounded to shard width so a create burst cannot flood the
     /// filesystem's sync queue faster than workers can drain it.
     create_permits: tokio::sync::Semaphore,
     #[cfg(test)]
-    faults: Mutex<Faults>,
+    faults: std::sync::Mutex<Faults>,
+}
+
+#[cfg(test)]
+impl StoreInner {
+    fn faults(&self) -> Faults {
+        use std::sync::PoisonError;
+
+        self.faults
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
 }
 
 impl Store {
     /// Creates a store without creating or modifying any filesystem path.
+    ///
+    /// The workspace keeps one canonical spelling for every durable identity:
+    /// the sessions directory key, the recorded session workspace, and the
+    /// reference lookups compare against. A symlinked spelling like `/var/...`
+    /// and its canonical `/private/var/...` target must resolve to the same
+    /// sessions or one workspace splits into two.
     #[must_use]
     pub fn new(data_root: PathBuf, workspace: Workspace, product: Product) -> Self {
+        let workspace =
+            Workspace::new(util::canonical_path(workspace.as_path())).unwrap_or(workspace);
         let workspace_key = util::workspace_key(workspace.as_path());
         Self {
             inner: Arc::new(StoreInner {
@@ -79,10 +98,9 @@ impl Store {
                 product,
                 workspace_key,
                 listing: crate::list::Listing::new(),
-                shards: Mutex::new(None),
                 create_permits: tokio::sync::Semaphore::new(crate::shard::SHARD_COUNT),
                 #[cfg(test)]
-                faults: Mutex::new(Faults::default()),
+                faults: std::sync::Mutex::new(Faults::default()),
             }),
         }
     }
@@ -133,7 +151,9 @@ impl Store {
             Err(source) => return Err(util::io_err(&journal_path, source)),
         }
         let (lock, opened) = open_locked_journal(&paths, id, faults).await?;
-        let shards = self.shards()?;
+        // The shard set is process-wide: a Store is minted per session, so a
+        // per-store owner would multiply journal threads by session count.
+        let shards = crate::shard::shared()?;
         let mut records = opened
             .records
             .into_iter()
@@ -197,12 +217,17 @@ impl Store {
 
     /// Resolves a name or identifier in `workspace`.
     ///
+    /// The argument workspace canonicalizes the same way [`Store::new`] does,
+    /// so a lookup from a symlinked or canonical cwd sees the same sessions.
+    ///
     /// # Errors
     /// Returns [`StoreError`] when the reference is empty, missing, or ambiguous.
     pub fn resolve(&self, workspace: &Workspace, arg: &str) -> Result<SessionId, StoreError> {
+        let canonical = Workspace::new(util::canonical_path(workspace.as_path()))
+            .unwrap_or_else(|_| workspace.clone());
         self.inner
             .listing
-            .resolve(&self.workspace_dir_for(workspace), workspace, arg)
+            .resolve(&self.workspace_dir_for(&canonical), &canonical, arg)
     }
 
     /// Returns the newest unarchived session in the configured workspace.
@@ -436,29 +461,9 @@ impl Store {
             .join(util::workspace_key(workspace.as_path()))
     }
 
-    fn shards(&self) -> Result<Arc<Shards>, StoreError> {
-        let mut shared = self.inner.shards.lock().map_err(|_| {
-            util::io_err(
-                &self.inner.data_root,
-                io::Error::other("journal shard owner mutex is poisoned"),
-            )
-        })?;
-        if let Some(shards) = shared.as_ref() {
-            return Ok(Arc::clone(shards));
-        }
-        let shards = Arc::new(Shards::start()?);
-        *shared = Some(Arc::clone(&shards));
-        Ok(shards)
-    }
     #[cfg(test)]
     fn faults(&self) -> Faults {
-        use std::sync::PoisonError;
-
-        self.inner
-            .faults
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.inner.faults()
     }
 
     #[cfg(not(test))]
@@ -942,32 +947,43 @@ impl Journal {
             }
         }
         let current_name = current_name.map(str::to_owned);
-        let store = Store {
-            inner: Arc::clone(&self.inner),
-        };
         let mut mark = std::time::Instant::now();
         let lap = |step: &str, mark: &mut std::time::Instant| {
             let taken = mark.elapsed();
             if taken > std::time::Duration::from_millis(250) {
-                eprintln!("[dal-store] first-append {step} took {taken:?}");
+                eprintln!(
+                    "[dal-store] session {:?} first-append {step} took {taken:?}",
+                    self.id
+                );
             }
             *mark = std::time::Instant::now();
         };
-        let shards = match store.shards() {
+        let shards = match crate::shard::shared() {
             Ok(shards) => shards,
             Err(error) => {
                 self.state = State::Lazy { blobs };
-                return Err(error);
+                return Err(error.into());
             }
         };
         lap("shards-init", &mut mark);
-        let create_permit = match self.inner.create_permits.acquire().await {
-            Ok(permit) => permit,
-            Err(_closed) => {
-                self.state = State::Lazy { blobs };
-                return Err(StoreError::Invalid {
-                    reason: "journal create permits are closed".into(),
-                });
+        let create_permit = {
+            // A permit wait has no timeout: holder starvation would park
+            // every later create in silence, so report long waits.
+            let mut waiting = Box::pin(self.inner.create_permits.acquire());
+            loop {
+                match tokio::time::timeout(std::time::Duration::from_secs(30), &mut waiting).await {
+                    Ok(Ok(permit)) => break permit,
+                    Ok(Err(_closed)) => {
+                        self.state = State::Lazy { blobs };
+                        return Err(StoreError::Invalid {
+                            reason: "journal create permits are closed".into(),
+                        });
+                    }
+                    Err(_elapsed) => eprintln!(
+                        "[dal-store] session {:?} create permit outstanding",
+                        self.id
+                    ),
+                }
             }
         };
         lap("create-permit", &mut mark);
@@ -1029,16 +1045,33 @@ impl Journal {
                     )?;
                 }
                 mark = lap("names", mark);
+                // Stage and finish every blob before one shared directory
+                // sync: same durability order, a fraction of the fsyncs on
+                // slow shared storage.
+                let mut dirs = Vec::new();
                 for blob in blobs {
-                    blob::put_prepared(&blob_dir, blob)?;
+                    blob::finish_staged(blob::stage_prepared(&blob_dir, blob)?, &mut dirs)?;
                 }
+                blob::sync_dirs(&mut dirs)?;
                 mark = lap("blobs", mark);
                 let journal = FileJournal::create(&journal_path, &bytes, &Faults::default())?;
                 lap("journal-create", mark);
                 Ok((lock, journal))
             }
         });
-        let (lock, file_journal) = match creation.await {
+        let mut creation = Box::pin(creation);
+        let outcome = loop {
+            // The join has no timeout either: a pooled blocking task that
+            // never schedules parks the permit and every later create.
+            match tokio::time::timeout(std::time::Duration::from_secs(30), &mut creation).await {
+                Ok(outcome) => break outcome,
+                Err(_elapsed) => eprintln!(
+                    "[dal-store] session {:?} journal create task outstanding",
+                    self.id
+                ),
+            }
+        };
+        let (lock, file_journal) = match outcome {
             Ok(Ok(pair)) => pair,
             Ok(Err(error)) => {
                 if !journal_path.exists() {
@@ -1062,7 +1095,7 @@ impl Journal {
         #[cfg(test)]
         let file_journal = {
             let mut file_journal = file_journal;
-            file_journal.set_faults(store.faults());
+            file_journal.set_faults(self.inner.faults());
             file_journal
         };
         self.pending = Some(PendingAppend {
@@ -1540,12 +1573,13 @@ fn write_failure(id: SessionId, error: StoreError) -> StoreError {
 /// process — an owner still draining a first append or a shutdown still
 /// releasing handles — never a foreign process, so a bounded wait resolves
 /// the contention instead of reporting `Locked` for our own ownership.
+/// The budget spans a convoyed first-append queue on slow filesystems.
 async fn open_locked_journal(
     paths: &SessionPaths,
     id: SessionId,
     faults: Faults,
 ) -> Result<(LockGuard, journal::Opened), StoreError> {
-    const RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+    const RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
     const RETRY_POLL: std::time::Duration = std::time::Duration::from_millis(25);
     let deadline = tokio::time::Instant::now() + RETRY_BUDGET;
     let mut mark = std::time::Instant::now();
@@ -1570,8 +1604,8 @@ async fn open_locked_journal(
         lap("acquire-open", &mut mark);
         match attempt {
             Ok(Ok(pair)) => return Ok(pair),
-            Ok(Err(StoreError::Locked { pid: Some(pid), .. }))
-                if pid == std::process::id() && tokio::time::Instant::now() < deadline =>
+            Ok(Err(StoreError::Locked { pid, .. }))
+                if lock_might_be_ours(pid) && tokio::time::Instant::now() < deadline =>
             {
                 tokio::time::sleep(RETRY_POLL).await;
             }
@@ -1583,6 +1617,14 @@ async fn open_locked_journal(
             }
         }
     }
+}
+
+/// The owner sidecar keeps the holder pid readable even while a lock seal
+/// blocks reads of the lock file itself, so only a lock held by this process
+/// is worth waiting out. An absent pid is never ours: our own acquisitions
+/// publish the sidecar before contention can read it.
+fn lock_might_be_ours(pid: Option<u32>) -> bool {
+    pid == Some(std::process::id())
 }
 
 #[cfg(test)]

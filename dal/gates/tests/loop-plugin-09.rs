@@ -9,7 +9,7 @@
 mod support;
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::HashMap,
     error::Error,
     fs,
     sync::{Arc, Mutex},
@@ -252,7 +252,7 @@ async fn start_session(
     })?;
     product.extensions.extend(extensions);
     let env = Env {
-        vars: BTreeMap::new(),
+        vars: support::captured_shell_vars(),
         cwd: workspace.path().to_path_buf(),
         sandbox_helper: None,
     };

@@ -197,6 +197,54 @@ async fn resume_resolution_matrix() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn symlinked_and_canonical_workspace_spellings_share_sessions() {
+    let temp = TempDir::new("list-symlink");
+    let real = temp.path().join("real");
+    fs::create_dir_all(&real).expect("real workspace exists");
+    let link = temp.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).expect("workspace symlink");
+
+    // A session opened under the symlinked spelling must resolve and list
+    // identically from the canonical spelling: both name the same directory.
+    let store = Store::new(
+        temp.path().join("data"),
+        Workspace::new(link.clone()).expect("linked workspace is absolute"),
+        Product::Dalgona,
+    );
+    let id = SessionId::new_v7();
+    let mut session = store.create_session(id);
+    session
+        .append(vec![user(1, "linked")])
+        .await
+        .expect("session appends");
+    session.close().await.expect("session closes");
+
+    let spelled = Workspace::new(real.clone()).expect("real workspace is absolute");
+    assert_eq!(
+        store
+            .resolve(&spelled, &id.to_string())
+            .expect("resolve from the canonical spelling"),
+        id,
+        "symlinked and canonical spellings reach the same session"
+    );
+    let page = store
+        .list(ListQuery {
+            limit: Some(500),
+            cursor: None,
+            search: None,
+        })
+        .expect("listing succeeds");
+    let canonical = std::fs::canonicalize(&real).expect("canonical workspace");
+    assert!(
+        page.items
+            .iter()
+            .any(|info| info.id == id && info.workspace.as_path() == canonical.as_path()),
+        "sessions record the canonical workspace spelling"
+    );
+}
+
 #[tokio::test]
 async fn continue_skips_archived_newest() {
     let (temp, store, _) = setup("list-newest");

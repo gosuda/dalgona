@@ -10,7 +10,7 @@
 )]
 mod support;
 
-use std::{collections::BTreeMap, error::Error, fs, process::Command};
+use std::{error::Error, fs, process::Command};
 
 use dal_agent::{Env, Host, SessionRef};
 use dal_core::{Config, ConfigProduct, Expect, PageReq, Part, Workspace};
@@ -42,7 +42,7 @@ async fn second_process_reports_current_session_lock_holder()
         config: &config,
     })?;
     let env = Env {
-        vars: BTreeMap::new(),
+        vars: support::captured_shell_vars(),
         cwd: workspace.clone(),
         sandbox_helper: None,
     };
@@ -73,6 +73,7 @@ async fn second_process_reports_current_session_lock_holder()
     let output = Command::new(support::dalgon_binary("dalgon")?)
         .current_dir(&workspace)
         .env_clear()
+        .envs(support::captured_shell_vars())
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("XDG_DATA_HOME", &data_home)
@@ -85,7 +86,12 @@ async fn second_process_reports_current_session_lock_holder()
         std::process::id()
     );
     assert!(!output.status.success());
-    assert!(String::from_utf8(output.stderr)?.contains(&expected));
+    let stderr = String::from_utf8(output.stderr)?;
+    let stdout = String::from_utf8(output.stdout)?;
+    assert!(
+        stderr.contains(&expected),
+        "second process stderr must name the holder pid; stderr:\n{stderr}\nstdout:\n{stdout}"
+    );
     let report = host.shutdown(std::time::Duration::from_secs(1)).await;
     assert_eq!(report.sessions_closed, 1);
     Ok(())

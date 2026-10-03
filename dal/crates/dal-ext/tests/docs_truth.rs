@@ -740,7 +740,7 @@ fn truth_readme_philosophy() {
         readme.contains(body_without_title.trim()),
         "README carries the philosophy body"
     );
-    assert!(readme.starts_with("# dal\n"));
+    assert_eq!(readme.lines().next(), Some("# dal"));
 }
 
 #[test]

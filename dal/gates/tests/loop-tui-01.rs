@@ -7,7 +7,6 @@
 mod support;
 
 use std::{
-    collections::BTreeMap,
     error::Error,
     path::{Path, PathBuf},
 };
@@ -43,7 +42,7 @@ async fn tui_backend_snapshots_inline_and_fullscreen() -> Result<(), Box<dyn Err
         config: &config,
     })?;
     let env = Env {
-        vars: BTreeMap::new(),
+        vars: support::captured_shell_vars(),
         cwd: workspace.path().to_path_buf(),
         sandbox_helper: None,
     };
@@ -127,6 +126,16 @@ fn render_buffer(
     for path in [data, workspace] {
         if let Some(name) = Path::new(path).file_name().and_then(|name| name.to_str()) {
             text = text.replace(name, "[root]");
+        }
+    }
+    // The status row truncates the workspace path to its leading cells, so a
+    // temp-dir spelling deeper than that never reaches the path masks above.
+    // Fold every head the truncation can leave back to the same root token.
+    if let Some(temp) = std::env::temp_dir().to_str().map(str::to_owned) {
+        for head in (8..=temp.len()).rev() {
+            if temp.is_char_boundary(head) {
+                text = text.replace(&temp[..head], "[root]");
+            }
         }
     }
     for prefix in ["/tmp/dalgon-gates-", "dalgon-gates-"] {

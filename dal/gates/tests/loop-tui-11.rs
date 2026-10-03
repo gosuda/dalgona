@@ -27,7 +27,10 @@ mod support;
 #[path = "support/vt.rs"]
 mod vt;
 
-use std::{error::Error, time::Duration};
+use std::{
+    error::Error,
+    time::{Duration, Instant},
+};
 
 use pty::{PtyProcess, dalgon_command};
 use support::TestDir;
@@ -59,20 +62,47 @@ fn quit_cleanly(terminal: &mut PtyProcess) -> TestResult {
     Err("dalgon stayed alive after repeated submit/Ctrl-D quit attempts".into())
 }
 
-/// Types `text`, submits it, and waits for the scripted reply, leaving the
-/// settled frame available on the recorder.
+/// Types `text`, submits it, waits for the scripted reply, then waits for the
+/// status row to idle. A mid-turn capture can hold the reply twice — once in
+/// committed transcript rows and once in the live block's assistant text — so
+/// row counts are only stable once the turn state clears.
 fn prompt_and_remember(
     terminal: &mut PtyProcess,
-    recorder: &mut VtRecorder,
     text: &str,
     reply: &str,
-) -> TestResult {
+) -> Result<VtRecorder, Box<dyn Error + Send + Sync>> {
     terminal.write(text.as_bytes())?;
     terminal.collect_for(SETTLE)?;
     terminal.write(b"\r")?;
     terminal.wait_for(reply.as_bytes(), SPAWN)?;
-    recorder.feed(terminal.output());
-    Ok(())
+    let deadline = Instant::now() + SPAWN;
+    // Busy markers can scroll off before the live block clears, so also
+    // require the output stream to go quiet: three consecutive polls with
+    // no new bytes and no busy status mean the frame is settled.
+    let mut last_len = 0usize;
+    let mut stable = 0usize;
+    loop {
+        terminal.collect_for(Duration::from_millis(60))?;
+        let output = terminal.output();
+        let mut probe = VtRecorder::new(100, 30);
+        probe.feed(output);
+        let busy = probe.screen_rows().iter().any(|row| {
+            let row = row.trim_start();
+            row.starts_with("* ") || row.contains(dal_tui::copy::ids::STATE_WAITING)
+        });
+        if !busy && output.len() == last_len {
+            stable += 1;
+            if stable >= 3 {
+                return Ok(probe);
+            }
+        } else {
+            stable = 0;
+            last_len = output.len();
+        }
+        if Instant::now() >= deadline {
+            return Ok(probe);
+        }
+    }
 }
 
 /// The full screen plus scrollback as one searchable text.
@@ -97,9 +127,8 @@ fn decomposed_jamo_reply_wraps_whole_syllables() -> TestResult {
     command.args(["--screen", "inline"]);
     let mut terminal = PtyProcess::spawn(&mut command, 100, 30)?;
     terminal.wait_for(dal_tui::copy::ids::COMPOSER_PLACEHOLDER.as_bytes(), SPAWN)?;
-    let mut recorder = VtRecorder::new(100, 30);
     // The needle sits inside the first wrapped row.
-    prompt_and_remember(&mut terminal, &mut recorder, "go", &syllable.repeat(20))?;
+    let recorder = prompt_and_remember(&mut terminal, "go", &syllable.repeat(20))?;
     let text = all_text(&recorder);
     let jamo_rows = text
         .lines()
@@ -141,8 +170,7 @@ fn ime_style_jamo_backspace_removes_whole_syllable() -> TestResult {
     // Fresh text proves the buffer is truly empty.
     terminal.write(b"a")?;
     terminal.collect_for(SETTLE)?;
-    let mut recorder = VtRecorder::new(100, 30);
-    prompt_and_remember(&mut terminal, &mut recorder, "", "done")?;
+    let recorder = prompt_and_remember(&mut terminal, "", "done")?;
     let text = all_text(&recorder);
     assert!(
         text.lines().any(|line| line.trim_end() == "> a"),
@@ -177,8 +205,7 @@ fn ambiguous_chars_widen_under_korean_locale() -> TestResult {
         .args(["--screen", "inline"]);
     let mut terminal = PtyProcess::spawn(&mut cjk, 100, 30)?;
     terminal.wait_for(dal_tui::copy::ids::COMPOSER_PLACEHOLDER.as_bytes(), SPAWN)?;
-    let mut recorder = VtRecorder::new(100, 30);
-    prompt_and_remember(&mut terminal, &mut recorder, "go", needle)?;
+    let recorder = prompt_and_remember(&mut terminal, "go", needle)?;
     let rows = dotted_rows(&recorder);
     assert_eq!(
         rows,
@@ -200,8 +227,7 @@ fn compatibility_jamo_replies_measure_two_cells() -> TestResult {
     command.args(["--screen", "inline"]);
     let mut terminal = PtyProcess::spawn(&mut command, 100, 30)?;
     terminal.wait_for(dal_tui::copy::ids::COMPOSER_PLACEHOLDER.as_bytes(), SPAWN)?;
-    let mut recorder = VtRecorder::new(100, 30);
-    prompt_and_remember(&mut terminal, &mut recorder, "go", &"ㄱ".repeat(20))?;
+    let recorder = prompt_and_remember(&mut terminal, "go", &"ㄱ".repeat(20))?;
     let text = all_text(&recorder);
     let jamo_rows = text.lines().filter(|line| line.contains('ㄱ')).count();
     assert_eq!(
@@ -222,8 +248,7 @@ fn mixed_hangul_prompt_echoes_without_replacement() -> TestResult {
     // Precomposed + decomposed + halfwidth jamo in one prompt: the echoed
     // transcript must carry every codepoint intact.
     let prompt = "한\u{1112}\u{1161}\u{11ab}\u{ffa1}ok";
-    let mut recorder = VtRecorder::new(100, 30);
-    prompt_and_remember(&mut terminal, &mut recorder, prompt, "done")?;
+    let recorder = prompt_and_remember(&mut terminal, prompt, "done")?;
     let text = all_text(&recorder);
     assert!(
         text.contains(prompt),

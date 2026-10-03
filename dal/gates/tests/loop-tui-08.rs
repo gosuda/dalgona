@@ -51,10 +51,11 @@ fn remote_tui_reattaches_after_dropped_websocket() -> Result<(), Box<dyn Error +
     let mut server_command = dalgon_command_with_fixture(server_home.path(), &fixture)?;
     let port = free_port()?;
     let port_text = port.to_string();
+    let serve_log = server_home.path().join("serve.stderr");
     server_command
         .args(["serve", "--bind", "127.0.0.1", "--port", &port_text])
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(Stdio::from(std::fs::File::create(&serve_log)?));
     let mut server = ServeChild::spawn(server_command.spawn()?);
     wait_for_listener(port, Duration::from_secs(10))?;
 
@@ -70,10 +71,13 @@ fn remote_tui_reattaches_after_dropped_websocket() -> Result<(), Box<dyn Error +
         &connect_addr,
     ]);
     let mut terminal = PtyProcess::spawn(&mut client_command, 100, 30)?;
-    terminal.wait_for(
+    if let Err(error) = terminal.wait_for(
         dal_tui::copy::ids::COMPOSER_PLACEHOLDER.as_bytes(),
         Duration::from_secs(10),
-    )?;
+    ) {
+        let log = std::fs::read_to_string(&serve_log).unwrap_or_default();
+        return Err(format!("{error}\nserve stderr:\n{log}").into());
+    }
     terminal.collect_for(Duration::from_millis(5))?;
     terminal.write(b"start the remote turn\r")?;
     terminal.wait_for(b"Allow this command?", Duration::from_secs(15))?;
@@ -322,6 +326,11 @@ fn proxy_loop(
             }
             Err(_) => return,
         };
+        // BSD accepts inherit the listener's O_NONBLOCK; the relays block on
+        // reads and must not see the flag.
+        if client.set_nonblocking(false).is_err() {
+            continue;
+        }
         let Ok(upstream) = TcpStream::connect(target) else {
             continue;
         };

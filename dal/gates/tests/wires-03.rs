@@ -5,7 +5,7 @@
 )]
 mod support;
 
-use std::{collections::BTreeMap, error::Error, path::PathBuf};
+use std::{error::Error, path::PathBuf};
 
 use dal_agent::{Delivery, Env, SessionRef};
 use dal_core::{
@@ -41,7 +41,7 @@ async fn unknown_update_variant_maps_to_fallback_and_turn_continues()
         config: &config,
     })?;
     let env = Env {
-        vars: BTreeMap::new(),
+        vars: support::captured_shell_vars(),
         cwd: workspace.path().to_path_buf(),
         sandbox_helper: None,
     };

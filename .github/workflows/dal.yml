@@ -60,6 +60,11 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: false
+      - name: Report the file-descriptor ceiling
+        if: runner.os == 'macOS'
+        run: |
+          ulimit -Sn; ulimit -Hn
+          sysctl kern.maxfiles kern.maxfilesperproc || true
       - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
         with:
           tool: cargo-semver-checks@0.50.0

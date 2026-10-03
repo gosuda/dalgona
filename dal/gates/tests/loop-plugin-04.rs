@@ -92,7 +92,7 @@ async fn undeclared_net_operation_is_denied_without_grant_request()
         config: &config,
     })?;
     let env = Env {
-        vars: BTreeMap::new(),
+        vars: support::captured_shell_vars(),
         cwd: workspace.path().to_path_buf(),
         sandbox_helper: None,
     };
@@ -169,6 +169,7 @@ fn headless_print_denies_exec_without_prompt() -> Result<(), Box<dyn Error + Sen
     let output = Command::new(dalgon_binary("dalgon")?)
         .current_dir(print.path())
         .env_clear()
+        .envs(support::captured_shell_vars())
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("XDG_DATA_HOME", &data_home)
@@ -219,7 +220,7 @@ async fn no_controller_denies_plugin_exec_without_opening_request()
         config: &config,
     })?;
     let env = Env {
-        vars: BTreeMap::new(),
+        vars: support::captured_shell_vars(),
         cwd: workspace.path().to_path_buf(),
         sandbox_helper: None,
     };

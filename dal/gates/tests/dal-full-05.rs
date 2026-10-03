@@ -5,7 +5,7 @@
 )]
 mod support;
 
-use std::{collections::BTreeMap, error::Error, path::PathBuf, time::Duration};
+use std::{error::Error, path::PathBuf, time::Duration};
 
 use dal_agent::{Env, Product, SessionRef};
 use dal_core::{
@@ -34,7 +34,7 @@ async fn sdk_scripted_path_returns_assistant_text_and_exits()
         bundled: Vec::new(),
     };
     let env = Env {
-        vars: BTreeMap::new(),
+        vars: support::captured_shell_vars(),
         cwd: workspace.path().to_path_buf(),
         sandbox_helper: None,
     };

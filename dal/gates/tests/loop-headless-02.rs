@@ -5,7 +5,7 @@
 )]
 mod support;
 
-use std::{collections::BTreeMap, error::Error, fs, path::PathBuf, time::Duration};
+use std::{error::Error, fs, path::PathBuf, time::Duration};
 
 use dal_agent::{Delivery, Env, SessionRef};
 use dal_core::{
@@ -41,7 +41,7 @@ async fn cancel_mid_exec_kills_grandchild_and_ends_once() -> Result<(), Box<dyn 
         config: &config,
     })?;
     let env = Env {
-        vars: BTreeMap::new(),
+        vars: support::captured_shell_vars(),
         cwd: workspace.path().to_path_buf(),
         sandbox_helper: None,
     };

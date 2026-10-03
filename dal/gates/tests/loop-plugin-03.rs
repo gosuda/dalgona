@@ -6,7 +6,7 @@
 )]
 mod support;
 
-use std::{collections::BTreeMap, error::Error, fs, path::PathBuf};
+use std::{error::Error, fs, path::PathBuf};
 
 use dal_agent::{Delivery, Env, SessionRef};
 use dal_core::{Command, Config, ConfigProduct, Expect, Part, Reply, UpdateKind, Workspace};
@@ -45,7 +45,7 @@ async fn failed_reload_preserves_live_generation() -> Result<(), Box<dyn Error +
         config: &config,
     })?;
     let env = Env {
-        vars: BTreeMap::new(),
+        vars: support::captured_shell_vars(),
         cwd: workspace.path().to_path_buf(),
         sandbox_helper: None,
     };
