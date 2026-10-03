@@ -69,6 +69,7 @@ fn read_pid_until(path: &Path) -> Result<Option<u32>, StoreError> {
         let bytes = match fs::read(path) {
             Ok(bytes) => bytes,
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(source) if lock_read_violation(&source) => return Ok(None),
             Err(source) => return Err(util::io_err(path, source)),
         };
         let current = parse_pid(&bytes);
@@ -82,6 +83,14 @@ fn read_pid_until(path: &Path) -> Result<Option<u32>, StoreError> {
         }
         thread::sleep(PID_POLL.min(deadline - now));
     }
+}
+
+/// An exclusive `LockFileEx` lock makes the held byte range unreadable on
+/// Windows, so a contended acquire can never observe the owner pid there.
+/// POSIX advisory locks keep the file readable, so this never matches there.
+fn lock_read_violation(source: &std::io::Error) -> bool {
+    const ERROR_LOCK_VIOLATION: i32 = 33;
+    cfg!(windows) && source.raw_os_error() == Some(ERROR_LOCK_VIOLATION)
 }
 
 fn parse_pid(bytes: &[u8]) -> Option<u32> {
@@ -153,24 +162,42 @@ mod tests {
             panic!("first lock acquisition must succeed")
         };
         let path = dir.0.join("lock");
-        let before = fs::read(&path).expect("read owner pid");
 
         let Err(error) = LockGuard::acquire(&dir.0.join("lock"), id) else {
             panic!("second acquisition must fail")
         };
 
-        assert_eq!(
-            error.to_string(),
-            format!("session {id} is open in process {}", std::process::id())
-        );
-        assert!(matches!(
-            &error,
-            StoreError::Locked { session, pid: Some(pid) }
-                if *session == id && *pid == std::process::id()
-        ));
-        assert_eq!(fs::read(path).expect("read unchanged owner pid"), before);
+        #[cfg(unix)]
+        {
+            let before = fs::read(&path).expect("read owner pid");
+            assert_eq!(
+                error.to_string(),
+                format!("session {id} is open in process {}", std::process::id())
+            );
+            assert!(matches!(
+                &error,
+                StoreError::Locked { session, pid: Some(pid) }
+                    if *session == id && *pid == std::process::id()
+            ));
+            assert_eq!(fs::read(path).expect("read unchanged owner pid"), before);
+        }
+        #[cfg(windows)]
+        {
+            // A held lock file is unreadable on Windows, so contention
+            // reports the owner as unknown instead of leaking the pid it
+            // cannot read.
+            assert_eq!(
+                error.to_string(),
+                format!("session {id} is open in another process")
+            );
+            assert!(matches!(
+                &error,
+                StoreError::Locked { session, pid: None } if *session == id
+            ));
+        }
     }
 
+    #[cfg(unix)]
     #[test]
     fn contended_lock_without_pid_reports_unknown_process() {
         let dir = TestDir::new();
@@ -210,10 +237,21 @@ mod tests {
             LockGuard::acquire(&dir.0.join("lock"), id).expect("lock released after guard drop");
 
         assert!(path.exists());
+        #[cfg(unix)]
         assert_eq!(
             fs::read(path).expect("new owner pid"),
             format!("{}\n", std::process::id()).as_bytes()
         );
+        #[cfg(windows)]
+        {
+            // The held lock file is unreadable on Windows; the pid text is
+            // verifiable once the new guard also drops.
+            drop(_next);
+            assert_eq!(
+                fs::read(&path).expect("new owner pid"),
+                format!("{}\n", std::process::id()).as_bytes()
+            );
+        }
         assert!(!stale_pid.is_empty());
     }
 }
