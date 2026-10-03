@@ -4,14 +4,15 @@
 //! A session is pinned by its UUID to one shard. The actor-facing [`Lane`]
 //! carries only a slot token. A queued append moves one complete batch to that
 //! shard in two durability phases: the worker writes each blob temp and hands
-//! the ordered publish steps to the per-shard syncer, and only once every
+//! the ordered publish steps to the shard's syncer pool, and only once every
 //! blob the batch references is durable does a FIFO control job bring the
 //! batch back so the worker can write it and stage the journal sync. Journal
 //! bytes therefore never precede the blobs they name, while a slow filesystem
-//! still stalls only the syncer, never the worker's FIFO, so one convoyed
-//! `fsync` cannot starve unrelated lanes (R-perf). One lane admits at most
-//! one unacknowledged batch, so cancellation cannot lose a receipt or reorder
-//! a session's appends.
+//! still stalls only one syncer lane, never the worker's FIFO, so one
+//! convoyed `fsync` cannot starve unrelated lanes (R-perf). One lane admits
+//! at most one unacknowledged batch, so cancellation cannot lose a receipt
+//! or reorder a session's appends, and same-journal sync jobs are always
+//! sequential whichever syncer lane they take.
 
 use std::{
     cell::Cell,
@@ -38,6 +39,13 @@ use crate::{
 /// The number of process-owned journal shard threads.
 pub(crate) const SHARD_COUNT: usize = 4;
 const _: () = assert!(SHARD_COUNT == 4);
+/// Syncer threads per shard. Filesystem sync latency is the throughput cap
+/// on a slow volume, so the shard set widens here instead of widening the
+/// worker count: a lane never has two staged jobs in flight, which makes
+/// same-journal ordering free at any pool width, and the total thread count
+/// stays a constant `4 + 4 * SYNCERS_PER_SHARD` no matter how many sessions
+/// are open.
+const SYNCERS_PER_SHARD: usize = 8;
 /// The maximum queued requests per shard, excluding the request being run.
 pub(crate) const QUEUE_CAPACITY: usize = 256;
 /// Queue admission bound: a saturated shard fails the append loudly instead
@@ -313,11 +321,11 @@ fn wake_all(wakers: Vec<Waker>) {
 struct Shard {
     queue: Arc<Queue>,
     thread: Option<JoinHandle<()>>,
-    syncer: Option<JoinHandle<()>>,
+    syncers: Vec<JoinHandle<()>>,
 }
 
-/// One staged durable operation finished on the per-shard syncer. Steps run
-/// in queue order so the journal fsync lands after every blob publish its
+/// One staged durable operation finished on a shard syncer. Steps run in
+/// queue order so the journal fsync lands after every blob publish its
 /// batch references.
 enum SyncStep {
     /// A staged blob publish: temp sync, rename, and directory sync.
@@ -450,10 +458,10 @@ impl Drop for RegistrationReply {
     }
 }
 
-/// Owner of exactly four journal shard threads.
+/// Owner of the journal shard workers and their syncer pools.
 ///
 /// Each worker owns its assigned physical journals. Dropping this owner closes
-/// admission, drains accepted requests, and joins all four threads. Lanes that
+/// admission, drains accepted requests, and joins every thread. Lanes that
 /// outlive it receive a wrapped [`JournalError::ShardClosed`].
 #[must_use]
 pub(crate) struct Shards {
@@ -467,8 +475,8 @@ static SHARED: Mutex<Option<Arc<Shards>>> = Mutex::new(None);
 ///
 /// A `Store` is minted per session, so a per-store shard set multiplies
 /// threads by session count and the OS thread budget becomes the session
-/// budget. One shared set keeps thread ownership at four workers plus four
-/// syncers no matter how many sessions are open.
+/// budget. One shared set keeps thread ownership constant — four workers
+/// plus their bounded syncer pools — no matter how many sessions are open.
 ///
 /// # Errors
 /// Returns [`JournalError::Io`] when the worker threads cannot spawn or the
@@ -490,7 +498,8 @@ pub(crate) fn shared() -> Result<Arc<Shards>, JournalError> {
 }
 
 impl Shards {
-    /// Starts exactly four standard-thread journal workers.
+    /// Starts exactly four standard-thread journal workers and each shard's
+    /// syncer pool.
     ///
     /// # Errors
     /// Returns [`JournalError::Io`] if the operating system refuses a worker
@@ -499,21 +508,33 @@ impl Shards {
         let mut shards: Vec<Shard> = Vec::with_capacity(SHARD_COUNT);
         for index in 0..SHARD_COUNT {
             let queue = Arc::new(Queue::new());
-            let (sync_outbox, sync_inbox) = std::sync::mpsc::channel::<SyncJob>();
+            let mut outboxes = Vec::with_capacity(SYNCERS_PER_SHARD);
+            let mut sync_inboxes = Vec::with_capacity(SYNCERS_PER_SHARD);
+            for _lane in 0..SYNCERS_PER_SHARD {
+                let (outbox, inbox) = std::sync::mpsc::channel::<SyncJob>();
+                outboxes.push(outbox);
+                sync_inboxes.push(inbox);
+            }
+            let sync = SyncFan { outboxes };
             let worker_queue = Arc::clone(&queue);
             let spawned = (|| {
                 let thread = thread::Builder::new()
                     .name(format!("dal-journal-{index}"))
                     .spawn(move || {
                         let _stopped = WorkerStopped(Arc::clone(&worker_queue));
-                        run(worker_queue, sync_outbox);
+                        run(&worker_queue, &sync);
                     })?;
-                let syncer = thread::Builder::new()
-                    .name(format!("dal-journal-sync-{index}"))
-                    .spawn(move || run_syncer(&sync_inbox))?;
-                Ok::<_, std::io::Error>((thread, syncer))
+                let mut syncers = Vec::with_capacity(SYNCERS_PER_SHARD);
+                for (lane, inbox) in sync_inboxes.into_iter().enumerate() {
+                    syncers.push(
+                        thread::Builder::new()
+                            .name(format!("dal-journal-sync-{index}-{lane}"))
+                            .spawn(move || run_syncer(&inbox))?,
+                    );
+                }
+                Ok::<_, std::io::Error>((thread, syncers))
             })();
-            let (thread, syncer) = match spawned {
+            let (thread, syncers) = match spawned {
                 Ok(pair) => pair,
                 Err(source) => {
                     for shard in &shards {
@@ -523,7 +544,7 @@ impl Shards {
                         if let Some(thread) = shard.thread.take() {
                             drop(thread.join());
                         }
-                        if let Some(syncer) = shard.syncer.take() {
+                        for syncer in shard.syncers.drain(..) {
                             drop(syncer.join());
                         }
                     }
@@ -537,7 +558,7 @@ impl Shards {
             shards.push(Shard {
                 queue,
                 thread: Some(thread),
-                syncer: Some(syncer),
+                syncers,
             });
         }
         Ok(Self { shards })
@@ -620,12 +641,12 @@ impl Drop for Shards {
             shard.queue.close();
         }
         for shard in &mut self.shards {
-            // Joining the worker drops its sync outbox, which ends the
-            // syncer's recv loop after every staged sync resolves.
+            // Joining the worker drops its sync outboxes, which ends every
+            // syncer's recv loop after its staged syncs resolve.
             if let Some(thread) = shard.thread.take() {
                 drop(thread.join());
             }
-            if let Some(syncer) = shard.syncer.take() {
+            for syncer in shard.syncers.drain(..) {
                 drop(syncer.join());
             }
         }
@@ -807,12 +828,20 @@ impl Drop for WorkerStopped {
     }
 }
 
+/// Fan-out across one shard's syncer pool. Jobs for one journal always take
+/// the same lane, which keeps their FIFO order without a second queue.
+struct SyncFan {
+    outboxes: Vec<std::sync::mpsc::Sender<SyncJob>>,
+}
+
+impl SyncFan {
+    fn send(&self, slot: usize, job: SyncJob) -> Result<(), std::sync::mpsc::SendError<SyncJob>> {
+        self.outboxes[slot % self.outboxes.len()].send(job)
+    }
+}
+
 /// The worker-local slot table is the sole owner of this shard's journals.
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "the shard thread owns its queue for its lifetime"
-)]
-fn run(queue: Arc<Queue>, sync: std::sync::mpsc::Sender<SyncJob>) {
+fn run(queue: &Arc<Queue>, sync: &SyncFan) {
     let mut journals: Vec<Option<(Journal, Option<PathBuf>)>> = Vec::new();
     let mut free = Vec::new();
     while let Some(job) = queue.pop() {
@@ -847,7 +876,7 @@ fn run(queue: Arc<Queue>, sync: std::sync::mpsc::Sender<SyncJob>) {
                 };
                 if blobs.is_empty() {
                     // Nothing to publish: the batch can write immediately.
-                    journalize(&mut journals, &queue, &sync, call);
+                    journalize(&mut journals, queue, sync, call);
                     continue;
                 }
                 // Phase one: write blob temps on the worker and hand the
@@ -865,9 +894,9 @@ fn run(queue: Arc<Queue>, sync: std::sync::mpsc::Sender<SyncJob>) {
                             born: std::time::Instant::now(),
                             steps,
                             then: Then::Journalize(call),
-                            queue: Arc::clone(&queue),
+                            queue: Arc::clone(queue),
                         };
-                        if let Err(unsent) = sync.send(job) {
+                        if let Err(unsent) = sync.send(slot, job) {
                             // The syncer died: finish the publishes inline,
                             // then the journal write, on the worker.
                             let job = unsent.0;
@@ -876,7 +905,7 @@ fn run(queue: Arc<Queue>, sync: std::sync::mpsc::Sender<SyncJob>) {
                                 continue;
                             };
                             match finish_steps(job.steps) {
-                                Ok(()) => journalize(&mut journals, &queue, &sync, call),
+                                Ok(()) => journalize(&mut journals, queue, sync, call),
                                 Err(failure) => {
                                     let _ = call.done.send(Err(failure));
                                 }
@@ -888,7 +917,7 @@ fn run(queue: Arc<Queue>, sync: std::sync::mpsc::Sender<SyncJob>) {
                     }
                 }
             }
-            Job::BlobsPublished(call) => journalize(&mut journals, &queue, &sync, call),
+            Job::BlobsPublished(call) => journalize(&mut journals, queue, sync, call),
             Job::Damaged { slot } => {
                 if let Some((journal, _)) = journals.get_mut(slot).and_then(Option::as_mut) {
                     journal.mark_damaged();
@@ -916,7 +945,7 @@ fn run(queue: Arc<Queue>, sync: std::sync::mpsc::Sender<SyncJob>) {
 fn journalize(
     journals: &mut [Option<(Journal, Option<PathBuf>)>],
     queue: &Arc<Queue>,
-    sync: &std::sync::mpsc::Sender<SyncJob>,
+    sync: &SyncFan,
     call: AppendCall,
 ) {
     let AppendCall {
@@ -955,7 +984,7 @@ fn journalize(
                 },
                 queue: Arc::clone(queue),
             };
-            if let Err(unsent) = sync.send(job) {
+            if let Err(unsent) = sync.send(slot, job) {
                 // The syncer died: resolve the receipt inline so the lane
                 // still learns the durable outcome.
                 let job = unsent.0;
