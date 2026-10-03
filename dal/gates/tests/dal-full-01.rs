@@ -1145,18 +1145,14 @@ fn resident_set_bytes() -> io::Result<u64> {
     }
 }
 
-/// Captures the variables the Windows shell ladder needs to find Git Bash;
-/// other platforms keep an empty snapshot.
+/// Captures the variables the Windows shell ladder and spawned tools need;
+/// other platforms keep an empty snapshot. Windows console tools read
+/// SystemRoot, TEMP, COMSPEC, and PSModulePath during startup, so the
+/// snapshot carries the whole runner environment.
 fn captured_shell_vars() -> BTreeMap<std::ffi::OsString, std::ffi::OsString> {
     #[cfg(windows)]
     {
-        std::env::vars_os()
-            .filter(|(key, _)| {
-                key.to_str().is_some_and(|key| {
-                    key.eq_ignore_ascii_case("path") || key.starts_with("ProgramFiles")
-                })
-            })
-            .collect()
+        std::env::vars_os().collect()
     }
     #[cfg(not(windows))]
     {
