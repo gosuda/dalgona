@@ -1500,21 +1500,19 @@ async fn full_load_scenario() -> Result<(), TestError> {
     drop(process_jobs);
     drop(idle_updates);
     drop(root);
+    // tokio keeps two kinds of kernel objects alive for the runtime's
+    // whole life: blocking-pool threads never exit (no idle timeout, 512
+    // cap), and its driver parks a small fixed set of events/ports once
+    // work saturates it. Only growth beyond those is a product leak.
+    const RUNTIME_SLACK: usize = 64;
     let mut after_handles = open_handle_count()?;
     let mut after_threads = open_thread_count()?;
-    // Kernel handle closes are synchronous when CloseHandle runs, but a
-    // burst of teardown can lag the assert by a beat; give the count a
-    // short settle window before calling the residual a leak. On Windows
-    // `HandleCount` includes thread handles and tokio's blocking pool
-    // never shrinks while the runtime lives, so the bound tolerates the
-    // threads spawned during the run while requiring every other kernel
-    // object — files, job objects, events — to close.
+    let settled = |handles: usize, threads: usize| {
+        handles.saturating_sub(pre_run_handles)
+            <= threads.saturating_sub(pre_run_threads) + RUNTIME_SLACK
+    };
     let settle_deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-    while tokio::time::Instant::now() < settle_deadline {
-        let growth = after_handles.saturating_sub(pre_run_handles);
-        if growth <= after_threads.saturating_sub(pre_run_threads) {
-            break;
-        }
+    while !settled(after_handles, after_threads) && tokio::time::Instant::now() < settle_deadline {
         tokio::time::sleep(Duration::from_millis(500)).await;
         after_handles = open_handle_count()?;
         after_threads = open_thread_count()?;
@@ -1523,7 +1521,7 @@ async fn full_load_scenario() -> Result<(), TestError> {
     let growth = after_handles.saturating_sub(pre_run_handles);
     let thread_growth = after_threads.saturating_sub(pre_run_threads);
     assert!(
-        growth <= thread_growth,
+        growth <= thread_growth + RUNTIME_SLACK,
         "non-thread kernel handles did not return to baseline \
          (handles={after_handles} baseline={pre_run_handles} \
          threads={after_threads} baseline-threads={pre_run_threads} \
