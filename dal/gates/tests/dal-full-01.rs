@@ -1094,6 +1094,25 @@ fn resident_set_bytes() -> io::Result<u64> {
     }
 }
 
+/// Captures the variables the Windows shell ladder needs to find Git Bash;
+/// other platforms keep an empty snapshot.
+fn captured_shell_vars() -> BTreeMap<std::ffi::OsString, std::ffi::OsString> {
+    #[cfg(windows)]
+    {
+        std::env::vars_os()
+            .filter(|(key, _)| {
+                key.to_str().is_some_and(|key| {
+                    key.eq_ignore_ascii_case("path") || key.starts_with("ProgramFiles")
+                })
+            })
+            .collect()
+    }
+    #[cfg(not(windows))]
+    {
+        BTreeMap::default()
+    }
+}
+
 fn open_handle_count() -> io::Result<usize> {
     #[cfg(unix)]
     {
@@ -1240,7 +1259,7 @@ async fn full_load_scenario() -> Result<(), TestError> {
     )?;
     let pre_run_handles = open_handle_count()?;
     let env = Env {
-        vars: BTreeMap::default(),
+        vars: captured_shell_vars(),
         cwd: workspace.as_path().to_path_buf(),
         sandbox_helper: None,
     };
@@ -1472,7 +1491,7 @@ async fn full_setup_for_actor_smoke(
         product,
         config,
         Env {
-            vars: BTreeMap::default(),
+            vars: captured_shell_vars(),
             cwd: workspace_dir,
             sandbox_helper: None,
         },
@@ -1945,7 +1964,12 @@ fn shuttle_actor_schedule() {
 
 #[cfg(not(all(windows, target_arch = "aarch64")))]
 fn shuttle_actor_state() -> ShuttleActorState {
-    let workspace = Workspace::new(PathBuf::from("/shuttle-workspace")).expect("Shuttle workspace");
+    let workspace = Workspace::new(if cfg!(windows) {
+        PathBuf::from("C:/shuttle-workspace")
+    } else {
+        PathBuf::from("/shuttle-workspace")
+    })
+    .expect("Shuttle workspace");
     let store = Store::new(PathBuf::from("/shuttle-data"), workspace, StoreProduct::Dal);
     let parent = SessionId::new_v7();
     let child = SessionId::new_v7();
