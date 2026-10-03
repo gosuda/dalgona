@@ -440,7 +440,7 @@ fn sync_parent(path: &Path) -> Result<(), TokenError> {
     #[cfg(windows)]
     {
         let _ = path;
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(windows))]
     {
