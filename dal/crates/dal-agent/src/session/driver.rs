@@ -52,6 +52,8 @@ const PARALLEL_READS: usize = 4;
 
 /// Bound for hook waits inside one turn.
 const TURN_DEADLINE: Duration = Duration::from_secs(600);
+/// A provider stream this quiet is a stall, not a slow model.
+const STREAM_IDLE_REPORT: Duration = Duration::from_secs(30);
 const COMPACTION_MIN_TOKENS: u64 = 1;
 const COMPACTION_KEEP_TOKENS: u64 = 20_000;
 
@@ -308,6 +310,17 @@ impl Driver {
         reason = "one provider request must preserve its ordered turn lifecycle"
     )]
     async fn infer(&mut self, turn: TurnId, params: RequestParams, batch: &TurnBatch) {
+        let session = self.deps.session;
+        let mut mark = std::time::Instant::now();
+        let lap = |step: &str, mark: &mut std::time::Instant| {
+            let taken = mark.elapsed();
+            if taken > std::time::Duration::from_millis(250) {
+                eprintln!(
+                    "[dal-agent] session {session:?} turn {turn} infer {step} took {taken:?}"
+                );
+            }
+            *mark = std::time::Instant::now();
+        };
         if let Some(route) = batch.model.clone() {
             let family = batch
                 .family
@@ -347,6 +360,7 @@ impl Driver {
                 return;
             }
         };
+        lap("resolve", &mut mark);
         {
             let state = self.turn(turn);
             state.model = Some((resolved.route.clone(), resolved.family));
@@ -395,12 +409,14 @@ impl Driver {
             (Arc::clone(&state.script), cancel)
         };
         let request = self.request(turn, &resolved, params).await;
+        lap("request", &mut mark);
         let deps = RequestDeps {
             session,
             host,
             script: Some(script),
         };
         let mut stream = infer_stream(&deps, request, &cancel).await;
+        lap("stream-open", &mut mark);
         let turn_info = TurnInfo::new(self.deps.session, turn);
         let generation = self.turn(turn).generation.clone();
         let mut watchers = Self::start_watchers(&generation, &turn_info);
@@ -415,6 +431,12 @@ impl Driver {
                 biased;
                 item = stream.next() => item,
                 () = cancel.cancelled() => return,
+                () = tokio::time::sleep(STREAM_IDLE_REPORT) => {
+                    eprintln!(
+                        "[dal-agent] session {session:?} turn {turn} provider stream idle > {STREAM_IDLE_REPORT:?}"
+                    );
+                    continue;
+                }
             };
             let Some(item) = item else { break };
             let event = match item {
