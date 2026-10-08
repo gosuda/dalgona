@@ -4,8 +4,9 @@ use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::super::support::{
-    HttpReply, WAIT, denied_result_text, gate_step, host_header, http, parse_reply, rig,
-    router_options, sse_data, text_step, tool_step, with_serve,
+    HttpReply, WAIT, ask_probe_extension, denied_result_text, gate_step, host_header, http,
+    parse_reply, result_text, rig, rig_with_extensions, router_options, sse_data, text_step,
+    tool_step, with_serve,
 };
 
 async fn post(addr: SocketAddr, path: &str, extra: &str, body: &str) -> HttpReply {
@@ -233,6 +234,32 @@ async fn a_router_session_denies_an_approval_at_once() {
             dal_core::parse_headless_denial(&denial).map(|(tool, _)| tool),
             Some("ask"),
             "{denial}"
+        );
+    })
+    .await;
+}
+
+/// An extension question raised in a router session takes its default at
+/// once: no client of the router can answer, so nothing waits for the
+/// question's time limit.
+#[tokio::test]
+async fn a_router_session_defaults_an_extension_question_at_once() {
+    let steps = [tool_step("c1", "probe_ask"), text_step(&["done"], 1, 1)];
+    let rig = rig_with_extensions(&steps, "", vec![ask_probe_extension()]).await;
+    with_serve(&rig, router_options(&rig), async |addr| {
+        let reply = post(
+            addr,
+            "/v1/responses",
+            "",
+            r#"{"model":"dalgon/normal","input":"ask"}"#,
+        )
+        .await;
+        assert_eq!(reply.status, 200, "{reply:?}");
+        let id = reply.json()["id"].as_str().expect("response id").to_owned();
+        let (session, _) = session_of(&id);
+        assert_eq!(
+            result_text(&rig, session, "probe_ask", false).await,
+            "default"
         );
     })
     .await;

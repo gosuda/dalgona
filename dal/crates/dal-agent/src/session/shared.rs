@@ -231,24 +231,34 @@ impl Shared {
         let view = inner.projection.snapshot(args);
         (view, entries)
     }
-    /// Reports whether a live answering subscriber watches this session.
-    /// Listen-only subscribers observe updates but cannot resolve approval
-    /// requests, so they never count here.
-    pub(crate) fn attached(&self) -> bool {
+    /// Reports whether a live approval-answering subscriber watches this
+    /// session. Listen-only subscribers observe updates but cannot resolve
+    /// approval requests, so they never count here.
+    pub(crate) fn attached_approval(&self) -> bool {
+        self.attached(Subscriber::answers_approval)
+    }
+
+    /// Reports whether a live ask-answering subscriber watches this session.
+    /// Listen-only subscribers observe updates but cannot answer extension
+    /// questions, so they never count here.
+    pub(crate) fn attached_ask(&self) -> bool {
+        self.attached(Subscriber::answers_ask)
+    }
+
+    fn attached(&self, answers: fn(&Arc<SubscriberShared>) -> bool) -> bool {
         self.inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .subscribers
             .iter()
-            .any(|slot| {
-                Subscriber::upgrade(slot).is_some_and(|shared| Subscriber::answers(&shared))
-            })
+            .any(|slot| Subscriber::upgrade(slot).is_some_and(|shared| answers(&shared)))
     }
 
     pub(crate) fn subscribe(
         self: &Arc<Self>,
         after: Option<(Gen, Seq)>,
-        answers: bool,
+        approval: bool,
+        ask: bool,
     ) -> Arc<SubscriberShared> {
         let mut inner = self
             .inner
@@ -277,7 +287,7 @@ impl Shared {
             position.r#gen,
             position.seq.unwrap_or(Seq::new(NonZeroU64::MIN)),
         );
-        let subscriber = Subscriber::with_backlog(backlog, current, answers);
+        let subscriber = Subscriber::with_backlog(backlog, current, approval, ask);
         let port = subscriber.port();
         inner.subscribers.push(subscriber.downgrade());
         port

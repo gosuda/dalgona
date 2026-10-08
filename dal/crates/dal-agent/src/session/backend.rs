@@ -322,7 +322,7 @@ impl Backend {
         let mut current = self.session;
         for _ in 0..=sessions.len() {
             let entry = sessions.get(&current)?;
-            if entry.shared.attached() {
+            if entry.shared.attached_approval() {
                 return Some((Arc::clone(&entry.broker), Arc::clone(&entry.shared)));
             }
             current = entry.parent?;
@@ -650,7 +650,7 @@ impl SessionBackend for Backend {
     }
 
     fn answerer_attached(&self) -> bool {
-        self.shared.attached()
+        self.shared.attached_ask()
     }
 
     fn notify(&self, notice: Notice) {

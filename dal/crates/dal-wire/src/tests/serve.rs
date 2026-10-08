@@ -5,8 +5,8 @@ use sonic_rs::JsonValueTrait;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::support::{
-    HttpReply, denied_result_text, host_header, http, parse_reply, rig, router_options, text_step,
-    tool_step, with_serve,
+    HttpReply, ask_probe_extension, denied_result_text, host_header, http, parse_reply,
+    result_text, rig, rig_with_extensions, router_options, text_step, tool_step, with_serve,
 };
 use crate::error::ServeError;
 #[cfg(unix)]
@@ -307,6 +307,40 @@ async fn an_a2a_session_denies_an_approval_at_once() {
             dal_core::parse_headless_denial(&denial).map(|(tool, _)| tool),
             Some("ask"),
             "{denial}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn an_a2a_session_defaults_an_extension_question_at_once() {
+    let steps = [tool_step("c1", "probe_ask"), text_step(&["done"], 1, 1)];
+    let rig = rig_with_extensions(&steps, "", vec![ask_probe_extension()]).await;
+    let mut options = router_options(&rig);
+    options.a2a = true;
+    with_serve(&rig, options, async |addr| {
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"SendMessage","params":{"message":{"role":"ROLE_USER","messageId":"m1","parts":[{"text":"ask"}]}}}"#;
+        let reply = http(
+            addr,
+            &format!(
+                "POST /a2a HTTP/1.1\r\n{}\r\ncontent-type: application/json\r\na2a-version: 1.0",
+                host_header(addr)
+            ),
+            body,
+        )
+        .await;
+        assert_eq!(reply.status, 200, "{reply:?}");
+        let json = reply.json();
+        let task = &json["result"]["task"];
+        assert_eq!(
+            task["status"]["state"].as_str(),
+            Some("TASK_STATE_COMPLETED"),
+            "{json}"
+        );
+        let context = task["contextId"].as_str().expect("context id");
+        assert_eq!(
+            result_text(&rig, context, "probe_ask", false).await,
+            "default"
         );
     })
     .await;

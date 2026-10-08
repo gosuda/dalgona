@@ -1228,7 +1228,7 @@ pub(crate) async fn direct_call_seeded(backend: &Backend, seed: NestedCall) -> T
             (
                 broker.unwrap_or_else(|| Arc::clone(backend.broker())),
                 shared.unwrap_or_else(|| Arc::clone(backend.shared())),
-                attached.unwrap_or_else(|| backend.shared().attached()),
+                attached.unwrap_or_else(|| backend.shared().attached_approval()),
             )
         },
         |(broker, shared)| (broker, shared, true),

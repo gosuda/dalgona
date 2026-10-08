@@ -9,6 +9,7 @@ use crate::transport::MemoryTransport;
 
 mod auth;
 mod backpressure;
+mod capabilities;
 mod concurrency;
 mod drain;
 mod foreign;

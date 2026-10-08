@@ -47,6 +47,15 @@ pub(crate) struct Conn {
     pub client: dal_core::ClientId,
     /// Negotiated capability names.
     pub caps: Vec<String>,
+    /// Whether the client declared the `approval` answerer role in
+    /// `initialize`. Read from the raw posted list: the protocol enabled
+    /// set keeps only method capabilities, so this never appears in the
+    /// `initialize` reply.
+    pub answer_approval: bool,
+    /// Whether the client declared the `ask` answerer role in `initialize`,
+    /// spelled `ask` or `question`. Read from the raw posted list, never
+    /// echoed in the reply.
+    pub answer_ask: bool,
     /// Sessions touched by this connection; dropping releases the holds.
     pub agents: HashMap<dal_core::SessionId, Agent>,
     /// Active session subscriptions: generation fence plus cancel token.
@@ -65,6 +74,8 @@ impl Conn {
             initialized: false,
             client,
             caps: Vec::new(),
+            answer_approval: false,
+            answer_ask: false,
             agents: HashMap::new(),
             subs: HashMap::new(),
             host_sub: None,
@@ -475,9 +486,18 @@ async fn initialize(state: &Arc<Mutex<Conn>>, params: &Value) -> Result<Value, E
         .unwrap_or_default();
     let negotiated = negotiate_capabilities(&requested);
     let name = crate::protocol::client_name(params, "rpc");
+    let answer_approval = requested.iter().any(|name| name == "approval");
+    // The ask role accepts two spellings, `ask` and `question`. Either
+    // declaration grants the role; capability-gated methods ignore both,
+    // so the `initialize` reply never echoes them.
+    let answer_ask = requested
+        .iter()
+        .any(|name| name == "ask" || name == "question");
     let mut locked = state.lock().await;
     locked.client = mint_client_id(&name);
     locked.caps.clone_from(&negotiated);
+    locked.answer_approval = answer_approval;
+    locked.answer_ask = answer_ask;
     locked.initialized = true;
     let client = locked.client.as_str().to_owned();
     drop(locked);

@@ -577,6 +577,49 @@ pub(super) async fn with_serve<F>(
     waited.expect("serve drains cleanly");
 }
 
+/// Reopens `session` and returns the text of its result for the tool `name`
+/// whose error flag equals `error`; panics with the journal entries when no
+/// such result exists.
+pub(super) async fn result_text(rig: &Rig, session: &str, name: &str, error: bool) -> String {
+    let agent = rig
+        .host
+        .open(
+            dal_agent::SessionRef::Resume {
+                key: session.into(),
+                workspace: rig.core_workspace(),
+            },
+            crate::protocol::mint_client_id("test"),
+        )
+        .await
+        .expect("the session reopens");
+    let view = agent
+        .view(dal_core::PageReq::default())
+        .expect("session view");
+    view.entries
+        .items
+        .iter()
+        .find_map(|entry| match &entry.kind {
+            dal_core::EntryKind::ToolResult {
+                name: tool,
+                error: failed,
+                parts,
+                ..
+            } if tool.as_ref() == name && *failed == error => {
+                parts.iter().find_map(|part| match part {
+                    dal_core::JournalPart::Text { text } => Some(text.to_string()),
+                    _ => None,
+                })
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "no result for tool {name} with error={error}: {:?}",
+                view.entries.items
+            )
+        })
+}
+
 /// Reopens `session` and returns the text of its error result for the tool
 /// `name`; panics with the journal entries when no such result exists.
 pub(super) async fn denied_result_text(rig: &Rig, session: &str, name: &str) -> String {
@@ -615,4 +658,63 @@ pub(super) async fn denied_result_text(rig: &Rig, session: &str, name: &str) -> 
                 view.entries.items
             )
         })
+}
+
+/// An extension whose `probe_ask` tool raises one text question through the
+/// `ask` service and reports `answered` or `default` as its result text.
+pub(super) fn ask_probe_extension() -> dal_agent::ext::Extension {
+    let inject = ServiceSet::from_names(["ask"]).expect("ask service");
+    ExtensionBuilder::new("askprobe", "0.0.0", inject)
+        .expect("extension name")
+        .tool(Arc::new(AskProbe::new()), Visibility::Model)
+        .build()
+        .expect("ask probe extension builds")
+}
+
+struct AskProbe {
+    name: Name,
+    spec: Arc<ToolSpec>,
+}
+
+impl AskProbe {
+    fn new() -> Self {
+        let name = Name::parse("probe_ask").expect("tool name");
+        let spec = Arc::new(ToolSpec {
+            name: name.clone(),
+            description: "Asks one question through the ask service.".into(),
+            parameters: RawJson::parse(r#"{"type":"object","properties":{}}"#)
+                .expect("schema json"),
+            grammar: None,
+        });
+        Self { name, spec }
+    }
+}
+
+impl Tool for AskProbe {
+    fn name(&self) -> &Name {
+        &self.name
+    }
+
+    fn spec(&self, _model: &ModelInfo) -> Arc<ToolSpec> {
+        Arc::clone(&self.spec)
+    }
+
+    fn classify(&self, _args: &RawValue, _ws: &Workspace) -> Result<ToolClass, ArgError> {
+        Ok(ToolClass::Read)
+    }
+
+    fn run<'a>(&'a self, _call: ToolCall, cx: ToolCx<'a>) -> BoxFuture<'a, ToolOutcome> {
+        Box::pin(async move {
+            let question = dal_core::Question::Text {
+                prompt: "who?".into(),
+                placeholder: None,
+            };
+            let text = match cx.services().ask(cx.caller(), question).await {
+                Ok(Some(_)) => "answered",
+                Ok(None) => "default",
+                Err(_) => "failed",
+            };
+            ToolOutcome::Ok(ToolOutput::from_text(text))
+        })
+    }
 }

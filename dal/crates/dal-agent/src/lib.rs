@@ -15,7 +15,7 @@ pub(crate) mod proc;
 mod scheme;
 pub(crate) mod session;
 
-pub use agent::{Agent, Delivery, Subscription};
+pub use agent::{Agent, AnswerScope, Delivery, Subscription};
 pub use broker::Broker;
 pub use error::{AgentError, DenyReason, HostError, ServiceError, ToolError, ValidationError};
 pub use ext::grants::{GrantKey, GrantStore, GrantStoreError, PersistentGrant};

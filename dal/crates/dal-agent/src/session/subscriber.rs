@@ -23,7 +23,8 @@ pub(crate) struct Subscriber {
 pub(crate) struct SubscriberShared {
     queue: Mutex<QueueState>,
     notify: Notify,
-    answers: bool,
+    approval: bool,
+    ask: bool,
 }
 
 struct QueueState {
@@ -38,12 +39,15 @@ struct QueueState {
 
 impl Subscriber {
     /// A subscriber preloaded with replay backlog at the given cursor.
-    /// `answers` marks subscribers that may resolve approval requests;
-    /// listen-only subscribers never count as an attached answerer.
+    /// `approval` marks subscribers that may resolve approval requests;
+    /// `ask` marks subscribers that may answer extension questions.
+    /// Listen-only subscribers declare neither and never count as an
+    /// attached answerer.
     pub(crate) fn with_backlog(
         backlog: VecDeque<Delivery>,
         current: (Gen, Seq),
-        answers: bool,
+        approval: bool,
+        ask: bool,
     ) -> Self {
         Self {
             shared: Arc::new(SubscriberShared {
@@ -57,7 +61,8 @@ impl Subscriber {
                     current,
                 }),
                 notify: Notify::new(),
-                answers,
+                approval,
+                ask,
             }),
         }
     }
@@ -78,8 +83,13 @@ impl Subscriber {
     }
 
     /// Whether this subscriber may answer approval requests.
-    pub(crate) fn answers(slot: &Arc<SubscriberShared>) -> bool {
-        slot.answers
+    pub(crate) fn answers_approval(slot: &Arc<SubscriberShared>) -> bool {
+        slot.approval
+    }
+
+    /// Whether this subscriber may answer extension questions.
+    pub(crate) fn answers_ask(slot: &Arc<SubscriberShared>) -> bool {
+        slot.ask
     }
 
     /// Offers one published update; shed or dropped offers return false.

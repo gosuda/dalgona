@@ -986,7 +986,7 @@ impl Driver {
         self.report(TurnWork::Resolved {
             turn,
             calls: resolved,
-            answerer_attached: self.deps.shared.attached(),
+            answerer_attached: self.deps.shared.attached_approval(),
         })
         .await;
     }

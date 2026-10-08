@@ -8,7 +8,7 @@
 use std::num::{NonZeroU32, NonZeroU64};
 use std::sync::Arc;
 
-use dal_agent::{Agent, Host, SessionRef};
+use dal_agent::{Agent, AnswerScope, Host, SessionRef};
 use dal_core::{Command, EntryId, Gen, ListQuery, PageReq, RequestId, Seq, SessionId};
 use sonic_rs::{JsonValueMutTrait, JsonValueTrait, Value};
 use tokio::sync::Mutex;
@@ -264,7 +264,7 @@ pub(crate) async fn subscribe(
         )));
     }
     let cursor = after.map(|after| (r#gen, after));
-    let subscription = match agent.subscribe(cursor) {
+    let subscription = match agent.subscribe_scoped(cursor, answer_scope(state).await) {
         Ok(subscription) => subscription,
         Err(error) => return Some(fail(agent_error("session/subscribe", error))),
     };
@@ -288,7 +288,7 @@ async fn emit_resync(
     r#gen: Gen,
     seq: dal_core::Seq,
 ) -> Option<Message> {
-    let subscription = match agent.subscribe(Some((r#gen, seq))) {
+    let subscription = match agent.subscribe_scoped(Some((r#gen, seq)), answer_scope(state).await) {
         Ok(subscription) => subscription,
         Err(error) => {
             return Some(Message::Error {
@@ -309,6 +309,16 @@ async fn emit_resync(
     let fence = replace_sub(state, session).await;
     super::session_pump(state.clone(), writer.clone(), session, fence, subscription).await;
     None
+}
+/// Reads the answerer roles this connection declared in `initialize`.
+/// A connection without a declaration subscribes listen-only, so its
+/// requests resolve at once instead of waiting for a person.
+async fn answer_scope(state: &Arc<Mutex<Conn>>) -> AnswerScope {
+    let locked = state.lock().await;
+    AnswerScope {
+        approval: locked.answer_approval,
+        ask: locked.answer_ask,
+    }
 }
 
 /// Handles `session/unsubscribe`: atomically replaces the session pump.

@@ -456,7 +456,7 @@ impl Actor {
 
     /// Reports whether a frontend can answer approval questions.
     fn answerer_attached(&self) -> bool {
-        self.shared.attached()
+        self.shared.attached_approval()
     }
 
     /// Locks the shared turn-bypass cell.
