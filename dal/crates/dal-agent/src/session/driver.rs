@@ -1495,12 +1495,9 @@ fn covered_entries(items: &[EntryView]) -> Vec<crate::ext::compact::CoveredEntry
         };
         let starts = matches!(content, ContextItem::User { .. }) && !user_open;
         user_open = matches!(content, ContextItem::User { .. });
-        out.push(crate::ext::compact::CoveredEntry {
-            entry: item.id,
-            starts_user_turn: starts,
-            estimated_tokens: estimate_tokens(&content),
-            content,
-        });
+        out.push(crate::ext::compact::CoveredEntry::new(
+            item.id, starts, content,
+        ));
     }
     out
 }
@@ -1520,12 +1517,6 @@ fn image_count(entry: &EntryView) -> usize {
             JournalPart::Text { .. } | JournalPart::TextBlob { .. } => false,
         })
         .count()
-}
-
-/// Heuristic token estimate: four characters per token.
-fn estimate_tokens(content: &ContextItem) -> u64 {
-    let bytes = sonic_rs::to_string(content).map_or(0, |text| text.len() as u64);
-    bytes / 4
 }
 
 /// Builds model-visible tool descriptions for section rendering.
@@ -1630,7 +1621,9 @@ fn summarize(
 ) -> dal_core::CompactionSummary {
     let covered_tokens: u64 = covered.iter().map(|entry| entry.estimated_tokens).sum();
     let summary = compaction.summary_text().map(str::to_owned);
-    let summary_tokens = summary.as_ref().map_or(0, |text| text.len() as u64 / 4);
+    let summary_tokens = summary
+        .as_deref()
+        .map_or(0, crate::ext::compact::estimate_text_tokens);
     let replay = match compaction.history() {
         Some(history) => {
             let items: Vec<&str> = history

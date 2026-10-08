@@ -34,11 +34,34 @@ pub struct CoveredEntry {
     pub entry: EntryId,
     /// True when this entry starts a completed user turn.
     pub starts_user_turn: bool,
-    /// Heuristic token estimate for this entry, four characters per token.
+    /// Heuristic token estimate for this entry, 3.5 characters per token.
     /// Never a measured count; providers report only whole-request usage.
     pub estimated_tokens: u64,
     /// Model context content for this entry.
     pub content: ContextItem,
+}
+
+impl CoveredEntry {
+    /// Builds one covered entry and estimates its token cost from the
+    /// serialized content.
+    pub(crate) fn new(entry: EntryId, starts_user_turn: bool, content: ContextItem) -> Self {
+        let estimated_tokens =
+            sonic_rs::to_string(&content).map_or(0, |text| estimate_text_tokens(&text));
+        Self {
+            entry,
+            starts_user_turn,
+            estimated_tokens,
+            content,
+        }
+    }
+}
+
+/// Estimates the tokens in `text` at 3.5 characters per token, rounded up.
+/// A character is one Unicode scalar value, so multi-byte text is not
+/// over-counted. Never a measured count.
+pub(crate) fn estimate_text_tokens(text: &str) -> u64 {
+    let characters = u64::try_from(text.chars().count()).unwrap_or(u64::MAX);
+    characters.saturating_mul(2).div_ceil(7)
 }
 
 /// Borrowed compaction input. The span is selected by the caller.
@@ -213,4 +236,50 @@ pub trait Compactor: Send + Sync + 'static {
         input: CompactInput<'a>,
         services: Arc<dyn Services>,
     ) -> BoxFuture<'a, Result<Option<Compaction>, CompactError>>;
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroU64;
+
+    use super::*;
+
+    fn entry() -> EntryId {
+        EntryId::new(NonZeroU64::MIN)
+    }
+
+    fn user_text(text: String) -> ContextItem {
+        ContextItem::User {
+            parts: vec![Part::Text { text: text.into() }],
+        }
+    }
+
+    #[test]
+    fn estimate_counts_three_and_a_half_characters_per_token_rounded_up() {
+        assert_eq!(estimate_text_tokens(""), 0);
+        assert_eq!(estimate_text_tokens("a"), 1);
+        assert_eq!(estimate_text_tokens(&"a".repeat(7)), 2);
+        assert_eq!(estimate_text_tokens(&"a".repeat(35)), 10);
+        assert_eq!(estimate_text_tokens(&"a".repeat(36)), 11);
+    }
+
+    #[test]
+    fn estimate_counts_characters_not_bytes() {
+        assert_eq!(
+            estimate_text_tokens(&"é".repeat(35)),
+            estimate_text_tokens(&"e".repeat(35)),
+        );
+    }
+
+    #[test]
+    fn covered_entry_estimates_from_serialized_characters() {
+        let plain = CoveredEntry::new(entry(), true, user_text("x".repeat(700)));
+        assert!(
+            plain.estimated_tokens >= 200,
+            "700 characters at 3.5 per token is at least 200 tokens, got {}",
+            plain.estimated_tokens
+        );
+        let accented = CoveredEntry::new(entry(), true, user_text("é".repeat(700)));
+        assert_eq!(accented.estimated_tokens, plain.estimated_tokens);
+    }
 }
