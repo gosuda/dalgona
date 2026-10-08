@@ -314,9 +314,29 @@ fn probe_landlock_abi(helper: &Path) -> Result<u32, SandboxSetupError> {
 pub(crate) fn platform_home(vars: &BTreeMap<OsString, OsString>) -> Option<PathBuf> {
     #[cfg(windows)]
     {
-        vars.get(OsStr::new("USERPROFILE"))
-            .or_else(|| vars.get(OsStr::new("HOME")))
-            .map(PathBuf::from)
+        let absolute = |name: &str| {
+            vars.get(OsStr::new(name))
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute())
+        };
+        for name in ["HOME", "USERPROFILE"] {
+            if let Some(path) = absolute(name) {
+                return Some(path);
+            }
+        }
+        if let (Some(drive), Some(path)) = (
+            vars.get(OsStr::new("HOMEDRIVE")),
+            vars.get(OsStr::new("HOMEPATH")),
+        ) {
+            let mut combined = drive.clone();
+            combined.push(path);
+            let combined = PathBuf::from(combined);
+            if combined.is_absolute() {
+                return Some(combined);
+            }
+        }
+        None
     }
     #[cfg(not(windows))]
     {
