@@ -43,6 +43,64 @@ async fn a_draining_connection_rejects_new_requests_with_server_draining() {
     outcome.expect("rpc serve ends cleanly");
 }
 
+/// A client that keeps sending after drain must not starve the deadline or
+/// make the unbounded writer outbox grow without limit.
+#[tokio::test]
+async fn a_draining_connection_bounds_replies_during_a_connected_flood() {
+    let rig = rig(&[]).await;
+    let drain = CancellationToken::new();
+    let (transport, peer) = MemoryTransport::pair(64);
+    let server = serve_rpc_draining(rig.host.clone(), transport, drain.clone());
+    let client = async {
+        let mut rpc = Rpc::new(peer);
+        initialize(&mut rpc).await;
+        drain.cancel();
+        let (incoming, mut outgoing) = rpc.into_parts();
+        let mut sent = 0_i64;
+        let mut replies = 0_usize;
+        loop {
+            tokio::select! {
+                frame = outgoing.recv() => {
+                    let Some(frame) = frame else { break };
+                    let value: sonic_rs::Value = sonic_rs::from_str(&frame).expect("reply json");
+                    if value["error"]["code"].as_i64() == Some(-32009) {
+                        replies += 1;
+                    }
+                }
+                result = incoming.send(
+                    sonic_rs::to_string(&sonic_rs::json!({
+                        "jsonrpc": "2.0",
+                        "id": sent,
+                        "method": "session/list",
+                        "params": {},
+                    }))
+                    .expect("request json"),
+                ), if sent < 50_000 => {
+                    if result.is_err() {
+                        break;
+                    }
+                    sent += 1;
+                }
+            }
+        }
+        (sent, replies)
+    };
+    let (outcome, (sent, replies)) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(server, client)
+    })
+    .await
+    .expect("draining connection closes despite the flood");
+    outcome.expect("rpc serve ends cleanly");
+    assert!(
+        sent > 64,
+        "the client did not exercise a sustained flood: {sent}"
+    );
+    assert!(
+        replies <= 64,
+        "draining replies exceeded the bounded budget: {replies}"
+    );
+}
+
 #[tokio::test]
 async fn a_draining_connection_closes_after_the_grace_period_without_a_client_hangup() {
     let rig = rig(&[]).await;

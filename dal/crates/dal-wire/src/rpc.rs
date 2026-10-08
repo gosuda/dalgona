@@ -36,6 +36,9 @@ pub(crate) use subs::{host_notifier, send_resync, session_pump};
 /// Maximum in-flight requests before the reader pauses.
 pub(crate) const MAX_IN_FLIGHT: usize = 256;
 
+/// Maximum rejection frames queued after a connection starts draining.
+const MAX_DRAIN_REPLIES: usize = 64;
+
 /// Grace period for draining handlers after transport end.
 pub(crate) const DRAIN_GRACE: Duration = Duration::from_secs(1);
 
@@ -118,10 +121,13 @@ pub async fn serve_rpc_draining(
     let state = Arc::new(Mutex::new(Conn::new(mint_client_id("rpc"))));
     let stop = CancellationToken::new();
     let mut pending: FuturesUnordered<Pending> = FuturesUnordered::new();
+    let mut drain_replies = 0;
 
     loop {
         tokio::select! {
             biased;
+            () = tokio::time::sleep_until(draining_until.unwrap_or_else(tokio::time::Instant::now)),
+                if draining_until.is_some() => break,
             () = drain.cancelled(), if draining_until.is_none() => {
                 draining_until = Some(tokio::time::Instant::now() + DRAIN_GRACE);
             }
@@ -139,6 +145,7 @@ pub async fn serve_rpc_draining(
                         &writer,
                         &stop,
                         draining_until.is_some(),
+                        &mut drain_replies,
                         &line,
                     )
                     .await
@@ -157,8 +164,6 @@ pub async fn serve_rpc_draining(
                 }
             }
             _ = pending.next(), if !pending.is_empty() => {}
-            () = tokio::time::sleep_until(draining_until.unwrap_or_else(tokio::time::Instant::now)),
-                if draining_until.is_some() => break,
         }
     }
 
@@ -170,9 +175,12 @@ pub async fn serve_rpc_draining(
             tokio::time::timeout(grace, async { while pending.next().await.is_some() {} }).await;
     }
     cancel_all(&state).await;
-    while let Some(text) = writer.take_queued_frame() {
-        let _ = writer.write_frame(&text).await;
+    if draining_until.is_none() {
+        while let Some(text) = writer.take_queued_frame() {
+            let _ = writer.write_frame(&text).await;
+        }
     }
+    transport.close().await;
     Ok(())
 }
 
@@ -191,11 +199,18 @@ async fn on_frame(
     writer: &FrameWriter,
     stop: &CancellationToken,
     draining: bool,
+    drain_replies: &mut usize,
     line: &str,
 ) -> Option<Pending> {
+    if draining && *drain_replies >= MAX_DRAIN_REPLIES {
+        return None;
+    }
     let message = match decode_jsonrpc(line) {
         Ok(message) => message,
         Err(error) => {
+            if draining {
+                *drain_replies += 1;
+            }
             let object = ErrorObject {
                 code: error.code,
                 message: error.message,
@@ -205,7 +220,10 @@ async fn on_frame(
         }
     };
     match message {
-        Message::Request { id, .. } if draining => reject(writer, id, server_draining()).await,
+        Message::Request { id, .. } if draining => {
+            *drain_replies += 1;
+            reject(writer, id, server_draining()).await
+        }
         Message::Request { id, method, params } => {
             let initialized = state.lock().await.initialized;
             if !initialized && method != "initialize" && method != "protocol/schema" {

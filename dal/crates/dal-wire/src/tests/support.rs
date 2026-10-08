@@ -314,6 +314,17 @@ impl Rpc {
             .await;
     }
 
+    /// Splits the peer after setup so a flood can send and receive
+    /// independently in one select loop.
+    pub(super) fn into_parts(
+        self,
+    ) -> (
+        tokio::sync::mpsc::Sender<String>,
+        tokio::sync::mpsc::Receiver<String>,
+    ) {
+        self.peer.into_parts()
+    }
+
     /// Sends one notification.
     pub(super) async fn notify(&self, method: &str, params: Value) {
         let frame = sonic_rs::json!({"jsonrpc": "2.0", "method": method, "params": params});
