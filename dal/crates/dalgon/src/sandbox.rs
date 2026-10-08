@@ -827,13 +827,7 @@ mod win {
     /// leaving an untracked ACE behind. When the last holder leaves, the
     /// write restores the DACL state the first planter observed. A revoke
     /// failure propagates so callers can report the retained grant.
-    fn lift(
-        edge: &Edge,
-        state: &mut DaclState,
-        key: &str,
-        guid: &str,
-        access: u32,
-    ) -> Result<(), String> {
+    fn lift(state: &mut DaclState, key: &str, guid: &str, access: u32) -> Result<(), String> {
         let has = state
             .holders
             .get(key)
@@ -876,7 +870,7 @@ mod win {
         for (path, guid, access) in dead {
             // Best-effort: a failed lift keeps its holder record and is
             // retried by the next transact.
-            let _ = lift(edge, state, &path, &guid, access);
+            let _ = lift(state, &path, &guid, access);
         }
     }
 
@@ -1066,10 +1060,6 @@ mod win {
     /// launch dir, ancestors, and writable roots are fatal: a failed grant
     /// there means the promised access cannot exist, so the run must not
     /// start with the read policy only partially installed.
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "the process edge owns environment reads; PATH decides the runtime dirs"
-    )]
     fn grant_plan(edge: &Edge, roots: &[PathBuf], executable: &Path) -> Vec<(PathBuf, u32, bool)> {
         let mut plan: Vec<(PathBuf, u32, bool)> = Vec::new();
         let push_rx = |dir: PathBuf, optional: bool, plan: &mut Vec<(PathBuf, u32, bool)>| {
@@ -1149,7 +1139,7 @@ mod win {
         let mut failed = Vec::new();
         for (path, access) in planted {
             if let Err(error) = transact(edge, |state| {
-                lift(edge, state, &path_key(path), &profile.guid, *access)
+                lift(state, &path_key(path), &profile.guid, *access)
             }) {
                 failed.push(error);
             }
