@@ -22,6 +22,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::broker::Broker;
+use crate::ext::EventStream;
 use crate::ext::generation::Generation;
 use crate::ext::hooks::{
     HookScope, ObserverReport, StreamFire, StreamFireAction, StreamVerdict, StreamWatch, TurnInfo,
@@ -306,22 +307,24 @@ impl Driver {
     }
 
     /// Runs one provider request for `turn` and steps its lifecycle.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one provider request must preserve its ordered turn lifecycle"
-    )]
     async fn infer(&mut self, turn: TurnId, params: RequestParams, batch: &TurnBatch) {
-        let session = self.deps.session;
         let mut mark = std::time::Instant::now();
-        let lap = |step: &str, mark: &mut std::time::Instant| {
-            let taken = mark.elapsed();
-            if taken > std::time::Duration::from_millis(250) {
-                eprintln!(
-                    "[dal-agent] session {session:?} turn {turn} infer {step} took {taken:?}"
-                );
-            }
-            *mark = std::time::Instant::now();
+        let Some(resolved) = self.resolve_request(turn, batch).await else {
+            return;
         };
+        lap(self.deps.session, turn, "resolve", &mut mark);
+        let (stream, cancel) = self.open_stream(turn, &resolved, params, batch).await;
+        lap(self.deps.session, turn, "stream-open", &mut mark);
+        self.consume_stream(turn, resolved, stream, cancel).await;
+    }
+
+    /// Resolves the route for `turn`, caches the resolved row, and reports
+    /// the request opening; `None` after the failure is already reported.
+    async fn resolve_request(
+        &mut self,
+        turn: TurnId,
+        batch: &TurnBatch,
+    ) -> Option<ResolvedRequest> {
         if let Some(route) = batch.model.clone() {
             let family = batch
                 .family
@@ -358,10 +361,9 @@ impl Driver {
                     })
                     .await;
                 }
-                return;
+                return None;
             }
         };
-        lap("resolve", &mut mark);
         {
             let state = self.turn(turn);
             state.model = Some((resolved.route.clone(), resolved.family));
@@ -387,6 +389,18 @@ impl Driver {
             compact,
         })
         .await;
+        Some(resolved)
+    }
+
+    /// Captures the decision boundary and opens the provider stream.
+    async fn open_stream(
+        &mut self,
+        turn: TurnId,
+        resolved: &ResolvedRequest,
+        params: RequestParams,
+        batch: &TurnBatch,
+    ) -> (EventStream, CancellationToken) {
+        let mut mark = std::time::Instant::now();
         // The decision-request boundary: one environment capture per
         // provider request freezes the authority, the cutoff, and the
         // policy fingerprint for every cell of this round (E01).
@@ -409,15 +423,27 @@ impl Driver {
             );
             (Arc::clone(&state.script), cancel)
         };
-        let request = self.request(turn, &resolved, params).await;
-        lap("request", &mut mark);
+        let request = self.request(turn, resolved, params).await;
+        lap(self.deps.session, turn, "request", &mut mark);
         let deps = RequestDeps {
             session,
             host,
             script: Some(script),
         };
-        let mut stream = infer_stream(&deps, request, &cancel).await;
-        lap("stream-open", &mut mark);
+        let stream = infer_stream(&deps, request, &cancel).await;
+        (stream, cancel)
+    }
+
+    /// Consumes the provider stream and reports the terminal outcome.
+    async fn consume_stream(
+        &mut self,
+        turn: TurnId,
+        resolved: ResolvedRequest,
+        mut stream: EventStream,
+        cancel: CancellationToken,
+    ) {
+        let session = self.deps.session;
+
         let turn_info = TurnInfo::new(self.deps.session, turn);
         let generation = self.turn(turn).generation.clone();
         let mut watchers = Self::start_watchers(&generation, &turn_info);
@@ -494,7 +520,16 @@ impl Driver {
         }
     }
 }
-/// One resolved model with its catalog row.
+
+/// Logs an infer step that exceeded 250 ms.
+fn lap(session: SessionId, turn: TurnId, step: &str, mark: &mut std::time::Instant) {
+    let taken = mark.elapsed();
+    if taken > std::time::Duration::from_millis(250) {
+        eprintln!("[dal-agent] session {session:?} turn {turn} infer {step} took {taken:?}");
+    }
+    *mark = std::time::Instant::now();
+}
+
 struct ResolvedRequest {
     route: ModelRoute,
     family: Family,
