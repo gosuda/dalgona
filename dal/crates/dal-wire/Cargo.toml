@@ -22,7 +22,7 @@ schemars.workspace = true
 serde.workspace = true
 sonic-rs.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["net", "io-util", "sync", "time", "rt", "macros"] }
+tokio = { workspace = true, features = ["fs", "net", "io-util", "sync", "time", "rt", "macros"] }
 tokio-tungstenite.workspace = true
 tokio-util = { workspace = true, features = ["rt"] }
 tracing.workspace = true

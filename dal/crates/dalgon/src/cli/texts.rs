@@ -417,6 +417,13 @@ pub(crate) fn rpc_socket_os(path: &Path, message: &str) -> [String; 2] {
     ]
 }
 
+pub(crate) fn wire_streams(wire: &str, message: &str) -> [String; 2] {
+    [
+        format!("dalgon {wire}: cannot take over standard input and output: {message}"),
+        "Start the command with standard input and output open, for example from an editor or a shell.".into(),
+    ]
+}
+
 pub(crate) fn internal_error_at(module: &str, message: &str, log_path: &Path) -> [String; 2] {
     [
         format!("dalgon: internal error: {module}: {message}"),

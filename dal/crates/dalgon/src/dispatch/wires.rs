@@ -87,6 +87,12 @@ async fn stdio(wire: Wire, startup: Startup, product: Product) -> ExitCode {
         helper,
         ..
     } = startup;
+    // Take the protocol streams before the host starts, so extension and tool
+    // children never inherit them.
+    let transport = match wire_transport() {
+        Ok(transport) => Transport::Stdio(transport),
+        Err(error) => return wire_streams_failure(wire, &error),
+    };
     let host = match start_host(product, &config, vars, cwd, helper, &data_root).await {
         Ok(host) => host,
         Err(code) => return code,
@@ -96,12 +102,6 @@ async fn stdio(wire: Wire, startup: Startup, product: Product) -> ExitCode {
     {
         let _ = writeln!(std::io::stderr().lock(), "{notice}");
     }
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "R4 edge: the stdio wire owns standard input"
-    )]
-    let reader = tokio::io::stdin();
-    let transport = Transport::Stdio(StdioTransport::new(reader, tokio::io::stdout()));
     let stop = CancellationToken::new();
     let outcome = super::drive(&stop, async {
         let result = tokio::select! {
@@ -197,5 +197,32 @@ fn wire_failure(wire: Wire, error: &WireError) -> ExitCode {
     two_lines(
         cli::texts::internal_error(wire.name(), &error.to_string()),
         exit::ExitKind::Internal,
+    )
+}
+
+/// Builds the stdio transport on private copies of the standard streams, then
+/// points the shared streams away from the protocol: input at the null device
+/// and output at standard error.
+#[cfg(unix)]
+fn wire_transport() -> std::io::Result<StdioTransport> {
+    let streams = edge::isolate_wire_streams()?;
+    Ok(StdioTransport::from_files(streams.reader, streams.writer))
+}
+
+/// Builds the stdio transport on the process standard streams.
+#[cfg(not(unix))]
+fn wire_transport() -> std::io::Result<StdioTransport> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "R4 edge: the stdio wire owns standard input"
+    )]
+    let reader = tokio::io::stdin();
+    Ok(StdioTransport::new(reader, tokio::io::stdout()))
+}
+
+fn wire_streams_failure(wire: Wire, error: &std::io::Error) -> ExitCode {
+    two_lines(
+        cli::texts::wire_streams(wire.name(), &error.to_string()),
+        exit::ExitKind::RequestedFailure,
     )
 }

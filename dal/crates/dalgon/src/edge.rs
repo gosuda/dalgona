@@ -131,6 +131,46 @@ pub(crate) fn terminal_snapshot() -> TerminalSnapshot {
     }
 }
 
+/// The protocol streams of a stdio wire, held privately by this process.
+#[cfg(unix)]
+pub(crate) struct WireStreams {
+    pub(crate) reader: std::fs::File,
+    pub(crate) writer: std::fs::File,
+}
+
+/// Moves a stdio wire onto private descriptors and detaches the shared ones.
+///
+/// Copies standard input and output to close-on-exec descriptors, so child
+/// processes never inherit the protocol streams. Then points standard input
+/// at the null device and standard output at standard error, so stray writes
+/// from this process, its libraries, and its children land in the diagnostic
+/// stream instead of corrupting the protocol.
+///
+/// # Errors
+///
+/// Returns the operating-system error when standard input or output is
+/// closed or a descriptor cannot be duplicated.
+#[cfg(unix)]
+pub(crate) fn isolate_wire_streams() -> io::Result<WireStreams> {
+    use rustix::io::{Errno, fcntl_dupfd_cloexec};
+    use rustix::stdio::{dup2_stdin, dup2_stdout, stderr, stdin, stdout};
+
+    let reader = fcntl_dupfd_cloexec(stdin(), 3)?;
+    let writer = fcntl_dupfd_cloexec(stdout(), 3)?;
+    let null = std::fs::File::open("/dev/null")?;
+    dup2_stdin(&null)?;
+    match dup2_stdout(stderr()) {
+        Ok(()) => {}
+        // A closed diagnostic stream leaves nowhere to send stray output.
+        Err(Errno::BADF) => dup2_stdout(&null)?,
+        Err(error) => return Err(error.into()),
+    }
+    Ok(WireStreams {
+        reader: reader.into(),
+        writer: writer.into(),
+    })
+}
+
 /// Waits for one shutdown signal and returns its `128 + signo` exit code.
 ///
 /// POSIX watches SIGINT, SIGTERM, and SIGHUP; other platforms watch the
