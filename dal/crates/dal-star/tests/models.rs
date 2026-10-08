@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use dal_agent::{Delivery, Env, Host, Product, SessionRef};
 use dal_core::{
-    Command, Config, ConfigProduct, Expect, PageReq, Part, Stop, UpdateKind, Workspace,
+    Answer, Command, Config, ConfigProduct, Expect, PageReq, Part, Stop, UpdateKind, Workspace,
 };
 
 mod support;
@@ -112,6 +112,13 @@ async fn prompt(host: &Host, data: &tempfile::TempDir) -> (Stop, String, Vec<Str
             continue;
         };
         seen.push(format!("{:?}", update.kind));
+        if let UpdateKind::RequestOpened(request) = &update.kind {
+            agent
+                .answer(request.id, Answer::ApproveForSession)
+                .await
+                .expect("grant answer lands");
+            continue;
+        }
         if let UpdateKind::TurnEnded { stop, .. } = update.kind {
             break stop;
         }
@@ -140,7 +147,6 @@ async fn scripted_model_forwards_through_its_invocation_context() {
     assert!(view.contains("forwarded"), "{view}");
 }
 
-#[ignore = "scope.infer inside a scripted model run deadlocks: the member inference never reaches a terminal outcome and the turn hangs with no Notice"]
 #[tokio::test]
 async fn scripted_model_scope_passes_policy_and_usd_budget_to_scoped_infer() {
     let run = r#"scope = ctx.scope(limit = 8, on_error = "settle", usd = 0.40)
