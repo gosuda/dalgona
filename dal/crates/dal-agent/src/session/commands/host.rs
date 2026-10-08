@@ -175,6 +175,16 @@ pub(crate) fn session_jobs_dir(
     store.session_jobs_dir(session)
 }
 
+/// Writes one export payload to its durable job log, creating the jobs
+/// directory when needed. A failure is surfaced by the caller as a failed
+/// job outcome rather than an empty successful log.
+async fn export_log(text: &str, log_path: &std::path::Path) -> std::io::Result<()> {
+    if let Some(parent) = log_path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    tokio::fs::write(log_path, text.as_bytes()).await
+}
+
 /// Labels one command for job table rows.
 fn command_label(cmd: &Command) -> String {
     match cmd {
@@ -271,14 +281,21 @@ impl CommandHost for DriverHost {
                 }
             } else {
                 match handle.submit(command, by).await {
-                    Ok(reply) => {
-                        let text = sonic_rs::to_string(&reply).unwrap_or_default();
-                        if let Some(parent) = log_path.parent() {
-                            let _ = tokio::fs::create_dir_all(parent).await;
-                        }
-                        let _ = tokio::fs::write(&log_path, text.as_bytes()).await;
-                        JobOutcome::Exited { code: 0 }
-                    }
+                    Ok(reply) => match sonic_rs::to_string(&reply) {
+                        Err(error) => JobOutcome::Failed {
+                            message: format!("export reply failed to serialize: {error}").into(),
+                        },
+                        Ok(text) => match export_log(&text, &log_path).await {
+                            Ok(()) => JobOutcome::Exited { code: 0 },
+                            Err(error) => JobOutcome::Failed {
+                                message: format!(
+                                    "export log {} failed to write: {error}",
+                                    log_path.display()
+                                )
+                                .into(),
+                            },
+                        },
+                    },
                     Err(error) => JobOutcome::Failed {
                         message: error.to_string().into(),
                     },
@@ -733,5 +750,44 @@ impl DriverHost {
         dal_provider::resolve(&catalog, &aliases, query).map_err(|_| ResolveMiss::NotFound {
             query: query.into(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::export_log;
+
+    /// A job log whose parent directory cannot exist must surface an io
+    /// error: `start_job` maps it to `JobOutcome::Failed`, not a silent
+    /// `Exited { code: 0 }` with an empty log.
+    #[tokio::test]
+    async fn export_log_reports_unwritable_parent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let blocker = dir.path().join("blocker");
+        tokio::fs::write(&blocker, b"x")
+            .await
+            .expect("write blocker file");
+        let log_path = blocker.join("job.log");
+        let error = export_log("{}", &log_path)
+            .await
+            .expect_err("a regular file cannot be a parent directory");
+        assert!(
+            !error.to_string().is_empty(),
+            "the io error carries a description"
+        );
+    }
+
+    /// A writable jobs dir receives the payload verbatim.
+    #[tokio::test]
+    async fn export_log_writes_payload() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log_path = dir.path().join("nested").join("job.log");
+        export_log("{\"ok\":true}", &log_path)
+            .await
+            .expect("export_log writes under a writable dir");
+        let text = tokio::fs::read_to_string(&log_path)
+            .await
+            .expect("read written log");
+        assert_eq!(text, "{\"ok\":true}");
     }
 }
