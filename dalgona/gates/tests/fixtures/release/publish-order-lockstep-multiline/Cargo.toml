@@ -1,0 +1,12 @@
+[workspace]
+resolver = "3"
+members = ["crates/only"]
+
+[workspace.package]
+description = """
+A multiline description carrying an assignment-shaped line.
+version = "0.1.0"
+The real workspace version appears after this string.
+"""
+version = "0.2.0"
+edition = "2024"

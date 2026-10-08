@@ -154,21 +154,63 @@ def _toml_string(raw: str) -> str | None:
     return decoded if isinstance(decoded, str) else None
 
 
+def _toml_multiline_open(value: str) -> str | None:
+    """Return the delimiter when `value` opens an unterminated multiline string.
+
+    TOML multiline basic (``\"\"\"``) and literal (``'''``) strings span
+    lines, and their contents may resemble headers or assignments. Scanning
+    must skip to the closing delimiter instead of reading string contents
+    as TOML.
+    """
+    pos = 0
+    while pos < len(value):
+        if value.startswith(('"""', "'''"), pos):
+            delimiter = value[pos : pos + 3]
+            close = value.find(delimiter, pos + 3)
+            if close < 0:
+                return delimiter
+            pos = close + 3
+            continue
+        char = value[pos]
+        if char == "#":
+            return None
+        if char == '"':
+            pos += 1
+            while pos < len(value) and value[pos] != '"':
+                pos += 2 if value[pos] == "\\" else 1
+            pos += 1
+            continue
+        if char == "'":
+            pos += 1
+            while pos < len(value) and value[pos] != "'":
+                pos += 1
+            pos += 1
+            continue
+        pos += 1
+    return None
+
+
 def workspace_package_version(root: Path) -> str | None:
     """Return the root manifest's ``[workspace.package]`` version, or None.
 
     Covers the TOML forms a workspace manifest uses: section headers,
-    quoted and dotted keys, inline tables, basic and literal strings, and
-    trailing comments. Anything outside that subset reads as absent, so
-    an unrecognized manifest fails the lockstep check instead of passing
-    silently.
+    quoted and dotted keys, inline tables, basic and literal strings,
+    and trailing comments. Lines inside multiline basic and literal
+    strings are skipped. Anything outside that subset reads as absent,
+    so an unrecognized manifest fails the lockstep check instead of
+    passing silently.
     """
     try:
         text = (root / "Cargo.toml").read_text(encoding="utf-8")
     except OSError:
         return None
     section: list[str] = []
+    multiline: str | None = None
     for line in (raw.strip() for raw in text.splitlines()):
+        if multiline is not None:
+            if multiline in line:
+                multiline = None
+            continue
         if not line or line.startswith("#"):
             continue
         if line.startswith("[["):
@@ -180,7 +222,13 @@ def workspace_package_version(root: Path) -> str | None:
             section = parsed if parsed is not None else []
             continue
         assignment = _TOML_ASSIGNMENT.match(line)
-        key = _toml_key_path(assignment.group(1)) if assignment else None
+        if assignment is None:
+            continue
+        delimiter = _toml_multiline_open(assignment.group(2))
+        if delimiter is not None:
+            multiline = delimiter
+            continue
+        key = _toml_key_path(assignment.group(1))
         if key is None:
             continue
         path = section + key
