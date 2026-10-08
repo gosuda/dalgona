@@ -183,6 +183,14 @@ impl ServiceSet {
         self.bits & service.mask() != 0
     }
 
+    /// Returns the union of two request sets.
+    #[must_use]
+    pub const fn union(self, other: Self) -> Self {
+        Self {
+            bits: self.bits | other.bits,
+        }
+    }
+
     /// Removes the user-prompt service while retaining all grantable services.
     #[must_use]
     pub const fn capabilities(self) -> Self {

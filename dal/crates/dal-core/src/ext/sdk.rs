@@ -149,10 +149,12 @@ impl NativeOp {
         Self::ALL.into_iter().find(|op| op.as_str() == id)
     }
 
-    /// Returns the grant service the operation maps to, if any (R03).
+    /// Returns the service the operation injects, if any (R03).
     ///
-    /// Ask operations require a declared ceiling but no persistent capability
-    /// grant, so they map to [`None`].
+    /// Every operation named in `uses` contributes its service bit to the
+    /// caller's injection set. Ask maps to [`Service::Ask`] even though it is
+    /// capability-free: [`Service::capability`] strips it from grant keys, and
+    /// the service layer admits capability-free services without a grant.
     #[must_use]
     pub const fn service(self) -> Option<Service> {
         match self {
@@ -161,7 +163,7 @@ impl NativeOp {
             Self::ToolsExec => Some(Service::Run),
             Self::ModelsInfer | Self::ModelsForward => Some(Service::Infer),
             Self::NetFetch => Some(Service::Net),
-            Self::AskConfirm | Self::AskSelect | Self::AskText => None,
+            Self::AskConfirm | Self::AskSelect | Self::AskText => Some(Service::Ask),
             Self::StateRead | Self::StateWrite | Self::StateDelete => Some(Service::Sidecar),
             Self::AgentsStart | Self::AgentsWait | Self::AgentsCancel | Self::AgentsList => {
                 Some(Service::Agents)
