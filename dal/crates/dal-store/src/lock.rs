@@ -2,7 +2,7 @@
 
 use std::{
     fs::{self, File, TryLockError},
-    io::{Seek, SeekFrom, Write},
+    io::{self, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     thread,
     time::{Duration, Instant},
@@ -36,41 +36,28 @@ impl LockGuard {
     /// # Errors
     /// Returns [`StoreError::Locked`] when another process owns the lock, with
     /// its pid when the lock file contains a parseable current pid. Returns
-    /// [`StoreError::Io`] when opening or updating the lock file fails.
+    /// [`StoreError::Io`] when opening or updating the lock file fails, or when
+    /// another process keeps replacing the lock file for the whole wait bound.
     pub(crate) fn acquire(path: &Path, session: SessionId) -> Result<Self, StoreError> {
-        let mut options = util::open_options();
-        options.read(true).write(true).create(true);
-        util::with_mode(&mut options, MODE_FILE);
-        let mut file = options
-            .open(path)
-            .map_err(|source| util::io_err(path, source))?;
+        Self::acquire_with(path, session, |_| {})
+    }
 
+    /// [`Self::acquire`] with `after_open` called after each open and before
+    /// the lock attempt, so a test can replace the lock file in that window.
+    fn acquire_with(
+        path: &Path,
+        session: SessionId,
+        mut after_open: impl FnMut(&Path),
+    ) -> Result<Self, StoreError> {
         let deadline = Instant::now() + PID_WAIT;
+        let mut file = open_lock_file(path)?;
+        after_open(path);
         loop {
             match file.try_lock() {
-                Ok(()) => {
-                    file.set_len(0)
-                        .map_err(|source| util::io_err(path, source))?;
-                    file.seek(SeekFrom::Start(0))
-                        .map_err(|source| util::io_err(path, source))?;
-                    writeln!(file, "{}", std::process::id())
-                        .map_err(|source| util::io_err(path, source))?;
-                    // The owner sidecar repeats the pid outside the locked file:
-                    // `LockFileEx` makes the held file unreadable to every other
-                    // handle on Windows, so a contended acquirer reads the pid
-                    // from the sidecar that the lock never seals.
-                    fs::write(
-                        owner_path(path),
-                        format!("{}\n", std::process::id()).as_bytes(),
-                    )
-                    .map_err(|source| util::io_err(path, source))?;
-                    return Ok(Self {
-                        _file: file,
-                        path: path.to_path_buf(),
-                    });
-                }
+                Ok(()) => {}
                 Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
                     thread::sleep(poll_delay(session));
+                    continue;
                 }
                 Err(TryLockError::WouldBlock) => {
                     let pid = read_pid_until(&owner_path(path))?;
@@ -84,8 +71,79 @@ impl LockGuard {
                     return Err(util::io_err(path, source));
                 }
             }
+            // A lock on a file that no longer sits at `path` excludes nobody:
+            // the next opener creates and locks a fresh file. Reopen and lock
+            // again, within the same wait bound.
+            if names_locked_file(&file, path).map_err(|source| util::io_err(path, source))? {
+                return Self::publish_owner(file, path);
+            }
+            if Instant::now() >= deadline {
+                return Err(util::io_err(
+                    path,
+                    io::Error::other(
+                        "the lock file was replaced while it was being locked; \
+                         open the session again",
+                    ),
+                ));
+            }
+            file = open_lock_file(path)?;
+            after_open(path);
         }
     }
+
+    /// Writes this process's pid into the freshly locked `file` and its sidecar.
+    fn publish_owner(mut file: File, path: &Path) -> Result<Self, StoreError> {
+        file.set_len(0)
+            .map_err(|source| util::io_err(path, source))?;
+        file.seek(SeekFrom::Start(0))
+            .map_err(|source| util::io_err(path, source))?;
+        writeln!(file, "{}", std::process::id()).map_err(|source| util::io_err(path, source))?;
+        // The owner sidecar repeats the pid outside the locked file:
+        // `LockFileEx` makes the held file unreadable to every other
+        // handle on Windows, so a contended acquirer reads the pid
+        // from the sidecar that the lock never seals.
+        fs::write(
+            owner_path(path),
+            format!("{}\n", std::process::id()).as_bytes(),
+        )
+        .map_err(|source| util::io_err(path, source))?;
+        Ok(Self {
+            _file: file,
+            path: path.to_path_buf(),
+        })
+    }
+}
+
+fn open_lock_file(path: &Path) -> Result<File, StoreError> {
+    let mut options = util::open_options();
+    options.read(true).write(true).create(true);
+    util::with_mode(&mut options, MODE_FILE);
+    options
+        .open(path)
+        .map_err(|source| util::io_err(path, source))
+}
+
+/// Whether `path` still names the file `file` holds open.
+///
+/// A missing path counts as replaced. Windows cannot unlink an open file, so
+/// the handle always names its path there.
+#[cfg(unix)]
+fn names_locked_file(file: &File, path: &Path) -> io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+
+    let held = file.metadata()?;
+    let named = match fs::metadata(path) {
+        Ok(named) => named,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(source) => return Err(source),
+    };
+    Ok(held.dev() == named.dev() && held.ino() == named.ino())
+}
+
+#[cfg(not(unix))]
+#[expect(clippy::unnecessary_wraps, reason = "matches the Unix signature")]
+fn names_locked_file(_file: &File, _path: &Path) -> io::Result<bool> {
+    Ok(true)
 }
 
 impl Drop for LockGuard {
@@ -337,5 +395,64 @@ mod tests {
             read_pid_until(&dir.0).is_err(),
             "non-NotFound read errors must surface, not be swallowed by the poll"
         );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod replaced_file_tests {
+    use std::{cell::Cell, fs, path::Path};
+
+    use dal_core::SessionId;
+
+    use super::LockGuard;
+    use crate::error::StoreError;
+
+    fn replace(path: &Path) -> std::io::Result<()> {
+        fs::remove_file(path)?;
+        fs::write(path, b"")
+    }
+
+    #[test]
+    fn lock_file_replaced_before_locking_still_excludes_a_second_opener() {
+        let dir =
+            std::env::temp_dir().join(format!("dal-store-lock-replaced-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("create test directory");
+        let path = dir.join("lock");
+        let id = SessionId::new_v7();
+        let replaced = Cell::new(false);
+
+        let guard = LockGuard::acquire_with(&path, id, |at| {
+            if !replaced.replace(true) {
+                replace(at).expect("replace the lock file");
+            }
+        })
+        .expect("acquire after the file was replaced");
+
+        let second = LockGuard::acquire(&path, id);
+        assert!(
+            matches!(second, Err(StoreError::Locked { session, .. }) if session == id),
+            "the held lock must be on the file at the path, got {second:?}"
+        );
+        drop(guard);
+        fs::remove_dir_all(&dir).expect("remove test directory");
+    }
+
+    #[test]
+    fn lock_file_replaced_on_every_attempt_fails_within_the_wait_bound() {
+        let dir = std::env::temp_dir().join(format!("dal-store-lock-churn-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("create test directory");
+        let path = dir.join("lock");
+        let started = std::time::Instant::now();
+
+        let result = LockGuard::acquire_with(&path, SessionId::new_v7(), |at| {
+            replace(at).expect("replace the lock file");
+        });
+
+        assert!(
+            matches!(result, Err(StoreError::Io { .. })),
+            "endless replacement must surface as an I/O error, got {result:?}"
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        fs::remove_dir_all(&dir).expect("remove test directory");
     }
 }
