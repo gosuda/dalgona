@@ -161,7 +161,10 @@ impl Refresher {
         let slot = self.slot(provider);
         let key = slot.key.lock().await;
         let mut in_flight = slot.in_flight.lock().await;
-        if in_flight.as_ref().is_some_and(tokio::task::JoinHandle::is_finished) {
+        if in_flight
+            .as_ref()
+            .is_some_and(tokio::task::JoinHandle::is_finished)
+        {
             match await_refresh(&mut in_flight).await {
                 Ok(credential) => {
                     drop(key);
@@ -327,11 +330,7 @@ async fn await_refresh(
 }
 
 /// Writes `credential` for `id` and atomically stores the updated auth file.
-fn commit(
-    store: &mut AuthStore,
-    id: &str,
-    credential: Credential,
-) -> Result<(), ProviderError> {
+fn commit(store: &mut AuthStore, id: &str, credential: Credential) -> Result<(), ProviderError> {
     store.set(id, credential)?;
     store.store()
 }

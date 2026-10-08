@@ -505,7 +505,12 @@ async fn failed_in_flight_refresh_gives_a_later_caller_a_fresh_attempt() {
     };
     let hiccup = String::from(r#"{"error":"server hiccup"}"#);
     let replies = vec![
-        Reply::JsonAfterNotify(Rc::clone(&started), Rc::clone(&release), 500, hiccup.clone()),
+        Reply::JsonAfterNotify(
+            Rc::clone(&started),
+            Rc::clone(&release),
+            500,
+            hiccup.clone(),
+        ),
         Reply::Json(500, hiccup),
         Reply::Json(200, String::from(NEW_TOKENS)),
     ];
