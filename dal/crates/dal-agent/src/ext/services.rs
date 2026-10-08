@@ -387,7 +387,7 @@ impl Services for SessionServices {
             };
             // One guard across check, open, and set: `open` is synchronous,
             // so two concurrent asks cannot both slip through.
-            let answer = {
+            let (request_id, answer) = {
                 let mut open = self
                     .ask_open
                     .lock()
@@ -402,7 +402,12 @@ impl Services for SessionServices {
                 let deadline = Instant::now() + self.ask_timeout;
                 let (request, answer) = self.broker.open(owner, question, turn, deadline);
                 *open = Some(request.id);
-                answer
+                // Front ends learn a request exists only from this update:
+                // without it the question is unanswerable and the caller
+                // waits out the timeout for nothing.
+                self.backend
+                    .publish_update(dal_core::UpdateKind::RequestOpened(request.clone()));
+                (request.id, answer)
             };
             // The guard clears the slot on every exit — including the
             // caller dropping this future — so a cancellation cannot
@@ -414,12 +419,20 @@ impl Services for SessionServices {
                 biased;
                 () = self.cancel.cancelled() => Err(ServiceError::Cancelled),
                 () = sleep(self.ask_timeout) => Ok(None),
-                (answer, _) = answer => match answer {
-                    value @ Answer::Value(_) => Ok(Some(value)),
-                    // Turn cancellation resolves the open request as
-                    // `Cancel`; dismissal arrives as `Decline`.
-                    Answer::Cancel => Err(ServiceError::Cancelled),
-                    _ => Ok(None),
+                (answer, by) = answer => {
+                    self.backend
+                        .publish_update(dal_core::UpdateKind::RequestResolved {
+                            id: request_id,
+                            answer: answer.clone(),
+                            by,
+                        });
+                    match answer {
+                        value @ Answer::Value(_) => Ok(Some(value)),
+                        // Turn cancellation resolves the open request as
+                        // `Cancel`; dismissal arrives as `Decline`.
+                        Answer::Cancel => Err(ServiceError::Cancelled),
+                        _ => Ok(None),
+                    }
                 },
             }
         })
