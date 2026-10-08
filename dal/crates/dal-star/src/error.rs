@@ -142,6 +142,17 @@ pub enum LoadError {
         /// Rejected directory name.
         name: Box<str>,
     },
+    /// `plugins` named a plugin absent from the scanned directory and the
+    /// bundled set.
+    #[error(
+        "plugin \"{name}\" not found; searched \"{dir}\" plus bundled plugins; install it there or remove it from `plugins`"
+    )]
+    UnknownPlugin {
+        /// Configured name that matched nothing.
+        name: Box<str>,
+        /// Plugin directory the scan covered.
+        dir: PathBuf,
+    },
     /// A nested module load escaped its plugin root.
     #[error("load \"{module}\" escapes the plugin directory")]
     LoadEscape {
