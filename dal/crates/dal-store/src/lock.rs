@@ -129,11 +129,12 @@ mod tests {
         fs,
         path::PathBuf,
         sync::atomic::{AtomicU64, Ordering},
+        time::Duration,
     };
 
     use dal_core::SessionId;
 
-    use super::{LockGuard, parse_pid};
+    use super::{LockGuard, parse_pid, read_pid_until};
     use crate::error::StoreError;
 
     static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
@@ -285,5 +286,44 @@ mod tests {
         );
         let _next = LockGuard::acquire(&path, id).expect("lock released after guard drop");
         assert!(owner.exists(), "the next holder republishes its own pid");
+    }
+
+    #[test]
+    fn read_pid_until_gives_up_as_none_on_a_missing_sidecar() {
+        let dir = TestDir::new();
+        let path = dir.0.join("session.lock.owner");
+        assert_eq!(
+            read_pid_until(&path).expect("a missing sidecar is transient, not an error"),
+            None,
+            "the poll must end at the deadline, not spin forever"
+        );
+    }
+
+    #[test]
+    fn read_pid_until_picks_up_a_sidecar_written_mid_poll() {
+        let dir = TestDir::new();
+        let path = dir.0.join("session.lock.owner");
+        let writer = path.clone();
+        let thread = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(40));
+            fs::write(&writer, b"4242\n").expect("write sidecar mid-poll");
+        });
+        assert_eq!(
+            read_pid_until(&path).expect("poll reads a sidecar that lands in time"),
+            Some(4242),
+            "the poll must not return before its deadline"
+        );
+        thread.join().expect("writer finished");
+    }
+
+    #[test]
+    fn read_pid_until_reports_errors_that_are_not_transient() {
+        let dir = TestDir::new();
+        // A directory is never a parseable pid file and never becomes one;
+        // mistaking it for a missing sidecar would poll instead of failing.
+        assert!(
+            read_pid_until(&dir.0).is_err(),
+            "non-NotFound read errors must surface, not be swallowed by the poll"
+        );
     }
 }
