@@ -12,14 +12,17 @@ use std::sync::Arc;
 
 use dal_core::ext::ToolCallEvent;
 use dal_core::{
-    Answer, CallId, ClientId, GrantSpec, JobEnd, JobId, Name, Owner, Policy, Preview, Question,
-    RawJson, Request, ResolvedCall, SessionId, SettledOutcome, ToolClass, TurnId, Unit, Workspace,
+    Answer, CallId, ClientId, GrantSpec, JobEnd, JobId, Mode, Name, Owner, Policy, Preview,
+    Question, RawJson, Request, ResolvedCall, SessionId, SettledOutcome, ToolClass, TurnId, Unit,
+    Workspace,
 };
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use super::backend::Backend;
-use super::context::{DeferredTool, is_core_tool_search, tool_search_query, tool_search_results};
+use super::context::{
+    DeferredTool, is_core_tool_search, resolve_named, tool_search_query, tool_search_results,
+};
 use crate::broker::{Broker, Resolved, default_timeout};
 use crate::ext::generation::Generation;
 use crate::ext::hooks::{HookScope, dispatch_tool_call, hook_fanout};
@@ -57,6 +60,8 @@ pub(crate) struct DispatchCtx {
     pub turn: TurnId,
     /// The session workspace.
     pub workspace: Workspace,
+    /// The execution mode the rewritten-argument resolve path gates on.
+    pub mode: Mode,
     /// The turn's generation snapshot.
     pub generation: Arc<Generation>,
     /// The turn's overlay tools, frozen at turn start.
@@ -292,6 +297,24 @@ async fn run_one_inner(
         }
         HookArgs::Args(args) => args,
     };
+    if args.as_str() != ready.args.as_str() {
+        let (promoted, result) = resolve_named(
+            &ctx.generation,
+            &ctx.tools,
+            &ready.name,
+            &args,
+            ctx.mode,
+            &ctx.workspace,
+        );
+        if result.is_err() {
+            return failed_outcome(&ResolvedCall {
+                call: ready.call.clone(),
+                name: ready.name.clone(),
+                promoted,
+                result,
+            });
+        }
+    }
     let caller = tool_caller(ctx, ready);
     let runtime = CallRuntime::new(ctx, ready, args.clone(), Arc::clone(reports));
     let cx = ToolCx::new(

@@ -321,44 +321,8 @@ pub(crate) fn resolve_calls(
                 None => continue,
             },
         };
-        if is_core_tool_search(generation, turn_tools, &name) {
-            let result = tool_search_query(&call.args)
-                .map(|_| ToolClass::Read)
-                .map_err(ResolveError::InvalidArgs);
-            resolved.push(ResolvedCall {
-                call: call.call.clone(),
-                name,
-                promoted: false,
-                result,
-            });
-            continue;
-        }
-        let Some((tool, visibility)) = turn_tools.tool(generation, &name) else {
-            resolved.push(ResolvedCall {
-                call: call.call.clone(),
-                name,
-                promoted: false,
-                result: Err(ResolveError::Unknown),
-            });
-            continue;
-        };
-        let visibility = Some(visibility);
-        if matches!(visibility, Some(Visibility::EvalOnly))
-            && !matches!(mode, Mode::EvalFirst | Mode::EvalOnly)
-        {
-            resolved.push(ResolvedCall {
-                call: call.call.clone(),
-                name,
-                promoted: false,
-                result: Err(ResolveError::EvalOnly),
-            });
-            continue;
-        }
-        let promoted = matches!(visibility, Some(Visibility::Deferred));
-        let result = match tool.classify(&call.args, workspace) {
-            Ok(class) => Ok(class),
-            Err(error) => Err(ResolveError::InvalidArgs(error.to_string().into())),
-        };
+        let (promoted, result) =
+            resolve_named(generation, turn_tools, &name, &call.args, mode, workspace);
         resolved.push(ResolvedCall {
             call: call.call.clone(),
             name,
@@ -367,6 +331,42 @@ pub(crate) fn resolve_calls(
         });
     }
     resolved
+}
+
+/// Resolves one named call's arguments: tool lookup, mode gate, and the
+/// tool's own classification of those arguments.
+///
+/// Returns whether the call promotes a deferred tool and its class or the
+/// model-visible failure. Dispatch calls this again on the arguments a
+/// `tool_call` hook rewrote, so a rewrite meets the same checks the
+/// streamed arguments did.
+pub(crate) fn resolve_named(
+    generation: &Generation,
+    turn_tools: &TurnTools,
+    name: &Name,
+    args: &RawJson,
+    mode: Mode,
+    workspace: &Workspace,
+) -> (bool, Result<ToolClass, ResolveError>) {
+    if is_core_tool_search(generation, turn_tools, name) {
+        let result = tool_search_query(args)
+            .map(|_| ToolClass::Read)
+            .map_err(ResolveError::InvalidArgs);
+        return (false, result);
+    }
+    let Some((tool, visibility)) = turn_tools.tool(generation, name) else {
+        return (false, Err(ResolveError::Unknown));
+    };
+    if matches!(visibility, Visibility::EvalOnly)
+        && !matches!(mode, Mode::EvalFirst | Mode::EvalOnly)
+    {
+        return (false, Err(ResolveError::EvalOnly));
+    }
+    let promoted = matches!(visibility, Visibility::Deferred);
+    let result = tool
+        .classify(args, workspace)
+        .map_err(|error| ResolveError::InvalidArgs(error.to_string().into()));
+    (promoted, result)
 }
 
 /// Salvages a display name for provider-sent tool names outside the grammar.

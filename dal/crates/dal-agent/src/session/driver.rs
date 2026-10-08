@@ -1018,6 +1018,7 @@ impl Driver {
             process_env: Arc::clone(&self.deps.host.shared.env),
             turn,
             workspace: self.deps.workspace.clone(),
+            mode: self.deps.host.shared.config.mode(),
             generation: Arc::clone(&state.generation),
             tools: state.tools.clone(),
             deferred_search: Arc::clone(&state.deferred_search),
