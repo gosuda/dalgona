@@ -177,3 +177,39 @@ fn pool_text_builders_match_contract() {
     );
     assert_eq!(GRACE_SECONDS, 60.0);
 }
+
+#[test]
+fn settled_keeps_the_teardown_failure_next_to_the_result_failure() {
+    let ChildDecision::Settle(settled) = decide(&ended(None, StopReason::Error("boom".to_owned())))
+    else {
+        panic!("an error settles");
+    };
+    assert_eq!(settled.failure_text().as_deref(), Some("boom"));
+    let settled = settled.with_teardown("close refused");
+    assert_eq!(
+        settled.state,
+        TaskState::Failed("boom".to_owned()),
+        "the result failure is not replaced"
+    );
+    assert_eq!(
+        settled.failure_text().as_deref(),
+        Some("boom; the child could not be closed afterwards: close refused")
+    );
+}
+
+#[test]
+fn settled_reports_a_teardown_failure_after_a_good_result() {
+    let ChildDecision::Settle(settled) = decide(&ended(
+        Some(stored(ReportStatus::Done, "all good")),
+        StopReason::EndTurn,
+    )) else {
+        panic!("a report settles");
+    };
+    assert_eq!(settled.failure_text(), None);
+    let settled = settled.with_teardown("close refused");
+    assert_eq!(settled.state.word(), "done");
+    assert_eq!(
+        settled.failure_text().as_deref(),
+        Some("the child could not be closed afterwards: close refused")
+    );
+}

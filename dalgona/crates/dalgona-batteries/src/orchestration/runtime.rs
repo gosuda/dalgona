@@ -16,8 +16,8 @@ use dal_core::ext::{
     ToolResultEvent, TurnEnd,
 };
 use dal_core::{
-    AgentState, AgentsOp, AgentsReply, CallId, JobId, JobStateView, JobsOp, JobsReply, Name,
-    Notice, RawJson, SessionId, TurnOp,
+    AgentReport, AgentState, AgentsOp, AgentsReply, CallId, JobId, JobStateView, JobsOp, JobsReply,
+    Name, Notice, RawJson, SessionId, TurnOp,
 };
 use sonic_rs::JsonContainerTrait;
 use tokio::sync::{mpsc, oneshot};
@@ -34,6 +34,9 @@ use super::stuck::{
     rewrite_exec_args,
 };
 use super::{JobsView, OrchestrationConfig, StopKind};
+
+#[cfg(test)]
+mod tests;
 
 #[derive(Clone)]
 pub(crate) struct Runtime {
@@ -537,18 +540,19 @@ impl SessionState {
     async fn close(&mut self) {
         self.goal_timer = None;
         super::monitor::state::stop_all(&mut self.monitors);
-        if let Ok(AgentsReply::Listed(agents)) =
-            self.services.agents(&self.caller, AgentsOp::List).await
-        {
-            for agent in agents
-                .iter()
-                .filter(|agent| matches!(agent.state, AgentState::Queued | AgentState::Running))
-            {
-                let _ = self
-                    .services
-                    .agents(&self.caller, AgentsOp::Cancel { id: agent.id })
-                    .await;
-            }
+        let sweep = cancel_descendants(self.services.as_ref(), &self.caller).await;
+        if let Some(failures) = sweep.failure_text() {
+            self.services.notify(
+                &self.caller,
+                Notice {
+                    turn: None,
+                    kind: "orchestration.cancel".into(),
+                    text: format!(
+                        "Some child sessions were not cancelled when the session ended: {failures}. They may still be running."
+                    )
+                    .into(),
+                },
+            );
         }
     }
 
@@ -647,27 +651,17 @@ impl SessionState {
             }
         }
         let monitors_stopped = super::monitor::state::stop_all(&mut self.monitors);
-        let children = match self.services.agents(&self.caller, AgentsOp::List).await? {
-            AgentsReply::Listed(children) => children,
-            _ => Vec::new(),
-        };
-        for child in children
-            .iter()
-            .filter(|child| matches!(child.state, AgentState::Queued | AgentState::Running))
-        {
-            let _ = self
-                .services
-                .agents(&self.caller, AgentsOp::Cancel { id: child.id })
-                .await;
-        }
+        let sweep = cancel_descendants(self.services.as_ref(), &self.caller).await;
         self.goal_timer = None;
         self.arbiter.on_abort();
-        self.persist_controller(&super::monitor::status::abort_reply(
-            turn_was_running,
-            jobs_cancelled,
-            monitors_stopped,
-        ))
-        .await
+        let mut reply =
+            super::monitor::status::abort_reply(turn_was_running, jobs_cancelled, monitors_stopped);
+        if let Some(failures) = sweep.failure_text() {
+            reply.push_str(" Some child sessions were not cancelled: ");
+            reply.push_str(&failures);
+            reply.push_str(". Run /abort again to retry.");
+        }
+        self.persist_controller(&reply).await
     }
 
     async fn tool(
@@ -1015,21 +1009,15 @@ impl SessionState {
                 Ok(reports.join("\n\n"))
             }
             super::agents_tool::AgentAction::Cancel { ids } => {
-                let mut cancelled = 0;
-                for display in ids {
-                    let id = SessionId::parse(&display).map_err(|_| {
-                        ServiceError::failed(None, super::agents_tool::unknown_id(&display))
-                    })?;
-                    if matches!(
-                        self.services
-                            .agents(&self.caller, AgentsOp::Cancel { id })
-                            .await?,
-                        AgentsReply::Cancelled { .. }
-                    ) {
-                        cancelled += 1;
-                    }
-                }
-                Ok(format!("cancelled {cancelled} child sessions."))
+                let ids = ids
+                    .iter()
+                    .map(|display| {
+                        SessionId::parse(display).map_err(|_| {
+                            ServiceError::failed(None, super::agents_tool::unknown_id(display))
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                cancel_listed(self.services.as_ref(), &self.caller, &ids).await
             }
             super::agents_tool::AgentAction::List { ids } => self.list_agents(ids).await,
             super::agents_tool::AgentAction::Run { label, workflow } => {
@@ -1155,25 +1143,7 @@ impl SessionState {
                         ));
                     }
                 };
-                let report = match self
-                    .services
-                    .agents(
-                        &self.caller,
-                        AgentsOp::Await {
-                            id: child,
-                            timeout: None,
-                        },
-                    )
-                    .await?
-                {
-                    AgentsReply::Await { report } => report,
-                    _ => {
-                        return Err(ServiceError::failed(
-                            None,
-                            "agents service did not return the child report",
-                        ));
-                    }
-                };
+                let report = await_child(self.services.as_ref(), &self.caller, child).await?;
                 if item.is_none() {
                     task_report = Some(report.text.clone());
                 }
@@ -1322,6 +1292,133 @@ impl JobsView for SessionJobsView<'_> {
 fn failed(message: &str) -> HookError {
     HookError::Failed {
         message: message.into(),
+    }
+}
+
+/// The result of cancelling every active descendant of one session.
+#[derive(Default)]
+struct Sweep {
+    failures: Vec<String>,
+}
+
+impl Sweep {
+    /// The failures joined for a reply or notice, or `None` when every
+    /// cancel worked.
+    fn failure_text(&self) -> Option<String> {
+        if self.failures.is_empty() {
+            None
+        } else {
+            Some(self.failures.join("; "))
+        }
+    }
+}
+
+/// Cancels every queued or running session the host lists for `caller`.
+/// The host may reveal deeper descendants while the first ones close, so
+/// the list is read again until no unvisited session is left. A visited set
+/// keeps each session to one cancel, and a failure never stops the walk:
+/// it is recorded next to the session it belongs to.
+async fn cancel_descendants(services: &dyn Services, caller: &Caller) -> Sweep {
+    let mut sweep = Sweep::default();
+    let mut visited = HashSet::new();
+    loop {
+        let listed = match services.agents(caller, AgentsOp::List).await {
+            Ok(AgentsReply::Listed(agents)) => agents,
+            Ok(_) => {
+                sweep.failures.push(
+                    "the agents service returned an unexpected reply to a list request".to_owned(),
+                );
+                return sweep;
+            }
+            Err(error) => {
+                sweep
+                    .failures
+                    .push(format!("the child sessions could not be listed: {error}"));
+                return sweep;
+            }
+        };
+        let pending: Vec<SessionId> = listed
+            .iter()
+            .filter(|agent| matches!(agent.state, AgentState::Queued | AgentState::Running))
+            .map(|agent| agent.id)
+            .filter(|id| visited.insert(*id))
+            .collect();
+        if pending.is_empty() {
+            return sweep;
+        }
+        for id in pending {
+            match services.agents(caller, AgentsOp::Cancel { id }).await {
+                Ok(AgentsReply::Cancelled { .. }) => {}
+                Ok(_) => sweep.failures.push(format!(
+                    "{id}: the agents service returned an unexpected reply to a cancel request"
+                )),
+                Err(error) => sweep.failures.push(format!("{id}: {error}")),
+            }
+        }
+    }
+}
+
+/// Cancels the sessions the model named. A session the host refuses to
+/// cancel does not stop the others: every id is tried once, and the refusals
+/// are reported together with the count that did close.
+async fn cancel_listed(
+    services: &dyn Services,
+    caller: &Caller,
+    ids: &[SessionId],
+) -> Result<String, ServiceError> {
+    let mut seen = HashSet::new();
+    let mut cancelled = 0;
+    let mut failures = Vec::new();
+    for &id in ids.iter().filter(|id| seen.insert(**id)) {
+        match services.agents(caller, AgentsOp::Cancel { id }).await {
+            Ok(AgentsReply::Cancelled { .. }) => cancelled += 1,
+            Ok(_) => {}
+            Err(error) => failures.push(format!("{id}: {error}")),
+        }
+    }
+    if failures.is_empty() {
+        return Ok(format!("cancelled {cancelled} child sessions."));
+    }
+    Err(ServiceError::failed(
+        None,
+        format!(
+            "cancelled {cancelled} child sessions; could not cancel {}.",
+            failures.join("; ")
+        ),
+    ))
+}
+
+/// Waits for one child's report. When the wait fails, the child is closed
+/// so it cannot keep running unseen, and a failed close stays next to the
+/// wait failure instead of replacing it.
+async fn await_child(
+    services: &dyn Services,
+    caller: &Caller,
+    child: SessionId,
+) -> Result<AgentReport, ServiceError> {
+    let failure = match services
+        .agents(
+            caller,
+            AgentsOp::Await {
+                id: child,
+                timeout: None,
+            },
+        )
+        .await
+    {
+        Ok(AgentsReply::Await { report }) => return Ok(report),
+        Ok(_) => ServiceError::failed(None, "agents service did not return the child report"),
+        Err(error) => error,
+    };
+    match services
+        .agents(caller, AgentsOp::Cancel { id: child })
+        .await
+    {
+        Ok(_) => Err(failure),
+        Err(teardown) => Err(ServiceError::failed(
+            None,
+            super::pool::failure_with_teardown(&failure.to_string(), &teardown.to_string()),
+        )),
     }
 }
 

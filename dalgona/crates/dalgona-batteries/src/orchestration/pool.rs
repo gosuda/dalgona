@@ -201,10 +201,43 @@ pub(crate) struct ChildEnd {
 
 /// One settled task plus the late-report note. The note travels with the
 /// verdict; the Change-8 record writer attaches it to the task outcome.
+/// A failed teardown travels with it too, so closing the child can never
+/// replace the result failure that came first.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Settled {
     pub state: TaskState,
     pub note: Option<String>,
+    /// Why closing the child failed after it settled.
+    pub teardown: Option<String>,
+}
+
+impl Settled {
+    /// Records that closing the child failed, keeping the settled result.
+    pub(crate) fn with_teardown(mut self, failure: impl Into<String>) -> Self {
+        self.teardown = Some(failure.into());
+        self
+    }
+
+    /// The failure text for this task: the result failure and the teardown
+    /// failure side by side. `None` when neither failed.
+    pub(crate) fn failure_text(&self) -> Option<String> {
+        match (&self.state, &self.teardown) {
+            (TaskState::Failed(result), Some(teardown)) => {
+                Some(failure_with_teardown(result, teardown))
+            }
+            (TaskState::Failed(result), None) => Some(result.clone()),
+            (_, Some(teardown)) => Some(format!(
+                "the child could not be closed afterwards: {teardown}"
+            )),
+            (_, None) => None,
+        }
+    }
+}
+
+/// Joins a result failure with the failure of the teardown that followed
+/// it, so neither hides the other.
+pub(crate) fn failure_with_teardown(result: &str, teardown: &str) -> String {
+    format!("{result}; the child could not be closed afterwards: {teardown}")
 }
 
 /// The verdict for one finished child turn: settle now or grant one grace.
@@ -223,24 +256,32 @@ pub(crate) fn decide(end: &ChildEnd) -> ChildDecision {
             ReportStatus::Blocked => TaskState::Blocked(report.clone()),
             ReportStatus::Failed => TaskState::Failed(report.text.clone()),
         };
-        return ChildDecision::Settle(Settled { state, note: None });
+        return ChildDecision::Settle(Settled {
+            state,
+            note: None,
+            teardown: None,
+        });
     }
     match &end.stop {
         StopReason::Cancelled if !end.deadline_hit => ChildDecision::Settle(Settled {
             state: TaskState::Cancelled,
             note: None,
+            teardown: None,
         }),
         StopReason::Error(message) => ChildDecision::Settle(Settled {
             state: TaskState::Failed(message.clone()),
             note: None,
+            teardown: None,
         }),
         StopReason::Filter => ChildDecision::Settle(Settled {
             state: TaskState::Failed("the provider filtered the reply".to_owned()),
             note: None,
+            teardown: None,
         }),
         StopReason::Gone(reason) => ChildDecision::Settle(Settled {
             state: TaskState::Failed(reason.clone()),
             note: None,
+            teardown: None,
         }),
         StopReason::EndTurn => ChildDecision::Grace(GraceCause::NoReport),
         StopReason::MaxSteps => ChildDecision::Grace(GraceCause::ToolRounds(end.max_rounds)),
@@ -262,11 +303,13 @@ pub(crate) fn decide_grace(report: Option<&Report>, cause: GraceCause) -> Settle
             Settled {
                 state,
                 note: Some(format!("reported after {}", cause.word())),
+                teardown: None,
             }
         }
         None => Settled {
             state: TaskState::Failed("no report after the last turn".to_owned()),
             note: None,
+            teardown: None,
         },
     }
 }
