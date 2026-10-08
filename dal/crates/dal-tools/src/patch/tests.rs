@@ -1432,6 +1432,95 @@ async fn stage_classify_create_delete_rename() {
     assert_eq!(error.class, super::ir::ErrorClass::Resolve);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "std has no mkfifo and rustix compiles mkfifoat out on Apple targets"
+)]
+async fn patch_rejects_fifo_before_reading() {
+    use std::{process::Command, time::Duration};
+
+    let dir = tempfile::tempdir().expect("temp workspace");
+    let fifo = dir.path().join("pipe");
+    let status = Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("create fifo");
+    assert!(status.success(), "mkfifo failed with {status}");
+    let session = test_session(dir.path(), false);
+    let path = std::path::Path::new("pipe");
+    let result = tokio::time::timeout(
+        Duration::from_secs(1),
+        stage::stage_file(
+            &session,
+            DialectId::Replace,
+            path,
+            &fifo,
+            vec![change_edit(
+                "pipe",
+                Locator::Whole,
+                Action::Replace,
+                "replacement\n",
+            )],
+        ),
+    )
+    .await
+    .expect("FIFO patch must return without blocking");
+    let error = result.expect_err("FIFO patch must be rejected");
+    assert_eq!(error.class, super::ir::ErrorClass::File);
+    assert!(error.message.contains("pipe"), "{}", error.message);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "std has no mkfifo and rustix compiles mkfifoat out on Apple targets"
+)]
+async fn patch_rejects_fifo_reference_before_reading() {
+    use std::{process::Command, time::Duration};
+
+    let dir = tempfile::tempdir().expect("temp workspace");
+    let fifo = dir.path().join("pipe");
+    let status = Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("create fifo");
+    assert!(status.success(), "mkfifo failed with {status}");
+    let session = test_session(dir.path(), false);
+    let path = std::path::Path::new("pipe");
+    let (reference, _) = session
+        .snapshots
+        .capture(
+            session.session,
+            session.generation,
+            session.consumer,
+            path,
+            b"source\n",
+        )
+        .expect("capture FIFO reference");
+    let result = tokio::time::timeout(
+        Duration::from_secs(1),
+        stage::stage_file(
+            &session,
+            DialectId::HashlineLight,
+            path,
+            &fifo,
+            vec![Edit::Delete {
+                index: 0,
+                path: path.to_path_buf(),
+                reference: Some(reference.display().to_string()),
+            }],
+        ),
+    )
+    .await
+    .expect("FIFO reference patch must return without blocking");
+    let error = result.expect_err("FIFO reference patch must be rejected");
+    assert_eq!(error.class, super::ir::ErrorClass::File);
+    assert!(error.message.contains("pipe"), "{}", error.message);
+}
+
 #[tokio::test]
 async fn stage_replacement_contract() {
     let dir = tempfile::tempdir().expect("temp workspace");

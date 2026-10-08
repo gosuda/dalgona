@@ -1,6 +1,9 @@
 //! Atomic commit: locks, temps, ordered operations, and truthful outcomes.
 
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use super::super::ir::{
     Diff, DiffFile, EngineError, ErrorClass, FileChange, FindingSeverity, Output, Plan,
@@ -15,6 +18,22 @@ fn lock_table()
         std::sync::Mutex<std::collections::HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>,
     > = std::sync::OnceLock::new();
     TABLE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn non_regular_target(display: &Path) -> EngineError {
+    EngineError::new(
+        ErrorClass::File,
+        format!("patch: {} is not a regular file.", display.display()),
+    )
+}
+
+async fn ensure_regular_target(canonical: &Path, display: &Path) -> Result<(), EngineError> {
+    if let Ok(metadata) = tokio::fs::metadata(canonical).await
+        && !metadata.is_file()
+    {
+        return Err(non_regular_target(display));
+    }
+    Ok(())
 }
 
 /// Acquires the canonical write set in ascending byte order — sources and
@@ -65,6 +84,7 @@ async fn prepare_write_set(
     }
     for file in &ordered {
         if let Some(expected) = file.before.as_deref() {
+            ensure_regular_target(&file.absolute_path, &file.path).await?;
             let current = tokio::fs::read(&file.absolute_path)
                 .await
                 .unwrap_or_default();
@@ -78,7 +98,10 @@ async fn prepare_write_set(
                     ),
                 ));
             }
-        } else if tokio::fs::metadata(&file.absolute_path).await.is_ok() {
+        } else if let Ok(metadata) = tokio::fs::metadata(&file.absolute_path).await {
+            if !metadata.is_file() {
+                return Err(non_regular_target(&file.path));
+            }
             drop(guards);
             return Err(EngineError::new(
                 ErrorClass::File,
@@ -221,19 +244,20 @@ async fn stage_temp(
     };
     // No-replace: rename destinations must be absent at prepare and commit.
     if file.op == super::super::ir::Operation::Rename
-        && tokio::fs::metadata(&target_abs).await.is_ok()
+        && let Ok(metadata) = tokio::fs::metadata(&target_abs).await
     {
         cleanup_temps(temps).await;
-        let dest = file
-            .renamed_to
-            .as_ref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default();
+        let dest = file.renamed_to.as_deref().unwrap_or(file.path.as_path());
+        if !metadata.is_file() {
+            return Err(non_regular_target(dest));
+        }
         return Err(EngineError::new(
             ErrorClass::File,
             format!(
-                "patch: cannot rename {} to {dest}: {dest} exists.",
-                file.path.display()
+                "patch: cannot rename {} to {}: {} exists.",
+                file.path.display(),
+                dest.display(),
+                dest.display()
             ),
         ));
     }

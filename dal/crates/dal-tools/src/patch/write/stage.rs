@@ -212,16 +212,21 @@ async fn classify_edits(
                     prove_reference(
                         session,
                         style,
+                        canonical,
                         display,
                         &super::super::ir::Locator::Gap { before_line: 0 },
                         0,
                         &reference,
-                    )?;
+                    )
+                    .await?;
                 }
                 rename_to = Some(to);
             }
             Edit::Create { path, body, .. } => {
-                if tokio::fs::metadata(canonical).await.is_ok() {
+                if let Ok(metadata) = tokio::fs::metadata(canonical).await {
+                    if !metadata.is_file() {
+                        return Err(non_regular_target(display));
+                    }
                     return Err(EngineError::new(
                         ErrorClass::File,
                         format!("patch: {} already exists.", display.display()),
@@ -243,11 +248,13 @@ async fn classify_edits(
                     prove_reference(
                         session,
                         style,
+                        canonical,
                         display,
                         &super::super::ir::Locator::Gap { before_line: 0 },
                         0,
                         &reference,
-                    )?;
+                    )
+                    .await?;
                 }
                 let before = read_target(canonical, display).await?;
                 return Ok(StagePlan::Ready(StagedFileOwned {
@@ -791,8 +798,7 @@ async fn prove_guard(
     session: &PatchSession,
     style: super::super::ir::DialectId,
     display: &Path,
-    #[cfg(feature = "symbols")] canonical: &Path,
-    #[cfg(not(feature = "symbols"))] _canonical: &Path,
+    canonical: &Path,
     before: &[u8],
     text: &super::super::resolve::Text,
     guard: &Guard,
@@ -850,7 +856,9 @@ async fn prove_guard(
                 ),
             ))
         }
-        Guard::Reference(token) => prove_reference(session, style, display, locator, index, token),
+        Guard::Reference(token) => {
+            prove_reference(session, style, canonical, display, locator, index, token).await
+        }
         Guard::DefTag(expected) => {
             // Definition-tag proof resolves the named definition through the
             // single parser service and compares its current tag.
@@ -917,14 +925,20 @@ async fn prove_guard(
     }
 }
 
-fn prove_reference(
+async fn prove_reference(
     session: &PatchSession,
     style: super::super::ir::DialectId,
+    canonical: &Path,
     display: &Path,
     locator: &Locator,
     index: usize,
     token: &str,
 ) -> Result<(), EngineError> {
+    if let Ok(metadata) = tokio::fs::metadata(canonical).await
+        && !metadata.is_file()
+    {
+        return Err(non_regular_target(display));
+    }
     let reference = super::super::snapshot::ReadRef::parse(token).ok_or_else(|| {
         EngineError::new(
             ErrorClass::Proof,
@@ -949,7 +963,7 @@ fn prove_reference(
         })?;
     // Digest continuity: current workspace bytes must equal the captured snapshot.
     // Snapshot.path is workspace-relative; always resolve against the session workspace.
-    let current = std::fs::read(session.workspace.join(display)).unwrap_or_default();
+    let current = tokio::fs::read(canonical).await.unwrap_or_default();
     if blake3::hash(&current).as_bytes() != &snapshot.digest {
         return Err(EngineError::new(
             ErrorClass::Stale,
@@ -1014,7 +1028,24 @@ fn destructive_footprint(locator: &Locator) -> Option<(usize, usize)> {
     }
 }
 
+fn non_regular_target(display: &Path) -> EngineError {
+    EngineError::new(
+        ErrorClass::File,
+        format!("patch: {} is not a regular file.", display.display()),
+    )
+}
+
+async fn ensure_regular_target(canonical: &Path, display: &Path) -> Result<(), EngineError> {
+    if let Ok(metadata) = tokio::fs::metadata(canonical).await
+        && !metadata.is_file()
+    {
+        return Err(non_regular_target(display));
+    }
+    Ok(())
+}
+
 async fn read_target(canonical: &Path, display: &Path) -> Result<Vec<u8>, EngineError> {
+    ensure_regular_target(canonical, display).await?;
     tokio::fs::read(canonical).await.map_err(|error| {
         EngineError::new(
             ErrorClass::File,
