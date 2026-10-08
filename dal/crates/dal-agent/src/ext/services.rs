@@ -27,10 +27,8 @@
 //!   on the current leaf path from the actor's published snapshot. No other
 //!   extension's rows are visible.
 //!
-//! Pending host wiring (implemented by the owning parts after this file
-//! lands): [`Broker::open`], `dal_core::ext::{McpRequest, McpResponse}`, and
-//! implementation. The run-output mapping leaves `stderr_tail` empty until
-//! the process layer exposes a separate stderr tail.
+//! The run-output mapping leaves `stderr_tail` empty until the process
+//! layer exposes a separate stderr tail.
 
 use std::collections::HashMap;
 use std::sync::{
@@ -51,10 +49,10 @@ use crate::proc::{ProcResult, ProcStatus, SpawnOpts};
 use dal_core::ExitStatusKind;
 use dal_core::ext::{McpDeclaration, McpRequest, McpResponse};
 use dal_core::{
-    AgentsOp, AgentsReply, Answer, CallId, DenyReason, EntryId, FetchRequest, FetchResponse,
-    Inference, JobsOp, JobsReply, ModelRequest, Name, Notice, Origin, Owner, Preview, Question,
-    RequestId, RunOutput, RunRequest, Service, SidecarOp, Site, TurnOp, TurnOpReply, Visibility,
-    Workspace,
+    AgentsOp, AgentsReply, Answer, CallId, ClientId, DenyReason, EntryId, FetchRequest,
+    FetchResponse, Inference, JobsOp, JobsReply, ModelRequest, Name, Notice, Origin, Owner,
+    Preview, Question, RequestId, RunOutput, RunRequest, Service, SidecarOp, Site, TurnOp,
+    TurnOpReply, Visibility, Workspace,
 };
 use dal_provider::EventStream;
 use tokio::sync::watch;
@@ -89,11 +87,18 @@ pub struct SessionServices {
     next_call: AtomicU64,
 }
 
-/// Releases the session's single open-ask slot on drop, so every exit
-/// from `ask` — including the caller dropping the future — frees the
-/// next ask. A stranded slot would deny every later ask as busy.
+/// Releases the session's single open-ask slot on drop and resolves the
+/// broker request as `Cancel`, so every exit from `ask` — including the
+/// caller dropping the future — frees the next ask and retires the
+/// question it published. A stranded slot would deny every later ask as
+/// busy; a stranded request would stay answerable on every front end
+/// while nobody consumes its reply.
 struct AskSlot<'a> {
     slot: &'a Mutex<Option<RequestId>>,
+    broker: &'a Broker,
+    backend: &'a dyn SessionBackend,
+    request: RequestId,
+    armed: bool,
 }
 
 impl Drop for AskSlot<'_> {
@@ -102,6 +107,22 @@ impl Drop for AskSlot<'_> {
             .slot
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        if !self.armed {
+            return;
+        }
+        let by = ClientId::new("core");
+        if self
+            .broker
+            .answer(self.request, Answer::Cancel, by.clone())
+            .is_ok()
+        {
+            self.backend
+                .publish_update(dal_core::UpdateKind::RequestResolved {
+                    id: self.request,
+                    answer: Answer::Cancel,
+                    by,
+                });
+        }
     }
 }
 
@@ -410,16 +431,21 @@ impl Services for SessionServices {
                 (request.id, answer)
             };
             // The guard clears the slot on every exit — including the
-            // caller dropping this future — so a cancellation cannot
-            // strand the session's one open ask.
-            let _slot = AskSlot {
+            // caller dropping this future — so a cancellation can strand
+            // neither the session's one open ask nor its broker request.
+            let mut guard = AskSlot {
                 slot: &self.ask_open,
+                broker: &self.broker,
+                backend: self.backend.as_ref(),
+                request: request_id,
+                armed: true,
             };
             tokio::select! {
                 biased;
                 () = self.cancel.cancelled() => Err(ServiceError::Cancelled),
                 () = sleep(self.ask_timeout) => Ok(None),
                 (answer, by) = answer => {
+                    guard.armed = false;
                     self.backend
                         .publish_update(dal_core::UpdateKind::RequestResolved {
                             id: request_id,

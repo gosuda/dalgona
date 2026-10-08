@@ -468,9 +468,20 @@ impl GrantStore {
         };
         // Only a grant question needs a live turn: callers without one
         // (slash commands) may still ride a persisted or session grant
-        // but have no turn to hang a request on.
+        // but have no turn to hang a request on. A turnless caller that
+        // reached the absent arm still owns the reservation: finalize it
+        // so waiters resolve as denied instead of hanging on a notify
+        // that no answer will ever fire.
         let Some(turn) = who.turn else {
-            return Err(ServiceError::Denied(DenyReason::NotGranted));
+            return self
+                .finalize(
+                    &key,
+                    service,
+                    Err(ServiceError::Denied(DenyReason::NotGranted)),
+                    None,
+                    &notify,
+                )
+                .await;
         };
         let capabilities: Vec<Box<str>> = key.services.iter().map(|s| s.as_str().into()).collect();
         let origin = match who.origin {

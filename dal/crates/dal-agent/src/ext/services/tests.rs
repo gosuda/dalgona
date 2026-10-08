@@ -50,6 +50,7 @@ struct FakeBackend {
     env_value: Mutex<Option<String>>,
     rows: Mutex<Vec<crate::ext::ExtRecord>>,
     blobs: Mutex<HashMap<[u8; 32], Vec<u8>>>,
+    updates: Mutex<Vec<dal_core::UpdateKind>>,
 }
 
 impl SessionBackend for FakeBackend {
@@ -170,7 +171,9 @@ impl SessionBackend for FakeBackend {
         Box::pin(async move { unreachable!("this test never calls tools") })
     }
 
-    fn publish_update(&self, _update: dal_core::UpdateKind) {}
+    fn publish_update(&self, update: dal_core::UpdateKind) {
+        self.updates.lock().unwrap().push(update);
+    }
 
     fn notify(&self, _notice: dal_core::Notice) {
         unreachable!("this test never notifies")
@@ -1134,4 +1137,41 @@ async fn scope_over_uses_the_supplied_service_caller() {
         handle.result().await,
         Err(ScopeError::Denied(DenyReason::NotInjected))
     ));
+}
+
+#[tokio::test]
+async fn a_dropped_ask_resolves_its_broker_request() {
+    let fx = fixture(Duration::from_secs(60));
+    let who = caller("focus", &["ask"], Some(turn()));
+    let mut ask = Box::pin(fx.services.ask(
+        &who,
+        Question::Text {
+            prompt: "why?".into(),
+            placeholder: None,
+        },
+    ));
+    assert!(
+        futures::poll!(ask.as_mut()).is_pending(),
+        "the ask waits for an answer"
+    );
+    drop(ask);
+    assert!(
+        fx.broker.open_requests().is_empty(),
+        "a dropped ask retires its broker request"
+    );
+    let updates = fx.backend.updates.lock().unwrap();
+    assert!(
+        updates
+            .iter()
+            .any(|u| matches!(u, dal_core::UpdateKind::RequestOpened(_))),
+        "the question was published: {updates:?}"
+    );
+    assert!(
+        updates.iter().any(|u| matches!(
+            u,
+            dal_core::UpdateKind::RequestResolved { answer, .. }
+                if *answer == dal_core::Answer::Cancel
+        )),
+        "the retired question resolves as Cancel: {updates:?}"
+    );
 }

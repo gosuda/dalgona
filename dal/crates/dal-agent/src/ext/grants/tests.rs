@@ -498,4 +498,33 @@ async fn a_turnless_caller_rides_a_persisted_grant_but_cannot_ask() {
         "a grant question still needs a turn: {denied:?}"
     );
     assert!(broker.open_requests().is_empty(), "no request may open");
+
+    // The turnless probe must not strand the reservation: a caller with a
+    // turn still reaches the broker and answers normally.
+    let turned = Caller::new(
+        "focus".parse::<Name>().expect("name"),
+        Origin::User,
+        ServiceSet::from_names(["net"]).expect("inject"),
+        CallerKind::Handler,
+        Some(TurnId::new(std::num::NonZeroU64::MIN)),
+    );
+    let (grant, ()) = futures::join!(
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            store.ensure(&turned, Service::Net, &cancel)
+        ),
+        async {
+            let id = loop {
+                if let Some(req) = broker.open_requests().into_iter().next() {
+                    break req.id;
+                }
+                tokio::task::yield_now().await;
+            };
+            broker.answer(id, Answer::Decline, tui()).expect("decline");
+        }
+    );
+    assert!(
+        matches!(grant, Ok(Err(ServiceError::Declined))),
+        "a turned caller after a turnless probe must be asked, not stranded: {grant:?}"
+    );
 }

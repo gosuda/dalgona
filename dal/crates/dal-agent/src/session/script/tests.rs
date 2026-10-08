@@ -894,3 +894,43 @@ async fn adoption_refuses_references_outside_the_parent_cutoff() {
     let error = host.adopt(&inv, "r1.1").expect_err("foreign reference");
     assert_eq!(error.code, FailureCode::ObservationUnavailable);
 }
+
+#[tokio::test]
+async fn a_get_fetch_needs_no_headers_or_body() {
+    let fx = fixture(Duration::ZERO).await;
+    let host = captured(&fx, &["net.fetch"]);
+    let inv = begin_eval(&host, None).expect("eval inherits A");
+    let outcome = call_op(
+        &host,
+        &inv,
+        OpId::Native(NativeOp::NetFetch),
+        r#"{"method":"GET","url":"http://127.0.0.1:1/"}"#,
+    )
+    .await;
+    if let OpOutcome::Failed { failure, .. } = &outcome {
+        assert!(
+            !failure.message.contains("invalid arguments"),
+            "headers and body are optional on a GET: {failure:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn label_only_choices_open_a_select_question() {
+    let fx = fixture(Duration::ZERO).await;
+    let host = captured(&fx, &["ask.select"]);
+    let inv = begin_eval(&host, None).expect("eval inherits A");
+    let outcome = call_op(
+        &host,
+        &inv,
+        OpId::Native(NativeOp::AskSelect),
+        r#"{"prompt":"pick","options":[{"label":"a"},{"label":"b"}],"multi":false}"#,
+    )
+    .await;
+    if let OpOutcome::Failed { failure, .. } = &outcome {
+        assert!(
+            !failure.message.contains("invalid arguments"),
+            "choice description is optional: {failure:?}"
+        );
+    }
+}
