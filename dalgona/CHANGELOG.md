@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fix finished orchestration children that kept their runtime until the session ended: a run now closes each child as soon as its report arrives, with or without a connected client, and shows a notice if the close fails.
 - Keep compaction images within the request size limit: history compaction now subtracts the bytes of the images that stay in the request from its image byte budget, so it draws fewer images, or declines, instead of building a request the provider rejects.
 - Add opt-in fenced-diagram rendering to TUI transcript rows and ask previews; Dalgona asks models for supported diagram fences when enabled.
 - Assemble Dalgona's batteries as bundled Rust extensions through dal's public extension API.

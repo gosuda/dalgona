@@ -1144,6 +1144,7 @@ impl SessionState {
                     }
                 };
                 let report = await_child(self.services.as_ref(), &self.caller, child).await?;
+                release_child(self.services.as_ref(), &self.caller, child).await;
                 if item.is_none() {
                     task_report = Some(report.text.clone());
                 }
@@ -1420,6 +1421,36 @@ async fn await_child(
             super::pool::failure_with_teardown(&failure.to_string(), &teardown.to_string()),
         )),
     }
+}
+
+/// Closes a run child whose report has been taken. The run owns the child
+/// and never addresses it again, so nothing else would close it: with no
+/// client attached, no front end would either, and every finished child
+/// would keep its runtime until the whole session ended. The close is
+/// awaited before the run starts its next child, so a new child never
+/// begins while an earlier release is still pending. A refused close does
+/// not fail the run, because the report is already in hand; it is reported
+/// as a notice instead.
+async fn release_child(services: &dyn Services, caller: &Caller, child: SessionId) {
+    let failure = match services
+        .agents(caller, AgentsOp::Cancel { id: child })
+        .await
+    {
+        Ok(AgentsReply::Cancelled { .. }) => return,
+        Ok(_) => "the agents service returned an unexpected reply to a close request".to_owned(),
+        Err(error) => error.to_string(),
+    };
+    services.notify(
+        caller,
+        Notice {
+            turn: None,
+            kind: "orchestration.release".into(),
+            text: format!(
+                "The finished child session {child} was not closed: {failure}. Its report is kept, but it may still hold memory until this session ends."
+            )
+            .into(),
+        },
+    );
 }
 
 pub(crate) struct SessionStartHook(pub(crate) Runtime);

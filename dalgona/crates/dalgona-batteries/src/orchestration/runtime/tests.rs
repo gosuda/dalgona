@@ -14,9 +14,9 @@ use dal_core::ext::{
     McpDeclaration, McpRequest, McpResponse, SessionEnd, SessionStart, Visibility,
 };
 use dal_core::{
-    AgentInfo, AgentState, AgentsOp, AgentsReply, Answer, CallId, EntryId, FetchRequest,
-    FetchResponse, Inference, JobsOp, JobsReply, ModelRequest, Notice, Question, RawJson,
-    RunOutput, RunRequest, SessionId, SidecarOp, TurnOp, TurnOpReply,
+    AgentInfo, AgentReport, AgentState, AgentsOp, AgentsReply, Answer, CallId, EntryId,
+    FetchRequest, FetchResponse, Inference, JobsOp, JobsReply, ModelRequest, Notice, Question,
+    RawJson, RunOutput, RunRequest, SessionId, SidecarOp, Stop, TurnOp, TurnOpReply,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -33,6 +33,7 @@ struct Script {
     cancel_refused: HashSet<SessionId>,
     started: Option<SessionId>,
     await_error: Option<&'static str>,
+    report: Option<&'static str>,
     cancels: Vec<SessionId>,
     notices: Vec<Notice>,
 }
@@ -132,9 +133,17 @@ impl Services for Host {
                 Some(id) => Ok(AgentsReply::Started { id }),
                 None => Err(ServiceError::failed(None, "no child was scripted")),
             },
-            AgentsOp::Await { .. } => match script.await_error {
-                Some(message) => Err(ServiceError::failed(None, message)),
-                None => Err(ServiceError::failed(None, "no report was scripted")),
+            AgentsOp::Await { id, .. } => match (script.await_error, script.report) {
+                (Some(message), _) => Err(ServiceError::failed(None, message)),
+                (None, Some(text)) => Ok(AgentsReply::Await {
+                    report: AgentReport {
+                        stop: Stop::EndTurn,
+                        text: text.into(),
+                        session: id,
+                        entry: EntryId::new(std::num::NonZeroU64::MIN),
+                    },
+                }),
+                (None, None) => Err(ServiceError::failed(None, "no report was scripted")),
             },
             _ => Err(ServiceError::failed(
                 None,
@@ -413,6 +422,57 @@ async fn failed_wait_with_clean_teardown_keeps_only_the_result_failure() -> Test
     assert_eq!(fixture.host.cancels(), vec![child]);
     assert!(error.contains("the provider stopped answering"), "{error}");
     assert!(!error.contains(CLOSE_REFUSED), "{error}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_reported_child_is_released_with_no_client_attached() -> TestResult {
+    // The scripted host has no connected client, like a run that outlives
+    // the front end that started it. The report must still release the
+    // child runtime; nothing else would ever close it.
+    let fixture = Fixture::open().await?;
+    let child = SessionId::new_v7();
+    {
+        let mut script = fixture.script();
+        script.started = Some(child);
+        script.report = Some("scan finished");
+    }
+    let reply = run_one_step(&fixture).await?;
+    assert!(
+        reply.contains("scan finished"),
+        "the report is kept: {reply}"
+    );
+    assert_eq!(
+        fixture.host.cancels(),
+        vec![child],
+        "the reported child is released once"
+    );
+    assert!(fixture.host.notices().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_refused_release_keeps_the_report_and_tells_the_user() -> TestResult {
+    let fixture = Fixture::open().await?;
+    let child = SessionId::new_v7();
+    {
+        let mut script = fixture.script();
+        script.started = Some(child);
+        script.report = Some("scan finished");
+        script.cancel_refused.insert(child);
+    }
+    let reply = run_one_step(&fixture).await?;
+    assert!(
+        reply.contains("scan finished"),
+        "the report is kept: {reply}"
+    );
+    let notices = fixture.host.notices();
+    assert_eq!(notices.len(), 1, "one notice reports the failed release");
+    assert!(
+        notices[0].text.contains(&child.to_string()) && notices[0].text.contains(CLOSE_REFUSED),
+        "notice: {}",
+        notices[0].text
+    );
     Ok(())
 }
 
