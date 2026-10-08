@@ -564,7 +564,7 @@ mod win {
                 backslashes = 0;
             }
             if unit == b'"' as u16 {
-                command.extend(std::iter::repeat_n(b'\\' as u16, backslashes * 2 + 1));
+                command.extend(std::iter::repeat_n(b'\\' as u16, backslashes + 1));
             }
             command.push(unit);
         }
@@ -647,9 +647,18 @@ mod win {
     ) -> Result<Vec<(PathBuf, u32)>, String> {
         let mut planted: Vec<(PathBuf, u32)> = Vec::new();
         let result = (|| {
-            if let Some(dir) = executable.parent() {
-                edit_dacl(dir, sid, GENERIC_READ_EXECUTE, GRANT_ACCESS)?;
-                planted.push((dir.to_path_buf(), GENERIC_READ_EXECUTE));
+            if let Some(dir) = executable
+                .parent()
+                .filter(|dir| !dir.as_os_str().is_empty())
+            {
+                // Read+execute on the launch directory only. System locations
+                // already permit ALL APPLICATION PACKAGES and an unprivileged
+                // user cannot edit them; a directory the container genuinely
+                // cannot read fails at exec time with an access error, so a
+                // failed grant here must not block launch.
+                if edit_dacl(dir, sid, GENERIC_READ_EXECUTE, GRANT_ACCESS).is_ok() {
+                    planted.push((dir.to_path_buf(), GENERIC_READ_EXECUTE));
+                }
             }
             for root in roots {
                 edit_dacl(root, sid, GENERIC_ALL_ACCESS, GRANT_ACCESS)?;
@@ -836,7 +845,10 @@ mod win {
             return Err(last_error("set the process attributes"));
         }
 
-        let mut application = wide_path(Path::new(executable));
+        let mut application = Path::new(executable)
+            .parent()
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .map(|_| wide_path(Path::new(executable)));
         let mut command: Vec<u16> = Vec::new();
         push_quoted(&mut command, executable);
         for arg in run_args {
@@ -855,7 +867,9 @@ mod win {
         let mut process: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
         let spawned = unsafe {
             CreateProcessW(
-                application.as_ptr(),
+                application
+                    .as_mut()
+                    .map_or(ptr::null(), |name| name.as_mut_ptr()),
                 command.as_mut_ptr(),
                 ptr::null(),
                 ptr::null(),
@@ -868,7 +882,9 @@ mod win {
             )
         };
         unsafe { DeleteProcThreadAttributeList(list) };
-        application.clear();
+        if let Some(name) = application.as_mut() {
+            name.clear();
+        }
         if spawned == FALSE {
             revoke_planted(&planted, profile.sid.0);
             return Err(last_error("spawn the sandboxed process"));
