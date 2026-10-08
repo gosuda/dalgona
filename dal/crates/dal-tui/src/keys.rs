@@ -364,6 +364,36 @@ mod tests {
     }
 
     #[test]
+    fn control_byte_aborts_partial_csi_sequence() {
+        let start = Instant::now();
+        let mut decoder = KeyDecoder::default();
+        assert!(decoder.feed(b"\x1b[<0;10;", start).is_empty());
+        assert_eq!(
+            decoder.feed(&[0x03], start + Duration::from_millis(1)),
+            [InputEvent::Key(Key::new(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL
+            ))]
+        );
+        assert_eq!(
+            decoder.feed(b"x", start + Duration::from_millis(2)),
+            [InputEvent::Key(Key::new(
+                KeyCode::Char('x'),
+                KeyModifiers::NONE
+            ))]
+        );
+
+        let mut decoder = KeyDecoder::default();
+        assert_eq!(
+            decoder.feed(b"\x1b[<0;10;\x03", start),
+            [InputEvent::Key(Key::new(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL
+            ))]
+        );
+    }
+
+    #[test]
     fn split_paste_start_and_bare_end_are_handled() {
         let start = Instant::now();
         let mut decoder = KeyDecoder::default();
