@@ -6,8 +6,9 @@ through the platform sandbox helper: Landlock on Linux through the
 The allowed roots are the workspace, the system temp directory, the platform
 cache directory, and the `sandbox_writable` entries; nothing else under the
 home directory is writable, and there is no network restriction. The Windows
-backend is stricter than write-only Landlock: the per-run `dalgon.sandbox.<pid>`
-container also denies reads outside the granted roots. If the helper is missing or
+backend is stricter than write-only Landlock: the per-run
+`dalgon.sandbox.<guid>` container also denies reads outside the granted
+roots and system locations already covered by `ALL APPLICATION PACKAGES`. If the helper is missing or
 the kernel cannot enforce the sandbox, dal refuses the command with the
 setup error instead of running it unsandboxed. It does not cover plugins
 running with your permissions.
