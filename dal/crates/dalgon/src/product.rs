@@ -180,32 +180,7 @@ pub fn assemble(cx: &BuildCx<'_>, parts: Parts) -> Result<Product, BuildError> {
     })?;
     extensions.extend(batch);
 
-    let mut claimants = std::collections::BTreeMap::new();
-    for extension in &extensions {
-        let name = extension.name();
-        let claimant = match extension.origin() {
-            dal_core::Origin::Builtin => dal_core::Claimant::Builtin,
-            dal_core::Origin::Bundled => dal_core::Claimant::Battery,
-            dal_core::Origin::User => dal_core::Claimant::Plugin,
-            _ => dal_core::Claimant::Plugin,
-        };
-        let claimant =
-            claimant(
-                dal_core::Name::parse(name).map_err(|source| BuildError::Section {
-                    section: "extension".into(),
-                    source: Box::new(source),
-                })?,
-            );
-        if let Some(previous) = claimants.insert(name, claimant) {
-            return Err(BuildError::Registration(
-                dal_core::RegistrationError::Conflict {
-                    kind: "extension",
-                    name: dal_core::Name::parse(name).expect("registered names are valid"),
-                    claimant: previous,
-                },
-            ));
-        }
-    }
+    reject_duplicate_extension_names(&extensions)?;
 
     let skills =
         dal_ext::skills::SkillRegistry::merge_extensions(&extensions).map_err(|source| {
@@ -225,6 +200,39 @@ pub fn assemble(cx: &BuildCx<'_>, parts: Parts) -> Result<Product, BuildError> {
         extensions,
         bundled: parts.bundled,
     })
+}
+
+/// Fails assembly when two extensions claim one registration name.
+///
+/// A user plugin named like a bundled battery would otherwise shadow it
+/// silently; the second claimant is rejected with the conflict that
+/// names the first owner.
+fn reject_duplicate_extension_names(extensions: &[Extension]) -> Result<(), BuildError> {
+    let mut claimants: std::collections::BTreeMap<dal_core::Name, dal_core::Claimant> =
+        std::collections::BTreeMap::new();
+    for extension in extensions {
+        let name =
+            dal_core::Name::parse(extension.name()).map_err(|source| BuildError::Section {
+                section: "extension".into(),
+                source: Box::new(source),
+            })?;
+        let claimant = match extension.origin() {
+            dal_core::Origin::Builtin => dal_core::Claimant::Builtin,
+            dal_core::Origin::Bundled => dal_core::Claimant::Battery,
+            _ => dal_core::Claimant::Plugin,
+        }(name.clone());
+        if let Some(previous) = claimants.get(&name) {
+            return Err(BuildError::Registration(
+                dal_core::RegistrationError::Conflict {
+                    kind: "extension",
+                    name,
+                    claimant: previous.clone(),
+                },
+            ));
+        }
+        claimants.insert(name, claimant);
+    }
+    Ok(())
 }
 
 fn diagrams_prompt_extension() -> Result<Extension, dal_core::RegistrationError> {
