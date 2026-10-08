@@ -44,9 +44,19 @@ fn frames(datas: &[&str]) -> String {
 
 /// Decodes wire bytes delivered in 7-byte chunks, as a network would.
 fn decode(wire: &str, oauth: bool) -> Vec<Result<StreamEvent, ProviderError>> {
+    decode_bound(wire, oauth, None)
+}
+
+/// Decodes like [`decode`], recording `prefix` as the producing request's
+/// replay binding.
+fn decode_bound(
+    wire: &str,
+    oauth: bool,
+    prefix: Option<&str>,
+) -> Vec<Result<StreamEvent, ProviderError>> {
     let chunks: Vec<Vec<u8>> = wire.as_bytes().chunks(7).map(<[u8]>::to_vec).collect();
     let events = sse::decode_stream(stream::iter(chunks));
-    block_on(decode_stream(events, "claude-sonnet-5".into(), oauth).collect())
+    block_on(decode_stream(events, "claude-sonnet-5".into(), oauth, prefix).collect())
 }
 
 fn assert_protocol_failure(wire: &str) {
@@ -453,13 +463,21 @@ fn end_of_input_before_message_stop_is_a_cut() {
 }
 
 fn request(context: Vec<ContextItem>, tools: Vec<ModelToolSpec>) -> ModelRequest {
+    request_with_system("Be brief.", context, tools)
+}
+
+fn request_with_system(
+    system: &str,
+    context: Vec<ContextItem>,
+    tools: Vec<ModelToolSpec>,
+) -> ModelRequest {
     ModelRequest {
         purpose: Purpose::Turn,
         model: ModelRoute::Api {
             family: Family::Anthropic,
             model: "claude-sonnet-5".into(),
         },
-        system: Arc::from("Be brief."),
+        system: Arc::from(system),
         tools: Arc::from(tools),
         context: Arc::from(context),
         params: RequestParams {
@@ -620,6 +638,133 @@ fn foreign_family_replay_is_omitted_without_losing_text_or_tool_calls() {
 fn different_model_replay_is_omitted_without_losing_text_or_tool_calls() {
     let body = replay_body(replay_source(Family::Anthropic, "claude-opus-5"));
     assert_replay_was_filtered(&body);
+}
+
+/// Builds a signed thinking replay bound to `prefix` in storage.
+fn bound_replay(prefix: &str) -> RawJson {
+    RawJson::parse(&format!(
+        r#"{{"type":"thinking","thinking":"private","signature":"signed","dal_prefix":"{prefix}"}}"#
+    ))
+    .unwrap()
+}
+
+/// Builds a body whose history holds one prefix-bound signed thinking block.
+fn bound_replay_body(system: &str, prefix: &str) -> String {
+    bound_replay_body_with_tools(system, prefix, Vec::new())
+}
+
+fn bound_replay_body_with_tools(system: &str, prefix: &str, tools: Vec<ModelToolSpec>) -> String {
+    let request = request_with_system(
+        system,
+        vec![ContextItem::Assistant {
+            source: replay_source(Family::Anthropic, "claude-sonnet-5"),
+            parts: vec![
+                AssistantPart::Thinking {
+                    text: "private".into(),
+                    replay: Some(bound_replay(prefix)),
+                },
+                AssistantPart::Text {
+                    text: "visible".into(),
+                },
+            ],
+        }],
+        tools,
+    );
+    let input = AnthropicRequest {
+        request: &request,
+        max_output: None,
+        thinking: AnthropicThinking::Omit,
+        effort: None,
+        display_supported: false,
+        temperature: None,
+        compaction: None,
+        summarize: false,
+    };
+    String::from_utf8(build(&input, AnthropicAuth::ApiKey("sk-ant")).unwrap().body).unwrap()
+}
+
+#[test]
+fn changed_system_prompt_drops_the_stale_thinking_block() {
+    // The block was produced under a prefix the current request no longer
+    // sends: its stored binding names the earlier system prompt.
+    let body = bound_replay_body("Current system.", "prefix-of-the-earlier-request");
+    assert!(!body.contains("signature"));
+    assert!(!body.contains(r#""type":"thinking""#));
+    assert!(!body.contains("dal_prefix"));
+    assert!(body.contains(r#""type":"text","text":"visible""#));
+}
+
+#[test]
+fn unchanged_prefix_keeps_the_signed_block_without_the_binding_member() {
+    let request = request_with_system(
+        "Be brief.",
+        vec![ContextItem::User {
+            parts: vec![Part::Text { text: "hi".into() }],
+        }],
+        vec![],
+    );
+    let prefix = prefix_fingerprint(&request, false).to_string();
+    let body = bound_replay_body("Be brief.", &prefix);
+    assert!(body.contains(r#""type":"thinking","thinking":"private","signature":"signed""#));
+    assert!(!body.contains("dal_prefix"));
+    assert!(body.contains(r#""type":"text","text":"visible""#));
+}
+
+#[test]
+fn a_changed_tool_list_drops_the_stale_thinking_block() {
+    let request = request_with_system(
+        "Be brief.",
+        vec![],
+        vec![ModelToolSpec {
+            name: "read".into(),
+            description: "d".into(),
+            parameters: RawJson::parse(r#"{"type":"object","properties":{}}"#).unwrap(),
+            grammar: None,
+        }],
+    );
+    let prefix = prefix_fingerprint(&request, false).to_string();
+    let tools = vec![tool("read"), tool("grep")];
+    let body = bound_replay_body_with_tools("Be brief.", &prefix, tools);
+    assert!(!body.contains("signature"));
+    assert!(!body.contains(r#""type":"thinking""#));
+}
+
+#[test]
+fn signed_replay_records_the_producing_prefix() {
+    let wire = frames(&[
+        START,
+        r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}"#,
+        r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"why"}}"#,
+        r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"EqQBCgIYAhIM"}}"#,
+        r#"{"type":"content_block_stop","index":0}"#,
+        r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null}}"#,
+        STOP,
+    ]);
+    let results = ok(decode_bound(&wire, false, Some("prefix-2026")));
+    let Some(StreamEvent::Replay { payload }) = results
+        .iter()
+        .find(|event| matches!(event, StreamEvent::Replay { .. }))
+    else {
+        panic!("signed thinking block replays");
+    };
+    assert_eq!(payload.family, Family::Anthropic);
+    assert_eq!(
+        payload.item.as_str(),
+        r#"{"type":"thinking","thinking":"why","signature":"EqQBCgIYAhIM","dal_prefix":"prefix-2026"}"#
+    );
+    // Without a producing prefix nothing is recorded, and the stored block
+    // stays byte for byte what the API sent.
+    let results = ok(decode(&wire, false));
+    let Some(StreamEvent::Replay { payload }) = results
+        .iter()
+        .find(|event| matches!(event, StreamEvent::Replay { .. }))
+    else {
+        panic!("signed thinking block replays");
+    };
+    assert_eq!(
+        payload.item.as_str(),
+        r#"{"type":"thinking","thinking":"why","signature":"EqQBCgIYAhIM"}"#
+    );
 }
 
 #[test]

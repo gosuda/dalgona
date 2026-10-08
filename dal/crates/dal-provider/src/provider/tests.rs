@@ -1092,6 +1092,7 @@ async fn a_two_hundred_that_is_not_an_sse_stream_never_ends_in_stop() {
                 "p",
                 "m",
                 false,
+                None,
                 Vec::new(),
             ))
             .await;
@@ -1125,6 +1126,7 @@ async fn a_body_read_failure_mid_stream_is_a_retryable_transport_error_at_any_cu
             "p",
             "m",
             false,
+            None,
             Vec::new(),
         ))
         .await;

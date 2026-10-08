@@ -131,8 +131,17 @@ pub(crate) async fn stream_attempt(
         &context.provider,
         &context.model,
         matches!(&credential, Credential::OAuth(_)),
+        replay_prefix(&context, &credential).as_deref(),
         secrets,
     )))
+}
+
+/// The prefix fingerprint of the request a stream answers, recorded inside
+/// signed thinking replays so stale blocks are dropped before replay.
+fn replay_prefix(context: &StreamContext, credential: &Credential) -> Option<Box<str>> {
+    let oauth = matches!(credential, Credential::OAuth(_));
+    (context.family == Family::Anthropic)
+        .then(|| family::anthropic::prefix_fingerprint(&context.request, oauth))
 }
 
 /// A built streaming request with its user agent and redaction secrets.

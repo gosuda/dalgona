@@ -73,6 +73,7 @@ pub(crate) fn decode_response(
     provider: &str,
     model: &str,
     oauth: bool,
+    replay_prefix: Option<&str>,
     secrets: Vec<Box<str>>,
 ) -> EventStream {
     let read_failure: Arc<Mutex<Option<ProviderError>>> = Arc::default();
@@ -108,6 +109,7 @@ pub(crate) fn decode_response(
                 events,
                 model.into(),
                 oauth,
+                replay_prefix,
             )),
         };
     // A body read failure ends the byte source, so the decoder would report

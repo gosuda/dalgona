@@ -5,8 +5,12 @@
 //! registration order, and two builds of the same input are equal byte for
 //! byte. Cache breakpoints sit on exactly three places: the last system block,
 //! the last tool, and the last typed content block of the last message.
-//! Tool arguments and replayed thinking blocks travel as raw JSON, never
-//! re-encoded. A Claude OAuth token also carries the fingerprint of
+//! Tool arguments travel as raw JSON, never re-encoded. Replayed thinking
+//! blocks travel as raw JSON too: a block stored without a prefix binding is
+//! sent verbatim, a bound block is rebuilt without the binding member so the
+//! API sees only the members it produced, and a block bound to a different
+//! system-prompt or tool-list prefix is dropped before the request is sent.
+//! A Claude OAuth token also carries the fingerprint of
 //! [`crate::claude_fingerprint`]; API keys and bearer keys never do.
 //!
 //! [`decode_stream`] turns the SSE events of one response into the neutral
@@ -26,6 +30,7 @@ use dal_core::{
 };
 use futures::{Stream, StreamExt, stream};
 use serde::{Deserialize, Serialize, Serializer, ser::SerializeMap};
+use sha2::{Digest, Sha256};
 use sonic_rs::{JsonValueTrait, LazyValue};
 
 use crate::{
@@ -238,7 +243,13 @@ pub(crate) fn build(
         },
         stream: !input.summarize,
         system: system_blocks(&request.system, oauth),
-        messages: messages(request, model, input.compaction, oauth)?,
+        messages: messages(
+            request,
+            model,
+            input.compaction,
+            oauth,
+            &prefix_fingerprint(request, oauth),
+        )?,
         tools: tools(request, oauth),
         tool_choice: (!request.tools.is_empty()).then_some(ToolChoice::Auto),
         thinking: match input.thinking {
@@ -356,6 +367,9 @@ struct Message<'a> {
 enum Block<'a> {
     Typed(Typed<'a>),
     Raw(&'a RawJson),
+    /// A signed thinking replay rebuilt without its dal prefix binding; the
+    /// thinking text and signature stay the bytes the provider produced.
+    Rebound(RawJson),
 }
 
 impl Serialize for Block<'_> {
@@ -363,6 +377,7 @@ impl Serialize for Block<'_> {
         match self {
             Self::Typed(block) => block.serialize(serializer),
             Self::Raw(raw) => raw.serialize(serializer),
+            Self::Rebound(raw) => raw.serialize(serializer),
         }
     }
 }
@@ -496,6 +511,7 @@ fn messages<'a>(
     model: &str,
     compaction: Option<&'a RawJson>,
     oauth: bool,
+    prefix: &str,
 ) -> Result<Vec<Message<'a>>, ProviderError> {
     let mut messages: Vec<Message<'a>> = Vec::new();
     let mut turn = ToolTurn::default();
@@ -511,7 +527,10 @@ fn messages<'a>(
             ContextItem::Assistant { source, parts } => {
                 let continues = messages.last().is_some_and(|last| last.role == "assistant");
                 turn.assistant(parts, continues)?;
-                ("assistant", assistant_blocks(parts, source, model, oauth))
+                (
+                    "assistant",
+                    assistant_blocks(parts, source, model, oauth, prefix),
+                )
             }
             ContextItem::ToolResult {
                 call,
@@ -558,7 +577,7 @@ fn messages<'a>(
     if let Some(slot) = messages.last_mut().and_then(|last| {
         last.content.iter_mut().rev().find_map(|block| match block {
             Block::Typed(typed) => Some(typed.cache_slot()),
-            Block::Raw(_) => None,
+            Block::Raw(_) | Block::Rebound(_) => None,
         })
     }) {
         *slot = Some(CacheControl::Ephemeral);
@@ -663,6 +682,7 @@ fn assistant_blocks<'a>(
     source: &ReplaySource,
     model: &str,
     oauth: bool,
+    prefix: &str,
 ) -> Vec<Block<'a>> {
     let replay_ok = source.family == Family::Anthropic && source.model.as_ref() == model;
     parts
@@ -673,10 +693,9 @@ fn assistant_blocks<'a>(
                 text,
                 cache_control: None,
             })),
-            AssistantPart::Thinking { replay, .. } if replay_ok => replay
-                .as_ref()
-                .filter(|raw| replayable(raw))
-                .map(Block::Raw),
+            AssistantPart::Thinking { replay, .. } if replay_ok => {
+                thinking_replay_block(replay.as_ref(), prefix)
+            }
             AssistantPart::Thinking { .. } => None,
             AssistantPart::ToolCall { call, name, args } => Some(Block::Typed(Typed::ToolUse {
                 id: call.as_str(),
@@ -708,23 +727,100 @@ fn replayable(raw: &RawJson) -> bool {
     }
 }
 
+/// The request prefix a signed thinking block is bound to: a digest of the
+/// wire system blocks and wire tool list. A stored block whose binding
+/// differs from the current digest was produced under a different prefix
+/// and the API rejects its signature, so it must not be replayed.
+pub(crate) fn prefix_fingerprint(request: &ModelRequest, oauth: bool) -> Box<str> {
+    let mut digest = Sha256::new();
+    let mut field = |bytes: &[u8]| {
+        let length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        digest.update(length.to_le_bytes());
+        digest.update(bytes);
+    };
+    for block in system_blocks(&request.system, oauth) {
+        field(block.text.as_bytes());
+    }
+    for tool in tools(request, oauth) {
+        field(tool.name.as_bytes());
+        field(tool.description.as_bytes());
+        field(tool.input_schema.as_str().as_bytes());
+    }
+    base64::engine::general_purpose::STANDARD
+        .encode(digest.finalize())
+        .into_boxed_str()
+}
+
+/// The prefix binding stored inside a signed thinking block, if any. Blocks
+/// recorded before the binding existed, and scripted payloads, store none.
+fn replay_bound_prefix(raw: &str) -> Option<String> {
+    sonic_rs::get_from_str(raw, [REPLAY_PREFIX_MEMBER])
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+}
+
+/// The replayable payload of one stored thinking part: the block when the
+/// API still accepts it under the current request prefix.
+fn thinking_replay_block<'a>(replay: Option<&'a RawJson>, prefix: &str) -> Option<Block<'a>> {
+    let raw = replay?;
+    if !replayable(raw) {
+        return None;
+    }
+    replay_block(raw, prefix)
+}
+
+/// Sends one stored signed thinking block: verbatim when it carries no
+/// prefix binding, otherwise rebuilt without the binding member so the API
+/// sees only the block it produced. `None` drops a bound block the binding
+/// member cannot be removed from.
+fn replay_block<'a>(raw: &'a RawJson, prefix: &str) -> Option<Block<'a>> {
+    match replay_bound_prefix(raw.as_str()) {
+        None => Some(Block::Raw(raw)),
+        Some(stored) if stored == prefix => unbound_replay(raw).map(Block::Rebound),
+        Some(_) => None,
+    }
+}
+
+/// Rebuilds a bound signed thinking block with only the members the API
+/// produced: the exact thinking text and signature.
+fn unbound_replay(raw: &RawJson) -> Option<RawJson> {
+    let member = |name: &str| {
+        sonic_rs::get_from_str(raw.as_str(), [name])
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+    };
+    let thinking = member("thinking")?;
+    let signature = member("signature")?;
+    let json = sonic_rs::to_string(&ThinkingReplay {
+        kind: "thinking",
+        thinking: &thinking,
+        signature: &signature,
+        prefix: None,
+    })
+    .ok()?;
+    RawJson::parse(&json).ok()
+}
+
 /// Decodes the SSE events of one Anthropic response into neutral events.
 ///
 /// `model` binds every [`ReplayPayload`]; `oauth` strips the Claude Code
-/// tool prefix from tool names. The stream yields the events of the 5.1
-/// grammar, then ends after `Stop` or after one error; input that ends
-/// before `message_stop` yields [`ProviderError::StreamCut`].
+/// tool prefix from tool names; `replay_prefix` is the producing request's
+/// prefix fingerprint, recorded inside every signed thinking replay for
+/// replay binding (`None` records nothing). The stream yields the events of
+/// the 5.1 grammar, then ends after `Stop` or after one error; input that
+/// ends before `message_stop` yields [`ProviderError::StreamCut`].
 pub(crate) fn decode_stream<S>(
     events: S,
     model: Box<str>,
     oauth: bool,
+    replay_prefix: Option<&str>,
 ) -> impl Stream<Item = Result<StreamEvent, ProviderError>> + Send + 'static
 where
     S: Stream<Item = Result<SseEvent, ProviderError>> + Send + 'static,
 {
     let state = Pump {
         events: Some(Box::pin(events)),
-        decoder: Decoder::new(model, oauth),
+        decoder: Decoder::new(model, oauth, replay_prefix.map(Box::<str>::from)),
         queue: VecDeque::new(),
     };
     stream::unfold(state, |mut pump| async move {
@@ -855,6 +951,10 @@ impl UsageState {
 struct Decoder {
     model: Box<str>,
     oauth: bool,
+    /// The prefix fingerprint of the request this stream answers; signed
+    /// thinking blocks record it for replay binding. `None` decodes without
+    /// a binding (scripted or synthetic streams).
+    prefix: Option<Box<str>>,
     usage: UsageState,
     stop: Option<StopReason>,
     open: BTreeMap<u64, OpenBlock>,
@@ -955,7 +1055,14 @@ struct ThinkingReplay<'a> {
     kind: &'static str,
     thinking: &'a str,
     signature: &'a str,
+    /// The request prefix the block was produced under, recorded for replay.
+    /// The member is dal storage only; it never reaches the API again.
+    #[serde(rename = "dal_prefix", skip_serializing_if = "Option::is_none")]
+    prefix: Option<&'a str>,
 }
+
+/// The member name [`ThinkingReplay::prefix`] is stored under.
+const REPLAY_PREFIX_MEMBER: &str = "dal_prefix";
 
 fn protocol(detail: impl Into<String>) -> ProviderError {
     ProviderError::Protocol {
@@ -1011,10 +1118,11 @@ fn stream_error(body: Option<ErrorBody>) -> ProviderError {
 }
 
 impl Decoder {
-    fn new(model: Box<str>, oauth: bool) -> Self {
+    fn new(model: Box<str>, oauth: bool, prefix: Option<Box<str>>) -> Self {
         Self {
             model,
             oauth,
+            prefix,
             usage: UsageState::default(),
             stop: None,
             open: BTreeMap::new(),
@@ -1254,6 +1362,7 @@ impl Decoder {
                     kind: "thinking",
                     thinking: &text,
                     signature: &signature,
+                    prefix: self.prefix.as_deref(),
                 };
                 let json = sonic_rs::to_string(&replay)
                     .map_err(|error| protocol(format!("thinking block did not encode: {error}")))?;
