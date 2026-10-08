@@ -2,89 +2,82 @@
 
 use std::ffi::OsStr;
 use std::net::IpAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use dal_agent::{Env, Host, Product};
 use dal_core::Screen as ConfigScreen;
+use dal_core::{Config, Workspace};
 use dal_tui::{EnvFacts, Screen, ThemeRequest, TuiError, TuiOptions, WidthMode};
 use dal_wire::{RemoteEndpoint, RemoteHost};
 
 use crate::cli::{self, ColorArg};
 use crate::edge;
 use crate::exit;
-use crate::{Startup, host_exit, session_ref, two_lines};
+use crate::{Startup, VarsMap, host_exit, session_ref, two_lines};
 
 mod remote;
 mod signal;
 
-/// Starts the interactive client after the process edge has resolved all inputs.
-#[expect(
-    clippy::too_many_lines,
-    reason = "one interactive dispatch walks setup, loop, and shutdown in place"
-)]
-pub(crate) async fn interactive(cli: &cli::Cli, startup: Startup, product: Product) -> ExitCode {
-    let t0 = std::time::Instant::now();
-    let snapshot = edge::terminal_snapshot();
-    let term = captured(&startup.vars, "TERM");
+/// Guards the interactive path on a usable terminal; returns the failure
+/// exit when any check fails.
+fn terminal_gate(snapshot: &edge::TerminalSnapshot, term: Option<&str>) -> Option<ExitCode> {
     if !snapshot.stdin_tty || !snapshot.stdout_tty {
-        return two_lines(
+        return Some(two_lines(
             [
                 cli::texts::NO_PROMPT.into(),
                 cli::texts::NO_PROMPT_HINT.into(),
             ],
             exit::ExitKind::RequestedFailure,
-        );
+        ));
     }
     if term.is_none_or(|value| value == "dumb") {
-        return two_lines(
+        return Some(two_lines(
             cli::texts::term_not_addressable(term.unwrap_or("unset")),
             exit::ExitKind::RequestedFailure,
-        );
+        ));
     }
     let width = crossterm::terminal::size().map_or(80, |(columns, _)| usize::from(columns));
     if width < 40 {
-        return two_lines(
+        return Some(two_lines(
             cli::texts::terminal_too_narrow(width),
             exit::ExitKind::RequestedFailure,
-        );
+        ));
     }
+    None
+}
 
-    let Startup {
-        vars,
-        cwd,
-        workspace_path: _,
-        workspace,
-        config,
-        config_path,
-        data_root,
-        helper,
-    } = startup;
-    let no_color = edge::resolve_color(cli.color, &vars, snapshot.stdout_tty) == ColorArg::Never;
-    if vars.contains_key(OsStr::new("DAL_DEBUG")) {
-        eprintln!("[t1] edge {}ms", t0.elapsed().as_millis());
-    }
+/// Builds the TUI options: terminal env facts, then the session
+/// options carrying them.
+fn build_opts(
+    cli: &cli::Cli,
+    workspace: Workspace,
+    config: &Config,
+    vars: &VarsMap,
+    snapshot: &edge::TerminalSnapshot,
+    no_color: bool,
+) -> TuiOptions {
     let env = EnvFacts {
         stdin_tty: snapshot.stdin_tty,
         path: vars.get(OsStr::new("PATH")).cloned(),
-        term: owned(&vars, "TERM"),
-        term_program: owned(&vars, "TERM_PROGRAM"),
-        colorterm: owned(&vars, "COLORTERM"),
-        colorfgbg: owned(&vars, "COLORFGBG"),
-        wt_session: owned(&vars, "WT_SESSION"),
-        wt_version: owned(&vars, "WT_VERSION"),
+        term: owned(vars, "TERM"),
+        term_program: owned(vars, "TERM_PROGRAM"),
+        colorterm: owned(vars, "COLORTERM"),
+        colorfgbg: owned(vars, "COLORFGBG"),
+        wt_session: owned(vars, "WT_SESSION"),
+        wt_version: owned(vars, "WT_VERSION"),
         tmux: vars.contains_key(OsStr::new("TMUX")),
         sty: vars.contains_key(OsStr::new("STY")),
         zellij: vars.contains_key(OsStr::new("ZELLIJ")),
         width_mode: WidthMode::from_locale([
-            captured(&vars, "LC_ALL").unwrap_or(""),
-            captured(&vars, "LC_CTYPE").unwrap_or(""),
-            captured(&vars, "LANG").unwrap_or(""),
+            captured(vars, "LC_ALL").unwrap_or(""),
+            captured(vars, "LC_CTYPE").unwrap_or(""),
+            captured(vars, "LANG").unwrap_or(""),
         ]),
         no_motion: vars.contains_key(OsStr::new("DAL_NO_MOTION")),
         debug: vars.contains_key(OsStr::new("DAL_DEBUG")),
     };
-    let opts = TuiOptions {
+    TuiOptions {
         session: session_ref(cli, workspace),
         screen: match config.screen() {
             ConfigScreen::Inline => Screen::Inline,
@@ -98,22 +91,28 @@ pub(crate) async fn interactive(cli: &cli::Cli, startup: Startup, product: Produ
         images: config.images(),
         diagrams: config.tui().diagrams,
         motion: config.motion() && !env.no_motion,
-        editor: captured(&vars, "VISUAL")
-            .or_else(|| captured(&vars, "EDITOR"))
+        editor: captured(vars, "VISUAL")
+            .or_else(|| captured(vars, "EDITOR"))
             .filter(|value| !value.is_empty())
             .unwrap_or(if cfg!(windows) { "notepad" } else { "vi" })
             .into(),
         color: dal_tui::term::color_mode(&env, no_color),
         env,
         rt: tokio::runtime::Handle::current(),
-    };
-    let mut saved_config = config.clone();
-    let save_config_path = config_path.clone();
-    let save_diagrams = move |enabled| -> Result<(), TuiError> {
+    }
+}
+
+/// Persists a TUI diagrams toggle back into dal.toml.
+fn diagram_saver(
+    mut config: Config,
+    config_path: PathBuf,
+) -> impl FnMut(bool) -> Result<(), TuiError> {
+    let save_config_path = config_path;
+    move |enabled| -> Result<(), TuiError> {
         let user_toml = edge::read_user_config(&save_config_path).map_err(|error| {
             TuiError::Terminal(format!("dalgon: cannot read dal.toml: {error}"))
         })?;
-        let updated = saved_config
+        let updated = config
             .update_tui_diagrams(enabled, user_toml.as_deref())
             .map_err(|error| {
                 TuiError::Terminal(format!("dalgon: cannot update dal.toml: {error}"))
@@ -136,43 +135,79 @@ pub(crate) async fn interactive(cli: &cli::Cli, startup: Startup, product: Produ
             ))
         })?;
         Ok(())
+    }
+}
+
+/// Connects the TUI to a remote host and runs it.
+async fn connect_remote(
+    cli: &cli::Cli,
+    addr: &str,
+    cwd: &Path,
+    opts: TuiOptions,
+    save_diagrams: impl FnMut(bool) -> Result<(), TuiError> + Send + 'static,
+) -> ExitCode {
+    let endpoint = match endpoint(addr) {
+        Ok(endpoint) => endpoint,
+        Err(error) => return tui_error(error),
     };
-    if let Some(addr) = &cli.connect {
-        let endpoint = match endpoint(addr) {
-            Ok(endpoint) => endpoint,
+    let host = if let Some(path) = connect_auth_path(&endpoint, cli.connect_token_file.as_deref()) {
+        let token = match connect_token(path, cwd) {
+            Ok(token) => token,
             Err(error) => return tui_error(error),
         };
-        let host =
-            if let Some(path) = connect_auth_path(&endpoint, cli.connect_token_file.as_deref()) {
-                let token = match connect_token(path, &cwd) {
-                    Ok(token) => token,
-                    Err(error) => return tui_error(error),
-                };
-                match RemoteHost::connect_with_auth(endpoint, &token).await {
-                    Ok(host) => host,
-                    Err(error) => return tui_error(TuiError::Backend(Box::new(error))),
-                }
-            } else {
-                match RemoteHost::connect(endpoint).await {
-                    Ok(host) => host,
-                    Err(error) => return tui_error(TuiError::Backend(Box::new(error))),
-                }
-            };
-        let model_host = host.clone();
-        let model_rt = opts.rt.clone();
-        let model_source = move || -> Result<Vec<dal_tui::picker::ModelOption>, TuiError> {
-            let models = model_rt
-                .block_on(model_host.models())
-                .map_err(|error| TuiError::Backend(Box::new(error)))?;
-            Ok(remote_model_options(models))
-        };
-        return run_blocking(
-            remote::RemoteBackend(host),
-            opts,
-            model_source,
-            save_diagrams,
-        )
-        .await;
+        match RemoteHost::connect_with_auth(endpoint, &token).await {
+            Ok(host) => host,
+            Err(error) => return tui_error(TuiError::Backend(Box::new(error))),
+        }
+    } else {
+        match RemoteHost::connect(endpoint).await {
+            Ok(host) => host,
+            Err(error) => return tui_error(TuiError::Backend(Box::new(error))),
+        }
+    };
+    let model_host = host.clone();
+    let model_rt = opts.rt.clone();
+    let model_source = move || -> Result<Vec<dal_tui::picker::ModelOption>, TuiError> {
+        let models = model_rt
+            .block_on(model_host.models())
+            .map_err(|error| TuiError::Backend(Box::new(error)))?;
+        Ok(remote_model_options(models))
+    };
+    run_blocking(
+        remote::RemoteBackend(host),
+        opts,
+        model_source,
+        save_diagrams,
+    )
+    .await
+}
+/// Starts the interactive client after the process edge has resolved all inputs.
+pub(crate) async fn interactive(cli: &cli::Cli, startup: Startup, product: Product) -> ExitCode {
+    let t0 = std::time::Instant::now();
+    let snapshot = edge::terminal_snapshot();
+    let term = captured(&startup.vars, "TERM");
+    if let Some(code) = terminal_gate(&snapshot, term) {
+        return code;
+    }
+
+    let Startup {
+        vars,
+        cwd,
+        workspace_path: _,
+        workspace,
+        config,
+        config_path,
+        data_root,
+        helper,
+    } = startup;
+    let no_color = edge::resolve_color(cli.color, &vars, snapshot.stdout_tty) == ColorArg::Never;
+    if vars.contains_key(OsStr::new("DAL_DEBUG")) {
+        eprintln!("[t1] edge {}ms", t0.elapsed().as_millis());
+    }
+    let opts = build_opts(cli, workspace, &config, &vars, &snapshot, no_color);
+    let save_diagrams = diagram_saver(config.clone(), config_path);
+    if let Some(addr) = cli.connect.as_deref() {
+        return connect_remote(cli, addr, &cwd, opts, save_diagrams).await;
     }
     let dal_debug = vars.contains_key(OsStr::new("DAL_DEBUG"));
     if dal_debug {

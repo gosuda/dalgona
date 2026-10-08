@@ -196,7 +196,7 @@ async fn run_command(
             .await
         }
         #[cfg(feature = "tui")]
-        None => dispatch::interactive(&cli, startup, product).await,
+        None => Box::pin(dispatch::interactive(&cli, startup, product)).await,
         #[cfg(not(feature = "tui"))]
         None => two_lines(
             [
