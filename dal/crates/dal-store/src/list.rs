@@ -144,13 +144,8 @@ impl Listing {
             return Ok(Page { items, next_before });
         };
         let search = search.to_ascii_lowercase();
-        let mut sessions = Vec::new();
-        for candidate in &Self::read_candidates(workspace_dir)? {
-            match self.read_candidate(candidate, workspace) {
-                Ok(listed) => sessions.push(listed),
-                Err(error) => warn_skipped_session(&candidate.directory, &error),
-            }
-        }
+        let candidates = Self::read_candidates(workspace_dir)?;
+        let mut sessions = self.read_search_candidates(&candidates, workspace);
         sessions.retain(|session| {
             session
                 .info
@@ -434,6 +429,21 @@ impl Listing {
         }
     }
 
+    fn read_search_candidates(
+        &self,
+        candidates: &[Candidate],
+        workspace: &Workspace,
+    ) -> Vec<Listed> {
+        let mut sessions = Vec::new();
+        for candidate in candidates {
+            match self.read_candidate(candidate, workspace) {
+                Ok(listed) => sessions.push(listed),
+                Err(error) => warn_skipped_session(&candidate.directory, &error),
+            }
+        }
+        sessions
+    }
+
     fn read_workspace(
         &self,
         workspace_dir: &Path,
@@ -470,55 +480,25 @@ impl Listing {
     /// silent absence, so `resolve` ambiguity counts and name-uniqueness checks
     /// cannot miss sessions.
     fn read_candidates_strict(workspace_dir: &Path) -> Result<Vec<Candidate>, StoreError> {
-        let directory = match fs::read_dir(workspace_dir) {
-            Ok(directory) => directory,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(source) => return Err(util::io_err(workspace_dir, source)),
-        };
-        let mut candidates = Vec::new();
-        for entry in directory {
-            let entry = entry.map_err(|source| util::io_err(workspace_dir, source))?;
-            let session_dir = entry.path();
-            let file_type = entry
-                .file_type()
-                .map_err(|source| util::io_err(&session_dir, source))?;
-            if !file_type.is_dir() {
-                continue;
-            }
-            let Some(id_text) = entry.file_name().to_str().map(str::to_owned) else {
-                continue;
-            };
-            let Ok(id) = SessionId::parse(&id_text) else {
-                continue;
-            };
-            let journal_path = session_dir.join("journal.jsonl");
-            let metadata = match fs::metadata(&journal_path) {
-                Ok(metadata) if metadata.is_file() => metadata,
-                Ok(_) => continue,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-                Err(source) => return Err(util::io_err(&journal_path, source)),
-            };
-            let journal_mtime = modified(&journal_path, &metadata)?;
-            let mtime_ms = timestamp_from_mtime(journal_mtime)?.as_millisecond();
-            candidates.push(Candidate {
-                id,
-                directory: session_dir,
-                journal_bytes: metadata.len(),
-                journal_mtime,
-                mtime_ms,
-                id_text: id_text.into_boxed_str(),
-            });
-        }
-        candidates.sort_by(|left, right| {
-            (right.mtime_ms, right.id_text.as_ref()).cmp(&(left.mtime_ms, left.id_text.as_ref()))
-        });
-        Ok(candidates)
+        Self::scan_candidates(workspace_dir, candidate_from_entry)
     }
 
     /// Scans the workspace for the listing, where one unreadable session must
-    /// not fail the page: per-entry failures warn and skip inside
-    /// `candidate_from_entry`. Lookup paths use [`Self::read_candidates_strict`].
+    /// not fail the page: per-entry failures warn and skip.
     fn read_candidates(workspace_dir: &Path) -> Result<Vec<Candidate>, StoreError> {
+        Self::scan_candidates(workspace_dir, |entry| match candidate_from_entry(entry) {
+            Ok(candidate) => Ok(candidate),
+            Err(error) => {
+                warn_skipped_session(&entry.path(), &error);
+                Ok(None)
+            }
+        })
+    }
+
+    fn scan_candidates(
+        workspace_dir: &Path,
+        mut extract: impl FnMut(&fs::DirEntry) -> Result<Option<Candidate>, StoreError>,
+    ) -> Result<Vec<Candidate>, StoreError> {
         let directory = match fs::read_dir(workspace_dir) {
             Ok(directory) => directory,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -527,7 +507,7 @@ impl Listing {
         let mut candidates = Vec::new();
         for entry in directory {
             let entry = entry.map_err(|source| util::io_err(workspace_dir, source))?;
-            let Some(candidate) = candidate_from_entry(&entry) else {
+            let Some(candidate) = extract(&entry)? else {
                 continue;
             };
             candidates.push(candidate);
@@ -560,59 +540,43 @@ impl Listing {
             );
     }
 }
-
 /// Converts one directory entry into a listing candidate.
 ///
 /// Entries that cannot be inspected — an unreadable file type, journal stat,
-/// or mtime — log a warn and yield `None` so one bad session never fails the
-/// whole listing. Stream-level failures stay in `read_candidates`, where they
-/// keep the hard error.
-fn candidate_from_entry(entry: &fs::DirEntry) -> Option<Candidate> {
+/// or mtime — return an error so the caller can choose whether to fail or
+/// skip the session. Invalid names and absent journals are silent skips.
+fn candidate_from_entry(entry: &fs::DirEntry) -> Result<Option<Candidate>, StoreError> {
     let session_dir = entry.path();
-    let is_dir = match entry.file_type() {
-        Ok(file_type) => file_type.is_dir(),
-        Err(error) => {
-            warn_skipped_session(&session_dir, &util::io_err(&session_dir, error));
-            return None;
-        }
-    };
+    let is_dir = entry
+        .file_type()
+        .map_err(|error| util::io_err(&session_dir, error))?
+        .is_dir();
     if !is_dir {
-        return None;
+        return Ok(None);
     }
-    let id_text = entry.file_name().to_str()?.to_owned();
-    let id = SessionId::parse(&id_text).ok()?;
+    let Some(id_text) = entry.file_name().to_str().map(str::to_owned) else {
+        return Ok(None);
+    };
+    let Ok(id) = SessionId::parse(&id_text) else {
+        return Ok(None);
+    };
     let journal_path = session_dir.join("journal.jsonl");
     let metadata = match fs::metadata(&journal_path) {
         Ok(metadata) if metadata.is_file() => metadata,
-        Ok(_) => return None,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return None,
-        Err(error) => {
-            warn_skipped_session(&session_dir, &util::io_err(&journal_path, error));
-            return None;
-        }
+        Ok(_) => return Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => return Err(util::io_err(&journal_path, source)),
     };
-    let journal_mtime = match modified(&journal_path, &metadata) {
-        Ok(mtime) => mtime,
-        Err(error) => {
-            warn_skipped_session(&session_dir, &error);
-            return None;
-        }
-    };
-    let mtime_ms = match timestamp_from_mtime(journal_mtime) {
-        Ok(timestamp) => timestamp.as_millisecond(),
-        Err(error) => {
-            warn_skipped_session(&session_dir, &error);
-            return None;
-        }
-    };
-    Some(Candidate {
+    let journal_mtime = modified(&journal_path, &metadata)?;
+    let mtime_ms = timestamp_from_mtime(journal_mtime)?.as_millisecond();
+    Ok(Some(Candidate {
         id,
         directory: session_dir,
         journal_bytes: metadata.len(),
         journal_mtime,
         mtime_ms,
         id_text: id_text.into_boxed_str(),
-    })
+    }))
 }
 
 /// Logs one skipped session at warn level and keeps the listing running.
@@ -864,7 +828,7 @@ mod tests {
     };
 
     #[cfg(unix)]
-    use std::{fs::Permissions, os::unix::fs::PermissionsExt};
+    use std::os::unix::fs::symlink;
 
     use dal_core::{
         BlobId, Entry, EntryId, EntryKind, Gen, Header, JournalPart, ListQuery, Product, Record,
@@ -873,7 +837,7 @@ mod tests {
 
     use crate::error::StoreError;
 
-    use super::{InfoFile, Listing, MAX_PREVIEW_BYTES};
+    use super::{Candidate, InfoFile, Listing, MAX_PREVIEW_BYTES};
 
     fn workspace(path: &Path) -> Workspace {
         Workspace::new(path.to_path_buf()).expect("absolute test workspace")
@@ -937,6 +901,12 @@ mod tests {
                 .expect("write record");
         }
         journal
+    }
+
+    #[cfg(unix)]
+    fn make_self_referential_journal(journal: &Path) {
+        fs::remove_file(journal).expect("remove journal before making loop");
+        symlink("journal.jsonl", journal).expect("make self-referential journal");
     }
 
     fn query(limit: u32, cursor: Option<&str>, search: Option<&str>) -> ListQuery {
@@ -1396,19 +1366,10 @@ mod tests {
             false,
             Some("readable"),
         );
-        // A session directory loses its read permission; the listing must
-        // warn and skip it instead of failing the whole page.
-        let blocked_dir = workspace_dir.join(blocked.to_string());
-        let mut permissions = fs::metadata(&blocked_dir)
-            .expect("stat blocked directory")
-            .permissions();
-        permissions.set_mode(0o000);
-        fs::set_permissions(&blocked_dir, permissions).expect("revoke directory permissions");
-        // Root reads through permission bits, so the skip is unreachable there; leave early.
-        if fs::metadata(blocked_dir.join("journal.jsonl")).is_ok() {
-            let _ = fs::set_permissions(&blocked_dir, Permissions::from_mode(0o700));
-            return;
-        }
+        let blocked_journal = workspace_dir
+            .join(blocked.to_string())
+            .join("journal.jsonl");
+        make_self_referential_journal(&blocked_journal);
 
         let page = Listing::new()
             .list(&workspace_dir, &workspace, &query(10, None, None))
@@ -1416,17 +1377,81 @@ mod tests {
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].id, healthy);
         assert_eq!(page.items[0].name.as_deref(), Some("healthy"));
-
-        let _ = fs::set_permissions(&blocked_dir, Permissions::from_mode(0o700));
     }
 
     #[test]
+    #[cfg(unix)]
+    fn search_skips_unreadable_session() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let workspace = workspace(root.path());
+        let workspace_dir = root.path().join("store").join("work");
+        let blocked = session_id("0192aa00-0000-7000-8000-000000000001");
+        let healthy = session_id("0192aa00-0000-7000-8000-000000000002");
+        write_journal(
+            &workspace_dir.join(blocked.to_string()),
+            blocked,
+            &workspace,
+            Some("blocked"),
+            false,
+            Some("unreadable"),
+        );
+        write_journal(
+            &workspace_dir.join(healthy.to_string()),
+            healthy,
+            &workspace,
+            Some("healthy"),
+            false,
+            Some("readable"),
+        );
+        make_self_referential_journal(
+            &workspace_dir
+                .join(blocked.to_string())
+                .join("journal.jsonl"),
+        );
+
+        let page = Listing::new()
+            .list(
+                &workspace_dir,
+                &workspace,
+                &query(10, None, Some("readable")),
+            )
+            .expect("search listing must survive one unreadable session");
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].id, healthy);
+        assert_eq!(page.items[0].name.as_deref(), Some("healthy"));
+    }
+
+    #[test]
+    fn search_skips_candidate_read_error() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let workspace = workspace(root.path());
+        let id = session_id("0192aa00-0000-7000-8000-000000000001");
+        let directory = root.path().join(id.to_string());
+        let journal = write_journal(&directory, id, &workspace, None, false, Some("text"));
+        let candidates = [Candidate {
+            id,
+            directory,
+            journal_bytes: fs::metadata(&journal).expect("stat journal").len(),
+            // Candidate discovery validates ordinary mtimes; this deliberately exercises
+            // the later read error policy in the search loop.
+            journal_mtime: UNIX_EPOCH + Duration::from_secs(1_000_000_000_000),
+            mtime_ms: 0,
+            id_text: id.to_string().into_boxed_str(),
+        }];
+
+        let sessions = Listing::new().read_search_candidates(&candidates, &workspace);
+        assert!(sessions.is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn ambiguous_reference_still_fails_hard() {
         let root = tempfile::tempdir().expect("tempdir");
         let workspace = workspace(root.path());
         let workspace_dir = root.path().join("store").join("work");
-        for suffix in ["000000000001", "000000000002"] {
-            let id = session_id(&format!("0192aa00-0000-7000-8000-{suffix}"));
+        let blocked = session_id("0192aa00-0000-7000-8000-000000000001");
+        let healthy = session_id("0192aa00-0000-7000-8000-000000000002");
+        for id in [blocked, healthy] {
             write_journal(
                 &workspace_dir.join(id.to_string()),
                 id,
@@ -1436,10 +1461,16 @@ mod tests {
                 Some("text"),
             );
         }
+        make_self_referential_journal(
+            &workspace_dir
+                .join(blocked.to_string())
+                .join("journal.jsonl"),
+        );
+
         let error = Listing::new()
             .resolve(&workspace_dir, &workspace, "0192aa")
-            .expect_err("ambiguous prefix must stay a hard failure");
-        assert!(matches!(error, StoreError::Ambiguous { count: 2, .. }));
+            .expect_err("an unreadable ambiguous member must not be skipped");
+        assert!(matches!(error, StoreError::Io { .. }));
     }
 
     #[test]
