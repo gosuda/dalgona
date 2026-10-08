@@ -108,10 +108,6 @@ pub enum PluginCommandError {
 /// # Errors
 /// Returns a stream-I/O error or the backing grant store's typed error. A
 /// request for an unconfigured plugin fails without changing the store.
-#[expect(
-    clippy::too_many_lines,
-    reason = "one plugin command walks list, install, and reload in place"
-)]
 pub async fn run(
     command: PluginCommand,
     plugins: &[ConfiguredPlugin],
@@ -123,103 +119,122 @@ pub async fn run(
     plugins.sort_by(|left, right| left.name.as_str().cmp(right.name.as_str()));
 
     match command {
-        PluginCommand::Grant { name } => {
-            let plugin = plugins
-                .iter()
-                .find(|plugin| plugin.name == name)
-                .copied()
-                .ok_or_else(|| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::NotFound,
-                        crate::cli::texts::plugin_not_configured(&name.to_string()),
-                    )
-                })?;
-            if plugin.origin == Origin::Builtin {
-                return Err(PluginCommandError::Builtin);
-            }
-            if plugin.capabilities.is_empty() {
-                writeln!(
-                    stdout,
-                    "{}",
-                    crate::cli::texts::plugin_declares_no_services(&plugin.name.to_string())
-                )?;
-                return Ok(ExitCode::SUCCESS);
-            }
-            let key = GrantKey {
-                extension: plugin.name.clone(),
-                origin: plugin.origin,
-                services: plugin.capabilities,
-            };
-            let inserted = grants.grant(key, by, jiff::Timestamp::now()).await?;
-            let services = display_services(plugin.capabilities);
-            let origin = display_origin(plugin.origin);
-            if inserted {
-                writeln!(
-                    stdout,
-                    "{}",
-                    crate::cli::texts::plugin_granted(&plugin.name.to_string(), origin, &services)
-                )?;
-            } else {
-                writeln!(
-                    stdout,
-                    "{}",
-                    crate::cli::texts::plugin_already_granted(
-                        &plugin.name.to_string(),
-                        origin,
-                        &services
-                    )
-                )?;
-            }
-            Ok(ExitCode::SUCCESS)
-        }
-        PluginCommand::Revoke { name } => {
-            let removed = grants.revoke(&name).await?;
-            if removed == 0 {
-                writeln!(
-                    stdout,
-                    "{}",
-                    crate::cli::texts::plugin_no_grants(&name.to_string())
-                )?;
-            } else {
-                writeln!(
-                    stdout,
-                    "{}",
-                    crate::cli::texts::plugin_revoked(&name.to_string(), removed)
-                )?;
-            }
-            Ok(ExitCode::SUCCESS)
-        }
-        PluginCommand::List => {
-            if plugins.is_empty() {
-                writeln!(stdout, "{}", crate::cli::texts::PLUGIN_NONE)?;
-                return Ok(ExitCode::SUCCESS);
-            }
-            for plugin in plugins {
-                let status = plugin.status(grants).await?;
-                let services = if plugin.capabilities.is_empty() {
-                    "none".to_owned()
-                } else {
-                    display_services(plugin.capabilities)
-                };
-                let status = match status {
-                    GrantStatus::Granted => "granted",
-                    GrantStatus::NotGranted => "not granted",
-                    GrantStatus::NotRequired => "not required",
-                };
-                writeln!(
-                    stdout,
-                    "{}",
-                    crate::cli::texts::plugin_list_row(
-                        &plugin.name.to_string(),
-                        display_origin(plugin.origin),
-                        &services,
-                        status
-                    )
-                )?;
-            }
-            Ok(ExitCode::SUCCESS)
-        }
+        PluginCommand::Grant { name } => grant_plugin(&name, &plugins, grants, by, stdout).await,
+        PluginCommand::Revoke { name } => revoke_plugin(&name, grants, stdout).await,
+        PluginCommand::List => list_plugins(&plugins, grants, stdout).await,
     }
+}
+
+/// Grants every declared capability of one configured plugin.
+async fn grant_plugin(
+    name: &Name,
+    plugins: &[&ConfiguredPlugin],
+    grants: &GrantStore,
+    by: ClientId,
+    stdout: &mut impl Write,
+) -> Result<ExitCode, PluginCommandError> {
+    let plugin = plugins
+        .iter()
+        .find(|plugin| plugin.name == *name)
+        .copied()
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                crate::cli::texts::plugin_not_configured(&name.to_string()),
+            )
+        })?;
+    if plugin.origin == Origin::Builtin {
+        return Err(PluginCommandError::Builtin);
+    }
+    if plugin.capabilities.is_empty() {
+        writeln!(
+            stdout,
+            "{}",
+            crate::cli::texts::plugin_declares_no_services(&plugin.name.to_string())
+        )?;
+        return Ok(ExitCode::SUCCESS);
+    }
+    let key = GrantKey {
+        extension: plugin.name.clone(),
+        origin: plugin.origin,
+        services: plugin.capabilities,
+    };
+    let inserted = grants.grant(key, by, jiff::Timestamp::now()).await?;
+    let services = display_services(plugin.capabilities);
+    let origin = display_origin(plugin.origin);
+    if inserted {
+        writeln!(
+            stdout,
+            "{}",
+            crate::cli::texts::plugin_granted(&plugin.name.to_string(), origin, &services)
+        )?;
+    } else {
+        writeln!(
+            stdout,
+            "{}",
+            crate::cli::texts::plugin_already_granted(&plugin.name.to_string(), origin, &services)
+        )?;
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Revokes all grants of one plugin.
+async fn revoke_plugin(
+    name: &Name,
+    grants: &GrantStore,
+    stdout: &mut impl Write,
+) -> Result<ExitCode, PluginCommandError> {
+    let removed = grants.revoke(name).await?;
+    if removed == 0 {
+        writeln!(
+            stdout,
+            "{}",
+            crate::cli::texts::plugin_no_grants(&name.to_string())
+        )?;
+    } else {
+        writeln!(
+            stdout,
+            "{}",
+            crate::cli::texts::plugin_revoked(&name.to_string(), removed)
+        )?;
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Lists configured plugins with grant status.
+async fn list_plugins(
+    plugins: &[&ConfiguredPlugin],
+    grants: &GrantStore,
+    stdout: &mut impl Write,
+) -> Result<ExitCode, PluginCommandError> {
+    if plugins.is_empty() {
+        writeln!(stdout, "{}", crate::cli::texts::PLUGIN_NONE)?;
+        return Ok(ExitCode::SUCCESS);
+    }
+    for plugin in plugins {
+        let status = plugin.status(grants).await?;
+        let services = if plugin.capabilities.is_empty() {
+            "none".to_owned()
+        } else {
+            display_services(plugin.capabilities)
+        };
+        let status = match status {
+            GrantStatus::Granted => "granted",
+            GrantStatus::NotGranted => "not granted",
+            GrantStatus::NotRequired => "not required",
+        };
+        writeln!(
+            stdout,
+            "{}",
+            crate::cli::texts::plugin_list_row(
+                &plugin.name.to_string(),
+                display_origin(plugin.origin),
+                &services,
+                status
+            )
+        )?;
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 fn display_origin(origin: Origin) -> &'static str {

@@ -1,5 +1,5 @@
 //! The `dalgon` command-line and process edge for the dal product.
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 use std::ffi::OsString;
 use std::io::Write as _;
@@ -196,7 +196,7 @@ async fn run_command(
             .await
         }
         #[cfg(feature = "tui")]
-        None => dispatch::interactive(&cli, startup, product).await,
+        None => Box::pin(dispatch::interactive(&cli, startup, product)).await,
         #[cfg(not(feature = "tui"))]
         None => two_lines(
             [
@@ -234,7 +234,6 @@ async fn run_command(
 /// Runs one headless prompt turn over the host agent.
 #[expect(
     clippy::too_many_arguments,
-    clippy::too_many_lines,
     reason = "one headless run carries cli, vars, paths, and host state"
 )]
 async fn run_headless(
@@ -261,48 +260,7 @@ async fn run_headless(
     let parts =
         match print::assemble_prompt(&cli.prompts, &workspace_path, snapshot.stdin_tty).await {
             Ok(parts) => parts,
-            Err(print::PromptError::Empty) => {
-                return two_lines(
-                    [
-                        cli::texts::NO_PROMPT.into(),
-                        cli::texts::NO_PROMPT_HINT.into(),
-                    ],
-                    exit::ExitKind::RequestedFailure,
-                );
-            }
-            Err(print::PromptError::DashWithoutPipe) => {
-                return two_lines(
-                    [
-                        cli::texts::DASH_NEEDS_STDIN.into(),
-                        cli::texts::DASH_NEEDS_STDIN_HINT.into(),
-                    ],
-                    exit::ExitKind::Usage,
-                );
-            }
-            Err(print::PromptError::FileMissing { path, arg }) => {
-                return two_lines(
-                    cli::texts::prompt_file_not_found(&path, &arg),
-                    exit::ExitKind::RequestedFailure,
-                );
-            }
-            Err(print::PromptError::FileUnreadable { path, source }) => {
-                return two_lines(
-                    cli::texts::prompt_file_unreadable(&path, &source.to_string()),
-                    exit::ExitKind::RequestedFailure,
-                );
-            }
-            Err(print::PromptError::FileNotUtf8 { path }) => {
-                return two_lines(
-                    cli::texts::prompt_file_not_utf8(&path),
-                    exit::ExitKind::RequestedFailure,
-                );
-            }
-            Err(print::PromptError::Stdin(source)) => {
-                return two_lines(
-                    cli::texts::stdin_unreadable(&source.to_string()),
-                    exit::ExitKind::RequestedFailure,
-                );
-            }
+            Err(error) => return prompt_error_exit(error),
         };
     // Print mode runs without a terminal: under `ask` the run cannot answer
     // approval requests, so it emits the once-per-run headless notice and
@@ -368,6 +326,42 @@ async fn run_headless(
             exit::code(exit::ExitKind::RequestedFailure)
         }
         Err(code) => ExitCode::from(code),
+    }
+}
+
+/// Maps a prompt assembly failure to its usage diagnostics.
+fn prompt_error_exit(error: print::PromptError) -> ExitCode {
+    match error {
+        print::PromptError::Empty => two_lines(
+            [
+                cli::texts::NO_PROMPT.into(),
+                cli::texts::NO_PROMPT_HINT.into(),
+            ],
+            exit::ExitKind::RequestedFailure,
+        ),
+        print::PromptError::DashWithoutPipe => two_lines(
+            [
+                cli::texts::DASH_NEEDS_STDIN.into(),
+                cli::texts::DASH_NEEDS_STDIN_HINT.into(),
+            ],
+            exit::ExitKind::Usage,
+        ),
+        print::PromptError::FileMissing { path, arg } => two_lines(
+            cli::texts::prompt_file_not_found(&path, &arg),
+            exit::ExitKind::RequestedFailure,
+        ),
+        print::PromptError::FileUnreadable { path, source } => two_lines(
+            cli::texts::prompt_file_unreadable(&path, &source.to_string()),
+            exit::ExitKind::RequestedFailure,
+        ),
+        print::PromptError::FileNotUtf8 { path } => two_lines(
+            cli::texts::prompt_file_not_utf8(&path),
+            exit::ExitKind::RequestedFailure,
+        ),
+        print::PromptError::Stdin(source) => two_lines(
+            cli::texts::stdin_unreadable(&source.to_string()),
+            exit::ExitKind::RequestedFailure,
+        ),
     }
 }
 
@@ -574,10 +568,6 @@ fn capture_process() -> Result<(VarsMap, PathBuf), ExitCode> {
 }
 
 /// Resolves roots, the workspace, and the layered configuration.
-#[expect(
-    clippy::too_many_lines,
-    reason = "startup assembly walks every layered input in place"
-)]
 fn assemble_startup(
     factory: &ProductFactory,
     cli: &cli::Cli,
@@ -586,47 +576,7 @@ fn assemble_startup(
 ) -> Result<Startup, ExitCode> {
     let roots = match edge::resolve_roots(&vars, factory.binary) {
         Ok(roots) => roots,
-        Err(edge::EdgeError::HomeMissing) => {
-            let what = if cfg!(windows) {
-                cli::texts::HOME_MISSING_WINDOWS
-            } else {
-                cli::texts::HOME_MISSING_POSIX
-            };
-            return Err(two_lines(
-                [what.into(), cli::texts::HOME_MISSING_HINT.into()],
-                exit::ExitKind::RequestedFailure,
-            ));
-        }
-        Err(edge::EdgeError::InvalidProduct) => {
-            let log_path = edge::log_file_path(&vars, factory.binary);
-            return Err(two_lines(
-                cli::texts::internal_error_at("edge", "invalid product identity", &log_path),
-                exit::ExitKind::Internal,
-            ));
-        }
-        Err(edge::EdgeError::Workspace(path)) => {
-            return Err(two_lines(
-                cli::texts::workspace_not_usable(&path.display().to_string()),
-                exit::ExitKind::RequestedFailure,
-            ));
-        }
-        Err(edge::EdgeError::WorkspaceRelative) => {
-            let log_path = edge::log_file_path(&vars, factory.binary);
-            return Err(two_lines(
-                cli::texts::internal_error_at(
-                    "edge",
-                    "the workspace path is not absolute",
-                    &log_path,
-                ),
-                exit::ExitKind::Internal,
-            ));
-        }
-        Err(edge::EdgeError::Io { path, source, .. }) => {
-            return Err(two_lines(
-                cli::texts::prompt_file_unreadable(&path, &source.to_string()),
-                exit::ExitKind::RequestedFailure,
-            ));
-        }
+        Err(error) => return Err(roots_exit(&vars, factory.binary, error)),
     };
     let workspace_path = edge::resolve_workspace_path(&cwd, cli.cd.as_deref());
     let workspace = match edge::validate_workspace(workspace_path.clone()) {
@@ -694,6 +644,49 @@ fn assemble_startup(
         helper: edge::current_exe(),
     };
     Ok(startup)
+}
+
+/// Maps an `resolve_roots` failure to its usage diagnostics.
+fn roots_exit(vars: &VarsMap, binary: &str, error: edge::EdgeError) -> ExitCode {
+    match error {
+        edge::EdgeError::HomeMissing => {
+            let what = if cfg!(windows) {
+                cli::texts::HOME_MISSING_WINDOWS
+            } else {
+                cli::texts::HOME_MISSING_POSIX
+            };
+            two_lines(
+                [what.into(), cli::texts::HOME_MISSING_HINT.into()],
+                exit::ExitKind::RequestedFailure,
+            )
+        }
+        edge::EdgeError::InvalidProduct => {
+            let log_path = edge::log_file_path(vars, binary);
+            two_lines(
+                cli::texts::internal_error_at("edge", "invalid product identity", &log_path),
+                exit::ExitKind::Internal,
+            )
+        }
+        edge::EdgeError::Workspace(path) => two_lines(
+            cli::texts::workspace_not_usable(&path.display().to_string()),
+            exit::ExitKind::RequestedFailure,
+        ),
+        edge::EdgeError::WorkspaceRelative => {
+            let log_path = edge::log_file_path(vars, binary);
+            two_lines(
+                cli::texts::internal_error_at(
+                    "edge",
+                    "the workspace path is not absolute",
+                    &log_path,
+                ),
+                exit::ExitKind::Internal,
+            )
+        }
+        edge::EdgeError::Io { path, source, .. } => two_lines(
+            cli::texts::prompt_file_unreadable(&path, &source.to_string()),
+            exit::ExitKind::RequestedFailure,
+        ),
+    }
 }
 
 /// Calls the product factory exactly once and maps build failures to exits.

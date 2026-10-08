@@ -388,23 +388,56 @@ async fn run_print_inner(
         QuietEnd::TimedOut(busy) => Some(busy),
     };
 
+    emit_print_result(
+        stop,
+        denial_count,
+        &assistant,
+        quiet_end,
+        opts.output_last_message,
+        opts.json,
+        opts.quiet_wait,
+        last_notice,
+        stdout,
+        stderr,
+    )
+    .await
+}
+
+/// Emits the turn's terminal output: failure mapping, denial short-circuit,
+/// the optional last-message file, and the json or text trailer.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the trailer consumes the whole loop state at once"
+)]
+async fn emit_print_result(
+    stop: Stop,
+    denial_count: usize,
+    assistant: &str,
+    quiet_end: Option<Box<str>>,
+    output_last_message: Option<PathBuf>,
+    json: bool,
+    quiet_wait: Option<Duration>,
+    last_notice: Option<Box<str>>,
+    stdout: &mut (impl AsyncWrite + Unpin),
+    stderr: &mut (impl AsyncWrite + Unpin),
+) -> Result<PrintOutcome, PrintError> {
     if stop == Stop::Failed {
         return Err(last_notice.map_or(PrintError::FailedWithoutMessage, PrintError::TurnFailed));
     }
 
     // One exact note per denied call; no summary sentence. A denied run is a
     // completed run with nothing to show: exit non-zero.
-    if denial_count > 0 && !opts.json {
+    if denial_count > 0 && !json {
         return Ok(PrintOutcome::Denied);
     }
 
-    if let Some(path) = opts.output_last_message
+    if let Some(path) = output_last_message
         && let Err(source) = tokio::fs::write(&path, assistant.as_bytes()).await
     {
         return Err(PrintError::OutputFile { path, source });
     }
 
-    if opts.json {
+    if json {
         let reason = match stop {
             Stop::EndTurn => "end_turn",
             Stop::Length => "max_tokens",
@@ -432,7 +465,7 @@ async fn run_print_inner(
     if let Some(busy) = quiet_end {
         return Err(PrintError::NotQuiet {
             busy,
-            wait: opts.quiet_wait.unwrap_or(QUIET_WAIT),
+            wait: quiet_wait.unwrap_or(QUIET_WAIT),
         });
     }
     Ok(PrintOutcome::Completed)

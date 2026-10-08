@@ -36,14 +36,11 @@ pub(crate) struct SandboxInputs<'a> {
     pub sandbox_writable: &'a [Box<str>],
     /// dal/dalgona config and data roots a writable path must not overlap.
     pub protected_roots: &'a [PathBuf],
-    /// The Linux helper path; `None` fails closed when sandboxing is on.
+    /// The sandbox helper path; `None` fails closed when sandboxing is on.
     /// macOS's Seatbelt path never reads it.
     #[cfg_attr(
-        any(windows, target_os = "macos"),
-        expect(
-            dead_code,
-            reason = "only the Linux Landlock probe reads the helper path"
-        )
+        target_os = "macos",
+        expect(dead_code, reason = "only the probe paths read the helper path")
     )]
     pub helper: Option<&'a Path>,
 }
@@ -80,15 +77,21 @@ pub(crate) fn resolve_launcher(inputs: &SandboxInputs<'_>) -> Result<Launcher, S
     if !inputs.sandbox_on {
         return Ok(Launcher::Direct);
     }
+    let roots = resolve_roots(inputs)?;
     #[cfg(windows)]
     {
-        Err(SandboxSetupError::new(
-            "sandbox = \"on\" is not supported on Windows. Set sandbox = \"off\" in config.toml, or run dalgon inside WSL 2.",
-        ))
+        let helper = inputs.helper.ok_or_else(|| {
+            SandboxSetupError::new(
+                "sandbox: no sandbox helper. SDK embedders must pass a helper path; the dalgon binary provides dalgon __sandbox.",
+            )
+        })?;
+        Ok(Launcher::Sandbox {
+            helper: Some(helper.to_path_buf()),
+            roots: roots.into_boxed_slice(),
+        })
     }
     #[cfg(not(windows))]
     {
-        let roots = resolve_roots(inputs)?;
         #[cfg(target_os = "macos")]
         {
             if !Path::new("/usr/bin/sandbox-exec").exists() {
@@ -133,21 +136,12 @@ pub(crate) fn session_launcher(
     if !config.sandbox() {
         return Ok(Launcher::Direct);
     }
-    #[cfg(windows)]
-    let (home, cache) = {
-        // Windows never resolves roots: the launcher rejects below.
-        let _ = vars;
-        (PathBuf::new(), PathBuf::new())
-    };
-    #[cfg(not(windows))]
-    let (home, cache) = {
-        let home = platform_home(vars).ok_or_else(|| {
-            SandboxSetupError::new(
-                "sandbox: HOME is not set, so the sandbox cannot resolve its writable roots. Set HOME, or set sandbox = \"off\" in config.toml.",
-            )
-        })?;
-        (home.clone(), platform_cache(vars, &home))
-    };
+    let home = platform_home(vars).ok_or_else(|| {
+        SandboxSetupError::new(
+            "sandbox: HOME is not set, so the sandbox cannot resolve its writable roots. Set HOME, or set sandbox = \"off\" in config.toml.",
+        )
+    })?;
+    let cache = platform_cache(vars, &home);
     resolve_launcher(&SandboxInputs {
         sandbox_on: true,
         workspace_root,
@@ -320,7 +314,29 @@ fn probe_landlock_abi(helper: &Path) -> Result<u32, SandboxSetupError> {
 pub(crate) fn platform_home(vars: &BTreeMap<OsString, OsString>) -> Option<PathBuf> {
     #[cfg(windows)]
     {
-        vars.get(OsStr::new("USERPROFILE")).map(PathBuf::from)
+        let absolute = |name: &str| {
+            vars.get(OsStr::new(name))
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute())
+        };
+        for name in ["HOME", "USERPROFILE"] {
+            if let Some(path) = absolute(name) {
+                return Some(path);
+            }
+        }
+        if let (Some(drive), Some(path)) = (
+            vars.get(OsStr::new("HOMEDRIVE")),
+            vars.get(OsStr::new("HOMEPATH")),
+        ) {
+            let mut combined = drive.clone();
+            combined.push(path);
+            let combined = PathBuf::from(combined);
+            if combined.is_absolute() {
+                return Some(combined);
+            }
+        }
+        None
     }
     #[cfg(not(windows))]
     {
@@ -411,13 +427,6 @@ pub(crate) fn sandbox_argv(
     helper: Option<&Path>,
     roots: &[PathBuf],
 ) -> Result<(OsString, Vec<OsString>, Option<PathBuf>), ToolError> {
-    #[cfg(windows)]
-    {
-        let _ = (target, target_args, job, helper, roots);
-        Err(ToolError::message(
-            "sandbox = \"on\" is not supported on Windows. Set sandbox = \"off\" in config.toml, or run dalgon inside WSL 2.",
-        ))
-    }
     #[cfg(target_os = "macos")]
     {
         let _ = helper;
@@ -431,7 +440,7 @@ pub(crate) fn sandbox_argv(
         args.extend(target_args.iter().cloned());
         Ok((OsString::from("/usr/bin/sandbox-exec"), args, Some(profile)))
     }
-    #[cfg(all(not(windows), not(target_os = "macos")))]
+    #[cfg(not(target_os = "macos"))]
     {
         let _ = job;
         let helper = helper.ok_or_else(|| {

@@ -214,11 +214,6 @@ pub(crate) fn resolve_roots(
         .unwrap_or_else(|| home.join(".local").join("share"));
     let config = append_product(config_base, family)?;
     let data = append_product(data_base, family)?;
-    if config.file_name() != Some(OsStr::new(family))
-        || data.file_name() != Some(OsStr::new(family))
-    {
-        return Err(EdgeError::InvalidProduct);
-    }
     Ok(RootPaths {
         home,
         cache: data.join("cache"),

@@ -84,6 +84,12 @@ pub fn protocol_schema() -> Value {
         ("SessionInfo", session_info),
         ("Part", part),
     ] {
+        // `subschema_for` already registered the real schema under this
+        // name in `definitions`; inserting the returned `$ref` stub would
+        // replace a real schema with a self-reference.
+        if defs_object.get(&name).is_some() {
+            continue;
+        }
         let text = sonic_rs::to_string(&schema).unwrap_or_else(|_| "true".to_owned());
         let value = sonic_rs::from_str::<Value>(&text).unwrap_or_else(|_| sonic_rs::json!(true));
         defs_object.insert(name, value);
@@ -146,7 +152,9 @@ pub fn client_name(params: &Value, fallback: &str) -> String {
 }
 #[cfg(test)]
 mod tests {
-    use super::{acp_prompt_error, acp_prompt_result};
+    use sonic_rs::JsonValueTrait;
+
+    use super::{acp_prompt_error, acp_prompt_result, protocol_schema};
 
     #[test]
     fn acp_prompt_lines_keep_jsonrpc_key_order_and_one_lf() {
@@ -158,5 +166,36 @@ mod tests {
             acp_prompt_error(-32000, "bad \"thing\"", "retry"),
             "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32000,\"message\":\"bad \\\"thing\\\"\",\"data\":{\"hint\":\"retry\"}}}\n"
         );
+    }
+
+    #[test]
+    fn protocol_schema_names_and_references_resolve() {
+        let schema = protocol_schema();
+        let defs = &schema["$defs"];
+        assert!(defs.is_object(), "$defs must be an object map");
+        for name in ["Command", "Update", "View", "Request", "Answer"] {
+            let def = &defs[name];
+            let text = sonic_rs::to_string(def).expect("def serializes");
+            assert!(
+                text.contains("\"type\"") || text.contains("\"properties\""),
+                "$defs must key {name} as a real object schema for clients generating types, got {text}"
+            );
+        }
+        // Every $ref in the document must resolve into $defs — a renamed
+        // schema leaves a dangling reference that clients validate against.
+        let text = sonic_rs::to_string(&schema).expect("schema serializes");
+        let mut missing = Vec::new();
+        for fragment in text.split("\"$ref\":").skip(1) {
+            if let Some(reference) = fragment
+                .trim_start()
+                .strip_prefix('"')
+                .and_then(|rest| rest.split('"').next())
+                && let Some(key) = reference.strip_prefix("#/$defs/")
+                && !defs[key].is_object()
+            {
+                missing.push(reference.to_owned());
+            }
+        }
+        assert!(missing.is_empty(), "dangling $refs: {missing:?}");
     }
 }

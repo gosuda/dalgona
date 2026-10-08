@@ -389,6 +389,38 @@ async fn rename_validation_cases() {
 }
 
 #[tokio::test]
+async fn name_cleared_before_first_flush_claims_nothing() {
+    let (_temp, store, _) = setup("list-clear-lazy");
+    let mut first = store.create_session(SessionId::new_v7());
+    first
+        .set_name(Some("taken"))
+        .await
+        .expect("name buffers while lazy");
+    first
+        .set_name(None)
+        .await
+        .expect("clear buffers while lazy");
+    let mut second = store.create_session(SessionId::new_v7());
+    second
+        .append(vec![user(1, "second")])
+        .await
+        .expect("second session appends");
+    second
+        .set_name(Some("taken"))
+        .await
+        .expect("second session takes the name");
+    first
+        .append(vec![user(1, "first")])
+        .await
+        .expect("a name cleared before the first flush claims nothing");
+    assert_eq!(
+        name_of(&store, first.id()),
+        None,
+        "the cleared name stays cleared after the first flush"
+    );
+}
+
+#[tokio::test]
 async fn paged_listing_cursor_and_search() {
     let (temp, store, workspace) = setup("list-paged");
     let data_root = temp.path().join("data");

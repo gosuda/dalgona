@@ -3,7 +3,7 @@
 use std::{
     fs::{self, File, TryLockError},
     io::{Seek, SeekFrom, Write},
-    path::Path,
+    path::{Path, PathBuf},
     thread,
     time::{Duration, Instant},
 };
@@ -21,11 +21,13 @@ const PID_POLL: Duration = Duration::from_millis(5);
 /// Holds the operating-system lock for one session.
 ///
 /// Keep this guard alive for as long as the session journal is open. Dropping
-/// it releases the lock; the lock file remains in the session directory.
+/// it removes the owner sidecar, then releases the lock; the lock file itself
+/// remains in the session directory.
 #[derive(Debug)]
 #[must_use = "keep the guard alive while the journal is open"]
 pub(crate) struct LockGuard {
     _file: File,
+    path: PathBuf,
 }
 
 impl LockGuard {
@@ -60,7 +62,10 @@ impl LockGuard {
                     format!("{}\n", std::process::id()).as_bytes(),
                 )
                 .map_err(|source| util::io_err(path, source))?;
-                Ok(Self { _file: file })
+                Ok(Self {
+                    _file: file,
+                    path: path.to_path_buf(),
+                })
             }
             Err(TryLockError::WouldBlock) => {
                 let pid = read_pid_until(&owner_path(path))?;
@@ -68,6 +73,15 @@ impl LockGuard {
             }
             Err(TryLockError::Error(source)) => Err(util::io_err(path, source)),
         }
+    }
+}
+
+impl Drop for LockGuard {
+    fn drop(&mut self) {
+        // Remove the sidecar before `file` closes and the lock releases: a
+        // contender that loses `try_lock` to the next holder must not read a
+        // retired pid during the gap before that holder republishes its own.
+        let _ = fs::remove_file(owner_path(&self.path));
     }
 }
 
@@ -80,7 +94,6 @@ fn owner_path(path: &Path) -> std::path::PathBuf {
 
 fn read_pid_until(path: &Path) -> Result<Option<u32>, StoreError> {
     let deadline = Instant::now() + PID_WAIT;
-    let mut previous = None;
     loop {
         let current = match fs::read(path) {
             Ok(bytes) => parse_pid(&bytes),
@@ -90,10 +103,12 @@ fn read_pid_until(path: &Path) -> Result<Option<u32>, StoreError> {
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => None,
             Err(source) => return Err(util::io_err(path, source)),
         };
-        if current.is_some() && current == previous {
+        // A parseable `pid\n` line is complete — the single-syscall write
+        // cannot tear it — so the first complete read settles the poll. Only
+        // missing or unparsable content keeps polling until the deadline.
+        if current.is_some() {
             return Ok(current);
         }
-        previous = current;
         let now = Instant::now();
         if now >= deadline {
             return Ok(None);
@@ -118,7 +133,7 @@ mod tests {
 
     use dal_core::SessionId;
 
-    use super::{LockGuard, parse_pid};
+    use super::{LockGuard, parse_pid, read_pid_until};
     use crate::error::StoreError;
 
     static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
@@ -250,5 +265,59 @@ mod tests {
             format!("{}\n", std::process::id()).as_bytes()
         );
         assert!(!stale_pid.is_empty());
+    }
+
+    #[test]
+    fn dropped_guard_removes_owner_sidecar() {
+        let dir = TestDir::new();
+        let id = SessionId::new_v7();
+        let path = dir.0.join("lock");
+        let owner = super::owner_path(&path);
+        {
+            let _guard = LockGuard::acquire(&path, id).expect("first lock acquisition");
+            assert!(owner.exists(), "held lock publishes its owner sidecar");
+            // A stale pid left by an older holder must not survive the drop.
+            fs::write(&owner, b"999999\n").expect("write stale owner text");
+        }
+        assert!(
+            !owner.exists(),
+            "dropped guard removes its owner sidecar, stale pid included"
+        );
+        let _next = LockGuard::acquire(&path, id).expect("lock released after guard drop");
+        assert!(owner.exists(), "the next holder republishes its own pid");
+    }
+
+    #[test]
+    fn read_pid_until_gives_up_as_none_on_a_missing_sidecar() {
+        let dir = TestDir::new();
+        let path = dir.0.join("session.lock.owner");
+        assert_eq!(
+            read_pid_until(&path).expect("a missing sidecar is transient, not an error"),
+            None,
+            "the poll must end at the deadline, not spin forever"
+        );
+    }
+
+    #[test]
+    fn read_pid_until_reads_a_present_sidecar() {
+        let dir = TestDir::new();
+        let path = dir.0.join("session.lock.owner");
+        fs::write(&path, b"4242\n").expect("write the owner sidecar");
+        assert_eq!(
+            read_pid_until(&path).expect("poll reads the sidecar"),
+            Some(4242),
+            "the poll must return the pid as soon as it is readable"
+        );
+    }
+
+    #[test]
+    fn read_pid_until_reports_errors_that_are_not_transient() {
+        let dir = TestDir::new();
+        // A directory is never a parseable pid file and never becomes one;
+        // mistaking it for a missing sidecar would poll instead of failing.
+        assert!(
+            read_pid_until(&dir.0).is_err(),
+            "non-NotFound read errors must surface, not be swallowed by the poll"
+        );
     }
 }

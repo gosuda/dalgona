@@ -724,6 +724,114 @@ fn scan_head_reads_only_tree_prefixes() {
 }
 
 #[test]
+fn tree_kind_tags_and_display_round_trip() {
+    for (kind, tag) in [
+        (TreeKind::User, "user"),
+        (TreeKind::Assistant, "assistant"),
+        (TreeKind::ToolResult, "tool_result"),
+        (TreeKind::Reminder, "reminder"),
+        (TreeKind::Model, "model"),
+        (TreeKind::Thinking, "thinking"),
+        (TreeKind::Approval, "approval"),
+        (TreeKind::Mode, "mode"),
+        (TreeKind::Compaction, "compaction"),
+        (TreeKind::BranchSummary, "branch_summary"),
+    ] {
+        assert_eq!(kind.tag(), tag, "tag literal for {kind:?}");
+        assert_eq!(kind.to_string(), tag, "Display for {kind:?}");
+    }
+}
+
+#[test]
+fn scan_head_rejects_corrupt_prefixes() {
+    let shortest = b"{\"v\":1,\"type\":\"user\",\"id\":4,\"parent\":3,\"x\":0}";
+    assert_eq!(
+        scan_head(shortest).map(|head| (head.id.get(), head.parent.map(EntryId::get))),
+        Some((4, Some(3))),
+        "a minimal prefix line still scans"
+    );
+    let wrong_version = b"{\"v\":2,\"type\":\"user\",\"id\":7,\"parent\":null,\"x\":0}";
+    assert_eq!(
+        scan_head(wrong_version),
+        None,
+        "a non-v1 line must not scan as a v1 head"
+    );
+    assert_eq!(
+        scan_head(b"{\"v\":1,\"type\":\"user"),
+        None,
+        "an unterminated tag must not scan or panic"
+    );
+    assert_eq!(
+        scan_head(b"{\"v\":1,\"type\":\"user\",\"id\":,\"parent\":3,\"x\":0}"),
+        None,
+        "an id with no digits must not scan"
+    );
+    assert_eq!(
+        scan_head(b"{\"v\":1,\"type\":\"user\",\"id\":4,\"parent\":,\"x\":0}"),
+        None,
+        "a parent with no digits must not scan"
+    );
+    assert_eq!(
+        scan_head(b"{\"v\":1,\"type\":\"user\",\"id\":4,\"parent\":0,\"x\":0}"),
+        None,
+        "parent 0 is not a valid entry id"
+    );
+}
+
+#[test]
+fn decode_preserves_exit_codes_and_reasoning_tokens() {
+    let ended = decode(
+        b"{\"v\":1,\"type\":\"job\",\"at\":\"2026-09-25T10:16:00.000Z\",\"job\":\"01927f40-0000-7000-8000-000000000002\",\"event\":\"end\",\"outcome\":{\"exited\":137}}\n",
+    )
+    .expect("a nonzero exit code decodes");
+    assert!(
+        matches!(
+            ended.record,
+            Record::Job {
+                event: JobEvent::Settled {
+                    outcome: Some(JobOutcome::Exited { code: 137 })
+                },
+                ..
+            }
+        ),
+        "the exit code survives the wire"
+    );
+    let signaled = decode(
+        b"{\"v\":1,\"type\":\"job\",\"at\":\"2026-09-25T10:16:00.000Z\",\"job\":\"01927f40-0000-7000-8000-000000000002\",\"event\":\"end\",\"outcome\":{\"exited\":-9}}\n",
+    )
+    .expect("a negative exit code decodes");
+    assert!(
+        matches!(
+            signaled.record,
+            Record::Job {
+                event: JobEvent::Settled {
+                    outcome: Some(JobOutcome::Exited { code: -9 })
+                },
+                ..
+            }
+        ),
+        "a signal-killed code stays negative"
+    );
+    let reasoned = decode(
+        b"{\"v\":1,\"type\":\"turn_end\",\"at\":\"2026-09-25T10:16:02.000Z\",\"turn\":1,\"stop\":\"done\",\"usage\":{\"input\":1,\"output\":1,\"cache_read\":0,\"cache_write\":0,\"reasoning\":5,\"cost_micro_usd\":0},\"changes\":[]}\n",
+    )
+    .expect("a non-null reasoning count decodes");
+    assert!(
+        matches!(
+            reasoned.record,
+            Record::TurnEnd {
+                usage: Some(Usage {
+                    reasoning_tokens: Some(5),
+                    ..
+                }),
+                ..
+            }
+        ),
+        "the reasoning count survives the wire"
+    );
+}
+
+#[test]
 fn branch_copies_path_and_labels() -> Result<(), Box<dyn std::error::Error>> {
     let header = Header {
         id: SessionId::new_v7(),

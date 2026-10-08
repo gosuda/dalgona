@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dal_core::{
-    ClientId, Effect, ListQuery, Page, PageReq, Session, SessionEnd, SessionId, SessionInfo,
+    ClientId, Effect, Gen, ListQuery, Page, PageReq, Session, SessionEnd, SessionId, SessionInfo,
     SessionStart, Timestamp, UpdateKind, Workspace,
 };
 use dal_store::{Journal, Store};
@@ -24,7 +24,8 @@ use crate::ext::hooks::{
 use crate::ext::script::ScriptCx;
 use crate::ext::services::{SessionServices, SessionServicesDeps};
 use crate::ext::{Caller, Services};
-use crate::session::actor::{ActorDeps, spawn};
+use crate::session::SessionHandle;
+use crate::session::actor::{ActorDeps, DriverPorts, spawn};
 use crate::session::backend::{Backend, BackendDeps};
 use crate::session::rt::{SessionRt, SessionRtDeps};
 use crate::session::script::SessionScriptHost;
@@ -63,6 +64,50 @@ const ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// Sweep interval of the shutdown quiet wait; polls are bounded reads.
 const STATUS_QUIET_POLL: Duration = Duration::from_millis(50);
+
+/// The replayed state a spawned session starts from.
+struct ReplayedSession {
+    /// The session fold built from journal replay.
+    fold: Session,
+    /// The journal generation.
+    generation: Gen,
+    /// The session data plane.
+    shared: Arc<Shared>,
+    /// The entry snapshot schemes expose at start.
+    initial_entries: Arc<[dal_core::EntryView]>,
+    /// The session-start conversation texts.
+    opening_texts: Arc<[String]>,
+    /// Effects replay queued for the actor.
+    pending: Vec<Effect>,
+    /// The session job table.
+    jobs: Arc<tokio::sync::Mutex<crate::jobs::JobTable>>,
+}
+
+/// The wired runtime pieces of one spawned session.
+struct WiredSession {
+    /// The actor handle.
+    handle: SessionHandle,
+    /// The actor's driver ports.
+    ports: DriverPorts,
+    /// The actor task.
+    task: tokio::task::JoinHandle<()>,
+    /// The session backend.
+    backend: Arc<Backend>,
+    /// The session services.
+    services: Arc<SessionServices>,
+    /// The turn overlay.
+    overlay: Arc<crate::ext::overlay::Overlay>,
+    /// The extension generation live at wire time.
+    ext_generation: Arc<Generation>,
+    /// The journal generation.
+    generation: Gen,
+    /// The request broker.
+    broker: Arc<Broker>,
+    /// The session data plane.
+    shared: Arc<Shared>,
+    /// The session job table.
+    jobs: Arc<tokio::sync::Mutex<crate::jobs::JobTable>>,
+}
 
 impl Host {
     /// Resolves a session reference, replays its journal, and spawns its actor.
@@ -420,16 +465,12 @@ impl Host {
         }
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "session startup wiring stays together with its publication sequence"
-    )]
-    async fn spawn_session(
+    /// Opens or creates the journal for `resolved` and applies its name.
+    async fn open_session_journal(
         &self,
-        resolved: ResolvedRef,
-        by: ClientId,
+        resolved: &ResolvedRef,
         journal: Option<Journal>,
-    ) -> Result<Agent, HostError> {
+    ) -> Result<(Journal, bool), HostError> {
         let store = self.store_for(&resolved.workspace);
         let id = resolved.id;
         let (mut journal, resumed) = match journal {
@@ -444,6 +485,15 @@ impl Host {
         if let Some(name) = resolved.name.as_deref() {
             journal.set_name(Some(name)).await?;
         }
+        Ok((journal, resumed))
+    }
+
+    /// Replays the journal into the fold and shared data plane.
+    async fn replay_session(
+        &self,
+        resolved: &ResolvedRef,
+        journal: &mut Journal,
+    ) -> Result<ReplayedSession, HostError> {
         let generation = journal.generation();
         let thinking = self.state.shared.config.thinking();
         let approval = self.state.shared.config.approval();
@@ -473,14 +523,13 @@ impl Host {
         ));
         shared.restore_fold(&fold);
         let initial_entries: Arc<[dal_core::EntryView]> = shared.leaf_entries().into();
-        let broker = Arc::new(Broker::new());
         let jobs_table = if resolved.ephemeral {
             crate::jobs::JobTable::new()
         } else {
             let jobs_dir = crate::session::commands::host::session_jobs_dir(
                 &self.state,
                 &resolved.workspace,
-                id,
+                resolved.id,
             );
             crate::jobs::JobTable::open(jobs_dir, fold.delivered_jobs())
                 .await
@@ -491,16 +540,44 @@ impl Host {
         };
         let jobs = Arc::new(tokio::sync::Mutex::new(jobs_table));
         let mut pending = Vec::new();
-        self.execute_replay(&mut journal, &shared, effects, &mut pending)
+        self.execute_replay(journal, &shared, effects, &mut pending)
             .await?;
-        let cancel = CancellationToken::new();
-        let tasks = SessionTasks::new();
+        Ok(ReplayedSession {
+            fold,
+            generation,
+            shared,
+            initial_entries,
+            opening_texts,
+            pending,
+            jobs,
+        })
+    }
+
+    /// Spawns the actor, backend, runtime, and services for one session.
+    async fn wire_session(
+        &self,
+        resolved: &ResolvedRef,
+        journal: Journal,
+        replayed: ReplayedSession,
+        cancel: &CancellationToken,
+        tasks: &SessionTasks,
+    ) -> Result<WiredSession, HostError> {
+        let ReplayedSession {
+            fold,
+            generation,
+            shared,
+            initial_entries,
+            opening_texts,
+            pending,
+            jobs,
+        } = replayed;
+        let broker = Arc::new(Broker::new());
         // The actor receives the data-plane through a cell: `Backend::new`
         // needs the actor handle `spawn` returns, and hook chains mint their
         // script hosts only once a request arrives, after the fill below.
         let backend_cell = Arc::new(std::sync::OnceLock::new());
         let (handle, ports, task) = spawn(ActorDeps {
-            session: id,
+            session: resolved.id,
             journal,
             fold,
             shared: Arc::clone(&shared),
@@ -514,7 +591,7 @@ impl Host {
             backend: Arc::clone(&backend_cell),
         });
         let backend = Arc::new(Backend::new(BackendDeps {
-            session: id,
+            session: resolved.id,
             workspace: resolved.workspace.clone(),
             host: Arc::clone(&self.state),
             shared: Arc::clone(&shared),
@@ -576,52 +653,84 @@ impl Host {
         // a closed channel here means the actor already failed, and the
         // first client operation reports it as `session.closed`.
         let _ = handle.services(services.clone()).await;
-        let observer_generation = Arc::clone(&ext_generation);
-        let observer_services: Arc<dyn Services> = services.clone() as Arc<dyn Services>;
-        let observer_cancel = cancel.clone();
+        Ok(WiredSession {
+            handle,
+            ports,
+            task,
+            backend,
+            services,
+            overlay,
+            ext_generation,
+            generation,
+            broker,
+            shared,
+            jobs,
+        })
+    }
+
+    /// Fires the `session_start` observer for the wired session.
+    async fn observe_start(
+        &self,
+        resolved: &ResolvedRef,
+        wired: &WiredSession,
+        cancel: &CancellationToken,
+        resumed: bool,
+    ) {
         let start_event = SessionStart {
-            session: id,
+            session: resolved.id,
             workspace: resolved.workspace.clone(),
             resumed,
         };
-        let observer_parent = resolved.parent;
+        let observer_services: Arc<dyn Services> = wired.services.clone() as Arc<dyn Services>;
         let observer_script = SessionScriptHost::for_generation(
-            id,
-            &backend,
+            resolved.id,
+            &wired.backend,
             Arc::clone(&self.state.shared.interpreters),
-            Arc::clone(&observer_generation),
+            Arc::clone(&wired.ext_generation),
         )
         .attach(None);
-        let observer_process_env = Arc::clone(&self.state.shared.env);
         // Delivered before the Agent is bound: a `before_turn` hook on the
         // first prompt must already see the state a `session_start`
         // observer just inserted.
         observe_session_start(
-            &observer_generation,
+            &wired.ext_generation,
             &observer_services,
-            &observer_cancel,
-            observer_parent,
-            &observer_process_env,
+            cancel,
+            resolved.parent,
+            &self.state.shared.env,
             observer_script,
             &start_event,
         )
         .await;
-        let control = ports.control.clone();
+    }
+
+    /// Spawns the driver, registers the session entry, and publishes the
+    /// host update; returns the bound agent.
+    fn activate_session(
+        &self,
+        resolved: &ResolvedRef,
+        wired: WiredSession,
+        cancel: CancellationToken,
+        tasks: &SessionTasks,
+        by: ClientId,
+    ) -> Agent {
+        let id = resolved.id;
+        let control = wired.ports.control.clone();
         let driver = crate::session::driver::spawn(
-            ports,
+            wired.ports,
             crate::session::driver::DriverDeps {
                 session: id,
                 parent: resolved.parent,
                 workspace: resolved.workspace.clone(),
                 host: Arc::clone(&self.state),
-                backend: Arc::clone(&backend),
-                services: Arc::clone(&services) as Arc<dyn crate::ext::Services>,
-                broker: Arc::clone(&broker),
-                jobs: Arc::clone(&jobs),
-                shared: Arc::clone(&shared),
-                overlay: Arc::clone(&overlay),
-                generation,
-                handle: handle.clone(),
+                backend: Arc::clone(&wired.backend),
+                services: Arc::clone(&wired.services) as Arc<dyn crate::ext::Services>,
+                broker: Arc::clone(&wired.broker),
+                jobs: Arc::clone(&wired.jobs),
+                shared: Arc::clone(&wired.shared),
+                overlay: Arc::clone(&wired.overlay),
+                generation: wired.generation,
+                handle: wired.handle.clone(),
                 tasks: tasks.clone(),
                 cancel: cancel.clone(),
                 ephemeral: resolved.ephemeral,
@@ -629,11 +738,11 @@ impl Host {
         );
         let ports = SessionPorts {
             id,
-            handle,
-            shared,
-            broker,
+            handle: wired.handle,
+            shared: wired.shared,
+            broker: wired.broker,
             workspace: resolved.workspace.clone(),
-            generation,
+            generation: wired.generation,
             control: Arc::clone(&control),
         };
         let agent = Self::bind(&ports, id, by);
@@ -647,18 +756,18 @@ impl Host {
                     handle: ports.handle,
                     shared: ports.shared,
                     broker: ports.broker,
-                    services: services.clone(),
+                    services: wired.services.clone(),
                     tasks: tasks.clone(),
                     workspace: ports.workspace,
                     depth: resolved.depth,
                     parent: resolved.parent,
                     generation: ports.generation,
                     driver,
-                    task,
+                    task: wired.task,
                     control: ports.control,
                     cancel,
-                    backend: Arc::clone(&backend),
-                    overlay,
+                    backend: Arc::clone(&wired.backend),
+                    overlay: wired.overlay,
                     reported: std::sync::atomic::AtomicBool::new(false),
                 },
             );
@@ -671,7 +780,25 @@ impl Host {
         } else {
             self.publish(&HostUpdate::SessionAdded { session: id });
         }
-        Ok(agent)
+        agent
+    }
+
+    async fn spawn_session(
+        &self,
+        resolved: ResolvedRef,
+        by: ClientId,
+        journal: Option<Journal>,
+    ) -> Result<Agent, HostError> {
+        let (mut journal, resumed) = self.open_session_journal(&resolved, journal).await?;
+        let replayed = self.replay_session(&resolved, &mut journal).await?;
+        let cancel = CancellationToken::new();
+        let tasks = SessionTasks::new();
+        let wired = self
+            .wire_session(&resolved, journal, replayed, &cancel, &tasks)
+            .await?;
+        self.observe_start(&resolved, &wired, &cancel, resumed)
+            .await;
+        Ok(self.activate_session(&resolved, wired, cancel, &tasks, by))
     }
 
     /// Launches a pre-branched journal as a child session of `parent`.

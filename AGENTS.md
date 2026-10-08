@@ -94,7 +94,11 @@ workspace rule may narrow a shared rule. It must not weaken it.
   behind a local crate. The one exception is `dal-star`. A module that defines Starlark
   values may carry `#![expect(unsafe_code, reason = "starlark value derives")]`. This
   exception exists because the starlark crate has no safe way to hold host data in an
-  unforgeable value. Such a module must contain no hand-written `unsafe`.
+  unforgeable value. Such a module must contain no hand-written `unsafe`. A second
+  exception is `dalgon`'s `#[cfg(windows)]` sandbox backend in `sandbox.rs`: it is the
+  composition edge that owns OS process launches, and no published safe wrapper exposes
+  AppContainer profiles, DACL editing, or job objects, so the module carries
+  `#[expect(unsafe_code, reason = "...")]` with every `unsafe` beside its call site.
 - Use immutable values, pure folds, and explicit effect records for domain decisions.
   Put I/O at named adapters. Then replay and tests can drive the same logic.
 - Give each mutable subsystem one owner task or one exclusive handle. Use bounded queues,
