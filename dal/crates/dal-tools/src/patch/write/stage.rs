@@ -301,7 +301,7 @@ async fn plan_change_edit(
             line_hint,
             all,
             ..
-        } => text_replacements(cx, old, *line_hint, *all, guard, index, body),
+        } => text_replacements(cx, (old, *line_hint, *all), action, guard, index, body),
         Locator::Span {
             first,
             last,
@@ -385,13 +385,13 @@ fn raw_offset(text: &super::super::resolve::Text, offset: usize) -> usize {
 /// `line_hint`, or every match under `all` with Seen coverage.
 fn text_replacements(
     cx: &ChangeCx<'_>,
-    old: &str,
-    line_hint: Option<usize>,
-    all: bool,
+    needle: (&str, Option<usize>, bool),
+    action: Action,
     guard: &Guard,
     index: usize,
     body: &str,
 ) -> Result<Vec<(usize, usize, Vec<u8>)>, EngineError> {
+    let (old, line_hint, all) = needle;
     let view = String::from_utf8_lossy(&cx.text.view).into_owned();
     let matches = find_text_matches(&view, old);
     if matches.is_empty() {
@@ -405,6 +405,17 @@ fn text_replacements(
         ));
     }
     let replacement = render_body(body, cx.text);
+    let planned = |start: usize, end: usize| match action {
+        Action::Replace => (raw_offset(cx.text, start), raw_offset(cx.text, end)),
+        Action::InsertBefore => {
+            let at = raw_offset(cx.text, start);
+            (at, at)
+        }
+        Action::InsertAfter => {
+            let at = raw_offset(cx.text, end);
+            (at, at)
+        }
+    };
     if all {
         // Replace-all requires whole-tag or Seen coverage of every line.
         if matches!(guard, Guard::Seen) {
@@ -428,11 +439,8 @@ fn text_replacements(
             .iter()
             .rev()
             .map(|(start, end)| {
-                (
-                    raw_offset(cx.text, *start),
-                    raw_offset(cx.text, *end),
-                    replacement.clone(),
-                )
+                let (start, end) = planned(*start, *end);
+                (start, end, replacement.clone())
             })
             .collect());
     }
@@ -441,7 +449,10 @@ fn text_replacements(
             .iter()
             .find(|(start, _)| view[..*start].matches('\n').count() + 1 == hint);
         return match selected {
-            Some((start, end)) => Ok(vec![(*start, *end, replacement)]),
+            Some((start, end)) => {
+                let (start, end) = planned(*start, *end);
+                Ok(vec![(start, end, replacement)])
+            }
             None => Err(EngineError::new(
                 ErrorClass::Resolve,
                 format!(
@@ -463,11 +474,8 @@ fn text_replacements(
         ));
     }
     let (start, end) = matches[0];
-    Ok(vec![(
-        raw_offset(cx.text, start),
-        raw_offset(cx.text, end),
-        replacement,
-    )])
+    let (start, end) = planned(start, end);
+    Ok(vec![(start, end, replacement)])
 }
 
 /// `Locator::Span`: an explicit line range needs Seen coverage of its
@@ -533,6 +541,12 @@ async fn node_replacements(
     index: usize,
     body: &str,
 ) -> Result<Vec<(usize, usize, Vec<u8>)>, EngineError> {
+    if !cx.session.symbols {
+        return Err(EngineError::new(
+            ErrorClass::Resolve,
+            format!("patch: changes[{index}]: symbol support is not enabled for this file."),
+        ));
+    }
     let (_byte_start, _byte_end, node_first, node_last) = super::super::ast::node_span(
         cx.canonical,
         cx.before,
