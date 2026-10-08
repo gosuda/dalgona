@@ -520,7 +520,7 @@ impl<'a> LoginFlow<'a> {
         verifier: &str,
         challenge: &str,
     ) -> Result<OAuthCredential, ProviderError> {
-        let listener = bind_callback(self.endpoints.claude_callback_port).await;
+        let listener = bind_callback_with_fallback(self.endpoints.claude_callback_port).await;
         let (listener, redirect) =
             self.claude_listener_redirect(listener, challenge, verifier, progress, cancel)?;
         report_progress(
@@ -1211,6 +1211,20 @@ pub(crate) fn unix_now() -> i64 {
 }
 
 async fn bind_callback(port: u16) -> std::io::Result<(TcpListener, u16)> {
+    bind_loopback(port).await
+}
+
+/// Binds the Claude callback listener: the preferred port when free, else
+/// any free loopback port. The provider accepts a loopback redirect on any
+/// port, so the authorize URL is built from the port actually bound.
+async fn bind_callback_with_fallback(port: u16) -> std::io::Result<(TcpListener, u16)> {
+    match bind_loopback(port).await {
+        Ok(bound) => Ok(bound),
+        Err(preferred_error) => bind_loopback(0).await.map_err(|_| preferred_error),
+    }
+}
+
+async fn bind_loopback(port: u16) -> std::io::Result<(TcpListener, u16)> {
     let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     let listener = TcpListener::bind(address).await?;
     let bound = listener.local_addr()?.port();

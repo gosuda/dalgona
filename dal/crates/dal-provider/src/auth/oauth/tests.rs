@@ -245,6 +245,91 @@ fn endpoint_override_rejects_non_loopback_origins() {
     assert!(LoginEndpoints::loopback("http://example.com").is_err());
 }
 
+/// Occupies one loopback port to stand in for the preferred callback port.
+async fn held_loopback_port() -> (TcpListener, u16) {
+    let holder = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("loopback bind succeeds");
+    let port = holder.local_addr().expect("bound address").port();
+    (holder, port)
+}
+
+#[tokio::test]
+async fn an_occupied_preferred_port_falls_back_to_a_free_port() {
+    let (holder, taken) = held_loopback_port().await;
+    let bound = super::bind_callback_with_fallback(taken).await;
+    let Ok((listener, port)) = bound else {
+        panic!("an occupied preferred port must not force paste login: {bound:?}");
+    };
+    assert_ne!(port, taken);
+    drop(listener);
+    drop(holder);
+}
+
+#[tokio::test]
+async fn a_free_preferred_port_stays_preferred_and_a_strict_bind_refuses() {
+    let (holder, taken) = held_loopback_port().await;
+    assert!(
+        super::bind_callback(taken).await.is_err(),
+        "the registered fixed port must stay strict for providers that register it"
+    );
+    let (listener, port) = super::bind_callback(0).await.expect("ephemeral binds");
+    assert_ne!(port, 0);
+    drop(listener);
+    drop(holder);
+}
+
+#[tokio::test]
+async fn occupied_claude_callback_advertises_a_bound_port() {
+    let dir = TestDir::new();
+    let blocker = occupied_callback_port().await;
+    assert!(blocker.is_some());
+    let Some((blocker, port)) = blocker else {
+        return;
+    };
+    let endpoints = loopback_endpoints("http://127.0.0.1:1", 0, port);
+    assert!(endpoints.is_some());
+    let Some(endpoints) = endpoints else {
+        return;
+    };
+    let mut store = AuthStore::empty(dir.auth_path());
+    let flow = configured_flow("anthropic", &mut store, &dir, endpoints);
+    assert!(flow.is_ok());
+    let Some(mut flow) = flow.ok() else {
+        return;
+    };
+    let observed = Arc::new(Mutex::new(None));
+    let cancel = CancellationToken::new();
+    let cancel_on_open = cancel.clone();
+    let sink = Arc::clone(&observed);
+    let progress = move |event| {
+        if let LoginProgress::OpenUrl { url } = event {
+            if let Ok(mut slot) = sink.lock() {
+                *slot = callback_port(&url);
+            }
+            cancel_on_open.cancel();
+        }
+    };
+    let result = flow.run(&progress, &cancel).await;
+    assert!(matches!(result, Err(ProviderError::LoginCancelled)));
+    drop(flow);
+    drop(blocker);
+    let advertised = observed.lock().ok().and_then(|slot| *slot);
+    assert_ne!(
+        advertised,
+        Some(port),
+        "the authorize URL must advertise the port actually bound, not the occupied one"
+    );
+    if let Some(advertised) = advertised {
+        let rebound = TcpListener::bind(("127.0.0.1", advertised)).await;
+        assert!(
+            rebound.is_ok(),
+            "advertised port {advertised} was not bound"
+        );
+    }
+    assert!(!dir.auth_path().exists());
+}
+
 #[tokio::test]
 async fn callback_state_mismatch_is_typed() {
     let bound = super::bind_callback(0).await;
@@ -297,10 +382,8 @@ async fn pasted_state_mismatch_does_not_write_auth_file() {
     let paste = Arc::new(Mutex::new(sender));
     let paste_on_prompt = Arc::clone(&paste);
     let progress = move |event| {
-        if !matches!(event, LoginProgress::AskPaste { .. }) {
-            return;
-        }
-        if let Ok(mut sender) = paste_on_prompt.lock()
+        if let LoginProgress::OpenUrl { .. } = event
+            && let Ok(mut sender) = paste_on_prompt.lock()
             && let Some(sender) = sender.take()
         {
             let _sent = sender.send(String::from("code123#wrong-state"));
@@ -430,7 +513,7 @@ async fn token_endpoint_400_and_500_leave_auth_file_unchanged() {
         let paste = Arc::new(Mutex::new(sender));
         let paste_on_prompt = Arc::clone(&paste);
         let progress = move |event| {
-            if matches!(event, LoginProgress::AskPaste { .. })
+            if let LoginProgress::OpenUrl { .. } = event
                 && let Ok(mut sender) = paste_on_prompt.lock()
                 && let Some(sender) = sender.take()
             {
@@ -488,7 +571,7 @@ async fn successful_claude_exchange_stores_complete_oauth_entry() {
     let paste = Arc::new(Mutex::new(sender));
     let paste_on_prompt = Arc::clone(&paste);
     let progress = move |event| {
-        if matches!(event, LoginProgress::AskPaste { .. })
+        if let LoginProgress::OpenUrl { .. } = event
             && let Ok(mut sender) = paste_on_prompt.lock()
             && let Some(sender) = sender.take()
         {
@@ -646,7 +729,7 @@ async fn oauth_307_and_308_do_not_forward_codes_or_verifiers() {
         let paste_on_prompt = Arc::new(Mutex::new(sender));
         let paste = Arc::clone(&paste_on_prompt);
         let progress = move |event| {
-            if matches!(event, LoginProgress::AskPaste { .. })
+            if let LoginProgress::OpenUrl { .. } = event
                 && let Ok(mut sender) = paste.lock()
                 && let Some(sender) = sender.take()
             {
