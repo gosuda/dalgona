@@ -420,7 +420,9 @@ impl Actor {
         }
         self.shared.sync_ext(&self.fold);
         self.poll_status();
-        self.run().await;
+        // `run` is a large future on Windows; boxing keeps `into_run` under
+        // the `large_futures` limit.
+        Box::pin(self.run()).await;
     }
 
     /// Polls every registered status kind once and publishes the changes.
