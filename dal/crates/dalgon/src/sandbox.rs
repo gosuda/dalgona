@@ -610,8 +610,9 @@ mod win {
     /// Returns whether the original DACL was unrestricted (absent or null):
     /// `SetEntriesInAclW` builds a one-entry ACL from a null DACL, so a lift
     /// that wrote the merged ACL back would turn an open root into deny-all.
-    /// `restore_open` writes a null DACL instead of the merged ACL, restoring
-    /// exactly that original state.
+    /// `restore_open` writes a null DACL instead of the merged ACL, but only
+    /// when the merged ACL is empty — ACEs planted on the same path by other
+    /// live runs must survive this run's lift.
     fn edit_dacl(
         path: &Path,
         sid: PSID,
@@ -673,6 +674,7 @@ mod win {
         if merge != 0 {
             return Err(last_error(&format!("build ACL for {}", path.display())));
         }
+        let restore = restore_open && (new_dacl.is_null() || unsafe { (*new_dacl).AceCount == 0 });
         let write = unsafe {
             SetNamedSecurityInfoW(
                 wide_path.as_ptr(),
@@ -680,11 +682,7 @@ mod win {
                 DACL_SECURITY_INFORMATION,
                 ptr::null_mut(),
                 ptr::null_mut(),
-                if restore_open {
-                    ptr::null_mut()
-                } else {
-                    new_dacl
-                },
+                if restore { ptr::null_mut() } else { new_dacl },
                 ptr::null_mut(),
             )
         };
@@ -753,11 +751,14 @@ mod win {
         result.map(|()| planted)
     }
 
-    /// Lifts every planted ACE; failures are collected instead of discarded so
-    /// the run reports grants it could not remove.
+    /// Lifts every planted ACE in reverse plant order — the last grant on a
+    /// path observed a non-null DACL, so the first-planted entry (which may
+    /// need an open-root restore) must be lifted last or its null write would
+    /// erase the still-pending second grant. Failures are collected instead
+    /// of discarded so the run reports grants it could not remove.
     fn revoke_planted(planted: &[(PathBuf, u32, bool)], sid: PSID) -> Option<String> {
         let mut failed = Vec::new();
-        for (path, access, was_open) in planted {
+        for (path, access, was_open) in planted.iter().rev() {
             if let Err(error) = edit_dacl(path, sid, *access, REVOKE_ACCESS, *was_open) {
                 failed.push(error);
             }
