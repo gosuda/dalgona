@@ -876,7 +876,7 @@ mod win {
         for (path, guid, access) in dead {
             // Best-effort: a failed lift keeps its holder record and is
             // retried by the next transact.
-            let _ = lift(state, &path, &guid, access);
+            let _ = lift(edge, state, &path, &guid, access);
         }
     }
 
