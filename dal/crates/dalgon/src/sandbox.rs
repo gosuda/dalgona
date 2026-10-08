@@ -463,8 +463,8 @@ mod win {
         DeriveAppContainerSidFromAppContainerName,
     };
     use windows_sys::Win32::Security::{
-        ACL, DACL_SECURITY_INFORMATION, FreeSid, PSID, SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES,
-        SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+        ACL, DACL_SECURITY_INFORMATION, FreeSid, GetSecurityDescriptorDacl, PSID,
+        SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES, SUB_CONTAINERS_AND_OBJECTS_INHERIT,
     };
     use windows_sys::Win32::System::Com::CoCreateGuid;
     use windows_sys::Win32::System::Console::{
@@ -477,12 +477,12 @@ mod win {
     };
     use windows_sys::Win32::System::SystemServices::SE_GROUP_ENABLED;
     use windows_sys::Win32::System::Threading::{
-        CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
+        CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateMutexW, CreateProcessW,
         DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, INFINITE,
         InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
         PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
-        PROCESS_INFORMATION, ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess,
-        UpdateProcThreadAttribute, WaitForSingleObject,
+        PROCESS_INFORMATION, ReleaseMutex, ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+        TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject,
     };
 
     const GENERIC_EXECUTE_ONLY: u32 = 0x2000_0000; // GENERIC_EXECUTE (FILE_EXECUTE|FILE_TRAVERSE)
@@ -580,9 +580,45 @@ mod win {
         command.push(u16::from(b'"'));
     }
 
+    /// Serializes DACL edits and the sandbox run they serve across processes:
+    /// `GetNamedSecurityInfoW` cannot see concurrent descriptor changes, so an
+    /// overlapping helper could erase an active sandbox's grant. One guard is
+    /// held for a whole plant→run→lift sequence, which also makes each run's
+    /// recorded original-DACL state truthful at lift time; sibling `__sandbox`
+    /// helpers wait rather than race. The mutex is session-local because an
+    /// `AppContainer` child always runs in its helper's session.
+    struct DaclLock(OwnedHandle);
+    impl DaclLock {
+        fn take() -> Result<Self, String> {
+            let name = wide("Local\\dalgon.sandbox.dacl");
+            let handle = unsafe { CreateMutexW(ptr::null(), FALSE, name.as_ptr()) };
+            let mutex = OwnedHandle::new(handle)?;
+            if unsafe { WaitForSingleObject(mutex.0, INFINITE) } != WAIT_OBJECT_0 {
+                return Err(last_error("lock the sandbox DACL mutex"));
+            }
+            Ok(Self(mutex))
+        }
+    }
+    impl Drop for DaclLock {
+        fn drop(&mut self) {
+            unsafe { ReleaseMutex((self.0).0) };
+        }
+    }
+
     /// Adds or removes the container SID's ACE on one path; `(OI)(CI)` covers
     /// the subtree. Callers must only edit DACLs the current user can write.
-    fn edit_dacl(path: &Path, sid: PSID, access: u32, mode: i32) -> Result<(), String> {
+    /// Returns whether the original DACL was unrestricted (absent or null):
+    /// `SetEntriesInAclW` builds a one-entry ACL from a null DACL, so a lift
+    /// that wrote the merged ACL back would turn an open root into deny-all.
+    /// `restore_open` writes a null DACL instead of the merged ACL, restoring
+    /// exactly that original state.
+    fn edit_dacl(
+        path: &Path,
+        sid: PSID,
+        access: u32,
+        mode: i32,
+        restore_open: bool,
+    ) -> Result<bool, String> {
         let wide_path = wide_path(path);
         let mut trustee: TRUSTEE_W = unsafe { std::mem::zeroed() };
         trustee.TrusteeForm = TRUSTEE_IS_SID;
@@ -611,6 +647,24 @@ mod win {
         if read != 0 {
             return Err(last_error(&format!("read ACL on {}", path.display())));
         }
+        let mut present = FALSE;
+        let mut defaulted = FALSE;
+        let mut stored_dacl: *mut ACL = ptr::null_mut();
+        let described = unsafe {
+            GetSecurityDescriptorDacl(
+                sd,
+                &raw mut present,
+                &raw mut stored_dacl,
+                &raw mut defaulted,
+            )
+        };
+        if described == FALSE {
+            if !sd.is_null() {
+                unsafe { LocalFree(sd) };
+            }
+            return Err(last_error(&format!("describe ACL on {}", path.display())));
+        }
+        let was_open = present == FALSE || stored_dacl.is_null();
         let mut new_dacl: *mut ACL = ptr::null_mut();
         let merge = unsafe { SetEntriesInAclW(1, &raw const entry, old_dacl, &raw mut new_dacl) };
         if !sd.is_null() {
@@ -626,7 +680,11 @@ mod win {
                 DACL_SECURITY_INFORMATION,
                 ptr::null_mut(),
                 ptr::null_mut(),
-                new_dacl,
+                if restore_open {
+                    ptr::null_mut()
+                } else {
+                    new_dacl
+                },
                 ptr::null_mut(),
             )
         };
@@ -634,7 +692,7 @@ mod win {
         if write != 0 {
             return Err(last_error(&format!("write ACL on {}", path.display())));
         }
-        Ok(())
+        Ok(was_open)
     }
 
     /// Grants the run-unique SID full access on each allowed root and
@@ -651,8 +709,8 @@ mod win {
         roots: &[PathBuf],
         executable: &Path,
         sid: PSID,
-    ) -> Result<Vec<(PathBuf, u32)>, String> {
-        let mut planted: Vec<(PathBuf, u32)> = Vec::new();
+    ) -> Result<Vec<(PathBuf, u32, bool)>, String> {
+        let mut planted: Vec<(PathBuf, u32, bool)> = Vec::new();
         let result = (|| {
             if let Some(dir) = executable
                 .parent()
@@ -663,8 +721,9 @@ mod win {
                 // user cannot edit them; a directory the container genuinely
                 // cannot read fails at exec time with an access error, so a
                 // failed grant here must not block launch.
-                if edit_dacl(dir, sid, GENERIC_EXECUTE_ONLY, GRANT_ACCESS).is_ok() {
-                    planted.push((dir.to_path_buf(), GENERIC_EXECUTE_ONLY));
+                if let Ok(was_open) = edit_dacl(dir, sid, GENERIC_EXECUTE_ONLY, GRANT_ACCESS, false)
+                {
+                    planted.push((dir.to_path_buf(), GENERIC_EXECUTE_ONLY, was_open));
                 }
             }
             // Execute on every PATH directory so the shell can reach its
@@ -675,14 +734,16 @@ mod win {
                     if dir.as_os_str().is_empty() {
                         continue;
                     }
-                    if edit_dacl(&dir, sid, GENERIC_EXECUTE_ONLY, GRANT_ACCESS).is_ok() {
-                        planted.push((dir, GENERIC_EXECUTE_ONLY));
+                    if let Ok(was_open) =
+                        edit_dacl(&dir, sid, GENERIC_EXECUTE_ONLY, GRANT_ACCESS, false)
+                    {
+                        planted.push((dir, GENERIC_EXECUTE_ONLY, was_open));
                     }
                 }
             }
             for root in roots {
-                edit_dacl(root, sid, GENERIC_ALL_ACCESS, GRANT_ACCESS)?;
-                planted.push((root.clone(), GENERIC_ALL_ACCESS));
+                let was_open = edit_dacl(root, sid, GENERIC_ALL_ACCESS, GRANT_ACCESS, false)?;
+                planted.push((root.clone(), GENERIC_ALL_ACCESS, was_open));
             }
             Ok(())
         })();
@@ -694,10 +755,10 @@ mod win {
 
     /// Lifts every planted ACE; failures are collected instead of discarded so
     /// the run reports grants it could not remove.
-    fn revoke_planted(planted: &[(PathBuf, u32)], sid: PSID) -> Option<String> {
+    fn revoke_planted(planted: &[(PathBuf, u32, bool)], sid: PSID) -> Option<String> {
         let mut failed = Vec::new();
-        for (path, access) in planted {
-            if let Err(error) = edit_dacl(path, sid, *access, REVOKE_ACCESS) {
+        for (path, access, was_open) in planted {
+            if let Err(error) = edit_dacl(path, sid, *access, REVOKE_ACCESS, *was_open) {
                 failed.push(error);
             }
         }
@@ -914,6 +975,9 @@ mod win {
         run_args: &[OsString],
     ) -> Result<ExitCode, String> {
         let (profile, capabilities) = container()?;
+        // Held for the whole plant→run→lift sequence: overlapping helpers
+        // then see a stable DACL state and each restores exactly what it read.
+        let _dacl_lock = DaclLock::take()?;
         let planted = plant_grants(roots, Path::new(executable), profile.sid.0)?;
 
         let std_handles = [
