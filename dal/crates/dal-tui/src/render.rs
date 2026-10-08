@@ -88,10 +88,6 @@ impl RenderRow {
 }
 
 /// Renders the bottom stack in inline mode or the whole screen in fullscreen mode.
-#[expect(
-    clippy::too_many_lines,
-    reason = "one row walk renders every entry kind in place"
-)]
 pub(crate) fn frame_rows(input: FrameInput<'_>, width: u16, height: u16) -> Vec<RenderRow> {
     let w = usize::from(width);
     let h = usize::from(height);
@@ -102,47 +98,7 @@ pub(crate) fn frame_rows(input: FrameInput<'_>, width: u16, height: u16) -> Vec<
         .model
         .as_ref()
         .map(|model| escape(model.id()));
-    let path = escape(&input.view.session.workspace.as_path().display().to_string());
-    let context = input
-        .view
-        .usage
-        .context_tokens
-        .saturating_mul(100)
-        .checked_div(input.view.usage.context_window)
-        .map(|percent| format!("ctx {percent}%"));
-    let waiting = input.dialog.is_open();
-    let running = matches!(
-        input.view.turn,
-        TurnState::Running { .. } | TurnState::Settling { .. }
-    );
-    let state = if waiting {
-        Some(crate::copy::ids::STATE_WAITING)
-    } else if matches!(input.view.turn, TurnState::Compacting { .. }) {
-        Some(crate::copy::ids::STATE_COMPACTING)
-    } else if let Some(activity) = input.live.activity() {
-        Some(activity)
-    } else if running {
-        Some(crate::copy::ids::STATE_WORKING)
-    } else {
-        None
-    };
-    let spinner = if running && !waiting {
-        Some(if input.opts.motion { "⠋" } else { "*" })
-    } else {
-        None
-    };
-    let status = status::render(
-        StatusData {
-            state,
-            spinner,
-            model: model.as_deref(),
-            path: Some(&path),
-            context: context.as_deref(),
-            ..StatusData::default()
-        },
-        w,
-        mode,
-    );
+    let status = status_line(&input, model.as_deref(), w, mode);
     if h < 8 {
         return resolve_colors(
             vec![
@@ -162,34 +118,7 @@ pub(crate) fn frame_rows(input: FrameInput<'_>, width: u16, height: u16) -> Vec<
         );
     }
 
-    let mut activity = Vec::new();
-    if input.view.settings.model.is_none() {
-        activity.push(RenderRow::new(
-            crate::copy::ids::FIRST_RUN_TITLE,
-            Role::Accent,
-        ));
-        activity.push(RenderRow::new(
-            crate::copy::ids::FIRST_RUN_ACTION,
-            Role::Text,
-        ));
-    }
-    activity.extend(
-        input
-            .live
-            .running_tool_rows()
-            .into_iter()
-            .map(|row| RenderRow::new(row, Role::Dim)),
-    );
-    activity.extend(input.transcript.pending_rows().cloned());
-    if !input.live.assistant_text().is_empty() {
-        activity.extend(text_rows(
-            input.live.assistant_text(),
-            prose_cap(w),
-            mode,
-            input.diagram_settings,
-            input.diagram_cache,
-        ));
-    }
+    let mut activity = activity_rows(&input, w, mode);
     let notices = input.live.notices();
     let picker_rows = input
         .picker
@@ -246,6 +175,25 @@ pub(crate) fn frame_rows(input: FrameInput<'_>, width: u16, height: u16) -> Vec<
             .map(|row| RenderRow::new(escape(row), Role::Dim)),
     );
     bottom.extend(activity.into_iter().rev().take(budget.activity).rev());
+    overlay_rows(&input, &budget, w, mode, &mut bottom);
+    bottom.push(RenderRow::new(status, Role::Dim));
+    let bottom: Vec<RenderRow> = bottom.into_iter().map(|row| row.clipped(w, mode)).collect();
+    let rows = if input.screen == Screen::Inline {
+        bottom
+    } else {
+        fullscreen_rows(&input, bottom, model.as_deref(), width, height, mode)
+    };
+    resolve_colors(rows, input.theme)
+}
+
+/// The interactive tail: an open dialog, a picker, or the composer and hint.
+fn overlay_rows(
+    input: &FrameInput<'_>,
+    budget: &RegionBudget,
+    w: usize,
+    mode: WidthMode,
+    bottom: &mut Vec<RenderRow>,
+) {
     if input.dialog.is_open() {
         bottom.extend(input.dialog.rendered_rows(
             w,
@@ -306,37 +254,121 @@ pub(crate) fn frame_rows(input: FrameInput<'_>, width: u16, height: u16) -> Vec<
             ));
         }
     }
-    bottom.push(RenderRow::new(status, Role::Dim));
-    let bottom: Vec<RenderRow> = bottom.into_iter().map(|row| row.clipped(w, mode)).collect();
-    let rows = if input.screen == Screen::Inline {
-        bottom
+}
+
+/// Fullscreen layout: header, padded transcript tail, then the bottom block.
+fn fullscreen_rows(
+    input: &FrameInput<'_>,
+    bottom: Vec<RenderRow>,
+    model: Option<&str>,
+    width: u16,
+    height: u16,
+    mode: WidthMode,
+) -> Vec<RenderRow> {
+    let w = usize::from(width);
+    let h = usize::from(height);
+    let header = crate::screen::fullscreen::header_rows(width, height);
+    let available = h.saturating_sub(header + bottom.len());
+    let mut rows = Vec::with_capacity(h);
+    if header > 0 {
+        rows.push(RenderRow::new(
+            format!(
+                "dal · {} · {}",
+                escape(input.view.session.name.as_deref().unwrap_or("session")),
+                model.unwrap_or("no model")
+            ),
+            Role::Accent,
+        ));
+    }
+    let transcript_len = input.transcript.rows().len();
+    let transcript_start = transcript_len.saturating_sub(available);
+    rows.extend(
+        (transcript_start..transcript_len).filter_map(|index| input.transcript.render_row(index)),
+    );
+    rows.resize_with(header + available, || {
+        RenderRow::new(String::new(), Role::Text)
+    });
+    rows.extend(bottom);
+    rows.into_iter().map(|row| row.clipped(w, mode)).collect()
+}
+
+/// The single status row text: turn state, spinner, model, path, context.
+fn status_line(input: &FrameInput<'_>, model: Option<&str>, w: usize, mode: WidthMode) -> String {
+    let path = escape(&input.view.session.workspace.as_path().display().to_string());
+    let context = input
+        .view
+        .usage
+        .context_tokens
+        .saturating_mul(100)
+        .checked_div(input.view.usage.context_window)
+        .map(|percent| format!("ctx {percent}%"));
+    let waiting = input.dialog.is_open();
+    let running = matches!(
+        input.view.turn,
+        TurnState::Running { .. } | TurnState::Settling { .. }
+    );
+    let state = if waiting {
+        Some(crate::copy::ids::STATE_WAITING)
+    } else if matches!(input.view.turn, TurnState::Compacting { .. }) {
+        Some(crate::copy::ids::STATE_COMPACTING)
+    } else if let Some(activity) = input.live.activity() {
+        Some(activity)
+    } else if running {
+        Some(crate::copy::ids::STATE_WORKING)
     } else {
-        let header = crate::screen::fullscreen::header_rows(width, height);
-        let available = h.saturating_sub(header + bottom.len());
-        let mut rows = Vec::with_capacity(h);
-        if header > 0 {
-            rows.push(RenderRow::new(
-                format!(
-                    "dal · {} · {}",
-                    escape(input.view.session.name.as_deref().unwrap_or("session")),
-                    model.as_deref().unwrap_or("no model")
-                ),
-                Role::Accent,
-            ));
-        }
-        let transcript_len = input.transcript.rows().len();
-        let transcript_start = transcript_len.saturating_sub(available);
-        rows.extend(
-            (transcript_start..transcript_len)
-                .filter_map(|index| input.transcript.render_row(index)),
-        );
-        rows.resize_with(header + available, || {
-            RenderRow::new(String::new(), Role::Text)
-        });
-        rows.extend(bottom);
-        rows.into_iter().map(|row| row.clipped(w, mode)).collect()
+        None
     };
-    resolve_colors(rows, input.theme)
+    let spinner = if running && !waiting {
+        Some(if input.opts.motion { "⠋" } else { "*" })
+    } else {
+        None
+    };
+    status::render(
+        StatusData {
+            state,
+            spinner,
+            model,
+            path: Some(&path),
+            context: context.as_deref(),
+            ..StatusData::default()
+        },
+        w,
+        mode,
+    )
+}
+
+/// The scrollable middle region: first-run hint, tool rows, pending
+/// transcript rows, and streamed assistant text.
+fn activity_rows(input: &FrameInput<'_>, w: usize, mode: WidthMode) -> Vec<RenderRow> {
+    let mut activity = Vec::new();
+    if input.view.settings.model.is_none() {
+        activity.push(RenderRow::new(
+            crate::copy::ids::FIRST_RUN_TITLE,
+            Role::Accent,
+        ));
+        activity.push(RenderRow::new(
+            crate::copy::ids::FIRST_RUN_ACTION,
+            Role::Text,
+        ));
+    }
+    activity.extend(
+        input
+            .live
+            .running_tool_rows()
+            .into_iter()
+            .map(|row| RenderRow::new(row, Role::Dim)),
+    );
+    activity.extend(input.transcript.pending_rows().cloned());
+    if !input.live.assistant_text().is_empty() {
+        activity.extend(text_rows(
+            input.live.assistant_text(),
+            prose_cap(w),
+            mode,
+            input.diagram_settings,
+            input.diagram_cache,
+        ));
+    }
+    activity
 }
 
 fn resolve_colors(mut rows: Vec<RenderRow>, theme: &ResolvedTheme) -> Vec<RenderRow> {
