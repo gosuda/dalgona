@@ -430,7 +430,7 @@ mod tests {
     }
 }
 
-/// Windows backend. Each run registers a process-unique AppContainer profile,
+/// Windows backend. Each run registers a GUID-unique AppContainer profile,
 /// grants its SID `(OI)(CI)` access on the allowed roots and read+execute on
 /// the executable's directory (system locations already grant
 /// `ALL APPLICATION PACKAGES`), then launches the target under the container
@@ -466,6 +466,7 @@ mod win {
         ACL, DACL_SECURITY_INFORMATION, FreeSid, PSID, SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES,
         SUB_CONTAINERS_AND_OBJECTS_INHERIT,
     };
+    use windows_sys::Win32::System::Com::CoCreateGuid;
     use windows_sys::Win32::System::Console::{
         GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
     };
@@ -514,7 +515,7 @@ mod win {
     }
 
     /// The AppContainer profile for this run. Name-keyed derivation gives each
-    /// helper process a unique SID, so planted grants can never cross runs.
+    /// run a unique SID, so planted grants can never cross runs.
     struct Profile {
         sid: OwnedSid,
         name: Vec<u16>,
@@ -638,8 +639,9 @@ mod win {
     }
 
     /// Grants the run-unique SID full access on each allowed root and
-    /// read+execute on the executable's directory so user-profile binaries
-    /// (outside the `ALL APPLICATION PACKAGES` grants) still load.
+    /// read+execute on the executable's directory plus every PATH directory so
+    /// the command runtime (outside the `ALL APPLICATION PACKAGES` grants)
+    /// still loads.
     fn plant_grants(
         roots: &[PathBuf],
         executable: &Path,
@@ -658,6 +660,19 @@ mod win {
                 // failed grant here must not block launch.
                 if edit_dacl(dir, sid, GENERIC_READ_EXECUTE, GRANT_ACCESS).is_ok() {
                     planted.push((dir.to_path_buf(), GENERIC_READ_EXECUTE));
+                }
+            }
+            // Read+execute on every PATH directory so the shell can reach its
+            // runtime (`cargo` under %USERPROFILE%\.cargo\bin, Git's usr\bin).
+            // Same tolerate rule as the launch directory: the OS decides.
+            if let Some(paths) = std::env::var_os("PATH") {
+                for dir in std::env::split_paths(&paths) {
+                    if dir.as_os_str().is_empty() {
+                        continue;
+                    }
+                    if edit_dacl(&dir, sid, GENERIC_READ_EXECUTE, GRANT_ACCESS).is_ok() {
+                        planted.push((dir, GENERIC_READ_EXECUTE));
+                    }
                 }
             }
             for root in roots {
@@ -692,10 +707,36 @@ mod win {
         }
     }
 
+    /// A run identity Windows cannot recycle: a fresh GUID, not a PID —
+    /// killed helpers leave profiles and ACEs that a recycled PID would revive.
+    fn run_id() -> String {
+        let mut guid = unsafe { std::mem::zeroed() };
+        if unsafe { CoCreateGuid(&mut guid) } < 0 {
+            return format!("{}.{}", std::process::id(), unsafe {
+                windows_sys::Win32::System::SystemInformation::GetTickCount64()
+            });
+        }
+        let guid: windows_sys::core::GUID = guid;
+        format!(
+            "{:08x}-{:04x}-{:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            guid.data1,
+            guid.data2,
+            guid.data3,
+            guid.data4[0],
+            guid.data4[1],
+            guid.data4[2],
+            guid.data4[3],
+            guid.data4[4],
+            guid.data4[5],
+            guid.data4[6],
+            guid.data4[7]
+        )
+    }
+
     /// Resolves or registers this run's AppContainer profile and returns its
     /// SID plus the network capability SIDs the sandbox does not restrict.
     fn container() -> Result<(Profile, Vec<SID_AND_ATTRIBUTES>), String> {
-        let name = wide(&format!("dalgon.sandbox.{}", std::process::id()));
+        let name = wide(&format!("dalgon.sandbox.{}", run_id()));
         let mut sid: PSID = ptr::null_mut();
         let profile = unsafe {
             CreateAppContainerProfile(
