@@ -453,3 +453,49 @@ async fn mcp_grant_misses_coalesce_and_publish_request_updates() {
     assert_eq!(*answer, Answer::Approve);
     assert_eq!(by, &tui());
 }
+
+#[tokio::test]
+async fn a_turnless_caller_rides_a_persisted_grant_but_cannot_ask() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (store, broker) = open_store(&dir, Duration::from_secs(30));
+    let inject = ServiceSet::from_names(["env"]).expect("inject");
+    let caller = test_caller(inject);
+    let cancel = CancellationToken::new();
+    let (grant, ()) = futures::join!(store.ensure(&caller, Service::Env, &cancel), async {
+        let id = loop {
+            if let Some(req) = broker.open_requests().into_iter().next() {
+                break req.id;
+            }
+            tokio::task::yield_now().await;
+        };
+        broker.answer(id, Answer::Approve, tui()).expect("approve");
+    });
+    grant.expect("granted");
+
+    let turnless = Caller::new(
+        "focus".parse::<Name>().expect("name"),
+        Origin::User,
+        inject,
+        CallerKind::Handler,
+        None,
+    );
+    let grant = store
+        .ensure(&turnless, Service::Env, &cancel)
+        .await
+        .expect("a persisted grant satisfies a turnless caller");
+    assert!(grant.persistent());
+
+    let ungranted = Caller::new(
+        "focus".parse::<Name>().expect("name"),
+        Origin::User,
+        ServiceSet::from_names(["net"]).expect("inject"),
+        CallerKind::Handler,
+        None,
+    );
+    let denied = store.ensure(&ungranted, Service::Net, &cancel).await;
+    assert!(
+        matches!(denied, Err(ServiceError::Denied(DenyReason::NotGranted))),
+        "a grant question still needs a turn: {denied:?}"
+    );
+    assert!(broker.open_requests().is_empty(), "no request may open");
+}

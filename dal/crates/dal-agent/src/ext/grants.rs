@@ -442,9 +442,6 @@ impl GrantStore {
                 persistent: false,
             });
         }
-        let Some(turn) = who.turn else {
-            return Err(ServiceError::Denied(DenyReason::NotGranted));
-        };
         // Reload persistent rows before every probe so a CLI revocation
         // lands on the next capability check. Malformed content fails
         // closed here; the file is never written on this path.
@@ -468,6 +465,12 @@ impl GrantStore {
             }
             (GrantState::Absent, Some(notify)) => notify,
             _ => return Err(ServiceError::Cancelled),
+        };
+        // Only a grant question needs a live turn: callers without one
+        // (slash commands) may still ride a persisted or session grant
+        // but have no turn to hang a request on.
+        let Some(turn) = who.turn else {
+            return Err(ServiceError::Denied(DenyReason::NotGranted));
         };
         let capabilities: Vec<Box<str>> = key.services.iter().map(|s| s.as_str().into()).collect();
         let origin = match who.origin {
