@@ -432,8 +432,8 @@ mod tests {
 
 /// Windows backend. Each run registers a GUID-unique `AppContainer` profile,
 /// grants its SID `(OI)(CI)` full access on the allowed roots and
-/// read+execute on drive roots, their ancestors, and `PATH` dirs (system
-/// locations already grant `ALL APPLICATION PACKAGES`), then launches the
+/// read+execute on their ancestors, the launch directory, and `PATH` dirs
+/// (system locations already grant `ALL APPLICATION PACKAGES`), then launches the
 /// target under the container
 /// inside its own kill-on-close job object. Grant lifetime is refcounted in a
 /// shared state file so overlapping runs keep concurrent access and a killed
@@ -471,7 +471,6 @@ mod win {
     use windows_sys::Win32::System::Console::{
         GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
     };
-    use windows_sys::Win32::Storage::FileSystem::GetLogicalDrives;
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
@@ -479,9 +478,9 @@ mod win {
     };
     use windows_sys::Win32::System::SystemServices::SE_GROUP_ENABLED;
     use windows_sys::Win32::System::Threading::{
-        CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateMutexW, CreateProcessW, OpenMutexW,
+        CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateMutexW, CreateProcessW,
         DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, INFINITE,
-        InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
+        InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST, OpenMutexW,
         PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
         PROCESS_INFORMATION, ReleaseMutex, ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW,
         TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject,
@@ -814,30 +813,87 @@ mod win {
         }
     }
 
-    /// Plants `(path, access)` for this run under the transact lock. The
-    /// first live planter probes and records the original DACL-open state.
-    fn plant(
-        state: &mut DaclState,
-        path: &Path,
-        sid: PSID,
-        guid: &str,
-        access: u32,
-    ) -> Result<bool, String> {
+    /// Reads whether the DACL on `path` is unrestricted (absent or null).
+    /// `SetEntriesInAclW` merges a one-entry ACL onto a null DACL, so a lift
+    /// that wrote the merged ACL back would turn an open root into deny-all —
+    /// the last lifter must restore this flag's value instead.
+    fn dacl_open(path: &Path) -> Result<bool, String> {
+        let wide_path = wide_path(path);
+        let mut sd = ptr::null_mut();
+        let mut old_dacl: *mut ACL = ptr::null_mut();
+        let read = unsafe {
+            GetNamedSecurityInfoW(
+                wide_path.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                &raw mut old_dacl,
+                ptr::null_mut(),
+                &raw mut sd,
+            )
+        };
+        if read != 0 {
+            return Err(last_error(&format!("read ACL on {}", path.display())));
+        }
+        let mut present = FALSE;
+        let mut defaulted = FALSE;
+        let mut stored_dacl: *mut ACL = ptr::null_mut();
+        let described = unsafe {
+            GetSecurityDescriptorDacl(
+                sd,
+                &raw mut present,
+                &raw mut stored_dacl,
+                &raw mut defaulted,
+            )
+        };
+        if !sd.is_null() {
+            unsafe { LocalFree(sd) };
+        }
+        if described == FALSE {
+            return Err(last_error(&format!("describe ACL on {}", path.display())));
+        }
+        Ok(present == FALSE || stored_dacl.is_null())
+    }
+
+    /// Plants `(path, access)` for this run in two transacts: the intent
+    /// (holder record plus the first live planter's DACL-open flag) is
+    /// persisted BEFORE the DACL changes, so a kill in the gap leaves a
+    /// stale intent the next reap retires — never an untracked live ACE.
+    /// A failed grant then retires its intent so reaps never chase an ACE
+    /// that does not exist.
+    fn plant(path: &Path, sid: PSID, guid: &str, access: u32) -> Result<bool, String> {
         let key = path_key(path);
-        if state
-            .holders
-            .get(&key)
-            .is_some_and(|h| h.iter().any(|(g, a)| g == guid && *a == access))
-        {
+        let recorded = transact(|state| {
+            if state
+                .holders
+                .get(&key)
+                .is_some_and(|h| h.iter().any(|(g, a)| g == guid && *a == access))
+            {
+                return Ok(false);
+            }
+            if !state.holders.contains_key(&key) {
+                state.orig.insert(key.clone(), dacl_open(path)?);
+            }
+            state.add_holder(path, guid, access);
+            Ok(true)
+        })?;
+        if !recorded {
             return Ok(false);
         }
-        let first = !state.holders.contains_key(&key);
-        let was_open = edit_dacl(path, sid, access, GRANT_ACCESS, false)?;
-        if first {
-            state.orig.insert(key.clone(), was_open);
+        match transact(|_state| edit_dacl(path, sid, access, GRANT_ACCESS, false).map(|_| ())) {
+            Ok(()) => Ok(true),
+            Err(error) => {
+                let _ = transact(|state| {
+                    if state.holders.get(&key).is_some_and(|h| h.len() == 1) {
+                        state.orig.remove(&key);
+                    }
+                    state.remove_holder(&key, guid, access);
+                    Ok(())
+                });
+                Err(error)
+            }
         }
-        state.add_holder(path, guid, access);
-        Ok(true)
     }
 
     /// Adds or removes the container SID's ACE on one path; `(OI)(CI)` covers
@@ -928,55 +984,47 @@ mod win {
         Ok(was_open)
     }
 
-    /// The grant plan: POSIX read-open parity. The container reads and
-    /// executes anywhere the user's own DACLs allow — RX ACEs on every fixed
-    /// drive root, each writable root's ancestors, the launch directory, and
-    /// every `PATH` directory — and writes only under the allowed roots,
-    /// which get full control. Optional sites tolerate grant failures the way
-    /// the launch dir always has: an unprivileged helper cannot edit most
-    /// system drive DACLs, and a genuinely unreadable directory fails at
-    /// access time with an OS error.
+    /// The grant plan, matched to the POSIX read-open model: the container
+    /// reads and executes wherever DACLs already let it — system locations
+    /// grant `ALL APPLICATION PACKAGES` out of the box — plus RX ACEs on the
+    /// launch directory, every `PATH` directory, and each writable root's
+    /// ancestors (without an ACE on each parent the container cannot reach
+    /// the granted root). Writable roots get full control. Drive roots are
+    /// never touched: an `(OI)(CI)` ACE on a drive root propagates to every
+    /// existing descendant on the volume. `PATH` entries tolerate grant
+    /// failure — system dirs already carry `ALL APPLICATION PACKAGES` —
+    /// while the launch dir, ancestors, and writable roots are fatal: a
+    /// failed grant there means the promised access cannot exist, so the
+    /// run must not start with the read policy only partially installed.
     #[expect(
         clippy::disallowed_methods,
         reason = "the process edge owns environment reads; PATH decides the runtime dirs"
     )]
     fn grant_plan(roots: &[PathBuf], executable: &Path) -> Vec<(PathBuf, u32, bool)> {
         let mut plan: Vec<(PathBuf, u32, bool)> = Vec::new();
-        let push_rx = |dir: PathBuf, plan: &mut Vec<(PathBuf, u32, bool)>| {
+        let push_rx = |dir: PathBuf, optional: bool, plan: &mut Vec<(PathBuf, u32, bool)>| {
             if !dir.as_os_str().is_empty()
                 && !plan
                     .iter()
                     .any(|(p, a, _)| *p == dir && *a == GENERIC_READ_EXECUTE)
             {
-                plan.push((dir, GENERIC_READ_EXECUTE, true));
+                plan.push((dir, GENERIC_READ_EXECUTE, optional));
             }
         };
-        let drives = unsafe { GetLogicalDrives() };
-        for index in 0..26u32 {
-            if drives & (1 << index) == 0 {
-                continue;
-            }
-            let Some(letter) = char::from_u32(u32::from(b'A') + index) else {
-                continue;
-            };
-            push_rx(PathBuf::from(format!("{letter}:\\")), &mut plan);
-        }
         if let Some(dir) = executable
             .parent()
             .filter(|dir| !dir.as_os_str().is_empty())
         {
-            push_rx(dir.to_path_buf(), &mut plan);
+            push_rx(dir.to_path_buf(), false, &mut plan);
         }
         if let Some(paths) = std::env::var_os("PATH") {
             for dir in std::env::split_paths(&paths) {
-                push_rx(dir, &mut plan);
+                push_rx(dir, true, &mut plan);
             }
         }
         for root in roots {
-            // Ancestors of a writable root need read+traverse too: without an
-            // ACE on each parent the container cannot reach the granted root.
             for ancestor in root.ancestors().skip(1) {
-                push_rx(ancestor.to_path_buf(), &mut plan);
+                push_rx(ancestor.to_path_buf(), false, &mut plan);
             }
             plan.push((root.clone(), GENERIC_ALL_ACCESS, false));
         }
@@ -994,7 +1042,7 @@ mod win {
         let mut planted: Vec<(PathBuf, u32)> = Vec::new();
         let result = (|| {
             for (dir, access, optional) in grant_plan(roots, executable) {
-                match transact(|state| plant(state, &dir, profile.sid.0, &profile.guid, access)) {
+                match plant(&dir, profile.sid.0, &profile.guid, access) {
                     Ok(_) => planted.push((dir, access)),
                     Err(error) if !optional => return Err(error),
                     Err(_) => {}
