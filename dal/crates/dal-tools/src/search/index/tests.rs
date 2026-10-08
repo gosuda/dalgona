@@ -289,6 +289,141 @@ async fn corrupt_posting_ids_force_the_fallback() {
     );
 }
 
+/// Re-encode a files-table section with its first stored path replaced by
+/// `poison`, keeping the header, count, and other entries valid so that
+/// only the path itself can fail validation.
+fn poison_first_file_path(section: &[u8], poison: &[u8]) -> Vec<u8> {
+    let mut out = section[..HEADER_LEN].to_vec();
+    let mut rest = &section[HEADER_LEN..];
+    let count = u64::from_le_bytes(rest[..8].try_into().unwrap());
+    out.extend_from_slice(&count.to_le_bytes());
+    rest = &rest[8..];
+    for n in 0..count {
+        let len = usize::try_from(u64::from_le_bytes(rest[..8].try_into().unwrap())).unwrap();
+        rest = &rest[8..];
+        let bytes = &rest[..len];
+        rest = &rest[len..];
+        let replacement = if n == 0 { poison } else { bytes };
+        out.extend_from_slice(&(replacement.len() as u64).to_le_bytes());
+        out.extend_from_slice(replacement);
+    }
+    assert!(
+        rest.is_empty(),
+        "the files-table format changed; update the poison helper"
+    );
+    out
+}
+
+/// Re-encode an extra-table section with its first stored path replaced by
+/// `poison`, keeping the header, count, kinds, and other entries valid so
+/// that only the path itself can fail validation.
+fn poison_first_extra_path(section: &[u8], poison: &[u8]) -> Vec<u8> {
+    let mut out = section[..HEADER_LEN].to_vec();
+    let mut rest = &section[HEADER_LEN..];
+    let count = u64::from_le_bytes(rest[..8].try_into().unwrap());
+    out.extend_from_slice(&count.to_le_bytes());
+    rest = &rest[8..];
+    for n in 0..count {
+        out.push(rest[0]);
+        rest = &rest[1..];
+        let len = usize::try_from(u64::from_le_bytes(rest[..8].try_into().unwrap())).unwrap();
+        rest = &rest[8..];
+        let bytes = &rest[..len];
+        rest = &rest[len..];
+        let replacement = if n == 0 { poison } else { bytes };
+        out.extend_from_slice(&(replacement.len() as u64).to_le_bytes());
+        out.extend_from_slice(replacement);
+    }
+    assert!(
+        rest.is_empty(),
+        "the extra-table format changed; update the poison helper"
+    );
+    out
+}
+
+#[test]
+fn escaping_stored_paths_read_as_absent() {
+    let ws = tempfile::tempdir().unwrap();
+    fs::write(ws.path().join("a.txt"), "gamma_delta").unwrap();
+    fs::create_dir(ws.path().join("sub")).unwrap();
+    fs::write(ws.path().join("sub/b.txt"), "gamma_delta").unwrap();
+    let canonical = fs::canonicalize(ws.path()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    build_dir(
+        dir.path(),
+        &canonical,
+        None,
+        find::walk_listing(&canonical).unwrap(),
+        ARENA_BYTES,
+    )
+    .unwrap();
+    assert!(
+        super::store::open(dir.path(), &canonical).is_some(),
+        "the honest index opens"
+    );
+
+    let files = fs::read(dir.path().join(FILES)).unwrap();
+    let extra = fs::read(dir.path().join(EXTRA)).unwrap();
+    for (name, poisoned) in [
+        (FILES, poison_first_file_path(&files, b"../outside")),
+        (
+            FILES,
+            poison_first_file_path(&files, b"/tmp/poisoned-absolute.txt"),
+        ),
+        (EXTRA, poison_first_extra_path(&extra, b"../outside-dir")),
+    ] {
+        fs::write(dir.path().join(name), &poisoned).unwrap();
+        assert!(
+            super::store::open(dir.path(), &canonical).is_none(),
+            "a poisoned stored path in {name} is corruption"
+        );
+        let honest = if name == FILES { &files } else { &extra };
+        fs::write(dir.path().join(name), honest).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn poisoned_index_rebuilds_without_leaving_the_root() {
+    let parent = tempfile::tempdir().unwrap();
+    let ws = parent.path().join("ws");
+    fs::create_dir(&ws).unwrap();
+    fs::write(ws.join("a.txt"), "gamma_delta inside\n").unwrap();
+    fs::write(parent.path().join("outside.txt"), "outside_secret_token\n").unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let first = Index::new(Some(root.path().to_path_buf()));
+    assert_eq!(
+        candidates(&first, &ws, "gamma_delta").await,
+        [Path::new("a.txt")]
+    );
+    let dir = first.dir_of(&ws);
+
+    // A crafted index points at a file outside the root; every other byte
+    // stays valid, so only path validation can reject it.
+    let files = fs::read(dir.join(FILES)).unwrap();
+    fs::write(
+        dir.join(FILES),
+        poison_first_file_path(&files, b"../outside.txt"),
+    )
+    .unwrap();
+
+    let reopened = Index::new(Some(root.path().to_path_buf()));
+    assert_eq!(
+        candidates(&reopened, &ws, "gamma_delta").await,
+        [Path::new("a.txt")]
+    );
+    assert_eq!(
+        reopened.ready(&ws),
+        Some((1, BuildKind::Full)),
+        "a poisoned index is corrupt and rebuilds; it never opens"
+    );
+    assert!(
+        candidates(&reopened, &ws, "outside_secret_token")
+            .await
+            .is_empty(),
+        "the escape target outside the root stays unread"
+    );
+}
+
 #[test]
 fn spill_merge_matches_memory_and_cleans_up() {
     let ws = tempfile::tempdir().unwrap();

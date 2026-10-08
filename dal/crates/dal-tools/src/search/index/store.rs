@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -582,8 +582,19 @@ fn section(bytes: &[u8], magic: [u8; 4], nonce: u64) -> Option<(Cursor<'_>, usiz
     (count <= cursor.0.len() / 8).then_some((cursor, count))
 }
 
+/// A stored path is confined when it names a location inside the workspace:
+/// relative, non-empty, and free of `..`. Anything else would join outside
+/// the root when a candidate is read, so the index holding it is corrupt.
+fn confined(path: &Path) -> bool {
+    !path.as_os_str().is_empty()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
+}
+
 /// Open a published index: header parse, validation, and load only. Any
-/// mismatch or read failure is an absent index.
+/// mismatch or read failure is an absent index, as is a stored path that
+/// escapes the workspace: the caller rebuilds from the walk instead.
 pub(super) fn open(dir: &Path, canonical: &Path) -> Option<Data> {
     let meta = fs::read(dir.join(META)).ok()?;
     let mut cursor = Cursor(&meta);
@@ -609,6 +620,14 @@ pub(super) fn open(dir: &Path, canonical: &Path) -> Option<Data> {
             Some((cursor.path()?, kind))
         })
         .collect::<Option<Vec<_>>>()?;
+
+    if files
+        .iter()
+        .chain(extra.iter().map(|(path, _)| path))
+        .any(|path| !confined(path))
+    {
+        return None;
+    }
 
     let bytes = fs::read(dir.join(STAMPS)).ok()?;
     let (mut cursor, count) = section(&bytes, MAGIC_STAMPS, nonce)?;
