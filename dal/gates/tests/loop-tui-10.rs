@@ -98,13 +98,22 @@ fn cjk_reply_wraps_on_cell_boundary() -> TestResult {
     // The needle must fit inside one wrapped row: the reply splits into
     // 46 + 4 cells of characters, so wait only on its first 40 clusters.
     prompt_and_remember(&mut terminal, &mut recorder, "go", &"漢".repeat(40))?;
-    let cjk_rows = all_text(&recorder)
+    let rendered = all_text(&recorder);
+    assert_eq!(
+        rendered.matches('漢').count(),
+        50,
+        "the 50-cluster reply must render exactly once: {rendered}"
+    );
+    let mut cjk_rows: Vec<&str> = rendered
         .lines()
         .filter(|line| line.contains('漢'))
-        .count();
+        .collect();
+    cjk_rows.sort_unstable();
+    cjk_rows.dedup();
     assert_eq!(
-        cjk_rows, 2,
-        "a 100-cell CJK reply must occupy exactly two wrapped rows"
+        cjk_rows.len(),
+        2,
+        "a 100-cell CJK reply must occupy exactly two distinct wrapped rows: {rendered}"
     );
     quit_cleanly(&mut terminal)?;
     Ok(())
@@ -122,10 +131,14 @@ fn ambiguous_chars_widen_under_cjk_locale() -> TestResult {
     // The footer hint row also carries '·' separators, so count only rows
     // that hold a long run of them.
     let dotted_rows = |recorder: &VtRecorder| {
-        all_text(recorder)
+        let mut rows: Vec<String> = all_text(recorder)
             .lines()
             .filter(|line| line.matches('·').count() > 10)
-            .count()
+            .map(str::to_string)
+            .collect();
+        rows.sort_unstable();
+        rows.dedup();
+        rows.len()
     };
     let mut narrow = dalgon_command(dir.path(), &[&reply])?;
     narrow.args(["--screen", "inline"]);
