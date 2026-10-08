@@ -3,7 +3,8 @@
     reason = "integration fixture failures must fail at their specific setup boundary"
 )]
 //! A `tool_call` hook rewrite is classified again before the tool runs: an
-//! invalid rewrite fails the call closed and a valid rewrite still runs.
+//! invalid rewrite fails the call closed and a valid rewrite still runs. A
+//! hook block reaches the model with the blocking extension named.
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Component, Path};
@@ -72,18 +73,32 @@ impl Tool for Stat {
     }
 }
 
-struct Rewrite {
-    args: &'static str,
+/// What the fixture hook answers for every call.
+#[derive(Clone, Copy)]
+enum Step {
+    Rewrite(&'static str),
+    Block(&'static str),
 }
 
-impl Hook<ToolCallEvent, ToolCallVerdict> for Rewrite {
+struct Guard {
+    step: Step,
+}
+
+impl Hook<ToolCallEvent, ToolCallVerdict> for Guard {
     fn call(
         &self,
         _input: ToolCallEvent,
         _cx: HookCx,
     ) -> BoxFuture<'static, Result<ToolCallVerdict, HookError>> {
-        let args = RawJson::parse(self.args).expect("rewrite arguments");
-        Box::pin(async { Ok(ToolCallVerdict::Rewrite { args }) })
+        let verdict = match self.step {
+            Step::Rewrite(args) => ToolCallVerdict::Rewrite {
+                args: RawJson::parse(args).expect("rewrite arguments"),
+            },
+            Step::Block(reason) => ToolCallVerdict::Block {
+                reason: reason.into(),
+            },
+        };
+        Box::pin(async { Ok(verdict) })
     }
 }
 
@@ -107,7 +122,7 @@ impl ObserveHook<ToolResultEvent> for Results {
     }
 }
 
-fn extension(rewrite: &'static str, ran: Arc<Mutex<Vec<String>>>, seen: Settled) -> Extension {
+fn extension(step: Step, ran: Arc<Mutex<Vec<String>>>, seen: Settled) -> Extension {
     let name = Name::parse("fixture__stat").expect("tool name");
     let stat = Arc::new(Stat {
         name: name.clone(),
@@ -121,7 +136,7 @@ fn extension(rewrite: &'static str, ran: Arc<Mutex<Vec<String>>>, seen: Settled)
     });
     ExtensionBuilder::new("fixture", "0.1.0", ServiceSet::EMPTY)
         .expect("extension builder")
-        .on_tool_call(Rewrite { args: rewrite })
+        .on_tool_call(Guard { step })
         .on_tool_result(Results { seen })
         .script_tool(
             stat,
@@ -141,9 +156,9 @@ fn extension(rewrite: &'static str, ran: Arc<Mutex<Vec<String>>>, seen: Settled)
         .expect("extension")
 }
 
-/// Runs one scripted call whose arguments the hook rewrites, then returns
+/// Runs one scripted call whose `tool_call` hook answers `step`, then returns
 /// the settled result and the arguments the tool actually ran with.
-async fn run_with_rewrite(rewrite: &'static str) -> ((bool, Box<str>), Vec<String>) {
+async fn run_with_hook(step: Step) -> ((bool, Box<str>), Vec<String>) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let data = tmp.path().join("data");
     let workspace_dir = tmp.path().join("workspace");
@@ -163,7 +178,7 @@ async fn run_with_rewrite(rewrite: &'static str) -> ((bool, Box<str>), Vec<Strin
         name: "dal",
         data_root: data.clone(),
         defaults: "",
-        extensions: vec![extension(rewrite, Arc::clone(&ran), Arc::clone(&seen))],
+        extensions: vec![extension(step, Arc::clone(&ran), Arc::clone(&seen))],
         bundled: Vec::new(),
     };
     let env = Env {
@@ -226,7 +241,7 @@ async fn run_with_rewrite(rewrite: &'static str) -> ((bool, Box<str>), Vec<Strin
 
 #[tokio::test]
 async fn rewrite_to_an_out_of_workspace_path_fails_closed_without_running_the_tool() {
-    let ((ok, preview), ran) = run_with_rewrite(r#"{"path":"/etc/passwd"}"#).await;
+    let ((ok, preview), ran) = run_with_hook(Step::Rewrite(r#"{"path":"/etc/passwd"}"#)).await;
     assert!(!ok, "the rewritten call must fail: {preview}");
     assert!(
         preview.contains("invalid arguments for fixture__stat")
@@ -238,7 +253,18 @@ async fn rewrite_to_an_out_of_workspace_path_fails_closed_without_running_the_to
 
 #[tokio::test]
 async fn rewrite_to_a_valid_path_still_runs_with_the_rewritten_arguments() {
-    let ((ok, preview), ran) = run_with_rewrite(r#"{"path":"other.txt"}"#).await;
+    let ((ok, preview), ran) = run_with_hook(Step::Rewrite(r#"{"path":"other.txt"}"#)).await;
     assert!(ok, "the valid rewrite must run: {preview}");
     assert_eq!(ran, vec![r#"{"path":"other.txt"}"#.to_owned()]);
+}
+
+#[tokio::test]
+async fn a_hook_block_names_the_blocking_extension_and_never_runs_the_tool() {
+    let ((ok, preview), ran) = run_with_hook(Step::Block("placeholder text in arguments")).await;
+    assert!(!ok, "a blocked call must fail: {preview}");
+    assert_eq!(
+        preview.as_ref(),
+        "blocked by fixture: placeholder text in arguments"
+    );
+    assert!(ran.is_empty(), "the tool must not run: {ran:?}");
 }

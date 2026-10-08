@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fix the text the model reads when a `tool_call` hook blocks a call: it now starts with `blocked by <extension>:` so the model and the user can see which extension refused the call and why.
 - Add `image_bytes_elsewhere` to compactor input: the bytes of the images that stay in the request, so a compactor can keep its images within a request size budget.
 - Fix an HTTP 413 "request too large" answer from a provider: dal now compacts the history and retries the turn, as for a context-overflow error, instead of failing the turn.
 - Price model requests by context size: a model can list request-wide price tiers in its prices (`dal.toml` and the bundled price table), and dal uses the highest tier that the request's input tokens exceed.

@@ -375,7 +375,9 @@ async fn run_hooks(ctx: &DispatchCtx, event: &ToolCallEvent, args: RawJson) -> H
         )
         .await;
         if let Some(reason) = step.block {
-            return HookArgs::Blocked { reason };
+            return HookArgs::Blocked {
+                reason: format!("blocked by {}: {reason}", extension.name()).into(),
+            };
         }
         current = step.args;
     }
@@ -530,6 +532,7 @@ struct GrantCover {
     /// The detached job bounding the grant, absent for session grants.
     job: Option<JobId>,
 }
+
 fn job_is_live(jobs: &JobTable, job: Option<JobId>) -> bool {
     job.is_none_or(|id| jobs.is_live(id))
 }
