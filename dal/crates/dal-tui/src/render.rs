@@ -472,18 +472,17 @@ pub(crate) fn entry_rows(
                 })
                 .unwrap_or("");
             let word = if *error { "failed" } else { "ok" };
-            vec![RenderRow::new(
-                take_cells(
-                    &format!(
+            vec![
+                RenderRow::new(
+                    format!(
                         "{word}  {} · {}",
                         escape(name),
                         escape(text.lines().next().unwrap_or(""))
                     ),
-                    cap,
-                    mode,
-                ),
-                Role::Text,
-            )]
+                    Role::Text,
+                )
+                .clipped(cap, mode),
+            ]
         }
         _ => Vec::new(),
     }
@@ -623,7 +622,7 @@ fn escape_linked(text: &str, links: Vec<RenderLink>) -> (String, Vec<RenderLink>
     (escaped, links)
 }
 
-fn prose_rows(text: &str, cap: usize, mode: WidthMode) -> Vec<RenderRow> {
+pub(crate) fn prose_rows(text: &str, cap: usize, mode: WidthMode) -> Vec<RenderRow> {
     let mut rows = Vec::new();
     for logical in text.split('\n') {
         let (line_text, line_links) = linked_text(logical);
@@ -938,5 +937,35 @@ mod tests {
             rows.iter()
                 .all(|row| !row.text.contains("[docs]") && !row.text.contains("(file://"))
         );
+    }
+    #[test]
+    fn clipped_tool_result_links_keep_the_complete_destination() {
+        use dal_core::CallId;
+
+        let path = "file:///workspace/project/src/very-long-module-name.rs";
+        let entry = dal_core::EntryView {
+            id: dal_core::EntryId::new(NonZeroU64::MIN),
+            parent: None,
+            kind: EntryKind::ToolResult {
+                call: CallId::new("call-1"),
+                name: "read".into(),
+                error: false,
+                parts: vec![JournalPart::Text { text: path.into() }],
+                changes: Vec::new(),
+            },
+        };
+        let rows = entry_rows(
+            &entry,
+            32,
+            WidthMode::Narrow,
+            DiagramSettings::default(),
+            &RenderCache::default(),
+        );
+
+        let link = rows
+            .first()
+            .and_then(|row| row.links.first())
+            .expect("clipped tool result keeps its file link");
+        assert_eq!(link.url, path);
     }
 }

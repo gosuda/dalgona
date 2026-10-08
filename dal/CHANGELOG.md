@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+
+- Fix question titles and clipped file links in the terminal: a question title always shows as text, even with diagram rendering on, and a file link in a clipped tool result keeps its full destination.
 - Fix tool and command panics that happen before the work starts. The call now returns an error and the session stays usable.
 
 - Add `cancel_queued`, a command that removes one queued follow-up by its turn id. The `queued` reply to a follow-up now carries that `turn`; a queued steer still has none. The removed text comes back in a `discarded` notice, and an id that is not queued is rejected and changes nothing. A follow-up that has already started cannot be removed; cancel its turn instead.

@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use dal_core::{Answer, CallGrant, Question, RawJson, Request};
 
 use crate::diagram::{DiagramSettings, RenderCache};
-use crate::render::{RenderRow, text_rows};
+use crate::render::{RenderRow, prose_rows, text_rows};
 use crate::theme::Role;
 
 /// Pending requests in open order with sent-answer tracking.
@@ -416,7 +416,7 @@ impl DialogUi {
             use std::fmt::Write as _;
             let _ = write!(title, " · {waiting} more waiting");
         }
-        let mut rows = text_rows(&title, width, mode, settings, cache)
+        let mut rows = prose_rows(&title, width, mode)
             .into_iter()
             .map(|mut row| {
                 row.role = Role::Accent;
@@ -710,6 +710,35 @@ mod tests {
         );
         assert_eq!(cache.renders(), 1);
     }
+    #[test]
+    fn fenced_question_titles_remain_plain_text_when_diagrams_are_enabled() {
+        use dal_core::{Owner, Question, Request, RequestId};
+        use std::time::Duration;
+
+        let mut dialog = super::DialogUi::default();
+        dialog.opened(Request {
+            id: RequestId::new_v7(),
+            turn: None,
+            owner: Owner::Core,
+            question: Question::Text {
+                prompt: "```mermaid\ngraph TD; A-->B\n```".into(),
+                placeholder: None,
+            },
+            timeout: Duration::from_secs(30),
+            default: Answer::Cancel,
+        });
+        let cache = RenderCache::default();
+        let rows = dialog.rendered_rows(
+            80,
+            20,
+            crate::WidthMode::Narrow,
+            DiagramSettings { enabled: true },
+            &cache,
+        );
+
+        assert!(rows.iter().any(|row| row.text.contains("graph TD; A-->B")));
+        assert_eq!(cache.renders(), 0);
+    }
 
     #[test]
     fn modified_letters_cannot_approve_an_approval() {
@@ -788,9 +817,19 @@ mod tests {
             )
         };
         let actions = render(40).pop().expect("actions row").text;
-        for height in 3..=10 {
+        let title_lines = ["one", "two", "three", "four", "five", "six"];
+        for height in 3usize..=10 {
+            let title_len = height.saturating_sub(2).min(title_lines.len()).max(1);
             let rows = render(height);
-            assert!(rows.len() <= height, "height {height}: {} rows", rows.len());
+            assert_eq!(rows.len(), title_len + 2, "height {height}");
+            for (row, expected) in rows.iter().take(title_len).zip(title_lines) {
+                assert_eq!(row.text, expected, "height {height}");
+                assert!(
+                    !row.text.contains('\n'),
+                    "height {height}: embedded newline"
+                );
+            }
+            assert!(rows[title_len].text.starts_with("> "), "height {height}");
             assert_eq!(rows.last().expect("actions row").text, actions);
         }
     }
