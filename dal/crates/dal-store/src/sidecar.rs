@@ -30,6 +30,12 @@ impl<'session> Sidecar<'session> {
         // the session directory may not exist yet.
         util::create_private_dir_all(self.paths.directory())
             .map_err(|source| util::io_err(self.paths.directory(), source))?;
+        // write_atomic syncs the session directory after the rename; the
+        // entry linking that directory to its parent needs the parent
+        // synced too, or a power loss can drop the whole session dir.
+        if let Some(parent) = self.paths.directory().parent() {
+            util::sync_dir(parent)?;
+        }
         util::write_atomic(&path, bytes, FileMode::Mode0600)
     }
 
