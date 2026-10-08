@@ -2354,3 +2354,45 @@ async fn stage_symbol_locator_and_needle_narrowing() {
     .expect_err("def tag on lines rejects");
     assert_eq!(error.class, super::ir::ErrorClass::Resolve);
 }
+#[tokio::test]
+async fn text_locator_accepts_canonical_equivalence() {
+    let dir = tempfile::tempdir().expect("temp workspace");
+    let session = test_session(dir.path(), false);
+    let path = std::path::Path::new("a.txt");
+    let locator = Locator::Text {
+        old: "let value = 'ok'".to_owned(),
+        line_hint: None,
+        all: false,
+        window: Window::BeforePayload,
+        context: None,
+        at_eof: false,
+    };
+    let staged = stage_one(
+        &session,
+        path,
+        "let value = ‘ok’  \r\n".as_bytes(),
+        vec![change_edit(
+            "a.txt",
+            locator,
+            Action::Replace,
+            "let value = 'new'",
+        )],
+    )
+    .await
+    .expect("canonical text plans");
+    assert_eq!(
+        &*staged.after.expect("after"),
+        "let value = 'new'\r\n".as_bytes()
+    );
+}
+
+#[test]
+fn text_locator_large_file_has_linear_work() {
+    let haystack = format!("{}c", "a".repeat(512 * 1024));
+    let needle = format!("{}b", "a".repeat(2048));
+    let comparisons = super::write::stage::find_text_matches_linear_probe(&haystack, &needle);
+    assert!(
+        comparisons <= haystack.len().saturating_add(needle.len()) * 4,
+        "matcher comparisons grew superlinearly: {comparisons}"
+    );
+}
