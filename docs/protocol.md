@@ -1,6 +1,6 @@
 # The dal protocol
 
-Framing over stdio or a local socket; `initialize` negotiates capabilities. The protocol version is 1.
+Framing over stdio or a local socket; `initialize` negotiates capabilities. The protocol version is 1. A client that can answer approval requests lists `approval` in its `initialize` capabilities, and a client that can answer extension questions lists `question`. A session with no such client attached denies approvals and gives questions their default answer at once.
 
 | method | params | result | capability |
 |---|---|---|---|
