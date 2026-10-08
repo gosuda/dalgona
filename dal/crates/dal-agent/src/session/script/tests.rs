@@ -152,8 +152,6 @@ impl Tool for ViewTool {
 /// The started host with the product tools extension and the fixture exports.
 struct Fixture {
     _host: Host,
-    /// Only the unix-only permission tests reach the session dir on disk.
-    #[cfg(unix)]
     data: std::path::PathBuf,
     session: SessionId,
     backend: Arc<Backend>,
@@ -381,7 +379,6 @@ async fn fixture_kind(delay: Duration, durable: bool) -> Fixture {
     let generation = host.state.shared.generation.borrow().clone();
     Fixture {
         _host: host,
-        #[cfg(unix)]
         data: data_root,
         session,
         backend,
@@ -1072,6 +1069,94 @@ async fn agents_start_cannot_escape_the_workspace_through_a_link() {
     assert!(
         reply.contains(r#""type":"cancelled""#),
         "a link resolving outside the workspace is refused: {reply}"
+    );
+}
+
+#[derive(serde::Deserialize)]
+struct AgentsStarted {
+    #[serde(rename = "type")]
+    kind: Box<str>,
+    value: AgentsStartedValue,
+}
+
+#[derive(serde::Deserialize)]
+struct AgentsStartedValue {
+    id: Box<str>,
+}
+
+#[derive(serde::Deserialize)]
+struct AgentsAwaited {
+    #[serde(rename = "type")]
+    kind: Box<str>,
+    value: AgentsAwaitedValue,
+}
+
+#[derive(serde::Deserialize)]
+struct AgentsAwaitedValue {
+    report: AgentsAwaitedReport,
+}
+
+#[derive(serde::Deserialize)]
+struct AgentsAwaitedReport {
+    stop: Box<str>,
+}
+
+/// A runnable `agents.start` must answer `started` and let its child finish:
+/// submitting any command that the fold rejects mid-turn (e.g. a rename while
+/// the accepted prompt is still running) would close the child instead and
+/// turn every start into `cancelled`.
+#[tokio::test]
+async fn agents_start_returns_started_and_the_child_completes() {
+    let fx = fixture(Duration::ZERO).await;
+    let host = captured(&fx, &["agents.start", "agents.wait"]);
+    let inv = begin_eval(&host, None).expect("eval inherits A");
+    // The fixture's tempdir root is reaped with it; the durable child needs
+    // its workspace and store root to exist on disk again.
+    std::fs::create_dir_all(&fx.data).expect("data dir");
+    let workspace = fx.backend.workspace().as_path().to_path_buf();
+    std::fs::create_dir_all(&workspace).expect("workspace dir");
+    let outcome = call_op(
+        &host,
+        &inv,
+        OpId::Native(NativeOp::AgentsStart),
+        r#"{"name":"probe","prompt":"reply"}"#,
+    )
+    .await;
+    let OpOutcome::Ok { value, .. } = outcome else {
+        panic!("agents.start answers a typed reply: {outcome:?}");
+    };
+    let OpValue::Json(raw) = value else {
+        panic!("agents.start answers raw JSON: {value:?}");
+    };
+    let started: AgentsStarted = raw.decode_as().expect("started reply decodes");
+    assert_eq!(
+        started.kind.as_ref(),
+        "started",
+        "a runnable child starts: {raw:?}"
+    );
+    let outcome = call_op(
+        &host,
+        &inv,
+        OpId::Native(NativeOp::AgentsWait),
+        &format!(r#"{{"id":"{}"}}"#, started.value.id),
+    )
+    .await;
+    let OpOutcome::Ok { value, .. } = outcome else {
+        panic!("agents.await answers a typed reply: {outcome:?}");
+    };
+    let OpValue::Json(raw) = value else {
+        panic!("agents.await answers raw JSON: {value:?}");
+    };
+    let report: AgentsAwaited = raw.decode_as().expect("await reply decodes");
+    assert_eq!(
+        report.kind.as_ref(),
+        "await",
+        "the child completes: {raw:?}"
+    );
+    assert_eq!(
+        report.value.report.stop.as_ref(),
+        "end_turn",
+        "the report carries the durable terminal stop: {raw:?}"
     );
 }
 
