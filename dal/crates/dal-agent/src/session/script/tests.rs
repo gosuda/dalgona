@@ -152,6 +152,8 @@ impl Tool for ViewTool {
 /// The started host with the product tools extension and the fixture exports.
 struct Fixture {
     _host: Host,
+    /// Only the unix-only permission tests reach the session dir on disk.
+    #[cfg(unix)]
     data: std::path::PathBuf,
     session: SessionId,
     backend: Arc<Backend>,
@@ -379,6 +381,7 @@ async fn fixture_kind(delay: Duration, durable: bool) -> Fixture {
     let generation = host.state.shared.generation.borrow().clone();
     Fixture {
         _host: host,
+        #[cfg(unix)]
         data: data_root,
         session,
         backend,
@@ -808,6 +811,7 @@ async fn state_ops_compare_and_swap_through_the_actor() {
 
 /// The session's `state` sidecar path under the fixture's data root:
 /// `data/sessions/<workspace>/<session>/state`.
+#[cfg(unix)]
 fn state_sidecar(data: &std::path::Path) -> std::path::PathBuf {
     let sessions = std::fs::read_dir(data.join("sessions")).expect("sessions dir");
     for ws in sessions {
