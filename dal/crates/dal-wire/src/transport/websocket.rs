@@ -288,7 +288,9 @@ impl AsyncWrite for WsWrite {
 /// upgrade helper before the handshake, and the upgrade driver re-checks the
 /// presented headers after it completes; the expected policy travels here so
 /// direct callers cannot bypass it. This task runs the version-1 connection
-/// to completion. Disconnection leaves sessions and turns running.
+/// to completion. Disconnection leaves sessions and turns running. When
+/// `drain` fires the connection answers new requests with `-32009` and closes
+/// within the drain grace.
 ///
 /// # Errors
 ///
@@ -298,6 +300,7 @@ pub async fn serve_websocket(
     upgraded: Upgraded,
     token: Option<SecretToken>,
     allowed_origins: &[HeaderValue],
+    drain: tokio_util::sync::CancellationToken,
 ) -> Result<(), WireError> {
     tracing::debug!(
         public = token.is_some(),
@@ -305,5 +308,10 @@ pub async fn serve_websocket(
         "serving websocket connection"
     );
     let transport = WebSocketTransport::accept(upgraded).await;
-    crate::rpc::serve_rpc(host, crate::transport::Transport::websocket(transport)).await
+    crate::rpc::serve_rpc_draining(
+        host,
+        crate::transport::Transport::websocket(transport),
+        drain,
+    )
+    .await
 }

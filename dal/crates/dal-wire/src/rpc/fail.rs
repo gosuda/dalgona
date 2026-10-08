@@ -16,6 +16,17 @@ pub(crate) fn invalid_params(method: &str, detail: impl Into<String>) -> ErrorOb
     }
 }
 
+/// Builds the `-32009` error object for a server that no longer takes requests.
+pub(crate) fn server_draining() -> ErrorObject {
+    ErrorObject {
+        code: -32009,
+        message: "the server is shutting down and accepts no new requests".to_owned(),
+        data: Some(sonic_rs::json!({
+            "hint": "Wait for the server to start again, then reconnect.",
+        })),
+    }
+}
+
 /// Maps one request id to its cancel-table key.
 pub(crate) fn id_key(id: &Id) -> String {
     match id {
@@ -166,11 +177,7 @@ pub(crate) fn host_error(error: HostError) -> ErrorObject {
             message: format!("internal error: admission wait expired: no free {limit} slot"),
             data: Some(hint_value()),
         },
-        HostError::Closed => ErrorObject {
-            code: -32603,
-            message: "internal error: the host is shut down".to_owned(),
-            data: Some(hint_value()),
-        },
+        HostError::Closed => server_draining(),
         HostError::Store(error) => store_error(&error),
         other => ErrorObject {
             code: -32603,

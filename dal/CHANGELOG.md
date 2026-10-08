@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add the `-32009` error code ("server draining") to the dal protocol. A WebSocket connection answers every new request with it once the listener begins to stop, lets running requests finish for up to one second, and then closes. A request to a host that has shut down now answers `-32009` instead of `-32603`.
 - Fix the text the model reads when a `tool_call` hook blocks a call: it now starts with `blocked by <extension>:` so the model and the user can see which extension refused the call and why.
 - Add `image_bytes_elsewhere` to compactor input: the bytes of the images that stay in the request, so a compactor can keep its images within a request size budget.
 - Fix an HTTP 413 "request too large" answer from a provider: dal now compacts the history and retries the turn, as for a context-overflow error, instead of failing the turn.

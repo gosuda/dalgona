@@ -37,7 +37,7 @@ pub use protocol::{
 };
 pub use remote::{RemoteAgent, RemoteDelivery, RemoteEndpoint, RemoteHost, RemoteSubscription};
 pub use router::serve::serve_router;
-pub use rpc::serve_rpc;
+pub use rpc::{serve_rpc, serve_rpc_draining};
 pub use serve::ServeHandle;
 pub use transport::{
     ConnectionFuture, FrameWriter, LocalSocketError, LocalTransport, MAX_FRAME_BYTES, MemoryPeer,

@@ -29,7 +29,7 @@ pub(crate) mod subs;
 
 pub(crate) use fail::{
     agent_error, decode_params, hint_value, host_error, id_key, invalid_params, scheme_error,
-    to_value,
+    server_draining, to_value,
 };
 pub(crate) use subs::{host_notifier, send_resync, session_pump};
 
@@ -88,7 +88,21 @@ impl Conn {
 /// # Errors
 ///
 /// Returns [`WireError`] when the transport fails or a reply cannot be framed.
-pub async fn serve_rpc(host: Host, mut transport: Transport) -> Result<(), WireError> {
+pub async fn serve_rpc(host: Host, transport: Transport) -> Result<(), WireError> {
+    serve_rpc_draining(host, transport, CancellationToken::new()).await
+}
+
+/// Serves one connection like [`serve_rpc`] until `drain` fires.
+///
+/// # Errors
+///
+/// Returns [`WireError`] when the transport fails or a reply cannot be framed.
+pub async fn serve_rpc_draining(
+    host: Host,
+    mut transport: Transport,
+    drain: CancellationToken,
+) -> Result<(), WireError> {
+    let mut draining_until: Option<tokio::time::Instant> = None;
     let writer = transport.writer();
     let state = Arc::new(Mutex::new(Conn::new(mint_client_id("rpc"))));
     let stop = CancellationToken::new();
@@ -97,6 +111,9 @@ pub async fn serve_rpc(host: Host, mut transport: Transport) -> Result<(), WireE
     loop {
         tokio::select! {
             biased;
+            () = drain.cancelled(), if draining_until.is_none() => {
+                draining_until = Some(tokio::time::Instant::now() + DRAIN_GRACE);
+            }
             frame = transport.read_frame(), if pending.len() < MAX_IN_FLIGHT => {
                 let ended = matches!(
                     frame,
@@ -105,8 +122,15 @@ pub async fn serve_rpc(host: Host, mut transport: Transport) -> Result<(), WireE
                         | ReadFrameError::FrameTooLarge(_))
                 );
                 if let Ok(line) = frame
-                    && let Some(task) =
-                        on_frame(&host, Arc::clone(&state), &writer, &stop, &line).await
+                    && let Some(task) = on_frame(
+                        &host,
+                        Arc::clone(&state),
+                        &writer,
+                        &stop,
+                        draining_until.is_some(),
+                        &line,
+                    )
+                    .await
                 {
                     pending.push(task);
                 }
@@ -122,20 +146,29 @@ pub async fn serve_rpc(host: Host, mut transport: Transport) -> Result<(), WireE
                 }
             }
             _ = pending.next(), if !pending.is_empty() => {}
+            () = tokio::time::sleep_until(draining_until.unwrap_or_else(tokio::time::Instant::now)),
+                if draining_until.is_some() => break,
         }
     }
 
     if !pending.is_empty() {
-        let _ = tokio::time::timeout(DRAIN_GRACE, async {
-            while pending.next().await.is_some() {}
-        })
-        .await;
+        let grace = draining_until.map_or(DRAIN_GRACE, |until| {
+            until.saturating_duration_since(tokio::time::Instant::now())
+        });
+        let _ =
+            tokio::time::timeout(grace, async { while pending.next().await.is_some() {} }).await;
     }
     cancel_all(&state).await;
     while let Some(text) = writer.take_queued_frame() {
         let _ = writer.write_frame(&text).await;
     }
     Ok(())
+}
+
+/// Answers one request with an error and starts no handler.
+async fn reject(writer: &FrameWriter, id: Id, error: ErrorObject) -> Option<Pending> {
+    send(writer, &Message::Error { id, error }).await;
+    None
 }
 
 type Pending = futures::future::BoxFuture<'static, ()>;
@@ -146,58 +179,39 @@ async fn on_frame(
     state: Arc<Mutex<Conn>>,
     writer: &FrameWriter,
     stop: &CancellationToken,
+    draining: bool,
     line: &str,
 ) -> Option<Pending> {
     let message = match decode_jsonrpc(line) {
         Ok(message) => message,
         Err(error) => {
-            send(
-                writer,
-                &Message::Error {
-                    id: error.id,
-                    error: ErrorObject {
-                        code: error.code,
-                        message: error.message,
-                        data: None,
-                    },
-                },
-            )
-            .await;
-            return None;
+            let object = ErrorObject {
+                code: error.code,
+                message: error.message,
+                data: None,
+            };
+            return reject(writer, error.id, object).await;
         }
     };
     match message {
+        Message::Request { id, .. } if draining => reject(writer, id, server_draining()).await,
         Message::Request { id, method, params } => {
             let initialized = state.lock().await.initialized;
             if !initialized && method != "initialize" && method != "protocol/schema" {
-                send(
-                    writer,
-                    &Message::Error {
-                        id,
-                        error: ErrorObject {
-                            code: -32006,
-                            message: "initialize must be the first request".to_owned(),
-                            data: None,
-                        },
-                    },
-                )
-                .await;
-                return None;
+                let object = ErrorObject {
+                    code: -32006,
+                    message: "initialize must be the first request".to_owned(),
+                    data: None,
+                };
+                return reject(writer, id, object).await;
             }
             if initialized && method == "initialize" {
-                send(
-                    writer,
-                    &Message::Error {
-                        id,
-                        error: ErrorObject {
-                            code: -32600,
-                            message: "initialize was already called".to_owned(),
-                            data: None,
-                        },
-                    },
-                )
-                .await;
-                return None;
+                let object = ErrorObject {
+                    code: -32600,
+                    message: "initialize was already called".to_owned(),
+                    data: None,
+                };
+                return reject(writer, id, object).await;
             }
             let child = stop.child_token();
             let key = id_key(&id);

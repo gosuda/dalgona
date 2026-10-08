@@ -10,6 +10,7 @@ use crate::transport::MemoryTransport;
 mod auth;
 mod backpressure;
 mod concurrency;
+mod drain;
 mod foreign;
 mod order;
 mod schema;
