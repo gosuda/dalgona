@@ -803,8 +803,10 @@ impl Journal {
     #[must_use]
     pub fn sidecar(&self) -> Option<Sidecar<'_>> {
         match &self.state {
-            State::File { .. } => Some(Sidecar::new(&self.paths)),
-            State::Lazy { .. } | State::Memory | State::Broken { .. } | State::Closed => None,
+            // A lazy journal already owns its session paths; sidecars can
+            // be written before the first journal record materializes.
+            State::File { .. } | State::Lazy { .. } => Some(Sidecar::new(&self.paths)),
+            State::Memory | State::Broken { .. } | State::Closed => None,
         }
     }
 

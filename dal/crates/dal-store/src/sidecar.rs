@@ -26,6 +26,10 @@ impl<'session> Sidecar<'session> {
     /// [`StoreError::Io`] when atomic publication fails.
     pub fn write(&self, name: &str, bytes: &[u8]) -> Result<(), StoreError> {
         let path = self.path(name)?;
+        // A lazy journal owns its session paths before any record lands, so
+        // the session directory may not exist yet.
+        util::create_private_dir_all(self.paths.directory())
+            .map_err(|source| util::io_err(self.paths.directory(), source))?;
         util::write_atomic(&path, bytes, FileMode::Mode0600)
     }
 
