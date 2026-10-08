@@ -3,7 +3,7 @@
 use std::{
     fs::{self, File, TryLockError},
     io::{Seek, SeekFrom, Write},
-    path::Path,
+    path::{Path, PathBuf},
     thread,
     time::{Duration, Instant},
 };
@@ -21,11 +21,13 @@ const PID_POLL: Duration = Duration::from_millis(5);
 /// Holds the operating-system lock for one session.
 ///
 /// Keep this guard alive for as long as the session journal is open. Dropping
-/// it releases the lock; the lock file remains in the session directory.
+/// it removes the owner sidecar, then releases the lock; the lock file itself
+/// remains in the session directory.
 #[derive(Debug)]
 #[must_use = "keep the guard alive while the journal is open"]
 pub(crate) struct LockGuard {
     _file: File,
+    path: PathBuf,
 }
 
 impl LockGuard {
@@ -60,7 +62,10 @@ impl LockGuard {
                     format!("{}\n", std::process::id()).as_bytes(),
                 )
                 .map_err(|source| util::io_err(path, source))?;
-                Ok(Self { _file: file })
+                Ok(Self {
+                    _file: file,
+                    path: path.to_path_buf(),
+                })
             }
             Err(TryLockError::WouldBlock) => {
                 let pid = read_pid_until(&owner_path(path))?;
@@ -68,6 +73,15 @@ impl LockGuard {
             }
             Err(TryLockError::Error(source)) => Err(util::io_err(path, source)),
         }
+    }
+}
+
+impl Drop for LockGuard {
+    fn drop(&mut self) {
+        // Remove the sidecar before `file` closes and the lock releases: a
+        // contender that loses `try_lock` to the next holder must not read a
+        // retired pid during the gap before that holder republishes its own.
+        let _ = fs::remove_file(owner_path(&self.path));
     }
 }
 
@@ -251,5 +265,25 @@ mod tests {
             format!("{}\n", std::process::id()).as_bytes()
         );
         assert!(!stale_pid.is_empty());
+    }
+
+    #[test]
+    fn dropped_guard_removes_owner_sidecar() {
+        let dir = TestDir::new();
+        let id = SessionId::new_v7();
+        let path = dir.0.join("lock");
+        let owner = super::owner_path(&path);
+        {
+            let _guard = LockGuard::acquire(&path, id).expect("first lock acquisition");
+            assert!(owner.exists(), "held lock publishes its owner sidecar");
+            // A stale pid left by an older holder must not survive the drop.
+            fs::write(&owner, b"999999\n").expect("write stale owner text");
+        }
+        assert!(
+            !owner.exists(),
+            "dropped guard removes its owner sidecar, stale pid included"
+        );
+        let _next = LockGuard::acquire(&path, id).expect("lock released after guard drop");
+        assert!(owner.exists(), "the next holder republishes its own pid");
     }
 }

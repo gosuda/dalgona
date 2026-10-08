@@ -1026,7 +1026,8 @@ impl Journal {
     }
 
     /// Returns the session's current display name across prior and new
-    /// records; ephemeral sessions never persist one.
+    /// records: the latest `Name` record's value, so a name cleared before
+    /// the first flush claims nothing. Ephemeral sessions never persist one.
     fn first_user_name(&self, records: &[Record]) -> Option<String> {
         if self.ephemeral {
             return None;
@@ -1034,12 +1035,13 @@ impl Journal {
         self.records
             .iter()
             .chain(records.iter())
-            .filter_map(|record| match record {
-                Record::Name { name, .. } => name.as_deref(),
+            .rev()
+            .find_map(|record| match record {
+                Record::Name { name, .. } => Some(name.clone()),
                 _ => None,
             })
-            .next_back()
-            .map(str::to_owned)
+            .flatten()
+            .map(|name| name.to_string())
     }
 
     async fn append_first_user(
