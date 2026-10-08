@@ -402,7 +402,7 @@ fn skill_capture_skip_rules() {
 
 #[test]
 fn extension_builds_skills_section_and_skill_scheme() {
-    let built = extension().expect("skills extension builds");
+    let built = extension(crate::skills::shared_registry()).expect("skills extension builds");
     let section = built.prompt_section().expect("skills section present");
     assert_eq!(section.order(), PromptOrder::Skills);
     assert_eq!(built.schemes().len(), 1);

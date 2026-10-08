@@ -132,7 +132,8 @@ fn letter_resolver_errors_and_fallback_notices_match_contract() {
 
 #[test]
 fn extension_registers_letter_scheme() {
-    let built = super::extension().expect("letter extension builds");
+    let built =
+        super::extension(crate::skills::shared_registry()).expect("letter extension builds");
     assert!(built.prompt_section().is_none());
     assert_eq!(built.schemes().len(), 1);
     assert_eq!(&*built.schemes()[0].0, "letter");

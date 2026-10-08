@@ -146,12 +146,13 @@ pub fn assemble(cx: &BuildCx<'_>, parts: Parts) -> Result<Product, BuildError> {
     let system = Arc::new(dal_star::PluginSystem::new(generation, roots, plugincfg));
     let reload: Arc<dyn dal_ext::commands::PluginReload> =
         Arc::new(ReloadPlugins(Arc::clone(&system)));
+    let skills_registry = dal_ext::skills::shared_registry();
     let mut extensions = vec![
         dal_tools::extension(parts.tools)?,
         parts.guard,
         dal_ext::prompt::extension()?,
-        dal_ext::skills::extension()?,
-        dal_ext::letter::extension()?,
+        dal_ext::skills::extension(std::sync::Arc::clone(&skills_registry))?,
+        dal_ext::letter::extension(std::sync::Arc::clone(&skills_registry))?,
         dal_ext::ttsr::extension()?,
         dal_ext::compact::extension()?,
         dal_ext::commands::extension(&reload)?,
@@ -178,6 +179,17 @@ pub fn assemble(cx: &BuildCx<'_>, parts: Parts) -> Result<Product, BuildError> {
         source: Box::new(source),
     })?;
     extensions.extend(batch);
+
+    let skills =
+        dal_ext::skills::SkillRegistry::merge_extensions(&extensions).map_err(|source| {
+            BuildError::Section {
+                section: "skills".into(),
+                source: Box::new(source),
+            }
+        })?;
+    *skills_registry
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = skills;
 
     Ok(Product {
         name: NAME,
@@ -257,7 +269,7 @@ mod tests {
         assert_eq!(
             names,
             [
-                "tools", "guard", "prompt", "skills", "letter", "ttsr", "compact", "commands",
+                "tools", "guard", "prompt", "skill", "letter", "ttsr", "compact", "commands",
                 "dal", "subagent", "sandbox", "eval",
             ]
         );
@@ -328,7 +340,7 @@ mod tests {
         assert_eq!(
             names,
             [
-                "tools", "guard", "prompt", "skills", "letter", "ttsr", "compact", "commands",
+                "tools", "guard", "prompt", "skill", "letter", "ttsr", "compact", "commands",
                 "dal", "subagent", "sandbox", "eval", "focus",
             ]
         );
@@ -372,7 +384,7 @@ mod tests {
         assert_eq!(
             names,
             [
-                "tools", "guard", "prompt", "skills", "letter", "ttsr", "compact", "commands",
+                "tools", "guard", "prompt", "skill", "letter", "ttsr", "compact", "commands",
                 "dal", "subagent", "sandbox", "eval", "battery", "focus",
             ]
         );

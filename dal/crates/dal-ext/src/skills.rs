@@ -15,14 +15,14 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use dal_agent::error::SchemeError;
 use dal_agent::ext::{
     BoxFuture, Doc, Extension, ExtensionBuilder, PromptOrder, PromptSection, SchemeCx,
     SchemeResolver, SectionCx, SectionFn,
 };
-use dal_core::ext::{McpBlock, SkillFrontError, decode_skill_mcp};
+use dal_core::ext::{McpBlock, SkillFrontError, SkillRecord, decode_skill_mcp};
 use dal_core::{RegistrationError, ServiceSet};
 
 use crate::letter::{Font, LetterAssembly};
@@ -77,6 +77,25 @@ pub struct RegisteredSkill {
     pub letter2image: bool,
     /// The MCP servers the front matter declares, if any.
     pub mcp: Option<McpBlock>,
+}
+
+impl RegisteredSkill {
+    /// Wraps one extension's validated [`SkillRecord`] with its owner tag.
+    ///
+    /// Rust extensions and converted Starlark extensions already validated
+    /// their records at registration; [`SkillRegistry::merge`] only settles
+    /// name claims across owners.
+    #[must_use]
+    pub fn from_record(plugin: &str, record: &SkillRecord) -> Self {
+        Self {
+            plugin: plugin.into(),
+            name: record.name.as_str().into(),
+            description: record.description.clone(),
+            body: Arc::clone(&record.body),
+            letter2image: record.letter2image,
+            mcp: record.mcp.clone(),
+        }
+    }
 }
 
 /// A registration rejected by [`validate_registration`].
@@ -295,6 +314,30 @@ impl fmt::Display for SkillConflict {
 
 impl std::error::Error for SkillConflict {}
 
+/// The skills slot shared by the `skill` resolver, the skills prompt
+/// section, and the letter first-input hook.
+///
+/// Extensions capture the handle at registration while it still holds an
+/// empty registry; the composition edge installs the merged registry once
+/// the full extension batch exists. A poisoned lock still yields its
+/// registry: skill reads are pure, so a panicking writer leaves a usable
+/// value.
+pub type SharedSkillRegistry = Arc<RwLock<SkillRegistry>>;
+
+/// Returns an empty shared skills slot for the composition edge.
+#[must_use]
+pub fn shared_registry() -> SharedSkillRegistry {
+    Arc::new(RwLock::new(SkillRegistry::empty()))
+}
+
+pub(crate) fn registry_snapshot(
+    registry: &RwLock<SkillRegistry>,
+) -> std::sync::RwLockReadGuard<'_, SkillRegistry> {
+    registry
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// The immutable set of registered skills, sorted bytewise by name.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SkillRegistry {
@@ -314,6 +357,35 @@ impl SkillRegistry {
             names: Box::new([]),
         }
     }
+    /// Merges the `skills` records of every extension into one registry.
+    ///
+    /// Each extension submits its records under its registered name, the
+    /// same claim surface [`merge`](Self::merge) applies to plugin
+    /// directories. Pass the complete extension batch: static, bundled, and
+    /// plugin-derived alike.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SkillConflict`] when at least one extension's records were
+    /// rejected; the surviving registry stays usable.
+    pub fn merge_extensions(extensions: &[Extension]) -> Result<Self, SkillConflict> {
+        let plugins: Vec<(&str, Vec<RegisteredSkill>)> = extensions
+            .iter()
+            .filter(|extension| !extension.skills().is_empty())
+            .map(|extension| {
+                (
+                    extension.name(),
+                    extension
+                        .skills()
+                        .iter()
+                        .map(|record| RegisteredSkill::from_record(extension.name(), record))
+                        .collect(),
+                )
+            })
+            .collect();
+        Self::merge(&plugins)
+    }
+
     /// Merges validated skills from every plugin into one registry.
     ///
     /// Plugins merge in bytewise plugin-name order, the directory-name order
@@ -458,13 +530,13 @@ pub fn section(registry: &SkillRegistry, assembly: &LetterAssembly) -> Option<Bo
 /// empty registry as its structural starting point.
 #[derive(Debug)]
 pub struct SkillResolver {
-    registry: Arc<SkillRegistry>,
+    registry: SharedSkillRegistry,
 }
 
 impl SkillResolver {
-    /// Builds a resolver over one immutable registry.
+    /// Builds a resolver over the shared skills slot.
     #[must_use]
-    pub fn new(registry: Arc<SkillRegistry>) -> Self {
+    pub fn new(registry: SharedSkillRegistry) -> Self {
         Self { registry }
     }
 }
@@ -475,19 +547,23 @@ impl SchemeResolver for SkillResolver {
         path: &'a str,
         _cx: &'a SchemeCx<'a>,
     ) -> BoxFuture<'a, Result<Doc, SchemeError>> {
+        let registry = registry_snapshot(&self.registry);
+        if let Some(body) = registry.body(path) {
+            let body = body.to_string();
+            drop(registry);
+            return Box::pin(async move { Ok(Doc::new(format!("skill://{path}"), body)) });
+        }
+        let names = registry
+            .names()
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect::<Vec<_>>();
+        drop(registry);
         Box::pin(async move {
-            if let Some(body) = self.registry.body(path) {
-                return Ok(Doc::new(format!("skill://{path}"), body.to_string()));
-            }
-            let names = self.registry.names();
             let message = if names.is_empty() {
                 format!("skill {path} does not exist; no skills are loaded")
             } else {
-                let list = names
-                    .iter()
-                    .map(std::convert::AsRef::as_ref)
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                let list = names.join(", ");
                 format!("skill {path} does not exist; known skills: {list}")
             };
             Err(SchemeError::Failed {
@@ -505,14 +581,15 @@ impl SchemeResolver for SkillResolver {
 /// loaded registry.
 #[derive(Debug, Clone)]
 struct SkillsSectionFn {
-    registry: Arc<SkillRegistry>,
+    registry: SharedSkillRegistry,
     font: Arc<Font>,
 }
 
 impl SectionFn for SkillsSectionFn {
     fn render(&self, _cx: &SectionCx<'_>) -> Option<String> {
-        let assembly = crate::letter::letters(&self.registry, &self.font).ok()?;
-        section(&self.registry, &assembly).map(str::into_string)
+        let registry = registry_snapshot(&self.registry);
+        let assembly = crate::letter::letters(&registry, &self.font).ok()?;
+        section(&registry, &assembly).map(str::into_string)
     }
 }
 
@@ -523,8 +600,7 @@ impl SectionFn for SkillsSectionFn {
 ///
 /// Returns the runtime's typed build error when the builder rejects the
 /// registration.
-pub fn extension() -> Result<Extension, RegistrationError> {
-    let registry = Arc::new(SkillRegistry::empty());
+pub fn extension(registry: SharedSkillRegistry) -> Result<Extension, RegistrationError> {
     let resolver = SkillResolver::new(Arc::clone(&registry));
     let section = PromptSection::session(
         PromptOrder::Skills,
@@ -533,7 +609,7 @@ pub fn extension() -> Result<Extension, RegistrationError> {
             font: Arc::new(Font::embedded()),
         }),
     );
-    ExtensionBuilder::new("skills", "0.1.0", ServiceSet::EMPTY)?
+    ExtensionBuilder::new("skill", "0.1.0", ServiceSet::EMPTY)?
         .prompt_section(section)
         .scheme("skill", Arc::new(resolver))
         .build()

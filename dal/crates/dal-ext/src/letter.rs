@@ -347,7 +347,7 @@ impl SchemeResolver for LetterResolver {
 /// content; it never returns image parts for blobs it cannot persist.
 #[derive(Debug, Clone)]
 struct FirstInputHook {
-    registry: Arc<crate::skills::SkillRegistry>,
+    registry: crate::skills::SharedSkillRegistry,
     font: Arc<Font>,
 }
 
@@ -383,7 +383,7 @@ impl Hook<InputEvent, InputVerdict> for FirstInputHook {
 pub async fn handle_first_input(
     session: SessionId,
     user_parts: Vec<Part>,
-    registry: Arc<crate::skills::SkillRegistry>,
+    registry: crate::skills::SharedSkillRegistry,
     font: Arc<Font>,
     cx: HookCx,
 ) -> Result<InputVerdict, HookError> {
@@ -392,6 +392,7 @@ pub async fn handle_first_input(
     if cx.cancel.is_cancelled() {
         return Err(HookError::Cancelled);
     }
+    let registry = crate::skills::registry_snapshot(&registry);
     let assembly = match letters(&registry, &font) {
         Ok(assembly) => assembly,
         Err(error) => {
@@ -425,8 +426,9 @@ pub async fn handle_first_input(
 ///
 /// Returns the runtime's typed build error when the builder rejects the
 /// registration.
-pub fn extension() -> Result<Extension, RegistrationError> {
-    let registry = Arc::new(crate::skills::SkillRegistry::empty());
+pub fn extension(
+    registry: crate::skills::SharedSkillRegistry,
+) -> Result<Extension, RegistrationError> {
     let font = Arc::new(Font::embedded());
     let resolver = LetterResolver::new();
     let hook = FirstInputHook { registry, font };
