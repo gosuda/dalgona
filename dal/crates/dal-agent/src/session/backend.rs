@@ -752,7 +752,9 @@ impl Backend {
                     parent: self.session,
                     call: start.call.clone(),
                     workspace,
-                    name: Some(start.name.clone()),
+                    // Naming materializes the durable journal; a cancelled
+                    // start must not leave an empty named session behind.
+                    name: None,
                 },
                 dal_core::ClientId::new("core"),
             )
@@ -784,6 +786,16 @@ impl Backend {
                     text: prompt.into(),
                 }],
             })
+            .await
+            .is_err()
+        {
+            let _ = host.close(child_id).await;
+            return AgentsReply::Cancelled { id: child_id };
+        }
+        // The name lands only after startup succeeds: a failed start keeps
+        // no durable named shell in session listings.
+        if child
+            .submit(dal_core::Command::Rename(start.name.clone()))
             .await
             .is_err()
         {
@@ -840,7 +852,15 @@ impl Backend {
                 return AgentsReply::Cancelled { id };
             };
             if matches!(view.turn, dal_core::TurnState::Idle) {
-                let report = Self::child_report(id, &view);
+                let stop = self
+                    .host
+                    .sessions
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get(&id)
+                    .and_then(|entry| entry.shared.last_stop())
+                    .unwrap_or(dal_core::Stop::EndTurn);
+                let report = Self::child_report(id, &view, stop);
                 if matches!(report, AgentsReply::Await { .. })
                     && let Some(entry) = self
                         .host
@@ -873,7 +893,9 @@ impl Backend {
     }
 
     /// Builds the completion report from the child's last assistant entry.
-    fn child_report(id: SessionId, view: &dal_core::View) -> AgentsReply {
+    /// `stop` is the child's durable terminal stop, read off its projection;
+    /// `view.turn` alone only knows the turn ended, not why.
+    fn child_report(id: SessionId, view: &dal_core::View, stop: dal_core::Stop) -> AgentsReply {
         let mut text = String::new();
         let mut entry = view.entries.items.last().map(|item| item.id);
         for item in view.entries.items.iter().rev() {
@@ -891,7 +913,7 @@ impl Backend {
         let entry = entry.unwrap_or_else(|| dal_core::EntryId::new(std::num::NonZeroU64::MIN));
         AgentsReply::Await {
             report: AgentReport {
-                stop: dal_core::Stop::EndTurn,
+                stop,
                 text: text.into(),
                 session: id,
                 entry,
@@ -925,7 +947,11 @@ impl Backend {
                         page: dal_core::PageReq::default(),
                     });
                 let state = match view.turn {
-                    dal_core::TurnState::Idle => AgentState::Done(dal_core::Stop::EndTurn),
+                    // `Idle` only means no turn is running; the terminal
+                    // reason survives on the projection's last-stop record.
+                    dal_core::TurnState::Idle => AgentState::Done(
+                        entry.shared.last_stop().unwrap_or(dal_core::Stop::EndTurn),
+                    ),
                     _ => AgentState::Running,
                 };
                 AgentInfo {
