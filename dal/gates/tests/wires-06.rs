@@ -180,7 +180,7 @@ fn codex_app_server_smoke_uses_pinned_core_subset() -> Result<(), Box<dyn Error 
     fs::write(
         home.join(".config/dal/dal.toml"),
         format!(
-            "model = \"openai-responses/gpt-6\"\n[providers.scripted]\nfixture = {:?}\n",
+            "model = \"openai/gpt-6-luna\"\n[providers.scripted]\nfixture = {:?}\n",
             replay.to_string_lossy()
         ),
     )?;
@@ -200,6 +200,7 @@ fn codex_app_server_smoke_uses_pinned_core_subset() -> Result<(), Box<dyn Error 
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("XDG_DATA_HOME", &data_home)
         .env("NO_COLOR", "1")
+        .env("OPENAI_API_KEY", "sk-test")
         .args(["app-server"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
