@@ -4,6 +4,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use dal_core::{Block, EntryKind, EntryView, JournalPart, TurnState, View};
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::diagram::{ArtRole, DiagramSettings, RenderCache, WiredBlock, wire_block};
 use crate::dialog::DialogUi;
@@ -49,6 +50,7 @@ pub(crate) struct RenderRow {
     pub(crate) role: Role,
     pub(crate) color: ratatui::style::Color,
     pub(crate) spans: Vec<RenderSpan>,
+    pub(crate) links: Vec<RenderLink>,
     pub(crate) pending_diagram: bool,
     pub(crate) image: Option<PixelImage>,
     pub(crate) image_tail: bool,
@@ -59,14 +61,21 @@ pub(crate) struct RenderSpan {
     pub(crate) range: Range<usize>,
     pub(crate) role: Role,
 }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RenderLink {
+    pub(crate) range: Range<usize>,
+    pub(crate) url: String,
+}
 
 impl RenderRow {
     pub(crate) fn new(text: impl Into<String>, role: Role) -> Self {
+        let (text, links) = linked_text(&text.into());
         Self {
-            text: text.into(),
+            text,
             role,
             color: ratatui::style::Color::Reset,
             spans: Vec::new(),
+            links,
             pending_diagram: false,
             image: None,
             image_tail: false,
@@ -81,6 +90,13 @@ impl RenderRow {
                 return false;
             }
             span.range.end = span.range.end.min(end);
+            true
+        });
+        self.links.retain_mut(|link| {
+            if link.range.start >= end {
+                return false;
+            }
+            link.range.end = link.range.end.min(end);
             true
         });
         self
@@ -311,10 +327,11 @@ fn status_line(input: &FrameInput<'_>, model: Option<&str>, w: usize, mode: Widt
         Some(crate::copy::ids::STATE_WAITING)
     } else if matches!(input.view.turn, TurnState::Compacting { .. }) {
         Some(crate::copy::ids::STATE_COMPACTING)
-    } else if let Some(activity) = input.live.activity() {
-        Some(activity)
     } else if running {
-        Some(crate::copy::ids::STATE_WORKING)
+        input
+            .live
+            .activity()
+            .or(Some(crate::copy::ids::STATE_WORKING))
     } else {
         None
     };
@@ -336,9 +353,23 @@ fn status_line(input: &FrameInput<'_>, model: Option<&str>, w: usize, mode: Widt
         mode,
     )
 }
+fn queued_steer_row(turn: TurnState, count: u32) -> Option<RenderRow> {
+    if count == 0 || !matches!(turn, TurnState::Running { .. } | TurnState::Settling { .. }) {
+        return None;
+    }
+    let n = count.to_string();
+    Some(RenderRow::new(
+        crate::copy::render(
+            crate::copy::ids::STEER_QUEUED,
+            &[("n", &n)],
+            u64::from(count),
+        ),
+        Role::Dim,
+    ))
+}
 
-/// The scrollable middle region: first-run hint, tool rows, pending
-/// transcript rows, and streamed assistant text.
+/// The scrollable middle region: first-run hint, queued steering, tool rows,
+/// pending transcript rows, and streamed assistant text.
 fn activity_rows(input: &FrameInput<'_>, w: usize, mode: WidthMode) -> Vec<RenderRow> {
     let mut activity = Vec::new();
     if input.view.settings.model.is_none() {
@@ -350,6 +381,9 @@ fn activity_rows(input: &FrameInput<'_>, w: usize, mode: WidthMode) -> Vec<Rende
             crate::copy::ids::FIRST_RUN_ACTION,
             Role::Text,
         ));
+    }
+    if let Some(row) = queued_steer_row(input.view.turn, input.view.stats.steers_queued) {
+        activity.push(row);
     }
     activity.extend(
         input
@@ -455,6 +489,224 @@ pub(crate) fn entry_rows(
     }
 }
 
+#[derive(Debug)]
+struct RichLine {
+    text: String,
+    links: Vec<RenderLink>,
+}
+
+fn linked_text(text: &str) -> (String, Vec<RenderLink>) {
+    let mut visible = String::with_capacity(text.len());
+    let mut links = Vec::new();
+    let mut cursor = 0;
+    while cursor < text.len() {
+        if let Some((consumed, label, url)) = osc8_link(&text[cursor..]) {
+            let start = visible.len();
+            visible.push_str(label);
+            links.push(RenderLink {
+                range: start..visible.len(),
+                url: url.to_owned(),
+            });
+            cursor += consumed;
+            continue;
+        }
+        if let Some((consumed, label, url)) = markdown_link(&text[cursor..]) {
+            let start = visible.len();
+            visible.push_str(label);
+            links.push(RenderLink {
+                range: start..visible.len(),
+                url: url.to_owned(),
+            });
+            cursor += consumed;
+            continue;
+        }
+        if let Some((consumed, url)) = plain_url(&text[cursor..]) {
+            let start = visible.len();
+            visible.push_str(&text[cursor..cursor + consumed]);
+            links.push(RenderLink {
+                range: start..visible.len(),
+                url,
+            });
+            cursor += consumed;
+            continue;
+        }
+        let Some(character) = text[cursor..].chars().next() else {
+            break;
+        };
+        visible.push(character);
+        cursor += character.len_utf8();
+    }
+    escape_linked(&visible, links)
+}
+
+fn osc8_link(text: &str) -> Option<(usize, &str, &str)> {
+    let prefix = "\u{1b}]8;;";
+    let terminator = "\u{1b}\\";
+    let close = "\u{1b}]8;;\u{1b}\\";
+    let rest = text.strip_prefix(prefix)?;
+    let url_end = rest.find(terminator)?;
+    let url = &rest[..url_end];
+    if !valid_link_url(url) {
+        return None;
+    }
+    let label_start = url_end + terminator.len();
+    let close_start = rest[label_start..].find(close)?;
+    let label = &rest[label_start..label_start + close_start];
+    Some((
+        prefix.len() + label_start + close_start + close.len(),
+        label,
+        url,
+    ))
+}
+
+fn markdown_link(text: &str) -> Option<(usize, &str, &str)> {
+    let text = text.strip_prefix('[')?;
+    let close_label = text.find(']')?;
+    if text.as_bytes().get(close_label + 1) != Some(&b'(') {
+        return None;
+    }
+    let close_url = text[close_label + 2..].find(')')? + close_label + 2;
+    let label = &text[..close_label];
+    let url = &text[close_label + 2..close_url];
+    valid_link_url(url).then_some((close_url + 2, label, url))
+}
+
+fn plain_url(text: &str) -> Option<(usize, String)> {
+    let valid_start = text.starts_with("file://");
+    if !valid_start {
+        return None;
+    }
+    let end = text
+        .char_indices()
+        .find(|(_, character)| character.is_whitespace() || character.is_control())
+        .map_or(text.len(), |(index, _)| index);
+    let candidate = text[..end].trim_end_matches(['.', ',', ';', ':', '!', '?']);
+    if candidate.is_empty() || !valid_link_url(candidate) {
+        return None;
+    }
+    Some((candidate.len(), candidate.to_owned()))
+}
+
+fn valid_link_url(url: &str) -> bool {
+    !url.bytes()
+        .any(|byte| byte.is_ascii_control() || byte == b'\x7f')
+        && url
+            .strip_prefix("file://")
+            .is_some_and(|path| std::path::Path::new(path).is_absolute())
+}
+
+fn escape_linked(text: &str, links: Vec<RenderLink>) -> (String, Vec<RenderLink>) {
+    let mut escaped = String::with_capacity(text.len());
+    let mut offsets = vec![0; text.len() + 1];
+    for (index, character) in text.char_indices() {
+        offsets[index] = escaped.len();
+        match character {
+            '\t' => escaped.push_str("\\t"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\u{7}' => escaped.push_str("\\a"),
+            character if character.is_control() => {
+                use std::fmt::Write as _;
+                let _ = write!(escaped, "\\u{{{}}}", u32::from(character));
+            }
+            character => escaped.push(character),
+        }
+    }
+    offsets[text.len()] = escaped.len();
+    let links = links
+        .into_iter()
+        .map(|link| RenderLink {
+            range: offsets[link.range.start]..offsets[link.range.end],
+            url: link.url,
+        })
+        .collect();
+    (escaped, links)
+}
+
+fn prose_rows(text: &str, cap: usize, mode: WidthMode) -> Vec<RenderRow> {
+    let mut rows = Vec::new();
+    for logical in text.split('\n') {
+        let (line_text, line_links) = linked_text(logical);
+        let mut line = RichLine {
+            text: line_text,
+            links: line_links,
+        };
+        for prefix in ["### ", "## ", "# "] {
+            if line.text.starts_with(prefix) {
+                line.text.drain(..prefix.len());
+                for link in &mut line.links {
+                    link.range.start = link.range.start.saturating_sub(prefix.len());
+                    link.range.end = link.range.end.saturating_sub(prefix.len());
+                }
+                line.links.retain(|link| link.range.start < link.range.end);
+                break;
+            }
+        }
+        rows.extend(wrap_rich_line(&line, cap, mode));
+    }
+    if rows.is_empty() {
+        rows.push(RenderRow::new(String::new(), Role::Text));
+    }
+    rows
+}
+
+fn wrap_rich_line(line: &RichLine, cap: usize, mode: WidthMode) -> Vec<RenderRow> {
+    if line.text.is_empty() {
+        return vec![RenderRow::new(String::new(), Role::Text)];
+    }
+    let cap = cap.max(1);
+    let mut rows = Vec::new();
+    let mut start = 0;
+    let mut row_width = 0;
+    for (index, cluster) in line.text.grapheme_indices(true) {
+        let cluster_width = crate::width::width(cluster, mode);
+        if start < index
+            && (row_width + cluster_width > cap
+                || (cluster_width == 2 && row_width == cap.saturating_sub(1)))
+        {
+            rows.push(linked_row(line, start, index));
+            start = index;
+            row_width = 0;
+        }
+        row_width += cluster_width;
+        let end = index + cluster.len();
+        if cluster_width > cap {
+            rows.push(linked_row(line, start, end));
+            start = end;
+            row_width = 0;
+        }
+    }
+    if start < line.text.len() || rows.is_empty() {
+        rows.push(linked_row(line, start, line.text.len()));
+    }
+    rows
+}
+
+fn linked_row(line: &RichLine, start: usize, end: usize) -> RenderRow {
+    let links = line
+        .links
+        .iter()
+        .filter_map(|link| {
+            let link_start = link.range.start.max(start);
+            let link_end = link.range.end.min(end);
+            (link_start < link_end).then(|| RenderLink {
+                range: link_start - start..link_end - start,
+                url: link.url.clone(),
+            })
+        })
+        .collect();
+    RenderRow {
+        text: line.text[start..end].to_owned(),
+        role: Role::Text,
+        color: ratatui::style::Color::Reset,
+        spans: Vec::new(),
+        links,
+        pending_diagram: false,
+        image: None,
+        image_tail: false,
+    }
+}
+
 pub(crate) fn text_rows(
     text: &str,
     cap: usize,
@@ -463,10 +715,7 @@ pub(crate) fn text_rows(
     cache: &RenderCache,
 ) -> Vec<RenderRow> {
     let Some(wired) = wire_block(&settings, cache, text, cap) else {
-        return safe_prose(text, cap, mode)
-            .into_iter()
-            .map(|row| RenderRow::new(row, Role::Text))
-            .collect();
+        return prose_rows(text, cap, mode);
     };
     match wired {
         WiredBlock::Art(art) => art.rows.iter().map(|cells| art_row(cells)).collect(),
@@ -479,11 +728,7 @@ pub(crate) fn text_rows(
                 crate::diagram::fallback_card(kind, &reason),
                 Role::Warning,
             )];
-            rows.extend(
-                safe_prose(&source, cap, mode)
-                    .into_iter()
-                    .map(|row| RenderRow::new(row, Role::Text)),
-            );
+            rows.extend(prose_rows(&source, cap, mode));
             rows
         }
         WiredBlock::Pixels(pixels) => pixel_rows(pixels, cap),
@@ -584,13 +829,11 @@ fn user_row(mut row: RenderRow) -> RenderRow {
         span.range.start += 2;
         span.range.end += 2;
     }
+    for link in &mut row.links {
+        link.range.start += 2;
+        link.range.end += 2;
+    }
     row
-}
-
-fn safe_prose(text: &str, cap: usize, mode: WidthMode) -> Vec<String> {
-    text.split('\n')
-        .flat_map(|line| crate::markdown::render_prose(&escape(line), cap, mode))
-        .collect()
 }
 
 fn prose_cap(width: usize) -> usize {
@@ -665,5 +908,35 @@ mod tests {
                 .is_some_and(|(_, spans)| !spans.is_empty())
         );
         assert_eq!(on_cache.renders(), 1);
+    }
+    #[test]
+    fn queued_steer_rows_follow_the_authoritative_turn_state() {
+        use dal_core::{TurnId, TurnState};
+
+        let turn = TurnId::new(NonZeroU64::MIN);
+        let row = super::queued_steer_row(TurnState::Running { turn }, 2)
+            .expect("running turns display queued steering");
+        assert_eq!(row.text, "2 messages queued for the next reply");
+        assert!(super::queued_steer_row(TurnState::Idle, 2).is_none());
+    }
+    #[test]
+    fn wrapped_transcript_links_keep_their_destination() {
+        let rows = super::text_rows(
+            "before [docs](file:///workspace/reference) after",
+            10,
+            WidthMode::Narrow,
+            DiagramSettings::default(),
+            &RenderCache::default(),
+        );
+        assert!(rows.iter().any(|row| !row.links.is_empty()));
+        assert!(
+            rows.iter()
+                .flat_map(|row| row.links.iter())
+                .all(|link| link.url == "file:///workspace/reference")
+        );
+        assert!(
+            rows.iter()
+                .all(|row| !row.text.contains("[docs]") && !row.text.contains("(file://"))
+        );
     }
 }

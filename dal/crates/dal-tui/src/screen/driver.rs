@@ -4,7 +4,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use crate::image::Rung;
-use crate::render::{FrameInput, PixelImage, RenderRow, RenderSpan, frame_rows};
+use crate::render::{FrameInput, PixelImage, RenderLink, RenderRow, RenderSpan, frame_rows};
 use crate::term::{TermIo, TermState};
 use crate::theme::{ResolvedTheme, Role};
 use crate::transcript::Transcript;
@@ -350,36 +350,80 @@ fn write_row(out: &mut Vec<u8>, row: &RenderRow, theme: &ResolvedTheme, image_su
     if row.image_tail || (row.image.is_some() && image_supported) {
         return;
     }
-    write_styled_text(out, &row.text, &row.spans, row.role, theme);
+    write_styled_text(out, &row.text, &row.spans, &row.links, row.role, theme);
 }
 
 fn write_styled_text(
     out: &mut Vec<u8>,
     text: &str,
     spans: &[RenderSpan],
+    links: &[RenderLink],
     fallback: Role,
     theme: &ResolvedTheme,
 ) {
-    if spans.is_empty() {
-        out.extend_from_slice(crate::status::role_sgr(theme, fallback).as_bytes());
-        out.extend_from_slice(text.as_bytes());
-    } else {
-        let mut offset = 0;
-        for span in spans {
-            if span.range.start > offset {
-                out.extend_from_slice(crate::status::role_sgr(theme, fallback).as_bytes());
-                out.extend_from_slice(&text.as_bytes()[offset..span.range.start]);
-            }
-            out.extend_from_slice(crate::status::role_sgr(theme, span.role).as_bytes());
-            out.extend_from_slice(text[span.range.clone()].as_bytes());
-            offset = span.range.end;
+    let mut boundaries = vec![0, text.len()];
+    boundaries.extend(
+        spans
+            .iter()
+            .flat_map(|span| [span.range.start, span.range.end]),
+    );
+    boundaries.extend(
+        links
+            .iter()
+            .flat_map(|link| [link.range.start, link.range.end]),
+    );
+    boundaries.retain(|boundary| *boundary <= text.len());
+    boundaries.sort_unstable();
+    boundaries.dedup();
+
+    let mut active: Option<&RenderLink> = None;
+    for window in boundaries.windows(2) {
+        let [start, end] = window else {
+            continue;
+        };
+        if start == end {
+            continue;
         }
-        if offset < text.len() {
-            out.extend_from_slice(crate::status::role_sgr(theme, fallback).as_bytes());
-            out.extend_from_slice(&text.as_bytes()[offset..]);
+        let next = links
+            .iter()
+            .find(|link| link.range.start <= *start && *start < link.range.end);
+        let active_range = active.map(|link| link.range.clone());
+        let link_changed = match (active_range.as_ref(), next) {
+            (Some(current), Some(next)) => current != &next.range,
+            (Some(_), None) => true,
+            _ => false,
+        };
+        if link_changed {
+            close_link(out);
+            active = None;
         }
+        if active.is_none()
+            && let Some(link) = next
+        {
+            open_link(out, &link.url);
+            active = Some(link);
+        }
+        let role = spans
+            .iter()
+            .find(|span| span.range.start <= *start && *start < span.range.end)
+            .map_or(fallback, |span| span.role);
+        out.extend_from_slice(crate::status::role_sgr(theme, role).as_bytes());
+        out.extend_from_slice(&text.as_bytes()[*start..*end]);
+    }
+    if active.is_some() {
+        close_link(out);
     }
     out.extend_from_slice(b"\x1b[0m");
+}
+
+fn open_link(out: &mut Vec<u8>, url: &str) {
+    out.extend_from_slice(b"\x1b]8;;");
+    out.extend_from_slice(url.as_bytes());
+    out.extend_from_slice(b"\x1b\\");
+}
+
+fn close_link(out: &mut Vec<u8>) {
+    out.extend_from_slice(b"\x1b]8;;\x1b\\");
 }
 #[cfg(test)]
 mod tests {
@@ -387,6 +431,7 @@ mod tests {
 
     use crate::image::Rung;
     use crate::render::PixelImage;
+    use crate::render::RenderRow;
 
     use super::Painter;
 
@@ -419,5 +464,29 @@ mod tests {
         let mut output = Vec::new();
         assert!(painter.write_image(&mut output, key, 0));
         assert!(output.windows(3).any(|bytes| bytes == b"\x1b_G"));
+    }
+    #[test]
+    fn styled_file_links_emit_clickable_osc8_sequences() {
+        let theme = crate::theme::load(
+            &crate::ThemeRequest::Palette,
+            crate::ColorMode::Never,
+            None,
+            None,
+        )
+        .expect("palette theme loads");
+        let row = RenderRow::new("open file:///workspace/main.rs.", crate::theme::Role::Text);
+        let mut output = Vec::new();
+        super::write_styled_text(
+            &mut output,
+            &row.text,
+            &row.spans,
+            &row.links,
+            crate::theme::Role::Text,
+            &theme,
+        );
+        let output = String::from_utf8(output).expect("terminal output is UTF-8");
+        assert!(output.contains(
+            "\x1b]8;;file:///workspace/main.rs\x1b\\file:///workspace/main.rs\x1b]8;;\x1b\\"
+        ));
     }
 }

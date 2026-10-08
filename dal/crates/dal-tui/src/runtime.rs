@@ -880,6 +880,7 @@ impl Surfaces {
                     continue;
                 }
             };
+            let queued = matches!(&submit_reply, Reply::Queued);
             let reply_rows = match submit_reply {
                 Reply::Choose { chooser, filter } => {
                     self.session.picker = None;
@@ -913,6 +914,9 @@ impl Surfaces {
                 }
                 other => self.session.accept_reply(other),
             };
+            if queued {
+                self.view = opts.rt.block_on(agent.view(snapshot_page()?))?;
+            }
             if !reply_rows.is_empty() {
                 self.session.command_seq = self.session.command_seq.saturating_add(1);
                 self.transcript.commit(

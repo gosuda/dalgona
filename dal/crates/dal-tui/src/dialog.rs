@@ -416,10 +416,17 @@ impl DialogUi {
             use std::fmt::Write as _;
             let _ = write!(title, " · {waiting} more waiting");
         }
-        let mut rows = vec![RenderRow::new(title, Role::Accent)];
+        let mut rows = text_rows(&title, width, mode, settings, cache)
+            .into_iter()
+            .map(|mut row| {
+                row.role = Role::Accent;
+                row
+            })
+            .collect::<Vec<_>>();
+        rows.truncate(height.saturating_sub(2).max(1));
         let mut body = self.body(&request.question, width, mode, settings, cache);
         let actions = self.actions(&request.question);
-        let visible = height.saturating_sub(2).max(1);
+        let visible = height.saturating_sub(rows.len() + 1).max(1);
         let hidden = body.len().saturating_sub(visible);
         if hidden > 0 && !self.expanded {
             let shown = visible.saturating_sub(1);
@@ -751,5 +758,65 @@ mod tests {
                 ))
                 .is_none()
         );
+    }
+
+    #[test]
+    fn multiline_titles_stay_inside_the_height_budget() {
+        use dal_core::{Owner, Question, Request, RequestId};
+
+        let mut dialog = super::DialogUi::default();
+        dialog.opened(Request {
+            id: RequestId::new_v7(),
+            turn: None,
+            owner: Owner::Core,
+            question: Question::Text {
+                prompt: "one\ntwo\nthree\nfour\nfive\nsix".into(),
+                placeholder: None,
+            },
+            timeout: std::time::Duration::from_secs(30),
+            default: Answer::Cancel,
+        });
+        let render = |height| {
+            dialog.rendered_rows(
+                32,
+                height,
+                crate::WidthMode::Narrow,
+                DiagramSettings::default(),
+                &RenderCache::default(),
+            )
+        };
+        let actions = render(40).pop().expect("actions row").text;
+        for height in 3..=10 {
+            let rows = render(height);
+            assert!(rows.len() <= height, "height {height}: {} rows", rows.len());
+            assert_eq!(rows.last().expect("actions row").text, actions);
+        }
+    }
+
+    #[test]
+    fn multiline_question_titles_keep_each_logical_line() {
+        use dal_core::{Owner, Question, Request, RequestId};
+
+        let mut dialog = super::DialogUi::default();
+        dialog.opened(Request {
+            id: RequestId::new_v7(),
+            turn: None,
+            owner: Owner::Core,
+            question: Question::Text {
+                prompt: "first line is long enough\nsecond line stays separate".into(),
+                placeholder: None,
+            },
+            timeout: std::time::Duration::from_secs(30),
+            default: Answer::Cancel,
+        });
+        let rows = dialog.rendered_rows(
+            32,
+            20,
+            crate::WidthMode::Narrow,
+            DiagramSettings::default(),
+            &RenderCache::default(),
+        );
+        assert_eq!(rows[0].text, "first line is long enough");
+        assert_eq!(rows[1].text, "second line stays separate");
     }
 }

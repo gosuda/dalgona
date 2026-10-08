@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use dal_core::{Update, UpdateKind};
 
-use crate::render::{PixelImage, RenderRow, RenderSpan};
+use crate::render::{PixelImage, RenderLink, RenderRow, RenderSpan};
 use crate::theme::Role;
 
 /// Settled transcript rows with exactly-once commit per entry id.
@@ -12,6 +12,7 @@ use crate::theme::Role;
 pub struct Transcript {
     rows: Vec<String>,
     styles: Vec<Vec<RenderSpan>>,
+    links: Vec<Vec<RenderLink>>,
     images: Vec<Option<PixelImage>>,
     image_tails: Vec<bool>,
     committed: HashSet<String>,
@@ -24,11 +25,19 @@ impl Transcript {
         if !self.committed.insert(entry_id.to_owned()) {
             return Vec::new();
         }
-        self.rows.extend(rows.iter().cloned());
-        self.styles.extend((0..rows.len()).map(|_| Vec::new()));
+        let rendered = rows
+            .iter()
+            .map(|row| RenderRow::new(row.clone(), Role::Text))
+            .collect::<Vec<_>>();
+        self.rows
+            .extend(rendered.iter().map(|row| row.text.clone()));
+        self.styles
+            .extend(rendered.iter().map(|row| row.spans.clone()));
+        self.links
+            .extend(rendered.iter().map(|row| row.links.clone()));
         self.images.extend((0..rows.len()).map(|_| None));
         self.image_tails.extend((0..rows.len()).map(|_| false));
-        rows.to_vec()
+        rendered.into_iter().map(|row| row.text).collect()
     }
 
     /// Appends rendered rows with their theme roles exactly once.
@@ -40,6 +49,7 @@ impl Transcript {
         for row in rows {
             self.rows.push(row.text.clone());
             self.styles.push(row.spans.clone());
+            self.links.push(row.links.clone());
             self.images.push(row.image.clone());
             self.image_tails.push(row.image_tail);
         }
@@ -83,6 +93,7 @@ impl Transcript {
             role: Role::Text,
             color: ratatui::style::Color::Reset,
             spans: spans.to_vec(),
+            links: self.links.get(index).cloned().unwrap_or_default(),
             pending_diagram: false,
             image: self.images.get(index).cloned().flatten(),
             image_tail: self.image_tails.get(index).copied().unwrap_or(false),
