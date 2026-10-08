@@ -125,8 +125,8 @@ fn open_lock_file(path: &Path) -> Result<File, StoreError> {
 
 /// Whether `path` still names the file `file` holds open.
 ///
-/// A missing path counts as replaced. Windows cannot unlink an open file, so
-/// the handle always names its path there.
+/// A missing path counts as replaced. The inode check is Unix-only; Windows
+/// keeps the replacement gap.
 #[cfg(unix)]
 fn names_locked_file(file: &File, path: &Path) -> io::Result<bool> {
     use std::os::unix::fs::MetadataExt;
@@ -215,10 +215,10 @@ mod tests {
 
     static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
 
-    struct TestDir(PathBuf);
+    pub(super) struct TestDir(pub(super) PathBuf);
 
     impl TestDir {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             let path = std::env::temp_dir().join(format!(
                 "dal-store-lock-{}-{}",
                 std::process::id(),
@@ -400,11 +400,11 @@ mod tests {
 
 #[cfg(all(test, unix))]
 mod replaced_file_tests {
-    use std::{cell::Cell, fs, path::Path};
+    use std::{cell::Cell, fs, path::Path, time::Duration};
 
     use dal_core::SessionId;
 
-    use super::LockGuard;
+    use super::{LockGuard, PID_WAIT, tests::TestDir};
     use crate::error::StoreError;
 
     fn replace(path: &Path) -> std::io::Result<()> {
@@ -414,10 +414,8 @@ mod replaced_file_tests {
 
     #[test]
     fn lock_file_replaced_before_locking_still_excludes_a_second_opener() {
-        let dir =
-            std::env::temp_dir().join(format!("dal-store-lock-replaced-{}", std::process::id()));
-        fs::create_dir_all(&dir).expect("create test directory");
-        let path = dir.join("lock");
+        let dir = TestDir::new();
+        let path = dir.0.join("lock");
         let id = SessionId::new_v7();
         let replaced = Cell::new(false);
 
@@ -434,14 +432,12 @@ mod replaced_file_tests {
             "the held lock must be on the file at the path, got {second:?}"
         );
         drop(guard);
-        fs::remove_dir_all(&dir).expect("remove test directory");
     }
 
     #[test]
     fn lock_file_replaced_on_every_attempt_fails_within_the_wait_bound() {
-        let dir = std::env::temp_dir().join(format!("dal-store-lock-churn-{}", std::process::id()));
-        fs::create_dir_all(&dir).expect("create test directory");
-        let path = dir.join("lock");
+        let dir = TestDir::new();
+        let path = dir.0.join("lock");
         let started = std::time::Instant::now();
 
         let result = LockGuard::acquire_with(&path, SessionId::new_v7(), |at| {
@@ -452,7 +448,6 @@ mod replaced_file_tests {
             matches!(result, Err(StoreError::Io { .. })),
             "endless replacement must surface as an I/O error, got {result:?}"
         );
-        assert!(started.elapsed() < std::time::Duration::from_secs(5));
-        fs::remove_dir_all(&dir).expect("remove test directory");
+        assert!(started.elapsed() < PID_WAIT + Duration::from_millis(100));
     }
 }
