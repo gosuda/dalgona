@@ -83,10 +83,8 @@ pub struct FetchRequest {
     /// The absolute HTTP or HTTPS URL.
     pub url: Box<str>,
     /// Request headers as ordered name/value pairs.
-    #[serde(default)]
     pub headers: Vec<(Box<str>, Box<str>)>,
     /// The request body bytes.
-    #[serde(default)]
     pub body: Vec<u8>,
 }
 

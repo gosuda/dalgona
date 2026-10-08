@@ -43,7 +43,6 @@ use crate::ext::{BoxFuture, Caller, CallerKind};
 use crate::session::backend::Backend;
 use crate::session::tasks::ScopeTable;
 
-mod service;
 #[cfg(test)]
 mod tests;
 
@@ -480,12 +479,6 @@ impl SessionScriptHost {
                 .and_then(|_| Name::parse(&wire_name(id)).ok()),
         };
         let Some(name) = name else {
-            if let OpId::Native(native) = &op
-                && service::wired(*native)
-                && generation.catalog().native(*native).available
-            {
-                return self.run_service_op(inv, req, call, cancel).await;
-            }
             let message = format!("operation {op} has no backend in this generation");
             let outcome = unavailable(&call, &op, &message);
             return (op, outcome, 0);
@@ -525,79 +518,6 @@ impl SessionScriptHost {
         };
         let (outcome, bytes) = convert_outcome(outcome, &call, &op, scope);
         (op, outcome, bytes)
-    }
-
-    /// Runs one native operation through the typed service seam (R03 R04).
-    ///
-    /// The issued-operation charge lands once the call starts (R10), matching
-    /// the tool and model paths. The caller is the invocation's minted
-    /// plugin identity, so the service layer enforces the plugin's declared
-    /// inject set and live grants.
-    async fn run_service_op(
-        self: &Arc<Self>,
-        inv: &Arc<Invocation>,
-        req: OpRequest,
-        call: CallId,
-        cancel: CancellationToken,
-    ) -> (OpId, OpOutcome, usize) {
-        let op = req.op.clone();
-        let OpId::Native(native) = &op else {
-            let outcome = unavailable(&call, &op, "operation is not a service call");
-            return (op, outcome, 0);
-        };
-        let Some(services) = self.backend.services().get().cloned() else {
-            let outcome = unavailable(&call, &op, "session services are not ready");
-            return (op, outcome, 0);
-        };
-        if inv.issue().is_err() {
-            let terminal = OpOutcome::Terminal(HostTerminal::LimitExceeded {
-                what: "issued operations",
-            });
-            return (op, terminal, 0);
-        }
-        let caller = inv.caller().clone();
-        let session = self.session;
-        let args = req.args.clone();
-        let run = service::call(&services, &caller, session, &call, *native, &args);
-        let result = tokio::select! {
-            biased;
-            () = inv.cancel().cancelled() => {
-                return (op, OpOutcome::Terminal(HostTerminal::Cancelled), 0);
-            }
-            () = cancel.cancelled() => {
-                return (op.clone(), owner_cancelled(&call, &op), 0);
-            }
-            result = run => result,
-        };
-        match result {
-            Ok(value) => {
-                let bytes = value.as_str().len();
-                (
-                    op.clone(),
-                    OpOutcome::Ok {
-                        value: OpValue::Json(value),
-                        record: OpRecord {
-                            call,
-                            op,
-                            status: EffectStatus::Completed,
-                        },
-                    },
-                    bytes,
-                )
-            }
-            Err(service::CallError::Args(message)) => (
-                op.clone(),
-                failed_operation(
-                    &call,
-                    &op,
-                    format!("{op}: invalid arguments: {message}").into(),
-                ),
-                0,
-            ),
-            Err(service::CallError::Service(error)) => {
-                (op.clone(), service_outcome(&call, &op, error), 0)
-            }
-        }
     }
 
     /// Validates a model operation and decodes its request payload.
@@ -715,7 +635,19 @@ impl SessionScriptHost {
         };
         let value = match value {
             Ok(value) => value,
-            Err(error) => return (op.clone(), service_outcome(&call, &op, error), 0),
+            Err(ServiceError::Denied(reason)) => {
+                return (op, OpOutcome::Terminal(HostTerminal::Denied { reason }), 0);
+            }
+            Err(ServiceError::Cancelled) => {
+                return (op, OpOutcome::Terminal(HostTerminal::Cancelled), 0);
+            }
+            Err(error) => {
+                return (
+                    op.clone(),
+                    failed_operation(&call, &op, error.to_string().into()),
+                    0,
+                );
+            }
         };
         let bytes = value.as_str().len();
         (
@@ -1076,16 +1008,6 @@ fn failed_operation(call: &CallId, op: &OpId, message: Box<str>) -> OpOutcome {
             op: op.clone(),
             status: EffectStatus::Failed,
         },
-    }
-}
-
-/// Maps a typed service error onto the outcome split: authority failures are
-/// terminal, every other service error is a catchable operation failure (R07).
-fn service_outcome(call: &CallId, op: &OpId, error: ServiceError) -> OpOutcome {
-    match error {
-        ServiceError::Denied(reason) => OpOutcome::Terminal(HostTerminal::Denied { reason }),
-        ServiceError::Cancelled => OpOutcome::Terminal(HostTerminal::Cancelled),
-        other => failed_operation(call, op, other.to_string().into()),
     }
 }
 

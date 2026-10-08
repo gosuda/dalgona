@@ -442,6 +442,9 @@ impl GrantStore {
                 persistent: false,
             });
         }
+        let Some(turn) = who.turn else {
+            return Err(ServiceError::Denied(DenyReason::NotGranted));
+        };
         // Reload persistent rows before every probe so a CLI revocation
         // lands on the next capability check. Malformed content fails
         // closed here; the file is never written on this path.
@@ -465,23 +468,6 @@ impl GrantStore {
             }
             (GrantState::Absent, Some(notify)) => notify,
             _ => return Err(ServiceError::Cancelled),
-        };
-        // Only a grant question needs a live turn: callers without one
-        // (slash commands) may still ride a persisted or session grant
-        // but have no turn to hang a request on. A turnless caller that
-        // reached the absent arm still owns the reservation: finalize it
-        // so waiters resolve as denied instead of hanging on a notify
-        // that no answer will ever fire.
-        let Some(turn) = who.turn else {
-            return self
-                .finalize(
-                    &key,
-                    service,
-                    Err(ServiceError::Denied(DenyReason::NotGranted)),
-                    None,
-                    &notify,
-                )
-                .await;
         };
         let capabilities: Vec<Box<str>> = key.services.iter().map(|s| s.as_str().into()).collect();
         let origin = match who.origin {
