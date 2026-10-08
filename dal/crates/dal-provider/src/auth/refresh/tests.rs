@@ -462,6 +462,68 @@ async fn cancelled_refresh_persists_rotated_credential() {
     probe.try_lock().expect("the file lock was released");
 }
 
+#[tokio::test]
+async fn failed_in_flight_refresh_gives_a_later_caller_a_fresh_attempt() {
+    let dir = TestDir::new("stale");
+    let held = codex(OLD_ACCESS, OLD_REFRESH, Some(unix_now() + 10));
+    seed(&dir.auth(), held.clone());
+    let (listener, base) = listen().await;
+    let refresher = refresher(&dir.auth(), &base);
+    let started = Rc::new(Notify::new());
+    let release = Rc::new(Notify::new());
+    let client = async {
+        // The only caller drops its wait once the request is on the wire;
+        // the in-flight task then fails alone.
+        tokio::select! {
+            biased;
+            () = started.notified() => {}
+            _ = refresher.refresh(OAuthProvider::OpenAiCodex, &held, RefreshReason::Expiring) => {
+                panic!("the refresh completed before cancellation")
+            }
+        }
+        release.notify_one();
+        // The failed task holds the auth file lock until its future ends,
+        // through the exhausted retry; wait for that before the next caller.
+        let probe = open_lock_file(&lock_path(&dir.auth()).expect("lock path")).expect("open lock");
+        loop {
+            match probe.try_lock() {
+                Ok(()) => break,
+                Err(fs::TryLockError::WouldBlock) => tokio::time::sleep(LOCK_POLL).await,
+                Err(error) => panic!("probe the auth file lock: {error}"),
+            }
+        }
+        drop(probe);
+        // The server now succeeds. The new caller must run a fresh refresh
+        // instead of receiving the finished task's stale error.
+        let result = refresher
+            .refresh(OAuthProvider::OpenAiCodex, &held, RefreshReason::Expiring)
+            .await
+            .expect("a finished failed task must be retried fresh");
+        let fresh = oauth(result);
+        assert_eq!(fresh.access_token.expose(), NEW_ACCESS);
+        Credential::OAuth(fresh)
+    };
+    let hiccup = String::from(r#"{"error":"server hiccup"}"#);
+    let replies = vec![
+        Reply::JsonAfterNotify(Rc::clone(&started), Rc::clone(&release), 500, hiccup.clone()),
+        Reply::Json(500, hiccup),
+        Reply::Json(200, String::from(NEW_TOKENS)),
+    ];
+    let (result, seen) = with_server(listener, replies, client).await;
+
+    assert_eq!(oauth(result).access_token.expose(), NEW_ACCESS);
+    assert_eq!(seen.len(), 3, "two failed attempts, then one fresh one");
+    let body = sonic_rs::from_str::<sonic_rs::Value>(&seen[2].body).expect("JSON body");
+    assert_eq!(
+        body.get("refresh_token").and_then(JsonValueTrait::as_str),
+        Some(OLD_REFRESH),
+        "the fresh attempt retries the stored refresh token"
+    );
+    let on_disk = stored(&dir.auth());
+    assert_eq!(on_disk.access_token.expose(), NEW_ACCESS);
+    assert_eq!(on_disk.refresh_token.expose(), NEW_REFRESH);
+}
+
 #[test]
 fn production_endpoints_are_the_documented_urls() {
     let endpoints = TokenEndpoints::production();

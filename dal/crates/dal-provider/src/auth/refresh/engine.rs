@@ -128,7 +128,10 @@ impl Refresher {
     /// that wait. The per-key slot keeps an in-flight task so a later caller
     /// awaits the same refresh. That task sends the request and persists its
     /// result before releasing the auth file lock, even if the first caller
-    /// drops its wait. The HTTP exchange remains bounded by [`OAUTH_TIMEOUT`].
+    /// drops its wait. A finished task's success is handed to the next
+    /// caller; its failure is dropped, so the next caller starts a fresh
+    /// refresh instead of receiving the old error. The HTTP exchange remains
+    /// bounded by [`OAUTH_TIMEOUT`].
     ///
     /// # Errors
     ///
@@ -158,6 +161,24 @@ impl Refresher {
         let slot = self.slot(provider);
         let key = slot.key.lock().await;
         let mut in_flight = slot.in_flight.lock().await;
+        if in_flight.as_ref().is_some_and(tokio::task::JoinHandle::is_finished) {
+            match await_refresh(&mut in_flight).await {
+                Ok(credential) => {
+                    drop(key);
+                    return Ok(credential);
+                }
+                // The finished task's failure is stale: nobody received it.
+                // await_refresh cleared the slot, so this caller starts the
+                // fresh refresh below, still holding the per-key guard to
+                // keep the fresh attempt single-flight.
+                Err(_) => {
+                    tracing::debug!(
+                        provider = provider.id(),
+                        "the joined refresh had already failed; starting a fresh one"
+                    );
+                }
+            }
+        }
         if in_flight.is_some() {
             drop(key);
             return await_refresh(&mut in_flight).await;
@@ -306,7 +327,7 @@ async fn await_refresh(
 }
 
 /// Writes `credential` for `id` and atomically stores the updated auth file.
-pub(crate) fn commit(
+fn commit(
     store: &mut AuthStore,
     id: &str,
     credential: Credential,
