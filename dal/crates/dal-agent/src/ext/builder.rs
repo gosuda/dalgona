@@ -361,10 +361,6 @@ impl ExtensionBuilder {
     /// Returns a [`RegistrationError`] for an invalid identity, a duplicate
     /// skill, rule, prompt section or status kind, an invalid export, or an
     /// invalid doc scheme or page.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Ordered validation reports the first registration error before sealing."
-    )]
     pub fn build(self) -> Result<Extension, RegistrationError> {
         if !valid_name(&self.name) {
             return Err(RegistrationError::InvalidName { name: self.name });
@@ -375,76 +371,9 @@ impl ExtensionBuilder {
             });
         }
         let owner: Name = self.name.parse()?;
-        for (index, skill) in self.skills.iter().enumerate() {
-            if self.skills[..index]
-                .iter()
-                .any(|seen| seen.name == skill.name)
-            {
-                return Err(RegistrationError::Conflict {
-                    kind: "skill",
-                    name: skill.name.clone(),
-                    claimant: Claimant::Plugin(owner.clone()),
-                });
-            }
-        }
-        for (index, rule) in self.rules.iter().enumerate() {
-            if self.rules[..index]
-                .iter()
-                .any(|seen| seen.name == rule.name)
-            {
-                return Err(RegistrationError::Conflict {
-                    kind: "rule",
-                    name: rule.name.clone(),
-                    claimant: Claimant::Plugin(owner.clone()),
-                });
-            }
-        }
-        if self.prompt_sections.len() > 1 {
-            return Err(RegistrationError::DuplicatePromptSection);
-        }
-        if self.statuses.len() > 1 {
-            return Err(RegistrationError::DuplicateStatusKind { ext: owner.clone() });
-        }
-        let mut exports = self.exports;
-        let mut seen_exports: std::collections::BTreeSet<ExportId> =
-            std::collections::BTreeSet::new();
-        for (export, wire) in &exports {
-            let expected = wire_name(&export.id);
-            if export.id.kind != ExportKind::Tool
-                || export.id.plugin != owner
-                || wire.as_str() != expected
-                || !seen_exports.insert(export.id.clone())
-            {
-                return Err(RegistrationError::InvalidExport {
-                    id: OpId::Export(export.id.clone()).to_string().into(),
-                    wire: expected.into(),
-                });
-            }
-        }
-        for export in self.declared_exports {
-            let expected = wire_name(&export.id);
-            let declared = matches!(export.id.kind, ExportKind::Command | ExportKind::Hook)
-                && export.id.plugin == owner;
-            let Some(Ok(wire)) = declared.then(|| Name::parse(&expected)) else {
-                return Err(invalid_export(&export.id, &expected));
-            };
-            if !seen_exports.insert(export.id.clone()) {
-                return Err(invalid_export(&export.id, &expected));
-            }
-            exports.push((export, wire));
-        }
-        for model in &self.models {
-            let Some(export) = &model.export else {
-                continue;
-            };
-            let expected = wire_name(export);
-            if export.kind != ExportKind::Model
-                || export.plugin != owner
-                || !seen_exports.insert(export.clone())
-            {
-                return Err(invalid_export(export, &expected));
-            }
-        }
+        self.check_duplicates(&owner)?;
+        let exports =
+            Self::merge_exports(self.exports, self.declared_exports, &self.models, &owner)?;
         if !self.docs.is_empty() {
             let site = self.docs[0].site.clone();
             docs::check_scheme(&self.name, &site)?;
@@ -488,6 +417,91 @@ impl ExtensionBuilder {
             docs: self.docs,
             exports,
         })
+    }
+
+    /// Rejects duplicate skills, rules, prompt sections, and status kinds.
+    fn check_duplicates(&self, owner: &Name) -> Result<(), RegistrationError> {
+        for (index, skill) in self.skills.iter().enumerate() {
+            if self.skills[..index]
+                .iter()
+                .any(|seen| seen.name == skill.name)
+            {
+                return Err(RegistrationError::Conflict {
+                    kind: "skill",
+                    name: skill.name.clone(),
+                    claimant: Claimant::Plugin(owner.clone()),
+                });
+            }
+        }
+
+        for (index, rule) in self.rules.iter().enumerate() {
+            if self.rules[..index]
+                .iter()
+                .any(|seen| seen.name == rule.name)
+            {
+                return Err(RegistrationError::Conflict {
+                    kind: "rule",
+                    name: rule.name.clone(),
+                    claimant: Claimant::Plugin(owner.clone()),
+                });
+            }
+        }
+        if self.prompt_sections.len() > 1 {
+            return Err(RegistrationError::DuplicatePromptSection);
+        }
+        if self.statuses.len() > 1 {
+            return Err(RegistrationError::DuplicateStatusKind { ext: owner.clone() });
+        }
+        Ok(())
+    }
+
+    /// Validates export identities and merges declared exports in.
+    fn merge_exports(
+        mut exports: Vec<(ExportSpec, Name)>,
+        declared: Vec<ExportSpec>,
+        models: &[ModelRecord],
+        owner: &Name,
+    ) -> Result<Vec<(ExportSpec, Name)>, RegistrationError> {
+        let mut seen_exports: std::collections::BTreeSet<ExportId> =
+            std::collections::BTreeSet::new();
+        for (export, wire) in &exports {
+            let expected = wire_name(&export.id);
+            if export.id.kind != ExportKind::Tool
+                || export.id.plugin != *owner
+                || wire.as_str() != expected
+                || !seen_exports.insert(export.id.clone())
+            {
+                return Err(RegistrationError::InvalidExport {
+                    id: OpId::Export(export.id.clone()).to_string().into(),
+                    wire: expected.into(),
+                });
+            }
+        }
+        for export in declared {
+            let expected = wire_name(&export.id);
+            let declared = matches!(export.id.kind, ExportKind::Command | ExportKind::Hook)
+                && export.id.plugin == *owner;
+            let Some(Ok(wire)) = declared.then(|| Name::parse(&expected)) else {
+                return Err(invalid_export(&export.id, &expected));
+            };
+            if !seen_exports.insert(export.id.clone()) {
+                return Err(invalid_export(&export.id, &expected));
+            }
+            exports.push((export, wire));
+        }
+        for model in models {
+            let Some(export) = &model.export else {
+                continue;
+            };
+            let expected = wire_name(export);
+            if export.kind != ExportKind::Model
+                || export.plugin != *owner
+                || !seen_exports.insert(export.clone())
+            {
+                return Err(invalid_export(export, &expected));
+            }
+        }
+        Ok(exports)
     }
 }
 
