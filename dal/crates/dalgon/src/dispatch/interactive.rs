@@ -56,6 +56,7 @@ fn build_opts(
     vars: &VarsMap,
     snapshot: &edge::TerminalSnapshot,
     no_color: bool,
+    binary: &'static str,
 ) -> TuiOptions {
     let env = EnvFacts {
         stdin_tty: snapshot.stdin_tty,
@@ -91,6 +92,7 @@ fn build_opts(
         images: config.images(),
         diagrams: config.tui().diagrams,
         motion: config.motion() && !env.no_motion,
+        binary,
         editor: captured(vars, "VISUAL")
             .or_else(|| captured(vars, "EDITOR"))
             .filter(|value| !value.is_empty())
@@ -198,13 +200,14 @@ pub(crate) async fn interactive(cli: &cli::Cli, startup: Startup, product: Produ
         config,
         config_path,
         data_root,
+        binary,
         helper,
     } = startup;
     let no_color = edge::resolve_color(cli.color, &vars, snapshot.stdout_tty) == ColorArg::Never;
     if vars.contains_key(OsStr::new("DAL_DEBUG")) {
         eprintln!("[t1] edge {}ms", t0.elapsed().as_millis());
     }
-    let opts = build_opts(cli, workspace, &config, &vars, &snapshot, no_color);
+    let opts = build_opts(cli, workspace, &config, &vars, &snapshot, no_color, binary);
     let save_diagrams = diagram_saver(config.clone(), config_path);
     if let Some(addr) = cli.connect.as_deref() {
         return connect_remote(cli, addr, &cwd, opts, save_diagrams).await;

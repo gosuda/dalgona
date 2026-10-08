@@ -98,6 +98,7 @@ pub(crate) async fn serve(
         config,
         config_path: _,
         data_root,
+        binary: _,
         helper,
     } = startup;
     let core_serve = config.serve();
