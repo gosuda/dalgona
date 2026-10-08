@@ -2,7 +2,7 @@
 #[path = "support/mod.rs"]
 mod support;
 
-use std::{fs, io, path::Path, time::Duration};
+use std::{fs, io, time::Duration};
 
 fn body_after_heading<'a>(
     document: &'a str,

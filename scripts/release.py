@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
-"""Implement the standalone release scripts using Cargo metadata."""
+"""Implement the standalone release scripts using Cargo metadata.
+
+Runs on the stock macOS interpreter: every annotation stays deferred and
+the single TOML read goes through a small fail-closed reader instead of
+``tomllib`` so Python 3.9 works.
+"""
+
+from __future__ import annotations
 
 import json
 import re
 import shutil
 import subprocess
 import sys
-import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,7 +25,7 @@ CRATES_IO_SOURCE = "registry+https://github.com/rust-lang/crates.io-index"
 
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class Member:
     name: str
     version: str
@@ -27,7 +33,7 @@ class Member:
     publishable: bool
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class Dependency:
     package: str
     name: str
@@ -36,7 +42,7 @@ class Dependency:
     requirement: str | None
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class Metadata:
     members: tuple[Member, ...]
     dependencies: tuple[Dependency, ...]
@@ -105,6 +111,136 @@ def metadata_value(value: object) -> Metadata:
             )
         )
     return Metadata(tuple(members), tuple(dependencies))
+
+
+_TOML_TABLE = re.compile(r"^\[\s*(.*?)\s*\]\s*(?:#.*)?$")
+_TOML_ASSIGNMENT = re.compile(r"^([^=\s][^=]*?)\s*=\s*(.*)$")
+_TOML_KEY_SEGMENT = re.compile(
+    r'\s*(?:([A-Za-z0-9_-]+)|"((?:[^"\\]|\\.)*)"|\'([^\']*)\')'
+)
+_TOML_STRING_VALUE = re.compile(
+    r'^\s*("(?:[^"\\]|\\.)*"|\'[^\']*\')\s*(?:#.*)?$'
+)
+_TOML_INLINE_VERSION = re.compile(
+    r'(?:^|[{,])\s*version\s*=\s*("(?:[^"\\]|\\.)*"|\'[^\']*\')'
+)
+
+
+def _toml_key_path(raw: str) -> list[str] | None:
+    parts: list[str] = []
+    pos = 0
+    while True:
+        match = _TOML_KEY_SEGMENT.match(raw, pos)
+        if match is None:
+            return None
+        parts.append(next(group for group in match.groups() if group is not None))
+        pos = match.end()
+        while pos < len(raw) and raw[pos] in " \t":
+            pos += 1
+        if pos == len(raw):
+            return parts
+        if raw[pos] != ".":
+            return None
+        pos += 1
+
+
+def _toml_string(raw: str) -> str | None:
+    if raw.startswith("'"):
+        return raw[1:-1]
+    try:
+        decoded = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    return decoded if isinstance(decoded, str) else None
+
+
+def _toml_multiline_open(value: str) -> str | None:
+    """Return the delimiter when `value` opens an unterminated multiline string.
+
+    TOML multiline basic (``\"\"\"``) and literal (``'''``) strings span
+    lines, and their contents may resemble headers or assignments. Scanning
+    must skip to the closing delimiter instead of reading string contents
+    as TOML.
+    """
+    pos = 0
+    while pos < len(value):
+        if value.startswith(('"""', "'''"), pos):
+            delimiter = value[pos : pos + 3]
+            close = value.find(delimiter, pos + 3)
+            if close < 0:
+                return delimiter
+            pos = close + 3
+            continue
+        char = value[pos]
+        if char == "#":
+            return None
+        if char == '"':
+            pos += 1
+            while pos < len(value) and value[pos] != '"':
+                pos += 2 if value[pos] == "\\" else 1
+            pos += 1
+            continue
+        if char == "'":
+            pos += 1
+            while pos < len(value) and value[pos] != "'":
+                pos += 1
+            pos += 1
+            continue
+        pos += 1
+    return None
+
+
+def workspace_package_version(root: Path) -> str | None:
+    """Return the root manifest's ``[workspace.package]`` version, or None.
+
+    Covers the TOML forms a workspace manifest uses: section headers,
+    quoted and dotted keys, inline tables, basic and literal strings,
+    and trailing comments. Lines inside multiline basic and literal
+    strings are skipped. Anything outside that subset reads as absent,
+    so an unrecognized manifest fails the lockstep check instead of
+    passing silently.
+    """
+    try:
+        text = (root / "Cargo.toml").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    section: list[str] = []
+    multiline: str | None = None
+    for line in (raw.strip() for raw in text.splitlines()):
+        if multiline is not None:
+            if multiline in line:
+                multiline = None
+            continue
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[["):
+            section = []
+            continue
+        if line.startswith("["):
+            header = _TOML_TABLE.match(line)
+            parsed = _toml_key_path(header.group(1)) if header else None
+            section = parsed if parsed is not None else []
+            continue
+        assignment = _TOML_ASSIGNMENT.match(line)
+        if assignment is None:
+            continue
+        delimiter = _toml_multiline_open(assignment.group(2))
+        if delimiter is not None:
+            multiline = delimiter
+            continue
+        key = _toml_key_path(assignment.group(1))
+        if key is None:
+            continue
+        path = section + key
+        if path == ["workspace", "package"]:
+            match = _TOML_INLINE_VERSION.search(assignment.group(2))
+            if match is None:
+                continue
+            return _toml_string(match.group(1))
+        if path == ["workspace", "package", "version"]:
+            match = _TOML_STRING_VALUE.match(assignment.group(2))
+            return _toml_string(match.group(1)) if match else None
+    return None
 
 
 def error(message: str, code: int) -> int:
@@ -281,7 +417,7 @@ def check_dep_only(name: str, requirement: str) -> int:
     if any(satisfies_requirement(version, requirement) for version in index_versions(sys.stdin.read())):
         return 0
     return error(
-        f'dalgon dependency {name} "{requirement}" not on crates.io; release dalgon first',
+        f'dalgon dependency {name} "{requirement}" not on crates.io; release dal first',
         3,
     )
 
@@ -355,34 +491,24 @@ def publish_main(arguments: list[str]) -> int:
             return usage_error(PUBLISH_USAGE)
         return check_dep_only(dep_name, dep_req)
 
-    try:
-        manifest: object = tomllib.loads((root / "Cargo.toml").read_text(encoding="utf-8"))
-        workspace = mapping(manifest).get("workspace")
-        workspace_package = mapping(workspace).get("package") if workspace is not None else None
-        workspace_version = (
-            optional_string_field(mapping(workspace_package), "version")
-            if workspace_package is not None
-            else None
-        )
-    except (OSError, tomllib.TOMLDecodeError, ValueError):
-        workspace_version = None
+    metadata, status = run_metadata(root, "the cargo metadata shape is invalid for the publish order")
+    if status is not None or metadata is None:
+        return status or 2
+    publishable = [member.name for member in metadata.members if member.publishable]
+    if not publishable:
+        return error(f"no publishable member found in {root_arg}", 4)
+    workspace_version = workspace_package_version(root)
     if not workspace_version:
         return error(
             f"workspace root {root_arg} has no [workspace.package] version; lockstep is broken",
             2,
         )
-    metadata, status = run_metadata(root, "the cargo metadata shape is invalid for the publish order")
-    if status is not None or metadata is None:
-        return status or 2
     for member in metadata.members:
         if member.version != workspace_version:
             return error(
                 f"workspace member {member.name} does not inherit the workspace version; lockstep is broken",
                 2,
             )
-    publishable = [member.name for member in metadata.members if member.publishable]
-    if not publishable:
-        return error(f"no publishable member found in {root_arg}", 4)
 
     directories_by_name = {member.name: member.manifest_path.parent.resolve() for member in metadata.members}
     names_by_directory = package_directories(metadata.members)
@@ -418,7 +544,7 @@ def publish_main(arguments: list[str]) -> int:
             versions = index_versions(sparse_index(dependency.name))
             if not any(satisfies_requirement(version, requirement) for version in versions):
                 return error(
-                    f'dalgon dependency {dependency.name} "{requirement}" not on crates.io; release dalgon first',
+                    f'dalgon dependency {dependency.name} "{requirement}" not on crates.io; release dal first',
                     3,
                 )
 

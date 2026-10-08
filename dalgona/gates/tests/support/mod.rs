@@ -49,7 +49,10 @@ pub(crate) const BATTERIES: [&str; 11] = [
     "work",
 ];
 
-pub(crate) fn build_product(root: PathBuf, user_toml: Option<&str>) -> TestResult<dalgon::Product> {
+pub(crate) fn build_product(
+    root: PathBuf,
+    user_toml: Option<&str>,
+) -> TestResult<dal_agent::Product> {
     let factory = dalgona::product();
     let config = dal_core::Config::load(
         dal_core::ConfigProduct::Dalgona,
@@ -64,7 +67,7 @@ pub(crate) fn build_product(root: PathBuf, user_toml: Option<&str>) -> TestResul
     Ok(dalgona::build(&cx)?)
 }
 
-pub(crate) fn battery_names(product: &dalgon::Product) -> std::collections::BTreeSet<&str> {
+pub(crate) fn battery_names(product: &dal_agent::Product) -> std::collections::BTreeSet<&str> {
     product
         .extensions
         .iter()
