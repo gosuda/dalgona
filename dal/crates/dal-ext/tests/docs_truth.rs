@@ -991,7 +991,7 @@ fn truth_dalgona_config_diff() {
     for (key, default) in [
         ("search_symbols", "true"),
         ("edit_style", "hashline"),
-        ("guard", "true"),
+        ("[guard].enabled", "true"),
     ] {
         let row: Vec<_> = text
             .lines()

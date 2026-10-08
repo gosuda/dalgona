@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dal_core::{
-    ClientId, Effect, ListQuery, Name, Page, PageReq, Session, SessionEnd, SessionId, SessionInfo,
+    ClientId, Effect, ListQuery, Page, PageReq, Session, SessionEnd, SessionId, SessionInfo,
     SessionStart, Timestamp, UpdateKind, Workspace,
 };
 use dal_store::{Journal, Store};
@@ -18,10 +18,12 @@ use crate::broker::Broker;
 use crate::error::HostError;
 use crate::ext::generation::Generation;
 use crate::ext::grants::GrantStore;
-use crate::ext::hooks::{DispatchCx, ObserverReport, dispatch_session_end, dispatch_session_start};
+use crate::ext::hooks::{
+    HookScope, ObserverReport, dispatch_session_end, dispatch_session_start, hook_fanout,
+};
 use crate::ext::script::ScriptCx;
 use crate::ext::services::{SessionServices, SessionServicesDeps};
-use crate::ext::{Caller, CallerKind, Services};
+use crate::ext::{Caller, Services};
 use crate::session::actor::{ActorDeps, spawn};
 use crate::session::backend::{Backend, BackendDeps};
 use crate::session::rt::{SessionRt, SessionRtDeps};
@@ -831,30 +833,18 @@ async fn observe_session_start(
     event: &SessionStart,
 ) {
     let mut report = ObserverReport::default();
-    let turn_deadline = tokio::time::Instant::now() + Duration::from_secs(60);
-    for (index, extension) in generation.extensions.iter().enumerate() {
-        let Ok(caller_name) = extension.name().parse::<Name>() else {
-            continue;
-        };
-        let caller = Caller::new(
-            caller_name,
-            extension.origin(),
-            extension.inject(),
-            CallerKind::Hook,
-            None,
-        );
+    let scope = HookScope {
+        services,
+        session: event.session,
+        parent,
+        process_env: Arc::clone(process_env),
+        cancel,
+        turn_deadline: tokio::time::Instant::now() + Duration::from_secs(60),
+        script,
+    };
+    for (index, extension, caller) in hook_fanout(generation, None) {
+        let cx = scope.cx(&caller, None);
         let failed_before = report.failed;
-        let cx = DispatchCx {
-            caller: &caller,
-            services,
-            session: event.session,
-            parent,
-            process_env: Arc::clone(process_env),
-            turn: None,
-            cancel,
-            turn_deadline,
-            script: script.clone(),
-        };
         dispatch_session_start(
             extension.name(),
             &cx,
@@ -885,30 +875,18 @@ async fn observe_session_end(
     event: &SessionEnd,
 ) {
     let mut report = ObserverReport::default();
-    let turn_deadline = tokio::time::Instant::now() + Duration::from_secs(60);
-    for (index, extension) in generation.extensions.iter().enumerate() {
-        let Ok(caller_name) = extension.name().parse::<Name>() else {
-            continue;
-        };
-        let caller = Caller::new(
-            caller_name,
-            extension.origin(),
-            extension.inject(),
-            CallerKind::Hook,
-            None,
-        );
+    let scope = HookScope {
+        services,
+        session: event.session,
+        parent,
+        process_env: Arc::clone(process_env),
+        cancel,
+        turn_deadline: tokio::time::Instant::now() + Duration::from_secs(60),
+        script,
+    };
+    for (index, extension, caller) in hook_fanout(generation, None) {
+        let cx = scope.cx(&caller, None);
         let failed_before = report.failed;
-        let cx = DispatchCx {
-            caller: &caller,
-            services,
-            session: event.session,
-            parent,
-            process_env: Arc::clone(process_env),
-            turn: None,
-            cancel,
-            turn_deadline,
-            script: script.clone(),
-        };
         dispatch_session_end(
             extension.name(),
             &cx,

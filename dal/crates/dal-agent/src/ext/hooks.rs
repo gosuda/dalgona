@@ -28,7 +28,10 @@ use dal_core::{
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use crate::ext::{BoxFuture, Caller, Hook, HookCx, HookError, Name, ScriptCx, Services};
+use crate::ext::generation::Generation;
+use crate::ext::{
+    BoxFuture, Caller, CallerKind, Extension, Hook, HookCx, HookError, Name, ScriptCx, Services,
+};
 
 pub use dal_core::{Caps, Part, ThinkingLevel};
 pub use observe::{
@@ -139,6 +142,75 @@ pub struct DispatchCx<'a> {
     pub turn_deadline: Instant,
     /// The captured script seam of a scripted hook, absent otherwise (E06).
     pub script: Option<ScriptCx>,
+}
+
+/// Minted hook caller for one extension; `None` when the extension's name
+/// cannot parse (a malformed generation entry is skipped, not fatal).
+#[must_use]
+pub(crate) fn hook_caller(extension: &Extension, turn: Option<TurnId>) -> Option<Caller> {
+    let name = extension.name().parse::<Name>().ok()?;
+    Some(Caller::new(
+        name,
+        extension.origin(),
+        extension.inject(),
+        CallerKind::Hook,
+        turn,
+    ))
+}
+
+/// The fields one hook fan-out shares: everything [`DispatchCx`] carries
+/// except the per-extension caller and the event's turn. [`Self::for_each`]
+/// mints each extension's caller and context in registration order.
+pub(crate) struct HookScope<'a> {
+    /// Host services for hook contexts.
+    pub services: &'a Arc<dyn Services>,
+    /// Session that owns the event.
+    pub session: SessionId,
+    /// Parent session when the event runs in a subagent session.
+    pub parent: Option<SessionId>,
+    /// Host-captured process-edge environment snapshot.
+    pub process_env: Arc<crate::Env>,
+    /// Cancellation token bounding every hook wait.
+    pub cancel: &'a CancellationToken,
+    /// Turn deadline; each dispatch additionally applies the hook budget.
+    pub turn_deadline: Instant,
+    /// The captured script seam of a scripted hook, absent otherwise (E06).
+    pub script: Option<ScriptCx>,
+}
+
+impl HookScope<'_> {
+    /// Builds the dispatch context of one iteration over
+    /// [`hook_fanout`]: `caller` is that iteration's minted caller and
+    /// `turn` is the turn passed to `hook_fanout`.
+    pub(crate) fn cx<'a>(&'a self, caller: &'a Caller, turn: Option<TurnId>) -> DispatchCx<'a> {
+        DispatchCx {
+            caller,
+            services: self.services,
+            session: self.session,
+            parent: self.parent,
+            process_env: Arc::clone(&self.process_env),
+            turn,
+            cancel: self.cancel,
+            turn_deadline: self.turn_deadline,
+            script: self.script.clone(),
+        }
+    }
+}
+
+/// Iterates the generation's extensions in canonical registration order,
+/// yielding each extension's index, record, and minted hook caller.
+/// Extensions whose names cannot parse are skipped.
+pub(crate) fn hook_fanout(
+    generation: &Generation,
+    turn: Option<TurnId>,
+) -> impl Iterator<Item = (usize, &Extension, Caller)> + '_ {
+    generation
+        .extensions
+        .iter()
+        .enumerate()
+        .filter_map(move |(index, extension)| {
+            Some((index, extension, hook_caller(extension, turn)?))
+        })
 }
 
 impl DispatchCx<'_> {
