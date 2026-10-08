@@ -541,35 +541,34 @@ impl SkillResolver {
     }
 }
 
+impl SkillResolver {
+    /// Resolves one `skill://` body or reports the unknown skill.
+    fn lookup(&self, path: &str) -> Result<Doc, SchemeError> {
+        let registry = registry_snapshot(&self.registry);
+        if let Some(body) = registry.body(path) {
+            let body = body.to_string();
+            drop(registry);
+            return Ok(Doc::new(format!("skill://{path}"), body));
+        }
+        drop(registry);
+        Err(SchemeError::Failed {
+            message: format!("unknown skill: {path}").into(),
+        })
+    }
+}
+
 impl SchemeResolver for SkillResolver {
     fn read<'a>(
         &'a self,
         path: &'a str,
         _cx: &'a SchemeCx<'a>,
     ) -> BoxFuture<'a, Result<Doc, SchemeError>> {
-        let registry = registry_snapshot(&self.registry);
-        if let Some(body) = registry.body(path) {
-            let body = body.to_string();
-            drop(registry);
-            return Box::pin(async move { Ok(Doc::new(format!("skill://{path}"), body)) });
-        }
-        let names = registry
-            .names()
-            .iter()
-            .map(std::string::ToString::to_string)
-            .collect::<Vec<_>>();
-        drop(registry);
-        Box::pin(async move {
-            let message = if names.is_empty() {
-                format!("skill {path} does not exist; no skills are loaded")
-            } else {
-                let list = names.join(", ");
-                format!("skill {path} does not exist; known skills: {list}")
-            };
-            Err(SchemeError::Failed {
-                message: message.into(),
-            })
-        })
+        let doc = self.lookup(path);
+        Box::pin(async move { doc })
+    }
+
+    fn read_static(&self, path: &str) -> Option<Result<Doc, SchemeError>> {
+        Some(self.lookup(path))
     }
 }
 
