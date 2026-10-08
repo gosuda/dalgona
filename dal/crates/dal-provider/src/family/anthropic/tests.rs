@@ -618,6 +618,41 @@ fn replay_body(source: ReplaySource) -> String {
     String::from_utf8(build(&input, AnthropicAuth::ApiKey("sk-ant")).unwrap().body).unwrap()
 }
 
+fn unbound_replay_body(system: &str) -> String {
+    let request = request_with_system(
+        system,
+        vec![ContextItem::Assistant {
+            source: replay_source(Family::Anthropic, "claude-sonnet-5"),
+            parts: vec![
+                AssistantPart::Thinking {
+                    text: "private".into(),
+                    replay: Some(
+                        RawJson::parse(
+                            r#"{ "type" : "thinking", "thinking" : "private", "signature" : "signed" }"#,
+                        )
+                        .unwrap(),
+                    ),
+                },
+                AssistantPart::Text {
+                    text: "visible".into(),
+                },
+            ],
+        }],
+        vec![tool("read")],
+    );
+    let input = AnthropicRequest {
+        request: &request,
+        max_output: None,
+        thinking: AnthropicThinking::Omit,
+        effort: None,
+        display_supported: false,
+        temperature: None,
+        compaction: None,
+        summarize: false,
+    };
+    String::from_utf8(build(&input, AnthropicAuth::ApiKey("sk-ant")).unwrap().body).unwrap()
+}
+
 fn assert_replay_was_filtered(body: &str) {
     assert!(body.contains(concat!(
         r#""role":"assistant","content":[{"type":"text","text":"visible"},"#,
@@ -638,6 +673,21 @@ fn foreign_family_replay_is_omitted_without_losing_text_or_tool_calls() {
 fn different_model_replay_is_omitted_without_losing_text_or_tool_calls() {
     let body = replay_body(replay_source(Family::Anthropic, "claude-opus-5"));
     assert_replay_was_filtered(&body);
+}
+
+#[test]
+fn unbound_signed_replay_is_dropped_after_a_prefix_change() {
+    let body = unbound_replay_body("Current system.");
+    assert!(!body.contains("signature"));
+    assert!(!body.contains(r#""type":"thinking""#));
+    assert!(body.contains(r#""type":"text","text":"visible""#));
+}
+
+#[test]
+fn unbound_signed_replay_stays_for_tool_use_continuation() {
+    let body = replay_body(replay_source(Family::Anthropic, "claude-sonnet-5"));
+    assert!(body.contains("private"));
+    assert!(body.contains("signature"));
 }
 
 /// Builds a signed thinking replay bound to `prefix` in storage.

@@ -6,10 +6,10 @@
 //! byte. Cache breakpoints sit on exactly three places: the last system block,
 //! the last tool, and the last typed content block of the last message.
 //! Tool arguments travel as raw JSON, never re-encoded. Replayed thinking
-//! blocks travel as raw JSON too: a block stored without a prefix binding is
-//! sent verbatim, a bound block is rebuilt without the binding member so the
-//! API sees only the members it produced, and a block bound to a different
-//! system-prompt or tool-list prefix is dropped before the request is sent.
+//! blocks travel as raw JSON too: a bound block is rebuilt without its
+//! `dal_prefix` member when its prefix matches; stale or unbound signed
+//! thinking blocks are dropped outside an in-progress tool-use turn, while
+//! the required continuation block and redacted thinking remain verbatim.
 //! A Claude OAuth token also carries the fingerprint of
 //! [`crate::claude_fingerprint`]; API keys and bearer keys never do.
 //!
@@ -515,7 +515,24 @@ fn messages<'a>(
 ) -> Result<Vec<Message<'a>>, ProviderError> {
     let mut messages: Vec<Message<'a>> = Vec::new();
     let mut turn = ToolTurn::default();
-    for item in &*request.context {
+    // The trailing assistant items before final tool results are the active
+    // tool-use turn; Anthropic requires their thinking blocks for continuation.
+    let active_assistant_range = match request.context.last() {
+        Some(ContextItem::ToolResult { .. }) => {
+            let mut end = request.context.len();
+            while end > 0 && matches!(&request.context[end - 1], ContextItem::ToolResult { .. }) {
+                end -= 1;
+            }
+            let mut start = end;
+            while start > 0 && matches!(&request.context[start - 1], ContextItem::Assistant { .. })
+            {
+                start -= 1;
+            }
+            Some((start, end))
+        }
+        _ => None,
+    };
+    for (index, item) in request.context.iter().enumerate() {
         let (role, blocks) = match item {
             ContextItem::User { parts } => {
                 let blocks = user_blocks(parts)?;
@@ -526,10 +543,12 @@ fn messages<'a>(
             }
             ContextItem::Assistant { source, parts } => {
                 let continues = messages.last().is_some_and(|last| last.role == "assistant");
+                let in_progress_tool_turn = active_assistant_range
+                    .is_some_and(|(start, end)| start <= index && index < end);
                 turn.assistant(parts, continues)?;
                 (
                     "assistant",
-                    assistant_blocks(parts, source, model, oauth, prefix),
+                    assistant_blocks(parts, source, model, oauth, prefix, in_progress_tool_turn),
                 )
             }
             ContextItem::ToolResult {
@@ -683,6 +702,7 @@ fn assistant_blocks<'a>(
     model: &str,
     oauth: bool,
     prefix: &str,
+    in_progress_tool_turn: bool,
 ) -> Vec<Block<'a>> {
     let replay_ok = source.family == Family::Anthropic && source.model.as_ref() == model;
     parts
@@ -694,7 +714,7 @@ fn assistant_blocks<'a>(
                 cache_control: None,
             })),
             AssistantPart::Thinking { replay, .. } if replay_ok => {
-                thinking_replay_block(replay.as_ref(), prefix)
+                thinking_replay_block(replay.as_ref(), prefix, in_progress_tool_turn)
             }
             AssistantPart::Thinking { .. } => None,
             AssistantPart::ToolCall { call, name, args } => Some(Block::Typed(Typed::ToolUse {
@@ -759,25 +779,44 @@ fn replay_bound_prefix(raw: &str) -> Option<String> {
         .and_then(|value| value.as_str().map(str::to_owned))
 }
 
+/// Redacted thinking carries opaque data instead of a signature, so it can
+/// remain verbatim when no prefix binding was recorded.
+fn is_redacted_thinking(raw: &RawJson) -> bool {
+    sonic_rs::get_from_str(raw.as_str(), ["type"]).is_ok_and(|value| {
+        value
+            .as_str()
+            .is_some_and(|kind| kind == "redacted_thinking")
+    })
+}
+
 /// The replayable payload of one stored thinking part: the block when the
 /// API still accepts it under the current request prefix.
-fn thinking_replay_block<'a>(replay: Option<&'a RawJson>, prefix: &str) -> Option<Block<'a>> {
+fn thinking_replay_block<'a>(
+    replay: Option<&'a RawJson>,
+    prefix: &str,
+    in_progress_tool_turn: bool,
+) -> Option<Block<'a>> {
     let raw = replay?;
     if !replayable(raw) {
         return None;
     }
-    replay_block(raw, prefix)
+    replay_block(raw, prefix, in_progress_tool_turn)
 }
 
-/// Sends one stored signed thinking block: verbatim when it carries no
-/// prefix binding, otherwise rebuilt without the binding member so the API
-/// sees only the block it produced. `None` drops a bound block the binding
-/// member cannot be removed from.
-fn replay_block<'a>(raw: &'a RawJson, prefix: &str) -> Option<Block<'a>> {
+/// Sends one stored thinking block when its prefix can be trusted. A bound
+/// block is rebuilt without the storage-only binding member. An unbound signed
+/// block is dropped unless it belongs to an in-progress tool-use turn, where
+/// Anthropic requires it for continuation; redacted thinking has no signature
+/// member and remains verbatim. `None` drops a block that cannot be sent.
+fn replay_block<'a>(
+    raw: &'a RawJson,
+    prefix: &str,
+    in_progress_tool_turn: bool,
+) -> Option<Block<'a>> {
     match replay_bound_prefix(raw.as_str()) {
-        None => Some(Block::Raw(raw)),
         Some(stored) if stored == prefix => unbound_replay(raw).map(Block::Rebound),
-        Some(_) => None,
+        None if is_redacted_thinking(raw) || in_progress_tool_turn => Some(Block::Raw(raw)),
+        _ => None,
     }
 }
 

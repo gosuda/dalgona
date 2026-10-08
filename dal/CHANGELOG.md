@@ -24,6 +24,7 @@
 - Add `DAL_THREAD_ID` and `DAL_TOOL_CALL_ID` to the environment of `exec` children. They carry the session id and the tool call id, and they replace values with the same names in the captured environment. A value that contains a NUL byte is left out.
 - Fix `patch` text matching on large files: the search now does linear work instead of rescanning the file for each match. When `old` has no exact match, the patch also accepts the same text with CRLF line ends, copied line-number prefixes, curly quotes, dashes, special spaces, or trailing spaces. Indentation must still match.
 - Fix Anthropic replay after the system prompt or tool list changes: signed thinking blocks from the old prefix are dropped instead of failing the request with "Invalid signature in thinking block".
+- Fix Anthropic replay from older sessions: signed thinking blocks without a recorded prefix are dropped unless they are needed to continue an active tool call.
 - Fix Claude login when the preferred callback port is busy: login now uses a free loopback port and sends that port in the redirect address, instead of falling back to pasting the code.
 - Fix terminal presentation: the queued and steering counts now come from the host's turn state, multiline question titles keep each line, wrapped transcript rows keep their links, and file paths in settled rows are clickable OSC 8 links.
 - Initial release.
