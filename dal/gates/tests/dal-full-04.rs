@@ -86,6 +86,7 @@ fn tui_probe(agent: &Agent, session: SessionRef) -> Result<(), Box<dyn Error + S
         motion: false,
         editor: "vi".into(),
         color: ColorMode::Never,
+        binary: "dalgon",
         env: EnvFacts {
             stdin_tty: true,
             term: Some("xterm-256color".to_owned()),
