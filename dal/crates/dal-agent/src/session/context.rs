@@ -450,7 +450,7 @@ fn compacted_items(entries: &[EntryView]) -> Vec<ContextItem> {
 /// Results answer the calls of the assistant message before them, so a call
 /// id is tracked from that message until the next one. A later response
 /// may reuse an id; its result is kept. The journal is not changed.
-fn collapse_duplicate_results(mut items: Vec<ContextItem>) -> Vec<ContextItem> {
+fn collapse_duplicate_results(items: Vec<ContextItem>) -> Vec<ContextItem> {
     let mut answered: HashSet<&CallId> = HashSet::new();
     let keep: Vec<bool> = items
         .iter()
@@ -463,9 +463,16 @@ fn collapse_duplicate_results(mut items: Vec<ContextItem>) -> Vec<ContextItem> {
             ContextItem::User { .. } => true,
         })
         .collect();
-    let mut keep = keep.into_iter();
-    items.retain(|_| keep.next().unwrap_or(true));
+    debug_assert_eq!(
+        items.len(),
+        keep.len(),
+        "one keep decision must exist for every context item"
+    );
     items
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(item, keep)| keep.then_some(item))
+        .collect()
 }
 
 /// Maps one leaf entry to its provider message, when it carries content.
