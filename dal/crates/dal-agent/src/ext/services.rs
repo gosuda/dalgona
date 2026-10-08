@@ -89,6 +89,22 @@ pub struct SessionServices {
     next_call: AtomicU64,
 }
 
+/// Releases the session's single open-ask slot on drop, so every exit
+/// from `ask` — including the caller dropping the future — frees the
+/// next ask. A stranded slot would deny every later ask as busy.
+struct AskSlot<'a> {
+    slot: &'a Mutex<Option<RequestId>>,
+}
+
+impl Drop for AskSlot<'_> {
+    fn drop(&mut self) {
+        *self
+            .slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+}
+
 impl SessionServices {
     /// Builds the session services from host-owned pieces.
     pub(crate) fn new(deps: SessionServicesDeps) -> Self {
@@ -388,7 +404,13 @@ impl Services for SessionServices {
                 *open = Some(request.id);
                 answer
             };
-            let out = tokio::select! {
+            // The guard clears the slot on every exit — including the
+            // caller dropping this future — so a cancellation cannot
+            // strand the session's one open ask.
+            let _slot = AskSlot {
+                slot: &self.ask_open,
+            };
+            tokio::select! {
                 biased;
                 () = self.cancel.cancelled() => Err(ServiceError::Cancelled),
                 () = sleep(self.ask_timeout) => Ok(None),
@@ -399,12 +421,7 @@ impl Services for SessionServices {
                     Answer::Cancel => Err(ServiceError::Cancelled),
                     _ => Ok(None),
                 },
-            };
-            *self
-                .ask_open
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-            out
+            }
         })
     }
 

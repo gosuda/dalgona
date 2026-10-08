@@ -56,6 +56,13 @@ fn declared_uses_fold_into_the_inject_manifest() -> Result<(), Box<dyn std::erro
 def probe(ctx, args):
     return args
 
+probe_cmd_tool = dal.tool(
+    description = "Probe command tool.",
+    input = dal.schema(value = dal.optional(dal.string())),
+    run = probe,
+    uses = ["jobs.list"],
+)
+
 plugin = dal.plugin(
     name = "probe",
     version = "0.1.0",
@@ -66,6 +73,9 @@ plugin = dal.plugin(
             run = probe,
             uses = ["env.read", "ask.select"],
         ),
+    },
+    commands = {
+        "probe_cmd": dal.command(tool = probe_cmd_tool),
     },
 )
 "#,
@@ -96,6 +106,10 @@ plugin = dal.plugin(
     assert!(
         inject.contains(dal_core::Service::Ask),
         "ask.select injects ask"
+    );
+    assert!(
+        inject.contains(dal_core::Service::Jobs),
+        "a command-only tool's uses injects its service"
     );
     assert!(
         !inject.contains(dal_core::Service::Run),

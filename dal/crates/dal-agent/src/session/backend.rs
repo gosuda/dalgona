@@ -666,9 +666,17 @@ impl Backend {
     async fn agents_op(&self, op: AgentsOp) -> AgentsReply {
         match op {
             AgentsOp::Start(start) => self.agent_start(start).await,
-            AgentsOp::Await { id, timeout } => self.agent_await(id, timeout).await,
+            AgentsOp::Await { id, timeout } => {
+                if self.is_child(id) {
+                    self.agent_await(id, timeout).await
+                } else {
+                    AgentsReply::Cancelled { id }
+                }
+            }
             AgentsOp::Cancel { id } => {
-                let _ = self.host().close(id).await;
+                if self.is_child(id) {
+                    let _ = self.host().close(id).await;
+                }
                 AgentsReply::Cancelled { id }
             }
             AgentsOp::List => AgentsReply::Listed(self.agent_list()),
@@ -681,6 +689,18 @@ impl Backend {
             AgentsOp::Recv { after, timeout } => self.agent_recv(after, timeout).await,
             _ => AgentsReply::Cancelled { id: self.session },
         }
+    }
+
+    /// Returns whether `id` is a live child of this session: an agents
+    /// grant may reach only the caller's own subtree, the same scope
+    /// `agent_list` publishes.
+    fn is_child(&self, id: SessionId) -> bool {
+        self.host
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&id)
+            .is_some_and(|entry| entry.parent == Some(self.session))
     }
 
     async fn agent_start(&self, start: dal_core::AgentStart) -> AgentsReply {

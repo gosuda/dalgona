@@ -261,6 +261,7 @@ pub(crate) fn validate(
         .map(|export| &export.uses)
         .chain(hooks.iter().map(|hook| &hook.uses))
         .chain(models.iter().map(|model| &model.uses))
+        .chain(commands.iter().map(|command| &command.tool.uses))
     {
         inject = inject.union(uses.services());
     }
