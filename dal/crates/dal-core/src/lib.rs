@@ -66,7 +66,7 @@ pub use journal::{
 pub use model::{
     AssistantPart, Caps, CompactOutcome, CompactedHistory, ContextItem, Family, InferFailure,
     Inference, MAX_SYNTHETIC_DEPTH, ModelInfo, ModelPrice, ModelRequest, ModelRoute, ModelToolSpec,
-    Purpose, ReplaySource, RequestParams, RouteError, Stop, StreamChannel, StreamEvent,
+    PriceTier, Purpose, ReplaySource, RequestParams, RouteError, Stop, StreamChannel, StreamEvent,
     ThinkingLevel, Usage, check_synthetic_chain,
 };
 pub use raw::{RawJson, RawJsonError};

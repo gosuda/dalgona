@@ -153,7 +153,9 @@ fn print_table(rows: &[&CatalogEntry]) -> std::io::Result<()> {
     )?;
     for entry in rows {
         let context = context_text(entry);
-        let price = model_price(entry).map_or_else(|| "-".to_owned(), format_price);
+        let price = model_price(entry)
+            .as_ref()
+            .map_or_else(|| "-".to_owned(), format_price);
         writeln!(
             stdout,
             "{:<provider_width$}  {:<id_width$}  {:<context_width$}  {price}",
@@ -175,7 +177,7 @@ fn model_price(entry: &CatalogEntry) -> Option<dal_core::ModelPrice> {
     compiled_price(&qualified)
 }
 
-fn format_price(price: dal_core::ModelPrice) -> String {
+fn format_price(price: &dal_core::ModelPrice) -> String {
     if price.input == 0.0 && price.output == 0.0 {
         return "-".to_owned();
     }

@@ -4,7 +4,7 @@ use super::super::{
     ApprovalMode, Config, ConfigError, ConfigOverrides, ConfigProduct, Mode, Screen,
 };
 use super::{DATA_ROOT, load};
-use crate::model::{ModelPrice, ThinkingLevel};
+use crate::model::{ModelPrice, PriceTier, ThinkingLevel};
 use std::path::{Path, PathBuf};
 
 #[test]
@@ -42,6 +42,7 @@ reasoning = 3.0
             cached_input: 0.5,
             output: 2.0,
             reasoning: 3.0,
+            tiers: Box::default(),
         })
     );
 
@@ -90,6 +91,7 @@ reasoning = 3.0
             cached_input: 0.0,
             output: 0.0,
             reasoning: 0.0,
+            tiers: Box::default(),
         })
     );
 }
@@ -110,6 +112,7 @@ fn config_merges_price_fields_and_rejects_incomplete_rates() {
             cached_input: 2.0,
             output: 3.0,
             reasoning: 4.0,
+            tiers: Box::default(),
         })
     );
 
@@ -140,6 +143,35 @@ fn config_price_layers_override_single_rates_including_zero() {
             cached_input: 0.0,
             output: 3.0,
             reasoning: 5.0,
+            tiers: Box::default(),
+        })
+    );
+}
+
+#[test]
+fn config_parses_request_wide_price_tiers() {
+    let config = Config::load(
+        ConfigProduct::Dalgon,
+        Path::new(DATA_ROOT),
+        "[prices.tiered]\ninput = 1.0\ncached_input = 0.5\noutput = 2.0\nreasoning = 3.0\ntiers = [{ size = 200000, input = 2.0, output = 4.0 }]",
+        None,
+    )
+    .expect("tiered price table parses");
+    assert_eq!(
+        config.price_for_model("tiered"),
+        Some(&ModelPrice {
+            input: 1.0,
+            cached_input: 0.5,
+            output: 2.0,
+            reasoning: 3.0,
+            tiers: vec![PriceTier {
+                size: 200_000,
+                input: Some(2.0),
+                cached_input: None,
+                output: Some(4.0),
+                reasoning: None,
+            }]
+            .into_boxed_slice(),
         })
     );
 }

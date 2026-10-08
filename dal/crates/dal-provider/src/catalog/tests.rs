@@ -714,6 +714,49 @@ fn exact_priced_model_and_missing_model_have_distinct_costs() {
     assert!(compiled_price("missing/model").is_none());
     assert!(compiled_price(&format!("{}-unlisted", row.model)).is_none());
 }
+#[test]
+fn compiled_price_selects_request_wide_context_tier() {
+    use dal_core::Usage;
+
+    let price = compiled_price("deepinfra/Qwen/Qwen3.7-Max").expect("tiered model resolves");
+    assert_eq!(price.tiers.len(), 2);
+    let at_boundary = Usage {
+        input_tokens: 32_000,
+        cached_input_tokens: 0,
+        output_tokens: 0,
+        reasoning_tokens: None,
+        cache_write_tokens: 0,
+        cost_usd: None,
+    };
+    assert_eq!(
+        at_boundary.cost_usd(None, Some(&price)),
+        Some(32_000.0 * 2.5 / 1_000_000.0)
+    );
+    let above_boundary = Usage {
+        input_tokens: 32_001,
+        ..at_boundary
+    };
+    assert_eq!(
+        above_boundary.cost_usd(None, Some(&price)),
+        Some(32_001.0 * 5.0 / 1_000_000.0)
+    );
+    let second_boundary = Usage {
+        input_tokens: 128_000,
+        ..at_boundary
+    };
+    assert_eq!(
+        second_boundary.cost_usd(None, Some(&price)),
+        Some(128_000.0 * 5.0 / 1_000_000.0)
+    );
+    let above_second_boundary = Usage {
+        input_tokens: 128_001,
+        ..at_boundary
+    };
+    assert_eq!(
+        above_second_boundary.cost_usd(None, Some(&price)),
+        Some(128_001.0 * 6.25 / 1_000_000.0)
+    );
+}
 
 #[test]
 fn generated_table_remains_sorted_for_binary_search() {

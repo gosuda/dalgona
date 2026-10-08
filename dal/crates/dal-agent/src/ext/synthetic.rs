@@ -422,7 +422,7 @@ fn lookup_price(shared: &HostShared, key: &str) -> Option<ModelPrice> {
     shared
         .config
         .price_for_model(key)
-        .copied()
+        .cloned()
         .or_else(|| dal_provider::compiled_price(key))
 }
 
