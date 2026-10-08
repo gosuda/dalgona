@@ -31,6 +31,7 @@ uuid = { workspace = true, features = ["v4"] }
 
 [target.'cfg(windows)'.dependencies]
 interprocess = { version = "=2.4.4", features = ["tokio"] }
+windows-sys.workspace = true
 
 [dev-dependencies]
 dal-ext = { path = "../dal-ext" }

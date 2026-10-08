@@ -414,7 +414,137 @@ fn open_exclusive(path: &Path) -> io::Result<File> {
             return Err(error);
         }
     }
+    #[cfg(windows)]
+    {
+        if let Err(error) = win::restrict_owner_access(path) {
+            drop(file);
+            let _ = fs::remove_file(path);
+            return Err(error);
+        }
+    }
     Ok(file)
+}
+
+/// Windows carries no mode bits; the token file gets an explicit protected
+/// DACL instead — the POSIX 0600 grant for the owner plus the privileged
+/// system accounts, with inheritance cut so the grant set is exact.
+#[cfg(windows)]
+#[expect(
+    unsafe_code,
+    reason = "token file DACL requires Win32 security descriptor calls"
+)]
+mod win {
+    use std::{io, os::windows::ffi::OsStrExt, path::Path, ptr};
+
+    use windows_sys::Win32::{
+        Foundation::{FALSE, LocalFree},
+        Security::{
+            ACL,
+            Authorization::{
+                ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+                GetNamedSecurityInfoW, SE_FILE_OBJECT, SetNamedSecurityInfoW,
+            },
+            DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, OWNER_SECURITY_INFORMATION,
+            PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+        },
+    };
+
+    fn wide(text: &str) -> Vec<u16> {
+        text.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    fn wide_path(path: &Path) -> Vec<u16> {
+        path.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+
+    /// Stamps `path` with a protected DACL granting the file owner, SYSTEM,
+    /// and Administrators — the Windows counterpart of `chmod 600`.
+    pub(super) fn restrict_owner_access(path: &Path) -> io::Result<()> {
+        let wide_path = wide_path(path);
+        let mut owner: PSID = ptr::null_mut();
+        let mut holder_sd: PSECURITY_DESCRIPTOR = ptr::null_mut();
+        let queried = unsafe {
+            GetNamedSecurityInfoW(
+                wide_path.as_ptr(),
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION,
+                &raw mut owner,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                &raw mut holder_sd,
+            )
+        };
+        if queried != 0 {
+            return Err(io::Error::from_raw_os_error(queried.cast_signed()));
+        }
+        let mut owner_text = ptr::null_mut();
+        let converted = unsafe { ConvertSidToStringSidW(owner, &raw mut owner_text) };
+        if !holder_sd.is_null() {
+            unsafe { LocalFree(holder_sd) };
+        }
+        if converted == FALSE {
+            return Err(io::Error::last_os_error());
+        }
+        let mut len = 0usize;
+        while unsafe { *owner_text.add(len) } != 0 {
+            len += 1;
+        }
+        let owner_sid =
+            String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(owner_text, len) });
+        unsafe { LocalFree(owner_text.cast()) };
+
+        // `P` marks the DACL protected so inherited ACEs cannot widen the
+        // grant; SY and BA are the SDDL aliases for SYSTEM and Administrators.
+        let sddl = wide(&format!("D:P(A;;FA;;;{owner_sid})(A;;FA;;;SY)(A;;FA;;;BA)"));
+        let mut described: PSECURITY_DESCRIPTOR = ptr::null_mut();
+        if unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                1,
+                &raw mut described,
+                ptr::null_mut(),
+            )
+        } == FALSE
+        {
+            return Err(io::Error::last_os_error());
+        }
+        let mut present = FALSE;
+        let mut defaulted = FALSE;
+        let mut dacl: *mut ACL = ptr::null_mut();
+        let described_ok = unsafe {
+            GetSecurityDescriptorDacl(
+                described,
+                &raw mut present,
+                &raw mut dacl,
+                &raw mut defaulted,
+            )
+        };
+        if described_ok == FALSE || present == FALSE || dacl.is_null() {
+            unsafe { LocalFree(described) };
+            return Err(io::Error::last_os_error());
+        }
+        let written = unsafe {
+            SetNamedSecurityInfoW(
+                wide_path.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                dacl,
+                ptr::null_mut(),
+            )
+        };
+        // `dacl` points into `described`; the descriptor must outlive the write.
+        unsafe { LocalFree(described) };
+        if written != 0 {
+            return Err(io::Error::from_raw_os_error(written.cast_signed()));
+        }
+        Ok(())
+    }
 }
 
 fn write_sync(file: &mut File, bytes: &[u8]) -> io::Result<()> {
