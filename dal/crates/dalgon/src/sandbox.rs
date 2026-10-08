@@ -431,8 +431,8 @@ mod tests {
 }
 
 /// Windows backend. Each run registers a GUID-unique AppContainer profile,
-/// grants its SID `(OI)(CI)` access on the allowed roots and read+execute on
-/// the executable's directory (system locations already grant
+/// grants its SID `(OI)(CI)` access on the allowed roots and execute-only on
+/// the executable's directory and PATH dirs (system locations already grant
 /// `ALL APPLICATION PACKAGES`), then launches the target under the container
 /// inside its own kill-on-close job object. The planted ACEs are lifted on
 /// return; residue left by an abrupt kill is inert because the SID is unique
@@ -486,7 +486,7 @@ mod win {
     };
     use windows_sys::core::PWSTR;
 
-    const GENERIC_READ_EXECUTE: u32 = 0xA2000000; // GENERIC_READ | GENERIC_EXECUTE
+    const GENERIC_EXECUTE_ONLY: u32 = 0x20000000; // GENERIC_EXECUTE (FILE_EXECUTE|FILE_TRAVERSE)
     const GENERIC_ALL_ACCESS: u32 = 0x10000000; // GENERIC_ALL
 
     struct OwnedHandle(windows_sys::Win32::Foundation::HANDLE);
@@ -639,9 +639,11 @@ mod win {
     }
 
     /// Grants the run-unique SID full access on each allowed root and
-    /// read+execute on the executable's directory plus every PATH directory so
+    /// execute-only on the executable's directory plus every PATH directory so
     /// the command runtime (outside the `ALL APPLICATION PACKAGES` grants)
-    /// still loads.
+    /// still loads. Runtime dirs grant `FILE_EXECUTE`, never `FILE_READ_DATA`:
+    /// image loading needs execute rights only, so private files in those
+    /// directories stay unreadable — consistent with the deny-read model.
     fn plant_grants(
         roots: &[PathBuf],
         executable: &Path,
@@ -653,16 +655,16 @@ mod win {
                 .parent()
                 .filter(|dir| !dir.as_os_str().is_empty())
             {
-                // Read+execute on the launch directory only. System locations
+                // Execute on the launch directory only. System locations
                 // already permit ALL APPLICATION PACKAGES and an unprivileged
                 // user cannot edit them; a directory the container genuinely
                 // cannot read fails at exec time with an access error, so a
                 // failed grant here must not block launch.
-                if edit_dacl(dir, sid, GENERIC_READ_EXECUTE, GRANT_ACCESS).is_ok() {
-                    planted.push((dir.to_path_buf(), GENERIC_READ_EXECUTE));
+                if edit_dacl(dir, sid, GENERIC_EXECUTE_ONLY, GRANT_ACCESS).is_ok() {
+                    planted.push((dir.to_path_buf(), GENERIC_EXECUTE_ONLY));
                 }
             }
-            // Read+execute on every PATH directory so the shell can reach its
+            // Execute on every PATH directory so the shell can reach its
             // runtime (`cargo` under %USERPROFILE%\.cargo\bin, Git's usr\bin).
             // Same tolerate rule as the launch directory: the OS decides.
             if let Some(paths) = std::env::var_os("PATH") {
@@ -670,8 +672,8 @@ mod win {
                     if dir.as_os_str().is_empty() {
                         continue;
                     }
-                    if edit_dacl(&dir, sid, GENERIC_READ_EXECUTE, GRANT_ACCESS).is_ok() {
-                        planted.push((dir, GENERIC_READ_EXECUTE));
+                    if edit_dacl(&dir, sid, GENERIC_EXECUTE_ONLY, GRANT_ACCESS).is_ok() {
+                        planted.push((dir, GENERIC_EXECUTE_ONLY));
                     }
                 }
             }
@@ -709,15 +711,15 @@ mod win {
 
     /// A run identity Windows cannot recycle: a fresh GUID, not a PID —
     /// killed helpers leave profiles and ACEs that a recycled PID would revive.
-    fn run_id() -> String {
+    /// Fails closed when the GUID cannot be minted; a weak identity would let
+    /// two runs share planted grants.
+    fn run_id() -> Result<String, String> {
         let mut guid = unsafe { std::mem::zeroed() };
         if unsafe { CoCreateGuid(&mut guid) } < 0 {
-            return format!("{}.{}", std::process::id(), unsafe {
-                windows_sys::Win32::System::SystemInformation::GetTickCount64()
-            });
+            return Err(last_error("mint the sandbox run identity"));
         }
         let guid: windows_sys::core::GUID = guid;
-        format!(
+        Ok(format!(
             "{:08x}-{:04x}-{:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
             guid.data1,
             guid.data2,
@@ -730,13 +732,13 @@ mod win {
             guid.data4[5],
             guid.data4[6],
             guid.data4[7]
-        )
+        ))
     }
 
     /// Resolves or registers this run's AppContainer profile and returns its
     /// SID plus the network capability SIDs the sandbox does not restrict.
     fn container() -> Result<(Profile, Vec<SID_AND_ATTRIBUTES>), String> {
-        let name = wide(&format!("dalgon.sandbox.{}", run_id()));
+        let name = wide(&format!("dalgon.sandbox.{}", run_id()?));
         let mut sid: PSID = ptr::null_mut();
         let profile = unsafe {
             CreateAppContainerProfile(
