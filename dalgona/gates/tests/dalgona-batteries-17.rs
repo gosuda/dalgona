@@ -119,7 +119,7 @@ const ALWAYS: [&str; 4] = [
     "project-workflow-agents-md-binding",
 ];
 
-fn rules(product: &dalgon::Product) -> support::TestResult<Vec<RuleRecord>> {
+fn rules(product: &dal_agent::Product) -> support::TestResult<Vec<RuleRecord>> {
     let extension = product
         .extensions
         .iter()

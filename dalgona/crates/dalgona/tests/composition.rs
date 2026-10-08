@@ -7,8 +7,9 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use dal_agent::Product;
 use dal_core::{Config, ConfigProduct};
-use dalgon::{BuildCx, Product};
+use dalgon::BuildCx;
 
 static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
 

@@ -17,7 +17,7 @@ fn defaults_reach_patch_search_and_guard() -> support::TestResult<()> {
     )?;
     assert_eq!(default_product.name, "dalgona");
     assert_eq!(overridden.name, "dalgona");
-    let extension_names = |product: &dalgon::Product| -> BTreeSet<String> {
+    let extension_names = |product: &dal_agent::Product| -> BTreeSet<String> {
         product
             .extensions
             .iter()

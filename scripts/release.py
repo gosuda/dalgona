@@ -417,7 +417,7 @@ def check_dep_only(name: str, requirement: str) -> int:
     if any(satisfies_requirement(version, requirement) for version in index_versions(sys.stdin.read())):
         return 0
     return error(
-        f'dalgon dependency {name} "{requirement}" not on crates.io; release dalgon first',
+        f'dalgon dependency {name} "{requirement}" not on crates.io; release dal first',
         3,
     )
 
@@ -491,24 +491,24 @@ def publish_main(arguments: list[str]) -> int:
             return usage_error(PUBLISH_USAGE)
         return check_dep_only(dep_name, dep_req)
 
+    metadata, status = run_metadata(root, "the cargo metadata shape is invalid for the publish order")
+    if status is not None or metadata is None:
+        return status or 2
+    publishable = [member.name for member in metadata.members if member.publishable]
+    if not publishable:
+        return error(f"no publishable member found in {root_arg}", 4)
     workspace_version = workspace_package_version(root)
     if not workspace_version:
         return error(
             f"workspace root {root_arg} has no [workspace.package] version; lockstep is broken",
             2,
         )
-    metadata, status = run_metadata(root, "the cargo metadata shape is invalid for the publish order")
-    if status is not None or metadata is None:
-        return status or 2
     for member in metadata.members:
         if member.version != workspace_version:
             return error(
                 f"workspace member {member.name} does not inherit the workspace version; lockstep is broken",
                 2,
             )
-    publishable = [member.name for member in metadata.members if member.publishable]
-    if not publishable:
-        return error(f"no publishable member found in {root_arg}", 4)
 
     directories_by_name = {member.name: member.manifest_path.parent.resolve() for member in metadata.members}
     names_by_directory = package_directories(metadata.members)
@@ -544,7 +544,7 @@ def publish_main(arguments: list[str]) -> int:
             versions = index_versions(sparse_index(dependency.name))
             if not any(satisfies_requirement(version, requirement) for version in versions):
                 return error(
-                    f'dalgon dependency {dependency.name} "{requirement}" not on crates.io; release dalgon first',
+                    f'dalgon dependency {dependency.name} "{requirement}" not on crates.io; release dal first',
                     3,
                 )
 

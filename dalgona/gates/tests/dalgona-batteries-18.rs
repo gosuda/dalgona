@@ -12,7 +12,7 @@ const SKILLS: [&str; 3] = [
     "initializer-and-sprints",
 ];
 
-fn skills(product: &dalgon::Product) -> support::TestResult<Vec<dal_core::ext::SkillRecord>> {
+fn skills(product: &dal_agent::Product) -> support::TestResult<Vec<dal_core::ext::SkillRecord>> {
     let extension = product
         .extensions
         .iter()

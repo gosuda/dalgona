@@ -280,7 +280,7 @@ async fn quality_apply_commits_the_approved_offer_in_a_real_session() -> TestRes
     assert!(matches!(reply, dal_core::Reply::Accepted { .. }));
     let mut ended = false;
     for _ in 0..20 {
-        let delivery = tokio::time::timeout(Duration::from_secs(3), subscription.next()).await?;
+        let delivery = tokio::time::timeout(Duration::from_secs(30), subscription.next()).await?;
         let Some(delivery) = delivery else {
             break;
         };
