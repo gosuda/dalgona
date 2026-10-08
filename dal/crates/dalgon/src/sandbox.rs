@@ -431,13 +431,14 @@ mod tests {
 }
 
 /// Windows backend. Each run registers a GUID-unique `AppContainer` profile,
-/// grants its SID `(OI)(CI)` access on the allowed roots and execute-only on
-/// the executable's directory and `PATH` dirs (system locations already grant
-/// `ALL APPLICATION PACKAGES`), then launches the target under the container
-/// inside its own kill-on-close job object. The planted ACEs are lifted on
-/// return; residue left by an abrupt kill is inert because the SID is unique
-/// to this run. Unlike the write-only Landlock model, an `AppContainer` also
-/// denies reads outside the granted roots.
+/// grants its SID `(OI)(CI)` full access on the allowed roots and
+/// read+execute on drive roots, their ancestors, and `PATH` dirs (system
+/// locations already grant `ALL APPLICATION PACKAGES`), then launches the
+/// target under the container
+/// inside its own kill-on-close job object. Grant lifetime is refcounted in a
+/// shared state file so overlapping runs keep concurrent access and a killed
+/// run's leftovers are reaped by the next edit. Reads match the Landlock and
+/// Seatbelt models: open wherever the user's DACLs allow.
 #[cfg(windows)]
 #[expect(
     unsafe_code,
@@ -445,7 +446,7 @@ mod tests {
 )]
 mod win {
     use std::ffi::{OsStr, OsString};
-    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
     use std::path::{Path, PathBuf};
     use std::process::ExitCode;
     use std::ptr;
@@ -470,6 +471,7 @@ mod win {
     use windows_sys::Win32::System::Console::{
         GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
     };
+    use windows_sys::Win32::Storage::FileSystem::GetLogicalDrives;
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
@@ -477,7 +479,7 @@ mod win {
     };
     use windows_sys::Win32::System::SystemServices::SE_GROUP_ENABLED;
     use windows_sys::Win32::System::Threading::{
-        CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateMutexW, CreateProcessW,
+        CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateMutexW, CreateProcessW, OpenMutexW,
         DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, INFINITE,
         InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
         PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
@@ -485,7 +487,7 @@ mod win {
         TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject,
     };
 
-    const GENERIC_EXECUTE_ONLY: u32 = 0x2000_0000; // GENERIC_EXECUTE (FILE_EXECUTE|FILE_TRAVERSE)
+    const GENERIC_READ_EXECUTE: u32 = 0xA000_0000; // GENERIC_READ | GENERIC_EXECUTE
     const GENERIC_ALL_ACCESS: u32 = 0x1000_0000; // GENERIC_ALL
 
     struct OwnedHandle(windows_sys::Win32::Foundation::HANDLE);
@@ -518,6 +520,7 @@ mod win {
     struct Profile {
         sid: OwnedSid,
         name: Vec<u16>,
+        guid: String,
     }
     impl Drop for Profile {
         fn drop(&mut self) {
@@ -580,17 +583,14 @@ mod win {
         command.push(u16::from(b'"'));
     }
 
-    /// Serializes DACL edits and the sandbox run they serve across processes:
-    /// `GetNamedSecurityInfoW` cannot see concurrent descriptor changes, so an
-    /// overlapping helper could erase an active sandbox's grant. One guard is
-    /// held for a whole plant→run→lift sequence, which also makes each run's
-    /// recorded original-DACL state truthful at lift time; sibling `__sandbox`
-    /// helpers wait rather than race. The mutex is session-local because an
-    /// `AppContainer` child always runs in its helper's session.
+    /// Serializes one DACL edit plus its bookkeeping across sibling helpers.
+    /// Held only for a load→edit→save transact — never across a child run —
+    /// so unrelated jobs run concurrently. `Global\` scope because the state
+    /// file lives in the shared per-user temp directory.
     struct DaclLock(OwnedHandle);
     impl DaclLock {
         fn take() -> Result<Self, String> {
-            let name = wide("Local\\dalgon.sandbox.dacl");
+            let name = wide("Global\\dalgon.sandbox.dacl");
             let handle = unsafe { CreateMutexW(ptr::null(), FALSE, name.as_ptr()) };
             let mutex = OwnedHandle::new(handle)?;
             if unsafe { WaitForSingleObject(mutex.0, INFINITE) } != WAIT_OBJECT_0 {
@@ -603,6 +603,241 @@ mod win {
         fn drop(&mut self) {
             unsafe { ReleaseMutex((self.0).0) };
         }
+    }
+
+    /// The liveness beacon for one run: a named mutex held for the whole
+    /// plant→run→lift sequence. A helper killed mid-run releases it, so the
+    /// next transact can reap that run's leftover grants by deriving its SID
+    /// from its GUID-named profile.
+    struct RunGuard(OwnedHandle);
+    impl RunGuard {
+        fn take(guid: &str) -> Result<Self, String> {
+            let name = wide(&format!("Global\\dalgon.sandbox.run.{guid}"));
+            let handle = unsafe { CreateMutexW(ptr::null(), FALSE, name.as_ptr()) };
+            let mutex = OwnedHandle::new(handle)?;
+            if unsafe { WaitForSingleObject(mutex.0, INFINITE) } != WAIT_OBJECT_0 {
+                return Err(last_error("take the sandbox run beacon"));
+            }
+            Ok(Self(mutex))
+        }
+    }
+    impl Drop for RunGuard {
+        fn drop(&mut self) {
+            unsafe { ReleaseMutex((self.0).0) };
+        }
+    }
+
+    /// A run beacon is alive while its mutex object exists: `OpenMutexW`
+    /// fails with `ERROR_FILE_NOT_FOUND` once every handle closes — which is
+    /// exactly when the last holder died. Any other failure means "alive".
+    fn run_alive(guid: &str) -> bool {
+        const SYNCHRONIZE: u32 = 0x0010_0000;
+        const ERROR_FILE_NOT_FOUND: u32 = 2;
+        let name = wide(&format!("Global\\dalgon.sandbox.run.{guid}"));
+        let handle = unsafe { OpenMutexW(SYNCHRONIZE, FALSE, name.as_ptr()) };
+        if !handle.is_null() {
+            unsafe { CloseHandle(handle) };
+            return true;
+        }
+        unsafe { GetLastError() != ERROR_FILE_NOT_FOUND }
+    }
+
+    /// Grant bookkeeping shared by every `__sandbox` helper of this user:
+    /// `orig[path]` is the DACL-open flag observed by the path's first live
+    /// planter; `holders[path]` is every live run's `(guid, access)` grant.
+    /// The last lifter restores exactly what the first planter saw, so an
+    /// open root returns to a null DACL and a deny-all root returns deny-all.
+    #[derive(Default)]
+    struct DaclState {
+        orig: std::collections::BTreeMap<String, bool>,
+        holders: std::collections::BTreeMap<String, Vec<(String, u32)>>,
+    }
+
+    fn dacl_state_path() -> PathBuf {
+        std::env::temp_dir().join("dalgon-sandbox-dacl.state")
+    }
+
+    fn path_key(path: &Path) -> String {
+        let mut key = String::new();
+        for unit in path.as_os_str().encode_wide() {
+            key.push_str(&format!("{unit:04x}"));
+        }
+        key
+    }
+
+    fn key_path(key: &str) -> Option<PathBuf> {
+        let units: Vec<u16> = (0..key.len() / 4)
+            .filter_map(|i| u16::from_str_radix(&key[i * 4..i * 4 + 4], 16).ok())
+            .collect();
+        if units.len() * 4 != key.len() {
+            return None;
+        }
+        Some(PathBuf::from(OsString::from_wide(&units)))
+    }
+
+    impl DaclState {
+        fn load() -> Self {
+            let mut state = Self::default();
+            let Ok(text) = std::fs::read_to_string(dacl_state_path()) else {
+                return state;
+            };
+            for line in text.lines().skip(1) {
+                let fields: Vec<&str> = line.split('\t').collect();
+                match fields.as_slice() {
+                    ["O", path, open] => {
+                        state.orig.insert((*path).to_string(), *open == "1");
+                    }
+                    ["H", path, guid, access] => {
+                        if let Ok(access) = u32::from_str_radix(access, 16) {
+                            state
+                                .holders
+                                .entry((*path).to_string())
+                                .or_default()
+                                .push(((*guid).to_string(), access));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            state
+        }
+
+        fn save(&self) -> Result<(), String> {
+            let mut text = String::from("v1\n");
+            for (path, open) in &self.orig {
+                text.push_str(&format!("O\t{path}\t{}\n", u8::from(*open)));
+            }
+            for (path, holders) in &self.holders {
+                for (guid, access) in holders {
+                    text.push_str(&format!("H\t{path}\t{guid}\t{access:x}\n"));
+                }
+            }
+            let path = dacl_state_path();
+            let tmp = path.with_extension("tmp");
+            std::fs::write(&tmp, text)
+                .and_then(|()| std::fs::rename(&tmp, &path))
+                .map_err(|source| format!("dalgon sandbox: save grant state: {source}"))
+        }
+
+        fn add_holder(&mut self, path: &Path, guid: &str, access: u32) {
+            let key = path_key(path);
+            let holders = self.holders.entry(key).or_default();
+            if !holders.iter().any(|(g, a)| g == guid && *a == access) {
+                holders.push((guid.to_string(), access));
+            }
+        }
+
+        fn remove_holder(&mut self, key: &str, guid: &str, access: u32) -> bool {
+            let Some(holders) = self.holders.get_mut(key) else {
+                return false;
+            };
+            let before = holders.len();
+            holders.retain(|(g, a)| !(g == guid && *a == access));
+            let removed = holders.len() != before;
+            if holders.is_empty() {
+                self.holders.remove(key);
+            }
+            removed
+        }
+    }
+
+    /// Runs `edit` under the DACL mutex with a freshly loaded, reap-swept
+    /// state, then persists it. Every grant mutation is one transact.
+    fn transact<R>(edit: impl FnOnce(&mut DaclState) -> Result<R, String>) -> Result<R, String> {
+        let _lock = DaclLock::take()?;
+        let mut state = DaclState::load();
+        reap_dead(&mut state);
+        let out = edit(&mut state)?;
+        state.save()?;
+        Ok(out)
+    }
+
+    /// Derives a dead run's `AppContainer` SID from its profile name.
+    fn sid_for(guid: &str) -> Option<OwnedSid> {
+        let name = wide(&format!("dalgon.sandbox.{guid}"));
+        let mut sid: PSID = ptr::null_mut();
+        let ok = unsafe { DeriveAppContainerSidFromAppContainerName(name.as_ptr(), &raw mut sid) };
+        if ok < 0 || sid.is_null() {
+            return None;
+        }
+        Some(OwnedSid(sid))
+    }
+
+    /// Lifts one `(path, guid, access)` grant: revokes that run's ACE, then
+    /// removes the holder record. The record is dropped only after the edit
+    /// succeeds, so a failed lift is retried by the next transact instead of
+    /// leaving an untracked ACE behind. When the last holder leaves, the
+    /// write restores the DACL state the first planter observed.
+    fn lift(state: &mut DaclState, key: &str, guid: &str, access: u32) {
+        let has = state
+            .holders
+            .get(key)
+            .is_some_and(|h| h.iter().any(|(g, a)| g == guid && *a == access));
+        if !has {
+            return;
+        }
+        let (Some(sid), Some(path)) = (sid_for(guid), key_path(key)) else {
+            return;
+        };
+        let last = state.holders.get(key).is_some_and(|h| h.len() == 1);
+        let was_open = if last {
+            state.orig.get(key).copied().unwrap_or(false)
+        } else {
+            false
+        };
+        if edit_dacl(&path, sid.0, access, REVOKE_ACCESS, last && was_open).is_err() {
+            return;
+        }
+        state.remove_holder(key, guid, access);
+        if last {
+            state.orig.remove(key);
+        }
+    }
+
+    /// Drops every grant whose run beacon is gone — a helper killed mid-run
+    /// leaves `H` records whose ACEs would otherwise pin the directory open
+    /// or deny-all forever.
+    fn reap_dead(state: &mut DaclState) {
+        let dead: Vec<(String, String, u32)> = state
+            .holders
+            .iter()
+            .flat_map(|(path, holders)| {
+                holders
+                    .iter()
+                    .filter(|(guid, _)| !run_alive(guid))
+                    .map(|(guid, access)| (path.clone(), guid.clone(), *access))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        for (path, guid, access) in dead {
+            lift(state, &path, &guid, access);
+        }
+    }
+
+    /// Plants `(path, access)` for this run under the transact lock. The
+    /// first live planter probes and records the original DACL-open state.
+    fn plant(
+        state: &mut DaclState,
+        path: &Path,
+        sid: PSID,
+        guid: &str,
+        access: u32,
+    ) -> Result<bool, String> {
+        let key = path_key(path);
+        if state
+            .holders
+            .get(&key)
+            .is_some_and(|h| h.iter().any(|(g, a)| g == guid && *a == access))
+        {
+            return Ok(false);
+        }
+        let first = !state.holders.contains_key(&key);
+        let was_open = edit_dacl(path, sid, access, GRANT_ACCESS, false)?;
+        if first {
+            state.orig.insert(key.clone(), was_open);
+        }
+        state.add_holder(path, guid, access);
+        Ok(true)
     }
 
     /// Adds or removes the container SID's ACE on one path; `(OI)(CI)` covers
@@ -693,73 +928,98 @@ mod win {
         Ok(was_open)
     }
 
-    /// Grants the run-unique SID full access on each allowed root and
-    /// execute-only on the executable's directory plus every PATH directory so
-    /// the command runtime (outside the `ALL APPLICATION PACKAGES` grants)
-    /// still loads. Runtime dirs grant `FILE_EXECUTE`, never `FILE_READ_DATA`:
-    /// image loading needs execute rights only, so private files in those
-    /// directories stay unreadable — consistent with the deny-read model.
+    /// The grant plan: POSIX read-open parity. The container reads and
+    /// executes anywhere the user's own DACLs allow — RX ACEs on every fixed
+    /// drive root, each writable root's ancestors, the launch directory, and
+    /// every `PATH` directory — and writes only under the allowed roots,
+    /// which get full control. Optional sites tolerate grant failures the way
+    /// the launch dir always has: an unprivileged helper cannot edit most
+    /// system drive DACLs, and a genuinely unreadable directory fails at
+    /// access time with an OS error.
     #[expect(
         clippy::disallowed_methods,
         reason = "the process edge owns environment reads; PATH decides the runtime dirs"
     )]
+    fn grant_plan(roots: &[PathBuf], executable: &Path) -> Vec<(PathBuf, u32, bool)> {
+        let mut plan: Vec<(PathBuf, u32, bool)> = Vec::new();
+        let push_rx = |dir: PathBuf, plan: &mut Vec<(PathBuf, u32, bool)>| {
+            if !dir.as_os_str().is_empty()
+                && !plan
+                    .iter()
+                    .any(|(p, a, _)| *p == dir && *a == GENERIC_READ_EXECUTE)
+            {
+                plan.push((dir, GENERIC_READ_EXECUTE, true));
+            }
+        };
+        let drives = unsafe { GetLogicalDrives() };
+        for index in 0..26u32 {
+            if drives & (1 << index) == 0 {
+                continue;
+            }
+            let Some(letter) = char::from_u32(u32::from(b'A') + index) else {
+                continue;
+            };
+            push_rx(PathBuf::from(format!("{letter}:\\")), &mut plan);
+        }
+        if let Some(dir) = executable
+            .parent()
+            .filter(|dir| !dir.as_os_str().is_empty())
+        {
+            push_rx(dir.to_path_buf(), &mut plan);
+        }
+        if let Some(paths) = std::env::var_os("PATH") {
+            for dir in std::env::split_paths(&paths) {
+                push_rx(dir, &mut plan);
+            }
+        }
+        for root in roots {
+            // Ancestors of a writable root need read+traverse too: without an
+            // ACE on each parent the container cannot reach the granted root.
+            for ancestor in root.ancestors().skip(1) {
+                push_rx(ancestor.to_path_buf(), &mut plan);
+            }
+            plan.push((root.clone(), GENERIC_ALL_ACCESS, false));
+        }
+        plan
+    }
+
+    /// Plants the grant plan under per-edit transacts. A fatal (writable
+    /// root) failure lifts what already planted and aborts; optional entries
+    /// tolerate the edit failing.
     fn plant_grants(
         roots: &[PathBuf],
         executable: &Path,
-        sid: PSID,
-    ) -> Result<Vec<(PathBuf, u32, bool)>, String> {
-        let mut planted: Vec<(PathBuf, u32, bool)> = Vec::new();
+        profile: &Profile,
+    ) -> Result<Vec<(PathBuf, u32)>, String> {
+        let mut planted: Vec<(PathBuf, u32)> = Vec::new();
         let result = (|| {
-            if let Some(dir) = executable
-                .parent()
-                .filter(|dir| !dir.as_os_str().is_empty())
-            {
-                // Execute on the launch directory only. System locations
-                // already permit `ALL APPLICATION PACKAGES` and an unprivileged
-                // user cannot edit them; a directory the container genuinely
-                // cannot read fails at exec time with an access error, so a
-                // failed grant here must not block launch.
-                if let Ok(was_open) = edit_dacl(dir, sid, GENERIC_EXECUTE_ONLY, GRANT_ACCESS, false)
-                {
-                    planted.push((dir.to_path_buf(), GENERIC_EXECUTE_ONLY, was_open));
+            for (dir, access, optional) in grant_plan(roots, executable) {
+                match transact(|state| plant(state, &dir, profile.sid.0, &profile.guid, access)) {
+                    Ok(_) => planted.push((dir, access)),
+                    Err(error) if !optional => return Err(error),
+                    Err(_) => {}
                 }
-            }
-            // Execute on every PATH directory so the shell can reach its
-            // runtime (`cargo` under %USERPROFILE%\.cargo\bin, Git's usr\bin).
-            // Same tolerate rule as the launch directory: the OS decides.
-            if let Some(paths) = std::env::var_os("PATH") {
-                for dir in std::env::split_paths(&paths) {
-                    if dir.as_os_str().is_empty() {
-                        continue;
-                    }
-                    if let Ok(was_open) =
-                        edit_dacl(&dir, sid, GENERIC_EXECUTE_ONLY, GRANT_ACCESS, false)
-                    {
-                        planted.push((dir, GENERIC_EXECUTE_ONLY, was_open));
-                    }
-                }
-            }
-            for root in roots {
-                let was_open = edit_dacl(root, sid, GENERIC_ALL_ACCESS, GRANT_ACCESS, false)?;
-                planted.push((root.clone(), GENERIC_ALL_ACCESS, was_open));
             }
             Ok(())
         })();
         if result.is_err() {
-            revoke_planted(&planted, sid);
+            lift_all(&planted, profile);
         }
         result.map(|()| planted)
     }
 
-    /// Lifts every planted ACE in reverse plant order — the last grant on a
-    /// path observed a non-null DACL, so the first-planted entry (which may
-    /// need an open-root restore) must be lifted last or its null write would
-    /// erase the still-pending second grant. Failures are collected instead
-    /// of discarded so the run reports grants it could not remove.
-    fn revoke_planted(planted: &[(PathBuf, u32, bool)], sid: PSID) -> Option<String> {
+    /// Lifts this run's planted grants. The state file decides each path's
+    /// restore: the last live holder returns the DACL the first planter
+    /// observed, so overlapping runs cannot erase each other and a killed
+    /// run's leftovers are reaped by the next transact. Failures collect so
+    /// the run reports grants it could not remove.
+    fn lift_all(planted: &[(PathBuf, u32)], profile: &Profile) -> Option<String> {
         let mut failed = Vec::new();
-        for (path, access, was_open) in planted.iter().rev() {
-            if let Err(error) = edit_dacl(path, sid, *access, REVOKE_ACCESS, *was_open) {
+        for (path, access) in planted {
+            if let Err(error) = transact(|state| {
+                lift(state, &path_key(path), &profile.guid, *access);
+                Ok(())
+            }) {
                 failed.push(error);
             }
         }
@@ -803,7 +1063,8 @@ mod win {
     /// Resolves or registers this run's `AppContainer` profile and returns its
     /// SID plus the network capability SIDs the sandbox does not restrict.
     fn container() -> Result<(Profile, Vec<SID_AND_ATTRIBUTES>), String> {
-        let name = wide(&format!("dalgon.sandbox.{}", run_id()?));
+        let guid = run_id()?;
+        let name = wide(&format!("dalgon.sandbox.{guid}"));
         let mut sid: PSID = ptr::null_mut();
         let profile = unsafe {
             CreateAppContainerProfile(
@@ -862,6 +1123,7 @@ mod win {
             Profile {
                 sid: OwnedSid(sid),
                 name,
+                guid,
             },
             capabilities,
         ))
@@ -976,10 +1238,11 @@ mod win {
         run_args: &[OsString],
     ) -> Result<ExitCode, String> {
         let (profile, capabilities) = container()?;
-        // Held for the whole plant→run→lift sequence: overlapping helpers
-        // then see a stable DACL state and each restores exactly what it read.
-        let _dacl_lock = DaclLock::take()?;
-        let planted = plant_grants(roots, Path::new(executable), profile.sid.0)?;
+        // The run beacon lives for the whole plant→run→lift sequence: if this
+        // helper dies mid-run the next transact reaps this run's grants instead
+        // of leaving ACEs pinned forever.
+        let _run = RunGuard::take(&profile.guid)?;
+        let planted = plant_grants(roots, Path::new(executable), &profile)?;
 
         let std_handles = [
             unsafe { GetStdHandle(STD_INPUT_HANDLE) },
@@ -988,7 +1251,7 @@ mod win {
         ];
 
         let attrs = attributes(&profile, &capabilities, &std_handles)
-            .inspect_err(|_| drop(revoke_planted(&planted, profile.sid.0)))?;
+            .inspect_err(|_| drop(lift_all(&planted, &profile)))?;
 
         let mut application = Path::new(executable)
             .parent()
@@ -1031,7 +1294,7 @@ mod win {
             name.clear();
         }
         if spawned == FALSE {
-            revoke_planted(&planted, profile.sid.0);
+            lift_all(&planted, &profile);
             return Err(last_error("spawn the sandboxed process"));
         }
 
@@ -1050,7 +1313,7 @@ mod win {
                     CloseHandle(process.hThread);
                     CloseHandle(process.hProcess);
                 }
-                revoke_planted(&planted, profile.sid.0);
+                lift_all(&planted, &profile);
                 return Err(error);
             }
         };
@@ -1064,7 +1327,7 @@ mod win {
             CloseHandle(process.hThread);
             CloseHandle(process.hProcess);
         };
-        let revoke_error = revoke_planted(&planted, profile.sid.0);
+        let revoke_error = lift_all(&planted, &profile);
         if let Some(error) = revoke_error {
             super::write_error(&error);
         }
