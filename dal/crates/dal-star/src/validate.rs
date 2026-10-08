@@ -251,6 +251,20 @@ pub(crate) fn validate(
     let rules = validate_rules(&site, &descriptor.rules)?;
     let models = validate_models(&site, &declared, &descriptor.models)?;
 
+    // Every operation a declaration may issue contributes its service to the
+    // plugin's injection manifest: `uses` is the declaration the service
+    // boundary reads, the same way an eval cell's ceiling resolves to its
+    // services (R03). An explicit `inject` list only ever adds to this.
+    let mut inject = inject;
+    for uses in exports
+        .iter()
+        .map(|export| &export.uses)
+        .chain(hooks.iter().map(|hook| &hook.uses))
+        .chain(models.iter().map(|model| &model.uses))
+    {
+        inject = inject.union(uses.services());
+    }
+
     let prompt = descriptor.prompt.clone().map(String::into_boxed_str);
 
     Ok(LoadedPlugin {

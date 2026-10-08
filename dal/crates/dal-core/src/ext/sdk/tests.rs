@@ -82,6 +82,29 @@ fn e01_uses_list_rejects_duplicates_and_oversize() -> TestResult {
 }
 
 #[test]
+fn uses_injects_its_services_including_capability_free_ask() -> TestResult {
+    let uses = OpSet::parse(["env.read", "ask.select", "agents.wait"])?;
+    let services = uses.services();
+    assert!(services.contains(crate::Service::Env));
+    assert!(services.contains(crate::Service::Ask));
+    assert!(services.contains(crate::Service::Agents));
+    assert!(
+        !services.contains(crate::Service::Run),
+        "an undeclared op never injects its service"
+    );
+    let grantable = services.capabilities();
+    assert!(
+        grantable.contains(crate::Service::Agents),
+        "grantable services reach the grant key"
+    );
+    assert!(
+        !grantable.contains(crate::Service::Ask),
+        "ask never joins a grant"
+    );
+    Ok(())
+}
+
+#[test]
 fn r03_service_map_keeps_ask_ungranted_and_exports_serviceless() -> TestResult {
     let set = OpSet::parse([
         "tools.read",
@@ -91,13 +114,20 @@ fn r03_service_map_keeps_ask_ungranted_and_exports_serviceless() -> TestResult {
         "tools.quality.todos",
     ])?;
     let services = set.services().iter().collect::<Vec<_>>();
-    assert_eq!(services, [Service::FsRead, Service::Sidecar]);
+    assert_eq!(services, [Service::FsRead, Service::Ask, Service::Sidecar]);
     assert_eq!(NativeOp::ToolsPatch.service(), Some(Service::FsWrite));
     assert_eq!(NativeOp::ToolsExec.service(), Some(Service::Run));
     assert_eq!(NativeOp::ModelsForward.service(), Some(Service::Infer));
     for ask in [NativeOp::AskConfirm, NativeOp::AskSelect, NativeOp::AskText] {
-        assert_eq!(ask.service(), None);
+        assert_eq!(ask.service(), Some(Service::Ask));
     }
+    assert!(
+        set.services().capabilities().iter().eq(services
+            .iter()
+            .copied()
+            .filter(|service| *service != Service::Ask)),
+        "ask is injected but never granted"
+    );
     Ok(())
 }
 
