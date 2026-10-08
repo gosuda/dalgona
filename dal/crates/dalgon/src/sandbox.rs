@@ -489,6 +489,9 @@ mod win {
 
     const GENERIC_READ_EXECUTE: u32 = 0xA000_0000; // GENERIC_READ | GENERIC_EXECUTE
     const GENERIC_ALL_ACCESS: u32 = 0x1000_0000; // GENERIC_ALL
+    /// POSIX `+x` parity: traverse plus attribute reads, no listing or file
+    /// contents — sibling names under an ancestor stay private.
+    const TRAVERSE_ACCESS: u32 = 0xA0; // FILE_TRAVERSE | FILE_READ_ATTRIBUTES
 
     struct OwnedHandle(windows_sys::Win32::Foundation::HANDLE);
     impl OwnedHandle {
@@ -1016,15 +1019,16 @@ mod win {
     /// The grant plan, matched to the POSIX read-open model: the container
     /// reads and executes wherever DACLs already let it — system locations
     /// grant `ALL APPLICATION PACKAGES` out of the box — plus RX ACEs on the
-    /// launch directory, every `PATH` directory, and each writable root's
-    /// ancestors (without an ACE on each parent the container cannot reach
-    /// the granted root). Writable roots get full control. Drive roots are
-    /// never touched: an `(OI)(CI)` ACE on a drive root propagates to every
-    /// existing descendant on the volume. `PATH` entries tolerate grant
-    /// failure — system dirs already carry `ALL APPLICATION PACKAGES` —
-    /// while the launch dir, ancestors, and writable roots are fatal: a
-    /// failed grant there means the promised access cannot exist, so the
-    /// run must not start with the read policy only partially installed.
+    /// launch directory and every `PATH` directory, and traverse-only ACEs
+    /// on each writable root's ancestors (POSIX `+x` parity: the container
+    /// can resolve through them but cannot list or read sibling files).
+    /// Writable roots get full control. Drive roots are never touched: an
+    /// `(OI)(CI)` ACE on a drive root propagates to every existing
+    /// descendant on the volume. `PATH` entries tolerate grant failure —
+    /// system dirs already carry `ALL APPLICATION PACKAGES` — while the
+    /// launch dir, ancestors, and writable roots are fatal: a failed grant
+    /// there means the promised access cannot exist, so the run must not
+    /// start with the read policy only partially installed.
     #[expect(
         clippy::disallowed_methods,
         reason = "the process edge owns environment reads; PATH decides the runtime dirs"
@@ -1052,16 +1056,21 @@ mod win {
             }
         }
         for root in roots {
-            // Ancestor RX stops before the drive/share root: an inheritable
-            // ACE on a volume root rewrites every descendant's DACL, and a
-            // normal user cannot write it anyway — the run would fail for
-            // lack of WRITE_DAC.
+            // Ancestor traverse stops before the drive/share root: an
+            // inheritable ACE on a volume root rewrites every descendant's
+            // DACL, and a normal user cannot write it anyway — the run
+            // would fail for lack of WRITE_DAC. Traverse, not RX, so the
+            // container cannot list or read sibling files under a private
+            // parent (POSIX `+x` parity).
             for ancestor in root
                 .ancestors()
                 .skip(1)
                 .take_while(|dir| dir.parent().is_some())
             {
-                push_rx(ancestor.to_path_buf(), false, &mut plan);
+                if !ancestor.as_os_str().is_empty() && !plan.iter().any(|(p, _, _)| *p == ancestor)
+                {
+                    plan.push((ancestor.to_path_buf(), TRAVERSE_ACCESS, false));
+                }
             }
             plan.push((root.clone(), GENERIC_ALL_ACCESS, false));
         }
