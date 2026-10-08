@@ -59,6 +59,7 @@ fn budget(window: u64, share: f64) -> Budget {
         window_tokens: Some(window),
         total_tokens: 2_100_000,
         images_elsewhere: 0,
+        image_bytes_elsewhere: 0,
         share,
     }
 }
@@ -542,4 +543,41 @@ fn compaction_ordinal_reads_only_compaction_ids() {
         summary: String::new(),
     };
     assert_eq!(dream.compaction_ordinal(), None);
+}
+
+#[tokio::test]
+async fn retained_image_bytes_use_the_png_budget() {
+    let total = all_letters().await;
+    let (_, drawn) = run(
+        limits(),
+        profile(1000),
+        request(&covered(), budget(u64::MAX / 4, 0.7)),
+    )
+    .await;
+    let sum: usize = drawn
+        .expect("drawn")
+        .letters
+        .iter()
+        .map(|letter| letter.png.len())
+        .sum();
+    let mut exact = limits();
+    exact.png_bytes = sum;
+
+    let mut carried = budget(u64::MAX / 4, 0.7);
+    carried.image_bytes_elsewhere = 1;
+    let (_, short) = run(exact, profile(1000), request(&covered(), carried)).await;
+    assert_eq!(
+        positions(&short.expect("drawn")),
+        std::iter::once(0).chain(2..total).collect::<Vec<_>>()
+    );
+
+    carried.image_bytes_elsewhere = sum;
+    let (result, drawn) = run(exact, profile(1000), request(&covered(), carried)).await;
+    assert!(is_refusal(result));
+    assert!(drawn.is_none());
+
+    carried.image_bytes_elsewhere = usize::MAX;
+    let (result, drawn) = run(exact, profile(1000), request(&covered(), carried)).await;
+    assert!(is_refusal(result));
+    assert!(drawn.is_none());
 }

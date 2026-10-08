@@ -54,9 +54,12 @@ const PARALLEL_READS: usize = 4;
 
 /// Bound for hook waits inside one turn.
 const TURN_DEADLINE: Duration = Duration::from_secs(600);
+
 /// A provider stream this quiet is a stall, not a slow model.
 const STREAM_IDLE_REPORT: Duration = Duration::from_secs(30);
+
 const COMPACTION_MIN_TOKENS: u64 = 1;
+
 const COMPACTION_KEEP_TOKENS: u64 = 20_000;
 
 struct OwnedWatcher {
@@ -1267,12 +1270,10 @@ impl Driver {
             .and_then(|first| entries.iter().position(|entry| entry.id == first))
             .unwrap_or(entries.len());
         let covered = covered_entries(&entries[..cut]);
-        let images_elsewhere = entries
+        let retained = entries[cut..]
             .iter()
-            .enumerate()
-            .filter(|(index, _entry)| *index >= cut)
-            .map(|(_, entry)| image_count(entry))
-            .sum();
+            .map(retained_images)
+            .fold(RetainedImages::default(), RetainedImages::add);
         let carried = entries.iter().rev().find_map(|entry| match &entry.kind {
             dal_core::EntryKind::Compaction {
                 summary: Some(summary),
@@ -1291,7 +1292,7 @@ impl Driver {
                         first_kept,
                         total,
                         measured,
-                        images_elsewhere,
+                        retained,
                         carried,
                         route,
                         image_profile,
@@ -1364,7 +1365,7 @@ impl Driver {
             first_kept,
             total,
             measured,
-            images_elsewhere,
+            retained,
             carried,
             route,
             image_profile,
@@ -1403,7 +1404,8 @@ impl Driver {
                 first_kept,
                 context_window: window,
                 image_profile,
-                images_elsewhere,
+                images_elsewhere: retained.count,
+                image_bytes_elsewhere: retained.bytes,
                 carried: carried.clone(),
                 total_tokens: total,
                 params: params.clone(),
@@ -1465,7 +1467,7 @@ struct CompactedSpan<'a> {
     first_kept: Option<dal_core::EntryId>,
     total: u64,
     measured: Option<u64>,
-    images_elsewhere: usize,
+    retained: RetainedImages,
     carried: Option<Box<str>>,
     route: ModelRoute,
     image_profile: Option<dal_provider::ImageProfile>,
@@ -1505,21 +1507,60 @@ fn covered_entries(items: &[EntryView]) -> Vec<crate::ext::compact::CoveredEntry
     out
 }
 
-fn image_count(entry: &EntryView) -> usize {
+/// The images that stay in the request after a compaction cut.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct RetainedImages {
+    /// Number of images.
+    count: usize,
+    /// Bytes the images occupy: decoded length of inline images, stored
+    /// length of blobs.
+    bytes: u64,
+}
+
+impl RetainedImages {
+    fn add(self, other: Self) -> Self {
+        Self {
+            count: self.count.saturating_add(other.count),
+            bytes: self.bytes.saturating_add(other.bytes),
+        }
+    }
+}
+
+/// Counts one entry's images and sums their bytes.
+fn retained_images(entry: &EntryView) -> RetainedImages {
     let (dal_core::EntryKind::User { parts }
     | dal_core::EntryKind::ToolResult { parts, .. }
     | dal_core::EntryKind::Compaction { parts, .. }) = &entry.kind
     else {
-        return 0;
+        return RetainedImages::default();
     };
     parts
         .iter()
-        .filter(|part| match part {
-            JournalPart::Image { .. } | JournalPart::ImageBlob { .. } => true,
-            JournalPart::Blob { mime, .. } => mime.starts_with("image/"),
-            JournalPart::Text { .. } | JournalPart::TextBlob { .. } => false,
+        .filter_map(|part| match part {
+            JournalPart::Image { base64, .. } => Some(decoded_base64_len(base64)),
+            JournalPart::ImageBlob { bytes, .. } => Some(*bytes),
+            JournalPart::Blob { mime, bytes, .. } if mime.starts_with("image/") => Some(*bytes),
+            JournalPart::Blob { .. } | JournalPart::Text { .. } | JournalPart::TextBlob { .. } => {
+                None
+            }
         })
-        .count()
+        .map(|bytes| RetainedImages { count: 1, bytes })
+        .fold(RetainedImages::default(), RetainedImages::add)
+}
+
+/// The decoded length of a base64 string, without decoding it.
+fn decoded_base64_len(base64: &str) -> u64 {
+    let padding = base64
+        .bytes()
+        .rev()
+        .take_while(|byte| *byte == b'=')
+        .count();
+    let length = u64::try_from(base64.len()).unwrap_or(u64::MAX);
+    let padding = u64::try_from(padding).unwrap_or(u64::MAX);
+    (length / 4)
+        .saturating_mul(3)
+        .saturating_add((length % 4).saturating_sub(1))
+        .saturating_sub(padding.min(2))
 }
 
 /// Builds model-visible tool descriptions for section rendering.

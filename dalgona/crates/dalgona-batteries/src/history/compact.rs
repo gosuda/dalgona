@@ -101,6 +101,8 @@ impl Compactor for HistoryCompactor {
                 window_tokens: input.context_window,
                 total_tokens: input.total_tokens,
                 images_elsewhere,
+                image_bytes_elsewhere: usize::try_from(input.image_bytes_elsewhere)
+                    .unwrap_or(usize::MAX),
                 share: self.share,
             };
             let mut request = Request::new(

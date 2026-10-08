@@ -23,6 +23,7 @@ use super::draw::{DrawError, Grid, draw, paginate};
 use super::records::{LetterRecord, RecordError};
 use super::selection::{
     LetterVisibility, entry_id, history_index_line, index_text, select_oldest_plus_newest,
+    select_oldest_plus_newest_by_bytes,
 };
 use super::spans::{CompactPiece, HistoryError, Item, SourceError, Span, items};
 use super::{CARRIED_PREFIX, HISTORY_HEADER, PNG_BYTE_BUDGET, RENDER_TIMEOUT_MS, SAVINGS_FACTOR};
@@ -137,6 +138,8 @@ pub(crate) struct Budget {
     pub(crate) total_tokens: u64,
     /// Images already elsewhere in the request.
     pub(crate) images_elsewhere: usize,
+    /// Bytes those images already occupy in the request.
+    pub(crate) image_bytes_elsewhere: usize,
     /// Fraction of the window billable to images.
     pub(crate) share: f64,
 }
@@ -459,19 +462,20 @@ impl Engine {
             });
         }
         let first = png_len(&candidates[pool[0]]);
-        let mut bytes = 0_usize;
-        let pool = keep(&pool, |index| {
-            let next = bytes.saturating_add(png_len(&candidates[index]));
-            let fits = next <= self.limits.png_bytes;
-            if fits {
-                bytes = next;
-            }
-            fits
-        });
+        let sizes: Vec<usize> = pool
+            .iter()
+            .map(|index| png_len(&candidates[*index]))
+            .collect();
+        let png_budget = self
+            .limits
+            .png_bytes
+            .saturating_sub(request.budget.image_bytes_elsewhere);
+        let kept = select_oldest_plus_newest_by_bytes(&sizes, png_budget);
+        let pool = kept.into_iter().map(|slot| pool[slot]).collect::<Vec<_>>();
         if pool.is_empty() {
             return Err(Decline::PngBudget {
                 need: first,
-                limit: self.limits.png_bytes,
+                limit: png_budget,
             });
         }
         let saving_cap = scaled(self.limits.savings, request.text_tokens);

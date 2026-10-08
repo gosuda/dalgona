@@ -16,10 +16,18 @@ use dal_store::Store;
 
 const FIXTURE: &str = "{\"kind\":\"events\",\"events\":[{\"type\":\"text_delta\",\"text\":\"warm\"},{\"type\":\"tool_calls_done\",\"calls\":[]},{\"type\":\"usage\",\"usage\":{\"input_tokens\":10,\"cached_input_tokens\":0,\"output_tokens\":5,\"reasoning_tokens\":null,\"cache_write_tokens\":0,\"cost_usd\":null}},{\"type\":\"stop\",\"reason\":\"end_turn\"}]}\n";
 
+/// Stored length of the retained blob image, `b"retained image"`.
+const RETAINED_IMAGE_BYTES: u64 = 14;
+
+/// The inline image `"hello"` in base64: five decoded bytes behind padding.
+const INLINE_IMAGE_BASE64: &str = "aGVsbG8=";
+const INLINE_IMAGE_BYTES: u64 = 5;
+
 #[derive(Clone, Debug, PartialEq)]
 struct Captured {
     image_profile: Option<ImageProfile>,
     images_elsewhere: usize,
+    image_bytes_elsewhere: u64,
     carried: Option<Box<str>>,
     first_kept: Option<EntryId>,
     covered_span: (EntryId, EntryId),
@@ -39,6 +47,7 @@ impl Compactor for CaptureCompactor {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Captured {
             image_profile: input.image_profile,
             images_elsewhere: input.images_elsewhere,
+            image_bytes_elsewhere: input.image_bytes_elsewhere,
             carried: input.carried.clone(),
             first_kept: input.first_kept,
             covered_span: input.span,
@@ -96,11 +105,17 @@ fn seed_records(image: &[u8], image_id: dal_core::BlobId) -> Vec<Record> {
         user(
             3,
             Some(entry(2)),
-            vec![JournalPart::ImageBlob {
-                mime: "image/png".into(),
-                blob: image_id.to_string().into(),
-                bytes: u64::try_from(image.len()).expect("image length fits"),
-            }],
+            vec![
+                JournalPart::ImageBlob {
+                    mime: "image/png".into(),
+                    blob: image_id.to_string().into(),
+                    bytes: u64::try_from(image.len()).expect("image length fits"),
+                },
+                JournalPart::Image {
+                    mime: "image/png".into(),
+                    base64: INLINE_IMAGE_BASE64.into(),
+                },
+            ],
         ),
         user(
             4,
@@ -241,7 +256,11 @@ async fn driver_passes_catalog_profile_retained_images_and_carried_summary() {
     .await
     .expect("compactor receives selected context");
     assert_eq!(captured.image_profile, Some(ImageProfile::openai()));
-    assert_eq!(captured.images_elsewhere, 1);
+    assert_eq!(captured.images_elsewhere, 2);
+    assert_eq!(
+        captured.image_bytes_elsewhere,
+        RETAINED_IMAGE_BYTES + INLINE_IMAGE_BYTES
+    );
     assert_eq!(captured.carried.as_deref(), Some("carried history summary"));
     assert_eq!(captured.first_kept, Some(entry(2)));
     assert_eq!(captured.covered_span, (entry(1), entry(1)));

@@ -81,6 +81,10 @@ pub struct CompactInput<'a> {
     pub image_profile: Option<ImageProfile>,
     /// Images in the retained context outside the covered prefix.
     pub images_elsewhere: usize,
+    /// Bytes those images occupy in the request: the decoded length of each
+    /// inline image and the stored length of each image blob. A compactor
+    /// that adds images subtracts this from its own request byte budget.
+    pub image_bytes_elsewhere: u64,
     /// Summary text carried forward from an earlier compaction.
     pub carried: Option<Box<str>>,
     /// Total projected token count for the branch.

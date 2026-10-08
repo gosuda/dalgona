@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add `image_bytes_elsewhere` to compactor input: the bytes of the images that stay in the request, so a compactor can keep its images within a request size budget.
 - Fix an HTTP 413 "request too large" answer from a provider: dal now compacts the history and retries the turn, as for a context-overflow error, instead of failing the turn.
 - Price model requests by context size: a model can list request-wide price tiers in its prices (`dal.toml` and the bundled price table), and dal uses the highest tier that the request's input tokens exceed.
 - Add opt-in fenced-diagram rendering for terminal transcript rows and ask previews: the `/settings` picker toggles `tui.diagrams` for the session and a save row persists it to `dal.toml` through the standard product configuration; CLI-backed diagram renders run on background workers with a pending placeholder, and pixel results draw through the terminal's image protocol (kitty, sixel, or iTerm2) instead of a text card.

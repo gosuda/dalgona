@@ -32,6 +32,25 @@ pub(crate) fn select_oldest_plus_newest(
     kept
 }
 
+/// Selects oldest-plus-newest candidates while their bytes fit one budget.
+///
+/// The byte total is charged in selection order: oldest first, then newest
+/// toward the middle. A candidate that would exceed the budget stops that
+/// direction, matching the other compaction caps.
+pub(crate) fn select_oldest_plus_newest_by_bytes(sizes: &[usize], budget: usize) -> Vec<usize> {
+    let mut used = 0_usize;
+    select_oldest_plus_newest(sizes.len(), |index| {
+        let Some(next) = used.checked_add(sizes[index]) else {
+            return false;
+        };
+        if next > budget {
+            return false;
+        }
+        used = next;
+        true
+    })
+}
+
 /// Formats the compaction index text.
 #[must_use]
 pub(crate) fn index_text(shown: usize, total: usize, hidden: &str) -> String {

@@ -13,7 +13,10 @@ use super::dream::{
     transition,
 };
 use super::records::{LetterRecord, RecordError};
-use super::selection::{LetterVisibility, history_index_line, select_oldest_plus_newest};
+use super::selection::{
+    LetterVisibility, history_index_line, select_oldest_plus_newest,
+    select_oldest_plus_newest_by_bytes,
+};
 use super::spans::{
     CompactPiece, HistoryError, Item, Role, SourceError, Span, items, retained_segments,
 };
@@ -427,6 +430,20 @@ fn selection_keeps_oldest_plus_newest() {
     assert_eq!(kept, expected);
     assert!(select_oldest_plus_newest(0, |_| true).is_empty());
     assert_eq!(select_oldest_plus_newest(3, |_| false), Vec::<usize>::new());
+}
+
+#[test]
+fn selection_trims_images_at_the_byte_budget_boundary() {
+    let sizes = [500, 200, 200];
+    assert_eq!(select_oldest_plus_newest_by_bytes(&sizes, 899), vec![0, 2]);
+    assert_eq!(
+        select_oldest_plus_newest_by_bytes(&sizes, 900),
+        vec![0, 1, 2]
+    );
+    assert_eq!(
+        select_oldest_plus_newest_by_bytes(&[usize::MAX, 1], usize::MAX),
+        vec![0]
+    );
 }
 
 #[test]
