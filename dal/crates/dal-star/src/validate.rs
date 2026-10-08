@@ -44,10 +44,6 @@ pub(crate) struct LoadedPlugin {
     /// The host services explicitly requested by the plugin.
     pub(crate) inject: ServiceSet,
     /// The state schema version; nonzero by constructor.
-    #[expect(
-        dead_code,
-        reason = "the host state namespace has no API that accepts a version yet"
-    )]
     pub(crate) state_version: NonZeroU32,
     /// The normalized config value, decoded from the host-supplied config
     /// object and validated against `config`; `Null` when absent.
