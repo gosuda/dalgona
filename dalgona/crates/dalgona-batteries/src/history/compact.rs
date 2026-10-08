@@ -19,9 +19,7 @@ use dal_ext::Font;
 use tokio::sync::Semaphore;
 
 use super::MAX_CONCURRENT_RENDERS;
-use super::pipeline::{
-    Budget, Commit, Decline, Engine, Limits, Request, SourceReader,
-};
+use super::pipeline::{Budget, Commit, Decline, Engine, Limits, Request, SourceReader};
 use super::records::LetterRecord;
 use super::spans::CompactPiece;
 

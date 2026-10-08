@@ -19,10 +19,7 @@ mod tests;
 
 /// Maximum tool-call records retained by the guard window.
 const RECORD_CAPACITY: usize = 64;
-pub(crate) use guard::{
-    GuardState, GuardVerdict, clear_pending_attempts, on_tool_call,
-    reset,
-};
+pub(crate) use guard::{GuardState, GuardVerdict, clear_pending_attempts, on_tool_call, reset};
 pub(crate) use rewrite::rewrite_exec_args;
 pub(crate) use sleep::SleepClassifier;
 

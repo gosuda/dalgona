@@ -88,15 +88,8 @@ impl StdioTransport {
             cause: format!("command {program:?} was not found on PATH"),
         })?;
 
-        let mut child = Self::spawn_piped(
-            key.clone(),
-            resolved,
-            command,
-            env,
-            environment,
-            budgets,
-        )
-        .await?;
+        let mut child =
+            Self::spawn_piped(key.clone(), resolved, command, env, environment, budgets).await?;
         let stdin = child.stdin().take();
         let stdout = child.stdout().take();
         let stderr = child.stderr().take();
@@ -572,21 +565,14 @@ fn unsupported_request(value: &sonic_rs::Value) -> Result<String, McpError> {
     ))
 }
 
-async fn deliver(
-    pending: &Pending,
-    id: u64,
-    result: Result<RawJson, McpError>,
-) {
+async fn deliver(pending: &Pending, id: u64, result: Result<RawJson, McpError>) {
     let sender = pending.lock().await.get(&id).cloned();
     if let Some(sender) = sender {
         let _ = sender.send(result).await;
     }
 }
 
-async fn fail_pending(
-    pending: &Pending,
-    error: McpError,
-) {
+async fn fail_pending(pending: &Pending, error: McpError) {
     let mut pending = pending.lock().await;
     let senders = pending.values().cloned().collect::<Vec<_>>();
     pending.clear();
@@ -596,9 +582,7 @@ async fn fail_pending(
     }
 }
 
-async fn clear_pending(
-    pending: &Pending,
-) {
+async fn clear_pending(pending: &Pending) {
     pending.lock().await.clear();
 }
 
