@@ -396,6 +396,20 @@ fn content_text(content: &[Part]) -> String {
     text
 }
 
+/// What [`Actor::classify`] produced from one work report.
+#[derive(Default)]
+struct FoldOutcome {
+    /// The fold event the work maps to, when it maps directly.
+    event: Option<Event>,
+    /// Read views the settled call delivered to the model.
+    delivered: Vec<dal_core::ext::ReadView>,
+    /// The reminder reply and its journal entry, when a step satisfied one.
+    receipt: Option<(
+        oneshot::Sender<Option<dal_core::EntryId>>,
+        Option<dal_core::EntryId>,
+    )>,
+}
+
 impl Actor {
     async fn into_run(mut self, pending: Vec<Effect>) {
         if !pending.is_empty() {
@@ -604,81 +618,107 @@ impl Actor {
     }
 
     /// Steps one driver work report through the fold and executes effects.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "cohesive turn-work state machine; extraction would split one invariant"
-    )]
     async fn on_work(&mut self, work: TurnWork) {
         let mut queue: VecDeque<Effect> = VecDeque::new();
         let mut effects = Vec::new();
-        let mut delivered: Vec<dal_core::ext::ReadView> = Vec::new();
-        let mut receipt: Option<(
-            oneshot::Sender<Option<dal_core::EntryId>>,
-            Option<dal_core::EntryId>,
-        )> = None;
-        match work {
-            TurnWork::Asked { request } => {
-                let _ = self.fold.step(
-                    Event::RequestOpened { request },
-                    Timestamp::now(),
-                    &mut effects,
-                );
-            }
-            TurnWork::Answered { resolved } => {
-                self.queue_resolved(&resolved, &mut queue);
-            }
-            TurnWork::CallStarted { turn, call } => {
-                let _ = self.fold.step(
-                    Event::CallStarted { turn, call },
-                    Timestamp::now(),
-                    &mut effects,
-                );
-            }
+        let outcome = self.classify(work, &mut queue, &mut effects);
+        if let Some(event) = outcome.event {
+            self.step(event, &mut effects);
+        }
+        queue.extend(effects);
+        self.execute(queue.into(), None).await;
+        if let Some((reply, entry)) = outcome.receipt {
+            let _ = reply.send(if self.broken.is_none() { entry } else { None });
+        }
+        self.mark_delivered(&outcome.delivered);
+    }
+
+    /// Maps one driver work report to its fold event plus side products:
+    /// queued effects, views delivered to the model, and a reminder reply.
+    fn classify(
+        &mut self,
+        work: TurnWork,
+        queue: &mut VecDeque<Effect>,
+        effects: &mut Vec<Effect>,
+    ) -> FoldOutcome {
+        let mut outcome = FoldOutcome::default();
+        let event = match work {
+            TurnWork::Asked { request } => Some(Event::RequestOpened { request }),
+            TurnWork::CallStarted { turn, call } => Some(Event::CallStarted { turn, call }),
             TurnWork::Settled {
                 turn,
                 call,
-                outcome,
+                outcome: settled,
             } => {
-                delivered = read_views(&outcome);
-                let _ = self.fold.step(
-                    Event::Settled {
-                        turn,
-                        call,
-                        outcome,
-                    },
-                    Timestamp::now(),
-                    &mut effects,
-                );
+                outcome.delivered = read_views(&settled);
+                Some(Event::Settled {
+                    turn,
+                    call,
+                    outcome: settled,
+                })
             }
-            TurnWork::Streamed { turn, event } => {
-                let _ = self.fold.step(
-                    Event::Stream { turn, event },
-                    Timestamp::now(),
-                    &mut effects,
-                );
+            TurnWork::Streamed { turn, event } => Some(Event::Stream { turn, event }),
+            TurnWork::StreamEnded {
+                turn,
+                model,
+                family,
+                result,
+                partial,
+            } => Some(Event::StreamEnded {
+                turn,
+                model,
+                family,
+                result,
+                partial,
+            }),
+            TurnWork::Resolved {
+                turn,
+                calls,
+                answerer_attached,
+            } => Some(Event::Resolved {
+                turn,
+                calls,
+                answerer_attached,
+            }),
+            TurnWork::Boundary { turn } => Some(Event::Boundary { turn }),
+            TurnWork::CompactionSettled {
+                turn,
+                outcome: settled,
+            } => Some(Event::CompactionSettled {
+                turn,
+                outcome: settled,
+            }),
+            work => return self.classify_side(work, queue, effects, outcome),
+        };
+        outcome.event = event;
+        outcome
+    }
+
+    /// Handles the work reports that act on actor state instead of — or
+    /// before — mapping to one fold event.
+    fn classify_side(
+        &mut self,
+        work: TurnWork,
+        queue: &mut VecDeque<Effect>,
+        effects: &mut Vec<Effect>,
+        mut outcome: FoldOutcome,
+    ) -> FoldOutcome {
+        match work {
+            TurnWork::Answered { resolved } => {
+                self.queue_resolved(&resolved, queue);
             }
             TurnWork::WatcherVerdict {
                 turn,
                 verdict,
                 reply,
             } => {
-                let stepped = self
-                    .fold
-                    .step(
-                        Event::StreamVerdict { turn, verdict },
-                        Timestamp::now(),
-                        &mut effects,
-                    )
-                    .is_ok();
-                let entry = reminder_entry(&effects);
-                let retried = effects
-                    .iter()
-                    .any(|effect| matches!(effect, Effect::Infer(plan) if plan.turn == turn));
-                if stepped && retried && entry.is_some() {
-                    receipt = Some((reply, entry));
-                } else {
-                    let _ = reply.send(None);
-                }
+                outcome.receipt = self.step_receipt(
+                    Event::StreamVerdict { turn, verdict },
+                    turn,
+                    true,
+                    reply,
+                    effects,
+                );
             }
             TurnWork::StreamReminder {
                 turn,
@@ -686,20 +726,13 @@ impl Actor {
                 text,
                 reply,
             } => {
-                let stepped = self
-                    .fold
-                    .step(
-                        Event::StreamReminder { turn, rule, text },
-                        Timestamp::now(),
-                        &mut effects,
-                    )
-                    .is_ok();
-                let entry = reminder_entry(&effects);
-                if stepped && entry.is_some() {
-                    receipt = Some((reply, entry));
-                } else {
-                    let _ = reply.send(None);
-                }
+                outcome.receipt = self.step_receipt(
+                    Event::StreamReminder { turn, rule, text },
+                    turn,
+                    false,
+                    reply,
+                    effects,
+                );
             }
             TurnWork::Cancelled { turn, stop } => {
                 // Cancelled turns defer their `TurnEnded` to this driver
@@ -724,97 +757,77 @@ impl Actor {
                 max_steps,
                 compact,
             } => {
-                let _ = self.fold.step(
+                self.step(
                     Event::Limits {
                         window,
                         max_steps,
                         compact,
                     },
-                    Timestamp::now(),
-                    &mut effects,
+                    effects,
                 );
-                let _ = self.fold.step(
-                    Event::RequestStarted {
-                        turn,
-                        model,
-                        family,
-                    },
-                    Timestamp::now(),
-                    &mut effects,
-                );
-            }
-            TurnWork::StreamEnded {
-                turn,
-                model,
-                family,
-                result,
-                partial,
-            } => {
-                let _ = self.fold.step(
-                    Event::StreamEnded {
-                        turn,
-                        model,
-                        family,
-                        result,
-                        partial,
-                    },
-                    Timestamp::now(),
-                    &mut effects,
-                );
-            }
-            TurnWork::Resolved {
-                turn,
-                calls,
-                answerer_attached,
-            } => {
-                let _ = self.fold.step(
-                    Event::Resolved {
-                        turn,
-                        calls,
-                        answerer_attached,
-                    },
-                    Timestamp::now(),
-                    &mut effects,
-                );
-            }
-            TurnWork::Boundary { turn } => {
-                let _ = self
-                    .fold
-                    .step(Event::Boundary { turn }, Timestamp::now(), &mut effects);
-            }
-            TurnWork::CompactionSettled { turn, outcome } => {
-                let _ = self.fold.step(
-                    Event::CompactionSettled { turn, outcome },
-                    Timestamp::now(),
-                    &mut effects,
-                );
+                outcome.event = Some(Event::RequestStarted {
+                    turn,
+                    model,
+                    family,
+                });
             }
             TurnWork::CommandDone { result } => {
                 if let Some(tx) = self.pending_commands.pop_front() {
                     let _ = tx.send(result);
                 }
             }
+            _ => unreachable!("classify routes every event-mapped work kind first"),
         }
-        queue.extend(effects);
-        self.execute(queue.into(), None).await;
-        if let Some((reply, entry)) = receipt {
-            let _ = reply.send(if self.broken.is_none() { entry } else { None });
+        outcome
+    }
+
+    /// Steps the fold, discarding a rejected event.
+    fn step(&mut self, event: Event, effects: &mut Vec<Effect>) {
+        let _ = self.fold.step(event, Timestamp::now(), effects);
+    }
+
+    /// Steps a reminder-style event and reports the new reminder entry to
+    /// the waiter; `require_retry` holds the receipt until the step also
+    /// re-queued inference for `turn`. An unsatisfied step answers `None`.
+    fn step_receipt(
+        &mut self,
+        event: Event,
+        turn: TurnId,
+        require_retry: bool,
+        reply: oneshot::Sender<Option<dal_core::EntryId>>,
+        effects: &mut Vec<Effect>,
+    ) -> Option<(
+        oneshot::Sender<Option<dal_core::EntryId>>,
+        Option<dal_core::EntryId>,
+    )> {
+        let stepped = self.fold.step(event, Timestamp::now(), effects).is_ok();
+        let entry = reminder_entry(effects);
+        let retried = !require_retry
+            || effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::Infer(plan) if plan.turn == turn));
+        if stepped && retried && entry.is_some() {
+            return Some((reply, entry));
         }
-        // Delivery to the root model happens when the settled result is
-        // published; the evidence owner marks the complete rows at the
-        // shared cursor so later captures freeze the right cutoff (R06).
-        if !delivered.is_empty() {
-            let at = self.shared.cursor();
-            let generation = self.host.shared.generation.borrow().clone();
-            if let Some(evidence) = generation.evidence() {
-                for view in &delivered {
-                    evidence.delivered(view, dal_core::ext::Consumer::Model, at);
-                }
+        let _ = reply.send(None);
+        None
+    }
+
+    /// Marks complete read views delivered at the shared cursor so later
+    /// captures freeze the right cutoff (R06).
+    fn mark_delivered(&mut self, delivered: &[dal_core::ext::ReadView]) {
+        if delivered.is_empty() {
+            return;
+        }
+        let at = self.shared.cursor();
+        let generation = self.host.shared.generation.borrow().clone();
+        if let Some(evidence) = generation.evidence() {
+            for view in delivered {
+                evidence.delivered(view, dal_core::ext::Consumer::Model, at);
             }
         }
     }
 
-    /// Flushes the journal, closes subscriber queues, and stops the loop.
     async fn on_shutdown(&mut self) {
         self.control().cancel_opening();
         self.tasks.stop().await;
