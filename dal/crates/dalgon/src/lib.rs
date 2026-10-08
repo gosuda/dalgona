@@ -1,5 +1,5 @@
 //! The `dalgon` command-line and process edge for the dal product.
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 use std::ffi::OsString;
 use std::io::Write as _;
