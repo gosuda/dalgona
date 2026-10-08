@@ -18,19 +18,16 @@
 //!   refresh token, and the new tokens are committed by the atomic rename of
 //!   [`AuthStore::store`].
 //!
-//! The commit is the last step. Each locked refresh owns a
-//! [`CancellationToken`] that fires when its future is dropped; the commit
-//! runs on the blocking pool owning both lock guards and first checks that
-//! token. That check is the commit's linearization point: a cancellation
-//! before it sends no write, leaves `auth.json` byte-for-byte unchanged, and
-//! releases both locks; once past it, the single atomic rename runs to its
-//! end before the locks release, so the file is never half-written and no
-//! write starts after a cancellation. All file I/O runs on the blocking pool.
+//! The commit is the last step. A caller can drop its future while it waits
+//! for either lock; the per-key slot keeps an in-flight task so a later caller
+//! awaits that same refresh. The task keeps the auth file lock through the
+//! bounded exchange and atomic commit. The commit runs on the blocking pool
+//! and all file I/O runs there. The file is never half-written, and a rotated
+//! refresh token is not discarded by cancellation.
 //! Nothing here reads the environment or keeps process-global state, and no
 //! error text or log line carries a token.
 //!
 //! [`AuthStore::store`]: crate::auth::credential::AuthStore::store
-//! [`CancellationToken`]: tokio_util::sync::CancellationToken
 
 use std::{
     fs::{File, OpenOptions, TryLockError},

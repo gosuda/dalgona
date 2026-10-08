@@ -1,6 +1,7 @@
 use std::{
     cell::RefCell,
     fs,
+    future::Future,
     io::ErrorKind,
     pin::pin,
     rc::Rc,
@@ -16,11 +17,10 @@ use tokio::{
     sync::Notify,
 };
 
-use super::engine::{commit, fresh_credential};
+use super::engine::fresh_credential;
 use super::*;
 use crate::auth::credential::{AuthStore, Credential, OAuthCredential, SecretString};
 use crate::auth::oauth::{CODEX_CLIENT_ID, unix_now};
-use tokio_util::sync::CancellationToken;
 
 const OLD_ACCESS: &str = "old-access-secret";
 const OLD_REFRESH: &str = "old-refresh-secret";
@@ -56,8 +56,8 @@ impl Drop for TestDir {
 
 enum Reply {
     Json(u16, String),
-    /// Holds the connection open without answering, then signals.
-    Stall(Rc<Notify>),
+    /// Waits after reading the request before answering.
+    JsonAfterNotify(Rc<Notify>, Rc<Notify>, u16, String),
 }
 
 struct Seen {
@@ -159,7 +159,6 @@ async fn write_response(stream: &TcpStream, status: u16, body: &str) {
 }
 
 async fn serve(listener: TcpListener, replies: Vec<Reply>, seen: &RefCell<Vec<Seen>>) {
-    let mut stalled = Vec::new();
     for reply in replies {
         let (stream, _) = listener.accept().await.expect("accept");
         let (head, body) = read_request(&stream).await;
@@ -170,9 +169,10 @@ async fn serve(listener: TcpListener, replies: Vec<Reply>, seen: &RefCell<Vec<Se
         });
         match reply {
             Reply::Json(status, body) => write_response(&stream, status, &body).await,
-            Reply::Stall(signal) => {
-                stalled.push(stream);
-                signal.notify_one();
+            Reply::JsonAfterNotify(started, release, status, body) => {
+                started.notify_one();
+                release.notified().await;
+                write_response(&stream, status, &body).await;
             }
         }
     }
@@ -409,63 +409,57 @@ async fn rejected_refresh_token_is_sign_in_expired_after_one_request() {
 }
 
 #[tokio::test]
-async fn cancelled_refresh_releases_locks_and_keeps_the_prior_credential() {
+async fn cancelled_refresh_persists_rotated_credential() {
     let dir = TestDir::new("cancel");
     let held = codex(OLD_ACCESS, OLD_REFRESH, Some(unix_now() + 10));
     seed(&dir.auth(), held.clone());
-    let before = fs::read(dir.auth()).expect("read seed");
     let (listener, base) = listen().await;
     let refresher = refresher(&dir.auth(), &base);
-    let stalled = Rc::new(Notify::new());
+    let started = Rc::new(Notify::new());
+    let release = Rc::new(Notify::new());
     let client = async {
-        // Cancel only once the server holds the request: mid-request.
         tokio::select! {
+            biased;
+            () = started.notified() => {}
             _ = refresher.refresh(OAuthProvider::OpenAiCodex, &held, RefreshReason::Expiring) => {
-                panic!("the stalled refresh must not finish");
+                panic!("the refresh completed before cancellation")
             }
-            () = stalled.notified() => {}
         }
-        assert_eq!(fs::read(dir.auth()).expect("read after cancel"), before);
-        let probe = open_lock_file(&lock_path(&dir.auth()).expect("lock path")).expect("open lock");
-        probe.try_lock().expect("the file lock was released");
-        drop(probe);
-        refresher
-            .refresh(OAuthProvider::OpenAiCodex, &held, RefreshReason::Expiring)
+        // The second caller must join while the first request is still waiting.
+        let second = refresher.refresh(OAuthProvider::OpenAiCodex, &held, RefreshReason::Expiring);
+        tokio::pin!(second);
+        futures::future::poll_fn(|cx| {
+            let _ = second.as_mut().poll(cx);
+            std::task::Poll::Ready(())
+        })
+        .await;
+        release.notify_one();
+        let result = tokio::time::timeout(Duration::from_secs(1), second)
             .await
+            .expect("the second caller waits for the in-flight refresh")
+            .expect("the persisted refresh is reused");
+        let fresh = oauth(result);
+        assert_eq!(fresh.access_token.expose(), NEW_ACCESS);
+        Credential::OAuth(fresh)
     };
     let replies = vec![
-        Reply::Stall(Rc::clone(&stalled)),
-        Reply::Json(200, String::from(NEW_TOKENS)),
+        Reply::JsonAfterNotify(
+            Rc::clone(&started),
+            Rc::clone(&release),
+            200,
+            String::from(NEW_TOKENS),
+        ),
+        Reply::Json(500, String::from(r#"{"error":"duplicate refresh"}"#)),
     ];
     let (result, seen) = with_server(listener, replies, client).await;
 
-    assert_eq!(
-        oauth(result.expect("next caller refreshes"))
-            .access_token
-            .expose(),
-        NEW_ACCESS
-    );
-    assert_eq!(seen.len(), 2);
-    assert_eq!(stored(&dir.auth()).access_token.expose(), NEW_ACCESS);
-}
-
-#[test]
-fn cancelled_commit_writes_nothing() {
-    let dir = TestDir::new("commit");
-    let held = codex(OLD_ACCESS, OLD_REFRESH, Some(unix_now() + 10));
-    seed(&dir.auth(), held);
-    let before = fs::read(dir.auth()).expect("read seed");
-    let mut store = AuthStore::load(dir.auth()).expect("load");
-    let cancel = CancellationToken::new();
-    cancel.cancel();
-    let fresh = Credential::OAuth(codex(NEW_ACCESS, NEW_REFRESH, Some(unix_now() + 3600)));
-    let error = commit(&cancel, &mut store, "openai-codex", fresh.clone())
-        .expect_err("a cancelled commit is refused");
-    assert!(matches!(error, ProviderError::AuthWrite { .. }));
-    assert_eq!(fs::read(dir.auth()).expect("read after"), before);
-
-    commit(&CancellationToken::new(), &mut store, "openai-codex", fresh).expect("live commit");
-    assert_eq!(stored(&dir.auth()).access_token.expose(), NEW_ACCESS);
+    assert_eq!(oauth(result).access_token.expose(), NEW_ACCESS);
+    assert_eq!(seen.len(), 1);
+    let on_disk = stored(&dir.auth());
+    assert_eq!(on_disk.access_token.expose(), NEW_ACCESS);
+    assert_eq!(on_disk.refresh_token.expose(), NEW_REFRESH);
+    let probe = open_lock_file(&lock_path(&dir.auth()).expect("lock path")).expect("open lock");
+    probe.try_lock().expect("the file lock was released");
 }
 
 #[test]

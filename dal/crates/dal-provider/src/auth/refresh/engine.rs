@@ -1,17 +1,18 @@
 //! The serialized refresh engine: one refresher per `auth.json`.
 //!
-//! The commit is the last step; its cancellation check is the linearization
-//! point. All file I/O runs on the blocking pool through the sibling lock.
+//! The per-key flight slot owns one refresh task from the request through
+//! persistence. The task holds the auth file lock; the slot serializes
+//! callers. A caller can drop its wait before the task starts, but cannot
+//! interrupt a request that may have rotated the stored refresh token.
 
 use std::{
     path::{Path, PathBuf},
-    sync::{Arc, LazyLock},
+    sync::LazyLock,
 };
 
 use serde::{Deserialize, Serialize};
 use sonic_rs::JsonValueTrait;
 use tokio::sync::Mutex;
-use tokio_util::sync::CancellationToken;
 
 use super::{
     PERMANENT_CODES, PROACTIVE_WINDOW_SECS, RETRY_DELAY, blocking,
@@ -40,8 +41,23 @@ pub struct Refresher {
     user_agent: Box<str>,
     auth_path: PathBuf,
     endpoints: TokenEndpoints,
-    anthropic: Arc<Mutex<()>>,
-    openai_codex: Arc<Mutex<()>>,
+    anthropic: RefreshSlot,
+    openai_codex: RefreshSlot,
+}
+
+#[derive(Debug)]
+struct RefreshSlot {
+    key: Mutex<()>,
+    in_flight: Mutex<Option<tokio::task::JoinHandle<Result<Credential, ProviderError>>>>,
+}
+
+impl RefreshSlot {
+    fn new() -> Self {
+        Self {
+            key: Mutex::new(()),
+            in_flight: Mutex::new(None),
+        }
+    }
 }
 
 /// Builds the redirect-free client one [`Refresher`] uses.
@@ -84,8 +100,8 @@ impl Refresher {
             user_agent: user_agent.into(),
             auth_path: auth_path.into(),
             endpoints,
-            anthropic: Arc::new(Mutex::new(())),
-            openai_codex: Arc::new(Mutex::new(())),
+            anthropic: RefreshSlot::new(),
+            openai_codex: RefreshSlot::new(),
         }
     }
 
@@ -108,11 +124,11 @@ impl Refresher {
     /// one atomic rename before returning them. A stored entry that is no
     /// longer an OAuth sign-in (an API key) is returned as is.
     ///
-    /// Cancelling the returned future before the commit check drops any
-    /// in-flight request, releases both locks, and leaves `auth.json`
-    /// unchanged, even when the token endpoint already answered. A commit
-    /// already past its check finishes its one atomic rename, then both
-    /// locks release.
+    /// Dropping the returned future while it waits for either lock abandons
+    /// that wait. The per-key slot keeps an in-flight task so a later caller
+    /// awaits the same refresh. That task sends the request and persists its
+    /// result before releasing the auth file lock, even if the first caller
+    /// drops its wait. The HTTP exchange remains bounded by [`OAUTH_TIMEOUT`].
     ///
     /// # Errors
     ///
@@ -139,10 +155,13 @@ impl Refresher {
         if reason == RefreshReason::Expiring && !expiring(held, unix_now()) {
             return Ok(Credential::OAuth(held.clone()));
         }
-        let cancel = CancellationToken::new();
-        // Fires when this future is dropped, cancelling a commit not yet begun.
-        let _cancel_on_drop = cancel.clone().drop_guard();
-        let key = Arc::clone(self.key_mutex(provider)).lock_owned().await;
+        let slot = self.slot(provider);
+        let key = slot.key.lock().await;
+        let mut in_flight = slot.in_flight.lock().await;
+        if in_flight.is_some() {
+            drop(key);
+            return await_refresh(&mut in_flight).await;
+        }
         let file = lock_auth_file(&self.auth_path).await?;
         let path = self.auth_path.clone();
         let mut store = blocking(move || AuthStore::load(path)).await?;
@@ -160,20 +179,32 @@ impl Refresher {
         {
             return Ok(Credential::OAuth(stored));
         }
-        let fresh = self.exchange(provider, &stored).await?;
-        let committed = Credential::OAuth(fresh.clone());
+        let client = (*self.client).clone();
+        let user_agent = self.user_agent.clone();
+        let endpoints = self.endpoints.clone();
         let id = provider.id();
-        blocking(move || {
-            // The guards live until the commit ends or is refused.
-            let _locks = (key, file);
-            commit(&cancel, &mut store, id, committed)
-        })
-        .await?;
-        tracing::debug!(provider = id, "stored refreshed OAuth tokens");
-        Ok(Credential::OAuth(fresh))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the refresh task is stored in the per-key slot and must persist a rotated token after caller cancellation"
+        )]
+        let task = tokio::spawn(async move {
+            let fresh = Self::exchange(&client, &user_agent, &endpoints, provider, &stored).await?;
+            let committed = Credential::OAuth(fresh.clone());
+            blocking(move || {
+                // The file lock lives until the request and commit both finish.
+                let _file = file;
+                commit(&mut store, id, committed)
+            })
+            .await?;
+            tracing::debug!(provider = id, "stored refreshed OAuth tokens");
+            Ok::<Credential, ProviderError>(Credential::OAuth(fresh))
+        });
+        *in_flight = Some(task);
+        drop(key);
+        await_refresh(&mut in_flight).await
     }
 
-    const fn key_mutex(&self, provider: OAuthProvider) -> &Arc<Mutex<()>> {
+    const fn slot(&self, provider: OAuthProvider) -> &RefreshSlot {
         match provider {
             OAuthProvider::Anthropic => &self.anthropic,
             OAuthProvider::OpenAiCodex => &self.openai_codex,
@@ -184,7 +215,9 @@ impl Refresher {
     /// Sends the refresh request, retrying once after [`RETRY_DELAY`] on a
     /// transient failure.
     async fn exchange(
-        &self,
+        client: &reqwest::Client,
+        user_agent: &str,
+        endpoints: &TokenEndpoints,
         provider: OAuthProvider,
         stored: &OAuthCredential,
     ) -> Result<OAuthCredential, ProviderError> {
@@ -199,7 +232,16 @@ impl Refresher {
         })?;
         let mut retried = false;
         loop {
-            match self.attempt(provider, stored, body.clone()).await {
+            match Self::attempt(
+                client,
+                user_agent,
+                endpoints,
+                provider,
+                stored,
+                body.clone(),
+            )
+            .await
+            {
                 Ok(fresh) => return Ok(fresh),
                 Err(Failure::Transient(_)) if !retried => {
                     retried = true;
@@ -216,28 +258,21 @@ impl Refresher {
 
     /// One refresh request and the classification of its outcome.
     async fn attempt(
-        &self,
+        client: &reqwest::Client,
+        user_agent: &str,
+        endpoints: &TokenEndpoints,
         provider: OAuthProvider,
         stored: &OAuthCredential,
         body: Vec<u8>,
     ) -> Result<OAuthCredential, Failure> {
         let family = provider.family();
-        let request = self
-            .client
-            .post(self.endpoints.url(provider).clone())
-            .body(body);
+        let request = client.post(endpoints.url(provider).clone()).body(body);
         let exchange = Exchange::Json {
             total: OAUTH_TIMEOUT,
         };
-        let response = send(
-            family,
-            request,
-            &self.user_agent,
-            exchange,
-            tokio::time::sleep,
-        )
-        .await
-        .map_err(Failure::from_http)?;
+        let response = send(family, request, user_agent, exchange, tokio::time::sleep)
+            .await
+            .map_err(Failure::from_http)?;
         let status = response.status();
         let bytes = read_body(family, response)
             .await
@@ -250,20 +285,32 @@ impl Refresher {
     }
 }
 
-/// Writes `credential` for `id` unless `cancel` has fired. The check is the
-/// commit's linearization point: after a cancellation nothing is written;
-/// past the check the atomic rename of [`AuthStore::store`] runs to its end.
+async fn await_refresh(
+    in_flight: &mut Option<tokio::task::JoinHandle<Result<Credential, ProviderError>>>,
+) -> Result<Credential, ProviderError> {
+    let result = {
+        let Some(task) = in_flight.as_mut() else {
+            return Err(ProviderError::AuthWrite {
+                reason: String::from("the refresh task is missing"),
+            });
+        };
+        match task.await {
+            Ok(result) => result,
+            Err(error) => Err(ProviderError::AuthWrite {
+                reason: format!("the OAuth refresh task failed: {error}"),
+            }),
+        }
+    };
+    *in_flight = None;
+    result
+}
+
+/// Writes `credential` for `id` and atomically stores the updated auth file.
 pub(crate) fn commit(
-    cancel: &CancellationToken,
     store: &mut AuthStore,
     id: &str,
     credential: Credential,
 ) -> Result<(), ProviderError> {
-    if cancel.is_cancelled() {
-        return Err(ProviderError::AuthWrite {
-            reason: String::from("the refresh was cancelled before the commit"),
-        });
-    }
     store.set(id, credential)?;
     store.store()
 }
