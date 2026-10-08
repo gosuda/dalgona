@@ -571,42 +571,9 @@ fn header<'a>(wire: &'a AnthropicWire, name: &str) -> Option<&'a str> {
         .map(|(_, value)| value.as_str())
 }
 
-fn replay_body(source: ReplaySource) -> String {
-    let request = request(
-            vec![
-                ContextItem::Assistant {
-                    source,
-                    parts: vec![
-                        AssistantPart::Thinking {
-                            text: "private".into(),
-                            replay: Some(
-                                RawJson::parse(
-                                    r#"{ "type" : "thinking", "thinking" : "private", "signature" : "signed" }"#,
-                                )
-                                .unwrap(),
-                            ),
-                        },
-                        AssistantPart::Text {
-                            text: "visible".into(),
-                        },
-                        AssistantPart::ToolCall {
-                            call: CallId::new("call_1"),
-                            name: "read".into(),
-                            args: RawJson::parse(r#"{"path":"notes.txt"}"#).unwrap(),
-                        },
-                    ],
-                },
-                ContextItem::ToolResult {
-                    call: CallId::new("call_1"),
-                    name: "read".into(),
-                    is_error: false,
-                    parts: vec![Part::Text { text: "done".into() }],
-                },
-            ],
-            vec![tool("read")],
-        );
+fn anthropic_body(request: &ModelRequest) -> String {
     let input = AnthropicRequest {
-        request: &request,
+        request,
         max_output: None,
         thinking: AnthropicThinking::Omit,
         effort: None,
@@ -616,6 +583,44 @@ fn replay_body(source: ReplaySource) -> String {
         summarize: false,
     };
     String::from_utf8(build(&input, AnthropicAuth::ApiKey("sk-ant")).unwrap().body).unwrap()
+}
+
+fn unbound_tool_context(source: ReplaySource) -> Vec<ContextItem> {
+    vec![
+        ContextItem::Assistant {
+            source,
+            parts: vec![
+                AssistantPart::Thinking {
+                    text: "private".into(),
+                    replay: Some(
+                        RawJson::parse(
+                            r#"{ "type" : "thinking", "thinking" : "private", "signature" : "signed" }"#,
+                        )
+                        .unwrap(),
+                    ),
+                },
+                AssistantPart::Text {
+                    text: "visible".into(),
+                },
+                AssistantPart::ToolCall {
+                    call: CallId::new("call_1"),
+                    name: "read".into(),
+                    args: RawJson::parse(r#"{"path":"notes.txt"}"#).unwrap(),
+                },
+            ],
+        },
+        ContextItem::ToolResult {
+            call: CallId::new("call_1"),
+            name: "read".into(),
+            is_error: false,
+            parts: vec![Part::Text { text: "done".into() }],
+        },
+    ]
+}
+
+fn replay_body(source: ReplaySource) -> String {
+    let request = request(unbound_tool_context(source), vec![tool("read")]);
+    anthropic_body(&request)
 }
 
 fn unbound_replay_body(system: &str) -> String {
@@ -640,17 +645,35 @@ fn unbound_replay_body(system: &str) -> String {
         }],
         vec![tool("read")],
     );
-    let input = AnthropicRequest {
-        request: &request,
-        max_output: None,
-        thinking: AnthropicThinking::Omit,
-        effort: None,
-        display_supported: false,
-        temperature: None,
-        compaction: None,
-        summarize: false,
-    };
-    String::from_utf8(build(&input, AnthropicAuth::ApiKey("sk-ant")).unwrap().body).unwrap()
+    anthropic_body(&request)
+}
+
+fn settled_unbound_replay_body() -> String {
+    let mut context = unbound_tool_context(replay_source(Family::Anthropic, "claude-sonnet-5"));
+    context.push(ContextItem::User {
+        parts: vec![Part::Text {
+            text: "next prompt".into(),
+        }],
+    });
+    let request = request_with_system("Current system.", context, vec![tool("read")]);
+    anthropic_body(&request)
+}
+
+fn unbound_redacted_replay_body() -> String {
+    let request = request_with_system(
+        "Current system.",
+        vec![ContextItem::Assistant {
+            source: replay_source(Family::Anthropic, "claude-sonnet-5"),
+            parts: vec![AssistantPart::Thinking {
+                text: "".into(),
+                replay: Some(
+                    RawJson::parse(r#"{"type":"redacted_thinking","data":"opaque"}"#).unwrap(),
+                ),
+            }],
+        }],
+        vec![tool("read")],
+    );
+    anthropic_body(&request)
 }
 
 fn assert_replay_was_filtered(body: &str) {
@@ -688,6 +711,23 @@ fn unbound_signed_replay_stays_for_tool_use_continuation() {
     let body = replay_body(replay_source(Family::Anthropic, "claude-sonnet-5"));
     assert!(body.contains("private"));
     assert!(body.contains("signature"));
+    assert!(body.contains(r#""type":"tool_use","id":"call_1""#));
+    assert!(body.contains(r#""type":"tool_result","tool_use_id":"call_1""#));
+}
+
+#[test]
+fn settled_unbound_signed_replay_is_dropped_after_tool_turn() {
+    let body = settled_unbound_replay_body();
+    assert!(!body.contains("signature"));
+    assert!(!body.contains("private"));
+    assert!(body.contains(r#""type":"tool_use","id":"call_1""#));
+    assert!(body.contains(r#""type":"tool_result","tool_use_id":"call_1""#));
+}
+
+#[test]
+fn unbound_redacted_replay_remains_verbatim() {
+    let body = unbound_redacted_replay_body();
+    assert!(body.contains(r#""type":"redacted_thinking","data":"opaque""#));
 }
 
 /// Builds a signed thinking replay bound to `prefix` in storage.
