@@ -799,6 +799,59 @@ impl Journal {
         self.ephemeral
     }
 
+    /// Whether this journal has buffered records but no durable file yet.
+    #[must_use]
+    pub fn is_lazy(&self) -> bool {
+        matches!(&self.state, State::Lazy { .. })
+    }
+
+    /// Writes a lazy journal's buffered records to its durable journal
+    /// file through the same path as the first user append. Afterwards
+    /// the session is recoverable, so callers may acknowledge writes
+    /// that must outlive the in-memory journal — memory state must
+    /// never be more durable than the journal.
+    ///
+    /// No-op on a file-backed or ephemeral journal.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] when the journal is broken or closed, or the
+    /// first append fails; the journal stays `State::Lazy` on failure.
+    pub async fn materialize(&mut self) -> Result<(), StoreError> {
+        match &self.state {
+            State::Lazy { .. } => {}
+            State::Broken { .. } => return Err(self.broken_error()),
+            State::Closed => {
+                return Err(StoreError::Invalid {
+                    reason: "session is closed".into(),
+                });
+            }
+            State::File { .. } | State::Memory => return Ok(()),
+        }
+        self.settle_pending().await?;
+        self.ensure_validator()?;
+        let next_index = self.index.parent_batch(self.records.len(), &mut []);
+        let validation = self
+            .validator
+            .as_ref()
+            .ok_or_else(|| invalid_record("session validator is unavailable"))?
+            .prepare_batch(&[])
+            .map_err(validation_error)?;
+        let blobs = match &mut self.state {
+            State::Lazy { blobs } => std::mem::take(blobs),
+            _ => unreachable!("lazy state was checked above"),
+        };
+        self.append_first_user(
+            Vec::new(),
+            next_index,
+            blobs,
+            self.generation,
+            validation,
+            true,
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Returns a sidecar handle while a file-backed journal is open.
     #[must_use]
     pub fn sidecar(&self) -> Option<Sidecar<'_>> {
