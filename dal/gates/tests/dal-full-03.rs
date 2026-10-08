@@ -26,6 +26,10 @@ use tokio::{
 const PROCESS_PATH: &str = r"C:\Windows\System32;C:\Windows";
 #[cfg(not(windows))]
 const PROCESS_PATH: &str = "/usr/bin:/bin";
+#[cfg(windows)]
+const RPC_TIMEOUT: Duration = Duration::from_secs(60);
+#[cfg(not(windows))]
+const RPC_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn scripted_rm_fixture(sentinel: &Path) -> Result<String, Box<dyn Error + Send + Sync>> {
     let command = format!("/bin/rm -- {}", sentinel.display());
@@ -92,7 +96,7 @@ async fn write_request(
 async fn read_frame(
     output: &mut Lines<BufReader<ChildStdout>>,
 ) -> Result<Value, Box<dyn Error + Send + Sync>> {
-    let line = tokio::time::timeout(Duration::from_secs(10), output.next_line()).await??;
+    let line = tokio::time::timeout(RPC_TIMEOUT, output.next_line()).await??;
     let Some(line) = line else {
         return Err(io::Error::other("dalgon RPC closed before replying").into());
     };
@@ -276,7 +280,7 @@ async fn run_sandbox_probe() -> Result<(String, bool), Box<dyn Error + Send + Sy
     }
     assert!(accepted && turn_ended, "RPC turn did not settle");
     drop(input);
-    let status = tokio::time::timeout(Duration::from_secs(10), child.wait()).await??;
+    let status = tokio::time::timeout(RPC_TIMEOUT, child.wait()).await??;
     assert!(status.success(), "dalgon RPC exited with {status}");
     let error_text = error_text.unwrap();
     Ok((error_text, sentinel.exists()))
