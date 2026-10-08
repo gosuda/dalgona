@@ -5,7 +5,7 @@
 | `search_symbols` | `false` | `true` |
 | `[tui].diagrams` | `false` | `false` |
 | `edit_style` | `anchor` | `hashline` |
-| `guard` | `false` | `true` |
+| `[guard].enabled` | `false` | `true` |
 | `disabled_batteries` | none | `[]` |
 | `experimental_batteries` | none | `[]` |
 | `rule_sets.enabled` | none | all shipped sets |

@@ -165,6 +165,10 @@ return results[0].value"#;
     let (data, host) = host_for(run).await;
     let (stop, view, seen) = prompt(&host, &data).await;
     assert_eq!(stop, Stop::EndTurn, "{seen:?} {view}");
+    assert!(
+        seen.iter().any(|kind| kind.contains("Grant")),
+        "scope.infer opened a grant request: {seen:?}"
+    );
     assert!(view.contains("forwarded"), "{seen:?} {view}");
 }
 
