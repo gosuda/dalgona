@@ -583,11 +583,16 @@ impl SessionScriptHost {
         };
         match result {
             Ok(value) => {
-                let bytes = value.as_str().len();
+                let (value, bytes) = match value {
+                    service::CallOutput::Json(value) => {
+                        (OpValue::Json(value.clone()), value.as_str().len())
+                    }
+                    service::CallOutput::State(record) => (OpValue::State(record), 0),
+                };
                 (
                     op.clone(),
                     OpOutcome::Ok {
-                        value: OpValue::Json(value),
+                        value,
                         record: OpRecord {
                             call,
                             op,

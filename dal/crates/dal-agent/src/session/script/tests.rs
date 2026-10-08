@@ -723,13 +723,12 @@ async fn state_ops_compare_and_swap_through_the_actor() {
     let OpOutcome::Ok { value, .. } = read else {
         panic!("state.read reaches the state owner: {read:?}");
     };
-    let OpValue::Json(raw) = value else {
-        panic!("state.read answers raw JSON: {value:?}");
+    let OpValue::State(record) = value else {
+        panic!("state.read answers a typed record: {value:?}");
     };
-    assert_eq!(
-        raw.as_str(),
-        r#"{"present":false,"value":null,"revision":1}"#,
-        "an absent key mints its first revision"
+    assert!(
+        !record.present && record.value.is_none() && record.revision.get().get() == 1,
+        "an absent key mints its first revision: {record:?}"
     );
     let write = call_op(
         &host,
@@ -741,13 +740,14 @@ async fn state_ops_compare_and_swap_through_the_actor() {
     let OpOutcome::Ok { value, .. } = write else {
         panic!("state.write with the minted revision commits: {write:?}");
     };
-    let OpValue::Json(raw) = value else {
-        panic!("state.write answers raw JSON: {value:?}");
+    let OpValue::State(record) = value else {
+        panic!("state.write answers a typed record: {value:?}");
     };
-    assert_eq!(
-        raw.as_str(),
-        r#"{"present":true,"value":41,"revision":2}"#,
-        "the committed record carries the next revision"
+    assert!(
+        record.present
+            && record.value.as_ref().map(dal_core::RawJson::as_str) == Some("41")
+            && record.revision.get().get() == 2,
+        "the committed record carries the next revision: {record:?}"
     );
     let stale = call_op(
         &host,
@@ -778,13 +778,14 @@ async fn state_ops_compare_and_swap_through_the_actor() {
     let OpOutcome::Ok { value, .. } = recheck else {
         panic!("the conflicting write touched nothing: {recheck:?}");
     };
-    let OpValue::Json(raw) = value else {
-        panic!("state.read answers raw JSON: {value:?}");
+    let OpValue::State(record) = value else {
+        panic!("state.read answers a typed record: {value:?}");
     };
-    assert_eq!(
-        raw.as_str(),
-        r#"{"present":true,"value":41,"revision":2}"#,
-        "the rejected write left the committed value and revision"
+    assert!(
+        record.present
+            && record.value.as_ref().map(dal_core::RawJson::as_str) == Some("41")
+            && record.revision.get().get() == 2,
+        "the rejected write left the committed value and revision: {record:?}"
     );
     let delete = call_op(
         &host,
@@ -796,13 +797,12 @@ async fn state_ops_compare_and_swap_through_the_actor() {
     let OpOutcome::Ok { value, .. } = delete else {
         panic!("state.delete with the minted revision tombstones: {delete:?}");
     };
-    let OpValue::Json(raw) = value else {
-        panic!("state.delete answers raw JSON: {value:?}");
+    let OpValue::State(record) = value else {
+        panic!("state.delete answers a typed record: {value:?}");
     };
-    assert_eq!(
-        raw.as_str(),
-        r#"{"present":false,"value":null,"revision":3}"#,
-        "the tombstone mints a fresh revision a stale token cannot reuse"
+    assert!(
+        !record.present && record.value.is_none() && record.revision.get().get() == 3,
+        "the tombstone mints a fresh revision a stale token cannot reuse: {record:?}"
     );
 }
 
@@ -872,14 +872,61 @@ async fn a_failed_sidecar_write_rolls_the_map_back() {
     let OpOutcome::Ok { value, .. } = commit else {
         panic!("the rolled-back map still accepts the original CAS: {commit:?}");
     };
-    let OpValue::Json(raw) = value else {
-        panic!("state.write answers raw JSON: {value:?}");
+    let OpValue::State(record) = value else {
+        panic!("state.write answers a typed record: {value:?}");
     };
-    assert_eq!(
-        raw.as_str(),
-        r#"{"present":true,"value":99,"revision":2}"#,
-        "the failed write minted nothing"
+    assert!(
+        record.present
+            && record.value.as_ref().map(dal_core::RawJson::as_str) == Some("99")
+            && record.revision.get().get() == 2,
+        "the failed write minted nothing: {record:?}"
     );
+}
+
+/// A `state.read` of an existing key never touches the sidecar: the
+/// session dir can be readable-but-unwritable and the read still answers
+/// (R08 — reads mint nothing durable).
+#[cfg(unix)]
+#[tokio::test]
+async fn a_read_on_an_existing_key_needs_no_write() {
+    use std::os::unix::fs::PermissionsExt;
+    let fx = durable_fixture(Duration::ZERO).await;
+    let host = captured(&fx, &["state.read", "state.write"]);
+    let inv = begin_eval(&host, None).expect("eval inherits A");
+    let _ = call_op(
+        &host,
+        &inv,
+        OpId::Native(NativeOp::StateRead),
+        r#"{"key":"counter"}"#,
+    )
+    .await;
+    let committed = call_op(
+        &host,
+        &inv,
+        OpId::Native(NativeOp::StateWrite),
+        r#"{"key":"counter","value":41,"expected":1}"#,
+    )
+    .await;
+    let OpOutcome::Ok { .. } = committed else {
+        panic!("the record committed before the directory locked: {committed:?}");
+    };
+    let dir = state_sidecar(&fx.data)
+        .parent()
+        .expect("session dir")
+        .to_path_buf();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).expect("read only");
+    let read = call_op(
+        &host,
+        &inv,
+        OpId::Native(NativeOp::StateRead),
+        r#"{"key":"counter"}"#,
+    )
+    .await;
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).expect("restore");
+    let OpOutcome::Ok { value, .. } = read else {
+        panic!("an existing-key read needs no write and still answers: {read:?}");
+    };
+    assert!(matches!(value, OpValue::State(..)));
 }
 
 #[tokio::test]

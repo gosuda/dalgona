@@ -15,7 +15,7 @@ use dal_core::{
     McpRequest, Name, Preview, Question, RawJson, Revision, SessionId, StateError, StateKey,
     StateNs, StateOp, StateRecord, TurnOp, Workspace,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use crate::error::ServiceError;
 use crate::ext::script::FailureCode;
@@ -95,8 +95,11 @@ pub(super) async fn call(
     call: &CallId,
     op: NativeOp,
     args: &RawJson,
-) -> Result<RawJson, CallError> {
-    match op {
+) -> Result<CallOutput, CallError> {
+    let out = match op {
+        NativeOp::StateRead | NativeOp::StateWrite | NativeOp::StateDelete => {
+            return call_state(services, who, op, args).await;
+        }
         NativeOp::EnvRead => {
             let args: KeyArgs = decode(args)?;
             encode(
@@ -335,6 +338,26 @@ pub(super) async fn call(
                     .map_err(CallError::Service)?,
             )
         }
+        other => Err(CallError::Args(
+            format!("operation {other} has no service dispatch")
+                .as_str()
+                .into(),
+        )),
+    };
+    out.map(CallOutput::Json)
+}
+
+/// Runs one `state.*` operation and returns its typed record: the record
+/// must cross the op boundary as [`OpValue::State`] so the Starlark adapter
+/// mints an opaque, generation-bound revision token the script can only
+/// compare — never a raw counter it could fabricate (R08).
+async fn call_state(
+    services: &Arc<dyn Services>,
+    who: &Caller,
+    op: NativeOp,
+    args: &RawJson,
+) -> Result<CallOutput, CallError> {
+    match op {
         NativeOp::StateRead => {
             let args: KeyArgs = decode(args)?;
             let key = StateKey::parse(&args.key)
@@ -389,7 +412,7 @@ pub(super) async fn call(
             )
         }
         other => Err(CallError::Args(
-            format!("operation {other} has no service dispatch")
+            format!("operation {other} has no state dispatch")
                 .as_str()
                 .into(),
         )),
@@ -432,7 +455,7 @@ fn revision(raw: u64) -> Result<Revision, CallError> {
 /// unavailable state store keeps its typed outcome (R08).
 fn state_reply(
     result: Result<Result<StateRecord, StateError>, ServiceError>,
-) -> Result<RawJson, CallError> {
+) -> Result<CallOutput, CallError> {
     match result {
         Err(error) => Err(CallError::Service(error)),
         // A stale revision keeps its typed `conflict` code so a script can
@@ -446,30 +469,18 @@ fn state_reply(
                 what: "state".into(),
             },
         ))),
-        Ok(Ok(record)) => encode(&StateReply::from(record)),
+        Ok(Ok(record)) => Ok(CallOutput::State(record)),
     }
 }
 
-/// The wire shape one state operation returns (R08).
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct StateReply {
-    /// Whether the key holds a value.
-    present: bool,
-    /// The stored value; `null` when absent or tombstoned.
-    value: Option<RawJson>,
-    /// The key's current revision.
-    revision: u64,
-}
-
-impl From<StateRecord> for StateReply {
-    fn from(record: StateRecord) -> Self {
-        Self {
-            present: record.present,
-            value: record.value,
-            revision: record.revision.get().get(),
-        }
-    }
+/// What one service call returns: a JSON payload for ordinary operations,
+/// or the typed `StateRecord` for `state.*` so the op boundary mints the
+/// opaque revision token instead of encoding the counter (R08).
+pub(super) enum CallOutput {
+    /// An ordinary JSON result.
+    Json(RawJson),
+    /// A typed state record; revisions cross only as opaque tokens.
+    State(StateRecord),
 }
 
 #[derive(Deserialize)]
