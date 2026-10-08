@@ -394,6 +394,7 @@ async fn reload_prefix_keeps_product_base() {
         Name::parse("test").expect("literal name parses"),
         Origin::Builtin,
         ServiceSet::EMPTY,
+        std::num::NonZeroU32::MIN,
         CallerKind::Handler,
         None,
     );

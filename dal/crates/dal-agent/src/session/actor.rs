@@ -311,6 +311,30 @@ fn revision(at: u64) -> dal_core::ext::Revision {
     dal_core::ext::Revision::new(NonZeroU64::new(at).unwrap_or(NonZeroU64::MIN))
 }
 
+/// Loads the durable state map from one sidecar read (R08).
+///
+/// A missing file is an empty map. A read failure, malformed JSON, or an
+/// entry whose stored key no longer parses is surfaced as
+/// [`StateError::Unavailable`]: resetting to an empty map here would let
+/// the next write destroy every previously stored key.
+fn load_state_map(
+    read: Result<Vec<u8>, dal_store::StoreError>,
+) -> Result<(StateMap, u64), StateError> {
+    let file = match read {
+        Ok(bytes) => {
+            sonic_rs::from_slice::<StateFile>(&bytes).map_err(|_| StateError::Unavailable)?
+        }
+        Err(dal_store::StoreError::NotFound { .. }) => StateFile::default(),
+        Err(_) => return Err(StateError::Unavailable),
+    };
+    let mut map = StateMap::new();
+    for entry in file.entries {
+        let key = StateKey::parse(&entry.key).map_err(|_| StateError::Unavailable)?;
+        map.insert((entry.ns, key), (entry.value, entry.revision));
+    }
+    Ok((map, file.revisions))
+}
+
 /// Pages the session's journaled mail after a cursor.
 ///
 /// The cursor is the 1-based ordinal of the last-delivered mail record;
@@ -1376,21 +1400,11 @@ impl Actor {
             return Err(StateError::Unavailable);
         };
         if self.state.is_none() {
-            let file = sidecar
-                .read(STATE_SIDECAR)
-                .ok()
-                .and_then(|bytes| sonic_rs::from_slice::<StateFile>(&bytes).ok())
-                .unwrap_or_default();
-            self.state_rev = file.revisions;
-            self.state = Some(
-                file.entries
-                    .into_iter()
-                    .filter_map(|entry| {
-                        let key = StateKey::parse(&entry.key).ok()?;
-                        Some(((entry.ns, key), (entry.value, entry.revision)))
-                    })
-                    .collect(),
-            );
+            // A missing sidecar is an empty map; an unreadable or corrupt one
+            // must surface rather than silently reset every stored key.
+            let (map, revisions) = load_state_map(sidecar.read(STATE_SIDECAR))?;
+            self.state_rev = revisions;
+            self.state = Some(map);
         }
         let Some(map) = self.state.as_mut() else {
             return Err(StateError::Unavailable);
@@ -1401,6 +1415,11 @@ impl Actor {
             | StateOp::Delete { ns, key, .. } => (ns, key),
         };
         let slot = (ns_label(ns), key.clone());
+        // Build the prospective map and revision first, then publish them only
+        // after the sidecar write succeeds: memory must never run ahead of the
+        // journal (a failed write leaves the stored state untouched).
+        let mut next = map.clone();
+        let mut next_rev = self.state_rev;
         let record = match op {
             StateOp::Read { .. } => {
                 if let Some((value, at)) = map.get(&slot) {
@@ -1412,9 +1431,9 @@ impl Actor {
                 } else {
                     // A missing key still mints a revision so the caller can
                     // compare-and-swap its first write (R08).
-                    self.state_rev += 1;
-                    let minted = self.state_rev;
-                    map.insert(slot, (None, minted));
+                    next_rev += 1;
+                    let minted = next_rev;
+                    next.insert(slot, (None, minted));
                     StateRecord {
                         present: false,
                         value: None,
@@ -1429,9 +1448,9 @@ impl Actor {
                     Some((_, current)) if *current == expected.get().get() => {}
                     _ => return Err(StateError::Conflict),
                 }
-                self.state_rev += 1;
-                let minted = self.state_rev;
-                map.insert(slot, (Some(value.clone()), minted));
+                next_rev += 1;
+                let minted = next_rev;
+                next.insert(slot, (Some(value.clone()), minted));
                 StateRecord {
                     present: true,
                     value: Some(value),
@@ -1443,9 +1462,9 @@ impl Actor {
                     Some((_, current)) if *current == expected.get().get() => {}
                     _ => return Err(StateError::Conflict),
                 }
-                self.state_rev += 1;
-                let minted = self.state_rev;
-                map.insert(slot, (None, minted));
+                next_rev += 1;
+                let minted = next_rev;
+                next.insert(slot, (None, minted));
                 StateRecord {
                     present: false,
                     value: None,
@@ -1454,8 +1473,8 @@ impl Actor {
             }
         };
         let file = StateFile {
-            revisions: self.state_rev,
-            entries: map
+            revisions: next_rev,
+            entries: next
                 .iter()
                 .map(|((ns, key), (value, at))| StateFileEntry {
                     ns: ns.clone(),
@@ -1471,6 +1490,8 @@ impl Actor {
         if sidecar.write(STATE_SIDECAR, bytes.as_bytes()).is_err() {
             return Err(StateError::Unavailable);
         }
+        self.state_rev = next_rev;
+        *map = next;
         Ok(record)
     }
 
@@ -1765,5 +1786,45 @@ fn map_turn_state(state: TurnState, control: &ControlCell) -> ActualTurn {
                     phase: TurnPhase::Compacting,
                 })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_state_map_treats_a_missing_file_as_empty() {
+        let (map, revisions) = load_state_map(Err(dal_store::StoreError::NotFound {
+            path: std::path::PathBuf::from("state"),
+        }))
+        .expect("missing is empty");
+        assert!(map.is_empty() && revisions == 0);
+    }
+
+    #[test]
+    fn load_state_map_surfaces_corruption_instead_of_resetting() {
+        let corrupt = load_state_map(Ok(b"{not json".to_vec()));
+        assert!(
+            matches!(corrupt, Err(StateError::Unavailable)),
+            "malformed JSON fails closed: {corrupt:?}"
+        );
+        let bad_key = load_state_map(Ok(
+            br#"{"revisions":3,"entries":[{"ns":"eval","key":"BAD KEY","value":null,"revision":3}]}"#
+                .to_vec(),
+        ));
+        assert!(
+            matches!(bad_key, Err(StateError::Unavailable)),
+            "an invalid stored key fails closed: {bad_key:?}"
+        );
+    }
+
+    #[test]
+    fn load_state_map_replays_stored_entries() {
+        let bytes = br#"{"revisions":4,"entries":[{"ns":"eval","key":"counter","value":"41","revision":2}]}"#
+            .to_vec();
+        let (map, revisions) = load_state_map(Ok(bytes)).expect("stored map");
+        assert_eq!(revisions, 4);
+        assert_eq!(map.len(), 1);
     }
 }

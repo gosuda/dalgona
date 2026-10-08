@@ -419,6 +419,7 @@ fn caller(ext: &str, inject: &[&str], turn: Option<TurnId>) -> Caller {
         ext.parse::<Name>().unwrap(),
         Origin::User,
         ServiceSet::from_names(inject.iter().copied()).unwrap(),
+        std::num::NonZeroU32::MIN,
         CallerKind::Handler,
         turn,
     )

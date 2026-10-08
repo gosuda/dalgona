@@ -130,29 +130,18 @@ impl SessionServices {
     /// Derives the caller's state namespace (R08): eval cells share the
     /// session eval namespace; every other caller owns the namespace its
     /// extension's `origin`, name, and `state_version` isolate.
-    pub(crate) fn state_ns(&self, who: &Caller) -> Result<StateNs, ServiceError> {
+    pub(crate) fn state_ns(who: &Caller) -> StateNs {
         if who.cell() {
-            return Ok(StateNs::Eval);
+            return StateNs::Eval;
         }
-        let generation = Arc::clone(&self.generation.borrow());
-        let ext = generation
-            .extensions
-            .iter()
-            .find(|ext| ext.name() == who.ext().as_str());
-        ext.map(|ext| StateNs::Plugin {
+        // The caller carries its extension's `state_version` minted at
+        // dispatch: an in-flight invocation keeps the namespace its own
+        // generation snapshot gave it across a plugin reload.
+        StateNs::Plugin {
             origin: who.origin(),
             plugin: who.ext().clone(),
-            version: ext.state_version(),
-        })
-        .ok_or_else(|| {
-            ServiceError::failed(
-                Some(Service::Sidecar),
-                format!(
-                    "extension \"{}\" is not in the current generation",
-                    who.ext()
-                ),
-            )
-        })
+            version: who.state_version(),
+        }
     }
 
     /// Builds the session services from host-owned pieces.
@@ -631,7 +620,7 @@ impl Services for SessionServices {
         Box::pin(async move {
             Self::check_inject(&who, Service::Sidecar)?;
             self.gated(&who, Service::Sidecar).await?;
-            let ns = self.state_ns(&who)?;
+            let ns = Self::state_ns(&who);
             // The caller never names its namespace: it is derived here so a
             // script cannot reach another plugin's state.
             let op = match op {

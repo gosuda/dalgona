@@ -727,8 +727,15 @@ impl Backend {
             .unwrap_or_else(|| self.workspace.clone());
         // A child workspace must stay inside the caller's root: an
         // absolute path outside it would widen the `agents` grant into
-        // tool access across the whole filesystem.
-        if !workspace.as_path().starts_with(self.workspace.as_path()) {
+        // tool access across the whole filesystem. The lexical spelling
+        // lies — `/root/../etc` starts with `/root` — so containment is
+        // checked on canonical paths; a workspace that cannot be resolved
+        // fails closed.
+        let inside = std::fs::canonicalize(workspace.as_path())
+            .ok()
+            .zip(std::fs::canonicalize(self.workspace.as_path()).ok())
+            .is_some_and(|(child, root)| child.starts_with(root));
+        if !inside {
             return AgentsReply::Cancelled { id: self.session };
         }
         // An explicit child model the catalog cannot route refuses the

@@ -143,6 +143,7 @@ fn caller() -> Caller {
         "test".parse::<Name>().expect("name"),
         Origin::Builtin,
         ServiceSet::EMPTY,
+        std::num::NonZeroU32::MIN,
         CallerKind::Hook,
         Some(TurnId::new(std::num::NonZeroU64::MIN)),
     )

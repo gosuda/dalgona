@@ -12,12 +12,13 @@ use std::time::Duration;
 use dal_core::ext::NativeOp;
 use dal_core::{
     AgentStart, AgentsOp, Answer, CallId, Choice, DenyReason, FetchRequest, JobId, JobsOp,
-    McpRequest, Name, Preview, Question, RawJson, Revision, Service, SessionId, StateError,
-    StateKey, StateNs, StateOp, StateRecord, TurnOp, Workspace,
+    McpRequest, Name, Preview, Question, RawJson, Revision, SessionId, StateError, StateKey,
+    StateNs, StateOp, StateRecord, TurnOp, Workspace,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::error::ServiceError;
+use crate::ext::script::FailureCode;
 use crate::ext::{Caller, Services};
 
 /// How a service operation failed: strict argument decode, or the service.
@@ -26,6 +27,13 @@ pub(super) enum CallError {
     Args(Box<str>),
     /// The typed service returned its own error.
     Service(ServiceError),
+    /// A catchable failure carrying its typed code.
+    Failed {
+        /// The failure code the script sees.
+        code: FailureCode,
+        /// The failure message.
+        message: Box<str>,
+    },
 }
 
 /// Reports whether `op` dispatches through the typed service seam.
@@ -427,10 +435,12 @@ fn state_reply(
 ) -> Result<RawJson, CallError> {
     match result {
         Err(error) => Err(CallError::Service(error)),
-        Ok(Err(StateError::Conflict)) => Err(CallError::Service(ServiceError::failed(
-            Some(Service::Sidecar),
-            StateError::Conflict.to_string(),
-        ))),
+        // A stale revision keeps its typed `conflict` code so a script can
+        // tell a retryable CAS race from an ordinary service failure.
+        Ok(Err(StateError::Conflict)) => Err(CallError::Failed {
+            code: FailureCode::Conflict,
+            message: StateError::Conflict.to_string().into(),
+        }),
         Ok(Err(StateError::Unavailable)) => Err(CallError::Service(ServiceError::Denied(
             DenyReason::Unavailable {
                 what: "state".into(),
