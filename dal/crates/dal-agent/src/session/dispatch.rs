@@ -22,7 +22,7 @@ use super::backend::Backend;
 use super::context::{DeferredTool, is_core_tool_search, tool_search_query, tool_search_results};
 use crate::broker::{Broker, Resolved, default_timeout};
 use crate::ext::generation::Generation;
-use crate::ext::hooks::{DispatchCx, dispatch_tool_call};
+use crate::ext::hooks::{HookScope, dispatch_tool_call, hook_fanout};
 use crate::ext::overlay::TurnTools;
 use crate::ext::tool::{Approved, CallSnapshot, ToolCall, ToolCx, ToolCxRuntime, ToolOutcome};
 use crate::ext::{BoxFuture, Caller, CallerKind, Doc, ScriptCx, Services};
@@ -330,28 +330,17 @@ enum HookArgs {
 /// Folds every extension's `tool_call` hooks over the arguments in order.
 async fn run_hooks(ctx: &DispatchCtx, event: &ToolCallEvent, args: RawJson) -> HookArgs {
     let mut current = args;
-    for (index, extension) in ctx.generation.extensions.iter().enumerate() {
-        let Ok(ext) = extension.name().parse::<Name>() else {
-            continue;
-        };
-        let caller = Caller::new(
-            ext,
-            extension.origin(),
-            extension.inject(),
-            CallerKind::Hook,
-            Some(ctx.turn),
-        );
-        let dispatch = DispatchCx {
-            parent: ctx.parent,
-            process_env: Arc::clone(&ctx.process_env),
-            caller: &caller,
-            services: &ctx.services,
-            session: ctx.session,
-            turn: Some(ctx.turn),
-            cancel: &ctx.cancel,
-            turn_deadline: ctx.turn_deadline,
-            script: ctx.script.clone(),
-        };
+    let scope = HookScope {
+        services: &ctx.services,
+        session: ctx.session,
+        parent: ctx.parent,
+        process_env: Arc::clone(&ctx.process_env),
+        cancel: &ctx.cancel,
+        turn_deadline: ctx.turn_deadline,
+        script: ctx.script.clone(),
+    };
+    for (index, extension, caller) in hook_fanout(&ctx.generation, Some(ctx.turn)) {
+        let dispatch = scope.cx(&caller, Some(ctx.turn));
         let step = dispatch_tool_call(
             extension.name(),
             &dispatch,
