@@ -397,12 +397,20 @@ fn sanitized_name(raw: &str) -> Option<Name> {
     };
     Name::parse(fallback).ok()
 }
+
 /// Builds provider context messages from leaf entries in order.
 ///
 /// Conversation entries map to their message shape; settings entries carry
 /// no conversation content and are skipped. Blob parts stay references;
 /// inline images decode from base64, and undecodable bytes skip the part.
+/// A journal that holds several results for one tool call yields only the
+/// first, because providers reject a second result for the same call.
 pub(crate) fn context_items(entries: &[EntryView]) -> Vec<ContextItem> {
+    collapse_duplicate_results(compacted_items(entries))
+}
+
+/// Maps the leaf entries, replacing the compacted prefix with its summary.
+fn compacted_items(entries: &[EntryView]) -> Vec<ContextItem> {
     let Some(compaction_index) = entries
         .iter()
         .rposition(|entry| matches!(&entry.kind, EntryKind::Compaction { .. }))
@@ -435,6 +443,29 @@ pub(crate) fn context_items(entries: &[EntryView]) -> Vec<ContextItem> {
             .filter_map(context_item),
     );
     out
+}
+
+/// Keeps the first tool result for each call of one model response.
+///
+/// Results answer the calls of the assistant message before them, so a call
+/// id is tracked from that message until the next one. A later response
+/// may reuse an id; its result is kept. The journal is not changed.
+fn collapse_duplicate_results(mut items: Vec<ContextItem>) -> Vec<ContextItem> {
+    let mut answered: HashSet<&CallId> = HashSet::new();
+    let keep: Vec<bool> = items
+        .iter()
+        .map(|item| match item {
+            ContextItem::Assistant { .. } => {
+                answered.clear();
+                true
+            }
+            ContextItem::ToolResult { call, .. } => answered.insert(call),
+            ContextItem::User { .. } => true,
+        })
+        .collect();
+    let mut keep = keep.into_iter();
+    items.retain(|_| keep.next().unwrap_or(true));
+    items
 }
 
 /// Maps one leaf entry to its provider message, when it carries content.
@@ -608,6 +639,130 @@ mod tests {
                     }],
                 },
             ]
+        );
+    }
+
+    fn assistant_calling(id: u64, parent: Option<EntryId>, calls: &[&str]) -> EntryView {
+        entry(
+            id,
+            parent,
+            EntryKind::Assistant {
+                api: Family::Chat,
+                model: "model".into(),
+                content: calls
+                    .iter()
+                    .map(|call| Block::ToolCall {
+                        id: CallId::new(*call),
+                        name: "read".into(),
+                        input: RawJson::parse("{}").expect("valid JSON"),
+                    })
+                    .collect(),
+                usage: dal_core::Usage {
+                    input_tokens: 0,
+                    cached_input_tokens: 0,
+                    output_tokens: 0,
+                    reasoning_tokens: None,
+                    cache_write_tokens: 0,
+                    cost_usd: None,
+                },
+                stop: dal_core::AssistantStop::ToolUse,
+            },
+        )
+    }
+
+    fn result_for(id: u64, parent: Option<EntryId>, call: &str, text: &str) -> EntryView {
+        entry(
+            id,
+            parent,
+            EntryKind::ToolResult {
+                call: CallId::new(call),
+                name: "read".into(),
+                error: false,
+                parts: vec![JournalPart::Text { text: text.into() }],
+                changes: Vec::new(),
+            },
+        )
+    }
+
+    fn result_calls(items: &[ContextItem]) -> Vec<(&str, String)> {
+        items
+            .iter()
+            .filter_map(|item| match item {
+                ContextItem::ToolResult { call, parts, .. } => Some((
+                    call.as_str(),
+                    parts
+                        .iter()
+                        .filter_map(|part| match part {
+                            Part::Text { text } => Some(text.as_ref()),
+                            _ => None,
+                        })
+                        .collect(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn duplicate_tool_results_collapse_to_the_first_per_call() {
+        let assistant = assistant_calling(1, None, &["call-a", "call-b"]);
+        let first = result_for(2, Some(assistant.id), "call-a", "original");
+        let second = result_for(3, Some(first.id), "call-b", "other");
+        let duplicate = result_for(4, Some(second.id), "call-a", "replayed");
+
+        let context = context_items(&[assistant, first, second, duplicate]);
+
+        assert_eq!(
+            result_calls(&context),
+            vec![
+                ("call-a", "original".to_owned()),
+                ("call-b", "other".to_owned())
+            ]
+        );
+    }
+
+    #[test]
+    fn a_call_id_reused_by_a_later_response_keeps_its_own_result() {
+        let first_call = assistant_calling(1, None, &["call-0"]);
+        let first_result = result_for(2, Some(first_call.id), "call-0", "round one");
+        let second_call = assistant_calling(3, Some(first_result.id), &["call-0"]);
+        let second_result = result_for(4, Some(second_call.id), "call-0", "round two");
+
+        let context = context_items(&[first_call, first_result, second_call, second_result]);
+
+        assert_eq!(
+            result_calls(&context),
+            vec![
+                ("call-0", "round one".to_owned()),
+                ("call-0", "round two".to_owned())
+            ]
+        );
+    }
+
+    #[test]
+    fn duplicate_tool_results_collapse_across_a_compaction_boundary() {
+        let assistant = assistant_calling(1, None, &["call-a"]);
+        let first = result_for(2, Some(assistant.id), "call-a", "original");
+        let compaction = entry(
+            3,
+            Some(first.id),
+            EntryKind::Compaction {
+                summary: Some("replacement".into()),
+                first_kept: Some(assistant.id),
+                tokens_before: 100,
+                replay: None,
+                usage: None,
+                parts: Vec::new(),
+                parts_tokens: 0,
+            },
+        );
+        let duplicate = result_for(4, Some(compaction.id), "call-a", "replayed");
+
+        let context = context_items(&[assistant, first, compaction, duplicate]);
+
+        assert_eq!(
+            result_calls(&context),
+            vec![("call-a", "original".to_owned())]
         );
     }
 
