@@ -73,7 +73,40 @@ pub fn parts(cx: &BuildCx<'_>) -> Result<Parts, BuildError> {
     })
 }
 
-struct ReloadPlugins(Arc<dal_star::PluginSystem>);
+struct ReloadPlugins {
+    system: Arc<dal_star::PluginSystem>,
+    skills: dal_ext::skills::SharedSkillRegistry,
+    /// Skill records of the non-user extensions, in assembly order. They
+    /// survive every reload unchanged, so the merge only re-reads the user
+    /// plugin set.
+    kept: std::sync::Mutex<Vec<(Box<str>, Vec<dal_ext::skills::RegisteredSkill>)>>,
+}
+
+impl ReloadPlugins {
+    /// Captures the skill records that outlive every plugin reload: the
+    /// builtin and bundled extensions the product assembled.
+    fn capture_kept(&self, extensions: &[Extension]) {
+        *self
+            .kept
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = extensions
+            .iter()
+            .filter(|ext| ext.origin() != dal_core::Origin::User)
+            .map(|ext| {
+                (
+                    ext.name().into(),
+                    ext.skills()
+                        .iter()
+                        .map(|record| {
+                            dal_ext::skills::RegisteredSkill::from_record(ext.name(), record)
+                        })
+                        .collect(),
+                )
+            })
+            .collect();
+    }
+}
+
 impl dal_ext::commands::PluginReload for ReloadPlugins {
     fn reload<'a>(
         &'a self,
@@ -83,24 +116,57 @@ impl dal_ext::commands::PluginReload for ReloadPlugins {
         Result<dal_agent::ext::command::ReloadSummary, dal_core::command::ErrorTriple>,
     > {
         Box::pin(async move {
-            self.0.reload()?;
-            let set = self
-                .0
-                .user_extensions()
-                .map_err(|error| dal_core::command::ErrorTriple {
+            self.system.reload()?;
+            let set =
+                self.system
+                    .user_extensions()
+                    .map_err(|error| dal_core::command::ErrorTriple {
+                        what: "plugin reload".into(),
+                        why: error
+                            .render()
+                            .lines()
+                            .next()
+                            .unwrap_or("plugin conversion failed")
+                            .to_owned()
+                            .into(),
+                        fix: "edit the failing plugin and run /reload again".into(),
+                    })?;
+            let mut order: Vec<(Box<str>, Vec<dal_ext::skills::RegisteredSkill>)> = self
+                .kept
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            order.extend(set.iter().map(|ext| {
+                (
+                    ext.name().into(),
+                    ext.skills()
+                        .iter()
+                        .map(|record| {
+                            dal_ext::skills::RegisteredSkill::from_record(ext.name(), record)
+                        })
+                        .collect(),
+                )
+            }));
+            let borrowed: Vec<(&str, Vec<dal_ext::skills::RegisteredSkill>)> = order
+                .iter()
+                .map(|(name, skills)| (name.as_ref(), skills.clone()))
+                .collect();
+            let skills = dal_ext::skills::SkillRegistry::merge(&borrowed).map_err(|error| {
+                dal_core::command::ErrorTriple {
                     what: "plugin reload".into(),
-                    why: error
-                        .render()
-                        .lines()
-                        .next()
-                        .unwrap_or("plugin conversion failed")
-                        .to_owned()
-                        .into(),
-                    fix: "edit the failing plugin and run /reload again".into(),
-                })?;
-            cx.publish_plugins(set)
+                    why: error.to_string().into(),
+                    fix: "rename the colliding skill and run /reload again".into(),
+                }
+            })?;
+            let summary = cx
+                .publish_plugins(set)
                 .await
-                .map_err(|error| dal_ext::commands::misc::publish_failure(&error))
+                .map_err(|error| dal_ext::commands::misc::publish_failure(&error))?;
+            *self
+                .skills
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = skills;
+            Ok(summary)
         })
     }
 }
@@ -144,9 +210,13 @@ pub fn assemble(cx: &BuildCx<'_>, parts: Parts) -> Result<Product, BuildError> {
         source: Box::new(source),
     })?;
     let system = Arc::new(dal_star::PluginSystem::new(generation, roots, plugincfg));
-    let reload: Arc<dyn dal_ext::commands::PluginReload> =
-        Arc::new(ReloadPlugins(Arc::clone(&system)));
     let skills_registry = dal_ext::skills::shared_registry();
+    let reload = Arc::new(ReloadPlugins {
+        system: Arc::clone(&system),
+        skills: std::sync::Arc::clone(&skills_registry),
+        kept: std::sync::Mutex::new(Vec::new()),
+    });
+    let reload_dyn: Arc<dyn dal_ext::commands::PluginReload> = reload.clone();
     let mut extensions = vec![
         dal_tools::extension(parts.tools)?,
         parts.guard,
@@ -155,7 +225,7 @@ pub fn assemble(cx: &BuildCx<'_>, parts: Parts) -> Result<Product, BuildError> {
         dal_ext::letter::extension(std::sync::Arc::clone(&skills_registry))?,
         dal_ext::ttsr::extension()?,
         dal_ext::compact::extension()?,
-        dal_ext::commands::extension(&reload)?,
+        dal_ext::commands::extension(&reload_dyn)?,
         dal_ext::docs::extension()?,
         dal_ext::subagent::extension()?,
         crate::sandbox::extension(
@@ -181,6 +251,7 @@ pub fn assemble(cx: &BuildCx<'_>, parts: Parts) -> Result<Product, BuildError> {
     extensions.extend(batch);
 
     reject_duplicate_extension_names(&extensions)?;
+    reload.capture_kept(&extensions);
 
     let skills =
         dal_ext::skills::SkillRegistry::merge_extensions(&extensions).map_err(|source| {
@@ -204,9 +275,10 @@ pub fn assemble(cx: &BuildCx<'_>, parts: Parts) -> Result<Product, BuildError> {
 
 /// Fails assembly when two extensions claim one registration name.
 ///
-/// A user plugin named like a bundled battery would otherwise shadow it
-/// silently; the second claimant is rejected with the conflict that
-/// names the first owner.
+/// CLI paths such as `plugin list` assemble the product without building
+/// a generation, so the composition edge repeats the claim that
+/// `ValidatedExtensions::validate` enforces on every generation: a user
+/// plugin named like a bundled battery fails instead of shadowing it.
 fn reject_duplicate_extension_names(extensions: &[Extension]) -> Result<(), BuildError> {
     let mut claimants: std::collections::BTreeMap<dal_core::Name, dal_core::Claimant> =
         std::collections::BTreeMap::new();
@@ -218,7 +290,6 @@ fn reject_duplicate_extension_names(extensions: &[Extension]) -> Result<(), Buil
             })?;
         let claimant = match extension.origin() {
             dal_core::Origin::Builtin => dal_core::Claimant::Builtin,
-            dal_core::Origin::Bundled => dal_core::Claimant::Battery,
             _ => dal_core::Claimant::Plugin,
         }(name.clone());
         if let Some(previous) = claimants.get(&name) {
