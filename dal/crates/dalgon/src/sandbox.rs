@@ -583,14 +583,28 @@ mod win {
         command.push(u16::from(b'"'));
     }
 
+    /// A stable tag separating one user's kernel objects from another's:
+    /// on a multi-session or Remote Desktop host a fixed `Global\` name lets
+    /// any session squat the object and deny sandbox startup to everyone else.
+    fn user_tag() -> String {
+        let key = std::env::var_os("USERPROFILE")
+            .or_else(|| std::env::var_os("USERNAME"))
+            .unwrap_or_default();
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for unit in key.encode_wide() {
+            hash = (hash ^ u64::from(unit)).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        format!("{hash:016x}")
+    }
+
     /// Serializes one DACL edit plus its bookkeeping across sibling helpers.
     /// Held only for a load→edit→save transact — never across a child run —
-    /// so unrelated jobs run concurrently. `Global\` scope because the state
-    /// file lives in the shared per-user temp directory.
+    /// so unrelated jobs run concurrently. `Global\` scope so same-user
+    /// sessions share it, user-tagged so other users cannot squat the name.
     struct DaclLock(OwnedHandle);
     impl DaclLock {
         fn take() -> Result<Self, String> {
-            let name = wide("Global\\dalgon.sandbox.dacl");
+            let name = wide(&format!("Global\\dalgon.sandbox.dacl.{}", user_tag()));
             let handle = unsafe { CreateMutexW(ptr::null(), FALSE, name.as_ptr()) };
             let mutex = OwnedHandle::new(handle)?;
             if unsafe { WaitForSingleObject(mutex.0, INFINITE) } != WAIT_OBJECT_0 {
@@ -612,7 +626,7 @@ mod win {
     struct RunGuard(OwnedHandle);
     impl RunGuard {
         fn take(guid: &str) -> Result<Self, String> {
-            let name = wide(&format!("Global\\dalgon.sandbox.run.{guid}"));
+            let name = wide(&format!("Global\\dalgon.sandbox.run.{guid}.{}", user_tag()));
             let handle = unsafe { CreateMutexW(ptr::null(), FALSE, name.as_ptr()) };
             let mutex = OwnedHandle::new(handle)?;
             if unsafe { WaitForSingleObject(mutex.0, INFINITE) } != WAIT_OBJECT_0 {
@@ -633,7 +647,7 @@ mod win {
     fn run_alive(guid: &str) -> bool {
         const SYNCHRONIZE: u32 = 0x0010_0000;
         const ERROR_FILE_NOT_FOUND: u32 = 2;
-        let name = wide(&format!("Global\\dalgon.sandbox.run.{guid}"));
+        let name = wide(&format!("Global\\dalgon.sandbox.run.{guid}.{}", user_tag()));
         let handle = unsafe { OpenMutexW(SYNCHRONIZE, FALSE, name.as_ptr()) };
         if !handle.is_null() {
             unsafe { CloseHandle(handle) };
@@ -653,8 +667,15 @@ mod win {
         holders: std::collections::BTreeMap<String, Vec<(String, u32)>>,
     }
 
+    /// Bookkeeping lives under `LOCALAPPDATA`, never inside a writable
+    /// root: the temp root carries an inheritable full-control grant, so a
+    /// sandboxed command could delete or forge holder records there and
+    /// cleanup would retire ACEs that were never lifted.
     fn dacl_state_path() -> PathBuf {
-        std::env::temp_dir().join("dalgon-sandbox-dacl.state")
+        std::env::var_os("LOCALAPPDATA")
+            .map_or_else(std::env::temp_dir, PathBuf::from)
+            .join("dalgon")
+            .join("sandbox-dacl.state")
     }
 
     fn path_key(path: &Path) -> String {
@@ -714,6 +735,11 @@ mod win {
             }
             let path = dacl_state_path();
             let tmp = path.with_extension("tmp");
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir).map_err(|source| {
+                    format!("dalgon sandbox: create grant state dir: {source}")
+                })?;
+            }
             std::fs::write(&tmp, text)
                 .and_then(|()| std::fs::rename(&tmp, &path))
                 .map_err(|source| format!("dalgon sandbox: save grant state: {source}"))
@@ -767,17 +793,18 @@ mod win {
     /// removes the holder record. The record is dropped only after the edit
     /// succeeds, so a failed lift is retried by the next transact instead of
     /// leaving an untracked ACE behind. When the last holder leaves, the
-    /// write restores the DACL state the first planter observed.
-    fn lift(state: &mut DaclState, key: &str, guid: &str, access: u32) {
+    /// write restores the DACL state the first planter observed. A revoke
+    /// failure propagates so callers can report the retained grant.
+    fn lift(state: &mut DaclState, key: &str, guid: &str, access: u32) -> Result<(), String> {
         let has = state
             .holders
             .get(key)
             .is_some_and(|h| h.iter().any(|(g, a)| g == guid && *a == access));
         if !has {
-            return;
+            return Ok(());
         }
         let (Some(sid), Some(path)) = (sid_for(guid), key_path(key)) else {
-            return;
+            return Err(format!("cannot resolve the grant identity for {key}"));
         };
         let last = state.holders.get(key).is_some_and(|h| h.len() == 1);
         let was_open = if last {
@@ -785,13 +812,12 @@ mod win {
         } else {
             false
         };
-        if edit_dacl(&path, sid.0, access, REVOKE_ACCESS, last && was_open).is_err() {
-            return;
-        }
+        edit_dacl(&path, sid.0, access, REVOKE_ACCESS, last && was_open)?;
         state.remove_holder(key, guid, access);
         if last {
             state.orig.remove(key);
         }
+        Ok(())
     }
 
     /// Drops every grant whose run beacon is gone — a helper killed mid-run
@@ -810,7 +836,9 @@ mod win {
             })
             .collect();
         for (path, guid, access) in dead {
-            lift(state, &path, &guid, access);
+            // Best-effort: a failed lift keeps its holder record and is
+            // retried by the next transact.
+            let _ = lift(state, &path, &guid, access);
         }
     }
 
@@ -1024,7 +1052,15 @@ mod win {
             }
         }
         for root in roots {
-            for ancestor in root.ancestors().skip(1) {
+            // Ancestor RX stops before the drive/share root: an inheritable
+            // ACE on a volume root rewrites every descendant's DACL, and a
+            // normal user cannot write it anyway — the run would fail for
+            // lack of WRITE_DAC.
+            for ancestor in root
+                .ancestors()
+                .skip(1)
+                .take_while(|dir| dir.parent().is_some())
+            {
                 push_rx(ancestor.to_path_buf(), false, &mut plan);
             }
             plan.push((root.clone(), GENERIC_ALL_ACCESS, false));
@@ -1065,10 +1101,9 @@ mod win {
     fn lift_all(planted: &[(PathBuf, u32)], profile: &Profile) -> Option<String> {
         let mut failed = Vec::new();
         for (path, access) in planted {
-            if let Err(error) = transact(|state| {
-                lift(state, &path_key(path), &profile.guid, *access);
-                Ok(())
-            }) {
+            if let Err(error) =
+                transact(|state| lift(state, &path_key(path), &profile.guid, *access))
+            {
                 failed.push(error);
             }
         }
