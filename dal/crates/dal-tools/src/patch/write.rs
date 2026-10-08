@@ -48,6 +48,25 @@ pub struct PatchSession {
     pub cutoff: Option<u64>,
 }
 
+pub(super) fn non_regular_target(display: &Path) -> EngineError {
+    EngineError::new(
+        ErrorClass::File,
+        format!("patch: {} is not a regular file.", display.display()),
+    )
+}
+
+pub(super) async fn ensure_regular_target(
+    canonical: &Path,
+    display: &Path,
+) -> Result<(), EngineError> {
+    if let Ok(metadata) = tokio::fs::metadata(canonical).await
+        && !metadata.is_file()
+    {
+        return Err(non_regular_target(display));
+    }
+    Ok(())
+}
+
 /// Parses, resolves, proves, and stages one payload without writing.
 ///
 /// The returned plan owns complete before/after bytes; observers run on it

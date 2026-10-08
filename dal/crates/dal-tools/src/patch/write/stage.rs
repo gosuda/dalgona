@@ -10,7 +10,7 @@ use super::super::{
     resolve::{decode, line_count},
 };
 
-use super::PatchSession;
+use super::{PatchSession, ensure_regular_target, non_regular_target};
 
 pub(crate) async fn stage_replacement(
     display: &Path,
@@ -934,11 +934,7 @@ async fn prove_reference(
     index: usize,
     token: &str,
 ) -> Result<(), EngineError> {
-    if let Ok(metadata) = tokio::fs::metadata(canonical).await
-        && !metadata.is_file()
-    {
-        return Err(non_regular_target(display));
-    }
+    ensure_regular_target(canonical, display).await?;
     let reference = super::super::snapshot::ReadRef::parse(token).ok_or_else(|| {
         EngineError::new(
             ErrorClass::Proof,
@@ -1026,22 +1022,6 @@ fn destructive_footprint(locator: &Locator) -> Option<(usize, usize)> {
         | Locator::Gap { .. }
         | Locator::Symbol { .. } => None,
     }
-}
-
-fn non_regular_target(display: &Path) -> EngineError {
-    EngineError::new(
-        ErrorClass::File,
-        format!("patch: {} is not a regular file.", display.display()),
-    )
-}
-
-async fn ensure_regular_target(canonical: &Path, display: &Path) -> Result<(), EngineError> {
-    if let Ok(metadata) = tokio::fs::metadata(canonical).await
-        && !metadata.is_file()
-    {
-        return Err(non_regular_target(display));
-    }
-    Ok(())
 }
 
 async fn read_target(canonical: &Path, display: &Path) -> Result<Vec<u8>, EngineError> {

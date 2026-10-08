@@ -1521,6 +1521,45 @@ async fn patch_rejects_fifo_reference_before_reading() {
     assert!(error.message.contains("pipe"), "{}", error.message);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "std has no mkfifo and rustix compiles mkfifoat out on Apple targets"
+)]
+async fn commit_rejects_fifo_after_staging() {
+    use std::{process::Command, time::Duration};
+
+    let dir = tempfile::tempdir().expect("temp workspace");
+    let path = dir.path().join("pipe");
+    tokio::fs::write(&path, b"before\n")
+        .await
+        .expect("seed regular file");
+    let session = test_session(dir.path(), false);
+    let staged = plan(
+        &session,
+        DialectId::Replace,
+        "{\"changes\":[{\"path\":\"pipe\",\"old\":\"before\",\"new\":\"after\"}]}",
+    )
+    .await
+    .expect("stage regular file patch");
+
+    tokio::fs::remove_file(&path)
+        .await
+        .expect("remove regular file");
+    let status = Command::new("mkfifo")
+        .arg(&path)
+        .status()
+        .expect("create fifo");
+    assert!(status.success(), "mkfifo failed with {status}");
+
+    let output = tokio::time::timeout(Duration::from_secs(1), commit(&session, staged, &[]))
+        .await
+        .expect("FIFO commit must return without blocking");
+    assert_eq!(output.error_class, Some(super::ir::ErrorClass::File));
+    assert!(output.text.contains("pipe"), "{}", output.text);
+}
+
 #[tokio::test]
 async fn stage_replacement_contract() {
     let dir = tempfile::tempdir().expect("temp workspace");

@@ -1,16 +1,13 @@
 //! Atomic commit: locks, temps, ordered operations, and truthful outcomes.
 
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{path::PathBuf, sync::Arc};
 
 use super::super::ir::{
     Diff, DiffFile, EngineError, ErrorClass, FileChange, FindingSeverity, Output, Plan,
     StagedFileOwned,
 };
 
-use super::PatchSession;
+use super::{PatchSession, ensure_regular_target, non_regular_target};
 
 fn lock_table()
 -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>> {
@@ -18,22 +15,6 @@ fn lock_table()
         std::sync::Mutex<std::collections::HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>,
     > = std::sync::OnceLock::new();
     TABLE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
-}
-
-fn non_regular_target(display: &Path) -> EngineError {
-    EngineError::new(
-        ErrorClass::File,
-        format!("patch: {} is not a regular file.", display.display()),
-    )
-}
-
-async fn ensure_regular_target(canonical: &Path, display: &Path) -> Result<(), EngineError> {
-    if let Ok(metadata) = tokio::fs::metadata(canonical).await
-        && !metadata.is_file()
-    {
-        return Err(non_regular_target(display));
-    }
-    Ok(())
 }
 
 /// Acquires the canonical write set in ascending byte order — sources and
