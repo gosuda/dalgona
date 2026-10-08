@@ -390,6 +390,8 @@ impl SessionBackend for Backend {
                 FetchMethod::Put => reqwest::Method::PUT,
                 FetchMethod::Delete => reqwest::Method::DELETE,
                 FetchMethod::Head => reqwest::Method::HEAD,
+                FetchMethod::Options => reqwest::Method::OPTIONS,
+                FetchMethod::Patch => reqwest::Method::PATCH,
                 _ => reqwest::Method::GET,
             };
             let client = dal_provider::build_client();
