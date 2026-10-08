@@ -394,7 +394,6 @@ impl JobTable {
     }
 
     /// Refreshes the live tail snapshot for progress without settling.
-    #[cfg(test)]
     pub(crate) fn update_tail(&mut self, id: JobId, tail: Box<[u8]>) -> Result<(), ToolError> {
         let Some(record) = self.jobs.get_mut(&id) else {
             return Err(invalid_transition());

@@ -86,7 +86,11 @@ async fn spawn(
     }
     // The spawn payload is the job's input; seed it as the initial tail
     // so `jobs.text` can read it back before the owner settles the row.
-    table.push_output(id, payload.as_str().as_bytes());
+    if let Err(error) = table.update_tail(id, payload.as_str().as_bytes().into()) {
+        return JobsReply::Unavailable {
+            reason: error.to_string().into(),
+        };
+    }
     JobsReply::Spawned { id }
 }
 
