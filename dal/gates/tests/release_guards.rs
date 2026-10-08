@@ -99,7 +99,7 @@ fn write_executable(path: &std::path::Path, text: &str) -> Result<(), Box<dyn Er
 #[cfg(unix)]
 #[test]
 fn release_publish_failure_wraps_cargo_error() -> Result<(), Box<dyn Error>> {
-    use std::{fs, io, process::Command};
+    use std::{fs, io};
     let workspace = tempfile::tempdir()?;
     fs::create_dir_all(workspace.path().join("tiny/src"))?;
     fs::write(
