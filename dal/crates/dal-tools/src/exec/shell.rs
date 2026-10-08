@@ -14,6 +14,29 @@ pub(crate) struct ResolvedShell {
     pub program: PathBuf,
 }
 
+/// Builds the provenance overrides for one child without changing the
+/// host-captured environment snapshot.
+///
+/// The identifiers are supplied as environment overlays so they win over a
+/// captured value. A value containing NUL cannot be passed to a child process
+/// and is omitted instead.
+pub(crate) fn provenance_environment(
+    thread_id: &str,
+    tool_call_id: &str,
+) -> Vec<(OsString, OsString)> {
+    let mut environment = Vec::with_capacity(2);
+    if !thread_id.as_bytes().contains(&0) {
+        environment.push((OsString::from("DAL_THREAD_ID"), OsString::from(thread_id)));
+    }
+    if !tool_call_id.as_bytes().contains(&0) {
+        environment.push((
+            OsString::from("DAL_TOOL_CALL_ID"),
+            OsString::from(tool_call_id),
+        ));
+    }
+    environment
+}
+
 /// Resolves a configured shell against captured paths and the platform ladder.
 ///
 /// A configured shell is authoritative: failure to resolve it never falls back
@@ -131,12 +154,28 @@ fn is_executable_file(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, fs, path::Path};
+    use std::{collections::BTreeMap, ffi::OsString, fs, path::Path};
 
-    #[cfg(windows)]
-    use std::ffi::OsString;
+    use super::{provenance_environment, resolve};
 
-    use super::resolve;
+    #[test]
+    fn provenance_environment_exports_ids_and_omits_nul_values() {
+        assert_eq!(
+            provenance_environment("thread-1", "call-2"),
+            vec![
+                (OsString::from("DAL_THREAD_ID"), OsString::from("thread-1")),
+                (OsString::from("DAL_TOOL_CALL_ID"), OsString::from("call-2")),
+            ]
+        );
+        assert_eq!(
+            provenance_environment("thread\0", "call-2"),
+            vec![(OsString::from("DAL_TOOL_CALL_ID"), OsString::from("call-2"))]
+        );
+        assert_eq!(
+            provenance_environment("thread-1", "call\0"),
+            vec![(OsString::from("DAL_THREAD_ID"), OsString::from("thread-1"))]
+        );
+    }
 
     #[test]
     fn shell_resolution_missing_bash() {

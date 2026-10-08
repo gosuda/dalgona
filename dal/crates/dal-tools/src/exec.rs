@@ -512,10 +512,11 @@ impl ExecTool {
             OsString::from("-c"),
             OsString::from(&validated.command),
         ];
+        let thread_id = cx.session().to_string();
         let opts = SpawnOpts {
             cwd: validated.cwd.clone(),
             timeout: validated.timeout,
-            env: Vec::new(),
+            env: shell::provenance_environment(&thread_id, call.id.as_str()),
         };
         let mut proc = match cx.spawn(&spawn_argv, opts, approved) {
             Ok(proc) => proc,

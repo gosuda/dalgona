@@ -5,6 +5,15 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(unix)]
+use dal_agent::{Delivery, Env, Host, Product, SessionRef};
+#[cfg(unix)]
+use dal_core::{
+    ClientId, Command, Config, ConfigProduct, Expect, PageReq, Part, UpdateKind, Workspace,
+};
+#[cfg(unix)]
+use std::{collections::BTreeMap, ffi::OsString};
+
 #[test]
 fn decode_error_literals() {
     for (input, expected) in [
@@ -257,4 +266,132 @@ fn final_text_omits_success_status_and_empty_preview() {
         false,
     );
     assert_eq!(text, "Full output: /session/jobs/call.log");
+}
+
+#[cfg(unix)]
+fn write_exec_fixture(path: &Path, command: &str) {
+    let usage = sonic_rs::json!({
+        "input_tokens": 1,
+        "cached_input_tokens": 0,
+        "output_tokens": 1,
+        "reasoning_tokens": null,
+        "cache_write_tokens": 0,
+        "cost_usd": null
+    });
+    let first = sonic_rs::json!({
+        "kind": "events",
+        "events": [
+            {"type": "tool_call_started", "id": "exec-call", "name": "exec"},
+            {"type": "tool_calls_done", "calls": [{
+                "id": "exec-call",
+                "name": "exec",
+                "args": {
+                    "kind": "parsed",
+                    "value": {"command": command, "timeout_seconds": 10}
+                }
+            }]},
+            {"type": "usage", "usage": usage},
+            {"type": "stop", "reason": "tool_use"}
+        ]
+    });
+    let second = sonic_rs::json!({
+        "kind": "events",
+        "events": [
+            {"type": "text_delta", "text": "exec completed"},
+            {"type": "tool_calls_done", "calls": []},
+            {"type": "usage", "usage": usage},
+            {"type": "stop", "reason": "end_turn"}
+        ]
+    });
+    std::fs::write(
+        path,
+        format!(
+            "{}\n{}\n",
+            sonic_rs::to_string(&first).expect("encode first response"),
+            sonic_rs::to_string(&second).expect("encode second response")
+        ),
+    )
+    .expect("write scripted fixture");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn exec_child_gets_provenance_after_captured_environment_overlays() {
+    let data = tempfile::tempdir().expect("create data root");
+    let workspace_dir = tempfile::tempdir().expect("create workspace");
+    let fixture_path = data.path().join("exec-provenance.jsonl");
+    write_exec_fixture(
+        &fixture_path,
+        r#"printf '%s\n' "$DAL_THREAD_ID" "$DAL_TOOL_CALL_ID" > provenance.txt"#,
+    );
+    let user = format!(
+        "model = \"openai/gpt-6\"\napproval = \"all\"\n[providers.scripted]\nfixture = {:?}\n",
+        fixture_path.to_string_lossy()
+    );
+    let config =
+        Config::load(ConfigProduct::Dalgon, data.path(), "", Some(&user)).expect("load config");
+    let product = Product {
+        name: "dal",
+        data_root: data.path().to_path_buf(),
+        defaults: "",
+        extensions: vec![crate::extension(crate::ToolsConfig::default()).expect("tools extension")],
+        bundled: Vec::new(),
+    };
+    let env = Env {
+        vars: BTreeMap::from([
+            (
+                OsString::from("DAL_THREAD_ID"),
+                OsString::from("captured-thread"),
+            ),
+            (
+                OsString::from("DAL_TOOL_CALL_ID"),
+                OsString::from("captured-call"),
+            ),
+        ]),
+        cwd: workspace_dir.path().to_path_buf(),
+        sandbox_helper: None,
+    };
+    let host = Host::start(product, config, env).await.expect("start host");
+    let workspace = Workspace::new(workspace_dir.path().to_path_buf()).expect("workspace");
+    let agent = host
+        .open(
+            SessionRef::Ephemeral { workspace },
+            ClientId::new("exec-provenance-test"),
+        )
+        .await
+        .expect("open session");
+    let thread = agent
+        .view(PageReq::default())
+        .expect("read session view")
+        .session
+        .id;
+    let mut updates = agent.subscribe(None).expect("subscribe to session");
+    let reply = agent
+        .submit(Command::Prompt {
+            expect: Expect::Idle,
+            content: vec![Part::Text {
+                text: "Run the scripted exec call.".into(),
+            }],
+        })
+        .await
+        .expect("submit prompt");
+    assert!(matches!(reply, dal_core::Reply::Accepted { .. }));
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let Some(Delivery::Update(update)) = updates.next().await else {
+                panic!("session ended before the exec turn ended");
+            };
+            if matches!(update.kind, UpdateKind::TurnEnded { .. }) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("wait for exec turn");
+    let contents = tokio::fs::read_to_string(workspace_dir.path().join("provenance.txt"))
+        .await
+        .expect("read provenance output");
+    assert_eq!(contents, format!("{thread}\nexec-call\n"));
+    let shutdown = host.shutdown(Duration::from_secs(1)).await;
+    assert_eq!(shutdown.sessions_closed, 1);
 }
