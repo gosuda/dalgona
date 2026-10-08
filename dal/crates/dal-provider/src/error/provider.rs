@@ -478,10 +478,17 @@ impl From<ProviderError> for InferFailure {
 
         let message = error.to_string().into_boxed_str();
         let fix = error.fix().map(String::into_boxed_str);
-        // Exhaustive on purpose: a new variant must choose its class here.
         match error {
             E::ContextOverflow { code, .. } => Self::Overflow {
                 code: code.into_boxed_str(),
+                message,
+            },
+            E::Status {
+                family: _,
+                status: 413,
+                ..
+            } => Self::Overflow {
+                code: "request_too_large".into(),
                 message,
             },
             E::RateLimited { retry_after, .. } => Self::Retryable {

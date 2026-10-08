@@ -469,7 +469,7 @@ impl Driver {
             let event = match item {
                 Ok(event) => event,
                 Err(error) => {
-                    failed = Some(self.failure(&error));
+                    failed = Some(self.failure(error));
                     break;
                 }
             };
@@ -938,16 +938,19 @@ impl Driver {
     }
 
     /// Maps a transport error onto the classified failure surface.
-    fn failure(&self, error: &dal_provider::ProviderError) -> InferFailure {
+    ///
+    /// The provider's own classification is kept for overflow (a context
+    /// window error or an HTTP 413) so the fold can compact and retry. A
+    /// retryable failure that reaches this point has already used its whole
+    /// retry budget, and the fold ignores `Retryable`, so it ends the turn as
+    /// `Fatal`.
+    fn failure(&self, error: dal_provider::ProviderError) -> InferFailure {
         if self.deps.cancel.is_cancelled() {
             return InferFailure::Cancelled;
         }
-        if let dal_provider::ProviderError::Synthetic(failure) = error {
-            return failure.clone();
-        }
-        InferFailure::Fatal {
-            message: error.to_string().into(),
-            fix: None,
+        match InferFailure::from(error) {
+            InferFailure::Retryable { message, .. } => InferFailure::Fatal { message, fix: None },
+            classified => classified,
         }
     }
 
