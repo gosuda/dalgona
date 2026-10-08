@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Implement the standalone release scripts using Cargo metadata and jq."""
+"""Implement the standalone release scripts using Cargo metadata."""
 
 import json
 import re
@@ -17,33 +17,6 @@ PUBLISH_USAGE = (
 SEMVER_USAGE = "usage: scripts/semver-gate.sh [--baseline-root <dir>] <workspace-root>"
 CRATES_IO_SOURCE = "registry+https://github.com/rust-lang/crates.io-index"
 
-WORKSPACE_FILTER = r"""
-.workspace_members as $ids
-| [.packages[] | select(.id as $id | $ids | index($id))] as $packages
-| {
-    members: [
-      $packages[]
-      | {
-          name,
-          version,
-          manifest_path,
-          publishable: (if .publish == false or .publish == [] then false else true end)
-        }
-    ],
-    dependencies: [
-      $packages[] as $package
-      | $package.dependencies[]?
-      | select(.kind != "dev")
-      | {
-          package: $package.name,
-          name,
-          path: (.path // null),
-          source: (.source // null),
-          req: (.req // null)
-        }
-    ]
-  }
-"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,25 +44,25 @@ class Metadata:
 
 def mapping(value: object) -> dict[str, object]:
     if not isinstance(value, dict):
-        raise ValueError("jq returned an invalid metadata object")
+        raise ValueError("cargo metadata returned an invalid metadata object")
     result: dict[str, object] = {}
     for key, item in value.items():
         if not isinstance(key, str):
-            raise ValueError("jq returned a non-string object key")
+            raise ValueError("cargo metadata returned a non-string object key")
         result[key] = item
     return result
 
 
 def sequence(value: object) -> list[object]:
     if not isinstance(value, list):
-        raise ValueError("jq returned an invalid metadata list")
+        raise ValueError("cargo metadata returned an invalid metadata list")
     return [item for item in value]
 
 
 def string_field(fields: dict[str, object], name: str) -> str:
     value = fields.get(name)
     if not isinstance(value, str):
-        raise ValueError(f"jq returned an invalid {name} field")
+        raise ValueError(f"cargo metadata returned an invalid {name} field")
     return value
 
 
@@ -98,7 +71,7 @@ def optional_string_field(fields: dict[str, object], name: str) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str):
-        raise ValueError(f"jq returned an invalid {name} field")
+        raise ValueError(f"cargo metadata returned an invalid {name} field")
     return value
 
 
@@ -109,7 +82,7 @@ def metadata_value(value: object) -> Metadata:
         member = mapping(item)
         publishable = member.get("publishable")
         if not isinstance(publishable, bool):
-            raise ValueError("jq returned an invalid publishable field")
+            raise ValueError("cargo metadata returned an invalid publishable field")
         members.append(
             Member(
                 string_field(member, "name"),
@@ -139,10 +112,6 @@ def error(message: str, code: int) -> int:
     return code
 
 
-def require_jq(message: str) -> int | None:
-    return None if shutil.which("jq") else error(message, 64)
-
-
 def require_curl() -> int | None:
     return (
         None
@@ -162,7 +131,50 @@ def parse_root(root: str) -> tuple[Path | None, int | None]:
     return Path(root).absolute(), None
 
 
-def run_metadata(root: Path, jq_error: str) -> tuple[Metadata | None, int | None]:
+def workspace_filter(raw: object) -> dict[str, object]:
+    fields = mapping(raw)
+    members: set[object] = set()
+    for member in sequence(fields.get("workspace_members")):
+        if not isinstance(member, str):
+            raise ValueError("cargo metadata returned a non-string workspace member")
+        members.add(member)
+    packages = [
+        mapping(item)
+        for item in sequence(fields.get("packages"))
+        if isinstance(mapping(item).get("id"), str) and mapping(item).get("id") in members
+    ]
+    dependencies: list[dict[str, object]] = []
+    for package in packages:
+        for item in sequence(package.get("dependencies")):
+            dependency = mapping(item)
+            if dependency.get("kind") == "dev":
+                continue
+            dependencies.append(
+                {
+                    "package": package.get("name"),
+                    "name": dependency.get("name"),
+                    "path": dependency.get("path"),
+                    "source": dependency.get("source"),
+                    "req": dependency.get("req"),
+                }
+            )
+    return {
+        "members": [
+            {
+                "name": package.get("name"),
+                "version": package.get("version"),
+                "manifest_path": package.get("manifest_path"),
+                "publishable": not (
+                    (publish := package.get("publish")) is False or publish == []
+                ),
+            }
+            for package in packages
+        ],
+        "dependencies": dependencies,
+    }
+
+
+def run_metadata(root: Path, metadata_error: str) -> tuple[Metadata | None, int | None]:
     cargo = subprocess.run(
         [
             "cargo",
@@ -181,20 +193,10 @@ def run_metadata(root: Path, jq_error: str) -> tuple[Metadata | None, int | None
         sys.stdout.write(cargo.stdout)
         sys.stderr.write(cargo.stderr)
         return None, cargo.returncode
-    parsed = subprocess.run(
-        ["jq", "-c", WORKSPACE_FILTER],
-        input=cargo.stdout,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if parsed.returncode:
-        sys.stderr.write(parsed.stderr)
-        return None, parsed.returncode
     try:
-        return metadata_value(json.loads(parsed.stdout)), None
+        return metadata_value(workspace_filter(json.loads(cargo.stdout))), None
     except (json.JSONDecodeError, ValueError):
-        return None, error(jq_error, 2)
+        return None, error(metadata_error, 2)
 
 
 def package_directories(members: tuple[Member, ...]) -> dict[Path, str]:
@@ -245,20 +247,18 @@ def sparse_index(name: str) -> str:
 
 
 def index_versions(index_text: str) -> list[str]:
-    result = subprocess.run(
-        [
-            "jq",
-            "-r",
-            'select(type == "object" and (.vers | type == "string")) | .vers',
-        ],
-        input=index_text,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode:
-        return []
-    return [line for line in result.stdout.splitlines() if line]
+    versions: list[str] = []
+    for line in index_text.splitlines():
+        if not line:
+            continue
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(item, dict) or not isinstance(item.get("vers"), str):
+            return []
+        versions.append(item["vers"])
+    return versions
 
 
 def satisfies_requirement(version: str, requirement: str) -> bool:
@@ -347,9 +347,6 @@ def publish_main(arguments: list[str]) -> int:
     if parsed is None:
         return usage_error(PUBLISH_USAGE)
     dry_run, check_registry_deps, dep_name, dep_req, root_arg = parsed
-    jq_status = require_jq("jq is required to compute the publish order")
-    if jq_status is not None:
-        return jq_status
     root, status = parse_root(root_arg)
     if status is not None or root is None:
         return status or 64
@@ -374,7 +371,7 @@ def publish_main(arguments: list[str]) -> int:
             f"workspace root {root_arg} has no [workspace.package] version; lockstep is broken",
             2,
         )
-    metadata, status = run_metadata(root, "jq is required to compute the publish order")
+    metadata, status = run_metadata(root, "the cargo metadata shape is invalid for the publish order")
     if status is not None or metadata is None:
         return status or 2
     for member in metadata.members:
@@ -468,9 +465,6 @@ def semver_main(arguments: list[str]) -> int:
     if parsed is None:
         return usage_error(SEMVER_USAGE)
     baseline_arg, root_arg = parsed
-    jq_status = require_jq("jq is required to compute the checked members")
-    if jq_status is not None:
-        return jq_status
     curl_status = require_curl()
     if curl_status is not None:
         return curl_status
@@ -478,7 +472,7 @@ def semver_main(arguments: list[str]) -> int:
     if status is not None or root is None:
         return status or 64
     baseline = Path(baseline_arg).absolute() if baseline_arg is not None else None
-    metadata, status = run_metadata(root, "jq is required to compute the checked members")
+    metadata, status = run_metadata(root, "the cargo metadata shape is invalid for the checked members")
     if status is not None or metadata is None:
         return status or 2
     for member in metadata.members:
