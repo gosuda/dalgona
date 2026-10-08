@@ -446,6 +446,7 @@ mod tests {
 )]
 mod win {
     use std::ffi::{OsStr, OsString};
+    use std::fmt::Write as _;
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
     use std::path::{Path, PathBuf};
     use std::process::ExitCode;
@@ -659,7 +660,7 @@ mod win {
     fn path_key(path: &Path) -> String {
         let mut key = String::new();
         for unit in path.as_os_str().encode_wide() {
-            key.push_str(&format!("{unit:04x}"));
+            let _ = write!(key, "{unit:04x}");
         }
         key
     }
@@ -704,11 +705,11 @@ mod win {
         fn save(&self) -> Result<(), String> {
             let mut text = String::from("v1\n");
             for (path, open) in &self.orig {
-                text.push_str(&format!("O\t{path}\t{}\n", u8::from(*open)));
+                let _ = writeln!(text, "O\t{path}\t{}", u8::from(*open));
             }
             for (path, holders) in &self.holders {
                 for (guid, access) in holders {
-                    text.push_str(&format!("H\t{path}\t{guid}\t{access:x}\n"));
+                    let _ = writeln!(text, "H\t{path}\t{guid}\t{access:x}");
                 }
             }
             let path = dacl_state_path();

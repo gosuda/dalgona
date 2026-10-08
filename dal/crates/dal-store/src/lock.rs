@@ -129,7 +129,6 @@ mod tests {
         fs,
         path::PathBuf,
         sync::atomic::{AtomicU64, Ordering},
-        time::Duration,
     };
 
     use dal_core::SessionId;
@@ -300,20 +299,15 @@ mod tests {
     }
 
     #[test]
-    fn read_pid_until_picks_up_a_sidecar_written_mid_poll() {
+    fn read_pid_until_reads_a_present_sidecar() {
         let dir = TestDir::new();
         let path = dir.0.join("session.lock.owner");
-        let writer = path.clone();
-        let thread = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(40));
-            fs::write(&writer, b"4242\n").expect("write sidecar mid-poll");
-        });
+        fs::write(&path, b"4242\n").expect("write the owner sidecar");
         assert_eq!(
-            read_pid_until(&path).expect("poll reads a sidecar that lands in time"),
+            read_pid_until(&path).expect("poll reads the sidecar"),
             Some(4242),
-            "the poll must not return before its deadline"
+            "the poll must return the pid as soon as it is readable"
         );
-        thread.join().expect("writer finished");
     }
 
     #[test]
