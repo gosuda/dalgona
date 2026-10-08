@@ -652,7 +652,7 @@ impl Actor {
                 self.on_sidecar(op);
             }
             ActorRequest::State { req } => {
-                self.on_state(req);
+                self.on_state(req).await;
             }
             ActorRequest::Mail { req } => {
                 self.on_mail(req).await;
@@ -1430,8 +1430,8 @@ impl Actor {
 
     /// Runs one compare-and-swap state operation against the actor-owned
     /// map, persisted through the session's durable sidecar (R08).
-    fn on_state(&mut self, req: super::StateReq) {
-        let _ = req.reply.send(self.state_result(req.op));
+    async fn on_state(&mut self, req: super::StateReq) {
+        let _ = req.reply.send(self.state_result(req.op).await);
     }
 
     /// Applies one state operation: the mutation is written to the
@@ -1441,13 +1441,14 @@ impl Actor {
         clippy::too_many_lines,
         reason = "one match arm per op keeps the CAS table readable"
     )]
-    fn state_result(&mut self, op: StateOp) -> Result<StateRecord, StateError> {
-        let Some(sidecar) = self.journal.sidecar() else {
+    async fn state_result(&mut self, op: StateOp) -> Result<StateRecord, StateError> {
+        if self.journal.sidecar().is_none() {
             return Err(StateError::Unavailable);
-        };
+        }
         if self.state.is_none() {
             // A missing sidecar is an empty map; an unreadable or corrupt one
             // must surface rather than silently reset every stored key.
+            let sidecar = self.journal.sidecar().ok_or(StateError::Unavailable)?;
             let (map, revisions) = load_state_map(sidecar.read(STATE_SIDECAR))?;
             self.state_rev = revisions;
             self.state = Some(map);
@@ -1550,6 +1551,20 @@ impl Actor {
                 .collect(),
         };
         let Ok(bytes) = sonic_rs::to_string(&file) else {
+            return Err(StateError::Unavailable);
+        };
+        if self.journal.is_lazy() {
+            // The state file is about to be durable; the session it belongs
+            // to must be recoverable first, or an acknowledged write is
+            // unreachable after restart. Memory state must never be more
+            // durable than the journal.
+            self.journal
+                .materialize()
+                .await
+                .map_err(|_| StateError::Unavailable)?;
+        }
+        let Some(sidecar) = self.journal.sidecar() else {
+            self.state = None;
             return Err(StateError::Unavailable);
         };
         if sidecar.write(STATE_SIDECAR, bytes.as_bytes()).is_err() {

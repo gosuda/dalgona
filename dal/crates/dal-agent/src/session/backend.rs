@@ -730,14 +730,21 @@ impl Backend {
         // tool access across the whole filesystem. The lexical spelling
         // lies — `/root/../etc` starts with `/root` — so containment is
         // checked on canonical paths; a workspace that cannot be resolved
-        // fails closed.
-        let inside = std::fs::canonicalize(workspace.as_path())
-            .ok()
-            .zip(std::fs::canonicalize(self.workspace.as_path()).ok())
-            .is_some_and(|(child, root)| child.starts_with(root));
-        if !inside {
+        // fails closed. The checked canonical path is the one the child
+        // receives: re-resolving the lexical spelling later would race a
+        // swapped symlink into an outside root.
+        let Some(child_root) = std::fs::canonicalize(workspace.as_path()).ok() else {
+            return AgentsReply::Cancelled { id: self.session };
+        };
+        let Some(parent_root) = std::fs::canonicalize(self.workspace.as_path()).ok() else {
+            return AgentsReply::Cancelled { id: self.session };
+        };
+        if !child_root.starts_with(&parent_root) {
             return AgentsReply::Cancelled { id: self.session };
         }
+        let Ok(workspace) = Workspace::new(child_root) else {
+            return AgentsReply::Cancelled { id: self.session };
+        };
         // An explicit child model the catalog cannot route refuses the
         // start; silently inheriting the caller's model would run a
         // different program than the one requested.
