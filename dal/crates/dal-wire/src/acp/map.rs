@@ -2,7 +2,9 @@
 //!
 //! Every core update becomes zero or more `session/update` bodies per the
 //! version tables. Request questions become `session/request_permission` (or
-//! `elicitation/create`) server-initiated requests; client answers map back
+//! `elicitation/create`) server-initiated requests; an approval names its
+//! tool call by the provider call id that the tool-call updates announced,
+//! and every other question by its request id. Client answers map back
 //! to core [`Answer`] values. Extension status updates become
 //! `_dal/notice` bodies of kind `status`; unknown update variants map to
 //! nothing.

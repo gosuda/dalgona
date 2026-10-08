@@ -114,6 +114,7 @@ fn build_question(
             tool,
             preview,
             grant,
+            ..
         } => {
             let mut title = approval_title(tool, preview);
             if let Some(grant) = grant {
@@ -157,7 +158,13 @@ fn build_question(
         }
         _ => return None,
     };
-    let tool_call = sonic_rs::json!({"toolCallId": request.id.to_string(), "title": title});
+    let tool_call_id = match &request.question {
+        Question::Approval {
+            call: Some(call), ..
+        } => call.as_str().to_owned(),
+        _ => request.id.to_string(),
+    };
+    let tool_call = sonic_rs::json!({"toolCallId": tool_call_id, "title": title});
     let params = match version {
         AcpVersion::V1 => sonic_rs::json!({
             "sessionId": session_text,

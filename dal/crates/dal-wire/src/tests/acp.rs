@@ -477,6 +477,96 @@ async fn acp_tool_panic_reaches_the_client_and_connection_survives() {
     rig.host.shutdown(Duration::from_secs(1)).await;
 }
 
+/// Returns the `toolCallId` a permission request names on `version`.
+fn requested_tool_call(version: i64, params: &Value) -> Option<String> {
+    let call = match version {
+        1 => &params["toolCall"],
+        _ => &params["subject"]["toolCall"],
+    };
+    call["toolCallId"].as_str().map(str::to_owned)
+}
+
+/// Approves the permission request `frame` by choosing `allow`.
+async fn allow_permission(acp: &Rpc, frame: &Value) {
+    let answer = sonic_rs::json!({
+        "jsonrpc": "2.0",
+        "id": frame["id"],
+        "result": {"outcome": "selected", "optionId": "allow"},
+    });
+    acp.send_raw(&sonic_rs::to_string(&answer).expect("answer json"))
+        .await;
+}
+
+/// Returns whether `frame` ends the prompt turn: v1 replies to the prompt,
+/// v2 reports the idle state.
+fn prompt_finished(version: i64, frame: &Value) -> bool {
+    match version {
+        1 => frame["id"].as_i64() == Some(3),
+        _ => frame["params"]["update"]["state"].as_str() == Some("idle"),
+    }
+}
+
+/// Drives one approval-gated tool call and returns the `toolCallId` the
+/// tool-call update announced and the one the permission request carries.
+async fn announced_and_requested_call_ids(version: i64) -> (String, String) {
+    let rig = rig(&[
+        tool_step("provider-call-7", "ask"),
+        text_step(&["ok"], 1, 1),
+    ])
+    .await;
+    let ws = rig.ws();
+    let mut announced = None;
+    let mut requested = None;
+    with_acp(&rig, async |mut acp| {
+        init(&mut acp, version).await;
+        let session = new_session(&mut acp, 2, &ws).await;
+        acp.send(3, "session/prompt", prompt_params(&session, "go"))
+            .await;
+        loop {
+            let frame = acp.next().await;
+            if prompt_finished(version, &frame) {
+                break;
+            }
+            if frame["method"].as_str() == Some("session/request_permission") {
+                requested = requested_tool_call(version, &frame["params"]);
+                allow_permission(&acp, &frame).await;
+            }
+            if matches!(update_kind(&frame), Some("tool_call" | "tool_call_update")) {
+                announced.get_or_insert_with(|| {
+                    let id = frame["params"]["update"]["toolCallId"].as_str();
+                    id.expect("tool-call update names its call").to_owned()
+                });
+            }
+        }
+    })
+    .await;
+    rig.host.shutdown(Duration::from_secs(1)).await;
+    (
+        announced.expect("a tool-call update announced the call"),
+        requested.expect("a permission request named a tool call"),
+    )
+}
+
+#[tokio::test]
+async fn acp_v1_permission_request_names_the_announced_tool_call() {
+    let (announced, requested) = announced_and_requested_call_ids(1).await;
+    assert_eq!(announced, "provider-call-7");
+    assert_eq!(
+        requested, announced,
+        "the permission request must carry the provider call id"
+    );
+}
+
+#[tokio::test]
+async fn acp_v2_permission_request_names_the_announced_tool_call() {
+    let (announced, requested) = announced_and_requested_call_ids(2).await;
+    assert_eq!(announced, "provider-call-7");
+    assert_eq!(
+        requested, announced,
+        "the permission request must carry the provider call id"
+    );
+}
+
 /// Loads `session` on a v1 connection and returns the replayed update kinds.
 async fn replayed_kinds(acp: &mut Rpc, id: i64, session: &str, cwd: &str) -> Vec<String> {
     acp.send(

@@ -789,6 +789,7 @@ impl CallRuntime {
                 roots: spec.roots,
                 until: JobEnd(JobId::new_v7()),
             }),
+            call: Some(call.clone()),
         };
         let secs = default_timeout(&question).as_secs();
         let deadline = tokio::time::Instant::now() + default_timeout(&question);

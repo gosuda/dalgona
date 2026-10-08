@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Add opt-in fenced-diagram rendering for terminal transcript rows and ask previews: the `/settings` picker toggles `tui.diagrams` for the session and a save row persists it to `dal.toml` through the standard product configuration; CLI-backed diagram renders run on background workers with a pending placeholder, and pixel results draw through the terminal's image protocol (kitty, sixel, or iTerm2) instead of a text card.
+- Fix ACP permission requests: `toolCall.toolCallId` now carries the provider's tool-call id that the tool-call updates announced, so a client can match a permission request to its call. Approval questions gain an optional `call` member for this; encoded questions without it still decode, and a question with no call keeps the request id.
 
 - Persist image-bearing compaction parts and their extension letters atomically, replay them from the journal, and resolve letter history sources after resume; pass the selected catalog image profile, retained-image count, and carried summary to compactors.
 - Accept mapped MCP tool names in registration, dispatch, approval, and replay; send provider-safe aliases to providers and restore internal names on streamed calls.

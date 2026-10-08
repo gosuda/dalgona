@@ -99,11 +99,13 @@ fn questions() -> Vec<Question> {
                 roots: vec!["/w".into()],
                 until: JobEnd(JobId::new_v7()),
             }),
+            call: None,
         },
         Question::Approval {
             tool: "patch".into(),
             preview: preview("src/lib.rs", "+fn main() {}"),
             grant: None,
+            call: None,
         },
         Question::Grant {
             ext: "web".into(),

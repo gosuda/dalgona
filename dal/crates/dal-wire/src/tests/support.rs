@@ -9,10 +9,10 @@ use std::time::Duration;
 
 use dal_agent::ext::tool::{ArgError, RawValue, Tool, ToolCall, ToolCx, ToolOutcome, ToolOutput};
 use dal_agent::ext::{BoxFuture, ExtensionBuilder};
-use dal_agent::{Env, Host, Product};
+use dal_agent::{Env, Host, Product, ToolError};
 use dal_core::{
-    Config, ConfigProduct, ModelInfo, Name, RawJson, ServiceSet, ToolClass, ToolSpec, Visibility,
-    Workspace,
+    Config, ConfigProduct, ModelInfo, Name, Preview, RawJson, ServiceSet, ToolClass, ToolSpec,
+    Visibility, Workspace,
 };
 use sonic_rs::{JsonValueTrait, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -176,8 +176,18 @@ impl Tool for AskTool {
         Ok(ToolClass::Patch)
     }
 
-    fn run<'a>(&'a self, _call: ToolCall, _cx: ToolCx<'a>) -> BoxFuture<'a, ToolOutcome> {
-        Box::pin(async { ToolOutcome::Ok(ToolOutput::from_text("asked-ok")) })
+    fn run<'a>(&'a self, _call: ToolCall, mut cx: ToolCx<'a>) -> BoxFuture<'a, ToolOutcome> {
+        Box::pin(async move {
+            let preview = Preview {
+                title: "ask".into(),
+                body: String::new().into(),
+                digest: None,
+            };
+            match cx.authorize(preview).await {
+                Ok(_) => ToolOutcome::Ok(ToolOutput::from_text("asked-ok")),
+                Err(reason) => ToolOutcome::Err(ToolError::Denied(reason)),
+            }
+        })
     }
 }
 

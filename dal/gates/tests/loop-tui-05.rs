@@ -77,6 +77,7 @@ fn approval_request() -> Request {
                 digest: None,
             },
             grant: None,
+            call: None,
         },
         timeout: Duration::from_secs(30),
         default: Answer::Decline,

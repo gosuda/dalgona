@@ -528,6 +528,7 @@ async fn open_asks_counts_only_user_questions_and_requires_injection() {
                 digest: None,
             },
             grant: None,
+            call: None,
         },
         turn(),
         tokio::time::Instant::now() + Duration::from_secs(30),
