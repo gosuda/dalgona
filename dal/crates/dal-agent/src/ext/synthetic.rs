@@ -34,6 +34,7 @@ use super::{
 use crate::host::HostShared;
 use crate::host::ops::request_reference;
 use crate::session::SessionHandle;
+use crate::session::contain::{contained, crashed_tool};
 use crate::session::turn::{RequestDeps, StreamConverter, infer_stream};
 
 mod relay;
@@ -839,11 +840,12 @@ async fn call_private(
         id: CallId::new(call.id.as_str()),
         args: args.clone(),
     };
-    match tool.run(tool_call, cx).await {
-        ToolOutcome::Ok(output) => (false, output.to_string()),
-        ToolOutcome::Err(error) => (true, error.to_string()),
-        ToolOutcome::Interrupted => (true, "Tool call interrupted by user.".into()),
-        ToolOutcome::Detached(job) => (true, format!("tool detached as job {job}")),
+    match contained(tool.run(tool_call, cx)).await {
+        Ok(ToolOutcome::Ok(output)) => (false, output.to_string()),
+        Ok(ToolOutcome::Err(error)) => (true, error.to_string()),
+        Ok(ToolOutcome::Interrupted) => (true, "Tool call interrupted by user.".into()),
+        Ok(ToolOutcome::Detached(job)) => (true, format!("tool detached as job {job}")),
+        Err(panic) => (true, crashed_tool(tool.name(), &panic)),
     }
 }
 
