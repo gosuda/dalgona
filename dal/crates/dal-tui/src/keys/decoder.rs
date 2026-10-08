@@ -266,6 +266,9 @@ fn parse_csi(bytes: &[u8]) -> EscapeParse {
     if let Some(index) = control_index
         && final_index.is_none_or(|final_index| index < final_index)
     {
+        if remainder[index] == 0x1b {
+            return EscapeParse::Consumed(index + 2);
+        }
         let consumed = index + 3;
         return sequence_control_key(remainder[index])
             .map_or(EscapeParse::Consumed(consumed), |key| {

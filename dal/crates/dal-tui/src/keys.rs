@@ -364,6 +364,32 @@ mod tests {
     }
 
     #[test]
+    fn escape_aborts_partial_csi_without_leaking_literal_text() {
+        let start = Instant::now();
+        let mut decoder = KeyDecoder::default();
+        assert_eq!(
+            decoder.feed(b"\x1b[<0;10;\x1b[C", start),
+            [InputEvent::Key(Key::new(
+                KeyCode::Right,
+                KeyModifiers::NONE
+            ))]
+        );
+    }
+
+    #[test]
+    fn unmapped_control_aborts_partial_csi_without_leaking_literal_text() {
+        let start = Instant::now();
+        let mut decoder = KeyDecoder::default();
+        assert_eq!(
+            decoder.feed(b"\x1b[<0;10;\x1ca", start),
+            [InputEvent::Key(Key::new(
+                KeyCode::Char('a'),
+                KeyModifiers::NONE
+            ))]
+        );
+    }
+
+    #[test]
     fn control_byte_aborts_partial_csi_sequence() {
         let start = Instant::now();
         let mut decoder = KeyDecoder::default();
