@@ -787,6 +787,25 @@ fn only_an_authorized_command_grants_one_restart() {
     assert!(status.take_restart_authorization(session));
 }
 
+/// Seeds `max_rounds` non-converged rounds of one capped session.
+fn seed_capped_records(
+    fake: &FakeReviewServices,
+    session: SessionId,
+    max_rounds: u8,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut records = fake
+        .records
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let bodies = records.entry("review".to_owned()).or_default();
+    for round in 1..=max_rounds {
+        bodies.push(dal_core::RawJson::parse(&format!(
+            r#"{{"session":"{session}","round":{round},"verdict":"findings","new_count":1,"findings":[{{"path":"src/lib.rs","line":7,"severity":"major","title":"Unchecked index","detail":"It can panic."}}]}}"#
+        ))?);
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn the_command_grant_restarts_one_capped_session_and_is_spent()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -794,18 +813,7 @@ async fn the_command_grant_restarts_one_capped_session_and_is_spent()
     let status = Arc::new(ReviewStatus::new(cfg.max_rounds));
     let fake = FakeReviewServices::default();
     let session = SessionId::new_v7();
-    {
-        let mut records = fake
-            .records
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let bodies = records.entry("review".to_owned()).or_default();
-        for round in 1..=cfg.max_rounds {
-            bodies.push(dal_core::RawJson::parse(&format!(
-                r#"{{"session":"{session}","round":{round},"verdict":"findings","new_count":1,"findings":[{{"path":"src/lib.rs","line":7,"severity":"major","title":"Unchecked index","detail":"It can panic."}}]}}"#
-            ))?);
-        }
-    }
+    seed_capped_records(&fake, session, cfg.max_rounds)?;
     fake.runs
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -821,6 +829,32 @@ async fn the_command_grant_restarts_one_capped_session_and_is_spent()
 
     let spent = outcome_text(review_round(&cfg, &status, &cx, None, RoundRequest::Restart).await);
     assert!(spent.contains("reached the cap of"), "{spent}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_continue_call_consumes_the_grant_so_a_later_restart_refuses()
+-> Result<(), Box<dyn std::error::Error>> {
+    let cfg = ReviewConfig::default();
+    let status = Arc::new(ReviewStatus::new(cfg.max_rounds));
+    let fake = FakeReviewServices::default();
+    let session = SessionId::new_v7();
+    seed_capped_records(&fake, session, cfg.max_rounds)?;
+    let services: Arc<dyn dal_agent::ext::Services> = Arc::new(fake);
+    let cx = ToolCx::for_test(Arc::clone(&services));
+
+    status.authorize_restart(cx.session());
+    // The continue call itself stops at the cap and eats the grant.
+    let stopped =
+        outcome_text(review_round(&cfg, &status, &cx, None, RoundRequest::Continue).await);
+    assert!(stopped.contains("reached the cap of"), "{stopped}");
+
+    let refused = outcome_text(review_round(&cfg, &status, &cx, None, RoundRequest::Restart).await);
+    assert!(refused.contains("reached the cap of"), "{refused}");
+    assert!(
+        refused.contains("Stop and tell the user"),
+        "the refused restart must read as a continuation, not a fresh session: {refused}"
+    );
     Ok(())
 }
 
