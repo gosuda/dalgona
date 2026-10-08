@@ -474,6 +474,102 @@ async fn a_tool_uses_the_services_its_extension_injects() {
     drop(fixture);
 }
 
+/// Opens an ask while an answerer is attached, detaches the answerer, and
+/// proves the question keeps waiting for a client that reattaches instead of
+/// resolving early.
+#[tokio::test]
+async fn an_open_ask_survives_its_answerer_detaching() {
+    let seen = Arc::new(Mutex::new(None));
+    let script = turn_script("probe", "{}");
+    let (fixture, agent) = start(vec![asker_extension(Arc::clone(&seen))], script).await;
+    let subscription = agent.subscribe(None).expect("subscription");
+    until_ok(async || {
+        agent
+            .submit(Command::Prompt {
+                expect: Expect::Idle,
+                content: vec![Part::Text {
+                    text: "ask me".into(),
+                }],
+            })
+            .await
+    })
+    .await;
+    let request = tokio::time::timeout(WAIT, async {
+        loop {
+            let open = agent.view(dal_core::PageReq::default()).expect("view").open;
+            if let Some(request) = open.first() {
+                return request.id;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the tool opened a request");
+
+    drop(subscription);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let open = agent.view(dal_core::PageReq::default()).expect("view").open;
+    assert_eq!(
+        open.iter().map(|open| open.id).collect::<Vec<_>>(),
+        vec![request],
+        "the question stays open for a client that reattaches"
+    );
+    assert!(
+        seen.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_none(),
+        "the ask has not resolved"
+    );
+
+    let mut subscription = agent.subscribe(None).expect("resubscription");
+    let answer = Answer::Value(RawJson::parse("\"ada\"").expect("answer json"));
+    agent.answer(request, answer).await.expect("answered");
+    turn_ended(&mut subscription).await;
+    let outcome = seen
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    assert!(
+        matches!(outcome, Some(Ok(Some(Answer::Value(_))))),
+        "the reattached client answered the waiting ask: {outcome:?}"
+    );
+    drop(fixture);
+}
+
+/// A question raised while no answerer is attached takes its fail-closed
+/// default at once, even when an answerer attached earlier and left. The
+/// ask timeout in this fixture is far longer than the wait below, so an
+/// outcome inside the wait proves the question did not open.
+#[tokio::test]
+async fn an_ask_raised_with_no_answerer_attached_resolves_at_once() {
+    let seen = Arc::new(Mutex::new(None));
+    let script = turn_script("probe", "{}");
+    let (fixture, agent) = start(vec![asker_extension(Arc::clone(&seen))], script).await;
+    drop(agent.subscribe(None).expect("answerer"));
+    let mut listener = agent.subscribe_listen(None).expect("listener");
+    until_ok(async || {
+        agent
+            .submit(Command::Prompt {
+                expect: Expect::Idle,
+                content: vec![Part::Text {
+                    text: "ask me".into(),
+                }],
+            })
+            .await
+    })
+    .await;
+    turn_ended(&mut listener).await;
+    let outcome = seen
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    assert!(
+        matches!(outcome, Some(Ok(None))),
+        "the ask took its default with nobody to answer: {outcome:?}"
+    );
+    drop(fixture);
+}
+
 #[tokio::test]
 async fn records_follow_the_leaf_across_branches() {
     let script = format!(

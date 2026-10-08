@@ -193,7 +193,7 @@ async fn start_task(
     }
     let prompt = prompt_text(&parts);
     let subscription = agent
-        .subscribe(None)
+        .subscribe_listen(None)
         .map_err(|error| Fail::internal(error.to_string()))?;
     let command = Command::Prompt {
         expect: Expect::Idle,

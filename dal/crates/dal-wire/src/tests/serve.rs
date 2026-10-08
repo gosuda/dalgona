@@ -1,11 +1,13 @@
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 
-#[cfg(unix)]
 use sonic_rs::JsonValueTrait;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use super::support::{HttpReply, host_header, http, parse_reply, rig, router_options, with_serve};
+use super::support::{
+    HttpReply, denied_result_text, host_header, http, parse_reply, rig, router_options, text_step,
+    tool_step, with_serve,
+};
 use crate::error::ServeError;
 #[cfg(unix)]
 use crate::token::TokenError;
@@ -269,4 +271,43 @@ async fn alias_shadows_mode() {
         matches!(&error, ServeError::AliasShadowsMode { alias } if &**alias == "dalgon/normal"),
         "{error:?}"
     );
+}
+
+/// A2A never declares the answer capability, so an approval raised in its
+/// session is denied at once as a headless denial instead of leaving the task
+/// waiting for input that no client can give.
+#[tokio::test]
+async fn an_a2a_session_denies_an_approval_at_once() {
+    let steps = [tool_step("c1", "ask"), text_step(&["done"], 1, 1)];
+    let rig = rig(&steps).await;
+    let mut options = router_options(&rig);
+    options.a2a = true;
+    with_serve(&rig, options, async |addr| {
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"SendMessage","params":{"message":{"role":"ROLE_USER","messageId":"m1","parts":[{"text":"edit"}]}}}"#;
+        let reply = http(
+            addr,
+            &format!(
+                "POST /a2a HTTP/1.1\r\n{}\r\ncontent-type: application/json\r\na2a-version: 1.0",
+                host_header(addr)
+            ),
+            body,
+        )
+        .await;
+        assert_eq!(reply.status, 200, "{reply:?}");
+        let json = reply.json();
+        let task = &json["result"]["task"];
+        assert_eq!(
+            task["status"]["state"].as_str(),
+            Some("TASK_STATE_COMPLETED"),
+            "{json}"
+        );
+        let context = task["contextId"].as_str().expect("context id");
+        let denial = denied_result_text(&rig, context, "ask").await;
+        assert_eq!(
+            dal_core::parse_headless_denial(&denial).map(|(tool, _)| tool),
+            Some("ask"),
+            "{denial}"
+        );
+    })
+    .await;
 }

@@ -649,6 +649,10 @@ impl SessionBackend for Backend {
         self.shared.publish(update);
     }
 
+    fn answerer_attached(&self) -> bool {
+        self.shared.attached()
+    }
+
     fn notify(&self, notice: Notice) {
         self.shared.publish(dal_core::UpdateKind::Notice(notice));
     }

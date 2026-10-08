@@ -28,7 +28,6 @@ use tokio_util::sync::CancellationToken;
 use super::SessionServicesDeps;
 use super::{Caller, CallerKind, ServiceFuture, Services, SessionBackend, SessionServices};
 use crate::Broker;
-use crate::broker::BrokerState;
 use crate::error::ServiceError;
 use crate::ext::Doc;
 use crate::ext::generation::{Generation, ValidatedExtensions};
@@ -51,6 +50,7 @@ struct FakeBackend {
     rows: Mutex<Vec<crate::ext::ExtRecord>>,
     blobs: Mutex<HashMap<[u8; 32], Vec<u8>>>,
     updates: Mutex<Vec<dal_core::UpdateKind>>,
+    headless: std::sync::atomic::AtomicBool,
 }
 
 impl SessionBackend for FakeBackend {
@@ -173,6 +173,10 @@ impl SessionBackend for FakeBackend {
 
     fn publish_update(&self, update: dal_core::UpdateKind) {
         self.updates.lock().unwrap().push(update);
+    }
+
+    fn answerer_attached(&self) -> bool {
+        !self.headless.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     fn notify(&self, _notice: dal_core::Notice) {
@@ -355,12 +359,7 @@ fn ephemeral_fixture(ask_timeout: Duration) -> Fixture {
 
 fn assemble(ask_timeout: Duration, ephemeral: bool) -> Fixture {
     let temp = tempfile::tempdir().unwrap();
-    let broker = Arc::new(Broker {
-        state: Mutex::new(BrokerState {
-            slots: HashMap::new(),
-            open_order: VecDeque::new(),
-        }),
-    });
+    let broker = Arc::new(Broker::new());
     let grants = Arc::new(
         GrantStore::with_runtime(
             temp.path().to_path_buf(),
@@ -1174,5 +1173,71 @@ async fn a_dropped_ask_resolves_its_broker_request() {
                 if *answer == dal_core::Answer::Cancel
         )),
         "the retired question resolves as Cancel: {updates:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_ask_with_no_answerer_attached_defaults_at_once() {
+    let fx = fixture(Duration::from_secs(60));
+    fx.backend
+        .headless
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let who = caller("focus", &["ask"], Some(turn()));
+    let answer = tokio::time::timeout(
+        Duration::from_secs(1),
+        fx.services.ask(
+            &who,
+            Question::Text {
+                prompt: "why?".into(),
+                placeholder: None,
+            },
+        ),
+    )
+    .await
+    .expect("a headless ask never waits for its timeout")
+    .expect("a headless ask is a default, not an error");
+    assert_eq!(answer, None, "the fail-closed default is no answer");
+    assert!(
+        fx.broker.open_requests().is_empty(),
+        "no request opens for a front end nobody runs"
+    );
+    assert!(fx.backend.updates.lock().unwrap().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_open_ask_times_out_at_its_absolute_deadline() {
+    let fx = fixture(Duration::from_secs(60));
+    let services = Arc::clone(&fx.services);
+    let who = caller("focus", &["ask"], Some(turn()));
+    let mut asked = JoinSet::new();
+    asked.spawn(async move {
+        services
+            .ask(
+                &who,
+                Question::Text {
+                    prompt: "why?".into(),
+                    placeholder: None,
+                },
+            )
+            .await
+    });
+    await_open(&fx.broker).await;
+
+    tokio::time::advance(Duration::from_secs(59)).await;
+    assert!(
+        asked.try_join_next().is_none(),
+        "the question stays open until its absolute deadline"
+    );
+    assert_eq!(fx.broker.open_requests().len(), 1);
+
+    tokio::time::advance(Duration::from_secs(1)).await;
+    let outcome = asked
+        .join_next()
+        .await
+        .expect("the ask settles")
+        .expect("the ask task joins");
+    assert!(
+        matches!(outcome, Ok(None)),
+        "the absolute timeout resolves to no answer: {outcome:?}"
     );
 }

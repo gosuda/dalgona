@@ -219,7 +219,7 @@ impl Driver {
         for (request, waiter) in std::mem::take(&mut batch.asks) {
             let handle = self.deps.handle.clone();
             self.deps.tasks.spawn(async move {
-                let (answer, by) = waiter.await;
+                let crate::broker::Settled { answer, by, .. } = waiter.await;
                 let _ = handle
                     .work(TurnWork::Answered {
                         resolved: crate::broker::Resolved {

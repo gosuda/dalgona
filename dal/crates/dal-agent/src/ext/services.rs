@@ -44,6 +44,7 @@ use super::overlay::Overlay;
 use super::tool::{RawValue, Tool, ToolCxRuntime, ToolOutcome};
 use super::{Caller, CallerKind};
 use crate::Broker;
+use crate::broker::{Resolution, Settled};
 use crate::error::{ServiceError, ToolError};
 use crate::proc::{ProcResult, ProcStatus, SpawnOpts};
 use dal_core::ExitStatusKind;
@@ -406,6 +407,15 @@ impl Services for SessionServices {
             let Some(turn) = who.turn else {
                 return Err(ServiceError::turn_not_running());
             };
+            // With no answering front end attached at the moment of raise
+            // (print mode, --json, the router, A2A, child sessions), the
+            // question takes its fail-closed default at once and no request
+            // opens. A request raised while one is attached keeps waiting if
+            // it detaches: only the absolute timeout ends it, so a client can
+            // reattach.
+            if !self.backend.answerer_attached() {
+                return Ok(None);
+            }
             // One guard across check, open, and set: `open` is synchronous,
             // so two concurrent asks cannot both slip through.
             let (request_id, answer) = {
@@ -444,7 +454,7 @@ impl Services for SessionServices {
                 biased;
                 () = self.cancel.cancelled() => Err(ServiceError::Cancelled),
                 () = sleep(self.ask_timeout) => Ok(None),
-                (answer, by) = answer => {
+                Settled { answer, by, resolution } = answer => {
                     guard.armed = false;
                     self.backend
                         .publish_update(dal_core::UpdateKind::RequestResolved {
@@ -452,11 +462,14 @@ impl Services for SessionServices {
                             answer: answer.clone(),
                             by,
                         });
-                    match answer {
-                        value @ Answer::Value(_) => Ok(Some(value)),
+                    match (resolution, answer) {
+                        // No controller answered: the fail-closed default,
+                        // never a dismissal and never an interruption.
+                        (Resolution::Unavailable, _) => Ok(None),
+                        (_, value @ Answer::Value(_)) => Ok(Some(value)),
                         // Turn cancellation resolves the open request as
                         // `Cancel`; dismissal arrives as `Decline`.
-                        Answer::Cancel => Err(ServiceError::Cancelled),
+                        (_, Answer::Cancel) => Err(ServiceError::Cancelled),
                         _ => Ok(None),
                     }
                 },

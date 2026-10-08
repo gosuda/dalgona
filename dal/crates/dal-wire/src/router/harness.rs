@@ -4,7 +4,9 @@
 //! run the dal harness with its own tools: client tools, tool choices, and
 //! tool history are refused. Sessions continue by header, previous response
 //! id, or history digest; anything else opens a new session at the serve
-//! working directory. Open questions answer their core defaults at once.
+//! working directory. The router never declares the answer capability, so an
+//! approval it needs is denied at once and an extension question takes its
+//! default at once.
 
 use std::sync::Arc;
 
@@ -270,7 +272,7 @@ async fn run_harness(
             .await?;
     }
     let pre_leaf = active_leaf(&head);
-    let subscription = agent.subscribe(Some((head.r#gen, head.seq)))?;
+    let subscription = agent.subscribe_listen(Some((head.r#gen, head.seq)))?;
     let command = Command::Prompt {
         expect: Expect::Idle,
         content: parts,

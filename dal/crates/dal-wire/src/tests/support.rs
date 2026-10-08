@@ -7,9 +7,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use dal_agent::error::ToolError;
 use dal_agent::ext::tool::{ArgError, RawValue, Tool, ToolCall, ToolCx, ToolOutcome, ToolOutput};
 use dal_agent::ext::{BoxFuture, ExtensionBuilder};
-use dal_agent::{Env, Host, Product, ToolError};
+use dal_agent::{Env, Host, Product};
 use dal_core::{
     Config, ConfigProduct, ModelInfo, Name, Preview, RawJson, ServiceSet, ToolClass, ToolSpec,
     Visibility, Workspace,
@@ -574,4 +575,44 @@ pub(super) async fn with_serve<F>(
     };
     let (waited, ()) = tokio::join!(handle.wait(), driven);
     waited.expect("serve drains cleanly");
+}
+
+/// Reopens `session` and returns the text of its error result for the tool
+/// `name`; panics with the journal entries when no such result exists.
+pub(super) async fn denied_result_text(rig: &Rig, session: &str, name: &str) -> String {
+    let agent = rig
+        .host
+        .open(
+            dal_agent::SessionRef::Resume {
+                key: session.into(),
+                workspace: rig.core_workspace(),
+            },
+            crate::protocol::mint_client_id("test"),
+        )
+        .await
+        .expect("the session reopens");
+    let view = agent
+        .view(dal_core::PageReq::default())
+        .expect("session view");
+    view.entries
+        .items
+        .iter()
+        .find_map(|entry| match &entry.kind {
+            dal_core::EntryKind::ToolResult {
+                name: tool,
+                error: true,
+                parts,
+                ..
+            } if tool.as_ref() == name => parts.iter().find_map(|part| match part {
+                dal_core::JournalPart::Text { text } => Some(text.to_string()),
+                _ => None,
+            }),
+            _ => None,
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "the denied call left an error result: {:?}",
+                view.entries.items
+            )
+        })
 }

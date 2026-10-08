@@ -22,6 +22,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::Broker;
+use crate::broker::Settled;
 use crate::error::ServiceError;
 
 use super::services::ServiceFuture;
@@ -400,7 +401,7 @@ impl GrantStore {
                 .await
             }
             () = notify.notified() => self.take_mcp(&key),
-            (answer, by) = answer => {
+            Settled { answer, by, .. } = answer => {
                 let (outcome, mut row) = Self::decide(&key.key, &answer, by.clone());
                 if let Some(row) = &mut row {
                     row.mcp_set = Some(key.set.clone());
@@ -515,7 +516,7 @@ impl GrantStore {
                 self.finalize(&key, service, Err(ServiceError::Denied(DenyReason::NotGranted)), None, &notify).await
             }
             () = notify.notified() => self.take(&key),
-            (answer, by) = answer => {
+            Settled { answer, by, .. } = answer => {
                 let (outcome, row) = GrantStore::decide(&key, &answer, by.clone());
                 let result = self.finalize(&key, service, outcome, row, &notify).await;
                 self.publish_request_update(dal_core::UpdateKind::RequestResolved {

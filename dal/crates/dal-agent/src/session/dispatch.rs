@@ -23,7 +23,7 @@ use super::backend::Backend;
 use super::context::{
     DeferredTool, is_core_tool_search, resolve_named, tool_search_query, tool_search_results,
 };
-use crate::broker::{Broker, Resolved, default_timeout};
+use crate::broker::{Broker, Resolution, Resolved, Settled, default_timeout};
 use crate::ext::generation::Generation;
 use crate::ext::hooks::{HookScope, dispatch_tool_call, hook_fanout};
 use crate::ext::overlay::TurnTools;
@@ -805,7 +805,12 @@ impl CallRuntime {
             () = self.cancel.cancelled() => None,
             outcome = waiter => Some(outcome),
         };
-        let Some((answer, by)) = answered else {
+        let Some(Settled {
+            answer,
+            by,
+            resolution,
+        }) = answered
+        else {
             return Err(DenyReason::Unavailable {
                 what: "turn cancelled".into(),
             });
@@ -832,17 +837,16 @@ impl CallRuntime {
                 self.finish_approval(preview.digest, Box::new([]), roots, None, &class, cancel)
                     .await
             }
-            Answer::Decline => Err(DenyReason::out_of_scope(if by.as_str() == "core" {
-                format!(
-                    "Permission denied {} needed approval and no one answered within {secs} s.",
+            Answer::Decline => Err(DenyReason::out_of_scope(match resolution {
+                Resolution::Unavailable => format!(
+                    "Permission denied: {} needed approval and no one answered within {secs} s.",
                     self.tool.as_str()
-                )
-            } else {
-                format!(
+                ),
+                Resolution::Answered | Resolution::Cancelled => format!(
                     "Permission denied: {} was declined by {}.",
                     self.tool.as_str(),
                     by.as_str()
-                )
+                ),
             })),
             Answer::Cancel => Err(DenyReason::Unavailable {
                 what: "approval cancelled".into(),
