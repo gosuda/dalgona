@@ -18,7 +18,9 @@
 use std::sync::Arc;
 
 use dal_core::CompactedHistory;
-use dal_core::{ContextItem, EntryId, ModelRoute, Part, RequestParams, SessionId, Usage};
+use dal_core::{
+    ContextItem, EntryId, ModelRoute, Part, RequestParams, SessionId, Usage, estimate_text_tokens,
+};
 
 use super::{BoxFuture, Caller, ExtRecord, Services};
 use crate::error::ServiceError;
@@ -54,14 +56,6 @@ impl CoveredEntry {
             content,
         }
     }
-}
-
-/// Estimates the tokens in `text` at 3.5 characters per token, rounded up.
-/// A character is one Unicode scalar value, so multi-byte text is not
-/// over-counted. Never a measured count.
-pub(crate) fn estimate_text_tokens(text: &str) -> u64 {
-    let characters = u64::try_from(text.chars().count()).unwrap_or(u64::MAX);
-    characters.saturating_mul(2).div_ceil(7)
 }
 
 /// Borrowed compaction input. The span is selected by the caller.
@@ -252,23 +246,6 @@ mod tests {
         ContextItem::User {
             parts: vec![Part::Text { text: text.into() }],
         }
-    }
-
-    #[test]
-    fn estimate_counts_three_and_a_half_characters_per_token_rounded_up() {
-        assert_eq!(estimate_text_tokens(""), 0);
-        assert_eq!(estimate_text_tokens("a"), 1);
-        assert_eq!(estimate_text_tokens(&"a".repeat(7)), 2);
-        assert_eq!(estimate_text_tokens(&"a".repeat(35)), 10);
-        assert_eq!(estimate_text_tokens(&"a".repeat(36)), 11);
-    }
-
-    #[test]
-    fn estimate_counts_characters_not_bytes() {
-        assert_eq!(
-            estimate_text_tokens(&"é".repeat(35)),
-            estimate_text_tokens(&"e".repeat(35)),
-        );
     }
 
     #[test]

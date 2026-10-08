@@ -2484,3 +2484,34 @@ fn replay_rejects_out_of_order_turn_ids() {
         turn_end_record(2),
     ]));
 }
+
+#[test]
+fn tokens_since_compaction_estimate_uses_the_shared_character_rate() {
+    let text = "a".repeat(35);
+    let mut session = session();
+    let mut journal = Vec::new();
+    let prompted = send(
+        &mut session,
+        Event::Command {
+            cmd: Command::Prompt {
+                expect: Expect::Idle,
+                content: vec![Part::Text {
+                    text: text.clone().into(),
+                }],
+            },
+            by: client(),
+        },
+    )
+    .unwrap();
+    append_emitted(&prompted, &mut journal);
+    let turn = match session.phase() {
+        Phase::Opening { turn, .. } => *turn,
+        phase => panic!("prompt did not open a turn: {phase:?}"),
+    };
+    append_emitted(&send(&mut session, guard(turn)).unwrap(), &mut journal);
+    // The branch estimate and the shared estimator agree on the same text.
+    assert_eq!(
+        session.tokens_since_last_compaction(),
+        crate::tokens::estimate_text_tokens(&text),
+    );
+}

@@ -1621,9 +1621,7 @@ fn summarize(
 ) -> dal_core::CompactionSummary {
     let covered_tokens: u64 = covered.iter().map(|entry| entry.estimated_tokens).sum();
     let summary = compaction.summary_text().map(str::to_owned);
-    let summary_tokens = summary
-        .as_deref()
-        .map_or(0, crate::ext::compact::estimate_text_tokens);
+    let summary_tokens = summary.as_deref().map_or(0, dal_core::estimate_text_tokens);
     let replay = match compaction.history() {
         Some(history) => {
             let items: Vec<&str> = history
