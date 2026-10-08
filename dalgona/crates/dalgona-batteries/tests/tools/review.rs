@@ -85,11 +85,13 @@ async fn a_call_after_the_round_cap_stops_and_reports_the_outstanding_findings()
 }
 
 #[tokio::test]
-async fn an_explicit_restart_after_the_round_cap_starts_a_new_session() -> TestResult {
+async fn a_restart_argument_without_the_command_stops_at_the_cap() -> TestResult {
     let host = Host::with_runs([exited(0, "", ""), exited(0, "", "")]);
     seed_capped_session(&host, ReviewConfig::default().max_rounds)?;
     let text = run_review(&host, r#"{"restart":true}"#).await?;
-    assert_eq!(text, "No changes to review.");
-    assert_eq!(locked(&host.runs).len(), 0);
+    assert!(text.contains("reached the cap of 3 rounds"), "{text}");
+    assert!(text.contains("src/lib.rs"), "{text}");
+    assert!(text.contains("Unchecked index"), "{text}");
+    assert_eq!(host.infer_calls.load(Ordering::SeqCst), 0);
     Ok(())
 }

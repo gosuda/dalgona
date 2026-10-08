@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
 //! The review battery: one reviewer round over the session's git changes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 pub mod config;
@@ -78,8 +78,10 @@ pub const REVIEW_DOC: &str = concat!(
     "finding marked new or repeat and asks for the new findings. After\n",
     "`max_rounds` (1 to 10, default 3) non-converged rounds the review session\n",
     "reaches its cap and stops. The review then reports the findings still open\n",
-    "and asks the user what to do; the model never starts a new session on its\n",
-    "own. Running `/review` after the cap is the request for a new session: the\n",
+    "and asks the user what to do. After the cap the model never starts a new\n",
+    "session on its own: `restart` set to true restarts only when the same\n",
+    "session ran `/review`, and one `/review` authorizes one restart. Running\n",
+    "`/review` after the cap is the request for a new session: the\n",
     "command asks the model to call `review` with `restart` set to true.\n",
     "`restart` only takes effect at the cap; mid-session it continues the open\n",
     "rounds. The reviewer\n",
@@ -179,6 +181,7 @@ impl ReviewArgs {
 struct ReviewStatus {
     max_rounds: u8,
     running: Mutex<HashMap<SessionId, Vec<u8>>>,
+    restart_authorized: Mutex<HashSet<SessionId>>,
 }
 
 impl ReviewStatus {
@@ -187,7 +190,29 @@ impl ReviewStatus {
         Self {
             max_rounds,
             running: Mutex::new(HashMap::new()),
+            restart_authorized: Mutex::new(HashSet::new()),
         }
+    }
+
+    /// Records one restart authorization for `session`, granted by the
+    /// `/review` command.
+    fn authorize_restart(&self, session: SessionId) {
+        self.restart_authorized
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(session);
+    }
+
+    /// Consumes the one restart authorization for `session`, if present.
+    ///
+    /// The next review call consumes the grant whatever it asks, so a
+    /// stale grant cannot restart a later session.
+    #[must_use]
+    fn take_restart_authorization(&self, session: SessionId) -> bool {
+        self.restart_authorized
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&session)
     }
 
     fn lock(&self) -> MutexGuard<'_, HashMap<SessionId, Vec<u8>>> {
@@ -253,7 +278,9 @@ impl dal_agent::ext::StatusPoll for ReviewStatus {
     }
 }
 
-struct ReviewCommand;
+struct ReviewCommand {
+    status: Arc<ReviewStatus>,
+}
 
 impl dal_agent::ext::CommandHandler for ReviewCommand {
     fn run<'a>(
@@ -263,6 +290,7 @@ impl dal_agent::ext::CommandHandler for ReviewCommand {
     ) -> dal_agent::ext::BoxFuture<'a, Result<dal_core::Reply, dal_agent::error::ServiceError>>
     {
         Box::pin(async move {
+            self.status.authorize_restart(cx.session());
             let prompt = reply::command_prompt(args.trim());
             let content = vec![dal_core::Part::Text {
                 text: prompt.into(),
@@ -287,6 +315,14 @@ async fn review_round(
 ) -> ToolOutcome {
     let services = cx.services();
     let caller = cx.caller().clone();
+    // One /review grants one restart. Consume it before mapping the
+    // request, whatever this call asks, so a stale grant cannot ride a
+    // later self-initiated restart.
+    let authorized = status.take_restart_authorization(cx.session());
+    let request = match (request, authorized) {
+        (rounds::RoundRequest::Restart, true) => rounds::RoundRequest::Restart,
+        _ => rounds::RoundRequest::Continue,
+    };
     let raw_records = match services.records(&caller, "review").await {
         Ok(records) => records,
         Err(error) => return service_outcome(error),
@@ -498,7 +534,9 @@ pub fn review(cfg: ReviewConfig) -> Result<Extension, RegistrationError> {
             summary: REVIEW_COMMAND_SUMMARY.into(),
             args_hint: Some(REVIEW_COMMAND_ARGS_HINT.into()),
         },
-        Arc::new(ReviewCommand),
+        Arc::new(ReviewCommand {
+            status: Arc::clone(&status),
+        }),
     )
     .status_kind("review", status)
     .build()

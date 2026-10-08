@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
 //! Review battery tests: config, reply decoding, rounds, rendering, and local git.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
 
 use dal_core::SessionId;
 
@@ -21,6 +22,240 @@ use super::{
     MAX_ERROR_BYTES, MAX_FINDINGS, MAX_STORED_DETAIL_BYTES, REVIEW_REPLY_FORMAT, ReviewError,
     utf8_prefix,
 };
+use crate::review::review_round;
+
+use dal_agent::ext::ToolCx;
+
+/// A scripted `Services` host for driving `review_round` in-crate: the
+/// records store seeds a capped session, the run service answers two git
+/// calls, and everything else refuses.
+#[derive(Default)]
+struct FakeReviewServices {
+    records: std::sync::Mutex<HashMap<String, Vec<dal_core::RawJson>>>,
+    runs: std::sync::Mutex<std::collections::VecDeque<dal_core::RunOutput>>,
+}
+
+impl dal_agent::ext::Services for FakeReviewServices {
+    fn run(
+        &self,
+        _who: &dal_agent::ext::Caller,
+        _req: dal_core::RunRequest,
+    ) -> dal_agent::ext::services::ServiceFuture<'_, dal_core::RunOutput> {
+        let next = self
+            .runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop_front();
+        Box::pin(async move {
+            next.ok_or_else(|| {
+                dal_agent::error::ServiceError::failed(None, "no scripted git output")
+            })
+        })
+    }
+
+    fn records(
+        &self,
+        _who: &dal_agent::ext::Caller,
+        kind: &str,
+    ) -> dal_agent::ext::services::ServiceFuture<'_, Vec<Box<dal_agent::ext::RawValue>>> {
+        let bodies = self
+            .records
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(kind)
+            .cloned()
+            .unwrap_or_default();
+        Box::pin(async move { Ok(bodies.into_iter().map(Box::new).collect()) })
+    }
+
+    fn fs_read(
+        &self,
+        _who: &dal_agent::ext::Caller,
+        _path: &str,
+    ) -> dal_agent::ext::services::ServiceFuture<'_, Option<Vec<u8>>> {
+        unavailable()
+    }
+
+    fn fs_write(
+        &self,
+        _who: &dal_agent::ext::Caller,
+        _path: &str,
+        _bytes: Vec<u8>,
+    ) -> dal_agent::ext::services::ServiceFuture<'_, ()> {
+        unavailable()
+    }
+
+    fn net(
+        &self,
+        _who: &dal_agent::ext::Caller,
+        _req: dal_core::FetchRequest,
+    ) -> dal_agent::ext::services::ServiceFuture<'_, dal_core::FetchResponse> {
+        unavailable()
+    }
+
+    fn env(
+        &self,
+        _who: &dal_agent::ext::Caller,
+        _key: &str,
+    ) -> dal_agent::ext::services::ServiceFuture<'_, Option<String>> {
+        unavailable()
+    }
+
+    fn ask(
+        &self,
+        _who: &dal_agent::ext::Caller,
+        _question: dal_core::Question,
+    ) -> dal_agent::ext::services::ServiceFuture<'_, Option<dal_core::Answer>> {
+        unavailable()
+    }
+
+    fn mcp(
+        &self,
+        _who: &dal_agent::ext::Caller,
+        _req: dal_core::ext::McpRequest,
+    ) -> dal_agent::ext::services::ServiceFuture<'_, dal_core::ext::McpResponse> {
+        unavailable()
+    }
+
+    fn mcp_declarations(
+        &self,
+        _who: &dal_agent::ext::Caller,
+    ) -> dal_agent::ext::services::ServiceFuture<'_, Vec<dal_core::ext::McpDeclaration>> {
+        unavailable()
+    }
+
+    fn agents(
+        &self,
+        _who: &dal_agent::ext::Caller,
+        _op: dal_core::AgentsOp,
+    ) -> dal_agent::ext::services::ServiceFuture<'_, dal_core::AgentsReply> {
+        unavailable()
+    }
+
+    fn jobs(
+        &self,
+        _who: &dal_agent::ext::Caller,
+        _op: dal_core::JobsOp,
+    ) -> dal_agent::ext::services::ServiceFuture<'_, dal_core::JobsReply> {
+        unavailable()
+    }
+
+    fn turn(
+        &self,
+        _who: &dal_agent::ext::Caller,
+        _op: dal_core::TurnOp,
+    ) -> dal_agent::ext::services::ServiceFuture<'_, dal_core::TurnOpReply> {
+        unavailable()
+    }
+
+    fn history_texts(
+        &self,
+        _who: &dal_agent::ext::Caller,
+    ) -> dal_agent::ext::services::ServiceFuture<'_, Vec<String>> {
+        unavailable()
+    }
+
+    fn blob_put(
+        &self,
+        _who: &dal_agent::ext::Caller,
+        _bytes: Vec<u8>,
+    ) -> dal_agent::ext::services::ServiceFuture<'_, [u8; 32]> {
+        unavailable()
+    }
+
+    fn blob_get(
+        &self,
+        _who: &dal_agent::ext::Caller,
+        _digest: [u8; 32],
+    ) -> dal_agent::ext::services::ServiceFuture<'_, Option<Vec<u8>>> {
+        unavailable()
+    }
+
+    fn add_session_tools(
+        &self,
+        _who: &dal_agent::ext::Caller,
+        _tools: Vec<(Arc<dyn dal_agent::ext::Tool>, dal_core::Visibility)>,
+    ) -> dal_agent::ext::services::ServiceFuture<'_, ()> {
+        unavailable()
+    }
+
+    fn open_asks(
+        &self,
+        _who: &dal_agent::ext::Caller,
+    ) -> dal_agent::ext::services::ServiceFuture<'_, usize> {
+        unavailable()
+    }
+
+    fn scheme(
+        &self,
+        _who: &dal_agent::ext::Caller,
+        _uri: &str,
+    ) -> dal_agent::ext::services::ServiceFuture<'_, Option<dal_agent::ext::Doc>> {
+        unavailable()
+    }
+
+    fn sidecar(
+        &self,
+        _who: &dal_agent::ext::Caller,
+        _op: dal_core::SidecarOp,
+    ) -> dal_agent::ext::services::ServiceFuture<'_, Option<Vec<u8>>> {
+        unavailable()
+    }
+
+    fn infer(
+        &self,
+        _who: &dal_agent::ext::Caller,
+        _req: dal_core::ModelRequest,
+    ) -> dal_agent::ext::services::ServiceFuture<'_, dal_core::Inference> {
+        unavailable()
+    }
+
+    fn infer_stream(
+        &self,
+        _who: &dal_agent::ext::Caller,
+        _req: dal_core::ModelRequest,
+    ) -> dal_agent::ext::services::ServiceFuture<'_, dal_agent::ext::EventStream> {
+        unavailable()
+    }
+
+    fn call_tool(
+        &self,
+        _who: &dal_agent::ext::Caller,
+        _name: &str,
+        _args: Box<dal_agent::ext::RawValue>,
+    ) -> dal_agent::ext::services::ServiceFuture<'_, dal_agent::ext::ToolOutcome> {
+        unavailable()
+    }
+
+    fn notify(&self, _who: &dal_agent::ext::Caller, _notice: dal_core::Notice) {}
+
+    fn append_record(
+        &self,
+        _who: &dal_agent::ext::Caller,
+        _kind: &str,
+        _body: Box<dal_agent::ext::RawValue>,
+    ) -> dal_agent::ext::services::ServiceFuture<'_, dal_core::EntryId> {
+        unavailable()
+    }
+}
+
+fn unavailable<T: Send + 'static>() -> dal_agent::ext::services::ServiceFuture<'static, T> {
+    Box::pin(async {
+        Err(dal_agent::error::ServiceError::failed(
+            None,
+            "unavailable in the scripted host",
+        ))
+    })
+}
+
+fn outcome_text(outcome: dal_agent::ext::ToolOutcome) -> String {
+    match outcome {
+        dal_agent::ext::ToolOutcome::Ok(output) => output.to_string(),
+        dal_agent::ext::ToolOutcome::Err(error) => error.to_string(),
+        dal_agent::ext::ToolOutcome::Interrupted => "interrupted".to_owned(),
+        dal_agent::ext::ToolOutcome::Detached(_) => "detached".to_owned(),
+    }
+}
 const COMMAND_PROMPT_BASE: &str = "Review the current changes with the review tool. Set its `restart` argument to true: you were asked to review, so a capped session starts a new one.";
 const ONE_FINDING: &str = r#"{"verdict":"findings","findings":[{"path":"src/lib.rs","line":null,"severity":"major","title":"  Broken   behavior ","detail":"A failure."}],"summary":"reviewed"}"#;
 #[test]
@@ -521,4 +756,82 @@ fn git_requests_use_explicit_workspace_and_fixed_argv() -> Result<(), Box<dyn st
     );
     assert_eq!(status_request.cwd, Some(dir));
     Ok(())
+}
+
+#[test]
+fn only_an_authorized_command_grants_one_restart() {
+    let status = Arc::new(ReviewStatus::new(3));
+    let session = SessionId::new_v7();
+
+    assert!(
+        !status.take_restart_authorization(session),
+        "a session without /review holds no grant: restart must refuse"
+    );
+
+    status.authorize_restart(session);
+    assert!(
+        status.take_restart_authorization(session),
+        "the /review command granted one restart"
+    );
+    assert!(
+        !status.take_restart_authorization(session),
+        "the grant was consumed; it cannot be replayed"
+    );
+
+    let other = SessionId::new_v7();
+    status.authorize_restart(session);
+    assert!(
+        !status.take_restart_authorization(other),
+        "a grant is scoped to its session"
+    );
+    assert!(status.take_restart_authorization(session));
+}
+
+#[tokio::test]
+async fn the_command_grant_restarts_one_capped_session_and_is_spent()
+-> Result<(), Box<dyn std::error::Error>> {
+    let cfg = ReviewConfig::default();
+    let status = Arc::new(ReviewStatus::new(cfg.max_rounds));
+    let fake = FakeReviewServices::default();
+    let session = SessionId::new_v7();
+    {
+        let mut records = fake
+            .records
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let bodies = records.entry("review".to_owned()).or_default();
+        for round in 1..=cfg.max_rounds {
+            bodies.push(dal_core::RawJson::parse(&format!(
+                r#"{{"session":"{session}","round":{round},"verdict":"findings","new_count":1,"findings":[{{"path":"src/lib.rs","line":7,"severity":"major","title":"Unchecked index","detail":"It can panic."}}]}}"#
+            ))?);
+        }
+    }
+    fake.runs
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .extend([exited_run(""), exited_run("")]);
+    let services: Arc<dyn dal_agent::ext::Services> = Arc::new(fake);
+    let cx = ToolCx::for_test(Arc::clone(&services));
+    let refused = outcome_text(review_round(&cfg, &status, &cx, None, RoundRequest::Restart).await);
+    assert!(refused.contains("reached the cap of"), "{refused}");
+
+    status.authorize_restart(cx.session());
+    let started = outcome_text(review_round(&cfg, &status, &cx, None, RoundRequest::Restart).await);
+    assert_eq!(started, "No changes to review.");
+
+    let spent = outcome_text(review_round(&cfg, &status, &cx, None, RoundRequest::Restart).await);
+    assert!(spent.contains("reached the cap of"), "{spent}");
+    Ok(())
+}
+
+/// One successful empty git output for the in-crate host.
+fn exited_run(stdout: &str) -> dal_core::RunOutput {
+    dal_core::RunOutput {
+        status: dal_core::ExitStatusKind::Exited(0),
+        stdout_tail: Vec::new(),
+        stdout_prefix: stdout.as_bytes().to_vec(),
+        stdout_prefix_overflowed: false,
+        stderr_tail: Vec::new(),
+        log: None,
+    }
 }
