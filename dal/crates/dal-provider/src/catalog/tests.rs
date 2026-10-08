@@ -11,7 +11,7 @@ use super::*;
 use super::{
     cache::{read_cache_async, write_cache_async},
     decode::{decode_anthropic_page, decode_codex_models, decode_openai_models},
-    prices::PRICE_ROWS,
+    prices::{PRICE_ROWS, PRICE_TIER_ROWS, TierRow, tier_rows_are_sorted_unique},
     resolve::capability_row,
 };
 use crate::{
@@ -759,9 +759,41 @@ fn compiled_price_selects_request_wide_context_tier() {
 }
 
 #[test]
+fn tier_table_guard_rejects_unsorted_or_duplicate_models() {
+    let unsorted = [
+        TierRow {
+            model: "b",
+            tiers: &[],
+        },
+        TierRow {
+            model: "a",
+            tiers: &[],
+        },
+    ];
+    assert!(!tier_rows_are_sorted_unique(&unsorted));
+
+    let duplicate = [
+        TierRow {
+            model: "model",
+            tiers: &[],
+        },
+        TierRow {
+            model: "model",
+            tiers: &[],
+        },
+    ];
+    assert!(!tier_rows_are_sorted_unique(&duplicate));
+}
+
+#[test]
 fn generated_table_remains_sorted_for_binary_search() {
     assert!(
         PRICE_ROWS
+            .windows(2)
+            .all(|pair| pair[0].model < pair[1].model)
+    );
+    assert!(
+        PRICE_TIER_ROWS
             .windows(2)
             .all(|pair| pair[0].model < pair[1].model)
     );

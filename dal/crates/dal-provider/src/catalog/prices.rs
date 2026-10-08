@@ -20,6 +20,32 @@ pub(crate) struct TierRow {
 
 include!("../prices_generated.rs");
 
+const fn model_is_before(left: &str, right: &str) -> bool {
+    let left_bytes = left.as_bytes();
+    let right_bytes = right.as_bytes();
+    let mut index = 0;
+    while index < left_bytes.len() && index < right_bytes.len() {
+        if left_bytes[index] != right_bytes[index] {
+            return left_bytes[index] < right_bytes[index];
+        }
+        index += 1;
+    }
+    left_bytes.len() < right_bytes.len()
+}
+
+pub(crate) const fn tier_rows_are_sorted_unique(rows: &[TierRow]) -> bool {
+    let mut index = 1;
+    while index < rows.len() {
+        if !model_is_before(rows[index - 1].model, rows[index].model) {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+const _: () = assert!(tier_rows_are_sorted_unique(PRICE_TIER_ROWS));
+
 /// Returns whether the exact provider/model pair is marked for temperature in
 /// the compiled models.dev snapshot.
 #[must_use]

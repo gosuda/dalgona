@@ -177,6 +177,38 @@ fn config_parses_request_wide_price_tiers() {
 }
 
 #[test]
+fn config_rejects_non_increasing_price_tier_sizes() {
+    let prefix =
+        "[prices.tiered]\ninput = 1.0\ncached_input = 0.5\noutput = 2.0\nreasoning = 3.0\n";
+    for suffix in [
+        "tiers = [{ size = 200000, input = 2.0 }, { size = 200000, output = 4.0 }]",
+        "tiers = [{ size = 200000, input = 2.0 }, { size = 199999, output = 4.0 }]",
+    ] {
+        let error = load(ConfigProduct::Dalgon, &format!("{prefix}{suffix}"))
+            .expect_err("non-increasing tier sizes are rejected");
+        assert!(matches!(
+            error,
+            ConfigError::InvalidValue { key, expected, .. }
+                if key.as_ref() == "prices.tiered.tiers"
+                    && expected.as_ref() == "strictly increasing context tier sizes"
+        ));
+    }
+}
+
+#[test]
+fn config_rejects_unknown_price_tier_fields() {
+    let error = load(
+        ConfigProduct::Dalgon,
+        "[prices.tiered]\ninput = 1.0\ncached_input = 0.5\noutput = 2.0\nreasoning = 3.0\ntiers = [{ size = 200000, input = 2.0, typo = 4.0 }]",
+    )
+    .expect_err("unknown tier fields are rejected");
+    assert!(matches!(
+        error,
+        ConfigError::UnknownKey { key, .. } if key.as_ref() == "prices.tiered.tiers.typo"
+    ));
+}
+
+#[test]
 fn config_rejects_corrupt_compiled_defaults_before_user_text() {
     let error = Config::load(
         ConfigProduct::Dalgon,

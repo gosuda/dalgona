@@ -79,7 +79,7 @@ pub(crate) enum Decline {
     PngBudget {
         /// Encoded bytes of the first candidate image.
         need: usize,
-        /// The configured byte budget.
+        /// The byte budget left for drawn images.
         limit: usize,
     },
     /// Drawing exceeded the per-render timeout.
