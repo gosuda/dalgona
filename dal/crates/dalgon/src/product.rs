@@ -180,6 +180,33 @@ pub fn assemble(cx: &BuildCx<'_>, parts: Parts) -> Result<Product, BuildError> {
     })?;
     extensions.extend(batch);
 
+    let mut claimants = std::collections::BTreeMap::new();
+    for extension in &extensions {
+        let name = extension.name();
+        let claimant = match extension.origin() {
+            dal_core::Origin::Builtin => dal_core::Claimant::Builtin,
+            dal_core::Origin::Bundled => dal_core::Claimant::Battery,
+            dal_core::Origin::User => dal_core::Claimant::Plugin,
+            _ => dal_core::Claimant::Plugin,
+        };
+        let claimant =
+            claimant(
+                dal_core::Name::parse(name).map_err(|source| BuildError::Section {
+                    section: "extension".into(),
+                    source: Box::new(source),
+                })?,
+            );
+        if let Some(previous) = claimants.insert(name, claimant) {
+            return Err(BuildError::Registration(
+                dal_core::RegistrationError::Conflict {
+                    kind: "extension",
+                    name: dal_core::Name::parse(name).expect("registered names are valid"),
+                    claimant: previous,
+                },
+            ));
+        }
+    }
+
     let skills =
         dal_ext::skills::SkillRegistry::merge_extensions(&extensions).map_err(|source| {
             BuildError::Section {
