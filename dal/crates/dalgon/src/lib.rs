@@ -568,10 +568,6 @@ fn capture_process() -> Result<(VarsMap, PathBuf), ExitCode> {
 }
 
 /// Resolves roots, the workspace, and the layered configuration.
-#[expect(
-    clippy::too_many_lines,
-    reason = "startup assembly walks every layered input in place"
-)]
 fn assemble_startup(
     factory: &ProductFactory,
     cli: &cli::Cli,
@@ -580,47 +576,7 @@ fn assemble_startup(
 ) -> Result<Startup, ExitCode> {
     let roots = match edge::resolve_roots(&vars, factory.binary) {
         Ok(roots) => roots,
-        Err(edge::EdgeError::HomeMissing) => {
-            let what = if cfg!(windows) {
-                cli::texts::HOME_MISSING_WINDOWS
-            } else {
-                cli::texts::HOME_MISSING_POSIX
-            };
-            return Err(two_lines(
-                [what.into(), cli::texts::HOME_MISSING_HINT.into()],
-                exit::ExitKind::RequestedFailure,
-            ));
-        }
-        Err(edge::EdgeError::InvalidProduct) => {
-            let log_path = edge::log_file_path(&vars, factory.binary);
-            return Err(two_lines(
-                cli::texts::internal_error_at("edge", "invalid product identity", &log_path),
-                exit::ExitKind::Internal,
-            ));
-        }
-        Err(edge::EdgeError::Workspace(path)) => {
-            return Err(two_lines(
-                cli::texts::workspace_not_usable(&path.display().to_string()),
-                exit::ExitKind::RequestedFailure,
-            ));
-        }
-        Err(edge::EdgeError::WorkspaceRelative) => {
-            let log_path = edge::log_file_path(&vars, factory.binary);
-            return Err(two_lines(
-                cli::texts::internal_error_at(
-                    "edge",
-                    "the workspace path is not absolute",
-                    &log_path,
-                ),
-                exit::ExitKind::Internal,
-            ));
-        }
-        Err(edge::EdgeError::Io { path, source, .. }) => {
-            return Err(two_lines(
-                cli::texts::prompt_file_unreadable(&path, &source.to_string()),
-                exit::ExitKind::RequestedFailure,
-            ));
-        }
+        Err(error) => return Err(roots_exit(&vars, factory.binary, error)),
     };
     let workspace_path = edge::resolve_workspace_path(&cwd, cli.cd.as_deref());
     let workspace = match edge::validate_workspace(workspace_path.clone()) {
@@ -688,6 +644,49 @@ fn assemble_startup(
         helper: edge::current_exe(),
     };
     Ok(startup)
+}
+
+/// Maps an `resolve_roots` failure to its usage diagnostics.
+fn roots_exit(vars: &VarsMap, binary: &str, error: edge::EdgeError) -> ExitCode {
+    match error {
+        edge::EdgeError::HomeMissing => {
+            let what = if cfg!(windows) {
+                cli::texts::HOME_MISSING_WINDOWS
+            } else {
+                cli::texts::HOME_MISSING_POSIX
+            };
+            two_lines(
+                [what.into(), cli::texts::HOME_MISSING_HINT.into()],
+                exit::ExitKind::RequestedFailure,
+            )
+        }
+        edge::EdgeError::InvalidProduct => {
+            let log_path = edge::log_file_path(vars, binary);
+            two_lines(
+                cli::texts::internal_error_at("edge", "invalid product identity", &log_path),
+                exit::ExitKind::Internal,
+            )
+        }
+        edge::EdgeError::Workspace(path) => two_lines(
+            cli::texts::workspace_not_usable(&path.display().to_string()),
+            exit::ExitKind::RequestedFailure,
+        ),
+        edge::EdgeError::WorkspaceRelative => {
+            let log_path = edge::log_file_path(vars, binary);
+            two_lines(
+                cli::texts::internal_error_at(
+                    "edge",
+                    "the workspace path is not absolute",
+                    &log_path,
+                ),
+                exit::ExitKind::Internal,
+            )
+        }
+        edge::EdgeError::Io { path, source, .. } => two_lines(
+            cli::texts::prompt_file_unreadable(&path, &source.to_string()),
+            exit::ExitKind::RequestedFailure,
+        ),
+    }
 }
 
 /// Calls the product factory exactly once and maps build failures to exits.
