@@ -430,13 +430,13 @@ mod tests {
     }
 }
 
-/// Windows backend. Each run registers a GUID-unique AppContainer profile,
+/// Windows backend. Each run registers a GUID-unique `AppContainer` profile,
 /// grants its SID `(OI)(CI)` access on the allowed roots and execute-only on
-/// the executable's directory and PATH dirs (system locations already grant
+/// the executable's directory and `PATH` dirs (system locations already grant
 /// `ALL APPLICATION PACKAGES`), then launches the target under the container
 /// inside its own kill-on-close job object. The planted ACEs are lifted on
 /// return; residue left by an abrupt kill is inert because the SID is unique
-/// to this run. Unlike the write-only Landlock model, an AppContainer also
+/// to this run. Unlike the write-only Landlock model, an `AppContainer` also
 /// denies reads outside the granted roots.
 #[cfg(windows)]
 #[expect(
@@ -484,10 +484,9 @@ mod win {
         PROCESS_INFORMATION, ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess,
         UpdateProcThreadAttribute, WaitForSingleObject,
     };
-    use windows_sys::core::PWSTR;
 
-    const GENERIC_EXECUTE_ONLY: u32 = 0x20000000; // GENERIC_EXECUTE (FILE_EXECUTE|FILE_TRAVERSE)
-    const GENERIC_ALL_ACCESS: u32 = 0x10000000; // GENERIC_ALL
+    const GENERIC_EXECUTE_ONLY: u32 = 0x2000_0000; // GENERIC_EXECUTE (FILE_EXECUTE|FILE_TRAVERSE)
+    const GENERIC_ALL_ACCESS: u32 = 0x1000_0000; // GENERIC_ALL
 
     struct OwnedHandle(windows_sys::Win32::Foundation::HANDLE);
     impl OwnedHandle {
@@ -514,7 +513,7 @@ mod win {
         }
     }
 
-    /// The AppContainer profile for this run. Name-keyed derivation gives each
+    /// The `AppContainer` profile for this run. Name-keyed derivation gives each
     /// run a unique SID, so planted grants can never cross runs.
     struct Profile {
         sid: OwnedSid,
@@ -540,7 +539,7 @@ mod win {
         })
     }
 
-    /// Appends one arg to the command line under CommandLineToArgvW rules:
+    /// Appends one arg to the command line under `CommandLineToArgvW` rules:
     /// wrap in quotes when it is empty or holds space/tab/quote, double
     /// backslashes before a quote, escape inner quotes.
     fn push_quoted(command: &mut Vec<u16>, arg: &OsStr) {
@@ -549,36 +548,36 @@ mod win {
             encoded.pop();
         }
         let needs_quotes = encoded.is_empty()
-            || encoded
-                .iter()
-                .any(|unit| *unit == b' ' as u16 || *unit == b'\t' as u16 || *unit == b'"' as u16);
+            || encoded.iter().any(|unit| {
+                *unit == u16::from(b' ') || *unit == u16::from(b'\t') || *unit == u16::from(b'"')
+            });
         if !needs_quotes {
             command.extend(encoded);
             return;
         }
-        command.push(b'"' as u16);
+        command.push(u16::from(b'"'));
         let mut backslashes = 0usize;
         for unit in encoded {
-            if unit == b'\\' as u16 {
+            if unit == u16::from(b'\\') {
                 backslashes += 1;
             } else {
                 backslashes = 0;
             }
-            if unit == b'"' as u16 {
-                command.extend(std::iter::repeat_n(b'\\' as u16, backslashes + 1));
+            if unit == u16::from(b'"') {
+                command.extend(std::iter::repeat_n(u16::from(b'\\'), backslashes + 1));
             }
             command.push(unit);
         }
         let tail: usize = command
             .iter()
             .rev()
-            .take_while(|unit| **unit == b'\\' as u16)
+            .take_while(|unit| **unit == u16::from(b'\\'))
             .count();
         let quote_tail = tail;
         for _ in 0..quote_tail {
-            command.push(b'\\' as u16);
+            command.push(u16::from(b'\\'));
         }
-        command.push(b'"' as u16);
+        command.push(u16::from(b'"'));
     }
 
     /// Adds or removes the container SID's ACE on one path; `(OI)(CI)` covers
@@ -588,7 +587,7 @@ mod win {
         let mut trustee: TRUSTEE_W = unsafe { std::mem::zeroed() };
         trustee.TrusteeForm = TRUSTEE_IS_SID;
         trustee.TrusteeType = TRUSTEE_IS_NAME;
-        trustee.ptstrName = sid as PWSTR;
+        trustee.ptstrName = sid.cast();
         let entry = EXPLICIT_ACCESS_W {
             grfAccessPermissions: access,
             grfAccessMode: mode,
@@ -604,16 +603,16 @@ mod win {
                 DACL_SECURITY_INFORMATION,
                 ptr::null_mut(),
                 ptr::null_mut(),
-                &mut old_dacl,
+                &raw mut old_dacl,
                 ptr::null_mut(),
-                &mut sd,
+                &raw mut sd,
             )
         };
         if read != 0 {
             return Err(last_error(&format!("read ACL on {}", path.display())));
         }
         let mut new_dacl: *mut ACL = ptr::null_mut();
-        let merge = unsafe { SetEntriesInAclW(1, &entry, old_dacl, &mut new_dacl) };
+        let merge = unsafe { SetEntriesInAclW(1, &raw const entry, old_dacl, &raw mut new_dacl) };
         if !sd.is_null() {
             unsafe { LocalFree(sd) };
         }
@@ -644,6 +643,10 @@ mod win {
     /// still loads. Runtime dirs grant `FILE_EXECUTE`, never `FILE_READ_DATA`:
     /// image loading needs execute rights only, so private files in those
     /// directories stay unreadable — consistent with the deny-read model.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the process edge owns environment reads; PATH decides the runtime dirs"
+    )]
     fn plant_grants(
         roots: &[PathBuf],
         executable: &Path,
@@ -656,7 +659,7 @@ mod win {
                 .filter(|dir| !dir.as_os_str().is_empty())
             {
                 // Execute on the launch directory only. System locations
-                // already permit ALL APPLICATION PACKAGES and an unprivileged
+                // already permit `ALL APPLICATION PACKAGES` and an unprivileged
                 // user cannot edit them; a directory the container genuinely
                 // cannot read fails at exec time with an access error, so a
                 // failed grant here must not block launch.
@@ -709,13 +712,13 @@ mod win {
         }
     }
 
-    /// A run identity Windows cannot recycle: a fresh GUID, not a PID —
+    /// A run identity Windows cannot recycle: a fresh GUID, not a `PID` —
     /// killed helpers leave profiles and ACEs that a recycled PID would revive.
     /// Fails closed when the GUID cannot be minted; a weak identity would let
     /// two runs share planted grants.
     fn run_id() -> Result<String, String> {
         let mut guid = unsafe { std::mem::zeroed() };
-        if unsafe { CoCreateGuid(&mut guid) } < 0 {
+        if unsafe { CoCreateGuid(&raw mut guid) } < 0 {
             return Err(last_error("mint the sandbox run identity"));
         }
         let guid: windows_sys::core::GUID = guid;
@@ -735,7 +738,7 @@ mod win {
         ))
     }
 
-    /// Resolves or registers this run's AppContainer profile and returns its
+    /// Resolves or registers this run's `AppContainer` profile and returns its
     /// SID plus the network capability SIDs the sandbox does not restrict.
     fn container() -> Result<(Profile, Vec<SID_AND_ATTRIBUTES>), String> {
         let name = wide(&format!("dalgon.sandbox.{}", run_id()?));
@@ -747,12 +750,12 @@ mod win {
                 name.as_ptr(),
                 ptr::null(),
                 0,
-                &mut sid,
+                &raw mut sid,
             )
         };
         if profile < 0 || sid.is_null() {
             let derive =
-                unsafe { DeriveAppContainerSidFromAppContainerName(name.as_ptr(), &mut sid) };
+                unsafe { DeriveAppContainerSidFromAppContainerName(name.as_ptr(), &raw mut sid) };
             if derive < 0 || sid.is_null() {
                 return Err(format!(
                     "dalgon sandbox: cannot resolve the AppContainer profile (0x{profile:08x})."
@@ -773,10 +776,10 @@ mod win {
             let ok = unsafe {
                 DeriveCapabilitySidsFromName(
                     capability.as_ptr(),
-                    &mut group_sids,
-                    &mut group_count,
-                    &mut sids,
-                    &mut count,
+                    &raw mut group_sids,
+                    &raw mut group_count,
+                    &raw mut sids,
+                    &raw mut count,
                 )
             };
             if ok == FALSE || count == 0 {
@@ -784,10 +787,12 @@ mod win {
                     "dalgon sandbox: cannot resolve the network capability SIDs.".to_string(),
                 );
             }
-            for index in 0..count as isize {
+            for index in
+                0..isize::try_from(count).map_err(|_| last_error("index the capability sids"))?
+            {
                 capabilities.push(SID_AND_ATTRIBUTES {
                     Sid: unsafe { *sids.offset(index) },
-                    Attributes: SE_GROUP_ENABLED as u32,
+                    Attributes: SE_GROUP_ENABLED.cast_unsigned(),
                 });
             }
         }
@@ -812,7 +817,8 @@ mod win {
                 job.0,
                 JobObjectExtendedLimitInformation,
                 ptr::addr_of_mut!(limits).cast(),
-                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                u32::try_from(std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>())
+                    .map_err(|_| last_error("size the job limits"))?,
             )
         };
         if set == FALSE {
@@ -821,8 +827,83 @@ mod win {
         Ok(job)
     }
 
-    /// Spawns the target inside this run's AppContainer and returns its exit
+    /// Spawns the target inside this run's `AppContainer` and returns its exit
     /// code. stdio is inherited through the three parent standard handles only.
+    ///
+    /// Owning proc-thread attribute list. `DeleteProcThreadAttributeList`
+    /// runs on drop, so launch exits cannot leak the list.
+    struct AttrList(Vec<u8>);
+
+    impl AttrList {
+        fn as_ptr(&self) -> LPPROC_THREAD_ATTRIBUTE_LIST {
+            self.0.as_ptr().cast_mut().cast()
+        }
+    }
+
+    impl Drop for AttrList {
+        fn drop(&mut self) {
+            if !self.0.is_empty() {
+                unsafe { DeleteProcThreadAttributeList(self.as_ptr()) };
+            }
+        }
+    }
+
+    /// Builds the proc-thread attribute list: the container security
+    /// capabilities plus the three-handle inheritance bound.
+    fn attributes(
+        profile: &Profile,
+        capabilities: &[SID_AND_ATTRIBUTES],
+        std_handles: &[windows_sys::Win32::Foundation::HANDLE; 3],
+    ) -> Result<AttrList, String> {
+        let mut list_size = 0usize;
+        unsafe { InitializeProcThreadAttributeList(ptr::null_mut(), 2, 0, &raw mut list_size) };
+        if list_size == 0 {
+            return Err(last_error("size the attribute list"));
+        }
+        let mut buffer = vec![0u8; list_size];
+        let list: LPPROC_THREAD_ATTRIBUTE_LIST = buffer.as_mut_ptr().cast();
+        if unsafe { InitializeProcThreadAttributeList(list, 2, 0, &raw mut list_size) } == FALSE {
+            return Err(last_error("initialize the attribute list"));
+        }
+        let mut security = SECURITY_CAPABILITIES {
+            AppContainerSid: profile.sid.0,
+            Capabilities: capabilities.as_ptr().cast_mut(),
+            CapabilityCount: u32::try_from(capabilities.len())
+                .map_err(|_| last_error("count the capabilities"))?,
+            Reserved: 0,
+        };
+        let security_set = unsafe {
+            UpdateProcThreadAttribute(
+                list,
+                0,
+                usize::try_from(PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES)
+                    .map_err(|_| last_error("attribute number"))?,
+                ptr::addr_of_mut!(security).cast(),
+                std::mem::size_of::<SECURITY_CAPABILITIES>(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        };
+        let handles_set = security_set != FALSE
+            && unsafe {
+                UpdateProcThreadAttribute(
+                    list,
+                    0,
+                    usize::try_from(PROC_THREAD_ATTRIBUTE_HANDLE_LIST)
+                        .map_err(|_| last_error("attribute number"))?,
+                    std_handles.as_ptr().cast(),
+                    std::mem::size_of_val(std_handles),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                )
+            } != FALSE;
+        if !handles_set {
+            unsafe { DeleteProcThreadAttributeList(list) };
+            return Err(last_error("set the process attributes"));
+        }
+        Ok(AttrList(buffer))
+    }
+
     ///
     /// # Safety
     /// Win32 process launch; handles and the attribute list are closed on
@@ -841,52 +922,8 @@ mod win {
             unsafe { GetStdHandle(STD_ERROR_HANDLE) },
         ];
 
-        let mut list_size = 0usize;
-        unsafe { InitializeProcThreadAttributeList(ptr::null_mut(), 2, 0, &mut list_size) };
-        if list_size == 0 {
-            revoke_planted(&planted, profile.sid.0);
-            return Err(last_error("size the attribute list"));
-        }
-        let mut buffer = vec![0u8; list_size];
-        let list: LPPROC_THREAD_ATTRIBUTE_LIST = buffer.as_mut_ptr().cast();
-        if unsafe { InitializeProcThreadAttributeList(list, 2, 0, &mut list_size) } == FALSE {
-            revoke_planted(&planted, profile.sid.0);
-            return Err(last_error("initialize the attribute list"));
-        }
-        let mut security = SECURITY_CAPABILITIES {
-            AppContainerSid: profile.sid.0,
-            Capabilities: capabilities.as_ptr() as *mut SID_AND_ATTRIBUTES,
-            CapabilityCount: capabilities.len() as u32,
-            Reserved: 0,
-        };
-        let security_set = unsafe {
-            UpdateProcThreadAttribute(
-                list,
-                0,
-                PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES as usize,
-                ptr::addr_of_mut!(security).cast(),
-                std::mem::size_of::<SECURITY_CAPABILITIES>(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-            )
-        };
-        let handles_set = security_set != FALSE
-            && unsafe {
-                UpdateProcThreadAttribute(
-                    list,
-                    0,
-                    PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
-                    std::ptr::from_ref(&std_handles).cast_mut().cast(),
-                    std::mem::size_of_val(&std_handles),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                )
-            } != FALSE;
-        if !handles_set {
-            unsafe { DeleteProcThreadAttributeList(list) };
-            revoke_planted(&planted, profile.sid.0);
-            return Err(last_error("set the process attributes"));
-        }
+        let attrs = attributes(&profile, &capabilities, &std_handles)
+            .inspect_err(|_| drop(revoke_planted(&planted, profile.sid.0)))?;
 
         let mut application = Path::new(executable)
             .parent()
@@ -895,18 +932,19 @@ mod win {
         let mut command: Vec<u16> = Vec::new();
         push_quoted(&mut command, executable);
         for arg in run_args {
-            command.push(b' ' as u16);
+            command.push(u16::from(b' '));
             push_quoted(&mut command, arg);
         }
         command.push(0);
 
         let mut info: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
-        info.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
+        info.StartupInfo.cb = u32::try_from(std::mem::size_of::<STARTUPINFOEXW>())
+            .map_err(|_| "STARTUPINFOEXW overflows u32".to_string())?;
         info.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
         info.StartupInfo.hStdInput = std_handles[0];
         info.StartupInfo.hStdOutput = std_handles[1];
         info.StartupInfo.hStdError = std_handles[2];
-        info.lpAttributeList = list;
+        info.lpAttributeList = attrs.as_ptr();
         let mut process: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
         let spawned = unsafe {
             CreateProcessW(
@@ -920,11 +958,10 @@ mod win {
                 CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
                 ptr::null(),
                 ptr::null(),
-                &mut info.StartupInfo,
-                &mut process,
+                &raw const info.StartupInfo,
+                &raw mut process,
             )
         };
-        unsafe { DeleteProcThreadAttributeList(list) };
         if let Some(name) = application.as_mut() {
             name.clear();
         }
@@ -956,7 +993,7 @@ mod win {
         let waited = unsafe { WaitForSingleObject(process.hProcess, INFINITE) };
         let mut code = 1u32;
         if waited == WAIT_OBJECT_0 {
-            unsafe { GetExitCodeProcess(process.hProcess, &mut code) };
+            unsafe { GetExitCodeProcess(process.hProcess, &raw mut code) };
         }
         unsafe {
             CloseHandle(process.hThread);
@@ -966,7 +1003,7 @@ mod win {
         if let Some(error) = revoke_error {
             super::write_error(&error);
         }
-        Ok(ExitCode::from((code & 0xFF) as u8))
+        u8::try_from(code & 0xFF).map_or(Ok(ExitCode::from(126)), |c| Ok(ExitCode::from(c)))
     }
 }
 
