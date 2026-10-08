@@ -489,6 +489,9 @@ mod win {
 
     const GENERIC_READ_EXECUTE: u32 = 0xA000_0000; // GENERIC_READ | GENERIC_EXECUTE
     const GENERIC_ALL_ACCESS: u32 = 0x1000_0000; // GENERIC_ALL
+    /// POSIX `+x` parity: traverse plus attribute reads, no listing or file
+    /// contents — sibling names under an ancestor stay private.
+    const TRAVERSE_ACCESS: u32 = 0xA0; // FILE_TRAVERSE | FILE_READ_ATTRIBUTES
 
     struct OwnedHandle(windows_sys::Win32::Foundation::HANDLE);
     impl OwnedHandle {
@@ -583,15 +586,34 @@ mod win {
         command.push(u16::from(b'"'));
     }
 
+    /// Environment captured once at the process edge (`spawn`): ambient
+    /// `std::env::var*` reads are disallowed, so the two variables the
+    /// sandbox needs resolve here and thread down as a typed snapshot.
+    struct Edge {
+        user_key: OsString,
+        state_root: Option<OsString>,
+        path: Option<OsString>,
+    }
+    impl Edge {
+        fn capture() -> Self {
+            let vars: std::collections::HashMap<OsString, OsString> = std::env::vars_os().collect();
+            let get = |name: &str| vars.get(OsStr::new(name)).cloned();
+            Self {
+                user_key: get("USERPROFILE")
+                    .or_else(|| get("USERNAME"))
+                    .unwrap_or_default(),
+                state_root: get("LOCALAPPDATA"),
+                path: get("PATH"),
+            }
+        }
+    }
+
     /// A stable tag separating one user's kernel objects from another's:
     /// on a multi-session or Remote Desktop host a fixed `Global\` name lets
     /// any session squat the object and deny sandbox startup to everyone else.
-    fn user_tag() -> String {
-        let key = std::env::var_os("USERPROFILE")
-            .or_else(|| std::env::var_os("USERNAME"))
-            .unwrap_or_default();
+    fn user_tag(edge: &Edge) -> String {
         let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-        for unit in key.encode_wide() {
+        for unit in edge.user_key.encode_wide() {
             hash = (hash ^ u64::from(unit)).wrapping_mul(0x0000_0100_0000_01b3);
         }
         format!("{hash:016x}")
@@ -603,8 +625,8 @@ mod win {
     /// sessions share it, user-tagged so other users cannot squat the name.
     struct DaclLock(OwnedHandle);
     impl DaclLock {
-        fn take() -> Result<Self, String> {
-            let name = wide(&format!("Global\\dalgon.sandbox.dacl.{}", user_tag()));
+        fn take(edge: &Edge) -> Result<Self, String> {
+            let name = wide(&format!("Global\\dalgon.sandbox.dacl.{}", user_tag(edge)));
             let handle = unsafe { CreateMutexW(ptr::null(), FALSE, name.as_ptr()) };
             let mutex = OwnedHandle::new(handle)?;
             if unsafe { WaitForSingleObject(mutex.0, INFINITE) } != WAIT_OBJECT_0 {
@@ -625,8 +647,11 @@ mod win {
     /// from its GUID-named profile.
     struct RunGuard(OwnedHandle);
     impl RunGuard {
-        fn take(guid: &str) -> Result<Self, String> {
-            let name = wide(&format!("Global\\dalgon.sandbox.run.{guid}.{}", user_tag()));
+        fn take(edge: &Edge, guid: &str) -> Result<Self, String> {
+            let name = wide(&format!(
+                "Global\\dalgon.sandbox.run.{guid}.{}",
+                user_tag(edge)
+            ));
             let handle = unsafe { CreateMutexW(ptr::null(), FALSE, name.as_ptr()) };
             let mutex = OwnedHandle::new(handle)?;
             if unsafe { WaitForSingleObject(mutex.0, INFINITE) } != WAIT_OBJECT_0 {
@@ -644,10 +669,13 @@ mod win {
     /// A run beacon is alive while its mutex object exists: `OpenMutexW`
     /// fails with `ERROR_FILE_NOT_FOUND` once every handle closes — which is
     /// exactly when the last holder died. Any other failure means "alive".
-    fn run_alive(guid: &str) -> bool {
+    fn run_alive(edge: &Edge, guid: &str) -> bool {
         const SYNCHRONIZE: u32 = 0x0010_0000;
         const ERROR_FILE_NOT_FOUND: u32 = 2;
-        let name = wide(&format!("Global\\dalgon.sandbox.run.{guid}.{}", user_tag()));
+        let name = wide(&format!(
+            "Global\\dalgon.sandbox.run.{guid}.{}",
+            user_tag(edge)
+        ));
         let handle = unsafe { OpenMutexW(SYNCHRONIZE, FALSE, name.as_ptr()) };
         if !handle.is_null() {
             unsafe { CloseHandle(handle) };
@@ -671,8 +699,9 @@ mod win {
     /// root: the temp root carries an inheritable full-control grant, so a
     /// sandboxed command could delete or forge holder records there and
     /// cleanup would retire ACEs that were never lifted.
-    fn dacl_state_path() -> PathBuf {
-        std::env::var_os("LOCALAPPDATA")
+    fn dacl_state_path(edge: &Edge) -> PathBuf {
+        edge.state_root
+            .as_ref()
             .map_or_else(std::env::temp_dir, PathBuf::from)
             .join("dalgon")
             .join("sandbox-dacl.state")
@@ -697,9 +726,9 @@ mod win {
     }
 
     impl DaclState {
-        fn load() -> Self {
+        fn load(edge: &Edge) -> Self {
             let mut state = Self::default();
-            let Ok(text) = std::fs::read_to_string(dacl_state_path()) else {
+            let Ok(text) = std::fs::read_to_string(dacl_state_path(edge)) else {
                 return state;
             };
             for line in text.lines().skip(1) {
@@ -723,7 +752,7 @@ mod win {
             state
         }
 
-        fn save(&self) -> Result<(), String> {
+        fn save(&self, edge: &Edge) -> Result<(), String> {
             let mut text = String::from("v1\n");
             for (path, open) in &self.orig {
                 let _ = writeln!(text, "O\t{path}\t{}", u8::from(*open));
@@ -733,7 +762,7 @@ mod win {
                     let _ = writeln!(text, "H\t{path}\t{guid}\t{access:x}");
                 }
             }
-            let path = dacl_state_path();
+            let path = dacl_state_path(edge);
             let tmp = path.with_extension("tmp");
             if let Some(dir) = path.parent() {
                 std::fs::create_dir_all(dir).map_err(|source| {
@@ -769,12 +798,15 @@ mod win {
 
     /// Runs `edit` under the DACL mutex with a freshly loaded, reap-swept
     /// state, then persists it. Every grant mutation is one transact.
-    fn transact<R>(edit: impl FnOnce(&mut DaclState) -> Result<R, String>) -> Result<R, String> {
-        let _lock = DaclLock::take()?;
-        let mut state = DaclState::load();
-        reap_dead(&mut state);
+    fn transact<R>(
+        edge: &Edge,
+        edit: impl FnOnce(&mut DaclState) -> Result<R, String>,
+    ) -> Result<R, String> {
+        let _lock = DaclLock::take(edge)?;
+        let mut state = DaclState::load(edge);
+        reap_dead(edge, &mut state);
         let out = edit(&mut state)?;
-        state.save()?;
+        state.save(edge)?;
         Ok(out)
     }
 
@@ -823,14 +855,14 @@ mod win {
     /// Drops every grant whose run beacon is gone — a helper killed mid-run
     /// leaves `H` records whose ACEs would otherwise pin the directory open
     /// or deny-all forever.
-    fn reap_dead(state: &mut DaclState) {
+    fn reap_dead(edge: &Edge, state: &mut DaclState) {
         let dead: Vec<(String, String, u32)> = state
             .holders
             .iter()
             .flat_map(|(path, holders)| {
                 holders
                     .iter()
-                    .filter(|(guid, _)| !run_alive(guid))
+                    .filter(|(guid, _)| !run_alive(edge, guid))
                     .map(|(guid, access)| (path.clone(), guid.clone(), *access))
                     .collect::<Vec<_>>()
             })
@@ -891,9 +923,9 @@ mod win {
     /// stale intent the next reap retires — never an untracked live ACE.
     /// A failed grant then retires its intent so reaps never chase an ACE
     /// that does not exist.
-    fn plant(path: &Path, sid: PSID, guid: &str, access: u32) -> Result<bool, String> {
+    fn plant(edge: &Edge, path: &Path, sid: PSID, guid: &str, access: u32) -> Result<bool, String> {
         let key = path_key(path);
-        let recorded = transact(|state| {
+        let recorded = transact(edge, |state| {
             if state
                 .holders
                 .get(&key)
@@ -910,10 +942,12 @@ mod win {
         if !recorded {
             return Ok(false);
         }
-        match transact(|_state| edit_dacl(path, sid, access, GRANT_ACCESS, false).map(|_| ())) {
+        match transact(edge, |_state| {
+            edit_dacl(path, sid, access, GRANT_ACCESS, false).map(|_| ())
+        }) {
             Ok(()) => Ok(true),
             Err(error) => {
-                let _ = transact(|state| {
+                let _ = transact(edge, |state| {
                     if state.holders.get(&key).is_some_and(|h| h.len() == 1) {
                         state.orig.remove(&key);
                     }
@@ -1016,20 +1050,17 @@ mod win {
     /// The grant plan, matched to the POSIX read-open model: the container
     /// reads and executes wherever DACLs already let it — system locations
     /// grant `ALL APPLICATION PACKAGES` out of the box — plus RX ACEs on the
-    /// launch directory, every `PATH` directory, and each writable root's
-    /// ancestors (without an ACE on each parent the container cannot reach
-    /// the granted root). Writable roots get full control. Drive roots are
-    /// never touched: an `(OI)(CI)` ACE on a drive root propagates to every
-    /// existing descendant on the volume. `PATH` entries tolerate grant
-    /// failure — system dirs already carry `ALL APPLICATION PACKAGES` —
-    /// while the launch dir, ancestors, and writable roots are fatal: a
-    /// failed grant there means the promised access cannot exist, so the
-    /// run must not start with the read policy only partially installed.
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "the process edge owns environment reads; PATH decides the runtime dirs"
-    )]
-    fn grant_plan(roots: &[PathBuf], executable: &Path) -> Vec<(PathBuf, u32, bool)> {
+    /// launch directory and every `PATH` directory, and traverse-only ACEs
+    /// on each writable root's ancestors (POSIX `+x` parity: the container
+    /// can resolve through them but cannot list or read sibling files).
+    /// Writable roots get full control. Drive roots are never touched: an
+    /// `(OI)(CI)` ACE on a drive root propagates to every existing
+    /// descendant on the volume. `PATH` entries tolerate grant failure —
+    /// system dirs already carry `ALL APPLICATION PACKAGES` — while the
+    /// launch dir, ancestors, and writable roots are fatal: a failed grant
+    /// there means the promised access cannot exist, so the run must not
+    /// start with the read policy only partially installed.
+    fn grant_plan(edge: &Edge, roots: &[PathBuf], executable: &Path) -> Vec<(PathBuf, u32, bool)> {
         let mut plan: Vec<(PathBuf, u32, bool)> = Vec::new();
         let push_rx = |dir: PathBuf, optional: bool, plan: &mut Vec<(PathBuf, u32, bool)>| {
             if !dir.as_os_str().is_empty()
@@ -1046,22 +1077,27 @@ mod win {
         {
             push_rx(dir.to_path_buf(), false, &mut plan);
         }
-        if let Some(paths) = std::env::var_os("PATH") {
+        if let Some(paths) = &edge.path {
             for dir in std::env::split_paths(&paths) {
                 push_rx(dir, true, &mut plan);
             }
         }
         for root in roots {
-            // Ancestor RX stops before the drive/share root: an inheritable
-            // ACE on a volume root rewrites every descendant's DACL, and a
-            // normal user cannot write it anyway — the run would fail for
-            // lack of WRITE_DAC.
+            // Ancestor traverse stops before the drive/share root: an
+            // inheritable ACE on a volume root rewrites every descendant's
+            // DACL, and a normal user cannot write it anyway — the run
+            // would fail for lack of WRITE_DAC. Traverse, not RX, so the
+            // container cannot list or read sibling files under a private
+            // parent (POSIX `+x` parity).
             for ancestor in root
                 .ancestors()
                 .skip(1)
                 .take_while(|dir| dir.parent().is_some())
             {
-                push_rx(ancestor.to_path_buf(), false, &mut plan);
+                if !ancestor.as_os_str().is_empty() && !plan.iter().any(|(p, _, _)| *p == ancestor)
+                {
+                    plan.push((ancestor.to_path_buf(), TRAVERSE_ACCESS, false));
+                }
             }
             plan.push((root.clone(), GENERIC_ALL_ACCESS, false));
         }
@@ -1072,14 +1108,15 @@ mod win {
     /// root) failure lifts what already planted and aborts; optional entries
     /// tolerate the edit failing.
     fn plant_grants(
+        edge: &Edge,
         roots: &[PathBuf],
         executable: &Path,
         profile: &Profile,
     ) -> Result<Vec<(PathBuf, u32)>, String> {
         let mut planted: Vec<(PathBuf, u32)> = Vec::new();
         let result = (|| {
-            for (dir, access, optional) in grant_plan(roots, executable) {
-                match plant(&dir, profile.sid.0, &profile.guid, access) {
+            for (dir, access, optional) in grant_plan(edge, roots, executable) {
+                match plant(edge, &dir, profile.sid.0, &profile.guid, access) {
                     Ok(_) => planted.push((dir, access)),
                     Err(error) if !optional => return Err(error),
                     Err(_) => {}
@@ -1088,7 +1125,7 @@ mod win {
             Ok(())
         })();
         if result.is_err() {
-            lift_all(&planted, profile);
+            lift_all(edge, &planted, profile);
         }
         result.map(|()| planted)
     }
@@ -1098,12 +1135,12 @@ mod win {
     /// observed, so overlapping runs cannot erase each other and a killed
     /// run's leftovers are reaped by the next transact. Failures collect so
     /// the run reports grants it could not remove.
-    fn lift_all(planted: &[(PathBuf, u32)], profile: &Profile) -> Option<String> {
+    fn lift_all(edge: &Edge, planted: &[(PathBuf, u32)], profile: &Profile) -> Option<String> {
         let mut failed = Vec::new();
         for (path, access) in planted {
-            if let Err(error) =
-                transact(|state| lift(state, &path_key(path), &profile.guid, *access))
-            {
+            if let Err(error) = transact(edge, |state| {
+                lift(state, &path_key(path), &profile.guid, *access)
+            }) {
                 failed.push(error);
             }
         }
@@ -1321,12 +1358,13 @@ mod win {
         executable: &OsStr,
         run_args: &[OsString],
     ) -> Result<ExitCode, String> {
+        let edge = Edge::capture();
         let (profile, capabilities) = container()?;
         // The run beacon lives for the whole plant→run→lift sequence: if this
         // helper dies mid-run the next transact reaps this run's grants instead
         // of leaving ACEs pinned forever.
-        let _run = RunGuard::take(&profile.guid)?;
-        let planted = plant_grants(roots, Path::new(executable), &profile)?;
+        let _run = RunGuard::take(&edge, &profile.guid)?;
+        let planted = plant_grants(&edge, roots, Path::new(executable), &profile)?;
 
         let std_handles = [
             unsafe { GetStdHandle(STD_INPUT_HANDLE) },
@@ -1335,7 +1373,7 @@ mod win {
         ];
 
         let attrs = attributes(&profile, &capabilities, &std_handles)
-            .inspect_err(|_| drop(lift_all(&planted, &profile)))?;
+            .inspect_err(|_| drop(lift_all(&edge, &planted, &profile)))?;
 
         let mut application = Path::new(executable)
             .parent()
@@ -1378,7 +1416,7 @@ mod win {
             name.clear();
         }
         if spawned == FALSE {
-            lift_all(&planted, &profile);
+            lift_all(&edge, &planted, &profile);
             return Err(last_error("spawn the sandboxed process"));
         }
 
@@ -1397,7 +1435,7 @@ mod win {
                     CloseHandle(process.hThread);
                     CloseHandle(process.hProcess);
                 }
-                lift_all(&planted, &profile);
+                lift_all(&edge, &planted, &profile);
                 return Err(error);
             }
         };
@@ -1411,7 +1449,7 @@ mod win {
             CloseHandle(process.hThread);
             CloseHandle(process.hProcess);
         };
-        let revoke_error = lift_all(&planted, &profile);
+        let revoke_error = lift_all(&edge, &planted, &profile);
         if let Some(error) = revoke_error {
             super::write_error(&error);
         }
