@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fix the agents `cancel` operation: a failure to close the child session is now returned to the caller instead of being reported as a successful cancel.
 - Fix question titles and clipped file links in the terminal: a question title always shows as text, even with diagram rendering on, and a file link in a clipped tool result keeps its full destination.
 - Fix tool and command panics that happen before the work starts. The call now returns an error and the session stays usable.
 

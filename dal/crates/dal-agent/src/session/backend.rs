@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use dal_core::ext::Mail as ExtMail;
+use dal_core::ext::{Mail as ExtMail, Service};
 use dal_core::{
     AgentInfo, AgentReport, AgentState, AgentsOp, AgentsReply, BlobId, EntryId, FetchMethod,
     FetchRequest, FetchResponse, Inference, JobsOp, JobsReply, MailMode, ModelRequest, Name,
@@ -19,7 +19,7 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use crate::broker::Broker;
-use crate::error::{AgentError, ServiceError};
+use crate::error::{AgentError, HostError, ServiceError};
 use crate::ext::ExtRecord;
 use crate::ext::services::{ServiceFuture, SessionBackend, SessionServices};
 use crate::ext::tool::RawValue;
@@ -430,7 +430,7 @@ impl SessionBackend for Backend {
     }
 
     fn agents(&self, op: AgentsOp) -> ServiceFuture<'_, AgentsReply> {
-        Box::pin(async move { Ok(self.agents_op(op).await) })
+        Box::pin(async move { self.agents_op(op).await })
     }
 
     fn jobs(&self, owner: &Name, op: JobsOp) -> ServiceFuture<'_, JobsReply> {
@@ -668,32 +668,44 @@ impl SessionBackend for Backend {
     }
 }
 
+fn cancel_child(id: SessionId, result: Result<(), HostError>) -> Result<AgentsReply, ServiceError> {
+    result
+        .map(|()| AgentsReply::Cancelled { id })
+        .map_err(|error| {
+            ServiceError::failed(
+                Some(Service::Agents),
+                format!("could not cancel child session {id}: {error}"),
+            )
+        })
+}
+
 impl Backend {
-    async fn agents_op(&self, op: AgentsOp) -> AgentsReply {
+    async fn agents_op(&self, op: AgentsOp) -> Result<AgentsReply, ServiceError> {
         match op {
-            AgentsOp::Start(start) => self.agent_start(start).await,
+            AgentsOp::Start(start) => Ok(self.agent_start(start).await),
             AgentsOp::Await { id, timeout } => {
                 if self.is_child(id) {
-                    self.agent_await(id, timeout).await
+                    Ok(self.agent_await(id, timeout).await)
                 } else {
-                    AgentsReply::Cancelled { id }
+                    Ok(AgentsReply::Cancelled { id })
                 }
             }
             AgentsOp::Cancel { id } => {
                 if self.is_child(id) {
-                    let _ = self.host().close(id).await;
+                    cancel_child(id, self.host().close(id).await)
+                } else {
+                    Ok(AgentsReply::Cancelled { id })
                 }
-                AgentsReply::Cancelled { id }
             }
-            AgentsOp::List => AgentsReply::Listed(self.agent_list()),
+            AgentsOp::List => Ok(AgentsReply::Listed(self.agent_list())),
             AgentsOp::Send {
                 to,
                 text,
                 mode,
                 reply_to,
-            } => self.agent_send(to, text, mode, reply_to).await,
-            AgentsOp::Recv { after, timeout } => self.agent_recv(after, timeout).await,
-            _ => AgentsReply::Cancelled { id: self.session },
+            } => Ok(self.agent_send(to, text, mode, reply_to).await),
+            AgentsOp::Recv { after, timeout } => Ok(self.agent_recv(after, timeout).await),
+            _ => Ok(AgentsReply::Cancelled { id: self.session }),
         }
     }
 
@@ -1025,5 +1037,23 @@ impl Backend {
             host: Arc::clone(&self.host),
             script: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancel_child_reports_non_lifecycle_close_failures() {
+        let id = SessionId::new_v7();
+        let error = HostError::Config {
+            message: "close refused".into(),
+        };
+        let result = cancel_child(id, Err(error)).expect_err("close failure must propagate");
+        assert_eq!(
+            result.to_string(),
+            format!("could not cancel child session {id}: close refused")
+        );
     }
 }
