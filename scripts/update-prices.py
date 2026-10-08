@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Generate the pinned models.dev price table from the committed snapshot."""
 
+from __future__ import annotations
+
 import json
 import math
 import re
@@ -10,7 +12,7 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
-from typing import NoReturn, TypeAlias
+from typing import NoReturn, Union
 
 PRICE_SOURCE: str = "models.dev"
 PRICE_SOURCE_URL: str = "https://models.dev/api.json"
@@ -28,7 +30,7 @@ NO_PRICED_MESSAGE: str = "update-prices: no priced models found"
 _DATE_PATTERN: re.Pattern[str] = re.compile("([0-9]{4}-[0-9]{2}-[0-9]{2})" + chr(10) + "?")
 _MAX_F64: float = sys.float_info.max
 
-JSONValue: TypeAlias = bool | int | float | Decimal | str | None | list["JSONValue"] | dict[str, "JSONValue"]
+JSONValue = Union[bool, int, float, Decimal, str, None, "list[JSONValue]", "dict[str, JSONValue]"]
 
 
 class UpdatePricesError(Exception):
