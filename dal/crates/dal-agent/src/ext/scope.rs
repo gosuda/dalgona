@@ -456,6 +456,10 @@ impl Drop for Inner {
                 true
             });
         }
+        self.tasks
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .detach_all();
     }
 }
 

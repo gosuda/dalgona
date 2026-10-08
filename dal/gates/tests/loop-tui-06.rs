@@ -1,6 +1,6 @@
-#![expect(
-    dead_code,
-    reason = "gate support exposes helpers shared across independent targets"
+#![cfg_attr(
+    not(unix),
+    expect(missing_docs, reason = "the whole crate is cfg'd out off unix")
 )]
 #![cfg(unix)]
 #![expect(
@@ -15,6 +15,10 @@
 )]
 #[path = "support/pty.rs"]
 mod pty;
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 #[path = "support/vt.rs"]
 mod vt;

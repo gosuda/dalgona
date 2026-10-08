@@ -1,19 +1,18 @@
-//! A second product process reports the current session lock holder.
+//! A second process reports the live session lock holder.
 #![expect(
     clippy::disallowed_methods,
     reason = "SC test starts a second product process"
 )]
-#![expect(
+#[expect(
     dead_code,
-    reason = "gate support exposes helpers shared across independent targets"
+    reason = "gate support helpers are shared across independent test targets"
 )]
-
 mod support;
 
-use std::{collections::BTreeMap, error::Error, fs, process::Command};
+use std::{error::Error, fs, process::Command};
 
 use dal_agent::{Env, Host, SessionRef};
-use dal_core::{Config, ConfigProduct, PageReq, Workspace};
+use dal_core::{Config, ConfigProduct, Expect, PageReq, Part, Workspace};
 use support::TestDir;
 
 #[tokio::test]
@@ -42,7 +41,7 @@ async fn second_process_reports_current_session_lock_holder()
         config: &config,
     })?;
     let env = Env {
-        vars: BTreeMap::new(),
+        vars: support::captured_shell_vars(),
         cwd: workspace.clone(),
         sandbox_helper: None,
     };
@@ -57,11 +56,23 @@ async fn second_process_reports_current_session_lock_holder()
             dal_core::ClientId::new("core"),
         )
         .await?;
+    // A lazy session journals nothing until its first user entry; prompt so
+    // the store materializes and holds the cross-process lock the second
+    // process must contend with.
+    let _ = agent
+        .submit(dal_core::Command::Prompt {
+            expect: Expect::Idle,
+            content: vec![Part::Text {
+                text: "Materialize this session.".into(),
+            }],
+        })
+        .await;
     let session_id = agent.view(PageReq::default())?.session.id.to_string();
 
     let output = Command::new(support::dalgon_binary("dalgon")?)
         .current_dir(&workspace)
         .env_clear()
+        .envs(support::captured_shell_vars())
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("XDG_DATA_HOME", &data_home)
@@ -74,7 +85,12 @@ async fn second_process_reports_current_session_lock_holder()
         std::process::id()
     );
     assert!(!output.status.success());
-    assert!(String::from_utf8(output.stderr)?.contains(&expected));
+    let stderr = String::from_utf8(output.stderr)?;
+    let stdout = String::from_utf8(output.stdout)?;
+    assert!(
+        stderr.contains(&expected),
+        "second process stderr must name the holder pid; stderr:\n{stderr}\nstdout:\n{stdout}"
+    );
     let report = host.shutdown(std::time::Duration::from_secs(1)).await;
     assert_eq!(report.sessions_closed, 1);
     Ok(())

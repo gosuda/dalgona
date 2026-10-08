@@ -64,9 +64,16 @@ fn cluster_width(cluster: &str, mode: WidthMode) -> usize {
     }
 
     if regional_indicators > 0 {
-        return regional_indicators * 2;
+        // A cluster carries at most two indicators, and a paired flag is
+        // one two-cell glyph — counting them per-codepoint reports 4
+        // cells for what every terminal draws in 2.
+        return 2;
     }
-    if has_zwj || has_vs16 || has_keycap || jamo >= 2 {
+    if has_zwj || has_vs16 || has_keycap || jamo > 0 {
+        // A cluster holding any conjoining jamo is a syllable-region glyph:
+        // two cells whether it is a complete syllable, an archaic chain, or a
+        // lone jamo unicode-width reports as zero-width (Extended-B measures
+        // `None`, which would desync the cursor against the drawn cell).
         return 2;
     }
     max_width
@@ -175,7 +182,7 @@ mod tests {
         assert_eq!(width("❤", narrow), 1);
         assert_eq!(width("❤\u{fe0f}", narrow), 2);
         assert_eq!(width("❤\u{fe0e}", narrow), 1);
-        assert_eq!(width("🇫🇷", narrow), 4);
+        assert_eq!(width("🇫🇷", narrow), 2);
         assert_eq!(width("🇫", narrow), 2);
         assert_eq!(width("·±", narrow), 2);
         assert_eq!(width("·±", WidthMode::Cjk), 4);

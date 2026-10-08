@@ -9,13 +9,12 @@
 
 use unicode_width::UnicodeWidthChar;
 
-/// Cursor and scroll state captured when the alternate screen buffer activates.
-type SavedAlternate = (Vec<Vec<String>>, usize, usize, usize, usize);
-
 /// Terminal grid and control-state recorder for the byte subset emitted by dal-tui.
 ///
 /// The model uses xterm cursor and scroll-region semantics, disables reflow, and
 /// processes UTF-8 and escape sequences incrementally across arbitrary read chunks.
+type AlternateScreen = Option<(Vec<Vec<String>>, usize, usize, usize, usize)>;
+
 #[derive(Debug)]
 pub struct VtRecorder {
     columns: usize,
@@ -28,7 +27,7 @@ pub struct VtRecorder {
     scroll_top: usize,
     scroll_bottom: usize,
     wrap_pending: bool,
-    alternate: Option<SavedAlternate>,
+    alternate: AlternateScreen,
     pending: Vec<u8>,
     sync_open: bool,
     sync_pairs: usize,

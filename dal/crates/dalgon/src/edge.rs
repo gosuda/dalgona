@@ -210,11 +210,6 @@ pub(crate) fn resolve_roots(
         .unwrap_or_else(|| home.join(".local").join("share"));
     let config = append_product(config_base, family)?;
     let data = append_product(data_base, family)?;
-    if config.file_name() != Some(OsStr::new(family))
-        || data.file_name() != Some(OsStr::new(family))
-    {
-        return Err(EdgeError::InvalidProduct);
-    }
     Ok(RootPaths {
         home,
         cache: data.join("cache"),
@@ -491,21 +486,56 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    const TEST_HOME: &str = "C:\\t\\home";
+    #[cfg(not(windows))]
+    const TEST_HOME: &str = "/t/home";
+    #[cfg(windows)]
+    const TEST_DATA: &str = "C:\\t\\data\\";
+    #[cfg(not(windows))]
+    const TEST_DATA: &str = "/t/data/";
+    #[cfg(windows)]
+    const TEST_FAMILY_HOME: &str = "C:\\home\\dalgona";
+    #[cfg(not(windows))]
+    const TEST_FAMILY_HOME: &str = "/home/dalgona";
+
     #[test]
     fn relative_xdg_falls_back_and_absolute_xdg_appends_product_once() {
         let vars = env(&[
-            ("HOME", "/t/home"),
+            ("HOME", TEST_HOME),
             ("XDG_CONFIG_HOME", "relative"),
-            ("XDG_DATA_HOME", "/t/data/"),
+            ("XDG_DATA_HOME", TEST_DATA),
         ]);
         let roots = resolve_roots(&vars, "dalgon").unwrap();
-        assert_eq!(roots.config, PathBuf::from("/t/home/.config/dal"));
-        assert_eq!(roots.data, PathBuf::from("/t/data/dal"));
+        assert_eq!(roots.config, PathBuf::from(TEST_HOME).join(".config/dal"));
+        assert_eq!(roots.data, PathBuf::from(TEST_DATA).join("dal"));
+    }
+
+    /// `HOME` stays primary on Windows; `USERPROFILE` and the
+    /// `HOMEDRIVE`/`HOMEPATH` pair are the documented fallbacks.
+    #[cfg(windows)]
+    #[test]
+    fn userprofile_and_homedrive_pair_resolve_home_without_home() {
+        let vars = env(&[("USERPROFILE", "C:\\Users\\alice")]);
+        assert_eq!(
+            super::select_home(&vars).unwrap(),
+            PathBuf::from("C:\\Users\\alice")
+        );
+        let vars = env(&[("HOME", "relative"), ("USERPROFILE", "C:\\Users\\bob")]);
+        assert_eq!(
+            super::select_home(&vars).unwrap(),
+            PathBuf::from("C:\\Users\\bob")
+        );
+        let vars = env(&[("HOMEDRIVE", "C:"), ("HOMEPATH", "\\Users\\carol")]);
+        assert_eq!(
+            super::select_home(&vars).unwrap(),
+            PathBuf::from("C:\\Users\\carol")
+        );
     }
 
     #[test]
     fn product_roots_use_the_family_identity_not_home_basename() {
-        let vars = env(&[("HOME", "/home/dalgona")]);
+        let vars = env(&[("HOME", TEST_FAMILY_HOME)]);
         let dalgon = resolve_roots(&vars, "dalgon").unwrap();
         let dal = resolve_roots(&vars, "dal").unwrap();
         let dl = resolve_roots(&vars, "dl").unwrap();
@@ -517,7 +547,7 @@ mod tests {
         assert_ne!(dalgon.data, dalgona.data);
         assert_eq!(
             super::config_file_path(&dalgon),
-            PathBuf::from("/home/dalgona/.config/dal/dal.toml")
+            PathBuf::from(TEST_FAMILY_HOME).join(".config/dal/dal.toml")
         );
         assert!(matches!(
             resolve_roots(&vars, "unknown"),
@@ -628,14 +658,16 @@ mod tests {
 
     #[test]
     fn root_paths_keep_distinct_config_and_cache_roots() {
-        let roots = resolve_roots(&env(&[("HOME", "/h")]), "dalgon").unwrap();
+        let home = if cfg!(windows) { "C:\\h" } else { "/h" };
+        let roots = resolve_roots(&env(&[("HOME", home)]), "dalgon").unwrap();
+        let base = PathBuf::from(home);
         assert_eq!(
             roots,
             RootPaths {
-                home: PathBuf::from("/h"),
-                config: PathBuf::from("/h/.config/dal"),
-                data: PathBuf::from("/h/.local/share/dal"),
-                cache: PathBuf::from("/h/.local/share/dal/cache"),
+                home: base.clone(),
+                config: base.join(".config/dal"),
+                data: base.join(".local/share/dal"),
+                cache: base.join(".local/share/dal/cache"),
             }
         );
     }

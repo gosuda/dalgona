@@ -23,6 +23,7 @@ pub(crate) struct Subscriber {
 pub(crate) struct SubscriberShared {
     queue: Mutex<QueueState>,
     notify: Notify,
+    answers: bool,
 }
 
 struct QueueState {
@@ -37,7 +38,13 @@ struct QueueState {
 
 impl Subscriber {
     /// A subscriber preloaded with replay backlog at the given cursor.
-    pub(crate) fn with_backlog(backlog: VecDeque<Delivery>, current: (Gen, Seq)) -> Self {
+    /// `answers` marks subscribers that may resolve approval requests;
+    /// listen-only subscribers never count as an attached answerer.
+    pub(crate) fn with_backlog(
+        backlog: VecDeque<Delivery>,
+        current: (Gen, Seq),
+        answers: bool,
+    ) -> Self {
         Self {
             shared: Arc::new(SubscriberShared {
                 queue: Mutex::new(QueueState {
@@ -50,6 +57,7 @@ impl Subscriber {
                     current,
                 }),
                 notify: Notify::new(),
+                answers,
             }),
         }
     }
@@ -67,6 +75,11 @@ impl Subscriber {
     /// Rebuilds a strong handle from the actor table, if the client lives.
     pub(crate) fn upgrade(slot: &Weak<SubscriberShared>) -> Option<Arc<SubscriberShared>> {
         slot.upgrade()
+    }
+
+    /// Whether this subscriber may answer approval requests.
+    pub(crate) fn answers(slot: &Arc<SubscriberShared>) -> bool {
+        slot.answers
     }
 
     /// Offers one published update; shed or dropped offers return false.

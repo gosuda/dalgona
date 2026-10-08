@@ -5,6 +5,10 @@
 
 //! Undeclared operations and headless process approvals fail closed.
 
+#[expect(
+    dead_code,
+    reason = "gate helpers are shared across integration targets"
+)]
 mod support;
 
 use std::{collections::BTreeMap, error::Error, fs, process::Command};
@@ -88,7 +92,7 @@ async fn undeclared_net_operation_is_denied_without_grant_request()
         config: &config,
     })?;
     let env = Env {
-        vars: BTreeMap::new(),
+        vars: support::captured_shell_vars(),
         cwd: workspace.path().to_path_buf(),
         sandbox_helper: None,
     };
@@ -165,6 +169,7 @@ fn headless_print_denies_exec_without_prompt() -> Result<(), Box<dyn Error + Sen
     let output = Command::new(dalgon_binary("dalgon")?)
         .current_dir(print.path())
         .env_clear()
+        .envs(support::captured_shell_vars())
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("XDG_DATA_HOME", &data_home)
@@ -215,7 +220,7 @@ async fn no_controller_denies_plugin_exec_without_opening_request()
         config: &config,
     })?;
     let env = Env {
-        vars: BTreeMap::new(),
+        vars: support::captured_shell_vars(),
         cwd: workspace.path().to_path_buf(),
         sandbox_helper: None,
     };
@@ -223,7 +228,9 @@ async fn no_controller_denies_plugin_exec_without_opening_request()
         workspace: Workspace::new(workspace.path().to_path_buf())?,
     };
     let harness = scripted_session(product, config, env, session).await?;
-    let mut subscription = harness.agent.subscribe(None)?;
+    // Listen-only: with nobody attached to answer, `ask` must deny the
+    // gated plugin call without ever opening a request.
+    let mut subscription = harness.agent.subscribe_listen(None)?;
     let prompt_reply = harness
         .agent
         .submit(AgentCommand::Prompt {
@@ -250,8 +257,13 @@ async fn no_controller_denies_plugin_exec_without_opening_request()
         }
     }
     let exec_outcome = exec_outcome.ok_or_else(|| std::io::Error::other("missing exec outcome"))?;
+    assert!(exec_outcome.contains("\"isError\":true"), "{exec_outcome}");
     assert!(
-        exec_outcome.contains("\"text\":\"denied: no front end can answer\""),
+        exec_outcome.contains("needs approval, and this run has no one to ask."),
+        "{exec_outcome}"
+    );
+    assert!(
+        exec_outcome.contains("rerun with --approval all"),
         "{exec_outcome}"
     );
     assert_eq!(opened_requests, 0);

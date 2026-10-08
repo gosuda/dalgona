@@ -1,11 +1,13 @@
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 
+#[cfg(unix)]
 use sonic_rs::JsonValueTrait;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::support::{HttpReply, host_header, http, parse_reply, rig, router_options, with_serve};
 use crate::error::ServeError;
+#[cfg(unix)]
 use crate::token::TokenError;
 
 const CHAT: &str = "POST /v1/chat/completions HTTP/1.1";

@@ -5,11 +5,16 @@ use std::sync::Arc;
 use super::DiagramOutcome;
 
 const PNG_CAP: usize = 4 * 1_024 * 1_024;
-const PIXEL_CAP: f32 = 32.0 * 1_024.0 * 1_024.0;
+const PIXEL_CAP: u32 = 32 * 1_024 * 1_024;
 const AXIS_CAP: f32 = 16_384.0;
 
 /// Renders SVG bytes to PNG pixels with hardening caps.
 #[must_use]
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "dims are finiteness- and cap-checked; a saturating cast falls to the pixmap cap"
+)]
 pub fn render_svg(svg: &[u8], kind: super::DiagramKind) -> DiagramOutcome {
     if svg.len() > PNG_CAP {
         return fallback("too large");
@@ -27,20 +32,10 @@ pub fn render_svg(svg: &[u8], kind: super::DiagramKind) -> DiagramOutcome {
     }
     let pixels = size.width() * size.height();
     // Widening float comparison against the pixel cap; NaN and infinity fall out here.
-    if !pixels.is_finite() || pixels > PIXEL_CAP {
+    if !pixels.is_finite() || f64::from(pixels) > f64::from(PIXEL_CAP) {
         return fallback("too large");
     }
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "size is checked finite, positive, and at or below AXIS_CAP; the ceil is below 2^16"
-    )]
     let width = size.width().ceil() as u32;
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "size is checked finite, positive, and at or below AXIS_CAP; the ceil is below 2^16"
-    )]
     let height = size.height().ceil() as u32;
     if width == 0 || height == 0 {
         return fallback(invalid_kind(kind));

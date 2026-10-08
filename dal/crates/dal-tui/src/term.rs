@@ -20,24 +20,24 @@ pub trait TermIo: Send {
     /// Enables raw terminal input.
     ///
     /// # Errors
-    /// Returns an error when the terminal driver refuses to enable raw mode.
+    /// Returns the terminal I/O error when raw mode cannot be entered.
     fn enable_raw(&self) -> io::Result<()>;
     /// Disables raw terminal input without returning an error.
     fn disable_raw(&self);
     /// Returns terminal rows and columns.
     ///
     /// # Errors
-    /// Returns an error when the terminal size cannot be queried.
+    /// Returns the terminal I/O error when the size cannot be read.
     fn size(&self) -> io::Result<(u16, u16)>;
     /// Writes one complete logical output and flushes it once.
     ///
     /// # Errors
-    /// Returns an error when the bytes cannot be written or flushed.
+    /// Returns the terminal I/O error when the write or flush fails.
     fn write(&self, bytes: &[u8]) -> io::Result<()>;
     /// Reads input for at most `timeout`.
     ///
     /// # Errors
-    /// Returns an error when reading the input stream fails.
+    /// Returns the terminal I/O error when the read fails.
     fn read(&self, timeout: Duration) -> io::Result<Vec<u8>>;
     /// Raises `SIGTSTP` on POSIX; does nothing on Windows.
     fn raise_tstp(&self);
@@ -51,88 +51,70 @@ pub trait TermIo: Send {
     }
 }
 
-/// Bit set of captured terminal modes for idempotent cleanup.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct Modes(u8);
-
-impl std::ops::BitOr for Modes {
-    type Output = Self;
-
-    fn bitor(self, rhs: Self) -> Self {
-        Self(self.0 | rhs.0)
-    }
-}
-
-impl Modes {
-    const RAW: Self = Self(1 << 0);
-    const PASTE: Self = Self(1 << 1);
-    const KITTY: Self = Self(1 << 2);
-    const GRAPHEME: Self = Self(1 << 3);
-    const FULLSCREEN: Self = Self(1 << 4);
-    const TRANSCRIPT_OVERLAY: Self = Self(1 << 5);
-    const SYNC_OPEN: Self = Self(1 << 6);
-
-    /// Returns whether any of `flags` is currently set.
-    const fn contains(self, flags: Self) -> bool {
-        self.0 & flags.0 != 0
-    }
-
-    /// Sets or clears `flags` according to `enabled`.
-    fn set(&mut self, flags: Self, enabled: bool) {
-        if enabled {
-            self.0 |= flags.0;
-        } else {
-            self.0 &= !flags.0;
-        }
-    }
-}
-
 /// Terminal modes captured for idempotent cleanup.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent terminal modes; a bitset loses legibility"
+)]
 pub struct TermState {
-    modes: Modes,
+    raw: bool,
+    paste: bool,
+    kitty: bool,
+    grapheme: bool,
+    fullscreen: bool,
+    transcript_overlay: bool,
+    sync_open: bool,
 }
 
 impl TermState {
     /// Creates an unstarted terminal state.
     #[must_use]
     pub const fn new() -> Self {
-        Self { modes: Modes(0) }
+        Self {
+            raw: false,
+            paste: false,
+            kitty: false,
+            grapheme: false,
+            fullscreen: false,
+            transcript_overlay: false,
+            sync_open: false,
+        }
     }
 
     /// Records that raw mode is active.
     pub fn set_raw(&mut self, enabled: bool) {
-        self.modes.set(Modes::RAW, enabled);
+        self.raw = enabled;
     }
 
     /// Records bracketed-paste mode.
     pub fn set_paste(&mut self, enabled: bool) {
-        self.modes.set(Modes::PASTE, enabled);
+        self.paste = enabled;
     }
 
     /// Records kitty keyboard mode.
     pub fn set_kitty(&mut self, enabled: bool) {
-        self.modes.set(Modes::KITTY, enabled);
+        self.kitty = enabled;
     }
 
     /// Records grapheme-width terminal mode.
     pub fn set_grapheme(&mut self, enabled: bool) {
-        self.modes.set(Modes::GRAPHEME, enabled);
+        self.grapheme = enabled;
     }
 
     /// Records alternate-screen ownership.
     pub fn set_fullscreen(&mut self, enabled: bool) {
-        self.modes.set(Modes::FULLSCREEN, enabled);
+        self.fullscreen = enabled;
     }
 
     /// Records the inline transcript overlay's alternate-screen ownership.
     pub fn set_transcript_overlay(&mut self, enabled: bool) {
-        self.modes.set(Modes::TRANSCRIPT_OVERLAY, enabled);
+        self.transcript_overlay = enabled;
     }
 
     /// Records whether a synchronized-update bracket is open.
     pub fn set_sync_open(&mut self, enabled: bool) {
-        self.modes.set(Modes::SYNC_OPEN, enabled);
+        self.sync_open = enabled;
     }
 }
 
@@ -145,7 +127,7 @@ pub fn restore(state: &TermState) {
     let mut stdout = io::stdout().lock();
     let _ = stdout.write_all(&bytes);
     let _ = stdout.flush();
-    if state.modes.contains(Modes::RAW) {
+    if state.raw {
         let _ = terminal::disable_raw_mode();
     }
 }
@@ -154,21 +136,18 @@ pub fn restore(state: &TermState) {
 #[must_use]
 pub(crate) fn restore_bytes(state: &TermState) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(64);
-    if state.modes.contains(Modes::SYNC_OPEN) {
+    if state.sync_open {
         bytes.extend_from_slice(b"\x1b[?2026l");
     }
-    if state.modes.contains(Modes::KITTY) {
+    if state.kitty {
         bytes.extend_from_slice(b"\x1b[<u\x1b[<u\x1b[>4;0m");
     }
     bytes.extend_from_slice(b"\x1b[?2004l");
-    if state.modes.contains(Modes::GRAPHEME) {
+    if state.grapheme {
         bytes.extend_from_slice(b"\x1b[?2027l");
     }
     bytes.extend_from_slice(b"\x1b[?25h\x1b[0m");
-    if state
-        .modes
-        .contains(Modes::FULLSCREEN | Modes::TRANSCRIPT_OVERLAY)
-    {
+    if state.fullscreen || state.transcript_overlay {
         bytes.extend_from_slice(b"\x1b[r\x1b[?1049l");
     }
     bytes
@@ -252,6 +231,13 @@ pub struct CrosstermTermIo {
 impl CrosstermTermIo {
     /// Builds the adapter with standard input captured by the process edge.
     #[must_use]
+    #[cfg_attr(
+        not(unix),
+        expect(
+            clippy::needless_pass_by_value,
+            reason = "the uniform constructor captures Stdin; only unix stores it"
+        )
+    )]
     pub fn new(stdin: io::Stdin) -> Self {
         #[cfg(not(unix))]
         let _ = stdin;
@@ -442,7 +428,7 @@ impl TermIo for ScriptedTermIo {
 /// Resolves an `auto` or named theme request from a probe result and captured environment.
 ///
 /// # Errors
-/// Returns [`TuiError`] when a named theme cannot be resolved.
+/// Returns [`TuiError`] when the request names a theme the palette does not carry.
 pub fn resolve_theme_request(
     request: &ThemeRequest,
     probe: &Probe,
@@ -495,11 +481,11 @@ mod tests {
     fn osc11_parses_short_and_long_color_channels() {
         assert!(
             parse_osc11(b"\x1b]11;rgb:0000/0000/0000\x07")
-                .is_some_and(|luminance| luminance == 0.0)
+                .is_some_and(|luminance| luminance.abs() < 1e-6)
         );
         assert!(
             parse_osc11(b"\x1b]11;#ffffffffffff\x1b\\")
-                .is_some_and(|luminance| (luminance - 1.0).abs() < f64::EPSILON)
+                .is_some_and(|luminance| (luminance - 1.0).abs() < 1e-6)
         );
     }
 
@@ -508,14 +494,14 @@ mod tests {
         let (probe, replay) = parse_replies(
             b"\x1b[?2026;1$y\x1b[?2027;1$y\x1b[?1u\x1b]11;rgb:0000/0000/0000\x07\x1b[?1;2c",
         );
-        assert!(probe.modes.sync_update, "{probe:?}");
+        assert!(probe.sync_update, "{probe:?}");
         assert!(replay.is_empty());
     }
 
     #[test]
     fn reply_parser_replays_only_bytes_outside_replies() {
         let (probe, replay) = parse_replies(b"a\x1b[?2026;1$y\x1b[?62;4c");
-        assert!(probe.modes.sync_update);
+        assert!(probe.sync_update);
         assert!(probe.sixel);
         assert_eq!(replay, b"a");
     }

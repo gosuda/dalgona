@@ -6,6 +6,7 @@ mod extension;
 mod json_mode;
 mod jsonrpc;
 mod local;
+#[cfg(unix)]
 mod remote;
 mod router;
 mod rpc;

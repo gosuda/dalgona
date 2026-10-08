@@ -1,10 +1,10 @@
 //! Gate-full scenario 4: extension removal and headless surface probes.
 #![expect(clippy::expect_used, reason = "SC test")]
-#![expect(
-    dead_code,
-    reason = "gate support exposes helpers shared across independent targets"
-)]
 
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
 use std::{collections::BTreeMap, error::Error, fs, io, path::PathBuf, time::Duration};
@@ -134,7 +134,7 @@ async fn rpc_probe(host: dal_agent::Host) -> Result<(), Box<dyn Error + Send + S
             response
                 .get("result")
                 .and_then(|result| result.get("protocolVersion"))
-                .and_then(sonic_rs::Value::as_i64),
+                .and_then(sonic_rs::JsonValueTrait::as_i64),
             Some(1),
             "{response}"
         );

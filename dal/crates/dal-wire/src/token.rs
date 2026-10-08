@@ -370,6 +370,10 @@ fn check_connect_file_mode(path: &Path, metadata: &fs::Metadata) -> Result<(), T
 }
 
 #[cfg(not(unix))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "unix checks the mode bits; other platforms accept the file unchanged"
+)]
 fn check_connect_file_mode(_path: &Path, _metadata: &fs::Metadata) -> Result<(), TokenError> {
     Ok(())
 }
@@ -424,14 +428,30 @@ fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// Windows has no directory-sync door; the file sync is the durable edge.
+#[cfg_attr(
+    windows,
+    expect(
+        clippy::unnecessary_wraps,
+        reason = "directory sync fails only on POSIX"
+    )
+)]
 fn sync_parent(path: &Path) -> Result<(), TokenError> {
-    let Some(parent) = path.parent() else {
-        return Ok(());
-    };
-    File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|source| TokenError::Io {
-            path: parent.to_owned(),
-            source,
-        })
+    #[cfg(windows)]
+    {
+        let _ = path;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let Some(parent) = path.parent() else {
+            return Ok(());
+        };
+        File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|source| TokenError::Io {
+                path: parent.to_owned(),
+                source,
+            })
+    }
 }

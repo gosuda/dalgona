@@ -143,15 +143,17 @@ impl Default for ToolsConfig {
 
 impl fmt::Debug for ToolsConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ToolsConfig")
+        let mut debug = formatter.debug_struct("ToolsConfig");
+        debug
             .field("search_symbols", &self.search_symbols)
             .field("index_root", &self.index_root)
             .field("rerank_configured", &self.rerank.is_some())
             .field("edit_style", &self.edit_style)
             .field("observer_configured", &self.observer.is_some())
-            .field("exec", &self.exec)
-            .finish_non_exhaustive()
+            .field("exec", &self.exec);
+        #[cfg(feature = "symbols")]
+        debug.field("guard", &self.guard);
+        debug.finish()
     }
 }
 
@@ -325,13 +327,7 @@ impl Seen {
     }
 
     /// Returns the merged intervals recorded for the exact session, path, and digest.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "read.rs records coverage with `show` and reads it back in lib tests"
-        )
-    )]
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn intervals(
         &self,

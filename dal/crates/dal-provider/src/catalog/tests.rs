@@ -646,7 +646,14 @@ fn accept_loopback(listener: &TcpListener) -> TcpStream {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         match listener.accept() {
-            Ok((stream, _)) => return stream,
+            Ok((stream, _)) => {
+                // BSD/macOS accepted sockets inherit O_NONBLOCK; request
+                // reads below must block.
+                stream
+                    .set_nonblocking(false)
+                    .expect("accepted catalog stream blocking");
+                return stream;
+            }
             Err(error)
                 if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline =>
             {

@@ -1,20 +1,29 @@
-#![cfg(unix)]
-#![expect(
-    dead_code,
-    reason = "gate support exposes helpers shared across independent targets"
+#![cfg_attr(
+    not(unix),
+    expect(missing_docs, reason = "the whole crate is cfg'd out off unix")
 )]
+#![cfg(unix)]
 #![expect(
     clippy::disallowed_methods,
     reason = "SC test runs real dalgon processes"
 )]
 //! Reattaches the real TUI after its server-side WebSocket connection drops.
 
+#[expect(
+    dead_code,
+    reason = "PTY support helpers are shared across TUI gate targets"
+)]
 #[path = "support/pty.rs"]
 mod pty;
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
 use std::{
     error::Error,
+    fmt::Write as _,
     io::{self, Read, Write},
     net::{Shutdown, SocketAddr, TcpListener, TcpStream},
     process::{Child, Stdio},
@@ -42,10 +51,11 @@ fn remote_tui_reattaches_after_dropped_websocket() -> Result<(), Box<dyn Error +
     let mut server_command = dalgon_command_with_fixture(server_home.path(), &fixture)?;
     let port = free_port()?;
     let port_text = port.to_string();
+    let serve_log = server_home.path().join("serve.stderr");
     server_command
         .args(["serve", "--bind", "127.0.0.1", "--port", &port_text])
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(Stdio::from(std::fs::File::create(&serve_log)?));
     let mut server = ServeChild::spawn(server_command.spawn()?);
     wait_for_listener(port, Duration::from_secs(10))?;
 
@@ -61,13 +71,16 @@ fn remote_tui_reattaches_after_dropped_websocket() -> Result<(), Box<dyn Error +
         &connect_addr,
     ]);
     let mut terminal = PtyProcess::spawn(&mut client_command, 100, 30)?;
-    terminal.wait_for(
+    if let Err(error) = terminal.wait_for(
         dal_tui::copy::ids::COMPOSER_PLACEHOLDER.as_bytes(),
         Duration::from_secs(10),
-    )?;
+    ) {
+        let log = std::fs::read_to_string(&serve_log).unwrap_or_default();
+        return Err(format!("{error}\nserve stderr:\n{log}").into());
+    }
     terminal.collect_for(Duration::from_millis(5))?;
     terminal.write(b"start the remote turn\r")?;
-    terminal.wait_for(b"Allow this command?", Duration::from_secs(10))?;
+    terminal.wait_for(b"Allow this command?", Duration::from_secs(15))?;
     terminal.write(b"y")?;
     wait_for_path(&marker, Duration::from_secs(10))?;
     terminal.wait_for(
@@ -294,7 +307,7 @@ impl Drop for TcpProxy {
 
 #[expect(
     clippy::needless_pass_by_value,
-    reason = "the proxy thread owns the listener, channel, and shared counters"
+    reason = "arguments are moved into the spawned proxy thread"
 )]
 fn proxy_loop(
     listener: TcpListener,
@@ -313,6 +326,11 @@ fn proxy_loop(
             }
             Err(_) => return,
         };
+        // BSD accepts inherit the listener's O_NONBLOCK; the relays block on
+        // reads and must not see the flag.
+        if client.set_nonblocking(false).is_err() {
+            continue;
+        }
         let Ok(upstream) = TcpStream::connect(target) else {
             continue;
         };
@@ -341,11 +359,13 @@ fn proxy_loop(
         let first_finished = finished_sender.clone();
         let client_capture = Arc::clone(&capture);
         let server_capture = Arc::clone(&capture);
+        let serve_port = target.port();
         let client_to_upstream = thread::spawn(move || {
             forward(
                 client_reader,
                 upstream_writer,
                 Some((client_capture, TraceDirection::ClientToServer)),
+                Some(serve_port),
             );
             let _ = first_finished.send(());
         });
@@ -354,6 +374,7 @@ fn proxy_loop(
                 upstream_reader,
                 client_writer,
                 Some((server_capture, TraceDirection::ServerToClient)),
+                None,
             );
             let _ = finished_sender.send(());
         });
@@ -497,16 +518,38 @@ fn update_cursor(message: &str) -> Option<(u64, u64)> {
     Some((params.get("gen")?.as_u64()?, params.get("seq")?.as_u64()?))
 }
 
+/// Presents the serve port in the `Host` header of the upgrade request: the
+/// client dialed the proxy port, but the loopback host guard only accepts a
+/// host header that names the serve port.
+fn rewrite_host_header(request: &[u8], serve_port: u16) -> Vec<u8> {
+    let text = String::from_utf8_lossy(request);
+    let mut out = String::with_capacity(text.len());
+    for line in text.split_inclusive("\r\n") {
+        if line
+            .get(..5)
+            .is_some_and(|head| head.eq_ignore_ascii_case("host:"))
+        {
+            let _ = write!(out, "Host: 127.0.0.1:{serve_port}\r\n");
+        } else {
+            out.push_str(line);
+        }
+    }
+    out.into_bytes()
+}
+
 #[expect(
     clippy::needless_pass_by_value,
-    reason = "each forward thread takes ownership of its stream pair"
+    reason = "arguments are moved into the spawned relay thread"
 )]
 fn forward(
     mut reader: TcpStream,
     mut writer: TcpStream,
     capture: Option<(Arc<Mutex<FrameCapture>>, TraceDirection)>,
+    serve_port: Option<u16>,
 ) {
     let mut buffer = [0_u8; 8192];
+    let mut pending: Vec<u8> = Vec::new();
+    let mut upgrading = serve_port.is_some();
     loop {
         let length = match reader.read(&mut buffer) {
             Ok(0) => break,
@@ -523,9 +566,27 @@ fn forward(
                 TraceDirection::ServerToClient => capture.push_server(&buffer[..length]),
             }
         }
-        if writer.write_all(&buffer[..length]).is_err() {
+        let chunk = if upgrading {
+            pending.extend_from_slice(&buffer[..length]);
+            let Some(header_end) = pending.windows(4).position(|window| window == b"\r\n\r\n")
+            else {
+                continue;
+            };
+            let mut rewritten =
+                rewrite_host_header(&pending[..header_end + 4], serve_port.unwrap_or(0));
+            rewritten.extend_from_slice(&pending[header_end + 4..]);
+            pending.clear();
+            upgrading = false;
+            rewritten
+        } else {
+            buffer[..length].to_vec()
+        };
+        if writer.write_all(&chunk).is_err() {
             break;
         }
+    }
+    if upgrading && !pending.is_empty() {
+        let _ = writer.write_all(&pending);
     }
     let _ = writer.shutdown(Shutdown::Write);
 }

@@ -1,13 +1,12 @@
-//! JSON output mode emits exactly one result or one error.
+//! JSON mode emits exactly one result or one error.
 #![expect(
     clippy::disallowed_methods,
     reason = "SC test invokes the real CLI boundary"
 )]
-#![expect(
+#[expect(
     dead_code,
-    reason = "gate support exposes helpers shared across independent targets"
+    reason = "gate support helpers are shared across independent test targets"
 )]
-
 mod support;
 
 use std::{error::Error, fs, path::PathBuf, process::Command};
@@ -35,6 +34,7 @@ fn json_mode_emits_one_result_or_one_error() -> Result<(), Box<dyn Error + Send 
     let output = Command::new(dalgon_binary("dalgon")?)
         .current_dir(&home)
         .env_clear()
+        .envs(support::captured_shell_vars())
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("XDG_DATA_HOME", home.join(".local/share"))

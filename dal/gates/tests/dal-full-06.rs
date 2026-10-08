@@ -1,10 +1,10 @@
 //! Gate-full scenario 6: scope scheduling, FIFO admission, and cancellation p99.
 #![expect(clippy::expect_used, reason = "SC test")]
-#![expect(
-    dead_code,
-    reason = "gate support exposes helpers shared across independent targets"
-)]
 
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
 use std::{
@@ -115,7 +115,7 @@ struct OwnerModel {
 impl ModelHandler for OwnerModel {
     #[expect(
         clippy::too_many_lines,
-        reason = "the owner model scripts the whole 500-member admission walkthrough"
+        reason = "SC model stages the whole scope scenario in one run"
     )]
     fn run<'a>(
         &'a self,
@@ -190,8 +190,8 @@ impl ModelHandler for OwnerModel {
                 assert!(matches!(result, ScopeValue::Inference(_)));
             }
 
-            for (index, handle) in handles.iter().enumerate().take(ADMITTED).skip(1) {
-                control.releases[index].send_replace(true);
+            for (release, handle) in control.releases.iter().zip(handles.iter()).skip(1) {
+                release.send_replace(true);
                 let result = tokio::time::timeout(Duration::from_secs(30), handle.result())
                     .await
                     .expect("remaining admitted inference finishes")

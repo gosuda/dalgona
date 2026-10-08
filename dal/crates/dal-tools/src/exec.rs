@@ -1,6 +1,6 @@
 //! Shell execution tool contracts, state mapping, and user-facing results.
 
-/// Tool-specific classification of parsed exec commands.
+/// Read-only command classification for preview and guard seams.
 pub mod classify;
 /// Shell resolution against configured paths and platform ladders.
 pub(crate) mod shell;
@@ -101,6 +101,22 @@ pub(crate) enum ExecError {
         "exec: no bash found. Install Git for Windows (https://git-scm.com/downloads/win), add bash.exe to PATH, or set shell in dal.toml"
     )]
     NoBash,
+    /// The host process door could not start the resolved shell.
+    #[cfg(windows)]
+    #[cfg_attr(
+        windows,
+        expect(
+            dead_code,
+            reason = "windows host-door spawn errors are reported through this variant once the door lands"
+        )
+    )]
+    #[error("exec: cannot start {shell}: {reason}")]
+    CannotStart {
+        /// The resolved shell program.
+        shell: String,
+        /// The host process-door error.
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -491,7 +507,7 @@ impl ExecTool {
             Ok(approved) => approved,
             Err(reason) => return ToolOutcome::Err(ToolError::Denied(reason)),
         };
-        let argv = [
+        let spawn_argv = [
             OsString::from(shell.program.as_os_str()),
             OsString::from("-c"),
             OsString::from(&validated.command),
@@ -501,7 +517,7 @@ impl ExecTool {
             timeout: validated.timeout,
             env: Vec::new(),
         };
-        let mut proc = match cx.spawn(&argv, opts, approved) {
+        let mut proc = match cx.spawn(&spawn_argv, opts, approved) {
             Ok(proc) => proc,
             Err(ToolError::Spawn { source, .. }) => {
                 return ToolOutcome::Err(ToolError::message(format!(

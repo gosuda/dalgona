@@ -1,5 +1,4 @@
 use std::{
-    fmt::Write as _,
     io::{self, Write},
     path::Path,
     process::ExitCode,
@@ -438,13 +437,22 @@ fn status(data_root: &Path, vars: &crate::VarsMap) -> ExitCode {
         .is_some_and(|key| !key.is_empty());
         if let Some(kind) = kind {
             ready = true;
-            let _ = writeln!(output, "{provider:<14}{:<15}{kind}", "ready");
+            let _ = std::fmt::Write::write_fmt(
+                &mut output,
+                format_args!("{provider:<14}{:<15}{kind}\n", "ready"),
+            );
         } else if environment_key {
             ready = true;
-            let _ = writeln!(output, "{provider:<14}{:<15}api_key", "ready");
+            let _ = std::fmt::Write::write_fmt(
+                &mut output,
+                format_args!("{provider:<14}{:<15}api_key\n", "ready"),
+            );
         } else {
             first_missing.get_or_insert(provider);
-            let _ = writeln!(output, "{provider:<14}not configured");
+            let _ = std::fmt::Write::write_fmt(
+                &mut output,
+                format_args!("{provider:<14}not configured\n"),
+            );
         }
     }
     let _ = write!(std::io::stdout().lock(), "{output}");
@@ -490,7 +498,7 @@ fn no_terminal() -> ExitCode {
 }
 
 pub(super) fn provider_error(module: &str, error: &ProviderError, path: &Path) -> ExitCode {
-    let (what, hint) = match error {
+    let (what, hint) = match &error {
         ProviderError::AuthFileInvalid { message, .. } => (
             format!("dalgon: auth.json is not valid JSON: {message}"),
             crate::cli::texts::AUTH_INVALID_HINT.to_owned(),

@@ -4,7 +4,6 @@ mod support;
 
 use std::{
     error::Error,
-    fs,
     io::{Read, Write},
     net::TcpListener,
     thread,
@@ -35,6 +34,10 @@ fn json_models_fetches_from_loopback_and_filters_catalog() -> Result<(), Box<dyn
                 Err(error) => return Err(error),
             }
         };
+        // Accepted sockets inherit O_NONBLOCK on BSD/macOS; the reads below
+        // must block or the request poll can surface EAGAIN before the
+        // client's bytes arrive.
+        stream.set_nonblocking(false)?;
         let mut request = [0_u8; 4096];
         let count = stream.read(&mut request)?;
         let recorded = String::from_utf8_lossy(&request[..count]).into_owned();
@@ -115,9 +118,9 @@ fn insecure_auth_permissions_keep_the_auth_repair_diagnostic() -> Result<(), Box
     let fixture = CliFixture::new()?;
     fixture.write_auth(r#"{"openai":{"kind":"api_key","key":"secret-model-token"}}"#)?;
     let path = fixture.auth_file();
-    let mut permissions = fs::metadata(&path)?.permissions();
+    let mut permissions = std::fs::metadata(&path)?.permissions();
     permissions.set_mode(0o644);
-    fs::set_permissions(&path, permissions)?;
+    std::fs::set_permissions(&path, permissions)?;
 
     let output = fixture.output(&["models"])?;
 

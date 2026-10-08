@@ -1,12 +1,11 @@
-//! Gate-full scenario 5: session lifecycle over scripted providers.
-#![expect(
+//! SDK scripted path returns assistant text and exits.
+#[expect(
     dead_code,
-    reason = "gate support exposes helpers shared across independent targets"
+    reason = "gate support helpers are shared across independent test targets"
 )]
-
 mod support;
 
-use std::{collections::BTreeMap, error::Error, path::PathBuf, time::Duration};
+use std::{error::Error, path::PathBuf, time::Duration};
 
 use dal_agent::{Env, Product, SessionRef};
 use dal_core::{
@@ -35,7 +34,7 @@ async fn sdk_scripted_path_returns_assistant_text_and_exits()
         bundled: Vec::new(),
     };
     let env = Env {
-        vars: BTreeMap::new(),
+        vars: support::captured_shell_vars(),
         cwd: workspace.path().to_path_buf(),
         sandbox_helper: None,
     };

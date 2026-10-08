@@ -519,7 +519,12 @@ async fn repair_fault_matrix() {
         sync_error: true,
         ..Default::default()
     };
-    let file = fs::File::open(&path).expect("open journal file");
+    // Windows requires write access to flush a file; open it writable so the
+    // healthy sync below runs on every platform.
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .expect("open journal file");
     let sync_error = sync_sink
         .sync_file(&file)
         .expect_err("sync failpoint fires");

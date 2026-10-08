@@ -1,13 +1,12 @@
-//! WebSocket serve enforces auth, origin, keepalive, and disconnect limits.
+//! Serve failure surfaces and websocket request handling.
 #![expect(
     clippy::disallowed_methods,
     reason = "SC test exercises real websocket server"
 )]
-#![expect(
+#[expect(
     dead_code,
-    reason = "gate support exposes helpers shared across independent targets"
+    reason = "gate support helpers are shared across independent test targets"
 )]
-
 mod support;
 
 use std::{
@@ -237,6 +236,7 @@ async fn websocket_auth_origin_frame_keepalive_and_disconnect_contract()
     let token_out = Command::new(binary)
         .current_dir(&workspace)
         .env_clear()
+        .envs(support::captured_shell_vars())
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("XDG_DATA_HOME", &data_home)
@@ -248,6 +248,7 @@ async fn websocket_auth_origin_frame_keepalive_and_disconnect_contract()
     let child = Command::new(binary)
         .current_dir(&workspace)
         .env_clear()
+        .envs(support::captured_shell_vars())
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("XDG_DATA_HOME", &data_home)
@@ -318,6 +319,7 @@ async fn loopback_websocket_accepts_connections_without_a_token()
     let child = Command::new(binary)
         .current_dir(&workspace)
         .env_clear()
+        .envs(support::captured_shell_vars())
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("XDG_DATA_HOME", &data_home)

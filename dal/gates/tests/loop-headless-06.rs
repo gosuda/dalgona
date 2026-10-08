@@ -1,12 +1,11 @@
 //! An empty extension list still produces a text-only turn.
-#![expect(
+#[expect(
     dead_code,
-    reason = "gate support exposes helpers shared across independent targets"
+    reason = "gate support helpers are shared across independent test targets"
 )]
-
 mod support;
 
-use std::{collections::BTreeMap, error::Error, path::PathBuf, time::Duration};
+use std::{error::Error, path::PathBuf, time::Duration};
 
 use dal_agent::{Delivery, Env, SessionRef};
 use dal_core::{Command, Config, ConfigProduct, Expect, Part, Reply, Stop, UpdateKind, Workspace};
@@ -36,7 +35,7 @@ async fn empty_extension_list_produces_text_only_turn() -> Result<(), Box<dyn Er
     })?;
     product.extensions.clear();
     let env = Env {
-        vars: BTreeMap::new(),
+        vars: support::captured_shell_vars(),
         cwd: workspace.path().to_path_buf(),
         sandbox_helper: None,
     };

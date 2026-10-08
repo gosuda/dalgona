@@ -12,7 +12,9 @@ use super::decode::{cursor, host_update, protocol_error, session_update};
 use super::{RemoteEndpoint, RemoteHostUpdate, backoff};
 use crate::error::WireError;
 use crate::jsonrpc::{Id, Message, decode_jsonrpc, encode_jsonrpc};
-use crate::transport::{FrameWriter, LocalTransport, ReadFrameError, Transport};
+#[cfg(unix)]
+use crate::transport::LocalTransport;
+use crate::transport::{FrameWriter, ReadFrameError, Transport};
 
 /// One subscription to renew after a reconnect: session, fence, and cursor.
 type Resubscribe = (SessionId, u64, Option<(Gen, Seq)>);
@@ -559,9 +561,9 @@ async fn open_local(path: &std::path::Path) -> Result<Transport, WireError> {
 
 /// Opens one local-socket client transport (unsupported outside unix).
 #[cfg(not(unix))]
-async fn open_local(path: &std::path::Path) -> Result<Transport, WireError> {
-    Err(WireError::Transport(format!(
+fn open_local(path: &std::path::Path) -> std::future::Ready<Result<Transport, WireError>> {
+    std::future::ready(Err(WireError::Transport(format!(
         "local socket clients are not supported on this platform: {}",
         path.display()
-    )))
+    ))))
 }

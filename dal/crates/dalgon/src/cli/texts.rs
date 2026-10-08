@@ -123,6 +123,12 @@ pub(crate) const DASH_NEEDS_STDIN: &str = "dalgon: \"-\" needs piped standard in
 pub(crate) const DASH_NEEDS_STDIN_HINT: &str =
     "Pipe a prompt: git diff | dalgon -p - \"Review these changes\".";
 pub(crate) const HEADLESS_APPROVAL: &str = "dalgon: approval is ask and no terminal is attached: patch and exec calls are denied. Re-run with --approval all to approve them.";
+
+/// The per-call `approval.note_stderr` line: one exact note for each call a
+/// headless run could not ask about.
+pub(crate) fn approval_denied_note(tool: &str, rung: &str) -> String {
+    format!("dalgon: {tool} needs approval; print mode cannot ask. Rerun with --approval {rung}.")
+}
 pub(crate) const EMPTY_MESSAGE: &str = "dalgon: the model returned an empty message.";
 
 pub(crate) fn serve_token_already_exists(path: &Path) -> [String; 2] {

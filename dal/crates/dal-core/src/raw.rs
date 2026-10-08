@@ -102,6 +102,12 @@ impl schemars::JsonSchema for RawJson {
         "RawJson".into()
     }
 
+    fn inline_schema() -> bool {
+        // The schema is `true` — a `$ref` to it would dangle, since bool
+        // schemas are never registered as named definitions.
+        true
+    }
+
     fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
         // Any JSON value is accepted; the wire surfaces part narrows this.
         schemars::Schema::from(true)

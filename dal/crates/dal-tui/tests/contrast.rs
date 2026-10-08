@@ -1,6 +1,6 @@
 //! Committed contrast gate: WCAG oracle, shipped names, all 171 pairs.
 
-use dal_tui::theme::{SHIPPED_THEMES, contrast_ratio, verify_contrast_gate};
+use dal_tui::theme::{SHIPPED_THEMES, builtin_id, contrast_ratio, verify_contrast_gate};
 use proptest::prelude::*;
 
 #[test]
@@ -24,7 +24,7 @@ fn shipped_theme_names() {
     assert_eq!(SHIPPED_THEMES.len(), 9);
     for name in SHIPPED_THEMES {
         assert!(
-            opaline::builtins::load_by_name(name).is_some(),
+            opaline::builtins::load_by_name(builtin_id(name)).is_some(),
             "{name} missing"
         );
     }

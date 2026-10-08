@@ -286,7 +286,7 @@ impl Services for FakeServices {
             }
             sleep(step.delay).await;
             overlap.fetch_sub(1, Ordering::SeqCst);
-            step.reply.as_ref().map(inference_for).map_err(Clone::clone)
+            step.reply.map(|reply| inference_for(&reply))
         })
     }
 

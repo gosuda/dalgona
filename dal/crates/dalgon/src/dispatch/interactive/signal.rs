@@ -89,6 +89,10 @@ fn start_tasks(stop: Arc<AtomicU8>, resize: Arc<AtomicBool>) -> io::Result<Vec<J
     clippy::disallowed_methods,
     reason = "R4 edge: the process edge owns its signal watchers"
 )]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the unix variant fails on signal-driver setup; this variant cannot fail"
+)]
 fn start_tasks(stop: Arc<AtomicU8>, _resize: Arc<AtomicBool>) -> io::Result<Vec<JoinHandle<()>>> {
     Ok(vec![tokio::spawn(async move {
         if tokio::signal::ctrl_c().await.is_ok() {

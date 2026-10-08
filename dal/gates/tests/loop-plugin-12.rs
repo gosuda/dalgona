@@ -1,5 +1,4 @@
 #![expect(clippy::expect_used, reason = "SC test")]
-#![expect(clippy::panic, reason = "SC test")]
 #![expect(
     dead_code,
     reason = "gate support exposes helpers shared across independent targets"
@@ -7,10 +6,13 @@
 
 //! Private tools and scope results stay inside the synthetic handler boundary.
 
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
 use std::{
-    collections::BTreeMap,
     error::Error,
     fs,
     sync::{
@@ -76,6 +78,7 @@ struct BoundaryHandler {
 }
 
 impl ModelHandler for BoundaryHandler {
+    #[expect(clippy::panic, reason = "SC model aborts on impossible scope results")]
     fn run<'a>(
         &'a self,
         request: ModelRequest,
@@ -390,7 +393,7 @@ async fn synthetic_private_tools_and_forward_have_one_boundary()
         .build()?;
     product.extensions.push(extension);
     let env = Env {
-        vars: BTreeMap::new(),
+        vars: support::captured_shell_vars(),
         cwd: workspace.path().to_path_buf(),
         sandbox_helper: None,
     };

@@ -1,13 +1,12 @@
-//! The Codex app-server stdio speaks the pinned core subset without jsonrpc.
+//! Wire server helpers: process drop and captured server lines.
 #![expect(
     clippy::disallowed_methods,
     reason = "SC test drives real app-server stdio"
 )]
-#![expect(
+#[expect(
     dead_code,
-    reason = "gate support exposes helpers shared across independent targets"
+    reason = "gate support helpers are shared across independent test targets"
 )]
-
 mod support;
 
 use std::{
@@ -196,6 +195,7 @@ fn codex_app_server_smoke_uses_pinned_core_subset() -> Result<(), Box<dyn Error 
     let mut child = Command::new(binary)
         .current_dir(&workspace)
         .env_clear()
+        .envs(support::captured_shell_vars())
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("XDG_DATA_HOME", &data_home)

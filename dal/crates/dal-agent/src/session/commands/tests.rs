@@ -9,10 +9,12 @@ use dal_core::{
     Stats, ThinkingLevel, TreeOutline, TurnState, Usage, UsageView, View, Workspace,
 };
 
+#[cfg(unix)]
+use super::relative_export_path_escapes_workspace;
 use super::{
     ExportWriteError, MarkdownError, TempFileCleanup, base64_bytes_len, export_success_message,
-    export_target, export_write_error, fence, relative_export_path_escapes_workspace,
-    render_markdown, render_parts, untrusted_export_path_denied, write_export,
+    export_target, export_write_error, fence, render_markdown, render_parts,
+    untrusted_export_path_denied, write_export,
 };
 
 async fn assert_no_export_temp_files(target: &Path) -> Result<(), Box<dyn std::error::Error>> {

@@ -1,13 +1,11 @@
-//! Headless tools preserve call order and observe patch or note surfaces.
-#![expect(
+//! Headless tool calls preserve order and see the applied patch.
+#[expect(
     dead_code,
-    reason = "gate support exposes helpers shared across independent targets"
+    reason = "gate support helpers are shared across independent test targets"
 )]
-
 mod support;
 
 use std::{
-    collections::BTreeMap,
     error::Error,
     fs,
     path::{Path, PathBuf},
@@ -24,7 +22,7 @@ async fn scripted_headless(
 ) -> Result<GateHarness, Box<dyn Error + Send + Sync>> {
     let factory = dalgon::product();
     let user = format!(
-        "model = \"openai-responses/gpt-6\"\nedit_style = \"replace\"\n[providers.scripted]\nfixture = {:?}\n",
+        "model = \"openai-responses/gpt-6\"\napproval = \"all\"\nedit_style = \"replace\"\n[providers.scripted]\nfixture = {:?}\n",
         replay.to_string_lossy()
     );
     let config = Config::load(
@@ -38,7 +36,7 @@ async fn scripted_headless(
         config: &config,
     })?;
     let env = Env {
-        vars: BTreeMap::new(),
+        vars: support::captured_shell_vars(),
         cwd: workspace.path().to_path_buf(),
         sandbox_helper: None,
     };

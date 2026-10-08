@@ -1,15 +1,15 @@
 #![expect(clippy::expect_used, reason = "SC test")]
-#![expect(
-    dead_code,
-    reason = "gate support exposes helpers shared across independent targets"
-)]
 
 //! Service-grant checks through the host-minted extension context.
 
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::HashMap,
     error::Error,
     fs,
     sync::{Arc, Mutex},
@@ -252,7 +252,7 @@ async fn start_session(
     })?;
     product.extensions.extend(extensions);
     let env = Env {
-        vars: BTreeMap::new(),
+        vars: support::captured_shell_vars(),
         cwd: workspace.path().to_path_buf(),
         sandbox_helper: None,
     };
@@ -368,7 +368,10 @@ async fn run_tool_with_approval(
                 } => {
                     requests.push(GrantRequest {
                         extension: ext.to_string(),
-                        capabilities: capabilities.iter().map(ToString::to_string).collect(),
+                        capabilities: capabilities
+                            .iter()
+                            .map(std::string::ToString::to_string)
+                            .collect(),
                     });
                     harness
                         .agent

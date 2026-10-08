@@ -10,6 +10,10 @@
 
 //! Call grants stay bound to the approved argv, roots, and detached job.
 
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
 use std::{

@@ -258,6 +258,11 @@ pub(crate) struct SessionEntry {
     pub(crate) backend: Arc<Backend>,
     /// The session tool overlay; close clears it.
     pub(crate) overlay: Arc<crate::ext::overlay::Overlay>,
+    /// The turn-bypass cell shared with the actor and driver.
+    pub(crate) control: Arc<std::sync::Mutex<crate::session::control::ControlCell>>,
+    /// The member report has been taken: a set flag ends the member for
+    /// mailbox addressing even though its session stays listable.
+    pub(crate) reported: std::sync::atomic::AtomicBool,
 }
 
 /// The architecture product passed to [`Host::start`].

@@ -1,6 +1,11 @@
 //! A deterministic recording [`ScriptHost`] double plus reply and service
 //! helpers for the runtime tests.
 
+#![expect(
+    clippy::expect_used,
+    reason = "integration tests use unwrap/expect/panic freely per repo test convention"
+)]
+
 use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -499,6 +504,12 @@ impl Services for NoServices {
 #[must_use]
 pub fn tool_cx(script: ScriptCx) -> ToolCx<'static> {
     ToolCx::for_test(test_services()).with_script(script)
+}
+
+/// Builds a tool context whose authorization approves every request.
+#[must_use]
+pub fn tool_cx_approved(script: ScriptCx) -> ToolCx<'static> {
+    ToolCx::for_test_approved(test_services()).with_script(script)
 }
 
 /// A pure eval request (`uses = []`): `ToolCx::for_test` authorization is

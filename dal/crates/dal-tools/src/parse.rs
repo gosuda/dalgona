@@ -538,7 +538,6 @@ pub(crate) mod hooks {
 
 #[cfg(test)]
 mod tests {
-    use std::fmt::Write as _;
     use std::path::Path;
     use std::time::Duration;
 
@@ -958,8 +957,10 @@ void Widget::paint() {}
         let path = dir.path().join("big.c");
         let mut src = String::new();
         for n in 0..8_000 {
-            let _ = write!(src, "int f{n}(int x) {{ return x + {n}; }}");
-            src.push('\n');
+            let _ = std::fmt::Write::write_fmt(
+                &mut src,
+                format_args!("int f{n}(int x) {{ return x + {n}; }}\n"),
+            );
         }
         hooks::set_budget(&path, Duration::ZERO);
         assert_eq!(

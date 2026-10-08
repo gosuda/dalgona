@@ -77,13 +77,14 @@ pub(super) async fn rig_with_extensions(
     std::fs::write(&fixture, steps.join("\n")).expect("script fixture");
     let user = format!(
         "model = \"openai/gpt-6-luna\"\n{extra}\n[providers.scripted]\nfixture = \"{}\"\n",
-        fixture.display()
+        fixture.to_string_lossy().replace('\\', "\\\\")
     );
     let config =
         Config::load(ConfigProduct::Dalgon, &data, "", Some(&user)).expect("test config loads");
     let gate = Arc::new(Semaphore::new(0));
+    let no_reload: Arc<dyn dal_ext::commands::PluginReload> = Arc::new(NoReload);
     let mut extensions = vec![
-        dal_ext::commands::extension(Arc::new(NoReload)).expect("commands extension"),
+        dal_ext::commands::extension(&no_reload).expect("commands extension"),
         dal_ext::docs::extension().expect("docs extension"),
         tools_extension(&gate),
     ];

@@ -1,5 +1,4 @@
-//! Codex schema fixtures match the supported method set.
-
+//! Codex schema fixtures match the supported method surface.
 use sonic_rs::JsonValueTrait;
 
 const SCHEMA: &str =

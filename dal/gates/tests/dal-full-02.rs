@@ -1,9 +1,8 @@
-//! Gate-full scenario 2: guard findings run over scripted edits.
-#![expect(
+//! Scripted session turns against the in-process harness.
+#[expect(
     dead_code,
-    reason = "gate support exposes helpers shared across independent targets"
+    reason = "gate support helpers are shared across independent test targets"
 )]
-
 mod support;
 
 use std::{collections::BTreeMap, error::Error, fs, sync::Arc, time::Duration};
@@ -182,7 +181,11 @@ async fn run_edit(
 async fn guard_emits_four_reports_and_is_off_by_default() -> Result<(), Box<dyn Error + Send + Sync>>
 {
     let (edit_text, findings) = run_edit(true).await?;
-    assert!(edit_text.contains("guard: src/lib.rs ploc "), "{edit_text}");
+    let normalized = edit_text.replace('\\', "/");
+    assert!(
+        normalized.contains("guard: src/lib.rs ploc "),
+        "{edit_text}"
+    );
     assert!(edit_text.contains("functions 1"), "{edit_text}");
     assert!(edit_text.contains("cc-sum 16"), "{edit_text}");
     assert!(
@@ -215,7 +218,9 @@ async fn guard_emits_four_reports_and_is_off_by_default() -> Result<(), Box<dyn 
 
     let (default_output, default_findings) = run_edit(false).await?;
     assert!(
-        !default_output.contains("guard: src/lib.rs ploc"),
+        !default_output
+            .replace('\\', "/")
+            .contains("guard: src/lib.rs ploc"),
         "{default_output}"
     );
     assert!(default_findings.is_none());

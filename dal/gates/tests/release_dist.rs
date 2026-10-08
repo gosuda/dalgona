@@ -1,4 +1,4 @@
-//! Validates the release distribution plan, binstall URLs, and archives.
+//! Distribution layout gate: packaged binaries and manifest artifacts.
 use std::{
     collections::{BTreeMap, HashSet},
     error::Error,
@@ -11,11 +11,7 @@ use serde::Deserialize;
 
 #[derive(Deserialize)]
 struct DistManifest {
-    #[expect(
-        clippy::zero_sized_map_values,
-        reason = "the plan check only needs artifact names, never their payloads"
-    )]
-    artifacts: BTreeMap<String, serde::de::IgnoredAny>,
+    artifacts: BTreeMap<String, sonic_rs::Value>,
 }
 
 #[derive(Deserialize)]

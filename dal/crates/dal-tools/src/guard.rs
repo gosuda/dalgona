@@ -296,6 +296,7 @@ struct Session {
 pub(super) struct TurnState {
     id: TurnId,
     reduction_ask: bool,
+    counted: HashSet<CallId>,
     added: u64,
     deleted: u64,
     files: BTreeSet<Box<str>>,
@@ -309,10 +310,6 @@ pub(super) struct TurnState {
     calls: HashMap<CallId, (CallNote, u128)>,
     first_pre: BTreeMap<Box<str>, Vec<FunctionMetrics>>,
     last_post: BTreeMap<Box<str>, Vec<FunctionMetrics>>,
-    /// Findings already produced for a staged call, keyed by call id. Patch
-    /// observers run before approval and again at commit; this replay makes
-    /// the second run idempotent for turn accounting.
-    inspected: HashMap<CallId, Vec<crate::patch::EditFinding>>,
     bands: Vec<(f64, String)>,
     warnings: Vec<warnings::Warning>,
     stream_counts: BTreeMap<G8Rule, u32>,

@@ -1,10 +1,9 @@
-//! Release-guard checks for the publish script's dependency gate.
-#![expect(
-    dead_code,
-    reason = "release support exposes gate helpers shared across release targets"
-)]
-
+//! Release presence, lockstep, and path-dependency guards.
 #[path = "release_support/mod.rs"]
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
 use std::{error::Error, path::PathBuf};

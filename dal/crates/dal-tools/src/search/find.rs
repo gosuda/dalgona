@@ -5,7 +5,6 @@
 //! A directory that the rules exclude hides all of its children, even children
 //! that a deeper rule re-includes. Paths sort by raw path bytes.
 
-use std::fmt::Write as _;
 use std::fs::{File, Metadata};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -108,7 +107,10 @@ impl FindResult {
         let mut text = self.paths.join("\n");
         let more = self.total - self.paths.len();
         if more > 0 {
-            let _ = write!(text, "\n[Truncated: {more} more paths]");
+            let _ = std::fmt::Write::write_fmt(
+                &mut text,
+                format_args!("\n[Truncated: {more} more paths]"),
+            );
         }
         text
     }
@@ -127,13 +129,7 @@ pub(crate) fn walk(root: &Path) -> Result<Vec<Entry>, SearchError> {
 }
 
 /// Find paths under `root` whose relative path matches `pattern`.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "string-glob convenience wrapper; production compiles the glob once with find_with"
-    )
-)]
+#[cfg(test)]
 pub(crate) fn find(root: &Path, pattern: &str, limit: usize) -> Result<FindResult, SearchError> {
     find_with(root, &FindGlob::new(pattern)?, limit)
 }
@@ -463,12 +459,14 @@ mod tests {
             if kind.is_symlink() {
                 continue;
             }
+            // The reference oracle must speak the tool's `/`-separated rel
+            // paths on every platform, or nested names never match a glob.
             let rel = item
                 .path()
                 .strip_prefix(root)
                 .unwrap()
                 .to_string_lossy()
-                .into_owned();
+                .replace(std::path::MAIN_SEPARATOR, "/");
             if excluded(&rel, kind.is_dir()) {
                 continue;
             }

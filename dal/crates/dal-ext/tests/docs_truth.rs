@@ -10,6 +10,7 @@ use dal_ext::docs::{
 };
 use dal_ext::docsgen::{GenArgs, Scheme, generate};
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 fn repo_root() -> PathBuf {
@@ -58,8 +59,7 @@ fn fixture(names: &[(&str, &str)]) -> (tempfile_guard::Guard, GenArgs) {
         std::fs::write(dir.join(format!("{name}.md")), text).unwrap();
     }
     for (name, _) in names {
-        list.push_str(name);
-        list.push_str(" user docs 100\n");
+        let _ = writeln!(list, "{name} user docs 100");
     }
     std::fs::write(dir.join("pages"), list).unwrap();
     let scan = dir.clone();
@@ -80,13 +80,19 @@ mod tempfile_guard {
     }
     impl Guard {
         pub(super) fn new() -> Self {
+            // Clock resolution alone can collide on hosts whose timer is
+            // coarser than as_nanos implies (two tests in the same tick
+            // would share a dir and cross-write pages), so a per-process
+            // counter keeps every guard unique.
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let dir = std::env::temp_dir().join(format!(
-                "dal-docs-{}-{}",
+                "dal-docs-{}-{}-{}",
                 std::process::id(),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
-                    .as_nanos()
+                    .as_nanos(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             ));
             std::fs::create_dir_all(&dir).unwrap();
             Self { dir }
@@ -551,7 +557,7 @@ fn truth_config_page() {
     let pages = load_manual();
     let config = pages.get("config").expect("config page");
     let mut scalar_toml = String::new();
-    let mut sections: std::collections::BTreeMap<String, Vec<String>> = BTreeMap::default();
+    let mut sections: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut rows = 0;
     for line in config.lines().filter(|line| line.starts_with("| `")) {
         let cells: Vec<&str> = line.split('|').map(str::trim).collect();
@@ -578,7 +584,7 @@ fn truth_config_page() {
         };
         match name.split_once('.') {
             None => {
-                writeln!(scalar_toml, "{name} = {literal}").expect("write to String");
+                let _ = writeln!(scalar_toml, "{name} = {literal}");
             }
             Some((section, rest)) => sections
                 .entry(section.to_owned())
@@ -589,7 +595,7 @@ fn truth_config_page() {
     assert!(rows > 40, "every known key has a row");
     let mut document = scalar_toml;
     for (section, entries) in &sections {
-        write!(document, "[{section}]\n{}\n", entries.join("\n")).expect("write to String");
+        let _ = writeln!(document, "[{section}]\n{}", entries.join("\n"));
     }
     let dir = std::env::temp_dir().join("dal-docs-config");
     let _ = std::fs::create_dir_all(&dir);
@@ -736,7 +742,7 @@ fn truth_readme_philosophy() {
         readme.contains(body_without_title.trim()),
         "README carries the philosophy body"
     );
-    assert!(readme.starts_with("# dal\n"));
+    assert_eq!(readme.lines().next(), Some("# dal"));
 }
 
 #[test]
@@ -875,7 +881,7 @@ fn reload_wording_has_no_stale_text() {
     let mut files = vec![repo_root().join("README.md")];
     let push_md = |dir: &PathBuf, out: &mut Vec<PathBuf>| {
         let entries = std::fs::read_dir(dir).unwrap();
-        for entry in entries.filter_map(Result::ok) {
+        for entry in entries.filter_map(std::result::Result::ok) {
             let path = entry.path();
             if path.extension().and_then(|extension| extension.to_str()) == Some("md") {
                 out.push(path);
@@ -886,7 +892,7 @@ fn reload_wording_has_no_stale_text() {
     push_md(&repo_root().join("dalgona/docs"), &mut files);
     for entry in std::fs::read_dir(examples_dir())
         .unwrap()
-        .filter_map(Result::ok)
+        .filter_map(std::result::Result::ok)
     {
         if entry.file_type().unwrap().is_dir() {
             push_md(&entry.path(), &mut files);
@@ -989,7 +995,7 @@ fn truth_dalgona_config_diff() {
     for (key, default) in [
         ("search_symbols", "true"),
         ("edit_style", "hashline"),
-        ("guard", "true"),
+        ("[guard].enabled", "true"),
     ] {
         let row: Vec<_> = text
             .lines()
@@ -1096,7 +1102,7 @@ fn walk(current: &Path, out: &mut Vec<String>) {
     let Ok(entries) = std::fs::read_dir(current) else {
         return;
     };
-    for entry in entries.filter_map(Result::ok) {
+    for entry in entries.filter_map(std::result::Result::ok) {
         let path = entry.path();
         if path.is_symlink() {
             continue;

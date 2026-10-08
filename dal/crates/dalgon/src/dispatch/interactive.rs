@@ -7,116 +7,58 @@ use std::process::ExitCode;
 
 use dal_agent::{Env, Host, Product};
 use dal_core::Screen as ConfigScreen;
+use dal_core::{Config, Workspace};
 use dal_tui::{EnvFacts, Screen, ThemeRequest, TuiError, TuiOptions, WidthMode};
 use dal_wire::{RemoteEndpoint, RemoteHost};
 
 use crate::cli::{self, ColorArg};
 use crate::edge;
 use crate::exit;
-use crate::{Startup, host_exit, session_ref, two_lines};
+use crate::{Startup, VarsMap, host_exit, session_ref, two_lines};
 
 mod remote;
 mod signal;
 
-/// Starts the interactive client after the process edge has resolved all inputs.
-pub(crate) async fn interactive(cli: &cli::Cli, startup: Startup, product: Product) -> ExitCode {
-    let snapshot = edge::terminal_snapshot();
-    let term = captured(&startup.vars, "TERM");
+/// Guards the interactive path on a usable terminal; returns the failure
+/// exit when any check fails.
+fn terminal_gate(snapshot: &edge::TerminalSnapshot, term: Option<&str>) -> Option<ExitCode> {
     if !snapshot.stdin_tty || !snapshot.stdout_tty {
-        return two_lines(
+        return Some(two_lines(
             [
                 cli::texts::NO_PROMPT.into(),
                 cli::texts::NO_PROMPT_HINT.into(),
             ],
             exit::ExitKind::RequestedFailure,
-        );
+        ));
     }
     if term.is_none_or(|value| value == "dumb") {
-        return two_lines(
+        return Some(two_lines(
             cli::texts::term_not_addressable(term.unwrap_or("unset")),
             exit::ExitKind::RequestedFailure,
-        );
+        ));
     }
     let width = crossterm::terminal::size().map_or(80, |(columns, _)| usize::from(columns));
     if width < 40 {
-        return two_lines(
+        return Some(two_lines(
             cli::texts::terminal_too_narrow(width),
             exit::ExitKind::RequestedFailure,
-        );
+        ));
     }
-
-    let Startup {
-        vars,
-        cwd,
-        workspace_path: _,
-        workspace,
-        config,
-        config_path,
-        data_root,
-        helper,
-    } = startup;
-    let no_color = edge::resolve_color(cli.color, &vars, snapshot.stdout_tty) == ColorArg::Never;
-    let env = env_facts(&vars, snapshot.stdin_tty);
-    let opts = TuiOptions {
-        session: session_ref(cli, workspace),
-        screen: match config.screen() {
-            ConfigScreen::Inline => Screen::Inline,
-            ConfigScreen::Fullscreen => Screen::Fullscreen,
-        },
-        theme_request: match config.theme() {
-            "auto" => ThemeRequest::Auto,
-            "palette" => ThemeRequest::Palette,
-            name => ThemeRequest::Named(name.into()),
-        },
-        images: config.images(),
-        diagrams: config.tui().diagrams,
-        motion: config.motion() && !env.no_motion,
-        editor: captured(&vars, "VISUAL")
-            .or_else(|| captured(&vars, "EDITOR"))
-            .filter(|value| !value.is_empty())
-            .unwrap_or(if cfg!(windows) { "notepad" } else { "vi" })
-            .into(),
-        color: dal_tui::term::color_mode(&env, no_color),
-        env,
-        rt: tokio::runtime::Handle::current(),
-    };
-    let mut saved_config = config.clone();
-    let save_config_path = config_path.clone();
-    let save_diagrams =
-        move |enabled| save_diagrams_to(&save_config_path, &mut saved_config, enabled);
-    if let Some(addr) = &cli.connect {
-        return connect_remote(cli, &cwd, addr, opts, save_diagrams).await;
-    }
-    let host = match Host::start(
-        product,
-        config,
-        Env {
-            vars,
-            cwd,
-            sandbox_helper: helper,
-        },
-    )
-    .await
-    {
-        Ok(host) => host,
-        Err(error) => return host_exit(&error, &data_root),
-    };
-    let shutdown = host.clone();
-    let model_host = host.clone();
-    let model_rt = opts.rt.clone();
-    let model_source = move || -> Result<Vec<dal_tui::picker::ModelOption>, TuiError> {
-        let models = model_rt.block_on(model_host.models(None))?;
-        Ok(dal_tui::picker::model_options(models))
-    };
-    let code = run_blocking(host, opts, model_source, save_diagrams).await;
-    let _ = shutdown.shutdown(std::time::Duration::from_secs(3)).await;
-    code
+    None
 }
 
-/// Captures terminal-relevant environment facts from the process edge.
-fn env_facts(vars: &crate::VarsMap, stdin_tty: bool) -> EnvFacts {
-    EnvFacts {
-        stdin_tty,
+/// Builds the TUI options: terminal env facts, then the session
+/// options carrying them.
+fn build_opts(
+    cli: &cli::Cli,
+    workspace: Workspace,
+    config: &Config,
+    vars: &VarsMap,
+    snapshot: &edge::TerminalSnapshot,
+    no_color: bool,
+) -> TuiOptions {
+    let env = EnvFacts {
+        stdin_tty: snapshot.stdin_tty,
         path: vars.get(OsStr::new("PATH")).cloned(),
         term: owned(vars, "TERM"),
         term_program: owned(vars, "TERM_PROGRAM"),
@@ -136,45 +78,73 @@ fn env_facts(vars: &crate::VarsMap, stdin_tty: bool) -> EnvFacts {
         ]),
         no_motion: vars.contains_key(OsStr::new("DAL_NO_MOTION")),
         debug: vars.contains_key(OsStr::new("DAL_DEBUG")),
+    };
+    TuiOptions {
+        session: session_ref(cli, workspace),
+        screen: match config.screen() {
+            ConfigScreen::Inline => Screen::Inline,
+            ConfigScreen::Fullscreen => Screen::Fullscreen,
+        },
+        theme_request: match config.theme() {
+            "auto" => ThemeRequest::Auto,
+            "palette" => ThemeRequest::Palette,
+            name => ThemeRequest::Named(name.into()),
+        },
+        images: config.images(),
+        diagrams: config.tui().diagrams,
+        motion: config.motion() && !env.no_motion,
+        editor: captured(vars, "VISUAL")
+            .or_else(|| captured(vars, "EDITOR"))
+            .filter(|value| !value.is_empty())
+            .unwrap_or(if cfg!(windows) { "notepad" } else { "vi" })
+            .into(),
+        color: dal_tui::term::color_mode(&env, no_color),
+        env,
+        rt: tokio::runtime::Handle::current(),
     }
 }
 
-/// Persists a diagrams on/off toggle into the user's `dal.toml`.
-fn save_diagrams_to(
-    config_path: &Path,
-    config: &mut crate::Config,
-    enabled: bool,
-) -> Result<(), TuiError> {
-    let user_toml = edge::read_user_config(config_path)
-        .map_err(|error| TuiError::Terminal(format!("dalgon: cannot read dal.toml: {error}")))?;
-    let updated = config
-        .update_tui_diagrams(enabled, user_toml.as_deref())
-        .map_err(|error| TuiError::Terminal(format!("dalgon: cannot update dal.toml: {error}")))?;
-    let config_dir = config_path.parent().ok_or_else(|| {
-        TuiError::Terminal("dalgon: config path has no parent directory".to_owned())
-    })?;
-    dal_store::create_private_dir_all(config_dir).map_err(|error| {
-        TuiError::Terminal(format!("dalgon: cannot create config directory: {error}"))
-    })?;
-    dal_store::write_atomic(
-        config_path,
-        updated.as_bytes(),
-        dal_store::FileMode::Mode0600,
-    )
-    .map_err(|error| {
-        TuiError::Terminal(format!(
-            "dalgon: cannot save {}: {error}",
-            config_path.display()
-        ))
-    })?;
-    Ok(())
+/// Persists a TUI diagrams toggle back into dal.toml.
+fn diagram_saver(
+    mut config: Config,
+    config_path: PathBuf,
+) -> impl FnMut(bool) -> Result<(), TuiError> {
+    let save_config_path = config_path;
+    move |enabled| -> Result<(), TuiError> {
+        let user_toml = edge::read_user_config(&save_config_path).map_err(|error| {
+            TuiError::Terminal(format!("dalgon: cannot read dal.toml: {error}"))
+        })?;
+        let updated = config
+            .update_tui_diagrams(enabled, user_toml.as_deref())
+            .map_err(|error| {
+                TuiError::Terminal(format!("dalgon: cannot update dal.toml: {error}"))
+            })?;
+        let config_dir = save_config_path.parent().ok_or_else(|| {
+            TuiError::Terminal("dalgon: config path has no parent directory".to_owned())
+        })?;
+        dal_store::create_private_dir_all(config_dir).map_err(|error| {
+            TuiError::Terminal(format!("dalgon: cannot create config directory: {error}"))
+        })?;
+        dal_store::write_atomic(
+            &save_config_path,
+            updated.as_bytes(),
+            dal_store::FileMode::Mode0600,
+        )
+        .map_err(|error| {
+            TuiError::Terminal(format!(
+                "dalgon: cannot save {}: {error}",
+                save_config_path.display()
+            ))
+        })?;
+        Ok(())
+    }
 }
 
-/// Connects to a remote dal host and runs the interactive client over it.
+/// Connects the TUI to a remote host and runs it.
 async fn connect_remote(
     cli: &cli::Cli,
-    cwd: &Path,
     addr: &str,
+    cwd: &Path,
     opts: TuiOptions,
     save_diagrams: impl FnMut(bool) -> Result<(), TuiError> + Send + 'static,
 ) -> ExitCode {
@@ -213,6 +183,66 @@ async fn connect_remote(
     )
     .await
 }
+/// Starts the interactive client after the process edge has resolved all inputs.
+pub(crate) async fn interactive(cli: &cli::Cli, startup: Startup, product: Product) -> ExitCode {
+    let t0 = std::time::Instant::now();
+    let snapshot = edge::terminal_snapshot();
+    let term = captured(&startup.vars, "TERM");
+    if let Some(code) = terminal_gate(&snapshot, term) {
+        return code;
+    }
+
+    let Startup {
+        vars,
+        cwd,
+        workspace_path: _,
+        workspace,
+        config,
+        config_path,
+        data_root,
+        helper,
+    } = startup;
+    let no_color = edge::resolve_color(cli.color, &vars, snapshot.stdout_tty) == ColorArg::Never;
+    if vars.contains_key(OsStr::new("DAL_DEBUG")) {
+        eprintln!("[t1] edge {}ms", t0.elapsed().as_millis());
+    }
+    let opts = build_opts(cli, workspace, &config, &vars, &snapshot, no_color);
+    let save_diagrams = diagram_saver(config.clone(), config_path);
+    if let Some(addr) = cli.connect.as_deref() {
+        return connect_remote(cli, addr, &cwd, opts, save_diagrams).await;
+    }
+    let dal_debug = vars.contains_key(OsStr::new("DAL_DEBUG"));
+    if dal_debug {
+        eprintln!("[t1] pre-host {}ms", t0.elapsed().as_millis());
+    }
+    let host = match Host::start(
+        product,
+        config,
+        Env {
+            vars,
+            cwd,
+            sandbox_helper: helper,
+        },
+    )
+    .await
+    {
+        Ok(host) => host,
+        Err(error) => return host_exit(&error, &data_root),
+    };
+    let shutdown = host.clone();
+    let model_host = host.clone();
+    let model_rt = opts.rt.clone();
+    let model_source = move || -> Result<Vec<dal_tui::picker::ModelOption>, TuiError> {
+        let models = model_rt.block_on(model_host.models(None))?;
+        Ok(dal_tui::picker::model_options(models))
+    };
+    if dal_debug {
+        eprintln!("[t1] host started {}ms", t0.elapsed().as_millis());
+    }
+    let code = run_blocking(host, opts, model_source, save_diagrams).await;
+    let _ = shutdown.shutdown(std::time::Duration::from_secs(3)).await;
+    code
+}
 
 async fn run_blocking<H, M, S>(
     host: H,
@@ -239,7 +269,7 @@ where
     )]
     let io = signals.terminal(std::io::stdin());
     let result = tokio::task::spawn_blocking(move || {
-        dal_tui::run_backend_with_settings_save(host, opts, io, model_source, save_diagrams)
+        dal_tui::run_backend_with_settings_save(&host, &opts, &io, model_source, save_diagrams)
     })
     .await;
     let signal = signals.exit_status();

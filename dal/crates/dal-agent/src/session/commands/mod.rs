@@ -410,16 +410,14 @@ async fn publish_export_noclobber(temp: &Path, target: &Path) -> io::Result<()> 
     }
 }
 
+#[cfg(windows)]
+fn sync_export_dir(_path: &Path) -> std::future::Ready<io::Result<()>> {
+    std::future::ready(Ok(()))
+}
+
+#[cfg(not(windows))]
 async fn sync_export_dir(path: &Path) -> io::Result<()> {
-    #[cfg(windows)]
-    {
-        let _ = path;
-        Ok(())
-    }
-    #[cfg(not(windows))]
-    {
-        tokio::fs::File::open(path).await?.sync_all().await
-    }
+    tokio::fs::File::open(path).await?.sync_all().await
 }
 
 fn render_markdown(

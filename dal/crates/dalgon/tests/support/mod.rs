@@ -101,11 +101,20 @@ impl CliFixture {
     }
 }
 
+#[cfg_attr(
+    not(unix),
+    expect(
+        clippy::unnecessary_wraps,
+        reason = "the unix body chmods and can fail; other platforms have no mode bit to set"
+    )
+)]
 fn set_private_mode(path: &std::path::Path) -> io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }

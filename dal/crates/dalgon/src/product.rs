@@ -144,18 +144,24 @@ pub fn assemble(cx: &BuildCx<'_>, parts: Parts) -> Result<Product, BuildError> {
         source: Box::new(source),
     })?;
     let system = Arc::new(dal_star::PluginSystem::new(generation, roots, plugincfg));
+    let reload: Arc<dyn dal_ext::commands::PluginReload> =
+        Arc::new(ReloadPlugins(Arc::clone(&system)));
     let mut extensions = vec![
         dal_tools::extension(parts.tools)?,
         parts.guard,
-        sandbox_extension()?,
         dal_ext::prompt::extension()?,
         dal_ext::skills::extension()?,
         dal_ext::letter::extension()?,
         dal_ext::ttsr::extension()?,
         dal_ext::compact::extension()?,
-        dal_ext::commands::extension(Arc::new(ReloadPlugins(Arc::clone(&system))))?,
+        dal_ext::commands::extension(&reload)?,
         dal_ext::docs::extension()?,
         dal_ext::subagent::extension()?,
+        crate::sandbox::extension(
+            cx.config.sandbox(),
+            cx.config.sandbox_writable().into(),
+            Arc::new([cx.data_root.clone()]),
+        )?,
     ];
     if cx.config.tui().diagrams {
         extensions.push(diagrams_prompt_extension()?);
@@ -180,15 +186,6 @@ pub fn assemble(cx: &BuildCx<'_>, parts: Parts) -> Result<Product, BuildError> {
         extensions,
         bundled: parts.bundled,
     })
-}
-
-/// Builds the thin `sandbox` extension record: name registration only.
-///
-/// The sandbox runtime boundary (launcher resolution, canonical roots, the
-/// `__sandbox` helper probe) is prepared per session by the agent process
-/// launcher; this record is the product-registration surface.
-fn sandbox_extension() -> Result<Extension, dal_core::RegistrationError> {
-    ExtensionBuilder::new("sandbox", "0.1.0", dal_core::ServiceSet::EMPTY)?.build()
 }
 
 fn diagrams_prompt_extension() -> Result<Extension, dal_core::RegistrationError> {
@@ -260,8 +257,8 @@ mod tests {
         assert_eq!(
             names,
             [
-                "tools", "guard", "sandbox", "prompt", "skills", "letter", "ttsr", "compact",
-                "commands", "dal", "subagent", "eval",
+                "tools", "guard", "prompt", "skills", "letter", "ttsr", "compact", "commands",
+                "dal", "subagent", "sandbox", "eval",
             ]
         );
 
@@ -331,8 +328,8 @@ mod tests {
         assert_eq!(
             names,
             [
-                "tools", "guard", "sandbox", "prompt", "skills", "letter", "ttsr", "compact",
-                "commands", "dal", "subagent", "eval", "focus",
+                "tools", "guard", "prompt", "skills", "letter", "ttsr", "compact", "commands",
+                "dal", "subagent", "sandbox", "eval", "focus",
             ]
         );
     }
@@ -375,8 +372,8 @@ mod tests {
         assert_eq!(
             names,
             [
-                "tools", "guard", "sandbox", "prompt", "skills", "letter", "ttsr", "compact",
-                "commands", "dal", "subagent", "eval", "battery", "focus",
+                "tools", "guard", "prompt", "skills", "letter", "ttsr", "compact", "commands",
+                "dal", "subagent", "sandbox", "eval", "battery", "focus",
             ]
         );
     }

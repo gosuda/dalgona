@@ -368,8 +368,9 @@ fn test_view(session: SessionId, workspace: dal_core::Workspace) -> View {
 #[tokio::test]
 async fn reload_prefix_keeps_product_base() {
     let session = SessionId::new_v7();
+    let workspace_temp = tempfile::tempdir().expect("workspace tempdir");
     let workspace =
-        dal_core::Workspace::new(PathBuf::from("/tmp/dal-test-ws")).expect("test workspace");
+        dal_core::Workspace::new(workspace_temp.path().to_path_buf()).expect("test workspace");
     let first = ValidatedExtensions::validate(
         vec![
             ext("a", Origin::Builtin),

@@ -1003,8 +1003,13 @@ fn adjacent_assistant_items_share_pending_calls() {
             }],
         },
         result_item("toolu_a"),
-    ]);
-    assert!(wire.is_ok());
+    ])
+    .expect("an interleaved assistant item leaves the pending call resolvable");
+    let body = String::from_utf8(wire.body).unwrap();
+    assert!(
+        body.contains(r#""tool_use_id":"toolu_a""#),
+        "the result still resolves to toolu_a after the interleaved assistant item"
+    );
 }
 
 #[test]

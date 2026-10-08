@@ -184,7 +184,7 @@ impl fmt::Display for Screen {
 /// # Errors
 /// Returns [`TuiError::Host`] when the host rejects session access, or
 /// [`TuiError::Terminal`] when terminal setup or rendering fails.
-pub fn run(host: Host, opts: TuiOptions, io: impl term::TermIo) -> Result<TuiExit, TuiError> {
+pub fn run(host: &Host, opts: &TuiOptions, io: &impl term::TermIo) -> Result<TuiExit, TuiError> {
     let model_host = host.clone();
     let rt = opts.rt.clone();
     run_backend(host, opts, io, move || {
@@ -200,9 +200,9 @@ pub fn run(host: Host, opts: TuiOptions, io: impl term::TermIo) -> Result<TuiExi
 /// # Errors
 /// Returns [`TuiError`] when the host, model source, session, or terminal operation fails.
 pub fn run_backend<H, M>(
-    host: H,
-    opts: TuiOptions,
-    io: impl term::TermIo,
+    host: &H,
+    opts: &TuiOptions,
+    io: &impl term::TermIo,
     models: M,
 ) -> Result<TuiExit, TuiError>
 where
@@ -223,9 +223,9 @@ where
 /// A settings-writer error is shown in the TUI and leaves the session-local
 /// setting active.
 pub fn run_backend_with_settings_save<H, M, S>(
-    host: H,
-    opts: TuiOptions,
-    io: impl term::TermIo,
+    host: &H,
+    opts: &TuiOptions,
+    io: &impl term::TermIo,
     models: M,
     save_diagrams: S,
 ) -> Result<TuiExit, TuiError>

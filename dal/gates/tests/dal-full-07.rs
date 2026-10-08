@@ -1,14 +1,13 @@
 //! Gate-full scenario 7: hook deadlines end scopes and cancel handles.
 #![expect(clippy::expect_used, reason = "SC test")]
-#![expect(
-    dead_code,
-    reason = "gate support exposes helpers shared across independent targets"
-)]
 
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
 use std::{
-    collections::BTreeMap,
     error::Error,
     future::pending,
     sync::{
@@ -311,7 +310,7 @@ async fn hook_deadline_ends_scope_and_cancels_handles() -> Result<(), Box<dyn Er
     })?;
     product.extensions.push(extension);
     let env = Env {
-        vars: BTreeMap::new(),
+        vars: support::captured_shell_vars(),
         cwd: workspace.path().to_path_buf(),
         sandbox_helper: None,
     };

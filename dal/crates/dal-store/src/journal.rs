@@ -41,6 +41,8 @@ pub(crate) struct Faults {
     /// Fail the torn-tail side-file write at open.
     pub(crate) quarantine_error: bool,
     /// Fail the session-directory sync after writing the torn-tail sidefile.
+    /// Windows has no directory-sync door, so the fault is never injected there.
+    #[cfg_attr(windows, expect(dead_code, reason = "directory sync is POSIX-only"))]
     pub(crate) directory_sync_error: bool,
 }
 
@@ -115,7 +117,8 @@ impl Journal {
             faults: faults.clone(),
         };
         let result = journal
-            .write_batch(lines)
+            .write_bytes(lines)
+            .and_then(|()| journal.sync())
             .and_then(|()| sync_parent_directory(path, "sync"));
         if let Err(error) = result {
             drop(journal);
@@ -205,7 +208,21 @@ impl Journal {
     /// # Errors
     /// Returns [`JournalError::Io`] for the write or sync failure, and
     /// [`JournalError::Damaged`] when rollback failed.
+    /// The whole write-and-sync round trip, kept for tests that drive the
+    /// journal directly; the shard worker stages the two halves instead.
+    #[cfg(test)]
     pub(crate) fn append(&mut self, lines: &[u8]) -> Result<Receipt, JournalError> {
+        let receipt = self.append_unsynced(lines)?;
+        self.sync().map(|()| receipt)
+    }
+
+    /// Writes the batch without syncing it. Pair the returned receipt with
+    /// [`Self::stage_sync`] so the durability sync can run off the caller's
+    /// thread; the receipt must not surface before that sync lands.
+    ///
+    /// # Errors
+    /// Same as [`Self::append`] minus the sync failure (rollback identical).
+    pub(crate) fn append_unsynced(&mut self, lines: &[u8]) -> Result<Receipt, JournalError> {
         if let Health::Damaged = self.health {
             return Err(JournalError::Damaged {
                 path: self.path.clone(),
@@ -213,7 +230,7 @@ impl Journal {
             });
         }
         let offset = self.end;
-        match self.write_batch(lines) {
+        match self.write_bytes(lines) {
             Ok(()) => {
                 self.end = offset.saturating_add(lines.len() as u64);
                 Ok(Receipt {
@@ -232,6 +249,70 @@ impl Journal {
                 Err(error)
             }
         }
+    }
+
+    /// Prepares an off-thread sync for a receipt from
+    /// [`Self::append_unsynced`]: the cloned handle is a dup fd to this
+    /// journal, so its `sync_all` flushes the same pages and the caller can
+    /// run it on another thread. The injected sync fault is evaluated here,
+    /// before the hand-off, so test paths keep their deterministic error.
+    ///
+    /// # Errors
+    /// Returns [`JournalError::Io`] when the injected fault fires or the
+    /// handle cannot be duplicated.
+    pub(crate) fn stage_sync(
+        &self,
+        receipt: Receipt,
+    ) -> Result<(File, PathBuf, Receipt), JournalError> {
+        if self.faults.sync_error {
+            return Err(jio(
+                "sync",
+                &self.path,
+                io::Error::other("injected sync failure"),
+            ));
+        }
+        self.file
+            .try_clone()
+            .map(|file| (file, self.path.clone(), receipt))
+            .map_err(|source| jio("sync", &self.path, source))
+    }
+
+    /// Rolls the file and the tracked end offset back to `receipt.offset`:
+    /// the same repair [`Self::append`] runs on a sync failure, applied when
+    /// a staged sync fails before its receipt can surface.
+    ///
+    /// # Errors
+    /// Returns [`JournalError::Damaged`] when truncate-back itself fails.
+    pub(crate) fn roll_back(&mut self, receipt: Receipt) -> Result<(), JournalError> {
+        if self.faults.truncate_error || self.truncate_back(receipt.offset).is_err() {
+            self.health = Health::Damaged;
+            return Err(JournalError::Damaged {
+                path: self.path.clone(),
+                cause: "truncate-back after staged-sync failure also failed".into(),
+            });
+        }
+        self.end = receipt.offset;
+        Ok(())
+    }
+
+    /// Marks the journal damaged: an off-thread durability sync failed and
+    /// the bytes it covered can no longer be rolled back in place, so the
+    /// journal needs reopen repair instead of more appends.
+    pub(crate) fn mark_damaged(&mut self) {
+        self.health = Health::Damaged;
+    }
+
+    fn sync(&mut self) -> Result<(), JournalError> {
+        if self.faults.sync_error {
+            return Err(jio(
+                "sync",
+                &self.path,
+                io::Error::other("injected sync failure"),
+            ));
+        }
+        self.file
+            .sync_all()
+            .map_err(|source| jio("sync", &self.path, source))
     }
 
     /// The tracked end offset: the next batch starts here.
@@ -255,7 +336,7 @@ impl Journal {
             .map_err(|source| jio("sync", &self.path, source))
     }
 
-    fn write_batch(&mut self, bytes: &[u8]) -> Result<(), JournalError> {
+    fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), JournalError> {
         self.file
             .seek(SeekFrom::Start(self.end))
             .map_err(|source| jio("write", &self.path, source))?;
@@ -278,16 +359,7 @@ impl Journal {
                 .write_all(bytes)
                 .map_err(|source| jio("write", &self.path, source))?,
         }
-        if self.faults.sync_error {
-            return Err(jio(
-                "sync",
-                &self.path,
-                io::Error::other("injected sync failure"),
-            ));
-        }
-        self.file
-            .sync_all()
-            .map_err(|source| jio("sync", &self.path, source))
+        Ok(())
     }
 }
 
@@ -385,6 +457,8 @@ fn write_side_file(
     journal_path: &Path,
     faults: &Faults,
 ) -> Result<(), JournalError> {
+    #[cfg(windows)]
+    let _ = faults;
     let mut options = OpenOptions::new();
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -438,6 +512,14 @@ fn write_side_file(
     Ok(())
 }
 
+/// Windows has no directory-sync door; the `Result` is load-bearing on POSIX.
+#[cfg_attr(
+    windows,
+    expect(
+        clippy::unnecessary_wraps,
+        reason = "directory sync fails only on POSIX"
+    )
+)]
 fn sync_parent_directory(path: &Path, operation: &'static str) -> Result<(), JournalError> {
     #[cfg(windows)]
     {

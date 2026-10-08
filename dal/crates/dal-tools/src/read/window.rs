@@ -1,7 +1,6 @@
 //! Text windows over file bytes: line selection, budgets, cuts, and rendering.
 
 use dal_core::SourceRow;
-use std::fmt::Write as _;
 
 use super::{Lines, MAX_LIMIT};
 use crate::tag8;
@@ -191,21 +190,28 @@ pub(crate) fn render(window: &ReadWindow, path: &str) -> String {
         window.lines.last(),
     ) {
         (Some(next), Some(first), Some(last)) => {
-            let _ = write!(
-                out,
-                "[Showing lines {}-{} of {}. Use :{next} to continue.]",
-                first.number, last.number, window.total_lines
+            let _ = std::fmt::Write::write_fmt(
+                &mut out,
+                format_args!(
+                    "[Showing lines {}-{} of {}. Use :{next} to continue.]",
+                    first.number, last.number, window.total_lines
+                ),
             );
         }
         (Some(next), None, None) => {
-            let _ = write!(
-                out,
-                "[No lines at or after {next}; file has {} lines.]",
-                window.total_lines
+            let _ = std::fmt::Write::write_fmt(
+                &mut out,
+                format_args!(
+                    "[No lines at or after {next}; file has {} lines.]",
+                    window.total_lines
+                ),
             );
         }
         _ => {
-            let _ = write!(out, "[{path}#{}]", tag8("whole", &window.bytes));
+            let _ = std::fmt::Write::write_fmt(
+                &mut out,
+                format_args!("[{path}#{}]", tag8("whole", &window.bytes)),
+            );
         }
     }
     out

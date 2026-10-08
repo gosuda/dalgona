@@ -103,15 +103,18 @@ pub(super) fn sweep_process_group(leader_pid: u32) {
     }
 }
 
-/// Sweeps Linux `/proc` for descendants of recorded leader pids.
+/// Walks Linux `/proc` for the live descendants of a leader pid.
+///
+/// The ppid chain is only intact while the lineage still lives: a detached
+/// (`setsid`) descendant reparents to init the instant its bridge dies, so
+/// callers must snapshot before signaling if they need the detached set.
 #[cfg(target_os = "linux")]
-pub(super) fn sweep_proc_descendants(leader_pid: u32) {
-    use rustix::process::{Pid, Signal, kill_process};
+pub(super) fn proc_descendants(leader_pid: u32) -> Vec<u32> {
     use std::collections::{HashMap, HashSet};
 
     let mut parents: HashMap<u32, u32> = HashMap::new();
     let Ok(entries) = std::fs::read_dir("/proc") else {
-        return;
+        return Vec::new();
     };
     for entry in entries.flatten() {
         let name = entry.file_name();
@@ -153,15 +156,39 @@ pub(super) fn sweep_proc_descendants(leader_pid: u32) {
         }
     }
     doomed.remove(&leader_pid);
+    doomed.into_iter().collect()
+}
 
-    for pid in doomed {
-        let Ok(raw) = i32::try_from(pid) else {
-            continue;
-        };
-        let Some(target) = Pid::from_raw(raw) else {
-            continue;
-        };
-        let _ = kill_process(target, Signal::KILL);
+/// Sweeps Linux `/proc` for descendants of recorded leader pids.
+#[cfg(target_os = "linux")]
+pub(super) fn sweep_proc_descendants(leader_pid: u32) {
+    sweep_recorded(&proc_descendants(leader_pid));
+}
+
+/// Kills every pid a prior `proc_descendants` snapshot recorded.
+///
+/// `setsid` escapees reparent to init when their bridge dies, which severs
+/// the lineage the post-exit `/proc` sweep relies on; the snapshot taken
+/// before signaling is the only place they are still reachable. A recorded
+/// pid recycled between snapshot and sweep is an accepted narrow race.
+pub(super) fn sweep_recorded(pids: &[u32]) {
+    #[cfg(unix)]
+    {
+        use rustix::process::{Pid, Signal, kill_process};
+
+        for pid in pids {
+            let Ok(raw) = i32::try_from(*pid) else {
+                continue;
+            };
+            let Some(target) = Pid::from_raw(raw) else {
+                continue;
+            };
+            let _ = kill_process(target, Signal::KILL);
+        }
+    }
+    #[cfg(windows)]
+    {
+        let _ = pids;
     }
 }
 

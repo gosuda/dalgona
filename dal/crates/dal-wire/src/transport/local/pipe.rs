@@ -56,7 +56,7 @@ use interprocess::os::windows::{
 use tokio::io::split;
 
 #[cfg(windows)]
-use crate::{error::WireError, transport::Transport};
+use crate::error::WireError;
 
 #[cfg(windows)]
 use super::{ConnectionFuture, LocalTransport};
@@ -68,7 +68,7 @@ const MAX_PIPE_INSTANCES: u8 = 65;
 
 /// Serves same-user RPC connections through the SID-scoped Windows named pipe.
 #[cfg(windows)]
-pub async fn serve_windows_pipe<F>(
+pub(crate) async fn serve_windows_pipe<F>(
     path: &Path,
     default_endpoint: bool,
     current_user_sid: Option<&str>,

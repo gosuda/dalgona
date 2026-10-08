@@ -35,7 +35,6 @@ interprocess = { version = "=2.4.4", features = ["tokio"] }
 [dev-dependencies]
 dal-ext = { path = "../dal-ext" }
 proptest.workspace = true
-shuttle.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 

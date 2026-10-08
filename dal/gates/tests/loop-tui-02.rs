@@ -1,6 +1,6 @@
-#![expect(
-    dead_code,
-    reason = "gate support exposes helpers shared across independent targets"
+#![cfg_attr(
+    not(unix),
+    expect(missing_docs, reason = "the whole crate is cfg'd out off unix")
 )]
 #![cfg(unix)]
 #![expect(
@@ -10,7 +10,15 @@
 //! Verifies settled transcript rows stay frozen in the real terminal.
 
 #[path = "support/pty.rs"]
+#[expect(
+    dead_code,
+    reason = "PTY support helpers are shared across TUI gate targets"
+)]
 mod pty;
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 #[path = "support/vt.rs"]
 mod vt;
@@ -45,6 +53,11 @@ fn tui_pty_keeps_settled_rows_frozen() -> Result<(), Box<dyn Error + Send + Sync
     first_frame.feed(terminal.output());
     let committed_prompt_before = first_frame.row_containing("first prompt").unwrap();
     let committed_before = first_frame.row_containing("first frozen response").unwrap();
+    // The commit burst keeps streaming briefly after the row text first
+    // appears (status repaint, sync close); let it settle before marking
+    // the byte boundary, or a slower scheduler can split the burst across
+    // it and look like a re-print of settled text.
+    terminal.collect_for(Duration::from_millis(150))?;
     let committed_output_end = terminal.output().len();
 
     terminal.write(b"second prompt\r")?;

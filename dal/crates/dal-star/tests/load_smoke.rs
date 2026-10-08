@@ -46,6 +46,79 @@ fn minimal_plugin_loads_one_tool() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+fn declared_uses_fold_into_the_inject_manifest() -> Result<(), Box<dyn std::error::Error>> {
+    let data = temp_data()?;
+    write_plugin(
+        data.path(),
+        "probe",
+        r#"load("@dal/v1", "dal")
+
+def probe(ctx, args):
+    return args
+
+probe_cmd_tool = dal.tool(
+    description = "Probe command tool.",
+    input = dal.schema(value = dal.optional(dal.string())),
+    run = probe,
+    uses = ["jobs.list"],
+)
+
+plugin = dal.plugin(
+    name = "probe",
+    version = "0.1.0",
+    tools = {
+        "probe": dal.tool(
+            description = "Probe.",
+            input = dal.schema(value = dal.optional(dal.string())),
+            run = probe,
+            uses = ["env.read", "ask.select"],
+        ),
+    },
+    commands = {
+        "probe_cmd": dal.command(tool = probe_cmd_tool),
+    },
+)
+"#,
+    )?;
+    let generation = load_all(data.path())?;
+    let system = dal_star::PluginSystem::new(
+        generation,
+        LoadRoots {
+            data_root: data.path().to_path_buf(),
+            bundled: Vec::new(),
+        },
+        PluginsConfig {
+            enabled: Vec::new(),
+            limits: dal_core::PluginLimits::default(),
+            configs: BTreeMap::new(),
+        },
+    );
+    let probe = system
+        .extensions()?
+        .into_iter()
+        .find(|extension| extension.name() == "probe")
+        .expect("probe extension");
+    let inject = probe.inject();
+    assert!(
+        inject.contains(dal_core::Service::Env),
+        "env.read injects env"
+    );
+    assert!(
+        inject.contains(dal_core::Service::Ask),
+        "ask.select injects ask"
+    );
+    assert!(
+        inject.contains(dal_core::Service::Jobs),
+        "a command-only tool's uses injects its service"
+    );
+    assert!(
+        !inject.contains(dal_core::Service::Run),
+        "an undeclared operation never injects its service"
+    );
+    Ok(())
+}
+
+#[test]
 fn invalid_tool_name_fails_with_exact_grammar_text() -> Result<(), Box<dyn std::error::Error>> {
     let data = temp_data()?;
     write_plugin(
@@ -310,7 +383,7 @@ fn skill_front_matter_unknown_key_is_a_load_error_at_file_line_col()
         "---\nmcp:\n  servers:\n    web:\n      url: https://docs.example/mcp\n      retries: 3\n---\n",
     )?;
     let error = load_all(data.path()).expect_err("an unknown server key must fail the load");
-    let skill_path = data.path().join("plugins/docs/SKILL.md");
+    let skill_path = data.path().join("plugins").join("docs").join("SKILL.md");
     assert_eq!(
         error.render(),
         format!(

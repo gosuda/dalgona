@@ -522,10 +522,7 @@ fn validate_parts(value: &value::Value, assistant: bool) -> Result<(), Box<str>>
     for part in parts {
         let kind = object_tag(part, "type", "request.context[].parts[]")?;
         let allowed = match (assistant, kind) {
-            // `text` is the one part kind both roles share; `unnested_or_patterns`
-            // rejects the merged arm and `match_same_arms` rejects two.
-            (false, "text") if !assistant => &["type", "text"][..],
-            (true, "text") => &["type", "text"][..],
+            (_, "text") => &["type", "text"][..],
             (false, "image") => &["type", "mime", "bytes"][..],
             (false, "blob") => &["type", "blob_id", "mime", "bytes"][..],
             (true, "thinking") => &["type", "text", "replay"][..],

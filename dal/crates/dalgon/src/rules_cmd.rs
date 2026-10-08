@@ -284,7 +284,7 @@ mod tests {
     async fn tool_source_reports_match_without_running_tool() {
         let data = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
-        let rules = workspace.path().join(".dal/rules");
+        let rules = workspace.path().join(".dal").join("rules");
         tokio::fs::create_dir_all(&rules).await.unwrap();
         tokio::fs::write(
             rules.join("no-auto-commit.md"),
@@ -297,7 +297,7 @@ mod tests {
         let input = RuleBuildInput {
             records: &[],
             plugin_rules: &[],
-            known_tools: &[],
+            known_tools: &["exec"],
             agent: "test",
         };
         let result = run(
@@ -320,7 +320,7 @@ mod tests {
         assert_eq!(result, ExitCode::SUCCESS);
         assert_eq!(
             stdout,
-            b"fired: no-auto-commit (interrupt). The exec call matched /git commit -m/.\n"
+            b"fired: no-auto-commit (interrupt). The `exec` call matched /git commit -m/.\n"
         );
     }
 
@@ -330,8 +330,8 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let unrelated = tempfile::tempdir().unwrap();
         let user_rules = data.path().join("rules");
-        let project_rules = workspace.path().join(".dal/rules");
-        let unrelated_rules = unrelated.path().join(".dal/rules");
+        let project_rules = workspace.path().join(".dal").join("rules");
+        let unrelated_rules = unrelated.path().join(".dal").join("rules");
         tokio::fs::create_dir_all(&user_rules).await.unwrap();
         tokio::fs::create_dir_all(&project_rules).await.unwrap();
         tokio::fs::create_dir_all(&unrelated_rules).await.unwrap();
@@ -359,7 +359,7 @@ mod tests {
         let input = RuleBuildInput {
             records: &[],
             plugin_rules: &[],
-            known_tools: &[],
+            known_tools: &["exec"],
             agent: "test",
         };
         let result = run(
@@ -376,9 +376,21 @@ mod tests {
 
         assert_eq!(result, ExitCode::FAILURE);
         let output = String::from_utf8(stdout).unwrap();
-        assert!(output.contains(project.to_string_lossy().as_ref()));
-        assert!(output.contains(broken.to_string_lossy().as_ref()));
-        assert!(!output.contains("foreign-rule"));
-        assert!(output.contains("problems (1)\n"));
+        assert!(
+            output.contains(project.to_string_lossy().as_ref()),
+            "report must list the workspace rule path; report:\n{output}"
+        );
+        assert!(
+            output.contains(broken.to_string_lossy().as_ref()),
+            "report must list the skipped user rule path; report:\n{output}"
+        );
+        assert!(
+            !output.contains("foreign-rule"),
+            "report must not read rules outside the two roots; report:\n{output}"
+        );
+        assert!(
+            output.contains("problems (1)\n"),
+            "report must hold exactly the skipped-file problem; report:\n{output}"
+        );
     }
 }

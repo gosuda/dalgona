@@ -2,13 +2,13 @@
     clippy::disallowed_methods,
     reason = "SC test invokes the real startup path"
 )]
-#![expect(
-    dead_code,
-    reason = "gate support exposes helpers shared across independent targets"
-)]
 
 //! The v1 focus fixture loads, and invalid tool keys name their source file.
 
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
 use std::{error::Error, fs, path::PathBuf, process::Command};
@@ -34,6 +34,7 @@ fn focus_plugin_loads_and_negative_tool_name_is_rejected()
     let valid = Command::new(dalgon_binary("dalgon")?)
         .current_dir(&workspace)
         .env_clear()
+        .envs(support::captured_shell_vars())
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("XDG_DATA_HOME", home.join(".local/share"))
@@ -55,6 +56,7 @@ fn focus_plugin_loads_and_negative_tool_name_is_rejected()
     let invalid = Command::new(dalgon_binary("dalgon")?)
         .current_dir(&workspace)
         .env_clear()
+        .envs(support::captured_shell_vars())
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("XDG_DATA_HOME", home.join(".local/share"))

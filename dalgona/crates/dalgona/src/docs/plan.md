@@ -1,3 +1,3 @@
 # Plan
 
-Use `/plan` to enter or leave read-only planning. Submit one plan for approval through the shared request broker. Approval leaves plan mode, revision returns feedback while keeping it on, and rejection or cancellation leaves plan mode without turning into approval.
+Use `/plan` to enter or leave read-only planning. Submit a plan for review through the shared ask service. Approval, revision, rejection, and cancellation have distinct outcomes; plan mode resets when a session opens.

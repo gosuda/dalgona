@@ -91,6 +91,24 @@ fn write_isolation_artifact(
         .map_err(|error| std::io::Error::other(error.to_string()))
 }
 
+/// Maps a typed wake refusal onto the service error the caller sees.
+fn wake_service_error(reason: dal_core::ext::WakeError) -> ServiceError {
+    match reason {
+        dal_core::ext::WakeError::Limit => ServiceError::Denied(dal_core::DenyReason::WakeLimit),
+        dal_core::ext::WakeError::Busy => ServiceError::failed(
+            Some(dal_core::Service::Turn),
+            "the session is busy: a turn or compaction is running",
+        ),
+        dal_core::ext::WakeError::Journal { message } => {
+            ServiceError::failed(Some(dal_core::Service::Turn), message)
+        }
+        other => ServiceError::failed(
+            Some(dal_core::Service::Turn),
+            format!("the wake was refused: {other}"),
+        ),
+    }
+}
+
 fn session_root(
     sessions: &std::collections::HashMap<SessionId, crate::host::SessionEntry>,
     start: SessionId,
@@ -372,6 +390,8 @@ impl SessionBackend for Backend {
                 FetchMethod::Put => reqwest::Method::PUT,
                 FetchMethod::Delete => reqwest::Method::DELETE,
                 FetchMethod::Head => reqwest::Method::HEAD,
+                FetchMethod::Options => reqwest::Method::OPTIONS,
+                FetchMethod::Patch => reqwest::Method::PATCH,
                 _ => reqwest::Method::GET,
             };
             let client = dal_provider::build_client();
@@ -493,7 +513,12 @@ impl SessionBackend for Backend {
     }
 
     fn turn(&self, op: TurnOp) -> ServiceFuture<'_, TurnOpReply> {
-        Box::pin(async move { Ok(self.turn_op(op).await) })
+        Box::pin(async move {
+            match self.turn_op(op).await {
+                TurnOpReply::WakeRefused(reason) => Err(wake_service_error(reason)),
+                reply => Ok(reply),
+            }
+        })
     }
 
     fn append_record(&self, ext: &Name, kind: &str, body: RawValue) -> ServiceFuture<'_, EntryId> {
@@ -643,9 +668,17 @@ impl Backend {
     async fn agents_op(&self, op: AgentsOp) -> AgentsReply {
         match op {
             AgentsOp::Start(start) => self.agent_start(start).await,
-            AgentsOp::Await { id, timeout } => self.agent_await(id, timeout).await,
+            AgentsOp::Await { id, timeout } => {
+                if self.is_child(id) {
+                    self.agent_await(id, timeout).await
+                } else {
+                    AgentsReply::Cancelled { id }
+                }
+            }
             AgentsOp::Cancel { id } => {
-                let _ = self.host().close(id).await;
+                if self.is_child(id) {
+                    let _ = self.host().close(id).await;
+                }
                 AgentsReply::Cancelled { id }
             }
             AgentsOp::List => AgentsReply::Listed(self.agent_list()),
@@ -660,11 +693,30 @@ impl Backend {
         }
     }
 
+    /// Returns whether `id` is a live child of this session: an agents
+    /// grant may reach only the caller's own subtree, the same scope
+    /// `agent_list` publishes.
+    fn is_child(&self, id: SessionId) -> bool {
+        self.host
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&id)
+            .is_some_and(|entry| entry.parent == Some(self.session))
+    }
+
     async fn agent_start(&self, start: dal_core::AgentStart) -> AgentsReply {
         let workspace = start
             .workspace
             .clone()
             .unwrap_or_else(|| self.workspace.clone());
+        // An explicit child model the catalog cannot route refuses the
+        // start; silently inheriting the caller's model would run a
+        // different program than the one requested.
+        let model = self.resolve_child_model(start.model.as_deref()).await;
+        if start.model.is_some() && model.is_none() {
+            return AgentsReply::Cancelled { id: self.session };
+        }
         let host = self.host();
         let Ok(child) = host
             .open(
@@ -684,7 +736,7 @@ impl Backend {
         if let Some(system) = start.system.as_ref().or(start.role.as_ref()) {
             prompt = format!("System: {system}\n\n{prompt}");
         }
-        if let Some(model) = self.resolve_child_model(start.model.as_deref()).await {
+        if let Some(model) = model {
             let _ = child
                 .submit(dal_core::Command::SetModel {
                     model,
@@ -706,6 +758,9 @@ impl Backend {
     /// Resolves a child model reference; unresolvable keeps the default.
     async fn resolve_child_model(&self, reference: Option<&str>) -> Option<dal_core::ModelRoute> {
         let reference = reference?;
+        if let Some(found) = crate::ext::synthetic::find(&self.host.shared, reference) {
+            return Some(found.route());
+        }
         let catalog = self.host.shared.providers.catalog().await.ok()?;
         let aliases: Vec<(Box<str>, Box<str>)> = self
             .host
@@ -748,9 +803,18 @@ impl Backend {
             };
             if matches!(view.turn, dal_core::TurnState::Idle) {
                 let report = Self::child_report(id, &view);
-                // A reported-complete member is torn down like a cancelled one:
-                // the entry leaves the table so later sends see Gone.
-                let _ = host.close(id).await;
+                if matches!(report, AgentsReply::Await { .. })
+                    && let Some(entry) = self
+                        .host
+                        .sessions
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .get(&id)
+                {
+                    entry
+                        .reported
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                }
                 return report;
             }
             if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
@@ -805,7 +869,10 @@ impl Backend {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         sessions
             .iter()
-            .filter(|(_, entry)| entry.depth > 0)
+            // Only the caller's own children: an unscoped list lets one
+            // session's session-end sweep cancel siblings' subtrees, which
+            // compounds to O(n²) closes across a shutdown cascade.
+            .filter(|(_, entry)| entry.parent == Some(self.session))
             .map(|(id, entry)| {
                 let name = entry
                     .shared
@@ -856,7 +923,10 @@ impl Backend {
             if sender_root.is_none() || sender_root != recipient_root {
                 return AgentsReply::Delivered(dal_core::ext::Receipt::Gone);
             }
-            sessions.get(&to).map(|entry| entry.handle.clone())
+            sessions
+                .get(&to)
+                .filter(|entry| !entry.reported.load(std::sync::atomic::Ordering::SeqCst))
+                .map(|entry| entry.handle.clone())
         };
         let Some(handle) = handle else {
             return AgentsReply::Delivered(dal_core::ext::Receipt::Gone);

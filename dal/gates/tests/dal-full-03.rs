@@ -2,14 +2,14 @@
 #![expect(clippy::unwrap_used, reason = "SC test")]
 #![expect(clippy::expect_used, reason = "SC test")]
 #![expect(
-    dead_code,
-    reason = "gate support exposes helpers shared across independent targets"
-)]
-#![expect(
     clippy::disallowed_methods,
     reason = "SC test launches the real dalgon sandbox boundary"
 )]
 
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
 use std::{error::Error, fs, io, path::Path, time::Duration};
@@ -109,7 +109,7 @@ async fn response(
     write_request(input, id, method, params).await?;
     loop {
         let frame = read_frame(output).await?;
-        if frame.get("id").and_then(Value::as_i64) == Some(id) {
+        if frame.get("id").and_then(sonic_rs::JsonValueTrait::as_i64) == Some(id) {
             return Ok(frame);
         }
     }
@@ -117,7 +117,11 @@ async fn response(
 
 fn tool_error_text(update: &Value) -> Option<String> {
     let outcome = update.get("outcome")?;
-    if outcome.get("isError").and_then(Value::as_bool) != Some(true) {
+    if outcome
+        .get("isError")
+        .and_then(sonic_rs::JsonValueTrait::as_bool)
+        != Some(true)
+    {
         return None;
     }
     outcome
@@ -128,7 +132,7 @@ fn tool_error_text(update: &Value) -> Option<String> {
 
 #[expect(
     clippy::too_many_lines,
-    reason = "the sandbox probe wires the full scripted harness before asserting"
+    reason = "SC sandbox probes are single long scripts"
 )]
 async fn run_sandbox_probe() -> Result<(String, bool), Box<dyn Error + Send + Sync>> {
     let dir = TestDir::new()?;
@@ -157,6 +161,7 @@ async fn run_sandbox_probe() -> Result<(String, bool), Box<dyn Error + Send + Sy
     let mut child = Command::new(dalgon_binary("dalgon")?)
         .args(["rpc"])
         .env_clear()
+        .envs(support::captured_shell_vars())
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("XDG_DATA_HOME", &data_home)
@@ -206,12 +211,12 @@ async fn run_sandbox_probe() -> Result<(String, bool), Box<dyn Error + Send + Sy
         .ok_or_else(|| io::Error::other("RPC session/open omitted sessionId"))?;
     let generation = result
         .get("gen")
-        .and_then(Value::as_u64)
+        .and_then(sonic_rs::JsonValueTrait::as_u64)
         .ok_or_else(|| io::Error::other("RPC session/open omitted generation"))?;
     let sequence = result
         .get("view")
         .and_then(|view| view.get("seq"))
-        .and_then(Value::as_u64)
+        .and_then(sonic_rs::JsonValueTrait::as_u64)
         .ok_or_else(|| io::Error::other("RPC session/open omitted sequence"))?;
     let subscription = response(
         &mut input,
@@ -242,7 +247,7 @@ async fn run_sandbox_probe() -> Result<(String, bool), Box<dyn Error + Send + Sy
     let mut error_text = None;
     loop {
         let frame = read_frame(&mut output).await?;
-        if frame.get("id").and_then(Value::as_i64) == Some(4) {
+        if frame.get("id").and_then(sonic_rs::JsonValueTrait::as_i64) == Some(4) {
             if frame.get("result").is_none() {
                 return Err(io::Error::other(format!("session/submit failed: {frame}")).into());
             }
@@ -292,7 +297,7 @@ async fn sandbox_rejects_rm_outside_allowed_roots() -> Result<(), Box<dyn Error 
     );
     #[cfg(target_os = "windows")]
     assert!(
-        tool_error.contains("sandbox = \"on\" is not supported on Windows"),
+        tool_error.contains("Access is denied") || tool_error.contains("dalgon sandbox"),
         "{tool_error}"
     );
     #[cfg(target_os = "macos")]

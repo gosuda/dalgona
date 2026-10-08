@@ -1058,7 +1058,6 @@ dependencies = [
  "proptest",
  "schemars",
  "serde",
- "shuttle",
  "sonic-rs",
  "tempfile",
  "thiserror 2.0.21",
@@ -1096,6 +1095,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "url",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

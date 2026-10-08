@@ -1,5 +1,5 @@
 //! The `dalgon` command-line and process edge for the dal product.
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 use std::ffi::OsString;
 use std::io::Write as _;
@@ -186,16 +186,18 @@ async fn run_command(
                 helper,
                 ..
             } = startup;
-            let headless = HeadlessRun {
+            run_headless(
+                &cli,
                 vars,
                 cwd,
                 workspace_path,
                 workspace,
                 config,
+                product,
                 helper,
-                data_root,
-            };
-            run_headless(&cli, headless, product).await
+                &data_root,
+            )
+            .await
         }
         #[cfg(feature = "tui")]
         None => Box::pin(dispatch::interactive(&cli, startup, product)).await,
@@ -233,19 +235,106 @@ async fn run_command(
     }
 }
 
-/// Startup inputs one headless prompt run needs.
-struct HeadlessRun {
+/// Runs one headless prompt turn over the host agent.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one headless run carries cli, vars, paths, and host state"
+)]
+async fn run_headless(
+    cli: &cli::Cli,
     vars: VarsMap,
     cwd: PathBuf,
     workspace_path: PathBuf,
     workspace: Workspace,
     config: Config,
+    product: dal_agent::Product,
     helper: Option<PathBuf>,
-    data_root: PathBuf,
+    data_root: &Path,
+) -> ExitCode {
+    if config.model().is_none() {
+        return two_lines(
+            [
+                cli::texts::NO_MODEL.into(),
+                cli::texts::NO_MODEL_HINT.into(),
+            ],
+            exit::ExitKind::RequestedFailure,
+        );
+    }
+    let snapshot = edge::terminal_snapshot();
+    let parts =
+        match print::assemble_prompt(&cli.prompts, &workspace_path, snapshot.stdin_tty).await {
+            Ok(parts) => parts,
+            Err(error) => return prompt_error_exit(error),
+        };
+    // Print mode runs without a terminal: under `ask` the run cannot answer
+    // approval requests, so it emits the once-per-run headless notice and
+    // denies gated calls instead of waiting out the broker timeout.
+    let headless_approval = config.approval() == dal_core::ApprovalMode::Ask;
+    let session = session_ref(cli, workspace);
+    let host = match Host::start(
+        product,
+        config,
+        Env {
+            vars,
+            cwd,
+            sandbox_helper: helper,
+        },
+    )
+    .await
+    {
+        Ok(host) => host,
+        Err(error) => return host_exit(&error, data_root),
+    };
+    let agent = match host.open(session, ClientId::new("cli")).await {
+        Ok(agent) => agent,
+        Err(error) => {
+            let code = host_exit(&error, data_root);
+            let _ = host.shutdown(Duration::from_secs(3)).await;
+            return code;
+        }
+    };
+    let stop = tokio_util::sync::CancellationToken::new();
+    let options = print::PrintOptions {
+        json: cli.json,
+        output_last_message: cli.output_last_message.clone(),
+        prompt: parts,
+        stderr_is_tty: snapshot.stderr_tty,
+        headless_approval,
+        stop: stop.clone(),
+        quiet_wait: (!cli.json).then_some(print::QUIET_WAIT),
+    };
+    let mut stdout = tokio::io::stdout();
+    let mut stderr = tokio::io::stderr();
+    let outcome = dispatch::drive(
+        &stop,
+        print::run_print(agent, options, &mut stdout, &mut stderr),
+    )
+    .await;
+    let shutdown = if matches!(&outcome, Ok(Err(print::PrintError::NotQuiet { .. }))) {
+        host.shutdown_after_quiet_wait(Duration::from_secs(3)).await
+    } else {
+        host.shutdown(Duration::from_secs(3)).await
+    };
+    if !shutdown.status_quiet && !matches!(&outcome, Ok(Err(print::PrintError::NotQuiet { .. }))) {
+        let [what, hint] = cli::texts::status_not_quiet_shutdown();
+        let _ = stderr
+            .write_all(format!("{what}\n{hint}\n").as_bytes())
+            .await;
+    }
+    match outcome {
+        Ok(Ok(print::PrintOutcome::Completed)) => exit::code(exit::ExitKind::Success),
+        Ok(Ok(print::PrintOutcome::Interrupted)) => exit::code(exit::ExitKind::Signal(2)),
+        Ok(Err(error)) if error.is_broken_pipe() => exit::code(exit::ExitKind::Signal(13)),
+        // A headless denial is a requested failure like a tool error.
+        Ok(Ok(print::PrintOutcome::Denied) | Err(_)) => {
+            exit::code(exit::ExitKind::RequestedFailure)
+        }
+        Err(code) => ExitCode::from(code),
+    }
 }
 
-/// Maps one prompt-assembly failure to its usage diagnostics.
-fn prompt_parts_exit(error: print::PromptError) -> ExitCode {
+/// Maps a prompt assembly failure to its usage diagnostics.
+fn prompt_error_exit(error: print::PromptError) -> ExitCode {
     match error {
         print::PromptError::Empty => two_lines(
             [
@@ -277,95 +366,6 @@ fn prompt_parts_exit(error: print::PromptError) -> ExitCode {
             cli::texts::stdin_unreadable(&source.to_string()),
             exit::ExitKind::RequestedFailure,
         ),
-    }
-}
-
-/// Runs one headless prompt turn over the host agent.
-async fn run_headless(
-    cli: &cli::Cli,
-    headless: HeadlessRun,
-    product: dal_agent::Product,
-) -> ExitCode {
-    let HeadlessRun {
-        vars,
-        cwd,
-        workspace_path,
-        workspace,
-        config,
-        helper,
-        data_root,
-    } = headless;
-    if config.model().is_none() {
-        return two_lines(
-            [
-                cli::texts::NO_MODEL.into(),
-                cli::texts::NO_MODEL_HINT.into(),
-            ],
-            exit::ExitKind::RequestedFailure,
-        );
-    }
-    let snapshot = edge::terminal_snapshot();
-    let parts =
-        match print::assemble_prompt(&cli.prompts, &workspace_path, snapshot.stdin_tty).await {
-            Ok(parts) => parts,
-            Err(error) => return prompt_parts_exit(error),
-        };
-    let session = session_ref(cli, workspace);
-    let host = match Host::start(
-        product,
-        config,
-        Env {
-            vars,
-            cwd,
-            sandbox_helper: helper,
-        },
-    )
-    .await
-    {
-        Ok(host) => host,
-        Err(error) => return host_exit(&error, &data_root),
-    };
-    let agent = match host.open(session, ClientId::new("cli")).await {
-        Ok(agent) => agent,
-        Err(error) => {
-            let code = host_exit(&error, &data_root);
-            let _ = host.shutdown(Duration::from_secs(3)).await;
-            return code;
-        }
-    };
-    let stop = tokio_util::sync::CancellationToken::new();
-    let options = print::PrintOptions {
-        json: cli.json,
-        output_last_message: cli.output_last_message.clone(),
-        prompt: parts,
-        stderr_is_tty: snapshot.stderr_tty,
-        stop: stop.clone(),
-        quiet_wait: (!cli.json).then_some(print::QUIET_WAIT),
-    };
-    let mut stdout = tokio::io::stdout();
-    let mut stderr = tokio::io::stderr();
-    let outcome = dispatch::drive(
-        &stop,
-        print::run_print(agent, options, &mut stdout, &mut stderr),
-    )
-    .await;
-    let shutdown = if matches!(&outcome, Ok(Err(print::PrintError::NotQuiet { .. }))) {
-        host.shutdown_after_quiet_wait(Duration::from_secs(3)).await
-    } else {
-        host.shutdown(Duration::from_secs(3)).await
-    };
-    if !shutdown.status_quiet && !matches!(&outcome, Ok(Err(print::PrintError::NotQuiet { .. }))) {
-        let [what, hint] = cli::texts::status_not_quiet_shutdown();
-        let _ = stderr
-            .write_all(format!("{what}\n{hint}\n").as_bytes())
-            .await;
-    }
-    match outcome {
-        Ok(Ok(print::PrintOutcome::Completed)) => exit::code(exit::ExitKind::Success),
-        Ok(Ok(print::PrintOutcome::Interrupted)) => exit::code(exit::ExitKind::Signal(2)),
-        Ok(Err(error)) if error.is_broken_pipe() => exit::code(exit::ExitKind::Signal(13)),
-        Ok(Err(_)) => exit::code(exit::ExitKind::RequestedFailure),
-        Err(code) => ExitCode::from(code),
     }
 }
 
@@ -557,7 +557,9 @@ fn capture_process() -> Result<(VarsMap, PathBuf), ExitCode> {
     if edge::parse_log_level(&vars).is_err() {
         let value = vars
             .get(std::ffi::OsStr::new("DAL_LOG"))
-            .map_or(String::new(), |value| value.to_string_lossy().into_owned());
+            .map_or_else(String::default, |value| {
+                value.to_string_lossy().into_owned()
+            });
         return Err(two_lines(
             [
                 format!("dalgon: DAL_LOG \"{value}\" is invalid"),
@@ -569,49 +571,6 @@ fn capture_process() -> Result<(VarsMap, PathBuf), ExitCode> {
     Ok((vars, cwd))
 }
 
-/// Maps one root-resolution failure to its startup diagnostics.
-fn roots_exit(error: &edge::EdgeError, vars: &VarsMap, binary: &str) -> ExitCode {
-    match error {
-        edge::EdgeError::HomeMissing => {
-            let what = if cfg!(windows) {
-                cli::texts::HOME_MISSING_WINDOWS
-            } else {
-                cli::texts::HOME_MISSING_POSIX
-            };
-            two_lines(
-                [what.into(), cli::texts::HOME_MISSING_HINT.into()],
-                exit::ExitKind::RequestedFailure,
-            )
-        }
-        edge::EdgeError::InvalidProduct => {
-            let log_path = edge::log_file_path(vars, binary);
-            two_lines(
-                cli::texts::internal_error_at("edge", "invalid product identity", &log_path),
-                exit::ExitKind::Internal,
-            )
-        }
-        edge::EdgeError::Workspace(path) => two_lines(
-            cli::texts::workspace_not_usable(&path.display().to_string()),
-            exit::ExitKind::RequestedFailure,
-        ),
-        edge::EdgeError::WorkspaceRelative => {
-            let log_path = edge::log_file_path(vars, binary);
-            two_lines(
-                cli::texts::internal_error_at(
-                    "edge",
-                    "the workspace path is not absolute",
-                    &log_path,
-                ),
-                exit::ExitKind::Internal,
-            )
-        }
-        edge::EdgeError::Io { path, source, .. } => two_lines(
-            cli::texts::prompt_file_unreadable(path, &source.to_string()),
-            exit::ExitKind::RequestedFailure,
-        ),
-    }
-}
-
 /// Resolves roots, the workspace, and the layered configuration.
 fn assemble_startup(
     factory: &ProductFactory,
@@ -621,7 +580,7 @@ fn assemble_startup(
 ) -> Result<Startup, ExitCode> {
     let roots = match edge::resolve_roots(&vars, factory.binary) {
         Ok(roots) => roots,
-        Err(error) => return Err(roots_exit(&error, &vars, factory.binary)),
+        Err(error) => return Err(roots_exit(&vars, factory.binary, error)),
     };
     let workspace_path = edge::resolve_workspace_path(&cwd, cli.cd.as_deref());
     let workspace = match edge::validate_workspace(workspace_path.clone()) {
@@ -692,6 +651,49 @@ fn assemble_startup(
     Ok(startup)
 }
 
+/// Maps an `resolve_roots` failure to its usage diagnostics.
+fn roots_exit(vars: &VarsMap, binary: &str, error: edge::EdgeError) -> ExitCode {
+    match error {
+        edge::EdgeError::HomeMissing => {
+            let what = if cfg!(windows) {
+                cli::texts::HOME_MISSING_WINDOWS
+            } else {
+                cli::texts::HOME_MISSING_POSIX
+            };
+            two_lines(
+                [what.into(), cli::texts::HOME_MISSING_HINT.into()],
+                exit::ExitKind::RequestedFailure,
+            )
+        }
+        edge::EdgeError::InvalidProduct => {
+            let log_path = edge::log_file_path(vars, binary);
+            two_lines(
+                cli::texts::internal_error_at("edge", "invalid product identity", &log_path),
+                exit::ExitKind::Internal,
+            )
+        }
+        edge::EdgeError::Workspace(path) => two_lines(
+            cli::texts::workspace_not_usable(&path.display().to_string()),
+            exit::ExitKind::RequestedFailure,
+        ),
+        edge::EdgeError::WorkspaceRelative => {
+            let log_path = edge::log_file_path(vars, binary);
+            two_lines(
+                cli::texts::internal_error_at(
+                    "edge",
+                    "the workspace path is not absolute",
+                    &log_path,
+                ),
+                exit::ExitKind::Internal,
+            )
+        }
+        edge::EdgeError::Io { path, source, .. } => two_lines(
+            cli::texts::prompt_file_unreadable(&path, &source.to_string()),
+            exit::ExitKind::RequestedFailure,
+        ),
+    }
+}
+
 /// Calls the product factory exactly once and maps build failures to exits.
 fn build_once(
     factory: &ProductFactory,
@@ -703,6 +705,16 @@ fn build_once(
         Err(BuildError::Registration(error)) => Err(two_lines(
             cli::texts::internal_error("product", &error.to_string()),
             exit::ExitKind::Internal,
+        )),
+        Err(BuildError::Section {
+            ref section,
+            ref source,
+        }) if section.as_ref() == "plugins" => Err(two_lines(
+            [
+                format!("plugin load failed: {source}"),
+                cli::texts::CONFIG_FIX_HINT.into(),
+            ],
+            exit::ExitKind::RequestedFailure,
         )),
         Err(error) => Err(two_lines(
             [

@@ -1,12 +1,11 @@
-//! Cancelling mid-exec kills the real grandchild and ends the turn once.
-#![expect(
+//! Cancelling mid-exec kills the process tree and ends exactly once.
+#[expect(
     dead_code,
-    reason = "gate support exposes helpers shared across independent targets"
+    reason = "gate support helpers are shared across independent test targets"
 )]
-
 mod support;
 
-use std::{collections::BTreeMap, error::Error, fs, path::PathBuf, time::Duration};
+use std::{error::Error, fs, path::PathBuf, time::Duration};
 
 use dal_agent::{Delivery, Env, SessionRef};
 use dal_core::{
@@ -28,7 +27,7 @@ async fn cancel_mid_exec_kills_grandchild_and_ends_once() -> Result<(), Box<dyn 
     let replay = fixtures.join("replay/loop-headless.jsonl");
     let factory = dalgon::product();
     let user = format!(
-        "model = \"openai-responses/gpt-6\"\n[providers.scripted]\nfixture = {:?}\n",
+        "model = \"openai-responses/gpt-6\"\napproval = \"all\"\n[providers.scripted]\nfixture = {:?}\n",
         replay.to_string_lossy()
     );
     let config = Config::load(
@@ -42,7 +41,7 @@ async fn cancel_mid_exec_kills_grandchild_and_ends_once() -> Result<(), Box<dyn 
         config: &config,
     })?;
     let env = Env {
-        vars: BTreeMap::new(),
+        vars: support::captured_shell_vars(),
         cwd: workspace.path().to_path_buf(),
         sandbox_helper: None,
     };
@@ -98,22 +97,7 @@ async fn cancel_mid_exec_kills_grandchild_and_ends_once() -> Result<(), Box<dyn 
     assert!(cancelled, "exec must have started before cancellation");
     assert_eq!(turn_ends, 1);
     let pid = fs::read_to_string(pid_file)?.trim().parse::<u32>()?;
-    #[cfg(target_os = "linux")]
-    assert!(!PathBuf::from(format!("/proc/{pid}")).exists());
-    #[cfg(target_os = "macos")]
-    assert!(
-        !std::process::Command::new("/bin/kill")
-            .args(["-0", &pid.to_string()])
-            .status()?
-            .success()
-    );
-    #[cfg(windows)]
-    assert!(
-        !std::process::Command::new("powershell.exe")
-            .args(["-NoProfile", "-Command", &format!("Get-Process -Id {pid}")])
-            .status()?
-            .success()
-    );
+    assert!(!support::process_alive(pid));
     let _ = harness.host.shutdown(Duration::from_secs(1)).await;
     Ok(())
 }

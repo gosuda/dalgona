@@ -71,7 +71,7 @@ async fn hook_parent_is_root_in_subagents_and_absent_at_root() {
     std::fs::write(&fixture, format!("{STEP_END}{STEP_END}")).expect("fixture");
     let user = format!(
         "model = \"openai/gpt-6-luna\"\n\n[providers.scripted]\nfixture = \"{}\"\n",
-        fixture.display()
+        fixture.to_string_lossy().replace('\\', "\\\\")
     );
     let config =
         Config::load(ConfigProduct::Dalgon, &data, "", Some(user.as_str())).expect("config");
@@ -129,8 +129,8 @@ async fn hook_parent_is_root_in_subagents_and_absent_at_root() {
         .expect("open child");
     run_prompt(&child).await.expect("child prompt");
     let seen = seen.lock().expect("seen lock").clone();
-    // The opening drive mints the hook once per turn; the driver-side
-    // dispatch before the provider round is gone.
+    // `before_turn` mints once per turn at the Opening phase; one prompt on
+    // each session is two fires total.
     assert_eq!(seen.len(), 2, "one fire per turn: seen={seen:?}");
     assert!(
         seen[..1].iter().all(Option::is_none),

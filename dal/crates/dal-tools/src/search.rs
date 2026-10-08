@@ -103,6 +103,16 @@ pub(crate) enum IndexScope<'a> {
     Directory(&'a Path),
 }
 
+impl<'a> IndexScope<'a> {
+    /// The directory filter for the index: `None` searches the whole root.
+    pub(crate) fn directory(self) -> Option<&'a Path> {
+        match self {
+            Self::Root => None,
+            Self::Directory(rel) => Some(rel),
+        }
+    }
+}
+
 /// Decoded, bounds-checked search arguments.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SearchArgs {
@@ -470,17 +480,12 @@ impl Search {
             (paths, total)
         } else {
             let indexed = match scope.index_scope() {
-                Some(index_scope) => {
-                    let scope = match index_scope {
-                        IndexScope::Root => None,
-                        IndexScope::Directory(rel) => Some(rel),
-                    };
-                    self.index
-                        .find_entries(call.workspace, scope, &glob, wanted)
-                        .await
-                        .ok()
-                        .flatten()
-                }
+                Some(index_scope) => self
+                    .index
+                    .find_entries(call.workspace, index_scope.directory(), &glob, wanted)
+                    .await
+                    .ok()
+                    .flatten(),
                 None => None,
             };
             let result = if let Some(result) = indexed {

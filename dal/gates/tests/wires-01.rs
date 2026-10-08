@@ -1,14 +1,13 @@
-//! JSON-RPC over stdio and spawned children keeps the wire contract.
+//! Stdio and socket wire requests: framing, dispatch, and drop semantics.
 #![expect(clippy::expect_used, reason = "SC test")]
 #![expect(
     clippy::disallowed_methods,
     reason = "SC test exercises real wire binaries"
 )]
-#![expect(
+#[expect(
     dead_code,
-    reason = "gate support exposes helpers shared across independent targets"
+    reason = "gate support helpers are shared across independent test targets"
 )]
-
 mod support;
 
 use std::{
@@ -40,6 +39,7 @@ fn stdio_request(
     let mut child = Command::new(binary)
         .current_dir(workspace)
         .env_clear()
+        .envs(support::captured_shell_vars())
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("XDG_DATA_HOME", data_home)
@@ -77,6 +77,7 @@ fn spawn_rpc(
     command
         .current_dir(workspace)
         .env_clear()
+        .envs(support::captured_shell_vars())
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("XDG_DATA_HOME", data_home)
@@ -124,7 +125,9 @@ async fn rpc_initialize(
 #[tokio::test]
 async fn rpc_bare_socket_flag_serves_the_default_local_endpoint()
 -> Result<(), Box<dyn Error + Send + Sync>> {
-    let dir = TestDir::new()?;
+    // The default socket lives under the data root; the deep BSD temp root
+    // would push the endpoint past SUN_LEN.
+    let dir = TestDir::new_in(std::path::Path::new("/tmp"))?;
     let home = dir.path().join("home");
     let workspace = dir.path().join("workspace");
     let data_home = home.join(".local/share");
@@ -166,7 +169,9 @@ async fn rpc_bare_socket_flag_serves_the_default_local_endpoint()
 #[cfg(unix)]
 #[tokio::test]
 async fn rpc_explicit_relative_socket_path_is_served() -> Result<(), Box<dyn Error + Send + Sync>> {
-    let dir = TestDir::new()?;
+    // The resolved socket path must stay under SUN_LEN; the deep BSD temp
+    // root pushes workspace/private/rpc.sock past it.
+    let dir = TestDir::new_in(std::path::Path::new("/tmp"))?;
     let home = dir.path().join("home");
     let workspace = dir.path().join("workspace");
     let data_home = home.join(".local/share");

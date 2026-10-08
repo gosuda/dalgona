@@ -5,7 +5,6 @@
 //! to an immutable captured buffer; legacy `[PATH#TAG]` stays in the
 //! style parsers and `Seen`/`Chain` path.
 
-use std::fmt::Write as _;
 use std::{
     collections::{HashMap, VecDeque},
     path::{Path, PathBuf},
@@ -79,7 +78,7 @@ impl ReadRef {
     pub fn display(self) -> Box<str> {
         let mut boot_hex = String::with_capacity(32);
         for byte in self.boot {
-            let _ = write!(boot_hex, "{byte:02x}");
+            let _ = std::fmt::Write::write_fmt(&mut boot_hex, format_args!("{byte:02x}"));
         }
         let mut seq_text = String::new();
         let mut value = self.seq;
@@ -172,7 +171,7 @@ impl Entry {
     }
 
     fn shown(&self, consumer: Consumer) -> &[(u64, u64)] {
-        self.shown.get(&consumer).map_or(&[], Vec::as_slice)
+        self.shown.get(&consumer).map_or(&[][..], Vec::as_slice)
     }
 
     fn show(&mut self, consumer: Consumer, first: u64, last: u64) {

@@ -31,8 +31,7 @@ pub(super) fn export(cx: &CommandCx<'_>, path: Option<&str>) -> Result<Reply, Er
     } else {
         let name = cx.view().settings.name.clone();
         let id = cx.view().session.id.to_string();
-        let now = jiff::Zoned::now();
-        let target = default_export_path(&workspace, name.as_deref(), &id, &now);
+        let target = default_export_path(&workspace, name.as_deref(), &id, &jiff::Zoned::now());
         (target, dal_core::command::ExportFormat::Markdown)
     };
     Ok(Reply::Started(cx.start_job(Command::Export {

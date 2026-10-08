@@ -7,7 +7,7 @@ use std::{
     collections::HashMap,
     fs, io,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 
 use dal_core::{
@@ -21,7 +21,7 @@ use crate::{
     journal::{self, Faults, Journal as FileJournal, Receipt},
     layout::SessionPaths,
     lock::LockGuard,
-    shard::{Lane, Shards},
+    shard::Lane,
     sidecar::Sidecar,
     util,
 };
@@ -58,15 +58,57 @@ struct StoreInner {
     product: Product,
     workspace_key: String,
     listing: crate::list::Listing,
-    shards: Mutex<Option<Arc<Shards>>>,
+    /// First-append journal creation is a write plus syncs; admissions are
+    /// bounded to shard width so a create burst cannot flood the
+    /// filesystem's sync queue faster than workers can drain it.
+    create_permits: Arc<tokio::sync::Semaphore>,
     #[cfg(test)]
-    faults: Mutex<Faults>,
+    faults: std::sync::Mutex<Faults>,
+}
+
+impl StoreInner {
+    /// Acquires one create permit; a >30 s wait logs instead of timing
+    /// out — a starved holder would otherwise park every later create.
+    async fn acquire_create(&self) -> Result<tokio::sync::OwnedSemaphorePermit, StoreError> {
+        let mut waiting = Box::pin(Arc::clone(&self.create_permits).acquire_owned());
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_secs(30), &mut waiting).await {
+                Ok(Ok(permit)) => return Ok(permit),
+                Ok(Err(_closed)) => {
+                    return Err(StoreError::Invalid {
+                        reason: "journal create permits are closed".into(),
+                    });
+                }
+                Err(_elapsed) => eprintln!("[dal-store] journal create permit outstanding"),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+impl StoreInner {
+    fn faults(&self) -> Faults {
+        use std::sync::PoisonError;
+
+        self.faults
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
 }
 
 impl Store {
     /// Creates a store without creating or modifying any filesystem path.
+    ///
+    /// The workspace keeps one canonical spelling for every durable identity:
+    /// the sessions directory key, the recorded session workspace, and the
+    /// reference lookups compare against. A symlinked spelling like `/var/...`
+    /// and its canonical `/private/var/...` target must resolve to the same
+    /// sessions or one workspace splits into two.
     #[must_use]
     pub fn new(data_root: PathBuf, workspace: Workspace, product: Product) -> Self {
+        let workspace =
+            Workspace::new(util::canonical_path(workspace.as_path())).unwrap_or(workspace);
         let workspace_key = util::workspace_key(workspace.as_path());
         Self {
             inner: Arc::new(StoreInner {
@@ -75,9 +117,9 @@ impl Store {
                 product,
                 workspace_key,
                 listing: crate::list::Listing::new(),
-                shards: Mutex::new(None),
+                create_permits: Arc::new(tokio::sync::Semaphore::new(crate::shard::SHARD_COUNT)),
                 #[cfg(test)]
-                faults: Mutex::new(Faults::default()),
+                faults: std::sync::Mutex::new(Faults::default()),
             }),
         }
     }
@@ -127,10 +169,10 @@ impl Store {
             }
             Err(source) => return Err(util::io_err(&journal_path, source)),
         }
-        let lock = LockGuard::acquire(&paths.lock(), id)?;
-        let shards = self.shards()?;
-        let opened = FileJournal::open(&journal_path, &faults)
-            .map_err(|failure| map_open_failure(&journal_path, failure))?;
+        let (lock, opened) = open_locked_journal(&paths, id, faults).await?;
+        // The shard set is process-wide: a Store is minted per session, so a
+        // per-store owner would multiply journal threads by session count.
+        let shards = crate::shard::shared()?;
         let mut records = opened
             .records
             .into_iter()
@@ -194,12 +236,17 @@ impl Store {
 
     /// Resolves a name or identifier in `workspace`.
     ///
+    /// The argument workspace canonicalizes the same way [`Store::new`] does,
+    /// so a lookup from a symlinked or canonical cwd sees the same sessions.
+    ///
     /// # Errors
     /// Returns [`StoreError`] when the reference is empty, missing, or ambiguous.
     pub fn resolve(&self, workspace: &Workspace, arg: &str) -> Result<SessionId, StoreError> {
+        let canonical = Workspace::new(util::canonical_path(workspace.as_path()))
+            .unwrap_or_else(|_| workspace.clone());
         self.inner
             .listing
-            .resolve(&self.workspace_dir_for(workspace), workspace, arg)
+            .resolve(&self.workspace_dir_for(&canonical), &canonical, arg)
     }
 
     /// Returns the newest unarchived session in the configured workspace.
@@ -433,29 +480,9 @@ impl Store {
             .join(util::workspace_key(workspace.as_path()))
     }
 
-    fn shards(&self) -> Result<Arc<Shards>, StoreError> {
-        let mut shared = self.inner.shards.lock().map_err(|_| {
-            util::io_err(
-                &self.inner.data_root,
-                io::Error::other("journal shard owner mutex is poisoned"),
-            )
-        })?;
-        if let Some(shards) = shared.as_ref() {
-            return Ok(Arc::clone(shards));
-        }
-        let shards = Arc::new(Shards::start()?);
-        *shared = Some(Arc::clone(&shards));
-        Ok(shards)
-    }
     #[cfg(test)]
     fn faults(&self) -> Faults {
-        use std::sync::PoisonError;
-
-        self.inner
-            .faults
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.inner.faults()
     }
 
     #[cfg(not(test))]
@@ -607,6 +634,93 @@ fn entry_mut(record: &mut Record) -> Option<&mut dal_core::Entry> {
         | Record::BranchSummary(entry) => Some(entry),
         _ => None,
     }
+}
+
+/// The inputs the first-append blocking task owns.
+struct FirstAppendSetup {
+    /// The session directory to create.
+    directory: PathBuf,
+    /// The blob subdirectory.
+    blob_dir: PathBuf,
+    /// The jobs subdirectory.
+    jobs_dir: PathBuf,
+    /// The session lock path.
+    lock_path: PathBuf,
+    /// The journal file path.
+    journal_path: PathBuf,
+    /// The workspace sessions directory for name normalization.
+    workspace_dir: PathBuf,
+    /// The workspace record.
+    workspace: Workspace,
+    /// Shared store state for the listing index.
+    inner: Arc<StoreInner>,
+    /// The session this journal belongs to.
+    id: SessionId,
+    /// A lock acquired before the blocking task, if one was taken.
+    prelocked: Option<LockGuard>,
+    /// The session's current display name, when set.
+    current_name: Option<String>,
+    /// The blobs to stage and publish.
+    blobs: Vec<PendingBlob>,
+    /// The encoded journal batch.
+    bytes: Vec<u8>,
+}
+
+/// Runs the first-append disk setup on the blocking pool: mkdirs, lock,
+/// name and blob publishes, then the journal create — every step writes
+/// and syncs, so the async worker must not own it (R-perf).
+fn first_append_setup(setup: FirstAppendSetup) -> Result<(LockGuard, FileJournal), StoreError> {
+    let FirstAppendSetup {
+        directory,
+        blob_dir,
+        jobs_dir,
+        lock_path,
+        journal_path,
+        workspace_dir,
+        workspace,
+        inner,
+        id,
+        prelocked,
+        current_name,
+        blobs,
+        bytes,
+    } = setup;
+    let lap = |step: &str, since: std::time::Instant| {
+        let taken = since.elapsed();
+        if taken > std::time::Duration::from_millis(250) {
+            eprintln!("[dal-store] first-append {step} took {taken:?}");
+        }
+        std::time::Instant::now()
+    };
+    let mut mark = std::time::Instant::now();
+    util::create_private_dir_all(&directory).map_err(|source| util::io_err(&directory, source))?;
+    mark = lap("session-dirs", mark);
+    let lock = match prelocked {
+        Some(lock) => lock,
+        None => LockGuard::acquire(&lock_path, id)?,
+    };
+    mark = lap("lock", mark);
+    util::create_private_dir_all(&blob_dir).map_err(|source| util::io_err(&blob_dir, source))?;
+    util::create_private_dir_all(&jobs_dir).map_err(|source| util::io_err(&jobs_dir, source))?;
+    mark = lap("sub-dirs", mark);
+    if let Some(name) = current_name.as_deref() {
+        inner
+            .listing
+            .normalize_name(&workspace_dir, &workspace, Some(name), Some(id))?;
+    }
+    mark = lap("names", mark);
+    // Stage and finish every blob before one shared directory sync:
+    // same durability order, a fraction of the fsyncs on slow shared
+    // storage.
+    let mut dirs = Vec::new();
+    for blob in blobs {
+        blob::finish_staged(blob::stage_prepared(&blob_dir, blob)?, &mut dirs)?;
+    }
+    blob::sync_dirs(&mut dirs)?;
+    mark = lap("blobs", mark);
+    let journal = FileJournal::create(&journal_path, &bytes, &Faults::default())?;
+    lap("journal-create", mark);
+    Ok((lock, journal))
 }
 
 impl Journal {
@@ -901,10 +1015,36 @@ impl Journal {
         .await
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "first-user materialization sequences lock, blobs, journal, and cache in one place"
-    )]
+    /// Validates and encodes the first batch; the caller restores
+    /// `State::Lazy` on the error return.
+    fn encode_first(&self, records: &[Record]) -> Result<(Vec<u8>, u64), StoreError> {
+        validate_record_values(records)?;
+        let bytes = encode_records(self.records.iter().chain(records.iter()))?;
+        let byte_len = u64::try_from(bytes.len()).map_err(|_| StoreError::Invalid {
+            reason: "journal batch length exceeds the byte counter".into(),
+        })?;
+        Ok((bytes, byte_len))
+    }
+
+    /// Returns the session's current display name across prior and new
+    /// records: the latest `Name` record's value, so a name cleared before
+    /// the first flush claims nothing. Ephemeral sessions never persist one.
+    fn first_user_name(&self, records: &[Record]) -> Option<String> {
+        if self.ephemeral {
+            return None;
+        }
+        self.records
+            .iter()
+            .chain(records.iter())
+            .rev()
+            .find_map(|record| match record {
+                Record::Name { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .flatten()
+            .map(|name| name.to_string())
+    }
+
     async fn append_first_user(
         &mut self,
         records: Vec<Record>,
@@ -914,116 +1054,47 @@ impl Journal {
         validation: journal::ValidationDelta,
         refresh_info: bool,
     ) -> Result<AppendOutcome, StoreError> {
-        if let Err(error) = validate_record_values(&records) {
-            self.state = State::Lazy { blobs };
-            return Err(error);
-        }
-        let bytes = match encode_records(self.records.iter().chain(records.iter())) {
-            Ok(bytes) => bytes,
+        let (bytes, byte_len) = match self.encode_first(&records) {
+            Ok(pair) => pair,
             Err(error) => {
                 self.state = State::Lazy { blobs };
                 return Err(error);
             }
         };
-        let Ok(byte_len) = u64::try_from(bytes.len()) else {
-            self.state = State::Lazy { blobs };
-            return Err(StoreError::Invalid {
-                reason: "journal batch length exceeds the byte counter".into(),
-            });
-        };
-        let blob_dir = self.paths.directory().join("blobs");
-        let jobs_dir = self.paths.jobs();
-        if let Err(source) = util::create_private_dir_all(self.paths.directory()) {
-            self.state = State::Lazy { blobs };
-            return Err(util::io_err(self.paths.directory(), source));
-        }
-        let lock = match self.prelocked.take() {
-            Some(lock) => lock,
-            None => match LockGuard::acquire(&self.paths.lock(), self.id) {
-                Ok(lock) => lock,
-                Err(error) => {
-                    self.state = State::Lazy { blobs };
-                    return Err(error);
-                }
-            },
-        };
-        let directory_setup = (|| {
-            util::create_private_dir_all(&blob_dir)
-                .map_err(|source| util::io_err(&blob_dir, source))?;
-            util::create_private_dir_all(&jobs_dir)
-                .map_err(|source| util::io_err(&jobs_dir, source))?;
-            Ok::<(), StoreError>(())
-        })();
-        if let Err(error) = directory_setup {
-            self.prelocked = Some(lock);
-            self.state = State::Lazy { blobs };
-            return Err(error);
-        }
-        if !self.ephemeral {
-            let mut current_name = None;
-            for record in self.records.iter().chain(records.iter()) {
-                if let Record::Name { name, .. } = record {
-                    current_name = name.as_deref();
-                }
+        let current_name = self.first_user_name(&records);
+        let id = self.id;
+        let mut mark = std::time::Instant::now();
+        let lap = |step: &str, mark: &mut std::time::Instant| {
+            let taken = mark.elapsed();
+            if taken > std::time::Duration::from_millis(250) {
+                eprintln!("[dal-store] session {id:?} first-append {step} took {taken:?}");
             }
-            if let Some(name) = current_name {
-                let workspace_dir = self
-                    .inner
-                    .data_root
-                    .join("sessions")
-                    .join(&self.inner.workspace_key);
-                if let Err(error) = self.inner.listing.normalize_name(
-                    &workspace_dir,
-                    &self.inner.workspace,
-                    Some(name),
-                    Some(self.id),
-                ) {
-                    self.prelocked = Some(lock);
-                    self.state = State::Lazy { blobs };
-                    return Err(error);
-                }
-            }
-        }
-        let store = Store {
-            inner: Arc::clone(&self.inner),
+            *mark = std::time::Instant::now();
         };
-        let shards = match store.shards() {
+        let shards = match crate::shard::shared() {
             Ok(shards) => shards,
             Err(error) => {
-                self.prelocked = Some(lock);
+                self.state = State::Lazy { blobs };
+                return Err(error.into());
+            }
+        };
+        lap("shards-init", &mut mark);
+        // A permit wait has no timeout: holder starvation would park
+        // every later create in silence, so long waits log each 30 s.
+        let create_permit = match self.inner.acquire_create().await {
+            Ok(permit) => permit,
+            Err(error) => {
                 self.state = State::Lazy { blobs };
                 return Err(error);
             }
         };
-        self.state = State::Broken {
-            lane: None,
-            lock: Some(lock),
-        };
-        for blob in blobs {
-            blob::put_prepared(&blob_dir, blob)?;
-        }
-
-        let journal_path = self.paths.journal();
-        let file_journal = match FileJournal::create(&journal_path, &bytes, &Faults::default()) {
-            Ok(journal) => journal,
-            Err(error) => {
-                if !journal_path.exists() {
-                    let state = std::mem::replace(&mut self.state, State::Closed);
-                    if let State::Broken {
-                        lock: Some(lock), ..
-                    } = state
-                    {
-                        self.prelocked = Some(lock);
-                    }
-                    self.state = State::Lazy { blobs: Vec::new() };
-                }
-                return Err(write_failure(self.id, error.into()));
-            }
-        };
+        lap("create-permit", &mut mark);
+        let file_journal = self.spawn_first_create(blobs, current_name, bytes).await?;
+        drop(create_permit);
         #[cfg(test)]
         let file_journal = {
             let mut file_journal = file_journal;
-            file_journal.set_faults(store.faults());
+            file_journal.set_faults(self.inner.faults());
             file_journal
         };
         self.pending = Some(PendingAppend {
@@ -1034,6 +1105,7 @@ impl Journal {
             validation,
             refresh_info,
         });
+        lap("create-join", &mut mark);
         let lane = shards
             .attach(
                 self.id,
@@ -1041,6 +1113,7 @@ impl Journal {
                 Some(self.paths.directory().join("blobs")),
             )
             .await?;
+        lap("attach", &mut mark);
         let lock = match &mut self.state {
             State::Broken { lane: None, lock } => lock.take(),
             _ => None,
@@ -1053,6 +1126,93 @@ impl Journal {
         };
         self.apply_pending(receipt)?;
         Ok(AppendOutcome::Durable(receipt))
+    }
+
+    /// Spawns and joins the first-append disk setup, parking the lock in
+    /// `State::Broken` for the shard attach to collect; on failure the
+    /// state restores `Lazy` when no journal file landed.
+    async fn spawn_first_create(
+        &mut self,
+        blobs: Vec<PendingBlob>,
+        current_name: Option<String>,
+        bytes: Vec<u8>,
+    ) -> Result<FileJournal, StoreError> {
+        self.state = State::Broken {
+            lane: None,
+            lock: None,
+        };
+        // First-append setup is mkdirs, a lock acquire, name and blob
+        // publishes, and the journal create — every step writes and syncs.
+        // Running them on the async worker monopolizes a single-threaded
+        // executor under slow storage, serializing every session's first
+        // append behind one task's fsyncs; the blocking pool owns all of it,
+        // bounded to shard width by `create_permits` (R-perf).
+        let directory = self.paths.directory().to_path_buf();
+        let journal_path = self.paths.journal();
+        let setup_journal_path = journal_path.clone();
+        let id = self.id;
+        let creation = tokio::task::spawn_blocking({
+            let blob_dir = directory.join("blobs");
+            let jobs_dir = self.paths.jobs();
+            let lock_path = self.paths.lock();
+            let workspace_dir = self
+                .inner
+                .data_root
+                .join("sessions")
+                .join(&self.inner.workspace_key);
+            let workspace = self.inner.workspace.clone();
+            let inner = Arc::clone(&self.inner);
+            let prelocked = self.prelocked.take();
+            move || {
+                first_append_setup(FirstAppendSetup {
+                    directory,
+                    blob_dir,
+                    jobs_dir,
+                    lock_path,
+                    journal_path: setup_journal_path,
+                    workspace_dir,
+                    workspace,
+                    inner,
+                    id,
+                    prelocked,
+                    current_name,
+                    blobs,
+                    bytes,
+                })
+            }
+        });
+        let mut creation = Box::pin(creation);
+        let outcome = loop {
+            // The join has no timeout either: a pooled blocking task that
+            // never schedules parks the permit and every later create.
+            match tokio::time::timeout(std::time::Duration::from_secs(30), &mut creation).await {
+                Ok(outcome) => break outcome,
+                Err(_elapsed) => {
+                    eprintln!("[dal-store] session {id:?} journal create task outstanding");
+                }
+            }
+        };
+        let (lock, file_journal) = match outcome {
+            Ok(Ok(pair)) => pair,
+            Ok(Err(error)) => {
+                if !journal_path.exists() {
+                    self.state = State::Lazy { blobs: Vec::new() };
+                }
+                return Err(write_failure(self.id, error));
+            }
+            Err(join) => {
+                if !journal_path.exists() {
+                    self.state = State::Lazy { blobs: Vec::new() };
+                }
+                return Err(StoreError::Invalid {
+                    reason: format!("journal create task failed to join: {join}").into(),
+                });
+            }
+        };
+        if let State::Broken { lock: slot, .. } = &mut self.state {
+            *slot = Some(lock);
+        }
+        Ok(file_journal)
     }
 
     async fn append_file(
@@ -1489,6 +1649,68 @@ fn write_failure(id: SessionId, error: StoreError) -> StoreError {
         },
         error => error,
     }
+}
+
+/// Acquires the session lock and opens the journal on the blocking pool.
+///
+/// The lock acquire and the scan/repair open both write and sync, so they
+/// run off the executor (R-perf). A lock held by this same process is
+/// retried briefly: it always signals another journal object inside the
+/// process — an owner still draining a first append or a shutdown still
+/// releasing handles — never a foreign process, so a bounded wait resolves
+/// the contention instead of reporting `Locked` for our own ownership.
+/// The budget spans a convoyed first-append queue on slow filesystems.
+async fn open_locked_journal(
+    paths: &SessionPaths,
+    id: SessionId,
+    faults: Faults,
+) -> Result<(LockGuard, journal::Opened), StoreError> {
+    const RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
+    const RETRY_POLL: std::time::Duration = std::time::Duration::from_millis(25);
+    let deadline = tokio::time::Instant::now() + RETRY_BUDGET;
+    let mut mark = std::time::Instant::now();
+    let lap = |step: &str, mark: &mut std::time::Instant| {
+        let taken = mark.elapsed();
+        if taken > std::time::Duration::from_millis(250) {
+            eprintln!("[dal-store] open-locked-journal {step} took {taken:?}");
+        }
+        *mark = std::time::Instant::now();
+    };
+    loop {
+        let journal_path = paths.journal();
+        let lock_path = paths.lock();
+        let faults = faults.clone();
+        let attempt = tokio::task::spawn_blocking(move || {
+            let lock = LockGuard::acquire(&lock_path, id)?;
+            let opened = FileJournal::open(&journal_path, &faults)
+                .map_err(|failure| map_open_failure(&journal_path, failure))?;
+            Ok::<_, StoreError>((lock, opened))
+        })
+        .await;
+        lap("acquire-open", &mut mark);
+        match attempt {
+            Ok(Ok(pair)) => return Ok(pair),
+            Ok(Err(StoreError::Locked { pid, .. }))
+                if lock_might_be_ours(pid) && tokio::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(RETRY_POLL).await;
+            }
+            Ok(Err(error)) => return Err(error),
+            Err(join) => {
+                return Err(StoreError::Invalid {
+                    reason: format!("journal open task failed to join: {join}").into(),
+                });
+            }
+        }
+    }
+}
+
+/// The owner sidecar keeps the holder pid readable even while a lock seal
+/// blocks reads of the lock file itself, so only a lock held by this process
+/// is worth waiting out. An absent pid is never ours: our own acquisitions
+/// publish the sidecar before contention can read it.
+fn lock_might_be_ours(pid: Option<u32>) -> bool {
+    pid == Some(std::process::id())
 }
 
 #[cfg(test)]

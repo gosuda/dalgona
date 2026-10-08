@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU64;
 use std::path::Path;
 use std::sync::Arc;
@@ -50,10 +50,11 @@ fn engine_with_turn(cfg: GuardConfig) -> (Arc<Engine>, SessionId, TurnId) {
         session,
         Session {
             reset_due: false,
-            seen_warnings: HashSet::default(),
+            seen_warnings: std::collections::HashSet::default(),
             turn: Some(TurnState {
                 id: turn,
                 reduction_ask: false,
+                counted: std::collections::HashSet::default(),
                 added: 0,
                 deleted: 0,
                 files: BTreeSet::new(),
@@ -64,16 +65,15 @@ fn engine_with_turn(cfg: GuardConfig) -> (Arc<Engine>, SessionId, TurnId) {
                 last_error: None,
                 pending_notices: Vec::new(),
                 sequence: 0,
-                calls: HashMap::default(),
+                calls: std::collections::HashMap::default(),
                 first_pre: BTreeMap::new(),
                 last_post: BTreeMap::new(),
-                inspected: HashMap::default(),
                 bands: Vec::new(),
                 warnings: Vec::new(),
                 stream_counts: BTreeMap::new(),
                 fired: BTreeSet::new(),
                 findings: BTreeMap::new(),
-                notices: HashSet::default(),
+                notices: std::collections::HashSet::default(),
             }),
             pending: None,
             announced_blocks: false,

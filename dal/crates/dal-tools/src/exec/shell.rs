@@ -4,6 +4,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[cfg(windows)]
+use std::ffi::OsStr;
+
 use super::ExecError;
 
 #[derive(Debug)]
@@ -98,10 +101,10 @@ fn default_windows_ladder(
             return Ok(ResolvedShell { program: candidate });
         }
     }
-    if let Some(path) = path {
-        if let Some(program) = find_in_path("bash.exe", path) {
-            return Ok(ResolvedShell { program });
-        }
+    if let Some(path) = path
+        && let Some(program) = find_in_path("bash.exe", path)
+    {
+        return Ok(ResolvedShell { program });
     }
     Err(ExecError::NoBash)
 }
@@ -123,14 +126,15 @@ fn is_executable_file(path: &Path) -> bool {
 
 #[cfg(windows)]
 fn is_executable_file(path: &Path) -> bool {
-    std::fs::metadata(path)
-        .map(|metadata| metadata.is_file())
-        .unwrap_or(false)
+    std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file())
 }
 
 #[cfg(test)]
 mod tests {
     use std::{collections::BTreeMap, fs, path::Path};
+
+    #[cfg(windows)]
+    use std::ffi::OsString;
 
     use super::resolve;
 

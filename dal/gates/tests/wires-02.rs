@@ -1,13 +1,12 @@
-//! Public serve replacement needs an owner-only token and the force flag.
+//! Public serve requires the owner token and `force` to replace sessions.
 #![expect(
     clippy::disallowed_methods,
     reason = "SC test exercises real server commands"
 )]
-#![expect(
+#[expect(
     dead_code,
-    reason = "gate support exposes helpers shared across independent targets"
+    reason = "gate support helpers are shared across independent test targets"
 )]
-
 mod support;
 
 use std::{error::Error, fs, process::Command};
@@ -30,6 +29,7 @@ async fn public_serve_requires_owner_only_token_and_force_to_replace()
     let missing = Command::new(binary)
         .current_dir(&workspace)
         .env_clear()
+        .envs(support::captured_shell_vars())
         .env("HOME", &home)
         .env("XDG_DATA_HOME", &data_home)
         .env("NO_COLOR", "1")
@@ -50,6 +50,7 @@ async fn public_serve_requires_owner_only_token_and_force_to_replace()
     let created = Command::new(binary)
         .current_dir(&workspace)
         .env_clear()
+        .envs(support::captured_shell_vars())
         .env("HOME", &home)
         .env("XDG_DATA_HOME", &data_home)
         .args(["serve", "token"])
@@ -64,7 +65,7 @@ async fn public_serve_requires_owner_only_token_and_force_to_replace()
     assert_eq!(fs::metadata(&token)?.permissions().mode() & 0o777, 0o600);
     #[cfg(windows)]
     {
-        let acl_check = r#"
+        let acl_check = r"
 $acl = Get-Acl -LiteralPath $env:DALGON_TOKEN_PATH
 if (-not $acl.AreAccessRulesProtected) { exit 10 }
 $owner = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
@@ -74,7 +75,7 @@ $allowed = @($acl.Access |
 $privileged = @($owner, 'S-1-5-18', 'S-1-5-32-544')
 if (-not $allowed.Contains($owner)) { exit 11 }
 if (@($allowed | Where-Object { $_ -notin $privileged }).Count -ne 0) { exit 12 }
-"#;
+";
         let result = Command::new("powershell")
             .args(["-NoProfile", "-NonInteractive", "-Command", acl_check])
             .env("DALGON_TOKEN_PATH", &token)
@@ -89,6 +90,7 @@ if (@($allowed | Where-Object { $_ -notin $privileged }).Count -ne 0) { exit 12 
     let refused = Command::new(binary)
         .current_dir(&workspace)
         .env_clear()
+        .envs(support::captured_shell_vars())
         .env("HOME", &home)
         .env("XDG_DATA_HOME", &data_home)
         .args(["serve", "token"])
@@ -99,6 +101,7 @@ if (@($allowed | Where-Object { $_ -notin $privileged }).Count -ne 0) { exit 12 
     let forced = Command::new(binary)
         .current_dir(&workspace)
         .env_clear()
+        .envs(support::captured_shell_vars())
         .env("HOME", &home)
         .env("XDG_DATA_HOME", &data_home)
         .args(["serve", "token", "--force"])

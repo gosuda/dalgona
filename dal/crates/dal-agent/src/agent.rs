@@ -6,8 +6,8 @@
 use std::sync::Arc;
 
 use dal_core::{
-    Answer, BlobId, ClientId, Command, ExtStatus, Gen, PageReq, Reply, RequestId, Seq, SessionId,
-    Timestamp, View, Workspace,
+    Answer, BlobId, CancelScope, ClientId, Command, ExtStatus, Gen, PageReq, Reply, RequestId, Seq,
+    SessionId, Timestamp, View, Workspace,
 };
 
 use crate::broker::Broker;
@@ -50,6 +50,7 @@ pub(crate) struct AgentInner {
     pub(crate) broker: Arc<Broker>,
     pub(crate) workspace: Workspace,
     pub(crate) generation: Gen,
+    pub(crate) control: Arc<std::sync::Mutex<crate::session::control::ControlCell>>,
     pub(crate) created_at: Option<Timestamp>,
     pub(crate) archived: Option<bool>,
 }
@@ -104,22 +105,52 @@ impl Agent {
     }
 
     /// Registers a subscriber at the given cursor on the shared snapshot.
+    /// The subscriber counts as an attached answerer: approval requests wait
+    /// for it before falling back to headless denial.
     ///
     /// # Errors
     /// This operation currently has no error cases and always returns `Ok`.
     pub fn subscribe(&self, after: Option<(Gen, Seq)>) -> Result<Subscription, AgentError> {
         Ok(Subscription {
-            port: self.inner.shared.subscribe(after),
+            port: self.inner.shared.subscribe(after, true),
+        })
+    }
+
+    /// Registers a listen-only subscriber at the given cursor. It receives the
+    /// same delivery stream but never counts as an attached answerer, so a
+    /// run with only listeners denies approval asks instead of waiting out
+    /// the request timeout.
+    ///
+    /// # Errors
+    /// This operation currently has no error cases and always returns `Ok`.
+    pub fn subscribe_listen(&self, after: Option<(Gen, Seq)>) -> Result<Subscription, AgentError> {
+        Ok(Subscription {
+            port: self.inner.shared.subscribe(after, false),
         })
     }
 
     /// Submits a command through the fold; full channels apply backpressure.
+    ///
+    /// A `Cancel` fires the turn token before the command crosses the
+    /// channel, so it preempts in-flight opening hooks and live streams
+    /// instead of waiting behind them.
     ///
     /// # Errors
     /// Returns [`AgentError::Invalid`] for a rejected command, [`AgentError::WrongTurn`]
     /// when its turn state does not match, [`AgentError::SteerFull`] when the steer
     /// queue is full, or [`AgentError::SessionClosed`] when the session is closed.
     pub async fn submit(&self, command: Command) -> Result<Reply, AgentError> {
+        if let Command::Cancel {
+            scope: CancelScope::Turn(turn),
+        } = &command
+        {
+            let _ = self
+                .inner
+                .control
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .cancel(*turn);
+        }
         self.inner
             .handle
             .submit(command, self.inner.client.clone())

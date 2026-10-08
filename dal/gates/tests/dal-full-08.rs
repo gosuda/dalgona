@@ -1,14 +1,13 @@
 //! Gate-full scenario 8: mailbox FIFO cursor reads with full-or-gone receipts.
 #![expect(clippy::expect_used, reason = "SC test")]
-#![expect(
-    dead_code,
-    reason = "gate support exposes helpers shared across independent targets"
-)]
 
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
 use std::{
-    collections::BTreeMap,
     error::Error,
     future::pending,
     sync::{
@@ -164,10 +163,7 @@ impl Hook<dal_core::ext::BeforeRequest, Option<RequestParams>> for MailboxHook {
     }
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "the mailbox probe walks parent, child, and receipt delivery in one helper"
-)]
+#[expect(clippy::too_many_lines, reason = "SC mailbox probe is one long script")]
 async fn run_mailbox_probe(
     state: &MailboxState,
     services: &Arc<dyn Services>,
@@ -553,7 +549,7 @@ async fn mailbox_is_fifo_cursor_read_and_reports_full_or_gone()
     })?;
     product.extensions.push(extension);
     let env = Env {
-        vars: BTreeMap::new(),
+        vars: support::captured_shell_vars(),
         cwd: workspace.path().to_path_buf(),
         sandbox_helper: None,
     };

@@ -20,7 +20,7 @@ thiserror = "=2.0.21"
 uuid = { version = "=1.26.1", features = ["v7"] }
 jiff = { version = "=0.2.37", features = ["serde"] }
 toml = "=1.1.6"
-toml_edit = "=0.25.15+spec-1.1.0"
+toml_edit = "=0.25.15"
 proptest = "=1.11.0"
 png = "=0.18.1"
 unicode-width = "=0.2.2"
@@ -44,6 +44,7 @@ regex = "=1.13.1"
 process-wrap = { version = "=10.0.1", features = ["tokio1", "process-group", "job-object", "kill-on-drop"] }
 rustix = { version = "=1.1.5", features = ["process"] }
 landlock = "=0.4.7"
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Isolation", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_System_Com", "Win32_System_Console", "Win32_System_JobObjects", "Win32_System_LibraryLoader", "Win32_System_SystemServices"] }
 similar = "=3.2.0"
 dal-core = { path = "crates/dal-core", version = "=0.1.0" }
 dal-agent = { path = "crates/dal-agent", version = "=0.1.0" }

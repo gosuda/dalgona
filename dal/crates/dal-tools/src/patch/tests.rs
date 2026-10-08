@@ -14,14 +14,52 @@ use dal_core::{
 use dal_core::{CallId, GenerationId, SessionId, TurnId};
 
 use super::{
-    ir::{DialectId, EditFinding, EditObserver, FindingSeverity, StagedBatch},
+    ir::{
+        Action, DialectId, Edit, EditFinding, EditObserver, FindingSeverity, Guard, Locator,
+        Operation, StagedBatch, Window,
+    },
     snapshot::{ReadRef, SnapshotStore},
     style::{EditStyleInput, parse_edit_style, pick},
     styles,
-    write::{PatchSession, commit, plan},
+    write::{PatchSession, commit, plan, stage},
 };
 
 mod observation;
+
+fn change_edit(path: &str, locator: Locator, action: Action, body: &str) -> Edit {
+    change_edit_guard(path, locator, action, Guard::Quoted, body)
+}
+
+fn change_edit_guard(
+    path: &str,
+    locator: Locator,
+    action: Action,
+    guard: Guard,
+    body: &str,
+) -> Edit {
+    Edit::Change {
+        index: 0,
+        path: std::path::PathBuf::from(path),
+        locator,
+        action,
+        guard,
+        body: body.to_owned(),
+        window: Window::BeforePayload,
+    }
+}
+
+async fn stage_one(
+    session: &PatchSession,
+    path: &std::path::Path,
+    bytes: &[u8],
+    edits: Vec<Edit>,
+) -> Result<super::ir::StagedFileOwned, super::ir::EngineError> {
+    let canonical = session.workspace.join(path);
+    tokio::fs::write(&canonical, bytes)
+        .await
+        .expect("seed the target file");
+    stage::stage_file(session, DialectId::Replace, path, &canonical, edits).await
+}
 
 fn test_session(workspace: &std::path::Path, symbols: bool) -> PatchSession {
     PatchSession {
@@ -716,8 +754,9 @@ async fn apply_replacement_blocking_observer_prevents_write() {
     );
 }
 
-type RecordingLog = Vec<(Vec<u8>, Vec<String>)>;
-struct RecordingObserver(Arc<Mutex<RecordingLog>>);
+type Recorded = (Vec<u8>, Vec<String>);
+
+struct RecordingObserver(Arc<Mutex<Vec<Recorded>>>);
 
 impl EditObserver for RecordingObserver {
     fn inspect(&self, batch: &StagedBatch<'_>) -> Vec<EditFinding> {
@@ -835,197 +874,1355 @@ async fn replacement_preview_matches_replace_record() {
 }
 
 #[tokio::test]
-async fn batch_delete_failure_mid_commit_restores_earlier_deletes_and_leaves_no_trash() {
-    // Two deletes stage cleanly. The commit's Phase-B delete loop moves the
-    // first file to trash; the second source is replaced by a directory so
-    // its trash rename fails with ENOTDIR/EISDIR after the first is gone.
-    // The rollback must restore the first delete and leave no trash behind.
+async fn stage_lines_actions_and_invalid_ranges() {
     let dir = tempfile::tempdir().expect("temp workspace");
-    tokio::fs::write(dir.path().join("alpha.txt"), b"alpha\n")
-        .await
-        .expect("seed alpha");
-    tokio::fs::write(dir.path().join("beta.txt"), b"beta\n")
-        .await
-        .expect("seed beta");
     let session = test_session(dir.path(), false);
-    let planned = plan(
-        &session,
-        DialectId::Replace,
-        r#"{"changes":[{"path":"alpha.txt","delete":true},{"path":"beta.txt","delete":true}]}"#,
-    )
-    .await
-    .expect("both deletes stage");
-    // Beta's staging read succeeded; replacing the file with a directory
-    // after staging makes only the commit-time rename fail.
-    tokio::fs::remove_file(dir.path().join("beta.txt"))
+    let path = std::path::Path::new("a.txt");
+    for (action, expected) in [
+        (Action::Replace, "a\nX\nd\n"),
+        (Action::InsertBefore, "a\nX\nb\nc\nd\n"),
+        (Action::InsertAfter, "a\nb\nc\nX\nd\n"),
+    ] {
+        let staged = stage_one(
+            &session,
+            path,
+            b"a\nb\nc\nd\n",
+            vec![change_edit(
+                "a.txt",
+                Locator::Lines { first: 2, last: 3 },
+                action,
+                "X\n",
+            )],
+        )
         .await
-        .expect("remove beta");
-    tokio::fs::create_dir(dir.path().join("beta.txt"))
-        .await
-        .expect("replace beta with a directory");
-    let output = commit(&session, planned, &[]).await;
-    assert!(
-        output.error_class.is_some(),
-        "the torn second delete must fail the batch: {}",
-        output.text
-    );
-    let restored = tokio::fs::read(dir.path().join("alpha.txt"))
-        .await
-        .expect("alpha readable");
-    assert_eq!(
-        restored, b"alpha\n",
-        "a failed batch must restore earlier deleted files"
-    );
-    let mut leftovers = 0;
-    let mut entries = tokio::fs::read_dir(dir.path()).await.expect("dir");
-    while let Some(entry) = entries.next_entry().await.expect("entry") {
-        if entry
-            .file_name()
-            .to_string_lossy()
-            .starts_with(".dalgon-trash-")
-        {
-            leftovers += 1;
-        }
+        .expect("lines edit plans");
+        assert_eq!(&*staged.after.expect("after"), expected.as_bytes());
+        assert_eq!(staged.op, Operation::Update);
+        assert!(!staged.hunks.is_empty(), "replace dialect emits hunks");
     }
-    assert_eq!(leftovers, 0, "no trash file may survive the commit");
-}
-
-#[tokio::test]
-async fn batch_delete_failure_restores_the_earlier_deleted_file() {
-    // A delete target swapped for a directory after staging reads as stale:
-    // commit must refuse atomically before any writes, and leave the
-    // directory untouched.
-    let dir = tempfile::tempdir().expect("temp workspace");
-    tokio::fs::write(dir.path().join("only.txt"), b"only\n")
+    for (first, last) in [(0, 1), (3, 2), (1, 9)] {
+        let error = stage_one(
+            &session,
+            path,
+            b"a\nb\nc\nd\n",
+            vec![change_edit(
+                "a.txt",
+                Locator::Lines { first, last },
+                Action::Replace,
+                "X\n",
+            )],
+        )
         .await
-        .expect("seed only");
-    let session = test_session(dir.path(), false);
-    let planned = plan(
-        &session,
-        DialectId::Replace,
-        r#"{"changes":[{"path":"only.txt","delete":true}]}"#,
-    )
-    .await
-    .expect("delete stages");
-    tokio::fs::remove_file(dir.path().join("only.txt"))
-        .await
-        .expect("remove only");
-    tokio::fs::create_dir(dir.path().join("only.txt"))
-        .await
-        .expect("replace only with a directory");
-    let output = commit(&session, planned, &[]).await;
-    assert!(
-        output.error_class.is_some(),
-        "the torn delete must fail the batch: {}",
-        output.text
-    );
-    let metadata = tokio::fs::metadata(dir.path().join("only.txt"))
-        .await
-        .expect("only.txt present");
-    assert!(
-        metadata.is_dir(),
-        "an atomic refusal before writes leaves the directory in place"
-    );
-    assert!(
-        output.text.contains("Nothing was written"),
-        "the refusal names atomic semantics: {}",
-        output.text
-    );
-}
-
-#[tokio::test]
-async fn rename_to_a_directory_that_swallowed_the_destination_fails_without_trash() {
-    // The destination is absent at staging; it appears as a directory before
-    // the install, so the commit's no-replace preflight fails atomically.
-    let dir = tempfile::tempdir().expect("temp workspace");
-    tokio::fs::write(dir.path().join("alpha.txt"), b"alpha\n")
-        .await
-        .expect("seed alpha");
-    let session = test_session(dir.path(), false);
-    let planned = plan(
-        &session,
-        DialectId::Replace,
-        r#"{"changes":[{"path":"alpha.txt","rename":"dest.txt"}]}"#,
-    )
-    .await
-    .expect("rename to an absent destination stages");
-    tokio::fs::create_dir(dir.path().join("dest.txt"))
-        .await
-        .expect("destination appears as a directory");
-    let output = commit(&session, planned, &[]).await;
-    assert!(
-        output.error_class.is_some(),
-        "the install rename must fail: {}",
-        output.text
-    );
-    assert_eq!(
-        tokio::fs::read(dir.path().join("alpha.txt"))
-            .await
-            .expect("bytes"),
-        b"alpha\n",
-        "a failed rename must restore the source"
-    );
-    let mut leftovers = 0;
-    let mut entries = tokio::fs::read_dir(dir.path()).await.expect("dir");
-    while let Some(entry) = entries.next_entry().await.expect("entry") {
-        if entry
-            .file_name()
-            .to_string_lossy()
-            .starts_with(".dalgon-trash-")
-        {
-            leftovers += 1;
-        }
+        .expect_err("invalid range rejects");
+        assert_eq!(error.class, super::ir::ErrorClass::Resolve);
     }
-    assert_eq!(leftovers, 0, "no trash file may survive the commit");
 }
 
 #[tokio::test]
-async fn rename_to_a_destination_that_became_a_directory_restores_the_source() {
-    // A rename destination that exists at staging is refused before approval.
+async fn stage_gap_inserts_and_bounds() {
     let dir = tempfile::tempdir().expect("temp workspace");
-    tokio::fs::write(dir.path().join("alpha.txt"), b"alpha\n")
-        .await
-        .expect("seed alpha");
-    tokio::fs::write(dir.path().join("dest.txt"), b"dest\n")
-        .await
-        .expect("seed dest");
     let session = test_session(dir.path(), false);
-    let planned = plan(
+    let path = std::path::Path::new("a.txt");
+    for (before_line, expected) in [
+        (0_usize, "X\na\nb\n"),
+        (2, "a\nX\nb\n"),
+        (usize::MAX, "a\nb\nX\n"),
+    ] {
+        let staged = stage_one(
+            &session,
+            path,
+            b"a\nb\n",
+            vec![change_edit(
+                "a.txt",
+                Locator::Gap { before_line },
+                Action::InsertAfter,
+                "X\n",
+            )],
+        )
+        .await
+        .expect("gap plans");
+        assert_eq!(&*staged.after.expect("after"), expected.as_bytes());
+    }
+    let error = stage_one(
         &session,
-        DialectId::Replace,
-        r#"{"changes":[{"path":"alpha.txt","rename":"dest.txt"}]}"#,
+        path,
+        b"a\nb\n",
+        vec![change_edit(
+            "a.txt",
+            Locator::Gap { before_line: 9 },
+            Action::InsertAfter,
+            "X\n",
+        )],
     )
     .await
-    .expect_err("rename to an existing destination must refuse at staging");
-    assert!(
-        planned.message.contains("already exists"),
-        "staging must refuse an occupied destination: {}",
-        planned.message
-    );
+    .expect_err("past-end gap rejects");
+    assert_eq!(error.class, super::ir::ErrorClass::Resolve);
 }
 
 #[tokio::test]
-async fn rename_destination_directory_chain_is_created_inside_the_workspace() {
-    // Phase A creates the destination parent chain; the whole chain must land
-    // under the workspace root.
+async fn stage_text_unique_ambiguous_hinted_and_all() {
     let dir = tempfile::tempdir().expect("temp workspace");
-    tokio::fs::write(dir.path().join("a.txt"), b"alpha\n")
-        .await
-        .expect("seed alpha");
     let session = test_session(dir.path(), false);
-    let planned = plan(
+    let path = std::path::Path::new("a.txt");
+    let text_locator = |all: bool, line_hint: Option<usize>| Locator::Text {
+        old: "x".to_owned(),
+        line_hint,
+        all,
+        window: Window::BeforePayload,
+        context: None,
+        at_eof: false,
+    };
+    let staged = stage_one(
         &session,
-        DialectId::Replace,
-        r#"{"changes":[{"path":"a.txt","rename":"new/deep/dest.txt"}]}"#,
+        path,
+        b"x\ny\nx\n",
+        vec![change_edit(
+            "a.txt",
+            text_locator(false, Some(3)),
+            Action::Replace,
+            "Z",
+        )],
     )
     .await
-    .expect("in-workspace rename plans");
-    let output = commit(&session, planned, &[]).await;
-    assert_eq!(output.error_class, None, "{}", output.text);
+    .expect("hinted match plans");
+    assert_eq!(&*staged.after.expect("after"), b"x\ny\nZ\n");
+    let error = stage_one(
+        &session,
+        path,
+        b"x\ny\nx\n",
+        vec![change_edit(
+            "a.txt",
+            text_locator(false, None),
+            Action::Replace,
+            "Z",
+        )],
+    )
+    .await
+    .expect_err("unhinted duplicate rejects");
+    assert_eq!(error.class, super::ir::ErrorClass::Resolve);
+    let error = stage_one(
+        &session,
+        path,
+        b"x\ny\nx\n",
+        vec![change_edit(
+            "a.txt",
+            text_locator(false, Some(2)),
+            Action::Replace,
+            "Z",
+        )],
+    )
+    .await
+    .expect_err("hint on a non-match line rejects");
+    assert_eq!(error.class, super::ir::ErrorClass::Resolve);
+    let staged = stage_one(
+        &session,
+        path,
+        b"x\ny\nx\n",
+        vec![change_edit(
+            "a.txt",
+            text_locator(true, None),
+            Action::Replace,
+            "Z",
+        )],
+    )
+    .await
+    .expect("replace-all plans");
+    assert_eq!(&*staged.after.expect("after"), b"Z\ny\nZ\n");
+    let error = stage_one(
+        &session,
+        path,
+        b"x\ny\nx\n",
+        vec![change_edit(
+            "a.txt",
+            Locator::Text {
+                old: "q".to_owned(),
+                line_hint: None,
+                all: false,
+                window: Window::BeforePayload,
+                context: None,
+                at_eof: false,
+            },
+            Action::Replace,
+            "Z",
+        )],
+    )
+    .await
+    .expect_err("absent needle rejects");
+    assert_eq!(error.class, super::ir::ErrorClass::Resolve);
+}
+
+#[tokio::test]
+async fn stage_text_all_seen_gate_and_overlap_scan() {
+    let dir = tempfile::tempdir().expect("temp workspace");
+    let session = test_session(dir.path(), false);
+    let path = std::path::Path::new("a.txt");
+    let all = |needle: &str| Locator::Text {
+        old: needle.to_owned(),
+        line_hint: None,
+        all: true,
+        window: Window::BeforePayload,
+        context: None,
+        at_eof: false,
+    };
+    // Seen guard without coverage: replace-all fails proof.
+    let error = stage_one(
+        &session,
+        path,
+        b"x\ny\nx\n",
+        vec![change_edit_guard(
+            "a.txt",
+            all("x"),
+            Action::Replace,
+            Guard::Seen,
+            "Z",
+        )],
+    )
+    .await
+    .expect_err("all+seen without coverage rejects");
+    assert_eq!(error.class, super::ir::ErrorClass::Proof);
+    // With full coverage the same edit plans.
+    let bytes = b"x\ny\nx\n";
+    let digest = *blake3::hash(bytes).as_bytes();
+    session.seen.show(session.session, "a.txt", digest, 1, 3);
+    let staged = stage_one(
+        &session,
+        path,
+        bytes,
+        vec![change_edit_guard(
+            "a.txt",
+            all("x"),
+            Action::Replace,
+            Guard::Seen,
+            "Z",
+        )],
+    )
+    .await
+    .expect("covered all plans");
+    assert_eq!(&*staged.after.expect("after"), b"Z\ny\nZ\n");
+    // Overlapping needle: "aa" in "aaa" matches twice under the one-step
+    // scan, and the descending splice collapses both spans into one write.
+    let staged = stage_one(
+        &session,
+        path,
+        b"h\naaa\nt\n",
+        vec![change_edit_guard(
+            "a.txt",
+            all("aa"),
+            Action::Replace,
+            Guard::Quoted,
+            "Z",
+        )],
+    )
+    .await
+    .expect("overlapping all plans");
+    assert_eq!(&*staged.after.expect("after"), b"h\nZ\nt\n");
+}
+
+#[tokio::test]
+async fn stage_span_requires_seen_coverage() {
+    let dir = tempfile::tempdir().expect("temp workspace");
+    let session = test_session(dir.path(), false);
+    let path = std::path::Path::new("a.txt");
+    let span = |first, last| Locator::Span {
+        first,
+        last,
+        quoted: vec![],
+    };
+    let error = stage_one(
+        &session,
+        path,
+        b"a\nb\nc\n",
+        vec![change_edit("a.txt", span(1, 2), Action::Replace, "X\n")],
+    )
+    .await
+    .expect_err("unseen span rejects");
+    assert_eq!(error.class, super::ir::ErrorClass::Proof);
+    let bytes = b"a\nb\nc\n";
+    let digest = *blake3::hash(bytes).as_bytes();
+    session.seen.show(session.session, "a.txt", digest, 1, 2);
+    let staged = stage_one(
+        &session,
+        path,
+        bytes,
+        vec![change_edit("a.txt", span(1, 2), Action::Replace, "X\n")],
+    )
+    .await
+    .expect("covered span plans");
+    assert_eq!(&*staged.after.expect("after"), b"X\nc\n");
+    let error = stage_one(
+        &session,
+        path,
+        bytes,
+        vec![change_edit("a.txt", span(1, 9), Action::Replace, "X\n")],
+    )
+    .await
+    .expect_err("past-end span rejects");
+    assert_eq!(error.class, super::ir::ErrorClass::Resolve);
+}
+
+#[tokio::test]
+async fn stage_whole_and_tag_guards() {
+    let dir = tempfile::tempdir().expect("temp workspace");
+    let session = test_session(dir.path(), false);
+    let path = std::path::Path::new("a.txt");
+    let bytes = b"a\nb\n";
+    let staged = stage_one(
+        &session,
+        path,
+        bytes,
+        vec![change_edit(
+            "a.txt",
+            Locator::Whole,
+            Action::Replace,
+            "new\n",
+        )],
+    )
+    .await
+    .expect("whole plans");
+    assert_eq!(&*staged.after.expect("after"), b"new\n");
+    // Seen + Whole without coverage fails proof; covered passes.
+    let error = stage_one(
+        &session,
+        path,
+        bytes,
+        vec![change_edit_guard(
+            "a.txt",
+            Locator::Whole,
+            Action::Replace,
+            Guard::Seen,
+            "new\n",
+        )],
+    )
+    .await
+    .expect_err("seen whole without coverage rejects");
+    assert_eq!(error.class, super::ir::ErrorClass::Proof);
+    let digest = *blake3::hash(bytes).as_bytes();
+    session.seen.show(session.session, "a.txt", digest, 1, 2);
+    let staged = stage_one(
+        &session,
+        path,
+        bytes,
+        vec![change_edit_guard(
+            "a.txt",
+            Locator::Whole,
+            Action::Replace,
+            Guard::Seen,
+            "new\n",
+        )],
+    )
+    .await
+    .expect("covered whole plans");
+    assert_eq!(&*staged.after.expect("after"), b"new\n");
+    // Tag guards: wrong tags are Stale, the right tag plans.
+    for guard in [
+        Guard::Version("ffff".to_owned()),
+        Guard::WholeTag("deadbeef".to_owned()),
+    ] {
+        let error = stage_one(
+            &session,
+            path,
+            bytes,
+            vec![change_edit_guard(
+                "a.txt",
+                Locator::Lines { first: 1, last: 1 },
+                Action::Replace,
+                guard,
+                "X\n",
+            )],
+        )
+        .await
+        .expect_err("stale tag rejects");
+        assert_eq!(error.class, super::ir::ErrorClass::Stale);
+    }
+    let version = format!("{:.4}", crate::tag8("version", bytes));
+    let staged = stage_one(
+        &session,
+        path,
+        bytes,
+        vec![change_edit_guard(
+            "a.txt",
+            Locator::Lines { first: 1, last: 1 },
+            Action::Replace,
+            Guard::Version(version),
+            "X\n",
+        )],
+    )
+    .await
+    .expect("fresh tag plans");
+    assert_eq!(&*staged.after.expect("after"), b"X\nb\n");
+}
+
+#[tokio::test]
+async fn stage_crlf_and_bom_map_back_to_raw_bytes() {
+    let dir = tempfile::tempdir().expect("temp workspace");
+    let session = test_session(dir.path(), false);
+    let path = std::path::Path::new("a.txt");
+    // BOM + CRLF: the view strips both; staged bytes must stay faithful.
+    let bytes = b"\xef\xbb\xbfa\r\nb\r\nc\r\n";
+    let staged = stage_one(
+        &session,
+        path,
+        bytes,
+        vec![change_edit(
+            "a.txt",
+            Locator::Lines { first: 2, last: 2 },
+            Action::Replace,
+            "X\n",
+        )],
+    )
+    .await
+    .expect("crlf lines plan");
     assert_eq!(
-        tokio::fs::read(dir.path().join("new/deep/dest.txt"))
-            .await
-            .expect("moved bytes"),
-        b"alpha\n"
+        &*staged.after.expect("after"),
+        b"\xef\xbb\xbfa\r\nX\r\nc\r\n"
     );
+    // InsertAfter must map the end offset through removed CRs and the BOM.
+    let staged = stage_one(
+        &session,
+        path,
+        bytes,
+        vec![change_edit(
+            "a.txt",
+            Locator::Lines { first: 1, last: 1 },
+            Action::InsertAfter,
+            "Y\n",
+        )],
+    )
+    .await
+    .expect("crlf insert plans");
+    assert_eq!(
+        &*staged.after.expect("after"),
+        b"\xef\xbb\xbfa\r\nY\r\nb\r\nc\r\n"
+    );
+}
+
+#[tokio::test]
+async fn stage_orders_descending_edits_once_each() {
+    let dir = tempfile::tempdir().expect("temp workspace");
+    let session = test_session(dir.path(), false);
+    let path = std::path::Path::new("a.txt");
+    let staged = stage_one(
+        &session,
+        path,
+        b"a\nb\nc\n",
+        vec![
+            change_edit(
+                "a.txt",
+                Locator::Lines { first: 1, last: 1 },
+                Action::Replace,
+                "P\n",
+            ),
+            Edit::Change {
+                index: 1,
+                path: std::path::PathBuf::from("a.txt"),
+                locator: Locator::Lines { first: 3, last: 3 },
+                action: Action::Replace,
+                guard: Guard::Quoted,
+                body: "Q\n".to_owned(),
+                window: Window::BeforePayload,
+            },
+        ],
+    )
+    .await
+    .expect("multi edit plans");
+    assert_eq!(&*staged.after.expect("after"), b"P\nb\nQ\n");
+}
+
+#[tokio::test]
+async fn stage_classify_create_delete_rename() {
+    let dir = tempfile::tempdir().expect("temp workspace");
+    let session = test_session(dir.path(), false);
+    // Create on an absent path stages Create with no before image.
+    let staged = stage::stage_file(
+        &session,
+        DialectId::Replace,
+        std::path::Path::new("new.txt"),
+        &dir.path().join("new.txt"),
+        vec![Edit::Create {
+            index: 0,
+            path: std::path::PathBuf::from("new.txt"),
+            body: "fresh\n".to_owned(),
+        }],
+    )
+    .await
+    .expect("create plans");
+    assert_eq!(staged.op, Operation::Create);
+    assert!(staged.before.is_none());
+    assert_eq!(&*staged.after.expect("after"), b"fresh\n");
+    // Create over an existing file is a File error.
+    let path = std::path::Path::new("a.txt");
+    let error = stage_one(
+        &session,
+        path,
+        b"here\n",
+        vec![Edit::Create {
+            index: 0,
+            path: std::path::PathBuf::from("a.txt"),
+            body: "x".to_owned(),
+        }],
+    )
+    .await
+    .expect_err("existing create rejects");
+    assert_eq!(error.class, super::ir::ErrorClass::File);
+    // Delete stages after=None.
+    let staged = stage_one(
+        &session,
+        path,
+        b"here\n",
+        vec![Edit::Delete {
+            index: 0,
+            path: std::path::PathBuf::from("a.txt"),
+            reference: None,
+        }],
+    )
+    .await
+    .expect("delete plans");
+    assert_eq!(staged.op, Operation::Delete);
+    assert!(staged.after.is_none());
+    // Rename plus a change stages op=Rename with the destination.
+    let staged = stage_one(
+        &session,
+        path,
+        b"a\nb\n",
+        vec![
+            change_edit(
+                "a.txt",
+                Locator::Lines { first: 1, last: 1 },
+                Action::Replace,
+                "P\n",
+            ),
+            Edit::Rename {
+                index: 1,
+                from: std::path::PathBuf::from("a.txt"),
+                to: std::path::PathBuf::from("b.txt"),
+                reference: None,
+            },
+        ],
+    )
+    .await
+    .expect("rename plans");
+    assert_eq!(staged.op, Operation::Rename);
+    assert_eq!(
+        staged.renamed_to.as_deref(),
+        Some(std::path::Path::new("b.txt"))
+    );
+    assert_eq!(&*staged.after.expect("after"), b"P\nb\n");
+    // Two renames in one payload conflict.
+    let error = stage_one(
+        &session,
+        path,
+        b"a\n",
+        vec![
+            Edit::Rename {
+                index: 0,
+                from: std::path::PathBuf::from("a.txt"),
+                to: std::path::PathBuf::from("b.txt"),
+                reference: None,
+            },
+            Edit::Rename {
+                index: 1,
+                from: std::path::PathBuf::from("a.txt"),
+                to: std::path::PathBuf::from("c.txt"),
+                reference: None,
+            },
+        ],
+    )
+    .await
+    .expect_err("double rename rejects");
+    assert_eq!(error.class, super::ir::ErrorClass::Resolve);
+}
+
+#[tokio::test]
+async fn stage_replacement_contract() {
+    let dir = tempfile::tempdir().expect("temp workspace");
+    let canonical = dir.path().join("a.txt");
+    let display = std::path::Path::new("a.txt");
+    tokio::fs::write(&canonical, b"one\ntwo\nthree\n")
+        .await
+        .expect("seed");
+    let staged = stage::stage_replacement(display, &canonical, b"two", b"dos", 2)
+        .await
+        .expect("replacement plans");
+    assert_eq!(&*staged.after.expect("after"), b"one\ndos\nthree\n");
+    assert_eq!(staged.op, Operation::Update);
+    // A match that starts inside the line, not at its first byte.
+    let staged = stage::stage_replacement(display, &canonical, b"wo", b"dos", 2)
+        .await
+        .expect("mid-line match plans");
+    assert_eq!(&*staged.after.expect("after"), b"one\ntdos\nthree\n");
+    for (before, line) in [
+        (&b"two"[..], 0_u32),
+        (&b""[..], 1),
+        (&b"four"[..], 2),
+        (&b"two"[..], 9),
+        // Real bytes but only reachable past the target line's end or
+        // outside the scan bound: each must stay a miss.
+        (&b"hr"[..], 2),
+        // A newline-leading needle only matches under a widened scan bound.
+        (&b"\nx"[..], 3),
+        // First byte matches at several positions; full needle never does.
+        (&b"tx"[..], 2),
+    ] {
+        let error = stage::stage_replacement(display, &canonical, before, b"x", line)
+            .await
+            .expect_err("bad replacement rejects");
+        assert_eq!(error.class, super::ir::ErrorClass::Resolve);
+    }
+    // Without a trailing newline, line 4 does not exist but the scan cursor
+    // still sits on "three": the line-exists guard must reject anyway.
+    let canonical_b = dir.path().join("b.txt");
+    let display_b = std::path::Path::new("b.txt");
+    tokio::fs::write(&canonical_b, b"one\ntwo\nthree")
+        .await
+        .expect("seed");
+    let error = stage::stage_replacement(display_b, &canonical_b, b"three", b"x", 4)
+        .await
+        .expect_err("missing line rejects");
+    assert_eq!(error.class, super::ir::ErrorClass::Resolve);
+    let staged = stage::stage_replacement(display_b, &canonical_b, b"three", b"x", 3)
+        .await
+        .expect("unterminated last line still matches");
+    assert_eq!(&*staged.after.expect("after"), b"one\ntwo\nx");
+}
+
+#[tokio::test]
+async fn stage_non_replace_dialect_emits_no_hunks() {
+    let dir = tempfile::tempdir().expect("temp workspace");
+    let session = test_session(dir.path(), false);
+    let path = std::path::Path::new("a.txt");
+    let canonical = session.workspace.join(path);
+    tokio::fs::write(&canonical, b"a\nb\n").await.expect("seed");
+    let staged = stage::stage_file(
+        &session,
+        DialectId::Anchor,
+        path,
+        &canonical,
+        vec![change_edit(
+            "a.txt",
+            Locator::Lines { first: 1, last: 1 },
+            Action::Replace,
+            "P\n",
+        )],
+    )
+    .await
+    .expect("anchor stages");
+    assert!(staged.hunks.is_empty(), "non-replace dialects defer hunks");
+}
+
+#[tokio::test]
+async fn stage_boundary_lines_gap_span() {
+    let dir = tempfile::tempdir().expect("temp workspace");
+    let session = test_session(dir.path(), false);
+    let path = std::path::Path::new("a.txt");
+    // Lines reaching the last line: end resolves to view.len().
+    let staged = stage_one(
+        &session,
+        path,
+        b"a\nb\nc\nd\n",
+        vec![change_edit(
+            "a.txt",
+            Locator::Lines { first: 1, last: 4 },
+            Action::Replace,
+            "Z\n",
+        )],
+    )
+    .await
+    .expect("full-range lines plan");
+    assert_eq!(&*staged.after.expect("after"), b"Z\n");
+    // Gap exactly one past the final line plans (append position).
+    let staged = stage_one(
+        &session,
+        path,
+        b"a\nb\n",
+        vec![change_edit(
+            "a.txt",
+            Locator::Gap { before_line: 3 },
+            Action::InsertAfter,
+            "X\n",
+        )],
+    )
+    .await
+    .expect("past-end gap plans");
+    assert_eq!(&*staged.after.expect("after"), b"a\nb\nX\n");
+    // Boundary spans: first == last and last == count both plan.
+    let bytes = b"a\nb\nc\n";
+    let digest = *blake3::hash(bytes).as_bytes();
+    session.seen.show(session.session, "a.txt", digest, 1, 3);
+    for (first, last) in [(1_usize, 1_usize), (3, 3)] {
+        let staged = stage_one(
+            &session,
+            path,
+            bytes,
+            vec![change_edit(
+                "a.txt",
+                Locator::Span {
+                    first,
+                    last,
+                    quoted: vec![],
+                },
+                Action::Replace,
+                "X\n",
+            )],
+        )
+        .await
+        .expect("boundary span plans");
+        assert!(staged.after.is_some());
+    }
+    // Invalid span combinations reject before any coverage check.
+    for (first, last) in [(0_usize, 2_usize), (2, 1)] {
+        let error = stage_one(
+            &session,
+            path,
+            bytes,
+            vec![change_edit(
+                "a.txt",
+                Locator::Span {
+                    first,
+                    last,
+                    quoted: vec![],
+                },
+                Action::Replace,
+                "X\n",
+            )],
+        )
+        .await
+        .expect_err("invalid span rejects");
+        assert_eq!(error.class, super::ir::ErrorClass::Resolve);
+    }
+}
+
+#[expect(clippy::too_many_lines, reason = "integration tests fail loudly")]
+#[tokio::test]
+async fn stage_text_maps_through_bom_and_crlf() {
+    let dir = tempfile::tempdir().expect("temp workspace");
+    let session = test_session(dir.path(), false);
+    let path = std::path::Path::new("a.txt");
+    let bytes = b"\xef\xbb\xbfa\r\nb\r\nc\r\n";
+    // The view strips BOM and CR; the staged span must land on raw bytes.
+    let staged = stage_one(
+        &session,
+        path,
+        bytes,
+        vec![change_edit(
+            "a.txt",
+            Locator::Text {
+                old: "b\n".to_owned(),
+                line_hint: None,
+                all: false,
+                window: Window::BeforePayload,
+                context: None,
+                at_eof: false,
+            },
+            Action::Replace,
+            "Z\n",
+        )],
+    )
+    .await
+    .expect("bom text plans");
+    assert_eq!(
+        &*staged.after.expect("after"),
+        b"\xef\xbb\xbfa\r\nZ\r\nc\r\n"
+    );
+    // InsertBefore maps the start offset the same way.
+    let staged = stage_one(
+        &session,
+        path,
+        bytes,
+        vec![change_edit(
+            "a.txt",
+            Locator::Text {
+                old: "b".to_owned(),
+                line_hint: None,
+                all: false,
+                window: Window::BeforePayload,
+                context: None,
+                at_eof: false,
+            },
+            Action::InsertBefore,
+            "Y\n",
+        )],
+    )
+    .await
+    .expect("bom insert plans");
+    assert_eq!(
+        &*staged.after.expect("after"),
+        b"\xef\xbb\xbfa\r\nY\r\nb\r\nc\r\n"
+    );
+    // A match ending exactly on a removed CR's view offset maps back
+    // without swallowing the CR (offset-boundary regression).
+    let staged = stage_one(
+        &session,
+        path,
+        b"a\r\nb\r\n",
+        vec![change_edit(
+            "a.txt",
+            Locator::Text {
+                old: "a".to_owned(),
+                line_hint: None,
+                all: false,
+                window: Window::BeforePayload,
+                context: None,
+                at_eof: false,
+            },
+            Action::Replace,
+            "X",
+        )],
+    )
+    .await
+    .expect("cr-boundary plans");
+    assert_eq!(&*staged.after.expect("after"), b"X\r\nb\r\n");
+    // InsertAfter maps the end offset.
+    let staged = stage_one(
+        &session,
+        path,
+        bytes,
+        vec![change_edit(
+            "a.txt",
+            Locator::Text {
+                old: "b".to_owned(),
+                line_hint: None,
+                all: false,
+                window: Window::BeforePayload,
+                context: None,
+                at_eof: false,
+            },
+            Action::InsertAfter,
+            "Y",
+        )],
+    )
+    .await
+    .expect("bom insert-after plans");
+    assert_eq!(
+        &*staged.after.expect("after"),
+        b"\xef\xbb\xbfa\r\nbY\r\nc\r\n"
+    );
+    // A hinted match still maps to raw bytes, not view offsets.
+    let staged = stage_one(
+        &session,
+        path,
+        bytes,
+        vec![change_edit(
+            "a.txt",
+            Locator::Text {
+                old: "b".to_owned(),
+                line_hint: Some(2),
+                all: false,
+                window: Window::BeforePayload,
+                context: None,
+                at_eof: false,
+            },
+            Action::Replace,
+            "Z",
+        )],
+    )
+    .await
+    .expect("bom hinted plans");
+    assert_eq!(
+        &*staged.after.expect("after"),
+        b"\xef\xbb\xbfa\r\nZ\r\nc\r\n"
+    );
+}
+
+#[tokio::test]
+async fn stage_seen_whole_empty_file_skips_coverage() {
+    let dir = tempfile::tempdir().expect("temp workspace");
+    let session = test_session(dir.path(), false);
+    let path = std::path::Path::new("a.txt");
+    // An empty file has zero lines; the Whole+Seen coverage gate opens.
+    let staged = stage_one(
+        &session,
+        path,
+        b"",
+        vec![change_edit_guard(
+            "a.txt",
+            Locator::Whole,
+            Action::Replace,
+            Guard::Seen,
+            "new\n",
+        )],
+    )
+    .await
+    .expect("empty whole plans");
+    assert_eq!(&*staged.after.expect("after"), b"new\n");
+}
+
+#[tokio::test]
+async fn stage_stale_version_names_current_tag() {
+    let dir = tempfile::tempdir().expect("temp workspace");
+    let session = test_session(dir.path(), false);
+    let path = std::path::Path::new("a.txt");
+    let bytes = b"a\nb\n";
+    let version = format!("{:.4}", crate::tag8("version", bytes));
+    let whole = crate::tag8("whole", bytes);
+    let error = stage_one(
+        &session,
+        path,
+        bytes,
+        vec![change_edit_guard(
+            "a.txt",
+            Locator::Lines { first: 1, last: 1 },
+            Action::Replace,
+            Guard::Version("ffff".to_owned()),
+            "X\n",
+        )],
+    )
+    .await
+    .expect_err("stale version rejects");
+    assert_eq!(error.class, super::ir::ErrorClass::Stale);
+    assert!(
+        error.message.contains(&version),
+        "stale error names the current version tag: {}",
+        error.message
+    );
+    assert!(!error.message.contains(&whole), "version error, not whole");
+    // The whole tag path also plans on a fresh tag.
+    let staged = stage_one(
+        &session,
+        path,
+        bytes,
+        vec![change_edit_guard(
+            "a.txt",
+            Locator::Lines { first: 1, last: 1 },
+            Action::Replace,
+            Guard::WholeTag(whole),
+            "X\n",
+        )],
+    )
+    .await
+    .expect("fresh whole tag plans");
+    assert_eq!(&*staged.after.expect("after"), b"X\nb\n");
+}
+
+#[tokio::test]
+async fn stage_node_symbol_reject_when_symbols_disabled() {
+    let dir = tempfile::tempdir().expect("temp workspace");
+    let session = test_session(dir.path(), false);
+    let path = std::path::Path::new("a.rs");
+    for locator in [
+        Locator::Node { first_line: 1 },
+        Locator::Symbol {
+            name: "one".to_owned(),
+            ordinal: None,
+            old: None,
+        },
+    ] {
+        let error = stage_one(
+            &session,
+            path,
+            b"fn one() {}\n",
+            vec![change_edit("a.rs", locator, Action::Replace, "x\n")],
+        )
+        .await
+        .expect_err("disabled symbols reject");
+        assert_eq!(error.class, super::ir::ErrorClass::Resolve);
+        assert!(
+            error.message.contains("symbol support is not enabled"),
+            "{}",
+            error.message
+        );
+    }
+    // A DefTag guard on any locator rejects on a symbols-disabled
+    // session before it can resolve a definition.
+    let error = stage_one(
+        &session,
+        path,
+        b"fn one() {}\n",
+        vec![change_edit_guard(
+            "a.rs",
+            Locator::Lines { first: 1, last: 1 },
+            Action::Replace,
+            Guard::DefTag("any".to_owned()),
+            "x\n",
+        )],
+    )
+    .await
+    .expect_err("deftag on disabled session rejects");
+    assert_eq!(error.class, super::ir::ErrorClass::Resolve);
+    assert!(
+        error.message.contains("symbol support is not enabled"),
+        "{}",
+        error.message
+    );
+}
+
+#[cfg(feature = "symbols")]
+#[expect(clippy::too_many_lines, reason = "integration tests fail loudly")]
+#[tokio::test]
+async fn stage_node_locator_coverage_and_language() {
+    let dir = tempfile::tempdir().expect("temp workspace");
+    let session = test_session(dir.path(), true);
+    let rs = std::path::Path::new("a.rs");
+    let bytes = b"fn one() {\n    let x = 1;\n}\n\nfn two() {\n    let y = 2;\n}\n";
+    // Replace: the outermost node at line 1 is `fn one`, lines 1-3.
+    let staged = stage_one(
+        &session,
+        rs,
+        bytes,
+        vec![change_edit(
+            "a.rs",
+            Locator::Node { first_line: 1 },
+            Action::Replace,
+            "fn three() {}\n",
+        )],
+    )
+    .await
+    .expect("node plans");
+    let after = String::from_utf8(staged.after.expect("after").into_vec()).expect("utf8");
+    assert_eq!(after, "fn three() {}\n\nfn two() {\n    let y = 2;\n}\n");
+    // Seen guard needs the node's line footprint covered.
+    let error = stage_one(
+        &session,
+        rs,
+        bytes,
+        vec![change_edit_guard(
+            "a.rs",
+            Locator::Node { first_line: 1 },
+            Action::Replace,
+            Guard::Seen,
+            "fn three() {}\n",
+        )],
+    )
+    .await
+    .expect_err("uncovered node rejects");
+    assert_eq!(error.class, super::ir::ErrorClass::Proof);
+    let digest = *blake3::hash(bytes).as_bytes();
+    session.seen.show(session.session, "a.rs", digest, 1, 3);
+    let staged = stage_one(
+        &session,
+        rs,
+        bytes,
+        vec![change_edit_guard(
+            "a.rs",
+            Locator::Node { first_line: 1 },
+            Action::Replace,
+            Guard::Seen,
+            "fn three() {}\n",
+        )],
+    )
+    .await
+    .expect("covered node plans");
+    assert!(staged.after.is_some());
+    // InsertAfter lands after the node's line span, not inside it.
+    let staged = stage_one(
+        &session,
+        rs,
+        bytes,
+        vec![change_edit(
+            "a.rs",
+            Locator::Node { first_line: 1 },
+            Action::InsertAfter,
+            "fn ins() {}\n",
+        )],
+    )
+    .await
+    .expect("node insert plans");
+    let after = String::from_utf8(staged.after.expect("after").into_vec()).expect("utf8");
+    assert_eq!(
+        after,
+        "fn one() {\n    let x = 1;\n}\nfn ins() {}\n\nfn two() {\n    let y = 2;\n}\n"
+    );
+    // A non-symbol file rejects block ops outright.
+    let error = stage_one(
+        &session,
+        std::path::Path::new("a.txt"),
+        b"plain\n",
+        vec![change_edit(
+            "a.txt",
+            Locator::Node { first_line: 1 },
+            Action::Replace,
+            "x\n",
+        )],
+    )
+    .await
+    .expect_err("txt node rejects");
+    assert_eq!(error.class, super::ir::ErrorClass::Resolve);
+    // A valid Reference under a non-Enhanced dialect clears the proof
+    // check but skips the coverage gate in node_coverage.
+    let (reference, _) = session
+        .snapshots
+        .capture(
+            session.session,
+            session.generation,
+            session.consumer,
+            rs,
+            bytes,
+        )
+        .expect("capture");
+    let staged = stage_one(
+        &session,
+        rs,
+        bytes,
+        vec![change_edit_guard(
+            "a.rs",
+            Locator::Node { first_line: 1 },
+            Action::Replace,
+            Guard::Reference(reference.display().to_string()),
+            "fn three() {}\n",
+        )],
+    )
+    .await
+    .expect("reference under replace plans");
+    assert!(staged.after.is_some());
+}
+
+#[cfg(feature = "symbols")]
+#[tokio::test]
+async fn stage_node_enhanced_reference_gate() {
+    let dir = tempfile::tempdir().expect("temp workspace");
+    let session = test_session(dir.path(), true);
+    let rs = std::path::Path::new("a.rs");
+    let canonical = session.workspace.join(rs);
+    let bytes = b"fn one() {\n    let x = 1;\n}\n\nfn two() {\n    let y = 2;\n}\n";
+    let (reference, _) = session
+        .snapshots
+        .capture(
+            session.session,
+            session.generation,
+            session.consumer,
+            rs,
+            bytes,
+        )
+        .expect("capture");
+    let node_edit = || Edit::Change {
+        index: 0,
+        path: std::path::PathBuf::from("a.rs"),
+        locator: Locator::Node { first_line: 1 },
+        action: Action::Replace,
+        guard: Guard::Reference(reference.display().to_string()),
+        body: "fn three() {}\n".to_owned(),
+        window: Window::BeforePayload,
+    };
+    tokio::fs::write(&canonical, bytes).await.expect("seed");
+    // No delivery yet: the node footprint is unobserved. Enhanced dialect
+    // is the only path that consults the snapshot ledger.
+    let error = stage::stage_file(
+        &session,
+        DialectId::HashlineEnhanced,
+        rs,
+        &session.workspace.join(rs),
+        vec![node_edit()],
+    )
+    .await
+    .expect_err("undelivered enhanced node rejects");
+    assert_eq!(error.class, super::ir::ErrorClass::Proof);
+    // Show then deliver the node's lines at a cutoff below the frozen
+    // call cutoff.
+    session.snapshots.show(reference, session.consumer, 1, 3);
+    session
+        .snapshots
+        .deliver(session.session, session.consumer, reference, 1, 3, 7);
+    let staged = stage::stage_file(
+        &session,
+        DialectId::HashlineEnhanced,
+        rs,
+        &session.workspace.join(rs),
+        vec![node_edit()],
+    )
+    .await
+    .expect("delivered enhanced node plans");
+    let after = String::from_utf8(staged.after.expect("after").into_vec()).expect("utf8");
+    assert_eq!(after, "fn three() {}\n\nfn two() {\n    let y = 2;\n}\n");
+}
+
+#[cfg(feature = "symbols")]
+#[expect(clippy::too_many_lines, reason = "integration tests fail loudly")]
+#[tokio::test]
+async fn stage_symbol_locator_and_needle_narrowing() {
+    let dir = tempfile::tempdir().expect("temp workspace");
+    let session = test_session(dir.path(), true);
+    let rs = std::path::Path::new("a.rs");
+    let bytes = b"fn one() {\n    let x = 1;\n}\n\nfn two() {\n    let y = 2;\n    let z = 3;\n}\n";
+    let symbol = |old: Option<&str>| Locator::Symbol {
+        name: "two".to_owned(),
+        ordinal: None,
+        old: old.map(str::to_owned),
+    };
+    // No `old`: the whole definition span is replaced.
+    let staged = stage_one(
+        &session,
+        rs,
+        bytes,
+        vec![change_edit(
+            "a.rs",
+            symbol(None),
+            Action::Replace,
+            "fn duo() {}\n",
+        )],
+    )
+    .await
+    .expect("symbol plans");
+    let after = String::from_utf8(staged.after.expect("after").into_vec()).expect("utf8");
+    assert_eq!(after, "fn one() {\n    let x = 1;\n}\n\nfn duo() {}\n\n");
+    // Unique `old` narrows the span to the matched fragment.
+    let staged = stage_one(
+        &session,
+        rs,
+        bytes,
+        vec![change_edit(
+            "a.rs",
+            symbol(Some("let y = 2")),
+            Action::Replace,
+            "let y = 9",
+        )],
+    )
+    .await
+    .expect("needle plans");
+    let after = String::from_utf8(staged.after.expect("after").into_vec()).expect("utf8");
+    assert_eq!(
+        after,
+        "fn one() {\n    let x = 1;\n}\n\nfn two() {\n    let y = 9;\n    let z = 3;\n}\n"
+    );
+    // A needle spanning the whole definition is still a unique match.
+    let whole_def = "fn two() {\n    let y = 2;\n    let z = 3;\n}";
+    let staged = stage_one(
+        &session,
+        rs,
+        bytes,
+        vec![change_edit(
+            "a.rs",
+            symbol(Some(whole_def)),
+            Action::Replace,
+            "fn duo() {}",
+        )],
+    )
+    .await
+    .expect("span-sized needle plans");
+    let after = String::from_utf8(staged.after.expect("after").into_vec()).expect("utf8");
+    assert_eq!(after, "fn one() {\n    let x = 1;\n}\n\nfn duo() {}\n");
+    // InsertBefore lands ahead of the definition's first byte.
+    let staged = stage_one(
+        &session,
+        rs,
+        bytes,
+        vec![change_edit(
+            "a.rs",
+            symbol(None),
+            Action::InsertBefore,
+            "// doc\n",
+        )],
+    )
+    .await
+    .expect("symbol insert plans");
+    let after = String::from_utf8(staged.after.expect("after").into_vec()).expect("utf8");
+    assert_eq!(
+        after,
+        "fn one() {\n    let x = 1;\n}\n\n// doc\nfn two() {\n    let y = 2;\n    let z = 3;\n}\n"
+    );
+    // Ambiguous and absent needles reject.
+    for needle in ["let", "not-present"] {
+        let error = stage_one(
+            &session,
+            rs,
+            bytes,
+            vec![change_edit(
+                "a.rs",
+                symbol(Some(needle)),
+                Action::Replace,
+                "X",
+            )],
+        )
+        .await
+        .expect_err("bad needle rejects");
+        assert_eq!(error.class, super::ir::ErrorClass::Resolve);
+    }
+    // DefTag on a Symbol locator: empty or current tag plans, wrong tag
+    // is Stale.
+    let (_, _, current_tag) =
+        super::ast::symbol_span(&session.workspace.join(rs), bytes, "two", None)
+            .await
+            .expect("tag resolves");
+    for expected in [String::new(), current_tag.clone()] {
+        let staged = stage_one(
+            &session,
+            rs,
+            bytes,
+            vec![change_edit_guard(
+                "a.rs",
+                symbol(None),
+                Action::Replace,
+                Guard::DefTag(expected),
+                "fn duo() {}\n",
+            )],
+        )
+        .await
+        .expect("matching tag plans");
+        assert!(staged.after.is_some());
+    }
+    let error = stage_one(
+        &session,
+        rs,
+        bytes,
+        vec![change_edit_guard(
+            "a.rs",
+            symbol(None),
+            Action::Replace,
+            Guard::DefTag("bogus-tag".to_owned()),
+            "fn duo() {}\n",
+        )],
+    )
+    .await
+    .expect_err("stale tag rejects");
+    assert_eq!(error.class, super::ir::ErrorClass::Stale);
+    // Unknown definitions reject; unknown names list no candidates.
+    let unknown = Locator::Symbol {
+        name: "nope".to_owned(),
+        ordinal: None,
+        old: None,
+    };
+    let error = stage_one(
+        &session,
+        rs,
+        bytes,
+        vec![change_edit("a.rs", unknown, Action::Replace, "X")],
+    )
+    .await
+    .expect_err("unknown definition rejects");
+    assert_eq!(error.class, super::ir::ErrorClass::Resolve);
+    // DefTag: empty or current tag plans; a wrong tag is Stale.
+    let staged = stage_one(
+        &session,
+        rs,
+        bytes,
+        vec![change_edit_guard(
+            "a.rs",
+            symbol(None),
+            Action::Replace,
+            Guard::DefTag(String::new()),
+            "fn duo() {}\n",
+        )],
+    )
+    .await
+    .expect("empty def tag plans");
+    assert!(staged.after.is_some());
+    let error = stage_one(
+        &session,
+        rs,
+        bytes,
+        vec![change_edit_guard(
+            "a.rs",
+            symbol(None),
+            Action::Replace,
+            Guard::DefTag("wrongtag".to_owned()),
+            "fn duo() {}\n",
+        )],
+    )
+    .await
+    .expect_err("stale def tag rejects");
+    assert_eq!(error.class, super::ir::ErrorClass::Stale);
+    // DefTag on a non-symbol locator resolves, not panics.
+    let error = stage_one(
+        &session,
+        rs,
+        bytes,
+        vec![change_edit_guard(
+            "a.rs",
+            Locator::Lines { first: 1, last: 1 },
+            Action::Replace,
+            Guard::DefTag(String::new()),
+            "X\n",
+        )],
+    )
+    .await
+    .expect_err("def tag on lines rejects");
+    assert_eq!(error.class, super::ir::ErrorClass::Resolve);
 }

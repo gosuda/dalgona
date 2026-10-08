@@ -190,13 +190,14 @@ fn exec_job_transitions_match_the_table() {
                 (ExecState::Running, ExecEvent::TimeoutFire) => {
                     Some(ExecTransition::Ladder(ExecOutcome::TimedOut))
                 }
+                (ExecState::Running | ExecState::Detached, ExecEvent::Cancel) => {
+                    Some(ExecTransition::Ladder(ExecOutcome::Aborted))
+                }
                 (ExecState::Running, ExecEvent::BudgetFire) => Some(ExecTransition::Detach),
                 (ExecState::Detached, ExecEvent::Exit(outcome)) => {
                     Some(ExecTransition::NoticeAndDone(outcome))
                 }
-                (ExecState::Running | ExecState::Detached, ExecEvent::Cancel) => {
-                    Some(ExecTransition::Ladder(ExecOutcome::Aborted))
-                }
+
                 (ExecState::LadderPending, ExecEvent::LadderComplete(outcome)) => {
                     Some(ExecTransition::FinishAfterLadder(outcome))
                 }

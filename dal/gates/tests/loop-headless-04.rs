@@ -1,13 +1,12 @@
-//! Print mode denies ask approval and names the required approval flag.
+//! Print mode refuses `ask` approval and names the flag.
 #![expect(
     clippy::disallowed_methods,
     reason = "SC test invokes the real CLI boundary"
 )]
-#![expect(
+#[expect(
     dead_code,
-    reason = "gate support exposes helpers shared across independent targets"
+    reason = "gate support helpers are shared across independent test targets"
 )]
-
 mod support;
 
 use std::{error::Error, fs, path::PathBuf, process::Command};
@@ -34,6 +33,7 @@ fn print_mode_denies_ask_and_names_approval_flag() -> Result<(), Box<dyn Error +
     let output = Command::new(dalgon_binary("dalgon")?)
         .current_dir(&home)
         .env_clear()
+        .envs(support::captured_shell_vars())
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("XDG_DATA_HOME", home.join(".local/share"))

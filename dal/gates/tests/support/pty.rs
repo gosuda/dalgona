@@ -25,6 +25,10 @@ use rustix::{
 pub struct PtyProcess {
     child: Child,
     master: File,
+    /// Kept open so the line discipline never sees the last slave close:
+    /// without it the kernel discards buffered output the instant the
+    /// child exits, and masters reads return EIO before the drain.
+    slave: File,
     output: Vec<u8>,
 }
 
@@ -59,13 +63,38 @@ impl PtyProcess {
         Ok(Self {
             child,
             master,
+            slave,
             output: Vec::new(),
         })
     }
 
     /// Writes key or paste bytes to the real terminal input stream.
+    ///
+    /// Large pastes exceed the kernel PTY input queue, so partial writes
+    /// retry on `WouldBlock` while draining child output; a full queue for
+    /// more than ~10 seconds is reported as a hang.
     pub fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
-        self.master.write_all(bytes)
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut offset = 0;
+        while offset < bytes.len() {
+            match self.master.write(&bytes[offset..]) {
+                Ok(0) => return Err(io::Error::other("PTY write returned 0 bytes")),
+                Ok(written) => offset += written,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "PTY input queue stayed full for 10 seconds",
+                        ));
+                    }
+                    self.read_available()?;
+                    thread::sleep(Duration::from_millis(2));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
     }
 
     /// Captures available output for at most `duration`.
@@ -90,9 +119,18 @@ impl PtyProcess {
                 return Ok(());
             }
             if let Some(status) = self.child.try_wait()? {
+                // The kernel keeps buffered output readable while we hold
+                // a slave fd, so drain once more before reporting the miss.
                 self.read_available()?;
+                if contains(&self.output, needle) {
+                    return Ok(());
+                }
+                let captured = String::from_utf8_lossy(&self.output);
+                let tail = captured
+                    .get(captured.len().saturating_sub(4096)..)
+                    .unwrap_or(&captured);
                 return Err(io::Error::other(format!(
-                    "PTY child exited with {status} before output {:?}",
+                    "PTY child exited with {status} before output {:?}\ncaptured tail:\n{tail}",
                     String::from_utf8_lossy(needle)
                 )));
             }
@@ -124,7 +162,12 @@ impl PtyProcess {
                 return Ok(());
             }
             if let Some(status) = self.child.try_wait()? {
+                // See wait_for: buffered output survives while the slave
+                // fd stays open, so drain once more before the verdict.
                 self.read_available()?;
+                if occurrences(&self.output, needle) >= count {
+                    return Ok(());
+                }
                 return Err(io::Error::other(format!(
                     "PTY child exited with {status} before {count} occurrences of {:?}",
                     String::from_utf8_lossy(needle)
@@ -143,6 +186,20 @@ impl PtyProcess {
                 thread::sleep(Duration::from_millis(2));
             }
         }
+    }
+
+    /// Resizes the slave side of the terminal and signals the child.
+    pub fn resize(&mut self, columns: u16, rows: u16) -> io::Result<()> {
+        tcsetwinsize(
+            &self.master,
+            Winsize {
+                ws_row: rows,
+                ws_col: columns,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            },
+        )
+        .map_err(io::Error::from)
     }
 
     /// Returns every byte read from the pseudoterminal master so far.
@@ -169,19 +226,25 @@ impl PtyProcess {
         }
     }
 
+    /// Drains the master until it would block; one `read` call can split a
+    /// message across the kernel buffer, so callers must loop.
     fn read_available(&mut self) -> io::Result<usize> {
-        let mut buffer = [0_u8; 8192];
-        match self.master.read(&mut buffer) {
-            Ok(0) => Ok(0),
-            Ok(length) => {
-                self.output.extend_from_slice(&buffer[..length]);
-                Ok(length)
+        let mut total = 0;
+        loop {
+            let mut buffer = [0_u8; 8192];
+            match self.master.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(length) => {
+                    self.output.extend_from_slice(&buffer[..length]);
+                    total += length;
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(_error) if self.child.try_wait()?.is_some() => break,
+                Err(error) => return Err(error),
             }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(0),
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => Ok(0),
-            Err(_error) if self.child.try_wait()?.is_some() => Ok(0),
-            Err(error) => Err(error),
         }
+        Ok(total)
     }
 }
 
@@ -199,7 +262,7 @@ pub fn dalgon_command(home: &Path, replies: &[&str]) -> io::Result<Command> {
     let mut contents = String::new();
     for reply in replies {
         writeln!(
-            contents,
+            &mut contents,
             "{{\"kind\":\"events\",\"events\":[{{\"type\":\"text_delta\",\"text\":{}}},{{\"type\":\"tool_calls_done\",\"calls\":[]}},{{\"type\":\"usage\",\"usage\":{{\"input_tokens\":12,\"cached_input_tokens\":0,\"output_tokens\":5,\"reasoning_tokens\":null,\"cache_write_tokens\":0,\"cost_usd\":null}}}},{{\"type\":\"stop\",\"reason\":\"end_turn\"}}]}}",
             sonic_rs::to_string(reply).map_err(io::Error::other)?
         )

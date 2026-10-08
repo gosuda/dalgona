@@ -351,9 +351,9 @@ fn action_resolution_table() {
         assert_eq!(tool_watch.fires().len(), 1);
         assert_eq!(tool_watch.fires()[0].action, action);
         assert_eq!(tool_watch.fires()[0].rule.as_str(), rule);
-        assert_eq!(
+        assert_ne!(
             tool_watch.fires()[0].inject.is_some(),
-            action != RuleAction::Report
+            action == RuleAction::Report
         );
     }
 }

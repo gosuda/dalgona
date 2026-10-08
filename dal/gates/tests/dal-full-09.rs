@@ -1,4 +1,4 @@
-//! Verifies gates sources never leak private planning paths or row citations.
+//! Gate ledgers verify manifest targets and reject private planning paths or row citations.
 #![expect(clippy::unwrap_used, reason = "SC test")]
 #![expect(
     clippy::disallowed_methods,
@@ -37,6 +37,9 @@ const INVENTORIES: [(&str, &[&str]); 5] = [
             "loop-tui-06",
             "loop-tui-07",
             "loop-tui-08",
+            "loop-tui-09",
+            "loop-tui-10",
+            "loop-tui-11",
         ],
     ),
     (
@@ -143,6 +146,7 @@ fn manifest_test_names(manifest: &str) -> std::collections::BTreeSet<&str> {
 }
 
 fn assert_public_content_is_private_free(path: &[u8], display_path: &Path, content: &[u8]) {
+    let display_path = display_path.display();
     let local_prefix = ["local:", "/"].concat();
     let planning_files = [
         ["dalgon-v0-", "plan.md"].concat(),
@@ -155,35 +159,26 @@ fn assert_public_content_is_private_free(path: &[u8], display_path: &Path, conte
 
     assert!(
         !contains(path, local_prefix.as_bytes()),
-        "private path in {}",
-        display_path.display()
+        "private path in {display_path}"
     );
     assert!(
         !contains(content, local_prefix.as_bytes()),
-        "private path in {}",
-        display_path.display()
+        "private path in {display_path}"
     );
     for filename in planning_files {
         assert!(
             !contains(path, filename.as_bytes()),
-            "planning filename in {}",
-            display_path.display()
+            "planning filename in {display_path}"
         );
         assert!(
             !contains(content, filename.as_bytes()),
-            "planning filename in {}",
-            display_path.display()
+            "planning filename in {display_path}"
         );
     }
-    assert!(
-        !has_row_number(path),
-        "planning citation in {}",
-        display_path.display()
-    );
+    assert!(!has_row_number(path), "planning citation in {display_path}");
     assert!(
         !has_row_number(content),
-        "planning citation in {}",
-        display_path.display()
+        "planning citation in {display_path}"
     );
 }
 
@@ -195,9 +190,14 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 }
 
 fn has_row_number(bytes: &[u8]) -> bool {
-    let prefix = b"row ";
+    let prefix = *b"row ";
     for (index, window) in bytes.windows(prefix.len()).enumerate() {
         if window != prefix {
+            continue;
+        }
+        // A citation token cannot start inside a longer word: model names
+        // such as "Arrow X.Y" carry the prefix plus a digit inside them.
+        if index > 0 && bytes[index - 1].is_ascii_alphanumeric() {
             continue;
         }
         let start = index + prefix.len();

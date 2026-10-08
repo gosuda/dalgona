@@ -339,10 +339,9 @@ fn uri_scheme(path: &str) -> Option<&str> {
 /// Splits a `<path>:<a>-<b>[,<c>[-<d>]]` selector off `path`. A suffix after
 /// the last colon is a selector attempt only when it starts with a digit;
 /// the returned intervals are sorted and merged.
-/// A path plus optional selected line ranges, sorted and merged.
-type PathSelection = (PathBuf, Option<Vec<(u64, u64)>>);
+type Selection = (PathBuf, Option<Vec<(u64, u64)>>);
 
-fn parse_selector(path: &str) -> Result<PathSelection, ReadError> {
+fn parse_selector(path: &str) -> Result<Selection, ReadError> {
     let Some((base, suffix)) = path.rsplit_once(':') else {
         return Ok((PathBuf::from(path), None));
     };
@@ -606,13 +605,7 @@ fn count_lines(file: &mut File) -> io::Result<u64> {
             Err(error) => return Err(error),
         };
         let chunk = &buffer[..read];
-        #[expect(
-            clippy::naive_bytecount,
-            reason = "bytecount crate is not a dependency of this crate"
-        )]
-        let newlines =
-            u64::try_from(chunk.iter().filter(|&&byte| byte == b'\n').count()).unwrap_or(u64::MAX);
-        total += newlines;
+        total += chunk.split(|byte| *byte == b'\n').count().saturating_sub(1) as u64;
         last = chunk.last().copied();
     }
     if last.is_some_and(|byte| byte != b'\n') {
@@ -623,7 +616,7 @@ fn count_lines(file: &mut File) -> io::Result<u64> {
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::Cell, fmt::Write as _, fs, future::Ready, path::Path};
+    use std::{cell::Cell, fs, future::Ready, path::Path};
 
     use dal_agent::{ToolError, error::SchemeError};
     use dal_core::{Part, SessionId};
@@ -637,7 +630,7 @@ mod tests {
 
     #[expect(
         clippy::needless_pass_by_value,
-        reason = "matches the `resolve` callback contract of `execute`"
+        reason = "the page-callback seam takes an owned uri"
     )]
     fn no_pages(uri: String) -> Ready<Result<String, ToolError>> {
         std::future::ready(Err(ToolError::Scheme(SchemeError::Failed {
@@ -677,11 +670,10 @@ mod tests {
     #[tokio::test]
     async fn read_window_tiling() {
         let dir = tempfile::tempdir().unwrap();
-        let mut body = String::new();
-        for n in 1..=3500 {
-            let _ = write!(body, "line {n}");
-            body.push('\n');
-        }
+        let body: String = (1..=3500).fold(String::new(), |mut body, n| {
+            let _ = std::fmt::Write::write_fmt(&mut body, format_args!("line {n}\n"));
+            body
+        });
         fs::write(dir.path().join("big.txt"), &body).unwrap();
         let mut offset = 1_u64;
         let mut numbers = Vec::new();
@@ -735,12 +727,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bytes = b"alpha\r\nbeta\r\ngamma";
         fs::write(dir.path().join("crlf.txt"), bytes).unwrap();
-        #[expect(
-            clippy::naive_bytecount,
-            reason = "bytecount crate is not a dependency of this crate"
-        )]
-        let newlines =
-            u64::try_from(bytes.iter().filter(|&&b| b == b'\n').count()).unwrap_or(u64::MAX);
+        let newlines = bytes.split(|b| *b == b'\n').count().saturating_sub(1) as u64;
         let expected_total = newlines + 1;
         let first = read(dir.path(), r#"{"path":"crlf.txt","limit":1}"#)
             .await
@@ -943,6 +930,9 @@ mod tests {
     async fn read_scheme_resolution() {
         let dir = tempfile::tempdir().unwrap();
         // Disk decoys: a scheme read that fell through to the filesystem would return these.
+        // Windows forbids `:` in file names, so there is nothing to plant; a
+        // fallthrough would fail with InvalidFilename instead of reading DISK.
+        #[cfg(unix)]
         for decoy in ["letter:/7", "letter:/nope", "dalgon:/config"] {
             let path = dir.path().join(decoy);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1048,11 +1038,10 @@ mod tests {
     #[tokio::test]
     async fn read_line_selector() {
         let dir = tempfile::tempdir().unwrap();
-        let mut body = String::new();
-        for n in 1..=12 {
-            let _ = write!(body, "l{n}");
-            body.push('\n');
-        }
+        let body: String = (1..=12).fold(String::new(), |mut body, n| {
+            let _ = std::fmt::Write::write_fmt(&mut body, format_args!("l{n}\n"));
+            body
+        });
         fs::write(dir.path().join("a.rs"), &body).unwrap();
 
         let partial = read(dir.path(), &args("a.rs:4-6,10")).await.unwrap();
@@ -1071,11 +1060,10 @@ mod tests {
         );
 
         let whole = read(dir.path(), &args("a.rs:7-12,1-6")).await.unwrap();
-        let mut expected = String::new();
-        for n in 1..=12 {
-            let _ = write!(expected, "{n}\tl{n}");
-            expected.push('\n');
-        }
+        let expected: String = (1..=12).fold(String::new(), |mut expected, n| {
+            let _ = std::fmt::Write::write_fmt(&mut expected, format_args!("{n}\tl{n}\n"));
+            expected
+        });
         assert_eq!(
             text(&whole),
             format!("{expected}{}", whole_tag("a.rs", body.as_bytes()))

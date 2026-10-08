@@ -18,6 +18,9 @@ on:
       - "LICENSE.md"
       - "AGENTS.md"
       - "README.md"
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
 permissions:
   contents: read
 concurrency:
@@ -57,6 +60,14 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: false
+      - name: Report the file-descriptor ceiling
+        if: runner.os == 'macOS'
+        run: |
+          ulimit -Sn; ulimit -Hn
+          sysctl kern.maxfiles kern.maxfilesperproc || true
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with:
+          tool: cargo-semver-checks@0.50.0
       - run: cargo clippy --all-targets --all-features --locked -- -D warnings
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo check --locked --no-default-features --workspace
@@ -73,7 +84,10 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
       - run: rustup toolchain install 1.90.0 --profile minimal
-      - run: cargo +1.90.0 check --workspace --all-features --locked
+      # Deps may declare a higher rust_version than their code needs
+      # (mermaid-text 0.57 declares 1.92 but compiles on 1.90); the MSRV
+      # gate measures compilation, not metadata.
+      - run: cargo +1.90.0 check --workspace --all-features --locked --ignore-rust-version
 
   deny:
     runs-on: ubuntu-24.04
@@ -87,3 +101,28 @@ jobs:
           tool: cargo-deny@0.20.2
       - run: cargo deny --locked check
         working-directory: dal
+
+  stress-budgets:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: macos-15-intel, target: x86_64-apple-darwin }
+          - { os: macos-15, target: aarch64-apple-darwin }
+          - { os: windows-2022, target: x86_64-pc-windows-msvc }
+          - { os: windows-11-arm, target: aarch64-pc-windows-msvc }
+    runs-on: ${{ matrix.os }}
+    env:
+      DAL_TIMING_BUDGETS: "1"
+    defaults:
+      run:
+        working-directory: dal
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - run: cargo test --locked -p gates --release -- stress_

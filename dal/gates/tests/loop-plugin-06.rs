@@ -1,15 +1,14 @@
-//! Exercises Starlark TTSR rules against replayed model streams.
-#![expect(clippy::unwrap_used, reason = "SC test")]
 #![expect(clippy::expect_used, reason = "SC test")]
-#![expect(
-    dead_code,
-    reason = "gate support exposes helpers shared across independent targets"
-)]
+#![expect(clippy::unwrap_used, reason = "SC test")]
+//! Exercises Starlark TTSR rules against replayed model streams.
 
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
 use std::{
-    collections::BTreeMap,
     error::Error,
     fs,
     sync::{Arc, Mutex},
@@ -37,12 +36,12 @@ async fn scripted_ttsr_session(
     let plugin_dir = data.path().join("plugins/gate-ttsr");
     fs::create_dir_all(&plugin_dir)?;
     fs::write(plugin_dir.join("plugin.star"), RULE_PLUGIN)?;
-    let replay = data.path().join("ttsr-scripted.jsonl");
-    fs::write(&replay, REPLAY)?;
+    let replay_fixture = data.path().join("ttsr-scripted.jsonl");
+    fs::write(&replay_fixture, REPLAY)?;
     let factory = dalgon::product();
     let user = format!(
         "model = \"openai/gpt-6\"\nplugins = [\"gate-ttsr\"]\n[providers.scripted]\nfixture = {:?}\n",
-        replay.to_string_lossy()
+        replay_fixture.to_string_lossy()
     );
     let config = Config::load(
         ConfigProduct::Dalgon,
@@ -113,7 +112,7 @@ async fn scripted_ttsr_session(
         .build()?;
     product.extensions.push(watcher_extension);
     let env = Env {
-        vars: BTreeMap::new(),
+        vars: support::captured_shell_vars(),
         cwd: workspace.path().to_path_buf(),
         sandbox_helper: None,
     };

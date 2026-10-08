@@ -22,10 +22,12 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::broker::Broker;
+use crate::ext::EventStream;
 use crate::ext::generation::Generation;
 use crate::ext::hooks::{
-    DispatchCx, ObserverReport, StreamFire, StreamFireAction, StreamVerdict, StreamWatch, TurnInfo,
+    HookScope, ObserverReport, StreamFire, StreamFireAction, StreamVerdict, StreamWatch, TurnInfo,
     dispatch_before_request, dispatch_settled, dispatch_tool_result, dispatch_turn_end,
+    hook_fanout,
 };
 use crate::ext::overlay::{Overlay, TurnTools};
 use crate::ext::prompt::{PromptSection, SectionCx};
@@ -39,6 +41,7 @@ use crate::session::context::{
     DeferredTool, StreamCall, api_family, context_items, model_info_for, resolve_calls,
     system_prompt, tool_list,
 };
+use crate::session::control::ControlCell;
 use crate::session::dispatch::{DispatchCtx, GrantLedger, ReadyCall, plan_units, run_unit};
 use crate::session::projection::SnapshotArgs;
 use crate::session::shared::Shared;
@@ -51,6 +54,8 @@ const PARALLEL_READS: usize = 4;
 
 /// Bound for hook waits inside one turn.
 const TURN_DEADLINE: Duration = Duration::from_secs(600);
+/// A provider stream this quiet is a stall, not a slow model.
+const STREAM_IDLE_REPORT: Duration = Duration::from_secs(30);
 const COMPACTION_MIN_TOKENS: u64 = 1;
 const COMPACTION_KEEP_TOKENS: u64 = 20_000;
 
@@ -133,10 +138,14 @@ struct Driver {
     scoped: Option<Vec<Box<str>>>,
     last_model: Option<(ModelRoute, Family)>,
     last_catalog_entry: Option<dal_provider::CatalogEntry>,
+    /// The actor's turn-bypass cell shared over `DriverPorts`; `cancel` there
+    /// preempts a live `infer` stream — a queued `Effect::Stop` can't.
+    control: Arc<std::sync::Mutex<ControlCell>>,
 }
 
 /// Spawns the session driver task consuming `ports`.
 pub(crate) fn spawn(ports: DriverPorts, deps: DriverDeps) -> JoinHandle<()> {
+    let control = ports.control.clone();
     #[expect(
         clippy::disallowed_methods,
         reason = "session-owned driver task: the host stores the handle and aborts it on close"
@@ -148,6 +157,7 @@ pub(crate) fn spawn(ports: DriverPorts, deps: DriverDeps) -> JoinHandle<()> {
             scoped: None,
             last_model: None,
             last_catalog_entry: None,
+            control,
         }
         .run(ports),
     )
@@ -192,7 +202,7 @@ impl Driver {
                 dal_core::Effect::Stop { turn, stop } => {
                     self.observe_turn_end(turn, stop).await;
                     self.observe_settled(turn).await;
-                    self.stop(turn).await;
+                    self.stop(turn, stop).await;
                 }
                 effect => {
                     self.report(TurnWork::TaskFailed {
@@ -241,8 +251,19 @@ impl Driver {
     }
 
     /// Returns the turn state, creating it on first touch of the turn.
+    ///
+    /// The turn binds the bypass-cell token when the actor already opened
+    /// it (`TurnStarted` is journaled before any driver effect), so an
+    /// out-of-band `cancel` stops the stream; a late/stale turn falls back
+    /// to a standalone token exactly as before.
     fn turn(&mut self, turn: TurnId) -> &mut TurnState {
         let deps = &self.deps;
+        let cancel = self
+            .control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .token(turn)
+            .unwrap_or_default();
         self.turns.entry(turn).or_insert_with(|| {
             let generation = deps.host.shared.generation.borrow().clone();
             let tools = deps.overlay.publish(&generation, deps.shared.promoted());
@@ -253,7 +274,7 @@ impl Driver {
                 Arc::clone(&generation),
             );
             TurnState {
-                cancel: CancellationToken::new(),
+                cancel,
                 script,
                 generation,
                 tools,
@@ -273,19 +294,37 @@ impl Driver {
     }
 
     /// Stops one turn: cancels its token and confirms through the fold.
-    async fn stop(&mut self, turn: TurnId) {
+    ///
+    /// The batch queue runs effects in order, so by the time a stop effect
+    /// arrives every in-flight call settle — including a cancelled process's
+    /// kill ladder — has completed; the reported confirmation is the point
+    /// at which `TurnEnded` may reach subscribers.
+    async fn stop(&mut self, turn: TurnId, stop: Stop) {
         if let Some(state) = self.turns.get(&turn) {
             state.cancel.cancel();
         }
-        self.report(TurnWork::Cancelled).await;
+        self.report(TurnWork::Cancelled { turn, stop }).await;
     }
 
     /// Runs one provider request for `turn` and steps its lifecycle.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one provider request must preserve its ordered turn lifecycle"
-    )]
     async fn infer(&mut self, turn: TurnId, params: RequestParams, batch: &TurnBatch) {
+        let mut mark = std::time::Instant::now();
+        let Some(resolved) = self.resolve_request(turn, batch).await else {
+            return;
+        };
+        lap(self.deps.session, turn, "resolve", &mut mark);
+        let (stream, cancel) = self.open_stream(turn, &resolved, params, batch).await;
+        lap(self.deps.session, turn, "stream-open", &mut mark);
+        self.consume_stream(turn, resolved, stream, cancel).await;
+    }
+
+    /// Resolves the route for `turn`, caches the resolved row, and reports
+    /// the request opening; `None` after the failure is already reported.
+    async fn resolve_request(
+        &mut self,
+        turn: TurnId,
+        batch: &TurnBatch,
+    ) -> Option<ResolvedRequest> {
         if let Some(route) = batch.model.clone() {
             let family = batch
                 .family
@@ -322,7 +361,7 @@ impl Driver {
                     })
                     .await;
                 }
-                return;
+                return None;
             }
         };
         {
@@ -350,6 +389,18 @@ impl Driver {
             compact,
         })
         .await;
+        Some(resolved)
+    }
+
+    /// Captures the decision boundary and opens the provider stream.
+    async fn open_stream(
+        &mut self,
+        turn: TurnId,
+        resolved: &ResolvedRequest,
+        params: RequestParams,
+        batch: &TurnBatch,
+    ) -> (EventStream, CancellationToken) {
+        let mut mark = std::time::Instant::now();
         // The decision-request boundary: one environment capture per
         // provider request freezes the authority, the cutoff, and the
         // policy fingerprint for every cell of this round (E01).
@@ -372,20 +423,49 @@ impl Driver {
             );
             (Arc::clone(&state.script), cancel)
         };
-        let request = self.request(turn, &resolved, params).await;
+        let request = self.request(turn, resolved, params).await;
+        lap(self.deps.session, turn, "request", &mut mark);
         let deps = RequestDeps {
             session,
             host,
             script: Some(script),
         };
-        let mut stream = infer_stream(&deps, request, &cancel).await;
+        let stream = infer_stream(&deps, request, &cancel).await;
+        (stream, cancel)
+    }
+
+    /// Consumes the provider stream and reports the terminal outcome.
+    async fn consume_stream(
+        &mut self,
+        turn: TurnId,
+        resolved: ResolvedRequest,
+        mut stream: EventStream,
+        cancel: CancellationToken,
+    ) {
+        let session = self.deps.session;
+
         let turn_info = TurnInfo::new(self.deps.session, turn);
         let generation = self.turn(turn).generation.clone();
         let mut watchers = Self::start_watchers(&generation, &turn_info);
         let mut converter = StreamConverter::new();
         let mut events: Vec<StreamEvent> = Vec::new();
         let mut failed: Option<InferFailure> = None;
-        while let Some(item) = stream.next().await {
+        // A turn cancel is the bypass: it fires this token out-of-band while
+        // `stream.next()` may wait forever, so the loop must race them — a
+        // queued `Effect::Stop` could never reach a blocked poll otherwise.
+        loop {
+            let item = tokio::select! {
+                biased;
+                item = stream.next() => item,
+                () = cancel.cancelled() => return,
+                () = tokio::time::sleep(STREAM_IDLE_REPORT) => {
+                    eprintln!(
+                        "[dal-agent] session {session:?} turn {turn} provider stream idle > {STREAM_IDLE_REPORT:?}"
+                    );
+                    continue;
+                }
+            };
+            let Some(item) = item else { break };
             let event = match item {
                 Ok(event) => event,
                 Err(error) => {
@@ -440,7 +520,16 @@ impl Driver {
         }
     }
 }
-/// One resolved model with its catalog row.
+
+/// Logs an infer step that exceeded 250 ms.
+fn lap(session: SessionId, turn: TurnId, step: &str, mark: &mut std::time::Instant) {
+    let taken = mark.elapsed();
+    if taken > std::time::Duration::from_millis(250) {
+        eprintln!("[dal-agent] session {session:?} turn {turn} infer {step} took {taken:?}");
+    }
+    *mark = std::time::Instant::now();
+}
+
 struct ResolvedRequest {
     route: ModelRoute,
     family: Family,
@@ -595,29 +684,18 @@ impl Driver {
             thinking_explicit: false,
         };
         let deadline = tokio::time::Instant::now() + TURN_DEADLINE;
+        let scope = HookScope {
+            services: &self.deps.services,
+            session: self.deps.session,
+            parent: self.deps.parent,
+            process_env: Arc::clone(&self.deps.host.shared.env),
+            cancel: &self.deps.cancel,
+            turn_deadline: deadline,
+            script: self.hook_script(),
+        };
         let mut current = event.params.clone();
-        for (index, extension) in generation.extensions.iter().enumerate() {
-            let Ok(ext) = extension.name().parse::<Name>() else {
-                continue;
-            };
-            let caller = Caller::new(
-                ext,
-                extension.origin(),
-                extension.inject(),
-                CallerKind::Hook,
-                Some(turn),
-            );
-            let dispatch = crate::ext::hooks::DispatchCx {
-                caller: &caller,
-                services: &self.deps.services,
-                session: self.deps.session,
-                parent: self.deps.parent,
-                process_env: Arc::clone(&self.deps.host.shared.env),
-                turn: Some(turn),
-                cancel: &self.deps.cancel,
-                turn_deadline: deadline,
-                script: self.hook_script(),
-            };
+        for (index, extension, caller) in hook_fanout(generation, Some(turn)) {
+            let dispatch = scope.cx(&caller, Some(turn));
             let step = dispatch_before_request(
                 extension.name(),
                 &dispatch,
@@ -981,28 +1059,17 @@ impl Driver {
 
     async fn observe_tool_result(&self, ctx: &DispatchCtx, event: &ToolResultEvent) {
         let mut report = ObserverReport::default();
-        for (index, extension) in ctx.generation.extensions.iter().enumerate() {
-            let Ok(caller_name) = extension.name().parse::<Name>() else {
-                continue;
-            };
-            let caller = Caller::new(
-                caller_name,
-                extension.origin(),
-                extension.inject(),
-                CallerKind::Hook,
-                Some(ctx.turn),
-            );
-            let dispatch = DispatchCx {
-                caller: &caller,
-                services: &ctx.services,
-                session: ctx.session,
-                parent: ctx.parent,
-                process_env: Arc::clone(&ctx.process_env),
-                turn: Some(ctx.turn),
-                cancel: &ctx.cancel,
-                turn_deadline: ctx.turn_deadline,
-                script: ctx.script.clone(),
-            };
+        let scope = HookScope {
+            services: &ctx.services,
+            session: ctx.session,
+            parent: ctx.parent,
+            process_env: Arc::clone(&ctx.process_env),
+            cancel: &ctx.cancel,
+            turn_deadline: ctx.turn_deadline,
+            script: ctx.script.clone(),
+        };
+        for (index, extension, caller) in hook_fanout(&ctx.generation, Some(ctx.turn)) {
+            let dispatch = scope.cx(&caller, Some(ctx.turn));
             dispatch_tool_result(
                 extension.name(),
                 &dispatch,
@@ -1031,29 +1098,17 @@ impl Driver {
         let script = state.script.attach(None);
         let event = TurnEnd { turn, stop };
         let mut report = ObserverReport::default();
-        let turn_deadline = tokio::time::Instant::now() + TURN_DEADLINE;
-        for (index, extension) in generation.extensions.iter().enumerate() {
-            let Ok(caller_name) = extension.name().parse::<Name>() else {
-                continue;
-            };
-            let caller = Caller::new(
-                caller_name,
-                extension.origin(),
-                extension.inject(),
-                CallerKind::Hook,
-                Some(turn),
-            );
-            let dispatch = DispatchCx {
-                caller: &caller,
-                services: &self.deps.services,
-                session: self.deps.session,
-                parent: self.deps.parent,
-                process_env: Arc::clone(&self.deps.host.shared.env),
-                turn: Some(turn),
-                cancel: &cancel,
-                turn_deadline,
-                script: script.clone(),
-            };
+        let scope = HookScope {
+            services: &self.deps.services,
+            session: self.deps.session,
+            parent: self.deps.parent,
+            process_env: Arc::clone(&self.deps.host.shared.env),
+            cancel: &cancel,
+            turn_deadline: tokio::time::Instant::now() + TURN_DEADLINE,
+            script,
+        };
+        for (index, extension, caller) in hook_fanout(&generation, Some(turn)) {
+            let dispatch = scope.cx(&caller, Some(turn));
             dispatch_turn_end(
                 extension.name(),
                 &dispatch,
@@ -1120,29 +1175,17 @@ impl Driver {
         let reply_text = settled_reply_text(&view.entries.items);
         let event = Settled { turn, reply_text };
         let mut report = ObserverReport::default();
-        let turn_deadline = tokio::time::Instant::now() + TURN_DEADLINE;
-        for (index, extension) in generation.extensions.iter().enumerate() {
-            let Ok(caller_name) = extension.name().parse::<Name>() else {
-                continue;
-            };
-            let caller = Caller::new(
-                caller_name,
-                extension.origin(),
-                extension.inject(),
-                CallerKind::Hook,
-                Some(turn),
-            );
-            let dispatch = DispatchCx {
-                caller: &caller,
-                services: &self.deps.services,
-                session: self.deps.session,
-                parent: self.deps.parent,
-                process_env: Arc::clone(&self.deps.host.shared.env),
-                turn: Some(turn),
-                cancel: &cancel,
-                turn_deadline,
-                script: script.clone(),
-            };
+        let scope = HookScope {
+            services: &self.deps.services,
+            session: self.deps.session,
+            parent: self.deps.parent,
+            process_env: Arc::clone(&self.deps.host.shared.env),
+            cancel: &cancel,
+            turn_deadline: tokio::time::Instant::now() + TURN_DEADLINE,
+            script,
+        };
+        for (index, extension, caller) in hook_fanout(&generation, Some(turn)) {
+            let dispatch = scope.cx(&caller, Some(turn));
             dispatch_settled(
                 extension.name(),
                 &dispatch,

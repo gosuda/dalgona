@@ -83,6 +83,14 @@ proptest! {
                 continue;
             }
             for scalar in cluster.chars() {
+                // Zero-width scalars (combining marks, joiners, selectors)
+                // inherit the base scalar's width; they are never ambiguous
+                // themselves and carry no cells of their own.
+                if width(&scalar.to_string(), WidthMode::Narrow) == 0
+                    && width(&scalar.to_string(), WidthMode::Cjk) == 0
+                {
+                    continue;
+                }
                 let scalar = u32::from(scalar);
                 prop_assert!(
                     is_ambiguous_excerpt(scalar),

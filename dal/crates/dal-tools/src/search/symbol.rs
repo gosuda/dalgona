@@ -5,7 +5,6 @@
 //! A leading `::` pins the match to the full qualified name. The index only
 //! narrows candidate files; every row comes from a parse of bytes read now.
 
-use std::fmt::Write as _;
 use std::path::Path;
 
 use dal_core::{SymbolHit, SymbolPage};
@@ -200,7 +199,7 @@ async fn seen_key(abs: &Path) -> String {
 /// is returned, not recorded: the caller records it only for the served result.
 #[expect(
     clippy::too_many_lines,
-    reason = "symbol search dispatch reads args, selects scope, and renders one page in order"
+    reason = "one symbol lookup walks pattern, gate, and reveal in place"
 )]
 pub(crate) async fn run(
     search: &Search,
@@ -335,14 +334,10 @@ async fn candidates(
         _ if name.len() < 3 => Err(REASON_SHORT),
         None => Err(REASON_NO_INDEX),
         Some(index_scope) => {
-            let index_scope = match index_scope {
-                crate::search::IndexScope::Root => None,
-                crate::search::IndexScope::Directory(rel) => Some(rel),
-            };
             let clauses = [vec![name.as_bytes().to_vec()]];
             match search
                 .index
-                .search_candidates(workspace, &clauses, false, index_scope)
+                .search_candidates(workspace, &clauses, false, index_scope.directory())
                 .await
             {
                 Ok(Some(paths)) => Ok(paths),
@@ -465,7 +460,10 @@ fn reveal(target: &Target, bytes: &[u8], def: &Def) -> Option<(String, u64, u64)
     let mut text = format!("{} tag {}", row(&target.shown, def), tag8("def", span));
     for (number, line) in (def.first..).zip(lines) {
         let line = line.strip_suffix(b"\r").unwrap_or(line);
-        let _ = write!(text, "\n{number}:{}", String::from_utf8_lossy(line));
+        let _ = std::fmt::Write::write_fmt(
+            &mut text,
+            format_args!("\n{number}:{}", String::from_utf8_lossy(line)),
+        );
     }
     Some((text, u64::from(def.first), u64::from(def.last)))
 }
@@ -579,11 +577,12 @@ mod tests {
     /// An independent def tag: BLAKE3 over `def:` and the raw bytes, first 8 uppercase hex.
     fn oracle_tag(span: &[u8]) -> String {
         let digest = blake3::hash(&[b"def:".as_slice(), span].concat());
-        let mut tag = String::new();
-        for byte in &digest.as_bytes()[..4] {
-            let _ = write!(tag, "{byte:02X}");
-        }
-        tag
+        digest.as_bytes()[..4]
+            .iter()
+            .fold(String::new(), |mut out, byte| {
+                let _ = std::fmt::Write::write_fmt(&mut out, format_args!("{byte:02X}"));
+                out
+            })
     }
 
     #[test]
@@ -791,11 +790,10 @@ mod tests {
         let mut source = String::from("int target_fn(void) { return 0; }\n");
         let mut index = 0;
         while source.len() < 4 << 20 {
-            let _ = write!(
-                source,
-                "int filler_{index}(int a, int b) {{ return a * b + {index}; }}"
+            let _ = std::fmt::Write::write_fmt(
+                &mut source,
+                format_args!("int filler_{index}(int a, int b) {{ return a * b + {index}; }}\n"),
             );
-            source.push('\n');
             index += 1;
         }
         write(dir.path(), "big.c", source.as_bytes());
@@ -1029,11 +1027,10 @@ mod tests {
         #[test]
         fn symbol_ordinal_soundness(names in proptest::collection::vec(0_usize..3, 1..12), pick in 0_usize..3, k in 1_u32..6) {
             let words = ["alpha_fn", "beta_fn", "gamma_fn"];
-            let mut source = String::new();
-            for &name in &names {
-                let _ = write!(source, "fn {}() {{}}", words[name]);
-                source.push('\n');
-            }
+            let source: String = names.iter().fold(String::new(), |mut source, &name| {
+                let _ = std::fmt::Write::write_fmt(&mut source, format_args!("fn {}() {{}}\n", words[name]));
+                source
+            });
             let lines: Vec<usize> = names
                 .iter()
                 .enumerate()

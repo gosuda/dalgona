@@ -103,14 +103,54 @@ pub(crate) async fn scripted_session(
     Ok(GateHarness { host, agent })
 }
 
+/// Probes whether `pid` still runs, portable across gate platforms.
+pub(crate) fn process_alive(pid: u32) -> bool {
+    #[cfg(target_os = "linux")]
+    let alive = PathBuf::from(format!("/proc/{pid}")).exists();
+    #[cfg(target_os = "macos")]
+    let alive = Command::new("/bin/kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .is_ok_and(|status| status.success());
+    #[cfg(windows)]
+    let alive = Command::new("powershell.exe")
+        .args(["-NoProfile", "-Command", &format!("Get-Process -Id {pid}")])
+        .status()
+        .is_ok_and(|status| status.success());
+    alive
+}
+
+/// The fixed environment snapshot for a test session. Windows console
+/// tools read `SystemRoot`, TEMP, `COMSPEC`, and `PSModulePath` during
+/// startup and the shell ladder needs the runner PATH to find Git Bash,
+/// so the snapshot carries the whole runner environment on Windows; other
+/// platforms keep an empty snapshot.
+pub(crate) fn captured_shell_vars() -> BTreeMap<std::ffi::OsString, std::ffi::OsString> {
+    #[cfg(windows)]
+    {
+        std::env::vars_os().collect()
+    }
+    #[cfg(not(windows))]
+    {
+        BTreeMap::default()
+    }
+}
+
 pub(crate) struct TestDir {
     path: PathBuf,
 }
 
 impl TestDir {
     pub(crate) fn new() -> io::Result<Self> {
+        Self::new_in(&std::env::temp_dir())
+    }
+
+    /// Creates the test directory under `root`: unix socket paths under the
+    /// platform temp root can exceed `SUN_LEN` on BSD, so socket tests need
+    /// a bounded base path.
+    pub(crate) fn new_in(root: &Path) -> io::Result<Self> {
         let id = NEXT_TEST_DIR.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("dalgon-gates-{}-{id}", std::process::id()));
+        let path = root.join(format!("dalgon-gates-{}-{id}", std::process::id()));
         std::fs::create_dir(&path)?;
         Ok(Self { path })
     }

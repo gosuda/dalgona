@@ -1,14 +1,14 @@
 //! The Starlark Fusion model runs its panels and preserves session calls.
 #![expect(clippy::expect_used, reason = "SC test")]
 #![expect(clippy::panic, reason = "SC test")]
-#![expect(
-    dead_code,
-    reason = "gate support exposes helpers shared across independent targets"
-)]
 
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
-use std::{collections::BTreeMap, error::Error, fs, path::PathBuf, time::Duration};
+use std::{error::Error, fs, path::PathBuf, time::Duration};
 
 use dal_agent::{Env, SessionRef, Subscription};
 use dal_core::{
@@ -119,7 +119,7 @@ async fn scripted_fusion_model_runs_panel_and_forwards_session_call()
         "fusion.star did not register its private tool"
     );
     let env = Env {
-        vars: BTreeMap::new(),
+        vars: support::captured_shell_vars(),
         cwd: workspace.path().to_path_buf(),
         sandbox_helper: None,
     };

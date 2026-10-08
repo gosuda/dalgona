@@ -2,10 +2,13 @@
 
 use std::{
     ffi::OsString,
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     io::{self, Write},
-    path::Path,
+    path::{Path, PathBuf},
 };
+
+#[cfg(not(windows))]
+use std::fs::File;
 
 use tempfile::TempPath;
 use unicode_segmentation::UnicodeSegmentation;
@@ -32,6 +35,38 @@ impl FileMode {
 
 /// Maximum session-name length in grapheme clusters.
 const NAME_MAX: usize = 64;
+
+/// The spelling a path carries for durable identity: every symlink resolved,
+/// with a Windows verbatim local root folded back to the drive spelling so
+/// stored and displayed paths stay readable. A path that cannot be resolved
+/// keeps its given form, so callers stay total.
+#[must_use]
+pub fn canonical_path(path: &Path) -> PathBuf {
+    simplify_verbatim(std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()))
+}
+
+/// Folds `\\?\C:\...` back to `C:\...`; verbatim UNC and device roots stay
+/// verbatim because they have no plain spelling.
+#[cfg(windows)]
+fn simplify_verbatim(path: PathBuf) -> PathBuf {
+    use std::path::{Component, Prefix};
+
+    let mut components = path.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return path;
+    };
+    let Prefix::VerbatimDisk(letter) = prefix.kind() else {
+        return path;
+    };
+    let mut simplified = PathBuf::from(format!("{}:\\", char::from(letter)));
+    simplified.extend(components);
+    simplified
+}
+
+#[cfg(not(windows))]
+fn simplify_verbatim(path: PathBuf) -> PathBuf {
+    path
+}
 
 /// The workspace directory name: cleaned base, cut to 32 bytes, plus 12 hex digits.
 #[must_use]
@@ -183,11 +218,19 @@ fn rename_temp(temp: &Path, target: &Path, publication: Publication) -> Result<(
     }
 }
 
+/// Windows has no directory-sync door; the `Result` is load-bearing on POSIX.
+#[cfg_attr(
+    windows,
+    expect(
+        clippy::unnecessary_wraps,
+        reason = "directory sync fails only on POSIX"
+    )
+)]
 pub(crate) fn sync_dir(dir: &Path) -> Result<(), StoreError> {
     #[cfg(windows)]
     {
         let _ = dir;
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(windows))]
     {
@@ -397,7 +440,9 @@ mod tests {
         assert_no_temporary_files(&dir.0);
     }
 
-    #[cfg(unix)]
+    /// APFS rejects non-UTF-8 filenames at create/open (EILSEQ), so the
+    /// preservation claim is only exercisable on byte-name filesystems.
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn atomic_write_preserves_non_utf8_target_name() {
         use std::os::unix::ffi::OsStrExt;

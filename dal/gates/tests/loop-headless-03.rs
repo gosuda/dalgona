@@ -1,13 +1,12 @@
-//! Killed process resume records aborts and replays synthetic results.
+//! Killed processes resume as aborted turns with synthetic tool results.
 #![expect(
     clippy::disallowed_methods,
     reason = "SC test kills a real host process"
 )]
-#![expect(
+#[expect(
     dead_code,
-    reason = "gate support exposes helpers shared across independent targets"
+    reason = "gate support helpers are shared across independent test targets"
 )]
-
 mod support;
 
 use std::{
@@ -49,6 +48,7 @@ async fn killed_process_resume_records_abort_and_synthetic_results()
     let mut host = Command::new(binary)
         .current_dir(&workspace)
         .env_clear()
+        .envs(support::captured_shell_vars())
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("XDG_DATA_HOME", &data_dir)
@@ -78,6 +78,7 @@ async fn killed_process_resume_records_abort_and_synthetic_results()
     let resumed = Command::new(binary)
         .current_dir(&workspace)
         .env_clear()
+        .envs(support::captured_shell_vars())
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("XDG_DATA_HOME", &data_dir)

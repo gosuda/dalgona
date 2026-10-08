@@ -82,6 +82,7 @@ pub fn gate_mode(
 ) -> Result<JudgeGate, JudgeGateError> {
     match (mode, judge_ready) {
         (JudgeMode::Off, _) => Ok(JudgeGate::Disabled { note: None }),
+
         (JudgeMode::On, false) => Err(JudgeGateError),
         (JudgeMode::Auto, false) => Ok(JudgeGate::Disabled {
             note: Some(judge_auto_off_note(judged_count)),

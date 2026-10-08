@@ -1,13 +1,12 @@
-#![expect(
-    dead_code,
-    reason = "gate support exposes helpers shared across independent targets"
-)]
 //! `TestBackend` snapshots for the inline and fullscreen TUI screens.
 
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
 use std::{
-    collections::BTreeMap,
     error::Error,
     path::{Path, PathBuf},
 };
@@ -43,7 +42,7 @@ async fn tui_backend_snapshots_inline_and_fullscreen() -> Result<(), Box<dyn Err
         config: &config,
     })?;
     let env = Env {
-        vars: BTreeMap::new(),
+        vars: support::captured_shell_vars(),
         cwd: workspace.path().to_path_buf(),
         sandbox_helper: None,
     };
@@ -129,15 +128,31 @@ fn render_buffer(
             text = text.replace(name, "[root]");
         }
     }
+    // The status row truncates the workspace path to its leading cells, so a
+    // temp-dir spelling deeper than that never reaches the path masks above.
+    // Fold every head the truncation can leave back to the same root token.
+    if let Some(temp) = std::env::temp_dir().to_str().map(str::to_owned) {
+        for head in (8..=temp.len()).rev() {
+            if temp.is_char_boundary(head) {
+                text = text.replace(&temp[..head], "[root]");
+            }
+        }
+    }
     for prefix in ["/tmp/dalgon-gates-", "dalgon-gates-"] {
         let mut search = 0;
         while let Some(offset) = text[search..].find(prefix) {
             let start = search + offset;
             let rest = &text[start + prefix.len()..];
-            let digits = rest
+            let mut matched = rest
                 .find(|ch: char| !ch.is_ascii_digit())
                 .unwrap_or(rest.len());
-            text.replace_range(start..start + prefix.len() + digits, "[root]");
+            if let Some(suffix) = rest[matched..].strip_prefix('-') {
+                let id_digits = suffix
+                    .find(|ch: char| !ch.is_ascii_digit())
+                    .unwrap_or(suffix.len());
+                matched += 1 + id_digits;
+            }
+            text.replace_range(start..start + prefix.len() + matched, "[root]");
             search = start + "[root]".len();
         }
     }

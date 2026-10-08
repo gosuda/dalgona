@@ -455,10 +455,9 @@ fn distance_at_most_one(left: &str, right: &str) -> Option<usize> {
     for (row, cell) in table.iter_mut().enumerate() {
         cell[0] = row;
     }
-    table[0]
-        .iter_mut()
-        .enumerate()
-        .for_each(|(column, cell)| *cell = column);
+    for (column, cell) in table[0].iter_mut().enumerate() {
+        *cell = column;
+    }
     for row in 1..=left.len() {
         for column in 1..=right.len() {
             let cost = usize::from(left[row - 1] != right[column - 1]);
@@ -602,8 +601,8 @@ pub(super) fn error_triple(
 ///
 /// # Errors
 ///
-/// Returns `Lex` for an unparsable tail and `Arity` when the tail's word
-/// count breaks the record's arity.
+/// Returns [`CommandError::Lex`] on an unparseable tail and
+/// [`CommandError::Arity`] on a tail the record does not accept.
 pub fn check_arity(
     cmd: &str,
     arity: Arity,
@@ -682,12 +681,8 @@ pub trait PluginReload: Send + Sync + 'static {
 /// Takes the reload seam by value and clones it into each of the 25 command
 /// handlers; the public constructor signature is pinned by the external
 /// consumers (dalgon product, dal-wire tests).
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "public constructor takes the seam by value and clones it per registration"
-)]
 pub fn extension(
-    reload: std::sync::Arc<dyn PluginReload>,
+    reload: &std::sync::Arc<dyn PluginReload>,
 ) -> Result<dal_agent::ext::Extension, dal_core::RegistrationError> {
     let mut builder = dal_agent::ext::ExtensionBuilder::new(
         "commands",

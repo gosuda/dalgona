@@ -1,13 +1,7 @@
 [advisories]
 version = 2
-ignore = [
-    # starlark is the scripting engine; its transitive unmaintained deps cannot
-    # be removed without dropping the feature. No known vulnerabilities.
-    "RUSTSEC-2023-0089", # atomic-polyfill via starlark
-    "RUSTSEC-2024-0388", # derivative via starlark
-    "RUSTSEC-2024-0436", # paste via starlark
-    "RUSTSEC-2025-0057", # fxhash via starlark_map
-]
+unmaintained = "workspace"
+
 [licenses]
 version = 2
 allow = [
@@ -21,8 +15,86 @@ allow = [
     "MIT",
     "Unicode-3.0",
     "Zlib",
+    "LicenseRef-Sustainable-Use-1.0",
     "SUL-1.0",
 ]
+[[licenses.clarify]]
+name = "dal-agent"
+version = "*"
+expression = "LicenseRef-Sustainable-Use-1.0"
+license-files = [{ path = "../../../LICENSE.md", hash = 0xcede84f7 }]
+
+[[licenses.clarify]]
+name = "dal-core"
+version = "*"
+expression = "LicenseRef-Sustainable-Use-1.0"
+license-files = [{ path = "../../../LICENSE.md", hash = 0xcede84f7 }]
+
+[[licenses.clarify]]
+name = "dal-ext"
+version = "*"
+expression = "LicenseRef-Sustainable-Use-1.0"
+license-files = [{ path = "../../../LICENSE.md", hash = 0xcede84f7 }]
+
+[[licenses.clarify]]
+name = "dal-provider"
+version = "*"
+expression = "LicenseRef-Sustainable-Use-1.0"
+license-files = [{ path = "../../../LICENSE.md", hash = 0xcede84f7 }]
+
+[[licenses.clarify]]
+name = "dal-star"
+version = "*"
+expression = "LicenseRef-Sustainable-Use-1.0"
+license-files = [{ path = "../../../LICENSE.md", hash = 0xcede84f7 }]
+
+[[licenses.clarify]]
+name = "dal-store"
+version = "*"
+expression = "LicenseRef-Sustainable-Use-1.0"
+license-files = [{ path = "../../../LICENSE.md", hash = 0xcede84f7 }]
+
+[[licenses.clarify]]
+name = "dal-tools"
+version = "*"
+expression = "LicenseRef-Sustainable-Use-1.0"
+license-files = [{ path = "../../../LICENSE.md", hash = 0xcede84f7 }]
+
+[[licenses.clarify]]
+name = "dal-tui"
+version = "*"
+expression = "LicenseRef-Sustainable-Use-1.0"
+license-files = [{ path = "../../../LICENSE.md", hash = 0xcede84f7 }]
+
+[[licenses.clarify]]
+name = "dal-wire"
+version = "*"
+expression = "LicenseRef-Sustainable-Use-1.0"
+license-files = [{ path = "../../../LICENSE.md", hash = 0xcede84f7 }]
+
+[[licenses.clarify]]
+name = "dalgon"
+version = "*"
+expression = "LicenseRef-Sustainable-Use-1.0"
+license-files = [{ path = "../../../LICENSE.md", hash = 0xcede84f7 }]
+
+[[licenses.clarify]]
+name = "dalgona"
+version = "*"
+expression = "LicenseRef-Sustainable-Use-1.0"
+license-files = [{ path = "../../../LICENSE.md", hash = 0xcede84f7 }]
+
+[[licenses.clarify]]
+name = "dalgona-batteries"
+version = "*"
+expression = "LicenseRef-Sustainable-Use-1.0"
+license-files = [{ path = "../../../LICENSE.md", hash = 0xcede84f7 }]
+
+[[licenses.clarify]]
+name = "gates"
+version = "*"
+expression = "LicenseRef-Sustainable-Use-1.0"
+license-files = [{ path = "../../LICENSE.md", hash = 0xcede84f7 }]
 
 [sources]
 unknown-registry = "deny"

@@ -177,38 +177,6 @@ pub fn dialog_title(question: &Question) -> String {
     }
 }
 
-/// Maps a key onto a text question; the composer owns the draft while it is open.
-fn text_key(input: &mut String, empty_hint: &mut bool, key: crate::keys::Key) -> Option<Answer> {
-    use crossterm::event::{KeyCode, KeyModifiers};
-
-    match key.code {
-        KeyCode::Esc => Some(Answer::Cancel),
-        KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
-            input.push('\n');
-            None
-        }
-        KeyCode::Enter => {
-            let answer = text_answer(input);
-            *empty_hint = answer.is_none();
-            answer
-        }
-        KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            input.push('\n');
-            None
-        }
-        KeyCode::Backspace => {
-            input.pop();
-            None
-        }
-        KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            input.push(ch);
-            *empty_hint = false;
-            None
-        }
-        _ => None,
-    }
-}
-
 fn value_string(text: &str) -> Answer {
     let mut body = String::new();
     append_json_string(&mut body, text);
@@ -315,7 +283,17 @@ impl DialogUi {
         {
             return None;
         }
-        let answer = match &request.question {
+        let question = request.question.clone();
+        let answer = self.question_answer(&question, key);
+        let answer = answer?;
+        self.queue.mark_answered(id).then_some((id, answer))
+    }
+
+    /// Maps one key to an answer for the shown question kind, mutating only
+    /// dialog-local focus, checked set, scroll, and input buffer.
+    fn question_answer(&mut self, question: &Question, key: crate::keys::Key) -> Option<Answer> {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        match question {
             Question::Approval { .. } | Question::Grant { .. } => match key.code {
                 KeyCode::Char('y' | 'Y') => Some(Answer::Approve),
                 KeyCode::Char('a' | 'A') => Some(Answer::ApproveForSession),
@@ -371,7 +349,32 @@ impl DialogUi {
                 }
                 _ => None,
             },
-            Question::Text { .. } => text_key(&mut self.input, &mut self.empty_hint, key),
+            Question::Text { .. } => match key.code {
+                KeyCode::Esc => Some(Answer::Cancel),
+                KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                    self.input.push('\n');
+                    None
+                }
+                KeyCode::Enter => {
+                    let answer = text_answer(&self.input);
+                    self.empty_hint = answer.is_none();
+                    answer
+                }
+                KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.input.push('\n');
+                    None
+                }
+                KeyCode::Backspace => {
+                    crate::composer::pop_grapheme(&mut self.input);
+                    None
+                }
+                KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.input.push(ch);
+                    self.empty_hint = false;
+                    None
+                }
+                _ => None,
+            },
             Question::Confirm { .. } => match key.code {
                 KeyCode::Char('y' | 'Y') => Some(confirm_answer('y')),
                 KeyCode::Char('n' | 'N') => Some(confirm_answer('n')),
@@ -379,9 +382,7 @@ impl DialogUi {
                 _ => None,
             },
             _ => (key.code == KeyCode::Esc).then_some(Answer::Cancel),
-        };
-        let answer = answer?;
-        self.queue.mark_answered(id).then_some((id, answer))
+        }
     }
 
     /// Renders the active dialog with a title, scrollable body, and fail-closed actions.
@@ -407,13 +408,13 @@ impl DialogUi {
         settings: DiagramSettings,
         cache: &RenderCache,
     ) -> Vec<RenderRow> {
-        let Some((request, extra)) = self.queue.shown() else {
+        let Some((request, waiting)) = self.queue.shown() else {
             return Vec::new();
         };
         let mut title = dialog_title(&request.question);
-        if extra > 0 {
+        if waiting > 0 {
             use std::fmt::Write as _;
-            let _ = write!(title, " · {extra} more waiting");
+            let _ = write!(title, " · {waiting} more waiting");
         }
         let mut rows = vec![RenderRow::new(title, Role::Accent)];
         let mut body = self.body(&request.question, width, mode, settings, cache);

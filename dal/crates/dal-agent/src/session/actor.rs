@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::num::NonZeroU64;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use dal_core::ext::{
@@ -29,8 +29,10 @@ use super::status::{STATUS_POLL, sweep};
 use super::{ActorRequest, COMMAND_CHANNEL, SessionHandle};
 use crate::broker::{AnswerWait, Broker, Resolved, default_timeout};
 use crate::error::{ActualTurn, AgentError, ServiceError, TurnPhase, ValidationError, deny_text};
-use crate::ext::hooks::{DispatchCx, dispatch_before_turn, dispatch_input, join_before_turn};
-use crate::ext::{Caller, CallerKind, Services};
+use crate::ext::Services;
+use crate::ext::hooks::{
+    HookScope, dispatch_before_turn, dispatch_input, hook_fanout, join_before_turn,
+};
 
 /// Bound for actor-to-driver effect batches.
 const DRIVER_CHANNEL: usize = 256;
@@ -45,7 +47,7 @@ pub(crate) struct TurnBatch {
     pub(crate) asks: Vec<(Request, AnswerWait)>,
     /// The fold approval policy snapshot for this batch.
     pub(crate) policy: Policy,
-    /// The active model route snapshot for this batch.
+    /// The requested model route snapshot for this batch.
     pub(crate) model: Option<ModelRoute>,
     /// The active provider family snapshot for this batch.
     pub(crate) family: Option<Family>,
@@ -55,6 +57,10 @@ pub(crate) struct TurnBatch {
 pub(crate) struct DriverPorts {
     /// Effect batches for the driver, with the ask waiters they may await.
     pub(crate) ops_rx: mpsc::Receiver<TurnBatch>,
+    /// The shared turn-bypass cell: the driver binds each turn's stream to the
+    /// token `ControlCell::cancel` fires, so a cancel preempts a live `infer`
+    /// out-of-band (a queued `Effect::Stop` could never reach it mid-stream).
+    pub(crate) control: Arc<Mutex<ControlCell>>,
 }
 
 /// Work the Step-3 driver reports back to the actor.
@@ -86,8 +92,15 @@ pub(crate) enum TurnWork {
         /// Receipt: the persisted reminder entry.
         reply: oneshot::Sender<Option<dal_core::EntryId>>,
     },
-    /// The driver confirmed cancellation.
-    Cancelled,
+    /// The driver confirmed a turn's stop: the batch queue is ordered, so an
+    /// in-flight call's kill ladder already finished; this is the earliest
+    /// point a cancelled turn's `TurnEnded` may reach subscribers.
+    Cancelled {
+        /// The stopped turn.
+        turn: TurnId,
+        /// The stop the turn ended with.
+        stop: dal_core::Stop,
+    },
     /// The driver task failed.
     TaskFailed {
         /// The failed turn, when known.
@@ -214,7 +227,7 @@ pub(crate) struct Actor {
     fold: Session,
     broker: Arc<Broker>,
     shared: Arc<Shared>,
-    control: std::sync::Arc<std::sync::Mutex<ControlCell>>,
+    control: Arc<Mutex<ControlCell>>,
     workspace: Workspace,
     sidecar: HashMap<dal_core::Name, Vec<u8>>,
     /// The child depth, zero for top-level sessions.
@@ -229,8 +242,7 @@ pub(crate) struct Actor {
     broken: Option<Box<str>>,
     /// Capability-scoped services for hook dispatch, attached after spawn.
     services: Option<Arc<dyn Services>>,
-    /// Cancellation for an in-flight opening-hook drive.
-    drive_cancel: Option<tokio_util::sync::CancellationToken>,
+
     /// The session data-plane cell backing scripted hook entries; filled
     /// right after the actor spawns.
     backend: Arc<std::sync::OnceLock<Arc<crate::session::backend::Backend>>>,
@@ -238,19 +250,6 @@ pub(crate) struct Actor {
 }
 
 type ReplyTx = oneshot::Sender<Result<Reply, AgentError>>;
-
-/// The messages waiting for delivery one recipient accepts (design 6.3).
-const MAILBOX_CAPACITY: usize = 100;
-
-/// Counts the recipient's next-turn records waiting for delivery.
-fn mailbox_waiting(to: &SessionId, records: &[Record]) -> usize {
-    records
-        .iter()
-        .filter(|record| {
-            matches!(record, Record::Mail(mail) if &mail.to == to && mail.mode == MailMode::NextTurn)
-        })
-        .count()
-}
 
 /// Pages the session's journaled mail after a cursor.
 ///
@@ -293,6 +292,39 @@ fn mailbox_page(
     (mail, next)
 }
 
+/// Maps a fold rejection onto the typed wake refusal reasons.
+fn wake_refusal(rejection: &Rejection) -> dal_core::ext::WakeError {
+    match rejection {
+        Rejection::Denied {
+            reason: dal_core::DenyReason::WakeLimit,
+        } => dal_core::ext::WakeError::Limit,
+        Rejection::BusyTurn => dal_core::ext::WakeError::Busy,
+        other => dal_core::ext::WakeError::Journal {
+            message: other.to_string().into(),
+        },
+    }
+}
+
+/// Undelivered mail bound for this session.
+///
+/// A `NextTurn` message always waits for a following turn, so its record
+/// counts as undelivered; `Aside` and delivered `Steer` records do not.
+fn undelivered_mail(session: SessionId, records: &[Record]) -> usize {
+    records
+        .iter()
+        .filter(|record| {
+            matches!(
+                record,
+                Record::Mail(record)
+                    if record.to == session && record.mode == MailMode::NextTurn
+            )
+        })
+        .count()
+}
+
+/// Waiting-mail capacity per recipient (the spec's 100-message bound).
+const MAILBOX_WAITING_LIMIT: usize = 100;
+
 /// Finds the reminder entry the fold emitted in one effect batch.
 fn reminder_entry(effects: &[Effect]) -> Option<dal_core::EntryId> {
     effects.iter().find_map(|effect| {
@@ -312,13 +344,14 @@ fn reminder_entry(effects: &[Effect]) -> Option<dal_core::EntryId> {
 pub(crate) fn spawn(deps: ActorDeps) -> (SessionHandle, DriverPorts, tokio::task::JoinHandle<()>) {
     let (tx, rx) = mpsc::channel(COMMAND_CHANNEL);
     let (driver_tx, ops_rx) = mpsc::channel(DRIVER_CHANNEL);
+    let control = Arc::new(Mutex::new(ControlCell::new()));
     let actor = Actor {
         session: deps.session,
         journal: deps.journal,
         fold: deps.fold,
         broker: deps.broker,
         shared: deps.shared,
-        control: std::sync::Arc::new(std::sync::Mutex::new(ControlCell::new())),
+        control: Arc::clone(&control),
         workspace: deps.workspace,
         sidecar: HashMap::new(),
         depth: deps.depth,
@@ -331,7 +364,6 @@ pub(crate) fn spawn(deps: ActorDeps) -> (SessionHandle, DriverPorts, tokio::task
         closing: false,
         broken: None,
         services: None,
-        drive_cancel: None,
         backend: deps.backend,
         tasks: deps.tasks,
     };
@@ -341,7 +373,7 @@ pub(crate) fn spawn(deps: ActorDeps) -> (SessionHandle, DriverPorts, tokio::task
         reason = "session-owned actor task: the host stores the handle and awaits it on close"
     )]
     let task = tokio::spawn(actor.into_run(deps.pending));
-    (handle, DriverPorts { ops_rx }, task)
+    (handle, DriverPorts { ops_rx, control }, task)
 }
 
 /// Borrows the content parts carried by one opening source.
@@ -364,16 +396,18 @@ fn content_text(content: &[Part]) -> String {
     text
 }
 
-/// Mints the hook caller for one extension, skipping unparseable names.
-fn hook_caller(extension: &crate::ext::Extension, turn: TurnId) -> Option<Caller> {
-    let name = extension.name().parse::<Name>().ok()?;
-    Some(Caller::new(
-        name,
-        extension.origin(),
-        extension.inject(),
-        CallerKind::Hook,
-        Some(turn),
-    ))
+/// What [`Actor::classify`] produced from one work report.
+#[derive(Default)]
+struct FoldOutcome {
+    /// The fold event the work maps to, when it maps directly.
+    event: Option<Event>,
+    /// Read views the settled call delivered to the model.
+    delivered: Vec<dal_core::ext::ReadView>,
+    /// The reminder reply and its journal entry, when a step satisfied one.
+    receipt: Option<(
+        oneshot::Sender<Option<dal_core::EntryId>>,
+        Option<dal_core::EntryId>,
+    )>,
 }
 
 impl Actor {
@@ -386,7 +420,9 @@ impl Actor {
         }
         self.shared.sync_ext(&self.fold);
         self.poll_status();
-        self.run().await;
+        // `run` is a large future on Windows; boxing keeps `into_run` under
+        // the `large_futures` limit.
+        Box::pin(self.run()).await;
     }
 
     /// Polls every registered status kind once and publishes the changes.
@@ -409,7 +445,11 @@ impl Actor {
             effects,
             asks,
             policy: self.fold.policy(self.answerer_attached()),
-            model: self.fold.active_model().cloned(),
+            model: self
+                .fold
+                .requested_model()
+                .cloned()
+                .or_else(|| self.fold.active_model().cloned()),
             family: self.fold.active_family(),
         }
     }
@@ -417,6 +457,11 @@ impl Actor {
     /// Reports whether a frontend can answer approval questions.
     fn answerer_attached(&self) -> bool {
         self.shared.attached()
+    }
+
+    /// Locks the shared turn-bypass cell.
+    fn control(&self) -> MutexGuard<'_, ControlCell> {
+        self.control.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     async fn run(mut self) {
@@ -442,14 +487,6 @@ impl Actor {
                 }
             }
         }
-    }
-
-    /// The running turn mirrored in the control cell, or `None` when idle.
-    fn running_turn(&self) -> Option<TurnId> {
-        self.control
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .running()
     }
 
     async fn on_request(&mut self, request: ActorRequest) {
@@ -497,6 +534,10 @@ impl Actor {
             }
             ActorRequest::Services { services } => {
                 self.services = Some(services);
+                // A submit that outran service attachment parked the fold in
+                // `Phase::Opening` (`drive_opening` bails without services);
+                // re-drive now that hooks can resolve.
+                self.execute(Vec::new(), None).await;
             }
             ActorRequest::ExtRecord { req } => {
                 self.on_ext_record(req).await;
@@ -579,81 +620,107 @@ impl Actor {
     }
 
     /// Steps one driver work report through the fold and executes effects.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "cohesive turn-work state machine; extraction would split one invariant"
-    )]
     async fn on_work(&mut self, work: TurnWork) {
         let mut queue: VecDeque<Effect> = VecDeque::new();
         let mut effects = Vec::new();
-        let mut delivered: Vec<dal_core::ext::ReadView> = Vec::new();
-        let mut receipt: Option<(
-            oneshot::Sender<Option<dal_core::EntryId>>,
-            Option<dal_core::EntryId>,
-        )> = None;
-        match work {
-            TurnWork::Asked { request } => {
-                let _ = self.fold.step(
-                    Event::RequestOpened { request },
-                    Timestamp::now(),
-                    &mut effects,
-                );
-            }
-            TurnWork::Answered { resolved } => {
-                self.queue_resolved(&resolved, &mut queue);
-            }
-            TurnWork::CallStarted { turn, call } => {
-                let _ = self.fold.step(
-                    Event::CallStarted { turn, call },
-                    Timestamp::now(),
-                    &mut effects,
-                );
-            }
+        let outcome = self.classify(work, &mut queue, &mut effects);
+        if let Some(event) = outcome.event {
+            self.step(event, &mut effects);
+        }
+        queue.extend(effects);
+        self.execute(queue.into(), None).await;
+        if let Some((reply, entry)) = outcome.receipt {
+            let _ = reply.send(if self.broken.is_none() { entry } else { None });
+        }
+        self.mark_delivered(&outcome.delivered);
+    }
+
+    /// Maps one driver work report to its fold event plus side products:
+    /// queued effects, views delivered to the model, and a reminder reply.
+    fn classify(
+        &mut self,
+        work: TurnWork,
+        queue: &mut VecDeque<Effect>,
+        effects: &mut Vec<Effect>,
+    ) -> FoldOutcome {
+        let mut outcome = FoldOutcome::default();
+        let event = match work {
+            TurnWork::Asked { request } => Some(Event::RequestOpened { request }),
+            TurnWork::CallStarted { turn, call } => Some(Event::CallStarted { turn, call }),
             TurnWork::Settled {
                 turn,
                 call,
-                outcome,
+                outcome: settled,
             } => {
-                delivered = read_views(&outcome);
-                let _ = self.fold.step(
-                    Event::Settled {
-                        turn,
-                        call,
-                        outcome,
-                    },
-                    Timestamp::now(),
-                    &mut effects,
-                );
+                outcome.delivered = read_views(&settled);
+                Some(Event::Settled {
+                    turn,
+                    call,
+                    outcome: settled,
+                })
             }
-            TurnWork::Streamed { turn, event } => {
-                let _ = self.fold.step(
-                    Event::Stream { turn, event },
-                    Timestamp::now(),
-                    &mut effects,
-                );
+            TurnWork::Streamed { turn, event } => Some(Event::Stream { turn, event }),
+            TurnWork::StreamEnded {
+                turn,
+                model,
+                family,
+                result,
+                partial,
+            } => Some(Event::StreamEnded {
+                turn,
+                model,
+                family,
+                result,
+                partial,
+            }),
+            TurnWork::Resolved {
+                turn,
+                calls,
+                answerer_attached,
+            } => Some(Event::Resolved {
+                turn,
+                calls,
+                answerer_attached,
+            }),
+            TurnWork::Boundary { turn } => Some(Event::Boundary { turn }),
+            TurnWork::CompactionSettled {
+                turn,
+                outcome: settled,
+            } => Some(Event::CompactionSettled {
+                turn,
+                outcome: settled,
+            }),
+            work => return self.classify_side(work, queue, effects, outcome),
+        };
+        outcome.event = event;
+        outcome
+    }
+
+    /// Handles the work reports that act on actor state instead of — or
+    /// before — mapping to one fold event.
+    fn classify_side(
+        &mut self,
+        work: TurnWork,
+        queue: &mut VecDeque<Effect>,
+        effects: &mut Vec<Effect>,
+        mut outcome: FoldOutcome,
+    ) -> FoldOutcome {
+        match work {
+            TurnWork::Answered { resolved } => {
+                self.queue_resolved(&resolved, queue);
             }
             TurnWork::WatcherVerdict {
                 turn,
                 verdict,
                 reply,
             } => {
-                let stepped = self
-                    .fold
-                    .step(
-                        Event::StreamVerdict { turn, verdict },
-                        Timestamp::now(),
-                        &mut effects,
-                    )
-                    .is_ok();
-                let entry = reminder_entry(&effects);
-                let retried = effects
-                    .iter()
-                    .any(|effect| matches!(effect, Effect::Infer(plan) if plan.turn == turn));
-                if stepped && retried && entry.is_some() {
-                    receipt = Some((reply, entry));
-                } else {
-                    let _ = reply.send(None);
-                }
+                outcome.receipt = self.step_receipt(
+                    Event::StreamVerdict { turn, verdict },
+                    turn,
+                    true,
+                    reply,
+                    effects,
+                );
             }
             TurnWork::StreamReminder {
                 turn,
@@ -661,22 +728,22 @@ impl Actor {
                 text,
                 reply,
             } => {
-                let stepped = self
-                    .fold
-                    .step(
-                        Event::StreamReminder { turn, rule, text },
-                        Timestamp::now(),
-                        &mut effects,
-                    )
-                    .is_ok();
-                let entry = reminder_entry(&effects);
-                if stepped && entry.is_some() {
-                    receipt = Some((reply, entry));
-                } else {
-                    let _ = reply.send(None);
+                outcome.receipt = self.step_receipt(
+                    Event::StreamReminder { turn, rule, text },
+                    turn,
+                    false,
+                    reply,
+                    effects,
+                );
+            }
+            TurnWork::Cancelled { turn, stop } => {
+                // Cancelled turns defer their `TurnEnded` to this driver
+                // confirmation — the kill ladder of an in-flight call has
+                // completed by now; other stops already published at `Emit`.
+                if stop == dal_core::Stop::Cancelled {
+                    self.publish(UpdateKind::TurnEnded { turn, stop });
                 }
             }
-            TurnWork::Cancelled => {}
             TurnWork::TaskFailed { turn, message } => {
                 self.publish(UpdateKind::Notice(dal_core::Notice {
                     turn,
@@ -692,101 +759,79 @@ impl Actor {
                 max_steps,
                 compact,
             } => {
-                let _ = self.fold.step(
+                self.step(
                     Event::Limits {
                         window,
                         max_steps,
                         compact,
                     },
-                    Timestamp::now(),
-                    &mut effects,
+                    effects,
                 );
-                let _ = self.fold.step(
-                    Event::RequestStarted {
-                        turn,
-                        model,
-                        family,
-                    },
-                    Timestamp::now(),
-                    &mut effects,
-                );
-            }
-            TurnWork::StreamEnded {
-                turn,
-                model,
-                family,
-                result,
-                partial,
-            } => {
-                let _ = self.fold.step(
-                    Event::StreamEnded {
-                        turn,
-                        model,
-                        family,
-                        result,
-                        partial,
-                    },
-                    Timestamp::now(),
-                    &mut effects,
-                );
-            }
-            TurnWork::Resolved {
-                turn,
-                calls,
-                answerer_attached,
-            } => {
-                let _ = self.fold.step(
-                    Event::Resolved {
-                        turn,
-                        calls,
-                        answerer_attached,
-                    },
-                    Timestamp::now(),
-                    &mut effects,
-                );
-            }
-            TurnWork::Boundary { turn } => {
-                let _ = self
-                    .fold
-                    .step(Event::Boundary { turn }, Timestamp::now(), &mut effects);
-            }
-            TurnWork::CompactionSettled { turn, outcome } => {
-                let _ = self.fold.step(
-                    Event::CompactionSettled { turn, outcome },
-                    Timestamp::now(),
-                    &mut effects,
-                );
+                outcome.event = Some(Event::RequestStarted {
+                    turn,
+                    model,
+                    family,
+                });
             }
             TurnWork::CommandDone { result } => {
                 if let Some(tx) = self.pending_commands.pop_front() {
                     let _ = tx.send(result);
                 }
             }
+            _ => unreachable!("classify routes every event-mapped work kind first"),
         }
-        queue.extend(effects);
-        self.execute(queue.into(), None).await;
-        if let Some((reply, entry)) = receipt {
-            let _ = reply.send(if self.broken.is_none() { entry } else { None });
+        outcome
+    }
+
+    /// Steps the fold, discarding a rejected event.
+    fn step(&mut self, event: Event, effects: &mut Vec<Effect>) {
+        let _ = self.fold.step(event, Timestamp::now(), effects);
+    }
+
+    /// Steps a reminder-style event and reports the new reminder entry to
+    /// the waiter; `require_retry` holds the receipt until the step also
+    /// re-queued inference for `turn`. An unsatisfied step answers `None`.
+    fn step_receipt(
+        &mut self,
+        event: Event,
+        turn: TurnId,
+        require_retry: bool,
+        reply: oneshot::Sender<Option<dal_core::EntryId>>,
+        effects: &mut Vec<Effect>,
+    ) -> Option<(
+        oneshot::Sender<Option<dal_core::EntryId>>,
+        Option<dal_core::EntryId>,
+    )> {
+        let stepped = self.fold.step(event, Timestamp::now(), effects).is_ok();
+        let entry = reminder_entry(effects);
+        let retried = !require_retry
+            || effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::Infer(plan) if plan.turn == turn));
+        if stepped && retried && entry.is_some() {
+            return Some((reply, entry));
         }
-        // Delivery to the root model happens when the settled result is
-        // published; the evidence owner marks the complete rows at the
-        // shared cursor so later captures freeze the right cutoff (R06).
-        if !delivered.is_empty() {
-            let at = self.shared.cursor();
-            let generation = self.host.shared.generation.borrow().clone();
-            if let Some(evidence) = generation.evidence() {
-                for view in &delivered {
-                    evidence.delivered(view, dal_core::ext::Consumer::Model, at);
-                }
+        let _ = reply.send(None);
+        None
+    }
+
+    /// Marks complete read views delivered at the shared cursor so later
+    /// captures freeze the right cutoff (R06).
+    fn mark_delivered(&mut self, delivered: &[dal_core::ext::ReadView]) {
+        if delivered.is_empty() {
+            return;
+        }
+        let at = self.shared.cursor();
+        let generation = self.host.shared.generation.borrow().clone();
+        if let Some(evidence) = generation.evidence() {
+            for view in delivered {
+                evidence.delivered(view, dal_core::ext::Consumer::Model, at);
             }
         }
     }
 
-    /// Flushes the journal, closes subscriber queues, and stops the loop.
     async fn on_shutdown(&mut self) {
-        if let Some(cancel) = self.drive_cancel.take() {
-            cancel.cancel();
-        }
+        self.control().cancel_opening();
         self.tasks.stop().await;
 
         let _ = self.journal.close().await;
@@ -809,7 +854,7 @@ impl Actor {
         );
         match stepped {
             Err(rejection) => {
-                let error = map_rejection(rejection, self.session, &self.control);
+                let error = map_rejection(rejection, self.session, &self.control());
                 let _ = reply.send(Err(error));
             }
             Ok(()) => self.execute(effects, Some(reply)).await,
@@ -821,11 +866,7 @@ impl Actor {
         if let Command::Cancel { scope } = command
             && let dal_core::CancelScope::Turn(turn) = scope
         {
-            let _ = self
-                .control
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .cancel(*turn);
+            let _ = self.control().cancel(*turn);
         }
     }
 
@@ -856,7 +897,7 @@ impl Actor {
                         }
                         if let Some(tx) = reply.take() {
                             let _ = tx.send(result.map_err(|rejection| {
-                                map_rejection(rejection, self.session, &self.control)
+                                map_rejection(rejection, self.session, &self.control())
                             }));
                         }
                     }
@@ -886,13 +927,37 @@ impl Actor {
             self.refresh_stats();
             if !driver_effects.is_empty() || !asks.is_empty() {
                 let batch = self.batch(driver_effects, asks);
-                if self.driver_tx.send(batch).await.is_err() {
+                // A bounded send can park behind a convoyed driver; report
+                // long waits instead of stalling the loop in silence.
+                let session = self.session;
+                let mut sending = Box::pin(self.driver_tx.send(batch));
+                let sent = loop {
+                    match tokio::time::timeout(Duration::from_secs(30), &mut sending).await {
+                        Ok(sent) => break sent,
+                        Err(_elapsed) => {
+                            eprintln!("[dal-agent] session {session:?} driver batch outstanding");
+                        }
+                    }
+                };
+                if sent.is_err() {
                     self.broken = Some("the turn driver is gone.".into());
                 }
             }
-            let Some(more) = self.drive_opening().await else {
-                break;
+            let more = {
+                // A turn opening has no deadline of its own: report long
+                // drives so a stalled hook chain is visible in the log.
+                let session = self.session;
+                let mut opening = Box::pin(self.drive_opening());
+                loop {
+                    match tokio::time::timeout(Duration::from_secs(30), &mut opening).await {
+                        Ok(more) => break more,
+                        Err(_elapsed) => {
+                            eprintln!("[dal-agent] session {session:?} turn opening outstanding");
+                        }
+                    }
+                }
             };
+            let Some(more) = more else { break };
             queue.extend(more);
         }
     }
@@ -906,10 +971,6 @@ impl Actor {
     /// `before_turn` hooks; wake openings skip the input hooks. A cancel that
     /// lands while the hooks run wins: the fold drops a verdict whose phase
     /// moved on.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "cohesive opening-hook state machine; extraction would split one invariant"
-    )]
     async fn drive_opening(&mut self) -> Option<Vec<Effect>> {
         let (turn, content, run_input) = match self.fold.phase() {
             Phase::Opening { turn, source, .. } => (
@@ -929,32 +990,22 @@ impl Actor {
         };
         let (turn, content) = (*turn, content);
         let services = self.services.clone()?;
-        let turn_token = self
-            .control
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .begin_turn(turn);
-        let cancel = turn_token.child_token();
-        self.drive_cancel = Some(cancel.clone());
+        let cancel = self.control().begin_opening(turn);
         let generation = self.host.shared.generation.borrow().clone();
         let deadline = Instant::now() + Self::OPENING_HOOK_DEADLINE;
+        let scope = HookScope {
+            services: &services,
+            session: self.session,
+            parent: self.parent,
+            process_env: Arc::clone(&self.host.shared.env),
+            cancel: &cancel,
+            turn_deadline: deadline,
+            script: self.hook_script(),
+        };
         let mut content = content;
         if run_input {
-            for (index, extension) in generation.extensions.iter().enumerate() {
-                let Some(caller) = hook_caller(extension, turn) else {
-                    continue;
-                };
-                let cx = DispatchCx {
-                    caller: &caller,
-                    services: &services,
-                    session: self.session,
-                    parent: self.parent,
-                    process_env: Arc::clone(&self.host.shared.env),
-                    turn: Some(turn),
-                    cancel: &cancel,
-                    turn_deadline: deadline,
-                    script: self.hook_script(),
-                };
+            for (index, extension, caller) in hook_fanout(&generation, Some(turn)) {
+                let cx = scope.cx(&caller, Some(turn));
                 let step = dispatch_input(
                     extension.name(),
                     &cx,
@@ -979,21 +1030,8 @@ impl Actor {
             text: content_text(&content).into(),
         };
         let mut texts = Vec::new();
-        for (index, extension) in generation.extensions.iter().enumerate() {
-            let Some(caller) = hook_caller(extension, turn) else {
-                continue;
-            };
-            let cx = DispatchCx {
-                caller: &caller,
-                services: &services,
-                session: self.session,
-                parent: self.parent,
-                process_env: Arc::clone(&self.host.shared.env),
-                turn: Some(turn),
-                cancel: &cancel,
-                turn_deadline: deadline,
-                script: self.hook_script(),
-            };
+        for (index, extension, caller) in hook_fanout(&generation, Some(turn)) {
+            let cx = scope.cx(&caller, Some(turn));
             let step = dispatch_before_turn(
                 extension.name(),
                 &cx,
@@ -1006,7 +1044,7 @@ impl Actor {
                 self.notice(turn, "hook.before_turn", &notice);
             }
         }
-        self.drive_cancel = None;
+        self.control().end_opening(turn);
         let add = join_before_turn(&texts).map(Into::into);
         let Ok(outcome) = HookOutcome::new(HookEvent::BeforeTurn, HookVerdict::BeforeTurn(add))
         else {
@@ -1051,6 +1089,10 @@ impl Actor {
     ) -> Result<(), AgentError> {
         let updates = emit.updates;
         if let Err(error) = self.journal.append(emit.records).await {
+            eprintln!(
+                "[dal-agent] session {:?} journal append failed: {error}",
+                self.session
+            );
             let message: Box<str> = format!("journal write failed: {error}").into();
             if breaks_session(&error) {
                 self.broken = Some(message.clone());
@@ -1067,21 +1109,22 @@ impl Actor {
     fn observe(&mut self, kind: UpdateKind, queue: &mut VecDeque<Effect>) {
         match &kind {
             UpdateKind::TurnStarted { turn, .. } => {
-                self.control
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .begin_turn(*turn);
+                self.control().begin_turn(*turn);
             }
-            UpdateKind::TurnEnded { turn, .. } => {
-                self.control
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .end_turn(*turn);
+            UpdateKind::TurnEnded { turn, stop } => {
+                self.control().end_turn(*turn);
                 let resolved = self
                     .broker
                     .resolve_turn(*turn, Answer::Cancel, core_client());
                 for item in resolved {
                     self.queue_resolved(&item, queue);
+                }
+                // A cancelled turn holds `TurnEnded` until the driver
+                // confirms: `Effect::Stop` lands after the in-flight call's
+                // kill ladder in the ordered batch queue, so subscribers only
+                // observe the end once the process tree is dead.
+                if *stop == dal_core::Stop::Cancelled {
+                    return;
                 }
             }
             _ => {}
@@ -1274,8 +1317,9 @@ impl Actor {
                 return;
             }
         };
+        let running = self.control().running();
         let receipt = match mail.mode {
-            MailMode::Steer => match self.running_turn() {
+            MailMode::Steer => match running {
                 // The fold owns the text once the steer lands in the
                 // running turn; a full steer queue refuses the message.
                 Some(turn) => {
@@ -1297,22 +1341,16 @@ impl Actor {
                         Err(_) => Receipt::Buffered,
                     }
                 }
-                None => Receipt::Buffered,
+                None => self.buffered_mail_receipt(),
             },
             MailMode::Aside => Receipt::Delivered,
-            MailMode::NextTurn => {
-                if mailbox_waiting(&mail.to, self.journal.records()) >= MAILBOX_CAPACITY {
-                    Receipt::Full
-                } else {
-                    Receipt::Buffered
-                }
-            }
+            MailMode::NextTurn => self.buffered_mail_receipt(),
             // `MailMode` is `#[non_exhaustive]`; every known variant has
             // an explicit arm above. An unknown future mode stores like
             // a deferred message until it gains an explicit arm.
             _ => {
                 debug_assert!(false, "unmapped mail mode; add an explicit arm");
-                Receipt::Buffered
+                self.buffered_mail_receipt()
             }
         };
         if receipt != Receipt::Full {
@@ -1329,14 +1367,21 @@ impl Actor {
         let _ = reply.send(Some(receipt));
     }
 
-    /// Runs one background-job operation against the session table.
-    ///
-    /// A known operation is answered from the job table; an unknown future
-    /// operation answers `Unavailable` instead of fabricating job state.
+    /// Receipt for a message that waits in the journal; a full mailbox
+    /// refuses with `Full` instead of silently accepting the message.
+    fn buffered_mail_receipt(&self) -> Receipt {
+        if undelivered_mail(self.session, self.journal.records()) >= MAILBOX_WAITING_LIMIT {
+            Receipt::Full
+        } else {
+            Receipt::Buffered
+        }
+    }
+
     /// Runs one turn operation against the control cell and fold.
     async fn on_turn(&mut self, req: super::TurnRequest) {
+        let running = self.control().running();
         let reply = match req.op {
-            TurnOp::Cancel => match self.running_turn() {
+            TurnOp::Cancel => match running {
                 Some(turn) => {
                     let command = dal_core::Command::Cancel {
                         scope: dal_core::CancelScope::Turn(turn),
@@ -1358,7 +1403,7 @@ impl Actor {
                 }
                 None => TurnOpReply::Idle(true),
             },
-            TurnOp::Steer { text } => match self.running_turn() {
+            TurnOp::Steer { text } => match running {
                 Some(turn) => {
                     let mut effects = Vec::new();
                     let stepped =
@@ -1388,14 +1433,15 @@ impl Actor {
                     Timestamp::now(),
                     &mut effects,
                 );
-                if stepped.is_ok() {
-                    self.execute(effects, None).await;
-                    TurnOpReply::Woken
-                } else {
-                    TurnOpReply::Idle(true)
+                match stepped {
+                    Ok(()) => {
+                        self.execute(effects, None).await;
+                        TurnOpReply::Woken
+                    }
+                    Err(rejection) => TurnOpReply::WakeRefused(wake_refusal(&rejection)),
                 }
             }
-            _ => TurnOpReply::Idle(self.running_turn().is_none()),
+            _ => TurnOpReply::Idle(running.is_none()),
         };
         let _ = req.reply.send(reply);
     }
@@ -1492,11 +1538,7 @@ fn breaks_session(error: &dal_store::StoreError) -> bool {
 }
 
 /// Maps a fold rejection to the agent error contract.
-fn map_rejection(
-    rejection: Rejection,
-    id: SessionId,
-    control: &std::sync::Mutex<ControlCell>,
-) -> AgentError {
+fn map_rejection(rejection: Rejection, id: SessionId, control: &ControlCell) -> AgentError {
     match rejection {
         Rejection::WrongTurn { expected, actual } => AgentError::WrongTurn {
             expected: crate::error::ExpectedTurn::from(expected),
@@ -1505,11 +1547,7 @@ fn map_rejection(
         Rejection::SessionClosed => AgentError::SessionClosed { id },
         Rejection::BusyTurn => AgentError::Invalid(ValidationError::busy_turn(
             "command",
-            control
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .running()
-                .unwrap_or(TurnId::new(NonZeroU64::MIN)),
+            control.running().unwrap_or(TurnId::new(NonZeroU64::MIN)),
         )),
         Rejection::Compacting => AgentError::Invalid(ValidationError::compacting()),
         Rejection::SteerFull => AgentError::Invalid(ValidationError::new(
@@ -1524,7 +1562,7 @@ fn map_rejection(
 }
 
 /// Maps fold turn state onto the mismatch report.
-fn map_turn_state(state: TurnState, control: &std::sync::Mutex<ControlCell>) -> ActualTurn {
+fn map_turn_state(state: TurnState, control: &ControlCell) -> ActualTurn {
     match state {
         TurnState::Idle => ActualTurn::Idle,
         TurnState::Running { turn } => ActualTurn::Turn {
@@ -1535,13 +1573,13 @@ fn map_turn_state(state: TurnState, control: &std::sync::Mutex<ControlCell>) -> 
             turn,
             phase: TurnPhase::Settling,
         },
-        TurnState::Compacting { .. } => control
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .running()
-            .map_or(ActualTurn::Idle, |turn| ActualTurn::Turn {
-                turn,
-                phase: TurnPhase::Compacting,
-            }),
+        TurnState::Compacting { .. } => {
+            control
+                .running()
+                .map_or(ActualTurn::Idle, |turn| ActualTurn::Turn {
+                    turn,
+                    phase: TurnPhase::Compacting,
+                })
+        }
     }
 }

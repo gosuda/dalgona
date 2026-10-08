@@ -350,6 +350,7 @@ pub(crate) async fn open(
         )
     };
     let token = cancel.child_token();
+    let guard = token.clone().drop_guard();
     let run = Arc::new(Run {
         deps: deps.clone(),
         caller: mint(CallerKind::Tool),
@@ -372,7 +373,7 @@ pub(crate) async fn open(
     let cx = ModelCx::new(run);
     let started = LINEAGE.scope(next.clone(), model.run(request, cx)).await;
     match started {
-        Ok(stream) => scoped(stream, next, token.drop_guard()),
+        Ok(stream) => scoped(stream, next, guard),
         Err(error) => failed(failure_of(error)),
     }
 }

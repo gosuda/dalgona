@@ -48,6 +48,10 @@ jobs:
   # Run 'dist plan' (or host) to determine what tasks we need to do
   plan:
     runs-on: "ubuntu-22.04"
+    # This workspace is dal/, not the repo root; dist discovers by cwd.
+    defaults:
+      run:
+        working-directory: dal
     outputs:
       val: ${{ steps.plan.outputs.manifest }}
       tag: ${{ !github.event.pull_request && github.ref_name || '' }}
@@ -85,7 +89,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: artifacts-plan-dist-manifest
-          path: plan-dist-manifest.json
+          path: dal/plan-dist-manifest.json
 
   # Build and packages all the platform-specific things
   build-local-artifacts:
@@ -109,6 +113,9 @@ jobs:
       matrix: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix }}
     runs-on: ${{ matrix.runner }}
     container: ${{ matrix.container && matrix.container.image || null }}
+    defaults:
+      run:
+        working-directory: dal
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       BUILD_MANIFEST_NAME: target/distrib/${{ join(matrix.targets, '-') }}-dist-manifest.json
@@ -134,7 +141,7 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           pattern: artifacts-*
-          path: target/distrib/
+          path: dal/target/distrib/
           merge-multiple: true
       - name: Install cargo-auditable
         run: ${{ matrix.install_cargo_auditable.run }}
@@ -155,7 +162,7 @@ jobs:
         run: |
           # Parse out what we just built and upload it to scratch storage
           echo "paths<<EOF" >> "$GITHUB_OUTPUT"
-          dist print-upload-files-from-manifest --manifest dist-manifest.json >> "$GITHUB_OUTPUT"
+          dist print-upload-files-from-manifest --manifest dist-manifest.json | sed 's|^|dal/|' >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
 
           cp dist-manifest.json "$BUILD_MANIFEST_NAME"
@@ -165,7 +172,7 @@ jobs:
           name: artifacts-build-local-${{ join(matrix.targets, '_') }}
           path: |
             ${{ steps.cargo-dist.outputs.paths }}
-            ${{ env.BUILD_MANIFEST_NAME }}
+            dal/${{ env.BUILD_MANIFEST_NAME }}
 
   # Build and package all the platform-agnostic(ish) things
   build-global-artifacts:
@@ -173,6 +180,9 @@ jobs:
       - plan
       - build-local-artifacts
     runs-on: "ubuntu-22.04"
+    defaults:
+      run:
+        working-directory: dal
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       BUILD_MANIFEST_NAME: target/distrib/global-dist-manifest.json
@@ -192,7 +202,7 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           pattern: artifacts-*
-          path: target/distrib/
+          path: dal/target/distrib/
           merge-multiple: true
       - id: cargo-dist
         shell: bash
@@ -202,7 +212,7 @@ jobs:
 
           # Parse out what we just built and upload it to scratch storage
           echo "paths<<EOF" >> "$GITHUB_OUTPUT"
-          jq --raw-output ".upload_files[]" dist-manifest.json >> "$GITHUB_OUTPUT"
+          jq --raw-output '.upload_files[] | "dal/" + .' dist-manifest.json >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
 
           cp dist-manifest.json "$BUILD_MANIFEST_NAME"
@@ -212,7 +222,7 @@ jobs:
           name: artifacts-build-global
           path: |
             ${{ steps.cargo-dist.outputs.paths }}
-            ${{ env.BUILD_MANIFEST_NAME }}
+            dal/${{ env.BUILD_MANIFEST_NAME }}
   # Determines if we should publish/announce
   host:
     needs:
@@ -224,6 +234,9 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-22.04"
+    defaults:
+      run:
+        working-directory: dal
     outputs:
       val: ${{ steps.host.outputs.manifest }}
     steps:
@@ -242,7 +255,7 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           pattern: artifacts-*
-          path: target/distrib/
+          path: dal/target/distrib/
           merge-multiple: true
       - id: host
         shell: bash
@@ -256,13 +269,13 @@ jobs:
         with:
           # Overwrite the previous copy
           name: artifacts-dist-manifest
-          path: dist-manifest.json
+          path: dal/dist-manifest.json
       # Create a GitHub Release while uploading all files to it
       - name: "Download GitHub Artifacts"
         uses: actions/download-artifact@v8
         with:
           pattern: artifacts-*
-          path: artifacts
+          path: dal/artifacts
           merge-multiple: true
       - name: Cleanup
         run: |

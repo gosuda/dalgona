@@ -413,16 +413,12 @@ async fn narrow(
     if scope.is_file {
         return (files, Some(REASON_SINGLE_FILE));
     }
-    let index_scope = scope.index_scope().and_then(|scope| match scope {
-        crate::search::IndexScope::Root => None,
-        crate::search::IndexScope::Directory(rel) => Some(rel),
-    });
-    let Some(index_scope) = index_scope else {
+    let Some(index_scope) = scope.index_scope() else {
         return (files, Some(REASON_NO_INDEX));
     };
     match search
         .index
-        .search_candidates(workspace, clauses, ignore_case, Some(index_scope))
+        .search_candidates(workspace, clauses, ignore_case, index_scope.directory())
         .await
     {
         Ok(Some(candidates)) => {

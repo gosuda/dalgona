@@ -31,29 +31,47 @@ pub fn encode(record: &Record) -> Result<Vec<u8>, EncodeError> {
     Ok(line)
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "one match arm per record kind keeps the wire table readable"
-)]
+/// Encodes one journal record body. The outer match is the record-kind
+/// index: each group owns one domain's wire table, and adding a variant
+/// to `Record` fails here until it joins a group.
 pub(super) fn encode_body(record: &Record) -> Result<Vec<u8>, EncodeError> {
     match record {
-        Record::Session(header) => encode_json(&SessionWire {
-            r#type: "session",
-            id: &header.id,
-            at: TsWire(&header.at),
-            workspace: &header.workspace,
-            product: &header.product,
-            from: header.from.map(|source| SourceWire {
-                session: source.session,
-                entry: source.entry,
-            }),
-        }),
-        Record::Boot { at, r#gen, version } => encode_json(&BootWire {
-            r#type: "boot",
-            at: TsWire(at),
-            r#gen: *r#gen,
-            version: version.as_ref(),
-        }),
+        Record::User { .. }
+        | Record::Assistant { .. }
+        | Record::ToolResult { .. }
+        | Record::Reminder { .. } => encode_message_entries(record),
+        Record::Model { .. }
+        | Record::Thinking { .. }
+        | Record::Approval { .. }
+        | Record::Mode { .. } => encode_setting_entries(record),
+        Record::Compaction { .. } | Record::BranchSummary { .. } => encode_context_entries(record),
+        Record::Session { .. }
+        | Record::Boot { .. }
+        | Record::Leaf { .. }
+        | Record::Label { .. }
+        | Record::Name { .. }
+        | Record::Archive { .. } => encode_meta(record),
+        Record::TurnStart { .. }
+        | Record::ToolStart { .. }
+        | Record::TurnEnd { .. }
+        | Record::RuleFired { .. }
+        | Record::Resolved { .. }
+        | Record::BeforeRequestMut { .. }
+        | Record::ToolPromoted { .. }
+        | Record::WakeAttempt { .. } => encode_control(record),
+        Record::AllowAlways { .. }
+        | Record::GrantGiven { .. }
+        | Record::ScopedGrant { .. }
+        | Record::ScopedGrantEnded { .. } => encode_grants(record),
+        Record::Job { .. } | Record::Ext { .. } | Record::Mail { .. } | Record::Inferred { .. } => {
+            encode_effects(record)
+        }
+    }
+}
+
+/// Entry records carrying turn content.
+fn encode_message_entries(record: &Record) -> Result<Vec<u8>, EncodeError> {
+    match record {
         Record::User(entry) => {
             let EntryKind::User { parts } = &entry.kind else {
                 return Err(EncodeError::MismatchedKind);
@@ -128,6 +146,13 @@ pub(super) fn encode_body(record: &Record) -> Result<Vec<u8>, EncodeError> {
                 text: text.as_ref(),
             })
         }
+        _ => unreachable!("the encode_body index routes only encode_message_entries kinds here"),
+    }
+}
+
+/// Entry records carrying turn settings.
+fn encode_setting_entries(record: &Record) -> Result<Vec<u8>, EncodeError> {
+    match record {
         Record::Model(entry) => {
             let EntryKind::Model { route } = &entry.kind else {
                 return Err(EncodeError::MismatchedKind);
@@ -170,6 +195,13 @@ pub(super) fn encode_body(record: &Record) -> Result<Vec<u8>, EncodeError> {
                 mode: *mode,
             })
         }
+        _ => unreachable!("the encode_body index routes only encode_setting_entries kinds here"),
+    }
+}
+
+/// Entry records carrying compacted context.
+fn encode_context_entries(record: &Record) -> Result<Vec<u8>, EncodeError> {
+    match record {
         Record::Compaction(entry) => {
             let EntryKind::Compaction {
                 summary,
@@ -210,6 +242,30 @@ pub(super) fn encode_body(record: &Record) -> Result<Vec<u8>, EncodeError> {
                 summary: summary.as_ref(),
             })
         }
+        _ => unreachable!("the encode_body index routes only encode_context_entries kinds here"),
+    }
+}
+
+/// Session lifecycle records.
+fn encode_meta(record: &Record) -> Result<Vec<u8>, EncodeError> {
+    match record {
+        Record::Session(header) => encode_json(&SessionWire {
+            r#type: "session",
+            id: &header.id,
+            at: TsWire(&header.at),
+            workspace: &header.workspace,
+            product: &header.product,
+            from: header.from.map(|source| SourceWire {
+                session: source.session,
+                entry: source.entry,
+            }),
+        }),
+        Record::Boot { at, r#gen, version } => encode_json(&BootWire {
+            r#type: "boot",
+            at: TsWire(at),
+            r#gen: *r#gen,
+            version: version.as_ref(),
+        }),
         Record::Leaf { at, to } => encode_json(&LeafWire {
             r#type: "leaf",
             at: TsWire(at),
@@ -231,6 +287,13 @@ pub(super) fn encode_body(record: &Record) -> Result<Vec<u8>, EncodeError> {
             at: TsWire(at),
             archived: *archived,
         }),
+        _ => unreachable!("the encode_body index routes only encode_meta kinds here"),
+    }
+}
+
+/// Turn control records.
+fn encode_control(record: &Record) -> Result<Vec<u8>, EncodeError> {
+    match record {
         Record::TurnStart { at, turn } => encode_json(&TurnStartWire {
             r#type: "turn_start",
             at: TsWire(at),
@@ -282,6 +345,53 @@ pub(super) fn encode_body(record: &Record) -> Result<Vec<u8>, EncodeError> {
             by,
             was_default: *was_default,
         }),
+        Record::BeforeRequestMut {
+            at,
+            turn,
+            ext,
+            field,
+            old,
+            new,
+        } => encode_json(&BeforeRequestMutWire {
+            r#type: "before_request_mut",
+            at: TsWire(at),
+            turn: *turn,
+            ext: ext.as_ref(),
+            field: field.as_ref(),
+            old: old.as_ref(),
+            new: new.as_ref(),
+        }),
+        Record::ToolPromoted {
+            at,
+            tool,
+            turn,
+            leaf,
+        } => encode_json(&ToolPromotedWire {
+            r#type: "tool_promoted",
+            at: TsWire(at),
+            tool: tool.as_ref(),
+            turn: *turn,
+            leaf: *leaf,
+        }),
+        Record::WakeAttempt {
+            at,
+            turn,
+            count,
+            jobs,
+        } => encode_json(&WakeAttemptWire {
+            r#type: "wake_attempt",
+            at: TsWire(at),
+            turn: *turn,
+            count: *count,
+            jobs,
+        }),
+        _ => unreachable!("the encode_body index routes only encode_control kinds here"),
+    }
+}
+
+/// Grant and approval records.
+fn encode_grants(record: &Record) -> Result<Vec<u8>, EncodeError> {
+    match record {
         Record::AllowAlways { at, tool, by } => encode_json(&AllowAlwaysWire {
             r#type: "allow_always",
             at: TsWire(at),
@@ -323,46 +433,13 @@ pub(super) fn encode_body(record: &Record) -> Result<Vec<u8>, EncodeError> {
             at: TsWire(at),
             job,
         }),
-        Record::BeforeRequestMut {
-            at,
-            turn,
-            ext,
-            field,
-            old,
-            new,
-        } => encode_json(&BeforeRequestMutWire {
-            r#type: "before_request_mut",
-            at: TsWire(at),
-            turn: *turn,
-            ext: ext.as_ref(),
-            field: field.as_ref(),
-            old: old.as_ref(),
-            new: new.as_ref(),
-        }),
-        Record::ToolPromoted {
-            at,
-            tool,
-            turn,
-            leaf,
-        } => encode_json(&ToolPromotedWire {
-            r#type: "tool_promoted",
-            at: TsWire(at),
-            tool: tool.as_ref(),
-            turn: *turn,
-            leaf: *leaf,
-        }),
-        Record::WakeAttempt {
-            at,
-            turn,
-            count,
-            jobs,
-        } => encode_json(&WakeAttemptWire {
-            r#type: "wake_attempt",
-            at: TsWire(at),
-            turn: *turn,
-            count: *count,
-            jobs,
-        }),
+        _ => unreachable!("the encode_body index routes only encode_grants kinds here"),
+    }
+}
+
+/// Async effect records.
+fn encode_effects(record: &Record) -> Result<Vec<u8>, EncodeError> {
+    match record {
         Record::Job { at, job, event } => {
             let (literal, kind, outcome, by) = match event {
                 JobEvent::Started { kind } => ("start", kind.as_deref(), None, None),
@@ -417,6 +494,7 @@ pub(super) fn encode_body(record: &Record) -> Result<Vec<u8>, EncodeError> {
             purpose: PurposeWire(purpose),
             usage: UsageWire::new(usage)?,
         }),
+        _ => unreachable!("the encode_body index routes only encode_effects kinds here"),
     }
 }
 

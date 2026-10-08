@@ -1,13 +1,13 @@
-//! Cold plugin errors report the Starlark path, line, and column.
+//! Cold plugin errors report the Starlark location; real startup rejects absent extension libraries.
 #![expect(
     clippy::disallowed_methods,
     reason = "SC test invokes the real startup path"
 )]
-#![expect(
-    dead_code,
-    reason = "gate support exposes helpers shared across independent targets"
-)]
 
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
 use std::{error::Error, fs, path::PathBuf, process::Command};
@@ -31,6 +31,7 @@ fn cold_plugin_error_reports_path_line_col() -> Result<(), Box<dyn Error + Send 
     let output = Command::new(dalgon_binary("dalgon")?)
         .current_dir(&workspace)
         .env_clear()
+        .envs(support::captured_shell_vars())
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("XDG_DATA_HOME", home.join(".local/share"))

@@ -5,9 +5,13 @@
 )]
 //! Exercises Deferred promotion persistence across durable session resume.
 
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
-use std::{collections::BTreeMap, error::Error, fs, io, path::Path, sync::Arc, time::Duration};
+use std::{error::Error, fs, io, path::Path, sync::Arc, time::Duration};
 
 use dal_agent::ext::tool::{Tool, ToolCall, ToolCx, ToolOutcome, ToolOutput};
 use dal_agent::{
@@ -89,7 +93,7 @@ async fn scripted_host(
     })?;
     product.extensions.push(deferred_extension()?);
     let env = Env {
-        vars: BTreeMap::new(),
+        vars: support::captured_shell_vars(),
         cwd: workspace.to_path_buf(),
         sandbox_helper: None,
     };

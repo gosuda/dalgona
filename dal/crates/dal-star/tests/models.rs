@@ -11,10 +11,9 @@ use std::time::Duration;
 
 use dal_agent::{Delivery, Env, Host, Product, SessionRef};
 use dal_core::{
-    Command, Config, ConfigProduct, Expect, PageReq, Part, Stop, UpdateKind, Workspace,
+    Answer, Command, Config, ConfigProduct, Expect, PageReq, Part, Stop, UpdateKind, Workspace,
 };
 
-#[path = "support.rs"]
 pub mod support;
 
 use support::system_with_plugin;
@@ -56,7 +55,7 @@ async fn host_for(run: &str) -> (tempfile::TempDir, Host) {
     )
     .expect("provider replay fixture");
     let user = format!(
-        "model = \"dalgona/fusion\"\n\n[providers.scripted]\nfixture = {:?}\n",
+        "model = \"dalgona/fusion\"\n\n[providers.scripted]\nfixture = {:?}\n\n[prices.gpt-6-luna]\ninput = 1.0\ncached_input = 0.5\noutput = 2.0\nreasoning = 0.0\n",
         fixture.display().to_string()
     );
     let config =
@@ -115,6 +114,13 @@ async fn prompt(host: &Host, data: &tempfile::TempDir) -> (Stop, String, Vec<Str
             continue;
         };
         seen.push(format!("{:?}", update.kind));
+        if let UpdateKind::RequestOpened(request) = &update.kind {
+            agent
+                .answer(request.id, Answer::ApproveForSession)
+                .await
+                .expect("grant answer lands");
+            continue;
+        }
         if let UpdateKind::TurnEnded { stop, .. } = update.kind {
             break stop;
         }
@@ -169,6 +175,10 @@ return results[0].value"#;
     let (data, host) = host_for(run).await;
     let (stop, view, seen) = prompt(&host, &data).await;
     assert_eq!(stop, Stop::EndTurn, "{seen:?} {view}");
+    assert!(
+        seen.iter().any(|kind| kind.contains("Grant")),
+        "scope.infer opened a grant request: {seen:?}"
+    );
     assert!(view.contains("forwarded"), "{seen:?} {view}");
 }
 
@@ -289,10 +299,11 @@ async fn scripted_model_runtime_error_fails_the_turn_not_the_host() {
     );
 }
 
-/// A USD-budgeted scope opens fine; scheduling inference on an unpriced
-/// route through it is refused at submit, so the turn fails. The control
-/// differs only by the missing `scope.infer` call and must end normally,
-/// so the refusal is attributed to the inference, not to the budget scope.
+/// A USD-budgeted scope opens fine; scheduling inference on a route with no
+/// price (the fixture prices only `gpt-6-luna`) is refused at submit, so the
+/// turn fails. The control differs only by the missing `scope.infer` call and
+/// must end normally, so the refusal is attributed to the inference, not to
+/// the budget scope.
 #[tokio::test(flavor = "multi_thread")]
 async fn usd_budget_scope_refuses_inference_on_an_unpriced_route() {
     let open = "scope = ctx.scope(limit = 8, on_error = \"settle\", usd = 0.40)\n";
@@ -307,7 +318,7 @@ async fn usd_budget_scope_refuses_inference_on_an_unpriced_route() {
 )"#;
     let infer = r#"scope.infer({
     "purpose": request.purpose,
-    "model": {"kind": "api", "family": "openai_chat", "model": "gpt-6-luna"},
+    "model": {"kind": "api", "family": "openai_chat", "model": "unpriced-model"},
     "system": request.system,
     "tools": request.tools,
     "context": request.context,

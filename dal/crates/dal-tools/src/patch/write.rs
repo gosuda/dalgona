@@ -227,7 +227,8 @@ pub(crate) async fn inspect(
     observers: &[Arc<dyn super::ir::EditObserver>],
 ) -> Vec<super::ir::EditFinding> {
     #[cfg(feature = "symbols")]
-    let (pre_parses, post_parses) = cached_parses(&plan.files).await;
+    let (pre_parses, post_parses) =
+        cached_parses(session, &plan.files, !observers.is_empty()).await;
     #[cfg(feature = "symbols")]
     let views: Vec<StagedFile<'_>> = plan
         .files
@@ -273,16 +274,19 @@ pub(crate) async fn inspect(
 /// and commit observer views so both see identical evidence.
 #[cfg(feature = "symbols")]
 pub(crate) async fn cached_parses(
+    session: &PatchSession,
     files: &[StagedFileOwned],
+    observers_present: bool,
 ) -> (
     Vec<Option<std::sync::Arc<crate::parse::Parsed>>>,
     Vec<Option<std::sync::Arc<crate::parse::Parsed>>>,
 ) {
+    let parse = session.symbols || observers_present;
     let mut pre = Vec::with_capacity(files.len());
     let mut post = Vec::with_capacity(files.len());
     for file in files {
-        pre.push(cached_parse(&file.path, file.before.as_deref()).await);
-        post.push(cached_parse(&file.path, file.after.as_deref()).await);
+        pre.push(cached_parse(&file.path, file.before.as_deref(), parse).await);
+        post.push(cached_parse(&file.path, file.after.as_deref(), parse).await);
     }
     (pre, post)
 }
@@ -291,7 +295,11 @@ pub(crate) async fn cached_parses(
 async fn cached_parse(
     path: &std::path::Path,
     bytes: Option<&[u8]>,
+    parse: bool,
 ) -> Option<std::sync::Arc<crate::parse::Parsed>> {
+    if !parse {
+        return None;
+    }
     let bytes = bytes?;
     crate::parse::language(path)?;
     match crate::parse::tree(path, bytes).await {

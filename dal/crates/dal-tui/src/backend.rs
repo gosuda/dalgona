@@ -1,6 +1,5 @@
 //! The operations shared by in-process and remote terminal clients.
 
-use std::future::Future;
 use std::sync::Arc;
 
 use dal_agent::{Agent, Delivery, Host, SessionRef, Subscription};
@@ -75,8 +74,8 @@ impl TuiHost for Host {
         Ok(self.open(session, client).await?)
     }
 
-    fn commands(&self) -> impl Future<Output = Result<Arc<[CommandSpec]>, TuiError>> {
-        std::future::ready(Ok(self.commands()))
+    async fn commands(&self) -> Result<Arc<[CommandSpec]>, TuiError> {
+        Ok(async { self.commands() }.await)
     }
 
     async fn close(&self, id: SessionId) -> Result<(), TuiError> {
@@ -87,15 +86,12 @@ impl TuiHost for Host {
 impl TuiAgent for Agent {
     type Subscription = Subscription;
 
-    fn view(&self, page: PageReq) -> impl Future<Output = Result<View, TuiError>> {
-        std::future::ready(self.view(page).map_err(TuiError::from))
+    async fn view(&self, page: PageReq) -> Result<View, TuiError> {
+        async { Ok(self.view(page)?) }.await
     }
 
-    fn subscribe(
-        &self,
-        after: Option<(Gen, Seq)>,
-    ) -> impl Future<Output = Result<Subscription, TuiError>> {
-        std::future::ready(self.subscribe(after).map_err(TuiError::from))
+    async fn subscribe(&self, after: Option<(Gen, Seq)>) -> Result<Subscription, TuiError> {
+        async { Ok(self.subscribe(after)?) }.await
     }
 
     async fn submit(&self, command: Command) -> Result<Reply, TuiError> {

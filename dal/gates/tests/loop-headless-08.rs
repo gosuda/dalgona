@@ -1,13 +1,12 @@
-//! Wake limits admit twenty prompts then reject and reset once released.
 #![expect(clippy::expect_used, reason = "SC test")]
-#![expect(
+//! Headless wake-loop bounds: twenty wakes, then rejection and reset.
+#[expect(
     dead_code,
-    reason = "gate support exposes helpers shared across independent targets"
+    reason = "gate support helpers are shared across independent test targets"
 )]
-
 mod support;
 
-use std::{collections::BTreeMap, error::Error, path::PathBuf, sync::Arc};
+use std::{error::Error, path::PathBuf, sync::Arc};
 
 use dal_agent::{
     Env, SessionRef, Subscription,
@@ -132,7 +131,7 @@ async fn wake_limit_allows_twenty_then_rejects_and_resets()
     })?;
     product.extensions.push(wake_extension()?);
     let env = Env {
-        vars: BTreeMap::new(),
+        vars: support::captured_shell_vars(),
         cwd: workspace.path().to_path_buf(),
         sandbox_helper: None,
     };

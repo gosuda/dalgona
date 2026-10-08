@@ -1,10 +1,9 @@
-//! Checks the semver gate accepts minor bumps and rejects patch-only breaks.
-#![expect(
-    dead_code,
-    reason = "release support exposes gate helpers shared across release targets"
-)]
-
+//! Semver gate: patch bumps violate and minor bumps pass.
 #[path = "release_support/mod.rs"]
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
 use std::{error::Error, path::PathBuf};

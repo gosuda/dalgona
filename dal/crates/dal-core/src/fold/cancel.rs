@@ -28,6 +28,8 @@ impl Session {
                 }
                 if matches!(&self.phase, Phase::Running { turn: active, .. } if *active == turn) {
                     self.end_turn(turn, TurnEndStop::Cancelled, partial, now, emit, effects)?;
+                    // `end_turn` emits `Stop` for the driver, not `Reply`; the
+                    // cancel caller still needs its `Done` like the opening arm.
                     effects.push(Effect::Reply(Ok(Reply::Done(Output::Nothing))));
                     return Ok(());
                 }

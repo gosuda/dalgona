@@ -1,13 +1,11 @@
-//! Headless shutdown waits for registered status channels to go quiet.
-#![expect(
+//! Headless shutdown waits for registered extension status to go quiet.
+#[expect(
     dead_code,
-    reason = "gate support exposes helpers shared across independent targets"
+    reason = "gate support helpers are shared across independent test targets"
 )]
-
 mod support;
 
 use std::{
-    collections::BTreeMap,
     error::Error,
     path::PathBuf,
     sync::{
@@ -19,7 +17,7 @@ use std::{
 
 use dal_agent::ext::{ExtensionBuilder, StatusCx, StatusPoll, StatusSnapshot};
 use dal_agent::{Env, SessionRef};
-use dal_core::{Command, Config, ConfigProduct, Expect, Part, Reply, ServiceSet, Workspace};
+use dal_core::{Command, Config, ConfigProduct, Expect, Part, Reply, Workspace};
 use support::{TestDir, scripted_session};
 
 struct GateStatus {
@@ -41,7 +39,7 @@ async fn headless_shutdown_waits_for_registered_status_quiet()
     let poll = Arc::new(GateStatus {
         quiet: AtomicBool::new(false),
     });
-    let extension = ExtensionBuilder::new("gate-status", "0.1.0", ServiceSet::default())?
+    let extension = ExtensionBuilder::new("gate-status", "0.1.0", dal_core::ServiceSet::default())?
         .status_kind("gate-status", poll.clone())
         .build()?;
     let (kind, _) = extension.status().expect("status kind must be registered");
@@ -68,7 +66,7 @@ async fn headless_shutdown_waits_for_registered_status_quiet()
     })?;
     product.extensions.push(extension);
     let env = Env {
-        vars: BTreeMap::new(),
+        vars: support::captured_shell_vars(),
         cwd: workspace.path().to_path_buf(),
         sandbox_helper: None,
     };
