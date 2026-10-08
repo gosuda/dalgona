@@ -27,6 +27,7 @@ use super::{
     Budgets, LIST_PAGE_MAX, MRTR_MAX, McpConfig, McpError, RESTART_BUDGET, TransportError,
     http::{
         HttpTransport,
+        auth::RefreshCoordinator,
         protocol::{self, LEGACY_PROTOCOL_VERSION, PROTOCOL_VERSION},
     },
     stdio::{ProcessEnvironment, StdioTransport},
@@ -240,6 +241,7 @@ impl Transport {
 pub(crate) struct Client {
     config: McpConfig,
     budgets: Budgets,
+    refreshes: Arc<RefreshCoordinator>,
     sessions: Mutex<HashMap<SessionId, Arc<Session>>>,
 }
 
@@ -248,6 +250,7 @@ impl Client {
         Arc::new(Self {
             config,
             budgets,
+            refreshes: Arc::new(RefreshCoordinator::new()),
             sessions: Mutex::new(HashMap::new()),
         })
     }
@@ -537,6 +540,7 @@ impl Client {
                     self.config.tokens_path.clone(),
                     self.config.client_version.clone(),
                     &self.budgets,
+                    Arc::clone(&self.refreshes),
                 )?;
                 Transport::Http(Box::new(transport))
             }

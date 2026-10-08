@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
 //! Protected-resource discovery, native OAuth authorization, and token refresh.
 
-use std::{net::IpAddr, time::Duration};
+use std::{future::Future, net::IpAddr, time::Duration};
 
 use dal_agent::ext::{Caller, Services};
 use dal_core::{Answer, Question};
@@ -138,34 +138,84 @@ pub(crate) async fn discover(
     })
 }
 
-pub(crate) async fn refresh(
+pub(crate) async fn refresh<P, Fut>(
+    coordinator: &auth::RefreshCoordinator,
     client: &Client,
     discovery: &Discovery,
     record: &TokenRecord,
     timeout: Duration,
     cancel: &CancellationToken,
-) -> Result<Option<TokenRecord>, McpError> {
+    persist: P,
+) -> Result<Option<TokenRecord>, McpError>
+where
+    P: FnOnce(TokenRecord) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<(), McpError>> + Send + 'static,
+{
     let Some(refresh_token) = record.refresh_token.as_deref() else {
         return Ok(None);
     };
-    let params = [
-        ("grant_type", "refresh_token"),
-        ("refresh_token", refresh_token),
-        ("client_id", record.client_id.as_str()),
-        ("resource", discovery.resource.as_str()),
-    ];
-    let response = post_form(client, &discovery.token_endpoint, &params, timeout, cancel).await?;
-    if !response.status().is_success() {
-        return Ok(None);
+    if cancel.is_cancelled() {
+        return Err(McpError::NoAskFrontEnd);
     }
-    let value = response_json(response, timeout, cancel).await?;
-    let token = token_from_response(
-        &value,
-        &record.client_id,
-        &record.scopes,
-        Some(refresh_token),
-    )?;
-    Ok(Some(token))
+    let key = auth::refresh_key(&discovery.issuer, &discovery.resource);
+    let client = client.clone();
+    let discovery = discovery.clone();
+    let record = record.clone();
+    let refresh_token = refresh_token.to_owned();
+    let operation = move || async move {
+        let params = [
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token.as_str()),
+            ("client_id", record.client_id.as_str()),
+            ("resource", discovery.resource.as_str()),
+        ];
+        let cancel = CancellationToken::new();
+        let response = post_form(
+            &client,
+            &discovery.token_endpoint,
+            &params,
+            timeout,
+            &cancel,
+        )
+        .await?;
+        if !response.status().is_success() {
+            return refresh_refusal(response.status());
+        }
+        let value = response_json(response, timeout, &cancel).await?;
+        let token = token_from_response(
+            &value,
+            &record.client_id,
+            &record.scopes,
+            Some(refresh_token.as_str()),
+        )?;
+        persist(token.clone()).await?;
+        Ok(Some(token))
+    };
+    tokio::select! {
+        () = cancel.cancelled() => Err(McpError::NoAskFrontEnd),
+        result = coordinator.run(&key, record.access_token.as_str(), operation) => result,
+    }
+}
+
+/// Maps a failed token-endpoint status for a refresh.
+///
+/// A client error is a refusal: the refresh token is invalid or revoked, so
+/// it reports `None` and the caller falls back to interactive authorization.
+/// A server error, timeout, or rate limit is transient: it reports an error
+/// so a later request may refresh again.
+fn refresh_refusal(status: StatusCode) -> Result<Option<TokenRecord>, McpError> {
+    let transient = status.is_server_error()
+        || matches!(
+            status,
+            StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_MANY_REQUESTS
+        );
+    if transient {
+        return Err(auth_error(&format!(
+            "OAuth token endpoint is unavailable (HTTP {}); try again later",
+            status.as_u16()
+        )));
+    }
+    Ok(None)
 }
 
 pub(crate) struct AuthorizeSpec<'a> {
@@ -310,8 +360,11 @@ pub(crate) async fn authorize(spec: AuthorizeSpec<'_>) -> Result<TokenRecord, Mc
         result = &mut callback => result?,
         answer = &mut prompt => {
             match answer {
-                Ok(Some(Answer::Value(value))) if value.decode_as::<bool>().unwrap_or(false) => {},
-                Ok(Some(Answer::Approve | Answer::ApproveForSession)) => {},
+                Ok(Some(Answer::Value(value))) if value.decode_as::<bool>().unwrap_or(false) => {}
+                Ok(Some(Answer::Approve | Answer::ApproveForSession)) => {}
+                Ok(Some(Answer::Decline | Answer::Cancel)) => {
+                    return Err(McpError::NoAskFrontEnd);
+                }
                 Ok(_) => return Err(auth_error("OAuth authorization was declined")),
                 Err(dal_agent::error::ServiceError::Denied(_)) => return Err(McpError::NoAskFrontEnd),
                 Err(dal_agent::error::ServiceError::Cancelled) if spec.cancel.is_cancelled() => return Err(McpError::NoAskFrontEnd),
@@ -538,8 +591,7 @@ async fn ask_client_id(
             }
             Ok(client_id.trim().to_owned())
         }
-        Ok(_) => Err(McpError::NoAskFrontEnd),
-        Err(dal_agent::error::ServiceError::Denied(_)) => Err(McpError::NoAskFrontEnd),
+        Ok(_) | Err(dal_agent::error::ServiceError::Denied(_)) => Err(McpError::NoAskFrontEnd),
         Err(dal_agent::error::ServiceError::Cancelled) if cancel.is_cancelled() => {
             Err(McpError::NoAskFrontEnd)
         }
@@ -815,10 +867,47 @@ fn auth_error(cause: &str) -> McpError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
     use tokio::{
         io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
         net::TcpListener,
     };
+
+    async fn token_server(listener: TcpListener, count: Arc<AtomicUsize>) {
+        let quiet = tokio::time::sleep(Duration::from_millis(100));
+        tokio::pin!(quiet);
+        loop {
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let (stream, _) = accepted.expect("token request");
+                    count.fetch_add(1, Ordering::Relaxed);
+                    let mut reader = BufReader::new(stream);
+                    loop {
+                        let mut line = String::new();
+                        reader.read_line(&mut line).await.expect("token headers");
+                        if line == "\r\n" {
+                            break;
+                        }
+                    }
+                    let body =
+                        r#"{"access_token":"new-access","refresh_token":"new-refresh","token_type":"Bearer"}"#;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    reader
+                        .get_mut()
+                        .write_all(response.as_bytes())
+                        .await
+                        .expect("token response");
+                }
+                () = &mut quiet => break,
+            }
+        }
+    }
 
     async fn metadata_server(listener: TcpListener, bodies: Vec<String>) -> Vec<String> {
         let mut paths = Vec::with_capacity(bodies.len());
@@ -949,6 +1038,67 @@ mod tests {
             parsed.resource_metadata.as_deref(),
             Some("https://auth.example/meta")
         );
+    }
+
+    #[tokio::test]
+    async fn concurrent_refreshes_issue_one_token_request() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("token listener");
+        let address = listener.local_addr().expect("token address");
+        let token_endpoint =
+            Url::parse(&format!("http://{address}/token")).expect("token endpoint");
+        let count = Arc::new(AtomicUsize::new(0));
+        let server = token_server(listener, Arc::clone(&count));
+        let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("OAuth client");
+        let discovery = Discovery {
+            issuer: format!("http://{address}/issuer"),
+            resource: format!("http://{address}/mcp"),
+            authorization_endpoint: token_endpoint.clone(),
+            token_endpoint,
+            registration_endpoint: None,
+            scopes: Vec::new(),
+            require_issuer_parameter: false,
+        };
+        let record = TokenRecord {
+            client_id: "client".to_owned(),
+            access_token: "old-access".to_owned(),
+            refresh_token: Some("old-refresh".to_owned()),
+            scopes: Vec::new(),
+        };
+        let cancel = CancellationToken::new();
+        let coordinator = Arc::new(auth::RefreshCoordinator::new());
+        let mut calls = tokio::task::JoinSet::new();
+        for _ in 0..8 {
+            let client = client.clone();
+            let discovery = discovery.clone();
+            let record = record.clone();
+            let cancel = cancel.clone();
+            let coordinator = Arc::clone(&coordinator);
+            calls.spawn(async move {
+                refresh(
+                    &coordinator,
+                    &client,
+                    &discovery,
+                    &record,
+                    Duration::from_secs(3),
+                    &cancel,
+                    |_| async { Ok::<(), McpError>(()) },
+                )
+                .await
+            });
+        }
+        let drain = async {
+            while let Some(result) = calls.join_next().await {
+                let refreshed = result.expect("refresh task").expect("refresh response");
+                assert!(refreshed.is_some());
+            }
+        };
+        tokio::join!(server, drain);
+        assert_eq!(count.load(Ordering::Relaxed), 1);
     }
 
     #[test]

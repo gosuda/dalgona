@@ -4,11 +4,13 @@
 //! This module owns the mode-0600 token file, per-resource binding, scope
 //! parsing, and the private SHA-256 used for PKCE S256.
 
-use std::{collections::BTreeMap, fmt, path::Path};
+use std::{collections::BTreeMap, fmt, future::Future, path::Path, sync::Arc};
 
 use dal_store::{FileMode, write_atomic};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
+use tokio::sync::{Mutex, Notify};
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::mcp::McpError;
 
@@ -42,6 +44,178 @@ impl fmt::Debug for TokenRecord {
 pub(crate) struct TokenFile {
     #[serde(default)]
     pub(crate) tokens: BTreeMap<String, BTreeMap<String, TokenRecord>>,
+}
+
+#[derive(Default)]
+pub(crate) struct AuthorizationState {
+    pub(crate) cancelled: bool,
+    pub(crate) refresh_failed: bool,
+}
+
+/// Coalesces one token refresh per credential key.
+///
+/// A refresh task owns the network request until it completes. Callers may
+/// stop waiting, but a later caller still joins the same task and receives its
+/// result.
+pub(crate) struct RefreshCoordinator {
+    flights: Mutex<BTreeMap<String, Arc<RefreshSlot>>>,
+}
+
+struct RefreshSlot {
+    state: Mutex<RefreshSlotState>,
+}
+
+impl RefreshSlot {
+    /// Clears a finished flight, keeping its fresh record unless an
+    /// interactive record superseded it while it ran.
+    async fn settle(&self, flight: &Arc<RefreshFlight>) {
+        let fresh = flight.fresh().await;
+        let mut state = self.state.lock().await;
+        if !state
+            .flight
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, flight))
+        {
+            return;
+        }
+        if let Some(fresh) = fresh
+            && !state.superseded
+        {
+            state.last = Some(fresh);
+        }
+        state.flight = None;
+        state.task = None;
+    }
+}
+
+#[derive(Default)]
+struct RefreshSlotState {
+    flight: Option<Arc<RefreshFlight>>,
+    task: Option<AbortOnDropHandle<()>>,
+    last: Option<TokenRecord>,
+    /// Set when an interactive record replaced `last` while a flight was
+    /// still running, so the older flight cannot overwrite it.
+    superseded: bool,
+}
+
+struct RefreshFlight {
+    result: Mutex<Option<Result<Option<TokenRecord>, McpError>>>,
+    notify: Notify,
+}
+
+/// Names the refresh slot for one stored credential.
+///
+/// The key matches the token file: one record per issuer and resource.
+pub(crate) fn refresh_key(issuer: &str, resource: &str) -> String {
+    format!("{issuer}\u{1f}{resource}")
+}
+
+impl RefreshCoordinator {
+    pub(crate) fn new() -> Self {
+        Self {
+            flights: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    async fn slot(&self, key: &str) -> Arc<RefreshSlot> {
+        let mut flights = self.flights.lock().await;
+        flights
+            .entry(key.to_owned())
+            .or_insert_with(|| {
+                Arc::new(RefreshSlot {
+                    state: Mutex::new(RefreshSlotState::default()),
+                })
+            })
+            .clone()
+    }
+
+    /// Records a record obtained outside a refresh, such as an interactive
+    /// authorization, so a caller still holding an older access token adopts
+    /// it instead of a stale cached refresh result.
+    pub(crate) async fn publish(&self, key: &str, record: TokenRecord) {
+        let slot = self.slot(key).await;
+        let mut state = slot.state.lock().await;
+        state.superseded = state.flight.is_some();
+        state.last = Some(record);
+    }
+
+    pub(crate) async fn run<F, Fut>(
+        &self,
+        key: &str,
+        held_access: &str,
+        operation: F,
+    ) -> Result<Option<TokenRecord>, McpError>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = Result<Option<TokenRecord>, McpError>> + Send + 'static,
+    {
+        let slot = self.slot(key).await;
+        let flight = {
+            let mut state = slot.state.lock().await;
+            if (state.flight.is_none() || state.superseded)
+                && let Some(record) = state.last.as_ref()
+                && record.access_token != held_access
+            {
+                return Ok(Some(record.clone()));
+            }
+            if let Some(flight) = state.flight.as_ref() {
+                Arc::clone(flight)
+            } else {
+                let flight = Arc::new(RefreshFlight {
+                    result: Mutex::new(None),
+                    notify: Notify::new(),
+                });
+                state.flight = Some(Arc::clone(&flight));
+                state.superseded = false;
+                let weak_flight = Arc::downgrade(&flight);
+                let weak_slot = Arc::downgrade(&slot);
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "the credential slot owns and aborts the refresh task"
+                )]
+                let task = AbortOnDropHandle::new(tokio::spawn(async move {
+                    let result = operation().await;
+                    let (Some(flight), Some(slot)) = (weak_flight.upgrade(), weak_slot.upgrade())
+                    else {
+                        return;
+                    };
+                    flight.finish(result).await;
+                    slot.settle(&flight).await;
+                }));
+                state.task = Some(task);
+                flight
+            }
+        };
+        flight.wait().await
+    }
+}
+
+impl RefreshFlight {
+    async fn finish(&self, result: Result<Option<TokenRecord>, McpError>) {
+        *self.result.lock().await = Some(result);
+        self.notify.notify_waiters();
+    }
+
+    async fn fresh(&self) -> Option<TokenRecord> {
+        match self.result.lock().await.as_ref() {
+            Some(Ok(Some(record))) => Some(record.clone()),
+            _ => None,
+        }
+    }
+
+    async fn wait(&self) -> Result<Option<TokenRecord>, McpError> {
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            let result = self.result.lock().await;
+            notified.as_mut().enable();
+            if let Some(result) = result.as_ref() {
+                return result.clone();
+            }
+            drop(result);
+            notified.await;
+        }
+    }
 }
 
 /// Reads the token file. A corrupt or unreadable file is ignored so the

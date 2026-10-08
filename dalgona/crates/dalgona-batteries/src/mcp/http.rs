@@ -8,14 +8,17 @@ pub(crate) mod protocol;
 use std::{
     net::IpAddr,
     path::PathBuf,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
 use dal_core::RawJson;
 use reqwest::{
     Client, Response, StatusCode, Url,
-    header::{HeaderName, HeaderValue},
+    header::{HeaderMap, HeaderName, HeaderValue},
     redirect::Policy,
 };
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
@@ -82,10 +85,28 @@ pub(crate) struct HttpTransport {
     call_max: Duration,
     stepup_timeout: Duration,
     shutdown_grace: Duration,
-    tokens: Mutex<Option<token_auth::TokenFile>>,
+    tokens: Arc<Mutex<Option<token_auth::TokenFile>>>,
     verified_issuer: Mutex<Option<String>>,
     session_id: Mutex<Option<String>>,
-    authorization: Mutex<()>,
+    authorization: Mutex<token_auth::AuthorizationState>,
+    refreshes: Arc<token_auth::RefreshCoordinator>,
+}
+
+/// Retry bounds for one request that keeps receiving 401.
+#[derive(Default)]
+struct AuthRetry {
+    attempts: u32,
+    stored_token: bool,
+    refresh: bool,
+    interactive: bool,
+}
+
+/// How a 401 was recovered.
+enum Recovered {
+    /// Resend with the credential now in the cache.
+    Retry,
+    /// The user authorized again; resend with a fresh call deadline.
+    Reauthorized,
 }
 
 impl HttpTransport {
@@ -96,6 +117,7 @@ impl HttpTransport {
         tokens_path: PathBuf,
         client_version: String,
         budgets: &Budgets,
+        refreshes: Arc<token_auth::RefreshCoordinator>,
     ) -> Result<Self, McpError> {
         validate_endpoint(&url)?;
         let client = Client::builder()
@@ -117,10 +139,11 @@ impl HttpTransport {
             call_max: budgets.call_max,
             stepup_timeout: budgets.stepup,
             shutdown_grace: budgets.shutdown_grace,
-            tokens: Mutex::new(None),
+            tokens: Arc::new(Mutex::new(None)),
             verified_issuer: Mutex::new(None),
             session_id: Mutex::new(None),
-            authorization: Mutex::new(()),
+            authorization: Mutex::new(token_auth::AuthorizationState::default()),
+            refreshes,
         })
     }
 
@@ -161,11 +184,8 @@ impl HttpTransport {
         let mut deadline = CallDeadline::new(self.call_timeout, self.call_max);
         let mut request_id = id;
         let mut used_token = None;
-        let mut auth_attempts = 0_u32;
+        let mut retry = AuthRetry::default();
         let mut step_ups = 0_u32;
-        let mut stored_token_attempted = false;
-        let mut refresh_attempted = false;
-        let mut interactive_attempted = false;
         loop {
             if cancel.is_cancelled() {
                 return Err(TransportError::Cancelled);
@@ -189,63 +209,19 @@ impl HttpTransport {
             self.capture_session(&response).await?;
             let status = response.status();
             if status == StatusCode::UNAUTHORIZED {
-                if auth_attempts >= 3 {
-                    return Err(TransportError::Mcp(McpError::HttpAuth {
-                        code: status.as_u16(),
-                        n: auth_attempts,
-                    }));
-                }
-                auth_attempts += 1;
-                let challenge = oauth::challenge(response.headers());
-                let _authorization = self.authorization.lock().await;
-                if self.bearer().await != used_token {
-                    request_id = ids.fetch_add(1, Ordering::Relaxed);
-                    continue;
-                }
-                let discovery = self.discover(&challenge, cancel).await?;
-                self.set_issuer(&discovery.issuer).await;
-                let existing = self.record(&discovery.issuer, &discovery.resource).await?;
-                if used_token.is_none()
-                    && !stored_token_attempted
-                    && let Some(record) = existing.as_ref()
-                    && !record.access_token.is_empty()
-                {
-                    stored_token_attempted = true;
-                    request_id = ids.fetch_add(1, Ordering::Relaxed);
-                    continue;
-                }
-                if !refresh_attempted
-                    && let Some(record) = existing.as_ref()
-                    && record.refresh_token.is_some()
-                {
-                    refresh_attempted = true;
-                    if let Some(updated) = oauth::refresh(
-                        &self.client,
-                        &discovery,
-                        record,
-                        self.connect_timeout,
+                let recovered = self
+                    .recover_unauthorized(
+                        response.headers(),
+                        used_token.as_deref(),
+                        &mut retry,
+                        services,
+                        who,
                         cancel,
                     )
-                    .await?
-                    {
-                        self.persist(&discovery, updated).await?;
-                        request_id = ids.fetch_add(1, Ordering::Relaxed);
-                        continue;
-                    }
-                }
-                if interactive_attempted {
-                    return Err(TransportError::Mcp(McpError::HttpAuth {
-                        code: status.as_u16(),
-                        n: auth_attempts,
-                    }));
-                }
-                interactive_attempted = true;
-                refresh_attempted = true;
-                let updated = self
-                    .authorize(&discovery, existing.as_ref(), None, services, who, cancel)
                     .await?;
-                self.persist(&discovery, updated).await?;
-                deadline = CallDeadline::new(self.call_timeout, self.call_max);
+                if matches!(recovered, Recovered::Reauthorized) {
+                    deadline = CallDeadline::new(self.call_timeout, self.call_max);
+                }
                 request_id = ids.fetch_add(1, Ordering::Relaxed);
                 continue;
             }
@@ -254,7 +230,7 @@ impl HttpTransport {
                 if !challenge.insufficient_scope {
                     return Err(TransportError::Mcp(McpError::HttpAuth {
                         code: status.as_u16(),
-                        n: auth_attempts,
+                        n: retry.attempts,
                     }));
                 }
                 if step_ups >= STEPUP_MAX {
@@ -313,7 +289,7 @@ impl HttpTransport {
                 }
                 return Err(TransportError::Mcp(McpError::HttpAuth {
                     code: status.as_u16(),
-                    n: auth_attempts,
+                    n: retry.attempts,
                 }));
             }
             let content_type = response
@@ -358,9 +334,8 @@ impl HttpTransport {
         let body = notification_body(method, version, &self.client_version)
             .map_err(TransportError::Mcp)?;
         let deadline = CallDeadline::new(self.call_timeout, self.call_timeout);
-        let mut auth_attempts = 0_u32;
+        let mut retry = AuthRetry::default();
         let mut step_ups = 0_u32;
-        let mut interactive_attempted = false;
         loop {
             if cancel.is_cancelled() {
                 return Err(TransportError::Cancelled);
@@ -380,52 +355,15 @@ impl HttpTransport {
                 .await?;
             self.capture_session(&response).await?;
             if response.status() == StatusCode::UNAUTHORIZED {
-                if auth_attempts >= 3 {
-                    return Err(TransportError::Mcp(McpError::HttpAuth {
-                        code: 401,
-                        n: auth_attempts,
-                    }));
-                }
-                auth_attempts += 1;
-                let challenge = oauth::challenge(response.headers());
-                let _authorization = self.authorization.lock().await;
-                if self.bearer().await != token {
-                    continue;
-                }
-                let discovery = self.discover(&challenge, cancel).await?;
-                self.set_issuer(&discovery.issuer).await;
-                let existing = self.record(&discovery.issuer, &discovery.resource).await?;
-                if token.is_none()
-                    && let Some(record) = existing.as_ref()
-                    && !record.access_token.is_empty()
-                {
-                    continue;
-                }
-                if let Some(record) = existing.as_ref()
-                    && record.refresh_token.is_some()
-                    && let Some(updated) = oauth::refresh(
-                        &self.client,
-                        &discovery,
-                        record,
-                        self.connect_timeout,
-                        cancel,
-                    )
-                    .await?
-                {
-                    self.persist(&discovery, updated).await?;
-                    continue;
-                }
-                if interactive_attempted {
-                    return Err(TransportError::Mcp(McpError::HttpAuth {
-                        code: 401,
-                        n: auth_attempts,
-                    }));
-                }
-                interactive_attempted = true;
-                let updated = self
-                    .authorize(&discovery, existing.as_ref(), None, services, who, cancel)
-                    .await?;
-                self.persist(&discovery, updated).await?;
+                self.recover_unauthorized(
+                    response.headers(),
+                    token.as_deref(),
+                    &mut retry,
+                    services,
+                    who,
+                    cancel,
+                )
+                .await?;
                 continue;
             }
             if response.status() == StatusCode::FORBIDDEN {
@@ -433,7 +371,7 @@ impl HttpTransport {
                 if !challenge.insufficient_scope {
                     return Err(TransportError::Mcp(McpError::HttpAuth {
                         code: 403,
-                        n: auth_attempts,
+                        n: retry.attempts,
                     }));
                 }
                 if step_ups >= STEPUP_MAX {
@@ -480,7 +418,7 @@ impl HttpTransport {
             }
             return Err(TransportError::Mcp(McpError::HttpAuth {
                 code: response.status().as_u16(),
-                n: auth_attempts,
+                n: retry.attempts,
             }));
         }
     }
@@ -744,6 +682,84 @@ impl HttpTransport {
         Ok(())
     }
 
+    /// Recovers from one 401: adopts a newer credential, refreshes, or asks
+    /// the user, within the bounds in `retry`.
+    ///
+    /// A refresh that fails with an error leaves no latch, so a later 401
+    /// refreshes again. Only a refusal by the token endpoint or a declined
+    /// prompt blocks further refreshes or prompts.
+    async fn recover_unauthorized(
+        &self,
+        headers: &HeaderMap,
+        used_token: Option<&str>,
+        retry: &mut AuthRetry,
+        services: &dyn dal_agent::ext::Services,
+        who: &dal_agent::ext::Caller,
+        cancel: &CancellationToken,
+    ) -> Result<Recovered, TransportError> {
+        let unauthorized = StatusCode::UNAUTHORIZED.as_u16();
+        retry.attempts += 1;
+        let challenge = oauth::challenge(headers);
+        let mut authorization = self.authorization.lock().await;
+        let current = self.bearer().await;
+        if current.as_deref() != used_token {
+            if used_token.is_some() && current.is_some() {
+                *retry = AuthRetry::default();
+                *authorization = token_auth::AuthorizationState::default();
+            }
+            return Ok(Recovered::Retry);
+        }
+        if retry.attempts > 3 {
+            return Err(TransportError::Mcp(McpError::HttpAuth {
+                code: unauthorized,
+                n: retry.attempts - 1,
+            }));
+        }
+        if authorization.cancelled {
+            return Err(TransportError::Mcp(McpError::NoAskFrontEnd));
+        }
+        let discovery = self.discover(&challenge, cancel).await?;
+        self.set_issuer(&discovery.issuer).await;
+        let existing = self.record(&discovery.issuer, &discovery.resource).await?;
+        let stored = existing
+            .as_ref()
+            .is_some_and(|record| !record.access_token.is_empty());
+        if used_token.is_none() && !retry.stored_token && stored {
+            retry.stored_token = true;
+            return Ok(Recovered::Retry);
+        }
+        if !retry.refresh
+            && !authorization.refresh_failed
+            && let Some(record) = existing.as_ref()
+            && record.refresh_token.is_some()
+        {
+            retry.refresh = true;
+            if let Some(updated) = self.refresh_token(&discovery, record, cancel).await? {
+                authorization.refresh_failed = used_token == Some(updated.access_token.as_str());
+                return Ok(Recovered::Retry);
+            }
+            authorization.refresh_failed = true;
+        }
+        if retry.interactive {
+            return Err(TransportError::Mcp(McpError::HttpAuth {
+                code: unauthorized,
+                n: retry.attempts,
+            }));
+        }
+        retry.interactive = true;
+        let updated = self
+            .authorize(&discovery, existing.as_ref(), None, services, who, cancel)
+            .await
+            .inspect_err(|error| {
+                if matches!(error, TransportError::Mcp(McpError::NoAskFrontEnd)) {
+                    authorization.cancelled = true;
+                }
+            })?;
+        self.persist(&discovery, updated).await?;
+        *authorization = token_auth::AuthorizationState::default();
+        Ok(Recovered::Reauthorized)
+    }
+
     async fn bearer(&self) -> Option<String> {
         let issuer = self.verified_issuer.lock().await.clone()?;
         let resource = token_auth::canonical_resource(&self.url);
@@ -778,6 +794,57 @@ impl HttpTransport {
         *self.verified_issuer.lock().await = Some(issuer.to_owned());
     }
 
+    async fn refresh_token(
+        &self,
+        discovery: &Discovery,
+        record: &token_auth::TokenRecord,
+        cancel: &CancellationToken,
+    ) -> Result<Option<token_auth::TokenRecord>, TransportError> {
+        let path = self.tokens_path.clone();
+        let issuer = discovery.issuer.clone();
+        let resource = discovery.resource.clone();
+        let cache = Arc::clone(&self.tokens);
+        let cache_issuer = issuer.clone();
+        let cache_resource = resource.clone();
+        let persist = move |record: token_auth::TokenRecord| async move {
+            let cache_record = record.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                token_auth::persist_token(&path, &issuer, &resource, record)
+            })
+            .await
+            .map_err(|_| McpError::Auth {
+                cause: "token persistence failed".to_owned(),
+            })?;
+            result?;
+            let mut tokens = cache.lock().await;
+            tokens
+                .get_or_insert_with(token_auth::TokenFile::default)
+                .tokens
+                .entry(cache_issuer)
+                .or_default()
+                .insert(cache_resource, cache_record);
+            Ok(())
+        };
+        let updated = oauth::refresh(
+            &self.refreshes,
+            &self.client,
+            discovery,
+            record,
+            self.connect_timeout,
+            cancel,
+            persist,
+        )
+        .await
+        .map_err(TransportError::Mcp)?;
+        if let Some(record) = updated.as_ref() {
+            self.remember(discovery, record.clone()).await;
+        }
+        Ok(updated)
+    }
+
+    /// Persists an interactively authorized record and publishes it to the
+    /// refresh coordinator, so a transport still holding an older access
+    /// token adopts it instead of a stale cached refresh result.
     async fn persist(
         &self,
         discovery: &Discovery,
@@ -797,6 +864,13 @@ impl HttpTransport {
             })
         })?
         .map_err(TransportError::Mcp)?;
+        let key = token_auth::refresh_key(&discovery.issuer, &discovery.resource);
+        self.refreshes.publish(&key, record.clone()).await;
+        self.remember(discovery, record).await;
+        Ok(())
+    }
+
+    async fn remember(&self, discovery: &Discovery, record: token_auth::TokenRecord) {
         let mut tokens = self.load_tokens().await;
         tokens
             .tokens
@@ -805,7 +879,6 @@ impl HttpTransport {
             .insert(discovery.resource.clone(), record);
         *self.tokens.lock().await = Some(tokens);
         self.set_issuer(&discovery.issuer).await;
-        Ok(())
     }
 
     async fn discover(
