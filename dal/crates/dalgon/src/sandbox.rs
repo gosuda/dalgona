@@ -1,7 +1,7 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::process::Command;
 use std::process::ExitCode;
@@ -15,7 +15,7 @@ use dal_core::{Notice, RegistrationError, ServiceSet};
 const DENIAL_NOTE: &str = "dalgon sandbox: a \"Permission denied\" or \"Operation not permitted\" error can come from the sandbox; if the path should be writable, add it to sandbox_writable in dal.toml.";
 #[expect(dead_code, reason = "kept for the SDK embedder seam")]
 const HELPER_ERROR: &str = "sandbox: no sandbox helper. SDK embedders must pass a helper path; the dalgon binary provides dalgon __sandbox.";
-#[cfg(any(windows, not(any(target_os = "linux", target_os = "macos", windows))))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 const WINDOWS_ERROR: &str = "sandbox = \"on\" is not supported on Windows. Set sandbox = \"off\" in dal.toml, or run dalgon inside WSL 2.";
 const MALFORMED_ARGS: &str = "dalgon sandbox: malformed launcher arguments";
 
@@ -95,7 +95,7 @@ impl ObserveHook<SessionStart> for NoticeHook {
             if let Some(text) = dal_agent::sandbox_notice(
                 on,
                 &env.vars,
-                workspace_path(&input),
+                input.workspace.as_path(),
                 &writable,
                 &protected,
             ) {
@@ -113,10 +113,6 @@ impl ObserveHook<SessionStart> for NoticeHook {
     }
 }
 
-fn workspace_path(input: &SessionStart) -> &Path {
-    input.workspace.as_path()
-}
-
 pub(crate) fn run(argv: &[OsString]) -> ExitCode {
     if argv.get(1).map(OsString::as_os_str) != Some(OsStr::new("__sandbox")) {
         return malformed();
@@ -132,13 +128,7 @@ pub(crate) fn run(argv: &[OsString]) -> ExitCode {
         run_macos(argv)
     }
 
-    #[cfg(windows)]
-    {
-        write_error(WINDOWS_ERROR);
-        ExitCode::from(126)
-    }
-
-    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         write_error(WINDOWS_ERROR);
         ExitCode::from(126)
