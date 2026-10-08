@@ -28,6 +28,14 @@ pub enum Command {
         /// The content to queue for the next turn.
         content: Vec<Part>,
     },
+    /// Remove one queued follow-up before it starts.
+    ///
+    /// The turn id is the one the queued reply named. The command is
+    /// rejected when no queued follow-up has that id.
+    CancelQueued {
+        /// The turn the queued follow-up was promised.
+        turn: TurnId,
+    },
     /// Cancel a running turn or job.
     Cancel {
         /// The turn or job to cancel.
@@ -127,6 +135,9 @@ pub(super) enum CommandShape<'a> {
         turn: &'a TurnId,
         content: &'a [Part],
     },
+    CancelQueued {
+        turn: &'a TurnId,
+    },
     Cancel {
         scope: &'a CancelScope,
     },
@@ -202,6 +213,9 @@ pub(super) enum CommandFields {
         turn: TurnId,
         content: Vec<Part>,
     },
+    CancelQueued {
+        turn: TurnId,
+    },
     Cancel {
         scope: CancelScope,
     },
@@ -256,6 +270,7 @@ impl Serialize for Command {
             Self::Steer { turn, content } => CommandShape::Steer { turn, content },
             Self::FollowUp { turn, content } => CommandShape::FollowUp { turn, content },
             Self::Cancel { scope } => CommandShape::Cancel { scope },
+            Self::CancelQueued { turn } => CommandShape::CancelQueued { turn },
             Self::SetModel { model, save } => CommandShape::SetModel { model, save },
             Self::SetThinking { level, save } => CommandShape::SetThinking { level, save },
             Self::SetApproval { mode, save } => CommandShape::SetApproval { mode, save },

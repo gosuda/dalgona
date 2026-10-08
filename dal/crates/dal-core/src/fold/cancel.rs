@@ -4,9 +4,9 @@ use super::helpers::{
 use super::types::{ManualCompletion, QueuedInput};
 use super::{
     CallId, CancelScope, CompactionReason, CompactionSummary, Effect, Emit, Entry, EntryId,
-    EntryKind, Expect, JournalPart, ModelRequestPlan, NonZeroU64, Notice, Output, PartialResponse,
-    PendingCall, Phase, Record, Rejection, Reply, Session, SettingsView, Step, TreeDelta,
-    TurnEndStop, TurnId, TurnSource, TurnStage, UpdateKind,
+    EntryKind, Expect, JournalPart, ModelRequestPlan, NonZeroU64, Notice, Output, Part,
+    PartialResponse, PendingCall, Phase, Record, Rejection, Reply, Session, SettingsView, Step,
+    TreeDelta, TurnEndStop, TurnId, TurnSource, TurnStage, UpdateKind,
 };
 
 impl Session {
@@ -36,6 +36,77 @@ impl Session {
                 Err(wrong_turn(Expect::After(turn), self.turn_state()))
             }
         }
+    }
+
+    /// Removes one queued follow-up by the turn id its reply named.
+    ///
+    /// A follow-up that reached the settling slot but has not begun is
+    /// removed too, and the next queued follow-up takes its place. The
+    /// opening verdict for a removed turn finds no matching phase, so the
+    /// fold drops it. The removed text returns in a `discarded` notice so a
+    /// client can restore it to the composer.
+    pub(super) fn cancel_queued(
+        &mut self,
+        turn: TurnId,
+        emit: &mut Emit,
+        effects: &mut Vec<Effect>,
+    ) -> Result<(), Rejection> {
+        let Some(content) = self
+            .take_settling_follow_up(turn, emit)
+            .or_else(|| self.take_queued_follow_up(turn))
+        else {
+            return Err(Rejection::Invalid {
+                reason: format!(
+                    "turn {turn} has no queued follow-up. It may have started or been cancelled already."
+                )
+                .into(),
+            });
+        };
+        emit.updates.push(UpdateKind::Notice(Notice {
+            turn: Some(turn),
+            kind: "discarded".into(),
+            text: parts_to_text(&content).into(),
+        }));
+        effects.push(Effect::Reply(Ok(Reply::Done(Output::Nothing))));
+        Ok(())
+    }
+
+    fn take_settling_follow_up(&mut self, turn: TurnId, emit: &mut Emit) -> Option<Vec<Part>> {
+        let Phase::Settling {
+            turn: ended,
+            follow_up,
+        } = &mut self.phase
+        else {
+            return None;
+        };
+        if !matches!(follow_up, Some((next, TurnSource::FollowUp { .. })) if *next == turn) {
+            return None;
+        }
+        let ended = *ended;
+        let Some((_, TurnSource::FollowUp { content, .. })) = follow_up.take() else {
+            return None;
+        };
+        let promoted = self.pop_follow_up();
+        self.close_turn(ended, promoted, emit);
+        Some(content)
+    }
+
+    fn take_queued_follow_up(&mut self, turn: TurnId) -> Option<Vec<Part>> {
+        let index = self.queued_inputs.iter().position(|item| {
+            matches!(
+                item,
+                QueuedInput::FollowUp { turn: queued, source: TurnSource::FollowUp { .. } }
+                    if *queued == turn
+            )
+        })?;
+        let QueuedInput::FollowUp {
+            source: TurnSource::FollowUp { content, .. },
+            ..
+        } = self.queued_inputs.remove(index)
+        else {
+            return None;
+        };
+        Some(content)
     }
 
     pub(super) fn compaction_settled(

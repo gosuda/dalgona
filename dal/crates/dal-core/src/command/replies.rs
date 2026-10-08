@@ -15,7 +15,12 @@ pub enum Reply {
         message_id: EntryId,
     },
     /// Input was queued for a running or future turn.
-    Queued,
+    Queued {
+        /// The turn a queued follow-up will start, which
+        /// [`Command::CancelQueued`](super::Command::CancelQueued) accepts.
+        /// A queued steer joins the running turn and has no id.
+        turn: Option<TurnId>,
+    },
     /// The command completed with a payload.
     Done(Output),
     /// The client must show a picker.
@@ -42,7 +47,10 @@ pub(super) enum ReplyShape<'a> {
         turn: &'a TurnId,
         message_id: &'a EntryId,
     },
-    Queued,
+    Queued {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        turn: Option<&'a TurnId>,
+    },
     Done {
         output: &'a Output,
     },
@@ -62,7 +70,9 @@ impl Serialize for Reply {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let shape = match self {
             Self::Accepted { turn, message_id } => ReplyShape::Accepted { turn, message_id },
-            Self::Queued => ReplyShape::Queued,
+            Self::Queued { turn } => ReplyShape::Queued {
+                turn: turn.as_ref(),
+            },
             Self::Done(output) => ReplyShape::Done { output },
             Self::Choose { chooser, filter } => ReplyShape::Choose { chooser, filter },
             Self::Front(action) => ReplyShape::Front { action },
@@ -100,6 +110,12 @@ pub(super) struct StartedReplyFields {
     pub(super) job: JobId,
 }
 
+#[derive(Deserialize)]
+pub(super) struct QueuedReplyFields {
+    #[serde(default)]
+    pub(super) turn: Option<TurnId>,
+}
+
 impl<'de> Deserialize<'de> for Reply {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let tagged = Tagged::decode(
@@ -117,7 +133,11 @@ impl<'de> Deserialize<'de> for Reply {
                     message_id: wire.message_id,
                 })
             }
-            "queued" => Ok(Self::Queued),
+            "queued" => {
+                let wire: QueuedReplyFields =
+                    sonic_rs::from_str(tagged.raw()).map_err(de::Error::custom)?;
+                Ok(Self::Queued { turn: wire.turn })
+            }
             "done" => {
                 let wire: DoneReplyFields =
                     sonic_rs::from_str(tagged.raw()).map_err(de::Error::custom)?;
@@ -160,12 +180,27 @@ impl<'de> Deserialize<'de> for Reply {
     rename_all_fields = "camelCase"
 )]
 pub(super) enum ReplyFields {
-    Accepted { turn: TurnId, message_id: EntryId },
-    Queued,
-    Done { output: Output },
-    Choose { chooser: Chooser, filter: Box<str> },
-    Front { action: FrontAction },
-    Started { job: JobId },
+    Accepted {
+        turn: TurnId,
+        message_id: EntryId,
+    },
+    Queued {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn: Option<TurnId>,
+    },
+    Done {
+        output: Output,
+    },
+    Choose {
+        chooser: Chooser,
+        filter: Box<str>,
+    },
+    Front {
+        action: FrontAction,
+    },
+    Started {
+        job: JobId,
+    },
 }
 
 #[cfg(feature = "schema")]

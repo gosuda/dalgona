@@ -129,7 +129,7 @@ impl Session {
                 self.active_turn = Some(turn);
                 Vec::new()
             }
-            Reply::Queued => vec!["Message queued.".to_owned()],
+            Reply::Queued { .. } => vec!["Message queued.".to_owned()],
             Reply::Done(Output::Text(text) | Output::Markdown(text)) => {
                 text.lines().map(crate::width::escape).collect()
             }
@@ -880,7 +880,7 @@ impl Surfaces {
                     continue;
                 }
             };
-            let queued = matches!(&submit_reply, Reply::Queued);
+            let queued = matches!(&submit_reply, Reply::Queued { .. });
             let reply_rows = match submit_reply {
                 Reply::Choose { chooser, filter } => {
                     self.session.picker = None;

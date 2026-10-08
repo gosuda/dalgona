@@ -36,7 +36,7 @@ impl Session {
             }
             Command::Steer { turn: _, content } => {
                 self.queued_inputs.push(QueuedInput::Steer(content));
-                effects.push(Effect::Reply(Ok(Reply::Queued)));
+                effects.push(Effect::Reply(Ok(Reply::Queued { turn: None })));
             }
             Command::FollowUp { turn: _, content } => {
                 let turn = self.allocate_turn()?;
@@ -44,7 +44,10 @@ impl Session {
                     turn,
                     source: TurnSource::FollowUp { by, content },
                 });
-                effects.push(Effect::Reply(Ok(Reply::Queued)));
+                effects.push(Effect::Reply(Ok(Reply::Queued { turn: Some(turn) })));
+            }
+            Command::CancelQueued { turn } => {
+                return self.cancel_queued(turn, emit, effects);
             }
             Command::Cancel {
                 scope: scope @ CancelScope::Job(_),

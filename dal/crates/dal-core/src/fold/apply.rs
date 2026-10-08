@@ -122,7 +122,7 @@ impl Session {
     pub(super) fn queue_steer(&mut self, text: Box<str>, effects: &mut Vec<Effect>) {
         self.queued_inputs
             .push(QueuedInput::Steer(vec![Part::Text { text }]));
-        effects.push(Effect::Reply(Ok(Reply::Queued)));
+        effects.push(Effect::Reply(Ok(Reply::Queued { turn: None })));
     }
 
     pub(super) fn request_started(&mut self, turn: TurnId, model: ModelRoute, family: Family) {

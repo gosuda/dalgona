@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add `cancel_queued`, a command that removes one queued follow-up by its turn id. The `queued` reply to a follow-up now carries that `turn`; a queued steer still has none. The removed text comes back in a `discarded` notice, and an id that is not queued is rejected and changes nothing. A follow-up that has already started cannot be removed; cancel its turn instead.
 - Fix provider requests built from a journal that holds more than one result for the same tool call. The request now carries only the first result for each call of a model response, so providers no longer reject it. The journal is not changed.
 - Fix child sessions: a child started with a `tools` list now sees and can call only those tools, on every turn and after every reload, through the model, scripts, and extension services. An empty list gives the child no tools, and a start with no list leaves it unrestricted. A child also starts under the approval mode its parent runs under now, not the configured default.
 - Add the `-32009` error code ("server draining") to the dal protocol. A WebSocket connection answers every new request with it once the listener begins to stop, lets running requests finish for up to one second, and then closes. A request to a host that has shut down now answers `-32009` instead of `-32603`.

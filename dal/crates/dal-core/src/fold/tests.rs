@@ -343,7 +343,7 @@ fn steer_at_final_response_extends_turn() {
     .unwrap();
     assert!(matches!(
         queued.as_slice(),
-        [Effect::Reply(Ok(Reply::Queued))]
+        [Effect::Reply(Ok(Reply::Queued { turn: None }))]
     ));
     let boundary = send(&mut session, Event::Boundary { turn }).unwrap();
     assert!(
@@ -423,6 +423,167 @@ fn cancel_discards_queued_input() {
     )));
     assert!(emit.updates.iter().any(|update| matches!(update, UpdateKind::Notice(notice) if notice.kind.as_ref() == "discarded" && notice.text.as_ref() == "first\nsecond\nthird")));
     assert!(matches!(session.phase(), Phase::Idle));
+}
+
+fn follow_up(turn: TurnId, text: &str) -> Event {
+    Event::Command {
+        cmd: Command::FollowUp {
+            turn,
+            content: vec![Part::Text { text: text.into() }],
+        },
+        by: client(),
+    }
+}
+
+fn cancel_queued(turn: TurnId) -> Event {
+    Event::Command {
+        cmd: Command::CancelQueued { turn },
+        by: client(),
+    }
+}
+
+fn queued_turn(effects: &[Effect]) -> TurnId {
+    effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Reply(Ok(Reply::Queued { turn })) => *turn,
+            _ => None,
+        })
+        .expect("a follow-up reply names its turn")
+}
+
+fn notices(effects: &[Effect]) -> Vec<(&str, &str)> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Emit(emit) => Some(&emit.updates),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|update| match update {
+            UpdateKind::Notice(notice) => Some((notice.kind.as_ref(), notice.text.as_ref())),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn queued_follow_up_reply_names_its_turn_and_a_steer_reply_does_not() {
+    let mut session = session();
+    let turn = begin(&mut session);
+    let queued = send(&mut session, follow_up(turn, "next")).unwrap();
+    assert_eq!(queued_turn(&queued), id(2));
+    let steered = send(
+        &mut session,
+        Event::Steer {
+            turn,
+            text: "now".into(),
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        steered.as_slice(),
+        [Effect::Reply(Ok(Reply::Queued { turn: None }))]
+    ));
+}
+
+#[test]
+fn cancel_queued_removes_only_the_named_follow_up() {
+    let mut session = session();
+    let turn = begin(&mut session);
+    let first = queued_turn(&send(&mut session, follow_up(turn, "first")).unwrap());
+    let second = queued_turn(&send(&mut session, follow_up(turn, "second")).unwrap());
+    assert_eq!(session.follow_ups_queued(), 2);
+
+    let out = send(&mut session, cancel_queued(first)).unwrap();
+
+    assert!(
+        out.iter()
+            .any(|effect| matches!(effect, Effect::Reply(Ok(Reply::Done(Output::Nothing)))))
+    );
+    assert_eq!(notices(&out), [("discarded", "first")]);
+    assert_eq!(session.follow_ups_queued(), 1);
+    assert!(matches!(session.phase(), Phase::Running { turn: active, .. } if *active == turn));
+
+    stream_result(&mut session, turn, inference(Stop::EndTurn, &[], 10));
+    send(&mut session, Event::Boundary { turn }).unwrap();
+    assert!(
+        matches!(session.phase(), Phase::Settling { follow_up: Some((next, _)), .. } if *next == second),
+        "the surviving follow-up starts next: {:?}",
+        session.phase()
+    );
+}
+
+#[test]
+fn cancel_queued_rejects_an_id_that_is_not_queued() {
+    let mut session = session();
+    let turn = begin(&mut session);
+    let queued = queued_turn(&send(&mut session, follow_up(turn, "only")).unwrap());
+    send(&mut session, cancel_queued(queued)).unwrap();
+
+    assert!(matches!(
+        send(&mut session, cancel_queued(queued)),
+        Err(Rejection::Invalid { .. })
+    ));
+    assert!(matches!(
+        send(&mut session, cancel_queued(id(99))),
+        Err(Rejection::Invalid { .. })
+    ));
+    assert!(
+        matches!(
+            send(&mut session, cancel_queued(turn)),
+            Err(Rejection::Invalid { .. })
+        ),
+        "the running turn is not a queued follow-up"
+    );
+}
+
+#[test]
+fn cancelled_follow_up_never_starts_and_its_late_ack_is_dropped() {
+    let mut session = session();
+    let turn = begin(&mut session);
+    let queued = queued_turn(&send(&mut session, follow_up(turn, "later")).unwrap());
+    stream_result(&mut session, turn, inference(Stop::EndTurn, &[], 10));
+    send(&mut session, Event::Boundary { turn }).unwrap();
+    assert!(
+        matches!(session.phase(), Phase::Settling { follow_up: Some((next, _)), .. } if *next == queued)
+    );
+    let entries_before = session.tree.entries.len();
+
+    let out = send(&mut session, cancel_queued(queued)).unwrap();
+    assert_eq!(notices(&out), [("discarded", "later")]);
+    assert!(matches!(session.phase(), Phase::Idle));
+
+    let late = send(&mut session, guard(queued)).unwrap();
+    assert!(
+        late.iter().all(|effect| !matches!(effect, Effect::Emit(_))),
+        "the late verdict wrote nothing: {late:?}"
+    );
+    assert!(matches!(session.phase(), Phase::Idle));
+    assert_eq!(session.tree.entries.len(), entries_before);
+}
+
+#[test]
+fn cancelling_the_settling_follow_up_promotes_the_next_queued_one() {
+    let mut session = session();
+    let turn = begin(&mut session);
+    let first = queued_turn(&send(&mut session, follow_up(turn, "first")).unwrap());
+    let second = queued_turn(&send(&mut session, follow_up(turn, "second")).unwrap());
+    stream_result(&mut session, turn, inference(Stop::EndTurn, &[], 10));
+    send(&mut session, Event::Boundary { turn }).unwrap();
+
+    send(&mut session, cancel_queued(first)).unwrap();
+
+    assert!(
+        matches!(session.phase(), Phase::Settling { follow_up: Some((next, _)), .. } if *next == second),
+        "{:?}",
+        session.phase()
+    );
+    send(&mut session, guard(first)).unwrap();
+    assert!(
+        matches!(session.phase(), Phase::Settling { follow_up: Some((next, _)), .. } if *next == second),
+        "a late verdict for the cancelled turn leaves the next one waiting"
+    );
 }
 
 #[test]
