@@ -17,12 +17,14 @@ fn lock_table()
     TABLE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
-pub(crate) async fn apply_files(
+/// Acquires the canonical write set in ascending byte order — sources and
+/// rename destinations together — and re-checks every `before` digest under
+/// those guards. Two applies cannot interleave differently, and approval
+/// cannot go stale undetected.
+async fn prepare_write_set(
     session: &PatchSession,
     plan: &Plan,
-) -> Result<Output, EngineError> {
-    use std::collections::HashSet;
-    let mut seen_dirs: HashSet<PathBuf> = HashSet::new();
+) -> Result<Vec<tokio::sync::OwnedMutexGuard<()>>, EngineError> {
     // Acquire the full canonical write set in ascending byte order and
     // re-check every before digest under those guards (stale-approval check).
     let mut ordered: Vec<&StagedFileOwned> = plan.files.iter().collect();
@@ -84,6 +86,17 @@ pub(crate) async fn apply_files(
             ));
         }
     }
+    Ok(guards)
+}
+
+pub(crate) async fn apply_files(
+    session: &PatchSession,
+    plan: &Plan,
+) -> Result<Output, EngineError> {
+    use std::collections::HashSet;
+    let mut seen_dirs: HashSet<PathBuf> = HashSet::new();
+    let _guards = prepare_write_set(session, plan).await?;
+
     // Temps map target absolute path -> temp path. For renames the target
     // is the destination; the source is moved to trash in Phase B.
     let mut temps: Vec<(PathBuf, PathBuf)> = Vec::new();

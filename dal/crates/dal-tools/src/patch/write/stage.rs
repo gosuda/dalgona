@@ -160,7 +160,8 @@ pub(crate) async fn stage_file(
             ..
         } = edit
         {
-            replacements.extend(plan_change_edit(&cx, locator, action, guard, body, *index).await?);
+            replacements
+                .extend(plan_change_edit(&cx, locator, *action, guard, body, *index).await?);
         }
     }
     replacements.sort_by_key(|replacement| std::cmp::Reverse(replacement.0));
@@ -274,7 +275,7 @@ async fn classify_edits(
 async fn plan_change_edit(
     cx: &ChangeCx<'_>,
     locator: &Locator,
-    action: &Action,
+    action: Action,
     guard: &Guard,
     body: &str,
     index: usize,
@@ -310,7 +311,7 @@ async fn plan_change_edit(
             node_replacements(cx, *first_line, action, guard, index, body).await
         }
         Locator::Symbol { name, ordinal, old } => {
-            symbol_replacements(cx, name, ordinal, old, action, index, body).await
+            symbol_replacements(cx, name, *ordinal, old.as_ref(), action, index, body).await
         }
     }
 }
@@ -321,7 +322,7 @@ fn lines_replacement(
     cx: &ChangeCx<'_>,
     first: usize,
     last: usize,
-    action: &Action,
+    action: Action,
     index: usize,
     body: &str,
 ) -> Result<Vec<(usize, usize, Vec<u8>)>, EngineError> {
@@ -475,7 +476,7 @@ fn span_replacements(
     cx: &ChangeCx<'_>,
     first: usize,
     last: usize,
-    action: &Action,
+    action: Action,
     index: usize,
     body: &str,
 ) -> Result<Vec<(usize, usize, Vec<u8>)>, EngineError> {
@@ -527,7 +528,7 @@ fn symbols_disabled(display: &Path, index: usize) -> EngineError {
 async fn node_replacements(
     cx: &ChangeCx<'_>,
     first_line: usize,
-    action: &Action,
+    action: Action,
     guard: &Guard,
     index: usize,
     body: &str,
@@ -552,7 +553,7 @@ async fn node_replacements(
 async fn node_replacements(
     cx: &ChangeCx<'_>,
     _first_line: usize,
-    _action: &Action,
+    _action: Action,
     _guard: &Guard,
     index: usize,
     _body: &str,
@@ -642,9 +643,9 @@ fn node_coverage(
 async fn symbol_replacements(
     cx: &ChangeCx<'_>,
     name: &str,
-    ordinal: &Option<usize>,
-    old: &Option<String>,
-    action: &Action,
+    ordinal: Option<usize>,
+    old: Option<&String>,
+    action: Action,
     index: usize,
     body: &str,
 ) -> Result<Vec<(usize, usize, Vec<u8>)>, EngineError> {
@@ -655,7 +656,7 @@ async fn symbol_replacements(
         ));
     }
     let (def_start, def_end, _) =
-        super::super::ast::symbol_span(cx.canonical, cx.before, name, *ordinal).await?;
+        super::super::ast::symbol_span(cx.canonical, cx.before, name, ordinal).await?;
     let def_end = def_end.min(cx.before.len());
     let replacement = render_body(body, cx.text);
     Ok(vec![match action {
@@ -698,9 +699,9 @@ async fn symbol_replacements(
 async fn symbol_replacements(
     cx: &ChangeCx<'_>,
     _name: &str,
-    _ordinal: &Option<usize>,
-    _old: &Option<String>,
-    _action: &Action,
+    _ordinal: Option<usize>,
+    _old: Option<&String>,
+    _action: Action,
     index: usize,
     _body: &str,
 ) -> Result<Vec<(usize, usize, Vec<u8>)>, EngineError> {
