@@ -264,10 +264,6 @@ impl DialogUi {
     }
 
     /// Maps a key into an answer; an answered request disables its keys until resolution.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one key map walks every dialog kind in place"
-    )]
     pub fn key(&mut self, key: crate::keys::Key) -> Option<(dal_core::RequestId, Answer)> {
         use crossterm::event::{KeyCode, KeyModifiers};
         let (request, _) = self.queue.shown()?;
@@ -287,7 +283,17 @@ impl DialogUi {
         {
             return None;
         }
-        let answer = match &request.question {
+        let question = request.question.clone();
+        let answer = self.question_answer(&question, key);
+        let answer = answer?;
+        self.queue.mark_answered(id).then_some((id, answer))
+    }
+
+    /// Maps one key to an answer for the shown question kind, mutating only
+    /// dialog-local focus, checked set, scroll, and input buffer.
+    fn question_answer(&mut self, question: &Question, key: crate::keys::Key) -> Option<Answer> {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        match question {
             Question::Approval { .. } | Question::Grant { .. } => match key.code {
                 KeyCode::Char('y' | 'Y') => Some(Answer::Approve),
                 KeyCode::Char('a' | 'A') => Some(Answer::ApproveForSession),
@@ -376,9 +382,7 @@ impl DialogUi {
                 _ => None,
             },
             _ => (key.code == KeyCode::Esc).then_some(Answer::Cancel),
-        };
-        let answer = answer?;
-        self.queue.mark_answered(id).then_some((id, answer))
+        }
     }
 
     /// Renders the active dialog with a title, scrollable body, and fail-closed actions.

@@ -1150,10 +1150,6 @@ fn read_probe(io: &dyn TermIo) -> Result<(crate::term::Probe, Vec<u8>), TuiError
     Ok((probe, replay))
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "one input map walks every action in place"
-)]
 fn apply_event(session: &mut Session, dialog: &mut DialogUi, event: InputEvent, kitty: bool) {
     use crossterm::event::{KeyCode, KeyModifiers};
 
@@ -1191,48 +1187,7 @@ fn apply_event(session: &mut Session, dialog: &mut DialogUi, event: InputEvent, 
         return;
     }
     if session.picker.is_some() {
-        match key.code {
-            KeyCode::Esc => session.picker = None,
-            KeyCode::Enter => {
-                match session
-                    .picker
-                    .as_mut()
-                    .and_then(PickerUi::activate_selected)
-                {
-                    Some(PickerAction::Command(command)) => {
-                        session.pending_commands.push(command);
-                        session.picker = None;
-                    }
-                    Some(PickerAction::SetDiagrams { enabled, save }) => {
-                        session.pending_diagram_settings.push((enabled, save));
-                    }
-                    Some(_) | None => session.picker = None,
-                }
-            }
-            KeyCode::Up => {
-                if let Some(picker) = &mut session.picker {
-                    picker.move_selection(false);
-                }
-            }
-            KeyCode::Down => {
-                if let Some(picker) = &mut session.picker {
-                    picker.move_selection(true);
-                }
-            }
-            KeyCode::Backspace => {
-                if let Some(picker) = &mut session.picker {
-                    picker.remove_filter_char();
-                }
-            }
-            KeyCode::Char(character)
-                if key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT =>
-            {
-                if let Some(picker) = &mut session.picker {
-                    picker.add_filter_char(character);
-                }
-            }
-            _ => {}
-        }
+        apply_picker_key(session, key);
         return;
     }
     if session.overlay && key.code == KeyCode::Esc {
@@ -1272,6 +1227,55 @@ fn apply_event(session: &mut Session, dialog: &mut DialogUi, event: InputEvent, 
         _ => {}
     }
     session.update_popup();
+}
+
+/// Picker keys: Esc dismisses, Enter activates the focused option, and
+/// arrows plus plain characters drive selection and filter text.
+fn apply_picker_key(session: &mut Session, key: crate::keys::Key) {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    match key.code {
+        KeyCode::Esc => session.picker = None,
+        KeyCode::Enter => {
+            match session
+                .picker
+                .as_mut()
+                .and_then(PickerUi::activate_selected)
+            {
+                Some(PickerAction::Command(command)) => {
+                    session.pending_commands.push(command);
+                    session.picker = None;
+                }
+                Some(PickerAction::SetDiagrams { enabled, save }) => {
+                    session.pending_diagram_settings.push((enabled, save));
+                }
+                Some(_) | None => session.picker = None,
+            }
+        }
+        KeyCode::Up => {
+            if let Some(picker) = &mut session.picker {
+                picker.move_selection(false);
+            }
+        }
+        KeyCode::Down => {
+            if let Some(picker) = &mut session.picker {
+                picker.move_selection(true);
+            }
+        }
+        KeyCode::Backspace => {
+            if let Some(picker) = &mut session.picker {
+                picker.remove_filter_char();
+            }
+        }
+        KeyCode::Char(character)
+            if key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT =>
+        {
+            if let Some(picker) = &mut session.picker {
+                picker.add_filter_char(character);
+            }
+        }
+        _ => {}
+    }
 }
 
 #[cfg(test)]
