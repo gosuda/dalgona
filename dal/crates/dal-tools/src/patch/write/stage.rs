@@ -99,10 +99,28 @@ pub(crate) async fn stage_replacement(
     })
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "one stage carries the session, path pair, and proof inputs"
-)]
+/// Inputs shared by every change-locator planner: the session's proof
+/// ledgers, the dialect, the staged file's paths, and its decoded
+/// before-image.
+struct ChangeCx<'a> {
+    session: &'a PatchSession,
+    style: super::super::ir::DialectId,
+    display: &'a Path,
+    canonical: &'a Path,
+    before: &'a [u8],
+    text: &'a super::super::resolve::Text,
+}
+
+/// How one `Edit` sequence stages: create and delete produce the staged
+/// file directly; content edits plan byte replacements per locator.
+enum StagePlan {
+    Ready(StagedFileOwned),
+    Changes {
+        content_edits: Vec<Edit>,
+        rename_to: Option<PathBuf>,
+    },
+}
+
 pub(crate) async fn stage_file(
     session: &PatchSession,
     style: super::super::ir::DialectId,
@@ -110,7 +128,75 @@ pub(crate) async fn stage_file(
     canonical: &Path,
     edits: Vec<Edit>,
 ) -> Result<StagedFileOwned, EngineError> {
-    // Rename handling: exactly one rename, last, with optional prior content edits.
+    let (content_edits, rename_to) =
+        match classify_edits(session, style, display, canonical, edits).await? {
+            StagePlan::Ready(staged) => return Ok(staged),
+            StagePlan::Changes {
+                content_edits,
+                rename_to,
+            } => (content_edits, rename_to),
+        };
+    let before = read_target(canonical, display).await?;
+    let text = decode(display, &before)?;
+    let mut after = before.clone();
+    let cx = ChangeCx {
+        session,
+        style,
+        display,
+        canonical,
+        before: &before,
+        text: &text,
+    };
+    // Apply content edits in descending view-offset order; here lines only.
+    // Collect line replacements/insertions first, then splice once.
+    let mut replacements: Vec<(usize, usize, Vec<u8>)> = Vec::new();
+    for edit in &content_edits {
+        if let Edit::Change {
+            locator,
+            action,
+            guard,
+            body,
+            index,
+            ..
+        } = edit
+        {
+            replacements.extend(plan_change_edit(&cx, locator, action, guard, body, *index).await?);
+        }
+    }
+    replacements.sort_by_key(|replacement| std::cmp::Reverse(replacement.0));
+    for (start, end, replacement) in replacements {
+        after.splice(start..end, replacement);
+    }
+    let op = if rename_to.is_some() {
+        Operation::Rename
+    } else {
+        Operation::Update
+    };
+    let hunks = if style == super::super::ir::DialectId::Replace {
+        diff_hunks(&before, &after)
+    } else {
+        Vec::new()
+    };
+    Ok(StagedFileOwned {
+        path: display.to_path_buf(),
+        absolute_path: canonical.to_path_buf(),
+        before: Some(before.into_boxed_slice()),
+        after: Some(after.into_boxed_slice()),
+        op,
+        renamed_to: rename_to,
+        hunks,
+    })
+}
+
+/// Classifies the edit list: exactly one rename, last, with optional prior
+/// content edits; create and delete stage the file outright.
+async fn classify_edits(
+    session: &PatchSession,
+    style: super::super::ir::DialectId,
+    display: &Path,
+    canonical: &Path,
+    edits: Vec<Edit>,
+) -> Result<StagePlan, EngineError> {
     let mut rename_to: Option<PathBuf> = None;
     let mut content_edits = Vec::new();
     for edit in edits {
@@ -142,7 +228,7 @@ pub(crate) async fn stage_file(
                     ));
                 }
                 let _ = (style, path);
-                return Ok(StagedFileOwned {
+                return Ok(StagePlan::Ready(StagedFileOwned {
                     path: display.to_path_buf(),
                     absolute_path: canonical.to_path_buf(),
                     before: None,
@@ -150,7 +236,7 @@ pub(crate) async fn stage_file(
                     op: Operation::Create,
                     renamed_to: None,
                     hunks: Vec::new(),
-                });
+                }));
             }
             Edit::Delete { reference, .. } => {
                 if let Some(reference) = reference {
@@ -164,7 +250,7 @@ pub(crate) async fn stage_file(
                     )?;
                 }
                 let before = read_target(canonical, display).await?;
-                return Ok(StagedFileOwned {
+                return Ok(StagePlan::Ready(StagedFileOwned {
                     path: display.to_path_buf(),
                     absolute_path: canonical.to_path_buf(),
                     before: Some(before.into_boxed_slice()),
@@ -172,425 +258,473 @@ pub(crate) async fn stage_file(
                     op: Operation::Delete,
                     renamed_to: rename_to.clone(),
                     hunks: Vec::new(),
-                });
+                }));
             }
             Edit::Change { .. } => content_edits.push(edit),
         }
     }
-    let before = read_target(canonical, display).await?;
-    let text = decode(display, &before)?;
-    let mut after = before.clone();
-    // Apply content edits in descending view-offset order; here lines only.
-    // Collect line replacements/insertions first, then splice once.
-    let mut replacements: Vec<(usize, usize, Vec<u8>)> = Vec::new();
-    for edit in &content_edits {
-        if let Edit::Change {
-            locator,
-            action,
-            guard,
-            body,
-            index,
+    Ok(StagePlan::Changes {
+        content_edits,
+        rename_to,
+    })
+}
+
+/// Maps one `Change` edit's locator to raw byte-span replacements against
+/// the decoded before-image; callers splice in descending offset order.
+async fn plan_change_edit(
+    cx: &ChangeCx<'_>,
+    locator: &Locator,
+    action: &Action,
+    guard: &Guard,
+    body: &str,
+    index: usize,
+) -> Result<Vec<(usize, usize, Vec<u8>)>, EngineError> {
+    prove_guard(
+        cx.session,
+        cx.style,
+        cx.display,
+        cx.canonical,
+        cx.before,
+        cx.text,
+        guard,
+        locator,
+        index,
+    )
+    .await?;
+    match locator {
+        Locator::Lines { first, last } => lines_replacement(cx, *first, *last, action, index, body),
+        Locator::Gap { before_line } => gap_replacement(cx, *before_line, index, body),
+        Locator::Whole => Ok(vec![(0, cx.before.len(), render_body(body, cx.text))]),
+        Locator::Text {
+            old,
+            line_hint,
+            all,
             ..
-        } = edit
-        {
-            prove_guard(
-                session, style, display, canonical, &before, &text, guard, locator, *index,
-            )
-            .await?;
-            match locator {
-                Locator::Lines { first, last } => {
-                    if *first == 0 || *last == 0 || first > last {
-                        return Err(resolve_error(style, display, *index, "invalid range"));
-                    }
-                    let count = line_count(&text);
-                    if *last > count {
-                        return Err(EngineError::new(
-                            ErrorClass::Resolve,
-                            format!("patch: line {last} does not exist (file has {count} lines)"),
-                        ));
-                    }
-                    let (start, end) = line_byte_range(&text, *first, *last);
-                    let replacement = render_body(body, &text);
-                    match action {
-                        Action::Replace => replacements.push((start, end, replacement)),
-                        Action::InsertBefore => replacements.push((start, start, replacement)),
-                        Action::InsertAfter => replacements.push((end, end, replacement)),
-                    }
-                }
-                Locator::Gap { before_line } => {
-                    let count = line_count(&text);
-                    if *before_line != usize::MAX && *before_line > count.saturating_add(1) {
-                        return Err(EngineError::new(
-                            ErrorClass::Resolve,
-                            format!(
-                                "patch: line {before_line} does not exist (file has {count} lines)"
-                            ),
-                        ));
-                    }
-                    let offset = if *before_line == usize::MAX {
-                        after.len()
-                    } else if *before_line == 0 {
-                        0
-                    } else {
-                        line_byte_range(&text, *before_line, *before_line)
-                            .0
-                            .min(after.len())
-                    };
-                    let replacement = render_body(body, &text);
-                    replacements.push((offset, offset, replacement));
-                }
-                Locator::Whole => {
-                    let replacement = render_body(body, &text);
-                    replacements.push((0, after.len(), replacement));
-                }
-                Locator::Text {
-                    old,
-                    line_hint,
-                    all,
-                    ..
-                } => {
-                    let view = String::from_utf8_lossy(&text.view).into_owned();
-                    let matches = find_text_matches(&view, old);
-                    if matches.is_empty() {
-                        return Err(EngineError::new(
-                            ErrorClass::Resolve,
-                            format!(
-                                "patch: changes[{index}]: old is not in {}. Copy it again from the lines below, or read {}.",
-                                display.display(),
-                                display.display()
-                            ),
-                        ));
-                    }
-                    if *all {
-                        // Replace-all requires whole-tag or Seen coverage of every line.
-                        if matches!(guard, Guard::Seen) {
-                            let count = super::super::resolve::line_count(&text);
-                            let digest = *blake3::hash(&before).as_bytes();
-                            let path_str = display.to_string_lossy().replace('\\', "/");
-                            if !session.seen.covers(
-                                session.session,
-                                &path_str,
-                                digest,
-                                1,
-                                count as u64,
-                            ) {
-                                return Err(EngineError::new(
-                                    ErrorClass::Proof,
-                                    format!(
-                                        "patch: changes[{index}]: all needs tag. Read the whole file with read and copy the tag from its last line."
-                                    ),
-                                ));
-                            }
-                        }
-                        for (start, end) in matches.iter().rev() {
-                            let map = |offset: usize| {
-                                let removed = text
-                                    .removed_cr_offsets
-                                    .iter()
-                                    .filter(|pos| **pos < offset)
-                                    .count();
-                                offset + removed + if text.bom { 3 } else { 0 }
-                            };
-                            let replacement = render_body(body, &text);
-                            replacements.push((map(*start), map(*end), replacement));
-                        }
-                    } else if let Some(hint) = line_hint {
-                        let selected = matches
-                            .iter()
-                            .find(|(start, _)| view[..*start].matches('\n').count() + 1 == *hint);
-                        match selected {
-                            Some((start, end)) => {
-                                let replacement = render_body(body, &text);
-                                replacements.push((*start, *end, replacement));
-                            }
-                            None => {
-                                return Err(EngineError::new(
-                                    ErrorClass::Resolve,
-                                    format!(
-                                        "patch: changes[{index}]: old occurs {} times in {}, but none starts at line {hint}.",
-                                        matches.len(),
-                                        display.display()
-                                    ),
-                                ));
-                            }
-                        }
-                    } else if matches.len() > 1 {
-                        return Err(EngineError::new(
-                            ErrorClass::Resolve,
-                            format!(
-                                "patch: changes[{index}]: old occurs {} times in {}. Resend with line set to one of these start lines.",
-                                matches.len(),
-                                display.display()
-                            ),
-                        ));
-                    } else {
-                        let (start, end) = matches[0];
-                        // Map view offsets to raw offsets for splicing.
-                        let map = |offset: usize| {
-                            let removed = text
-                                .removed_cr_offsets
-                                .iter()
-                                .filter(|pos| **pos < offset)
-                                .count();
-                            offset + removed + if text.bom { 3 } else { 0 }
-                        };
-                        let replacement = render_body(body, &text);
-                        replacements.push((map(start), map(end), replacement));
-                    }
-                }
-                Locator::Span {
-                    first,
-                    last,
-                    quoted,
-                } => {
-                    let count = super::super::resolve::line_count(&text);
-                    if *first == 0 || *last == 0 || *first > *last || *last > count {
-                        return Err(EngineError::new(
-                            ErrorClass::Resolve,
-                            format!("patch: line {last} does not exist (file has {count} lines)"),
-                        ));
-                    }
-                    // Span replacement requires Seen coverage of its entire range.
-                    {
-                        let digest = *blake3::hash(&before).as_bytes();
-                        let path_str = display.to_string_lossy().replace('\\', "/");
-                        if !session.seen.covers(
-                            session.session,
-                            &path_str,
-                            digest,
-                            *first as u64,
-                            *last as u64,
-                        ) {
-                            return Err(EngineError::new(
-                                ErrorClass::Proof,
-                                format!(
-                                    "patch: changes[{index}]: lines {first}-{last} of {} were not displayed in this session.",
-                                    display.display()
-                                ),
-                            ));
-                        }
-                    }
-                    let _ = quoted;
-                    let (start, end) = line_byte_range(&text, *first, *last);
-                    let replacement = render_body(body, &text);
-                    match action {
-                        Action::Replace => replacements.push((start, end, replacement)),
-                        Action::InsertBefore => replacements.push((start, start, replacement)),
-                        Action::InsertAfter => replacements.push((end, end, replacement)),
-                    }
-                }
-                Locator::Node { first_line } => {
-                    #[cfg(feature = "symbols")]
-                    {
-                        let (byte_start, byte_end, node_first, node_last) =
-                            super::super::ast::node_span(
-                                canonical,
-                                &before,
-                                u32::try_from(*first_line).unwrap_or(u32::MAX),
-                            )
-                            .await?;
-                        // Map the entire source node footprint; Enhanced requires
-                        // coverage of the full effective span (C09).
-                        let _ = (byte_start, byte_end);
-                        let (start, end) =
-                            line_byte_range(&text, node_first as usize, node_last as usize);
-                        let replacement = render_body(body, &text);
-                        match action {
-                            Action::Replace => replacements.push((start, end, replacement)),
-                            Action::InsertBefore => {
-                                replacements.push((start, start, replacement));
-                            }
-                            Action::InsertAfter => replacements.push((end, end, replacement)),
-                        }
-                        // Record footprint for Enhanced coverage below via guard check.
-                        // Fall through to coverage verification using mapped span.
-                        {
-                            // Enhanced Reference guards prove coverage against
-                            // the bound snapshot ledger with the frozen cutoff.
-                            // Light is observation-optional (OBS-01): reference
-                            // identity + digest continuity only, no cutoff.
-                            // Legacy Node guards stay Seen-backed.
-                            let enhanced_reference =
-                                if style == super::super::ir::DialectId::HashlineEnhanced {
-                                    match guard {
-                                        Guard::Reference(token) => Some(token),
-                                        _ => None,
-                                    }
-                                } else {
-                                    None
-                                };
-                            if let Some(token) = enhanced_reference {
-                                let Some(reference) = super::super::snapshot::ReadRef::parse(token)
-                                else {
-                                    return Err(EngineError::new(
-                                        ErrorClass::Proof,
-                                        format!(
-                                            "patch: unknown reference {token} for {}. Read again.",
-                                            display.display()
-                                        ),
-                                    ));
-                                };
-                                let Some(cutoff) = session.cutoff else {
-                                    return Err(EngineError::new(
-                                        ErrorClass::Blocked,
-                                        "patch: observation_unavailable: Enhanced needs a reliable delivery boundary.".to_owned(),
-                                    ));
-                                };
-                                if !session.snapshots.covers(
-                                    session.session,
-                                    session.consumer,
-                                    reference,
-                                    u64::from(node_first),
-                                    u64::from(node_last),
-                                    cutoff,
-                                ) {
-                                    return Err(EngineError::new(
-                                        ErrorClass::Proof,
-                                        format!(
-                                            "patch: changes[{index}]: lines {node_first}-{node_last} of {} need prior observation. Read them, then resend.",
-                                            display.display()
-                                        ),
-                                    ));
-                                }
-                            }
-                            let digest = *blake3::hash(&before).as_bytes();
-                            let path_str = display.to_string_lossy().replace('\\', "/");
-                            if matches!(guard, Guard::Version(_) | Guard::Seen)
-                                && !session.seen.covers(
-                                    session.session,
-                                    &path_str,
-                                    digest,
-                                    u64::from(node_first),
-                                    u64::from(node_last),
-                                )
-                            {
-                                return Err(EngineError::new(
-                                    ErrorClass::Proof,
-                                    format!(
-                                        "patch: changes[{index}]: lines {node_first}-{node_last} of {} were not displayed in this session.",
-                                        display.display()
-                                    ),
-                                ));
-                            }
-                        }
-                    }
-                    #[cfg(not(feature = "symbols"))]
-                    {
-                        let _ = first_line;
-                        return Err(EngineError::new(
-                            ErrorClass::Resolve,
-                            format!(
-                                "patch: changes[{index}]: symbol support is not enabled for this file."
-                            ),
-                        ));
-                    }
-                }
-                Locator::Symbol { name, ordinal, old } => {
-                    #[cfg(feature = "symbols")]
-                    {
-                        if !session.symbols {
-                            return Err(EngineError::new(
-                                ErrorClass::Resolve,
-                                format!(
-                                    "patch: changes[{index}]: symbol support is not enabled for this file."
-                                ),
-                            ));
-                        }
-                        let (def_start, def_end, _) =
-                            super::super::ast::symbol_span(canonical, &before, name, *ordinal)
-                                .await?;
-                        let def_end = def_end.min(before.len());
-                        let replacement = render_body(body, &text);
-                        match action {
-                            Action::Replace => {
-                                if let Some(old) = old {
-                                    let span = &before[def_start..def_end];
-                                    let needle = old.as_bytes();
-                                    let mut positions = Vec::new();
-                                    let mut cursor = 0;
-                                    while cursor + needle.len() <= span.len() {
-                                        match span[cursor..]
-                                            .windows(needle.len())
-                                            .position(|window| window == needle)
-                                        {
-                                            Some(offset) => {
-                                                positions.push(cursor + offset);
-                                                cursor += offset + needle.len().max(1);
-                                            }
-                                            None => break,
-                                        }
-                                    }
-                                    if positions.is_empty() {
-                                        return Err(EngineError::new(
-                                            ErrorClass::Resolve,
-                                            format!(
-                                                "patch: changes[{index}]: old is not in {name} in {}. Copy it again from the lines below, or read {}.",
-                                                display.display(),
-                                                display.display()
-                                            ),
-                                        ));
-                                    }
-                                    if positions.len() > 1 {
-                                        return Err(EngineError::new(
-                                            ErrorClass::Resolve,
-                                            format!(
-                                                "patch: changes[{index}]: old occurs {} times in {name} in {}. Resend with a longer unique fragment.",
-                                                positions.len(),
-                                                display.display()
-                                            ),
-                                        ));
-                                    }
-                                    let at = def_start + positions[0];
-                                    replacements.push((at, at + needle.len(), replacement));
-                                } else {
-                                    replacements.push((def_start, def_end, replacement));
-                                }
-                            }
-                            Action::InsertBefore => {
-                                replacements.push((def_start, def_start, replacement));
-                            }
-                            Action::InsertAfter => {
-                                replacements.push((def_end, def_end, replacement));
-                            }
-                        }
-                    }
-                    #[cfg(not(feature = "symbols"))]
-                    {
-                        let _ = (name, ordinal, old);
-                        return Err(EngineError::new(
-                            ErrorClass::Resolve,
-                            format!(
-                                "patch: changes[{index}]: symbol support is not enabled for this file."
-                            ),
-                        ));
-                    }
-                }
-            }
+        } => text_replacements(cx, old, *line_hint, *all, guard, index, body),
+        Locator::Span {
+            first,
+            last,
+            quoted: _,
+        } => span_replacements(cx, *first, *last, action, index, body),
+        Locator::Node { first_line } => {
+            node_replacements(cx, *first_line, action, guard, index, body).await
+        }
+        Locator::Symbol { name, ordinal, old } => {
+            symbol_replacements(cx, name, ordinal, old, action, index, body).await
         }
     }
-    replacements.sort_by_key(|replacement| std::cmp::Reverse(replacement.0));
-    for (start, end, replacement) in replacements {
-        after.splice(start..end, replacement);
+}
+
+/// `Locator::Lines`: a line range must exist inside the file and becomes
+/// one replacement, insertion, or append span.
+fn lines_replacement(
+    cx: &ChangeCx<'_>,
+    first: usize,
+    last: usize,
+    action: &Action,
+    index: usize,
+    body: &str,
+) -> Result<Vec<(usize, usize, Vec<u8>)>, EngineError> {
+    if first == 0 || last == 0 || first > last {
+        return Err(resolve_error(cx.style, cx.display, index, "invalid range"));
     }
-    let op = if rename_to.is_some() {
-        Operation::Rename
+    let count = line_count(cx.text);
+    if last > count {
+        return Err(EngineError::new(
+            ErrorClass::Resolve,
+            format!("patch: line {last} does not exist (file has {count} lines)"),
+        ));
+    }
+    let (start, end) = line_byte_range(cx.text, first, last);
+    let replacement = render_body(body, cx.text);
+    Ok(vec![match action {
+        Action::Replace => (start, end, replacement),
+        Action::InsertBefore => (start, start, replacement),
+        Action::InsertAfter => (end, end, replacement),
+    }])
+}
+
+/// `Locator::Gap`: a position boundary becomes a zero-width insertion.
+fn gap_replacement(
+    cx: &ChangeCx<'_>,
+    before_line: usize,
+    _index: usize,
+    body: &str,
+) -> Result<Vec<(usize, usize, Vec<u8>)>, EngineError> {
+    let count = line_count(cx.text);
+    if before_line != usize::MAX && before_line > count.saturating_add(1) {
+        return Err(EngineError::new(
+            ErrorClass::Resolve,
+            format!("patch: line {before_line} does not exist (file has {count} lines)"),
+        ));
+    }
+    let offset = if before_line == usize::MAX {
+        cx.before.len()
+    } else if before_line == 0 {
+        0
     } else {
-        Operation::Update
+        line_byte_range(cx.text, before_line, before_line)
+            .0
+            .min(cx.before.len())
     };
-    let hunks = if style == super::super::ir::DialectId::Replace {
-        diff_hunks(&before, &after)
+    Ok(vec![(offset, offset, render_body(body, cx.text))])
+}
+
+/// Maps a view offset back to raw bytes: removed CR columns and the BOM.
+fn raw_offset(text: &super::super::resolve::Text, offset: usize) -> usize {
+    let removed = text
+        .removed_cr_offsets
+        .iter()
+        .filter(|pos| **pos < offset)
+        .count();
+    offset + removed + if text.bom { 3 } else { 0 }
+}
+
+/// `Locator::Text`: match `old` against the view; unique, hinted by
+/// `line_hint`, or every match under `all` with Seen coverage.
+fn text_replacements(
+    cx: &ChangeCx<'_>,
+    old: &str,
+    line_hint: Option<usize>,
+    all: bool,
+    guard: &Guard,
+    index: usize,
+    body: &str,
+) -> Result<Vec<(usize, usize, Vec<u8>)>, EngineError> {
+    let view = String::from_utf8_lossy(&cx.text.view).into_owned();
+    let matches = find_text_matches(&view, old);
+    if matches.is_empty() {
+        return Err(EngineError::new(
+            ErrorClass::Resolve,
+            format!(
+                "patch: changes[{index}]: old is not in {}. Copy it again from the lines below, or read {}.",
+                cx.display.display(),
+                cx.display.display()
+            ),
+        ));
+    }
+    let replacement = render_body(body, cx.text);
+    if all {
+        // Replace-all requires whole-tag or Seen coverage of every line.
+        if matches!(guard, Guard::Seen) {
+            let count = super::super::resolve::line_count(cx.text);
+            let digest = *blake3::hash(cx.before).as_bytes();
+            let path_str = cx.display.to_string_lossy().replace('\\', "/");
+            if !cx
+                .session
+                .seen
+                .covers(cx.session.session, &path_str, digest, 1, count as u64)
+            {
+                return Err(EngineError::new(
+                    ErrorClass::Proof,
+                    format!(
+                        "patch: changes[{index}]: all needs tag. Read the whole file with read and copy the tag from its last line."
+                    ),
+                ));
+            }
+        }
+        return Ok(matches
+            .iter()
+            .rev()
+            .map(|(start, end)| {
+                (
+                    raw_offset(cx.text, *start),
+                    raw_offset(cx.text, *end),
+                    replacement.clone(),
+                )
+            })
+            .collect());
+    }
+    if let Some(hint) = line_hint {
+        let selected = matches
+            .iter()
+            .find(|(start, _)| view[..*start].matches('\n').count() + 1 == hint);
+        return match selected {
+            Some((start, end)) => Ok(vec![(*start, *end, replacement)]),
+            None => Err(EngineError::new(
+                ErrorClass::Resolve,
+                format!(
+                    "patch: changes[{index}]: old occurs {} times in {}, but none starts at line {hint}.",
+                    matches.len(),
+                    cx.display.display()
+                ),
+            )),
+        };
+    }
+    if matches.len() > 1 {
+        return Err(EngineError::new(
+            ErrorClass::Resolve,
+            format!(
+                "patch: changes[{index}]: old occurs {} times in {}. Resend with line set to one of these start lines.",
+                matches.len(),
+                cx.display.display()
+            ),
+        ));
+    }
+    let (start, end) = matches[0];
+    Ok(vec![(
+        raw_offset(cx.text, start),
+        raw_offset(cx.text, end),
+        replacement,
+    )])
+}
+
+/// `Locator::Span`: an explicit line range needs Seen coverage of its
+/// whole span before it becomes one replacement span.
+fn span_replacements(
+    cx: &ChangeCx<'_>,
+    first: usize,
+    last: usize,
+    action: &Action,
+    index: usize,
+    body: &str,
+) -> Result<Vec<(usize, usize, Vec<u8>)>, EngineError> {
+    let count = super::super::resolve::line_count(cx.text);
+    if first == 0 || last == 0 || first > last || last > count {
+        return Err(EngineError::new(
+            ErrorClass::Resolve,
+            format!("patch: line {last} does not exist (file has {count} lines)"),
+        ));
+    }
+    let digest = *blake3::hash(cx.before).as_bytes();
+    let path_str = cx.display.to_string_lossy().replace('\\', "/");
+    if !cx.session.seen.covers(
+        cx.session.session,
+        &path_str,
+        digest,
+        first as u64,
+        last as u64,
+    ) {
+        return Err(EngineError::new(
+            ErrorClass::Proof,
+            format!(
+                "patch: changes[{index}]: lines {first}-{last} of {} were not displayed in this session.",
+                cx.display.display()
+            ),
+        ));
+    }
+    let (start, end) = line_byte_range(cx.text, first, last);
+    let replacement = render_body(body, cx.text);
+    Ok(vec![match action {
+        Action::Replace => (start, end, replacement),
+        Action::InsertBefore => (start, start, replacement),
+        Action::InsertAfter => (end, end, replacement),
+    }])
+}
+
+#[cfg(not(feature = "symbols"))]
+fn symbols_disabled(display: &Path, index: usize) -> EngineError {
+    let _ = display;
+    EngineError::new(
+        ErrorClass::Resolve,
+        format!("patch: changes[{index}]: symbol support is not enabled for this file."),
+    )
+}
+
+/// `Locator::Node`: the AST node footprint maps to one replacement span,
+/// proven by Enhanced snapshot coverage or the Seen ledger.
+#[cfg(feature = "symbols")]
+async fn node_replacements(
+    cx: &ChangeCx<'_>,
+    first_line: usize,
+    action: &Action,
+    guard: &Guard,
+    index: usize,
+    body: &str,
+) -> Result<Vec<(usize, usize, Vec<u8>)>, EngineError> {
+    let (_byte_start, _byte_end, node_first, node_last) = super::super::ast::node_span(
+        cx.canonical,
+        cx.before,
+        u32::try_from(first_line).unwrap_or(u32::MAX),
+    )
+    .await?;
+    let (start, end) = line_byte_range(cx.text, node_first as usize, node_last as usize);
+    let replacement = render_body(body, cx.text);
+    node_coverage(cx, guard, index, node_first, node_last)?;
+    Ok(vec![match action {
+        Action::Replace => (start, end, replacement),
+        Action::InsertBefore => (start, start, replacement),
+        Action::InsertAfter => (end, end, replacement),
+    }])
+}
+
+#[cfg(not(feature = "symbols"))]
+async fn node_replacements(
+    cx: &ChangeCx<'_>,
+    _first_line: usize,
+    _action: &Action,
+    _guard: &Guard,
+    index: usize,
+    _body: &str,
+) -> Result<Vec<(usize, usize, Vec<u8>)>, EngineError> {
+    Err(symbols_disabled(cx.display, index))
+}
+
+/// The Node arm's coverage proof: Enhanced Reference guards prove against
+/// the bound snapshot ledger with the frozen cutoff; Light is
+/// observation-optional (reference identity + digest continuity, no
+/// cutoff); legacy Node guards stay Seen-backed.
+#[cfg(feature = "symbols")]
+fn node_coverage(
+    cx: &ChangeCx<'_>,
+    guard: &Guard,
+    index: usize,
+    node_first: u32,
+    node_last: u32,
+) -> Result<(), EngineError> {
+    let enhanced_reference = if cx.style == super::super::ir::DialectId::HashlineEnhanced {
+        match guard {
+            Guard::Reference(token) => Some(token),
+            _ => None,
+        }
     } else {
-        Vec::new()
+        None
     };
-    Ok(StagedFileOwned {
-        path: display.to_path_buf(),
-        absolute_path: canonical.to_path_buf(),
-        before: Some(before.into_boxed_slice()),
-        after: Some(after.into_boxed_slice()),
-        op,
-        renamed_to: rename_to,
-        hunks,
-    })
+    if let Some(token) = enhanced_reference {
+        let Some(reference) = super::super::snapshot::ReadRef::parse(token) else {
+            return Err(EngineError::new(
+                ErrorClass::Proof,
+                format!(
+                    "patch: unknown reference {token} for {}. Read again.",
+                    cx.display.display()
+                ),
+            ));
+        };
+        let Some(cutoff) = cx.session.cutoff else {
+            return Err(EngineError::new(
+                ErrorClass::Blocked,
+                "patch: observation_unavailable: Enhanced needs a reliable delivery boundary."
+                    .to_owned(),
+            ));
+        };
+        if !cx.session.snapshots.covers(
+            cx.session.session,
+            cx.session.consumer,
+            reference,
+            u64::from(node_first),
+            u64::from(node_last),
+            cutoff,
+        ) {
+            return Err(EngineError::new(
+                ErrorClass::Proof,
+                format!(
+                    "patch: changes[{index}]: lines {node_first}-{node_last} of {} need prior observation. Read them, then resend.",
+                    cx.display.display()
+                ),
+            ));
+        }
+    }
+    let digest = *blake3::hash(cx.before).as_bytes();
+    let path_str = cx.display.to_string_lossy().replace('\\', "/");
+    if matches!(guard, Guard::Version(_) | Guard::Seen)
+        && !cx.session.seen.covers(
+            cx.session.session,
+            &path_str,
+            digest,
+            u64::from(node_first),
+            u64::from(node_last),
+        )
+    {
+        return Err(EngineError::new(
+            ErrorClass::Proof,
+            format!(
+                "patch: changes[{index}]: lines {node_first}-{node_last} of {} were not displayed in this session.",
+                cx.display.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// `Locator::Symbol`: the named definition maps to one replacement span;
+/// `old` inside it narrows to a unique byte match.
+#[cfg(feature = "symbols")]
+async fn symbol_replacements(
+    cx: &ChangeCx<'_>,
+    name: &str,
+    ordinal: &Option<usize>,
+    old: &Option<String>,
+    action: &Action,
+    index: usize,
+    body: &str,
+) -> Result<Vec<(usize, usize, Vec<u8>)>, EngineError> {
+    if !cx.session.symbols {
+        return Err(EngineError::new(
+            ErrorClass::Resolve,
+            format!("patch: changes[{index}]: symbol support is not enabled for this file."),
+        ));
+    }
+    let (def_start, def_end, _) =
+        super::super::ast::symbol_span(cx.canonical, cx.before, name, *ordinal).await?;
+    let def_end = def_end.min(cx.before.len());
+    let replacement = render_body(body, cx.text);
+    Ok(vec![match action {
+        Action::Replace => {
+            if let Some(old) = old {
+                let span = &cx.before[def_start..def_end];
+                let positions = needle_positions(span, old.as_bytes());
+                if positions.is_empty() {
+                    return Err(EngineError::new(
+                        ErrorClass::Resolve,
+                        format!(
+                            "patch: changes[{index}]: old is not in {name} in {}. Copy it again from the lines below, or read {}.",
+                            cx.display.display(),
+                            cx.display.display()
+                        ),
+                    ));
+                }
+                if positions.len() > 1 {
+                    return Err(EngineError::new(
+                        ErrorClass::Resolve,
+                        format!(
+                            "patch: changes[{index}]: old occurs {} times in {name} in {}. Resend with a longer unique fragment.",
+                            positions.len(),
+                            cx.display.display()
+                        ),
+                    ));
+                }
+                let at = def_start + positions[0];
+                (at, at + old.len(), replacement)
+            } else {
+                (def_start, def_end, replacement)
+            }
+        }
+        Action::InsertBefore => (def_start, def_start, replacement),
+        Action::InsertAfter => (def_end, def_end, replacement),
+    }])
+}
+
+#[cfg(not(feature = "symbols"))]
+async fn symbol_replacements(
+    cx: &ChangeCx<'_>,
+    _name: &str,
+    _ordinal: &Option<usize>,
+    _old: &Option<String>,
+    _action: &Action,
+    index: usize,
+    _body: &str,
+) -> Result<Vec<(usize, usize, Vec<u8>)>, EngineError> {
+    Err(symbols_disabled(cx.display, index))
+}
+
+/// All non-overlapping positions of `needle` inside `span`.
+#[cfg(feature = "symbols")]
+fn needle_positions(span: &[u8], needle: &[u8]) -> Vec<usize> {
+    let mut positions = Vec::new();
+    let mut cursor = 0;
+    while cursor + needle.len() <= span.len() {
+        match span[cursor..]
+            .windows(needle.len())
+            .position(|window| window == needle)
+        {
+            Some(offset) => {
+                positions.push(cursor + offset);
+                cursor += offset + needle.len().max(1);
+            }
+            None => break,
+        }
+    }
+    positions
 }
 
 fn diff_hunks(before: &[u8], after: &[u8]) -> Vec<DiffHunk> {
