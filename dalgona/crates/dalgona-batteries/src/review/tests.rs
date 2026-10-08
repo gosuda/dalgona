@@ -13,14 +13,15 @@ use super::reply::{
     review_content, settle_reply,
 };
 use super::rounds::{
-    ReviewRecord, ReviewRound, StoredFinding, identity, new_count, next_round, prior_findings,
-    stored_findings,
+    ReviewRecord, ReviewRound, RoundRequest, StoredFinding, identity, new_count, next_round,
+    prior_findings, stored_findings,
 };
 use super::{
     DIFF_TRUNCATION_MARKER, FOCUS_TRUNCATION_MARKER, GIT_STDOUT_PREFIX_LIMIT, MAX_DIFF_BYTES,
     MAX_ERROR_BYTES, MAX_FINDINGS, MAX_STORED_DETAIL_BYTES, REVIEW_REPLY_FORMAT, ReviewError,
     utf8_prefix,
 };
+const COMMAND_PROMPT_BASE: &str = "Review the current changes with the review tool. Set its `restart` argument to true: you were asked to review, so a capped session starts a new one.";
 const ONE_FINDING: &str = r#"{"verdict":"findings","findings":[{"path":"src/lib.rs","line":null,"severity":"major","title":"  Broken   behavior ","detail":"A failure."}],"summary":"reviewed"}"#;
 #[test]
 fn overlapping_reviews_keep_status_until_the_last_call_finishes()
@@ -265,19 +266,32 @@ fn review_rounds_resume_only_nonterminal_sessions() {
         findings: Vec::new(),
     };
     let pending = [record(1, Verdict::Findings, 1)];
-    assert!(matches!(
-        next_round(&pending, 3),
-        Ok(ReviewRound { session: current, round: 2 }) if current == session
-    ));
+    for request in [RoundRequest::Continue, RoundRequest::Restart] {
+        assert!(
+            matches!(
+                next_round(&pending, 3, request),
+                Ok(ReviewRound { session: current, round: 2 }) if current == session
+            ),
+            "a restart request must not discard in-progress rounds: {request:?}"
+        );
+    }
     let converged = [record(1, Verdict::Findings, 0)];
     assert!(matches!(
-        next_round(&converged, 3),
+        next_round(&converged, 3, RoundRequest::Continue),
         Ok(ReviewRound { session: current, round: 1 }) if current != session
     ));
     let capped = [record(2, Verdict::Findings, 1)];
     assert!(matches!(
-        next_round(&capped, 2),
+        next_round(&capped, 2, RoundRequest::Continue),
+        Err(ReviewError::CapReached { rounds: 2, .. })
+    ));
+    assert!(matches!(
+        next_round(&capped, 2, RoundRequest::Restart),
         Ok(ReviewRound { session: current, round: 1 }) if current != session
+    ));
+    assert!(matches!(
+        next_round(&[], 2, RoundRequest::Restart),
+        Ok(ReviewRound { round: 1, .. })
     ));
 }
 #[test]
@@ -314,11 +328,19 @@ fn diff_and_focus_caps_preserve_utf8_boundaries() {
     assert_eq!(
         command_prompt(&format!("{}b", "é".repeat(251))),
         format!(
-            "Review the current changes with the review tool.\nFocus: {}{}",
+            "{COMMAND_PROMPT_BASE}\nFocus: {}{}",
             "é".repeat(250),
             FOCUS_TRUNCATION_MARKER
         )
     );
+}
+#[test]
+fn the_review_command_prompt_tells_the_model_to_restart_a_capped_session() {
+    let empty = command_prompt("");
+    assert_eq!(empty, COMMAND_PROMPT_BASE);
+    assert!(empty.contains("`restart`"), "{empty}");
+    assert!(empty.contains("true"), "{empty}");
+    assert!(command_prompt("auth").starts_with(COMMAND_PROMPT_BASE));
 }
 #[test]
 fn status_capture_rejects_overflow_instead_of_truncating() {
@@ -406,15 +428,22 @@ fn review_convergence_counts_repeats_as_zero_new() -> Result<(), Box<dyn std::er
 }
 
 #[test]
-fn review_cap_reached_closes_and_restarts() -> Result<(), Box<dyn std::error::Error>> {
+fn review_cap_reached_stops_and_reports_outstanding_findings()
+-> Result<(), Box<dyn std::error::Error>> {
     let reply = parse_reply(ONE_FINDING, 2)?;
     let earlier = BTreeSet::new();
     let fresh = new_count(&reply, &earlier)?;
     assert_eq!(fresh, 1);
-    assert!(matches!(
-        settle_reply(2, 2, &reply, &earlier, fresh, false),
-        Err(ReviewError::CapReached { rounds: 2 })
-    ));
+    let settled = settle_reply(2, 2, &reply, &earlier, fresh, false);
+    let Err(ReviewError::CapReached {
+        rounds: 2,
+        outstanding,
+    }) = settled
+    else {
+        return Err("the capped round did not stop with CapReached".into());
+    };
+    assert!(outstanding.contains("src/lib.rs"), "{outstanding}");
+    assert!(outstanding.contains("Broken   behavior"), "{outstanding}");
     let session = SessionId::new_v7();
     let capped = [ReviewRecord {
         session,
@@ -423,10 +452,14 @@ fn review_cap_reached_closes_and_restarts() -> Result<(), Box<dyn std::error::Er
         new_count: fresh,
         findings: stored_findings(&reply),
     }];
-    assert!(matches!(
-        next_round(&capped, 2),
-        Ok(ReviewRound { session: current, round: 1 }) if current != session
-    ));
+    let Err(ReviewError::CapReached {
+        rounds: 2,
+        outstanding: repeated,
+    }) = next_round(&capped, 2, RoundRequest::Continue)
+    else {
+        return Err("a call after the cap did not stop".into());
+    };
+    assert_eq!(repeated, outstanding);
     Ok(())
 }
 
@@ -443,7 +476,7 @@ fn cancel_mid_round_appends_no_record_and_resumes() -> Result<(), Box<dyn std::e
         findings: stored_findings(&first),
     }];
     let count_before = records.len();
-    let resumed = next_round(&records, 3)?;
+    let resumed = next_round(&records, 3, RoundRequest::Continue)?;
     assert_eq!(resumed.session, session);
     assert_eq!(resumed.round, 2);
     assert_eq!(records.len(), count_before);
