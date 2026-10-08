@@ -29,8 +29,10 @@ use super::status::{STATUS_POLL, sweep};
 use super::{ActorRequest, COMMAND_CHANNEL, SessionHandle};
 use crate::broker::{AnswerWait, Broker, Resolved, default_timeout};
 use crate::error::{ActualTurn, AgentError, ServiceError, TurnPhase, ValidationError, deny_text};
-use crate::ext::hooks::{DispatchCx, dispatch_before_turn, dispatch_input, join_before_turn};
-use crate::ext::{Caller, CallerKind, Services};
+use crate::ext::Services;
+use crate::ext::hooks::{
+    HookScope, dispatch_before_turn, dispatch_input, hook_fanout, join_before_turn,
+};
 
 /// Bound for actor-to-driver effect batches.
 const DRIVER_CHANNEL: usize = 256;
@@ -392,18 +394,6 @@ fn content_text(content: &[Part]) -> String {
         }
     }
     text
-}
-
-/// Mints the hook caller for one extension, skipping unparseable names.
-fn hook_caller(extension: &crate::ext::Extension, turn: TurnId) -> Option<Caller> {
-    let name = extension.name().parse::<Name>().ok()?;
-    Some(Caller::new(
-        name,
-        extension.origin(),
-        extension.inject(),
-        CallerKind::Hook,
-        Some(turn),
-    ))
 }
 
 impl Actor {
@@ -969,10 +959,6 @@ impl Actor {
     /// `before_turn` hooks; wake openings skip the input hooks. A cancel that
     /// lands while the hooks run wins: the fold drops a verdict whose phase
     /// moved on.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "cohesive opening-hook state machine; extraction would split one invariant"
-    )]
     async fn drive_opening(&mut self) -> Option<Vec<Effect>> {
         let (turn, content, run_input) = match self.fold.phase() {
             Phase::Opening { turn, source, .. } => (
@@ -995,23 +981,19 @@ impl Actor {
         let cancel = self.control().begin_opening(turn);
         let generation = self.host.shared.generation.borrow().clone();
         let deadline = Instant::now() + Self::OPENING_HOOK_DEADLINE;
+        let scope = HookScope {
+            services: &services,
+            session: self.session,
+            parent: self.parent,
+            process_env: Arc::clone(&self.host.shared.env),
+            cancel: &cancel,
+            turn_deadline: deadline,
+            script: self.hook_script(),
+        };
         let mut content = content;
         if run_input {
-            for (index, extension) in generation.extensions.iter().enumerate() {
-                let Some(caller) = hook_caller(extension, turn) else {
-                    continue;
-                };
-                let cx = DispatchCx {
-                    caller: &caller,
-                    services: &services,
-                    session: self.session,
-                    parent: self.parent,
-                    process_env: Arc::clone(&self.host.shared.env),
-                    turn: Some(turn),
-                    cancel: &cancel,
-                    turn_deadline: deadline,
-                    script: self.hook_script(),
-                };
+            for (index, extension, caller) in hook_fanout(&generation, Some(turn)) {
+                let cx = scope.cx(&caller, Some(turn));
                 let step = dispatch_input(
                     extension.name(),
                     &cx,
@@ -1036,21 +1018,8 @@ impl Actor {
             text: content_text(&content).into(),
         };
         let mut texts = Vec::new();
-        for (index, extension) in generation.extensions.iter().enumerate() {
-            let Some(caller) = hook_caller(extension, turn) else {
-                continue;
-            };
-            let cx = DispatchCx {
-                caller: &caller,
-                services: &services,
-                session: self.session,
-                parent: self.parent,
-                process_env: Arc::clone(&self.host.shared.env),
-                turn: Some(turn),
-                cancel: &cancel,
-                turn_deadline: deadline,
-                script: self.hook_script(),
-            };
+        for (index, extension, caller) in hook_fanout(&generation, Some(turn)) {
+            let cx = scope.cx(&caller, Some(turn));
             let step = dispatch_before_turn(
                 extension.name(),
                 &cx,

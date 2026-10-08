@@ -24,8 +24,9 @@ use tokio_util::sync::CancellationToken;
 use crate::broker::Broker;
 use crate::ext::generation::Generation;
 use crate::ext::hooks::{
-    DispatchCx, ObserverReport, StreamFire, StreamFireAction, StreamVerdict, StreamWatch, TurnInfo,
+    HookScope, ObserverReport, StreamFire, StreamFireAction, StreamVerdict, StreamWatch, TurnInfo,
     dispatch_before_request, dispatch_settled, dispatch_tool_result, dispatch_turn_end,
+    hook_fanout,
 };
 use crate::ext::overlay::{Overlay, TurnTools};
 use crate::ext::prompt::{PromptSection, SectionCx};
@@ -648,29 +649,18 @@ impl Driver {
             thinking_explicit: false,
         };
         let deadline = tokio::time::Instant::now() + TURN_DEADLINE;
+        let scope = HookScope {
+            services: &self.deps.services,
+            session: self.deps.session,
+            parent: self.deps.parent,
+            process_env: Arc::clone(&self.deps.host.shared.env),
+            cancel: &self.deps.cancel,
+            turn_deadline: deadline,
+            script: self.hook_script(),
+        };
         let mut current = event.params.clone();
-        for (index, extension) in generation.extensions.iter().enumerate() {
-            let Ok(ext) = extension.name().parse::<Name>() else {
-                continue;
-            };
-            let caller = Caller::new(
-                ext,
-                extension.origin(),
-                extension.inject(),
-                CallerKind::Hook,
-                Some(turn),
-            );
-            let dispatch = crate::ext::hooks::DispatchCx {
-                caller: &caller,
-                services: &self.deps.services,
-                session: self.deps.session,
-                parent: self.deps.parent,
-                process_env: Arc::clone(&self.deps.host.shared.env),
-                turn: Some(turn),
-                cancel: &self.deps.cancel,
-                turn_deadline: deadline,
-                script: self.hook_script(),
-            };
+        for (index, extension, caller) in hook_fanout(generation, Some(turn)) {
+            let dispatch = scope.cx(&caller, Some(turn));
             let step = dispatch_before_request(
                 extension.name(),
                 &dispatch,
@@ -1034,28 +1024,17 @@ impl Driver {
 
     async fn observe_tool_result(&self, ctx: &DispatchCtx, event: &ToolResultEvent) {
         let mut report = ObserverReport::default();
-        for (index, extension) in ctx.generation.extensions.iter().enumerate() {
-            let Ok(caller_name) = extension.name().parse::<Name>() else {
-                continue;
-            };
-            let caller = Caller::new(
-                caller_name,
-                extension.origin(),
-                extension.inject(),
-                CallerKind::Hook,
-                Some(ctx.turn),
-            );
-            let dispatch = DispatchCx {
-                caller: &caller,
-                services: &ctx.services,
-                session: ctx.session,
-                parent: ctx.parent,
-                process_env: Arc::clone(&ctx.process_env),
-                turn: Some(ctx.turn),
-                cancel: &ctx.cancel,
-                turn_deadline: ctx.turn_deadline,
-                script: ctx.script.clone(),
-            };
+        let scope = HookScope {
+            services: &ctx.services,
+            session: ctx.session,
+            parent: ctx.parent,
+            process_env: Arc::clone(&ctx.process_env),
+            cancel: &ctx.cancel,
+            turn_deadline: ctx.turn_deadline,
+            script: ctx.script.clone(),
+        };
+        for (index, extension, caller) in hook_fanout(&ctx.generation, Some(ctx.turn)) {
+            let dispatch = scope.cx(&caller, Some(ctx.turn));
             dispatch_tool_result(
                 extension.name(),
                 &dispatch,
@@ -1084,29 +1063,17 @@ impl Driver {
         let script = state.script.attach(None);
         let event = TurnEnd { turn, stop };
         let mut report = ObserverReport::default();
-        let turn_deadline = tokio::time::Instant::now() + TURN_DEADLINE;
-        for (index, extension) in generation.extensions.iter().enumerate() {
-            let Ok(caller_name) = extension.name().parse::<Name>() else {
-                continue;
-            };
-            let caller = Caller::new(
-                caller_name,
-                extension.origin(),
-                extension.inject(),
-                CallerKind::Hook,
-                Some(turn),
-            );
-            let dispatch = DispatchCx {
-                caller: &caller,
-                services: &self.deps.services,
-                session: self.deps.session,
-                parent: self.deps.parent,
-                process_env: Arc::clone(&self.deps.host.shared.env),
-                turn: Some(turn),
-                cancel: &cancel,
-                turn_deadline,
-                script: script.clone(),
-            };
+        let scope = HookScope {
+            services: &self.deps.services,
+            session: self.deps.session,
+            parent: self.deps.parent,
+            process_env: Arc::clone(&self.deps.host.shared.env),
+            cancel: &cancel,
+            turn_deadline: tokio::time::Instant::now() + TURN_DEADLINE,
+            script,
+        };
+        for (index, extension, caller) in hook_fanout(&generation, Some(turn)) {
+            let dispatch = scope.cx(&caller, Some(turn));
             dispatch_turn_end(
                 extension.name(),
                 &dispatch,
@@ -1173,29 +1140,17 @@ impl Driver {
         let reply_text = settled_reply_text(&view.entries.items);
         let event = Settled { turn, reply_text };
         let mut report = ObserverReport::default();
-        let turn_deadline = tokio::time::Instant::now() + TURN_DEADLINE;
-        for (index, extension) in generation.extensions.iter().enumerate() {
-            let Ok(caller_name) = extension.name().parse::<Name>() else {
-                continue;
-            };
-            let caller = Caller::new(
-                caller_name,
-                extension.origin(),
-                extension.inject(),
-                CallerKind::Hook,
-                Some(turn),
-            );
-            let dispatch = DispatchCx {
-                caller: &caller,
-                services: &self.deps.services,
-                session: self.deps.session,
-                parent: self.deps.parent,
-                process_env: Arc::clone(&self.deps.host.shared.env),
-                turn: Some(turn),
-                cancel: &cancel,
-                turn_deadline,
-                script: script.clone(),
-            };
+        let scope = HookScope {
+            services: &self.deps.services,
+            session: self.deps.session,
+            parent: self.deps.parent,
+            process_env: Arc::clone(&self.deps.host.shared.env),
+            cancel: &cancel,
+            turn_deadline: tokio::time::Instant::now() + TURN_DEADLINE,
+            script,
+        };
+        for (index, extension, caller) in hook_fanout(&generation, Some(turn)) {
+            let dispatch = scope.cx(&caller, Some(turn));
             dispatch_settled(
                 extension.name(),
                 &dispatch,
