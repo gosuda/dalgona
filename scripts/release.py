@@ -6,7 +6,11 @@ import re
 import shutil
 import subprocess
 import sys
-import tomllib
+
+try:
+    import tomllib
+except ModuleNotFoundError:
+    sys.exit("scripts/release.py requires Python 3.11 or newer (tomllib)")
 from dataclasses import dataclass
 from pathlib import Path
 
