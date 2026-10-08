@@ -297,7 +297,7 @@ async fn sandbox_rejects_rm_outside_allowed_roots() -> Result<(), Box<dyn Error 
     );
     #[cfg(target_os = "windows")]
     assert!(
-        tool_error.contains("sandbox = \"on\" is not supported on Windows"),
+        tool_error.contains("Access is denied") || tool_error.contains("dalgon sandbox"),
         "{tool_error}"
     );
     #[cfg(target_os = "macos")]

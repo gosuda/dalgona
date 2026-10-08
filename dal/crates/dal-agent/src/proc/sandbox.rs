@@ -314,7 +314,9 @@ fn probe_landlock_abi(helper: &Path) -> Result<u32, SandboxSetupError> {
 pub(crate) fn platform_home(vars: &BTreeMap<OsString, OsString>) -> Option<PathBuf> {
     #[cfg(windows)]
     {
-        vars.get(OsStr::new("USERPROFILE")).map(PathBuf::from)
+        vars.get(OsStr::new("USERPROFILE"))
+            .or_else(|| vars.get(OsStr::new("HOME")))
+            .map(PathBuf::from)
     }
     #[cfg(not(windows))]
     {
