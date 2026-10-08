@@ -339,9 +339,9 @@ impl SnapshotStore {
             return false;
         };
         if !entry.binds(session, from)
-            || !rows
-                .iter()
-                .all(|&(first, last)| spans(entry.shown(from), first, last))
+            || !rows.iter().all(|&(first, last)| {
+                first != 0 && first <= last && spans(entry.shown(from), first, last)
+            })
         {
             return false;
         }
@@ -766,8 +766,34 @@ mod tests {
         assert!(!store.covers(session, Consumer::Model, reference, 4, 2, 5));
         store.show(reference, Consumer::Model, 0, 2);
         store.show(reference, Consumer::Model, 3, 1);
+        // Rows a rejected `show` must never enter the shown set: they cannot
+        // be delivered or handed off.
+        store.deliver(session, Consumer::Model, reference, 0, 2, 5);
+        store.deliver(session, Consumer::Model, reference, 3, 1, 5);
+        assert!(!store.rebind(
+            session,
+            reference,
+            Consumer::Model,
+            invocation(9),
+            &[(0, 2)],
+            5
+        ));
+        assert!(!store.rebind(
+            session,
+            reference,
+            Consumer::Model,
+            invocation(9),
+            &[(3, 1)],
+            5
+        ));
         store.deliver(session, Consumer::Model, reference, 1, 3, 5);
+        assert_eq!(
+            store.delivered(session, Consumer::Model, reference),
+            vec![(1, 3)]
+        );
         assert!(!store.covers(session, Consumer::Model, reference, 4, 5, 5));
+        // Inverted ranges stay uncovered even once deliveries exist.
+        assert!(!store.covers(session, Consumer::Model, reference, 4, 2, 5));
     }
 
     /// `covers` needs the snapshot live: an expired reference never covers.
