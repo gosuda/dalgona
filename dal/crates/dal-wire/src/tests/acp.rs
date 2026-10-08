@@ -1,10 +1,20 @@
 use std::time::Duration;
 
-use dal_agent::{HostUpdate, SessionRef};
-use dal_core::ClientId;
+use std::sync::Arc;
+
+use dal_agent::ext::command::{CommandCx, CommandHandler};
+use dal_agent::ext::tool::{ArgError, RawValue, Tool, ToolCall, ToolCx, ToolOutcome};
+use dal_agent::ext::{BoxFuture, ExtensionBuilder};
+use dal_agent::{HostUpdate, ServiceError, SessionRef};
+use dal_core::{
+    ClientId, CommandName, CommandSpec, ModelInfo, Name, RawJson, Reply, ServiceSet, ToolClass,
+    ToolSpec, Visibility, Workspace,
+};
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
 
-use super::support::{Rig, Rpc, assert_error, gate_step, result, rig, text_step};
+use super::support::{
+    Rig, Rpc, assert_error, gate_step, result, rig, rig_with_extensions, text_step, tool_step,
+};
 use crate::serve_acp;
 use crate::transport::MemoryTransport;
 
@@ -309,4 +319,213 @@ async fn transport_end_cancels() {
         "turn survived transport end: {:?}",
         view.turn
     );
+}
+
+/// A slash command whose handler panics.
+struct PanicCommand;
+
+impl CommandHandler for PanicCommand {
+    fn run<'a>(
+        &'a self,
+        _args: &'a str,
+        _cx: CommandCx<'a>,
+    ) -> BoxFuture<'a, Result<Reply, ServiceError>> {
+        Box::pin(async { panic!("command handler panicked") })
+    }
+}
+
+/// A tool whose call panics.
+struct PanicTool {
+    name: Name,
+    spec: Arc<ToolSpec>,
+}
+
+impl PanicTool {
+    fn new() -> Self {
+        let name = Name::parse("explode").expect("tool name");
+        let spec = Arc::new(ToolSpec {
+            name: name.clone(),
+            description: "Panics when called.".into(),
+            parameters: RawJson::parse(r#"{"type":"object","properties":{}}"#)
+                .expect("schema json"),
+            grammar: None,
+        });
+        Self { name, spec }
+    }
+}
+
+impl Tool for PanicTool {
+    fn name(&self) -> &Name {
+        &self.name
+    }
+
+    fn spec(&self, _model: &ModelInfo) -> Arc<ToolSpec> {
+        Arc::clone(&self.spec)
+    }
+
+    fn classify(&self, _args: &RawValue, _ws: &Workspace) -> Result<ToolClass, ArgError> {
+        Ok(ToolClass::Read)
+    }
+
+    fn run<'a>(&'a self, _call: ToolCall, _cx: ToolCx<'a>) -> BoxFuture<'a, ToolOutcome> {
+        Box::pin(async { panic!("tool panicked") })
+    }
+}
+
+fn panic_extension() -> dal_agent::ext::Extension {
+    ExtensionBuilder::new("panics", "0.0.0", ServiceSet::EMPTY)
+        .expect("extension name")
+        .command(
+            CommandSpec {
+                name: CommandName::parse("boom").expect("command name"),
+                summary: "Panics when run.".into(),
+                args_hint: None,
+            },
+            Arc::new(PanicCommand),
+        )
+        .tool(Arc::new(PanicTool::new()), Visibility::Model)
+        .build()
+        .expect("panic extension builds")
+}
+
+/// Reads frames until the reply to `id`, skipping notifications.
+async fn reply_to(acp: &mut Rpc, id: i64) -> Value {
+    loop {
+        let frame = acp.next().await;
+        if frame["id"].as_i64() == Some(id) {
+            return frame;
+        }
+    }
+}
+
+/// Proves the connection still serves a fresh session and prompt.
+async fn assert_connection_serves(acp: &mut Rpc, ws: &str, session_id: i64, prompt_id: i64) {
+    let session = new_session(acp, session_id, ws).await;
+    acp.send(prompt_id, "session/prompt", prompt_params(&session, "hi"))
+        .await;
+    let reply = reply_to(acp, prompt_id).await;
+    assert_eq!(
+        result(&reply)["stopReason"].as_str(),
+        Some("end_turn"),
+        "{reply}"
+    );
+}
+
+#[tokio::test]
+async fn acp_command_panic_answers_error_and_connection_survives() {
+    let rig = rig_with_extensions(&[text_step(&["ok"], 1, 1)], "", vec![panic_extension()]).await;
+    let ws = rig.ws();
+    with_acp(&rig, async |mut acp| {
+        init(&mut acp, 1).await;
+        let session = new_session(&mut acp, 2, &ws).await;
+        acp.send(3, "session/prompt", prompt_params(&session, "/boom"))
+            .await;
+        let reply = reply_to(&mut acp, 3).await;
+        assert!(
+            reply["error"]["code"].as_i64().is_some(),
+            "a panicking command must answer an error: {reply}"
+        );
+        let text = reply["error"].to_string();
+        assert!(
+            text.contains("boom") && text.contains("crashed"),
+            "the error names the command and the crash: {text}"
+        );
+        assert_connection_serves(&mut acp, &ws, 4, 5).await;
+    })
+    .await;
+    rig.host.shutdown(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn acp_tool_panic_reaches_the_client_and_connection_survives() {
+    let rig = rig_with_extensions(
+        &[
+            tool_step("p1", "explode"),
+            text_step(&["ok"], 1, 1),
+            text_step(&["again"], 1, 1),
+        ],
+        "",
+        vec![panic_extension()],
+    )
+    .await;
+    let ws = rig.ws();
+    with_acp(&rig, async |mut acp| {
+        init(&mut acp, 1).await;
+        let session = new_session(&mut acp, 2, &ws).await;
+        acp.send(3, "session/prompt", prompt_params(&session, "go"))
+            .await;
+        let mut seen = String::new();
+        let reply = loop {
+            let frame = acp.next().await;
+            if frame["id"].as_i64() == Some(3) {
+                break frame;
+            }
+            seen.push_str(&frame.to_string());
+        };
+        assert_eq!(
+            result(&reply)["stopReason"].as_str(),
+            Some("end_turn"),
+            "{reply}"
+        );
+        assert!(
+            seen.contains("explode tool crashed") && seen.contains("tool panicked"),
+            "the client sees the crash text: {seen}"
+        );
+        assert_connection_serves(&mut acp, &ws, 4, 5).await;
+    })
+    .await;
+    rig.host.shutdown(Duration::from_secs(1)).await;
+}
+
+/// Loads `session` on a v1 connection and returns the replayed update kinds.
+async fn replayed_kinds(acp: &mut Rpc, id: i64, session: &str, cwd: &str) -> Vec<String> {
+    acp.send(
+        id,
+        "session/load",
+        sonic_rs::json!({"sessionId": session, "cwd": cwd, "mcpServers": []}),
+    )
+    .await;
+    let mut kinds = Vec::new();
+    loop {
+        let frame = acp.next().await;
+        if frame["id"].as_i64() == Some(id) {
+            result(&frame);
+            return kinds;
+        }
+        if let Some(kind) = update_kind(&frame) {
+            kinds.push(kind.to_owned());
+        }
+    }
+}
+
+#[tokio::test]
+async fn acp_new_session_never_inherits_another_threads_history() {
+    let rig = rig(&[text_step(&["first thread"], 1, 1)]).await;
+    let ws = rig.ws();
+    with_acp(&rig, async |mut acp| {
+        init(&mut acp, 1).await;
+        let first = new_session(&mut acp, 2, &ws).await;
+        acp.send(3, "session/prompt", prompt_params(&first, "remember me"))
+            .await;
+        let reply = reply_to(&mut acp, 3).await;
+        assert_eq!(
+            result(&reply)["stopReason"].as_str(),
+            Some("end_turn"),
+            "{reply}"
+        );
+        let second = new_session(&mut acp, 4, &ws).await;
+        assert_ne!(first, second, "each session/new mints its own thread");
+        let second_replay = replayed_kinds(&mut acp, 5, &second, &ws).await;
+        assert!(
+            !second_replay.iter().any(|kind| kind.contains("message")),
+            "the new thread replayed another thread's history: {second_replay:?}"
+        );
+        let first_replay = replayed_kinds(&mut acp, 6, &first, &ws).await;
+        assert!(
+            first_replay.iter().any(|kind| kind.contains("message")),
+            "the first thread keeps its own history: {first_replay:?}"
+        );
+    })
+    .await;
+    rig.host.shutdown(Duration::from_secs(1)).await;
 }

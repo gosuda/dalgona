@@ -246,10 +246,15 @@ pub(super) fn text_step(chunks: &[&str], input: u64, output: u64) -> String {
 
 /// One replay step that calls the `gate` tool and stops for tool use.
 pub(super) fn gate_step(call: &str) -> String {
+    tool_step(call, "gate")
+}
+
+/// One replay step that calls the tool `name` and stops for tool use.
+pub(super) fn tool_step(call: &str, name: &str) -> String {
     let events = sonic_rs::json!([
-        {"type": "tool_call_started", "id": call, "name": "gate"},
+        {"type": "tool_call_started", "id": call, "name": name},
         {"type": "tool_calls_done", "calls": [
-            {"id": call, "name": "gate", "args": {"kind": "parsed", "value": {}}}
+            {"id": call, "name": name, "args": {"kind": "parsed", "value": {}}}
         ]},
         usage_event(1, 1),
         {"type": "stop", "reason": "tool_use"},

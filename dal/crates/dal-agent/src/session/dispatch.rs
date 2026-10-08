@@ -27,11 +27,14 @@ use crate::broker::{Broker, Resolved, default_timeout};
 use crate::ext::generation::Generation;
 use crate::ext::hooks::{HookScope, dispatch_tool_call, hook_fanout};
 use crate::ext::overlay::TurnTools;
-use crate::ext::tool::{Approved, CallSnapshot, ToolCall, ToolCx, ToolCxRuntime, ToolOutcome};
+use crate::ext::tool::{
+    Approved, CallSnapshot, Tool, ToolCall, ToolCx, ToolCxRuntime, ToolOutcome,
+};
 use crate::ext::{BoxFuture, Caller, CallerKind, Doc, ScriptCx, Services};
 use crate::jobs::JobTable;
 use crate::proc::{Proc, SpawnOpts, spawn_process};
 use crate::session::actor::TurnWork;
+use crate::session::contain::contained;
 use crate::session::tasks::SessionTasks;
 
 /// A call ready to run with its resolved details.
@@ -335,8 +338,7 @@ async fn run_one_inner(
         None => cx,
     };
     let call = ToolCall::new(ready.call.as_str(), args);
-    let outcome = tool.run(call, cx).await;
-    map_outcome(outcome)
+    map_outcome(run_contained(&*tool, call, cx).await)
 }
 
 /// Hook outcome for one call's arguments.
@@ -414,6 +416,24 @@ fn tool_caller(ctx: &DispatchCtx, ready: &ReadyCall) -> Caller {
             )
         });
     Caller::new(ext, origin, inject, CallerKind::Tool, Some(ctx.turn))
+}
+
+/// Runs one tool call and turns a panic into a visible tool error.
+///
+/// A panic would otherwise end the session driver task and leave the turn
+/// waiting for a result that never comes. The error text names the tool and
+/// carries the panic message, so the model and the client both see it.
+async fn run_contained(tool: &dyn Tool, call: ToolCall, cx: ToolCx<'_>) -> ToolOutcome {
+    let name = tool.name().clone();
+    match contained(tool.run(call, cx)).await {
+        Ok(outcome) => outcome,
+        Err(panic) => ToolOutcome::Err(crate::error::ToolError::Message {
+            message: format!(
+                "The {name} tool crashed and did not finish: {panic}. Report this to the tool's author, or try a different approach."
+            )
+            .into(),
+        }),
+    }
 }
 
 /// Maps one terminal tool outcome to its settlement.
@@ -1239,7 +1259,7 @@ pub(crate) async fn direct_call_seeded(backend: &Backend, seed: NestedCall) -> T
         Some(script) => cx.with_script(script),
         None => cx,
     };
-    let outcome = tool.run(ToolCall::new(call.as_str(), args), cx).await;
+    let outcome = run_contained(&*tool, ToolCall::new(call.as_str(), args), cx).await;
     for report in std::mem::take(&mut *reports.lock().await) {
         let _ = backend.handle().work(report).await;
     }

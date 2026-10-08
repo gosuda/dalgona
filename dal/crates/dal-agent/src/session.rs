@@ -3,6 +3,7 @@
 pub(crate) mod actor;
 pub(crate) mod backend;
 pub(crate) mod commands;
+pub(crate) mod contain;
 pub(crate) mod context;
 pub(crate) mod control;
 pub(crate) mod dispatch;
