@@ -149,17 +149,12 @@ async fn scripted_model_forwards_through_its_invocation_context() {
     assert!(view.contains("forwarded"), "{view}");
 }
 
-/// The scripted model schedules its inner inference through a scope and
-/// settles it. IGNORED: observed against the real session host, the turn
-/// never completes (10 s timeout) on both the current-thread and
-/// multi-thread tokio flavours, while `ctx.models.forward` from the same
-/// handler completes. Cause unclassified: the host's collect path
-/// (`session/script.rs` `collect_inner`) was not read, and dal-star's
-/// `block_on(spawn(collect))` bridge is a co-suspect.
-#[ignore = "turn never completes (10 s) on the real host; cause unclassified"]
-#[tokio::test(flavor = "multi_thread")]
-async fn scripted_model_scope_settles_a_scoped_infer_forward() {
-    let run = r#"scope = ctx.scope(limit = 8, on_error = "settle")
+/// The scripted model schedules its inner inference through a USD-budgeted
+/// scope on a priced route and settles it; the scope opens a grant request
+/// that the session answers.
+#[tokio::test]
+async fn scripted_model_scope_passes_policy_and_usd_budget_to_scoped_infer() {
+    let run = r#"scope = ctx.scope(limit = 8, on_error = "settle", usd = 0.40)
 request = {
     "purpose": request.purpose,
     "model": {"kind": "api", "family": "openai_chat", "model": "gpt-6-luna"},
