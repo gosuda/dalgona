@@ -31,6 +31,9 @@ const CLOSE_REFUSED: &str = "the host refused to close the session";
 struct Script {
     lists: VecDeque<Result<Vec<AgentInfo>, &'static str>>,
     cancel_refused: HashSet<SessionId>,
+    cancel_unexpected: HashSet<SessionId>,
+    turn_idle_error: Option<&'static str>,
+    jobs_list_error: Option<&'static str>,
     started: Option<SessionId>,
     await_error: Option<&'static str>,
     report: Option<&'static str>,
@@ -123,7 +126,9 @@ impl Services for Host {
             },
             AgentsOp::Cancel { id } => {
                 script.cancels.push(id);
-                if script.cancel_refused.contains(&id) {
+                if script.cancel_unexpected.remove(&id) {
+                    Ok(AgentsReply::Pending { id })
+                } else if script.cancel_refused.contains(&id) {
                     Err(ServiceError::failed(None, CLOSE_REFUSED))
                 } else {
                     Ok(AgentsReply::Cancelled { id })
@@ -155,11 +160,17 @@ impl Services for Host {
 
     fn jobs(&self, _who: &Caller, op: JobsOp) -> ServiceFuture<'_, JobsReply> {
         match op {
-            JobsOp::List => Box::pin(async { Ok(JobsReply::Listed(Vec::new())) }),
+            JobsOp::List => {
+                let mut script = locked(&self.script);
+                let reply = match script.jobs_list_error.take() {
+                    Some(message) => Err(ServiceError::failed(None, message)),
+                    None => Ok(JobsReply::Listed(Vec::new())),
+                };
+                Box::pin(async move { reply })
+            }
             _ => unavailable(),
         }
     }
-
     fn open_asks(&self, _who: &Caller) -> ServiceFuture<'_, usize> {
         unavailable()
     }
@@ -170,11 +181,17 @@ impl Services for Host {
 
     fn turn(&self, _who: &Caller, op: TurnOp) -> ServiceFuture<'_, TurnOpReply> {
         match op {
-            TurnOp::IsIdle => Box::pin(async { Ok(TurnOpReply::Idle(true)) }),
+            TurnOp::IsIdle => {
+                let mut script = locked(&self.script);
+                let reply = match script.turn_idle_error.take() {
+                    Some(message) => Err(ServiceError::failed(None, message)),
+                    None => Ok(TurnOpReply::Idle(true)),
+                };
+                Box::pin(async move { reply })
+            }
             _ => unavailable(),
         }
     }
-
     fn sidecar(&self, _who: &Caller, _op: SidecarOp) -> ServiceFuture<'_, Option<Vec<u8>>> {
         unavailable()
     }
@@ -505,6 +522,111 @@ async fn cancel_action_continues_past_a_failing_child() -> TestResult {
             && error.contains(&refused.to_string())
             && error.contains(CLOSE_REFUSED),
         "the failure names the child and its cause: {error}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancel_action_reports_an_unexpected_reply() -> TestResult {
+    let fixture = Fixture::open().await?;
+    let child = SessionId::new_v7();
+    fixture.script().cancel_unexpected.insert(child);
+    let args = format!("{{\"action\":\"cancel\",\"ids\":[\"{child}\"]}}");
+    let error = fixture
+        .runtime
+        .tool(
+            fixture.session,
+            CallId::new("call"),
+            "agents",
+            RawJson::parse(&args)?,
+            CancellationToken::new(),
+        )
+        .await
+        .err()
+        .ok_or("an unexpected cancel reply must be reported")?
+        .to_string();
+    assert_eq!(fixture.host.cancels(), vec![child]);
+    assert!(
+        error.contains(&child.to_string())
+            && error.contains("unexpected reply to a cancel request"),
+        "the unexpected reply is named: {error}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn abort_reports_active_sessions_after_the_sweep_limit() -> TestResult {
+    let fixture = Fixture::open().await?;
+    let ids: Vec<_> = (0..=super::CANCEL_SWEEP_PASS_LIMIT)
+        .map(|_| SessionId::new_v7())
+        .collect();
+    {
+        let mut script = fixture.script();
+        for id in &ids {
+            script
+                .lists
+                .push_back(Ok(vec![agent(*id, AgentState::Running)]));
+        }
+    }
+    let reply = fixture
+        .runtime
+        .command(fixture.session, "abort", "")
+        .await?;
+    assert_eq!(fixture.host.cancels().len(), super::CANCEL_SWEEP_PASS_LIMIT);
+    assert!(
+        reply.contains("cancellation sweep reached its pass limit")
+            && reply.contains(
+                &ids.last()
+                    .expect("the sweep limit is greater than zero")
+                    .to_string()
+            ),
+        "the active child at the bound is reported: {reply}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn abort_continues_when_the_turn_idle_check_fails() -> TestResult {
+    let fixture = Fixture::open().await?;
+    let child = SessionId::new_v7();
+    {
+        let mut script = fixture.script();
+        script.turn_idle_error = Some("the turn state is unavailable");
+        script
+            .lists
+            .push_back(Ok(vec![agent(child, AgentState::Running)]));
+    }
+    let reply = fixture
+        .runtime
+        .command(fixture.session, "abort", "")
+        .await?;
+    assert_eq!(fixture.host.cancels(), vec![child]);
+    assert!(
+        reply.contains("the turn state is unavailable"),
+        "the turn failure is reported: {reply}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn abort_continues_when_the_jobs_list_fails() -> TestResult {
+    let fixture = Fixture::open().await?;
+    let child = SessionId::new_v7();
+    {
+        let mut script = fixture.script();
+        script.jobs_list_error = Some("the jobs list is unavailable");
+        script
+            .lists
+            .push_back(Ok(vec![agent(child, AgentState::Running)]));
+    }
+    let reply = fixture
+        .runtime
+        .command(fixture.session, "abort", "")
+        .await?;
+    assert_eq!(fixture.host.cancels(), vec![child]);
+    assert!(
+        reply.contains("the jobs list is unavailable"),
+        "the jobs-list failure is reported: {reply}"
     );
     Ok(())
 }

@@ -34,6 +34,8 @@ use super::stuck::{
     rewrite_exec_args,
 };
 use super::{JobsView, OrchestrationConfig, StopKind};
+/// Maximum number of list-and-cancel passes during descendant shutdown.
+pub(crate) const CANCEL_SWEEP_PASS_LIMIT: usize = 64;
 
 #[cfg(test)]
 mod tests;
@@ -628,26 +630,53 @@ impl SessionState {
     }
 
     async fn abort_command(&mut self) -> Result<String, ServiceError> {
-        let turn_was_running = match self.services.turn(&self.caller, TurnOp::IsIdle).await? {
-            dal_core::TurnOpReply::Idle(idle) => !idle,
-            _ => false,
+        let mut failures = Vec::new();
+        let turn_was_running = match self.services.turn(&self.caller, TurnOp::IsIdle).await {
+            Ok(dal_core::TurnOpReply::Idle(idle)) => !idle,
+            Ok(_) => {
+                failures.push(
+                    "the turn service returned an unexpected reply while checking whether the turn is idle"
+                        .to_owned(),
+                );
+                false
+            }
+            Err(error) => {
+                failures.push(format!("the turn state could not be checked: {error}"));
+                false
+            }
         };
         if turn_was_running {
-            let _ = self.services.turn(&self.caller, TurnOp::Cancel).await;
+            match self.services.turn(&self.caller, TurnOp::Cancel).await {
+                Ok(dal_core::TurnOpReply::Cancelled) => {}
+                Ok(_) => failures.push(
+                    "the turn service returned an unexpected reply to a cancel request".to_owned(),
+                ),
+                Err(error) => failures.push(format!("the turn could not be cancelled: {error}")),
+            }
         }
-        let jobs = self.jobs_list().await?;
+        let jobs = match self.jobs_list().await {
+            Ok(jobs) => jobs,
+            Err(error) => {
+                failures.push(format!("the jobs could not be listed: {error}"));
+                Vec::new()
+            }
+        };
         let mut jobs_cancelled = 0;
         for job in jobs
             .iter()
             .filter(|job| matches!(job.state, JobStateView::Running | JobStateView::Detached))
         {
-            if self
+            match self
                 .services
                 .jobs(&self.caller, JobsOp::Cancel { id: job.id })
                 .await
-                .is_ok()
             {
-                jobs_cancelled += 1;
+                Ok(JobsReply::Cancelled { .. }) => jobs_cancelled += 1,
+                Ok(_) => failures.push(format!(
+                    "{}: the jobs service returned an unexpected reply to a cancel request",
+                    job.id
+                )),
+                Err(error) => failures.push(format!("{}: {error}", job.id)),
             }
         }
         let monitors_stopped = super::monitor::state::stop_all(&mut self.monitors);
@@ -656,10 +685,15 @@ impl SessionState {
         self.arbiter.on_abort();
         let mut reply =
             super::monitor::status::abort_reply(turn_was_running, jobs_cancelled, monitors_stopped);
-        if let Some(failures) = sweep.failure_text() {
+        if let Some(child_failures) = sweep.failure_text() {
             reply.push_str(" Some child sessions were not cancelled: ");
-            reply.push_str(&failures);
+            reply.push_str(&child_failures);
             reply.push_str(". Run /abort again to retry.");
+        }
+        if !failures.is_empty() {
+            reply.push_str(" Some abort operations failed: ");
+            reply.push_str(&failures.join("; "));
+            reply.push('.');
         }
         self.persist_controller(&reply).await
     }
@@ -1316,13 +1350,13 @@ impl Sweep {
 
 /// Cancels every queued or running session the host lists for `caller`.
 /// The host may reveal deeper descendants while the first ones close, so
-/// the list is read again until no unvisited session is left. A visited set
-/// keeps each session to one cancel, and a failure never stops the walk:
-/// it is recorded next to the session it belongs to.
+/// the list is read again until no unvisited session is left or the fixed
+/// pass limit is reached. A visited set keeps each session to one cancel,
+/// and a failure never stops the walk: it is recorded next to its session.
 async fn cancel_descendants(services: &dyn Services, caller: &Caller) -> Sweep {
     let mut sweep = Sweep::default();
     let mut visited = HashSet::new();
-    loop {
+    for pass in 0..CANCEL_SWEEP_PASS_LIMIT {
         let listed = match services.agents(caller, AgentsOp::List).await {
             Ok(AgentsReply::Listed(agents)) => agents,
             Ok(_) => {
@@ -1356,7 +1390,37 @@ async fn cancel_descendants(services: &dyn Services, caller: &Caller) -> Sweep {
                 Err(error) => sweep.failures.push(format!("{id}: {error}")),
             }
         }
+        if pass + 1 == CANCEL_SWEEP_PASS_LIMIT {
+            let active = match services.agents(caller, AgentsOp::List).await {
+                Ok(AgentsReply::Listed(agents)) => agents
+                    .into_iter()
+                    .filter(|agent| matches!(agent.state, AgentState::Queued | AgentState::Running))
+                    .map(|agent| agent.id.to_string())
+                    .collect::<Vec<_>>(),
+                Ok(_) => {
+                    sweep.failures.push(
+                        "the agents service returned an unexpected reply while checking the remaining active sessions"
+                            .to_owned(),
+                    );
+                    return sweep;
+                }
+                Err(error) => {
+                    sweep.failures.push(format!(
+                        "the remaining active child sessions could not be listed: {error}"
+                    ));
+                    return sweep;
+                }
+            };
+            if !active.is_empty() {
+                sweep.failures.push(format!(
+                    "the cancellation sweep reached its pass limit; active child sessions: {}",
+                    active.join(", ")
+                ));
+            }
+            return sweep;
+        }
     }
+    sweep
 }
 
 /// Cancels the sessions the model named. A session the host refuses to
@@ -1373,7 +1437,9 @@ async fn cancel_listed(
     for &id in ids.iter().filter(|id| seen.insert(**id)) {
         match services.agents(caller, AgentsOp::Cancel { id }).await {
             Ok(AgentsReply::Cancelled { .. }) => cancelled += 1,
-            Ok(_) => {}
+            Ok(_) => failures.push(format!(
+                "{id}: the agents service returned an unexpected reply to a cancel request"
+            )),
             Err(error) => failures.push(format!("{id}: {error}")),
         }
     }
