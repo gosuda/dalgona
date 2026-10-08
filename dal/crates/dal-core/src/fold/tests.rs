@@ -521,10 +521,13 @@ fn cancel_queued_rejects_an_id_that_is_not_queued() {
     let queued = queued_turn(&send(&mut session, follow_up(turn, "only")).unwrap());
     send(&mut session, cancel_queued(queued)).unwrap();
 
-    assert!(matches!(
-        send(&mut session, cancel_queued(queued)),
-        Err(Rejection::Invalid { .. })
-    ));
+    let Err(Rejection::Invalid { reason }) = send(&mut session, cancel_queued(queued)) else {
+        panic!("a consumed queue id must be rejected");
+    };
+    assert_eq!(
+        reason.as_ref(),
+        "turn 2 has no queued follow-up. If the follow-up already started, cancel its turn instead."
+    );
     assert!(matches!(
         send(&mut session, cancel_queued(id(99))),
         Err(Rejection::Invalid { .. })
@@ -535,54 +538,6 @@ fn cancel_queued_rejects_an_id_that_is_not_queued() {
             Err(Rejection::Invalid { .. })
         ),
         "the running turn is not a queued follow-up"
-    );
-}
-
-#[test]
-fn cancelled_follow_up_never_starts_and_its_late_ack_is_dropped() {
-    let mut session = session();
-    let turn = begin(&mut session);
-    let queued = queued_turn(&send(&mut session, follow_up(turn, "later")).unwrap());
-    stream_result(&mut session, turn, inference(Stop::EndTurn, &[], 10));
-    send(&mut session, Event::Boundary { turn }).unwrap();
-    assert!(
-        matches!(session.phase(), Phase::Settling { follow_up: Some((next, _)), .. } if *next == queued)
-    );
-    let entries_before = session.tree.entries.len();
-
-    let out = send(&mut session, cancel_queued(queued)).unwrap();
-    assert_eq!(notices(&out), [("discarded", "later")]);
-    assert!(matches!(session.phase(), Phase::Idle));
-
-    let late = send(&mut session, guard(queued)).unwrap();
-    assert!(
-        late.iter().all(|effect| !matches!(effect, Effect::Emit(_))),
-        "the late verdict wrote nothing: {late:?}"
-    );
-    assert!(matches!(session.phase(), Phase::Idle));
-    assert_eq!(session.tree.entries.len(), entries_before);
-}
-
-#[test]
-fn cancelling_the_settling_follow_up_promotes_the_next_queued_one() {
-    let mut session = session();
-    let turn = begin(&mut session);
-    let first = queued_turn(&send(&mut session, follow_up(turn, "first")).unwrap());
-    let second = queued_turn(&send(&mut session, follow_up(turn, "second")).unwrap());
-    stream_result(&mut session, turn, inference(Stop::EndTurn, &[], 10));
-    send(&mut session, Event::Boundary { turn }).unwrap();
-
-    send(&mut session, cancel_queued(first)).unwrap();
-
-    assert!(
-        matches!(session.phase(), Phase::Settling { follow_up: Some((next, _)), .. } if *next == second),
-        "{:?}",
-        session.phase()
-    );
-    send(&mut session, guard(first)).unwrap();
-    assert!(
-        matches!(session.phase(), Phase::Settling { follow_up: Some((next, _)), .. } if *next == second),
-        "a late verdict for the cancelled turn leaves the next one waiting"
     );
 }
 
