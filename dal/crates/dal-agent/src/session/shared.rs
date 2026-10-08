@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeSet, VecDeque};
 use std::num::NonZeroU64;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use dal_core::{
     ApprovalMode, EntryId, EntryView, Gen, Mode, Name, Seq, Session, ThinkingLevel, Update,
@@ -32,6 +32,7 @@ pub(crate) struct Shared {
     inner: Mutex<SharedInner>,
     ext: Mutex<ExtSnap>,
     promoted: Mutex<Arc<BTreeSet<Name>>>,
+    tool_allowlist: OnceLock<Arc<BTreeSet<Name>>>,
 }
 
 struct SharedInner {
@@ -80,6 +81,7 @@ impl Shared {
                 rows: Arc::from([]),
             }),
             promoted: Mutex::new(Arc::new(BTreeSet::new())),
+            tool_allowlist: OnceLock::new(),
         }
     }
 
@@ -91,6 +93,27 @@ impl Shared {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         )
+    }
+
+    /// Restricts the session to `names`; the first restriction stands and a
+    /// later call cannot widen it.
+    pub(crate) fn restrict_tools(&self, names: &[Name]) {
+        self.tool_allowlist
+            .get_or_init(|| Arc::new(names.iter().cloned().collect()));
+    }
+
+    /// The tool names the session may use; `None` means no restriction.
+    pub(crate) fn tool_allowlist(&self) -> Option<Arc<BTreeSet<Name>>> {
+        self.tool_allowlist.get().map(Arc::clone)
+    }
+
+    /// The approval mode the session runs under now.
+    pub(crate) fn approval(&self) -> ApprovalMode {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .projection
+            .approval()
     }
 
     /// Refreshes the fold-owned promotion set on every call, then republishes

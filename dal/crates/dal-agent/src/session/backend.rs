@@ -732,6 +732,28 @@ impl Backend {
             return AgentsReply::Cancelled { id: self.session };
         };
         let child_id = child.inner.session;
+        // The child is restricted before its first turn: a start that sets
+        // `tools` runs with exactly those tools, on every turn and across
+        // reloads, and an absent list leaves the child unrestricted.
+        if let Some(names) = &start.tools {
+            child.inner.shared.restrict_tools(names);
+        }
+        // The child starts under the approval mode its parent runs under now,
+        // not the configured default. When the mode cannot be set the child
+        // does not start.
+        let approval = self.shared.approval();
+        if child.inner.shared.approval() != approval
+            && child
+                .submit(dal_core::Command::SetApproval {
+                    mode: approval,
+                    save: dal_core::Save::SessionOnly,
+                })
+                .await
+                .is_err()
+        {
+            let _ = self.host().close(child_id).await;
+            return AgentsReply::Cancelled { id: self.session };
+        }
         let mut prompt = start.prompt.to_string();
         if let Some(system) = start.system.as_ref().or(start.role.as_ref()) {
             prompt = format!("System: {system}\n\n{prompt}");

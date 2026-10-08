@@ -104,6 +104,11 @@ impl Projection {
         &self.ext_statuses
     }
 
+    /// The approval mode the session runs under now.
+    pub(crate) fn approval(&self) -> ApprovalMode {
+        self.settings.approval
+    }
+
     /// Folds one published update kind into the snapshot.
     pub(crate) fn apply(&mut self, kind: &UpdateKind) {
         match kind {

@@ -149,6 +149,7 @@ impl Overlay {
             entries: entries.into(),
             promoted,
             grant_runtime: self.grant_runtime.clone(),
+            allowed: None,
         }
     }
 
@@ -365,6 +366,7 @@ pub(crate) struct TurnTools {
     entries: Arc<[Entry]>,
     promoted: Arc<BTreeSet<Name>>,
     grant_runtime: Option<GrantRuntime>,
+    allowed: Option<Arc<BTreeSet<Name>>>,
 }
 
 impl TurnTools {
@@ -374,6 +376,7 @@ impl TurnTools {
             entries: Arc::from([]),
             promoted: Arc::new(BTreeSet::new()),
             grant_runtime: None,
+            allowed: None,
         }
     }
 
@@ -386,12 +389,40 @@ impl TurnTools {
         }
     }
 
-    /// Resolves `name` in the generation first, then in the overlay.
+    /// Narrows the snapshot to `allowed`; `None` leaves every tool visible.
+    ///
+    /// Each turn takes a fresh snapshot against the generation current at its
+    /// start, so applying the list here keeps it in force across reloads.
+    pub(crate) fn restricted_to(mut self, allowed: Option<Arc<BTreeSet<Name>>>) -> Self {
+        if let Some(names) = &allowed {
+            self.entries = self
+                .entries
+                .iter()
+                .filter(|entry| names.contains(entry.tool.name()))
+                .cloned()
+                .collect();
+        }
+        self.allowed = allowed;
+        self
+    }
+
+    /// Whether the session may see and call `name`.
+    pub(crate) fn permits(&self, name: &Name) -> bool {
+        self.allowed
+            .as_ref()
+            .is_none_or(|names| names.contains(name))
+    }
+
+    /// Resolves `name` in the generation first, then in the overlay; a name
+    /// outside the session's allowlist resolves to nothing.
     pub(crate) fn tool<'a>(
         &'a self,
         generation: &'a Generation,
         name: &Name,
     ) -> Option<(&'a Arc<dyn Tool>, Visibility)> {
+        if !self.permits(name) {
+            return None;
+        }
         generation.tool(name).or_else(|| {
             self.entry(name)
                 .map(|entry| (&entry.tool, entry.visibility))

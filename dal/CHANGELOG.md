@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fix child sessions: a child started with a `tools` list now sees and can call only those tools, on every turn and after every reload, through the model, scripts, and extension services. An empty list gives the child no tools, and a start with no list leaves it unrestricted. A child also starts under the approval mode its parent runs under now, not the configured default.
 - Add the `-32009` error code ("server draining") to the dal protocol. A WebSocket connection answers every new request with it once the listener begins to stop, lets running requests finish for up to one second, and then closes. A request to a host that has shut down now answers `-32009` instead of `-32603`.
 - Fix the text the model reads when a `tool_call` hook blocks a call: it now starts with `blocked by <extension>:` so the model and the user can see which extension refused the call and why.
 - Add `image_bytes_elsewhere` to compactor input: the bytes of the images that stay in the request, so a compactor can keep its images within a request size budget.

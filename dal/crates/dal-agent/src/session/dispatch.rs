@@ -1170,6 +1170,26 @@ pub(crate) async fn direct_call(backend: &Backend, name: &str, args: RawJson) ->
     direct_call_seeded(backend, seed).await
 }
 
+/// Finds the tool a nested call names.
+///
+/// Scripts and extensions call tools on the session's behalf, so they meet
+/// its tool allowlist like the model does. A name outside the list finds
+/// nothing, like an unknown tool.
+fn nested_tool<'a>(
+    backend: &Backend,
+    generation: &'a Generation,
+    name: &Name,
+) -> Option<&'a Arc<dyn Tool>> {
+    let permitted = backend
+        .shared()
+        .tool_allowlist()
+        .is_none_or(|allowed| allowed.contains(name));
+    if !permitted {
+        return None;
+    }
+    generation.tool(name).map(|(tool, _)| tool)
+}
+
 /// Runs one seeded nested call through the checked tool path (R03 R04).
 pub(crate) async fn direct_call_seeded(backend: &Backend, seed: NestedCall) -> ToolOutcome {
     use dal_core::{ApprovalMode, DenyReason};
@@ -1192,7 +1212,7 @@ pub(crate) async fn direct_call_seeded(backend: &Backend, seed: NestedCall) -> T
         }));
     };
     let generation = backend.host_state().shared.generation.borrow().clone();
-    let Some((tool, _)) = generation.tool(&name) else {
+    let Some(tool) = nested_tool(backend, &generation, &name) else {
         return ToolOutcome::Err(crate::error::ToolError::message(format!(
             "unknown tool {}.",
             name.as_str()

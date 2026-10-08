@@ -113,6 +113,9 @@ pub(crate) fn tool_list(
     let mut specs: Vec<(bool, Arc<dal_core::ToolSpec>)> = Vec::new();
     for entry in generation.tools.entries() {
         let name = entry.name.clone();
+        if !turn_tools.permits(&name) {
+            continue;
+        }
         let visible = generation
             .tool_visibility(&name)
             .map(|declared| turn_tools.effective(&name, declared));
@@ -153,14 +156,12 @@ pub(crate) fn tool_list(
 }
 
 pub(crate) fn has_deferred_tools(generation: &Generation, turn_tools: &TurnTools) -> bool {
-    generation
-        .tools
-        .entries()
-        .iter()
-        .any(|entry| turn_tools.effective(&entry.name, entry.visibility) == Visibility::Deferred)
-        || turn_tools.entries().iter().any(|entry| {
-            turn_tools.effective(entry.tool.name(), entry.visibility) == Visibility::Deferred
-        })
+    generation.tools.entries().iter().any(|entry| {
+        turn_tools.permits(&entry.name)
+            && turn_tools.effective(&entry.name, entry.visibility) == Visibility::Deferred
+    }) || turn_tools.entries().iter().any(|entry| {
+        turn_tools.effective(entry.tool.name(), entry.visibility) == Visibility::Deferred
+    })
 }
 
 pub(crate) fn is_core_tool_search(
@@ -178,7 +179,7 @@ fn has_registered_tool_search(generation: &Generation, turn_tools: &TurnTools) -
         .tools
         .entries()
         .iter()
-        .any(|entry| entry.name.as_str() == TOOL_SEARCH_NAME)
+        .any(|entry| entry.name.as_str() == TOOL_SEARCH_NAME && turn_tools.permits(&entry.name))
         || turn_tools
             .entries()
             .iter()
@@ -193,7 +194,9 @@ fn deferred_tool_catalog(
 ) -> Vec<DeferredTool> {
     let mut deferred = Vec::new();
     for entry in generation.tools.entries() {
-        if turn_tools.effective(&entry.name, entry.visibility) != Visibility::Deferred {
+        if !turn_tools.permits(&entry.name)
+            || turn_tools.effective(&entry.name, entry.visibility) != Visibility::Deferred
+        {
             continue;
         }
         if let Some(spec) = generation.tool_spec(&entry.name, model, model_id) {

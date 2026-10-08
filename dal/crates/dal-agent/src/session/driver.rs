@@ -269,7 +269,10 @@ impl Driver {
             .unwrap_or_default();
         self.turns.entry(turn).or_insert_with(|| {
             let generation = deps.host.shared.generation.borrow().clone();
-            let tools = deps.overlay.publish(&generation, deps.shared.promoted());
+            let tools = deps
+                .overlay
+                .publish(&generation, deps.shared.promoted())
+                .restricted_to(deps.shared.tool_allowlist());
             let script = crate::session::script::SessionScriptHost::for_generation(
                 deps.session,
                 &deps.backend,
@@ -1576,6 +1579,7 @@ fn descriptions(
         .tools
         .entries()
         .iter()
+        .filter(|entry| turn_tools.permits(&entry.name))
         .filter_map(|entry| generation.tool(&entry.name))
         .map(|(tool, _)| tool.identity(info))
         .chain(overlay.map(|entry| entry.tool.identity(info)))
