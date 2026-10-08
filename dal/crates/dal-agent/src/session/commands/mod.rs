@@ -137,7 +137,7 @@ async fn run_handler(
         Some(script) => cx.with_script(script),
         None => cx,
     };
-    match contained(handler.run(args, cx)).await {
+    match contained(async move { handler.run(args, cx).await }).await {
         Ok(result) => result.map_err(|error| invalid(&error.to_string())),
         Err(panic) => Err(invalid(&format!(
             "Command {name} crashed and did not finish: {panic}. Report this to the command's author."

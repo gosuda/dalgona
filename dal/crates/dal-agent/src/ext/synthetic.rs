@@ -840,7 +840,7 @@ async fn call_private(
         id: CallId::new(call.id.as_str()),
         args: args.clone(),
     };
-    match contained(tool.run(tool_call, cx)).await {
+    match contained(async move { tool.run(tool_call, cx).await }).await {
         Ok(ToolOutcome::Ok(output)) => (false, output.to_string()),
         Ok(ToolOutcome::Err(error)) => (true, error.to_string()),
         Ok(ToolOutcome::Interrupted) => (true, "Tool call interrupted by user.".into()),

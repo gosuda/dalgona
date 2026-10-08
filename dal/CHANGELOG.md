@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Fix tool and command panics that happen before the work starts. The call now returns an error and the session stays usable.
 
 - Add `cancel_queued`, a command that removes one queued follow-up by its turn id. The `queued` reply to a follow-up now carries that `turn`; a queued steer still has none. The removed text comes back in a `discarded` notice, and an id that is not queued is rejected and changes nothing. A follow-up that has already started cannot be removed; cancel its turn instead.
 - Fix provider requests built from a journal that holds more than one result for the same tool call. The request now carries only the first result for each call of a model response, so providers no longer reject it. The journal is not changed.

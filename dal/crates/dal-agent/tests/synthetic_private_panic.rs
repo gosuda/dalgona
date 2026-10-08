@@ -54,7 +54,7 @@ impl Tool for Explode {
     }
 
     fn run<'a>(&'a self, _call: ToolCall, _cx: ToolCx<'a>) -> BoxFuture<'a, ToolOutcome> {
-        Box::pin(async { panic!("private tool state was corrupt") })
+        panic!("private tool state was corrupt")
     }
 }
 

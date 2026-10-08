@@ -427,7 +427,7 @@ fn tool_caller(ctx: &DispatchCtx, ready: &ReadyCall) -> Caller {
 /// carries the panic message, so the model and the client both see it.
 async fn run_contained(tool: &dyn Tool, call: ToolCall, cx: ToolCx<'_>) -> ToolOutcome {
     let name = tool.name().clone();
-    match contained(tool.run(call, cx)).await {
+    match contained(async move { tool.run(call, cx).await }).await {
         Ok(outcome) => outcome,
         Err(panic) => ToolOutcome::Err(crate::error::ToolError::Message {
             message: format!(
