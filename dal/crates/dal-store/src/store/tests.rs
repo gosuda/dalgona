@@ -291,7 +291,60 @@ async fn locked_session_cannot_be_opened_or_deleted_until_close() {
 
     journal.close().await.expect("release session lock");
     store.delete(id).expect("delete closed session");
+    assert!(
+        !store.paths(id).directory().exists(),
+        "deleted session tree must be gone"
+    );
     assert!(matches!(store.read_blob(id, blob_id), Err(BlobError::Gone)));
+}
+
+/// A parent directory whose sync fails must surface the error: the removal
+/// would otherwise report success while its directory entry could vanish.
+#[tokio::test]
+async fn delete_reports_a_failed_parent_directory_sync() {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = TempDir::new();
+    let store = store(&temp);
+    let id = SessionId::new_v7();
+    let mut journal = store.create_session(id);
+    journal
+        .append(vec![user(1, "b".repeat(INLINE_LIMIT))])
+        .await
+        .expect("create file session");
+    journal.close().await.expect("release session lock");
+
+    #[cfg(unix)]
+    {
+        let workspace_dir = store
+            .paths(id)
+            .directory()
+            .parent()
+            .expect("workspace key dir")
+            .to_path_buf();
+        let mut permissions = fs::metadata(&workspace_dir)
+            .expect("stat workspace directory")
+            .permissions();
+        permissions.set_mode(0o300);
+        fs::set_permissions(&workspace_dir, permissions).expect("drop directory read permission");
+        // Root reads through permission bits, so the sync failure is unreachable there.
+        if fs::read_dir(&workspace_dir).is_ok() {
+            let _ = fs::set_permissions(&workspace_dir, fs::Permissions::from_mode(0o700));
+            return;
+        }
+
+        let result = store.delete(id);
+        let _ = fs::set_permissions(&workspace_dir, fs::Permissions::from_mode(0o700));
+        assert!(
+            matches!(result, Err(StoreError::Io { .. })),
+            "got {result:?}"
+        );
+    }
+    #[cfg(not(unix))]
+    {
+        store.delete(id).expect("delete closed session");
+    }
 }
 
 #[tokio::test]
