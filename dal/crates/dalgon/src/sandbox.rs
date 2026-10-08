@@ -15,8 +15,9 @@ use dal_core::{Notice, RegistrationError, ServiceSet};
 const DENIAL_NOTE: &str = "dalgon sandbox: a \"Permission denied\" or \"Operation not permitted\" error can come from the sandbox; if the path should be writable, add it to sandbox_writable in dal.toml.";
 #[expect(dead_code, reason = "kept for the SDK embedder seam")]
 const HELPER_ERROR: &str = "sandbox: no sandbox helper. SDK embedders must pass a helper path; the dalgon binary provides dalgon __sandbox.";
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-const WINDOWS_ERROR: &str = "sandbox = \"on\" is not supported on Windows. Set sandbox = \"off\" in dal.toml, or run dalgon inside WSL 2.";
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+const WINDOWS_ERROR: &str =
+    "sandbox = \"on\" is not supported on this platform. Set sandbox = \"off\" in dal.toml.";
 const MALFORMED_ARGS: &str = "dalgon sandbox: malformed launcher arguments";
 
 #[non_exhaustive]
@@ -128,7 +129,12 @@ pub(crate) fn run(argv: &[OsString]) -> ExitCode {
         run_macos(argv)
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(windows)]
+    {
+        run_windows(argv)
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         write_error(WINDOWS_ERROR);
         ExitCode::from(126)
@@ -204,7 +210,7 @@ fn run_linux(argv: &[OsString]) -> ExitCode {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 fn parse_allow_args(argv: &[OsString]) -> Option<(Vec<PathBuf>, &OsStr, &[OsString])> {
     let mut index = 3;
     let mut roots = Vec::new();
@@ -421,5 +427,347 @@ mod tests {
             ]))
             .is_none()
         );
+    }
+}
+
+/// Windows backend: an AppContainer launch inside the kill-on-close job scope
+/// the parent's process wrap already provides. The container profile grants
+/// the network capabilities the plan leaves unrestricted; filesystem writes
+/// are allowed only where this run planted an explicit DACL grant.
+#[cfg(windows)]
+#[expect(
+    unsafe_code,
+    reason = "R4 edge: the Windows sandbox owns the Win32 launch"
+)]
+mod win {
+    use std::ffi::{OsStr, OsString};
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::{Path, PathBuf};
+    use std::process::ExitCode;
+    use std::ptr;
+
+    use windows_sys::Win32::Foundation::{CloseHandle, FALSE, GetLastError, LocalFree};
+    use windows_sys::Win32::Security::Authorization::{
+        EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW, REVOKE_ACCESS, SE_FILE_OBJECT,
+        SetEntriesInAclW, SetNamedSecurityInfoW, TRUSTEE_IS_NAME, TRUSTEE_IS_SID, TRUSTEE_W,
+    };
+    use windows_sys::Win32::Security::DeriveCapabilitySidsFromName;
+    use windows_sys::Win32::Security::Isolation::{
+        CreateAppContainerProfile, DeleteAppContainerProfile,
+        DeriveAppContainerSidFromAppContainerName,
+    };
+    use windows_sys::Win32::Security::{
+        ACL, DACL_SECURITY_INFORMATION, FreeSid, PSID, SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES,
+        SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+    };
+    use windows_sys::Win32::Storage::FileSystem::GetLogicalDrives;
+    use windows_sys::Win32::System::SystemServices::SE_GROUP_ENABLED;
+    use windows_sys::Win32::System::Threading::{
+        CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
+        DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, INFINITE,
+        InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
+        PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, PROCESS_INFORMATION, ResumeThread,
+        STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject,
+    };
+    use windows_sys::core::PWSTR;
+
+    const GENERIC_READ_EXECUTE: u32 = 0xA2000000; // GENERIC_READ | GENERIC_EXECUTE
+    const GENERIC_ALL_ACCESS: u32 = 0x10000000; // GENERIC_ALL
+    const PROFILE_NAME: &str = "dalgon.sandbox";
+    const STILL_ACTIVE: u32 = 259;
+
+    struct OwnedSid(PSID);
+    impl Drop for OwnedSid {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe { FreeSid(self.0) };
+            }
+        }
+    }
+
+    fn wide(text: &str) -> Vec<u16> {
+        OsStr::new(text).encode_wide().chain(Some(0)).collect()
+    }
+
+    fn wide_path(path: &Path) -> Vec<u16> {
+        path.as_os_str().encode_wide().chain(Some(0)).collect()
+    }
+
+    fn last_error(what: &str) -> String {
+        format!("dalgon sandbox: {what} failed ({}).", unsafe {
+            GetLastError()
+        })
+    }
+
+    /// Adds or removes the container SID's ACE on one path; inheritance is
+    /// `(OI)(CI)` so one ACE covers the subtree.
+    fn edit_dacl(path: &Path, sid: PSID, access: u32, mode: i32) -> Result<(), String> {
+        let wide_path = wide_path(path);
+        let mut trustee: TRUSTEE_W = unsafe { std::mem::zeroed() };
+        trustee.TrusteeForm = TRUSTEE_IS_SID;
+        trustee.TrusteeType = TRUSTEE_IS_NAME;
+        trustee.ptstrName = sid as PWSTR;
+        let entry = EXPLICIT_ACCESS_W {
+            grfAccessPermissions: access,
+            grfAccessMode: mode,
+            grfInheritance: SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+            Trustee: trustee,
+        };
+        let mut old_dacl: *mut ACL = ptr::null_mut();
+        let mut sd = ptr::null_mut();
+        let read = unsafe {
+            GetNamedSecurityInfoW(
+                wide_path.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                &mut old_dacl,
+                ptr::null_mut(),
+                &mut sd,
+            )
+        };
+        if read != 0 {
+            return Err(last_error(&format!("read ACL on {}", path.display())));
+        }
+        let mut new_dacl: *mut ACL = ptr::null_mut();
+        let merge = unsafe { SetEntriesInAclW(1, &entry, old_dacl, &mut new_dacl) };
+        if !sd.is_null() {
+            unsafe { LocalFree(sd) };
+        }
+        if merge != 0 {
+            return Err(last_error(&format!("build ACL for {}", path.display())));
+        }
+        let write = unsafe {
+            SetNamedSecurityInfoW(
+                wide_path.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                new_dacl,
+                ptr::null_mut(),
+            )
+        };
+        unsafe { LocalFree(new_dacl.cast()) };
+        if write != 0 {
+            return Err(last_error(&format!("write ACL on {}", path.display())));
+        }
+        Ok(())
+    }
+
+    /// Every mounted drive root so the container can read and exec system
+    /// binaries; writes stay denied outside the allowed roots.
+    fn drive_roots() -> Vec<PathBuf> {
+        let mut roots = Vec::new();
+        let mask = unsafe { GetLogicalDrives() };
+        for index in 0..26u32 {
+            if mask & (1 << index) != 0 {
+                roots.push(PathBuf::from(format!(
+                    "{}:\\",
+                    (b'A' + index as u8) as char
+                )));
+            }
+        }
+        roots
+    }
+
+    /// Plants the container grants: read+execute on every drive root, then
+    /// full access on each allowed root. On failure every planted ACE is
+    /// lifted before the error returns.
+    fn plant_grants(roots: &[PathBuf], sid: PSID) -> Result<Vec<(PathBuf, u32)>, String> {
+        let mut planted: Vec<(PathBuf, u32)> = Vec::new();
+        let result = (|| {
+            for root in drive_roots() {
+                edit_dacl(&root, sid, GENERIC_READ_EXECUTE, GRANT_ACCESS)?;
+                planted.push((root, GENERIC_READ_EXECUTE));
+            }
+            for root in roots {
+                edit_dacl(root, sid, GENERIC_ALL_ACCESS, GRANT_ACCESS)?;
+                planted.push((root.clone(), GENERIC_ALL_ACCESS));
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            revoke_planted(&planted, sid);
+        }
+        result.map(|()| planted)
+    }
+
+    fn revoke_planted(planted: &[(PathBuf, u32)], sid: PSID) {
+        for (path, access) in planted {
+            let _ = edit_dacl(path, sid, *access, REVOKE_ACCESS);
+        }
+    }
+
+    /// Resolves or registers the dalgon AppContainer profile and returns its
+    /// SID plus the unrestricted network capability SIDs.
+    fn container_sid() -> Result<(OwnedSid, Vec<SID_AND_ATTRIBUTES>), String> {
+        let name = wide(PROFILE_NAME);
+        let mut sid: PSID = ptr::null_mut();
+        let profile = unsafe {
+            CreateAppContainerProfile(
+                name.as_ptr(),
+                name.as_ptr(),
+                name.as_ptr(),
+                ptr::null(),
+                0,
+                &mut sid,
+            )
+        };
+        if profile < 0 || sid.is_null() {
+            let derive =
+                unsafe { DeriveAppContainerSidFromAppContainerName(name.as_ptr(), &mut sid) };
+            if derive < 0 || sid.is_null() {
+                return Err(format!(
+                    "dalgon sandbox: cannot resolve the AppContainer profile (0x{profile:08x})."
+                ));
+            }
+        }
+        let mut capabilities = Vec::new();
+        for capability in [
+            "internetClient",
+            "internetClientServer",
+            "privateNetworkClientServer",
+        ] {
+            let capability = wide(capability);
+            let mut sids: *mut PSID = ptr::null_mut();
+            let mut count = 0u32;
+            let mut group_sids: *mut PSID = ptr::null_mut();
+            let mut group_count = 0u32;
+            let ok = unsafe {
+                DeriveCapabilitySidsFromName(
+                    capability.as_ptr(),
+                    &mut group_sids,
+                    &mut group_count,
+                    &mut sids,
+                    &mut count,
+                )
+            };
+            if ok == FALSE || count == 0 {
+                return Err(
+                    "dalgon sandbox: cannot resolve the network capability SIDs.".to_string(),
+                );
+            }
+            for index in 0..count as isize {
+                capabilities.push(SID_AND_ATTRIBUTES {
+                    Sid: unsafe { *sids.offset(index) },
+                    Attributes: SE_GROUP_ENABLED as u32,
+                });
+            }
+        }
+        Ok((OwnedSid(sid), capabilities))
+    }
+
+    /// Spawns the target inside the AppContainer and waits for it, returning
+    /// the child's exit code. Every planted ACE is lifted on return.
+    ///
+    /// # Safety
+    /// Win32 process launch; handles and the attribute list are closed on
+    /// every exit path.
+    pub(super) fn spawn(
+        roots: &[PathBuf],
+        executable: &OsStr,
+        run_args: &[OsString],
+    ) -> Result<ExitCode, String> {
+        let (sid, capabilities) = container_sid()?;
+        let planted = plant_grants(roots, sid.0)?;
+
+        let mut list_size = 0usize;
+        unsafe { InitializeProcThreadAttributeList(ptr::null_mut(), 1, 0, &mut list_size) };
+        if list_size == 0 {
+            revoke_planted(&planted, sid.0);
+            return Err(last_error("size the attribute list"));
+        }
+        let mut buffer = vec![0u8; list_size];
+        let list: LPPROC_THREAD_ATTRIBUTE_LIST = buffer.as_mut_ptr().cast();
+        if unsafe { InitializeProcThreadAttributeList(list, 1, 0, &mut list_size) } == FALSE {
+            revoke_planted(&planted, sid.0);
+            return Err(last_error("initialize the attribute list"));
+        }
+        let mut security = SECURITY_CAPABILITIES {
+            AppContainerSid: sid.0,
+            Capabilities: capabilities.as_ptr() as *mut SID_AND_ATTRIBUTES,
+            CapabilityCount: capabilities.len() as u32,
+            Reserved: 0,
+        };
+        let attribute = unsafe {
+            UpdateProcThreadAttribute(
+                list,
+                0,
+                PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES as usize,
+                ptr::addr_of_mut!(security).cast(),
+                std::mem::size_of::<SECURITY_CAPABILITIES>(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        };
+        if attribute == FALSE {
+            unsafe { DeleteProcThreadAttributeList(list) };
+            revoke_planted(&planted, sid.0);
+            return Err(last_error("set the security capability attribute"));
+        }
+
+        let mut command = wide_path(Path::new(executable));
+        command.pop();
+        for arg in run_args {
+            command.extend(OsStr::new(" ").encode_wide());
+            command.extend(arg.encode_wide());
+        }
+        command.push(0);
+
+        let mut info: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
+        info.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
+        info.lpAttributeList = list;
+        let mut process: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+        let spawned = unsafe {
+            CreateProcessW(
+                ptr::null(),
+                command.as_mut_ptr(),
+                ptr::null(),
+                ptr::null(),
+                FALSE,
+                CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
+                ptr::null(),
+                ptr::null(),
+                &mut info.StartupInfo,
+                &mut process,
+            )
+        };
+        unsafe { DeleteProcThreadAttributeList(list) };
+        if spawned == FALSE {
+            revoke_planted(&planted, sid.0);
+            return Err(last_error("spawn the sandboxed process"));
+        }
+
+        unsafe { ResumeThread(process.hThread) };
+        unsafe { WaitForSingleObject(process.hProcess, INFINITE) };
+        let mut code = 0u32;
+        unsafe { GetExitCodeProcess(process.hProcess, &mut code) };
+        if code == STILL_ACTIVE {
+            unsafe { TerminateProcess(process.hProcess, 1) };
+            code = 1;
+        }
+        unsafe {
+            CloseHandle(process.hThread);
+            CloseHandle(process.hProcess);
+        };
+        revoke_planted(&planted, sid.0);
+        let _ = unsafe { DeleteAppContainerProfile(wide(PROFILE_NAME).as_ptr()) };
+        Ok(ExitCode::from((code & 0xFF) as u8))
+    }
+}
+
+#[cfg(windows)]
+fn run_windows(argv: &[OsString]) -> ExitCode {
+    let Some((roots, executable, run_args)) = parse_allow_args(argv) else {
+        return malformed();
+    };
+    match win::spawn(&roots, executable, run_args) {
+        Ok(code) => code,
+        Err(message) => {
+            write_error(&message);
+            ExitCode::from(126)
+        }
     }
 }

@@ -49,6 +49,9 @@ dal-tui = { path = "../dal-tui", version = "=0.1.0", optional = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
 [dev-dependencies]
 clap_mangen = "=0.3.3"
 tempfile.workspace = true
