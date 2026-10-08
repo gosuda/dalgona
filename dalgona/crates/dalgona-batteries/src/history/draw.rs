@@ -84,6 +84,7 @@ pub(crate) struct Placed {
     pub(crate) next: Cursor,
 }
 
+#[derive(Clone, Copy)]
 struct TextInput<'a> {
     item: &'a Item,
     span: Span,

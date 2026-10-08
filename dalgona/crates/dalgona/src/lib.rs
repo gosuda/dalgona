@@ -2,10 +2,13 @@
 
 //! Batteries-included composition for the dalgona product.
 
+mod battery_names;
 mod docs;
+mod plugins;
 mod sections;
 
 use dal_agent::ext::Extension;
+use dal_core::{Claimant, Name, Origin, RegistrationError};
 use dalgona_batteries::{
     ask, history, judged, mcp, orchestration, quality, review, skills, ttsr_rules, web, work,
 };
@@ -49,15 +52,53 @@ pub fn product() -> dalgon::ProductFactory {
 /// # Errors
 /// Returns a config or registration error from the shared dalgon builder.
 pub fn build(cx: &dalgon::BuildCx<'_>) -> Result<dal_agent::Product, dalgon::BuildError> {
-    cx.config.validate_battery_names(BATTERY_NAMES)?;
+    battery_names::validate(cx.config, BATTERY_NAMES)?;
     let sections = Sections::decode(cx.config)?;
     let mut parts = dalgon::parts(cx)?;
+    plugins::require_listed(cx, &parts.bundled)?;
     let batteries = compose(cx, sections, &mut parts)?;
     parts.batteries = batteries;
     let mut product = dalgon::assemble(cx, parts)?;
+    // The bundled `skills` battery owns that name; dal's Builtin placeholder
+    // carries an empty registry and would shadow it.
+    product.extensions.retain(|extension| {
+        !(extension.name() == "skills" && extension.origin() == Origin::Builtin)
+    });
+    reject_shadowed_names(&product.extensions)?;
     product.name = NAME;
     product.defaults = DEFAULTS;
     Ok(product)
+}
+
+/// A user plugin never replaces a bundled battery or built-in extension of the
+/// same name; the operator disables the battery first.
+fn reject_shadowed_names(extensions: &[Extension]) -> Result<(), dalgon::BuildError> {
+    for (index, user) in extensions
+        .iter()
+        .enumerate()
+        .filter(|(_, extension)| extension.origin() == Origin::User)
+    {
+        let Some(held) = extensions
+            .iter()
+            .take(index)
+            .find(|earlier| earlier.name() == user.name() && earlier.origin() != Origin::User)
+        else {
+            continue;
+        };
+        let name = Name::parse(user.name())?;
+        let claimant = if held.origin() == Origin::Builtin {
+            Claimant::Builtin(name.clone())
+        } else {
+            Claimant::Battery(name.clone())
+        };
+        return Err(RegistrationError::Conflict {
+            kind: "extension",
+            name,
+            claimant,
+        }
+        .into());
+    }
+    Ok(())
 }
 
 fn selected(cx: &dalgon::BuildCx<'_>, battery: &str) -> bool {

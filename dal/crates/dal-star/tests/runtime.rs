@@ -1,6 +1,14 @@
+//! Runtime adapter behavior over the scripted test host: calls, updates,
+//! and shutdown ordering.
+
+#![expect(
+    clippy::expect_used,
+    clippy::panic,
+    reason = "integration tests use unwrap/expect/panic freely per repo test convention"
+)]
 #[path = "support/host.rs"]
-mod host;
-mod support;
+pub mod host;
+pub mod support;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,8 +39,10 @@ fn named_tool(extension: &Extension, name: &str) -> Arc<dyn Tool> {
         .tools()
         .iter()
         .find(|(tool, _)| tool.name().as_str() == name)
-        .map(|(tool, _)| Arc::clone(tool))
-        .unwrap_or_else(|| panic!("tool {name:?} is registered"))
+        .map_or_else(
+            || panic!("tool {name:?} is registered"),
+            |(tool, _)| Arc::clone(tool),
+        )
 }
 
 fn output_text(outcome: &ToolOutcome) -> &str {

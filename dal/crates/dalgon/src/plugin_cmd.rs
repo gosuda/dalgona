@@ -119,55 +119,7 @@ pub async fn run(
     plugins.sort_by(|left, right| left.name.as_str().cmp(right.name.as_str()));
 
     match command {
-        PluginCommand::Grant { name } => {
-            let plugin = plugins
-                .iter()
-                .find(|plugin| plugin.name == name)
-                .copied()
-                .ok_or_else(|| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::NotFound,
-                        crate::cli::texts::plugin_not_configured(&name.to_string()),
-                    )
-                })?;
-            if plugin.origin == Origin::Builtin {
-                return Err(PluginCommandError::Builtin);
-            }
-            if plugin.capabilities.is_empty() {
-                writeln!(
-                    stdout,
-                    "{}",
-                    crate::cli::texts::plugin_declares_no_services(&plugin.name.to_string())
-                )?;
-                return Ok(ExitCode::SUCCESS);
-            }
-            let key = GrantKey {
-                extension: plugin.name.clone(),
-                origin: plugin.origin,
-                services: plugin.capabilities,
-            };
-            let inserted = grants.grant(key, by, jiff::Timestamp::now()).await?;
-            let services = display_services(plugin.capabilities);
-            let origin = display_origin(plugin.origin);
-            if inserted {
-                writeln!(
-                    stdout,
-                    "{}",
-                    crate::cli::texts::plugin_granted(&plugin.name.to_string(), origin, &services)
-                )?;
-            } else {
-                writeln!(
-                    stdout,
-                    "{}",
-                    crate::cli::texts::plugin_already_granted(
-                        &plugin.name.to_string(),
-                        origin,
-                        &services
-                    )
-                )?;
-            }
-            Ok(ExitCode::SUCCESS)
-        }
+        PluginCommand::Grant { name } => grant(&name, &plugins, grants, by, stdout).await,
         PluginCommand::Revoke { name } => {
             let removed = grants.revoke(&name).await?;
             if removed == 0 {
@@ -235,6 +187,62 @@ fn display_services(services: ServiceSet) -> String {
         names.push(service.as_str());
     }
     names.join(", ")
+}
+
+/// Grants one configured extension plugin's declared services.
+///
+/// Unconfigured plugins fail without touching the store; builtins refuse
+/// to be granted, and plugins without declared services only confirm.
+async fn grant(
+    name: &Name,
+    plugins: &[&ConfiguredPlugin],
+    grants: &GrantStore,
+    by: ClientId,
+    stdout: &mut impl Write,
+) -> Result<ExitCode, PluginCommandError> {
+    let plugin = plugins
+        .iter()
+        .find(|plugin| &plugin.name == name)
+        .copied()
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                crate::cli::texts::plugin_not_configured(&name.to_string()),
+            )
+        })?;
+    if plugin.origin == Origin::Builtin {
+        return Err(PluginCommandError::Builtin);
+    }
+    if plugin.capabilities.is_empty() {
+        writeln!(
+            stdout,
+            "{}",
+            crate::cli::texts::plugin_declares_no_services(&plugin.name.to_string())
+        )?;
+        return Ok(ExitCode::SUCCESS);
+    }
+    let key = GrantKey {
+        extension: plugin.name.clone(),
+        origin: plugin.origin,
+        services: plugin.capabilities,
+    };
+    let inserted = grants.grant(key, by, jiff::Timestamp::now()).await?;
+    let services = display_services(plugin.capabilities);
+    let origin = display_origin(plugin.origin);
+    if inserted {
+        writeln!(
+            stdout,
+            "{}",
+            crate::cli::texts::plugin_granted(&plugin.name.to_string(), origin, &services)
+        )?;
+    } else {
+        writeln!(
+            stdout,
+            "{}",
+            crate::cli::texts::plugin_already_granted(&plugin.name.to_string(), origin, &services)
+        )?;
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 #[cfg(test)]

@@ -56,12 +56,14 @@ pub fn parts(cx: &BuildCx<'_>) -> Result<Parts, BuildError> {
         })?;
     let guard = guard_extension(guard_config)?;
 
-    let mut tools = ToolsConfig::default();
-    tools.search_symbols = Arc::new(AtomicBool::new(cx.config.search_symbols()));
-    tools.index_root = Some(cx.data_root.join("index"));
-    tools.edit_style = cx.config.edit_style().clone();
+    let mut tools = ToolsConfig {
+        search_symbols: Arc::new(AtomicBool::new(cx.config.search_symbols())),
+        index_root: Some(cx.data_root.join("index")),
+        edit_style: cx.config.edit_style().clone(),
+        observer: Some(Arc::clone(&guard.observer)),
+        ..ToolsConfig::default()
+    };
     tools.exec.sandbox_on = cx.config.sandbox();
-    tools.observer = Some(Arc::clone(&guard.observer));
 
     Ok(Parts {
         tools,
@@ -98,7 +100,7 @@ impl dal_ext::commands::PluginReload for ReloadPlugins {
                 })?;
             cx.publish_plugins(set)
                 .await
-                .map_err(dal_ext::commands::misc::publish_failure)
+                .map_err(|error| dal_ext::commands::misc::publish_failure(&error))
         })
     }
 }
@@ -145,6 +147,7 @@ pub fn assemble(cx: &BuildCx<'_>, parts: Parts) -> Result<Product, BuildError> {
     let mut extensions = vec![
         dal_tools::extension(parts.tools)?,
         parts.guard,
+        sandbox_extension()?,
         dal_ext::prompt::extension()?,
         dal_ext::skills::extension()?,
         dal_ext::letter::extension()?,
@@ -177,6 +180,15 @@ pub fn assemble(cx: &BuildCx<'_>, parts: Parts) -> Result<Product, BuildError> {
         extensions,
         bundled: parts.bundled,
     })
+}
+
+/// Builds the thin `sandbox` extension record: name registration only.
+///
+/// The sandbox runtime boundary (launcher resolution, canonical roots, the
+/// `__sandbox` helper probe) is prepared per session by the agent process
+/// launcher; this record is the product-registration surface.
+fn sandbox_extension() -> Result<Extension, dal_core::RegistrationError> {
+    ExtensionBuilder::new("sandbox", "0.1.0", dal_core::ServiceSet::EMPTY)?.build()
 }
 
 fn diagrams_prompt_extension() -> Result<Extension, dal_core::RegistrationError> {
@@ -248,8 +260,8 @@ mod tests {
         assert_eq!(
             names,
             [
-                "tools", "guard", "prompt", "skills", "letter", "ttsr", "compact", "commands",
-                "dal", "subagent", "eval",
+                "tools", "guard", "sandbox", "prompt", "skills", "letter", "ttsr", "compact",
+                "commands", "dal", "subagent", "eval",
             ]
         );
 
@@ -289,7 +301,7 @@ mod tests {
                     )
                 })
                 .count();
-            assert_eq!(occurrences, if enabled { 1 } else { 0 });
+            assert_eq!(occurrences, usize::from(enabled));
         }
     }
 
@@ -319,8 +331,8 @@ mod tests {
         assert_eq!(
             names,
             [
-                "tools", "guard", "prompt", "skills", "letter", "ttsr", "compact", "commands",
-                "dal", "subagent", "eval", "focus",
+                "tools", "guard", "sandbox", "prompt", "skills", "letter", "ttsr", "compact",
+                "commands", "dal", "subagent", "eval", "focus",
             ]
         );
     }
@@ -363,8 +375,8 @@ mod tests {
         assert_eq!(
             names,
             [
-                "tools", "guard", "prompt", "skills", "letter", "ttsr", "compact", "commands",
-                "dal", "subagent", "eval", "battery", "focus",
+                "tools", "guard", "sandbox", "prompt", "skills", "letter", "ttsr", "compact",
+                "commands", "dal", "subagent", "eval", "battery", "focus",
             ]
         );
     }

@@ -1,8 +1,7 @@
-#![expect(clippy::unwrap_used, reason = "SC test")]
-#![expect(clippy::expect_used, reason = "SC test")]
+//! Cancelling mid-exec kills the real grandchild and ends the turn once.
 #![expect(
-    clippy::disallowed_methods,
-    reason = "SC test checks a real descendant process"
+    dead_code,
+    reason = "gate support exposes helpers shared across independent targets"
 )]
 
 mod support;

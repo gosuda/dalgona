@@ -1,48 +1,14 @@
 use std::ffi::{OsStr, OsString};
-use std::fmt;
 use std::io::{self, Write};
 use std::path::PathBuf;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::process::Command;
 use std::process::ExitCode;
 
-const DENIAL_NOTE: &str = "dalgon sandbox: a \"Permission denied\" or \"Operation not permitted\" error can come from the sandbox; if the path should be writable, add it to sandbox_writable in dal.toml.";
-const HELPER_ERROR: &str = "sandbox: no sandbox helper. SDK embedders must pass a helper path; the dalgon binary provides dalgon __sandbox.";
-#[cfg(any(windows, not(any(target_os = "linux", target_os = "macos", windows))))]
-const WINDOWS_ERROR: &str = "sandbox = \"on\" is not supported on Windows. Set sandbox = \"off\" in dal.toml, or run dalgon inside WSL 2.";
 const MALFORMED_ARGS: &str = "dalgon sandbox: malformed launcher arguments";
 
-#[non_exhaustive]
-#[derive(Debug)]
-pub(crate) enum SandboxError {
-    HelperPath(io::Error),
-    Landlock(String),
-    Seatbelt(String),
-}
-
-impl fmt::Display for SandboxError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::HelperPath(_) => formatter.write_str(HELPER_ERROR),
-            Self::Landlock(message) | Self::Seatbelt(message) => {
-                write!(formatter, "sandbox: {message}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for SandboxError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::HelperPath(error) => Some(error),
-            Self::Landlock(_) | Self::Seatbelt(_) => None,
-        }
-    }
-}
-
-pub(crate) fn helper_path() -> Result<PathBuf, SandboxError> {
-    std::env::current_exe().map_err(SandboxError::HelperPath)
-}
+#[cfg(any(windows, not(any(target_os = "linux", target_os = "macos", windows))))]
+const WINDOWS_ERROR: &str = "sandbox = \"on\" is not supported on Windows. Set sandbox = \"off\" in dal.toml, or run dalgon inside WSL 2.";
 
 pub(crate) fn run(argv: &[OsString]) -> ExitCode {
     if argv.get(1).map(OsString::as_os_str) != Some(OsStr::new("__sandbox")) {
@@ -70,11 +36,6 @@ pub(crate) fn run(argv: &[OsString]) -> ExitCode {
         write_error(WINDOWS_ERROR);
         ExitCode::from(126)
     }
-}
-
-pub(crate) fn denial_note(output: &str) -> Option<&'static str> {
-    (output.contains("Permission denied") || output.contains("Operation not permitted"))
-        .then_some(DENIAL_NOTE)
 }
 
 fn malformed() -> ExitCode {
@@ -113,7 +74,7 @@ fn run_linux(argv: &[OsString]) -> ExitCode {
             }
         }
         Some(mode) if mode == OsStr::new("--allow") => {
-            let Some((roots, executable, args)) = parse_allow_args(argv) else {
+            let Some((roots, executable, target_args)) = parse_allow_args(argv) else {
                 return malformed();
             };
             let abi = linux_abi();
@@ -133,7 +94,7 @@ fn run_linux(argv: &[OsString]) -> ExitCode {
                 clippy::disallowed_methods,
                 reason = "R4 edge: the sandbox helper execs the target in place, replacing the trampoline process"
             )]
-            let error = Command::new(executable).args(args).exec();
+            let error = Command::new(executable).args(target_args).exec();
             exec_error(executable, &error)
         }
         _ => malformed(),
@@ -205,7 +166,11 @@ fn apply_landlock(roots: &[PathBuf]) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
 
     for root in roots {
-        let fd = PathFd::new(root).map_err(|error| error.to_string())?;
+        // An automatic root (temp, cache) may have vanished since startup;
+        // omitting its rule denies it instead of failing the child.
+        let Ok(fd) = PathFd::new(root) else {
+            continue;
+        };
         ruleset = ruleset
             .add_rule(PathBeneath::new(fd, access))
             .map_err(|error| error.to_string())?;
@@ -263,25 +228,6 @@ fn run_macos(argv: &[OsString]) -> ExitCode {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
-
-    #[test]
-    fn denial_note_matches_permission_denied() {
-        assert_eq!(
-            denial_note("write failed: Permission denied"),
-            Some(DENIAL_NOTE)
-        );
-    }
-
-    #[test]
-    fn denial_note_matches_operation_not_permitted() {
-        assert_eq!(denial_note("Operation not permitted"), Some(DENIAL_NOTE));
-    }
-
-    #[test]
-    fn denial_note_ignores_unrelated_output() {
-        assert_eq!(denial_note("permission mismatch"), None);
-        assert_eq!(denial_note(""), None);
-    }
 
     #[test]
     fn landlock_denies_a_sibling_path_and_allows_its_root() -> io::Result<()> {

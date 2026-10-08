@@ -67,6 +67,11 @@ path = "tests/shuttle.rs"
 [[test]]
 name = "kill"
 path = "tests/kill.rs"
+
+[[test]]
+name = "adversarial"
+path = "tests/adversarial.rs"
+
 [[bin]]
 name = "append-child"
 path = "tests/support/append_child.rs"

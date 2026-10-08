@@ -15,13 +15,13 @@ use dal_core::ext::{
     InputEvent, InputVerdict, SessionEnd, SessionStart, Settled, ToolCallEvent, ToolCallVerdict,
     ToolResultEvent, TurnEnd,
 };
-use sonic_rs::JsonContainerTrait;
 use dal_core::{
-    AgentState, AgentsOp, AgentsReply, CallId, JobId, JobStateView, JobsOp, JobsReply, Name, Notice,
-    RawJson, SessionId, TurnOp,
+    AgentState, AgentsOp, AgentsReply, CallId, JobId, JobStateView, JobsOp, JobsReply, Name,
+    Notice, RawJson, SessionId, TurnOp,
 };
+use sonic_rs::JsonContainerTrait;
 use tokio::sync::{mpsc, oneshot};
-use tokio::time::{timeout_at, Instant as TokioInstant};
+use tokio::time::{Instant as TokioInstant, timeout_at};
 
 use super::agents_tool::{ReportCell, ReportOutcome, ReportStatus, submit};
 use super::arbiter::Arbiter;
@@ -30,8 +30,8 @@ use super::goal::ops::{GoalScope, TodoSummary};
 use super::monitor::state::{MonitorConfig, MonitorState};
 use super::monitor::status::{InflightCounts, status_json, status_payload};
 use super::stuck::{
-    GuardState, GuardVerdict, SleepClassifier, clear_pending_attempts, on_tool_call,
-    rewrite_exec_args, reset,
+    GuardState, GuardVerdict, SleepClassifier, clear_pending_attempts, on_tool_call, reset,
+    rewrite_exec_args,
 };
 use super::{JobsView, OrchestrationConfig, StopKind};
 
@@ -92,9 +92,9 @@ struct SessionState {
 impl Runtime {
     pub(crate) fn new(config: OrchestrationConfig) -> Result<Self, super::RegistrationError> {
         let sleep = if config.sleep.enabled {
-            Some(Arc::new(SleepClassifier::new().map_err(|_| {
-                super::RegistrationError::InvalidParameters
-            })?))
+            Some(Arc::new(
+                SleepClassifier::new().map_err(|_| super::RegistrationError::InvalidParameters)?,
+            ))
         } else {
             None
         };
@@ -160,7 +160,10 @@ impl Runtime {
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<String, ServiceError> {
         let Some(sender) = self.sender(session) else {
-            return Err(ServiceError::failed(None, "orchestration owner is not running"));
+            return Err(ServiceError::failed(
+                None,
+                "orchestration owner is not running",
+            ));
         };
         let (reply, response) = oneshot::channel();
         let message = Message::Tool {
@@ -198,7 +201,10 @@ impl Runtime {
         args: &str,
     ) -> Result<String, ServiceError> {
         let Some(sender) = self.sender(session) else {
-            return Err(ServiceError::failed(None, "orchestration owner is not running"));
+            return Err(ServiceError::failed(
+                None,
+                "orchestration owner is not running",
+            ));
         };
         let (reply, response) = oneshot::channel();
         let message = Message::Command {
@@ -223,8 +229,8 @@ impl Runtime {
         let caller = cx.caller.clone();
         let services = Arc::clone(&cx.services);
         if parent.is_some() && self.config.agents.enabled {
-            let report_tool = super::tools::report_tool(self)
-                .map_err(|error| failed(&error.to_string()))?;
+            let report_tool =
+                super::tools::report_tool(self).map_err(|error| failed(&error.to_string()))?;
             services
                 .add_session_tools(&caller, vec![report_tool])
                 .await
@@ -279,8 +285,11 @@ impl Runtime {
         if let Some(sender) = self.sender(session) {
             let (reply, response) = oneshot::channel();
             if sender.send(Message::Close(reply)).await.is_ok() {
-                let _ = timeout_at(TokioInstant::now() + std::time::Duration::from_secs(5), response)
-                    .await;
+                let _ = timeout_at(
+                    TokioInstant::now() + std::time::Duration::from_secs(5),
+                    response,
+                )
+                .await;
             }
         }
         if let Ok(mut owners) = self.owners.lock() {
@@ -335,7 +344,12 @@ impl SessionState {
                 self.publish_status();
                 let _ = reply.send(verdict);
             }
-            Message::Tool { call, name, args, reply } => {
+            Message::Tool {
+                call,
+                name,
+                args,
+                reply,
+            } => {
                 let result = self.tool(call, &name, &args).await;
                 self.publish_status();
                 let _ = reply.send(result);
@@ -401,8 +415,9 @@ impl SessionState {
         if ready.is_empty() {
             return Ok(());
         }
-        let (text, sources, job_ids) =
-            self.arbiter.compose(&ready, super::arbiter::INJECTION_BUDGET);
+        let (text, sources, job_ids) = self
+            .arbiter
+            .compose(&ready, super::arbiter::INJECTION_BUDGET);
         if text.is_empty() {
             self.requeue_ready(&ready);
             return Ok(());
@@ -446,7 +461,11 @@ impl SessionState {
             if let JobStateView::Done(_) = job.state
                 && !self.arbiter.is_committed(&job.id)
             {
-                let text = match self.services.jobs(&self.caller, JobsOp::Text { id: job.id }).await? {
+                let text = match self
+                    .services
+                    .jobs(&self.caller, JobsOp::Text { id: job.id })
+                    .await?
+                {
                     JobsReply::Text { text, .. } => text.to_string(),
                     _ => String::new(),
                 };
@@ -481,11 +500,7 @@ impl SessionState {
 
     async fn load_goal(&mut self) {
         let session = self.session.to_string();
-        self.goal = Some(adapter::load(
-            self.services.as_ref(),
-            &self.caller,
-            &session,
-        ).await);
+        self.goal = Some(adapter::load(self.services.as_ref(), &self.caller, &session).await);
         if self
             .goal
             .as_ref()
@@ -525,9 +540,10 @@ impl SessionState {
         if let Ok(AgentsReply::Listed(agents)) =
             self.services.agents(&self.caller, AgentsOp::List).await
         {
-            for agent in agents.iter().filter(|agent| {
-                matches!(agent.state, AgentState::Queued | AgentState::Running)
-            }) {
+            for agent in agents
+                .iter()
+                .filter(|agent| matches!(agent.state, AgentState::Queued | AgentState::Running))
+            {
                 let _ = self
                     .services
                     .agents(&self.caller, AgentsOp::Cancel { id: agent.id })
@@ -549,10 +565,9 @@ impl SessionState {
     }
 
     async fn goal_command(&mut self, args: &str) -> Result<String, ServiceError> {
-        let store = self
-            .goal
-            .as_mut()
-            .ok_or_else(|| ServiceError::failed(None, "goal: the session store is not available."))?;
+        let store = self.goal.as_mut().ok_or_else(|| {
+            ServiceError::failed(None, "goal: the session store is not available.")
+        })?;
         let session = self.session.to_string();
         let ctx = GoalScope {
             session: &session,
@@ -618,9 +633,10 @@ impl SessionState {
         }
         let jobs = self.jobs_list().await?;
         let mut jobs_cancelled = 0;
-        for job in jobs.iter().filter(|job| {
-            matches!(job.state, JobStateView::Running | JobStateView::Detached)
-        }) {
+        for job in jobs
+            .iter()
+            .filter(|job| matches!(job.state, JobStateView::Running | JobStateView::Detached))
+        {
             if self
                 .services
                 .jobs(&self.caller, JobsOp::Cancel { id: job.id })
@@ -635,9 +651,10 @@ impl SessionState {
             AgentsReply::Listed(children) => children,
             _ => Vec::new(),
         };
-        for child in children.iter().filter(|child| {
-            matches!(child.state, AgentState::Queued | AgentState::Running)
-        }) {
+        for child in children
+            .iter()
+            .filter(|child| matches!(child.state, AgentState::Queued | AgentState::Running))
+        {
             let _ = self
                 .services
                 .agents(&self.caller, AgentsOp::Cancel { id: child.id })
@@ -660,9 +677,7 @@ impl SessionState {
         args: &RawJson,
     ) -> Result<String, ServiceError> {
         match name {
-            "create_goal" | "update_goal" | "get_goal" => {
-                self.goal_tool(name, args.as_str()).await
-            }
+            "create_goal" | "update_goal" | "get_goal" => self.goal_tool(name, args.as_str()).await,
             "monitor" => self.monitor_tool(args).await,
             "report" => self.report_tool(args.as_str()),
             "agents" => self.agents_tool(call, args).await,
@@ -679,10 +694,9 @@ impl SessionState {
         }
         let todos = self.todo_summary().await?;
         let inflight = self.inflight_counts().await?;
-        let store = self
-            .goal
-            .as_mut()
-            .ok_or_else(|| ServiceError::failed(None, "goal: the session store is not available."))?;
+        let store = self.goal.as_mut().ok_or_else(|| {
+            ServiceError::failed(None, "goal: the session store is not available.")
+        })?;
         let session = self.session.to_string();
         let ctx = GoalScope {
             session: &session,
@@ -759,7 +773,12 @@ impl SessionState {
         let jobs = match self.services.jobs(&self.caller, JobsOp::List).await? {
             JobsReply::Listed(jobs) => jobs,
             JobsReply::Unavailable { reason } => return Err(ServiceError::failed(None, reason)),
-            _ => return Err(ServiceError::failed(None, "jobs service returned an unexpected reply")),
+            _ => {
+                return Err(ServiceError::failed(
+                    None,
+                    "jobs service returned an unexpected reply",
+                ));
+            }
         };
         self.inflight_jobs = jobs
             .iter()
@@ -799,7 +818,10 @@ impl SessionState {
                     first_titles.push(item.subject.clone().into_boxed_str());
                 }
             } else if !matches!(item.state.as_str(), "done" | "cancelled") {
-                return Err(ServiceError::failed(None, "todo record has an unknown state"));
+                return Err(ServiceError::failed(
+                    None,
+                    "todo record has an unknown state",
+                ));
             }
         }
         Ok(TodoSummary {
@@ -894,7 +916,6 @@ impl SessionState {
             };
             super::goal::policy::verdict(&input)
         };
-        let mut prompt_text = None;
         if let Some(store) = self.goal.as_mut()
             && let Some(sidecar) = store.sidecar.as_mut()
             && let Some(goal) = sidecar.goal.as_mut()
@@ -903,12 +924,12 @@ impl SessionState {
                 super::goal::policy::Verdict::Continue { prompt, stall } => {
                     let live_parts = Self::live_parts(&inflight);
                     let number = goal.unattended.saturating_add(1);
-                    prompt_text = Some(super::goal::prompt::build_prompt(
+                    let prompt_text = super::goal::prompt::build_prompt(
                         goal,
                         prompt,
                         number,
                         if stall { &live_parts } else { &[] },
-                    ));
+                    );
                     super::goal::policy::record_goal_turn(
                         goal,
                         &event.reply_text,
@@ -919,11 +940,13 @@ impl SessionState {
                         prompt,
                     );
                     goal.updated_at = now;
-                    self.goal_timer = prompt_text
-                        .take()
-                        .map(|text| (TokioInstant::now() + std::time::Duration::from_millis(
-                            super::goal::policy::CONTINUATION_DELAY_MS,
-                        ), text));
+                    self.goal_timer = Some((
+                        TokioInstant::now()
+                            + std::time::Duration::from_millis(
+                                super::goal::policy::CONTINUATION_DELAY_MS,
+                            ),
+                        prompt_text,
+                    ));
                 }
                 super::goal::policy::Verdict::Deny(reason) => {
                     if let Some(blocked) = reason.mechanical_reason() {
@@ -947,13 +970,12 @@ impl SessionState {
         Ok(())
     }
 
-    async fn agents_tool(
-        &mut self,
-        call: CallId,
-        args: &RawJson,
-    ) -> Result<String, ServiceError> {
+    async fn agents_tool(&mut self, call: CallId, args: &RawJson) -> Result<String, ServiceError> {
         if self.parent.is_some() {
-            return Err(ServiceError::failed(None, super::agents_tool::NO_NESTED_RUNS));
+            return Err(ServiceError::failed(
+                None,
+                super::agents_tool::NO_NESTED_RUNS,
+            ));
         }
         let saved = self
             .config
@@ -967,8 +989,9 @@ impl SessionState {
             super::agents_tool::AgentAction::Wait { ids, timeout_s } => {
                 let mut reports = Vec::new();
                 for display in ids {
-                    let id = SessionId::parse(&display)
-                        .map_err(|_| ServiceError::failed(None, super::agents_tool::unknown_id(&display)))?;
+                    let id = SessionId::parse(&display).map_err(|_| {
+                        ServiceError::failed(None, super::agents_tool::unknown_id(&display))
+                    })?;
                     match self
                         .services
                         .agents(
@@ -981,7 +1004,12 @@ impl SessionState {
                         .await?
                     {
                         AgentsReply::Await { report } => reports.push(report.text.to_string()),
-                        _ => return Err(ServiceError::failed(None, super::agents_tool::unknown_id(&display))),
+                        _ => {
+                            return Err(ServiceError::failed(
+                                None,
+                                super::agents_tool::unknown_id(&display),
+                            ));
+                        }
                     }
                 }
                 Ok(reports.join("\n\n"))
@@ -989,10 +1017,13 @@ impl SessionState {
             super::agents_tool::AgentAction::Cancel { ids } => {
                 let mut cancelled = 0;
                 for display in ids {
-                    let id = SessionId::parse(&display)
-                        .map_err(|_| ServiceError::failed(None, super::agents_tool::unknown_id(&display)))?;
+                    let id = SessionId::parse(&display).map_err(|_| {
+                        ServiceError::failed(None, super::agents_tool::unknown_id(&display))
+                    })?;
                     if matches!(
-                        self.services.agents(&self.caller, AgentsOp::Cancel { id }).await?,
+                        self.services
+                            .agents(&self.caller, AgentsOp::Cancel { id })
+                            .await?,
                         AgentsReply::Cancelled { .. }
                     ) {
                         cancelled += 1;
@@ -1010,7 +1041,12 @@ impl SessionState {
     async fn list_agents(&self, requested: Vec<String>) -> Result<String, ServiceError> {
         let agents = match self.services.agents(&self.caller, AgentsOp::List).await? {
             AgentsReply::Listed(agents) => agents,
-            _ => return Err(ServiceError::failed(None, "agents service returned an unexpected reply")),
+            _ => {
+                return Err(ServiceError::failed(
+                    None,
+                    "agents service returned an unexpected reply",
+                ));
+            }
         };
         let filtered = agents.iter().filter(|agent| {
             requested.is_empty() || requested.iter().any(|id| id == &agent.id.to_string())
@@ -1033,12 +1069,14 @@ impl SessionState {
     ) -> Result<String, ServiceError> {
         let mut reports = Vec::new();
         for (step_index, step) in workflow.steps.iter().enumerate() {
-            let mut from_items = Vec::new();
+            let from_items;
             let items = match &step.items {
                 super::workflow::Items::Task => vec![None],
                 super::workflow::Items::Literal(items) => items.iter().map(Some).collect(),
                 super::workflow::Items::From(source) => {
-                    let source = reports.iter().find(|result: &&super::workflow::StepResult| result.name == *source);
+                    let source = reports
+                        .iter()
+                        .find(|result: &&super::workflow::StepResult| result.name == *source);
                     let Some(source) = source else {
                         reports.push(super::workflow::StepResult {
                             name: step.name.clone(),
@@ -1055,11 +1093,14 @@ impl SessionState {
                         });
                         continue;
                     };
-                    let items = super::pool::split_items(text);
-                    if items.len() > super::pool::ITEM_LINES_LIMIT {
-                        return Err(ServiceError::failed(None, super::pool::too_many_items(source.name.as_str(), items.len())));
+                    let parts = super::pool::split_items(text);
+                    if parts.len() > super::pool::ITEM_LINES_LIMIT {
+                        return Err(ServiceError::failed(
+                            None,
+                            super::pool::too_many_items(source.name.as_str(), parts.len()),
+                        ));
                     }
-                    from_items = items;
+                    from_items = parts;
                     from_items.iter().map(Some).collect()
                 }
             };
@@ -1101,9 +1142,18 @@ impl SessionState {
                     tools: Some(tool_names.into_boxed_slice()),
                     workspace: None,
                 };
-                let child = match self.services.agents(&self.caller, AgentsOp::Start(start)).await? {
+                let child = match self
+                    .services
+                    .agents(&self.caller, AgentsOp::Start(start))
+                    .await?
+                {
                     AgentsReply::Started { id } => id,
-                    _ => return Err(ServiceError::failed(None, "agents service did not start the child")),
+                    _ => {
+                        return Err(ServiceError::failed(
+                            None,
+                            "agents service did not start the child",
+                        ));
+                    }
                 };
                 let report = match self
                     .services
@@ -1117,13 +1167,21 @@ impl SessionState {
                     .await?
                 {
                     AgentsReply::Await { report } => report,
-                    _ => return Err(ServiceError::failed(None, "agents service did not return the child report")),
+                    _ => {
+                        return Err(ServiceError::failed(
+                            None,
+                            "agents service did not return the child report",
+                        ));
+                    }
                 };
                 if item.is_none() {
                     task_report = Some(report.text.clone());
                 }
                 item_results.push(super::workflow::PoolItemResult {
-                    item: item.map_or_else(|| step.name.clone().into_boxed_str(), |item| item.clone().into_boxed_str()),
+                    item: item.map_or_else(
+                        || step.name.clone().into_boxed_str(),
+                        |item| item.clone().into_boxed_str(),
+                    ),
                     state: "done".into(),
                     summary: super::delivery::preview(&report.text, 200).into_boxed_str(),
                 });
@@ -1164,18 +1222,18 @@ impl SessionState {
                     if let Some(text) = effects.steer {
                         let _ = self
                             .services
-                            .turn(
-                                &self.caller,
-                                TurnOp::Steer { text },
-                            )
+                            .turn(&self.caller, TurnOp::Steer { text })
                             .await;
                     }
                     if let Some(text) = effects.warning {
-                        self.services.notify(&self.caller, Notice {
-                            turn: Some(event.turn),
-                            kind: "orchestration.loop_guard".into(),
-                            text,
-                        });
+                        self.services.notify(
+                            &self.caller,
+                            Notice {
+                                turn: Some(event.turn),
+                                kind: "orchestration.loop_guard".into(),
+                                text,
+                            },
+                        );
                     }
                     if let Some(text) = effects.p1_recovery {
                         self.arbiter.admit_recovery(text.into(), Instant::now());
@@ -1205,12 +1263,14 @@ impl SessionState {
         {
             let parsed = sonic_rs::from_str::<sonic_rs::Value>(event.args.as_str());
             if let Ok(args) = parsed
-                && let Some(command) = args.as_object().and_then(|object| object.get(&"command")).and_then(sonic_rs::JsonValueTrait::as_str)
+                && let Some(command) = args
+                    .as_object()
+                    .and_then(|object| object.get(&"command"))
+                    .and_then(sonic_rs::JsonValueTrait::as_str)
                 && let Some(wait) = classifier.classify(command)
+                && let Ok(Some(args)) = rewrite_exec_args(&event.args, wait)
             {
-                if let Ok(Some(args)) = rewrite_exec_args(&event.args, wait) {
-                    verdict = ToolCallVerdict::Rewrite { args };
-                }
+                verdict = ToolCallVerdict::Rewrite { args };
             }
         }
         verdict
@@ -1270,9 +1330,7 @@ pub(crate) struct SessionStartHook(pub(crate) Runtime);
 impl ObserveHook<SessionStart> for SessionStartHook {
     fn call(&self, start: SessionStart, cx: HookCx) -> BoxFuture<'static, Result<(), HookError>> {
         let runtime = self.0.clone();
-        Box::pin(async move {
-            runtime.open(start, cx).await
-        })
+        Box::pin(async move { runtime.open(start, cx).await })
     }
 }
 
@@ -1291,7 +1349,11 @@ impl ObserveHook<SessionEnd> for SessionEndHook {
 pub(crate) struct InputHook(pub(crate) Runtime);
 
 impl Hook<InputEvent, InputVerdict> for InputHook {
-    fn call(&self, _input: InputEvent, cx: HookCx) -> BoxFuture<'static, Result<InputVerdict, HookError>> {
+    fn call(
+        &self,
+        _input: InputEvent,
+        cx: HookCx,
+    ) -> BoxFuture<'static, Result<InputVerdict, HookError>> {
         let runtime = self.0.clone();
         let session = cx.session;
         let deadline = cx.deadline;
@@ -1311,14 +1373,20 @@ impl Hook<InputEvent, InputVerdict> for InputHook {
 pub(crate) struct ToolCallHook(pub(crate) Runtime);
 
 impl Hook<ToolCallEvent, ToolCallVerdict> for ToolCallHook {
-    fn call(&self, event: ToolCallEvent, cx: HookCx) -> BoxFuture<'static, Result<ToolCallVerdict, HookError>> {
+    fn call(
+        &self,
+        event: ToolCallEvent,
+        cx: HookCx,
+    ) -> BoxFuture<'static, Result<ToolCallVerdict, HookError>> {
         let runtime = self.0.clone();
         let session = cx.session;
         let deadline = cx.deadline;
         let cancel = cx.cancel;
         Box::pin(async move {
             runtime
-                .hook_request(session, deadline, cancel, |reply| Message::ToolCall(event, reply))
+                .hook_request(session, deadline, cancel, |reply| {
+                    Message::ToolCall(event, reply)
+                })
                 .await
         })
     }
@@ -1327,14 +1395,20 @@ impl Hook<ToolCallEvent, ToolCallVerdict> for ToolCallHook {
 pub(crate) struct ToolResultHook(pub(crate) Runtime);
 
 impl ObserveHook<ToolResultEvent> for ToolResultHook {
-    fn call(&self, event: ToolResultEvent, cx: HookCx) -> BoxFuture<'static, Result<(), HookError>> {
+    fn call(
+        &self,
+        event: ToolResultEvent,
+        cx: HookCx,
+    ) -> BoxFuture<'static, Result<(), HookError>> {
         let runtime = self.0.clone();
         let session = cx.session;
         let deadline = cx.deadline;
         let cancel = cx.cancel;
         Box::pin(async move {
             runtime
-                .hook_request(session, deadline, cancel, |reply| Message::ToolResult(event, reply))
+                .hook_request(session, deadline, cancel, |reply| {
+                    Message::ToolResult(event, reply)
+                })
                 .await
         })
     }
@@ -1350,7 +1424,9 @@ impl ObserveHook<TurnEnd> for TurnEndHook {
         let cancel = cx.cancel;
         Box::pin(async move {
             runtime
-                .hook_request(session, deadline, cancel, |reply| Message::TurnEnd(event, reply))
+                .hook_request(session, deadline, cancel, |reply| {
+                    Message::TurnEnd(event, reply)
+                })
                 .await
         })
     }
@@ -1366,7 +1442,9 @@ impl ObserveHook<Settled> for SettledHook {
         let cancel = cx.cancel;
         Box::pin(async move {
             match runtime
-                .hook_request(session, deadline, cancel, |reply| Message::Settled(event, reply))
+                .hook_request(session, deadline, cancel, |reply| {
+                    Message::Settled(event, reply)
+                })
                 .await?
             {
                 Ok(()) => Ok(()),

@@ -223,6 +223,38 @@ async fn codex_https_idle_timeout_is_stream_cut() -> Result<(), Box<dyn Error>> 
     Ok(())
 }
 
+#[tokio::test]
+async fn codex_https_body_cut_mid_frame_is_transport_not_protocol() -> Result<(), Box<dyn Error>> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let base = format!("http://{}", listener.local_addr()?);
+    let mut server = tokio::task::JoinSet::new();
+    server.spawn(async move {
+        let (mut socket, _) = listener.accept().await?;
+        read_request(&mut socket).await?;
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 500\r\nConnection: close\r\n\r\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"a",
+            )
+            .await?;
+        Ok::<(), std::io::Error>(())
+    });
+    let mut events = https_with_idle_timeout(
+        &reqwest::Client::new(),
+        &base,
+        wire(true),
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("Codex HTTPS stream opens");
+    assert!(matches!(
+        timeout(Duration::from_secs(2), events.next()).await?,
+        Some(Err(ProviderError::Transport { .. }))
+    ));
+    assert!(events.next().await.is_none());
+    server.join_next().await.expect("server completes")??;
+    Ok(())
+}
+
 #[test]
 fn codex_summary_auto_requires_the_resolved_capability() {
     let supported = wire(true);

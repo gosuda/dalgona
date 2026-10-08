@@ -14,25 +14,25 @@ use std::{
 
 use dal_core::RawJson;
 use reqwest::{
+    Client, Response, StatusCode, Url,
     header::{HeaderName, HeaderValue},
     redirect::Policy,
-    Client, Response, StatusCode, Url,
 };
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
 use tokio::{sync::Mutex, time::Instant};
 use tokio_util::sync::CancellationToken;
 
 use crate::mcp::{
+    Budgets, McpError, STEPUP_MAX, TransportError,
     http::{
         auth as token_auth,
         oauth::{Challenge, Discovery},
         protocol::{
-            notification_body, outbound_headers, protocol_error, request_body,
-            recognizes_modern_error, session_from, LEGACY_PROTOCOL_VERSION, PROTOCOL_VERSION,
+            LEGACY_PROTOCOL_VERSION, PROTOCOL_VERSION, notification_body, outbound_headers,
+            protocol_error, recognizes_modern_error, request_body, session_from,
         },
     },
-    tools::{parameter_headers, HeaderAnnotation, Key},
-    Budgets, McpError, TransportError, STEPUP_MAX,
+    tools::{HeaderAnnotation, Key, parameter_headers},
 };
 
 const RESPONSE_MAX: usize = 8 * 1024 * 1024;
@@ -170,14 +170,8 @@ impl HttpTransport {
             if cancel.is_cancelled() {
                 return Err(TransportError::Cancelled);
             }
-            let body = request_body(
-                request_id,
-                method,
-                params,
-                version,
-                &self.client_version,
-            )
-            .map_err(TransportError::Mcp)?;
+            let body = request_body(request_id, method, params, version, &self.client_version)
+                .map_err(TransportError::Mcp)?;
             let token = self.bearer().await;
             used_token.clone_from(&token);
             let response = self
@@ -202,7 +196,7 @@ impl HttpTransport {
                     }));
                 }
                 auth_attempts += 1;
-                let challenge = oauth::challenge(&response.headers());
+                let challenge = oauth::challenge(response.headers());
                 let _authorization = self.authorization.lock().await;
                 if self.bearer().await != used_token {
                     request_id = ids.fetch_add(1, Ordering::Relaxed);
@@ -248,14 +242,7 @@ impl HttpTransport {
                 interactive_attempted = true;
                 refresh_attempted = true;
                 let updated = self
-                    .authorize(
-                        &discovery,
-                        existing.as_ref(),
-                        None,
-                        services,
-                        who,
-                        cancel,
-                    )
+                    .authorize(&discovery, existing.as_ref(), None, services, who, cancel)
                     .await?;
                 self.persist(&discovery, updated).await?;
                 deadline = CallDeadline::new(self.call_timeout, self.call_max);
@@ -263,7 +250,7 @@ impl HttpTransport {
                 continue;
             }
             if status == StatusCode::FORBIDDEN {
-                let challenge = oauth::challenge(&response.headers());
+                let challenge = oauth::challenge(response.headers());
                 if !challenge.insufficient_scope {
                     return Err(TransportError::Mcp(McpError::HttpAuth {
                         code: status.as_u16(),
@@ -308,10 +295,12 @@ impl HttpTransport {
                     .await?;
                 let text = String::from_utf8_lossy(&body).into_owned();
                 if recognizes_modern_error(&text) {
-                    return response_for_id(&text, request_id, id)
-                        .map_err(TransportError::Mcp);
+                    return response_for_id(&text, request_id, id).map_err(TransportError::Mcp);
                 }
-                if matches!(status, StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED) {
+                if matches!(
+                    status,
+                    StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+                ) {
                     if version == LEGACY_PROTOCOL_VERSION {
                         return Err(TransportError::Mcp(McpError::Auth {
                             cause: "unsupported HTTP+SSE-only transport".to_owned(),
@@ -335,12 +324,23 @@ impl HttpTransport {
                 .to_ascii_lowercase();
             if content_type.starts_with("text/event-stream") {
                 return self
-                    .read_event_stream(response, request_id, id, cancel, &mut deadline, version, token.as_deref())
+                    .read_event_stream(
+                        response,
+                        request_id,
+                        id,
+                        cancel,
+                        &mut deadline,
+                        version,
+                        token.as_deref(),
+                    )
                     .await;
             }
-            let body = self.read_body(response, RESPONSE_MAX, cancel, &deadline).await?;
-            let text = std::str::from_utf8(&body)
-                .map_err(|_| TransportError::Mcp(protocol_error("invalid MCP response encoding".to_owned())))?;
+            let body = self
+                .read_body(response, RESPONSE_MAX, cancel, &deadline)
+                .await?;
+            let text = std::str::from_utf8(&body).map_err(|_| {
+                TransportError::Mcp(protocol_error("invalid MCP response encoding".to_owned()))
+            })?;
             return response_for_id(text, request_id, id).map_err(TransportError::Mcp);
         }
     }
@@ -387,7 +387,7 @@ impl HttpTransport {
                     }));
                 }
                 auth_attempts += 1;
-                let challenge = oauth::challenge(&response.headers());
+                let challenge = oauth::challenge(response.headers());
                 let _authorization = self.authorization.lock().await;
                 if self.bearer().await != token {
                     continue;
@@ -395,7 +395,10 @@ impl HttpTransport {
                 let discovery = self.discover(&challenge, cancel).await?;
                 self.set_issuer(&discovery.issuer).await;
                 let existing = self.record(&discovery.issuer, &discovery.resource).await?;
-                if token.is_none() && let Some(record) = existing.as_ref() && !record.access_token.is_empty() {
+                if token.is_none()
+                    && let Some(record) = existing.as_ref()
+                    && !record.access_token.is_empty()
+                {
                     continue;
                 }
                 if let Some(record) = existing.as_ref()
@@ -426,7 +429,7 @@ impl HttpTransport {
                 continue;
             }
             if response.status() == StatusCode::FORBIDDEN {
-                let challenge = oauth::challenge(&response.headers());
+                let challenge = oauth::challenge(response.headers());
                 if !challenge.insufficient_scope {
                     return Err(TransportError::Mcp(McpError::HttpAuth {
                         code: 403,
@@ -457,14 +460,19 @@ impl HttpTransport {
             if response.status().is_success() || response.status() == StatusCode::ACCEPTED {
                 return Ok(());
             }
-            if matches!(response.status(), StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED)
-                && version == LEGACY_PROTOCOL_VERSION
+            if matches!(
+                response.status(),
+                StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+            ) && version == LEGACY_PROTOCOL_VERSION
             {
                 return Err(TransportError::Mcp(McpError::Auth {
                     cause: "unsupported HTTP+SSE-only transport".to_owned(),
                 }));
             }
-            if matches!(response.status(), StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED) {
+            if matches!(
+                response.status(),
+                StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+            ) {
                 return Err(TransportError::Mcp(McpError::Protocol {
                     code: -32601,
                     message: format!("HTTP endpoint returned {}", response.status().as_u16()),
@@ -493,7 +501,10 @@ impl HttpTransport {
             .map_err(|_| protocol_error("HTTP session shutdown timed out".to_owned()))?
             .map_err(|_| protocol_error("HTTP session shutdown failed".to_owned()))?;
         if response.status().is_success()
-            || matches!(response.status(), StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED)
+            || matches!(
+                response.status(),
+                StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+            )
         {
             *self.session_id.lock().await = None;
             return Ok(());
@@ -563,7 +574,9 @@ impl HttpTransport {
                 return Ok(body);
             };
             if body.len().saturating_add(chunk.len()) > maximum {
-                return Err(TransportError::Mcp(protocol_error("HTTP response exceeds the size limit".to_owned())));
+                return Err(TransportError::Mcp(protocol_error(
+                    "HTTP response exceeds the size limit".to_owned(),
+                )));
             }
             body.extend_from_slice(&chunk);
         }
@@ -594,7 +607,15 @@ impl HttpTransport {
             };
             for event in parser.push(&chunk).map_err(TransportError::Mcp)? {
                 if let Some(reply) = self
-                    .process_event(&event, request_id, original_id, cancel, deadline, version, token)
+                    .process_event(
+                        &event,
+                        request_id,
+                        original_id,
+                        cancel,
+                        deadline,
+                        version,
+                        token,
+                    )
                     .await?
                 {
                     return Ok(reply);
@@ -603,7 +624,15 @@ impl HttpTransport {
         }
         for event in parser.finish().map_err(TransportError::Mcp)? {
             if let Some(reply) = self
-                .process_event(&event, request_id, original_id, cancel, deadline, version, token)
+                .process_event(
+                    &event,
+                    request_id,
+                    original_id,
+                    cancel,
+                    deadline,
+                    version,
+                    token,
+                )
                 .await?
             {
                 return Ok(reply);
@@ -627,11 +656,14 @@ impl HttpTransport {
         if event.is_empty() || event == "[DONE]" {
             return Ok(None);
         }
-        let raw = RawJson::parse(event)
-            .map_err(|_| TransportError::Mcp(protocol_error("invalid JSON in HTTP event stream".to_owned())))?;
-        let value = raw
-            .decode_as::<Value>()
-            .map_err(|_| TransportError::Mcp(protocol_error("invalid JSON-RPC event".to_owned())))?;
+        let raw = RawJson::parse(event).map_err(|_| {
+            TransportError::Mcp(protocol_error(
+                "invalid JSON in HTTP event stream".to_owned(),
+            ))
+        })?;
+        let value = raw.decode_as::<Value>().map_err(|_| {
+            TransportError::Mcp(protocol_error("invalid JSON-RPC event".to_owned()))
+        })?;
         if let Some(method) = value.get("method").and_then(JsonValueTrait::as_str) {
             if method == "notifications/progress" {
                 let token = value
@@ -645,7 +677,8 @@ impl HttpTransport {
                 return Ok(None);
             }
             if value.get("id").is_some() {
-                self.answer_server_request(&value, version, token, cancel).await;
+                self.answer_server_request(&value, version, token, cancel)
+                    .await;
             }
             return Ok(None);
         }
@@ -670,7 +703,9 @@ impl HttpTransport {
         let Ok(id) = sonic_rs::to_string(id) else {
             return;
         };
-        let Ok(method_name) = sonic_rs::to_string("client does not support server-initiated requests") else {
+        let Ok(method_name) =
+            sonic_rs::to_string("client does not support server-initiated requests")
+        else {
             return;
         };
         let Ok(body) = RawJson::parse(&format!(
@@ -756,9 +791,11 @@ impl HttpTransport {
             token_auth::persist_token(&path, &issuer, &resource, stored)
         })
         .await
-        .map_err(|_| TransportError::Mcp(McpError::Auth {
-            cause: "token persistence failed".to_owned(),
-        }))?
+        .map_err(|_| {
+            TransportError::Mcp(McpError::Auth {
+                cause: "token persistence failed".to_owned(),
+            })
+        })?
         .map_err(TransportError::Mcp)?;
         let mut tokens = self.load_tokens().await;
         tokens
@@ -798,23 +835,24 @@ impl HttpTransport {
     ) -> Result<token_auth::TokenRecord, TransportError> {
         tokio::time::timeout(
             self.stepup_timeout,
-            oauth::authorize(
-                &self.client,
-                &self.url,
-                &self.tokens_path,
+            oauth::authorize(oauth::AuthorizeSpec {
+                client: &self.client,
+                target: &self.url,
                 discovery,
                 existing,
-                scope,
-                &self.client_version,
+                requested_scope: scope,
+                client_version: &self.client_version,
                 services,
                 who,
                 cancel,
-            ),
+            }),
         )
         .await
-        .map_err(|_| TransportError::Mcp(McpError::Timeout {
-            n: self.stepup_timeout.as_secs(),
-        }))?
+        .map_err(|_| {
+            TransportError::Mcp(McpError::Timeout {
+                n: self.stepup_timeout.as_secs(),
+            })
+        })?
         .map_err(TransportError::Mcp)
     }
 }
@@ -839,21 +877,28 @@ fn is_loopback(url: &Url) -> bool {
         return false;
     };
     host.eq_ignore_ascii_case("localhost")
-        || host.parse::<IpAddr>().is_ok_and(|address| address.is_loopback())
+        || host
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
 }
 
 fn response_for_id(text: &str, attempt_id: u64, original_id: u64) -> Result<RawJson, McpError> {
-    let value = sonic_rs::from_str::<Value>(text).map_err(|_| protocol_error("invalid JSON-RPC response".to_owned()))?;
+    let value = sonic_rs::from_str::<Value>(text)
+        .map_err(|_| protocol_error("invalid JSON-RPC response".to_owned()))?;
     if let Some(items) = value.as_array() {
         for item in items {
             if item.get("id").and_then(JsonValueTrait::as_u64) == Some(attempt_id) {
                 return normalize_reply(item, original_id);
             }
         }
-        return Err(protocol_error("HTTP response did not match its request id".to_owned()));
+        return Err(protocol_error(
+            "HTTP response did not match its request id".to_owned(),
+        ));
     }
     if value.get("id").and_then(JsonValueTrait::as_u64) != Some(attempt_id) {
-        return Err(protocol_error("HTTP response did not match its request id".to_owned()));
+        return Err(protocol_error(
+            "HTTP response did not match its request id".to_owned(),
+        ));
     }
     normalize_reply(&value, original_id)
 }
@@ -868,9 +913,12 @@ fn normalize_reply(value: &Value, id: u64) -> Result<RawJson, McpError> {
             .map_err(|_| protocol_error("invalid JSON-RPC result response".to_owned()))?;
         format!("{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{result}}}")
     } else {
-        return Err(protocol_error("JSON-RPC response has no result or error".to_owned()));
+        return Err(protocol_error(
+            "JSON-RPC response has no result or error".to_owned(),
+        ));
     };
-    RawJson::parse(&body).map_err(|_| protocol_error("invalid correlated JSON-RPC response".to_owned()))
+    RawJson::parse(&body)
+        .map_err(|_| protocol_error("invalid correlated JSON-RPC response".to_owned()))
 }
 
 #[derive(Default)]
@@ -884,7 +932,9 @@ impl SseParser {
     fn push(&mut self, chunk: &[u8]) -> Result<Vec<String>, McpError> {
         self.bytes = self.bytes.saturating_add(chunk.len());
         if self.bytes > RESPONSE_MAX {
-            return Err(protocol_error("HTTP event stream exceeds the size limit".to_owned()));
+            return Err(protocol_error(
+                "HTTP event stream exceeds the size limit".to_owned(),
+            ));
         }
         let mut events = Vec::new();
         for byte in chunk {

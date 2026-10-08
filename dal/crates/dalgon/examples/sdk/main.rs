@@ -8,6 +8,10 @@ use std::{collections::BTreeMap, io, path::PathBuf, time::Duration};
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "R4 edge: the example embedder roots its workspace at the process cwd"
+    )]
     let cwd = std::env::current_dir()?;
     let workspace = Workspace::new(cwd.clone())?;
     let product = Product {

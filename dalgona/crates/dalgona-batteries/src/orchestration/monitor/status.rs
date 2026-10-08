@@ -93,23 +93,20 @@ pub(crate) fn status_json(payload: &StatusPayload) -> String {
     } else {
         "null".to_owned()
     };
-    let goal = payload
-        .goal
-        .as_ref()
-        .map_or_else(
-            || "null".to_owned(),
-            |goal| {
-                let status = match goal.status {
-                    GoalStatus::Active => "active",
-                    GoalStatus::Paused => "paused",
-                    GoalStatus::Blocked => "blocked",
-                    GoalStatus::Complete => "complete",
-                };
-                let id = sonic_rs::to_string(goal.id.as_ref()).unwrap_or_default();
-                let objective = sonic_rs::to_string(goal.objective.as_ref()).unwrap_or_default();
-                format!("{{\"id\":{id},\"status\":\"{status}\",\"objective\":{objective}}}")
-            },
-        );
+    let goal = payload.goal.as_ref().map_or_else(
+        || "null".to_owned(),
+        |goal| {
+            let status = match goal.status {
+                GoalStatus::Active => "active",
+                GoalStatus::Paused => "paused",
+                GoalStatus::Blocked => "blocked",
+                GoalStatus::Complete => "complete",
+            };
+            let id = sonic_rs::to_string(goal.id.as_ref()).unwrap_or_default();
+            let objective = sonic_rs::to_string(goal.objective.as_ref()).unwrap_or_default();
+            format!("{{\"id\":{id},\"status\":\"{status}\",\"objective\":{objective}}}")
+        },
+    );
     let inflight = payload.inflight;
     format!(
         "{{\"mode\":\"{mode}\",\"paused_reason\":{paused_reason},\"quiet\":{},\"inflight\":{{\"jobs\":{},\"monitors\":{},\"asks\":{},\"goal_timer\":{},\"loop_guard\":{}}},\"silent_jobs\":{},\"goal\":{goal}}}",

@@ -93,6 +93,16 @@ impl Default for CallState {
     }
 }
 
+/// The scalars one judge call needs, grouped so `call` stays under the
+/// argument limit.
+struct CallSpec<'a> {
+    feature: &'a str,
+    questions: usize,
+    turn: Option<TurnId>,
+    deadline_ms: Option<u64>,
+    system: &'static str,
+}
+
 impl Judge {
     /// Opens or retrieves the live judge for one session.
     ///
@@ -158,7 +168,7 @@ impl Judge {
                 tracing::debug!(reason = %message, "judge role resolved off");
                 (Gate::Off, Box::from(""))
             }
-            Err(error) => return Err(provider_error(error)),
+            Err(error) => return Err(provider_error(&error)),
         };
 
         let inner = Arc::new(JudgeInner {
@@ -246,11 +256,13 @@ impl Judge {
         let questions = Arc::new(questions);
         let render_questions = Arc::clone(&questions);
         self.call(
-            feature,
-            question_count,
-            turn,
-            deadline_ms,
-            SYSTEM_LINE,
+            CallSpec {
+                feature,
+                questions: question_count,
+                turn,
+                deadline_ms,
+                system: SYSTEM_LINE,
+            },
             move || render_envelope(shared, render_questions.as_slice()),
             move |reply| parse_answers(reply, questions.as_slice()),
         )
@@ -266,11 +278,13 @@ impl Judge {
         validate_shared(shared)?;
         self.ensure_ready()?;
         self.call(
-            "history",
-            1,
-            None,
-            None,
-            SUMMARY_SYSTEM_LINE,
+            CallSpec {
+                feature: "history",
+                questions: 1,
+                turn: None,
+                deadline_ms: None,
+                system: SUMMARY_SYSTEM_LINE,
+            },
             || render_summary(shared, prompt),
             |reply| Ok(reply.to_owned()),
         )
@@ -292,11 +306,7 @@ impl Judge {
 
     async fn call<T, Render, Parse>(
         &self,
-        feature: &str,
-        questions: usize,
-        turn: Option<TurnId>,
-        deadline_ms: Option<u64>,
-        system: &'static str,
+        spec: CallSpec<'_>,
         render: Render,
         parse: Parse,
     ) -> Result<T, JudgeError>
@@ -305,6 +315,13 @@ impl Judge {
         Render: FnOnce() -> String + Send,
         Parse: FnOnce(&str) -> Result<T, JudgeError> + Send,
     {
+        let CallSpec {
+            feature,
+            questions,
+            turn,
+            deadline_ms,
+            system,
+        } = spec;
         let (call, exhausted) = self.reserve_call(turn);
         let mut settlement =
             CallSettlement::new(Arc::clone(&self.inner), call, turn, feature, questions);
@@ -357,7 +374,7 @@ impl Judge {
                 drop(permit);
                 match inference {
                     Err(_) => (Err(JudgeError::Timeout { ms: timeout_ms }), 0, 0),
-                    Ok(Err(error)) => (Err(provider_error(error)), 0, 0),
+                    Ok(Err(error)) => (Err(provider_error(&error)), 0, 0),
                     Ok(Ok(inference)) => {
                         let (response, input_tokens, output_tokens) = split_inference(inference);
                         (parse(&response), input_tokens, output_tokens)
@@ -477,7 +494,7 @@ fn inference_text(inference: Inference) -> String {
     split_inference(inference).0
 }
 
-fn provider_error(error: ServiceError) -> JudgeError {
+fn provider_error(error: &ServiceError) -> JudgeError {
     JudgeError::Provider {
         message: reply_detail(&error.to_string()),
     }
@@ -496,7 +513,6 @@ fn error_status(error: &JudgeError) -> &'static str {
     match error {
         JudgeError::Timeout { .. } => "timeout",
         JudgeError::Parse { .. } => "parse",
-        JudgeError::Provider { .. } => "provider",
         _ => "provider",
     }
 }

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use dal_agent::ext::{StreamWatch, TurnInfo, WatchFactory};
+use dal_agent::ext::{TurnInfo, WatchFactory};
 use dal_core::ext::Channel;
 use dal_core::{EntryId, RulesConfig, SessionId, TurnId};
 
@@ -148,9 +148,8 @@ fn finish_after_interrupt_is_idempotent() {
     );
 }
 
-#[test]
-fn action_resolution_table() {
-    let fixture = fixture(&[
+fn resolution_fixture() -> Fixture {
+    fixture(&[
         (
             "r-always",
             "scope: text, thinking, tool\ncondition: ALWAYS123\n",
@@ -176,8 +175,17 @@ fn action_resolution_table() {
             "scope: text, thinking, tool\nreport: true\ncondition: REPORT123\n",
             "Report body.",
         ),
-    ]);
-    let cases: &[(&str, &str, WatchBudget, RuleAction, WatchVerdict)] = &[
+    ])
+}
+
+fn text_thinking_cases() -> Vec<(
+    &'static str,
+    &'static str,
+    WatchBudget,
+    RuleAction,
+    WatchVerdict,
+)> {
+    vec![
         (
             "r-always",
             "ALWAYS123",
@@ -241,80 +249,94 @@ fn action_resolution_table() {
             RuleAction::Report,
             WatchVerdict::Continue,
         ),
-    ];
-    for (rule, marker, budget, action, verdict) in cases {
-        let mut text_watch = watch(&fixture, 1, *budget, EditStyle::Replace);
+    ]
+}
+
+fn tool_cases() -> Vec<(
+    &'static str,
+    &'static str,
+    WatchBudget,
+    RuleAction,
+    WatchVerdict,
+)> {
+    vec![
+        (
+            "r-always",
+            "ALWAYS123",
+            WatchBudget::Interrupts,
+            RuleAction::Interrupt,
+            WatchVerdict::Stop,
+        ),
+        (
+            "r-always",
+            "ALWAYS123",
+            WatchBudget::RemindersOnly,
+            RuleAction::Remind,
+            WatchVerdict::Continue,
+        ),
+        (
+            "r-prose",
+            "PROSE123",
+            WatchBudget::Interrupts,
+            RuleAction::Remind,
+            WatchVerdict::Continue,
+        ),
+        (
+            "r-tool",
+            "TOOL123",
+            WatchBudget::Interrupts,
+            RuleAction::Interrupt,
+            WatchVerdict::Stop,
+        ),
+        (
+            "r-tool",
+            "TOOL123",
+            WatchBudget::RemindersOnly,
+            RuleAction::Remind,
+            WatchVerdict::Continue,
+        ),
+        (
+            "r-never",
+            "NEVER123",
+            WatchBudget::Interrupts,
+            RuleAction::Remind,
+            WatchVerdict::Continue,
+        ),
+        (
+            "r-report",
+            "REPORT123",
+            WatchBudget::Interrupts,
+            RuleAction::Report,
+            WatchVerdict::Continue,
+        ),
+    ]
+}
+
+#[test]
+fn action_resolution_table() {
+    let fixture = resolution_fixture();
+    for (rule, marker, budget, action, verdict) in text_thinking_cases() {
+        let mut text_watch = watch(&fixture, 1, budget, EditStyle::Replace);
         assert_eq!(
             text_watch.feed(SourceKind::Text, marker),
-            Ok(*verdict),
+            Ok(verdict),
             "text {rule} under {budget:?}"
         );
         assert_eq!(text_watch.fires().len(), 1);
-        assert_eq!(text_watch.fires()[0].action, *action);
-        assert_eq!(text_watch.fires()[0].rule.as_str(), *rule);
+        assert_eq!(text_watch.fires()[0].action, action);
+        assert_eq!(text_watch.fires()[0].rule.as_str(), rule);
 
-        let mut thinking_watch = watch(&fixture, 1, *budget, EditStyle::Replace);
+        let mut thinking_watch = watch(&fixture, 1, budget, EditStyle::Replace);
         assert_eq!(
             thinking_watch.feed(SourceKind::Thinking, marker),
-            Ok(*verdict),
+            Ok(verdict),
             "thinking {rule} under {budget:?}"
         );
-        assert_eq!(thinking_watch.fires()[0].action, *action);
+        assert_eq!(thinking_watch.fires()[0].action, action);
     }
 
-    let tool_cases: &[(&str, &str, WatchBudget, RuleAction, WatchVerdict)] = &[
-        (
-            "r-always",
-            "ALWAYS123",
-            WatchBudget::Interrupts,
-            RuleAction::Interrupt,
-            WatchVerdict::Stop,
-        ),
-        (
-            "r-always",
-            "ALWAYS123",
-            WatchBudget::RemindersOnly,
-            RuleAction::Remind,
-            WatchVerdict::Continue,
-        ),
-        (
-            "r-prose",
-            "PROSE123",
-            WatchBudget::Interrupts,
-            RuleAction::Remind,
-            WatchVerdict::Continue,
-        ),
-        (
-            "r-tool",
-            "TOOL123",
-            WatchBudget::Interrupts,
-            RuleAction::Interrupt,
-            WatchVerdict::Stop,
-        ),
-        (
-            "r-tool",
-            "TOOL123",
-            WatchBudget::RemindersOnly,
-            RuleAction::Remind,
-            WatchVerdict::Continue,
-        ),
-        (
-            "r-never",
-            "NEVER123",
-            WatchBudget::Interrupts,
-            RuleAction::Remind,
-            WatchVerdict::Continue,
-        ),
-        (
-            "r-report",
-            "REPORT123",
-            WatchBudget::Interrupts,
-            RuleAction::Report,
-            WatchVerdict::Continue,
-        ),
-    ];
-    for (rule, marker, budget, action, verdict) in tool_cases {
-        let mut tool_watch = watch(&fixture, 1, *budget, EditStyle::Replace);
+    for (rule, marker, budget, action, verdict) in tool_cases() {
+        let mut tool_watch = watch(&fixture, 1, budget, EditStyle::Replace);
         let delta = format!("{{\"command\":\"run {marker}\"}}");
         assert_eq!(
             tool_watch.feed(
@@ -323,13 +345,16 @@ fn action_resolution_table() {
                 },
                 &delta
             ),
-            Ok(*verdict),
+            Ok(verdict),
             "tool {rule} under {budget:?}"
         );
         assert_eq!(tool_watch.fires().len(), 1);
-        assert_eq!(tool_watch.fires()[0].action, *action);
-        assert_eq!(tool_watch.fires()[0].rule.as_str(), *rule);
-        assert!(tool_watch.fires()[0].inject.is_some() != (*action == RuleAction::Report));
+        assert_eq!(tool_watch.fires()[0].action, action);
+        assert_eq!(tool_watch.fires()[0].rule.as_str(), rule);
+        assert_eq!(
+            tool_watch.fires()[0].inject.is_some(),
+            action != RuleAction::Report
+        );
     }
 }
 
@@ -627,8 +652,10 @@ fn interrupt_mode_default_follows_config() {
     let data = temp.0.join("data");
     let workspace = temp.0.join("workspace");
     write_rule(&data.join("rules"), "r", "condition: MARK\n", "Body.");
-    let mut cfg = RulesConfig::default();
-    cfg.interrupt = InterruptMode::Never;
+    let cfg = RulesConfig {
+        interrupt: InterruptMode::Never,
+        ..RulesConfig::default()
+    };
     let input = RuleBuildInput {
         records: &[],
         plugin_rules: &[],

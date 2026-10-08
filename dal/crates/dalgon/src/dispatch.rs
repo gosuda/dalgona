@@ -96,9 +96,9 @@ pub(crate) async fn serve(
         workspace_path,
         workspace: _,
         config,
-        config_path: _,
         data_root,
         helper,
+        ..
     } = startup;
     let core_serve = config.serve();
     if let Some(cli::ServeSubcommand::Token(token)) = &args.command {
@@ -116,9 +116,7 @@ pub(crate) async fn serve(
             snapshot.stderr_tty,
             &mut out,
             &mut err,
-        )
-        .await
-        {
+        ) {
             Ok(code) => code,
             Err(error) => serve_error(error),
         };
@@ -167,11 +165,13 @@ pub(crate) async fn serve(
     match drive(
         &stop,
         serve::run(
-            host,
-            serve_args,
-            serve_config,
-            data_root,
-            stop.clone(),
+            serve::ServeRun {
+                host,
+                args: serve_args,
+                config: serve_config,
+                data_root,
+                stop: stop.clone(),
+            },
             &mut out,
             &mut err,
             snapshot.stderr_tty,
@@ -286,7 +286,7 @@ pub(crate) async fn plugin(args: cli::PluginArgs, startup: Startup, product: Pro
 }
 
 /// Renders one rules-command failure with its exit status.
-fn rules_error(error: rules_cmd::RulesCommandError) -> ExitCode {
+fn rules_error(error: &rules_cmd::RulesCommandError) -> ExitCode {
     let code = error.exit_code();
     let _ = writeln!(std::io::stderr().lock(), "{error}");
     code
@@ -352,14 +352,14 @@ pub(crate) async fn rules(args: cli::RulesArgs, startup: Startup, product: Produ
         &input,
         &startup.data_root,
         &startup.workspace_path,
-        &startup.config.rules(),
+        startup.config.rules(),
         &mut rules_stdin(),
         &mut out,
     )
     .await
     {
         Ok(code) => code,
-        Err(error) => rules_error(error),
+        Err(error) => rules_error(&error),
     }
 }
 

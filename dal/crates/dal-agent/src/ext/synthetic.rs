@@ -299,21 +299,7 @@ pub(crate) async fn open(
         return failed(failure_of(error));
     }
     let shared = &deps.host.shared;
-    let session = {
-        let sessions = deps
-            .host
-            .sessions
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        sessions.get(&deps.session).map(|entry| {
-            (
-                entry.handle.clone(),
-                Arc::clone(&entry.services),
-                entry.workspace.clone(),
-                entry.backend.script_services(),
-            )
-        })
-    };
+    let session = session_parts(deps);
     let extension = &found.generation.extensions[found.ext];
     let who = Owner::Extension {
         name: extension.name().into(),
@@ -322,11 +308,11 @@ pub(crate) async fn open(
     let next = Lineage {
         chain,
         who: Some(who),
-        journal: session.as_ref().map(|(handle, _, _, _)| handle.clone()),
+        journal: session.as_ref().map(|parts| parts.handle.clone()),
         ledger: outer.ledger,
     };
     let workspace = match session.as_ref() {
-        Some((_, _, workspace, _)) => workspace.clone(),
+        Some(parts) => parts.workspace.clone(),
         None => match relay::workspace(shared) {
             Ok(workspace) => workspace,
             Err(error) => {
@@ -338,7 +324,7 @@ pub(crate) async fn open(
         },
     };
     let services: Arc<dyn Services> = match &session {
-        Some((_, services, _, _)) => Arc::clone(services),
+        Some(parts) => Arc::clone(&parts.services),
         None => Arc::new(relay::RelayServices::new(deps.clone())),
     };
     let name = match dal_core::Name::parse(extension.name()) {
@@ -370,9 +356,7 @@ pub(crate) async fn open(
         handler: mint(CallerKind::Handler),
         lineage: next.clone(),
         services,
-        script_services: session
-            .as_ref()
-            .and_then(|(_, _, _, services)| services.clone()),
+        script_services: session.as_ref().and_then(|parts| parts.script.clone()),
         workspace,
         model_export: found.record.export.clone(),
         forwarded: AtomicBool::new(false),
@@ -391,6 +375,30 @@ pub(crate) async fn open(
         Ok(stream) => scoped(stream, next, token.drop_guard()),
         Err(error) => failed(failure_of(error)),
     }
+}
+
+/// The session-owned pieces a synthetic run snapshots before it opens.
+struct SessionParts {
+    handle: SessionHandle,
+    services: Arc<dyn Services>,
+    workspace: Workspace,
+    script: Option<Arc<crate::ext::services::SessionServices>>,
+}
+
+/// Snapshots the caller's session handle, services, workspace, and script
+/// services so the model runs against one consistent view.
+fn session_parts(deps: &RequestDeps) -> Option<SessionParts> {
+    let sessions = deps
+        .host
+        .sessions
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    sessions.get(&deps.session).map(|entry| SessionParts {
+        handle: entry.handle.clone(),
+        services: Arc::clone(&entry.services),
+        workspace: entry.workspace.clone(),
+        script: entry.backend.script_services(),
+    })
 }
 
 struct Run {
@@ -565,11 +573,8 @@ fn private_loop(
     lineage: Lineage,
 ) -> EventStream {
     let tools: Vec<Arc<dyn Tool>> = private.iter().map(|tool| Arc::clone(&tool.0)).collect();
-    let declared: std::collections::HashSet<Box<str>> = request
-        .tools
-        .iter()
-        .map(|spec| spec.name.clone())
-        .collect();
+    let declared: std::collections::HashSet<Box<str>> =
+        request.tools.iter().map(|spec| spec.name.clone()).collect();
     // The adapter binds an export as private exactly when `request.tools`
     // names its wire name, so a private spec already named there is bound
     // by the handler, not a shadow. A private tool never named in

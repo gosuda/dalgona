@@ -239,9 +239,11 @@ async fn rendered_image_spans_resolve_in_the_source_fixture() {
             drawn.slots[index - 1],
             Slot::Text(format!("letter://{id}").into())
         );
-        assert!(drawn.letters[*letter]
-            .index_line
-            .starts_with(&format!("letter://{id}  ")));
+        assert!(
+            drawn.letters[*letter]
+                .index_line
+                .starts_with(&format!("letter://{id}  "))
+        );
         assert!(!spans.is_empty());
         for span in spans {
             let bytes = source

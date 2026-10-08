@@ -1,6 +1,8 @@
 #![expect(clippy::unwrap_used, reason = "SC test")]
 #![expect(clippy::expect_used, reason = "SC test")]
 
+//! A synthetic model runs through the router without a session journal.
+
 use std::{
     collections::BTreeMap,
     error::Error,

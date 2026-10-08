@@ -72,7 +72,7 @@ pub(super) fn reload_text(summary: &ReloadSummary) -> String {
 /// then `{fix}`. Exported for the product-local adapter, which performs
 /// publication inside the seam.
 #[must_use]
-pub fn publish_failure(error: BuildError) -> ErrorTriple {
+pub fn publish_failure(error: &BuildError) -> ErrorTriple {
     super::error_triple(
         "reload failed",
         error.to_string(),
@@ -81,8 +81,8 @@ pub fn publish_failure(error: BuildError) -> ErrorTriple {
 }
 
 /// Refuses `/trust`: dal loads plugins only from its data directory.
-pub(super) fn trust(cx: &CommandCx<'_>) -> Result<Reply, ErrorTriple> {
-    Ok(Reply::Done(Output::Text(trust_text(cx.data_root()).into())))
+pub(super) fn trust(cx: &CommandCx<'_>) -> Reply {
+    Reply::Done(Output::Text(trust_text(cx.data_root()).into()))
 }
 
 /// Renders the `/trust` refusal for one data directory.
@@ -94,17 +94,17 @@ pub(super) fn trust_text(data: &std::path::Path) -> String {
 }
 
 /// Refuses `/share`: dal uploads no session data to any service.
-pub(super) fn share() -> Result<Reply, ErrorTriple> {
-    Ok(Reply::Done(Output::Text(
+pub(super) fn share() -> Reply {
+    Reply::Done(Output::Text(
         "/share is not in dalgon: dalgon uploads no session data to any service\nType /export to write the session to a file, then share the file yourself."
             .into(),
-    )))
+    ))
 }
 
 /// Refuses `/bug`: dal sends no reports or session data to its developers.
-pub(super) fn bug() -> Result<Reply, ErrorTriple> {
-    Ok(Reply::Done(Output::Text(
+pub(super) fn bug() -> Reply {
+    Reply::Done(Output::Text(
         "/bug is not in dalgon: dalgon sends no reports or session data to its developers\nType /export to write the session to a file, and attach it with the log path from /session to your report."
             .into(),
-    )))
+    ))
 }

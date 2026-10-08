@@ -1,16 +1,30 @@
 //! Terminal capability probe parsers and incremental reply handling.
 
-/// Terminal capabilities learned from the startup probe.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct Probe {
+/// DECRPM-reported terminal modes learned from the startup probe.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ModeCaps {
     /// DECRPM 2026 synchronized updates are supported.
     pub sync_update: bool,
     /// DECRPM 2027 grapheme-cluster mode is supported.
     pub grapheme_mode: bool,
+}
+
+/// Kitty-protocol capabilities learned from the startup probe.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct KittyCaps {
     /// Kitty keyboard protocol is supported.
-    pub kitty_keyboard: bool,
+    pub keyboard: bool,
     /// Kitty graphics query succeeded.
-    pub kitty_graphics: bool,
+    pub graphics: bool,
+}
+
+/// Terminal capabilities learned from the startup probe.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Probe {
+    /// DECRPM terminal modes.
+    pub modes: ModeCaps,
+    /// Kitty-protocol capabilities.
+    pub kitty: KittyCaps,
     /// DA1 advertised sixel.
     pub sixel: bool,
     /// A DA1 reply arrived, ending the probe window early.
@@ -154,19 +168,19 @@ impl ReplyParser {
                     let Some(end) = find_csi_end(&self.pending, cursor + 2) else {
                         break;
                     };
-                    let reply = &self.pending[start..=end];
-                    if is_decrpm_reply(reply) {
-                        probe.sync_update |= decrpm_status(reply, 2026)
+                    let segment = &self.pending[start..=end];
+                    if is_decrpm_reply(segment) {
+                        probe.modes.sync_update |= decrpm_status(segment, 2026)
                             .is_some_and(|status| matches!(status, 1..=3));
-                        probe.grapheme_mode |= decrpm_status(reply, 2027)
+                        probe.modes.grapheme_mode |= decrpm_status(segment, 2027)
                             .is_some_and(|status| matches!(status, 1..=3));
-                    } else if parse_kitty_keyboard(reply) {
-                        probe.kitty_keyboard = true;
-                    } else if is_da1_reply(reply) {
+                    } else if parse_kitty_keyboard(segment) {
+                        probe.kitty.keyboard = true;
+                    } else if is_da1_reply(segment) {
                         probe.da1 = true;
-                        probe.sixel |= parse_da1(reply);
+                        probe.sixel |= parse_da1(segment);
                     } else {
-                        replay.extend_from_slice(reply);
+                        replay.extend_from_slice(segment);
                     }
                     cursor = end + 1;
                 }
@@ -174,11 +188,11 @@ impl ReplyParser {
                     let Some(end) = find_osc_end(&self.pending, cursor + 2) else {
                         break;
                     };
-                    let reply = &self.pending[start..end];
-                    if reply.starts_with(b"\x1b]11;") {
-                        probe.background_luminance = parse_osc11(reply);
+                    let segment = &self.pending[start..end];
+                    if segment.starts_with(b"\x1b]11;") {
+                        probe.background_luminance = parse_osc11(segment);
                     } else {
-                        replay.extend_from_slice(reply);
+                        replay.extend_from_slice(segment);
                     }
                     cursor = end;
                 }
@@ -186,11 +200,11 @@ impl ReplyParser {
                     let Some(end) = find_st_end(&self.pending, cursor + 2) else {
                         break;
                     };
-                    let reply = &self.pending[start..end + 2];
-                    if reply.starts_with(b"\x1b_Gi=31;") {
-                        probe.kitty_graphics |= reply.windows(2).any(|pair| pair == b"OK");
+                    let segment = &self.pending[start..end + 2];
+                    if segment.starts_with(b"\x1b_Gi=31;") {
+                        probe.kitty.graphics |= segment.windows(2).any(|pair| pair == b"OK");
                     } else {
-                        replay.extend_from_slice(reply);
+                        replay.extend_from_slice(segment);
                     }
                     cursor = end + 2;
                 }

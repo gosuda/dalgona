@@ -214,7 +214,7 @@ pub(crate) struct Actor {
     fold: Session,
     broker: Arc<Broker>,
     shared: Arc<Shared>,
-    control: ControlCell,
+    control: std::sync::Arc<std::sync::Mutex<ControlCell>>,
     workspace: Workspace,
     sidecar: HashMap<dal_core::Name, Vec<u8>>,
     /// The child depth, zero for top-level sessions.
@@ -238,6 +238,19 @@ pub(crate) struct Actor {
 }
 
 type ReplyTx = oneshot::Sender<Result<Reply, AgentError>>;
+
+/// The messages waiting for delivery one recipient accepts (design 6.3).
+const MAILBOX_CAPACITY: usize = 100;
+
+/// Counts the recipient's next-turn records waiting for delivery.
+fn mailbox_waiting(to: &SessionId, records: &[Record]) -> usize {
+    records
+        .iter()
+        .filter(|record| {
+            matches!(record, Record::Mail(mail) if &mail.to == to && mail.mode == MailMode::NextTurn)
+        })
+        .count()
+}
 
 /// Pages the session's journaled mail after a cursor.
 ///
@@ -305,7 +318,7 @@ pub(crate) fn spawn(deps: ActorDeps) -> (SessionHandle, DriverPorts, tokio::task
         fold: deps.fold,
         broker: deps.broker,
         shared: deps.shared,
-        control: ControlCell::new(),
+        control: std::sync::Arc::new(std::sync::Mutex::new(ControlCell::new())),
         workspace: deps.workspace,
         sidecar: HashMap::new(),
         depth: deps.depth,
@@ -322,7 +335,7 @@ pub(crate) fn spawn(deps: ActorDeps) -> (SessionHandle, DriverPorts, tokio::task
         backend: deps.backend,
         tasks: deps.tasks,
     };
-    let handle = SessionHandle::new(deps.session, tx);
+    let handle = SessionHandle::new(deps.session, tx, std::sync::Arc::clone(&actor.control));
     #[expect(
         clippy::disallowed_methods,
         reason = "session-owned actor task: the host stores the handle and awaits it on close"
@@ -429,6 +442,14 @@ impl Actor {
                 }
             }
         }
+    }
+
+    /// The running turn mirrored in the control cell, or `None` when idle.
+    fn running_turn(&self) -> Option<TurnId> {
+        self.control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .running()
     }
 
     async fn on_request(&mut self, request: ActorRequest) {
@@ -780,9 +801,6 @@ impl Actor {
         }
         self.sweep_expiry().await;
         self.pending_compact = matches!(command, Command::Compact { .. });
-        if matches!(command, Command::Cancel { .. }) {
-            self.cancel_before_step(&command);
-        }
         let mut effects = Vec::new();
         let stepped = self.fold.step(
             Event::Command { cmd: command, by },
@@ -803,7 +821,11 @@ impl Actor {
         if let Command::Cancel { scope } = command
             && let dal_core::CancelScope::Turn(turn) = scope
         {
-            let _ = self.control.cancel(*turn);
+            let _ = self
+                .control
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .cancel(*turn);
         }
     }
 
@@ -907,7 +929,12 @@ impl Actor {
         };
         let (turn, content) = (*turn, content);
         let services = self.services.clone()?;
-        let cancel = tokio_util::sync::CancellationToken::new();
+        let turn_token = self
+            .control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .begin_turn(turn);
+        let cancel = turn_token.child_token();
         self.drive_cancel = Some(cancel.clone());
         let generation = self.host.shared.generation.borrow().clone();
         let deadline = Instant::now() + Self::OPENING_HOOK_DEADLINE;
@@ -1040,10 +1067,16 @@ impl Actor {
     fn observe(&mut self, kind: UpdateKind, queue: &mut VecDeque<Effect>) {
         match &kind {
             UpdateKind::TurnStarted { turn, .. } => {
-                self.control.begin_turn(*turn);
+                self.control
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .begin_turn(*turn);
             }
             UpdateKind::TurnEnded { turn, .. } => {
-                self.control.end_turn(*turn);
+                self.control
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .end_turn(*turn);
                 let resolved = self
                     .broker
                     .resolve_turn(*turn, Answer::Cancel, core_client());
@@ -1241,9 +1274,8 @@ impl Actor {
                 return;
             }
         };
-        let steer = matches!(mail.mode, MailMode::Steer);
         let receipt = match mail.mode {
-            MailMode::Steer => match self.control.running() {
+            MailMode::Steer => match self.running_turn() {
                 // The fold owns the text once the steer lands in the
                 // running turn; a full steer queue refuses the message.
                 Some(turn) => {
@@ -1268,7 +1300,13 @@ impl Actor {
                 None => Receipt::Buffered,
             },
             MailMode::Aside => Receipt::Delivered,
-            MailMode::NextTurn => Receipt::Buffered,
+            MailMode::NextTurn => {
+                if mailbox_waiting(&mail.to, self.journal.records()) >= MAILBOX_CAPACITY {
+                    Receipt::Full
+                } else {
+                    Receipt::Buffered
+                }
+            }
             // `MailMode` is `#[non_exhaustive]`; every known variant has
             // an explicit arm above. An unknown future mode stores like
             // a deferred message until it gains an explicit arm.
@@ -1277,8 +1315,7 @@ impl Actor {
                 Receipt::Buffered
             }
         };
-        let delivered_to_turn = steer && receipt == Receipt::Delivered;
-        if receipt != Receipt::Full && !delivered_to_turn {
+        if receipt != Receipt::Full {
             let record = Record::Mail(dal_core::Mail {
                 at: jiff::Timestamp::now(),
                 from: mail.from,
@@ -1299,7 +1336,7 @@ impl Actor {
     /// Runs one turn operation against the control cell and fold.
     async fn on_turn(&mut self, req: super::TurnRequest) {
         let reply = match req.op {
-            TurnOp::Cancel => match self.control.running() {
+            TurnOp::Cancel => match self.running_turn() {
                 Some(turn) => {
                     let command = dal_core::Command::Cancel {
                         scope: dal_core::CancelScope::Turn(turn),
@@ -1321,7 +1358,7 @@ impl Actor {
                 }
                 None => TurnOpReply::Idle(true),
             },
-            TurnOp::Steer { text } => match self.control.running() {
+            TurnOp::Steer { text } => match self.running_turn() {
                 Some(turn) => {
                     let mut effects = Vec::new();
                     let stepped =
@@ -1358,7 +1395,7 @@ impl Actor {
                     TurnOpReply::Idle(true)
                 }
             }
-            _ => TurnOpReply::Idle(self.control.running().is_none()),
+            _ => TurnOpReply::Idle(self.running_turn().is_none()),
         };
         let _ = req.reply.send(reply);
     }
@@ -1455,7 +1492,11 @@ fn breaks_session(error: &dal_store::StoreError) -> bool {
 }
 
 /// Maps a fold rejection to the agent error contract.
-fn map_rejection(rejection: Rejection, id: SessionId, control: &ControlCell) -> AgentError {
+fn map_rejection(
+    rejection: Rejection,
+    id: SessionId,
+    control: &std::sync::Mutex<ControlCell>,
+) -> AgentError {
     match rejection {
         Rejection::WrongTurn { expected, actual } => AgentError::WrongTurn {
             expected: crate::error::ExpectedTurn::from(expected),
@@ -1464,7 +1505,11 @@ fn map_rejection(rejection: Rejection, id: SessionId, control: &ControlCell) -> 
         Rejection::SessionClosed => AgentError::SessionClosed { id },
         Rejection::BusyTurn => AgentError::Invalid(ValidationError::busy_turn(
             "command",
-            control.running().unwrap_or(TurnId::new(NonZeroU64::MIN)),
+            control
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .running()
+                .unwrap_or(TurnId::new(NonZeroU64::MIN)),
         )),
         Rejection::Compacting => AgentError::Invalid(ValidationError::compacting()),
         Rejection::SteerFull => AgentError::Invalid(ValidationError::new(
@@ -1479,7 +1524,7 @@ fn map_rejection(rejection: Rejection, id: SessionId, control: &ControlCell) -> 
 }
 
 /// Maps fold turn state onto the mismatch report.
-fn map_turn_state(state: TurnState, control: &ControlCell) -> ActualTurn {
+fn map_turn_state(state: TurnState, control: &std::sync::Mutex<ControlCell>) -> ActualTurn {
     match state {
         TurnState::Idle => ActualTurn::Idle,
         TurnState::Running { turn } => ActualTurn::Turn {
@@ -1490,13 +1535,13 @@ fn map_turn_state(state: TurnState, control: &ControlCell) -> ActualTurn {
             turn,
             phase: TurnPhase::Settling,
         },
-        TurnState::Compacting { .. } => {
-            control
-                .running()
-                .map_or(ActualTurn::Idle, |turn| ActualTurn::Turn {
-                    turn,
-                    phase: TurnPhase::Compacting,
-                })
-        }
+        TurnState::Compacting { .. } => control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .running()
+            .map_or(ActualTurn::Idle, |turn| ActualTurn::Turn {
+                turn,
+                phase: TurnPhase::Compacting,
+            }),
     }
 }

@@ -158,9 +158,9 @@ impl Journal {
             &mut stream_buffer,
             |offset, record| records.push((offset, record)),
         )?;
-        let boot_count = validator.boot_count;
         let header = header_of(&records)?;
-        let next_gen = boot_count
+        let next_gen = validator
+            .last_boot_gen
             .checked_add(1)
             .and_then(core::num::NonZeroU64::new)
             .ok_or_else(|| OpenFailure::Damaged {
@@ -539,6 +539,7 @@ pub(crate) struct Validator {
     grants: HashSet<JobId>,
     ended_grants: HashSet<JobId>,
     boot_count: u64,
+    last_boot_gen: u64,
 }
 
 /// Batch-local structural additions, committed only after durable append.
@@ -555,6 +556,7 @@ pub(crate) struct ValidationDelta {
     grants: HashSet<JobId>,
     ended_grants: HashSet<JobId>,
     boot_count: u64,
+    last_boot_gen: u64,
 }
 
 impl Validator {
@@ -572,6 +574,7 @@ impl Validator {
             grants: HashSet::new(),
             ended_grants: HashSet::new(),
             boot_count: 0,
+            last_boot_gen: 0,
         }
     }
 
@@ -599,6 +602,7 @@ impl Validator {
             grants: HashSet::new(),
             ended_grants: HashSet::new(),
             boot_count: self.boot_count,
+            last_boot_gen: self.last_boot_gen,
         }
     }
 
@@ -624,6 +628,7 @@ impl Validator {
         self.grants.extend(delta.grants);
         self.ended_grants.extend(delta.ended_grants);
         self.boot_count = delta.boot_count;
+        self.last_boot_gen = delta.last_boot_gen;
     }
 
     /// Applies one record to batch-local state.
@@ -733,11 +738,22 @@ impl Validator {
                     ));
                 }
             }
-            Record::Boot { .. } => {
+            Record::Boot { r#gen, .. } => {
                 let Some(count) = delta.boot_count.checked_add(1) else {
                     return Err(damaged(offset, "boot count is exhausted"));
                 };
+                if r#gen.get() <= delta.last_boot_gen {
+                    return Err(damaged(
+                        offset,
+                        format!(
+                            "boot generation {} does not follow generation {}",
+                            r#gen.get(),
+                            delta.last_boot_gen
+                        ),
+                    ));
+                }
                 delta.boot_count = count;
+                delta.last_boot_gen = r#gen.get();
             }
             _ => {}
         }

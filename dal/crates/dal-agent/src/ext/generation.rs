@@ -206,9 +206,16 @@ impl Generation {
             spec_cache: Mutex::new(HashMap::new()),
         }
     }
-}
 
-impl Generation {
+    /// Returns the body of the registered skill `name`, when one exists.
+    pub(crate) fn skill_body(&self, name: &str) -> Option<&str> {
+        self.extensions
+            .iter()
+            .flat_map(Extension::skills)
+            .find(|skill| skill.name.as_str() == name)
+            .map(|skill| &*skill.body)
+    }
+
     /// Resolves one tool to its record and visibility, unfiltered: dispatch
     /// needs Deferred tools for promotion-on-call and `EvalOnly` tools for
     /// exact model errors. The request assembler filters the model list

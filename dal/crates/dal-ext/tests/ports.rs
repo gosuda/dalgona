@@ -7,6 +7,7 @@
 use dal_ext::docs::{DocsSnapshot, Lookup, Manual, lookup};
 use dal_ext::docsgen::{GenArgs, Scheme, generate, page_valid};
 use dal_star::load::{LoadRoots, PluginsConfig, load};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 fn repo_root() -> PathBuf {
@@ -35,8 +36,8 @@ fn load_one(dir: &Path) -> Result<dal_star::system::PluginGeneration, dal_star::
         },
         &PluginsConfig {
             enabled: Vec::new(),
-            limits: Default::default(),
-            configs: Default::default(),
+            limits: dal_core::PluginLimits::default(),
+            configs: BTreeMap::default(),
         },
     )
 }
@@ -278,11 +279,11 @@ fn reload_swaps_pages() {
 mod tempdir {
     use std::path::PathBuf;
 
-    pub struct Guard {
+    pub(super) struct Guard {
         dir: PathBuf,
     }
 
-    pub fn named(tag: &str) -> Guard {
+    pub(super) fn named(tag: &str) -> Guard {
         let dir = std::env::temp_dir().join(format!(
             "dal-ports-{}-{}-{}",
             tag,
@@ -297,7 +298,7 @@ mod tempdir {
     }
 
     impl Guard {
-        pub fn join(&self, child: &str) -> PathBuf {
+        pub(super) fn join(&self, child: &str) -> PathBuf {
             self.dir.join(child)
         }
     }

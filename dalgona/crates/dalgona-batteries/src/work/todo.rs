@@ -91,17 +91,12 @@ enum TodoStateSchema {
 
 /// Presence of the `todos` member: absent, explicit null, or a complete array.
 /// Explicit null is malformed for both actions; only absence means "no member".
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub(crate) enum TodosField {
+    #[default]
     Absent,
     Null,
     List(Vec<TodoItemInput>),
-}
-
-impl Default for TodosField {
-    fn default() -> Self {
-        Self::Absent
-    }
 }
 
 type TodosFieldSchema = Option<Vec<TodoItemInput>>;
@@ -323,6 +318,10 @@ pub(crate) async fn load(
     Ok(fold(&records))
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "ToolOutcome::Ok holds the output inline; boxing it is a published-API shape decision"
+)]
 pub(crate) async fn tool(
     args: &str,
     services: &dyn Services,
@@ -807,7 +806,9 @@ mod host_tests {
         let bodies = host.services.all_bodies("todo");
         assert_eq!(
             bodies,
-            [r#"{"list":[{"subject":"Fix the parser","description":"","state":"in_progress"},{"subject":"Add tests","description":"cover fold","state":"pending"},{"subject":"Write the plan","description":"","state":"done"}]}"#]
+            [
+                r#"{"list":[{"subject":"Fix the parser","description":"","state":"in_progress"},{"subject":"Add tests","description":"cover fold","state":"pending"},{"subject":"Write the plan","description":"","state":"done"}]}"#
+            ]
         );
 
         let read = host.tool("todo", r#"{"action":"read"}"#).await?;
@@ -887,7 +888,8 @@ mod host_tests {
         assert_eq!(host.todos_command("").await?, "No todo list.");
 
         host.services.set_leaf(Some(0));
-        host.todo_tool(&write_args(&[("branch", "", "done")])?).await;
+        host.todo_tool(&write_args(&[("branch", "", "done")])?)
+            .await;
         assert_eq!(host.todos_command("").await?, "- [x] branch");
 
         host.services.set_leaf(Some(1));
@@ -960,7 +962,7 @@ mod host_tests {
                     leaf = Some(entries.len() - 1);
                 }
                 2 => {
-                    let body = if next(&mut seed) % 2 == 0 {
+                    let body = if next(&mut seed).is_multiple_of(2) {
                         r#"{"list":{}}"#
                     } else {
                         r#"{"list":[{"subject":"bad","description":"","state":"waiting"}]}"#

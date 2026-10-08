@@ -162,6 +162,41 @@ async fn start_host(scratch: &Scratch, log: &Arc<Mutex<Vec<Seen>>>) -> (Host, Wo
     (host, Workspace::new(workspace_dir).expect("workspace"))
 }
 
+async fn open_session(host: &Host, session: SessionRef, client: &str) -> dal_agent::Agent {
+    host.open(session, ClientId::new(client))
+        .await
+        .expect("session")
+}
+
+fn session_id(agent: &dal_agent::Agent) -> dal_core::SessionId {
+    agent
+        .view(dal_core::PageReq::default())
+        .expect("view")
+        .session
+        .id
+}
+
+fn start_events(log: &Arc<Mutex<Vec<Seen>>>) -> Vec<(bool, Vec<String>)> {
+    log.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .filter_map(|event| match event {
+            Seen::Start { resumed, texts } => Some((*resumed, texts.clone())),
+            Seen::Settled => None,
+        })
+        .collect()
+}
+
+async fn wait_for_starts(log: &Arc<Mutex<Vec<Seen>>>, count: usize) {
+    wait_for(log, |seen| {
+        seen.iter()
+            .filter(|event| matches!(event, Seen::Start { .. }))
+            .count()
+            == count
+    })
+    .await;
+}
+
 async fn prompt(agent: &dal_agent::Agent, text: &str) {
     agent
         .submit(Command::Prompt {
@@ -177,21 +212,16 @@ async fn resumed_session_sees_prior_assistant_texts_and_fresh_sees_none() {
     let scratch = Scratch::new();
     let log = Arc::new(Mutex::new(Vec::new()));
     let (host, workspace) = start_host(&scratch, &log).await;
-    let agent = host
-        .open(
-            SessionRef::New {
-                workspace: workspace.clone(),
-                name: None,
-            },
-            ClientId::new("history-new"),
-        )
-        .await
-        .expect("session");
-    let session = agent
-        .view(dal_core::PageReq::default())
-        .expect("view")
-        .session
-        .id;
+    let agent = open_session(
+        &host,
+        SessionRef::New {
+            workspace: workspace.clone(),
+            name: None,
+        },
+        "history-new",
+    )
+    .await;
+    let session = session_id(&agent);
     wait_for(&log, |seen| !seen.is_empty()).await;
     prompt(&agent, "one").await;
     wait_for(&log, |seen| seen.contains(&Seen::Settled)).await;
@@ -202,41 +232,18 @@ async fn resumed_session_sees_prior_assistant_texts_and_fresh_sees_none() {
     .await;
     host.close(session).await.expect("close");
 
-    let resumed = host
-        .open(
-            SessionRef::Continue {
-                workspace: workspace.clone(),
-            },
-            ClientId::new("history-continue"),
-        )
-        .await
-        .expect("continued session");
-    assert_eq!(
-        resumed
-            .view(dal_core::PageReq::default())
-            .expect("view")
-            .session
-            .id,
-        session
-    );
-    wait_for(&log, |seen| {
-        seen.iter()
-            .filter(|event| matches!(event, Seen::Start { .. }))
-            .count()
-            == 2
-    })
+    let resumed = open_session(
+        &host,
+        SessionRef::Continue {
+            workspace: workspace.clone(),
+        },
+        "history-continue",
+    )
     .await;
-    let starts: Vec<_> = log
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .iter()
-        .filter_map(|event| match event {
-            Seen::Start { resumed, texts } => Some((*resumed, texts.clone())),
-            Seen::Settled => None,
-        })
-        .collect();
+    assert_eq!(session_id(&resumed), session);
+    wait_for_starts(&log, 2).await;
     assert_eq!(
-        starts,
+        start_events(&log),
         vec![
             (false, Vec::new()),
             (
@@ -246,42 +253,22 @@ async fn resumed_session_sees_prior_assistant_texts_and_fresh_sees_none() {
         ]
     );
 
-    let fresh = host
-        .open(
-            SessionRef::New {
-                workspace,
-                name: None,
-            },
-            ClientId::new("history-fresh"),
-        )
-        .await
-        .expect("fresh session");
-    wait_for(&log, |seen| {
-        seen.iter()
-            .filter(|event| matches!(event, Seen::Start { .. }))
-            .count()
-            == 3
-    })
+    let fresh = open_session(
+        &host,
+        SessionRef::New {
+            workspace,
+            name: None,
+        },
+        "history-fresh",
+    )
     .await;
-    let last = log
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .iter()
-        .rev()
-        .find_map(|event| match event {
-            Seen::Start { resumed, texts } => Some((*resumed, texts.clone())),
-            Seen::Settled => None,
-        });
+    wait_for_starts(&log, 3).await;
     assert_eq!(
-        last,
+        start_events(&log).pop(),
         Some((false, Vec::new())),
         "a new session beside a resumed one sees none of its texts"
     );
-    let fresh_id = fresh
-        .view(dal_core::PageReq::default())
-        .expect("view")
-        .session
-        .id;
+    let fresh_id = session_id(&fresh);
     host.close(fresh_id).await.expect("fresh close");
     host.close(session).await.expect("resumed close");
 }

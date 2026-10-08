@@ -264,7 +264,7 @@ impl From<StoreError> for HostError {
     /// keeps every other store failure typed.
     fn from(error: StoreError) -> Self {
         match error {
-            StoreError::Locked { session, pid } => Self::SessionBusy { id: session, pid },
+            StoreError::Locked { session, pid, .. } => Self::SessionBusy { id: session, pid },
             error => Self::Store(error),
         }
     }
@@ -708,6 +708,7 @@ mod tests {
         let locked = HostError::from(StoreError::Locked {
             session: id,
             pid: Some(7),
+            path: PathBuf::from("/s/lock"),
         });
         assert!(matches!(
             locked,

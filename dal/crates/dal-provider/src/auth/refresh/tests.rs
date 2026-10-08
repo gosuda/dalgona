@@ -507,3 +507,67 @@ fn anthropic_refresh_keeps_no_codex_identity_and_old_refresh_token_when_omitted(
         }
     ));
 }
+
+#[tokio::test]
+async fn the_proactive_window_holds_for_skewed_and_extreme_expiry() {
+    let now = unix_now();
+    let cases = [
+        (Some(i64::MIN), true),
+        (Some(now - 100_000), true),
+        (Some(now), true),
+        (Some(now + PROACTIVE_WINDOW_SECS - 5), true),
+        (Some(now + PROACTIVE_WINDOW_SECS + 5), false),
+        (Some(i64::MAX), false),
+        (None, false),
+    ];
+    for (expires_at, inside) in cases {
+        let dir = TestDir::new("window");
+        seed(&dir.auth(), codex(NEW_ACCESS, NEW_REFRESH, Some(i64::MAX)));
+        let held = codex(OLD_ACCESS, OLD_REFRESH, expires_at);
+        let credential = refresher(&dir.auth(), "http://127.0.0.1:1")
+            .refresh(OAuthProvider::OpenAiCodex, &held, RefreshReason::Expiring)
+            .await
+            .expect("no request is needed");
+        let expected = if inside { NEW_ACCESS } else { OLD_ACCESS };
+        assert_eq!(
+            oauth(credential).access_token.expose(),
+            expected,
+            "{expires_at:?}"
+        );
+    }
+}
+
+#[test]
+fn hostile_token_responses_are_typed_errors_and_never_echo_the_body() {
+    let stored = codex(OLD_ACCESS, OLD_REFRESH, Some(1));
+    let hostile: [&[u8]; 8] = [
+        br#"{"access_token":""}"#,
+        br#"{"access_token":"a","expires_in":"3600"}"#,
+        br#"{"expires_in":3600}"#,
+        b"leaked-body-secret <html>",
+        b"\xFF\xFE leaked-body-secret",
+        b"[]",
+        b"null",
+        b"",
+    ];
+    for body in hostile {
+        let error = fresh_credential(OAuthProvider::OpenAiCodex, &stored, body, 0)
+            .expect_err("not a token response");
+        assert!(matches!(error, ProviderError::Transport { .. }), "{body:?}");
+        assert!(!error.to_string().contains("leaked-body-secret"), "{error}");
+    }
+}
+
+#[test]
+fn extreme_expires_in_saturates_and_negative_is_already_expired() {
+    let stored = codex(OLD_ACCESS, OLD_REFRESH, Some(1));
+    let at = |expires_in: i64| {
+        let body = format!(r#"{{"access_token":"a","expires_in":{expires_in}}}"#);
+        fresh_credential(OAuthProvider::OpenAiCodex, &stored, body.as_bytes(), 1_000)
+            .expect("valid body")
+            .expires_at
+    };
+    assert_eq!(at(i64::MAX), Some(i64::MAX));
+    assert_eq!(at(-100), Some(900));
+    assert_eq!(at(0), Some(1_000));
+}

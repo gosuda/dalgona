@@ -193,7 +193,8 @@ pub(crate) fn run_result_text(
 
 /// Reads one optional string member; JSON null counts as absent.
 fn opt_string(args: &Value, field: &str) -> Option<String> {
-    args.as_object().and_then(|object| object.get(&field))
+    args.as_object()
+        .and_then(|object| object.get(&field))
         .and_then(JsonValueTrait::as_str)
         .map(str::to_owned)
 }
@@ -212,7 +213,8 @@ fn raw_steps(args: &Value) -> Option<RawJson> {
 /// Reads the `ids` member as display ids. Non-string entries cannot arrive
 /// behind the tool schema; they are skipped rather than rejected.
 fn read_ids(args: &Value) -> Vec<String> {
-    args.as_object().and_then(|object| object.get(&"ids"))
+    args.as_object()
+        .and_then(|object| object.get(&"ids"))
         .and_then(|ids| ids.as_array())
         .map(|ids| {
             ids.iter()
@@ -229,7 +231,10 @@ fn reject_unused(args: &Value, action: &'static str, used: &[&str]) -> Result<()
         if used.contains(&field) {
             continue;
         }
-        let present = args.as_object().and_then(|object| object.get(&field)).is_some_and(|value| !value.is_null());
+        let present = args
+            .as_object()
+            .and_then(|object| object.get(&field))
+            .is_some_and(|value| !value.is_null());
         if present {
             return Err(ActionError::FieldUnused {
                 field: field.to_owned(),
@@ -273,7 +278,11 @@ pub(crate) fn decode_action(
             };
             let label = match opt_string(&parsed, "name") {
                 Some(name) => name,
-                None if parsed.as_object().and_then(|object| object.get(&"workflow")).is_some_and(|name| !name.is_null()) => {
+                None if parsed
+                    .as_object()
+                    .and_then(|object| object.get(&"workflow"))
+                    .is_some_and(|name| !name.is_null()) =>
+                {
                     workflow.label.clone()
                 }
                 None => workflow
@@ -291,7 +300,8 @@ pub(crate) fn decode_action(
                 return Err(ActionError::NeedsIds("wait"));
             }
             let timeout_s = parsed
-                .as_object().and_then(|object| object.get(&"timeout"))
+                .as_object()
+                .and_then(|object| object.get(&"timeout"))
                 .and_then(sonic_rs::JsonValueTrait::as_u64)
                 .and_then(|timeout| u16::try_from(timeout).ok())
                 .unwrap_or(60);

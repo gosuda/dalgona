@@ -42,19 +42,36 @@ use dal_core::{
 /// `dal_core::GuardSection` (node02Core); until then tests build this
 /// struct literally.
 #[derive(Debug, Clone)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each bool independently enables one guard mechanism, mirroring the dal.toml keys"
+)]
 pub struct GuardConfig {
+    /// Whether the guard extension reacts at all; off means observe nothing.
     enabled: bool,
+    /// Maximum allowed cognitive complexity per function.
     cognitive_band: u32,
+    /// Maximum allowed cyclomatic complexity per function.
     cyclomatic_band: u32,
+    /// Maximum allowed physical lines per function.
     function_ploc_band: u32,
+    /// Maximum allowed nesting depth per function.
     nesting_band: u32,
+    /// Maximum allowed physical lines per file.
     file_ploc_band: u32,
+    /// Whether the wrap check reports per function.
     guard_wrap: bool,
+    /// Whether the broad-exception-handler check reports.
     broad_handler: bool,
+    /// Whether the helper-abstraction check reports.
     helper: bool,
+    /// Rule names the calibration refuses to block on; they only report.
     cannot_block: Vec<&'static str>,
+    /// g8 rules with an admitted labeled calibration set.
     calibrated: BTreeSet<G8Rule>,
+    /// Report threshold for lines removed relative to lines present.
     erosion_threshold: f64,
+    /// Turns a path may be touched in before the churn notice fires.
     churn_threshold: u32,
 }
 
@@ -86,6 +103,11 @@ impl GuardConfig {
     /// [`GuardConfigError::Uncalibrated`]. `guard_wrap` and `broad_handler`
     /// report in both modes; `BlockAfterCalibration` adds the rule name to
     /// `cannot_block`. `helper` follows `g4_enabled`.
+    ///
+    /// # Errors
+    /// Returns [`GuardConfigError::UnknownRule`] for an unknown g8 rule name
+    /// and [`GuardConfigError::Uncalibrated`] for a rule without a labeled
+    /// calibration set.
     pub fn from_section(
         section: &GuardSection,
         calibration: &Calibration,
@@ -134,20 +156,29 @@ impl GuardConfig {
 /// `dal_core::GuardSection` lands.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum GuardConfigError {
+    /// The `[guard]` table names a g8 rule the guard does not know.
     #[error("unknown guard g8 rule {0}")]
     UnknownRule(String),
+    /// The named rule lacks the labeled calibration sample set it requires.
     #[error("rule {0} lacks a labeled sample set (50 required, precision >= 0.95)")]
     Uncalibrated(&'static str),
 }
 
 /// The built guard: the extension, the patch observer, and the findings handle.
 pub struct GuardParts {
+    /// The guard extension to add to the agent's extension parts.
     pub extension: Extension,
+    /// The patch observer that feeds the guard from staged edits.
     pub observer: Arc<dyn crate::patch::EditObserver>,
+    /// Read access to the last findings of each session.
     pub findings: FindingsHandle,
 }
 
 /// Builds the guard extension, observer, and findings handle from `cfg`.
+///
+/// # Errors
+/// Returns the registration error when the extension builder rejects the
+/// service names or the scheme/prompt wiring.
 pub fn guard_extension(cfg: GuardConfig) -> Result<GuardParts, RegistrationError> {
     let engine = Arc::new(Engine::new(cfg));
     let extension = ExtensionBuilder::new(
@@ -179,11 +210,17 @@ pub fn guard_extension(cfg: GuardConfig) -> Result<GuardParts, RegistrationError
 /// Per-turn guard findings: files, warnings, stream counts, strikes, report.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GuardFindings {
+    /// The turn the findings were recorded in.
     pub turn: TurnId,
+    /// Findings per file, ordered by path.
     pub files: Vec<FileFindings>,
+    /// Anti-complexity warnings as `(key, count, text)`.
     pub warnings: Vec<(Box<str>, u32, Box<str>)>,
+    /// Stream sample counts per g8 rule.
     pub stream: Vec<(G8Rule, u32)>,
+    /// Strike level the session reached in this turn.
     pub strikes: u8,
+    /// The full churn report, when the turn ended with one.
     pub report: Option<Arc<str>>,
 }
 
@@ -272,6 +309,10 @@ pub(super) struct TurnState {
     calls: HashMap<CallId, (CallNote, u128)>,
     first_pre: BTreeMap<Box<str>, Vec<FunctionMetrics>>,
     last_post: BTreeMap<Box<str>, Vec<FunctionMetrics>>,
+    /// Findings already produced for a staged call, keyed by call id. Patch
+    /// observers run before approval and again at commit; this replay makes
+    /// the second run idempotent for turn accounting.
+    inspected: HashMap<CallId, Vec<crate::patch::EditFinding>>,
     bands: Vec<(f64, String)>,
     warnings: Vec<warnings::Warning>,
     stream_counts: BTreeMap<G8Rule, u32>,

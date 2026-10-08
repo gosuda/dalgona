@@ -6,17 +6,25 @@ use regex::RegexSet;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, LazyLock};
 
+/// The calibrated stream rules the guard watches output for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum G8Rule {
+    /// An ellipsis in place of written code.
     Placeholder,
+    /// A `todo` marker in output that should name real work.
     BareTodo,
+    /// A comment line with no comment text.
     EmptyComment,
+    /// A boolean comparison written as `== true`.
     EqTrue,
+    /// A debug print left in the patch.
     DebugPrint,
+    /// A banner of repeated punctuation in place of a section heading.
     SectionDivider,
 }
 
 impl G8Rule {
+    /// Every rule, in index order used by the shared regex set.
     pub const ALL: [G8Rule; 6] = [
         Self::Placeholder,
         Self::BareTodo,
@@ -26,6 +34,7 @@ impl G8Rule {
         Self::SectionDivider,
     ];
 
+    /// The rule name used in calibration tables and reports.
     #[must_use]
     pub fn name(self) -> &'static str {
         match self {
@@ -38,6 +47,7 @@ impl G8Rule {
         }
     }
 
+    /// Parses the rule name used in the core `g8_calibrated_rules` list.
     #[must_use]
     pub fn parse(name: &str) -> Option<G8Rule> {
         match name {
@@ -70,23 +80,31 @@ impl G8Rule {
     }
 }
 
+/// One labeled stream sample used to calibrate a rule.
 #[derive(Debug, Clone)]
 pub struct Sample {
+    /// The line of output being classified.
     pub text: Box<str>,
+    /// Whether the sample is a true rule hit (`false` marks a false positive).
     pub positive: bool,
 }
 
+/// The labeled samples for one rule.
 #[derive(Debug, Clone, Default)]
 pub struct SampleSet {
+    /// The samples, in label order.
     pub samples: Vec<Sample>,
 }
 
+/// Labeled sample sets per rule, supplied by the calibration store.
 #[derive(Debug, Clone, Default)]
 pub struct Calibration {
+    /// One set per calibrated rule.
     pub sets: BTreeMap<G8Rule, SampleSet>,
 }
 
 impl Calibration {
+    /// A calibration with no labeled samples; admits no rule.
     #[must_use]
     pub fn none() -> Calibration {
         Self::default()
@@ -216,10 +234,7 @@ impl Watch {
     }
 
     fn check_line(&mut self, line: &str) -> Option<StreamVerdict> {
-        let regexes = match REGEXES.as_ref() {
-            Ok(regexes) => regexes,
-            Err(_) => return None,
-        };
+        let regexes = REGEXES.as_ref().ok()?;
         let matches = regexes.matches(line);
         for rule in G8Rule::ALL {
             if !matches.matched(rule.index()) {

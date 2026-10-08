@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::num::NonZeroU64;
 use std::path::Path;
 use std::sync::Arc;
@@ -50,7 +50,7 @@ fn engine_with_turn(cfg: GuardConfig) -> (Arc<Engine>, SessionId, TurnId) {
         session,
         Session {
             reset_due: false,
-            seen_warnings: Default::default(),
+            seen_warnings: HashSet::default(),
             turn: Some(TurnState {
                 id: turn,
                 reduction_ask: false,
@@ -64,15 +64,16 @@ fn engine_with_turn(cfg: GuardConfig) -> (Arc<Engine>, SessionId, TurnId) {
                 last_error: None,
                 pending_notices: Vec::new(),
                 sequence: 0,
-                calls: Default::default(),
+                calls: HashMap::default(),
                 first_pre: BTreeMap::new(),
                 last_post: BTreeMap::new(),
+                inspected: HashMap::default(),
                 bands: Vec::new(),
                 warnings: Vec::new(),
                 stream_counts: BTreeMap::new(),
                 fired: BTreeSet::new(),
                 findings: BTreeMap::new(),
-                notices: Default::default(),
+                notices: HashSet::default(),
             }),
             pending: None,
             announced_blocks: false,
@@ -99,6 +100,23 @@ fn xorshift(state: &mut u64) -> u64 {
     x ^= x << 17;
     *state = x;
     x
+}
+
+/// Builds the guard bands fixture used by the crossing tests.
+fn bands(
+    cognitive: u32,
+    cyclomatic: u32,
+    function_ploc: u32,
+    nesting: u32,
+    file_ploc: u32,
+) -> metrics::Bands {
+    metrics::Bands {
+        cognitive,
+        cyclomatic,
+        function_ploc,
+        nesting,
+        file_ploc,
+    }
 }
 
 #[test]
@@ -352,14 +370,16 @@ fn delta_only_band_crossing() {
         cog_sum: 10,
         cc_sum: 2,
     };
-    assert!(metrics::crossings("a.rs", Some(&pre), &post_ten, 15, 15, 50, 4, 500).is_empty());
+    assert!(
+        metrics::crossings("a.rs", Some(&pre), &post_ten, &bands(15, 15, 50, 4, 500)).is_empty()
+    );
     let post_big = super::FileMetrics {
         ploc: 10,
         functions: vec![function(17)],
         cog_sum: 17,
         cc_sum: 2,
     };
-    let crossings = metrics::crossings("a.rs", Some(&pre), &post_big, 15, 15, 50, 4, 500);
+    let crossings = metrics::crossings("a.rs", Some(&pre), &post_big, &bands(15, 15, 50, 4, 500));
     assert_eq!(crossings.len(), 1, "{crossings:?}");
     assert_eq!(crossings[0].line, "f f cognitive 9→17 (over 15)");
 }
@@ -375,7 +395,7 @@ fn erosion_mass_fixture() {
         ploc,
         nesting: 0,
     };
-    let functions = vec![function(10, 196), function(14, 25)];
+    let functions = [function(10, 196), function(14, 25)];
     let erosion = metrics::erosion(functions.iter());
     assert!((erosion - 20.0 / 60.0).abs() < 1e-9, "{erosion}");
     assert_eq!(
@@ -472,8 +492,8 @@ fn strike_canonical_rounding() {
     let far: sonic_rs::Value = sonic_rs::from_str("{\"n\": 1.244}").expect("json");
     assert_eq!(strike::canonical(&left), strike::canonical(&right));
     assert_ne!(strike::canonical(&left), strike::canonical(&far));
-    assert_eq!(strike::round3(1.234), 1.23);
-    assert_eq!(strike::round3(0.0), 0.0);
+    assert!((strike::round3(1.234) - 1.23).abs() < f64::EPSILON);
+    assert!(strike::round3(0.0).abs() < f64::EPSILON);
     let key = strike::call_key("patch", &left);
     assert_eq!(
         strike::display_key("patch", &key).len(),
@@ -867,7 +887,8 @@ fn ledger_arithmetic_property() {
         let added = xorshift(&mut state) % 50;
         let deleted = xorshift(&mut state) % 50;
         let files = (xorshift(&mut state) % 5) as usize;
-        let new_files = (xorshift(&mut state) % (files as u64 + 1)) as usize;
+        let new_files = xorshift(&mut state) % (u64::try_from(files).unwrap_or(u64::MAX) + 1);
+        let new_files = usize::try_from(new_files).unwrap_or(0);
         let line = report::ledger(added, deleted, files, new_files);
         let net = i128::from(added) - i128::from(deleted);
         assert!(
@@ -929,7 +950,7 @@ fn strike_counter_property() {
         let steps = (xorshift(&mut state) % 8) + 1;
         for sequence in 1..=steps {
             let key = [(xorshift(&mut state) % 4) as u8; 16];
-            let ok = xorshift(&mut state) % 2 == 0;
+            let ok = xorshift(&mut state).is_multiple_of(2);
             let got = stream.on_call(key, u128::from(sequence));
             if last == Some(key) {
                 expected = expected.saturating_add(if errored { 2 } else { 1 }).min(3);
@@ -957,8 +978,13 @@ async fn metric_purity_bounds() {
     let mut state = 0x9E37_79B9_7F4A_7C15_u64;
     for _ in 0..200 {
         let mut body = String::from("fn f() {\n");
-        for _ in 0..(xorshift(&mut state) % 3 + 1) {
-            body.push_str(fragments[(xorshift(&mut state) % fragments.len() as u64) as usize]);
+        for _ in 0..=xorshift(&mut state) % 3 {
+            body.push_str(
+                fragments[usize::try_from(
+                    xorshift(&mut state) % u64::try_from(fragments.len()).unwrap_or(0),
+                )
+                .unwrap_or(0)],
+            );
         }
         body.push_str("}\n");
         let Ok(parsed) = parse::tree(Path::new("/ws/f.rs"), body.as_bytes()).await else {

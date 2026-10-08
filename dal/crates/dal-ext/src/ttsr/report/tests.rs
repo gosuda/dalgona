@@ -92,7 +92,7 @@ fn record_source(
             name: plugin_name(name),
             patterns: vec!["sleep".into()],
             text: "Nap.".into(),
-            judge: judge.map(|question| question.into()),
+            judge: judge.map(std::convert::Into::into),
             scope: None,
             globs: None,
             agents: None,
@@ -351,7 +351,7 @@ fn offline_test_reports_fire_and_exit_zero() {
         data_root.path(),
         workspace.path(),
         &cfg,
-        test_flags(TestSource::Text, "leaks secret-42 here"),
+        &test_flags(TestSource::Text, "leaks secret-42 here"),
     )
     .expect("valid offline test");
     assert_eq!(
@@ -377,7 +377,7 @@ fn offline_test_without_fire_exits_one() {
         data_root.path(),
         workspace.path(),
         &cfg,
-        test_flags(TestSource::Text, "nothing to see"),
+        &test_flags(TestSource::Text, "nothing to see"),
     )
     .expect("valid offline test");
     assert_eq!(proved.text, "No rule fired. Checked 1 stream rules.\n");
@@ -400,7 +400,7 @@ fn offline_tool_source_feeds_added_text() {
         data_root.path(),
         workspace.path(),
         &cfg,
-        TestFlags {
+        &TestFlags {
             source: TestSource::Tool,
             tool: "patch".to_owned(),
             path: Some("src/main.rs".to_owned()),
@@ -427,7 +427,7 @@ fn offline_test_usage_errors() {
         data_root.path(),
         workspace.path(),
         &cfg,
-        TestFlags {
+        &TestFlags {
             source: TestSource::Text,
             tool: "exec".to_owned(),
             path: None,
@@ -445,7 +445,7 @@ fn offline_test_usage_errors() {
         data_root.path(),
         workspace.path(),
         &cfg,
-        TestFlags {
+        &TestFlags {
             source: TestSource::Thinking,
             tool: "patch".to_owned(),
             path: Some("a.rs".to_owned()),
@@ -463,7 +463,7 @@ fn offline_test_usage_errors() {
         data_root.path(),
         workspace.path(),
         &cfg,
-        test_flags(TestSource::Text, &"x".repeat(TEST_TEXT_MAX_BYTES + 1)),
+        &test_flags(TestSource::Text, &"x".repeat(TEST_TEXT_MAX_BYTES + 1)),
     );
     assert_eq!(too_long, Err(UsageError::TextTooLong));
     assert_eq!(

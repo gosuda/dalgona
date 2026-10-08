@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
+
+//! The judge-fed battery: deduplication, reranking, thinking hints, and claim docs.
+
 mod anchor;
 mod claim;
 mod config;

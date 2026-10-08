@@ -1,9 +1,12 @@
 //! Provider transport helpers: error decoding, redaction, permits, and refresh.
 
-use std::{pin::Pin, sync::Arc};
+use std::{
+    pin::Pin,
+    sync::{Arc, Mutex},
+};
 
 use dal_core::Family;
-use futures::{Stream, StreamExt};
+use futures::{Stream, StreamExt, future::ready};
 use serde::Deserialize;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio_util::sync::CancellationToken;
@@ -72,10 +75,23 @@ pub(crate) fn decode_response(
     oauth: bool,
     secrets: Vec<Box<str>>,
 ) -> EventStream {
-    let chunks = response.bytes_stream().map(|chunk| match chunk {
-        Ok(bytes) => bytes.to_vec(),
-        Err(_) => Vec::new(),
-    });
+    let read_failure: Arc<Mutex<Option<ProviderError>>> = Arc::default();
+    let chunks = response
+        .bytes_stream()
+        .scan(Arc::clone(&read_failure), move |slot, chunk| {
+            ready(match chunk {
+                Ok(bytes) => Some(bytes.to_vec()),
+                Err(error) => {
+                    // An idle stall stays a cut, like the Codex HTTPS stream.
+                    if !error.is_timeout()
+                        && let Ok(mut failure) = slot.lock()
+                    {
+                        *failure = Some(crate::http::from_reqwest(family, error));
+                    }
+                    None
+                }
+            })
+        });
     let events = crate::sse::decode_stream(chunks);
     let decoded: Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>> =
         match family {
@@ -94,8 +110,15 @@ pub(crate) fn decode_response(
                 oauth,
             )),
         };
-    let safe_errors =
-        decoded.map(move |result| result.map_err(|error| redact_provider_error(error, &secrets)));
+    // A body read failure ends the byte source, so the decoder would report
+    // it as a cut (or as a protocol error for a half-read frame); the transport
+    // failure is the retryable truth.
+    let safe_errors = decoded.map(move |result| {
+        result.map_err(|error| {
+            let failure = read_failure.lock().ok().and_then(|mut slot| slot.take());
+            redact_provider_error(failure.unwrap_or(error), &secrets)
+        })
+    });
     EventStream::new(safe_errors, || {})
 }
 
@@ -187,7 +210,7 @@ pub(crate) fn redact_provider_error(error: ProviderError, secrets: &[Box<str>]) 
     }
 }
 
-fn redact_text(mut text: String, secrets: &[Box<str>]) -> String {
+pub(crate) fn redact_text(mut text: String, secrets: &[Box<str>]) -> String {
     for secret in secrets {
         if !secret.is_empty() && text.contains(secret.as_ref()) {
             text = text.replace(secret.as_ref(), "<redacted>");

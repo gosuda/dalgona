@@ -34,12 +34,24 @@ fn sul_license_is_the_only_product_license() -> support::TestResult<()> {
     assert!(license.contains("metaphorics"));
     assert!(!root.join("dalgona/LICENSE").exists());
     assert!(!root.join("dalgona/NOTICE").exists());
-    for manifest in [root.join("dalgona/Cargo.toml"), root.join("dalgona/crates/dalgona/Cargo.toml"), root.join("dalgona/crates/dalgona-batteries/Cargo.toml")] {
+    for manifest in [
+        root.join("dalgona/Cargo.toml"),
+        root.join("dalgona/crates/dalgona/Cargo.toml"),
+        root.join("dalgona/crates/dalgona-batteries/Cargo.toml"),
+    ] {
         let contents = fs::read_to_string(manifest)?;
         assert!(contents.contains("license-file.workspace = true"));
         assert!(!contents.contains("license = \"Apache"));
     }
-    let deny = support::run_command(std::process::Command::new("cargo").args(["deny", "--locked", "check"]).current_dir(root.join("dalgona")))?;
-    assert!(deny.status.success(), "{}", String::from_utf8_lossy(&deny.stderr));
+    let deny = support::run_command(
+        std::process::Command::new("cargo")
+            .args(["deny", "--locked", "check"])
+            .current_dir(root.join("dalgona")),
+    )?;
+    assert!(
+        deny.status.success(),
+        "{}",
+        String::from_utf8_lossy(&deny.stderr)
+    );
     Ok(())
 }

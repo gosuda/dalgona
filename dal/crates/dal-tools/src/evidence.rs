@@ -111,7 +111,8 @@ impl SnapshotEvidence {
 
 impl Evidence for SnapshotEvidence {
     fn delivered(&self, view: &ReadView, to: Consumer, at: u64) {
-        self.deliver(view, to, at);
+        let delivered = self.deliver(view, to, at);
+        debug_assert!(delivered, "the delivered view was intact and re-bound");
     }
 
     fn adopt(

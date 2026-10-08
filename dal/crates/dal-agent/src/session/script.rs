@@ -719,7 +719,9 @@ impl SessionScriptHost {
     async fn has_inflight(&self, inv: &Arc<Invocation>) -> bool {
         let pending = {
             let runners = self.runners.lock().await;
-            runners.get(&inv.id()).map(|runner| Arc::clone(&runner.pending))
+            runners
+                .get(&inv.id())
+                .map(|runner| Arc::clone(&runner.pending))
         };
         let Some(pending) = pending else {
             return false;
@@ -892,27 +894,17 @@ impl SessionScriptHost {
             inv.gate().close();
         }
         inv.cancel().cancel();
-        let mut child_errors = Vec::new();
         let observer = {
             let mut observers = self
                 .observers
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            match inv.parent() {
-                None => observers.remove(&inv.root()).unwrap_or_default(),
-                // A child reports its slice without emptying the root's
-                // accumulated list, which the root's own finish reports (E07).
-                Some(_) => {
-                    let root = observers.entry(inv.root()).or_default();
-                    let root_list = &mut *root;
-                    let child_start = root_list
-                        .iter()
-                        .rposition(|error| child_errors.contains(error))
-                        .map_or(0, |position| position + 1);
-                    let reported = root_list.drain(child_start..).collect::<Vec<_>>();
-                    child_errors.extend(reported.iter().cloned());
-                    reported
-                }
+            // A child reports no slice here: the root's own finish reports
+            // the accumulated list once, in root order (E07).
+            if inv.parent().is_none() {
+                observers.remove(&inv.root()).unwrap_or_default()
+            } else {
+                Vec::new()
             }
         };
         let remaining = inv.deadline().saturating_duration_since(Instant::now());

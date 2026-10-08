@@ -138,9 +138,7 @@ fn parse_steps(steps: &RawJson) -> Result<Vec<RawStep>, WorkflowError> {
     Ok(raw)
 }
 
-fn validate_names_and_prompts(
-    raw: &[RawStep],
-) -> Result<HashMap<&str, usize>, WorkflowError> {
+fn validate_names_and_prompts(raw: &[RawStep]) -> Result<HashMap<&str, usize>, WorkflowError> {
     let mut names = HashMap::with_capacity(raw.len());
     for step in raw {
         if !valid_name(&step.name) {
@@ -349,10 +347,7 @@ fn decode_tools(raw: &[RawStep]) -> Result<Vec<Vec<String>>, WorkflowError> {
     Ok(tools)
 }
 
-fn decode_options(
-    raw: &[RawStep],
-    tools: &[Vec<String>],
-) -> Result<DecodedOptions, WorkflowError> {
+fn decode_options(raw: &[RawStep], tools: &[Vec<String>]) -> Result<DecodedOptions, WorkflowError> {
     let mut isolation = Vec::with_capacity(raw.len());
     let mut model = Vec::with_capacity(raw.len());
     let mut role = Vec::with_capacity(raw.len());
@@ -530,9 +525,7 @@ fn optional_string(
         .as_str()
         .map(|value| Some(value.to_owned()))
         .ok_or_else(|| {
-            WorkflowError::new(format!(
-                "agents: step {step}: {field} must be a string."
-            ))
+            WorkflowError::new(format!("agents: step {step}: {field} must be a string."))
         })
 }
 

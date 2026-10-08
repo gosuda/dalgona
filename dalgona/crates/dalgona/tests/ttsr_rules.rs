@@ -53,7 +53,11 @@ fn rule_names_and_conditions_are_valid_and_unique() -> Result<(), Box<dyn Error>
     let mut names = BTreeSet::new();
     let mut conditions = 0;
     for record in &all {
-        assert!(names.insert(record.name.to_string()), "duplicate {}", record.name);
+        assert!(
+            names.insert(record.name.to_string()),
+            "duplicate {}",
+            record.name
+        );
         assert!(record.patterns.len() <= 16, "{}", record.name);
         assert!(record.text.len() <= 12_288, "{}", record.name);
         for pattern in &record.patterns {
@@ -63,8 +67,14 @@ fn rule_names_and_conditions_are_valid_and_unique() -> Result<(), Box<dyn Error>
     }
     assert_eq!(conditions, 15);
     for name in DETECTOR_RULES {
-        assert!(Name::parse(name).is_ok(), "invalid detector rule name {name}");
-        assert!(names.insert((*name).to_owned()), "detector rule {name} collides with a pack rule");
+        assert!(
+            Name::parse(name).is_ok(),
+            "invalid detector rule name {name}"
+        );
+        assert!(
+            names.insert((*name).to_owned()),
+            "detector rule {name} collides with a pack rule"
+        );
     }
     assert_eq!(names.len(), 23);
     Ok(())
@@ -85,7 +95,10 @@ fn unknown_set_is_rejected_with_the_set_list() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn default_empty_and_duplicate_lists_validate() -> Result<(), Box<dyn Error>> {
-    let mut defaults: Vec<String> = DEFAULT_ENABLED.iter().map(|name| (*name).to_owned()).collect();
+    let mut defaults: Vec<String> = DEFAULT_ENABLED
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect();
     ttsr_rules::validate_enabled(&defaults)?;
     ttsr_rules::validate_enabled(&[])?;
     defaults.push("steer".to_owned());
@@ -107,7 +120,10 @@ fn quote_and_escape_conditions_match_their_samples() -> Result<(), Box<dyn Error
     for (name, sample) in cases {
         let regex = rule(&all, name)?;
         assert!(regex.is_match(sample), "{name} did not match its sample");
-        assert!(!regex.is_match(negative), "{name} matched the negative sample");
+        assert!(
+            !regex.is_match(negative),
+            "{name} matched the negative sample"
+        );
     }
     let apology = rule(&all, "steer-no-apologies")?;
     for (text, expected) in [

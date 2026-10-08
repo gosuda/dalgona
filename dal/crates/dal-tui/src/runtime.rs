@@ -127,7 +127,6 @@ impl Session {
                 Vec::new()
             }
             Reply::Queued => vec!["Message queued.".to_owned()],
-            Reply::Done(Output::Nothing) => Vec::new(),
             Reply::Done(Output::Text(text) | Output::Markdown(text)) => {
                 text.lines().map(crate::width::escape).collect()
             }
@@ -140,7 +139,6 @@ impl Session {
                         .join("  ")
                 })
                 .collect(),
-            Reply::Choose { .. } => Vec::new(),
             Reply::Front(FrontAction::Quit) => {
                 if self.composer.trim().is_empty() {
                     self.quit = true;
@@ -159,6 +157,14 @@ impl Session {
         }
     }
 }
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "public entry seam consumes opts and io once; references would leak borrows into the public API"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "single setup-pump-teardown flow; splitting would hide the event ordering"
+)]
 pub(super) fn run<H, M, S>(
     host: H,
     opts: TuiOptions,
@@ -179,24 +185,14 @@ where
         crate::theme::resolve_name(name)?;
     }
 
-    let debug_start = std::time::Instant::now();
     let agent = opts
         .rt
         .block_on(host.open(opts.session.clone(), ClientId::new("dal-tui")))?;
-    if opts.env.debug {
-        eprintln!("[t0] host.open {}ms", debug_start.elapsed().as_millis());
-    }
     let view = opts.rt.block_on(agent.view(snapshot_page()?))?;
-    if opts.env.debug {
-        eprintln!("[t0] view {}ms", debug_start.elapsed().as_millis());
-    }
     let session_id = view.session.id;
     let subscription = opts
         .rt
         .block_on(agent.subscribe(Some((view.r#gen, view.seq))))?;
-    if opts.env.debug {
-        eprintln!("[t0] subscribe {}ms", debug_start.elapsed().as_millis());
-    }
     let commands = opts.rt.block_on(host.commands())?;
     let mut pump = Pump::spawn(&opts, subscription);
     let state = Arc::new(Mutex::new(TermState::new()));
@@ -339,6 +335,14 @@ impl Drop for PanicHookGuard {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "loop carries io, options, state, agent, pump, commands, and settings save"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one event-loop body; extraction would split shared mutable state"
+)]
 fn run_loop<A, M, S>(
     io: &dyn TermIo,
     opts: &TuiOptions,
@@ -354,6 +358,7 @@ where
     M: FnMut() -> Result<Vec<ModelOption>, TuiError>,
     S: FnMut(bool) -> Result<(), TuiError>,
 {
+    const RESOLUTION_POLL_INTERVAL: Duration = Duration::from_millis(250);
     let CommandContext {
         specs,
         mut model_source,
@@ -414,12 +419,8 @@ where
         );
         diagram_generation = diagram_cache.generation();
     }
-    let debug_start = std::time::Instant::now();
     let mut painter = Painter::default();
     let palette = crate::theme::load(&crate::ThemeRequest::Palette, opts.color, None, None)?;
-    if opts.env.debug {
-        eprintln!("[t0] pre-paint {}ms", debug_start.elapsed().as_millis());
-    }
     painter.paint(
         io,
         state,
@@ -439,10 +440,7 @@ where
         },
         session.overlay,
     )?;
-    let (probe, replay) = read_probe(io)?;
-    if opts.env.debug {
-        eprintln!("[t0] probe done {}ms", debug_start.elapsed().as_millis());
-    }
+    let (probe, replayed) = read_probe(io)?;
     let theme = crate::theme::load(
         &opts.theme_request,
         opts.color,
@@ -452,7 +450,7 @@ where
     painter.set_image_rung(crate::image::resolve_rung(
         &opts.env,
         crate::image::ImageProbe {
-            kitty_ok: probe.kitty_graphics,
+            kitty_ok: probe.kitty.graphics,
             da1_sixel: probe.sixel,
         },
         opts.images || diagram_settings.enabled,
@@ -476,7 +474,7 @@ where
         },
         session.overlay,
     )?;
-    if probe.kitty_keyboard {
+    if probe.kitty.keyboard {
         io.write(b"\x1b[>1u")
             .map_err(|error| crate::term::te_raw_mode_failed(&error.to_string()))?;
         state
@@ -484,7 +482,7 @@ where
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .set_kitty(true);
     }
-    if probe.grapheme_mode {
+    if probe.modes.grapheme_mode {
         io.write(b"\x1b[?2027h")
             .map_err(|error| crate::term::te_raw_mode_failed(&error.to_string()))?;
         state
@@ -492,13 +490,12 @@ where
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .set_grapheme(true);
     }
-    painter.set_sync(probe.sync_update);
-    for event in decoder.feed(&replay, Instant::now()) {
-        apply_event(&mut session, &mut dialog, event, probe.kitty_keyboard);
+    painter.set_sync(probe.modes.sync_update);
+    for event in decoder.feed(&replayed, Instant::now()) {
+        apply_event(&mut session, &mut dialog, event, probe.kitty.keyboard);
     }
 
     let mut resolution_poll = Instant::now();
-    const RESOLUTION_POLL_INTERVAL: Duration = Duration::from_millis(250);
     loop {
         if io.shutdown_code().is_some() {
             break;
@@ -521,7 +518,7 @@ where
             decoder.feed(&bytes, now)
         };
         for event in events {
-            apply_event(&mut session, &mut dialog, event, probe.kitty_keyboard);
+            apply_event(&mut session, &mut dialog, event, probe.kitty.keyboard);
         }
         for (id, answer) in std::mem::take(&mut session.pending_answers) {
             if let Err(error) = opts.rt.block_on(agent.answer(id, answer)) {
@@ -548,13 +545,14 @@ where
                             let entries = fork_entries(opts, agent)?;
                             Some(crate::picker::fork_picker(&entries, &filter))
                         }
-                        Chooser::Model => match model_source() {
-                            Ok(models) => Some(crate::picker::model_picker(&models, &filter)),
-                            Err(_) => {
+                        Chooser::Model => {
+                            if let Ok(models) = model_source() {
+                                Some(crate::picker::model_picker(&models, &filter))
+                            } else {
                                 live.notice(crate::copy::ids::MODEL_PICKER_FAIL.to_owned());
                                 None
                             }
-                        },
+                        }
                         Chooser::Settings => Some(crate::picker::settings_picker(
                             diagram_settings.enabled,
                             &filter,
@@ -579,7 +577,7 @@ where
             painter.set_image_rung(crate::image::resolve_rung(
                 &opts.env,
                 crate::image::ImageProbe {
-                    kitty_ok: probe.kitty_graphics,
+                    kitty_ok: probe.kitty.graphics,
                     da1_sixel: probe.sixel,
                 },
                 opts.images || enabled,
@@ -601,14 +599,18 @@ where
             opts,
             agent,
             pump,
-            &mut view,
-            &mut live,
-            &mut transcript,
-            &mut dialog,
-            &mut session,
-            columns,
-            diagram_settings,
-            &diagram_cache,
+            UiState {
+                view: &mut view,
+                live: &mut live,
+                transcript: &mut transcript,
+                dialog: &mut dialog,
+                session: &mut session,
+            },
+            &DiagramEnv {
+                columns,
+                settings: diagram_settings,
+                cache: &diagram_cache,
+            },
         )?;
         if dialog.awaiting_resolution() {
             let now = Instant::now();
@@ -646,7 +648,8 @@ where
                 });
                 session.quit = false;
                 session.cancelling = Some(turn);
-                session.cancel_deadline = Some(std::time::Instant::now() + std::time::Duration::from_secs(3));
+                session.cancel_deadline =
+                    Some(std::time::Instant::now() + std::time::Duration::from_secs(3));
             } else {
                 break;
             }
@@ -704,14 +707,14 @@ fn wait_for_cancelled<S: TuiSubscription>(
             .recv_timeout(remaining.min(Duration::from_millis(50)))
         {
             Ok(Ok(TuiDelivery::Update(update))) => {
-                if let UpdateKind::TurnEnded { turn: ended, stop } = &update.kind {
-                    if *ended == turn {
-                        return *stop == Stop::Cancelled;
-                    }
+                if let UpdateKind::TurnEnded { turn: ended, stop } = &update.kind
+                    && *ended == turn
+                {
+                    return *stop == Stop::Cancelled;
                 }
             }
-            Ok(Ok(TuiDelivery::Resync(_))) | Ok(Err(_)) => return false,
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return false,
+            Ok(Ok(TuiDelivery::Resync(_)) | Err(_))
+            | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return false,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
         }
     }
@@ -751,7 +754,7 @@ impl<S: TuiSubscription> Pump<S> {
                         });
                         match tick {
                             // Idle tick: poll again until asked to stop.
-                            Err(_) => continue,
+                            Err(_) => {}
                             // Closed or lagged latches `None`; later calls
                             // return at once, so exit instead of spinning.
                             Ok(Ok(None)) => break,
@@ -794,20 +797,42 @@ impl<S: TuiSubscription> Drop for Pump<S> {
     }
 }
 
+/// Mutable render state threaded through one delivery batch.
+struct UiState<'a> {
+    view: &'a mut dal_core::View,
+    live: &'a mut Live,
+    transcript: &'a mut Transcript,
+    dialog: &'a mut DialogUi,
+    session: &'a mut Session,
+}
+
+/// Column and diagram render inputs threaded through every row builder.
+struct DiagramEnv<'a> {
+    columns: u16,
+    settings: crate::diagram::DiagramSettings,
+    cache: &'a crate::diagram::RenderCache,
+}
+
 /// Applies every queued delivery; resubscribes with a fresh pump on resync.
 fn drain_deliveries<A: TuiAgent>(
     opts: &TuiOptions,
     agent: &A,
     pump: &mut Pump<A::Subscription>,
-    view: &mut dal_core::View,
-    live: &mut Live,
-    transcript: &mut Transcript,
-    dialog: &mut DialogUi,
-    session: &mut Session,
-    columns: u16,
-    diagram_settings: crate::diagram::DiagramSettings,
-    diagram_cache: &crate::diagram::RenderCache,
+    ui: UiState<'_>,
+    env: &DiagramEnv<'_>,
 ) -> Result<(), TuiError> {
+    let UiState {
+        view,
+        live,
+        transcript,
+        dialog,
+        session,
+    } = ui;
+    let DiagramEnv {
+        columns,
+        settings: diagram_settings,
+        cache: diagram_cache,
+    } = *env;
     while let Ok(delivery) = pump.deliveries.try_recv() {
         match delivery? {
             TuiDelivery::Update(update) => {
@@ -875,38 +900,76 @@ fn drain_deliveries<A: TuiAgent>(
                 }
             }
             TuiDelivery::Resync(snapshot) => {
-                let remote_repaint = snapshot.is_some();
-                let fresh = if let Some(view) = snapshot {
-                    *view
-                } else {
-                    opts.rt.block_on(agent.view(snapshot_page()?))?
-                };
-                if !remote_repaint {
-                    let subscription = opts
-                        .rt
-                        .block_on(agent.subscribe(Some((fresh.r#gen, fresh.seq))))?;
-                    pump.restart(opts, subscription);
-                }
-                live.reset_after_resync();
-                live.seed_ext_status(&agent.ext_status());
-                seed_transcript(
-                    &fresh,
-                    transcript,
-                    columns,
-                    opts.env.width_mode,
-                    diagram_settings,
-                    diagram_cache,
-                );
-                dialog.resync(fresh.open.clone());
-                session.active_turn = match fresh.turn {
-                    TurnState::Running { turn } | TurnState::Settling { turn } => Some(turn),
-                    _ => None,
-                };
-                *view = fresh;
+                handle_resync(
+                    opts,
+                    agent,
+                    pump,
+                    UiState {
+                        view: &mut *view,
+                        live: &mut *live,
+                        transcript: &mut *transcript,
+                        dialog: &mut *dialog,
+                        session: &mut *session,
+                    },
+                    env,
+                    snapshot,
+                )?;
                 break;
             }
         }
     }
+    Ok(())
+}
+
+/// Resubscribes with a fresh cursor, reseeds the transcript, and replaces the view.
+fn handle_resync<A: TuiAgent>(
+    opts: &TuiOptions,
+    agent: &A,
+    pump: &mut Pump<A::Subscription>,
+    ui: UiState<'_>,
+    env: &DiagramEnv<'_>,
+    snapshot: Option<Box<dal_core::View>>,
+) -> Result<(), TuiError> {
+    let UiState {
+        view,
+        live,
+        transcript,
+        dialog,
+        session,
+    } = ui;
+    let DiagramEnv {
+        columns,
+        settings: diagram_settings,
+        cache: diagram_cache,
+    } = *env;
+    let remote_repaint = snapshot.is_some();
+    let fresh = if let Some(view) = snapshot {
+        *view
+    } else {
+        opts.rt.block_on(agent.view(snapshot_page()?))?
+    };
+    if !remote_repaint {
+        let subscription = opts
+            .rt
+            .block_on(agent.subscribe(Some((fresh.r#gen, fresh.seq))))?;
+        pump.restart(opts, subscription);
+    }
+    live.reset_after_resync();
+    live.seed_ext_status(&agent.ext_status());
+    seed_transcript(
+        &fresh,
+        transcript,
+        columns,
+        opts.env.width_mode,
+        diagram_settings,
+        diagram_cache,
+    );
+    dialog.resync(fresh.open.clone());
+    session.active_turn = match fresh.turn {
+        TurnState::Running { turn } | TurnState::Settling { turn } => Some(turn),
+        _ => None,
+    };
+    *view = fresh;
     Ok(())
 }
 
@@ -974,8 +1037,8 @@ fn fork_entries<A: TuiAgent>(
     let mut pages = Vec::new();
     let mut before = None;
     loop {
-        let request = PageReq::new(limit, before.clone())
-            .map_err(|error| TuiError::Terminal(error.to_string()))?;
+        let request =
+            PageReq::new(limit, before).map_err(|error| TuiError::Terminal(error.to_string()))?;
         let page = opts.rt.block_on(agent.view(request))?;
         let next = page.entries.next_before;
         if next.is_some() && next == before {
@@ -1015,10 +1078,10 @@ fn read_probe(io: &dyn TermIo) -> Result<(crate::term::Probe, Vec<u8>), TuiError
             continue;
         }
         let (next, keys) = parser.feed(&bytes);
-        probe.sync_update |= next.sync_update;
-        probe.grapheme_mode |= next.grapheme_mode;
-        probe.kitty_keyboard |= next.kitty_keyboard;
-        probe.kitty_graphics |= next.kitty_graphics;
+        probe.modes.sync_update |= next.modes.sync_update;
+        probe.modes.grapheme_mode |= next.modes.grapheme_mode;
+        probe.kitty.keyboard |= next.kitty.keyboard;
+        probe.kitty.graphics |= next.kitty.graphics;
         probe.sixel |= next.sixel;
         probe.da1 |= next.da1;
         if next.background_luminance.is_some() {
@@ -1055,7 +1118,7 @@ fn apply_event(session: &mut Session, dialog: &mut DialogUi, event: InputEvent, 
     if let Some(ExitDialog::DiscardDraft) = session.dialog {
         match key.code {
             KeyCode::Char(choice) if key.modifiers == KeyModifiers::NONE => {
-                session.answer_dialog(choice)
+                session.answer_dialog(choice);
             }
             KeyCode::Esc => session.dialog = None,
             _ => {}
@@ -1068,49 +1131,7 @@ fn apply_event(session: &mut Session, dialog: &mut DialogUi, event: InputEvent, 
         }
         return;
     }
-    if session.picker.is_some() {
-        match key.code {
-            KeyCode::Esc => session.picker = None,
-            KeyCode::Enter => {
-                match session
-                    .picker
-                    .as_mut()
-                    .and_then(PickerUi::activate_selected)
-                {
-                    Some(PickerAction::Command(command)) => {
-                        session.pending_commands.push(command);
-                        session.picker = None;
-                    }
-                    Some(PickerAction::SetDiagrams { enabled, save }) => {
-                        session.pending_diagram_settings.push((enabled, save));
-                    }
-                    Some(_) | None => session.picker = None,
-                }
-            }
-            KeyCode::Up => {
-                if let Some(picker) = &mut session.picker {
-                    picker.move_selection(false);
-                }
-            }
-            KeyCode::Down => {
-                if let Some(picker) = &mut session.picker {
-                    picker.move_selection(true);
-                }
-            }
-            KeyCode::Backspace => {
-                if let Some(picker) = &mut session.picker {
-                    picker.remove_filter_char();
-                }
-            }
-            KeyCode::Char(character)
-                if key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT =>
-            {
-                if let Some(picker) = &mut session.picker {
-                    picker.add_filter_char(character);
-                }
-            }
-            _ => {}
-        }
+    if picker_key(session, key) {
         return;
     }
     if session.overlay && key.code == KeyCode::Esc {
@@ -1124,7 +1145,7 @@ fn apply_event(session: &mut Session, dialog: &mut DialogUi, event: InputEvent, 
             let line = session.composer.clone();
             session.submit_line(&line);
         }
-        Some(Action::CloseOverlayOrInterrupt) | Some(Action::Interrupt) => session.interrupt(),
+        Some(Action::CloseOverlayOrInterrupt | Action::Interrupt) => session.interrupt(),
         Some(Action::Newline) => session.composer.push('\n'),
         Some(Action::TranscriptOverlay) => session.overlay = !session.overlay,
         Some(Action::AcceptCycleCompletion) => {
@@ -1139,7 +1160,6 @@ fn apply_event(session: &mut Session, dialog: &mut DialogUi, event: InputEvent, 
             args: "".into(),
             expected: None,
         }),
-        Some(Action::ClearRegion) => {}
         None if key.code == KeyCode::Backspace => {
             session.composer.pop();
         }
@@ -1151,6 +1171,58 @@ fn apply_event(session: &mut Session, dialog: &mut DialogUi, event: InputEvent, 
         _ => {}
     }
     session.update_popup();
+}
+
+/// Applies a key while the picker owns input; returns whether it did.
+fn picker_key(session: &mut Session, key: crate::keys::Key) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    if session.picker.is_none() {
+        return false;
+    }
+    match key.code {
+        KeyCode::Esc => session.picker = None,
+        KeyCode::Enter => {
+            match session
+                .picker
+                .as_mut()
+                .and_then(PickerUi::activate_selected)
+            {
+                Some(PickerAction::Command(command)) => {
+                    session.pending_commands.push(command);
+                    session.picker = None;
+                }
+                Some(PickerAction::SetDiagrams { enabled, save }) => {
+                    session.pending_diagram_settings.push((enabled, save));
+                }
+                Some(_) | None => session.picker = None,
+            }
+        }
+        KeyCode::Up => {
+            if let Some(picker) = &mut session.picker {
+                picker.move_selection(false);
+            }
+        }
+        KeyCode::Down => {
+            if let Some(picker) = &mut session.picker {
+                picker.move_selection(true);
+            }
+        }
+        KeyCode::Backspace => {
+            if let Some(picker) = &mut session.picker {
+                picker.remove_filter_char();
+            }
+        }
+        KeyCode::Char(character)
+            if key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT =>
+        {
+            if let Some(picker) = &mut session.picker {
+                picker.add_filter_char(character);
+            }
+        }
+        _ => {}
+    }
+    true
 }
 
 #[cfg(test)]
@@ -1179,29 +1251,31 @@ mod tests {
         use crate::picker::{PickerAction, PickerOption, PickerUi};
         use crossterm::event::{KeyCode, KeyModifiers};
 
-        let mut session = Session::default();
-        session.picker = Some(PickerUi::new(
-            "Pick a model",
-            "",
-            vec![
-                PickerOption {
-                    label: "first".to_owned(),
-                    action: PickerAction::Command(dal_core::Command::Run {
-                        name: "model".into(),
-                        args: "openai/first".into(),
-                        expected: None,
-                    }),
-                },
-                PickerOption {
-                    label: "second".to_owned(),
-                    action: PickerAction::Command(dal_core::Command::Run {
-                        name: "model".into(),
-                        args: "openai/second".into(),
-                        expected: None,
-                    }),
-                },
-            ],
-        ));
+        let mut session = Session {
+            picker: Some(PickerUi::new(
+                "Pick a model",
+                "",
+                vec![
+                    PickerOption {
+                        label: "first".to_owned(),
+                        action: PickerAction::Command(dal_core::Command::Run {
+                            name: "model".into(),
+                            args: "openai/first".into(),
+                            expected: None,
+                        }),
+                    },
+                    PickerOption {
+                        label: "second".to_owned(),
+                        action: PickerAction::Command(dal_core::Command::Run {
+                            name: "model".into(),
+                            args: "openai/second".into(),
+                            expected: None,
+                        }),
+                    },
+                ],
+            )),
+            ..Session::default()
+        };
         apply_event(
             &mut session,
             &mut DialogUi::default(),
@@ -1247,8 +1321,10 @@ mod tests {
         use crate::keys::{InputEvent, Key};
         use crossterm::event::{KeyCode, KeyModifiers};
 
-        let mut session = Session::default();
-        session.picker = Some(crate::picker::settings_picker(false, ""));
+        let mut session = Session {
+            picker: Some(crate::picker::settings_picker(false, "")),
+            ..Session::default()
+        };
         apply_event(
             &mut session,
             &mut DialogUi::default(),
@@ -1284,8 +1360,10 @@ mod tests {
 
     #[test]
     fn quit_with_draft_requires_confirmation() {
-        let mut session = Session::default();
-        session.composer = "rewrite the query".to_owned();
+        let mut session = Session {
+            composer: "rewrite the query".to_owned(),
+            ..Session::default()
+        };
         session.accept_reply(dal_core::Reply::Front(dal_core::FrontAction::Quit));
         assert_eq!(session.dialog, Some(ExitDialog::DiscardDraft));
         assert!(!session.quit);

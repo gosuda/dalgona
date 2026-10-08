@@ -1,8 +1,11 @@
-#![expect(clippy::unwrap_used, reason = "SC test")]
-#![expect(clippy::expect_used, reason = "SC test")]
+//! The Codex app-server stdio speaks the pinned core subset without jsonrpc.
 #![expect(
     clippy::disallowed_methods,
     reason = "SC test drives real app-server stdio"
+)]
+#![expect(
+    dead_code,
+    reason = "gate support exposes helpers shared across independent targets"
 )]
 
 mod support;
@@ -15,7 +18,7 @@ use std::{
     time::Duration,
 };
 
-use sonic_rs::{JsonContainerTrait, JsonValueMutTrait, JsonValueTrait};
+use sonic_rs::{JsonValueMutTrait, JsonValueTrait};
 use support::{TestDir, dalgon_binary};
 
 struct ChildGuard(Option<Child>);
@@ -55,6 +58,114 @@ fn read_response(lines: &ServerLines) -> Result<sonic_rs::Value, Box<dyn Error +
             return Ok(value);
         }
     }
+}
+
+fn send_request(
+    stdin: &mut std::process::ChildStdin,
+    request: &sonic_rs::Value,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let payload = sonic_rs::to_string(request)?;
+    stdin.write_all(payload.as_bytes())?;
+    stdin.write_all(b"\n")?;
+    stdin.flush()?;
+    Ok(())
+}
+
+fn drive_handshake(
+    stdin: &mut std::process::ChildStdin,
+    lines: &ServerLines,
+    fixture_root: &std::path::Path,
+    workspace: &std::path::Path,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let mut thread_id = String::new();
+    for name in [
+        "initialize.request.json",
+        "thread-start.request.json",
+        "turn-start.request.json",
+    ] {
+        let payload = fs::read_to_string(fixture_root.join(name))?;
+        assert!(!payload.contains("jsonrpc"), "{name} must omit jsonrpc");
+        let mut request: sonic_rs::Value = sonic_rs::from_str(&payload)?;
+        if name == "thread-start.request.json" || name == "turn-start.request.json" {
+            let params = request
+                .get_mut("params")
+                .and_then(|params| params.as_object_mut())
+                .ok_or_else(|| std::io::Error::other("fixture request has no params object"))?;
+            if name == "thread-start.request.json" {
+                let cwd = workspace.display().to_string();
+                params.insert("cwd", sonic_rs::Value::from(&cwd));
+            }
+            if name == "turn-start.request.json" {
+                params.insert("threadId", thread_id.as_str());
+            }
+        }
+        send_request(stdin, &request)?;
+        if name == "turn-start.request.json" {
+            break;
+        }
+        let response = read_response(lines)?;
+        if name == "thread-start.request.json" {
+            let id = response
+                .get("result")
+                .and_then(|result| result.get("thread"))
+                .and_then(|thread| thread.get("id"))
+                .and_then(sonic_rs::Value::as_str)
+                .ok_or_else(|| std::io::Error::other("thread/start result names no thread"))?;
+            id.clone_into(&mut thread_id);
+        } else {
+            stdin.write_all(br#"{"method":"initialized","params":{}}"#)?;
+            stdin.write_all(b"\n")?;
+            stdin.flush()?;
+        }
+    }
+    Ok(())
+}
+
+fn pump_until_turn_completed(
+    stdin: &mut std::process::ChildStdin,
+    lines: &ServerLines,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let mut saw_turn_completed = false;
+    let mut answered_once = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while std::time::Instant::now() < deadline {
+        let timeout = deadline.saturating_duration_since(std::time::Instant::now());
+        let line = match lines.recv_timeout(timeout) {
+            Ok(Ok(line)) => line,
+            Ok(Err(error)) => return Err(error.into()),
+            Err(_) => break,
+        };
+        if line.is_empty() {
+            continue;
+        }
+        assert!(
+            !line.contains("\"jsonrpc\""),
+            "every Codex frame omits jsonrpc"
+        );
+        let value: sonic_rs::Value = sonic_rs::from_str(&line)?;
+        let method = value
+            .get("method")
+            .and_then(sonic_rs::Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        if method == "turn/completed" {
+            saw_turn_completed = true;
+            break;
+        }
+        if method.contains("requestApproval") || method.contains("requestUserInput") {
+            let id = value
+                .get("id")
+                .and_then(sonic_rs::Value::as_u64)
+                .unwrap_or(0);
+            let answer = format!("{{\"id\":{id},\"result\":{{\"decision\":\"accept\"}}}}\n");
+            stdin.write_all(answer.as_bytes())?;
+            stdin.flush()?;
+            answered_once = true;
+        }
+    }
+    assert!(answered_once, "must answer one approval/user-input request");
+    assert!(saw_turn_completed, "must observe turn completed");
+    Ok(())
 }
 
 #[test]
@@ -99,91 +210,9 @@ fn codex_app_server_smoke_uses_pinned_core_subset() -> Result<(), Box<dyn Error 
     let mut guard = ChildGuard(Some(child));
     let lines = server_lines(stdout);
 
-    let mut thread_id = String::new();
-    for name in [
-        "initialize.request.json",
-        "thread-start.request.json",
-        "turn-start.request.json",
-    ] {
-        let payload = fs::read_to_string(fixture_root.join(name))?;
-        assert!(!payload.contains("jsonrpc"), "{name} must omit jsonrpc");
-        let mut request: sonic_rs::Value = sonic_rs::from_str(&payload)?;
-        if name == "thread-start.request.json" || name == "turn-start.request.json" {
-            let params = request
-                .get_mut("params")
-                .and_then(|params| params.as_object_mut())
-                .ok_or_else(|| std::io::Error::other("fixture request has no params object"))?;
-            if name == "thread-start.request.json" {
-                let cwd = workspace.display().to_string();
-                params.insert("cwd", sonic_rs::Value::from(&cwd));
-            }
-            if name == "turn-start.request.json" {
-                params.insert("threadId", thread_id.as_str());
-            }
-        }
-        let payload = sonic_rs::to_string(&request)?;
-        stdin.write_all(payload.as_bytes())?;
-        stdin.write_all(b"\n")?;
-        stdin.flush()?;
-        if name == "turn-start.request.json" {
-            break;
-        }
-        let response = read_response(&lines)?;
-        if name == "thread-start.request.json" {
-            thread_id = response
-                .get("result")
-                .and_then(|result| result.get("thread"))
-                .and_then(|thread| thread.get("id"))
-                .and_then(sonic_rs::Value::as_str)
-                .expect("thread/start result names the thread")
-                .to_owned();
-        } else {
-            stdin.write_all(br#"{"method":"initialized","params":{}}"#)?;
-            stdin.write_all(b"\n")?;
-            stdin.flush()?;
-        }
-    }
+    drive_handshake(&mut stdin, &lines, &fixture_root, &workspace)?;
 
-    let mut saw_turn_completed = false;
-    let mut answered_once = false;
-    let deadline = std::time::Instant::now() + Duration::from_secs(15);
-    while std::time::Instant::now() < deadline {
-        let timeout = deadline.saturating_duration_since(std::time::Instant::now());
-        let line = match lines.recv_timeout(timeout) {
-            Ok(Ok(line)) => line,
-            Ok(Err(error)) => return Err(error.into()),
-            Err(_) => break,
-        };
-        if line.is_empty() {
-            continue;
-        }
-        assert!(
-            !line.contains("\"jsonrpc\""),
-            "every Codex frame omits jsonrpc"
-        );
-        let value: sonic_rs::Value = sonic_rs::from_str(&line)?;
-        let method = value
-            .get("method")
-            .and_then(sonic_rs::Value::as_str)
-            .unwrap_or("")
-            .to_owned();
-        if method == "turn/completed" {
-            saw_turn_completed = true;
-            break;
-        }
-        if method.contains("requestApproval") || method.contains("requestUserInput") {
-            let id = value
-                .get("id")
-                .and_then(sonic_rs::Value::as_u64)
-                .unwrap_or(0);
-            let answer = format!("{{\"id\":{id},\"result\":{{\"decision\":\"accept\"}}}}\n");
-            stdin.write_all(answer.as_bytes())?;
-            stdin.flush()?;
-            answered_once = true;
-        }
-    }
-    assert!(answered_once, "must answer one approval/user-input request");
-    assert!(saw_turn_completed, "must observe turn completed");
+    pump_until_turn_completed(&mut stdin, &lines)?;
 
     stdin.write_all(br#"{"id":99,"method":"unknown/method","params":{}}"#)?;
     stdin.write_all(b"\n")?;
@@ -193,9 +222,8 @@ fn codex_app_server_smoke_uses_pinned_core_subset() -> Result<(), Box<dyn Error 
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while std::time::Instant::now() < deadline {
         let timeout = deadline.saturating_duration_since(std::time::Instant::now());
-        let line = match lines.recv_timeout(timeout) {
-            Ok(Ok(line)) => line,
-            _ => break,
+        let Ok(Ok(line)) = lines.recv_timeout(timeout) else {
+            break;
         };
         if line.contains("-32601") {
             saw_32601 = true;

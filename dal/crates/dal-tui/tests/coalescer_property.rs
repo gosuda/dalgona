@@ -27,7 +27,7 @@ proptest! {
             queue.push_update(update(index as u64 + 1, UpdateKind::Delta {
                 turn: turn(),
                 channel: StreamChannel::Text,
-                text: text.to_string().into_boxed_str(),
+                text: text.clone().into_boxed_str(),
             }));
         }
         let drained = queue.take_updates();
@@ -44,14 +44,15 @@ proptest! {
     fn lossless_events_survive_overflow(count in 4_100usize..4_200) {
         let mut queue = Coalescer::default();
         for index in 0..count {
-            queue.push_update(update(index as u64 + 1, UpdateKind::Delta {
-                turn: turn(),
-                channel: StreamChannel::Text,
-                text: "x".into(),
+            queue.push_update(update(index as u64 + 1, UpdateKind::JobStarted {
+                job: dal_core::JobId::new_v7(),
             }));
         }
         let shed = queue.take_shed_count();
         prop_assert!(shed > 0);
-        prop_assert_eq!(queue.take_updates().len(), 4_096 - shed as usize);
+        prop_assert_eq!(
+            queue.take_updates().len(),
+            count - usize::try_from(shed).unwrap_or(0)
+        );
     }
 }

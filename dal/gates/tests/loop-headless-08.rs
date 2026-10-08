@@ -1,13 +1,17 @@
-#![expect(clippy::unwrap_used, reason = "SC test")]
+//! Wake limits admit twenty prompts then reject and reset once released.
 #![expect(clippy::expect_used, reason = "SC test")]
+#![expect(
+    dead_code,
+    reason = "gate support exposes helpers shared across independent targets"
+)]
 
 mod support;
 
 use std::{collections::BTreeMap, error::Error, path::PathBuf, sync::Arc};
 
 use dal_agent::{
-    Env, SessionRef,
-    ext::{BoxFuture, CommandCx, CommandHandler, ExtensionBuilder, Services},
+    Env, SessionRef, Subscription,
+    ext::{BoxFuture, CommandCx, CommandHandler, Extension, ExtensionBuilder, Services},
 };
 use dal_core::{
     Command, CommandName, CommandSpec, Config, ConfigProduct, Expect, Output, Part, Reply,
@@ -57,6 +61,53 @@ async fn wake_once(
         .await
 }
 
+fn wake_extension() -> Result<Extension, Box<dyn Error + Send + Sync>> {
+    // Services::turn enforces inject scope first (services.rs:596): declare Turn or
+    // every wake dies on inject denial before reaching the wake limit.
+    Ok(
+        ExtensionBuilder::new("gate-wake", "0.1.0", ServiceSet::from_names(["turn"])?)?
+            .command(
+                CommandSpec {
+                    name: CommandName::parse("gate-wake")?,
+                    summary: "Gate wake-limit probe.".into(),
+                    args_hint: None,
+                },
+                Arc::new(WakeCommand),
+            )
+            .build()?,
+    )
+}
+
+async fn wait_wake_turn(updates: &mut Subscription) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let mut saw_wake_start = false;
+    let mut saw_end = false;
+    while let Some(delivery) =
+        tokio::time::timeout(std::time::Duration::from_secs(30), updates.next())
+            .await
+            .expect("wake turn must end")
+    {
+        let dal_agent::Delivery::Update(update) = delivery else {
+            continue;
+        };
+        match &update.kind {
+            UpdateKind::TurnStarted {
+                cause: TurnCause::Wake,
+                ..
+            } => saw_wake_start = true,
+            UpdateKind::TurnEnded { .. } if saw_wake_start => {
+                saw_end = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        saw_wake_start && saw_end,
+        "wake tool must start a Wake-caused turn"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn wake_limit_allows_twenty_then_rejects_and_resets()
 -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -79,19 +130,7 @@ async fn wake_limit_allows_twenty_then_rejects_and_resets()
         data_root: data.path().to_path_buf(),
         config: &config,
     })?;
-    // Services::turn enforces inject scope first (services.rs:596): declare Turn or
-    // every wake dies on inject denial before reaching the wake limit.
-    let wake_ext = ExtensionBuilder::new("gate-wake", "0.1.0", ServiceSet::from_names(["turn"])?)?
-        .command(
-            CommandSpec {
-                name: CommandName::parse("gate-wake")?,
-                summary: "Gate wake-limit probe.".into(),
-                args_hint: None,
-            },
-            Arc::new(WakeCommand),
-        )
-        .build()?;
-    product.extensions.push(wake_ext);
+    product.extensions.push(wake_extension()?);
     let env = Env {
         vars: BTreeMap::new(),
         cwd: workspace.path().to_path_buf(),
@@ -113,32 +152,7 @@ async fn wake_limit_allows_twenty_then_rejects_and_resets()
             })
             .await?;
         assert!(matches!(reply, Reply::Done(_)));
-        let mut saw_wake_start = false;
-        let mut saw_end = false;
-        while let Some(delivery) =
-            tokio::time::timeout(std::time::Duration::from_secs(30), updates.next())
-                .await
-                .expect("wake turn must end")
-        {
-            let dal_agent::Delivery::Update(update) = delivery else {
-                continue;
-            };
-            match &update.kind {
-                UpdateKind::TurnStarted {
-                    cause: TurnCause::Wake,
-                    ..
-                } => saw_wake_start = true,
-                UpdateKind::TurnEnded { .. } if saw_wake_start => {
-                    saw_end = true;
-                    break;
-                }
-                _ => {}
-            }
-        }
-        assert!(
-            saw_wake_start && saw_end,
-            "wake tool must start a Wake-caused turn"
-        );
+        wait_wake_turn(&mut updates).await?;
     }
 
     let twenty_first = harness

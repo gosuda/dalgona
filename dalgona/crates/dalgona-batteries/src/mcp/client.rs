@@ -5,8 +5,8 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     ffi::OsString,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -16,21 +16,24 @@ use dal_agent::{
     ext::{BoxFuture, Caller, HookCx, McpClient, ObserveHook, Services, Tool},
 };
 use dal_core::{
-    ext::{McpDeclaration, McpServerDecl, Visibility},
     Answer, Choice, McpRequest, McpResponse, Name, Notice, Question, RawJson, Service, SessionId,
+    ext::{McpDeclaration, McpServerDecl, Visibility},
 };
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    http::{protocol::{self, LEGACY_PROTOCOL_VERSION, PROTOCOL_VERSION}, HttpTransport},
+    Budgets, LIST_PAGE_MAX, MRTR_MAX, McpConfig, McpError, RESTART_BUDGET, TransportError,
+    http::{
+        HttpTransport,
+        protocol::{self, LEGACY_PROTOCOL_VERSION, PROTOCOL_VERSION},
+    },
     stdio::{ProcessEnvironment, StdioTransport},
     tools::{
-        cache_ttl, decode_tool_page, fold_tool_name, shape_result, tool_spec, HeaderAnnotation,
-        Key, MappedTool, RemoteTool, ServerEntryTool, ToolListCache,
+        HeaderAnnotation, Key, MappedTool, RemoteTool, ServerEntryTool, ToolListCache, cache_ttl,
+        decode_tool_page, fold_tool_name, shape_result, tool_spec,
     },
-    Budgets, McpConfig, McpError, TransportError, LIST_PAGE_MAX, MRTR_MAX, RESTART_BUDGET,
 };
 
 struct DeclaredServer {
@@ -80,7 +83,7 @@ struct Ready {
 
 enum Transport {
     Stdio(StdioTransport),
-    Http(HttpTransport),
+    Http(Box<HttpTransport>),
 }
 
 #[derive(Clone, Copy)]
@@ -166,34 +169,69 @@ impl Transport {
                 let mut events = transport.send(id, &body, &ctx.instance.cancel).await?;
                 let response = await_reply(id, &mut events, ctx).await;
                 transport.finish(id).await;
-                if matches!(response, Err(TransportError::Cancelled | TransportError::Mcp(McpError::Timeout { .. }))) {
-                    transport.cancel_request(id, version, &ctx.instance.cancel).await;
+                if matches!(
+                    response,
+                    Err(TransportError::Cancelled | TransportError::Mcp(McpError::Timeout { .. }))
+                ) {
+                    transport
+                        .cancel_request(id, version, &ctx.instance.cancel)
+                        .await;
                 }
                 response
             }
             Self::Http(transport) => {
-                transport.exchange(
-                    id, &ctx.instance.next_id, method, params, annotations, arguments, version,
-                    ctx.session.services.as_ref(), ctx.who, &ctx.instance.cancel,
-                ).await
+                transport
+                    .exchange(
+                        id,
+                        &ctx.instance.next_id,
+                        method,
+                        params,
+                        annotations,
+                        arguments,
+                        version,
+                        ctx.session.services.as_ref(),
+                        ctx.who,
+                        &ctx.instance.cancel,
+                    )
+                    .await
             }
         }
     }
 
-    async fn notify(&self, method: &str, version: &str, ctx: RequestContext<'_>) -> Result<(), TransportError> {
+    async fn notify(
+        &self,
+        method: &str,
+        version: &str,
+        ctx: RequestContext<'_>,
+    ) -> Result<(), TransportError> {
         match self {
             Self::Stdio(transport) => {
                 let body = protocol::notification_body(method, version, ctx.client_version)?;
                 transport.notify(&body, &ctx.instance.cancel).await
             }
-            Self::Http(transport) => transport.notify(&ctx.instance.next_id, method, version, ctx.session.services.as_ref(), ctx.who, &ctx.instance.cancel).await,
+            Self::Http(transport) => {
+                transport
+                    .notify(
+                        &ctx.instance.next_id,
+                        method,
+                        version,
+                        ctx.session.services.as_ref(),
+                        ctx.who,
+                        &ctx.instance.cancel,
+                    )
+                    .await
+            }
         }
     }
 
     async fn shutdown(&self, grace: Duration) {
         match self {
-            Self::Stdio(transport) => { let _ = transport.shutdown(grace).await; }
-            Self::Http(transport) => { let _ = transport.shutdown().await; }
+            Self::Stdio(transport) => {
+                let _ = transport.shutdown(grace).await;
+            }
+            Self::Http(transport) => {
+                let _ = transport.shutdown().await;
+            }
         }
     }
 }
@@ -207,12 +245,25 @@ pub(crate) struct Client {
 
 impl Client {
     pub(crate) fn new(config: McpConfig, budgets: Budgets) -> Arc<Self> {
-        Arc::new(Self { config, budgets, sessions: Mutex::new(HashMap::new()) })
+        Arc::new(Self {
+            config,
+            budgets,
+            sessions: Mutex::new(HashMap::new()),
+        })
     }
 
-    fn context<'a>(&'a self, instance: &'a Instance, session: &'a Session, who: &'a Caller) -> RequestContext<'a> {
+    fn context<'a>(
+        &'a self,
+        instance: &'a Instance,
+        session: &'a Session,
+        who: &'a Caller,
+    ) -> RequestContext<'a> {
         RequestContext {
-            instance, session, who, budgets: &self.budgets, client_version: &self.config.client_version,
+            instance,
+            session,
+            who,
+            budgets: &self.budgets,
+            client_version: &self.config.client_version,
         }
     }
 
@@ -234,13 +285,24 @@ impl Client {
     }
 
     async fn end_session(&self, id: SessionId) {
-        let Some(session) = self.sessions.lock().await.remove(&id) else { return };
+        let Some(session) = self.sessions.lock().await.remove(&id) else {
+            return;
+        };
         session.cancel.cancel();
-        let instances: Vec<_> = session.instances.lock().await.drain().map(|(_, instance)| instance).collect();
+        let instances: Vec<_> = session
+            .instances
+            .lock()
+            .await
+            .drain()
+            .map(|(_, instance)| instance)
+            .collect();
         for instance in instances {
             instance.stop(self.budgets.shutdown_grace).await;
         }
-        let _ = session.services.add_session_tools(&session.caller, Vec::new()).await;
+        let _ = session
+            .services
+            .add_session_tools(&session.caller, Vec::new())
+            .await;
     }
 
     async fn reconcile(&self, id: SessionId, session: &Arc<Session>) -> Result<(), ServiceError> {
@@ -248,18 +310,28 @@ impl Client {
         let next = collect_declarations(id, feed, session);
         let previous = {
             let mut guard = session.declarations.lock().await;
-            if same_declarations(&guard, &next) { return Ok(()) }
+            if same_declarations(&guard, &next) {
+                return Ok(());
+            }
             std::mem::replace(&mut *guard, next)
         };
         let current = session.declarations.lock().await;
         let obsolete: Vec<_> = {
             let mut instances = session.instances.lock().await;
-            let keys: Vec<_> = instances.keys().filter(|key| {
-                current.get(*key).is_none_or(|decl| {
-                    previous.get(*key).is_none_or(|old| old.server != decl.server)
+            let keys: Vec<_> = instances
+                .keys()
+                .filter(|key| {
+                    current.get(*key).is_none_or(|decl| {
+                        previous
+                            .get(*key)
+                            .is_none_or(|old| old.server != decl.server)
+                    })
                 })
-            }).cloned().collect();
-            keys.into_iter().filter_map(|key| instances.remove(&key)).collect()
+                .cloned()
+                .collect();
+            keys.into_iter()
+                .filter_map(|key| instances.remove(&key))
+                .collect()
         };
         drop(current);
         for instance in obsolete {
@@ -275,18 +347,25 @@ impl Client {
         let mut tools: Vec<(Arc<dyn Tool>, Visibility)> = Vec::new();
         let mut used: BTreeMap<Name, Key> = BTreeMap::new();
         for (key, declaration) in declarations.iter() {
-            let entry = ServerEntryTool::new(key.clone(), declaration.plugin.clone(), declaration.server.clone())
-                .map_err(|error| ServiceError::failed(Some(Service::Mcp), error.to_string()))?;
+            let entry = ServerEntryTool::new(
+                key.clone(),
+                declaration.plugin.clone(),
+                declaration.server.clone(),
+            )
+            .map_err(|error| ServiceError::failed(Some(Service::Mcp), error.to_string()))?;
             insert_tool(&mut tools, &mut used, key, Arc::new(entry), session)?;
-            let Some(instance) = instances.get(key) else { continue };
+            let Some(instance) = instances.get(key) else {
+                continue;
+            };
             let state = instance.state.lock().await;
-            let Phase::Ready(ready) = &state.phase else { continue };
+            let Phase::Ready(ready) = &state.phase else {
+                continue;
+            };
             let cache = ready.cache.lock().await;
             for remote in &cache.tools {
                 let folded = fold_tool_name(&key.skill, &key.server, &remote.name);
-                let name = Name::parse_mapped_tool(&folded).map_err(|error| {
-                    ServiceError::failed(Some(Service::Mcp), error.to_string())
-                })?;
+                let name = Name::parse_mapped_tool(&folded)
+                    .map_err(|error| ServiceError::failed(Some(Service::Mcp), error.to_string()))?;
                 let tool = Arc::new(MappedTool {
                     key: key.clone(),
                     plugin: declaration.plugin.clone(),
@@ -300,7 +379,11 @@ impl Client {
         drop(instances);
         drop(declarations);
         loop {
-            match session.services.add_session_tools(&session.caller, tools.clone()).await {
+            match session
+                .services
+                .add_session_tools(&session.caller, tools.clone())
+                .await
+            {
                 Ok(()) => return Ok(()),
                 Err(ServiceError::ToolNameInUse { name, held_by }) => {
                     if held_by.as_ref() == session.caller.ext().as_str() {
@@ -308,7 +391,9 @@ impl Client {
                     }
                     let before = tools.len();
                     tools.retain(|(tool, _)| tool.name().as_str() != name.as_ref());
-                    if tools.len() == before { return Err(ServiceError::ToolNameInUse { name, held_by }) }
+                    if tools.len() == before {
+                        return Err(ServiceError::ToolNameInUse { name, held_by });
+                    }
                     session.services.notify(&session.caller, Notice {
                         turn: None,
                         kind: "mcp".into(),
@@ -320,26 +405,48 @@ impl Client {
         }
     }
 
-    async fn resolve(&self, session: &Arc<Session>, who: &Caller, req: &McpRequest) -> Result<(Key, Arc<McpServerDecl>), McpError> {
+    async fn resolve(
+        &self,
+        session: &Arc<Session>,
+        who: &Caller,
+        req: &McpRequest,
+    ) -> Result<(Key, Arc<McpServerDecl>), McpError> {
         let declarations = session.declarations.lock().await;
         let qualified = req.server.rsplit_once('.');
         let found = declarations.iter().find(|(key, value)| {
             value.plugin == *who.ext()
                 && (key.server == req.server.as_ref()
-                    || qualified.is_some_and(|(skill, server)| key.skill == skill && key.server == server))
+                    || qualified
+                        .is_some_and(|(skill, server)| key.skill == skill && key.server == server))
         });
-        found.map(|(key, value)| (key.clone(), value.server.clone())).ok_or_else(|| {
-            McpError::NotGranted { key: req.server.to_string() }
-        })
+        found
+            .map(|(key, value)| (key.clone(), value.server.clone()))
+            .ok_or_else(|| McpError::NotGranted {
+                key: req.server.to_string(),
+            })
     }
 
-    async fn ready(&self, session: &Arc<Session>, instance: &Arc<Instance>, who: &Caller) -> Result<Arc<Ready>, McpError> {
+    async fn ready(
+        &self,
+        session: &Arc<Session>,
+        instance: &Arc<Instance>,
+        who: &Caller,
+    ) -> Result<Arc<Ready>, McpError> {
         {
             let state = instance.state.lock().await;
             match &state.phase {
                 Phase::Ready(ready) => return Ok(Arc::clone(ready)),
-                Phase::Latched => return Err(McpError::Latched { key: instance.key.display() }),
-                Phase::Stopped => return Err(McpError::Start { key: instance.key.display(), cause: "session ended".into() }),
+                Phase::Latched => {
+                    return Err(McpError::Latched {
+                        key: instance.key.display(),
+                    });
+                }
+                Phase::Stopped => {
+                    return Err(McpError::Start {
+                        key: instance.key.display(),
+                        cause: "session ended".into(),
+                    });
+                }
                 _ => {}
             }
         }
@@ -348,11 +455,22 @@ impl Client {
             let mut state = instance.state.lock().await;
             match &state.phase {
                 Phase::Ready(ready) => return Ok(Arc::clone(ready)),
-                Phase::Latched => return Err(McpError::Latched { key: instance.key.display() }),
-                Phase::Stopped => return Err(McpError::Start { key: instance.key.display(), cause: "session ended".into() }),
+                Phase::Latched => {
+                    return Err(McpError::Latched {
+                        key: instance.key.display(),
+                    });
+                }
+                Phase::Stopped => {
+                    return Err(McpError::Start {
+                        key: instance.key.display(),
+                        cause: "session ended".into(),
+                    });
+                }
                 Phase::Failed if state.restarts_left == 0 => {
                     state.phase = Phase::Latched;
-                    return Err(McpError::Latched { key: instance.key.display() });
+                    return Err(McpError::Latched {
+                        key: instance.key.display(),
+                    });
                 }
                 Phase::Failed => state.restarts_left -= 1,
                 _ => {}
@@ -366,14 +484,20 @@ impl Client {
                 if instance.cancel.is_cancelled() || matches!(state.phase, Phase::Stopped) {
                     drop(state);
                     ready.transport.shutdown(self.budgets.shutdown_grace).await;
-                    return Err(McpError::Start { key: instance.key.display(), cause: "session ended".into() });
+                    return Err(McpError::Start {
+                        key: instance.key.display(),
+                        cause: "session ended".into(),
+                    });
                 }
                 state.phase = Phase::Ready(Arc::clone(&ready));
                 drop(state);
                 if let Err(error) = self.publish(session).await {
                     instance.crash().await;
                     ready.transport.shutdown(self.budgets.shutdown_grace).await;
-                    return Err(McpError::Start { key: instance.key.display(), cause: error.to_string() });
+                    return Err(McpError::Start {
+                        key: instance.key.display(),
+                        cause: error.to_string(),
+                    });
                 }
                 Ok(ready)
             }
@@ -384,22 +508,37 @@ impl Client {
         }
     }
 
-    async fn start_transport(&self, session: &Session, instance: &Instance, who: &Caller) -> Result<Arc<Ready>, McpError> {
+    async fn start_transport(
+        &self,
+        session: &Session,
+        instance: &Instance,
+        who: &Caller,
+    ) -> Result<Arc<Ready>, McpError> {
         let transport = match instance.server.as_ref() {
             McpServerDecl::Stdio { .. } => {
                 let env = process_environment(session, who).await?;
-                let transport = StdioTransport::start(instance.key.clone(), &instance.server, &env, &self.budgets).await?;
+                let transport = StdioTransport::start(
+                    instance.key.clone(),
+                    &instance.server,
+                    &env,
+                    &self.budgets,
+                )
+                .await?;
                 Transport::Stdio(transport)
             }
             McpServerDecl::Http { url } => {
                 let parsed = reqwest::Url::parse(url).map_err(|error| McpError::Start {
-                    key: instance.key.display(), cause: error.to_string()
+                    key: instance.key.display(),
+                    cause: error.to_string(),
                 })?;
                 let transport = HttpTransport::new(
-                    instance.key.clone(), parsed, self.config.tokens_path.clone(),
-                    self.config.client_version.clone(), &self.budgets,
+                    instance.key.clone(),
+                    parsed,
+                    self.config.tokens_path.clone(),
+                    self.config.client_version.clone(),
+                    &self.budgets,
                 )?;
-                Transport::Http(transport)
+                Transport::Http(Box::new(transport))
             }
         };
         let started = self.handshake(&transport, instance, session, who).await;
@@ -410,50 +549,130 @@ impl Client {
                 return Err(error);
             }
         };
-        let cache = match self.list(&transport, instance, session, who, &version).await {
+        let cache = match self
+            .list(&transport, instance, session, who, &version)
+            .await
+        {
             Ok(cache) => cache,
             Err(error) => {
                 transport.shutdown(self.budgets.shutdown_grace).await;
                 return Err(error);
             }
         };
-        Ok(Arc::new(Ready { transport, version, cache: Mutex::new(cache) }))
+        Ok(Arc::new(Ready {
+            transport,
+            version,
+            cache: Mutex::new(cache),
+        }))
     }
 
-    async fn handshake(&self, transport: &Transport, instance: &Instance, session: &Session, who: &Caller) -> Result<String, McpError> {
+    async fn handshake(
+        &self,
+        transport: &Transport,
+        instance: &Instance,
+        session: &Session,
+        who: &Caller,
+    ) -> Result<String, McpError> {
         let probe = tokio::time::timeout(
             self.budgets.discover,
-            transport.exchange("server/discover", "{}", PROTOCOL_VERSION, &[], None, self.context(instance, session, who)),
-        ).await;
+            transport.exchange(
+                "server/discover",
+                "{}",
+                PROTOCOL_VERSION,
+                &[],
+                None,
+                self.context(instance, session, who),
+            ),
+        )
+        .await;
         match probe {
             Ok(Ok(body)) => {
-                if let Some(McpError::Protocol { code: -32022, message }) = protocol::json_rpc_error(body.as_str()) {
-                    if !protocol::advertises_legacy(&message) { return Err(McpError::Protocol { code: -32022, message }) }
-                    let second = transport.exchange("server/discover", "{}", LEGACY_PROTOCOL_VERSION, &[], None, self.context(instance, session, who)).await.map_err(map_transport)?;
-                    if let Some(error) = protocol::json_rpc_error(second.as_str()) { return Err(error) }
+                if let Some(McpError::Protocol {
+                    code: -32022,
+                    message,
+                }) = protocol::json_rpc_error(body.as_str())
+                {
+                    if !protocol::advertises_legacy(&message) {
+                        return Err(McpError::Protocol {
+                            code: -32022,
+                            message,
+                        });
+                    }
+                    let second = transport
+                        .exchange(
+                            "server/discover",
+                            "{}",
+                            LEGACY_PROTOCOL_VERSION,
+                            &[],
+                            None,
+                            self.context(instance, session, who),
+                        )
+                        .await
+                        .map_err(map_transport)?;
+                    if let Some(error) = protocol::json_rpc_error(second.as_str()) {
+                        return Err(error);
+                    }
                     return Ok(LEGACY_PROTOCOL_VERSION.to_owned());
                 }
-                if let Some(McpError::Protocol { code: -32020 | -32021, .. }) = protocol::json_rpc_error(body.as_str()) {
+                if let Some(McpError::Protocol {
+                    code: -32020 | -32021,
+                    ..
+                }) = protocol::json_rpc_error(body.as_str())
+                {
                     return Ok(PROTOCOL_VERSION.to_owned());
                 }
-                if protocol::json_rpc_error(body.as_str()).is_none() { return Ok(PROTOCOL_VERSION.to_owned()) }
+                if protocol::json_rpc_error(body.as_str()).is_none() {
+                    return Ok(PROTOCOL_VERSION.to_owned());
+                }
             }
-            Ok(Err(TransportError::Cancelled)) => return Err(McpError::Start { key: instance.key.display(), cause: "session cancelled".into() }),
+            Ok(Err(TransportError::Cancelled)) => {
+                return Err(McpError::Start {
+                    key: instance.key.display(),
+                    cause: "session cancelled".into(),
+                });
+            }
             _ => {}
         }
         let params = format!(
             "{{\"protocolVersion\":\"{LEGACY_PROTOCOL_VERSION}\",\"capabilities\":{{}},\"clientInfo\":{{\"name\":\"dalgona\",\"version\":{}}}}}",
             sonic_rs::to_string(&self.config.client_version).map_err(|error| McpError::Start {
-                key: instance.key.display(), cause: error.to_string(),
+                key: instance.key.display(),
+                cause: error.to_string(),
             })?
         );
-        let result = transport.exchange("initialize", &params, LEGACY_PROTOCOL_VERSION, &[], None, self.context(instance, session, who)).await.map_err(map_transport)?;
-        if let Some(error) = protocol::json_rpc_error(result.as_str()) { return Err(error) }
-        transport.notify("notifications/initialized", LEGACY_PROTOCOL_VERSION, self.context(instance, session, who)).await.map_err(map_transport)?;
+        let result = transport
+            .exchange(
+                "initialize",
+                &params,
+                LEGACY_PROTOCOL_VERSION,
+                &[],
+                None,
+                self.context(instance, session, who),
+            )
+            .await
+            .map_err(map_transport)?;
+        if let Some(error) = protocol::json_rpc_error(result.as_str()) {
+            return Err(error);
+        }
+        transport
+            .notify(
+                "notifications/initialized",
+                LEGACY_PROTOCOL_VERSION,
+                self.context(instance, session, who),
+            )
+            .await
+            .map_err(map_transport)?;
         Ok(LEGACY_PROTOCOL_VERSION.to_owned())
     }
 
-    async fn list(&self, transport: &Transport, instance: &Instance, session: &Session, who: &Caller, version: &str) -> Result<ToolListCache, McpError> {
+    async fn list(
+        &self,
+        transport: &Transport,
+        instance: &Instance,
+        session: &Session,
+        who: &Caller,
+        version: &str,
+    ) -> Result<ToolListCache, McpError> {
         let deadline = Instant::now() + self.budgets.list;
         let mut tools = Vec::new();
         let mut cursor: Option<String> = None;
@@ -462,117 +681,249 @@ impl Client {
             let params = match &cursor {
                 Some(cursor) => format!(
                     "{{\"cursor\":{}}}",
-                    sonic_rs::to_string(cursor).map_err(|error| protocol_error(error.to_string()))?
+                    sonic_rs::to_string(cursor)
+                        .map_err(|error| protocol_error(error.to_string()))?
                 ),
                 None => "{}".to_owned(),
             };
-            let exchange = transport.exchange("tools/list", &params, version, &[], None, self.context(instance, session, who));
+            let exchange = transport.exchange(
+                "tools/list",
+                &params,
+                version,
+                &[],
+                None,
+                self.context(instance, session, who),
+            );
             let remaining = deadline.saturating_duration_since(Instant::now());
-            let reply = tokio::time::timeout(remaining, exchange).await
-                .map_err(|_| McpError::Timeout { n: self.budgets.list.as_secs() })?
+            let reply = tokio::time::timeout(remaining, exchange)
+                .await
+                .map_err(|_| McpError::Timeout {
+                    n: self.budgets.list.as_secs(),
+                })?
                 .map_err(map_transport)?;
             let result = response_result(&reply)?;
-            let page = decode_tool_page(&sonic_rs::to_string(&result).map_err(|error| protocol_error(error.to_string()))?)?;
+            let page = decode_tool_page(
+                &sonic_rs::to_string(&result).map_err(|error| protocol_error(error.to_string()))?,
+            )?;
             for excluded in page.excluded {
-                session.services.notify(&session.caller, Notice {
-                    turn: None, kind: "mcp".into(), text: excluded.warning.into(),
-                });
+                session.services.notify(
+                    &session.caller,
+                    Notice {
+                        turn: None,
+                        kind: "mcp".into(),
+                        text: excluded.warning.into(),
+                    },
+                );
             }
             ttl = page.ttl_ms.or(ttl);
             tools.extend(page.tools);
             cursor = page.next_cursor;
             if cursor.is_none() {
-                return Ok(ToolListCache { until: Instant::now() + cache_ttl(ttl), tools });
+                return Ok(ToolListCache {
+                    until: Instant::now() + cache_ttl(ttl),
+                    tools,
+                });
             }
-            if page_no + 1 == LIST_PAGE_MAX { return Err(McpError::ListPages) }
+            if page_no + 1 == LIST_PAGE_MAX {
+                return Err(McpError::ListPages);
+            }
         }
         Err(McpError::ListPages)
     }
 
-    async fn call_server(&self, session: &Arc<Session>, who: &Caller, req: McpRequest) -> Result<McpResponse, McpError> {
-        self.reconcile(req.session, session).await.map_err(|error| McpError::Start {
-            key: req.server.to_string(), cause: error.to_string(),
-        })?;
+    async fn call_server(
+        &self,
+        session: &Arc<Session>,
+        who: &Caller,
+        req: McpRequest,
+    ) -> Result<McpResponse, McpError> {
+        self.reconcile(req.session, session)
+            .await
+            .map_err(|error| McpError::Start {
+                key: req.server.to_string(),
+                cause: error.to_string(),
+            })?;
         let (key, server) = self.resolve(session, who, &req).await?;
         let instance = {
             let mut instances = session.instances.lock().await;
-            Arc::clone(instances.entry(key.clone()).or_insert_with(|| Arc::new(Instance::new(key, server, session.cancel.child_token()))))
+            Arc::clone(instances.entry(key.clone()).or_insert_with(|| {
+                Arc::new(Instance::new(key, server, session.cancel.child_token()))
+            }))
         };
         instance.granted.store(true, Ordering::SeqCst);
         let ready = self.ready(session, &instance, who).await?;
         if req.tool.is_empty() {
-            let tools = ready.cache.lock().await.tools.iter().map(|tool| {
-                fold_tool_name(&instance.key.skill, &instance.key.server, &tool.name)
-            }).collect::<Vec<_>>();
+            let tools = ready
+                .cache
+                .lock()
+                .await
+                .tools
+                .iter()
+                .map(|tool| fold_tool_name(&instance.key.skill, &instance.key.server, &tool.name))
+                .collect::<Vec<_>>();
             let text = if tools.is_empty() {
                 format!("mcp server {} has no tools.", instance.key.display())
-            } else { tools.join("\n") };
-            return Ok(McpResponse { text: text.into(), is_error: false });
+            } else {
+                tools.join("\n")
+            };
+            return Ok(McpResponse {
+                text: text.into(),
+                is_error: false,
+            });
         }
-        let (remote, refreshed) = self.find_tool(&ready, &instance, session, who, &req.tool).await?;
+        let (remote, refreshed) = self
+            .find_tool(&ready, &instance, session, who, &req.tool)
+            .await?;
         if refreshed {
-            self.publish(session).await.map_err(|error| McpError::Start {
-                key: instance.key.display(), cause: error.to_string(),
-            })?;
+            self.publish(session)
+                .await
+                .map_err(|error| McpError::Start {
+                    key: instance.key.display(),
+                    cause: error.to_string(),
+                })?;
         }
         let remote = remote.ok_or_else(|| McpError::NotFound {
-            key: instance.key.display(), tool: req.tool.to_string(),
+            key: instance.key.display(),
+            tool: req.tool.to_string(),
         })?;
-        let result = self.call_tool(&ready, &instance, session, who, &req, &remote).await;
-        if matches!(result, Err(McpError::Exited { .. } | McpError::InvalidLine { .. })) {
+        let result = self
+            .call_tool(&ready, &instance, session, who, &req, &remote)
+            .await;
+        if matches!(
+            result,
+            Err(McpError::Exited { .. } | McpError::InvalidLine { .. })
+        ) {
             instance.crash().await;
-            self.publish(session).await.map_err(|error| McpError::Start { key: instance.key.display(), cause: error.to_string() })?;
+            self.publish(session)
+                .await
+                .map_err(|error| McpError::Start {
+                    key: instance.key.display(),
+                    cause: error.to_string(),
+                })?;
             ready.transport.shutdown(self.budgets.shutdown_grace).await;
         }
         result
     }
 
-    async fn find_tool(&self, ready: &Ready, instance: &Instance, session: &Session, who: &Caller, tool: &str) -> Result<(Option<RemoteTool>, bool), McpError> {
+    async fn find_tool(
+        &self,
+        ready: &Ready,
+        instance: &Instance,
+        session: &Session,
+        who: &Caller,
+        tool: &str,
+    ) -> Result<(Option<RemoteTool>, bool), McpError> {
         let mut cache = ready.cache.lock().await;
         let refreshed = Instant::now() >= cache.until;
         if refreshed {
-            *cache = self.list(&ready.transport, instance, session, who, &ready.version).await?;
+            *cache = self
+                .list(&ready.transport, instance, session, who, &ready.version)
+                .await?;
         }
-        Ok((cache.tools.iter().find(|item| item.name == tool).cloned(), refreshed))
+        Ok((
+            cache.tools.iter().find(|item| item.name == tool).cloned(),
+            refreshed,
+        ))
     }
 
-    async fn call_tool(&self, ready: &Ready, instance: &Instance, session: &Session, who: &Caller, req: &McpRequest, tool: &RemoteTool) -> Result<McpResponse, McpError> {
+    async fn call_tool(
+        &self,
+        ready: &Ready,
+        instance: &Instance,
+        session: &Session,
+        who: &Caller,
+        req: &McpRequest,
+        tool: &RemoteTool,
+    ) -> Result<McpResponse, McpError> {
         let mut responses: Option<String> = None;
         let mut request_state: Option<String> = None;
         for _ in 0..=MRTR_MAX {
-            let params = call_params(&req.tool, &req.arguments, responses.as_deref(), request_state.as_deref())?;
-            let reply = ready.transport.exchange("tools/call", &params, &ready.version, &tool.headers, Some(&req.arguments), self.context(instance, session, who)).await.map_err(map_transport)?;
+            let params = call_params(
+                &req.tool,
+                &req.arguments,
+                responses.as_deref(),
+                request_state.as_deref(),
+            )?;
+            let reply = ready
+                .transport
+                .exchange(
+                    "tools/call",
+                    &params,
+                    &ready.version,
+                    &tool.headers,
+                    Some(&req.arguments),
+                    self.context(instance, session, who),
+                )
+                .await
+                .map_err(map_transport)?;
             let result = response_result(&reply)?;
-            let result_type = result.get("resultType").and_then(JsonValueTrait::as_str).unwrap_or("complete");
+            let result_type = result
+                .get("resultType")
+                .and_then(JsonValueTrait::as_str)
+                .unwrap_or("complete");
             if result_type == "input_required" {
                 responses = Some(answer_inputs(&result, session, who).await?);
-                request_state = result.get("requestState").map(|value| sonic_rs::to_string(value)).transpose().map_err(|error| protocol_error(error.to_string()))?;
+                request_state = result
+                    .get("requestState")
+                    .map(sonic_rs::to_string)
+                    .transpose()
+                    .map_err(|error| protocol_error(error.to_string()))?;
                 continue;
             }
-            let content = result.get("content").and_then(|value| value.as_array())
-                .map(|items| items.iter().cloned().collect::<Vec<_>>()).unwrap_or_default();
-            let is_error = result.get("isError").and_then(JsonValueTrait::as_bool).unwrap_or(false);
+            let content = result
+                .get("content")
+                .and_then(|value| value.as_array())
+                .map(|items| items.iter().cloned().collect::<Vec<_>>())
+                .unwrap_or_default();
+            let is_error = result
+                .get("isError")
+                .and_then(JsonValueTrait::as_bool)
+                .unwrap_or(false);
             let shaped = shape_result(&content, is_error, Some(result_type))?;
-            return Ok(McpResponse { text: shaped.text.into(), is_error: shaped.is_error });
+            return Ok(McpResponse {
+                text: shaped.text.into(),
+                is_error: shaped.is_error,
+            });
         }
         Err(McpError::InputRequiredLimit)
     }
 
     pub(crate) async fn status(&self, id: SessionId) -> String {
-        let Some(session) = self.session(id).await else { return "no MCP servers in this session.".into() };
-        if let Err(error) = self.reconcile(id, &session).await { return error.to_string() }
+        let Some(session) = self.session(id).await else {
+            return "no MCP servers in this session.".into();
+        };
+        if let Err(error) = self.reconcile(id, &session).await {
+            return error.to_string();
+        }
         let declarations = session.declarations.lock().await;
-        if declarations.is_empty() { return "no MCP servers in this session.".into() }
+        if declarations.is_empty() {
+            return "no MCP servers in this session.".into();
+        }
         let instances = session.instances.lock().await;
         let mut lines = Vec::new();
         for (key, decl) in declarations.iter() {
             let (state, count, grant) = if let Some(instance) = instances.get(key) {
                 let (state, count) = instance.status().await;
-                let grant = if instance.granted.load(Ordering::SeqCst) { "granted" } else { "unasked" };
+                let grant = if instance.granted.load(Ordering::SeqCst) {
+                    "granted"
+                } else {
+                    "unasked"
+                };
                 (state, count, grant)
-            } else { ("declared", 0, "unasked") };
-            let transport = match decl.server.as_ref() { McpServerDecl::Stdio { .. } => "stdio", McpServerDecl::Http { .. } => "http" };
-            lines.push(format!("{} | {} | {} | {} tools | {grant}", key.display(), transport, state, count));
+            } else {
+                ("declared", 0, "unasked")
+            };
+            let transport = match decl.server.as_ref() {
+                McpServerDecl::Stdio { .. } => "stdio",
+                McpServerDecl::Http { .. } => "http",
+            };
+            lines.push(format!(
+                "{} | {} | {} | {} tools | {grant}",
+                key.display(),
+                transport,
+                state,
+                count
+            ));
         }
         lines.sort();
         lines.join("\n")
@@ -580,12 +931,21 @@ impl Client {
 }
 
 impl McpClient for Client {
-    fn call<'a>(&'a self, who: &'a Caller, req: McpRequest) -> BoxFuture<'a, Result<McpResponse, ServiceError>> {
+    fn call<'a>(
+        &'a self,
+        who: &'a Caller,
+        req: McpRequest,
+    ) -> BoxFuture<'a, Result<McpResponse, ServiceError>> {
         Box::pin(async move {
             let Some(session) = self.session(req.session).await else {
-                return Err(ServiceError::failed(Some(Service::Mcp), McpError::Start {
-                    key: req.server.to_string(), cause: "no session context".into(),
-                }.to_string()));
+                return Err(ServiceError::failed(
+                    Some(Service::Mcp),
+                    McpError::Start {
+                        key: req.server.to_string(),
+                        cause: "no session context".into(),
+                    }
+                    .to_string(),
+                ));
             };
             let result = self.call_server(&session, who, req).await;
             if session.cancel.is_cancelled() {
@@ -596,29 +956,57 @@ impl McpClient for Client {
     }
 }
 
-fn collect_declarations(id: SessionId, feed: Vec<McpDeclaration>, session: &Session) -> HashMap<Key, DeclaredServer> {
+fn collect_declarations(
+    id: SessionId,
+    feed: Vec<McpDeclaration>,
+    session: &Session,
+) -> HashMap<Key, DeclaredServer> {
     let mut declarations = HashMap::new();
     let mut seen = HashSet::new();
     for record in feed {
         for (server, decl) in record.block.servers {
             if !seen.insert((record.plugin.clone(), server.clone())) {
-                session.services.notify(&session.caller, Notice {
-                    turn: None, kind: "mcp".into(),
-                    text: format!("mcp: server {server} is declared by multiple skills of {}", record.plugin).into(),
-                });
+                session.services.notify(
+                    &session.caller,
+                    Notice {
+                        turn: None,
+                        kind: "mcp".into(),
+                        text: format!(
+                            "mcp: server {server} is declared by multiple skills of {}",
+                            record.plugin
+                        )
+                        .into(),
+                    },
+                );
                 continue;
             }
-            let key = Key { session: id, skill: record.skill.as_str().to_owned(), server: server.into() };
-            declarations.insert(key, DeclaredServer { plugin: record.plugin.clone(), server: Arc::new(decl) });
+            let key = Key {
+                session: id,
+                skill: record.skill.as_str().to_owned(),
+                server: server.into(),
+            };
+            declarations.insert(
+                key,
+                DeclaredServer {
+                    plugin: record.plugin.clone(),
+                    server: Arc::new(decl),
+                },
+            );
         }
     }
     declarations
 }
 
-fn same_declarations(old: &HashMap<Key, DeclaredServer>, new: &HashMap<Key, DeclaredServer>) -> bool {
-    old.len() == new.len() && old.iter().all(|(key, declaration)| {
-        new.get(key).is_some_and(|next| next.plugin == declaration.plugin && next.server == declaration.server)
-    })
+fn same_declarations(
+    old: &HashMap<Key, DeclaredServer>,
+    new: &HashMap<Key, DeclaredServer>,
+) -> bool {
+    old.len() == new.len()
+        && old.iter().all(|(key, declaration)| {
+            new.get(key).is_some_and(|next| {
+                next.plugin == declaration.plugin && next.server == declaration.server
+            })
+        })
 }
 
 fn insert_tool(
@@ -629,15 +1017,30 @@ fn insert_tool(
     session: &Session,
 ) -> Result<(), ServiceError> {
     if let Some(other) = names.insert(tool.name().clone(), key.clone()) {
-        let error = format!("mcp: mapped tool {} collides between {} and {}", tool.name(), other.display(), key.display());
-        session.services.notify(&session.caller, Notice { turn: None, kind: "mcp".into(), text: error.clone().into() });
+        let error = format!(
+            "mcp: mapped tool {} collides between {} and {}",
+            tool.name(),
+            other.display(),
+            key.display()
+        );
+        session.services.notify(
+            &session.caller,
+            Notice {
+                turn: None,
+                kind: "mcp".into(),
+                text: error.clone().into(),
+            },
+        );
         return Err(ServiceError::failed(Some(Service::Mcp), error));
     }
     tools.push((tool, Visibility::Deferred));
     Ok(())
 }
 
-async fn process_environment(session: &Session, who: &Caller) -> Result<ProcessEnvironment, McpError> {
+async fn process_environment(
+    session: &Session,
+    who: &Caller,
+) -> Result<ProcessEnvironment, McpError> {
     let path = env_key(session, who, "PATH").await?;
     let home = env_key(session, who, "HOME").await?;
     let tmpdir = env_key(session, who, "TMPDIR").await?;
@@ -645,75 +1048,141 @@ async fn process_environment(session: &Session, who: &Caller) -> Result<ProcessE
 }
 
 async fn env_key(session: &Session, who: &Caller, key: &str) -> Result<Option<OsString>, McpError> {
-    session.services.env(who, key).await.map(|value| value.map(OsString::from)).map_err(|error| {
-        McpError::Start { key: key.to_owned(), cause: error.to_string() }
-    })
+    session
+        .services
+        .env(who, key)
+        .await
+        .map(|value| value.map(OsString::from))
+        .map_err(|error| McpError::Start {
+            key: key.to_owned(),
+            cause: error.to_string(),
+        })
 }
 
 fn response_result(reply: &RawJson) -> Result<Value, McpError> {
-    let value = reply.decode_as::<Value>().map_err(|error| protocol_error(error.to_string()))?;
-    if let Some(error) = protocol::json_rpc_error(reply.as_str()) { return Err(error) }
-    value.get("result").cloned().ok_or_else(|| protocol_error("MCP response has no result".into()))
+    let value = reply
+        .decode_as::<Value>()
+        .map_err(|error| protocol_error(error.to_string()))?;
+    if let Some(error) = protocol::json_rpc_error(reply.as_str()) {
+        return Err(error);
+    }
+    value
+        .get("result")
+        .cloned()
+        .ok_or_else(|| protocol_error("MCP response has no result".into()))
 }
 
 fn protocol_error(message: String) -> McpError {
-    McpError::Protocol { code: -32600, message }
+    McpError::Protocol {
+        code: -32600,
+        message,
+    }
 }
 
 fn map_transport(error: TransportError) -> McpError {
     match error {
         TransportError::Mcp(error) => error,
-        TransportError::Cancelled => McpError::Start { key: "session".into(), cause: "session cancelled".into() },
+        TransportError::Cancelled => McpError::Start {
+            key: "session".into(),
+            cause: "session cancelled".into(),
+        },
     }
 }
 
-fn call_params(tool: &str, arguments: &RawJson, responses: Option<&str>, request_state: Option<&str>) -> Result<String, McpError> {
+fn call_params(
+    tool: &str,
+    arguments: &RawJson,
+    responses: Option<&str>,
+    request_state: Option<&str>,
+) -> Result<String, McpError> {
+    use std::fmt::Write as _;
     let tool = sonic_rs::to_string(tool).map_err(|error| protocol_error(error.to_string()))?;
     let mut params = format!("{{\"name\":{tool},\"arguments\":{}", arguments.as_str());
-    if let Some(responses) = responses { params.push_str(&format!(",\"inputResponses\":{responses}")); }
-    if let Some(state) = request_state { params.push_str(&format!(",\"requestState\":{state}")); }
+    if let Some(responses) = responses {
+        let _ = write!(params, ",\"inputResponses\":{responses}");
+    }
+    if let Some(state) = request_state {
+        let _ = write!(params, ",\"requestState\":{state}");
+    }
     params.push('}');
     Ok(params)
 }
 
-async fn answer_inputs(result: &Value, session: &Session, who: &Caller) -> Result<String, McpError> {
-    let Some(requests) = result.get("inputRequests").and_then(|value| value.as_object()) else {
+async fn answer_inputs(
+    result: &Value,
+    session: &Session,
+    who: &Caller,
+) -> Result<String, McpError> {
+    let Some(requests) = result
+        .get("inputRequests")
+        .and_then(|value| value.as_object())
+    else {
         return Ok("{}".into());
     };
     let mut answers = Vec::new();
-    for (name, request) in requests.iter() {
-        let name: &str = name.as_ref();
-        let answer = if request.get("method").and_then(JsonValueTrait::as_str) == Some("elicitation/create") {
+    for (name, request) in requests {
+        let name: &str = name;
+        let answer = if request.get("method").and_then(JsonValueTrait::as_str)
+            == Some("elicitation/create")
+        {
             answer_elicitation(request, session, who).await?
-        } else { "{\"action\":\"decline\"}".into() };
+        } else {
+            "{\"action\":\"decline\"}".into()
+        };
         let name = sonic_rs::to_string(name).map_err(|error| protocol_error(error.to_string()))?;
         answers.push(format!("{name}:{answer}"));
     }
     Ok(format!("{{{}}}", answers.join(",")))
 }
 
-async fn answer_elicitation(request: &Value, session: &Session, who: &Caller) -> Result<String, McpError> {
+async fn answer_elicitation(
+    request: &Value,
+    session: &Session,
+    who: &Caller,
+) -> Result<String, McpError> {
     let params = request.get("params");
-    let message = params.and_then(|value| value.get("message")).and_then(JsonValueTrait::as_str).unwrap_or("MCP server requests input");
-    let properties = params.and_then(|value| value.get("requestedSchema"))
-        .and_then(|value| value.get("properties")).and_then(|value| value.as_object());
-    let Some(properties) = properties else { return Ok("{\"action\":\"decline\"}".into()) };
+    let message = params
+        .and_then(|value| value.get("message"))
+        .and_then(JsonValueTrait::as_str)
+        .unwrap_or("MCP server requests input");
+    let properties = params
+        .and_then(|value| value.get("requestedSchema"))
+        .and_then(|value| value.get("properties"))
+        .and_then(|value| value.as_object());
+    let Some(properties) = properties else {
+        return Ok("{\"action\":\"decline\"}".into());
+    };
     let mut content = Vec::new();
-    for (name, schema) in properties.iter() {
-        let name: &str = name.as_ref();
+    for (name, schema) in properties {
+        let name: &str = name;
         let prompt = format!("{message}: {name}");
-        let question = if let Some(variants) = schema.get("enum").and_then(|value| value.as_array()) {
+        let question = if let Some(variants) = schema.get("enum").and_then(|value| value.as_array())
+        {
             Question::Select {
                 prompt: prompt.into(),
-                options: variants.iter().filter_map(JsonValueTrait::as_str).map(|label| Choice {
-                    label: label.into(), description: None,
-                }).collect(),
-                multi: false, preview: None,
+                options: variants
+                    .iter()
+                    .filter_map(JsonValueTrait::as_str)
+                    .map(|label| Choice {
+                        label: label.into(),
+                        description: None,
+                    })
+                    .collect(),
+                multi: false,
+                preview: None,
             }
-        } else { Question::Text { prompt: prompt.into(), placeholder: None } };
+        } else {
+            Question::Text {
+                prompt: prompt.into(),
+                placeholder: None,
+            }
+        };
         let answer = session.services.ask(who, question).await;
         let Ok(Some(Answer::Value(value))) = answer else {
-            if matches!(answer, Err(ServiceError::Denied(dal_core::DenyReason::NoFrontEnd))) {
+            if matches!(
+                answer,
+                Err(ServiceError::Denied(dal_core::DenyReason::NoFrontEnd))
+            ) {
                 return Err(McpError::NoAskFrontEnd);
             }
             return Ok("{\"action\":\"decline\"}".into());
@@ -721,7 +1190,10 @@ async fn answer_elicitation(request: &Value, session: &Session, who: &Caller) ->
         let name = sonic_rs::to_string(name).map_err(|error| protocol_error(error.to_string()))?;
         content.push(format!("{name}:{}", value.as_str()));
     }
-    Ok(format!("{{\"action\":\"accept\",\"content\":{{{}}}}}", content.join(",")))
+    Ok(format!(
+        "{{\"action\":\"accept\",\"content\":{{{}}}}}",
+        content.join(",")
+    ))
 }
 
 /// Waits for a correlated reply; matching progress extends only this call's idle deadline.
@@ -742,28 +1214,57 @@ async fn await_reply(
         };
         let event = match event {
             Ok(Some(event)) => event,
-            Ok(None) => return Err(TransportError::Mcp(McpError::Exited { key: ctx.instance.key.display(), code: -1 })),
-            Err(_) => return Err(TransportError::Mcp(McpError::Timeout {
-                n: if Instant::now() >= cap { ctx.budgets.call_max.as_secs() } else { ctx.budgets.call.as_secs() },
-            })),
+            Ok(None) => {
+                return Err(TransportError::Mcp(McpError::Exited {
+                    key: ctx.instance.key.display(),
+                    code: -1,
+                }));
+            }
+            Err(_) => {
+                return Err(TransportError::Mcp(McpError::Timeout {
+                    n: if Instant::now() >= cap {
+                        ctx.budgets.call_max.as_secs()
+                    } else {
+                        ctx.budgets.call.as_secs()
+                    },
+                }));
+            }
         };
         let reply = event.map_err(TransportError::Mcp)?;
-        let value = reply.decode_as::<Value>().map_err(|error| TransportError::Mcp(protocol_error(error.to_string())))?;
-        let progress = value.get("method").and_then(JsonValueTrait::as_str) == Some("notifications/progress");
-        let token = value.get("params").and_then(|params| params.get("_meta"))
-            .and_then(|meta| meta.get("progressToken")).and_then(JsonValueTrait::as_str);
+        let value = reply
+            .decode_as::<Value>()
+            .map_err(|error| TransportError::Mcp(protocol_error(error.to_string())))?;
+        let progress =
+            value.get("method").and_then(JsonValueTrait::as_str) == Some("notifications/progress");
+        let token = value
+            .get("params")
+            .and_then(|params| params.get("_meta"))
+            .and_then(|meta| meta.get("progressToken"))
+            .and_then(JsonValueTrait::as_str);
         if progress && token == Some(progress_token.as_str()) {
             deadline = Instant::now() + ctx.budgets.call;
             let mut last_notice = ctx.instance.last_notice.lock().await;
             if last_notice.is_none_or(|instant| instant.elapsed() >= Duration::from_secs(1)) {
-                let text = value.get("params").and_then(|params| params.get("message"))
-                    .and_then(JsonValueTrait::as_str).unwrap_or("progress");
-                ctx.session.services.notify(ctx.who, Notice { turn: None, kind: "mcp".into(), text: format!("{}: {text}", ctx.instance.key.display()).into() });
+                let text = value
+                    .get("params")
+                    .and_then(|params| params.get("message"))
+                    .and_then(JsonValueTrait::as_str)
+                    .unwrap_or("progress");
+                ctx.session.services.notify(
+                    ctx.who,
+                    Notice {
+                        turn: None,
+                        kind: "mcp".into(),
+                        text: format!("{}: {text}", ctx.instance.key.display()).into(),
+                    },
+                );
                 *last_notice = Some(Instant::now());
             }
             continue;
         }
-        if value.get("id").and_then(JsonValueTrait::as_u64) == Some(id) { return Ok(reply) }
+        if value.get("id").and_then(JsonValueTrait::as_u64) == Some(id) {
+            return Ok(reply);
+        }
     }
 }
 
@@ -791,19 +1292,35 @@ impl dal_agent::ext::CommandHandler for McpCommand {
 pub(crate) struct SessionStartHook(pub(crate) Arc<Client>);
 
 impl ObserveHook<dal_core::SessionStart> for SessionStartHook {
-    fn call(&self, input: dal_core::SessionStart, cx: HookCx) -> BoxFuture<'static, Result<(), dal_agent::ext::HookError>> {
+    fn call(
+        &self,
+        input: dal_core::SessionStart,
+        cx: HookCx,
+    ) -> BoxFuture<'static, Result<(), dal_agent::ext::HookError>> {
         let client = Arc::clone(&self.0);
-        Box::pin(async move { client.start_session(input.session, cx).await.map_err(|error| {
-            dal_agent::ext::HookError::Failed { message: error.to_string().into() }
-        }) })
+        Box::pin(async move {
+            client
+                .start_session(input.session, cx)
+                .await
+                .map_err(|error| dal_agent::ext::HookError::Failed {
+                    message: error.to_string().into(),
+                })
+        })
     }
 }
 
 pub(crate) struct SessionEndHook(pub(crate) Arc<Client>);
 
 impl ObserveHook<dal_core::SessionEnd> for SessionEndHook {
-    fn call(&self, input: dal_core::SessionEnd, _cx: HookCx) -> BoxFuture<'static, Result<(), dal_agent::ext::HookError>> {
+    fn call(
+        &self,
+        input: dal_core::SessionEnd,
+        _cx: HookCx,
+    ) -> BoxFuture<'static, Result<(), dal_agent::ext::HookError>> {
         let client = Arc::clone(&self.0);
-        Box::pin(async move { client.end_session(input.session).await; Ok(()) })
+        Box::pin(async move {
+            client.end_session(input.session).await;
+            Ok(())
+        })
     }
 }

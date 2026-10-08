@@ -1,6 +1,8 @@
 //! Shell execution tool contracts, state mapping, and user-facing results.
 
+/// Tool-specific classification of parsed exec commands.
 pub mod classify;
+/// Shell resolution against configured paths and platform ladders.
 pub(crate) mod shell;
 
 pub use classify::exec_reads_only;
@@ -99,15 +101,6 @@ pub(crate) enum ExecError {
         "exec: no bash found. Install Git for Windows (https://git-scm.com/downloads/win), add bash.exe to PATH, or set shell in dal.toml"
     )]
     NoBash,
-    /// The host process door could not start the resolved shell.
-    #[cfg(windows)]
-    #[error("exec: cannot start {shell}: {reason}")]
-    CannotStart {
-        /// The resolved shell program.
-        shell: String,
-        /// The host process-door error.
-        reason: String,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -235,28 +228,69 @@ pub(crate) fn validate(args: ExecArgs, root: &Path) -> Result<ValidatedCall, Exe
     })
 }
 
+/// Process-door lifecycle stage of one exec job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExecState {
+    /// Created; waiting for the host to start the shell process.
     Queued,
+    /// The shell process is running under a deadline.
     Running,
+    /// The foreground budget elapsed; the job continues in the background.
     Detached,
+    /// The host is stopping the process group of the job.
     LadderPending,
+    /// The job produced its user-facing result.
     Done,
 }
 
+/// Terminal condition of one exec job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExecOutcome {
+    /// The command exited with the given status code.
     Exited(i32),
+    /// The command was killed by the given signal.
     Signaled(i32),
+    /// The deadline elapsed before the command exited.
     TimedOut,
+    /// The turn ended before the command exited.
     Aborted,
 }
 
+/// Host door event applied to one exec job by [`ExecJob::on`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExecEvent {
-    Spawned { at: Instant },
+    /// The host started the shell process at `at`.
+    Spawned {
+        /// The instant the host door reported the process start.
+        at: Instant,
+    },
+    /// The process exited or was stopped with the given outcome.
     Exit(ExecOutcome),
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "state-machine inputs the host driver does not yet emit; exercised by exec/tests.rs"
+        )
+    )]
+    TimeoutFire,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "state-machine inputs the host driver does not yet emit; exercised by exec/tests.rs"
+        )
+    )]
+    Cancel,
     BudgetFire,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "state-machine inputs the host driver does not yet emit; exercised by exec/tests.rs"
+        )
+    )]
+    LadderComplete(ExecOutcome),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -289,7 +323,13 @@ impl ExecJob {
         }
     }
 
-    #[cfg(test)]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "read by exec/tests.rs; the host driver reads the deadline internally"
+        )
+    )]
     #[must_use]
     pub(crate) fn deadline(&self) -> Option<Instant> {
         self.deadline
@@ -319,7 +359,7 @@ impl ExecJob {
                 self.state = LadderPending;
                 Some(ExecTransition::Ladder(ExecOutcome::TimedOut))
             }
-            (Running, ExecEvent::Cancel) => {
+            (Running | Detached, ExecEvent::Cancel) => {
                 self.state = LadderPending;
                 Some(ExecTransition::Ladder(ExecOutcome::Aborted))
             }
@@ -330,10 +370,6 @@ impl ExecJob {
             (Detached, ExecEvent::Exit(outcome)) => {
                 self.state = ExecState::Done;
                 Some(ExecTransition::NoticeAndDone(outcome))
-            }
-            (Detached, ExecEvent::Cancel) => {
-                self.state = LadderPending;
-                Some(ExecTransition::Ladder(ExecOutcome::Aborted))
             }
             (LadderPending, ExecEvent::LadderComplete(outcome)) => {
                 self.state = ExecState::Done;
@@ -422,8 +458,8 @@ impl ExecTool {
     }
 
     async fn drive<'a>(&'a self, call: ToolCall, mut cx: ToolCx<'a>) -> ToolOutcome {
-        let args = match decode(call.args.as_str()) {
-            Ok(args) => args,
+        let parsed = match decode(call.args.as_str()) {
+            Ok(parsed) => parsed,
             Err(error) => return ToolOutcome::Err(ToolError::message(error.to_string())),
         };
         let root = cx.workspace().as_path().to_path_buf();
@@ -432,9 +468,9 @@ impl ExecTool {
         let foreground_seconds = self.cfg.foreground_seconds;
         let captured_vars = cx.env().vars.clone();
         let blocking = tokio::task::spawn_blocking(move || {
-            let validated = validate(args, &root)?;
-            let shell = shell::resolve(shell_setting.as_deref(), &validated.cwd, &captured_vars)?;
-            Ok::<_, ExecError>((validated, shell))
+            let call = validate(parsed, &root)?;
+            let shell = shell::resolve(shell_setting.as_deref(), &call.cwd, &captured_vars)?;
+            Ok::<_, ExecError>((call, shell))
         })
         .await;
         let (validated, shell) = match blocking {
@@ -484,50 +520,48 @@ impl ExecTool {
         let budget = validated
             .foreground
             .unwrap_or(Duration::from_secs(foreground_seconds));
-        enum Decision {
-            Waited(Result<ProcResult, ToolError>),
-            Budget,
-        }
-        let decision = tokio::select! {
+        let waited = tokio::select! {
             biased;
-            waited = proc.wait(cx.cancel()) => Decision::Waited(waited),
-            () = tokio::time::sleep(budget) => Decision::Budget,
-        };
-        match decision {
-            Decision::Budget => {
+            waited = proc.wait(cx.cancel()) => waited,
+            () = tokio::time::sleep(budget) => {
                 job.on(ExecEvent::BudgetFire);
-                ToolOutcome::Detached(cx.detach(proc))
+                return ToolOutcome::Detached(cx.detach(proc));
             }
-            Decision::Waited(Err(error)) => ToolOutcome::Err(error),
-            Decision::Waited(Ok(result)) => {
-                let outcome = match result.status {
-                    ProcStatus::Exited { code } => ExecOutcome::Exited(code),
-                    ProcStatus::Signaled { signal } => ExecOutcome::Signaled(signal),
-                    ProcStatus::TimedOut => ExecOutcome::TimedOut,
-                    ProcStatus::Cancelled => ExecOutcome::Aborted,
-                };
-                job.on(ExecEvent::Exit(outcome));
-                let preview_text = String::from_utf8_lossy(&result.preview);
-                let preview = if result.preview.is_empty() {
-                    None
-                } else {
-                    Some(preview_text.as_ref())
-                };
-                let text = final_text(
-                    preview,
-                    &result.log_path,
-                    outcome,
-                    validated.timeout_seconds,
-                    sandbox_on,
-                    result.denial_seen,
-                );
-                match outcome {
-                    ExecOutcome::Exited(0) => {
-                        ToolOutcome::Ok(ToolOutput::from_text(text.into_boxed_str()))
-                    }
-                    _ => ToolOutcome::Err(ToolError::message(text)),
-                }
-            }
+        };
+        Self::settle(&mut job, &validated, waited, sandbox_on)
+    }
+
+    /// Maps one finished process result to the user-facing exec outcome.
+    fn settle(
+        job: &mut ExecJob,
+        validated: &ValidatedCall,
+        result: Result<ProcResult, ToolError>,
+        sandbox_on: bool,
+    ) -> ToolOutcome {
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => return ToolOutcome::Err(error),
+        };
+        let outcome = match result.status {
+            ProcStatus::Exited { code } => ExecOutcome::Exited(code),
+            ProcStatus::Signaled { signal } => ExecOutcome::Signaled(signal),
+            ProcStatus::TimedOut => ExecOutcome::TimedOut,
+            ProcStatus::Cancelled => ExecOutcome::Aborted,
+        };
+        job.on(ExecEvent::Exit(outcome));
+        let preview_text = String::from_utf8_lossy(&result.preview);
+        let preview = (!result.preview.is_empty()).then_some(preview_text.as_ref());
+        let text = final_text(
+            preview,
+            &result.log_path,
+            outcome,
+            validated.timeout_seconds,
+            sandbox_on,
+            result.denial_seen,
+        );
+        match outcome {
+            ExecOutcome::Exited(0) => ToolOutcome::Ok(ToolOutput::from_text(text.into_boxed_str())),
+            _ => ToolOutcome::Err(ToolError::message(text)),
         }
     }
 }

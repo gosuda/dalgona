@@ -23,6 +23,7 @@ use std::error::Error;
 use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::pin::pin;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use dal_core::Family;
@@ -74,9 +75,9 @@ pub enum Exchange {
 /// Builds the one client a host keeps per provider set.
 ///
 /// The client connects within [`CONNECT_TIMEOUT`], fails any read that stays
-/// idle for [`STREAM_IDLE_TIMEOUT`], follows at most 10 redirects and only to
-/// URLs [`check_base_url`] admits (a plain-HTTP loopback hop only when the
-/// request itself started on plain-HTTP loopback), sends no `referer`, never
+/// idle for [`STREAM_IDLE_TIMEOUT`], follows at most 10 redirects and only
+/// within the origin of the request (a hop to another scheme, host, or port
+/// never carries provider credentials), sends no `referer`, never
 /// retries on its own (the request lifecycle owns every retry), and sets no
 /// default headers. It keeps no cookies: the `cookies` feature is off, so
 /// reqwest has no store to enable. reqwest's built-in `accept: */*` never goes
@@ -105,6 +106,27 @@ pub fn build_client() -> reqwest::Client {
         .retry(reqwest::retry::never())
         .build()
         .expect("the reqwest TLS backend initializes")
+}
+
+/// A [`build_client`] client built on first use.
+///
+/// Building a client parses the platform trust roots, which costs tens of
+/// milliseconds; a host that never sends a request (a terminal that has not yet
+/// received a prompt) must not pay it at startup. Clones share one build.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct LazyClient(Arc<OnceLock<reqwest::Client>>);
+
+impl LazyClient {
+    /// The shared client, built by [`build_client`] on the first call.
+    pub(crate) fn get(&self) -> &reqwest::Client {
+        self.0.get_or_init(build_client)
+    }
+}
+
+impl From<reqwest::Client> for LazyClient {
+    fn from(client: reqwest::Client) -> Self {
+        Self(Arc::new(OnceLock::from(client)))
+    }
 }
 
 /// Renders the `user-agent` value every request sends.
@@ -343,23 +365,24 @@ fn is_loopback(url: &Url) -> bool {
     }
 }
 
-/// The redirect rule: a hop is followed when it is within [`MAX_REDIRECTS`],
-/// uses `https`, or uses plain-HTTP loopback from a request that itself started
-/// on plain-HTTP loopback. A remote server can never steer a request into
-/// plaintext or onto a local port.
+/// The redirect rule: a hop is followed when it is within [`MAX_REDIRECTS`]
+/// and keeps the origin (scheme, host, port) of the hop before it. reqwest
+/// strips only `authorization` and cookie headers when a redirect changes
+/// host, so provider credentials in `x-api-key` or `chatgpt-account-id` would
+/// reach a foreign server; a provider endpoint has no reason to redirect
+/// elsewhere. A plain-HTTP hop off loopback stays a [`RefusedRedirect::PlainHttp`].
 fn follow(next: &Url, previous: &[Url]) -> Result<(), RefusedRedirect> {
     if previous.len() > MAX_REDIRECTS {
         return Err(RefusedRedirect::TooMany);
     }
     match next.scheme() {
-        "https" if next.host().is_some() => Ok(()),
         "http" if !is_loopback(next) => Err(RefusedRedirect::PlainHttp {
             host: next.host_str().unwrap_or_default().to_owned(),
         }),
-        "http"
+        "https" | "http"
             if previous
-                .first()
-                .is_some_and(|origin| origin.scheme() == "http" && is_loopback(origin)) =>
+                .last()
+                .is_some_and(|hop| hop.origin() == next.origin()) =>
         {
             Ok(())
         }
@@ -392,7 +415,7 @@ impl Error for RefusedRedirect {}
 
 /// Maps a reqwest failure to the typed provider error, recovering a refused
 /// redirect from the source chain. The reason omits the URL.
-fn from_reqwest(family: Family, error: reqwest::Error) -> ProviderError {
+pub(crate) fn from_reqwest(family: Family, error: reqwest::Error) -> ProviderError {
     let error = error.without_url();
     let mut reason = error.to_string();
     let mut source = error.source();

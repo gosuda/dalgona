@@ -193,12 +193,39 @@ pub(crate) type SubscriberPort = std::sync::Arc<SubscriberShared>;
 pub(crate) struct SessionHandle {
     session: SessionId,
     tx: mpsc::Sender<ActorRequest>,
+    control: std::sync::Arc<std::sync::Mutex<control::ControlCell>>,
 }
 
 impl SessionHandle {
-    /// A port into the actor behind the bounded command channel.
-    pub(crate) fn new(session: SessionId, tx: mpsc::Sender<ActorRequest>) -> Self {
-        Self { session, tx }
+    /// A port into the actor behind the bounded command channel, sharing the
+    /// turn-control cell so a cancel fires before the actor drains the queue.
+    pub(crate) fn new(
+        session: SessionId,
+        tx: mpsc::Sender<ActorRequest>,
+        control: std::sync::Arc<std::sync::Mutex<control::ControlCell>>,
+    ) -> Self {
+        Self {
+            session,
+            tx,
+            control,
+        }
+    }
+
+    /// Fires the running turn's token before the command queues; the in-flight
+    /// hook drive or stream observes the token instead of waiting for the
+    /// actor to drain the mailbox.
+    fn cancel_before_queue(&self, command: &Command) {
+        let Command::Cancel { scope } = command else {
+            return;
+        };
+        let dal_core::CancelScope::Turn(turn) = scope else {
+            return;
+        };
+        let _ = self
+            .control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .cancel(*turn);
     }
 
     /// The session this port addresses.
@@ -221,6 +248,7 @@ impl SessionHandle {
 
     /// Submits a command; full channels apply backpressure to the caller.
     pub(crate) async fn submit(&self, command: Command, by: ClientId) -> Result<Reply, AgentError> {
+        self.cancel_before_queue(&command);
         self.roundtrip(|reply| ActorRequest::Submit { command, by, reply })
             .await?
     }

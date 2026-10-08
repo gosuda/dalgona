@@ -12,6 +12,8 @@ use dal_core::{
 };
 use tokio::io::AsyncWriteExt as _;
 
+/// The assembled product a binary or harness serves through a [`Host`].
+pub use dal_agent::Product;
 /// Product configuration shared with the edge builder.
 pub use dal_core::Config;
 /// Typed product-configuration failures.
@@ -100,6 +102,8 @@ pub(crate) struct Startup {
     pub(crate) workspace_path: PathBuf,
     pub(crate) workspace: Workspace,
     pub(crate) config: Config,
+    /// The user `dal.toml` path; only the interactive UI persists to it.
+    #[cfg(feature = "tui")]
     pub(crate) config_path: PathBuf,
     pub(crate) data_root: PathBuf,
     pub(crate) helper: Option<PathBuf>,
@@ -178,25 +182,23 @@ async fn run_command(
                 workspace_path,
                 workspace,
                 config,
-                config_path: _,
                 data_root,
                 helper,
+                ..
             } = startup;
-            run_headless(
-                &cli,
+            let headless = HeadlessRun {
                 vars,
                 cwd,
                 workspace_path,
                 workspace,
                 config,
-                product,
                 helper,
-                &data_root,
-            )
-            .await
+                data_root,
+            };
+            run_headless(&cli, headless, product).await
         }
         #[cfg(feature = "tui")]
-        None => dispatch::interactive(&cli, startup, product).await,
+        None => Box::pin(dispatch::interactive(&cli, startup, product)).await,
         #[cfg(not(feature = "tui"))]
         None => two_lines(
             [
@@ -231,18 +233,68 @@ async fn run_command(
     }
 }
 
-/// Runs one headless prompt turn over the host agent.
-async fn run_headless(
-    cli: &cli::Cli,
+/// Startup inputs one headless prompt run needs.
+struct HeadlessRun {
     vars: VarsMap,
     cwd: PathBuf,
     workspace_path: PathBuf,
     workspace: Workspace,
     config: Config,
-    product: dal_agent::Product,
     helper: Option<PathBuf>,
-    data_root: &Path,
+    data_root: PathBuf,
+}
+
+/// Maps one prompt-assembly failure to its usage diagnostics.
+fn prompt_parts_exit(error: print::PromptError) -> ExitCode {
+    match error {
+        print::PromptError::Empty => two_lines(
+            [
+                cli::texts::NO_PROMPT.into(),
+                cli::texts::NO_PROMPT_HINT.into(),
+            ],
+            exit::ExitKind::RequestedFailure,
+        ),
+        print::PromptError::DashWithoutPipe => two_lines(
+            [
+                cli::texts::DASH_NEEDS_STDIN.into(),
+                cli::texts::DASH_NEEDS_STDIN_HINT.into(),
+            ],
+            exit::ExitKind::Usage,
+        ),
+        print::PromptError::FileMissing { path, arg } => two_lines(
+            cli::texts::prompt_file_not_found(&path, &arg),
+            exit::ExitKind::RequestedFailure,
+        ),
+        print::PromptError::FileUnreadable { path, source } => two_lines(
+            cli::texts::prompt_file_unreadable(&path, &source.to_string()),
+            exit::ExitKind::RequestedFailure,
+        ),
+        print::PromptError::FileNotUtf8 { path } => two_lines(
+            cli::texts::prompt_file_not_utf8(&path),
+            exit::ExitKind::RequestedFailure,
+        ),
+        print::PromptError::Stdin(source) => two_lines(
+            cli::texts::stdin_unreadable(&source.to_string()),
+            exit::ExitKind::RequestedFailure,
+        ),
+    }
+}
+
+/// Runs one headless prompt turn over the host agent.
+async fn run_headless(
+    cli: &cli::Cli,
+    headless: HeadlessRun,
+    product: dal_agent::Product,
 ) -> ExitCode {
+    let HeadlessRun {
+        vars,
+        cwd,
+        workspace_path,
+        workspace,
+        config,
+        helper,
+        data_root,
+    } = headless;
     if config.model().is_none() {
         return two_lines(
             [
@@ -256,48 +308,7 @@ async fn run_headless(
     let parts =
         match print::assemble_prompt(&cli.prompts, &workspace_path, snapshot.stdin_tty).await {
             Ok(parts) => parts,
-            Err(print::PromptError::Empty) => {
-                return two_lines(
-                    [
-                        cli::texts::NO_PROMPT.into(),
-                        cli::texts::NO_PROMPT_HINT.into(),
-                    ],
-                    exit::ExitKind::RequestedFailure,
-                );
-            }
-            Err(print::PromptError::DashWithoutPipe) => {
-                return two_lines(
-                    [
-                        cli::texts::DASH_NEEDS_STDIN.into(),
-                        cli::texts::DASH_NEEDS_STDIN_HINT.into(),
-                    ],
-                    exit::ExitKind::Usage,
-                );
-            }
-            Err(print::PromptError::FileMissing { path, arg }) => {
-                return two_lines(
-                    cli::texts::prompt_file_not_found(&path, &arg),
-                    exit::ExitKind::RequestedFailure,
-                );
-            }
-            Err(print::PromptError::FileUnreadable { path, source }) => {
-                return two_lines(
-                    cli::texts::prompt_file_unreadable(&path, &source.to_string()),
-                    exit::ExitKind::RequestedFailure,
-                );
-            }
-            Err(print::PromptError::FileNotUtf8 { path }) => {
-                return two_lines(
-                    cli::texts::prompt_file_not_utf8(&path),
-                    exit::ExitKind::RequestedFailure,
-                );
-            }
-            Err(print::PromptError::Stdin(source)) => {
-                return two_lines(
-                    cli::texts::stdin_unreadable(&source.to_string()),
-                    exit::ExitKind::RequestedFailure,
-                );
-            }
+            Err(error) => return prompt_parts_exit(error),
         };
     let session = session_ref(cli, workspace);
     let host = match Host::start(
@@ -312,12 +323,12 @@ async fn run_headless(
     .await
     {
         Ok(host) => host,
-        Err(error) => return host_exit(&error, data_root),
+        Err(error) => return host_exit(&error, &data_root),
     };
     let agent = match host.open(session, ClientId::new("cli")).await {
         Ok(agent) => agent,
         Err(error) => {
-            let code = host_exit(&error, data_root);
+            let code = host_exit(&error, &data_root);
             let _ = host.shutdown(Duration::from_secs(3)).await;
             return code;
         }
@@ -546,7 +557,7 @@ fn capture_process() -> Result<(VarsMap, PathBuf), ExitCode> {
     if edge::parse_log_level(&vars).is_err() {
         let value = vars
             .get(std::ffi::OsStr::new("DAL_LOG"))
-            .map_or_default(|value| value.to_string_lossy().into_owned());
+            .map_or(String::new(), |value| value.to_string_lossy().into_owned());
         return Err(two_lines(
             [
                 format!("dalgon: DAL_LOG \"{value}\" is invalid"),
@@ -558,6 +569,49 @@ fn capture_process() -> Result<(VarsMap, PathBuf), ExitCode> {
     Ok((vars, cwd))
 }
 
+/// Maps one root-resolution failure to its startup diagnostics.
+fn roots_exit(error: &edge::EdgeError, vars: &VarsMap, binary: &str) -> ExitCode {
+    match error {
+        edge::EdgeError::HomeMissing => {
+            let what = if cfg!(windows) {
+                cli::texts::HOME_MISSING_WINDOWS
+            } else {
+                cli::texts::HOME_MISSING_POSIX
+            };
+            two_lines(
+                [what.into(), cli::texts::HOME_MISSING_HINT.into()],
+                exit::ExitKind::RequestedFailure,
+            )
+        }
+        edge::EdgeError::InvalidProduct => {
+            let log_path = edge::log_file_path(vars, binary);
+            two_lines(
+                cli::texts::internal_error_at("edge", "invalid product identity", &log_path),
+                exit::ExitKind::Internal,
+            )
+        }
+        edge::EdgeError::Workspace(path) => two_lines(
+            cli::texts::workspace_not_usable(&path.display().to_string()),
+            exit::ExitKind::RequestedFailure,
+        ),
+        edge::EdgeError::WorkspaceRelative => {
+            let log_path = edge::log_file_path(vars, binary);
+            two_lines(
+                cli::texts::internal_error_at(
+                    "edge",
+                    "the workspace path is not absolute",
+                    &log_path,
+                ),
+                exit::ExitKind::Internal,
+            )
+        }
+        edge::EdgeError::Io { path, source, .. } => two_lines(
+            cli::texts::prompt_file_unreadable(path, &source.to_string()),
+            exit::ExitKind::RequestedFailure,
+        ),
+    }
+}
+
 /// Resolves roots, the workspace, and the layered configuration.
 fn assemble_startup(
     factory: &ProductFactory,
@@ -567,47 +621,7 @@ fn assemble_startup(
 ) -> Result<Startup, ExitCode> {
     let roots = match edge::resolve_roots(&vars, factory.binary) {
         Ok(roots) => roots,
-        Err(edge::EdgeError::HomeMissing) => {
-            let what = if cfg!(windows) {
-                cli::texts::HOME_MISSING_WINDOWS
-            } else {
-                cli::texts::HOME_MISSING_POSIX
-            };
-            return Err(two_lines(
-                [what.into(), cli::texts::HOME_MISSING_HINT.into()],
-                exit::ExitKind::RequestedFailure,
-            ));
-        }
-        Err(edge::EdgeError::InvalidProduct) => {
-            let log_path = edge::log_file_path(&vars, factory.binary);
-            return Err(two_lines(
-                cli::texts::internal_error_at("edge", "invalid product identity", &log_path),
-                exit::ExitKind::Internal,
-            ));
-        }
-        Err(edge::EdgeError::Workspace(path)) => {
-            return Err(two_lines(
-                cli::texts::workspace_not_usable(&path.display().to_string()),
-                exit::ExitKind::RequestedFailure,
-            ));
-        }
-        Err(edge::EdgeError::WorkspaceRelative) => {
-            let log_path = edge::log_file_path(&vars, factory.binary);
-            return Err(two_lines(
-                cli::texts::internal_error_at(
-                    "edge",
-                    "the workspace path is not absolute",
-                    &log_path,
-                ),
-                exit::ExitKind::Internal,
-            ));
-        }
-        Err(edge::EdgeError::Io { path, source, .. }) => {
-            return Err(two_lines(
-                cli::texts::prompt_file_unreadable(&path, &source.to_string()),
-                exit::ExitKind::RequestedFailure,
-            ));
-        }
+        Err(error) => return Err(roots_exit(&error, &vars, factory.binary)),
     };
     let workspace_path = edge::resolve_workspace_path(&cwd, cli.cd.as_deref());
     let workspace = match edge::validate_workspace(workspace_path.clone()) {
@@ -670,6 +684,7 @@ fn assemble_startup(
         workspace_path,
         workspace,
         config,
+        #[cfg(feature = "tui")]
         config_path,
         data_root: roots.data,
         helper: edge::current_exe(),

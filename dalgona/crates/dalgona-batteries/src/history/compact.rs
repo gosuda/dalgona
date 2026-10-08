@@ -20,7 +20,7 @@ use tokio::sync::Semaphore;
 
 use super::MAX_CONCURRENT_RENDERS;
 use super::pipeline::{
-    Budget, Commit, Decline, Drawn, Engine, ImageProfile, Limits, Request, SourceReader,
+    Budget, Commit, Decline, Engine, Limits, Request, SourceReader,
 };
 use super::records::LetterRecord;
 use super::spans::CompactPiece;
@@ -93,13 +93,8 @@ impl Compactor for HistoryCompactor {
         services: Arc<dyn Services>,
     ) -> BoxFuture<'a, Result<Option<Compaction>, CompactError>> {
         Box::pin(async move {
-            let profile = input
-                .image_profile
-                .ok_or(Decline::NoImageProfile)?;
-            let (pieces, source) = self
-                .host
-                .source(&input)
-                .ok_or(Decline::SourceUnavailable)?;
+            let profile = input.image_profile.ok_or(Decline::NoImageProfile)?;
+            let (pieces, source) = self.host.source(&input).ok_or(Decline::SourceUnavailable)?;
             let images_elsewhere = input.images_elsewhere;
             let ordinal = next_ordinal(&services, input.caller).await?;
             let budget = Budget {
@@ -108,8 +103,15 @@ impl Compactor for HistoryCompactor {
                 images_elsewhere,
                 share: self.share,
             };
-            let mut request =
-                Request::new(input.session, input.covered, input.span, ordinal, budget, pieces, source);
+            let mut request = Request::new(
+                input.session,
+                input.covered,
+                input.span,
+                ordinal,
+                budget,
+                pieces,
+                source,
+            );
             if let Some(carried) = input.carried {
                 request = request.with_carried(carried);
             }
@@ -123,10 +125,7 @@ impl Compactor for HistoryCompactor {
 }
 
 /// Returns the next one-based compaction ordinal on the current path.
-async fn next_ordinal(
-    services: &Arc<dyn Services>,
-    caller: &Caller,
-) -> Result<u32, CompactError> {
+async fn next_ordinal(services: &Arc<dyn Services>, caller: &Caller) -> Result<u32, CompactError> {
     let bodies = services.records(caller, "letter").await?;
     let newest = EntryId::new(NonZeroU64::MAX);
     let highest = bodies

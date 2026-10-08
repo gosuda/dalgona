@@ -2,6 +2,10 @@
     clippy::disallowed_methods,
     reason = "SC test invokes the real startup path"
 )]
+#![expect(
+    dead_code,
+    reason = "gate support exposes helpers shared across independent targets"
+)]
 
 //! The v1 focus fixture loads, and invalid tool keys name their source file.
 

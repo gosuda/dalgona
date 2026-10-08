@@ -83,6 +83,11 @@ enum AgentAction {
 }
 
 /// Registers the `agent` tool with the `agents` injection and cleanup hook.
+///
+/// # Errors
+///
+/// Fails with [`RegistrationError`] when the builder rejects the extension
+/// name, the tool registration, or the hook.
 pub fn extension() -> Result<Extension, RegistrationError> {
     let inject = ServiceSet::from_names(["agents"])?;
     ExtensionBuilder::new("subagent", env!("CARGO_PKG_VERSION"), inject)?
@@ -137,6 +142,14 @@ impl Tool for AgentTool {
 
 impl AgentTool {
     /// Decodes the action and dispatches one child operation.
+    ///
+    /// The per-op routing is intentionally linear and readable side by side;
+    /// splitting it would scatter the shared preamble (admission, span,
+    /// journal).
+    #[expect(
+        clippy::too_many_lines,
+        reason = "linear per-op dispatch; each branch shares the same preamble"
+    )]
     async fn drive(&self, call: ToolCall, mut cx: ToolCx<'_>) -> ToolOutcome {
         let action = match decode_action(call.args.as_str()) {
             Ok(action) => action,
@@ -309,9 +322,10 @@ struct CancelChildren;
 impl ObserveHook<SessionEnd> for CancelChildren {
     fn call(&self, _end: SessionEnd, cx: HookCx) -> BoxFuture<'static, Result<(), HookError>> {
         Box::pin(async move {
-            let children = match cx.services.agents(&cx.caller, AgentsOp::List).await {
-                Ok(AgentsReply::Listed(children)) => children,
-                Ok(_) | Err(_) => return Ok(()),
+            let Ok(AgentsReply::Listed(children)) =
+                cx.services.agents(&cx.caller, AgentsOp::List).await
+            else {
+                return Ok(());
             };
             for child in children
                 .iter()

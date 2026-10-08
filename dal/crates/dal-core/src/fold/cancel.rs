@@ -27,14 +27,9 @@ impl Session {
                     return Ok(());
                 }
                 if matches!(&self.phase, Phase::Running { turn: active, .. } if *active == turn) {
-                    return self.end_turn(
-                        turn,
-                        TurnEndStop::Cancelled,
-                        partial,
-                        now,
-                        emit,
-                        effects,
-                    );
+                    self.end_turn(turn, TurnEndStop::Cancelled, partial, now, emit, effects)?;
+                    effects.push(Effect::Reply(Ok(Reply::Done(Output::Nothing))));
+                    return Ok(());
                 }
                 Err(wrong_turn(Expect::After(turn), self.turn_state()))
             }

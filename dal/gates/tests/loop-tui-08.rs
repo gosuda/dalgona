@@ -1,10 +1,8 @@
-#![expect(clippy::unwrap_used, reason = "SC test")]
-#![expect(clippy::expect_used, reason = "SC test")]
+#![cfg(unix)]
 #![expect(
     dead_code,
     reason = "gate support exposes helpers shared across independent targets"
 )]
-#![cfg(unix)]
 #![expect(
     clippy::disallowed_methods,
     reason = "SC test runs real dalgon processes"
@@ -280,7 +278,7 @@ impl TcpProxy {
             .messages
             .iter()
             .filter_map(|message| update_cursor(message))
-            .last()
+            .next_back()
     }
 }
 
@@ -294,6 +292,10 @@ impl Drop for TcpProxy {
     }
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "the proxy thread owns the listener, channel, and shared counters"
+)]
 fn proxy_loop(
     listener: TcpListener,
     target: SocketAddr,
@@ -412,10 +414,7 @@ impl WebSocketStream {
             self.frame_start = Some(end + 4);
         }
         let mut cursor = self.frame_start.unwrap_or(0);
-        loop {
-            let Some(first) = self.bytes.get(cursor).copied() else {
-                break;
-            };
+        while let Some(first) = self.bytes.get(cursor).copied() {
             let Some(second) = self.bytes.get(cursor + 1).copied() else {
                 break;
             };
@@ -498,6 +497,10 @@ fn update_cursor(message: &str) -> Option<(u64, u64)> {
     Some((params.get("gen")?.as_u64()?, params.get("seq")?.as_u64()?))
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "each forward thread takes ownership of its stream pair"
+)]
 fn forward(
     mut reader: TcpStream,
     mut writer: TcpStream,

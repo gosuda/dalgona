@@ -105,7 +105,7 @@ impl<'v> StarlarkValue<'v> for OpAdapter {
         let bound = self.bind_args(args, eval.heap())?;
         let (request, model_route) = self.request(&bound)?;
         if let Some(shared) = &self.scheduled {
-            self.scheduled_call(shared, request, model_route, eval.heap())
+            self.scheduled_call(shared, request, model_route.as_ref(), eval.heap())
         } else {
             let outcome = self.dispatch(request);
             let outcome = wrap_model_outcome(outcome, model_route)?;
@@ -310,7 +310,7 @@ impl OpAdapter {
             .map_err(|error| api_error(format!("{}: {error}", self.op)))?;
         let args = value::Value::Object(vec![("request".into(), request)].into_boxed_slice());
         let (request, model_route) = self.request(&args)?;
-        self.scheduled_call(shared, request, model_route, heap)
+        self.scheduled_call(shared, request, model_route.as_ref(), heap)
     }
 
     /// Blocks the Starlark thread on `host.call` (§R09).
@@ -359,7 +359,7 @@ impl OpAdapter {
         &self,
         shared: &Arc<ScopeShared>,
         request: OpRequest,
-        model_route: Option<ModelRoute>,
+        model_route: Option<&ModelRoute>,
         heap: Heap<'v>,
     ) -> starlark::Result<Value<'v>> {
         if !shared.is_open() {
@@ -387,7 +387,7 @@ impl OpAdapter {
             Submit::Terminal(terminal) => Err(crate::outcome::terminal_error(terminal)),
             Submit::Refused(error) => Err(api_error(error.to_string())),
             Submit::Queued(task) | Submit::Settled(task) => {
-                if let Some(route) = &model_route {
+                if let Some(route) = model_route {
                     shared
                         .model_routes
                         .lock()
@@ -471,7 +471,7 @@ fn validate_model_request_fields(value: &value::Value) -> Result<(), Box<str>> {
         let value::Value::List(tools) = tools else {
             return Err("request.tools must be a list".into());
         };
-        for tool in tools.iter() {
+        for tool in tools {
             strict_object(
                 tool,
                 "request.tools[]",
@@ -483,7 +483,7 @@ fn validate_model_request_fields(value: &value::Value) -> Result<(), Box<str>> {
         let value::Value::List(items) = context else {
             return Err("request.context must be a list".into());
         };
-        for item in items.iter() {
+        for item in items {
             validate_context_item(item)?;
         }
     }
@@ -519,13 +519,15 @@ fn validate_parts(value: &value::Value, assistant: bool) -> Result<(), Box<str>>
     let value::Value::List(parts) = value else {
         return Err("request.context[].parts must be a list".into());
     };
-    for part in parts.iter() {
+    for part in parts {
         let kind = object_tag(part, "type", "request.context[].parts[]")?;
         let allowed = match (assistant, kind) {
-            (false, "text") => &["type", "text"][..],
+            // `text` is the one part kind both roles share; `unnested_or_patterns`
+            // rejects the merged arm and `match_same_arms` rejects two.
+            (false, "text") if !assistant => &["type", "text"][..],
+            (true, "text") => &["type", "text"][..],
             (false, "image") => &["type", "mime", "bytes"][..],
             (false, "blob") => &["type", "blob_id", "mime", "bytes"][..],
-            (true, "text") => &["type", "text"][..],
             (true, "thinking") => &["type", "text", "replay"][..],
             (true, "tool_call") => &["type", "call", "name", "args"][..],
             _ => return Err(format!("request.context[].parts[] has unknown type `{kind}`").into()),
@@ -553,7 +555,7 @@ fn strict_object<'a>(
     let value::Value::Object(fields) = value else {
         return Err(format!("{label} must be an object").into());
     };
-    for (name, _) in fields.iter() {
+    for (name, _) in fields {
         if !allowed.contains(&name.as_ref()) {
             return Err(format!("{label} has unknown field `{name}`").into());
         }

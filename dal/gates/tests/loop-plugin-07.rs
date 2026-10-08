@@ -1,6 +1,11 @@
 #![expect(clippy::unwrap_used, reason = "SC test")]
 #![expect(clippy::expect_used, reason = "SC test")]
-//! Exercises eval cell service injection and EvalOnly tool visibility.
+#![expect(clippy::panic, reason = "SC test")]
+#![expect(
+    dead_code,
+    reason = "gate support exposes helpers shared across independent targets"
+)]
+//! Exercises eval cell service injection and `EvalOnly` tool visibility.
 
 mod support;
 

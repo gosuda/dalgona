@@ -87,7 +87,7 @@ fn letter_paths_classify_numeric_history_and_malformed() {
         classify_letter_path("99999999999"),
         LetterRoute::Numeric("99999999999".into())
     );
-    assert_eq!(parse_letter_id("99999999999"), Some(99999999999));
+    assert_eq!(parse_letter_id("99999999999"), Some(99_999_999_999));
     assert_eq!(
         classify_letter_path("99999999999999999999999"),
         LetterRoute::Numeric("99999999999999999999999".into())

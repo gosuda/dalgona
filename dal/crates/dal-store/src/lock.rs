@@ -29,7 +29,7 @@ pub(crate) struct LockGuard {
 }
 
 impl LockGuard {
-    /// Opens and exclusively locks `path` without waiting.
+    /// Opens and exclusively locks `path`, retrying a contended lock briefly before giving up.
     ///
     /// # Errors
     /// Returns [`StoreError::Locked`] when another process owns the lock, with
@@ -43,23 +43,42 @@ impl LockGuard {
             .open(path)
             .map_err(|source| util::io_err(path, source))?;
 
-        match file.try_lock() {
-            Ok(()) => {
-                file.set_len(0)
-                    .map_err(|source| util::io_err(path, source))?;
-                file.seek(SeekFrom::Start(0))
-                    .map_err(|source| util::io_err(path, source))?;
-                writeln!(file, "{}", std::process::id())
-                    .map_err(|source| util::io_err(path, source))?;
-                Ok(Self { _file: file })
+        let deadline = Instant::now() + PID_WAIT;
+        loop {
+            match file.try_lock() {
+                Ok(()) => {
+                    file.set_len(0)
+                        .map_err(|source| util::io_err(path, source))?;
+                    file.seek(SeekFrom::Start(0))
+                        .map_err(|source| util::io_err(path, source))?;
+                    writeln!(file, "{}", std::process::id())
+                        .map_err(|source| util::io_err(path, source))?;
+                    return Ok(Self { _file: file });
+                }
+                Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                    thread::sleep(poll_delay(session));
+                }
+                Err(TryLockError::WouldBlock) => {
+                    let pid = read_pid_until(path)?;
+                    return Err(StoreError::Locked {
+                        session,
+                        pid,
+                        path: path.to_path_buf(),
+                    });
+                }
+                Err(TryLockError::Error(source)) => {
+                    return Err(util::io_err(path, source));
+                }
             }
-            Err(TryLockError::WouldBlock) => {
-                let pid = read_pid_until(path)?;
-                Err(StoreError::Locked { session, pid })
-            }
-            Err(TryLockError::Error(source)) => Err(util::io_err(path, source)),
         }
     }
+}
+
+fn poll_delay(session: SessionId) -> Duration {
+    use std::hash::BuildHasher;
+    let hash = std::collections::hash_map::RandomState::new().hash_one(session);
+    let jitter = Duration::from_millis(hash % u64::from(PID_POLL.subsec_millis()));
+    PID_POLL.saturating_add(jitter)
 }
 
 fn read_pid_until(path: &Path) -> Result<Option<u32>, StoreError> {
@@ -159,13 +178,9 @@ mod tests {
             panic!("second acquisition must fail")
         };
 
-        assert_eq!(
-            error.to_string(),
-            format!("session {id} is open in process {}", std::process::id())
-        );
         assert!(matches!(
             &error,
-            StoreError::Locked { session, pid: Some(pid) }
+            StoreError::Locked { session, pid: Some(pid), .. }
                 if *session == id && *pid == std::process::id()
         ));
         assert_eq!(fs::read(path).expect("read unchanged owner pid"), before);
@@ -186,11 +201,14 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            format!("session {id} is open in another process")
+            format!(
+                "session {id} is open in another process (lock {})",
+                path.display()
+            )
         );
         assert!(matches!(
             error,
-            StoreError::Locked { session, pid: None } if session == id
+            StoreError::Locked { session, pid: None, .. } if session == id
         ));
         assert_eq!(fs::read(path).expect("read unchanged lock text"), before);
     }

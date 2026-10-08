@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use dal_agent::{Agent, AgentError, Delivery};
-use dal_core::{CancelScope, Command, Expect, Part, Reply, Stop, StreamChannel, UpdateKind};
+use dal_core::{
+    CancelScope, Command, Expect, Part, Reply, Stop, StreamChannel, TurnId, UpdateKind,
+};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
@@ -269,7 +271,19 @@ async fn run_print_inner(
     stdout: &mut (impl AsyncWrite + Unpin),
     stderr: &mut (impl AsyncWrite + Unpin),
 ) -> Result<PrintOutcome, PrintError> {
-    if opts.stop.is_cancelled() {
+    let PrintOptions {
+        json,
+        output_last_message,
+        prompt,
+        stderr_is_tty,
+        stop,
+        quiet_wait,
+    } = opts;
+    let style = PumpStyle {
+        json,
+        stderr_is_tty,
+    };
+    if stop.is_cancelled() {
         stdout.flush().await.map_err(PrintError::Io)?;
         return Ok(PrintOutcome::Interrupted);
     }
@@ -277,13 +291,155 @@ async fn run_print_inner(
     let reply = agent
         .submit(Command::Prompt {
             expect: Expect::Idle,
-            content: opts.prompt,
+            content: prompt,
         })
         .await?;
     let Reply::Accepted { turn, .. } = reply else {
         return Err(PrintError::UnexpectedReply);
     };
 
+    let Some(Streamed {
+        assistant,
+        last_notice,
+        denial_count,
+        stop: stop_reason,
+    }) = pump_turn(
+        &agent,
+        turn,
+        &mut subscription,
+        &stop,
+        style,
+        stdout,
+        stderr,
+    )
+    .await?
+    else {
+        return Ok(PrintOutcome::Interrupted);
+    };
+    drop(subscription);
+
+    let quiet_end = match await_quiet(&agent, &stop, quiet_wait).await? {
+        QuietEnd::Quiet => None,
+        QuietEnd::Stopped => {
+            stdout.flush().await.map_err(PrintError::Io)?;
+            return Ok(PrintOutcome::Interrupted);
+        }
+        QuietEnd::TimedOut(busy) => Some(busy),
+    };
+    write_print_output(
+        Streamed {
+            assistant,
+            last_notice,
+            denial_count,
+            stop: stop_reason,
+        },
+        json,
+        output_last_message,
+        stdout,
+        stderr,
+    )
+    .await?;
+    stdout.flush().await.map_err(PrintError::Io)?;
+    if let Some(busy) = quiet_end {
+        return Err(PrintError::NotQuiet {
+            busy,
+            wait: quiet_wait.unwrap_or(QUIET_WAIT),
+        });
+    }
+    Ok(PrintOutcome::Completed)
+}
+
+/// Writes the denial summary and the final assistant payload.
+///
+/// Consumes one streamed turn's remains; fails without output when the turn
+/// stopped without a message.
+async fn write_print_output(
+    streamed: Streamed,
+    json: bool,
+    output_last_message: Option<PathBuf>,
+    stdout: &mut (impl AsyncWrite + Unpin),
+    stderr: &mut (impl AsyncWrite + Unpin),
+) -> Result<(), PrintError> {
+    let Streamed {
+        assistant,
+        last_notice,
+        denial_count,
+        stop,
+    } = streamed;
+    if denial_count > 0 && !json {
+        let plural = if denial_count == 1 { "" } else { "s" };
+        let summary = format!("dalgon: {denial_count} call{plural} denied by approval mode.\n");
+        stderr
+            .write_all(summary.as_bytes())
+            .await
+            .map_err(PrintError::Io)?;
+    }
+
+    if stop == Stop::Failed {
+        return Err(last_notice.map_or(PrintError::FailedWithoutMessage, PrintError::TurnFailed));
+    }
+
+    if let Some(path) = output_last_message
+        && let Err(source) = tokio::fs::write(&path, assistant.as_bytes()).await
+    {
+        return Err(PrintError::OutputFile { path, source });
+    }
+
+    if json {
+        let reason = match stop {
+            Stop::EndTurn => "end_turn",
+            Stop::Length => "max_tokens",
+            Stop::MaxSteps => "max_turn_requests",
+            Stop::Cancelled => "cancelled",
+            Stop::Filter => "refused",
+            Stop::Failed => return Err(PrintError::FailedWithoutMessage),
+        };
+        let line = dal_wire::acp_prompt_result(reason);
+        stdout
+            .write_all(line.as_bytes())
+            .await
+            .map_err(PrintError::Io)?;
+    } else {
+        if assistant.is_empty() {
+            stderr
+                .write_all(dal_texts::EMPTY_MESSAGE.as_bytes())
+                .await
+                .map_err(PrintError::Io)?;
+            stderr.write_all(b"\n").await.map_err(PrintError::Io)?;
+        }
+        stdout.write_all(b"\n").await.map_err(PrintError::Io)?;
+    }
+    Ok(())
+}
+
+/// What one streamed turn left behind when it reached its stop reason.
+struct Streamed {
+    assistant: String,
+    last_notice: Option<Box<str>>,
+    denial_count: usize,
+    stop: Stop,
+}
+
+/// Stream rendering flags for the turn pump.
+#[derive(Clone, Copy)]
+struct PumpStyle {
+    json: bool,
+    stderr_is_tty: bool,
+}
+
+/// Streams one prompt turn's updates until it stops.
+///
+/// Returns `Ok(None)` when the turn was cancelled or interrupted mid-flight;
+/// the interruption output has been flushed to `stdout` already.
+async fn pump_turn(
+    agent: &Agent,
+    turn: TurnId,
+    subscription: &mut dal_agent::Subscription,
+    stop: &CancellationToken,
+    style: PumpStyle,
+    stdout: &mut (impl AsyncWrite + Unpin),
+    stderr: &mut (impl AsyncWrite + Unpin),
+) -> Result<Option<Streamed>, PrintError> {
     let mut assistant = String::new();
     let mut last_notice = None;
     let mut denial_count = 0_usize;
@@ -291,14 +447,14 @@ async fn run_print_inner(
     let stop = loop {
         let delivery = tokio::select! {
             biased;
-            () = opts.stop.cancelled() => {
+            () = stop.cancelled() => {
                 let _ = agent
                     .submit(Command::Cancel {
                         scope: CancelScope::Turn(turn),
                     })
                     .await;
                 stdout.flush().await.map_err(PrintError::Io)?;
-                return Ok(PrintOutcome::Interrupted);
+                return Ok(None);
             }
             delivery = subscription.next() => delivery,
         };
@@ -314,14 +470,14 @@ async fn run_print_inner(
                 ..
             } => {
                 assistant.push_str(text);
-                if !opts.json {
+                if !style.json {
                     stdout
                         .write_all(text.as_bytes())
                         .await
                         .map_err(PrintError::Io)?;
                 }
             }
-            UpdateKind::ToolStarted { tool, .. } if opts.stderr_is_tty && !opts.json => {
+            UpdateKind::ToolStarted { tool, .. } if style.stderr_is_tty && !style.json => {
                 let progress = format!("Running {tool}.\n");
                 stderr
                     .write_all(progress.as_bytes())
@@ -330,7 +486,7 @@ async fn run_print_inner(
             }
             UpdateKind::Notice(notice) => {
                 last_notice = Some(notice.text.clone());
-                if !opts.json {
+                if !style.json {
                     if notice.text.as_ref() == dal_texts::HEADLESS_APPROVAL {
                         first_denial_notice = true;
                     }
@@ -356,68 +512,12 @@ async fn run_print_inner(
             _ => {}
         }
     };
-    drop(subscription);
-
-    let quiet_end = match await_quiet(&agent, &opts.stop, opts.quiet_wait).await? {
-        QuietEnd::Quiet => None,
-        QuietEnd::Stopped => {
-            stdout.flush().await.map_err(PrintError::Io)?;
-            return Ok(PrintOutcome::Interrupted);
-        }
-        QuietEnd::TimedOut(busy) => Some(busy),
-    };
-
-    if denial_count > 0 && !opts.json {
-        let plural = if denial_count == 1 { "" } else { "s" };
-        let summary = format!("dalgon: {denial_count} call{plural} denied by approval mode.\n");
-        stderr
-            .write_all(summary.as_bytes())
-            .await
-            .map_err(PrintError::Io)?;
-    }
-
-    if stop == Stop::Failed {
-        return Err(last_notice.map_or(PrintError::FailedWithoutMessage, PrintError::TurnFailed));
-    }
-
-    if let Some(path) = opts.output_last_message
-        && let Err(source) = tokio::fs::write(&path, assistant.as_bytes()).await
-    {
-        return Err(PrintError::OutputFile { path, source });
-    }
-
-    if opts.json {
-        let reason = match stop {
-            Stop::EndTurn => "end_turn",
-            Stop::Length => "max_tokens",
-            Stop::MaxSteps => "max_turn_requests",
-            Stop::Cancelled => "cancelled",
-            Stop::Filter => "refused",
-            Stop::Failed => return Err(PrintError::FailedWithoutMessage),
-        };
-        let line = dal_wire::acp_prompt_result(reason);
-        stdout
-            .write_all(line.as_bytes())
-            .await
-            .map_err(PrintError::Io)?;
-    } else {
-        if assistant.is_empty() {
-            stderr
-                .write_all(dal_texts::EMPTY_MESSAGE.as_bytes())
-                .await
-                .map_err(PrintError::Io)?;
-            stderr.write_all(b"\n").await.map_err(PrintError::Io)?;
-        }
-        stdout.write_all(b"\n").await.map_err(PrintError::Io)?;
-    }
-    stdout.flush().await.map_err(PrintError::Io)?;
-    if let Some(busy) = quiet_end {
-        return Err(PrintError::NotQuiet {
-            busy,
-            wait: opts.quiet_wait.unwrap_or(QUIET_WAIT),
-        });
-    }
-    Ok(PrintOutcome::Completed)
+    Ok(Some(Streamed {
+        assistant,
+        last_notice,
+        denial_count,
+        stop,
+    }))
 }
 
 enum QuietEnd {

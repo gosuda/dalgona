@@ -747,7 +747,11 @@ impl Backend {
                 return AgentsReply::Cancelled { id };
             };
             if matches!(view.turn, dal_core::TurnState::Idle) {
-                return Self::child_report(id, &view);
+                let report = Self::child_report(id, &view);
+                // A reported-complete member is torn down like a cancelled one:
+                // the entry leaves the table so later sends see Gone.
+                let _ = host.close(id).await;
+                return report;
             }
             if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
                 return AgentsReply::Pending { id };

@@ -7,7 +7,9 @@ use std::time::Duration;
 #[test]
 fn ask_answers_across_tui_print_and_rpc_surfaces() -> support::TestResult<()> {
     let scratch = support::Scratch::new("ask-front-ends")?;
-    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
     runtime.block_on(async {
         let host = support::start_dalgona(scratch.path().to_path_buf()).await?;
         let doc = host.doc("dalgona://ask")?;

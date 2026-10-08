@@ -1,8 +1,12 @@
-#![expect(clippy::unwrap_used, reason = "SC test")]
+//! JSON-RPC over stdio and spawned children keeps the wire contract.
 #![expect(clippy::expect_used, reason = "SC test")]
 #![expect(
     clippy::disallowed_methods,
     reason = "SC test exercises real wire binaries"
+)]
+#![expect(
+    dead_code,
+    reason = "gate support exposes helpers shared across independent targets"
 )]
 
 mod support;

@@ -5,7 +5,6 @@ use std::num::NonZeroU64;
 
 use dal_core::EntryId;
 
-
 /// Selects image candidates oldest-plus-newest under one cap.
 ///
 /// Keeps the oldest candidate when it fits, then walks newest to oldest while
@@ -47,6 +46,10 @@ pub(crate) fn index_text(shown: usize, total: usize, hidden: &str) -> String {
 
 /// Visibility state of a history letter in one compaction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[expect(
+    dead_code,
+    reason = "undrawable-glyph and budget-hidden producers land with the history imaging rows"
+)]
 pub(crate) enum LetterVisibility {
     /// The PNG is drawn in the compacted message.
     Drawn,

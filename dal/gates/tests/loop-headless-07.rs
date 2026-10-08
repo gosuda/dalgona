@@ -1,8 +1,11 @@
-#![expect(clippy::unwrap_used, reason = "SC test")]
-#![expect(clippy::expect_used, reason = "SC test")]
+//! JSON output mode emits exactly one result or one error.
 #![expect(
     clippy::disallowed_methods,
     reason = "SC test invokes the real CLI boundary"
+)]
+#![expect(
+    dead_code,
+    reason = "gate support exposes helpers shared across independent targets"
 )]
 
 mod support;

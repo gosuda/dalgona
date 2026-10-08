@@ -5,6 +5,7 @@
 //! A directory that the rules exclude hides all of its children, even children
 //! that a deeper rule re-includes. Paths sort by raw path bytes.
 
+use std::fmt::Write as _;
 use std::fs::{File, Metadata};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -107,7 +108,7 @@ impl FindResult {
         let mut text = self.paths.join("\n");
         let more = self.total - self.paths.len();
         if more > 0 {
-            text.push_str(&format!("\n[Truncated: {more} more paths]"));
+            let _ = write!(text, "\n[Truncated: {more} more paths]");
         }
         text
     }
@@ -126,6 +127,13 @@ pub(crate) fn walk(root: &Path) -> Result<Vec<Entry>, SearchError> {
 }
 
 /// Find paths under `root` whose relative path matches `pattern`.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "string-glob convenience wrapper; production compiles the glob once with find_with"
+    )
+)]
 pub(crate) fn find(root: &Path, pattern: &str, limit: usize) -> Result<FindResult, SearchError> {
     find_with(root, &FindGlob::new(pattern)?, limit)
 }

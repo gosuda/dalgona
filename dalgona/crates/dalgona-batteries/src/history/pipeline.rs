@@ -10,8 +10,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use dal_agent::ext::{BoxFuture, CompactError, Compaction, CoveredEntry};
 pub(crate) use dal_agent::ext::ImageProfile;
+use dal_agent::ext::{BoxFuture, CompactError, Compaction, CoveredEntry};
 use dal_core::{EntryId, SessionId};
 use dal_ext::Font;
 use thiserror::Error;
@@ -24,7 +24,7 @@ use super::records::{LetterRecord, RecordError};
 use super::selection::{
     LetterVisibility, entry_id, history_index_line, index_text, select_oldest_plus_newest,
 };
-use super::spans::{CompactPiece, HistoryError, Item, Role, SourceError, Span, items};
+use super::spans::{CompactPiece, HistoryError, Item, SourceError, Span, items};
 use super::{CARRIED_PREFIX, HISTORY_HEADER, PNG_BYTE_BUDGET, RENDER_TIMEOUT_MS, SAVINGS_FACTOR};
 
 /// Minimum completed user turns in the covered span for a drawable history.
@@ -181,10 +181,13 @@ impl Request {
             ordinal,
             budget,
             carried: None,
-            user_turns: covered.iter().filter(|entry| entry.starts_user_turn).count(),
-            text_tokens: covered
+            user_turns: covered
                 .iter()
-                .fold(0_u64, |sum, entry| sum.saturating_add(entry.estimated_tokens)),
+                .filter(|entry| entry.starts_user_turn)
+                .count(),
+            text_tokens: covered.iter().fold(0_u64, |sum, entry| {
+                sum.saturating_add(entry.estimated_tokens)
+            }),
             pieces: pieces.into(),
             source,
         }
@@ -386,14 +389,12 @@ impl Engine {
             return Err(Decline::NothingToDraw.into());
         }
         let window = request.budget.window_tokens.ok_or(Decline::UnknownWindow)?;
-        let mut candidates = self
-            .render(&request, &profile, Arc::clone(&permit))
-            .await?;
+        let mut candidates = self.render(&request, &profile, Arc::clone(&permit)).await?;
         let pool = drawable(&candidates);
         if pool.is_empty() {
             return Err(Decline::NothingToDraw.into());
         }
-        let selected = self.select(&request, &profile, window, &candidates, pool)?;
+        let selected = self.select(&request, &profile, window, &candidates, &pool)?;
         let drawn = assemble(&request, &profile, &mut candidates, &selected)?;
         drawn.verify()?;
         sink.commit(request.span, drawn).await
@@ -408,7 +409,7 @@ impl Engine {
         let font = Arc::clone(&self.font);
         let source = Arc::clone(&request.source);
         let pieces = Arc::clone(&request.pieces);
-        let grid = profile_grid(&profile);
+        let grid = profile_grid(profile);
         let worker = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             render_pages(&font, grid, &pieces, source.as_ref())
@@ -428,12 +429,12 @@ impl Engine {
         profile: &ImageProfile,
         window: u64,
         candidates: &[Candidate],
-        pool: Vec<usize>,
+        pool: &[usize],
     ) -> Result<Vec<usize>, Decline> {
         let tokens = profile.image_tokens;
         let share_cap = scaled(request.budget.share, window);
         let mut used = 0_u64;
-        let pool = keep(&pool, |_| take(&mut used, tokens, share_cap));
+        let pool = keep(pool, |_| take(&mut used, tokens, share_cap));
         if pool.is_empty() {
             return Err(Decline::NoTokenRoom {
                 stay: request
@@ -598,7 +599,12 @@ fn assemble(
     candidates: &mut [Candidate],
     selected: &[usize],
 ) -> Result<Drawn, Decline> {
-    let next_value = request.span.1.get().checked_add(1).ok_or(Decline::Inconsistent)?;
+    let next_value = request
+        .span
+        .1
+        .get()
+        .checked_add(1)
+        .ok_or(Decline::Inconsistent)?;
     let next = entry_id(next_value).ok_or(Decline::Inconsistent)?;
     let mut slots = vec![Slot::Text(Box::from(HISTORY_HEADER))];
     if let Some(carried) = &request.carried {
@@ -668,7 +674,7 @@ fn letter(
     };
     LetterRecord::check(&record, next)?;
     let (first, last) = entry_range(&candidate.spans);
-    let index_line = history_index_line(&record.id(), first, last, LetterVisibility::Drawn);
+    let index_line = history_index_line(record.id(), first, last, LetterVisibility::Drawn);
     Ok(DrawnLetter {
         png,
         record,
@@ -706,10 +712,12 @@ fn hidden_ranges(ordinal: u32, hidden: &[(usize, (u64, u64))]) -> String {
         .collect();
     let mut text = named.join(", ");
     if groups.len() > MAX_HIDDEN_GROUPS {
-        text.push_str(&format!(
+        use std::fmt::Write as _;
+        let _ = write!(
+            text,
             "; and {} more ranges",
             groups.len() - MAX_HIDDEN_GROUPS
-        ));
+        );
     }
     text
 }

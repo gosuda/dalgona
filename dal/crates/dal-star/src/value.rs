@@ -115,7 +115,7 @@ impl Value {
     }
 
     /// Enforces the signed 53-bit integer bound.
-    fn integer(number: i64) -> Result<Self, CodecError> {
+    pub(crate) fn integer(number: i64) -> Result<Self, CodecError> {
         if !(-INT_LIMIT..=INT_LIMIT).contains(&number) {
             return Err(CodecError::Invalid(
                 "integer exceeds signed 53-bit range".into(),

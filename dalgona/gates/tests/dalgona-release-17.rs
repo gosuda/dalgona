@@ -8,10 +8,23 @@ fn version(binary: &str) -> support::TestResult<String> {
     let workspace = support::repo_root().join("dalgona");
     let output = support::run_command(
         Command::new("cargo")
-            .args(["run", "--locked", "-p", "dalgona", "--bin", binary, "--", "--version"])
+            .args([
+                "run",
+                "--locked",
+                "-p",
+                "dalgona",
+                "--bin",
+                binary,
+                "--",
+                "--version",
+            ])
             .current_dir(&workspace),
     )?;
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     Ok(String::from_utf8(output.stdout)?)
 }
 

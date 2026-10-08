@@ -436,7 +436,12 @@ impl Host {
         let mode = self.state.shared.config.mode();
         let (fold, effects) = Session::replay_with(
             dal_core::Settings {
-                model: None,
+                model: self
+                    .state
+                    .shared
+                    .config
+                    .model()
+                    .map(dal_core::ModelRoute::from_id),
                 thinking,
                 approval,
                 name: None,
@@ -579,18 +584,19 @@ impl Host {
         )
         .attach(None);
         let observer_process_env = Arc::clone(&self.state.shared.env);
-        tasks.spawn(async move {
-            observe_session_start(
-                &observer_generation,
-                &observer_services,
-                &observer_cancel,
-                observer_parent,
-                &observer_process_env,
-                observer_script,
-                &start_event,
-            )
-            .await;
-        });
+        // Session-start observers must finish before the handle returns: turn
+        // hooks and patch observers read the state they register, and the
+        // dispatch deadline bounds the wait.
+        observe_session_start(
+            &observer_generation,
+            &observer_services,
+            &observer_cancel,
+            observer_parent,
+            &observer_process_env,
+            observer_script,
+            &start_event,
+        )
+        .await;
         let driver = crate::session::driver::spawn(
             ports,
             crate::session::driver::DriverDeps {

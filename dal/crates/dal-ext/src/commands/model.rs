@@ -4,6 +4,8 @@
 //! over the network. `/model` resolves against the cached catalog rows only;
 //! config aliases fall to `Unknown` until a config read seam lands.
 
+use std::fmt::Write as _;
+
 use dal_agent::ext::command::{CommandCx, SaveError};
 use dal_core::command::{Chooser, Command, ErrorTriple, FrontAction, Output, Reply};
 use dal_core::{Family, Mode, ModelRoute, ThinkingLevel};
@@ -204,13 +206,13 @@ async fn apply_route(
     match saved {
         None => line.push_str(" Saved as the default."),
         Some(reason) => {
-            line.push_str(&format!(" It was not saved as the default: {reason}."));
+            let _ = write!(line, " It was not saved as the default: {reason}.");
         }
     }
     if let Some(previous) = old {
         let before = cx.edit_style_for(&previous);
         if before != after {
-            line.push_str(&format!("\nEdit style: {after}. It follows the model."));
+            let _ = write!(line, "\nEdit style: {after}. It follows the model.");
         }
     }
     Ok(Reply::Done(Output::Text(line.into())))

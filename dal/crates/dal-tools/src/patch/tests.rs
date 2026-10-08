@@ -716,12 +716,13 @@ async fn apply_replacement_blocking_observer_prevents_write() {
     );
 }
 
-struct RecordingObserver(Arc<Mutex<Vec<(Vec<u8>, Vec<String>)>>>);
+type RecordingLog = Vec<(Vec<u8>, Vec<String>)>;
+struct RecordingObserver(Arc<Mutex<RecordingLog>>);
 
 impl EditObserver for RecordingObserver {
     fn inspect(&self, batch: &StagedBatch<'_>) -> Vec<EditFinding> {
         if let Some(file) = batch.files.first() {
-            let after = file.after.map_or_else(Vec::new, |after| after.to_vec());
+            let after = file.after.map_or_else(Vec::new, <[u8]>::to_vec);
             let added = file
                 .hunks
                 .iter()
@@ -753,8 +754,8 @@ async fn replacement_plan_commit_applies_exact_bytes_and_observes() {
     let plan = super::write::plan_replacement(&session, "test.txt", b"needle", b"new\r\nbytes", 2)
         .await
         .expect("replacement plan");
-    let observed = Arc::new(Mutex::new(Vec::new()));
-    let observer = RecordingObserver(Arc::clone(&observed));
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let observer = RecordingObserver(Arc::clone(&recorded));
     let output = commit(&session, plan, &[Arc::new(observer)]).await;
     assert!(output.error_class.is_none(), "{}", output.text);
     assert_eq!(
@@ -762,7 +763,7 @@ async fn replacement_plan_commit_applies_exact_bytes_and_observes() {
         b"alpha\nnew\r\nbytes\nomega\n"
     );
     assert_eq!(
-        observed
+        recorded
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_slice(),
@@ -830,5 +831,201 @@ async fn replacement_preview_matches_replace_record() {
     assert_eq!(
         super::preview_for_plan(&direct),
         super::preview_for_plan(&record)
+    );
+}
+
+#[tokio::test]
+async fn batch_delete_failure_mid_commit_restores_earlier_deletes_and_leaves_no_trash() {
+    // Two deletes stage cleanly. The commit's Phase-B delete loop moves the
+    // first file to trash; the second source is replaced by a directory so
+    // its trash rename fails with ENOTDIR/EISDIR after the first is gone.
+    // The rollback must restore the first delete and leave no trash behind.
+    let dir = tempfile::tempdir().expect("temp workspace");
+    tokio::fs::write(dir.path().join("alpha.txt"), b"alpha\n")
+        .await
+        .expect("seed alpha");
+    tokio::fs::write(dir.path().join("beta.txt"), b"beta\n")
+        .await
+        .expect("seed beta");
+    let session = test_session(dir.path(), false);
+    let planned = plan(
+        &session,
+        DialectId::Replace,
+        r#"{"changes":[{"path":"alpha.txt","delete":true},{"path":"beta.txt","delete":true}]}"#,
+    )
+    .await
+    .expect("both deletes stage");
+    // Beta's staging read succeeded; replacing the file with a directory
+    // after staging makes only the commit-time rename fail.
+    tokio::fs::remove_file(dir.path().join("beta.txt"))
+        .await
+        .expect("remove beta");
+    tokio::fs::create_dir(dir.path().join("beta.txt"))
+        .await
+        .expect("replace beta with a directory");
+    let output = commit(&session, planned, &[]).await;
+    assert!(
+        output.error_class.is_some(),
+        "the torn second delete must fail the batch: {}",
+        output.text
+    );
+    let restored = tokio::fs::read(dir.path().join("alpha.txt"))
+        .await
+        .expect("alpha readable");
+    assert_eq!(
+        restored, b"alpha\n",
+        "a failed batch must restore earlier deleted files"
+    );
+    let mut leftovers = 0;
+    let mut entries = tokio::fs::read_dir(dir.path()).await.expect("dir");
+    while let Some(entry) = entries.next_entry().await.expect("entry") {
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".dalgon-trash-")
+        {
+            leftovers += 1;
+        }
+    }
+    assert_eq!(leftovers, 0, "no trash file may survive the commit");
+}
+
+#[tokio::test]
+async fn batch_delete_failure_restores_the_earlier_deleted_file() {
+    // A delete target swapped for a directory after staging reads as stale:
+    // commit must refuse atomically before any writes, and leave the
+    // directory untouched.
+    let dir = tempfile::tempdir().expect("temp workspace");
+    tokio::fs::write(dir.path().join("only.txt"), b"only\n")
+        .await
+        .expect("seed only");
+    let session = test_session(dir.path(), false);
+    let planned = plan(
+        &session,
+        DialectId::Replace,
+        r#"{"changes":[{"path":"only.txt","delete":true}]}"#,
+    )
+    .await
+    .expect("delete stages");
+    tokio::fs::remove_file(dir.path().join("only.txt"))
+        .await
+        .expect("remove only");
+    tokio::fs::create_dir(dir.path().join("only.txt"))
+        .await
+        .expect("replace only with a directory");
+    let output = commit(&session, planned, &[]).await;
+    assert!(
+        output.error_class.is_some(),
+        "the torn delete must fail the batch: {}",
+        output.text
+    );
+    let metadata = tokio::fs::metadata(dir.path().join("only.txt"))
+        .await
+        .expect("only.txt present");
+    assert!(
+        metadata.is_dir(),
+        "an atomic refusal before writes leaves the directory in place"
+    );
+    assert!(
+        output.text.contains("Nothing was written"),
+        "the refusal names atomic semantics: {}",
+        output.text
+    );
+}
+
+#[tokio::test]
+async fn rename_to_a_directory_that_swallowed_the_destination_fails_without_trash() {
+    // The destination is absent at staging; it appears as a directory before
+    // the install, so the commit's no-replace preflight fails atomically.
+    let dir = tempfile::tempdir().expect("temp workspace");
+    tokio::fs::write(dir.path().join("alpha.txt"), b"alpha\n")
+        .await
+        .expect("seed alpha");
+    let session = test_session(dir.path(), false);
+    let planned = plan(
+        &session,
+        DialectId::Replace,
+        r#"{"changes":[{"path":"alpha.txt","rename":"dest.txt"}]}"#,
+    )
+    .await
+    .expect("rename to an absent destination stages");
+    tokio::fs::create_dir(dir.path().join("dest.txt"))
+        .await
+        .expect("destination appears as a directory");
+    let output = commit(&session, planned, &[]).await;
+    assert!(
+        output.error_class.is_some(),
+        "the install rename must fail: {}",
+        output.text
+    );
+    assert_eq!(
+        tokio::fs::read(dir.path().join("alpha.txt"))
+            .await
+            .expect("bytes"),
+        b"alpha\n",
+        "a failed rename must restore the source"
+    );
+    let mut leftovers = 0;
+    let mut entries = tokio::fs::read_dir(dir.path()).await.expect("dir");
+    while let Some(entry) = entries.next_entry().await.expect("entry") {
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".dalgon-trash-")
+        {
+            leftovers += 1;
+        }
+    }
+    assert_eq!(leftovers, 0, "no trash file may survive the commit");
+}
+
+#[tokio::test]
+async fn rename_to_a_destination_that_became_a_directory_restores_the_source() {
+    // A rename destination that exists at staging is refused before approval.
+    let dir = tempfile::tempdir().expect("temp workspace");
+    tokio::fs::write(dir.path().join("alpha.txt"), b"alpha\n")
+        .await
+        .expect("seed alpha");
+    tokio::fs::write(dir.path().join("dest.txt"), b"dest\n")
+        .await
+        .expect("seed dest");
+    let session = test_session(dir.path(), false);
+    let planned = plan(
+        &session,
+        DialectId::Replace,
+        r#"{"changes":[{"path":"alpha.txt","rename":"dest.txt"}]}"#,
+    )
+    .await
+    .expect_err("rename to an existing destination must refuse at staging");
+    assert!(
+        planned.message.contains("already exists"),
+        "staging must refuse an occupied destination: {}",
+        planned.message
+    );
+}
+
+#[tokio::test]
+async fn rename_destination_directory_chain_is_created_inside_the_workspace() {
+    // Phase A creates the destination parent chain; the whole chain must land
+    // under the workspace root.
+    let dir = tempfile::tempdir().expect("temp workspace");
+    tokio::fs::write(dir.path().join("a.txt"), b"alpha\n")
+        .await
+        .expect("seed alpha");
+    let session = test_session(dir.path(), false);
+    let planned = plan(
+        &session,
+        DialectId::Replace,
+        r#"{"changes":[{"path":"a.txt","rename":"new/deep/dest.txt"}]}"#,
+    )
+    .await
+    .expect("in-workspace rename plans");
+    let output = commit(&session, planned, &[]).await;
+    assert_eq!(output.error_class, None, "{}", output.text);
+    assert_eq!(
+        tokio::fs::read(dir.path().join("new/deep/dest.txt"))
+            .await
+            .expect("moved bytes"),
+        b"alpha\n"
     );
 }

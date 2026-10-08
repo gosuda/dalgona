@@ -18,6 +18,11 @@ pub(super) fn usage_of(inference: &Inference) -> Option<Usage> {
 }
 
 /// Registers dal's native-first, text-summary compaction chain.
+///
+/// # Errors
+///
+/// Fails with [`RegistrationError`] when the builder rejects the extension
+/// name or one of the compactors.
 pub fn extension() -> Result<Extension, RegistrationError> {
     ExtensionBuilder::new("compact", env!("CARGO_PKG_VERSION"), ServiceSet::default())?
         .compactor("remote", Arc::new(remote::Remote))

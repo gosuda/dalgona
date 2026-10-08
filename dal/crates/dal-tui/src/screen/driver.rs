@@ -19,7 +19,7 @@ pub(crate) struct Painter {
     sync: bool,
     initialized: bool,
     overlay: bool,
-    theme_name: Option<Option<&'static str>>,
+    theme_name: Option<&'static str>,
     image_rung: Option<Rung>,
     image_picker: Option<ratatui_image::picker::Picker>,
     image_protocols: HashMap<ImageKey, Option<ratatui_image::protocol::Protocol>>,
@@ -27,6 +27,14 @@ pub(crate) struct Painter {
 }
 
 const IMAGE_PROTOCOL_CACHE_CAP: usize = 16;
+
+/// Per-frame inline-layout inputs for the paint thread.
+struct InlineFrame<'a> {
+    rows: &'a [RenderRow],
+    transcript: &'a Transcript,
+    commit_start: usize,
+    structural: bool,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct ImageKey {
@@ -97,16 +105,18 @@ impl Painter {
         let structural = !self.initialized
             || self.size != size
             || self.previous.len() != rows.len()
-            || self.theme_name != Some(theme.name());
+            || self.theme_name != theme.name();
         let transcript_grew = committed_len > self.committed;
         if screen == Screen::Inline {
             self.inline_bytes(
                 &mut bytes,
                 size,
-                &rows,
-                input.transcript,
-                self.committed,
-                structural,
+                &InlineFrame {
+                    rows: &rows,
+                    transcript: input.transcript,
+                    commit_start: self.committed,
+                    structural,
+                },
                 theme,
             );
         } else {
@@ -117,7 +127,7 @@ impl Painter {
         if image_written && screen == Screen::Inline {
             bytes.extend_from_slice(format!("\x1b[{};1H", size.1).as_bytes());
         }
-        self.theme_name = Some(theme.name());
+        self.theme_name = theme.name();
         self.committed = committed_len;
         self.size = size;
         self.previous = rows;
@@ -152,12 +162,15 @@ impl Painter {
         &mut self,
         out: &mut Vec<u8>,
         size: (u16, u16),
-        rows: &[RenderRow],
-        transcript: &Transcript,
-        commit_start: usize,
-        structural: bool,
+        frame: &InlineFrame<'_>,
         theme: &ResolvedTheme,
     ) {
+        let InlineFrame {
+            rows,
+            transcript,
+            commit_start,
+            structural,
+        } = *frame;
         let old_height = self.previous.len();
         let new_height = rows.len();
         let commit_len = transcript.rows().len().saturating_sub(commit_start);
@@ -360,15 +373,15 @@ fn write_styled_text(
         for span in spans {
             if span.range.start > offset {
                 out.extend_from_slice(crate::status::role_sgr(theme, fallback).as_bytes());
-                out.extend_from_slice(text[offset..span.range.start].as_bytes());
+                out.extend_from_slice(&text.as_bytes()[offset..span.range.start]);
             }
             out.extend_from_slice(crate::status::role_sgr(theme, span.role).as_bytes());
-            out.extend_from_slice(text[span.range.clone()].as_bytes());
+            out.extend_from_slice(&text.as_bytes()[span.range.clone()]);
             offset = span.range.end;
         }
         if offset < text.len() {
             out.extend_from_slice(crate::status::role_sgr(theme, fallback).as_bytes());
-            out.extend_from_slice(text[offset..].as_bytes());
+            out.extend_from_slice(&text.as_bytes()[offset..]);
         }
     }
     out.extend_from_slice(b"\x1b[0m");

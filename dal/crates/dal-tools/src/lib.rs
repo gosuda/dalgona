@@ -39,12 +39,12 @@ pub fn digest32(bytes: &[u8]) -> [u8; 32] {
 pub fn tag8(domain: &str, bytes: &[u8]) -> String {
     // Hash sequential chunks without concatenating an intermediate buffer.
     // https://docs.rs/blake3/1.8.7/blake3/struct.Hasher.html
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut hasher = blake3::Hasher::new();
     hasher.update(domain.as_bytes());
     hasher.update(b":");
     hasher.update(bytes);
     let digest = hasher.finalize();
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut tag = String::with_capacity(8);
     for byte in &digest.as_bytes()[..4] {
         tag.push(char::from(HEX[usize::from(*byte >> 4)]));
@@ -151,7 +151,7 @@ impl fmt::Debug for ToolsConfig {
             .field("edit_style", &self.edit_style)
             .field("observer_configured", &self.observer.is_some())
             .field("exec", &self.exec)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -177,7 +177,7 @@ pub fn extension(cfg: ToolsConfig) -> Result<Extension, RegistrationError> {
         cfg.rerank.clone(),
     )?;
     let patch_tool = patch::tool(
-        cfg.edit_style.clone(),
+        &cfg.edit_style,
         index.clone(),
         seen,
         snapshots,
@@ -325,6 +325,13 @@ impl Seen {
     }
 
     /// Returns the merged intervals recorded for the exact session, path, and digest.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "read.rs records coverage with `show` and reads it back in lib tests"
+        )
+    )]
     #[must_use]
     pub(crate) fn intervals(
         &self,

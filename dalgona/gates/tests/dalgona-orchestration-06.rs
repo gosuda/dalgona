@@ -7,7 +7,9 @@ use std::time::Duration;
 #[test]
 fn scope_created_in_hook_is_cancelled_at_hook_deadline() -> support::TestResult<()> {
     let scratch = support::Scratch::new("orchestration-hook-deadline")?;
-    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
     runtime.block_on(async {
         let host = support::start_dalgona(scratch.path().to_path_buf()).await?;
         let doc = host.doc("dalgona://orchestration")?;

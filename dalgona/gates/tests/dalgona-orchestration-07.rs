@@ -5,9 +5,12 @@ mod support;
 use std::time::Duration;
 
 #[test]
-fn synthetic_model_streaming_and_private_tools_follow_the_handler_contract() -> support::TestResult<()> {
+fn synthetic_model_streaming_and_private_tools_follow_the_handler_contract()
+-> support::TestResult<()> {
     let scratch = support::Scratch::new("orchestration-synthetic-model")?;
-    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
     runtime.block_on(async {
         let host = support::start_dalgona(scratch.path().to_path_buf()).await?;
         let doc = host.doc("dalgona://orchestration")?;

@@ -215,8 +215,8 @@ mod tests {
     fn parser_rejects_non_object_extra_members_and_duplicate_answer_keys() -> TestResult {
         let question = [JudgeQuestion::bool("continue?")?];
         for body in [
-            r#"true"#,
-            r#"{}"#,
+            "true",
+            "{}",
             r#"{"answer":[true]}"#,
             r#"{"answers":[true, false]}"#,
             r#"{"answers":[true],"why":"x"}"#,

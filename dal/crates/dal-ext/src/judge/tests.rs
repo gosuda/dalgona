@@ -25,7 +25,7 @@ use sonic_rs::{JsonContainerTrait, JsonValueTrait};
 use tokio::time::sleep;
 
 use super::{
-    BATCH_MAX, Gate, GateSetting, Judge, JudgeConfig, JudgeError, JudgeOpen, JudgeQuestion,
+    Gate, GateSetting, Judge, JudgeConfig, JudgeError, JudgeOpen, JudgeQuestion,
     REASON_NO_CREDENTIALS, SHARED_MAX, STREAK_NOTICE_PREFIX, Verdict,
 };
 
@@ -153,7 +153,7 @@ fn envelope_text(request: &ModelRequest) -> Option<String> {
     None
 }
 
-fn inference_for(reply: ScriptReply) -> Inference {
+fn inference_for(reply: &ScriptReply) -> Inference {
     Inference {
         events: vec![
             StreamEvent::Delta {
@@ -286,7 +286,7 @@ impl Services for FakeServices {
             }
             sleep(step.delay).await;
             overlap.fetch_sub(1, Ordering::SeqCst);
-            step.reply.map(inference_for)
+            step.reply.as_ref().map(inference_for).map_err(Clone::clone)
         })
     }
 
@@ -727,7 +727,7 @@ async fn concurrency_and_fifo() -> TestResult {
                 .expect("row slot wait"),
         ));
     }
-    waits.sort();
+    waits.sort_unstable();
     assert_eq!(waits.len(), 4);
     for window in waits.windows(2) {
         assert!(window[0].1 <= window[1].1, "slot waits follow submit order");
@@ -1093,10 +1093,8 @@ proptest! {
             (Err(_), None) => {}
             _ => prop_assert!(false, "parser disagreed with the independent value oracle"),
         }
-        for verdicts in [parse_answers(&body, &questions)] {
-            if let Ok(verdicts) = verdicts {
-                prop_assert_eq!(verdicts.len(), questions.len());
-            }
+        for verdicts in [parse_answers(&body, &questions)].into_iter().flatten() {
+            prop_assert_eq!(verdicts.len(), questions.len());
         }
     }
 

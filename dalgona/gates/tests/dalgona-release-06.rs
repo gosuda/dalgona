@@ -8,7 +8,11 @@ use std::process::Command;
 fn binstall_templates_expand_to_dist_artifacts() -> support::TestResult<()> {
     let workspace = support::repo_root().join("dalgona");
     let output = support::run_command(Command::new("dist").arg("plan").current_dir(&workspace))?;
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let plan = String::from_utf8(output.stdout)?;
     for target in [
         "x86_64-unknown-linux-gnu",

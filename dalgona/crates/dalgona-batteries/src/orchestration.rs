@@ -1,22 +1,99 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
 //! Orchestration battery: one owner task per session, strict session-start config.
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "run-admission checks land with the orchestration run-start rows"
+    )
+)]
 pub(crate) mod admission;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "agents tool helpers land with the orchestration agents rows"
+    )
+)]
 pub(crate) mod agents_tool;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "arbiter cancel hooks land with the orchestration arbiter rows"
+    )
+)]
 pub(crate) mod arbiter;
 mod commands;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "run and task notice renderers land with the orchestration delivery rows"
+    )
+)]
 pub(crate) mod delivery;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "goal policy and sidecar producers land with the orchestration goal rows"
+    )
+)]
 pub(crate) mod goal;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "monitor delivery producers land with the orchestration monitor rows"
+    )
+)]
 pub(crate) mod monitor;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "pool decision, grace, and skip producers land with the orchestration pool rows"
+    )
+)]
 pub(crate) mod pool;
-pub(crate) mod stuck;
-pub(crate) mod types;
-mod tools;
-pub(crate) mod workflow;
-pub(crate) mod worktree;
 mod runtime;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "loop-guard suffix and argument canonicalization land with the orchestration stuck rows"
+    )
+)]
+pub(crate) mod stuck;
 #[cfg(test)]
 mod tests;
+mod tools;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "view and collector types land with the orchestration delivery rows"
+    )
+)]
+pub(crate) mod types;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "saved-workflow listing lands with the orchestration workflow rows"
+    )
+)]
+pub(crate) mod workflow;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "worktree argv builders and retained-notice producers land with the orchestration worktree rows"
+    )
+)]
+pub(crate) mod worktree;
 
 pub(crate) use types::{ControllerMode, GoalStatus, JobsView, StopKind};
 
@@ -29,7 +106,33 @@ use dal_core::{Origin, RegistrationError, ServiceSet};
 pub const CLAIM_HONESTY: &str = "Reports are claims, not proof. Before you rely on one:\n1. Rebuild the task's scope from its prompt: every file, change, and check it owed.\n2. Read the changed files and run the checks yourself. A summary proves nothing.\n3. Check both ways: nothing owed is missing, and nothing outside the scope changed.\nIf a check fails, start a new run with exact instructions, or fix it yourself.";
 
 /// Manual page text registered under `dalgona://orchestration`.
-pub const ORCHESTRATION_DOC: &str = "# Orchestration\n\nThe orchestration extension coordinates background jobs, monitored output, goals, and child-agent workflows. Use `agents` to run, wait for, cancel, or list workflows. Use `monitor` to watch matching output from a background job. Use `create_goal`, `update_goal`, and `get_goal` with `/goal` to manage a durable session goal. `/continuation` controls automatic turns, and `/abort` cancels active orchestration work. Automatic reminders are delivered only when the session is ready; child reports are claims, not proof.\n";
+pub const ORCHESTRATION_DOC: &str = concat!(
+    "# Orchestration\n\n",
+    "The orchestration extension coordinates background jobs, monitored output, goals, and child-agent workflows. ",
+    "Use `agents` to run, wait for, cancel, or list workflows. ",
+    "Use `monitor` to watch matching output from a background job. ",
+    "Use `create_goal`, `update_goal`, and `get_goal` with `/goal` to manage a durable session goal. ",
+    "`/continuation` controls automatic turns, and `/abort` cancels active orchestration work. ",
+    "Automatic reminders are delivered only when the session is ready; child reports are claims, not proof.\n\n",
+    "## Agents, jobs, cancel, and shutdown\n\n",
+    "Each `agents` run and each background job belongs to one session. ",
+    "Cancel stops the run and its descendants; host shutdown cancels what is still active before the session closes. ",
+    "Every child run ends with exactly one report message to its parent, and a report is a claim to verify.\n\n",
+    "## Wakes\n\n",
+    "A wake starts a turn without a user prompt. A session accepts 20 wake-started turns in a row; ",
+    "the 21st wake is refused, and a user prompt resets the count.\n\n",
+    "## Scope, budget, and deadline\n\n",
+    "A scope caps concurrent model handles with a limit; handles past the limit wait in FIFO order. ",
+    "Its budget bounds requests, tokens, wall time, and cost, and an `on_error` policy decides what one failed handle does to its siblings. ",
+    "A scope created inside a hook is cancelled when the hook deadline passes; there is no separate timeout setting.\n\n",
+    "## Mailbox\n\n",
+    "Sessions in one tree exchange messages through a mailbox. Each message carries a mode: ",
+    "`aside` delivers without steering the current turn, `steer` steers the running turn, and `next_turn` queues for the recipient's next turn. ",
+    "Reading the mailbox does not consume messages; a full waiting queue returns `Full`, and an out-of-tree or finished recipient returns `Gone`.\n\n",
+    "## Synthetic models\n\n",
+    "A synthetic model is a plugin-defined model id whose handler can forward to another model. ",
+    "Only the handler may forward, and only once: a second forward is refused. Private tool calls run inside the handler and never reach the session, a private tool cannot shadow a session tool, a cycle is refused, and a chain of more than four routes is refused.\n",
+);
 
 /// Enables or disables one orchestration sub-battery.
 #[derive(Clone, Debug, serde::Deserialize)]
@@ -101,7 +204,7 @@ impl Default for OrchestrationAgentsConfig {
 }
 
 /// Strict configuration for `[plugin.orchestration]`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct OrchestrationConfig {
     /// Loop guard sub-battery.
     pub loop_guard: BatteryConfig,
@@ -121,22 +224,6 @@ pub struct OrchestrationConfig {
     pub isolation: BatteryConfig,
     /// Optional named saved workflows.
     pub workflows: Option<toml::Value>,
-}
-
-impl Default for OrchestrationConfig {
-    fn default() -> Self {
-        Self {
-            loop_guard: BatteryConfig::default(),
-            sleep: BatteryConfig::default(),
-            monitor: OrchestrationMonitorConfig::default(),
-            inflight: BatteryConfig::default(),
-            goal: BatteryConfig::default(),
-            arbiter: BatteryConfig::default(),
-            agents: OrchestrationAgentsConfig::default(),
-            isolation: BatteryConfig::default(),
-            workflows: None,
-        }
-    }
 }
 
 /// Configuration decode error for the orchestration battery.
@@ -260,8 +347,7 @@ pub fn orchestration(config: OrchestrationConfig) -> Result<Extension, Registrat
         || config.arbiter.enabled
         || config.agents.enabled
         || config.isolation.enabled;
-    let input_enabled =
-        config.loop_guard.enabled || config.goal.enabled || config.arbiter.enabled;
+    let input_enabled = config.loop_guard.enabled || config.goal.enabled || config.arbiter.enabled;
     let tool_hook_enabled = config.loop_guard.enabled
         || config.sleep.enabled
         || config.goal.enabled
@@ -280,8 +366,8 @@ pub fn orchestration(config: OrchestrationConfig) -> Result<Extension, Registrat
     let tool_result_enabled = config.goal.enabled || config.monitor.enabled;
     let runtime = runtime::Runtime::new(config)?;
     let inject = ServiceSet::from_names(["agents", "jobs", "turn", "sidecar", "run", "ask"])?;
-    let mut builder = ExtensionBuilder::new("orchestration", "0.1.0", inject)?
-        .with_origin(Origin::Bundled, None);
+    let mut builder =
+        ExtensionBuilder::new("orchestration", "0.1.0", inject)?.with_origin(Origin::Bundled, None);
     builder = tools::register(builder, &runtime)?;
     builder = commands::register(builder, &runtime)?;
     if needs_owner {

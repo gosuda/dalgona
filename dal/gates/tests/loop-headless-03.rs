@@ -1,8 +1,11 @@
-#![expect(clippy::unwrap_used, reason = "SC test")]
-#![expect(clippy::expect_used, reason = "SC test")]
+//! Killed process resume records aborts and replays synthetic results.
 #![expect(
     clippy::disallowed_methods,
     reason = "SC test kills a real host process"
+)]
+#![expect(
+    dead_code,
+    reason = "gate support exposes helpers shared across independent targets"
 )]
 
 mod support;

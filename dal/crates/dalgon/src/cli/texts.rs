@@ -352,6 +352,8 @@ pub(crate) const NO_MODEL: &str =
 pub(crate) const NO_MODEL_HINT: &str =
     "Run dalgon once and pick a model after sign-in, or pass --model ID. See dalgon models.";
 
+/// The terminal-width refusal; only the interactive UI measures width.
+#[cfg(feature = "tui")]
 pub(crate) fn terminal_too_narrow(width: usize) -> [String; 2] {
     [
         format!("dalgon: the terminal is {width} columns wide: dalgon needs at least 40"),
@@ -359,6 +361,8 @@ pub(crate) fn terminal_too_narrow(width: usize) -> [String; 2] {
     ]
 }
 
+/// The non-addressable-TERM refusal; only the interactive UI needs it.
+#[cfg(feature = "tui")]
 pub(crate) fn term_not_addressable(value: &str) -> [String; 2] {
     [
         format!("dalgon: TERM is \"{value}\": the interactive UI needs cursor addressing"),

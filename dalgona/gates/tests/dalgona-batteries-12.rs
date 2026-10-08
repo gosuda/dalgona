@@ -8,8 +8,7 @@ use dal_agent::SessionRef;
 use dal_core::{ClientId, Command, Config, ConfigProduct, Output, PageReq, Reply, Workspace};
 
 #[test]
-fn empty_mcp_declarations_start_no_transport_or_mapped_tool()
--> support::TestResult<()> {
+fn empty_mcp_declarations_start_no_transport_or_mapped_tool() -> support::TestResult<()> {
     let scratch = support::Scratch::new("inert-web-mcp")?;
     let root = scratch.path().to_path_buf();
     let factory = dalgona::product();
@@ -26,9 +25,14 @@ fn empty_mcp_declarations_start_no_transport_or_mapped_tool()
         .ok_or_else(|| io::Error::other("the product has no mcp extension"))?;
     assert!(mcp.tools().is_empty(), "MCP tools are session-declared");
     assert_eq!(mcp.mcp_clients().len(), 1);
-    assert!(!root.join("mcp").exists(), "registration starts no transport");
+    assert!(
+        !root.join("mcp").exists(),
+        "registration starts no transport"
+    );
 
-    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
     runtime.block_on(async {
         let host = support::start_dalgona(root.clone()).await?;
         assert!(
@@ -59,7 +63,8 @@ fn empty_mcp_declarations_start_no_transport_or_mapped_tool()
             Reply::Done(Output::Markdown("no MCP servers in this session.".into()))
         );
         assert!(
-            !host.commands()
+            !host
+                .commands()
                 .iter()
                 .any(|command| command.name.as_str() == "web_search"),
             "web_search is a tool, not a slash command"
@@ -71,6 +76,9 @@ fn empty_mcp_declarations_start_no_transport_or_mapped_tool()
         assert_eq!(report.sessions_closed, 0);
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     })?;
-    assert!(!root.join("mcp").exists(), "empty declarations start no server or token store");
+    assert!(
+        !root.join("mcp").exists(),
+        "empty declarations start no server or token store"
+    );
     Ok(())
 }

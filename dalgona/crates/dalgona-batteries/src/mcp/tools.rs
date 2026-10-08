@@ -8,16 +8,17 @@ use std::{
 
 use std::sync::Arc;
 
-use dal_agent::ext::{ArgError, BoxFuture, Tool, ToolCall, ToolCx, ToolOutcome, ToolOutput};
 use dal_agent::error::{ServiceError, ToolError};
-use dal_core::{McpRequest, ModelInfo, Name, Preview, RawJson, SessionId, ToolClass, ToolSpec, Workspace};
+use dal_agent::ext::{ArgError, BoxFuture, Tool, ToolCall, ToolCx, ToolOutcome, ToolOutput};
+use dal_core::{
+    McpRequest, ModelInfo, Name, Preview, RawJson, SessionId, ToolClass, ToolSpec, Workspace,
+};
 use reqwest::header::{HeaderName, HeaderValue};
 use serde::Deserialize;
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
 
 use crate::mcp::{
-    McpError, RESULT_TEXT_CAP, RESULT_TRUNCATED_MARKER, TOOL_CACHE_CAP,
-    TOOL_CACHE_DEFAULT,
+    McpError, RESULT_TEXT_CAP, RESULT_TRUNCATED_MARKER, TOOL_CACHE_CAP, TOOL_CACHE_DEFAULT,
 };
 
 pub(crate) use dal_core::ext::McpServerDecl as ServerDecl;
@@ -42,8 +43,7 @@ fn executable_file(path: &Path) -> bool {
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::metadata(path)
-            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
-            .unwrap_or(false)
+            .is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0)
     }
     #[cfg(not(unix))]
     {
@@ -53,7 +53,7 @@ fn executable_file(path: &Path) -> bool {
 
 /// A stable per-session server identity.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct Key {
+pub(crate) struct Key {
     pub session: SessionId,
     pub skill: String,
     pub server: String,
@@ -62,14 +62,14 @@ pub struct Key {
 impl Key {
     /// Returns the diagnostic and command identity `<session>:<skill>:<server>`.
     #[must_use]
-    pub fn display(&self) -> String {
+    pub(crate) fn display(&self) -> String {
         format!("{}:{}:{}", self.session, self.skill, self.server)
     }
 }
 
 /// Folds an MCP tool name to the stable mapped-tool grammar.
 #[must_use]
-pub fn fold_tool_name(skill: &str, server: &str, tool: &str) -> String {
+pub(crate) fn fold_tool_name(skill: &str, server: &str, tool: &str) -> String {
     let mut output = String::with_capacity(
         skill
             .len()
@@ -86,11 +86,13 @@ pub fn fold_tool_name(skill: &str, server: &str, tool: &str) -> String {
             if output.len() == 200 {
                 return output;
             }
-            output.push(if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-') {
-                character
-            } else {
-                '_'
-            });
+            output.push(
+                if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-') {
+                    character
+                } else {
+                    '_'
+                },
+            );
         }
     }
     output
@@ -131,8 +133,8 @@ fn collect_header_annotations(
     let Some(properties) = schema.get("properties").and_then(|value| value.as_object()) else {
         return Ok(());
     };
-    for (property, definition) in properties.iter() {
-        let property: &str = property.as_ref();
+    for (property, definition) in properties {
+        let property: &str = property;
         path.push(property.to_owned());
         if let Some(annotation) = definition.get("x-mcp-header") {
             let Some(header) = annotation.as_str() else {
@@ -159,7 +161,23 @@ fn valid_header_name(name: &str) -> bool {
     !name.is_empty()
         && name.bytes().all(|byte| {
             byte.is_ascii_alphanumeric()
-                || matches!(byte, b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'*' | b'+' | b'-' | b'.' | b'^' | b'_' | b'`' | b'|' | b'~')
+                || matches!(
+                    byte,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
         })
 }
 
@@ -193,7 +211,8 @@ pub(crate) fn parameter_headers(
         let encoded = encode_header_value(&text);
         let name = HeaderName::from_bytes(format!("Mcp-Param-{}", annotation.header).as_bytes())
             .map_err(|_| ParameterHeaderError::InvalidName)?;
-        let value = HeaderValue::from_str(&encoded).map_err(|_| ParameterHeaderError::InvalidValue)?;
+        let value =
+            HeaderValue::from_str(&encoded).map_err(|_| ParameterHeaderError::InvalidValue)?;
         headers.push((name, value));
     }
     Ok(headers)
@@ -217,7 +236,7 @@ fn encode_header_value(value: &str) -> String {
     if value.is_ascii() && !already_encoded {
         return value.to_owned();
     }
-    use base64::{engine::general_purpose::STANDARD, Engine};
+    use base64::{Engine, engine::general_purpose::STANDARD};
     format!("=?base64?{}?=", STANDARD.encode(value.as_bytes()))
 }
 
@@ -253,7 +272,6 @@ struct RemoteToolPageWire {
 /// A decoded tool was excluded because its optional header metadata was invalid.
 #[derive(Clone, Debug)]
 pub(crate) struct ExcludedTool {
-    pub(crate) name: String,
     pub(crate) warning: String,
 }
 
@@ -268,10 +286,11 @@ pub(crate) struct RemoteToolPage {
 
 /// Parses one tools/list page while retaining each tool schema as validated raw JSON.
 pub(crate) fn decode_tool_page(body: &str) -> Result<RemoteToolPage, McpError> {
-    let wire = sonic_rs::from_str::<RemoteToolPageWire>(body).map_err(|error| McpError::Protocol {
-        code: -32600,
-        message: format!("invalid tools/list response: {error}"),
-    })?;
+    let wire =
+        sonic_rs::from_str::<RemoteToolPageWire>(body).map_err(|error| McpError::Protocol {
+            code: -32600,
+            message: format!("invalid tools/list response: {error}"),
+        })?;
     let mut tools = Vec::with_capacity(wire.tools.len());
     let mut excluded = Vec::new();
     for tool in wire.tools {
@@ -304,10 +323,12 @@ fn decode_tool(wire: RemoteToolWire) -> Result<Result<RemoteTool, ExcludedTool>,
             }
         })?,
     };
-    let schema_value = schema.decode_as::<Value>().map_err(|error| McpError::Protocol {
-        code: -32600,
-        message: format!("server returned an invalid tool schema: {error}"),
-    })?;
+    let schema_value = schema
+        .decode_as::<Value>()
+        .map_err(|error| McpError::Protocol {
+            code: -32600,
+            message: format!("server returned an invalid tool schema: {error}"),
+        })?;
     let headers = match header_annotations(&schema_value) {
         Ok(headers) => headers,
         Err(_) => {
@@ -316,7 +337,6 @@ fn decode_tool(wire: RemoteToolWire) -> Result<Result<RemoteTool, ExcludedTool>,
                     "mcp: mapped tool {} excluded; invalid x-mcp-header annotation",
                     wire.name
                 ),
-                name: wire.name,
             }));
         }
     };
@@ -429,7 +449,6 @@ pub(crate) fn shape_result(
     })
 }
 
-
 fn mime_type(block: &Value) -> &str {
     block
         .get("mimeType")
@@ -482,15 +501,27 @@ pub(crate) struct ServerEntryTool {
 }
 
 impl ServerEntryTool {
-    pub(crate) fn new(key: Key, plugin: Name, declaration: Arc<ServerDecl>) -> Result<Self, McpError> {
-        let name = Name::parse_mapped_tool(&fold_tool_name(&key.skill, &key.server, ""))
-            .map_err(|error| McpError::Protocol { code: -32600, message: error.to_string() })?;
+    pub(crate) fn new(
+        key: Key,
+        plugin: Name,
+        declaration: Arc<ServerDecl>,
+    ) -> Result<Self, McpError> {
+        let name = Name::parse_mapped_tool(&fold_tool_name(&key.skill, &key.server, "")).map_err(
+            |error| McpError::Protocol {
+                code: -32600,
+                message: error.to_string(),
+            },
+        )?;
         let description = format!(
             "Connects to the MCP server \"{}\" declared by the skill \"{}\" and lists its tools. Run this once; the tools appear as {}.{}.<tool> after it returns.",
             key.server, key.skill, key.skill, key.server
         );
-        let parameters = RawJson::parse(r#"{"type":"object","properties":{},"additionalProperties":false}"#)
-            .map_err(|error| McpError::Protocol { code: -32600, message: error.to_string() })?;
+        let parameters =
+            RawJson::parse(r#"{"type":"object","properties":{},"additionalProperties":false}"#)
+                .map_err(|error| McpError::Protocol {
+                    code: -32600,
+                    message: error.to_string(),
+                })?;
         Ok(Self {
             key,
             plugin,
@@ -519,11 +550,17 @@ impl Tool for ServerEntryTool {
     }
 
     fn classify(&self, args: &RawJson, _ws: &Workspace) -> Result<ToolClass, ArgError> {
-        let empty = args.decode_as::<Value>().ok().and_then(|value| value.as_object().map(|obj| obj.is_empty()));
+        let empty = args
+            .decode_as::<Value>()
+            .ok()
+            .and_then(|value| value.as_object().map(sonic_rs::Object::is_empty));
         if empty != Some(true) {
             return Err(ArgError::message("mcp server entry takes no arguments"));
         }
-        Ok(ToolClass::Exec { read_only: false, grant: None })
+        Ok(ToolClass::Exec {
+            read_only: false,
+            grant: None,
+        })
     }
 
     fn run<'a>(&'a self, call: ToolCall, mut cx: ToolCx<'a>) -> BoxFuture<'a, ToolOutcome> {
@@ -551,7 +588,10 @@ impl Tool for MappedTool {
     }
 
     fn classify(&self, _args: &RawJson, _ws: &Workspace) -> Result<ToolClass, ArgError> {
-        Ok(ToolClass::Exec { read_only: false, grant: None })
+        Ok(ToolClass::Exec {
+            read_only: false,
+            grant: None,
+        })
     }
 
     fn run<'a>(&'a self, call: ToolCall, mut cx: ToolCx<'a>) -> BoxFuture<'a, ToolOutcome> {
@@ -582,7 +622,12 @@ fn server_preview(key: &Key, declaration: &ServerDecl, tool: &str, arguments: &R
     }
     Preview {
         title: format!("MCP {}.{}", key.server, tool).into(),
-        body: format!("server: {}\n{target}\ntool: {tool}\narguments: {}", key.display(), arguments.as_str()).into(),
+        body: format!(
+            "server: {}\n{target}\ntool: {tool}\narguments: {}",
+            key.display(),
+            arguments.as_str()
+        )
+        .into(),
         digest: None,
     }
 }
@@ -600,7 +645,10 @@ async fn call_mcp(key: &Key, remote: &str, arguments: RawJson, cx: ToolCx<'_>) -
         Ok(response) => ToolOutcome::Ok(ToolOutput::from_text(response.text)),
         Err(ServiceError::Cancelled) => ToolOutcome::Interrupted,
         Err(ServiceError::Declined) => ToolOutcome::Err(ToolError::message(
-            McpError::Declined { plugin: cx.caller().ext().as_str().to_owned() }.to_string()
+            McpError::Declined {
+                plugin: cx.caller().ext().as_str().to_owned(),
+            }
+            .to_string(),
         )),
         Err(ServiceError::Denied(reason)) => ToolOutcome::Err(ToolError::Denied(reason)),
         Err(error) => ToolOutcome::Err(ToolError::message(error.to_string())),

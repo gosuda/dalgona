@@ -40,7 +40,6 @@ enum PluginConfigError {
     WrongSection { plugin: String },
 }
 
-
 /// Every decoded battery section.
 pub(crate) struct Sections {
     pub(crate) history: HistoryConfig,
@@ -101,19 +100,13 @@ fn has_configured_plugin(config: &dalgon::Config, name: &str) -> bool {
         .any(|configured| configured.as_ref() == name)
 }
 
-fn empty_plugin_section(
-    config: &dalgon::Config,
-    name: &str,
-) -> Result<(), dalgon::BuildError> {
+fn empty_plugin_section(config: &dalgon::Config, name: &str) -> Result<(), dalgon::BuildError> {
     let section_name = format!("plugin.{name}");
     let Some(section) = config.section(&section_name) else {
         return Ok(());
     };
     let Some(table) = section.as_table() else {
-        return Err(section_error(
-            &section_name,
-            PluginConfigError::NotATable,
-        ));
+        return Err(section_error(&section_name, PluginConfigError::NotATable));
     };
     if let Some(key) = table.keys().next() {
         return Err(section_error(

@@ -8,10 +8,11 @@ use std::{
 
 use dal_core::{CallId, GenerationId, SessionId, TurnId};
 
+#[cfg(feature = "symbols")]
+use super::ir::StagedFileOwned;
 use super::{
     ir::{
-        Diff, Edit, EngineError, ErrorClass, FindingSeverity, Output, Plan, StagedBatch,
-        StagedFile, StagedFileOwned,
+        Diff, Edit, EngineError, ErrorClass, FindingSeverity, Output, Plan, StagedBatch, StagedFile,
     },
     resolve::{check_overlap, resolve_path},
     snapshot::SnapshotStore,
@@ -51,6 +52,10 @@ pub struct PatchSession {
 ///
 /// The returned plan owns complete before/after bytes; observers run on it
 /// before any authorization decision.
+///
+/// # Errors
+/// Returns the engine error when parsing, resolution, guard proofs, or
+/// staging refuse the payload; nothing is written on error.
 pub async fn plan(
     session: &PatchSession,
     style: super::ir::DialectId,
@@ -110,6 +115,21 @@ pub async fn plan(
                 .map_or(0, |bytes| bytes.len())
                 .saturating_add(staged.after.as_ref().map_or(0, |bytes| bytes.len())),
         );
+        if let Some(dest) = staged.renamed_to.as_ref()
+            && tokio::fs::metadata(session.workspace.join(dest))
+                .await
+                .is_ok()
+        {
+            return Err(EngineError::new(
+                ErrorClass::File,
+                format!(
+                    "patch: cannot rename {} to {}: {} already exists.",
+                    display.display(),
+                    dest.display(),
+                    dest.display()
+                ),
+            ));
+        }
         files.push(staged);
     }
     let staged_mib = staged_bytes.div_ceil(1 << 20);
@@ -122,7 +142,10 @@ pub async fn plan(
         ));
     }
     // No-op elimination: every file identical is an error.
-    if files.iter().all(|file| file.before == file.after) {
+    if files
+        .iter()
+        .all(|file| file.before == file.after && file.renamed_to.is_none())
+    {
         return Err(EngineError::new(
             ErrorClass::Resolve,
             "patch: the edits produce no change.".to_owned(),
@@ -163,8 +186,14 @@ pub async fn commit(
     mut plan: Plan,
     observers: &[Arc<dyn super::ir::EditObserver>],
 ) -> Output {
-    let findings = inspect(session, &plan, observers).await;
-    if let Some(blocked) = findings
+    // Pre-approval inspection (patch.rs, patch::apply_replacement) already ran
+    // the observers on this exact plan; re-running would double-count each
+    // edit in per-turn guard accounting. Inspect only when findings are empty.
+    if plan.findings.is_empty() {
+        plan.findings = inspect(session, &plan, observers).await;
+    }
+    if let Some(blocked) = plan
+        .findings
         .iter()
         .find(|finding| finding.severity == FindingSeverity::Block)
     {
@@ -178,7 +207,6 @@ pub async fn commit(
             },
         };
     }
-    plan.findings = findings;
     match commit::apply_files(session, &plan).await {
         Ok(output) => output,
         Err(error) => Output {
@@ -199,7 +227,7 @@ pub(crate) async fn inspect(
     observers: &[Arc<dyn super::ir::EditObserver>],
 ) -> Vec<super::ir::EditFinding> {
     #[cfg(feature = "symbols")]
-    let (pre_parses, post_parses) = cached_parses(session, &plan.files).await;
+    let (pre_parses, post_parses) = cached_parses(&plan.files).await;
     #[cfg(feature = "symbols")]
     let views: Vec<StagedFile<'_>> = plan
         .files
@@ -245,7 +273,6 @@ pub(crate) async fn inspect(
 /// and commit observer views so both see identical evidence.
 #[cfg(feature = "symbols")]
 pub(crate) async fn cached_parses(
-    session: &PatchSession,
     files: &[StagedFileOwned],
 ) -> (
     Vec<Option<std::sync::Arc<crate::parse::Parsed>>>,
@@ -254,8 +281,8 @@ pub(crate) async fn cached_parses(
     let mut pre = Vec::with_capacity(files.len());
     let mut post = Vec::with_capacity(files.len());
     for file in files {
-        pre.push(cached_parse(&file.path, file.before.as_deref(), session.symbols).await);
-        post.push(cached_parse(&file.path, file.after.as_deref(), session.symbols).await);
+        pre.push(cached_parse(&file.path, file.before.as_deref()).await);
+        post.push(cached_parse(&file.path, file.after.as_deref()).await);
     }
     (pre, post)
 }
@@ -264,11 +291,7 @@ pub(crate) async fn cached_parses(
 async fn cached_parse(
     path: &std::path::Path,
     bytes: Option<&[u8]>,
-    symbols: bool,
 ) -> Option<std::sync::Arc<crate::parse::Parsed>> {
-    if !symbols {
-        return None;
-    }
     let bytes = bytes?;
     crate::parse::language(path)?;
     match crate::parse::tree(path, bytes).await {

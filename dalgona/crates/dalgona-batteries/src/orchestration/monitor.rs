@@ -12,6 +12,6 @@ pub(crate) mod status;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use status::{GoalPreview, InflightCounts};
 #[cfg(test)]
 pub(crate) use status::inflight_counts;
+pub(crate) use status::{GoalPreview, InflightCounts};

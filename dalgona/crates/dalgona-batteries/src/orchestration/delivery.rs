@@ -250,7 +250,9 @@ fn section_lines(section: &StepNotice, preview_mode: Preview) -> Vec<String> {
             task.changed,
             task.suffix,
         )];
-        if let Preview::Show(limit) = preview_mode && !task.preview_text.is_empty() {
+        if let Preview::Show(limit) = preview_mode
+            && !task.preview_text.is_empty()
+        {
             lines.push(format!("  {}", preview(task.preview_text, limit)));
         }
         return lines;
@@ -268,7 +270,9 @@ fn section_lines(section: &StepNotice, preview_mode: Preview) -> Vec<String> {
             task.changed,
             task.suffix,
         ));
-        if let Preview::Show(limit) = preview_mode && !task.preview_text.is_empty() {
+        if let Preview::Show(limit) = preview_mode
+            && !task.preview_text.is_empty()
+        {
             lines.push(format!("    {}", preview(task.preview_text, limit)));
         }
     }
@@ -329,7 +333,9 @@ fn notice_body(run: JobId, sections: &[StepNotice], preview_mode: Preview, room:
                 task.changed,
                 task.suffix,
             )];
-            if let Preview::Show(limit) = preview_mode && !task.preview_text.is_empty() {
+            if let Preview::Show(limit) = preview_mode
+                && !task.preview_text.is_empty()
+            {
                 lines.push(format!("    {}", preview(task.preview_text, limit)));
             }
             let chunk: String = lines.join("\n");

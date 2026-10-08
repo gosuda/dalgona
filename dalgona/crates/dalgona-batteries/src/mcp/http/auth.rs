@@ -28,7 +28,10 @@ impl fmt::Debug for TokenRecord {
             .debug_struct("TokenRecord")
             .field("client_id", &self.client_id)
             .field("access_token", &"<redacted>")
-            .field("refresh_token", &self.refresh_token.as_ref().map(|_| "<redacted>"))
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "<redacted>"),
+            )
             .field("scopes", &self.scopes)
             .finish()
     }
@@ -90,7 +93,10 @@ pub(crate) fn persist_token(
 pub(crate) fn canonical_resource(url: &Url) -> String {
     let scheme = url.scheme().to_ascii_lowercase();
     let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
-    let port = url.port().map(|port| format!(":{port}")).unwrap_or_default();
+    let port = url
+        .port()
+        .map(|port| format!(":{port}"))
+        .unwrap_or_default();
     let path = url.path().trim_end_matches('/').to_owned();
     format!("{scheme}://{host}{port}{path}")
 }
@@ -104,7 +110,8 @@ pub(crate) fn challenge_param(challenge: &str, name: &str) -> Option<String> {
     loop {
         while chars.next_if(|&c| matches!(c, ' ' | '\t' | ',')).is_some() {}
         let key: String =
-            std::iter::from_fn(|| chars.next_if(|&c| !matches!(c, ' ' | '\t' | ',' | '='))).collect();
+            std::iter::from_fn(|| chars.next_if(|&c| !matches!(c, ' ' | '\t' | ',' | '=')))
+                .collect();
         if key.is_empty() && chars.peek().is_none() {
             return None;
         }
@@ -137,7 +144,7 @@ fn quoted_value(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> String 
 
 /// Computes the PKCE S256 code challenge for a verifier.
 pub(crate) fn pkce_challenge(verifier: &str) -> String {
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     URL_SAFE_NO_PAD.encode(sha256(verifier.as_bytes()))
 }
 
@@ -145,20 +152,20 @@ pub(crate) fn pkce_challenge(verifier: &str) -> String {
 /// the one MCP PKCE challenge.
 pub(crate) fn sha256(bytes: &[u8]) -> [u8; 32] {
     const K: [u32; 64] = [
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
-        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
-        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
-        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
-        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
-        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
-        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
-        0xc67178f2,
+        0x428a_2f98, 0x7137_4491, 0xb5c0_fbcf, 0xe9b5_dba5, 0x3956_c25b, 0x59f1_11f1, 0x923f_82a4,
+        0xab1c_5ed5, 0xd807_aa98, 0x1283_5b01, 0x2431_85be, 0x550c_7dc3, 0x72be_5d74, 0x80de_b1fe,
+        0x9bdc_06a7, 0xc19b_f174, 0xe49b_69c1, 0xefbe_4786, 0x0fc1_9dc6, 0x240c_a1cc, 0x2de9_2c6f,
+        0x4a74_84aa, 0x5cb0_a9dc, 0x76f9_88da, 0x983e_5152, 0xa831_c66d, 0xb003_27c8, 0xbf59_7fc7,
+        0xc6e0_0bf3, 0xd5a7_9147, 0x06ca_6351, 0x1429_2967, 0x27b7_0a85, 0x2e1b_2138, 0x4d2c_6dfc,
+        0x5338_0d13, 0x650a_7354, 0x766a_0abb, 0x81c2_c92e, 0x9272_2c85, 0xa2bf_e8a1, 0xa81a_664b,
+        0xc24b_8b70, 0xc76c_51a3, 0xd192_e819, 0xd699_0624, 0xf40e_3585, 0x106a_a070, 0x19a4_c116,
+        0x1e37_6c08, 0x2748_774c, 0x34b0_bcb5, 0x391c_0cb3, 0x4ed8_aa4a, 0x5b9c_ca4f, 0x682e_6ff3,
+        0x748f_82ee, 0x78a5_636f, 0x84c8_7814, 0x8cc7_0208, 0x90be_fffa, 0xa450_6ceb, 0xbef9_a3f7,
+        0xc671_78f2,
     ];
     let mut state: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-        0x5be0cd19,
+        0x6a09_e667, 0xbb67_ae85, 0x3c6e_f372, 0xa54f_f53a, 0x510e_527f, 0x9b05_688c, 0x1f83_d9ab,
+        0x5be0_cd19,
     ];
     let bit_len = (bytes.len() as u64).wrapping_mul(8);
     let mut padded = bytes.to_vec();
@@ -167,7 +174,7 @@ pub(crate) fn sha256(bytes: &[u8]) -> [u8; 32] {
         padded.push(0);
     }
     padded.extend_from_slice(&bit_len.to_be_bytes());
-    for chunk in padded.chunks_exact(64) {
+    for chunk in padded.as_chunks::<64>().0 {
         let mut schedule = [0_u32; 64];
         for (index, word) in schedule.iter_mut().enumerate().take(16) {
             let at = index * 4;
@@ -185,37 +192,38 @@ pub(crate) fn sha256(bytes: &[u8]) -> [u8; 32] {
                 .wrapping_add(schedule[index - 7])
                 .wrapping_add(small1);
         }
-        let (mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h) = (
-            state[0], state[1], state[2], state[3], state[4], state[5], state[6], state[7],
-        );
-        for index in 0..64 {
-            let big1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
-            let choice = (e & f) ^ ((!e) & g);
-            let temp1 = h
+        let [mut work_a, mut work_b, mut work_c, mut work_d, mut work_e, mut work_f, mut work_g, mut work_h] =
+            state;
+        for round in 0..64 {
+            let big1 = work_e.rotate_right(6) ^ work_e.rotate_right(11) ^ work_e.rotate_right(25);
+            let choice = (work_e & work_f) ^ ((!work_e) & work_g);
+            let temp1 = work_h
                 .wrapping_add(big1)
                 .wrapping_add(choice)
-                .wrapping_add(K[index])
-                .wrapping_add(schedule[index]);
-            let big0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
-            let majority = (a & b) ^ (a & c) ^ (b & c);
+                .wrapping_add(K[round])
+                .wrapping_add(schedule[round]);
+            let big0 = work_a.rotate_right(2)
+                ^ work_a.rotate_right(13)
+                ^ work_a.rotate_right(22);
+            let majority = (work_a & work_b) ^ (work_a & work_c) ^ (work_b & work_c);
             let temp2 = big0.wrapping_add(majority);
-            h = g;
-            g = f;
-            f = e;
-            e = d.wrapping_add(temp1);
-            d = c;
-            c = b;
-            b = a;
-            a = temp1.wrapping_add(temp2);
+            work_h = work_g;
+            work_g = work_f;
+            work_f = work_e;
+            work_e = work_d.wrapping_add(temp1);
+            work_d = work_c;
+            work_c = work_b;
+            work_b = work_a;
+            work_a = temp1.wrapping_add(temp2);
         }
-        state[0] = state[0].wrapping_add(a);
-        state[1] = state[1].wrapping_add(b);
-        state[2] = state[2].wrapping_add(c);
-        state[3] = state[3].wrapping_add(d);
-        state[4] = state[4].wrapping_add(e);
-        state[5] = state[5].wrapping_add(f);
-        state[6] = state[6].wrapping_add(g);
-        state[7] = state[7].wrapping_add(h);
+        state[0] = state[0].wrapping_add(work_a);
+        state[1] = state[1].wrapping_add(work_b);
+        state[2] = state[2].wrapping_add(work_c);
+        state[3] = state[3].wrapping_add(work_d);
+        state[4] = state[4].wrapping_add(work_e);
+        state[5] = state[5].wrapping_add(work_f);
+        state[6] = state[6].wrapping_add(work_g);
+        state[7] = state[7].wrapping_add(work_h);
     }
     let mut digest = [0_u8; 32];
     for (index, word) in state.iter().enumerate() {
@@ -243,7 +251,9 @@ mod tests {
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
         assert_eq!(
-            hex(sha256(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")),
+            hex(sha256(
+                b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
+            )),
             "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
         );
     }
@@ -277,7 +287,10 @@ mod tests {
             challenge_param(challenge, "error"),
             Some("insufficient_scope".to_owned())
         );
-        assert_eq!(challenge_param(challenge, "realm"), Some("plain".to_owned()));
+        assert_eq!(
+            challenge_param(challenge, "realm"),
+            Some("plain".to_owned())
+        );
         assert_eq!(challenge_param("Bearer", "scope"), None);
         assert_eq!(challenge_param(r#"Bearer scope="""#, "scope"), None);
     }
@@ -292,25 +305,39 @@ mod tests {
 
     #[test]
     fn persisted_token_file_is_mode_0600_and_resource_bound() {
-        let path = std::env::temp_dir().join(format!(
-            "dalgona-mcp-tokens-{}.json",
-            uuid::Uuid::new_v4()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("dalgona-mcp-tokens-{}.json", uuid::Uuid::new_v4()));
         let record = TokenRecord {
             client_id: "client".to_owned(),
             access_token: "access".to_owned(),
             refresh_token: Some("refresh".to_owned()),
             scopes: vec!["read".to_owned()],
         };
-        persist_token(&path, "https://issuer.example", "https://server.example/mcp", record)
-            .expect("persist token");
+        persist_token(
+            &path,
+            "https://issuer.example",
+            "https://server.example/mcp",
+            record,
+        )
+        .expect("persist token");
         let loaded = read_tokens(&path);
         assert_eq!(
-            record_for(&loaded, "https://issuer.example", "https://server.example/mcp")
-                .map(|record| record.client_id.as_str()),
+            record_for(
+                &loaded,
+                "https://issuer.example",
+                "https://server.example/mcp"
+            )
+            .map(|record| record.client_id.as_str()),
             Some("client")
         );
-        assert!(record_for(&loaded, "https://other.example", "https://server.example/mcp").is_none());
+        assert!(
+            record_for(
+                &loaded,
+                "https://other.example",
+                "https://server.example/mcp"
+            )
+            .is_none()
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

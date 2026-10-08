@@ -49,10 +49,7 @@ pub(crate) const BATTERIES: [&str; 11] = [
     "work",
 ];
 
-pub(crate) fn build_product(
-    root: PathBuf,
-    user_toml: Option<&str>,
-) -> TestResult<dalgon::Product> {
+pub(crate) fn build_product(root: PathBuf, user_toml: Option<&str>) -> TestResult<dalgon::Product> {
     let factory = dalgona::product();
     let config = dal_core::Config::load(
         dal_core::ConfigProduct::Dalgona,
@@ -76,20 +73,27 @@ pub(crate) fn battery_names(product: &dalgon::Product) -> std::collections::BTre
         .collect()
 }
 
+/// Finds the prebuilt `dalgona` binary next to the test executable's profile
+/// directory, or under `CARGO_TARGET_DIR` when `build.build-dir` splits
+/// intermediate artifacts from final binaries.
 pub(crate) fn dalgona_binary() -> TestResult<PathBuf> {
-    let suffix = std::env::consts::EXE_SUFFIX;
+    let file = format!("dalgona{}", std::env::consts::EXE_SUFFIX);
     let exe = std::env::current_exe()?;
-    let target_profile = exe
+    let profile = exe
         .parent()
         .and_then(Path::parent)
         .ok_or("the test binary has no target directory")?;
-    let path = target_profile.join(format!("dalgona{suffix}"));
-    if path.is_file() {
-        return Ok(path);
+    let mut candidates = vec![profile.join(&file)];
+    if let (Some(target), Some(name)) = (std::env::var_os("CARGO_TARGET_DIR"), profile.file_name())
+    {
+        candidates.push(Path::new(&target).join(name).join(&file));
+    }
+    if let Some(found) = candidates.iter().find(|path| path.is_file()) {
+        return Ok(found.clone());
     }
     Err(format!(
         "the Dalgona binary is missing at {}; run `cargo build -p dalgona --bin dalgona` before this gate",
-        path.display()
+        candidates[0].display()
     )
     .into())
 }

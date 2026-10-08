@@ -171,10 +171,41 @@ pub fn dialog_title(question: &Question) -> String {
             ],
             1,
         ),
-        Question::Select { prompt, .. } => prompt.to_string(),
+        Question::Select { prompt, .. } | Question::Text { prompt, .. } => prompt.to_string(),
         Question::Confirm { text } => text.to_string(),
-        Question::Text { prompt, .. } => prompt.to_string(),
         _ => "This question type is not supported here. Answer it from another client.".to_owned(),
+    }
+}
+
+/// Maps a key onto a text question; the composer owns the draft while it is open.
+fn text_key(input: &mut String, empty_hint: &mut bool, key: crate::keys::Key) -> Option<Answer> {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    match key.code {
+        KeyCode::Esc => Some(Answer::Cancel),
+        KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            input.push('\n');
+            None
+        }
+        KeyCode::Enter => {
+            let answer = text_answer(input);
+            *empty_hint = answer.is_none();
+            answer
+        }
+        KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            input.push('\n');
+            None
+        }
+        KeyCode::Backspace => {
+            input.pop();
+            None
+        }
+        KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            input.push(ch);
+            *empty_hint = false;
+            None
+        }
+        _ => None,
     }
 }
 
@@ -340,32 +371,7 @@ impl DialogUi {
                 }
                 _ => None,
             },
-            Question::Text { .. } => match key.code {
-                KeyCode::Esc => Some(Answer::Cancel),
-                KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                    self.input.push('\n');
-                    None
-                }
-                KeyCode::Enter => {
-                    let answer = text_answer(&self.input);
-                    self.empty_hint = answer.is_none();
-                    answer
-                }
-                KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.input.push('\n');
-                    None
-                }
-                KeyCode::Backspace => {
-                    self.input.pop();
-                    None
-                }
-                KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.input.push(ch);
-                    self.empty_hint = false;
-                    None
-                }
-                _ => None,
-            },
+            Question::Text { .. } => text_key(&mut self.input, &mut self.empty_hint, key),
             Question::Confirm { .. } => match key.code {
                 KeyCode::Char('y' | 'Y') => Some(confirm_answer('y')),
                 KeyCode::Char('n' | 'N') => Some(confirm_answer('n')),
@@ -401,12 +407,13 @@ impl DialogUi {
         settings: DiagramSettings,
         cache: &RenderCache,
     ) -> Vec<RenderRow> {
-        let Some((request, more)) = self.queue.shown() else {
+        let Some((request, extra)) = self.queue.shown() else {
             return Vec::new();
         };
         let mut title = dialog_title(&request.question);
-        if more > 0 {
-            title.push_str(&format!(" · {more} more waiting"));
+        if extra > 0 {
+            use std::fmt::Write as _;
+            let _ = write!(title, " · {extra} more waiting");
         }
         let mut rows = vec![RenderRow::new(title, Role::Accent)];
         let mut body = self.body(&request.question, width, mode, settings, cache);

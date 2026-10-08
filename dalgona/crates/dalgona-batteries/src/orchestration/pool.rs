@@ -86,7 +86,9 @@ impl IndexCollector {
     /// Stores one finished item. A late result never replaces the settled
     /// one: every task keeps exactly one final state.
     pub(crate) fn insert(&mut self, index: usize, result: TaskResult) {
-        if let Some(slot) = self.slots.get_mut(index) && slot.is_none() {
+        if let Some(slot) = self.slots.get_mut(index)
+            && slot.is_none()
+        {
             *slot = Some(result);
         }
     }

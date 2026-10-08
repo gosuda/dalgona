@@ -101,7 +101,7 @@ fn decode_forward(value: &value::Value) -> Result<(ModelRoute, Vec<CoreEvent>), 
     let value::Value::Object(fields) = value else {
         return Err("scripted model must return a model inference record".into());
     };
-    for (name, _) in fields.iter() {
+    for (name, _) in fields {
         if !matches!(name.as_ref(), "model" | "events") {
             return Err(format!("model inference has unknown field `{name}`").into());
         }

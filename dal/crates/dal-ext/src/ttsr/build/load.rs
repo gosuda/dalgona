@@ -106,6 +106,10 @@ pub(super) fn add_plugin_rule_files(files: &[&RuleFile], builder: &mut BuildCont
     }
 }
 
+#[expect(
+    clippy::case_sensitive_file_extension_comparisons,
+    reason = "rule files key on the exact lowercase .md suffix"
+)]
 fn plugin_rule_directory(path: &str) -> Option<&str> {
     let (directory, file) = path.rsplit_once('/')?;
     (directory.rsplit('/').next() == Some("rules") && file.ends_with(".md")).then_some(directory)

@@ -976,3 +976,167 @@ async fn codex_401_refreshes_then_retries_with_the_stored_new_credential() -> Te
     assert_eq!(stored.access_token.expose(), "new-access");
     Ok(())
 }
+
+fn reply(status: u16, content_type: &str, body: Vec<u8>) -> reqwest::Response {
+    reqwest::Response::from(
+        hyper::http::Response::builder()
+            .status(status)
+            .header("content-type", content_type)
+            .body(reqwest::Body::from(body))
+            .unwrap(),
+    )
+}
+
+async fn failure_of(response: reqwest::Response, key: &str) -> (u16, Option<String>, String) {
+    let credential = Credential::ApiKey {
+        key: crate::auth::credential::SecretString::from(key),
+    };
+    let failure = super::request::status_failure(
+        response,
+        Family::Chat,
+        &credential,
+        &[],
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("status_failure errored"))
+    .expect("not cancelled");
+    match failure {
+        crate::lifecycle::AttemptFailure::Response {
+            status,
+            code,
+            message,
+            ..
+        } => (status, code, message),
+        other @ crate::lifecycle::AttemptFailure::Provider(_) => {
+            panic!("expected a response failure, got {other:?}")
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_error_body_never_echoes_the_key_even_behind_json_escapes() {
+    let body = br#"{"error":{"code":"invalid_api_key","message":"bad key sk\u002dsecret-123"}}"#;
+    let (status, code, message) = failure_of(
+        reply(401, "application/json", body.to_vec()),
+        "sk-secret-123",
+    )
+    .await;
+    assert_eq!(status, 401);
+    assert_eq!(code.as_deref(), Some("invalid_api_key"));
+    assert!(!message.contains("sk-secret-123"), "{message}");
+}
+
+#[tokio::test]
+async fn error_bodies_of_any_shape_or_content_type_become_one_bounded_line() {
+    let (status, code, message) = failure_of(
+        reply(
+            502,
+            "text/html",
+            b"<html>Bad Gateway</html>\n<p>more</p>".to_vec(),
+        ),
+        "k",
+    )
+    .await;
+    assert_eq!((status, code.as_deref()), (502, None));
+    assert_eq!(message, "<html>Bad Gateway</html>");
+
+    let (_, code, message) = failure_of(
+        reply(
+            500,
+            "application/json",
+            br#"{"error":"flat string"}"#.to_vec(),
+        ),
+        "k",
+    )
+    .await;
+    assert_eq!(code, None);
+    assert_eq!(message, r#"{"error":"flat string"}"#);
+
+    let (_, _, message) = failure_of(reply(500, "text/plain", vec![0xFF, 0xFE, b'x']), "k").await;
+    assert_eq!(message, "\u{FFFD}\u{FFFD}x");
+
+    let long = format!(r#"{{"message":"{}"}}"#, "é".repeat(200));
+    let (_, _, message) = failure_of(reply(400, "application/json", long.into_bytes()), "k").await;
+    assert_eq!(message.len(), 300);
+    assert!(message.chars().all(|c| c == 'é'));
+
+    let (_, code, message) = failure_of(reply(503, "text/plain", Vec::new()), "k").await;
+    assert_eq!((code, message.as_str()), (None, ""));
+}
+
+async fn drain(mut stream: EventStream) -> Vec<Result<StreamEvent, ProviderError>> {
+    let mut out = Vec::new();
+    while let Some(item) = stream.next().await {
+        out.push(item);
+    }
+    out
+}
+
+#[tokio::test]
+async fn a_two_hundred_that_is_not_an_sse_stream_never_ends_in_stop() {
+    for body in [
+        br#"{"error":{"message":"upstream failed"}}"#.to_vec(),
+        b"<html>captive portal</html>".to_vec(),
+        Vec::new(),
+    ] {
+        for family in [
+            Family::Chat,
+            Family::Responses,
+            Family::Codex,
+            Family::Anthropic,
+        ] {
+            let events = drain(super::transport::decode_response(
+                reply(200, "text/html", body.clone()),
+                family,
+                "p",
+                "m",
+                false,
+                Vec::new(),
+            ))
+            .await;
+            assert!(
+                matches!(events.as_slice(), [Err(_)]),
+                "{family:?} {body:?}: {events:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_body_read_failure_mid_stream_is_a_retryable_transport_error_at_any_cut_point() {
+    let frame = br#"data: {"choices":[{"delta":{"content":"hi"}}]}"#;
+    for (cut, delivered) in [
+        (frame.to_vec(), true),
+        (frame[..frame.len() - 9].to_vec(), false),
+    ] {
+        let mut first = cut;
+        if delivered {
+            first.extend_from_slice(b"\n\n");
+        }
+        let chunks: Vec<Result<Vec<u8>, io::Error>> =
+            vec![Ok(first), Err(io::Error::other("connection reset"))];
+        let response = reqwest::Response::from(hyper::http::Response::new(
+            reqwest::Body::wrap_stream(futures::stream::iter(chunks)),
+        ));
+        let events = drain(super::transport::decode_response(
+            response,
+            Family::Chat,
+            "p",
+            "m",
+            false,
+            Vec::new(),
+        ))
+        .await;
+        assert_eq!(
+            matches!(events.first(), Some(Ok(StreamEvent::TextDelta { .. }))),
+            delivered
+        );
+        let Some(Err(ProviderError::Transport { family, reason })) = events.last() else {
+            panic!("expected a transport error last, got {events:?}");
+        };
+        assert_eq!(*family, Family::Chat);
+        assert!(reason.contains("connection reset"), "{reason}");
+        assert_eq!(events.iter().filter(|event| event.is_err()).count(), 1);
+    }
+}

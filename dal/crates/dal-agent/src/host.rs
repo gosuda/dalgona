@@ -32,6 +32,18 @@ pub struct Env {
     pub sandbox_helper: Option<PathBuf>,
 }
 
+impl Env {
+    /// Builds an environment with no variables and no sandbox helper whose working directory is `root`.
+    #[must_use]
+    pub fn data_root(root: PathBuf) -> Self {
+        Self {
+            vars: BTreeMap::new(),
+            cwd: root,
+            sandbox_helper: None,
+        }
+    }
+}
+
 /// Selects a durable, ephemeral, or child session in an explicit workspace.
 #[non_exhaustive]
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

@@ -647,3 +647,51 @@ async fn workspace_key_uses_full_canonical_path() {
         "prefix plus separator plus digest"
     );
 }
+
+#[tokio::test]
+async fn unusable_info_cache_falls_back_to_the_journal() {
+    let (_temp, store, _) = setup("list-cache-loss");
+    let id = SessionId::new_v7();
+    let mut journal = store.create_session(id);
+    journal
+        .append(vec![user(1, "first")])
+        .await
+        .expect("first append");
+    journal.set_name(Some("kept")).await.expect("name appends");
+    journal.close().await.expect("session closes");
+    let info = store.session_file(id).with_file_name("info.json");
+
+    fs::write(&info, b"\xff{not json").expect("corrupt the cache");
+    assert_eq!(
+        name_of(&store, id).as_deref(),
+        Some("kept"),
+        "garbage cache"
+    );
+    fs::remove_file(&info).expect("remove the cache");
+    assert_eq!(name_of(&store, id).as_deref(), Some("kept"), "absent cache");
+}
+
+#[tokio::test]
+async fn list_limit_of_one_returns_one_of_two_sessions() {
+    let (_temp, store, _) = setup("list-limit-one");
+    for n in 1..=2 {
+        let mut journal = store.create_session(fixed_id(n));
+        journal
+            .append(vec![user(1, "first")])
+            .await
+            .expect("append");
+        journal.close().await.expect("session closes");
+    }
+    let page = store
+        .list(ListQuery {
+            limit: Some(1),
+            cursor: None,
+            search: None,
+        })
+        .expect("limit 1 is the lower bound");
+    assert_eq!(page.items.len(), 1, "exactly the limit comes back");
+    assert!(
+        page.next_before.is_some(),
+        "the second session is reachable by cursor"
+    );
+}

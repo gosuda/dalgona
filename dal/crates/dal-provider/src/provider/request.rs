@@ -288,17 +288,18 @@ pub(crate) async fn status_failure(
         () = cancel.cancelled() => return Ok(None),
         body = http::read_body(family, response) => body.map_err(AttemptFailure::Provider)?,
     };
-    let mut body = String::from_utf8_lossy(&body).into_owned();
-    for secret in credential_secrets(credential).iter().chain(extra_secrets) {
-        if !secret.is_empty() && body.contains(secret.as_ref()) {
-            body = body.replace(secret.as_ref(), "<redacted>");
-        }
-    }
+    let secrets: Vec<Box<str>> = credential_secrets(credential)
+        .into_iter()
+        .chain(extra_secrets.iter().cloned())
+        .collect();
+    let body = transport_mod::redact_text(String::from_utf8_lossy(&body).into_owned(), &secrets);
     let (code, message) = transport_mod::error_fields(&body);
+    // JSON escapes decode in `error_fields`, so a secret written as `\u002d`
+    // only matches after parsing.
     Ok(Some(AttemptFailure::Response {
         status,
-        code,
-        message,
+        code: code.map(|code| transport_mod::redact_text(code, &secrets)),
+        message: transport_mod::redact_text(message, &secrets),
         retry_after,
     }))
 }

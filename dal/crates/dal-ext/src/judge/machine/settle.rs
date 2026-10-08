@@ -83,7 +83,7 @@ impl<'a> CallSettlement<'a> {
             .services
             .append_record(&self.inner.caller, "judge", Box::new(body))
             .await
-            .map_err(provider_error)
+            .map_err(|error| provider_error(&error))
             .map(|_| ())?;
         Ok(())
     }

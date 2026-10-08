@@ -1,5 +1,9 @@
-#![expect(clippy::unwrap_used, reason = "SC test")]
 #![expect(clippy::expect_used, reason = "SC test")]
+#![expect(clippy::panic, reason = "SC test")]
+#![expect(
+    dead_code,
+    reason = "gate support exposes helpers shared across independent targets"
+)]
 
 //! Synthetic model recursion, private rounds, and USD admission expose typed failures.
 
@@ -18,9 +22,9 @@ use std::{
 use dal_agent::{
     Env, Product, SessionRef,
     ext::{
-        ArgError, BoxFuture, EventStream, ExtensionBuilder, ModelCx, ModelError, ModelHandler,
-        ModelRecord, PrivateTool, RawValue, ScopeError, ScopeValue, Tool, ToolCx, ToolOutcome,
-        ToolOutput,
+        ArgError, BoxFuture, EventStream, Extension, ExtensionBuilder, ModelCx, ModelError,
+        ModelHandler, ModelRecord, PrivateTool, RawValue, ScopeError, ScopeValue, Tool, ToolCx,
+        ToolOutcome, ToolOutput,
     },
 };
 use dal_core::{
@@ -31,6 +35,88 @@ use dal_core::{
 };
 use dal_provider::{ProviderError, StopReason, StreamEvent as ProviderEvent};
 use support::{TestDir, scripted_session};
+
+fn probe_extension(
+    private: PrivateTool,
+    private_name: String,
+    state: &Arc<Mutex<ObservedErrors>>,
+    calls: Arc<AtomicUsize>,
+    max_private_results: Arc<AtomicUsize>,
+) -> Result<Extension, Box<dyn Error + Send + Sync>> {
+    let mut builder = ExtensionBuilder::new("gate-model-probes", "0.1.0", ServiceSet::EMPTY)?
+        .model(model_record(
+            "gate/probe",
+            Arc::new(ProbeHandler {
+                private,
+                state: Arc::clone(state),
+            }),
+        )?)
+        .model(model_record(
+            "gate/cycle",
+            Arc::new(CycleHandler {
+                state: Arc::clone(state),
+            }),
+        )?);
+    for index in 0..6 {
+        let next = (index < 5).then(|| format!("gate/depth-{}", index + 1));
+        builder = builder.model(model_record(
+            &format!("gate/depth-{index}"),
+            Arc::new(DepthHandler {
+                next,
+                state: Arc::clone(state),
+            }),
+        )?);
+    }
+    Ok(builder
+        .model(model_record(
+            "gate/round-model",
+            Arc::new(RoundModel {
+                private_name,
+                calls,
+                max_private_results,
+            }),
+        )?)
+        .build()?)
+}
+
+#[expect(clippy::unwrap_used, reason = "SC test")]
+fn assert_observed_errors(state: &Mutex<ObservedErrors>) {
+    let mut observed = lock(state);
+    let cycle = observed.cycle.take().unwrap();
+    let ModelError::SyntheticCycle { chain } = cycle else {
+        panic!("cycle probe did not return SyntheticCycle");
+    };
+    assert_eq!(
+        chain.iter().map(ModelId::as_str).collect::<Vec<_>>(),
+        ["gate/probe", "gate/cycle", "gate/cycle"]
+    );
+    let depth = observed.depth.take().unwrap();
+    let ModelError::SyntheticDepth { chain } = depth else {
+        panic!("depth probe did not return SyntheticDepth");
+    };
+    assert_eq!(
+        chain.iter().map(ModelId::as_str).collect::<Vec<_>>(),
+        [
+            "gate/probe",
+            "gate/depth-0",
+            "gate/depth-1",
+            "gate/depth-2",
+            "gate/depth-3",
+        ]
+    );
+    let unpriced = observed.unpriced.take().unwrap();
+    assert!(matches!(
+        unpriced,
+        ScopeError::UnpricedModel { model } if model.as_ref() == "gate/no-price"
+    ));
+    let private_failure = observed.private_rounds.take().unwrap();
+    let expected_private_rounds = ModelError::PrivateRounds.to_string();
+    assert!(matches!(
+        private_failure,
+        ProviderError::Synthetic(InferFailure::Fatal { message, fix })
+            if message.as_ref() == expected_private_rounds.as_str() && fix.is_none()
+    ));
+}
 
 #[derive(Default)]
 struct ObservedErrors {
@@ -115,9 +201,8 @@ impl ModelHandler for CycleHandler {
         Box::pin(async move {
             let mut repeated = request;
             repeated.model = ModelRoute::from_id("gate/cycle");
-            match cx.forward(repeated, &[]).await {
-                Err(error) => lock(&self.state).cycle = Some(error),
-                Ok(_) => {}
+            if let Err(error) = cx.forward(repeated, &[]).await {
+                lock(&self.state).cycle = Some(error);
             }
             Ok(text_stream("cycle checked"))
         })
@@ -366,39 +451,13 @@ async fn synthetic_cycle_depth_round_and_unpriced_errors_are_typed()
     let state = Arc::new(Mutex::new(ObservedErrors::default()));
     let calls = Arc::new(AtomicUsize::new(0));
     let max_private_results = Arc::new(AtomicUsize::new(0));
-    let mut builder = ExtensionBuilder::new("gate-model-probes", "0.1.0", ServiceSet::EMPTY)?
-        .model(model_record(
-            "gate/probe",
-            Arc::new(ProbeHandler {
-                private,
-                state: Arc::clone(&state),
-            }),
-        )?)
-        .model(model_record(
-            "gate/cycle",
-            Arc::new(CycleHandler {
-                state: Arc::clone(&state),
-            }),
-        )?);
-    for index in 0..6 {
-        let next = (index < 5).then(|| format!("gate/depth-{}", index + 1));
-        builder = builder.model(model_record(
-            &format!("gate/depth-{index}"),
-            Arc::new(DepthHandler {
-                next,
-                state: Arc::clone(&state),
-            }),
-        )?);
-    }
-    builder = builder.model(model_record(
-        "gate/round-model",
-        Arc::new(RoundModel {
-            private_name,
-            calls: Arc::clone(&calls),
-            max_private_results: Arc::clone(&max_private_results),
-        }),
+    product.extensions.push(probe_extension(
+        private,
+        private_name,
+        &state,
+        Arc::clone(&calls),
+        Arc::clone(&max_private_results),
     )?);
-    product.extensions.push(builder.build()?);
     let env = Env {
         vars: BTreeMap::new(),
         cwd: workspace.path().to_path_buf(),
@@ -441,47 +500,12 @@ async fn synthetic_cycle_depth_round_and_unpriced_errors_are_typed()
             _ => {}
         }
     }
-    let mut observed = lock(&state);
-    let cycle = observed.cycle.take().unwrap();
-    let ModelError::SyntheticCycle { chain } = cycle else {
-        panic!("cycle probe did not return SyntheticCycle");
-    };
-    assert_eq!(
-        chain.iter().map(ModelId::as_str).collect::<Vec<_>>(),
-        ["gate/probe", "gate/cycle", "gate/cycle"]
-    );
-    let depth = observed.depth.take().unwrap();
-    let ModelError::SyntheticDepth { chain } = depth else {
-        panic!("depth probe did not return SyntheticDepth");
-    };
-    assert_eq!(
-        chain.iter().map(ModelId::as_str).collect::<Vec<_>>(),
-        [
-            "gate/probe",
-            "gate/depth-0",
-            "gate/depth-1",
-            "gate/depth-2",
-            "gate/depth-3",
-        ]
-    );
-    let unpriced = observed.unpriced.take().unwrap();
-    assert!(matches!(
-        unpriced,
-        ScopeError::UnpricedModel { model } if model.as_ref() == "gate/no-price"
-    ));
-    let private_failure = observed.private_rounds.take().unwrap();
-    let expected_private_rounds = ModelError::PrivateRounds.to_string();
-    assert!(matches!(
-        private_failure,
-        ProviderError::Synthetic(InferFailure::Fatal { message, fix })
-            if message.as_ref() == expected_private_rounds.as_str() && fix.is_none()
-    ));
+    assert_observed_errors(&state);
     assert_eq!(calls.load(Ordering::SeqCst), 9);
     assert_eq!(private_calls.load(Ordering::SeqCst), 8);
     assert_eq!(max_private_results.load(Ordering::SeqCst), 8);
     assert!(session_calls.is_empty());
     assert_eq!(assistant_text, "synthetic probes complete");
-    drop(observed);
     let _ = harness.host.shutdown(Duration::from_secs(1)).await;
     Ok(())
 }

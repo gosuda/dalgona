@@ -15,9 +15,8 @@ impl crate::patch::EditObserver for Engine {
         if !self.cfg.enabled {
             return Vec::new();
         }
-        let mut state = match self.state.lock() {
-            Ok(state) => state,
-            Err(_) => return Vec::new(),
+        let Ok(mut state) = self.state.lock() else {
+            return Vec::new();
         };
         let Some(session) = state.sessions.get_mut(&batch.session) else {
             return Vec::new();
@@ -25,6 +24,12 @@ impl crate::patch::EditObserver for Engine {
         let Some(turn) = session.turn.as_mut().filter(|turn| turn.id == batch.turn) else {
             return Vec::new();
         };
+        // Patch observers run before approval and again at commit; replaying
+        // the cached findings keeps the second pass from re-recording the
+        // turn ledger and bands for the same staged call.
+        if let Some(findings) = turn.inspected.get(&batch.call) {
+            return findings.clone();
+        }
         let mut out = Vec::new();
         let mut displayed = 0_usize;
         for file in &batch.files {
@@ -106,7 +111,12 @@ fn pre_line_count(before: &[u8]) -> u64 {
     if before.is_empty() {
         return 0;
     }
-    let newlines = before.iter().filter(|byte| **byte == b'\n').count() as u64;
+    #[expect(
+        clippy::naive_bytecount,
+        reason = "bytecount crate is not a dependency of this crate"
+    )]
+    let newlines =
+        u64::try_from(before.iter().filter(|&&byte| byte == b'\n').count()).unwrap_or(u64::MAX);
     if before.last() == Some(&b'\n') {
         newlines
     } else {
@@ -129,14 +139,19 @@ pub(super) fn hunk_counts(hunks: &[crate::patch::DiffHunk]) -> (u64, u64) {
     (added, deleted)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one staged file's guard pipeline: ledger, gates, metrics, and findings in order"
+)]
 fn record_file(
     ctx: &mut Ctx<'_>,
-    path: &Box<str>,
+    path: &str,
     file: &crate::patch::StagedFile<'_>,
     post: &[u8],
     hunks: &[checks::Hunk],
     parsed: Option<&crate::parse::Parsed>,
 ) {
+    let path: Box<str> = path.into();
     let (added, deleted) = hunk_counts(file.hunks);
     ctx.turn.added = ctx.turn.added.saturating_add(added);
     ctx.turn.deleted = ctx.turn.deleted.saturating_add(deleted);
@@ -167,7 +182,7 @@ fn record_file(
             ctx.out.push(EditFinding {
                 rule: "metrics".into(),
                 severity: FindingSeverity::Report,
-                text: report::large_file(path).into(),
+                text: report::large_file(&path).into(),
             });
         }
         *ctx.displayed = ctx.displayed.saturating_add(1);
@@ -201,7 +216,7 @@ fn record_file(
         })
     });
     let post_metrics = metrics::measure(language, &parsed.tree, post);
-    if !ctx.turn.first_pre.contains_key(path) {
+    if !ctx.turn.first_pre.contains_key(&path) {
         ctx.turn.first_pre.insert(
             path.clone(),
             pre_metrics
@@ -219,7 +234,7 @@ fn record_file(
     {
         items.push(finding);
     }
-    if let Some(finding) = checks::broad_handler(language, hunks, path)
+    if let Some(finding) = checks::broad_handler(language, hunks, &path)
         && ctx.cfg.broad_handler
         && !checks::bypassed(finding.rule, post_text, finding.line)
     {
@@ -229,7 +244,7 @@ fn record_file(
         items.extend(
             checks::helper(
                 language,
-                path,
+                &path,
                 pre_metrics.as_ref(),
                 parsed,
                 post,
@@ -251,21 +266,23 @@ fn record_file(
             .filter(|finding| !checks::bypassed(finding.rule, post_text, finding.line)),
     );
     let crossings = metrics::crossings(
-        path,
+        &path,
         pre_metrics.as_ref(),
         &post_metrics,
-        ctx.cfg.cognitive_band,
-        ctx.cfg.cyclomatic_band,
-        ctx.cfg.function_ploc_band,
-        ctx.cfg.nesting_band,
-        ctx.cfg.file_ploc_band,
+        &metrics::Bands {
+            cognitive: ctx.cfg.cognitive_band,
+            cyclomatic: ctx.cfg.cyclomatic_band,
+            function_ploc: ctx.cfg.function_ploc_band,
+            nesting: ctx.cfg.nesting_band,
+            file_ploc: ctx.cfg.file_ploc_band,
+        },
     );
     if *ctx.displayed < 20 {
         ctx.out.push(EditFinding {
             rule: "metrics".into(),
             severity: FindingSeverity::Report,
             text: report::receipt(
-                path,
+                &path,
                 post_metrics.ploc,
                 post_metrics.functions.len(),
                 post_metrics.cog_sum,
@@ -315,7 +332,8 @@ fn record_file(
     );
 }
 
-fn record_unmeasured(turn: &mut TurnState, path: &Box<str>, file: &crate::patch::StagedFile<'_>) {
+fn record_unmeasured(turn: &mut TurnState, path: &str, file: &crate::patch::StagedFile<'_>) {
+    let path: Box<str> = path.into();
     let (added, deleted) = hunk_counts(file.hunks);
     turn.added = turn.added.saturating_add(added);
     turn.deleted = turn.deleted.saturating_add(deleted);

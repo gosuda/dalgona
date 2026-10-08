@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use dal_core::ext::{BeforeRequest, BeforeTurn, Channel, TurnEnd};
+use dal_core::ext::{BeforeRequest, Channel, TurnEnd};
 use dal_core::{
     CallId, CompactLimits, CompactionExtRecord, ContextItem, EntryView, Family, Gen, InferFailure,
     Inference, JournalPart, ModelInfo, ModelRequest, ModelRoute, Name, PageReq, Part, Purpose,
@@ -25,8 +25,7 @@ use crate::broker::Broker;
 use crate::ext::generation::Generation;
 use crate::ext::hooks::{
     DispatchCx, ObserverReport, StreamFire, StreamFireAction, StreamVerdict, StreamWatch, TurnInfo,
-    dispatch_before_request, dispatch_before_turn, dispatch_settled, dispatch_tool_result,
-    dispatch_turn_end, join_before_turn,
+    dispatch_before_request, dispatch_settled, dispatch_tool_result, dispatch_turn_end,
 };
 use crate::ext::overlay::{Overlay, TurnTools};
 use crate::ext::prompt::{PromptSection, SectionCx};
@@ -115,10 +114,6 @@ struct TurnState {
     context_window: Option<u64>,
     /// The request round within the turn.
     round: u32,
-    /// Whether before-turn hooks ran for this turn.
-    hooked: bool,
-    /// Appended before-turn text for the system prompt.
-    extra_system: Option<String>,
     /// Streamed tool calls in response order.
     calls: Vec<StreamCall>,
     /// Classification stepped into the fold.
@@ -268,8 +263,6 @@ impl Driver {
                 image_profile: None,
                 context_window: None,
                 round: 0,
-                hooked: false,
-                extra_system: None,
                 calls: Vec::new(),
                 resolved: Vec::new(),
                 args: HashMap::new(),
@@ -567,9 +560,7 @@ impl Driver {
         let params = self
             .hook_params(turn, &generation, &info, params, mur)
             .await;
-        let system = self
-            .system(turn, &generation, &turn_tools, mode, &info)
-            .await;
+        let system = self.system(turn, &generation, &turn_tools, mode, &info);
         let (model_tools, deferred_search) =
             tool_list(&generation, &turn_tools, &info, &model_id, mode);
         self.turn(turn).deferred_search = deferred_search;
@@ -643,8 +634,8 @@ impl Driver {
         crate::ext::hooks::clamp_params(current, &info.caps)
     }
 
-    /// Renders the system prompt with before-turn hook text on first request.
-    async fn system(
+    /// Renders the system prompt for one provider request.
+    fn system(
         &mut self,
         turn: TurnId,
         generation: &Generation,
@@ -653,66 +644,10 @@ impl Driver {
         info: &ModelInfo,
     ) -> String {
         let tools = descriptions(generation, turn_tools, info);
-        let base = {
-            let deps = &self.deps;
-            system_prompt(generation, mode, &|section| {
-                render_section(deps, section, turn, &tools)
-            })
-        };
-        if self.turn(turn).hooked {
-            return match self.turn(turn).extra_system.clone() {
-                Some(extra) => format!("{base}\n\n{extra}"),
-                None => base,
-            };
-        }
-        self.turn(turn).hooked = true;
-        let event = BeforeTurn {
-            turn,
-            text: base.clone().into(),
-        };
-        let deadline = tokio::time::Instant::now() + TURN_DEADLINE;
-        let mut texts: Vec<Box<str>> = Vec::new();
-        for (index, extension) in generation.extensions.iter().enumerate() {
-            let Ok(ext) = extension.name().parse::<Name>() else {
-                continue;
-            };
-            let caller = Caller::new(
-                ext,
-                extension.origin(),
-                extension.inject(),
-                CallerKind::Hook,
-                Some(turn),
-            );
-            let dispatch = crate::ext::hooks::DispatchCx {
-                caller: &caller,
-                services: &self.deps.services,
-                session: self.deps.session,
-                parent: self.deps.parent,
-                process_env: Arc::clone(&self.deps.host.shared.env),
-                turn: Some(turn),
-                cancel: &self.deps.cancel,
-                turn_deadline: deadline,
-                script: self.hook_script(),
-            };
-            let step = dispatch_before_turn(
-                extension.name(),
-                &dispatch,
-                generation.before_turns(index),
-                &event,
-            )
-            .await;
-            texts.extend(step.texts);
-            for notice in step.notices {
-                self.notice(turn, "hook.before_turn", &notice);
-            }
-        }
-        match join_before_turn(&texts) {
-            Some(extra) => {
-                self.turn(turn).extra_system = Some(extra.clone());
-                format!("{base}\n\n{extra}")
-            }
-            None => base,
-        }
+        let deps = &self.deps;
+        system_prompt(generation, mode, &|section| {
+            render_section(deps, section, turn, &tools)
+        })
     }
 
     /// Publishes one hook notice without journaling.

@@ -1,8 +1,7 @@
-#![expect(clippy::unwrap_used, reason = "SC test")]
 #![expect(clippy::expect_used, reason = "SC test")]
 #![expect(
-    clippy::disallowed_methods,
-    reason = "SC test writes private scripted fixtures"
+    dead_code,
+    reason = "gate support exposes helpers shared across independent targets"
 )]
 
 //! Service-grant checks through the host-minted extension context.
@@ -178,11 +177,13 @@ impl Tool for ProbeTool {
     }
 }
 
+type ProbeStates = HashMap<Probe, Arc<ProbeState>>;
+
 fn build_extension(
     name: &str,
     probes: &[Probe],
     inject: ServiceSet,
-) -> Result<(Extension, HashMap<Probe, Arc<ProbeState>>), Box<dyn Error + Send + Sync>> {
+) -> Result<(Extension, ProbeStates), Box<dyn Error + Send + Sync>> {
     let mut builder = ExtensionBuilder::new(name, "0.1.0", inject)?.with_origin(Origin::User, None);
     let mut states = HashMap::new();
     for probe in probes {
@@ -297,7 +298,7 @@ fn scripted_text(text: &str) -> String {
     )
 }
 
-fn replay(responses: Vec<String>) -> String {
+fn replay(responses: &[String]) -> String {
     format!("{}\n", responses.join("\n"))
 }
 
@@ -367,7 +368,7 @@ async fn run_tool_with_approval(
                 } => {
                     requests.push(GrantRequest {
                         extension: ext.to_string(),
-                        capabilities: capabilities.iter().map(|value| value.to_string()).collect(),
+                        capabilities: capabilities.iter().map(ToString::to_string).collect(),
                     });
                     harness
                         .agent
@@ -398,7 +399,7 @@ async fn each_extension_service_requires_its_own_grant() -> Result<(), Box<dyn E
         declared_names.insert(probe, name);
         extensions.push(extension);
     }
-    let denied_replay = replay(vec![scripted_text("no inference call is expected")]);
+    let denied_replay = replay(&[scripted_text("no inference call is expected")]);
     let denied = start_session(extensions, denied_replay).await?;
     let mut failures = Vec::new();
     for probe in PROBES {
@@ -443,7 +444,7 @@ async fn each_extension_service_requires_its_own_grant() -> Result<(), Box<dyn E
         responses.push(scripted_tool_call(&name));
         responses.push(scripted_text("capability probe completed"));
     }
-    let allowed = start_session(allowed_extensions, replay(responses)).await?;
+    let allowed = start_session(allowed_extensions, replay(&responses)).await?;
     for probe in PROBES {
         let requests = run_tool_with_approval(&allowed.harness, probe).await?;
         if requests.len() != 1

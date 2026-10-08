@@ -398,6 +398,8 @@ pub(crate) fn id8(id: &str) -> String {
     id.chars().take(8).collect()
 }
 
+use std::fmt::Write as _;
+
 pub(crate) fn comma_group(mut n: u64) -> String {
     let mut groups = [0_u64; 7];
     let mut group_count = 0;
@@ -407,7 +409,6 @@ pub(crate) fn comma_group(mut n: u64) -> String {
         n /= 1_000;
     }
 
-    use std::fmt::Write as _;
     let mut result = String::with_capacity(26);
     let _ = write!(result, "{n}");
     for group in groups[..group_count].iter().rev() {
@@ -454,9 +455,10 @@ fn distance_at_most_one(left: &str, right: &str) -> Option<usize> {
     for (row, cell) in table.iter_mut().enumerate() {
         cell[0] = row;
     }
-    for column in 0..=right.len() {
-        table[0][column] = column;
-    }
+    table[0]
+        .iter_mut()
+        .enumerate()
+        .for_each(|(column, cell)| *cell = column);
     for row in 1..=left.len() {
         for column in 1..=right.len() {
             let cost = usize::from(left[row - 1] != right[column - 1]);
@@ -597,6 +599,11 @@ pub(super) fn error_triple(
 /// other parse failure is `Lex`; a second word or any tail where none is
 /// allowed is `Arity`. The idle gate runs before this check, so a gated tail
 /// during a turn is busy, never arity.
+///
+/// # Errors
+///
+/// Returns `Lex` for an unparsable tail and `Arity` when the tail's word
+/// count breaks the record's arity.
 pub fn check_arity(
     cmd: &str,
     arity: Arity,
@@ -671,6 +678,14 @@ pub trait PluginReload: Send + Sync + 'static {
 /// # Errors
 ///
 /// Returns the builder's registration error for an invalid identity.
+///
+/// Takes the reload seam by value and clones it into each of the 25 command
+/// handlers; the public constructor signature is pinned by the external
+/// consumers (dalgon product, dal-wire tests).
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "public constructor takes the seam by value and clones it per registration"
+)]
 pub fn extension(
     reload: std::sync::Arc<dyn PluginReload>,
 ) -> Result<dal_agent::ext::Extension, dal_core::RegistrationError> {
@@ -727,6 +742,11 @@ impl dal_agent::ext::CommandHandler for BuiltinHandler {
 /// and lifts handler triples into the service error path the dispatcher
 /// renders as the `error { what, why, fix }` reply. Unknown names render
 /// through the shared unknown pair; the idle gate runs before this call.
+///
+/// # Errors
+///
+/// Returns the rendered `ErrorTriple` for an unknown name or an arity
+/// failure, and each handler's own triple otherwise.
 pub async fn dispatch<'a>(
     name: &str,
     cx: dal_agent::ext::command::CommandCx<'a>,
@@ -755,21 +775,21 @@ pub async fn dispatch<'a>(
     match record.name {
         "settings" => Ok(model::settings()),
         "model" => model::model(&cx, word).await,
-        "tree" => tree::tree(&cx).await,
+        "tree" => tree::tree(&cx),
         "thinking" => model::thinking(&cx, word).await,
         "scoped-models" => model::scoped_models(&cx),
         "export" => session::export(&cx, word),
         "import" => session::import(&cx, text),
-        "share" => misc::share(),
-        "bug" => misc::bug(),
+        "share" => Ok(misc::share()),
+        "bug" => Ok(misc::bug()),
         "copy" => session::copy(&cx),
         "name" => session::name(&cx, text).await,
         "session" => Ok(session::details(&cx)),
         "changelog" => Ok(session::changelog(&cx)),
         "hotkeys" => Ok(session::hotkeys()),
-        "fork" => tree::fork(&cx).await,
-        "clone" => tree::clone(&cx).await,
-        "trust" => misc::trust(&cx),
+        "fork" => tree::fork(&cx),
+        "clone" => tree::clone(&cx),
+        "trust" => Ok(misc::trust(&cx)),
         "login" => model::login(word),
         "logout" => model::logout(word),
         "new" => Ok(session::new_session()),

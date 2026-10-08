@@ -1,3 +1,9 @@
+//! Checks the semver gate accepts minor bumps and rejects patch-only breaks.
+#![expect(
+    dead_code,
+    reason = "release support exposes gate helpers shared across release targets"
+)]
+
 #[path = "release_support/mod.rs"]
 mod support;
 

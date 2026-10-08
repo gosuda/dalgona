@@ -6,6 +6,8 @@ use std::error::Error;
 
 use dal_core::Timestamp;
 
+use super::super::monitor::{InflightCounts, inflight_counts};
+use super::super::{ControllerMode, GoalStatus, StopKind};
 use super::ops::{
     GoalCommand, GoalScope, TodoSummary, UpdateTarget, apply_goal_command, clear_recovery_doc,
     continuation_line, continuation_unknown, continuation_unsaved, create_goal, format_duration,
@@ -17,8 +19,6 @@ use super::policy::{
 };
 use super::prompt::{build_prompt, escape_objective};
 use super::sidecar::{BlockedReason, Goal, GoalSidecar, decode_sidecar, encode_sidecar};
-use super::super::monitor::{InflightCounts, inflight_counts};
-use super::super::{ControllerMode, GoalStatus, StopKind};
 
 fn ts(text: &str) -> Result<Timestamp, Box<dyn Error>> {
     Ok(text.parse::<Timestamp>()?)

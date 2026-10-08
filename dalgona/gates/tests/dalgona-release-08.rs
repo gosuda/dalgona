@@ -14,6 +14,9 @@ fn tag_version_mismatch_fails_the_dist_plan() -> support::TestResult<()> {
     )?;
     assert!(!output.status.success());
     let diagnostic = String::from_utf8_lossy(&output.stderr);
-    assert!(diagnostic.contains("version"), "unexpected dist diagnostic: {diagnostic}");
+    assert!(
+        diagnostic.contains("version"),
+        "unexpected dist diagnostic: {diagnostic}"
+    );
     Ok(())
 }

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use dal_agent::error::ServiceError;
 use dal_agent::ext::{BoxFuture, CommandCx, CommandHandler, ExtensionBuilder};
-use dal_core::{CommandName, CommandSpec, Output, Reply, RegistrationError};
+use dal_core::{CommandName, CommandSpec, Output, RegistrationError, Reply};
 
 use super::runtime::Runtime;
 
@@ -20,10 +20,7 @@ impl CommandHandler for OrchestrationCommand {
         cx: CommandCx<'a>,
     ) -> BoxFuture<'a, Result<Reply, ServiceError>> {
         Box::pin(async move {
-            let text = self
-                .runtime
-                .command(cx.session(), self.name, args)
-                .await?;
+            let text = self.runtime.command(cx.session(), self.name, args).await?;
             Ok(Reply::Done(Output::Text(text.into())))
         })
     }
@@ -56,13 +53,31 @@ pub(crate) fn register(
 ) -> Result<ExtensionBuilder, RegistrationError> {
     let config = runtime.config();
     if config.goal.enabled {
-        builder = add_command(builder, runtime, "goal", "Show or change the session goal", Some("<objective|pause|resume|clear>"))?;
+        builder = add_command(
+            builder,
+            runtime,
+            "goal",
+            "Show or change the session goal",
+            Some("<objective|pause|resume|clear>"),
+        )?;
     }
     if config.arbiter.enabled {
-        builder = add_command(builder, runtime, "continuation", "Control automatic turns", Some("<run|pause|stop>"))?;
+        builder = add_command(
+            builder,
+            runtime,
+            "continuation",
+            "Control automatic turns",
+            Some("<run|pause|stop>"),
+        )?;
     }
     if config.arbiter.enabled || config.monitor.enabled {
-        builder = add_command(builder, runtime, "abort", "Cancel orchestration work and pause automatic turns", None)?;
+        builder = add_command(
+            builder,
+            runtime,
+            "abort",
+            "Cancel orchestration work and pause automatic turns",
+            None,
+        )?;
     }
     Ok(builder)
 }

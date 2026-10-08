@@ -223,8 +223,7 @@ pub(crate) fn flush(
             lines,
             dropped,
         };
-        let fingerprint: Box<str> =
-            format!("{line_times:?}\0{}", batch.text()).into_boxed_str();
+        let fingerprint: Box<str> = format!("{line_times:?}\0{}", batch.text()).into_boxed_str();
         if monitor.last_batch_fingerprint.as_deref() == Some(&fingerprint) {
             continue;
         }

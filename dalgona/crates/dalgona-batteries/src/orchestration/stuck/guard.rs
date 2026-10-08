@@ -226,7 +226,11 @@ fn push_record(records: &mut VecDeque<ToolCallRecord>, record: ToolCallRecord) {
 /// blocked call in the same episode pauses instead and emits no warning.
 fn block_call(state: &mut GuardState, tool: &str, args: &Value) -> GuardEffects {
     let polling_job = (tool == "agents"
-        && args.as_object().and_then(|object| object.get(&"action")).and_then(|value| value.as_str()) == Some("wait"))
+        && args
+            .as_object()
+            .and_then(|object| object.get(&"action"))
+            .and_then(|value| value.as_str())
+            == Some("wait"))
         || (tool == "read" && read_path(args).is_some_and(|path| path.starts_with("job://")));
     let recovery = if polling_job {
         POLL_RECOVERY

@@ -25,13 +25,13 @@ pub(crate) async fn run(args: cli::ProviderArgs, startup: Startup) -> ExitCode {
     for provider in providers {
         let mut store = match AuthStore::load(&path) {
             Ok(store) => store,
-            Err(error) => return auth_error(error, &path),
+            Err(error) => return auth_error(&error, &path),
         };
         if store.credential(provider).is_none() {
             continue;
         }
         if let Err(error) = dal_provider::logout(provider, &mut store).await {
-            return auth_error(error, &path);
+            return auth_error(&error, &path);
         }
         removed.push(provider);
     }
@@ -89,8 +89,8 @@ fn warn_saved_model_provider(startup: &Startup, removed: &[&str]) {
     let _ = writeln!(std::io::stderr().lock(), "{message}");
 }
 
-fn auth_error(error: ProviderError, path: &Path) -> ExitCode {
-    let (what, hint) = match &error {
+fn auth_error(error: &ProviderError, path: &Path) -> ExitCode {
+    let (what, hint) = match error {
         ProviderError::AuthFileInvalid { message, .. } => (
             format!("dalgon: auth.json is not valid JSON: {message}"),
             crate::cli::texts::AUTH_INVALID_HINT.to_owned(),

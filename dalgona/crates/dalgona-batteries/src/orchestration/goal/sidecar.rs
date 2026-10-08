@@ -334,7 +334,7 @@ pub(crate) fn decode_sidecar(
             return Err(damaged(format_args!("missing member `{key}`")));
         }
     }
-    for (key, _) in object.iter() {
+    for (key, _) in object {
         if !SIDECAR_KEYS.contains(&key) {
             return Err(damaged(format_args!("unknown member `{key}`")));
         }

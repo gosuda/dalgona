@@ -81,7 +81,18 @@ fn publish_with_id(dir: &Path, id: BlobId, bytes: &[u8]) -> Result<(), BlobError
         sync_dir(dir)?;
         return Ok(());
     }
-    copy_publish(&mut &bytes[..], dir, &dest)
+    copy_publish(&mut &bytes[..], dir, &dest).map_err(|error| gone_if_session_lost(dir, error))
+}
+
+/// A publish that fails `NotFound` under an absent session directory means the session is gone.
+fn gone_if_session_lost(dir: &Path, error: BlobError) -> BlobError {
+    let session_absent = dir.parent().is_some_and(|session| !session.exists());
+    match error {
+        BlobError::Io { source } if session_absent && source.kind() == io::ErrorKind::NotFound => {
+            BlobError::Gone
+        }
+        other => other,
+    }
 }
 
 fn check_blob_size(length: usize) -> Result<(), BlobError> {
@@ -167,7 +178,11 @@ fn sync_dir(dir: &Path) -> Result<(), BlobError> {
 pub(crate) fn read(session_dir: &Path, id: &BlobId) -> Result<Vec<u8>, BlobError> {
     let path = session_dir.join("blobs").join(id.to_string());
     match fs::read(&path) {
-        Ok(bytes) => Ok(bytes),
+        Ok(bytes) if BlobId::from_bytes(&bytes) == *id => Ok(bytes),
+        Ok(_) => Err(io_blob(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("blob {id} does not match its digest; the file is damaged"),
+        ))),
         Err(source) if source.kind() == io::ErrorKind::NotFound => {
             match fs::metadata(session_dir) {
                 Ok(_) => Err(BlobError::NotFound { id: *id }),

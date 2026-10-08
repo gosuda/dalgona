@@ -50,9 +50,6 @@ static COMMENT_RUST: LazyLock<Result<Regex, regex::Error>> = LazyLock::new(|| {
 pub(super) struct Rejection(pub(super) String);
 
 pub(super) fn placeholder(added: &str) -> Option<Rejection> {
-    if added.is_empty() {
-        return None;
-    }
     const PHRASES: [&str; 6] = [
         "rest of methods",
         "implementation omitted",
@@ -61,6 +58,9 @@ pub(super) fn placeholder(added: &str) -> Option<Rejection> {
         "-- ... rest of implementation",
         "(* ... rest of implementation *)",
     ];
+    if added.is_empty() {
+        return None;
+    }
     let mut matched = false;
     let mut remaining = added.to_owned();
     for phrase in PHRASES {
@@ -116,11 +116,16 @@ fn standalone_ellipsis(line: &str) -> bool {
     })
 }
 
+/// The parse gate verdict for one staged file.
 #[derive(Debug, Clone)]
 pub(super) enum GateOutcome<'a> {
+    /// The post-image parses; run the checks with its tree.
     Pass(Option<&'a Parsed>),
+    /// The pre-image already failed to parse; record nothing and keep edits.
     Exempt(Option<&'a Parsed>),
+    /// The post-image does not parse; reject the edit with the given reason.
     Reject(Rejection),
+    /// The file type is not guarded; take no action.
     Skipped,
 }
 
@@ -159,7 +164,7 @@ pub(super) fn parse_gate<'a>(
     let Some(post_parsed) = post_parsed.filter(|parsed| parsed.lang == language) else {
         return GateOutcome::Skipped;
     };
-    let pre_error = if pre == None {
+    let pre_error = if pre.is_none() {
         false
     } else {
         let Some(pre_parsed) = pre_parsed.filter(|parsed| parsed.lang == language) else {
@@ -211,17 +216,25 @@ fn first_syntax_error(tree: &Tree) -> Option<Node<'_>> {
     None
 }
 
+/// The guard rule a finding came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Rule {
+    /// Function grew past the nesting/wrap band.
     GuardWrap,
+    /// One handler catches every error type.
     BroadHandler,
+    /// A function only forwards to another function.
     Helper,
+    /// A previously clean file gained a warning in this edit.
     NewWarning,
+    /// A comment carries a whole block of commented-out code.
     CommentedOutCode,
+    /// A calibrated stream rule fired; payload names the rule.
     Stream(G8Rule),
 }
 
 impl Rule {
+    /// The rule name used in reports and the findings document.
     #[must_use]
     pub fn name(self) -> &'static str {
         match self {
@@ -235,32 +248,50 @@ impl Rule {
     }
 }
 
+/// One guard finding on a staged file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Finding {
+    /// The rule that fired.
     pub rule: Rule,
+    /// First affected line, one-based.
     pub line: u32,
+    /// Last affected line, one-based; equals `line` for single-line findings.
     pub line_end: u32,
+    /// Whether the finding spans the whole lines it names.
     pub whole_line: bool,
+    /// The user-facing finding text.
     pub text: Box<str>,
 }
 
+/// The guard verdict for one file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
+    /// The file passed every check.
     Clean,
+    /// The file produced findings.
     Findings,
+    /// The file type is not guarded.
     Skipped,
 }
 
+/// Findings and metrics for one file in one turn.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FileFindings {
+    /// Path relative to the workspace root.
     pub path: Box<str>,
+    /// The overall verdict for the file.
     pub verdict: Verdict,
+    /// Individual findings, in source order.
     pub items: Vec<Finding>,
+    /// File-level metrics, when the file could be parsed.
     pub metrics: Option<metrics::FileMetrics>,
 }
 
+/// One diff hunk split into removed lines and added lines with numbers.
 pub(super) struct Hunk {
+    /// Lines the edit removes, verbatim.
     pub removed: Vec<Box<str>>,
+    /// Lines the edit adds, with their one-based post-image numbers.
     pub added: Vec<(u32, Box<str>)>,
 }
 

@@ -1,3 +1,9 @@
+//! Release-guard checks for the publish script's dependency gate.
+#![expect(
+    dead_code,
+    reason = "release support exposes gate helpers shared across release targets"
+)]
+
 #[path = "release_support/mod.rs"]
 mod support;
 
@@ -99,6 +105,10 @@ fn release_publish_failure_wraps_cargo_error() -> Result<(), Box<dyn Error>> {
         "[package]\nname = \"tiny\"\nversion.workspace = true\nedition.workspace = true\n",
     )?;
     fs::write(workspace.path().join("tiny/src/lib.rs"), "")?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the guard test needs the ambient PATH to locate the real cargo"
+    )]
     let real_path = std::env::var_os("PATH").ok_or_else(|| io::Error::other("PATH is not set"))?;
     let real_cargo = executable_in_path(&real_path, "cargo")
         .ok_or_else(|| io::Error::other("cargo is not on PATH"))?;
@@ -112,6 +122,10 @@ fn release_publish_failure_wraps_cargo_error() -> Result<(), Box<dyn Error>> {
         std::iter::once(scratch.path().to_path_buf()).chain(std::env::split_paths(&real_path)),
     )?;
     let script = support::repo_root().join("scripts/publish-crates.sh");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the guard test runs the repo's own publish script through bash"
+    )]
     let output = Command::new("bash")
         .arg(script)
         .arg(".")

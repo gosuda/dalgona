@@ -339,7 +339,10 @@ fn uri_scheme(path: &str) -> Option<&str> {
 /// Splits a `<path>:<a>-<b>[,<c>[-<d>]]` selector off `path`. A suffix after
 /// the last colon is a selector attempt only when it starts with a digit;
 /// the returned intervals are sorted and merged.
-fn parse_selector(path: &str) -> Result<(PathBuf, Option<Vec<(u64, u64)>>), ReadError> {
+/// A path plus optional selected line ranges, sorted and merged.
+type PathSelection = (PathBuf, Option<Vec<(u64, u64)>>);
+
+fn parse_selector(path: &str) -> Result<PathSelection, ReadError> {
     let Some((base, suffix)) = path.rsplit_once(':') else {
         return Ok((PathBuf::from(path), None));
     };
@@ -603,7 +606,13 @@ fn count_lines(file: &mut File) -> io::Result<u64> {
             Err(error) => return Err(error),
         };
         let chunk = &buffer[..read];
-        total += chunk.iter().filter(|&&byte| byte == b'\n').count() as u64;
+        #[expect(
+            clippy::naive_bytecount,
+            reason = "bytecount crate is not a dependency of this crate"
+        )]
+        let newlines =
+            u64::try_from(chunk.iter().filter(|&&byte| byte == b'\n').count()).unwrap_or(u64::MAX);
+        total += newlines;
         last = chunk.last().copied();
     }
     if last.is_some_and(|byte| byte != b'\n') {
@@ -614,7 +623,7 @@ fn count_lines(file: &mut File) -> io::Result<u64> {
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::Cell, fs, future::Ready, path::Path};
+    use std::{cell::Cell, fmt::Write as _, fs, future::Ready, path::Path};
 
     use dal_agent::{ToolError, error::SchemeError};
     use dal_core::{Part, SessionId};
@@ -626,6 +635,10 @@ mod tests {
     };
     use crate::{Seen, tag8};
 
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "matches the `resolve` callback contract of `execute`"
+    )]
     fn no_pages(uri: String) -> Ready<Result<String, ToolError>> {
         std::future::ready(Err(ToolError::Scheme(SchemeError::Failed {
             message: format!("unexpected page request {uri}").into(),
@@ -664,7 +677,11 @@ mod tests {
     #[tokio::test]
     async fn read_window_tiling() {
         let dir = tempfile::tempdir().unwrap();
-        let body: String = (1..=3500).map(|n| format!("line {n}\n")).collect();
+        let mut body = String::new();
+        for n in 1..=3500 {
+            let _ = write!(body, "line {n}");
+            body.push('\n');
+        }
         fs::write(dir.path().join("big.txt"), &body).unwrap();
         let mut offset = 1_u64;
         let mut numbers = Vec::new();
@@ -718,7 +735,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bytes = b"alpha\r\nbeta\r\ngamma";
         fs::write(dir.path().join("crlf.txt"), bytes).unwrap();
-        let newlines = bytes.iter().filter(|&&b| b == b'\n').count() as u64;
+        #[expect(
+            clippy::naive_bytecount,
+            reason = "bytecount crate is not a dependency of this crate"
+        )]
+        let newlines =
+            u64::try_from(bytes.iter().filter(|&&b| b == b'\n').count()).unwrap_or(u64::MAX);
         let expected_total = newlines + 1;
         let first = read(dir.path(), r#"{"path":"crlf.txt","limit":1}"#)
             .await
@@ -1026,7 +1048,11 @@ mod tests {
     #[tokio::test]
     async fn read_line_selector() {
         let dir = tempfile::tempdir().unwrap();
-        let body: String = (1..=12).map(|n| format!("l{n}\n")).collect();
+        let mut body = String::new();
+        for n in 1..=12 {
+            let _ = write!(body, "l{n}");
+            body.push('\n');
+        }
         fs::write(dir.path().join("a.rs"), &body).unwrap();
 
         let partial = read(dir.path(), &args("a.rs:4-6,10")).await.unwrap();
@@ -1045,7 +1071,11 @@ mod tests {
         );
 
         let whole = read(dir.path(), &args("a.rs:7-12,1-6")).await.unwrap();
-        let expected: String = (1..=12).map(|n| format!("{n}\tl{n}\n")).collect();
+        let mut expected = String::new();
+        for n in 1..=12 {
+            let _ = write!(expected, "{n}\tl{n}");
+            expected.push('\n');
+        }
         assert_eq!(
             text(&whole),
             format!("{expected}{}", whole_tag("a.rs", body.as_bytes()))

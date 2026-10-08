@@ -8,9 +8,7 @@ use std::{
 pub(crate) type Run = Result<(i32, String, String), Box<dyn Error>>;
 
 pub(crate) fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .to_path_buf()
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
 fn captured(command: &mut Command, input: Option<&str>) -> Run {
@@ -42,6 +40,10 @@ fn captured(command: &mut Command, input: Option<&str>) -> Run {
 
 pub(crate) fn run_publish_script(root: &Path, args: &[&str]) -> Run {
     let script = repo_root().join("scripts/publish-crates.sh");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "release gates spawn the repo's own publish script"
+    )]
     let mut command = Command::new("bash");
     command.arg(script).args(args).current_dir(root);
     captured(&mut command, None)
@@ -49,6 +51,10 @@ pub(crate) fn run_publish_script(root: &Path, args: &[&str]) -> Run {
 
 pub(crate) fn run_gate_dep(name: &str, req: &str, stdin_json: &str) -> Run {
     let script = repo_root().join("scripts/publish-crates.sh");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "release gates spawn the repo's own publish script"
+    )]
     let mut command = Command::new("bash");
     command
         .arg(script)
@@ -59,6 +65,10 @@ pub(crate) fn run_gate_dep(name: &str, req: &str, stdin_json: &str) -> Run {
 
 pub(crate) fn run_semver_gate(current: &Path, baseline: &Path) -> Run {
     let script = repo_root().join("scripts/semver-gate.sh");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "release gates spawn the repo's own semver gate script"
+    )]
     let mut command = Command::new("bash");
     command
         .arg(script)

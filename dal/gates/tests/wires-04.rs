@@ -1,8 +1,11 @@
-#![expect(clippy::unwrap_used, reason = "SC test")]
-#![expect(clippy::expect_used, reason = "SC test")]
+//! WebSocket serve enforces auth, origin, keepalive, and disconnect limits.
 #![expect(
     clippy::disallowed_methods,
     reason = "SC test exercises real websocket server"
+)]
+#![expect(
+    dead_code,
+    reason = "gate support exposes helpers shared across independent targets"
 )]
 
 mod support;
@@ -17,7 +20,9 @@ use std::{
 use futures::{SinkExt, StreamExt};
 use sonic_rs::JsonValueTrait;
 use support::{TestDir, dalgon_binary};
+use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::protocol::Message;
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 
@@ -58,16 +63,12 @@ async fn advertisement_websocket(
     loop {
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for entry in entries.flatten() {
-                if entry.path().extension().is_some_and(|ext| ext == "json") {
-                    if let Ok(bytes) = std::fs::read(entry.path()) {
-                        if let Ok(value) = sonic_rs::from_slice::<sonic_rs::Value>(&bytes) {
-                            if let Some(url) =
-                                value.get("websocket").and_then(sonic_rs::Value::as_str)
-                            {
-                                return Ok(url.to_owned());
-                            }
-                        }
-                    }
+                if entry.path().extension().is_some_and(|ext| ext == "json")
+                    && let Ok(bytes) = std::fs::read(entry.path())
+                    && let Ok(value) = sonic_rs::from_slice::<sonic_rs::Value>(&bytes)
+                    && let Some(url) = value.get("websocket").and_then(sonic_rs::Value::as_str)
+                {
+                    return Ok(url.to_owned());
                 }
             }
         }
@@ -76,6 +77,145 @@ async fn advertisement_websocket(
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+fn bearer_request(
+    url: &str,
+    token: &str,
+) -> Result<tokio_tungstenite::tungstenite::http::Request<()>, Box<dyn Error + Send + Sync>> {
+    let mut request = websocket_request(url)?;
+    request.headers_mut().insert(
+        "authorization",
+        format!("Bearer {token}")
+            .parse()
+            .map_err(|error| format!("bad bearer header: {error}"))?,
+    );
+    Ok(request)
+}
+
+async fn connect_authorized(
+    url: &str,
+    token: &str,
+    dir_path: &std::path::Path,
+) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>, Box<dyn Error + Send + Sync>> {
+    let bearer = bearer_request(url, token)?;
+    let (mut socket, _) = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio_tungstenite::connect_async(bearer),
+    )
+    .await
+    .map_err(|error| serve_failure(dir_path, "authenticated-connect", &error))?
+    .map_err(|error| serve_failure(dir_path, "authenticated-connect", &error))?;
+    for id in [1u64, 2] {
+        socket
+            .send(Message::Text(
+                format!(
+                    "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"initialize\",\"params\":{{}}}}"
+                )
+                .into(),
+            ))
+            .await
+            .map_err(|error| serve_failure(dir_path, "initialize-send", &error))?;
+    }
+    for expected in [1u64, 2] {
+        let frame = tokio::time::timeout(Duration::from_secs(5), socket.next())
+            .await
+            .map_err(|error| serve_failure(dir_path, "first-replies-read", &error))?
+            .ok_or_else(|| std::io::Error::other("websocket closed before initialize replies"))?
+            .map_err(|error| serve_failure(dir_path, "first-replies-read", &error))?;
+        let text = frame.into_text()?;
+        let value: sonic_rs::Value = sonic_rs::from_str(&text)?;
+        assert_eq!(
+            value.get("id").and_then(sonic_rs::Value::as_u64),
+            Some(expected)
+        );
+    }
+    Ok(socket)
+}
+
+async fn assert_token_and_origin_denied(url: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let bad = bearer_request(url, "dal_dead")?;
+    let bad_result = tokio_tungstenite::connect_async(bad).await;
+    assert!(
+        bad_result.is_err(),
+        "bad token must be denied: {bad_result:?}"
+    );
+
+    let mut evil = websocket_request(url)?;
+    evil.headers_mut().insert(
+        "origin",
+        "https://evil.example"
+            .parse()
+            .map_err(|error| format!("bad origin header: {error}"))?,
+    );
+    let evil_result = tokio_tungstenite::connect_async(evil).await;
+    assert!(
+        evil_result.is_err(),
+        "disallowed origin must be 403: {evil_result:?}"
+    );
+    Ok(())
+}
+
+async fn assert_oversized_frame_closes(
+    url: &str,
+    token: &str,
+    dir_path: &std::path::Path,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let over = bearer_request(url, token)?;
+    let (mut over_socket, _) = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio_tungstenite::connect_async(over),
+    )
+    .await
+    .map_err(|error| serve_failure(dir_path, "oversized-connect", &error))?
+    .map_err(|error| serve_failure(dir_path, "oversized-connect", &error))?;
+    let _ = over_socket
+        .send(Message::Binary(vec![0u8; 16 * 1024 * 1024 + 1].into()))
+        .await;
+    match tokio::time::timeout(Duration::from_secs(5), over_socket.next())
+        .await
+        .map_err(|error| serve_failure(dir_path, "close-read", &error))?
+    {
+        None | Some(Err(_)) => {}
+        Some(Ok(frame)) => {
+            return Err(
+                format!("oversized frame must end without a close frame, got {frame:?}").into(),
+            );
+        }
+    }
+    drop(over_socket);
+    Ok(())
+}
+
+async fn assert_reattach_after_disconnect(
+    url: &str,
+    token: &str,
+    dir_path: &std::path::Path,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let bearer2 = bearer_request(url, token)?;
+    let (mut socket2, _) = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio_tungstenite::connect_async(bearer2),
+    )
+    .await
+    .map_err(|error| serve_failure(dir_path, "close-read", &error))?
+    .map_err(|error| serve_failure(dir_path, "close-read", &error))?;
+    socket2
+        .send(Message::Text(
+            "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"initialize\",\"params\":{}}".into(),
+        ))
+        .await
+        .map_err(|error| serve_failure(dir_path, "close-read", &error))?;
+    let frame = tokio::time::timeout(Duration::from_secs(5), socket2.next())
+        .await
+        .map_err(|error| serve_failure(dir_path, "reattach-connect", &error))?
+        .ok_or_else(|| std::io::Error::other("websocket closed before the id-3 reply"))?
+        .map_err(|error| serve_failure(dir_path, "reattach-connect", &error))?;
+    assert!(
+        frame.into_text()?.contains("\"id\":3"),
+        "disconnect must cancel nothing"
+    );
+    Ok(())
 }
 
 #[tokio::test]
@@ -121,73 +261,8 @@ async fn websocket_auth_origin_frame_keepalive_and_disconnect_contract()
     let _guard = ChildGuard(Some(child));
 
     let url = advertisement_websocket(&data_root).await?;
-
-    let mut bearer = websocket_request(&url)?;
-    bearer.headers_mut().insert(
-        "authorization",
-        format!("Bearer {token}")
-            .parse()
-            .map_err(|error| format!("bad bearer header: {error}"))?,
-    );
     let dir_path = dir.path().to_owned();
-    let (mut socket, _) = tokio::time::timeout(
-        Duration::from_secs(10),
-        tokio_tungstenite::connect_async(bearer),
-    )
-    .await
-    .map_err(|error| serve_failure(&dir_path, "authenticated-connect", &error))?
-    .map_err(|error| serve_failure(&dir_path, "authenticated-connect", &error))?;
-    socket
-        .send(Message::Text(
-            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}".into(),
-        ))
-        .await
-        .map_err(|error| serve_failure(&dir_path, "initialize-1-send", &error))?;
-    socket
-        .send(Message::Text(
-            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"initialize\",\"params\":{}}".into(),
-        ))
-        .await
-        .map_err(|error| serve_failure(&dir_path, "initialize-2-send", &error))?;
-    for expected in [1u64, 2] {
-        let frame = tokio::time::timeout(Duration::from_secs(5), socket.next())
-            .await
-            .map_err(|error| serve_failure(&dir_path, "first-replies-read", &error))?
-            .expect("frame")
-            .map_err(|error| serve_failure(&dir_path, "first-replies-read", &error))?;
-        let text = frame.into_text()?;
-        let value: sonic_rs::Value = sonic_rs::from_str(&text)?;
-        assert_eq!(
-            value.get("id").and_then(sonic_rs::Value::as_u64),
-            Some(expected)
-        );
-    }
-
-    let mut bad = websocket_request(&url)?;
-    bad.headers_mut().insert(
-        "authorization",
-        "Bearer dal_dead"
-            .parse()
-            .map_err(|error| format!("bad bearer header: {error}"))?,
-    );
-    let bad_result = tokio_tungstenite::connect_async(bad).await;
-    assert!(
-        bad_result.is_err(),
-        "bad token must be denied: {bad_result:?}"
-    );
-
-    let mut evil = websocket_request(&url)?;
-    evil.headers_mut().insert(
-        "origin",
-        "https://evil.example"
-            .parse()
-            .map_err(|error| format!("bad origin header: {error}"))?,
-    );
-    let evil_result = tokio_tungstenite::connect_async(evil).await;
-    assert!(
-        evil_result.is_err(),
-        "disallowed origin must be 403: {evil_result:?}"
-    );
+    let mut socket = connect_authorized(&url, &token, &dir_path).await?;
 
     socket
         .send(Message::Ping(vec![1, 2, 3].into()))
@@ -218,65 +293,9 @@ async fn websocket_auth_origin_frame_keepalive_and_disconnect_contract()
     }
     drop(socket);
 
-    let mut over = websocket_request(&url)?;
-    over.headers_mut().insert(
-        "authorization",
-        format!("Bearer {token}")
-            .parse()
-            .map_err(|error| format!("bad bearer header: {error}"))?,
-    );
-    let (mut over_socket, _) = tokio::time::timeout(
-        Duration::from_secs(10),
-        tokio_tungstenite::connect_async(over),
-    )
-    .await
-    .map_err(|error| serve_failure(&dir_path, "oversized-connect", &error))?
-    .map_err(|error| serve_failure(&dir_path, "oversized-connect", &error))?;
-    let _ = over_socket
-        .send(Message::Binary(vec![0u8; 16 * 1024 * 1024 + 1].into()))
-        .await;
-    match tokio::time::timeout(Duration::from_secs(5), over_socket.next())
-        .await
-        .map_err(|error| serve_failure(&dir_path, "close-read", &error))?
-    {
-        None | Some(Err(_)) => {}
-        Some(Ok(frame)) => {
-            return Err(
-                format!("oversized frame must end without a close frame, got {frame:?}").into(),
-            );
-        }
-    }
-    drop(over_socket);
-
-    let mut bearer2 = websocket_request(&url)?;
-    bearer2.headers_mut().insert(
-        "authorization",
-        format!("Bearer {token}")
-            .parse()
-            .map_err(|error| format!("bad bearer header: {error}"))?,
-    );
-    let (mut socket2, _) = tokio::time::timeout(
-        Duration::from_secs(10),
-        tokio_tungstenite::connect_async(bearer2),
-    )
-    .await
-    .map_err(|error| serve_failure(&dir_path, "close-read", &error))?
-    .map_err(|error| serve_failure(&dir_path, "close-read", &error))?;
-    socket2
-        .send(Message::Text(
-            "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"initialize\",\"params\":{}}".into(),
-        ))
-        .await
-        .map_err(|error| serve_failure(&dir_path, "close-read", &error))?;
-    let frame = tokio::time::timeout(Duration::from_secs(5), socket2.next())
-        .await
-        .map_err(|error| serve_failure(&dir_path, "reattach-connect", &error))?
-        .expect("frame")
-        .map_err(|error| serve_failure(&dir_path, "reattach-connect", &error))?;
-    assert!(
-        frame.into_text()?.contains("\"id\":3"),
-        "disconnect must cancel nothing"
-    );
+    assert_token_and_origin_denied(&url).await?;
+    assert_oversized_frame_closes(&url, &token, &dir_path).await?;
+    assert_reattach_after_disconnect(&url, &token, &dir_path).await?;
     Ok(())
 }
 

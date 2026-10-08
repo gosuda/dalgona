@@ -221,10 +221,8 @@ fn invalid_question(reason: impl Into<Box<str>>) -> JudgeError {
 mod tests {
     use super::{JudgeError, JudgeQuestion};
 
-    type TestResult = Result<(), Box<dyn std::error::Error>>;
-
     #[test]
-    fn prompt_byte_limit_accepts_boundary_and_rejects_next_byte() -> TestResult {
+    fn prompt_byte_limit_accepts_boundary_and_rejects_next_byte() {
         let accepted = "a".repeat(4096);
         assert!(JudgeQuestion::bool(&accepted).is_ok());
         let rejected = "a".repeat(4097);
@@ -233,11 +231,10 @@ mod tests {
             Err(JudgeError::InvalidQuestion { reason })
                 if reason.as_ref() == "prompt is 4097 bytes (max 4096)"
         ));
-        Ok(())
     }
 
     #[test]
-    fn prompt_limit_counts_utf8_bytes() -> TestResult {
+    fn prompt_limit_counts_utf8_bytes() {
         let accepted = "é".repeat(2048);
         assert!(JudgeQuestion::bool(&accepted).is_ok());
         let rejected = "é".repeat(2049);
@@ -246,7 +243,6 @@ mod tests {
             Err(JudgeError::InvalidQuestion { reason })
                 if reason.as_ref() == "prompt is 4098 bytes (max 4096)"
         ));
-        Ok(())
     }
 
     #[test]
@@ -264,7 +260,7 @@ mod tests {
     }
 
     #[test]
-    fn choice_question_checks_option_count_and_byte_boundary() -> TestResult {
+    fn choice_question_checks_option_count_and_byte_boundary() {
         let two = ["keep", "revert"];
         assert!(JudgeQuestion::choice("choose", &two).is_ok());
         assert!(matches!(
@@ -286,7 +282,6 @@ mod tests {
             Err(JudgeError::InvalidQuestion { reason })
                 if reason.as_ref() == "option 1 is 201 bytes (max 200)"
         ));
-        Ok(())
     }
 
     #[test]
@@ -304,13 +299,12 @@ mod tests {
     }
 
     #[test]
-    fn score_question_requires_nonzero_inclusive_maximum() -> TestResult {
+    fn score_question_requires_nonzero_inclusive_maximum() {
         assert!(JudgeQuestion::score("rate", u8::MAX).is_ok());
         assert!(matches!(
             JudgeQuestion::score("rate", 0),
             Err(JudgeError::InvalidQuestion { reason })
                 if reason.as_ref() == "score max must be 1 to 255"
         ));
-        Ok(())
     }
 }

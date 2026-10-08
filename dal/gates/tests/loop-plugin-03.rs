@@ -1,4 +1,8 @@
 //! A failed plugin reload leaves the validated generation callable.
+#![expect(
+    dead_code,
+    reason = "gate support exposes helpers shared across independent targets"
+)]
 
 mod support;
 

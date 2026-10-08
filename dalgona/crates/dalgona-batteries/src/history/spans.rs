@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
 use std::{num::NonZeroU64, ops::Range};
 
 use dal_core::EntryId;

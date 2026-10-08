@@ -1016,3 +1016,36 @@ fn tool_call_without_result_at_end_is_refused() {
     ]);
     assert!(message.contains("tool call toolu_b has no result before the end of the context"));
 }
+
+#[test]
+fn a_repeated_message_stop_yields_one_stop_and_nothing_after() {
+    let doubled =
+        format!("{BASIC_TEXT_STREAM}event: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n");
+    let results = decode(&doubled, false);
+    let stops = results
+        .iter()
+        .filter(|result| matches!(result, Ok(StreamEvent::Stop { .. })))
+        .count();
+    assert_eq!(stops, 1);
+    assert!(matches!(results.last(), Some(Ok(StreamEvent::Stop { .. }))));
+}
+
+#[test]
+fn malformed_json_mid_stream_ends_in_one_protocol_error() {
+    let (head, _) = BASIC_TEXT_STREAM
+        .split_once("event: content_block_stop")
+        .unwrap();
+    let wire = format!(
+        "{head}event: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":\n\n{BASIC_TEXT_STREAM}"
+    );
+    let results = decode(&wire, false);
+    let errors = results.iter().filter(|result| result.is_err()).count();
+    assert_eq!(errors, 1);
+    assert!(matches!(
+        results.last(),
+        Some(Err(ProviderError::Protocol {
+            family: Family::Anthropic,
+            ..
+        }))
+    ));
+}

@@ -69,6 +69,17 @@ pub enum ColorMode {
     Never,
 }
 
+/// Terminal-multiplexer presence captured at the process edge.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MultiplexerFacts {
+    /// Whether `TMUX` was present at the process edge.
+    pub tmux: bool,
+    /// Whether `STY` was present at the process edge.
+    pub sty: bool,
+    /// Whether `ZELLIJ` was present at the process edge.
+    pub zellij: bool,
+}
+
 /// Environment facts captured once by the process edge.
 #[derive(Debug, Clone, Default)]
 pub struct EnvFacts {
@@ -88,12 +99,8 @@ pub struct EnvFacts {
     pub wt_session: Option<String>,
     /// The Windows Terminal version, when known.
     pub wt_version: Option<String>,
-    /// Whether `TMUX` was present at the process edge.
-    pub tmux: bool,
-    /// Whether `STY` was present at the process edge.
-    pub sty: bool,
-    /// Whether `ZELLIJ` was present at the process edge.
-    pub zellij: bool,
+    /// Multiplexer presence captured at the process edge.
+    pub multiplexer: MultiplexerFacts,
     /// Locale-derived Unicode width mode.
     pub width_mode: WidthMode,
     /// Whether reduced motion was requested at the process edge.
@@ -192,7 +199,6 @@ pub fn run(host: Host, opts: TuiOptions, io: impl term::TermIo) -> Result<TuiExi
 ///
 /// # Errors
 /// Returns [`TuiError`] when the host, model source, session, or terminal operation fails.
-#[must_use]
 pub fn run_backend<H, M>(
     host: H,
     opts: TuiOptions,
@@ -216,7 +222,6 @@ where
 /// Returns [`TuiError`] when the host, model source, session, or terminal operation fails.
 /// A settings-writer error is shown in the TUI and leaves the session-local
 /// setting active.
-#[must_use]
 pub fn run_backend_with_settings_save<H, M, S>(
     host: H,
     opts: TuiOptions,

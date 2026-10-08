@@ -266,8 +266,6 @@ impl Data {
 /// The validated `postings.bin` buffer.
 pub(super) struct Postings {
     pub(super) bytes: Arc<[u8]>,
-    /// Posting count; any valid file id stays below it.
-    pub(super) postings: usize,
     pub(super) grams: usize,
     pub(super) table_at: usize,
 }
@@ -279,7 +277,6 @@ impl Postings {
         bytes.extend_from_slice(&0_u64.to_le_bytes());
         Self {
             bytes: bytes.into(),
-            postings: 0,
             grams: 0,
             table_at: HEADER_LEN,
         }
@@ -300,7 +297,6 @@ impl Postings {
         }
         let postings = Self {
             bytes,
-            postings: count,
             grams,
             table_at,
         };
@@ -316,22 +312,32 @@ impl Postings {
         }
         (running == count).then_some(postings)
     }
+}
 
+/// The three states a gram's posting list can hold once checked.
+pub(super) enum GramList {
+    /// The gram is unused or its list fails the corruption check.
+    Absent,
+    /// A valid posting list: `(start, len)` into the postings section.
+    List(usize, usize),
+}
+
+impl Postings {
     /// The ids of one used posting list, checked to ascend strictly and name a
     /// file of the path table; `None` marks the section corrupt.
-    pub(super) fn checked_list(&self, gram: u32, files: usize) -> Option<Option<(usize, usize)>> {
+    pub(super) fn checked_list(&self, gram: u32, files: usize) -> Option<GramList> {
         let Some((start, len)) = self.list(gram) else {
-            return Some(None);
+            return Some(GramList::Absent);
         };
         let mut previous = None;
         for at in start..start + len {
             let (file, _, _) = self.record(at)?;
             if (file as usize) >= files || previous.is_some_and(|p| p >= file) {
-                return Some(None);
+                return Some(GramList::Absent);
             }
             previous = Some(file);
         }
-        Some(Some((start, len)))
+        Some(GramList::List(start, len))
     }
 
     pub(super) fn entry(&self, at: usize) -> Option<(u32, usize, usize)> {

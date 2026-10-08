@@ -1,5 +1,6 @@
 //! Atomic commit: locks, temps, ordered operations, and truthful outcomes.
 
+use std::fmt::Write as _;
 use std::{path::PathBuf, sync::Arc};
 
 use super::super::ir::{
@@ -17,6 +18,10 @@ fn lock_table()
     TABLE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "per-plan apply loop with per-edit rollback; a split would pass the session through every arm"
+)]
 pub(crate) async fn apply_files(
     session: &PatchSession,
     plan: &Plan,
@@ -351,12 +356,12 @@ pub(crate) async fn apply_files(
     }
     let mut text = String::from("Success. Updated the following files:");
     for change in &changes {
-        text.push_str(&format!("\nM {}", change.path));
+        let _ = write!(text, "\nM {}", change.path);
     }
     // Append observer report findings after patch notes.
     for finding in &plan.findings {
         if finding.severity == FindingSeverity::Report {
-            text.push_str(&format!("\n{}", finding.text));
+            let _ = write!(text, "\n{}", finding.text);
         }
     }
     Ok(Output {
@@ -382,8 +387,10 @@ fn count_lines(before: Option<&[u8]>, after: Option<&[u8]>) -> (u64, u64) {
             if bytes.is_empty() {
                 0
             } else {
-                bytes.iter().filter(|byte| **byte == b'\n').count() as u64
-                    + u64::from(!bytes.ends_with(b"\n"))
+                let newlines = bytes
+                    .iter()
+                    .fold(0, |total, &byte| total + u64::from(byte == b'\n'));
+                newlines + u64::from(!bytes.ends_with(b"\n"))
             }
         })
     };

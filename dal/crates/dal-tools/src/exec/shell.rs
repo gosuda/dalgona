@@ -29,19 +29,21 @@ pub(crate) fn resolve(
         } else {
             cwd.join(path)
         };
-        return if is_executable_file(&resolved) {
-            Ok(ResolvedShell { program: resolved })
-        } else {
-            Err(ExecError::ShellMissing {
-                path: value.to_owned(),
-            })
-        };
+        if is_executable_file(&resolved) {
+            return Ok(ResolvedShell { program: resolved });
+        }
+        return Err(ExecError::ShellMissing {
+            path: value.to_owned(),
+        });
     }
+    #[cfg(unix)]
+    return Ok(default_ladder(environment));
+    #[cfg(windows)]
     default_ladder(environment)
 }
 
 #[cfg(unix)]
-fn default_ladder(_environment: &BTreeMap<OsString, OsString>) -> Result<ResolvedShell, ExecError> {
+fn default_ladder(_environment: &BTreeMap<OsString, OsString>) -> ResolvedShell {
     const CANDIDATES: [&str; 4] = [
         "/bin/bash",
         "/usr/bin/bash",
@@ -51,14 +53,14 @@ fn default_ladder(_environment: &BTreeMap<OsString, OsString>) -> Result<Resolve
     for candidate in CANDIDATES {
         let path = Path::new(candidate);
         if is_executable_file(path) {
-            return Ok(ResolvedShell {
+            return ResolvedShell {
                 program: PathBuf::from(candidate),
-            });
+            };
         }
     }
-    Ok(ResolvedShell {
+    ResolvedShell {
         program: PathBuf::from("/bin/sh"),
-    })
+    }
 }
 
 #[cfg(windows)]
@@ -128,7 +130,7 @@ fn is_executable_file(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, ffi::OsString, fs, path::Path};
+    use std::{collections::BTreeMap, fs, path::Path};
 
     use super::resolve;
 

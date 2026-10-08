@@ -28,9 +28,21 @@ fn disabling_ask_lets_a_user_plugin_take_the_name() -> support::TestResult<()> {
             .env("XDG_DATA_HOME", &data_home)
             .env("XDG_CONFIG_HOME", &config_home),
     )?;
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let listing = String::from_utf8(output.stdout)?;
-    assert!(listing.lines().any(|line| line.starts_with("ask (user):")), "{listing}");
-    assert!(!listing.lines().any(|line| line.starts_with("ask (bundled):")), "{listing}");
+    assert!(
+        listing.lines().any(|line| line.starts_with("ask (user):")),
+        "{listing}"
+    );
+    assert!(
+        !listing
+            .lines()
+            .any(|line| line.starts_with("ask (bundled):")),
+        "{listing}"
+    );
     Ok(())
 }

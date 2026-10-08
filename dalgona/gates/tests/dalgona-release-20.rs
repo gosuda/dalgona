@@ -12,23 +12,46 @@ fn dalgona_man_pages_match_the_cli_tree() -> support::TestResult<()> {
     let output_dir = scratch.path().join("rendered");
     let render = support::run_command(
         Command::new("cargo")
-            .args(["run", "--locked", "-p", "dalgona", "--release", "--example", "render-man", "--"])
+            .args([
+                "run",
+                "--locked",
+                "-p",
+                "dalgona",
+                "--release",
+                "--example",
+                "render-man",
+                "--",
+            ])
             .arg(&output_dir)
             .current_dir(&workspace),
     )?;
-    assert!(render.status.success(), "{}", String::from_utf8_lossy(&render.stderr));
+    assert!(
+        render.status.success(),
+        "{}",
+        String::from_utf8_lossy(&render.stderr)
+    );
     let expected_dir = workspace.join("crates/dalgona/man");
     let mut expected = BTreeMap::new();
     for entry in fs::read_dir(&expected_dir)? {
         let path = entry?.path();
         if path.extension().is_some_and(|extension| extension == "1") {
-            expected.insert(path.file_name().ok_or("man page has no filename")?.to_owned(), fs::read(path)?);
+            expected.insert(
+                path.file_name()
+                    .ok_or("man page has no filename")?
+                    .to_owned(),
+                fs::read(path)?,
+            );
         }
     }
     let mut rendered = BTreeMap::new();
     for entry in fs::read_dir(&output_dir)? {
         let path = entry?.path();
-        rendered.insert(path.file_name().ok_or("rendered man page has no filename")?.to_owned(), fs::read(path)?);
+        rendered.insert(
+            path.file_name()
+                .ok_or("rendered man page has no filename")?
+                .to_owned(),
+            fs::read(path)?,
+        );
     }
     assert_eq!(rendered, expected);
     Ok(())

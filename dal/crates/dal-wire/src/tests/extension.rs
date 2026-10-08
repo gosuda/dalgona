@@ -354,14 +354,18 @@ async fn router_scenario(rig: &Rig, gauge: &Arc<Gauge>) {
         }
         assert_eq!(seen, 2, "the session published busy then quiet");
     };
-    with_serve(rig, router_options(rig), async |addr| {
-        let (reply, ()) = tokio::join!(request(addr), driver);
-        assert_eq!(reply.status, 200, "{}", reply.body);
-        let body = sse_data(&reply.body).join("\n");
-        assert!(body.contains("done"), "{body}");
-        assert!(!body.contains("focus"), "{body}");
-        assert!(!body.contains("ext_status"), "{body}");
-        assert!(!reply.head.contains("focus"), "{}", reply.head);
+    // The driver future above is ~26 KB; boxing keeps the future passed to
+    // `with_serve` small enough for `clippy::large_futures`.
+    with_serve(rig, router_options(rig), |addr| {
+        Box::pin(async move {
+            let (reply, ()) = tokio::join!(request(addr), driver);
+            assert_eq!(reply.status, 200, "{}", reply.body);
+            let body = sse_data(&reply.body).join("\n");
+            assert!(body.contains("done"), "{body}");
+            assert!(!body.contains("focus"), "{body}");
+            assert!(!body.contains("ext_status"), "{body}");
+            assert!(!reply.head.contains("focus"), "{}", reply.head);
+        })
     })
     .await;
 }

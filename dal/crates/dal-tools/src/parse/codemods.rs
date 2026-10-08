@@ -140,8 +140,9 @@ pub(super) const CPP_EMPTY_CATCH: &str = r#"((catch_clause) @empty
 pub(super) const OCAML_EMPTY_CATCH: &str = r#"((try_expression (_) (match_case) @empty)
   (#match? @empty "^\\|?\\s*_\\s*->\\s*\\(\\s*\\)\\s*$"))"#;
 
-static QUERY_CACHE: LazyLock<Mutex<HashMap<(Codemod, Language), Arc<Query>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Cached compiled queries per codemod and language.
+type QueryCache = HashMap<(Codemod, Language), Arc<Query>>;
+static QUERY_CACHE: LazyLock<Mutex<QueryCache>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn compiled_query(codemod: Codemod, lang: Language) -> Result<Arc<Query>, ParseFailure> {
     let mut cache = lock(&QUERY_CACHE);

@@ -99,6 +99,10 @@ pub(crate) async fn stage_replacement(
     })
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "staging is one ordered pipeline: resolve, guard, verify, capture; seams would thread nine locals"
+)]
 pub(crate) async fn stage_file(
     session: &PatchSession,
     style: super::super::ir::DialectId,
@@ -379,8 +383,12 @@ pub(crate) async fn stage_file(
                     #[cfg(feature = "symbols")]
                     {
                         let (byte_start, byte_end, node_first, node_last) =
-                            super::super::ast::node_span(canonical, &before, *first_line as u32)
-                                .await?;
+                            super::super::ast::node_span(
+                                canonical,
+                                &before,
+                                u32::try_from(*first_line).unwrap_or(u32::MAX),
+                            )
+                            .await?;
                         // Map the entire source node footprint; Enhanced requires
                         // coverage of the full effective span (C09).
                         let _ = (byte_start, byte_end);
@@ -560,7 +568,7 @@ pub(crate) async fn stage_file(
             }
         }
     }
-    replacements.sort_by(|left, right| right.0.cmp(&left.0));
+    replacements.sort_by_key(|left| std::cmp::Reverse(left.0));
     for (start, end, replacement) in replacements {
         after.splice(start..end, replacement);
     }
@@ -608,9 +616,7 @@ fn diff_hunks(before: &[u8], after: &[u8]) -> Vec<DiffHunk> {
                         similar::ChangeTag::Delete => DiffLineKind::Removed,
                         similar::ChangeTag::Insert => DiffLineKind::Added,
                     };
-                    let text = change
-                        .value()
-                        .trim_end_matches(|character| character == '\r' || character == '\n');
+                    let text = change.value().trim_end_matches(['\r', '\n']);
                     DiffLine {
                         kind,
                         text: text.into(),
@@ -628,11 +634,20 @@ fn diff_hunks(before: &[u8], after: &[u8]) -> Vec<DiffHunk> {
         .collect()
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "proof needs the session, dialect, paths, buffers, guard, locator, and edit index together"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one guard proof per Guard variant; arms share the stale-tag wording"
+)]
 async fn prove_guard(
     session: &PatchSession,
     style: super::super::ir::DialectId,
     display: &Path,
-    canonical: &Path,
+    #[cfg(feature = "symbols")] canonical: &Path,
+    #[cfg(not(feature = "symbols"))] _canonical: &Path,
     before: &[u8],
     text: &super::super::resolve::Text,
     guard: &Guard,

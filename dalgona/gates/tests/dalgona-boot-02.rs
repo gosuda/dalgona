@@ -13,7 +13,11 @@ fn plugin_list_shows_the_eleven_bundled_batteries() -> support::TestResult<()> {
             .env("XDG_DATA_HOME", scratch.path().join("data"))
             .env("XDG_CONFIG_HOME", scratch.path().join("config")),
     )?;
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let listing = String::from_utf8(output.stdout)?;
     for name in support::BATTERIES {
         let row = format!("{name} (bundled): services:");

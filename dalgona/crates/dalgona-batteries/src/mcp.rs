@@ -36,9 +36,9 @@ pub const LIST_PAGE_MAX: usize = 50;
 /// Maximum amount of child stderr retained for crash diagnostics.
 pub const STDERR_RING: usize = 65_536;
 /// Default time-to-live for a tools/list response.
-pub const TOOL_CACHE_DEFAULT: Duration = Duration::from_millis(60_000);
+pub const TOOL_CACHE_DEFAULT: Duration = Duration::from_secs(60);
 /// Maximum time-to-live accepted for a tools/list response.
-pub const TOOL_CACHE_CAP: Duration = Duration::from_millis(3_600_000);
+pub const TOOL_CACHE_CAP: Duration = Duration::from_secs(3600);
 /// Maximum number of bytes returned as MCP result text.
 pub const RESULT_TEXT_CAP: usize = 524_288;
 /// Marker appended when an MCP result exceeds [`RESULT_TEXT_CAP`].
@@ -59,34 +59,73 @@ pub struct McpConfig {
 pub enum McpError {
     /// The user declined the full MCP server-set grant.
     #[error("mcp service declined by user for {plugin}")]
-    Declined { plugin: String },
+    Declined {
+        /// The plugin whose server set the user declined.
+        plugin: String,
+    },
     /// The caller requested an undeclared server.
     #[error("mcp server {key} is not granted")]
-    NotGranted { key: String },
+    NotGranted {
+        /// The undeclared server key the caller requested.
+        key: String,
+    },
     /// A declared server could not be started.
     #[error("mcp server {key} failed to start: {cause}")]
-    Start { key: String, cause: String },
+    Start {
+        /// The declared server key that failed to start.
+        key: String,
+        /// The start failure rendered for the user.
+        cause: String,
+    },
     /// A stdio server exited while a request was in flight.
     #[error("mcp server {key} exited during the call with status {code}")]
-    Exited { key: String, code: i32 },
+    Exited {
+        /// The server key that exited mid-call.
+        key: String,
+        /// The process exit status code.
+        code: i32,
+    },
     /// A stdout protocol line was malformed and the server was treated as crashed.
     #[error("mcp server {key} wrote an invalid protocol line; treated as a crash")]
-    InvalidLine { key: String },
+    InvalidLine {
+        /// The server key that wrote the malformed line.
+        key: String,
+    },
     /// The server exhausted its one-restart budget and is latched off for this session.
     #[error("mcp server {key} crashed twice in this session; it stays off until the session ends")]
-    Latched { key: String },
+    Latched {
+        /// The server key whose restart budget is exhausted.
+        key: String,
+    },
     /// An MCP call exceeded its effective deadline.
     #[error("mcp call timed out after {n} s")]
-    Timeout { n: u64 },
+    Timeout {
+        /// The effective deadline in seconds.
+        n: u64,
+    },
     /// The requested remote tool is not in the server's current list.
     #[error("mcp tool {tool} not found on server {key}")]
-    NotFound { tool: String, key: String },
+    NotFound {
+        /// The remote tool name that is absent.
+        tool: String,
+        /// The server key that lacks the tool.
+        key: String,
+    },
     /// The server returned a JSON-RPC error response.
     #[error("mcp protocol error {code}: {message}")]
-    Protocol { code: i64, message: String },
+    Protocol {
+        /// The JSON-RPC error code.
+        code: i64,
+        /// The JSON-RPC error message.
+        message: String,
+    },
     /// The server returned an unsupported MCP result type.
     #[error("unsupported mcp resultType {value}")]
-    ResultType { value: String },
+    ResultType {
+        /// The unsupported resultType value.
+        value: String,
+    },
+
     /// The server exceeded the tools/list page limit.
     #[error("mcp list exceeded 50 pages")]
     ListPages,
@@ -101,10 +140,18 @@ pub enum McpError {
     StepUpLimit,
     /// OAuth authorization failed for another reason.
     #[error("mcp authorization failed: {cause}")]
-    Auth { cause: String },
+    Auth {
+        /// The authorization failure rendered for the user.
+        cause: String,
+    },
     /// The HTTP endpoint continued rejecting requests after authorization.
     #[error("mcp http status {code} after {n} authorization attempts")]
-    HttpAuth { code: u16, n: u32 },
+    HttpAuth {
+        /// The HTTP status the endpoint kept returning.
+        code: u16,
+        /// The number of authorization attempts made.
+        n: u32,
+    },
     /// The server repeatedly requested interactive input.
     #[error("mcp input-required limit reached")]
     InputRequiredLimit,
@@ -133,7 +180,10 @@ pub enum McpConfigError {
     InvalidSection,
     /// The section names a key MCP does not read.
     #[error("unknown key \"plugin.mcp.{key}\"; MCP has no user settings")]
-    UnknownKey { key: Box<str> },
+    UnknownKey {
+        /// The rejected `[plugin.mcp]` key name.
+        key: Box<str>,
+    },
     /// The shared `enabled` switch is not a boolean.
     #[error("plugin.mcp.enabled must be a boolean")]
     InvalidEnabled,

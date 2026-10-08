@@ -1,17 +1,34 @@
-#![expect(clippy::unwrap_used, reason = "SC test")]
-#![expect(clippy::expect_used, reason = "SC test")]
+//! Gate-full scenario 2: guard findings run over scripted edits.
+#![expect(
+    dead_code,
+    reason = "gate support exposes helpers shared across independent targets"
+)]
 
 mod support;
 
-use std::{error::Error, fs, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, error::Error, fs, sync::Arc, time::Duration};
 
 use dal_agent::{Delivery, Env, SessionRef};
 use dal_core::{
-    Answer, Command, Config, ConfigProduct, Expect, PageReq, Part, Question, Reply, Stop,
-    UpdateKind, Workspace,
+    Command, Config, ConfigProduct, Expect, PageReq, Part, Reply, Stop, UpdateKind, Workspace,
 };
 use dal_tools::{Calibration, GuardConfig, GuardFindings, guard_extension};
-use support::{TestDir, scripted_session};
+use support::{GateHarness, TestDir, scripted_session};
+
+fn edit_turn_timeout(harness: &GateHarness) -> std::io::Error {
+    let state = harness.agent.view(PageReq::default()).map_or_else(
+        |error| format!("view unavailable: {error}"),
+        |view| {
+            format!(
+                "turn={:?}, open={:?}, last_entry={:?}",
+                view.turn,
+                view.open,
+                view.entries.items.last().map(|entry| &entry.kind)
+            )
+        },
+    );
+    std::io::Error::other(format!("guard edit turn timed out: {state}"))
+}
 
 const BEFORE: &str = "fn f() -> i32 {\n    1\n}\n";
 const AFTER: &str = "fn f(mut x: i32) -> i32 {\n    if x > 0 { x += 1; }\n    if x > 1 { x += 1; }\n    if x > 2 { x += 1; }\n    if x > 3 { x += 1; }\n    if x > 4 { x += 1; }\n    if x > 5 { x += 1; }\n    if x > 6 { x += 1; }\n    if x > 7 { x += 1; }\n    if x > 8 { x += 1; }\n    if x > 9 { x += 1; }\n    if x > 10 { x += 1; }\n    if x > 11 { x += 1; }\n    if x > 12 { x += 1; }\n    if x > 13 { x += 1; }\n    if x > 14 { x += 1; }\n    x\n}\n";
@@ -98,7 +115,7 @@ async fn run_edit(
     parts.guard = guard.extension;
     let product = dalgon::assemble(&cx, parts)?;
     let env = Env {
-        vars: Default::default(),
+        vars: BTreeMap::default(),
         cwd: workspace.path().to_path_buf(),
         sandbox_helper: None,
     };
@@ -131,20 +148,6 @@ async fn run_edit(
                 continue;
             };
             match &update.kind {
-                UpdateKind::RequestOpened(request) => {
-                    assert!(
-                        matches!(&request.question, Question::Grant { ext, .. } if ext.as_ref() == "guard"),
-                        "unexpected request: {:?}",
-                        request.question
-                    );
-                    if let Err(error) = harness
-                        .agent
-                        .answer(request.id, Answer::ApproveForSession)
-                        .await
-                    {
-                        return Err(std::io::Error::other(error.to_string()));
-                    }
-                }
                 UpdateKind::ToolSettled { outcome, .. } => {
                     assert!(!outcome.is_error, "{}", outcome.text);
                     text.push_str(&outcome.text);
@@ -159,26 +162,12 @@ async fn run_edit(
         Ok::<_, std::io::Error>(text)
     })
     .await
-    .map_err(|_| {
-        let state = harness.agent.view(PageReq::default()).map_or_else(
-            |error| format!("view unavailable: {error}"),
-            |view| {
-                format!(
-                    "turn={:?}, open={}, last_entry={:?}",
-                    view.turn,
-                    view.open.len(),
-                    view.entries.items.last().map(|entry| &entry.kind)
-                )
-            },
-        );
-        std::io::Error::other(format!("guard edit turn timed out: {state}"))
-    })??;
+    .map_err(|_| edit_turn_timeout(&harness))??;
     let findings = guard.findings.last(&session_id);
-    let actual = fs::read_to_string(workspace.path().join("src/lib.rs"))?;
     assert_eq!(
-        actual,
+        fs::read_to_string(workspace.path().join("src/lib.rs"))?,
         AFTER,
-        "patch settled with: {edit_text}\nACTUAL: {actual:?}"
+        "patch settled with: {edit_text}"
     );
     let report = tokio::time::timeout(
         Duration::from_secs(5),

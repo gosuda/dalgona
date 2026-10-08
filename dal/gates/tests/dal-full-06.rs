@@ -1,11 +1,14 @@
-#![expect(clippy::unwrap_used, reason = "SC test")]
+//! Gate-full scenario 6: scope scheduling, FIFO admission, and cancellation p99.
 #![expect(clippy::expect_used, reason = "SC test")]
-#![expect(missing_docs, reason = "SC test")]
+#![expect(
+    dead_code,
+    reason = "gate support exposes helpers shared across independent targets"
+)]
 
 mod support;
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     error::Error,
     sync::{Arc, Mutex},
     time::Duration,
@@ -21,7 +24,7 @@ use dal_agent::{
 use dal_core::{
     Budget, Caps, Command, Config, ConfigProduct, ContextItem, Expect, ModelId, ModelRequest,
     ModelRoute, OnError, Part, Purpose, Reply, RequestParams, ScopeSpec, ServiceSet, Stop,
-    ThinkingLevel, UpdateKind, Usage, Workspace,
+    UpdateKind, Usage, Workspace,
 };
 use dal_provider::{StopReason, StreamEvent as ProviderEvent};
 use futures::stream;
@@ -110,6 +113,10 @@ struct OwnerModel {
 }
 
 impl ModelHandler for OwnerModel {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the owner model scripts the whole 500-member admission walkthrough"
+    )]
     fn run<'a>(
         &'a self,
         _request: ModelRequest,
@@ -183,9 +190,9 @@ impl ModelHandler for OwnerModel {
                 assert!(matches!(result, ScopeValue::Inference(_)));
             }
 
-            for index in 1..ADMITTED {
+            for (index, handle) in handles.iter().enumerate().take(ADMITTED).skip(1) {
                 control.releases[index].send_replace(true);
-                let result = tokio::time::timeout(Duration::from_secs(30), handles[index].result())
+                let result = tokio::time::timeout(Duration::from_secs(30), handle.result())
                     .await
                     .expect("remaining admitted inference finishes")
                     .expect("remaining admitted inference succeeds");
@@ -251,17 +258,12 @@ impl ModelHandler for OwnerModel {
     }
 }
 
-fn wait_for_started<'a>(
-    started: &'a mut watch::Receiver<usize>,
-    target: usize,
-) -> impl std::future::Future<Output = ()> + 'a {
-    async move {
-        while *started.borrow_and_update() < target {
-            tokio::time::timeout(Duration::from_secs(30), started.changed())
-                .await
-                .expect("scope members start in time")
-                .expect("scope member tracker stays connected");
-        }
+async fn wait_for_started(started: &mut watch::Receiver<usize>, target: usize) {
+    while *started.borrow_and_update() < target {
+        tokio::time::timeout(Duration::from_secs(30), started.changed())
+            .await
+            .expect("scope members start in time")
+            .expect("scope member tracker stays connected");
     }
 }
 
@@ -322,6 +324,10 @@ fn scripted_fixture() -> String {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the 500-member scenario is one deliberate end-to-end walkthrough"
+)]
 async fn scope_500_members_admits_fifo_and_stays_within_budget()
 -> Result<(), Box<dyn Error + Send + Sync>> {
     let data = TestDir::new()?;
@@ -364,7 +370,7 @@ async fn scope_500_members_admits_fifo_and_stays_within_budget()
     })?;
     product.extensions.push(extension);
     let env = Env {
-        vars: Default::default(),
+        vars: BTreeMap::default(),
         cwd: workspace.path().to_path_buf(),
         sandbox_helper: None,
     };

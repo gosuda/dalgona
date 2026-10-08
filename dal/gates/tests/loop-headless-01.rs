@@ -1,27 +1,27 @@
-#![expect(clippy::unwrap_used, reason = "SC test")]
-#![expect(clippy::expect_used, reason = "SC test")]
+//! Headless tools preserve call order and observe patch or note surfaces.
+#![expect(
+    dead_code,
+    reason = "gate support exposes helpers shared across independent targets"
+)]
 
 mod support;
 
-use std::{collections::BTreeMap, error::Error, fs, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    error::Error,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use dal_agent::{Delivery, Env, SessionRef};
 use dal_core::{Command, Config, ConfigProduct, Expect, Part, Reply, Stop, UpdateKind, Workspace};
-use support::{TestDir, scripted_session};
+use support::{GateHarness, TestDir, scripted_session};
 
-#[tokio::test]
-async fn headless_tools_preserve_call_order_and_see_patch()
--> Result<(), Box<dyn Error + Send + Sync>> {
-    let data = TestDir::new()?;
-    let workspace = TestDir::new()?;
-    fs::write(workspace.path().join("test.txt"), "before\n")?;
-    let fixtures =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../crates/dalgon/tests/fixtures");
-    fs::copy(
-        fixtures.join("process/grandchild.sh"),
-        workspace.path().join("grandchild.sh"),
-    )?;
-    let replay = fixtures.join("replay/loop-headless.jsonl");
+async fn scripted_headless(
+    replay: &Path,
+    workspace: &TestDir,
+    data: &TestDir,
+) -> Result<GateHarness, Box<dyn Error + Send + Sync>> {
     let factory = dalgon::product();
     let user = format!(
         "model = \"openai-responses/gpt-6\"\nedit_style = \"replace\"\n[providers.scripted]\nfixture = {:?}\n",
@@ -45,9 +45,25 @@ async fn headless_tools_preserve_call_order_and_see_patch()
     let session = SessionRef::Ephemeral {
         workspace: Workspace::new(workspace.path().to_path_buf())?,
     };
-    let harness = scripted_session(product, config, env, session).await?;
+    scripted_session(product, config, env, session).await
+}
+
+#[tokio::test]
+async fn headless_tools_preserve_call_order_and_see_patch()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let data = TestDir::new()?;
+    let workspace = TestDir::new()?;
+    fs::write(workspace.path().join("test.txt"), "before\n")?;
+    let fixtures =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../crates/dalgon/tests/fixtures");
+    fs::copy(
+        fixtures.join("process/grandchild.sh"),
+        workspace.path().join("grandchild.sh"),
+    )?;
+    let replay = fixtures.join("replay/loop-headless.jsonl");
+    let harness = scripted_headless(&replay, &workspace, &data).await?;
     let mut subscription = harness.agent.subscribe(None)?;
-    let reply = harness
+    let accepted = harness
         .agent
         .submit(Command::Prompt {
             expect: Expect::Idle,
@@ -56,7 +72,7 @@ async fn headless_tools_preserve_call_order_and_see_patch()
             }],
         })
         .await?;
-    assert!(matches!(reply, Reply::Accepted { .. }));
+    assert!(matches!(accepted, Reply::Accepted { .. }));
 
     let mut started = Vec::<(String, String)>::new();
     let mut settled = Vec::<String>::new();
@@ -74,8 +90,7 @@ async fn headless_tools_preserve_call_order_and_see_patch()
                 let name = started
                     .iter()
                     .find(|(started_call, _)| started_call == &call.as_str().to_owned())
-                    .map(|(_, name)| name.as_str())
-                    .unwrap_or("missing-start");
+                    .map_or("missing-start", |(_, name)| name.as_str());
                 settled.push(name.to_owned());
                 if name == "read" {
                     read_results.push(sonic_rs::to_string(outcome)?);

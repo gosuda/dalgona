@@ -1,5 +1,11 @@
+//! Gate-stress scenario: 500 child sessions, 200 process jobs, nested scopes,
+//! synthetic models, and WebSocket clients under one resource budget.
 #![expect(clippy::unwrap_used, reason = "SC test")]
-#![expect(clippy::expect_used, reason = "SC test")]
+#![expect(clippy::expect_used, clippy::panic, reason = "SC test")]
+#![expect(
+    dead_code,
+    reason = "gate support exposes helpers shared across independent targets"
+)]
 #![expect(
     clippy::disallowed_methods,
     reason = "SC test exercises real process and filesystem boundaries"
@@ -12,7 +18,7 @@
 mod support;
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     error::Error,
     fs, io,
     path::{Path, PathBuf},
@@ -39,8 +45,8 @@ use dal_core::{
     AgentReport, AgentStart, Budget, CallId, CancelScope, Caps, ClientId, Command, Config,
     ConfigProduct, ContextItem, Effect, EntryKind, Event, Expect, HookEvent, HookOutcome,
     HookVerdict, InputEvent, InputVerdict, ModelId, ModelRequest, ModelRoute, OnError, PageReq,
-    Part, Phase, Product as StoreProduct, RawJson, Record, Reply, Save, ScopeSpec, Session,
-    SessionEnd, SessionId, SessionStart, Settled, Stop, StreamVerdict, ToolCallEvent,
+    Part, Phase, Product as StoreProduct, RawJson, Record, Reply, Save, ScopeSpec, ServiceSet,
+    Session, SessionEnd, SessionId, SessionStart, Settled, Stop, StreamVerdict, ToolCallEvent,
     ToolCallVerdict, ToolResultEvent, TurnId, TurnState, Usage, Workspace,
 };
 use dal_provider::{EventStream, StopReason, StreamEvent, ToolArgs, ToolCall};
@@ -60,7 +66,6 @@ const WEBSOCKET_CLIENTS: usize = 8;
 const RESOURCE_LIMIT_BYTES: u64 = 256 * 1024 * 1024;
 const HANDLE_LIMIT: usize = 2048;
 const CANCEL_P99: Duration = Duration::from_millis(250);
-const FIXTURE_REPLY: &str = "member complete";
 const ROOT_MODEL: &str = "gate-stress/children";
 const NESTED_MODEL: &str = "gate-stress/nested";
 const LEAF_MODEL: &str = "gate-stress/leaf";
@@ -211,7 +216,6 @@ impl StreamWatch for CountingWatch {
 
 struct ChildLoadModel {
     reports: Arc<Mutex<Vec<AgentReport>>>,
-    leaf_runs: Arc<AtomicUsize>,
 }
 
 impl ModelHandler for ChildLoadModel {
@@ -264,9 +268,7 @@ impl ModelHandler for ChildLoadModel {
     }
 }
 
-struct NestedModel {
-    leaf_runs: Arc<AtomicUsize>,
-}
+struct NestedModel;
 
 impl ModelHandler for NestedModel {
     fn run<'a>(
@@ -576,44 +578,39 @@ fn process_command(index: usize) -> String {
 }
 
 fn full_extension(
-    counts: Arc<HookCounts>,
+    counts: &Arc<HookCounts>,
     reports: Arc<Mutex<Vec<AgentReport>>>,
-    leaf_runs: Arc<AtomicUsize>,
+    leaf_runs: &Arc<AtomicUsize>,
     idle_starts: Arc<AtomicUsize>,
 ) -> Result<Extension, Box<dyn Error + Send + Sync>> {
-    let builder = ExtensionBuilder::new("gate-stress", "0.1.0", Default::default())?
-        .on_session_start_lossless(CountingHooks(Arc::clone(&counts)))
-        .on_session_end_lossless(CountingHooks(Arc::clone(&counts)))
-        .on_input(CountingHooks(Arc::clone(&counts)))
-        .on_before_turn(CountingHooks(Arc::clone(&counts)))
-        .on_before_request(CountingHooks(Arc::clone(&counts)))
-        .on_tool_call(CountingHooks(Arc::clone(&counts)))
-        .on_tool_result_lossless(CountingHooks(Arc::clone(&counts)))
-        .on_turn_end(CountingHooks(Arc::clone(&counts)))
-        .on_settled(CountingHooks(Arc::clone(&counts)))
-        .output_stream(Arc::new(CountingWatchFactory(Arc::clone(&counts))))
+    let builder = ExtensionBuilder::new("gate-stress", "0.1.0", ServiceSet::default())?
+        .on_session_start_lossless(CountingHooks(Arc::clone(counts)))
+        .on_session_end_lossless(CountingHooks(Arc::clone(counts)))
+        .on_input(CountingHooks(Arc::clone(counts)))
+        .on_before_turn(CountingHooks(Arc::clone(counts)))
+        .on_before_request(CountingHooks(Arc::clone(counts)))
+        .on_tool_call(CountingHooks(Arc::clone(counts)))
+        .on_tool_result_lossless(CountingHooks(Arc::clone(counts)))
+        .on_turn_end(CountingHooks(Arc::clone(counts)))
+        .on_settled(CountingHooks(Arc::clone(counts)))
+        .output_stream(Arc::new(CountingWatchFactory(Arc::clone(counts))))
         .model(ModelRecord {
             id: ModelId::parse(ROOT_MODEL)?,
             caps: caps(true),
-            handler: Arc::new(ChildLoadModel {
-                reports,
-                leaf_runs: Arc::clone(&leaf_runs),
-            }),
+            handler: Arc::new(ChildLoadModel { reports }),
             export: None,
         })
         .model(ModelRecord {
             id: ModelId::parse(NESTED_MODEL)?,
             caps: caps(false),
-            handler: Arc::new(NestedModel {
-                leaf_runs: Arc::clone(&leaf_runs),
-            }),
+            handler: Arc::new(NestedModel),
             export: None,
         })
         .model(ModelRecord {
             id: ModelId::parse(LEAF_MODEL)?,
             caps: caps(false),
             handler: Arc::new(LeafModel {
-                runs: Arc::clone(&leaf_runs),
+                runs: Arc::clone(leaf_runs),
             }),
             export: None,
         })
@@ -635,14 +632,14 @@ fn full_extension(
 }
 
 fn shuttle_extension(
-    counts: Arc<HookCounts>,
+    counts: &Arc<HookCounts>,
     mail_results: Arc<Mutex<Vec<(String, dal_core::Receipt)>>>,
     completed_sends: Arc<AtomicUsize>,
     slow_starts: Arc<AtomicUsize>,
 ) -> Result<Extension, Box<dyn Error + Send + Sync>> {
-    let builder = ExtensionBuilder::new("gate-stress", "0.1.0", Default::default())?
-        .on_session_start_lossless(ChildSessionHook(Arc::clone(&counts)))
-        .on_turn_end_lossless(CountingHooks(Arc::clone(&counts)))
+    let builder = ExtensionBuilder::new("gate-stress", "0.1.0", ServiceSet::default())?
+        .on_session_start_lossless(ChildSessionHook(Arc::clone(counts)))
+        .on_turn_end_lossless(CountingHooks(Arc::clone(counts)))
         .model(ModelRecord {
             id: ModelId::parse(SHUTTLE_ROOT_MODEL)?,
             caps: caps(false),
@@ -796,7 +793,7 @@ async fn start_process_jobs(
             .await?;
         assert!(matches!(model, Reply::Done(_)));
         let view = agent.view(PageReq::default())?;
-        let mut updates = agent.subscribe(Some((view.r#gen, view.seq)))?;
+        let updates = agent.subscribe(Some((view.r#gen, view.seq)))?;
         let reply = agent
             .submit(Command::Prompt {
                 expect: Expect::Idle,
@@ -1095,6 +1092,10 @@ async fn wait_for_processes_to_exit(pids: &[u32]) -> Result<(), TestError> {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the load scenario is one deliberate end-to-end stress walkthrough"
+)]
 async fn full_load_scenario() -> Result<(), TestError> {
     let data = TestDir::new()?;
     let workspace_dir = TestDir::new()?;
@@ -1116,9 +1117,9 @@ async fn full_load_scenario() -> Result<(), TestError> {
     let leaf_runs = Arc::new(AtomicUsize::new(0));
     let idle_starts = Arc::new(AtomicUsize::new(0));
     let extension = full_extension(
-        Arc::clone(&hooks),
+        &hooks,
         Arc::clone(&reports),
-        Arc::clone(&leaf_runs),
+        &leaf_runs,
         Arc::clone(&idle_starts),
     )?;
     let user = format!(
@@ -1142,7 +1143,7 @@ async fn full_load_scenario() -> Result<(), TestError> {
     )?;
     let pre_run_handles = open_handle_count()?;
     let env = Env {
-        vars: Default::default(),
+        vars: BTreeMap::default(),
         cwd: workspace.as_path().to_path_buf(),
         sandbox_helper: None,
     };
@@ -1196,8 +1197,7 @@ async fn full_load_scenario() -> Result<(), TestError> {
     let handles = open_handle_count()?;
     assert!(
         rss < RESOURCE_LIMIT_BYTES,
-        "resident memory was {} bytes",
-        rss
+        "resident memory was {rss} bytes",
     );
     assert!(handles < HANDLE_LIMIT, "open handle count was {handles}");
     let loaded_samples = cancel_jobs(&mut process_jobs, CANCELLATIONS).await?;
@@ -1240,14 +1240,16 @@ async fn full_load_scenario() -> Result<(), TestError> {
     assert!(hooks.stream_finishes.load(Ordering::Acquire) > 0);
     let session_ids = expected_session_ids(root_id, &process_jobs, &reports, &hooks);
     assert_eq!(session_ids.len(), CHILD_SESSIONS + PROCESS_JOBS + 1);
-    let ends_by_session = locked(&hooks.ends_by_session);
-    assert_eq!(ends_by_session.len(), session_ids.len());
+    assert_eq!(
+        locked(&hooks.ends_by_session).len(),
+        session_ids.len(),
+        "every session journaled exactly one end"
+    );
     assert!(
         session_ids
             .iter()
-            .all(|id| ends_by_session.get(id) == Some(&1))
+            .all(|id| locked(&hooks.ends_by_session).get(id) == Some(&1))
     );
-    drop(ends_by_session);
     verify_journal_ends(
         data.path(),
         &workspace,
@@ -1361,7 +1363,7 @@ async fn full_setup_for_actor_smoke(
         product,
         config,
         Env {
-            vars: Default::default(),
+            vars: BTreeMap::default(),
             cwd: workspace_dir,
             sandbox_helper: None,
         },
@@ -1410,7 +1412,7 @@ fn replay_matches_model(
         source
             .iter()
             .filter_map(|record| match record {
-                Record::TurnEnd { turn, stop, .. } => Some((turn.clone(), stop.clone())),
+                Record::TurnEnd { turn, stop, .. } => Some((*turn, stop.clone())),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -1428,11 +1430,7 @@ fn replay_matches_model(
         ));
     }
 
-    let active_turns = if matches!(model, PhaseModel::Idle) {
-        0
-    } else {
-        1
-    };
+    let active_turns = usize::from(!matches!(model, PhaseModel::Idle));
     if turns_completed.checked_add(active_turns) != usize::try_from(turns_allocated).ok() {
         return Err(format!(
             "model counts disagree: allocated={turns_allocated}, completed={turns_completed}, active={active_turns}"
@@ -1466,9 +1464,10 @@ fn replay_matches_model(
     }
     if !matches!(
         (model, replayed.phase()),
-        (PhaseModel::Idle, Phase::Idle)
-            | (PhaseModel::Opening(_), Phase::Idle)
-            | (PhaseModel::Running(_), Phase::Idle)
+        (
+            PhaseModel::Idle | PhaseModel::Opening(_) | PhaseModel::Running(_),
+            Phase::Idle
+        )
     ) {
         return Err(format!(
             "replay phase {:?} disagrees with recovery of model phase",
@@ -1480,9 +1479,9 @@ fn replay_matches_model(
 
 fn assert_live_phase(session: &Session, expected: &PhaseModel) -> bool {
     match (expected, session.phase()) {
+        (PhaseModel::Opening(expected), Phase::Opening { turn, .. })
+        | (PhaseModel::Running(expected), Phase::Running { turn, .. }) => expected == turn,
         (PhaseModel::Idle, Phase::Idle) => true,
-        (PhaseModel::Opening(expected), Phase::Opening { turn, .. }) => expected == turn,
-        (PhaseModel::Running(expected), Phase::Running { turn, .. }) => expected == turn,
         _ => false,
     }
 }
@@ -1501,6 +1500,11 @@ enum GeneratedStep {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "TEST_LOCK serializes the heavyweight stress scenarios; \
+              the guard is deliberately held across the await"
+)]
 async fn stress_500_children_200_jobs_nested_scopes_synthetic_models_and_websockets()
 -> Result<(), TestError> {
     let _serial = TEST_LOCK.lock().expect("stress gate serialization lock");
@@ -1530,8 +1534,8 @@ proptest! {
                         std::num::NonZeroU64::new(next_turn).expect("nonzero model turn"),
                     ),
                 ),
-                (1, PhaseModel::Opening(turn)) => GeneratedStep::Guard(turn.clone()),
-                (2, PhaseModel::Running(turn)) => GeneratedStep::Cancel(turn.clone()),
+                (1, PhaseModel::Opening(turn)) => GeneratedStep::Guard(*turn),
+                (2, PhaseModel::Running(turn)) => GeneratedStep::Cancel(*turn),
                 _ => GeneratedStep::Reject,
             };
             let event = match &step {
@@ -1545,7 +1549,7 @@ proptest! {
                     by: ClientId::new("property"),
                 },
                 GeneratedStep::Guard(turn) => Event::Guard {
-                    turn: turn.clone(),
+                    turn: *turn,
                     call: None,
                     extension: None,
                     outcome: HookOutcome::new(
@@ -1554,7 +1558,7 @@ proptest! {
                     ).expect("before-turn verdict matches"),
                 },
                 GeneratedStep::Cancel(turn) => Event::Cancel {
-                    scope: CancelScope::Turn(turn.clone()),
+                    scope: CancelScope::Turn(*turn),
                     partial: None,
                 },
                 GeneratedStep::Reject => Event::Command {
@@ -1604,11 +1608,11 @@ proptest! {
 
 #[test]
 fn stress_shuttle_schedules_preserve_actor_invariants() {
+    const DEFAULT_SHUTTLE_SEED: u64 = 0x5eed_01a7_0c70_5e5d;
     let _serial = TEST_LOCK.lock().expect("stress gate serialization lock");
     // Keep one real actor smoke run beside the pure scheduler run. The smoke
     // run proves the public actor path; the scheduler run is deliberately
     // limited to Shuttle-aware futures and the in-memory journal.
-    const DEFAULT_SHUTTLE_SEED: u64 = 0x5eed_01a7_0c70_5e5d;
     let seed = std::env::var("SHUTTLE_RANDOM_SEED")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
@@ -1616,7 +1620,7 @@ fn stress_shuttle_schedules_preserve_actor_invariants() {
     let data = TestDir::new().expect("actor smoke data directory");
     let data_root = data.path().to_path_buf();
     fs::create_dir_all(data_root.join("workspace")).expect("actor smoke workspace directory");
-    actor_schedule(data_root);
+    actor_schedule(&data_root);
 
     // Shuttle controls every task poll in this half. No Tokio runtime, file
     // shard, process, or network handle crosses the Shuttle continuation.
@@ -1626,13 +1630,13 @@ fn stress_shuttle_schedules_preserve_actor_invariants() {
 /// Public-API smoke for the actual actor. This intentionally runs outside
 /// Shuttle: the actor owns Tokio tasks, while the schedule proof below uses
 /// the same fold/journal protocol on Shuttle's executor.
-fn actor_schedule(data_root: PathBuf) {
+fn actor_schedule(data_root: &std::path::Path) {
     let hooks = Arc::new(HookCounts::default());
     let mail_results = Arc::new(Mutex::new(Vec::new()));
     let completed_sends = Arc::new(AtomicUsize::new(0));
     let slow_starts = Arc::new(AtomicUsize::new(0));
     let extension = shuttle_extension(
-        Arc::clone(&hooks),
+        &hooks,
         Arc::clone(&mail_results),
         Arc::clone(&completed_sends),
         Arc::clone(&slow_starts),
@@ -1643,7 +1647,7 @@ fn actor_schedule(data_root: PathBuf) {
         .build()
         .expect("actor smoke runtime builds");
     let (host, parent, workspace) = runtime
-        .block_on(full_setup_for_actor_smoke(&data_root, extension))
+        .block_on(full_setup_for_actor_smoke(data_root, extension))
         .expect("actor smoke opens");
     let parent_id = parent
         .view(PageReq::default())
@@ -1789,7 +1793,7 @@ fn shuttle_actor_schedule() {
         .records()
         .iter()
         .filter_map(|record| match record {
-            Record::TurnEnd { turn, .. } if *turn == actor.turn => Some(turn.clone()),
+            Record::TurnEnd { turn, .. } if *turn == actor.turn => Some(*turn),
             _ => None,
         })
         .collect();
@@ -1852,7 +1856,7 @@ fn shuttle_actor_state() -> ShuttleActorState {
     session
         .step(
             Event::Guard {
-                turn: turn.clone(),
+                turn,
                 call: None,
                 extension: None,
                 outcome: HookOutcome::new(HookEvent::BeforeTurn, HookVerdict::BeforeTurn(None))
@@ -1910,7 +1914,7 @@ async fn shuttle_cancel_task(actor: ShuttleActor) {
         return;
     }
     let mut effects = Vec::new();
-    let turn = actor.turn.clone();
+    let turn = actor.turn;
     let result = actor.session.step(
         Event::Cancel {
             scope: CancelScope::Turn(turn),
@@ -1934,7 +1938,7 @@ async fn shuttle_shutdown_task(actor: ShuttleActor) {
     actor.shutting_down = true;
     if actor.turn_open {
         let mut effects = Vec::new();
-        let turn = actor.turn.clone();
+        let turn = actor.turn;
         let result = actor.session.step(
             Event::Cancel {
                 scope: CancelScope::Turn(turn),

@@ -2,6 +2,10 @@
     clippy::disallowed_methods,
     reason = "SC test launches the real server process"
 )]
+#![expect(
+    dead_code,
+    reason = "gate support exposes helpers shared across independent targets"
+)]
 
 //! WebSocket authorization failures do not disclose token values.
 
@@ -161,7 +165,7 @@ async fn websocket_auth_never_logs_token_values() -> Result<(), Box<dyn Error + 
     ] {
         match std::fs::read_to_string(&path) {
             Ok(text) => logged.push_str(&text),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
     }

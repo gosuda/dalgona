@@ -61,6 +61,10 @@ pub(crate) async fn rpc(args: cli::RpcArgs, startup: Startup, product: Product) 
     let Some(socket) = args.socket else {
         return stdio(Wire::Rpc, startup, product).await;
     };
+    let socket = match socket {
+        cli::RpcSocket::Auto => None,
+        cli::RpcSocket::Path(path) => Some(path),
+    };
     local_socket(socket, startup, product).await
 }
 
@@ -102,7 +106,7 @@ async fn stdio(wire: Wire, startup: Startup, product: Product) -> ExitCode {
     let outcome = super::drive(&stop, async {
         let result = tokio::select! {
             biased;
-            _ = stop.cancelled() => Ok(()),
+            () = stop.cancelled() => Ok(()),
             result = wire.serve(host.clone(), transport) => result,
         };
         let _ = host.shutdown(HOST_GRACE).await;
@@ -130,6 +134,7 @@ async fn local_socket(socket: Option<PathBuf>, startup: Startup, product: Produc
         Some(path) => (cwd.join(path), None),
         None => (default_path, Some(data_root.as_path())),
     };
+    #[cfg(windows)]
     let sid = match edge::current_user_sid(&vars) {
         Ok(sid) => sid,
         Err(error) => {
@@ -139,6 +144,8 @@ async fn local_socket(socket: Option<PathBuf>, startup: Startup, product: Produc
             );
         }
     };
+    #[cfg(not(windows))]
+    let sid = edge::current_user_sid(&vars);
     let host = match start_host(product, &config, vars, cwd, helper, &data_root).await {
         Ok(host) => host,
         Err(code) => return code,
@@ -148,7 +155,7 @@ async fn local_socket(socket: Option<PathBuf>, startup: Startup, product: Produc
     let outcome = super::drive(&stop, async {
         let result = tokio::select! {
             biased;
-            _ = stop.cancelled() => Ok(()),
+            () = stop.cancelled() => Ok(()),
             result = serve_local(
                 &path,
                 default_root,

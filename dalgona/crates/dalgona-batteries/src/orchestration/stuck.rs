@@ -20,11 +20,11 @@ mod tests;
 /// Maximum tool-call records retained by the guard window.
 const RECORD_CAPACITY: usize = 64;
 pub(crate) use guard::{
-    GuardEffects, GuardState, GuardVerdict, canonical_args, clear_pending_attempts, on_tool_call,
+    GuardState, GuardVerdict, clear_pending_attempts, on_tool_call,
     reset,
 };
 pub(crate) use rewrite::rewrite_exec_args;
-pub(crate) use sleep::{SleepClassifier, SleepWait};
+pub(crate) use sleep::SleepClassifier;
 
 pub(crate) const IDENTICAL_NOTICE: &str = "<system-reminder>\nLOOP GUARD - IDENTICAL TOOL CALLS: you called `<tool>` <count> times in a row with the EXACT same arguments. Re-issuing the same call returns the same result. Snap out of it:\n- reuse the result you already received from this exact call;\n- if you were re-checking for new output or state, use the monitor tool, or change one parameter deliberately (filter, offset, query);\n- if nothing is actually changing, stop calling this tool, state what is blocking you, and try a different tool or ask the user.\nDo not call `<tool>` again with identical arguments.\n</system-reminder>";
 pub(crate) const SIMILAR_NOTICE: &str = "<system-reminder>\nLOOP GUARD - NEAR-IDENTICAL TOOL CALLS: your last <count> calls to `<tool>` had arguments about <percent>% identical. This may be legitimate batch work, or a loop that only looks like progress:\n- if these calls target different inputs, continue deliberately, but consider one wider call instead of one call per small variation;\n- if you are scanning output bit by bit, widen the window once, or use the monitor tool;\n- if the results keep saying the same thing, change strategy now: a different tool, a wider query, or asking the user.\n</system-reminder>";

@@ -1,5 +1,10 @@
+//! Gate-full scenario 3: sandbox probes reject tool calls outside allowed roots.
 #![expect(clippy::unwrap_used, reason = "SC test")]
 #![expect(clippy::expect_used, reason = "SC test")]
+#![expect(
+    dead_code,
+    reason = "gate support exposes helpers shared across independent targets"
+)]
 #![expect(
     clippy::disallowed_methods,
     reason = "SC test launches the real dalgon sandbox boundary"
@@ -104,7 +109,7 @@ async fn response(
     write_request(input, id, method, params).await?;
     loop {
         let frame = read_frame(output).await?;
-        if frame.get("id").and_then(|value| value.as_i64()) == Some(id) {
+        if frame.get("id").and_then(Value::as_i64) == Some(id) {
             return Ok(frame);
         }
     }
@@ -112,15 +117,19 @@ async fn response(
 
 fn tool_error_text(update: &Value) -> Option<String> {
     let outcome = update.get("outcome")?;
-    if outcome.get("isError").and_then(|value| value.as_bool()) != Some(true) {
+    if outcome.get("isError").and_then(Value::as_bool) != Some(true) {
         return None;
     }
     outcome
         .get("text")
-        .and_then(|value| value.as_str())
+        .and_then(Value::as_str)
         .map(str::to_owned)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the sandbox probe wires the full scripted harness before asserting"
+)]
 async fn run_sandbox_probe() -> Result<(String, bool), Box<dyn Error + Send + Sync>> {
     let dir = TestDir::new()?;
     let home = dir.path().join("home");
@@ -193,16 +202,16 @@ async fn run_sandbox_probe() -> Result<(String, bool), Box<dyn Error + Send + Sy
         .ok_or_else(|| io::Error::other("RPC session/open failed"))?;
     let session_id = result
         .get("sessionId")
-        .and_then(|value| value.as_str())
+        .and_then(Value::as_str)
         .ok_or_else(|| io::Error::other("RPC session/open omitted sessionId"))?;
     let generation = result
         .get("gen")
-        .and_then(|value| value.as_u64())
+        .and_then(Value::as_u64)
         .ok_or_else(|| io::Error::other("RPC session/open omitted generation"))?;
     let sequence = result
         .get("view")
         .and_then(|view| view.get("seq"))
-        .and_then(|value| value.as_u64())
+        .and_then(Value::as_u64)
         .ok_or_else(|| io::Error::other("RPC session/open omitted sequence"))?;
     let subscription = response(
         &mut input,
@@ -233,7 +242,7 @@ async fn run_sandbox_probe() -> Result<(String, bool), Box<dyn Error + Send + Sy
     let mut error_text = None;
     loop {
         let frame = read_frame(&mut output).await?;
-        if frame.get("id").and_then(|value| value.as_i64()) == Some(4) {
+        if frame.get("id").and_then(Value::as_i64) == Some(4) {
             if frame.get("result").is_none() {
                 return Err(io::Error::other(format!("session/submit failed: {frame}")).into());
             }
@@ -243,13 +252,13 @@ async fn run_sandbox_probe() -> Result<(String, bool), Box<dyn Error + Send + Sy
             }
             continue;
         }
-        if frame.get("method").and_then(|value| value.as_str()) != Some("session/update") {
+        if frame.get("method").and_then(Value::as_str) != Some("session/update") {
             continue;
         }
         let Some(update) = frame.get("params").and_then(|params| params.get("update")) else {
             continue;
         };
-        let update_type = update.get("type").and_then(|value| value.as_str());
+        let update_type = update.get("type").and_then(Value::as_str);
         if update_type == Some("tool_settled") {
             error_text = tool_error_text(update);
         }

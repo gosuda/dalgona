@@ -1,5 +1,8 @@
-#![expect(clippy::unwrap_used, reason = "SC test")]
-#![expect(clippy::expect_used, reason = "SC test")]
+//! Headless shutdown waits for registered status channels to go quiet.
+#![expect(
+    dead_code,
+    reason = "gate support exposes helpers shared across independent targets"
+)]
 
 mod support;
 
@@ -16,7 +19,7 @@ use std::{
 
 use dal_agent::ext::{ExtensionBuilder, StatusCx, StatusPoll, StatusSnapshot};
 use dal_agent::{Env, SessionRef};
-use dal_core::{Command, Config, ConfigProduct, Expect, Part, Reply, Workspace};
+use dal_core::{Command, Config, ConfigProduct, Expect, Part, Reply, ServiceSet, Workspace};
 use support::{TestDir, scripted_session};
 
 struct GateStatus {
@@ -38,7 +41,7 @@ async fn headless_shutdown_waits_for_registered_status_quiet()
     let poll = Arc::new(GateStatus {
         quiet: AtomicBool::new(false),
     });
-    let extension = ExtensionBuilder::new("gate-status", "0.1.0", Default::default())?
+    let extension = ExtensionBuilder::new("gate-status", "0.1.0", ServiceSet::default())?
         .status_kind("gate-status", poll.clone())
         .build()?;
     let (kind, _) = extension.status().expect("status kind must be registered");
@@ -85,14 +88,14 @@ async fn headless_shutdown_waits_for_registered_status_quiet()
     assert!(matches!(reply, Reply::Accepted { .. }));
 
     let started = Instant::now();
-    let shutdown = tokio::spawn(harness.host.shutdown(Duration::from_secs(2)));
+    let mut shutdown = Box::pin(harness.host.shutdown(Duration::from_secs(2)));
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(
-        !shutdown.is_finished(),
+        futures::poll!(shutdown.as_mut()).is_pending(),
         "shutdown must wait while status is busy"
     );
     poll.quiet.store(true, Ordering::SeqCst);
-    let report = shutdown.await?;
+    let report = shutdown.await;
     assert_eq!(report.sessions_closed, 1);
     assert!(started.elapsed() >= Duration::from_millis(200));
     Ok(())

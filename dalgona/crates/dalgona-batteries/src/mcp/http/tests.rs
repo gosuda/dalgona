@@ -2,7 +2,10 @@
 
 use std::{future::Future, path::PathBuf};
 
-use reqwest::{header::{HeaderName, HeaderValue}, Url};
+use reqwest::{
+    Url,
+    header::{HeaderName, HeaderValue},
+};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
@@ -10,10 +13,10 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    protocol::{outbound_headers, request_body, PROTOCOL_VERSION},
     CallDeadline, HttpTransport,
+    protocol::{PROTOCOL_VERSION, outbound_headers, request_body},
 };
-use crate::mcp::{tools::Key, Budgets};
+use crate::mcp::{Budgets, tools::Key};
 
 async fn request_parts(stream: TcpStream) -> (String, String, BufReader<TcpStream>) {
     let mut reader = BufReader::new(stream);
@@ -40,11 +43,17 @@ async fn request_parts(stream: TcpStream) -> (String, String, BufReader<TcpStrea
         .unwrap_or_default();
     let mut body = vec![0; length];
     reader.read_exact(&mut body).await.expect("request body");
-    (headers, String::from_utf8(body).expect("UTF-8 request body"), reader)
+    (
+        headers,
+        String::from_utf8(body).expect("UTF-8 request body"),
+        reader,
+    )
 }
 
 async fn fixture_response(response: String) -> (Url, impl Future<Output = (String, String)>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("loopback listener");
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("loopback listener");
     let address = listener.local_addr().expect("listener address");
     let url = Url::parse(&format!("http://{address}/mcp")).expect("fixture URL");
     let server = async move {
@@ -84,8 +93,14 @@ async fn posts_mcp_headers_and_correlates_a_retried_id() {
     );
     let (url, server) = fixture_response(response).await;
     let transport = test_transport(url);
-    let request = request_body(9, "tools/call", "{\"name\":\"echo\"}", PROTOCOL_VERSION, "0.1.0")
-        .expect("request envelope");
+    let request = request_body(
+        9,
+        "tools/call",
+        "{\"name\":\"echo\"}",
+        PROTOCOL_VERSION,
+        "0.1.0",
+    )
+    .expect("request envelope");
     let extra = [(
         HeaderName::from_static("mcp-param-x-trace"),
         HeaderValue::from_static("trace-1"),
@@ -98,7 +113,10 @@ async fn posts_mcp_headers_and_correlates_a_retried_id() {
         None,
     )
     .expect("MCP headers");
-    let deadline = CallDeadline::new(std::time::Duration::from_secs(5), std::time::Duration::from_secs(5));
+    let deadline = CallDeadline::new(
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(5),
+    );
     let cancel = CancellationToken::new();
     let (response, (headers, sent_body)) = tokio::join!(
         transport.send_once(
@@ -114,21 +132,44 @@ async fn posts_mcp_headers_and_correlates_a_retried_id() {
         server,
     );
     let response = response.expect("HTTP response");
-    assert!(headers.to_ascii_lowercase().contains("mcp-method: tools/call"));
-    assert!(headers.to_ascii_lowercase().contains("mcp-protocol-version: 2026-07-28"));
+    assert!(
+        headers
+            .to_ascii_lowercase()
+            .contains("mcp-method: tools/call")
+    );
+    assert!(
+        headers
+            .to_ascii_lowercase()
+            .contains("mcp-protocol-version: 2026-07-28")
+    );
     assert!(headers.to_ascii_lowercase().contains("mcp-name: echo"));
-    assert!(headers.to_ascii_lowercase().contains("mcp-param-x-trace: trace-1"));
+    assert!(
+        headers
+            .to_ascii_lowercase()
+            .contains("mcp-param-x-trace: trace-1")
+    );
     assert!(sent_body.contains("\"progressToken\":\"t-9\""));
     assert!(request_headers.contains_key("mcp-protocol-version"));
-    transport.capture_session(&response).await.expect("session header");
+    transport
+        .capture_session(&response)
+        .await
+        .expect("session header");
     let bytes = transport
-        .read_body(response, super::RESPONSE_MAX, &CancellationToken::new(), &deadline)
+        .read_body(
+            response,
+            super::RESPONSE_MAX,
+            &CancellationToken::new(),
+            &deadline,
+        )
         .await
         .expect("bounded JSON response");
     let text = std::str::from_utf8(&bytes).expect("JSON UTF-8");
     let normalized = super::response_for_id(text, 9, 4).expect("correlated response");
     assert!(normalized.as_str().contains("\"id\":4"));
-    assert_eq!(transport.session_id.lock().await.as_deref(), Some("fixture-session"));
+    assert_eq!(
+        transport.session_id.lock().await.as_deref(),
+        Some("fixture-session")
+    );
 }
 
 #[tokio::test]
@@ -158,7 +199,10 @@ async fn consumes_request_scoped_sse_incrementally_and_extends_on_progress() {
         },
         server,
     );
-    let mut deadline = CallDeadline::new(std::time::Duration::from_secs(2), std::time::Duration::from_secs(4));
+    let mut deadline = CallDeadline::new(
+        std::time::Duration::from_secs(2),
+        std::time::Duration::from_secs(4),
+    );
     let initial_deadline = deadline.expires;
     let response = transport
         .read_event_stream(
@@ -182,5 +226,8 @@ fn validates_http_loopback_policy() {
     let remote = Url::parse("http://example.com/mcp").expect("remote URL");
     assert!(super::validate_endpoint(&loopback).is_ok());
     assert!(super::validate_endpoint(&remote).is_err());
-    assert!(super::validate_endpoint(&Url::parse("https://example.com/mcp").expect("HTTPS URL")).is_ok());
+    assert!(
+        super::validate_endpoint(&Url::parse("https://example.com/mcp").expect("HTTPS URL"))
+            .is_ok()
+    );
 }

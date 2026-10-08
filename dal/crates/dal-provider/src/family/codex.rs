@@ -273,7 +273,7 @@ async fn https_with_idle_timeout(
     let event_token = token;
     let decoded =
         responses::decode(events, Family::Codex, wire.model).map(move |event| match event {
-            Err(ProviderError::StreamCut) if *lock(&read_failed) => {
+            Err(_) if *lock(&read_failed) => {
                 let mut error = ProviderError::Transport {
                     family: Family::Codex,
                     reason: String::from("Codex response body read failed"),

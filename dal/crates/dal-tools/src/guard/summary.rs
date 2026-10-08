@@ -2,6 +2,10 @@ use std::collections::HashSet;
 
 use super::{FunctionMetrics, GuardConfig, TurnState, metrics, report};
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "turn-summary assembly is one ordered report; extracting sections hides the emit order"
+)]
 pub(super) fn build(
     cfg: &GuardConfig,
     reset_due: &mut bool,

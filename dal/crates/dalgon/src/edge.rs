@@ -5,8 +5,6 @@ use std::ffi::{OsStr, OsString};
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
-use thiserror::Error;
-
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum EdgeError {
     #[error("home directory is unavailable")]
@@ -42,7 +40,9 @@ pub(crate) struct TerminalSnapshot {
     pub width: usize,
 }
 
-#[derive(Debug, Error)]
+/// Typed failures of the Windows current-user SID probe.
+#[cfg(any(windows, test))]
+#[derive(Debug, thiserror::Error)]
 pub(crate) enum SidError {
     #[error("SystemRoot is not set to an absolute directory")]
     SystemRoot,
@@ -334,6 +334,8 @@ pub(crate) fn validate_workspace(path: PathBuf) -> Result<dal_core::Workspace, E
     }
 }
 
+/// Resolves the effective color choice for the interactive UI.
+#[cfg(feature = "tui")]
 pub(crate) fn resolve_color(
     requested: Option<crate::cli::ColorArg>,
     vars: &BTreeMap<OsString, OsString>,
@@ -357,37 +359,40 @@ pub(crate) fn resolve_color(
     }
 }
 
+/// Returns the current user's SID for naming the local RPC socket.
+///
+/// Windows probes `whoami.exe` and reports typed failures; every other
+/// platform has no SID and always yields `None`.
+#[cfg(windows)]
 pub(crate) fn current_user_sid(
     vars: &BTreeMap<OsString, OsString>,
 ) -> Result<Option<CurrentUserSid>, SidError> {
-    #[cfg(windows)]
-    {
-        let system_root = env_value(vars, "SystemRoot").map(PathBuf::from);
-        let Some(system_root) = system_root.filter(|path| path.is_absolute()) else {
-            return Err(SidError::SystemRoot);
-        };
-        let executable = system_root.join("System32").join("whoami.exe");
-        let output = run_whoami(&executable).map_err(SidError::Spawn)?;
-        if !output.status.success() {
-            return Err(SidError::Failed(output.status.code()));
-        }
-        let stdout = String::from_utf8(output.stdout)?;
-        let mut lines = stdout.lines();
-        let Some(line) = lines.next() else {
-            return Err(SidError::Csv);
-        };
-        if lines.next().is_some() {
-            return Err(SidError::Csv);
-        }
-        let fields = parse_csv_row(line)?;
-        let sid = fields.get(1).ok_or(SidError::Csv)?;
-        parse_sid(sid).map(Some)
+    let system_root = env_value(vars, "SystemRoot").map(PathBuf::from);
+    let Some(system_root) = system_root.filter(|path| path.is_absolute()) else {
+        return Err(SidError::SystemRoot);
+    };
+    let executable = system_root.join("System32").join("whoami.exe");
+    let output = run_whoami(&executable).map_err(SidError::Spawn)?;
+    if !output.status.success() {
+        return Err(SidError::Failed(output.status.code()));
     }
-    #[cfg(not(windows))]
-    {
-        let _ = vars;
-        Ok(None)
+    let stdout = String::from_utf8(output.stdout)?;
+    let mut lines = stdout.lines();
+    let Some(line) = lines.next() else {
+        return Err(SidError::Csv);
+    };
+    if lines.next().is_some() {
+        return Err(SidError::Csv);
     }
+    let fields = parse_csv_row(line)?;
+    let sid = fields.get(1).ok_or(SidError::Csv)?;
+    parse_sid(sid).map(Some)
+}
+
+#[cfg(not(windows))]
+pub(crate) fn current_user_sid(vars: &BTreeMap<OsString, OsString>) -> Option<CurrentUserSid> {
+    let _ = vars;
+    None
 }
 
 #[cfg(windows)]
@@ -398,6 +403,7 @@ fn run_whoami(executable: &Path) -> io::Result<std::process::Output> {
         .output()
 }
 
+#[cfg(any(windows, test))]
 fn parse_csv_row(row: &str) -> Result<Vec<String>, SidError> {
     let mut fields = Vec::with_capacity(2);
     let mut field = String::new();
@@ -414,7 +420,6 @@ fn parse_csv_row(row: &str) -> Result<Vec<String>, SidError> {
                 quoted = false;
                 closed_quote = true;
             }
-            (true, _, value) => field.push(value),
             (false, false, '"') if field.is_empty() => quoted = true,
             (false, false, ',') => {
                 fields.push(std::mem::take(&mut field));
@@ -423,7 +428,7 @@ fn parse_csv_row(row: &str) -> Result<Vec<String>, SidError> {
                 fields.push(std::mem::take(&mut field));
                 closed_quote = false;
             }
-            (false, false, value) => field.push(value),
+            (true, _, value) | (false, false, value) => field.push(value),
             (false, true, _) => return Err(SidError::Csv),
         }
     }
@@ -434,6 +439,7 @@ fn parse_csv_row(row: &str) -> Result<Vec<String>, SidError> {
     Ok(fields)
 }
 
+#[cfg(any(windows, test))]
 fn parse_sid(value: &str) -> Result<CurrentUserSid, SidError> {
     let Some(tail) = value.strip_prefix("S-1-") else {
         return Err(SidError::InvalidSid);
@@ -458,6 +464,7 @@ fn parse_sid(value: &str) -> Result<CurrentUserSid, SidError> {
     Ok(CurrentUserSid(value.into()))
 }
 
+#[cfg(any(windows, test))]
 fn decimal_field(value: &str) -> bool {
     !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
 }
@@ -465,12 +472,12 @@ fn decimal_field(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        EdgeError, RootPaths, decimal_field, parse_csv_row, parse_sid, resolve_color,
-        resolve_roots, resolve_workspace_path,
+        EdgeError, RootPaths, SidError, decimal_field, parse_csv_row, parse_sid, resolve_roots,
+        resolve_workspace_path,
     };
-    use crate::cli::ColorArg;
     use std::collections::BTreeMap;
     use std::ffi::{OsStr, OsString};
+    use std::io;
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -536,8 +543,12 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "tui")]
     #[test]
     fn color_precedence_uses_environment_presence_not_values() {
+        use super::resolve_color;
+        use crate::cli::ColorArg;
+
         let vars = env(&[("NO_COLOR", ""), ("FORCE_COLOR", "0"), ("TERM", "xterm")]);
         assert_eq!(resolve_color(None, &vars, true), ColorArg::Never);
         let vars = env(&[("FORCE_COLOR", "0"), ("TERM", "xterm")]);
@@ -567,6 +578,34 @@ mod tests {
         assert!(parse_sid("S-1-5").is_err());
         assert!(parse_sid("S-1-5-x").is_err());
         assert!(!decimal_field(""));
+    }
+
+    #[test]
+    fn sid_probe_failures_render_their_operational_messages() {
+        assert_eq!(
+            SidError::SystemRoot.to_string(),
+            "SystemRoot is not set to an absolute directory"
+        );
+        assert_eq!(
+            SidError::Spawn(io::Error::other("access is denied")).to_string(),
+            "cannot start whoami.exe: access is denied"
+        );
+        assert_eq!(
+            SidError::Failed(None).to_string(),
+            "whoami.exe exited with status None"
+        );
+        assert_eq!(
+            SidError::Failed(Some(1)).to_string(),
+            "whoami.exe exited with status Some(1)"
+        );
+        assert_eq!(
+            SidError::Csv.to_string(),
+            "whoami.exe returned malformed CSV"
+        );
+        assert_eq!(
+            SidError::InvalidSid.to_string(),
+            "whoami.exe did not return a valid current-user SID"
+        );
     }
 
     #[test]

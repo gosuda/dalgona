@@ -1091,3 +1091,272 @@ async fn atomic_new_preserves_existing_target() {
         "the target is never replaced"
     );
 }
+
+#[tokio::test]
+async fn closed_session_refuses_further_writes_with_a_typed_error() {
+    let (_temp, store) = setup("life-closed");
+    let id = SessionId::new_v7();
+    let mut journal = store.create_session(id);
+    journal
+        .append(vec![user(1, "before close")])
+        .await
+        .expect("append before close");
+    journal.close().await.expect("session closes");
+    let before = fs::read(store.session_file(id)).expect("read journal");
+
+    let append = journal
+        .append(vec![user(2, "after close")])
+        .await
+        .expect_err("append after close is refused");
+    assert!(
+        matches!(&append, StoreError::Invalid { reason } if reason.as_ref() == "session is closed"),
+        "got {append:?}"
+    );
+    let blob = journal
+        .put_blob(b"after close".to_vec())
+        .expect_err("blob put after close is refused");
+    assert!(
+        matches!(&blob, StoreError::Invalid { reason } if reason.as_ref() == "session is closed"),
+        "got {blob:?}"
+    );
+    journal.close().await.expect("a second close is harmless");
+    assert_eq!(
+        fs::read(store.session_file(id)).expect("reread journal"),
+        before,
+        "refused writes leave the journal untouched"
+    );
+}
+
+#[tokio::test]
+async fn creating_over_an_existing_session_fails_without_touching_it() {
+    let (_temp, store) = setup("life-duplicate");
+    let id = SessionId::new_v7();
+    let mut original = store.create_session(id);
+    original
+        .append(vec![user(1, "original")])
+        .await
+        .expect("original append");
+
+    let mut clash = store.create_session(id);
+    let locked = clash
+        .append(vec![user(1, "clash")])
+        .await
+        .expect_err("a live session id cannot be created again");
+    assert!(
+        matches!(locked, StoreError::Locked { session, .. } if session == id),
+        "got {locked:?}"
+    );
+    original.close().await.expect("original closes");
+    let before = fs::read(store.session_file(id)).expect("read journal");
+
+    let mut clash = store.create_session(id);
+    let exists = clash
+        .append(vec![user(1, "clash")])
+        .await
+        .expect_err("a stored session id cannot be created again");
+    let text = exists.to_string();
+    assert!(
+        text.contains("create") && text.contains(&store.session_file(id).display().to_string()),
+        "the failure names the operation and journal path: {text}"
+    );
+    assert_eq!(
+        fs::read(store.session_file(id)).expect("reread journal"),
+        before,
+        "the stored session is untouched"
+    );
+    drop(clash);
+    let (mut reopened, _) = store.open_session(id).await.expect("original still opens");
+    reopened.close().await.expect("session closes");
+}
+
+#[cfg(unix)]
+mod permissions {
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+
+    use super::*;
+
+    fn chmod(path: &Path, mode: u32) {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).expect("set test permissions");
+    }
+
+    fn enforced(dir: &Path) -> bool {
+        fs::File::create(dir.join("probe")).is_err()
+    }
+
+    #[tokio::test]
+    async fn unwritable_data_root_fails_the_first_append_with_the_path_and_recovers() {
+        let (temp, store) = setup("life-eacces");
+        let root = temp.path().join("data");
+        fs::create_dir_all(&root).expect("create data root");
+        chmod(&root, 0o500);
+        if !enforced(&root) {
+            chmod(&root, 0o700);
+            return;
+        }
+        let id = SessionId::new_v7();
+        let mut journal = store.create_session(id);
+        let refused = journal
+            .append(vec![user(1, "no room")])
+            .await
+            .expect_err("a read-only data root refuses the first write");
+        chmod(&root, 0o700);
+        assert!(
+            matches!(&refused, StoreError::Io { path, source }
+                if path.starts_with(&root) && source.kind() == std::io::ErrorKind::PermissionDenied),
+            "typed Io naming a path under the root, got {refused:?}"
+        );
+        assert!(!store.session_file(id).exists(), "no journal was created");
+        journal
+            .append(vec![user(1, "room now")])
+            .await
+            .expect("the same session retries once the cause is removed");
+        journal.close().await.expect("session closes");
+    }
+
+    #[tokio::test]
+    async fn unreadable_journal_fails_open_with_the_path_and_releases_the_lock() {
+        let (_temp, store) = setup("life-eacces-open");
+        let id = SessionId::new_v7();
+        let mut journal = store.create_session(id);
+        journal
+            .append(vec![user(1, "sealed")])
+            .await
+            .expect("append");
+        journal.close().await.expect("session closes");
+        let path = store.session_file(id);
+        chmod(&path, 0o000);
+        if fs::File::open(&path).is_ok() {
+            chmod(&path, 0o600);
+            return;
+        }
+        let refused = store
+            .open_session(id)
+            .await
+            .expect_err("an unreadable journal is not opened");
+        let text = refused.to_string();
+        assert!(
+            text.contains("open") && text.contains(&path.display().to_string()),
+            "names the operation and path: {text}"
+        );
+        chmod(&path, 0o600);
+        let (mut reopened, _) = store
+            .open_session(id)
+            .await
+            .expect("the failed open did not leak the session lock");
+        reopened.close().await.expect("session closes");
+    }
+
+    #[tokio::test]
+    async fn delete_refused_by_permissions_reports_the_session_directory() {
+        let (_temp, store) = setup("life-eacces-delete");
+        let id = SessionId::new_v7();
+        let mut journal = store.create_session(id);
+        journal.append(vec![user(1, "keep")]).await.expect("append");
+        journal.close().await.expect("session closes");
+        let session_dir = store
+            .session_file(id)
+            .parent()
+            .expect("journal has a directory")
+            .to_path_buf();
+        let workspace_dir = session_dir
+            .parent()
+            .expect("session has a parent")
+            .to_path_buf();
+        chmod(&workspace_dir, 0o500);
+        if !enforced(&workspace_dir) {
+            chmod(&workspace_dir, 0o700);
+            return;
+        }
+        let refused = store
+            .delete(id)
+            .expect_err("delete cannot remove the directory");
+        chmod(&workspace_dir, 0o700);
+        assert!(
+            matches!(&refused, StoreError::Io { path, .. } if path == &session_dir),
+            "typed Io naming the session directory, got {refused:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn unknown_session_is_reported_with_its_path_and_creates_nothing() {
+    let (temp, store) = setup("life-unknown");
+    let id = SessionId::new_v7();
+    let opened = store.open_session(id).await.expect_err("no such session");
+    assert!(
+        matches!(&opened, StoreError::NotFound { path } if *path == store.session_file(id)),
+        "got {opened:?}"
+    );
+    let deleted = store.delete(id).expect_err("no such session");
+    assert!(
+        matches!(&deleted, StoreError::NotFound { path } if *path == store.session_file(id)),
+        "got {deleted:?}"
+    );
+    assert!(
+        !temp.path().join("data").exists(),
+        "failed lookups create no directories"
+    );
+}
+
+#[tokio::test]
+async fn dropped_journal_releases_its_lock_and_keeps_acknowledged_records() {
+    let (_temp, store) = setup("life-drop");
+    let id = SessionId::new_v7();
+    let mut journal = store.create_session(id);
+    journal
+        .append(vec![user(1, "acknowledged")])
+        .await
+        .expect("append is durable");
+    drop(journal);
+    let (mut reopened, _) = store
+        .open_session(id)
+        .await
+        .expect("a dropped journal frees the session");
+    assert!(
+        reopened.records().iter().any(|record| matches!(
+            record,
+            Record::User(entry) if entry.id == EntryId::new(NonZeroU64::new(1).expect("nonzero"))
+        )),
+        "the acknowledged record replays"
+    );
+    reopened.close().await.expect("session closes");
+}
+
+#[tokio::test]
+async fn sidecar_cannot_overwrite_the_sessions_own_files() {
+    let (_temp, store) = setup("life-sidecar");
+    let id = SessionId::new_v7();
+    let mut journal = store.create_session(id);
+    journal
+        .append(vec![user(1, "live")])
+        .await
+        .expect("append materializes the session");
+    let before = fs::read(store.session_file(id)).expect("read journal");
+    let sidecar = journal
+        .sidecar()
+        .expect("file-backed session has a sidecar");
+
+    for name in ["journal.jsonl", "lock", "info.json", "blobs", "jobs"] {
+        let refused = sidecar
+            .write(name, b"clobber")
+            .expect_err("a reserved layout name is refused");
+        assert!(
+            matches!(&refused, StoreError::Invalid { reason } if reason.contains(name)),
+            "{name}: got {refused:?}"
+        );
+        assert!(
+            matches!(sidecar.read(name), Err(StoreError::Invalid { .. })),
+            "{name}: reads are refused too"
+        );
+    }
+    assert_eq!(
+        fs::read(store.session_file(id)).expect("reread journal"),
+        before,
+        "the journal is untouched"
+    );
+    sidecar
+        .write("notes", b"fine")
+        .expect("ordinary names still work");
+    journal.close().await.expect("session closes");
+}

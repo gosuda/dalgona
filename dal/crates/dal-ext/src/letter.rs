@@ -360,7 +360,7 @@ impl Hook<InputEvent, InputVerdict> for FirstInputHook {
         let registry = Arc::clone(&self.registry);
         let font = Arc::clone(&self.font);
         Box::pin(
-            async move { handle_first_input(cx.session, input.content, registry, font, cx).await },
+            async move { handle_first_input(&cx.session, &input.content, &registry, &font, &cx) },
         )
     }
 }
@@ -376,19 +376,18 @@ impl Hook<InputEvent, InputVerdict> for FirstInputHook {
 ///
 /// Returns [`HookError::Cancelled`] when the turn is cancelled and
 /// [`HookError::Failed`] when the font table fails to parse.
-pub async fn handle_first_input(
-    session: SessionId,
-    user_parts: Vec<Part>,
-    registry: Arc<crate::skills::SkillRegistry>,
-    font: Arc<Font>,
-    cx: HookCx,
+pub fn handle_first_input(
+    session: &SessionId,
+    _user_parts: &[Part],
+    registry: &crate::skills::SkillRegistry,
+    font: &Font,
+    cx: &HookCx,
 ) -> Result<InputVerdict, HookError> {
-    debug_assert_eq!(session, cx.session);
-    let _ = user_parts;
+    debug_assert_eq!(session, &cx.session);
     if cx.cancel.is_cancelled() {
         return Err(HookError::Cancelled);
     }
-    let assembly = match letters(&registry, &font) {
+    let assembly = match letters(registry, font) {
         Ok(assembly) => assembly,
         Err(error) => {
             return Err(HookError::Failed {

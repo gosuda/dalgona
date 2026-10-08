@@ -105,6 +105,7 @@ impl Hook<BeforeTurn, Option<String>> for BeforeTurnHook {
                 calls: HashMap::new(),
                 first_pre: BTreeMap::new(),
                 last_post: BTreeMap::new(),
+                inspected: HashMap::new(),
                 bands: Vec::new(),
                 warnings: Vec::new(),
                 stream_counts: BTreeMap::new(),

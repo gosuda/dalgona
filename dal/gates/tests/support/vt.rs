@@ -9,6 +9,9 @@
 
 use unicode_width::UnicodeWidthChar;
 
+/// Cursor and scroll state captured when the alternate screen buffer activates.
+type SavedAlternate = (Vec<Vec<String>>, usize, usize, usize, usize);
+
 /// Terminal grid and control-state recorder for the byte subset emitted by dal-tui.
 ///
 /// The model uses xterm cursor and scroll-region semantics, disables reflow, and
@@ -25,7 +28,7 @@ pub struct VtRecorder {
     scroll_top: usize,
     scroll_bottom: usize,
     wrap_pending: bool,
-    alternate: Option<(Vec<Vec<String>>, usize, usize, usize, usize)>,
+    alternate: Option<SavedAlternate>,
     pending: Vec<u8>,
     sync_open: bool,
     sync_pairs: usize,
@@ -492,7 +495,6 @@ fn blank_row(columns: usize) -> Vec<String> {
 
 fn utf8_width(first: u8) -> usize {
     match first {
-        0x00..=0x7f => 1,
         0xc2..=0xdf => 2,
         0xe0..=0xef => 3,
         0xf0..=0xf4 => 4,

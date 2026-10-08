@@ -1,8 +1,11 @@
-#![expect(clippy::unwrap_used, reason = "SC test")]
-#![expect(clippy::expect_used, reason = "SC test")]
+//! Cold plugin errors report the Starlark path, line, and column.
 #![expect(
     clippy::disallowed_methods,
     reason = "SC test invokes the real startup path"
+)]
+#![expect(
+    dead_code,
+    reason = "gate support exposes helpers shared across independent targets"
 )]
 
 mod support;

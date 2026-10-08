@@ -5,6 +5,7 @@
 )]
 
 use std::{
+    fmt::Write as _,
     fs::{File, OpenOptions},
     io::{self, Read, Write},
     path::Path,
@@ -197,10 +198,12 @@ impl Drop for PtyProcess {
 pub fn dalgon_command(home: &Path, replies: &[&str]) -> io::Result<Command> {
     let mut contents = String::new();
     for reply in replies {
-        contents.push_str(&format!(
-            "{{\"kind\":\"events\",\"events\":[{{\"type\":\"text_delta\",\"text\":{}}},{{\"type\":\"tool_calls_done\",\"calls\":[]}},{{\"type\":\"usage\",\"usage\":{{\"input_tokens\":12,\"cached_input_tokens\":0,\"output_tokens\":5,\"reasoning_tokens\":null,\"cache_write_tokens\":0,\"cost_usd\":null}}}},{{\"type\":\"stop\",\"reason\":\"end_turn\"}}]}}\n",
+        writeln!(
+            contents,
+            "{{\"kind\":\"events\",\"events\":[{{\"type\":\"text_delta\",\"text\":{}}},{{\"type\":\"tool_calls_done\",\"calls\":[]}},{{\"type\":\"usage\",\"usage\":{{\"input_tokens\":12,\"cached_input_tokens\":0,\"output_tokens\":5,\"reasoning_tokens\":null,\"cache_write_tokens\":0,\"cost_usd\":null}}}},{{\"type\":\"stop\",\"reason\":\"end_turn\"}}]}}",
             sonic_rs::to_string(reply).map_err(io::Error::other)?
-        ));
+        )
+        .map_err(io::Error::other)?;
     }
     dalgon_command_with_fixture(home, &contents)
 }

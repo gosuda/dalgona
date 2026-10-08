@@ -249,7 +249,7 @@ impl Store {
         blob::put(&dir, bytes)
     }
 
-    /// Deletes a session tree after obtaining its nonblocking session lock.
+    /// Deletes a session tree after obtaining its session lock.
     ///
     /// # Errors
     /// Returns [`StoreError::Locked`] without changing the tree when an actor owns the lock.
@@ -850,6 +850,7 @@ impl Journal {
 
         if matches!(&self.state, State::Lazy { .. }) {
             if !has_user_in_batch {
+                encode_records(&records)?;
                 let State::Lazy { blobs } = &mut self.state else {
                     unreachable!("lazy state was checked above");
                 };

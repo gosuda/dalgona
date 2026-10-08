@@ -1,4 +1,6 @@
-mod support;
+//! Scripted hook events run through the host agent loop and return verdicts.
+
+pub mod support;
 
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -188,13 +190,11 @@ async fn lifecycle_notices(
     let mut subscription = agent.subscribe(None)?;
     let mut notices = Vec::new();
     let deadline = tokio::time::Instant::now() + window;
-    loop {
-        match tokio::time::timeout_at(deadline, subscription.next()).await {
-            Ok(Some(Delivery::Update(update))) => match &update.kind {
-                UpdateKind::Notice(notice) => notices.push(notice.text.to_string()),
-                _ => {}
-            },
-            _ => break,
+    while let Ok(Some(Delivery::Update(update))) =
+        tokio::time::timeout_at(deadline, subscription.next()).await
+    {
+        if let UpdateKind::Notice(notice) = &update.kind {
+            notices.push(notice.text.to_string());
         }
     }
     let _ = host.shutdown(Duration::from_secs(2)).await;

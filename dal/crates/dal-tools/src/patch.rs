@@ -23,6 +23,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
+use dal_agent::ToolError;
 use dal_agent::ext::tool::ArgError;
 use dal_agent::ext::{BoxFuture, Tool, ToolCall, ToolCx, ToolOutcome, ToolOutput};
 use dal_core::{
@@ -169,7 +170,7 @@ impl Tool for PatchTool {
 /// directly. Returns a registration error instead of panicking on fixed
 /// schema literals.
 pub(crate) fn tool(
-    edit_style: EditStyleInput,
+    edit_style: &EditStyleInput,
     index: Arc<crate::search::index::Index>,
     seen: Arc<crate::Seen>,
     snapshots: Arc<snapshot::SnapshotStore>,
@@ -177,7 +178,7 @@ pub(crate) fn tool(
     search_symbols: Arc<AtomicBool>,
 ) -> Result<Arc<dyn dal_agent::ext::Tool>, dal_core::RegistrationError> {
     let name = dal_core::Name::parse("patch")?;
-    let config = parse_edit_style(&edit_style).map_err(|_| RegistrationError::InvalidParameters)?;
+    let config = parse_edit_style(edit_style).map_err(|_| RegistrationError::InvalidParameters)?;
     // Fixed replace schema bytes from the plan (symbols-off).
     let schema_text = r#"{"type":"object","properties":{"changes":{"type":"array","minItems":1,"maxItems":64,"items":{"type":"object","properties":{"path":{"type":"string","description":"File to change."},"old":{"type":"string","description":"Exact text to replace, copied from read or search output without the <n>: prefixes."},"line":{"type":"integer","minimum":1,"description":"Line where old starts. Needed only when old occurs more than once."},"all":{"type":"boolean","description":"true replaces every occurrence of old. Needs tag."},"new":{"type":"string","description":"Replacement text. Empty removes old."},"tag":{"type":"string","description":"Tag printed with the whole text you replace."},"create":{"type":"string","description":"Content of a new file at path."},"delete":{"type":"boolean","description":"true removes the file at path."},"rename":{"type":"string","description":"New path for the file."}},"required":["path"],"additionalProperties":false}}},"required":["changes"],"additionalProperties":false}"#;
     let parameters =
@@ -289,7 +290,7 @@ impl PatchTool {
                 // owner supplies the exact dirty handle once its public API lands).
                 ToolOutcome::Ok(ToolOutput::from_text(text.as_str()))
             }
-            Err(deny) => ToolOutcome::Ok(ToolOutput::from_text(format!("patch denied: {deny:?}"))),
+            Err(deny) => ToolOutcome::Err(ToolError::Denied(deny)),
         }
     }
 

@@ -1,3 +1,4 @@
+//! Validates the release distribution plan, binstall URLs, and archives.
 use std::{
     collections::{BTreeMap, HashSet},
     error::Error,
@@ -10,6 +11,10 @@ use serde::Deserialize;
 
 #[derive(Deserialize)]
 struct DistManifest {
+    #[expect(
+        clippy::zero_sized_map_values,
+        reason = "the plan check only needs artifact names, never their payloads"
+    )]
     artifacts: BTreeMap<String, serde::de::IgnoredAny>,
 }
 
@@ -87,6 +92,10 @@ fn dal_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the dist gate probes the real cargo-dist binary"
+)]
 fn dist_ready() -> Result<bool, Box<dyn Error>> {
     let output = match Command::new("dist").arg("--version").output() {
         Ok(output) => output,
@@ -107,6 +116,10 @@ enum Plan {
     Skip,
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the dist gate shells out to the real cargo-dist binary"
+)]
 fn load_plan(workspace: &Path, what: &str) -> Result<Plan, Box<dyn Error>> {
     let output = Command::new("dist")
         .args(["plan", "--output-format=json"])
@@ -158,6 +171,10 @@ fn assert_manifest_artifacts(product: &str, manifest: &DistManifest) {
     );
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the dist gate reads the real cargo metadata"
+)]
 fn cargo_package(workspace: &Path, name: &str) -> Result<CargoPackage, Box<dyn Error>> {
     let output = Command::new("cargo")
         .args([
@@ -347,6 +364,10 @@ fn release_binstall_url_expansion() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the dist gate shells out to the real cargo-dist binary"
+)]
 fn release_tag_version_mismatch() -> Result<(), Box<dyn Error>> {
     if !dist_ready()? {
         eprintln!("skipped release_tag_version_mismatch: cargo-dist 0.32.0 is not installed");
@@ -367,6 +388,10 @@ fn release_tag_version_mismatch() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the dist gate builds and unpacks a real release archive"
+)]
 fn release_archive_members_exact() -> Result<(), Box<dyn Error>> {
     if !dist_ready()? {
         eprintln!("skipped release_archive_members_exact: cargo-dist 0.32.0 is not installed");

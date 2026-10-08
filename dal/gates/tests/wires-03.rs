@@ -1,5 +1,8 @@
-#![expect(clippy::unwrap_used, reason = "SC test")]
-#![expect(clippy::expect_used, reason = "SC test")]
+//! Unknown update variants map to a fallback entry and the turn continues.
+#![expect(
+    dead_code,
+    reason = "gate support exposes helpers shared across independent targets"
+)]
 
 mod support;
 
@@ -60,17 +63,17 @@ async fn unknown_update_variant_maps_to_fallback_and_turn_continues()
     assert!(matches!(reply, Reply::Accepted { .. }));
     let mut ended = false;
     while let Some(delivery) = subscription.next().await {
-        if let Delivery::Update(update) = delivery {
-            if matches!(
+        if let Delivery::Update(update) = delivery
+            && matches!(
                 update.kind,
                 UpdateKind::TurnEnded {
                     stop: Stop::EndTurn,
                     ..
                 }
-            ) {
-                ended = true;
-                break;
-            }
+            )
+        {
+            ended = true;
+            break;
         }
     }
     assert!(ended);

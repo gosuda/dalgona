@@ -8,6 +8,9 @@ use crate::{
     util::{self, FileMode},
 };
 
+/// Names the session layout owns; a sidecar of the same name would replace live session state.
+const RESERVED: [&str; 5] = ["journal.jsonl", "lock", "info.json", "blobs", "jobs"];
+
 /// Reads and atomically writes private files within one file-backed session.
 #[derive(Debug)]
 pub struct Sidecar<'session> {
@@ -57,6 +60,12 @@ impl<'session> Sidecar<'session> {
         if !valid {
             return Err(StoreError::Invalid {
                 reason: "sidecar name must be 1 to 64 ASCII alphanumeric, '.', '_', or '-' characters and must not start with '.'".into(),
+            });
+        }
+        if RESERVED.contains(&name) {
+            return Err(StoreError::Invalid {
+                reason: format!("sidecar name {name:?} is reserved for the session's own files")
+                    .into(),
             });
         }
         Ok(self.paths.sidecar(name))

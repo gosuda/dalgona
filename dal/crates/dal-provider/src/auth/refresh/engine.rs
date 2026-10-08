@@ -5,7 +5,7 @@
 
 use std::{
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, LazyLock},
 };
 
 use serde::{Deserialize, Serialize};
@@ -36,7 +36,7 @@ use crate::{
 /// mutexes. It holds no secret itself.
 #[derive(Debug)]
 pub struct Refresher {
-    client: reqwest::Client,
+    client: LazyLock<reqwest::Client, fn() -> reqwest::Client>,
     user_agent: Box<str>,
     auth_path: PathBuf,
     endpoints: TokenEndpoints,
@@ -44,38 +44,43 @@ pub struct Refresher {
     openai_codex: Arc<Mutex<()>>,
 }
 
+/// Builds the redirect-free client one [`Refresher`] uses.
+///
+/// # Panics
+///
+/// Panics when reqwest cannot initialize its TLS backend, which only a broken
+/// build configuration causes.
+#[expect(
+    clippy::expect_used,
+    reason = "the builder fails only when the compiled TLS backend cannot initialize"
+)]
+fn refresh_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .referer(false)
+        .retry(reqwest::retry::never())
+        .build()
+        .expect("the reqwest TLS backend initializes")
+}
+
 impl Refresher {
     /// A refresher for the `auth.json` at `auth_path` that sends refresh
     /// requests with `user_agent` to `endpoints`.
     ///
-    /// It builds its own client, which follows no redirect: a refresh body
-    /// carries the refresh token, and reqwest resends a body on a 307 or 308
-    /// to whatever host the redirect names. A 3xx answer is a
+    /// Its client is built by the first refresh, not here, because building
+    /// one parses the platform trust roots. It follows no redirect: a refresh
+    /// body carries the refresh token, and reqwest resends a body on a 307 or
+    /// 308 to whatever host the redirect names. A 3xx answer is a
     /// [`ProviderError::Status`] instead.
-    ///
-    /// # Panics
-    ///
-    /// Panics when reqwest cannot initialize its TLS backend, which only a
-    /// broken build configuration causes.
     #[must_use]
-    #[expect(
-        clippy::expect_used,
-        reason = "the builder fails only when the compiled TLS backend cannot initialize"
-    )]
     pub fn new(
         user_agent: impl Into<Box<str>>,
         auth_path: impl Into<PathBuf>,
         endpoints: TokenEndpoints,
     ) -> Self {
-        let client = reqwest::Client::builder()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .redirect(reqwest::redirect::Policy::none())
-            .referer(false)
-            .retry(reqwest::retry::never())
-            .build()
-            .expect("the reqwest TLS backend initializes");
         Self {
-            client,
+            client: LazyLock::new(refresh_client),
             user_agent: user_agent.into(),
             auth_path: auth_path.into(),
             endpoints,

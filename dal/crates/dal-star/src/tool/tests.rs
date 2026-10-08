@@ -118,3 +118,105 @@ fn shell_substitution_text_is_rejected_as_an_invalid_integer() {
 
     assert_eq!(error.to_string(), "`$(id)` is not an integer for `count`");
 }
+
+fn bind_error(tail: &str) -> String {
+    let plugin = loaded_plugin();
+    bind_command(tail, &["path".into()], command_schema(&plugin))
+        .expect_err("the tail must be rejected")
+        .to_string()
+}
+
+#[test]
+fn command_binding_rejects_each_malformed_tail_with_a_named_reason() {
+    let cases = [
+        ("", "missing positional arguments: path"),
+        ("a b", "unexpected argument `b`"),
+        ("a --bogus", "unknown option `--bogus`"),
+        ("a --no-bogus", "unknown option `--bogus`"),
+        ("a --count", "`--count` expects a value"),
+        ("a --count=x", "`x` is not an integer for `count`"),
+        ("a --count=1.5", "`1.5` is not an integer for `count`"),
+        (
+            "a --count=9223372036854775808",
+            "not an integer for `count`",
+        ),
+        ("a --enabled=true", "boolean `--enabled` takes no value"),
+        ("a --no-count", "unknown option `--no-count`"),
+        ("a --path=b", "field `path` assigned more than once"),
+        (
+            "a --count=1 --count=2",
+            "field `count` assigned more than once",
+        ),
+    ];
+    for (tail, reason) in cases {
+        let message = bind_error(tail);
+        assert!(message.contains(reason), "{tail:?}: {message}");
+    }
+}
+
+#[test]
+fn double_dash_ends_option_parsing_for_positional_values() {
+    let plugin = loaded_plugin();
+    let args = bind_command("-- --dashed", &["path".into()], command_schema(&plugin))
+        .expect("a `--` tail makes the next token positional");
+    assert!(
+        args.to_json().contains("\"path\":\"--dashed\""),
+        "{}",
+        args.to_json()
+    );
+}
+
+#[test]
+fn command_and_model_paths_agree_on_the_signed_53_bit_integer_bound() {
+    let plugin = loaded_plugin();
+    let export = plugin
+        .exports
+        .iter()
+        .find(|export| export.id.kind == ExportKind::Tool)
+        .expect("tool export");
+    let ExportBody::Tool { schema, .. } = &export.body;
+    for (count, fits) in [
+        ("9007199254740990", true),
+        ("9007199254740991", true),
+        ("9007199254740992", false),
+        ("-9007199254740991", true),
+        ("-9007199254740992", false),
+    ] {
+        let model = decode_args(&format!(r#"{{"path":"p","count":{count}}}"#), schema);
+        let command = bind_command(
+            &format!("p --count={count}"),
+            &["path".into()],
+            command_schema(&plugin),
+        );
+        assert_eq!(model.is_ok(), fits, "model path {count}: {model:?}");
+        assert_eq!(command.is_ok(), fits, "command path {count}: {command:?}");
+    }
+}
+
+#[test]
+fn non_finite_and_malformed_model_arguments_are_rejected() {
+    let plugin = loaded_plugin();
+    let export = plugin
+        .exports
+        .iter()
+        .find(|export| export.id.kind == ExportKind::Tool)
+        .expect("tool export");
+    let ExportBody::Tool { schema, .. } = &export.body;
+    for raw in [
+        "",
+        "{",
+        "[]",
+        "null",
+        r#"{"path":"p","count":"3"}"#,
+        r#"{"path":"p","count":3.0}"#,
+        r#"{"path":"p","enabled":1}"#,
+        r#"{"path":"p","extra":1}"#,
+        r#"{"path":"p","path":"q"}"#,
+        r#"{"path":null}"#,
+    ] {
+        assert!(
+            decode_args(raw, schema).is_err(),
+            "{raw:?} must be rejected"
+        );
+    }
+}

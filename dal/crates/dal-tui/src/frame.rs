@@ -171,9 +171,9 @@ impl Default for Coalescer {
 }
 
 impl Coalescer {
-    /// Enqueues an update, merging adjacent text deltas and replacing progress by call id.
+    /// Enqueues an update, merging adjacent text deltas, replacing progress by call id, and shedding the oldest entry when the queue is full.
     pub fn push_update(&mut self, update: Update) {
-        if coalesce_update(&mut self.updates, update.clone()) {
+        if coalesce_update(&mut self.updates, &update) {
             return;
         }
         let incoming_class = classify(&update.kind);
@@ -188,6 +188,9 @@ impl Coalescer {
             } else if incoming_class == QueueClass::Replaceable {
                 self.shed = self.shed.saturating_add(1);
                 return;
+            } else {
+                self.updates.pop_front();
+                self.shed = self.shed.saturating_add(1);
             }
         }
         self.updates.push_back(update);
@@ -225,7 +228,7 @@ fn classify(kind: &UpdateKind) -> QueueClass {
     }
 }
 
-fn coalesce_update(queue: &mut VecDeque<Update>, incoming: Update) -> bool {
+fn coalesce_update(queue: &mut VecDeque<Update>, incoming: &Update) -> bool {
     let UpdateKind::Delta {
         turn,
         channel,

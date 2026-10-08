@@ -1,8 +1,11 @@
-#![expect(clippy::unwrap_used, reason = "SC test")]
-#![expect(clippy::expect_used, reason = "SC test")]
+//! Public serve replacement needs an owner-only token and the force flag.
 #![expect(
     clippy::disallowed_methods,
     reason = "SC test exercises real server commands"
+)]
+#![expect(
+    dead_code,
+    reason = "gate support exposes helpers shared across independent targets"
 )]
 
 mod support;

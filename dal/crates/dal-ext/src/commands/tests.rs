@@ -80,11 +80,11 @@ fn registry_order() {
             single_instance: false,
         }
     );
-    assert_eq!(BUILTINS[5].single_instance, true);
-    assert_eq!(BUILTINS[15].single_instance, true);
-    assert_eq!(BUILTINS[20].single_instance, true);
-    assert_eq!(BUILTINS[22].single_instance, true);
-    assert_eq!(BUILTINS[14].single_instance, false);
+    assert!(BUILTINS[5].single_instance);
+    assert!(BUILTINS[15].single_instance);
+    assert!(BUILTINS[20].single_instance);
+    assert!(BUILTINS[22].single_instance);
+    assert!(!BUILTINS[14].single_instance);
 }
 
 #[test]
@@ -575,14 +575,14 @@ fn refusals_and_front_data() {
     use super::session::{hotkeys, new_session};
 
     assert_eq!(
-        share().unwrap(),
+        share(),
         Reply::Done(Output::Text(
             "/share is not in dalgon: dalgon uploads no session data to any service\nType /export to write the session to a file, then share the file yourself."
                 .into(),
         ))
     );
     assert_eq!(
-        bug().unwrap(),
+        bug(),
         Reply::Done(Output::Text(
             "/bug is not in dalgon: dalgon sends no reports or session data to its developers\nType /export to write the session to a file, and attach it with the log path from /session to your report."
                 .into(),
@@ -635,7 +635,7 @@ fn reload_publish_failure() {
     let error =
         BuildError::validation(dal_core::RegistrationError::InvalidName { name: "x".into() });
     assert_eq!(
-        publish_failure(error),
+        publish_failure(&error),
         triple(
             "reload failed",
             "invalid name \"x\"; names must match [a-z][a-z0-9_-]{0,63}",

@@ -1,6 +1,7 @@
 //! Tests for the workspace index.
 
 use std::collections::BTreeSet;
+use std::fmt::Write as _;
 
 use super::build::build_dir;
 use super::store::{EXTRA, FILES, HEADER_LEN, META, POSTINGS, STAMPS};
@@ -353,11 +354,13 @@ async fn build_budgets() {
             state ^= state << 13;
             state ^= state >> 7;
             state ^= state << 17;
-            body.push_str(&format!(
-                "let ident_{:x} = call_{}();\n",
-                state & 0xFFFF_FF,
+            let _ = write!(
+                body,
+                "let ident_{:x} = call_{}();",
+                state & 0x00FF_FFFF,
                 state % 997
-            ));
+            );
+            body.push('\n');
         }
         fs::write(dir.join(format!("f{n}.rs")), body).unwrap();
     }

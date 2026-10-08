@@ -1,6 +1,9 @@
-#![expect(clippy::unwrap_used, reason = "SC test")]
+//! Gate-full scenario 8: mailbox FIFO cursor reads with full-or-gone receipts.
 #![expect(clippy::expect_used, reason = "SC test")]
-#![expect(missing_docs, reason = "SC test")]
+#![expect(
+    dead_code,
+    reason = "gate support exposes helpers shared across independent targets"
+)]
 
 mod support;
 
@@ -23,9 +26,9 @@ use dal_agent::{
 };
 use dal_core::ext::Mail;
 use dal_core::{
-    AgentStart, AgentsOp, AgentsReply, CallId, CancelScope, ClientId, Command, CommandName,
-    CommandSpec, Config, ConfigProduct, Expect, MailMode, Output, PageReq, Part, Receipt, Reply,
-    RequestParams, Service, ServiceSet, Workspace,
+    AgentStart, AgentsOp, AgentsReply, CallId, ClientId, Command, CommandName, CommandSpec, Config,
+    ConfigProduct, MailMode, Output, PageReq, Receipt, Reply, RequestParams, Service, ServiceSet,
+    Workspace,
 };
 use support::{TestDir, scripted_session};
 use tokio::sync::watch;
@@ -161,6 +164,10 @@ impl Hook<dal_core::ext::BeforeRequest, Option<RequestParams>> for MailboxHook {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the mailbox probe walks parent, child, and receipt delivery in one helper"
+)]
 async fn run_mailbox_probe(
     state: &MailboxState,
     services: &Arc<dyn Services>,
@@ -493,14 +500,16 @@ fn hook_failure(message: impl Into<Box<str>>) -> HookError {
 
 const fn expected_receipt(mode: MailMode) -> Receipt {
     match mode {
-        MailMode::Aside => Receipt::Delivered,
-        MailMode::Steer => Receipt::Delivered,
-        MailMode::NextTurn => Receipt::Buffered,
+        MailMode::Aside | MailMode::Steer => Receipt::Delivered,
         _ => Receipt::Buffered,
     }
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the fifo mailbox scenario covers cursor reads and both overflow paths in one walkthrough"
+)]
 async fn mailbox_is_fifo_cursor_read_and_reports_full_or_gone()
 -> Result<(), Box<dyn Error + Send + Sync>> {
     let data = TestDir::new()?;

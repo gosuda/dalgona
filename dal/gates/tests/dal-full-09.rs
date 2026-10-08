@@ -1,5 +1,5 @@
+//! Verifies gates sources never leak private planning paths or row citations.
 #![expect(clippy::unwrap_used, reason = "SC test")]
-#![expect(clippy::expect_used, reason = "SC test")]
 #![expect(
     clippy::disallowed_methods,
     reason = "SC test inspects tracked public content"
@@ -155,29 +155,35 @@ fn assert_public_content_is_private_free(path: &[u8], display_path: &Path, conte
 
     assert!(
         !contains(path, local_prefix.as_bytes()),
-        "private path in {display_path:?}"
+        "private path in {}",
+        display_path.display()
     );
     assert!(
         !contains(content, local_prefix.as_bytes()),
-        "private path in {display_path:?}"
+        "private path in {}",
+        display_path.display()
     );
     for filename in planning_files {
         assert!(
             !contains(path, filename.as_bytes()),
-            "planning filename in {display_path:?}"
+            "planning filename in {}",
+            display_path.display()
         );
         assert!(
             !contains(content, filename.as_bytes()),
-            "planning filename in {display_path:?}"
+            "planning filename in {}",
+            display_path.display()
         );
     }
     assert!(
         !has_row_number(path),
-        "planning citation in {display_path:?}"
+        "planning citation in {}",
+        display_path.display()
     );
     assert!(
         !has_row_number(content),
-        "planning citation in {display_path:?}"
+        "planning citation in {}",
+        display_path.display()
     );
 }
 
@@ -189,7 +195,7 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 }
 
 fn has_row_number(bytes: &[u8]) -> bool {
-    let prefix = [b'r', b'o', b'w', b' '];
+    let prefix = b"row ";
     for (index, window) in bytes.windows(prefix.len()).enumerate() {
         if window != prefix {
             continue;

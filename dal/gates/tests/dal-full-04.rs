@@ -1,9 +1,13 @@
-#![expect(clippy::unwrap_used, reason = "SC test")]
+//! Gate-full scenario 4: extension removal and headless surface probes.
 #![expect(clippy::expect_used, reason = "SC test")]
+#![expect(
+    dead_code,
+    reason = "gate support exposes helpers shared across independent targets"
+)]
 
 mod support;
 
-use std::{error::Error, fs, io, path::PathBuf, time::Duration};
+use std::{collections::BTreeMap, error::Error, fs, io, path::PathBuf, time::Duration};
 
 use dal_agent::{Agent, Delivery, Env, SessionRef};
 use dal_core::{
@@ -130,7 +134,7 @@ async fn rpc_probe(host: dal_agent::Host) -> Result<(), Box<dyn Error + Send + S
             response
                 .get("result")
                 .and_then(|result| result.get("protocolVersion"))
-                .and_then(|value| value.as_i64()),
+                .and_then(sonic_rs::Value::as_i64),
             Some(1),
             "{response}"
         );
@@ -177,7 +181,7 @@ async fn probe_without(extension_name: &str) -> Result<(), Box<dyn Error + Send 
         .extensions
         .iter()
         .find(|extension| extension.name() == "focus")
-        .unwrap();
+        .expect("focus plugin loaded");
     assert_eq!(focus.version(), "0.1.0");
     let present = product
         .extensions
@@ -194,7 +198,7 @@ async fn probe_without(extension_name: &str) -> Result<(), Box<dyn Error + Send 
         .retain(|extension| extension.name() != extension_name);
     assert_eq!(product.extensions.len() + 1, original_len);
     let env = Env {
-        vars: Default::default(),
+        vars: BTreeMap::default(),
         cwd: workspace.path().to_path_buf(),
         sandbox_helper: None,
     };

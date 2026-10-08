@@ -442,6 +442,20 @@ struct Inner {
 impl Drop for Inner {
     fn drop(&mut self) {
         self.shared.ledger.cancel.cancel();
+        let handles = std::mem::take(&mut locked(&self.shared.book).all);
+        for handle in handles {
+            let state = &handle.state;
+            if terminal(*state.status.borrow()) {
+                continue;
+            }
+            state.cancel.cancel();
+            *locked(&state.result) = Some(Err(ScopeError::Cancelled));
+            state.status.send_replace(HandleStatus::Cancelled);
+            self.shared.progress.send_if_modified(|count| {
+                *count += 1;
+                true
+            });
+        }
     }
 }
 

@@ -413,8 +413,9 @@ impl dal_agent::ext::SchemeResolver for DalScheme {
                 }],
             };
             match lookup(&snap, &uri) {
-                Lookup::Page { uri, text, .. } => Ok(dal_agent::ext::Doc::new(uri, text)),
-                Lookup::Index { uri, text } => Ok(dal_agent::ext::Doc::new(uri, text)),
+                Lookup::Page { uri, text, .. } | Lookup::Index { uri, text } => {
+                    Ok(dal_agent::ext::Doc::new(uri, text))
+                }
                 Lookup::Miss(miss) => match read_miss_line(&miss) {
                     // The miss text is the scheme's ordinary product text, so
                     // the read tool prints the fixed hint, not a bare miss.

@@ -18,7 +18,9 @@ fn done_output(reply: Reply) -> support::TestResult<Output> {
 fn plan_and_todos_commands_use_a_real_session_journal() -> support::TestResult<()> {
     let scratch = support::Scratch::new("work-session-commands")?;
     let root = scratch.path().to_path_buf();
-    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
     runtime.block_on(async {
         let host = support::start_dalgona(root.clone()).await?;
         let workspace = Workspace::new(root)?;
@@ -51,7 +53,10 @@ fn plan_and_todos_commands_use_a_real_session_journal() -> support::TestResult<(
         )?;
         assert!(matches!(plan_on, Output::Text(_)));
         assert!(matches!(plan_off, Output::Text(_)));
-        assert_ne!(plan_on, plan_off, "plan mode commands must change session state");
+        assert_ne!(
+            plan_on, plan_off,
+            "plan mode commands must change session state"
+        );
 
         let todos = done_output(
             agent

@@ -4,6 +4,6 @@
 
 mod ask;
 mod common;
+mod quality;
 mod review;
 mod web;
-mod quality;

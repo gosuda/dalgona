@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
 use dal_agent::ext::HookCx;
 use dal_core::{ToolCallEvent, ToolCallVerdict};
 use dal_ext::judge::{Gate, JudgeQuestion, Verdict};
@@ -18,7 +19,9 @@ fn is_explicit(raw: &str) -> bool {
     let Ok(args) = sonic_rs::from_str::<sonic_rs::Value>(raw) else {
         return false;
     };
-    args.get("explicit").and_then(sonic_rs::JsonValueTrait::as_bool) == Some(true)
+    args.get("explicit")
+        .and_then(sonic_rs::JsonValueTrait::as_bool)
+        == Some(true)
 }
 
 /// Classifies only `ask` calls that do not carry an explicit user request.

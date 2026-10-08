@@ -4,7 +4,9 @@
 
 use dal_agent::ext::{Extension, ExtensionBuilder};
 use dal_core::{Origin, RegistrationError, ServiceSet};
-use dalgona_batteries::{ask, history, judged, mcp, orchestration, quality, review, skills, ttsr_rules, web, work};
+use dalgona_batteries::{
+    ask, history, judged, mcp, orchestration, quality, review, skills, ttsr_rules, web, work,
+};
 
 const PAGES: &[(&str, &str)] = &[
     ("ask", ask::ASK_DOC),
@@ -41,8 +43,9 @@ fn title(text: &str) -> &str {
 /// # Errors
 /// Returns a registration error when a page path or the identity is invalid.
 pub(crate) fn extension() -> Result<Extension, RegistrationError> {
-    let mut builder = ExtensionBuilder::new(crate::NAME, env!("CARGO_PKG_VERSION"), ServiceSet::EMPTY)?
-        .with_origin(Origin::Builtin, None);
+    let mut builder =
+        ExtensionBuilder::new(crate::NAME, env!("CARGO_PKG_VERSION"), ServiceSet::EMPTY)?
+            .with_origin(Origin::Builtin, None);
     for (path, text) in PAGES {
         builder = builder.doc(path, title(text), text);
     }

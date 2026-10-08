@@ -124,6 +124,14 @@ impl Host {
             Err(_) => {}
         }
         let generation = self.state.shared.generation.borrow().clone();
+        if parsed.scheme == "skill" {
+            return generation
+                .skill_body(parsed.path)
+                .map(|body| Doc::new(uri, body))
+                .ok_or_else(|| SchemeError::Failed {
+                    message: format!("unknown skill: {}", parsed.path).into(),
+                });
+        }
         let docs = generation.docs();
         if let Some(page) = docs.find(uri) {
             return Ok(Doc::new(page.uri.clone(), page.text.clone()));
