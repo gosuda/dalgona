@@ -1,6 +1,6 @@
 # Batteries
 
-Every battery is compiled Rust registered through the public extension API with origin `bundled`. Name a battery in `disabled_batteries` and it registers nothing. Where a battery exposes an `enabled` key, setting it to false also prevents registration. The `dalgona://` manual is a separate built-in extension, not a battery.
+Every battery is compiled Rust registered through the public extension API with origin `bundled`. Name a battery in `disabled_batteries` and it registers nothing. A battery whose `[plugin.<name>]` table sets `enabled = false` also registers nothing. The `dalgona://` manual is a separate built-in extension, not a battery.
 
 | battery | registers | page |
 |---|---|---|

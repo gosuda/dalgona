@@ -1,3 +1,3 @@
 # Search
 
-Dalgona enables symbol search and AST-aware editing with the shared `search_symbols` switch. The judged battery can rerank search results through dal's shared judge; when ranking is disabled, dal's deterministic base ranking remains.
+Dalgona enables symbol search and AST-aware editing through the shared search switch. The judged battery can rerank search results with dal's shared judge; disabling the `ranking` feature leaves deterministic base ranking intact.
