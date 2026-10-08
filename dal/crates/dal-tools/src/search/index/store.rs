@@ -27,9 +27,9 @@ pub(super) const MAGIC_POSTINGS: [u8; 4] = *b"DALP";
 const MAGIC_STAMPS: [u8; 4] = *b"DALS";
 
 pub(super) const HEADER_LEN: usize = 16;
-const POSTING_LEN: usize = 6;
+pub(super) const POSTING_LEN: usize = 6;
 const TABLE_ENTRY_LEN: usize = 16;
-const FOOTER_LEN: usize = 16;
+pub(super) const FOOTER_LEN: usize = 16;
 const STAMP_LEN: usize = 20;
 pub(super) const GRAM_LIMIT: u32 = 1 << 24;
 
@@ -314,9 +314,9 @@ impl Postings {
     }
 }
 
-/// The three states a gram's posting list can hold once checked.
+/// The checked state of one gram's posting list.
 pub(super) enum GramList {
-    /// The gram is unused or its list fails the corruption check.
+    /// The gram is unused: no file holds it.
     Absent,
     /// A valid posting list: `(start, len)` into the postings section.
     List(usize, usize),
@@ -333,7 +333,7 @@ impl Postings {
         for at in start..start + len {
             let (file, _, _) = self.record(at)?;
             if (file as usize) >= files || previous.is_some_and(|p| p >= file) {
-                return Some(GramList::Absent);
+                return None;
             }
             previous = Some(file);
         }

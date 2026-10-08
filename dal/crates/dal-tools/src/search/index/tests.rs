@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use super::build::build_dir;
-use super::store::{EXTRA, FILES, HEADER_LEN, META, POSTINGS, STAMPS};
+use super::store::{EXTRA, FILES, FOOTER_LEN, HEADER_LEN, META, POSTING_LEN, POSTINGS, STAMPS};
 use super::*;
 
 fn token(text: &str) -> Vec<Vec<Vec<u8>>> {
@@ -256,6 +256,37 @@ async fn invalid_version_reads_as_absent() {
     let truncated = Index::new(Some(root.path().to_path_buf()));
     candidates(&truncated, ws.path(), "gamma_delta").await;
     assert_eq!(truncated.ready(ws.path()), Some((1, BuildKind::Full)));
+}
+
+#[tokio::test]
+async fn corrupt_posting_ids_force_the_fallback() {
+    let ws = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    fs::write(ws.path().join("a.txt"), "gamma_delta").unwrap();
+    let first = Index::new(Some(root.path().to_path_buf()));
+    candidates(&first, ws.path(), "gamma_delta").await;
+    let dir = first.dir_of(ws.path());
+
+    let mut postings = fs::read(dir.join(POSTINGS)).unwrap();
+    let footer = postings.len() - FOOTER_LEN;
+    let count = usize::try_from(u64::from_le_bytes(
+        postings[footer..footer + 8].try_into().unwrap(),
+    ))
+    .unwrap();
+    for at in 0..count {
+        let base = HEADER_LEN + at * POSTING_LEN;
+        postings[base..base + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+    }
+    fs::write(dir.join(POSTINGS), postings).unwrap();
+
+    let reopened = Index::new(Some(root.path().to_path_buf()));
+    let found = reopened
+        .search_candidates(ws.path(), &token("gamma_delta"), false, None)
+        .await;
+    assert!(
+        matches!(found, Err(IndexError::Build(_))),
+        "a posting id outside the path table must fail validation, not prove absence: {found:?}"
+    );
 }
 
 #[test]
