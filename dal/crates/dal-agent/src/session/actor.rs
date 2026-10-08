@@ -297,7 +297,11 @@ struct StateFileEntry {
     ns: Box<str>,
     /// The key inside the namespace; validated again on load.
     key: Box<str>,
-    /// The stored value, absent on a tombstone.
+    /// Whether this entry stores a value (false marks a tombstone).
+    /// `Option<RawJson>` alone cannot hold an explicit JSON `null`:
+    /// serde decodes `null` as `None`, the tombstone shape.
+    present: bool,
+    /// The stored value; `null` or absent when `present` is false.
     value: Option<dal_core::RawJson>,
     /// The revision minted when this entry last changed.
     revision: u64,
@@ -349,8 +353,26 @@ fn load_state_map(
     }
     let mut map = StateMap::new();
     for entry in file.entries {
+        // Reject a damaged file rather than publish it: a zero revision
+        // mints a key that can never satisfy its own CAS, a revision ahead
+        // of the counter can be re-minted, and a duplicate slot makes the
+        // stored order load-bearing.
+        if entry.revision == 0 || entry.revision > file.revisions {
+            return Err(StateError::Unavailable);
+        }
         let key = StateKey::parse(&entry.key).map_err(|_| StateError::Unavailable)?;
-        map.insert((entry.ns, key), (entry.value, entry.revision));
+        let value = match (entry.present, entry.value) {
+            (true, value) => Some(value.unwrap_or_else(dal_core::RawJson::null)),
+            (false, None) => None,
+            // A tombstone carrying a payload is not a file this code wrote.
+            (false, Some(_)) => return Err(StateError::Unavailable),
+        };
+        if map
+            .insert((entry.ns, key), (value, entry.revision))
+            .is_some()
+        {
+            return Err(StateError::Unavailable);
+        }
     }
     Ok((map, file.revisions))
 }
@@ -1521,6 +1543,7 @@ impl Actor {
                 .map(|((ns, key), (value, at))| StateFileEntry {
                     ns: ns.clone(),
                     key: key.as_str().into(),
+                    present: value.is_some(),
                     value: value.clone(),
                     revision: *at,
                 })
@@ -1530,10 +1553,15 @@ impl Actor {
             return Err(StateError::Unavailable);
         };
         if sidecar.write(STATE_SIDECAR, bytes.as_bytes()).is_err() {
+            // The write's outcome is indeterminate (the rename may have
+            // published before the directory sync failed), so drop the
+            // cached map: the next operation reloads whatever is durable
+            // instead of serving a map the file may no longer match.
+            self.state = None;
             return Err(StateError::Unavailable);
         }
         self.state_rev = next_rev;
-        *map = next;
+        self.state = Some(next);
         Ok(record)
     }
 
@@ -1852,7 +1880,7 @@ mod tests {
             "malformed JSON fails closed: {corrupt:?}"
         );
         let bad_key = load_state_map(Ok(
-            br#"{"format":1,"revisions":3,"entries":[{"ns":"eval","key":"BAD KEY","value":null,"revision":3}]}"#
+            br#"{"format":1,"revisions":3,"entries":[{"ns":"eval","key":"BAD KEY","present":false,"value":null,"revision":3}]}"#
                 .to_vec(),
         ));
         assert!(
@@ -1871,11 +1899,61 @@ mod tests {
             matches!(unknown, Err(StateError::Unavailable)),
             "an unknown stored field fails closed: {unknown:?}"
         );
+        let zero = load_state_map(Ok(
+            br#"{"format":1,"revisions":3,"entries":[{"ns":"eval","key":"k","present":true,"value":0,"revision":0}]}"#
+                .to_vec(),
+        ));
+        assert!(
+            matches!(zero, Err(StateError::Unavailable)),
+            "a zero stored revision fails closed: {zero:?}"
+        );
+        let ahead = load_state_map(Ok(
+            br#"{"format":1,"revisions":3,"entries":[{"ns":"eval","key":"k","present":true,"value":0,"revision":4}]}"#
+                .to_vec(),
+        ));
+        assert!(
+            matches!(ahead, Err(StateError::Unavailable)),
+            "a revision ahead of the counter fails closed: {ahead:?}"
+        );
+        let dupe = load_state_map(Ok(
+            br#"{"format":1,"revisions":4,"entries":[{"ns":"eval","key":"k","present":true,"value":0,"revision":2},{"ns":"eval","key":"k","present":true,"value":1,"revision":3}]}"#
+                .to_vec(),
+        ));
+        assert!(
+            matches!(dupe, Err(StateError::Unavailable)),
+            "a duplicate slot fails closed: {dupe:?}"
+        );
+        let armed = load_state_map(Ok(
+            br#"{"format":1,"revisions":3,"entries":[{"ns":"eval","key":"k","present":false,"value":0,"revision":2}]}"#
+                .to_vec(),
+        ));
+        assert!(
+            matches!(armed, Err(StateError::Unavailable)),
+            "a tombstone carrying a payload fails closed: {armed:?}"
+        );
+    }
+
+    #[test]
+    fn load_state_map_preserves_an_explicit_null_value() {
+        // `value: null` with `present: true` is a stored JSON null, not a
+        // tombstone: serde cannot distinguish them without the flag.
+        let bytes = br#"{"format":1,"revisions":2,"entries":[{"ns":"eval","key":"k","present":true,"value":null,"revision":2}]}"#
+            .to_vec();
+        let (map, _) = load_state_map(Ok(bytes)).expect("stored map");
+        let Some((value, at)) = map.get(&("eval".into(), StateKey::parse("k").expect("key")))
+        else {
+            panic!("the null entry survives the load");
+        };
+        assert_eq!(*at, 2);
+        let Some(value) = value else {
+            panic!("an explicit null is present, not a tombstone");
+        };
+        assert_eq!(value.as_str(), "null");
     }
 
     #[test]
     fn load_state_map_replays_stored_entries() {
-        let bytes = br#"{"format":1,"revisions":4,"entries":[{"ns":"eval","key":"counter","value":"41","revision":2}]}"#
+        let bytes = br#"{"format":1,"revisions":4,"entries":[{"ns":"eval","key":"counter","present":true,"value":"41","revision":2}]}"#
             .to_vec();
         let (map, revisions) = load_state_map(Ok(bytes)).expect("stored map");
         assert_eq!(revisions, 4);
