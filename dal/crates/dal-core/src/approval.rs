@@ -533,6 +533,26 @@ mod tests {
     }
 
     #[test]
+    fn headless_denial_text_round_trips_tool_and_rung() {
+        for (rung, flag) in [(Rung::Edits, "edits"), (Rung::All, "all")] {
+            let text = headless_denial_text("patch", rung);
+            assert!(
+                text.contains(&format!("--approval {flag}.")),
+                "denial must name the rung's flag so a user can rerun: {text}"
+            );
+            assert_eq!(
+                parse_headless_denial(&text),
+                Some(("patch", rung)),
+                "the parser front ends rely on must read its own format back"
+            );
+        }
+        // A denial the parser does not own must not be mistaken for this
+        // protocol — front ends render a different note for it.
+        assert_eq!(parse_headless_denial("Permission denied: other."), None);
+        assert_eq!(parse_headless_denial("unrelated"), None);
+    }
+
+    #[test]
     fn planner_handles_empty_and_singleton_inputs() {
         let policy = policy(ApprovalMode::Ask, true);
         assert!(plan(&[], &policy).is_empty());
