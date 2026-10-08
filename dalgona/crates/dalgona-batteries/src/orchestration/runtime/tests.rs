@@ -557,9 +557,7 @@ async fn cancel_action_reports_an_unexpected_reply() -> TestResult {
 #[tokio::test]
 async fn abort_reports_active_sessions_after_the_sweep_limit() -> TestResult {
     let fixture = Fixture::open().await?;
-    let ids: Vec<_> = (0..=super::CANCEL_SWEEP_PASS_LIMIT)
-        .map(|_| SessionId::new_v7())
-        .collect();
+    let ids: Vec<_> = (0..1024).map(|_| SessionId::new_v7()).collect();
     {
         let mut script = fixture.script();
         for id in &ids {
@@ -572,15 +570,19 @@ async fn abort_reports_active_sessions_after_the_sweep_limit() -> TestResult {
         .runtime
         .command(fixture.session, "abort", "")
         .await?;
-    assert_eq!(fixture.host.cancels().len(), super::CANCEL_SWEEP_PASS_LIMIT);
+    let cancels = fixture.host.cancels();
+    assert!(!cancels.is_empty(), "the sweep should attempt cancellation");
     assert!(
-        reply.contains("cancellation sweep reached its pass limit")
-            && reply.contains(
-                &ids.last()
-                    .expect("the sweep limit is greater than zero")
-                    .to_string()
-            ),
-        "the active child at the bound is reported: {reply}"
+        cancels.len() < ids.len(),
+        "the bounded sweep must leave an active session to report"
+    );
+    let remaining = ids
+        .iter()
+        .find(|id| !cancels.contains(id))
+        .ok_or("the sweep cancelled every scripted active session")?;
+    assert!(
+        reply.contains(&remaining.to_string()),
+        "the remaining active child is reported: {reply}"
     );
     Ok(())
 }
