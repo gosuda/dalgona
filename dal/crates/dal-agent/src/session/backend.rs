@@ -752,9 +752,9 @@ impl Backend {
                     parent: self.session,
                     call: start.call.clone(),
                     workspace,
-                    // Naming materializes the durable journal; a cancelled
-                    // start must not leave an empty named session behind.
-                    name: None,
+                    // Queued for the first durable record: a start cancelled
+                    // before it records leaves no named session behind.
+                    name: Some(start.name.clone()),
                 },
                 dal_core::ClientId::new("core"),
             )
@@ -786,16 +786,6 @@ impl Backend {
                     text: prompt.into(),
                 }],
             })
-            .await
-            .is_err()
-        {
-            let _ = host.close(child_id).await;
-            return AgentsReply::Cancelled { id: child_id };
-        }
-        // The name lands only after startup succeeds: a failed start keeps
-        // no durable named shell in session listings.
-        if child
-            .submit(dal_core::Command::Rename(start.name.clone()))
             .await
             .is_err()
         {

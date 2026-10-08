@@ -486,6 +486,9 @@ impl Host {
             },
         };
         if let Some(name) = resolved.name.as_deref() {
+            // Buffered, not written: a lazy journal holds the name in its
+            // in-memory record prefix, so a start cancelled before its first
+            // user entry leaves no named session behind.
             journal.set_name(Some(name)).await?;
         }
         Ok((journal, resumed))
