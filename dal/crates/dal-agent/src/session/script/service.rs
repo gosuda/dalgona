@@ -49,6 +49,7 @@ pub(super) fn wired(op: NativeOp) -> bool {
         | NativeOp::JobsCancel
         | NativeOp::JobsList
         | NativeOp::JobsText
+        | NativeOp::JobsSettle
         | NativeOp::TurnCancel
         | NativeOp::TurnSteer
         | NativeOp::TurnWake
@@ -150,6 +151,12 @@ pub(super) async fn call(
         }
         NativeOp::AgentsStart => {
             let args: AgentStartArgs = decode(args)?;
+            // The child session has no per-session tool allowlist, so a
+            // supplied list cannot be honored; refuse rather than run
+            // wider authority than the caller asked for.
+            if args.tools.is_some() {
+                return Err(CallError::Args("agents.start does not accept tools".into()));
+            }
             let start = AgentStart {
                 call: call.clone(),
                 name: args.name.unwrap_or_else(|| who.ext().as_str().into()),
@@ -257,6 +264,22 @@ pub(super) async fn call(
             encode(
                 &services
                     .jobs(who, JobsOp::Text { id: args.id })
+                    .await
+                    .map_err(CallError::Service)?,
+            )
+        }
+        NativeOp::JobsSettle => {
+            let args: SettleJobArgs = decode(args)?;
+            encode(
+                &services
+                    .jobs(
+                        who,
+                        JobsOp::Settle {
+                            id: args.id,
+                            outcome: args.outcome,
+                            text: args.text,
+                        },
+                    )
                     .await
                     .map_err(CallError::Service)?,
             )
@@ -432,6 +455,14 @@ struct SpawnJobArgs {
     payload: RawJson,
     #[serde(default)]
     parent: Option<JobId>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SettleJobArgs {
+    id: JobId,
+    outcome: dal_core::JobOutcome,
+    text: Box<str>,
 }
 
 #[derive(Deserialize)]

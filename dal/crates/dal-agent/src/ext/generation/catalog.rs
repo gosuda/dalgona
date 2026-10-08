@@ -73,6 +73,7 @@ const fn host_backed(op: NativeOp) -> bool {
         | NativeOp::AgentsCancel
         | NativeOp::AgentsList
         | NativeOp::JobsStart
+        | NativeOp::JobsSettle
         | NativeOp::JobsCancel
         | NativeOp::JobsWait
         | NativeOp::JobsList
@@ -133,7 +134,7 @@ pub(crate) struct ModelRouteEntry {
 /// The immutable operation catalog of one generation (R03).
 #[derive(Clone)]
 pub struct Catalog {
-    native: [OpSpec; 28],
+    native: [OpSpec; 29],
     exports: BTreeMap<ExportId, (ExportSpec, Name)>,
     model_routes: BTreeMap<Box<str>, ModelRouteEntry>,
     model_exports: BTreeMap<ExportId, ModelExport>,

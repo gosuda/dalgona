@@ -409,7 +409,7 @@ impl SessionBackend for Backend {
                 headers: Vec::new(),
                 body: Vec::new(),
             };
-            let Ok(response) = outgoing.send().await else {
+            let Ok(mut response) = outgoing.send().await else {
                 return Ok(failure);
             };
             let status = response.status().as_u16();
@@ -418,9 +418,13 @@ impl SessionBackend for Backend {
                 .iter()
                 .map(|(name, value)| (name.as_str().into(), value.to_str().unwrap_or("").into()))
                 .collect();
-            let body = response.bytes().await.map_or(Vec::new(), |bytes| {
-                bytes.into_iter().take(dal_provider::BODY_LIMIT).collect()
-            });
+            let mut body = Vec::new();
+            while body.len() < dal_provider::BODY_LIMIT
+                && let Ok(Some(chunk)) = response.chunk().await
+            {
+                let room = dal_provider::BODY_LIMIT - body.len();
+                body.extend_from_slice(&chunk[..chunk.len().min(room)]);
+            }
             Ok(FetchResponse {
                 status,
                 headers,
@@ -710,6 +714,12 @@ impl Backend {
             .workspace
             .clone()
             .unwrap_or_else(|| self.workspace.clone());
+        // A child workspace must stay inside the caller's root: an
+        // absolute path outside it would widen the `agents` grant into
+        // tool access across the whole filesystem.
+        if !workspace.as_path().starts_with(self.workspace.as_path()) {
+            return AgentsReply::Cancelled { id: self.session };
+        }
         // An explicit child model the catalog cannot route refuses the
         // start; silently inheriting the caller's model would run a
         // different program than the one requested.
@@ -724,6 +734,7 @@ impl Backend {
                     parent: self.session,
                     call: start.call.clone(),
                     workspace,
+                    name: Some(start.name.clone()),
                 },
                 dal_core::ClientId::new("core"),
             )
@@ -736,22 +747,31 @@ impl Backend {
         if let Some(system) = start.system.as_ref().or(start.role.as_ref()) {
             prompt = format!("System: {system}\n\n{prompt}");
         }
-        if let Some(model) = model {
-            let _ = child
+        if let Some(model) = model
+            && child
                 .submit(dal_core::Command::SetModel {
                     model,
                     save: dal_core::Save::SessionOnly,
                 })
-                .await;
+                .await
+                .is_err()
+        {
+            let _ = host.close(child_id).await;
+            return AgentsReply::Cancelled { id: child_id };
         }
-        let _ = child
+        if child
             .submit(dal_core::Command::Prompt {
                 expect: dal_core::Expect::Idle,
                 content: vec![Part::Text {
                     text: prompt.into(),
                 }],
             })
-            .await;
+            .await
+            .is_err()
+        {
+            let _ = host.close(child_id).await;
+            return AgentsReply::Cancelled { id: child_id };
+        }
         AgentsReply::Started { id: child_id }
     }
 
@@ -874,7 +894,7 @@ impl Backend {
             // compounds to O(n²) closes across a shutdown cascade.
             .filter(|(_, entry)| entry.parent == Some(self.session))
             .map(|(id, entry)| {
-                let name = entry
+                let view = entry
                     .shared
                     .snapshot(crate::session::projection::SnapshotArgs {
                         generation: entry.generation,
@@ -885,14 +905,15 @@ impl Backend {
                         created_at: None,
                         archived: None,
                         page: dal_core::PageReq::default(),
-                    })
-                    .session
-                    .name
-                    .unwrap_or_default();
+                    });
+                let state = match view.turn {
+                    dal_core::TurnState::Idle => AgentState::Done(dal_core::Stop::EndTurn),
+                    _ => AgentState::Running,
+                };
                 AgentInfo {
                     id: *id,
-                    name,
-                    state: AgentState::Running,
+                    name: view.session.name.unwrap_or_default(),
+                    state,
                 }
             })
             .collect()

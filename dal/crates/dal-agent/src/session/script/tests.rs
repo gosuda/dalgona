@@ -693,6 +693,79 @@ async fn a_service_op_replies_in_the_wire_shape() {
 }
 
 #[tokio::test]
+async fn agents_start_refuses_a_tools_allowlist() {
+    let fx = fixture(Duration::ZERO).await;
+    let host = captured(&fx, &["agents.start"]);
+    let inv = begin_eval(&host, None).expect("eval inherits A");
+    let outcome = call_op(
+        &host,
+        &inv,
+        OpId::Native(NativeOp::AgentsStart),
+        r#"{"prompt":"work","tools":["bash"]}"#,
+    )
+    .await;
+    let OpOutcome::Failed { failure, .. } = outcome else {
+        panic!("an unhonorable allowlist fails rather than widens: {outcome:?}");
+    };
+    assert!(
+        failure.message.contains("does not accept tools"),
+        "the refusal names the unsupported field: {failure:?}"
+    );
+}
+
+#[tokio::test]
+async fn jobs_settle_closes_a_spawned_job() {
+    let fx = fixture(Duration::ZERO).await;
+    let host = captured(&fx, &["jobs.start", "jobs.settle", "jobs.list"]);
+    let inv = begin_eval(&host, None).expect("eval inherits A");
+    let outcome = call_op(
+        &host,
+        &inv,
+        OpId::Native(NativeOp::JobsStart),
+        r#"{"name":"probe","payload":{"n":1}}"#,
+    )
+    .await;
+    let OpOutcome::Ok { value, .. } = outcome else {
+        panic!("jobs.start routes to the jobs service: {outcome:?}");
+    };
+    let OpValue::Json(raw) = value else {
+        panic!("jobs.start answers raw JSON: {value:?}");
+    };
+    let marker = r#""id":""#;
+    let from = raw
+        .as_str()
+        .find(marker)
+        .map(|at| at + marker.len())
+        .expect("spawned reply carries an id");
+    let id = &raw.as_str()[from..raw.as_str()[from..]
+        .find('"')
+        .map(|end| from + end)
+        .expect("id closes")];
+    let outcome = call_op(
+        &host,
+        &inv,
+        OpId::Native(NativeOp::JobsSettle),
+        &format!(r#"{{"id":"{id}","outcome":{{"state":"exited","code":0}},"text":"done"}}"#),
+    )
+    .await;
+    let OpOutcome::Ok { .. } = outcome else {
+        panic!("jobs.settle reaches the table: {outcome:?}");
+    };
+    let outcome = call_op(&host, &inv, OpId::Native(NativeOp::JobsList), "{}").await;
+    let OpOutcome::Ok { value, .. } = outcome else {
+        panic!("jobs.list answers: {outcome:?}");
+    };
+    let OpValue::Json(raw) = value else {
+        panic!("jobs.list answers raw JSON: {value:?}");
+    };
+    assert!(
+        raw.as_str().contains("exited"),
+        "the settled outcome is observable: {}",
+        raw.as_str()
+    );
+}
+
+#[tokio::test]
 async fn an_unwired_native_op_still_fails_unavailable() {
     let fx = fixture(Duration::ZERO).await;
     let host = captured(&fx, &["state.read"]);

@@ -401,6 +401,7 @@ impl Services for SessionServices {
 
     fn ask(&self, who: &Caller, question: Question) -> ServiceFuture<'_, Option<Answer>> {
         let who = who.clone();
+        let confirm = matches!(question, Question::Confirm { .. });
         Box::pin(async move {
             Self::check_inject(&who, Service::Ask)?;
             let Some(turn) = who.turn else {
@@ -454,6 +455,17 @@ impl Services for SessionServices {
                         });
                     match answer {
                         value @ Answer::Value(_) => Ok(Some(value)),
+                        // Confirmation front ends answer with approve and
+                        // decline rather than typed booleans; normalize
+                        // both before the script sees them.
+                        Answer::Approve if confirm => Ok(Some(Answer::Value(
+                            dal_core::RawJson::parse("true")
+                                .map_err(|error| ServiceError::failed(Some(Service::Ask), error.to_string()))?,
+                        ))),
+                        Answer::Decline if confirm => Ok(Some(Answer::Value(
+                            dal_core::RawJson::parse("false")
+                                .map_err(|error| ServiceError::failed(Some(Service::Ask), error.to_string()))?,
+                        ))),
                         // Turn cancellation resolves the open request as
                         // `Cancel`; dismissal arrives as `Decline`.
                         Answer::Cancel => Err(ServiceError::Cancelled),

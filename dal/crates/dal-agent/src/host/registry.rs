@@ -445,7 +445,10 @@ impl Host {
                 })
             }
             SessionRef::Child {
-                parent, workspace, ..
+                parent,
+                workspace,
+                name,
+                ..
             } => {
                 let depth = self.depth_of(*parent)? + 1;
                 if depth > self.max_depth() {
@@ -459,7 +462,7 @@ impl Host {
                     resumed: false,
                     child: true,
                     parent: Some(*parent),
-                    name: None,
+                    name: name.clone(),
                 })
             }
         }

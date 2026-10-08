@@ -122,6 +122,7 @@ async fn hook_parent_is_root_in_subagents_and_absent_at_root() {
                 parent: root_id,
                 call: CallId::new("parent-probe"),
                 workspace: workspace.clone(),
+                name: None,
             },
             ClientId::new("probe"),
         )

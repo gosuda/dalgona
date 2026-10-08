@@ -28,9 +28,9 @@ pub(crate) async fn run_jobs_op(ctx: JobsCtx, op: JobsOp) -> JobsReply {
     match op {
         JobsOp::Spawn {
             name,
-            payload: _,
+            payload,
             parent,
-        } => spawn(ctx, name, parent).await,
+        } => spawn(ctx, name, payload, parent).await,
         JobsOp::Status { id } => status(&ctx.table, id).await,
         JobsOp::Find { id } => find(&ctx.table, id).await,
         JobsOp::Cancel { id } => cancel(&ctx, id).await,
@@ -60,7 +60,12 @@ pub(crate) async fn run_jobs_op(ctx: JobsCtx, op: JobsOp) -> JobsReply {
     }
 }
 
-async fn spawn(ctx: JobsCtx, name: Name, parent: Option<JobId>) -> JobsReply {
+async fn spawn(
+    ctx: JobsCtx,
+    name: Name,
+    payload: dal_core::RawJson,
+    parent: Option<JobId>,
+) -> JobsReply {
     let id = JobId::new_v7();
     let record = JobRecord::new(
         id,
@@ -70,12 +75,19 @@ async fn spawn(ctx: JobsCtx, name: Name, parent: Option<JobId>) -> JobsReply {
     )
     .with_parent(parent)
     .owned_by(ctx.owner);
-    match ctx.table.lock().await.spawn_owned(record) {
-        Ok(()) => JobsReply::Spawned { id },
-        Err(error) => JobsReply::Unavailable {
-            reason: error.to_string().into(),
-        },
+    let mut table = ctx.table.lock().await;
+    match table.spawn_owned(record) {
+        Ok(()) => {}
+        Err(error) => {
+            return JobsReply::Unavailable {
+                reason: error.to_string().into(),
+            };
+        }
     }
+    // The spawn payload is the job's input; seed it as the initial tail
+    // so `jobs.text` can read it back before the owner settles the row.
+    table.push_output(id, payload.as_str().as_bytes());
+    JobsReply::Spawned { id }
 }
 
 async fn settle(
