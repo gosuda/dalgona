@@ -4,7 +4,10 @@ mod support;
 
 use std::{fs, io, time::Duration};
 
-fn body_after_heading<'a>(document: &'a str, expected_heading: &str) -> support::TestResult<&'a str> {
+fn body_after_heading<'a>(
+    document: &'a str,
+    expected_heading: &str,
+) -> support::TestResult<&'a str> {
     let (heading, body) = document
         .split_once('\n')
         .ok_or_else(|| io::Error::other("document has no body"))?;

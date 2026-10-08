@@ -23,12 +23,16 @@ fn dalgona_docs_resolve_only_in_dalgona() -> support::TestResult<()> {
             config: &config,
         };
         let product = (factory.build)(&cx)?;
-        let dal_host =
-            dal_agent::Host::start(product, config, dal_agent::Env {
+        let dal_host = dal_agent::Host::start(
+            product,
+            config,
+            dal_agent::Env {
                 vars: std::collections::BTreeMap::new(),
                 cwd: dal_root,
                 sandbox_helper: None,
-            }).await?;
+            },
+        )
+        .await?;
         let error = match dal_host.doc("dalgona://config") {
             Ok(_) => {
                 return Err(io::Error::other(
