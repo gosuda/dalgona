@@ -15,12 +15,12 @@ mod tests;
 pub use config::{ReviewConfig, ReviewConfigError};
 
 use dal_agent::ext::{
-    ArgError, BoxFuture, Extension, ExtensionBuilder, RawValue, StatusCx, StatusSnapshot, ToolCall,
-    ToolCx, ToolOutcome, ToolOutput,
+    ArgError, BoxFuture, Extension, ExtensionBuilder, HookCx, HookError, ObserveHook, RawValue,
+    StatusCx, StatusSnapshot, ToolCall, ToolCx, ToolOutcome, ToolOutput,
 };
 use dal_core::{
-    CommandName, CommandSpec, Name, RawJson, RegistrationError, ServiceSet, SessionId, ToolClass,
-    ToolSpec, Workspace,
+    CommandName, CommandSpec, Name, RawJson, RegistrationError, ServiceSet, SessionEnd, SessionId,
+    ToolClass, ToolSpec, Workspace,
 };
 
 const REVIEW_COMMAND_ARGS_HINT: &str = "[focus]";
@@ -48,7 +48,7 @@ pub(crate) enum ReviewError {
     #[error("reviewer returned {count} findings; the cap is 50; resolve the reported ones first")]
     TooManyFindings { count: usize },
     #[error(
-        "review session reached the cap of {rounds} rounds with these findings still open:\n{outstanding}\nStop and tell the user. Ask whether to start a new review session; the user can run /review for that. Call review with restart set to true only when the user asks for a new session."
+        "review session reached the cap of {rounds} rounds with these findings still open:\n{outstanding}\nStop and tell the user. The user must run /review first; /review grants one restart. Only then call review with restart set to true."
     )]
     CapReached { rounds: u8, outstanding: Box<str> },
     #[error("workspace status exceeds {limit} bytes; commit or stash unrelated changes")]
@@ -78,11 +78,11 @@ pub const REVIEW_DOC: &str = concat!(
     "finding marked new or repeat and asks for the new findings. After\n",
     "`max_rounds` (1 to 10, default 3) non-converged rounds the review session\n",
     "reaches its cap and stops. The review then reports the findings still open\n",
-    "and asks the user what to do. After the cap the model never starts a new\n",
-    "session on its own: `restart` set to true restarts only when the same\n",
-    "session ran `/review`, and one `/review` authorizes one restart. Running\n",
-    "`/review` after the cap is the request for a new session: the\n",
-    "command asks the model to call `review` with `restart` set to true.\n",
+    "and asks the user what to do. The model never starts a new session on\n",
+    "its own. The user must run `/review` before the model calls `review`\n",
+    "with `restart` set to true; `/review` grants one restart. The\n",
+    "`/review` command asks the model to call `review` with `restart` set to\n",
+    "true.\n",
     "`restart` only takes effect at the cap; mid-session it continues the open\n",
     "rounds. The reviewer\n",
     "model is `reviewer_model` (empty selects the session model); the diff base\n",
@@ -103,7 +103,7 @@ impl ReviewTool {
             r#"{"type":"object","properties":{"focus":{"type":"string","#,
             r#""description":"What the reviewer should look at first."},"#,
             r#""restart":{"type":"boolean","#,
-            r#""description":"Start a new review session after the round cap. Set it only when the user asked for a new session."}},"#,
+            r#""description":"Use true only after the user runs /review; /review grants one restart before you call review with restart set to true."}},"#,
             r#""additionalProperties":false}"#,
         ))
         .map_err(|_| RegistrationError::InvalidParameters)?;
@@ -215,6 +215,14 @@ impl ReviewStatus {
             .remove(&session)
     }
 
+    /// Drops an unused restart authorization when the owning session closes.
+    fn session_end(&self, session: SessionId) {
+        self.restart_authorized
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&session);
+    }
+
     fn lock(&self) -> MutexGuard<'_, HashMap<SessionId, Vec<u8>>> {
         self.running.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -242,6 +250,17 @@ impl ReviewStatus {
             max_rounds: self.max_rounds,
         })
         .ok()
+    }
+}
+
+struct SessionEndHook {
+    status: Arc<ReviewStatus>,
+}
+
+impl ObserveHook<SessionEnd> for SessionEndHook {
+    fn call(&self, input: SessionEnd, _cx: HookCx) -> BoxFuture<'static, Result<(), HookError>> {
+        self.status.session_end(input.session);
+        Box::pin(async { Ok(()) })
     }
 }
 
@@ -527,6 +546,9 @@ pub fn review(cfg: ReviewConfig) -> Result<Extension, RegistrationError> {
         ServiceSet::from_names(["run", "infer"])?,
     )?
     .with_origin(dal_core::Origin::Bundled, None)
+    .on_session_end_lossless(SessionEndHook {
+        status: Arc::clone(&status),
+    })
     .tool(Arc::new(tool), dal_core::Visibility::Model)
     .command(
         CommandSpec {

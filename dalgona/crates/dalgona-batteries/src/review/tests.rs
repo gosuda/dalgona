@@ -4,9 +4,8 @@
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
-use dal_core::SessionId;
+use dal_core::{SessionEnd, SessionId};
 
-use super::ReviewStatus;
 use super::config::{ReviewConfig, ReviewConfigError};
 use super::git::{cap_diff, diff_argv, git_run_request, status_argv, status_exceeds_limit};
 use super::reply::{
@@ -22,9 +21,10 @@ use super::{
     MAX_ERROR_BYTES, MAX_FINDINGS, MAX_STORED_DETAIL_BYTES, REVIEW_REPLY_FORMAT, ReviewError,
     utf8_prefix,
 };
+use super::{ReviewStatus, ReviewTool};
 use crate::review::review_round;
 
-use dal_agent::ext::ToolCx;
+use dal_agent::ext::{HookCx, ObserveHook, ToolCx};
 
 /// A scripted `Services` host for driving `review_round` in-crate: the
 /// records store seeds a capped session, the run service answers two git
@@ -256,7 +256,7 @@ fn outcome_text(outcome: dal_agent::ext::ToolOutcome) -> String {
         dal_agent::ext::ToolOutcome::Detached(_) => "detached".to_owned(),
     }
 }
-const COMMAND_PROMPT_BASE: &str = "Review the current changes with the review tool. Set its `restart` argument to true: you were asked to review, so a capped session starts a new one.";
+const COMMAND_PROMPT_BASE: &str = "Review the current changes with the review tool. The user ran /review, which grants one restart; call review with restart set to true.";
 const ONE_FINDING: &str = r#"{"verdict":"findings","findings":[{"path":"src/lib.rs","line":null,"severity":"major","title":"  Broken   behavior ","detail":"A failure."}],"summary":"reviewed"}"#;
 #[test]
 fn overlapping_reviews_keep_status_until_the_last_call_finishes()
@@ -573,9 +573,22 @@ fn diff_and_focus_caps_preserve_utf8_boundaries() {
 fn the_review_command_prompt_tells_the_model_to_restart_a_capped_session() {
     let empty = command_prompt("");
     assert_eq!(empty, COMMAND_PROMPT_BASE);
-    assert!(empty.contains("`restart`"), "{empty}");
-    assert!(empty.contains("true"), "{empty}");
+    assert!(empty.contains("/review"), "{empty}");
+    assert!(empty.contains("grants one restart"), "{empty}");
     assert!(command_prompt("auth").starts_with(COMMAND_PROMPT_BASE));
+}
+#[test]
+fn review_restart_schema_requires_user_command() {
+    let status = Arc::new(ReviewStatus::new(3));
+    let tool = ReviewTool::new(ReviewConfig::default(), status).expect("review tool");
+    let schema = tool.spec.parameters.as_str();
+
+    assert!(schema.contains("user runs /review"), "{schema}");
+    assert!(schema.contains("grants one restart"), "{schema}");
+    assert!(
+        schema.contains("review with restart set to true"),
+        "{schema}"
+    );
 }
 #[test]
 fn status_capture_rejects_overflow_instead_of_truncating() {
@@ -679,6 +692,17 @@ fn review_cap_reached_stops_and_reports_outstanding_findings()
     };
     assert!(outstanding.contains("src/lib.rs"), "{outstanding}");
     assert!(outstanding.contains("Broken   behavior"), "{outstanding}");
+    let message = ReviewError::CapReached {
+        rounds: 2,
+        outstanding: outstanding.clone(),
+    }
+    .to_string();
+    assert!(message.contains("must run /review"), "{message}");
+    assert!(message.contains("grants one restart"), "{message}");
+    assert!(
+        message.contains("review with restart set to true"),
+        "{message}"
+    );
     let session = SessionId::new_v7();
     let capped = [ReviewRecord {
         session,
@@ -785,6 +809,32 @@ fn only_an_authorized_command_grants_one_restart() {
         "a grant is scoped to its session"
     );
     assert!(status.take_restart_authorization(session));
+}
+#[tokio::test]
+async fn closed_sessions_drop_unused_restart_grants() -> Result<(), Box<dyn std::error::Error>> {
+    let status = Arc::new(ReviewStatus::new(3));
+    let session = SessionId::new_v7();
+    status.authorize_restart(session);
+
+    let services: Arc<dyn dal_agent::ext::Services> = Arc::new(FakeReviewServices::default());
+    let cx = HookCx::for_test(services, session, None);
+    let hook = super::SessionEndHook {
+        status: Arc::clone(&status),
+    };
+    hook.call(
+        SessionEnd {
+            session,
+            reason: "close".into(),
+        },
+        cx,
+    )
+    .await?;
+
+    assert!(
+        !status.take_restart_authorization(session),
+        "a closed session cannot retain a restart grant"
+    );
+    Ok(())
 }
 
 /// Seeds `max_rounds` non-converged rounds of one capped session.

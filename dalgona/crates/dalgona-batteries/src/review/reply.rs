@@ -306,7 +306,7 @@ impl Severity {
         }
     }
 }
-const COMMAND_PROMPT_BASE: &str = "Review the current changes with the review tool. Set its `restart` argument to true: you were asked to review, so a capped session starts a new one.";
+const COMMAND_PROMPT_BASE: &str = "Review the current changes with the review tool. The user ran /review, which grants one restart; call review with restart set to true.";
 
 pub(crate) fn command_prompt(focus: &str) -> String {
     if focus.is_empty() {
