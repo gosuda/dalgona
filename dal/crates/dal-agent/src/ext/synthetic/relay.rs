@@ -5,8 +5,8 @@ use dal_core::Answer;
 use dal_core::ext::{McpDeclaration, McpRequest, McpResponse};
 use dal_core::{
     AgentsOp, AgentsReply, DenyReason, EntryId, FetchRequest, FetchResponse, Inference, JobsOp,
-    JobsReply, ModelRequest, Notice, Question, RunOutput, RunRequest, SidecarOp, TurnOp,
-    TurnOpReply, Workspace,
+    JobsReply, ModelRequest, Notice, Question, RunOutput, RunRequest, SidecarOp, StateError,
+    StateOp, StateRecord, TurnOp, TurnOpReply, Workspace,
 };
 use dal_provider::EventStream;
 
@@ -75,6 +75,14 @@ impl Services for RelayServices {
     }
 
     fn ask(&self, _who: &Caller, _question: Question) -> ServiceFuture<'_, Option<Answer>> {
+        unavailable()
+    }
+
+    fn state(
+        &self,
+        _who: &Caller,
+        _op: StateOp,
+    ) -> ServiceFuture<'_, Result<StateRecord, StateError>> {
         unavailable()
     }
 

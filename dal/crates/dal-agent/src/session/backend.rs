@@ -12,7 +12,7 @@ use dal_core::ext::Mail as ExtMail;
 use dal_core::{
     AgentInfo, AgentReport, AgentState, AgentsOp, AgentsReply, BlobId, EntryId, FetchMethod,
     FetchRequest, FetchResponse, Inference, JobsOp, JobsReply, MailMode, ModelRequest, Name,
-    Notice, Part, SessionId, TurnOp, TurnOpReply, Workspace,
+    Notice, Part, SessionId, StateError, StateOp, StateRecord, TurnOp, TurnOpReply, Workspace,
 };
 use dal_provider::EventStream;
 use tokio::sync::oneshot;
@@ -595,6 +595,17 @@ impl SessionBackend for Backend {
                 .await;
             let _ = rx.await;
             Ok(())
+        })
+    }
+
+    fn state(&self, op: StateOp) -> ServiceFuture<'_, Result<StateRecord, StateError>> {
+        Box::pin(async move {
+            let (tx, rx) = oneshot::channel();
+            let _ = self
+                .handle
+                .state(crate::session::StateReq { op, reply: tx })
+                .await;
+            Ok(rx.await.unwrap_or(Err(StateError::Unavailable)))
         })
     }
 

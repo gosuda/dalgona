@@ -135,6 +135,12 @@ impl Caller {
     pub(crate) fn cell_approved(&self) -> bool {
         matches!(self.kind, CallerKind::Cell { approved: true })
     }
+
+    /// Reports whether this caller is an eval cell, approved or not.
+    #[must_use]
+    pub(crate) fn cell(&self) -> bool {
+        matches!(self.kind, CallerKind::Cell { .. })
+    }
 }
 
 /// A hook failure; cancellation stays distinct from error text.

@@ -160,11 +160,20 @@ struct Fixture {
 }
 
 /// Starts one real session with the product tools and the fixture export.
+async fn fixture(delay: Duration) -> Fixture {
+    fixture_kind(delay, false).await
+}
+
+/// The fixture against a durable session whose store keeps a sidecar.
+async fn durable_fixture(delay: Duration) -> Fixture {
+    fixture_kind(delay, true).await
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "test fixture builds one real session"
 )]
-async fn fixture(delay: Duration) -> Fixture {
+async fn fixture_kind(delay: Duration, durable: bool) -> Fixture {
     let tmp = tempfile::tempdir().expect("tempdir");
     let data = tmp.path().join("data");
     let workspace_dir = tmp.path().join("w");
@@ -265,13 +274,18 @@ async fn fixture(delay: Duration) -> Fixture {
     };
     let host = Host::start(product, config, env).await.expect("host");
     let workspace = Workspace::new(workspace_dir).expect("workspace");
+    let reference = if durable {
+        SessionRef::New {
+            workspace: workspace.clone(),
+            name: None,
+        }
+    } else {
+        SessionRef::Ephemeral {
+            workspace: workspace.clone(),
+        }
+    };
     let _agent = host
-        .open(
-            SessionRef::Ephemeral {
-                workspace: workspace.clone(),
-            },
-            ClientId::new("probe"),
-        )
+        .open(reference, ClientId::new("probe"))
         .await
         .expect("open");
     let session = *host
@@ -300,7 +314,7 @@ async fn fixture(delay: Duration) -> Fixture {
     // The fixture's job table is the data-plane's own; the actor keeps the
     // session table internally.
     let jobs = Arc::new(tokio::sync::Mutex::new(crate::jobs::JobTable::new()));
-    let ephemeral = true;
+    let ephemeral = !durable;
     let tasks = crate::session::tasks::SessionTasks::new();
     let backend = Arc::new(Backend::new(crate::session::backend::BackendDeps {
         session,
@@ -693,6 +707,176 @@ async fn a_service_op_replies_in_the_wire_shape() {
 }
 
 #[tokio::test]
+async fn state_ops_compare_and_swap_through_the_actor() {
+    let fx = durable_fixture(Duration::ZERO).await;
+    let host = captured(&fx, &["state.read", "state.write", "state.delete"]);
+    let inv = begin_eval(&host, None).expect("eval inherits A");
+    let read = call_op(
+        &host,
+        &inv,
+        OpId::Native(NativeOp::StateRead),
+        r#"{"key":"counter"}"#,
+    )
+    .await;
+    let OpOutcome::Ok { value, .. } = read else {
+        panic!("state.read reaches the state owner: {read:?}");
+    };
+    let OpValue::Json(raw) = value else {
+        panic!("state.read answers raw JSON: {value:?}");
+    };
+    assert_eq!(
+        raw.as_str(),
+        r#"{"present":false,"value":null,"revision":1}"#,
+        "an absent key mints its first revision"
+    );
+    let write = call_op(
+        &host,
+        &inv,
+        OpId::Native(NativeOp::StateWrite),
+        r#"{"key":"counter","value":41,"expected":1}"#,
+    )
+    .await;
+    let OpOutcome::Ok { value, .. } = write else {
+        panic!("state.write with the minted revision commits: {write:?}");
+    };
+    let OpValue::Json(raw) = value else {
+        panic!("state.write answers raw JSON: {value:?}");
+    };
+    assert_eq!(
+        raw.as_str(),
+        r#"{"present":true,"value":41,"revision":2}"#,
+        "the committed record carries the next revision"
+    );
+    let stale = call_op(
+        &host,
+        &inv,
+        OpId::Native(NativeOp::StateWrite),
+        r#"{"key":"counter","value":99,"expected":1}"#,
+    )
+    .await;
+    let OpOutcome::Failed { failure, .. } = stale else {
+        panic!("a stale revision is a catchable conflict: {stale:?}");
+    };
+    assert!(
+        failure.message.contains("state revision conflict"),
+        "the conflict keeps the R08 wording: {failure:?}"
+    );
+    let recheck = call_op(
+        &host,
+        &inv,
+        OpId::Native(NativeOp::StateRead),
+        r#"{"key":"counter"}"#,
+    )
+    .await;
+    let OpOutcome::Ok { value, .. } = recheck else {
+        panic!("the conflicting write touched nothing: {recheck:?}");
+    };
+    let OpValue::Json(raw) = value else {
+        panic!("state.read answers raw JSON: {value:?}");
+    };
+    assert_eq!(
+        raw.as_str(),
+        r#"{"present":true,"value":41,"revision":2}"#,
+        "the rejected write left the committed value and revision"
+    );
+    let delete = call_op(
+        &host,
+        &inv,
+        OpId::Native(NativeOp::StateDelete),
+        r#"{"key":"counter","expected":2}"#,
+    )
+    .await;
+    let OpOutcome::Ok { value, .. } = delete else {
+        panic!("state.delete with the minted revision tombstones: {delete:?}");
+    };
+    let OpValue::Json(raw) = value else {
+        panic!("state.delete answers raw JSON: {value:?}");
+    };
+    assert_eq!(
+        raw.as_str(),
+        r#"{"present":false,"value":null,"revision":3}"#,
+        "the tombstone mints a fresh revision a stale token cannot reuse"
+    );
+}
+
+#[tokio::test]
+async fn state_ops_fail_closed_on_an_ephemeral_session() {
+    let fx = fixture(Duration::ZERO).await;
+    let host = captured(&fx, &["state.read"]);
+    let inv = begin_eval(&host, None).expect("eval inherits A");
+    let outcome = call_op(
+        &host,
+        &inv,
+        OpId::Native(NativeOp::StateRead),
+        r#"{"key":"counter"}"#,
+    )
+    .await;
+    let OpOutcome::Terminal(HostTerminal::Denied { reason, .. }) = outcome else {
+        panic!("an ephemeral session keeps the typed outcome: {outcome:?}");
+    };
+    let DenyReason::Unavailable { what } = reason else {
+        panic!("the state store is the unavailable piece: {reason:?}");
+    };
+    assert_eq!(what.as_ref(), "state");
+}
+
+#[tokio::test]
+async fn a_state_op_rejects_a_zero_revision() {
+    let fx = durable_fixture(Duration::ZERO).await;
+    let host = captured(&fx, &["state.write"]);
+    let inv = begin_eval(&host, None).expect("eval inherits A");
+    let outcome = call_op(
+        &host,
+        &inv,
+        OpId::Native(NativeOp::StateWrite),
+        r#"{"key":"counter","value":1,"expected":0}"#,
+    )
+    .await;
+    let OpOutcome::Failed { failure, .. } = outcome else {
+        panic!("revision zero is an argument failure: {outcome:?}");
+    };
+    assert!(
+        failure.message.contains("invalid arguments"),
+        "the decode error names the contract: {failure:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_state_namespace_derives_from_the_caller() {
+    use crate::ext::{Caller, CallerKind};
+    use dal_core::StateNs;
+    let fx = durable_fixture(Duration::ZERO).await;
+    let services = fx
+        .backend
+        .script_services()
+        .expect("the fixture published services");
+    let cell = Caller::new(
+        Name::parse("fixture").expect("plugin"),
+        dal_core::Origin::User,
+        dal_core::ServiceSet::EMPTY,
+        CallerKind::Cell { approved: false },
+        None,
+    );
+    assert_eq!(services.state_ns(&cell).ok(), Some(StateNs::Eval));
+    let who = Caller::new(
+        Name::parse("fixture").expect("plugin"),
+        dal_core::Origin::User,
+        dal_core::ServiceSet::EMPTY,
+        CallerKind::Tool,
+        None,
+    );
+    assert_eq!(
+        services.state_ns(&who).ok(),
+        Some(StateNs::Plugin {
+            origin: dal_core::Origin::User,
+            plugin: Name::parse("fixture").expect("plugin"),
+            version: std::num::NonZeroU32::MIN,
+        }),
+        "a tool caller owns its plugin's isolated namespace"
+    );
+}
+
+#[tokio::test]
 async fn agents_start_refuses_a_tools_allowlist() {
     let fx = fixture(Duration::ZERO).await;
     let host = captured(&fx, &["agents.start"]);
@@ -714,71 +898,19 @@ async fn agents_start_refuses_a_tools_allowlist() {
 }
 
 #[tokio::test]
-async fn jobs_settle_closes_a_spawned_job() {
+async fn an_unbacked_native_op_still_fails_unavailable() {
     let fx = fixture(Duration::ZERO).await;
-    let host = captured(&fx, &["jobs.start", "jobs.settle", "jobs.list"]);
+    let host = captured(&fx, &["mcp.call"]);
     let inv = begin_eval(&host, None).expect("eval inherits A");
     let outcome = call_op(
         &host,
         &inv,
-        OpId::Native(NativeOp::JobsStart),
-        r#"{"name":"probe","payload":{"n":1}}"#,
-    )
-    .await;
-    let OpOutcome::Ok { value, .. } = outcome else {
-        panic!("jobs.start routes to the jobs service: {outcome:?}");
-    };
-    let OpValue::Json(raw) = value else {
-        panic!("jobs.start answers raw JSON: {value:?}");
-    };
-    let marker = r#""id":""#;
-    let from = raw
-        .as_str()
-        .find(marker)
-        .map(|at| at + marker.len())
-        .expect("spawned reply carries an id");
-    let id = &raw.as_str()[from..raw.as_str()[from..]
-        .find('"')
-        .map(|end| from + end)
-        .expect("id closes")];
-    let outcome = call_op(
-        &host,
-        &inv,
-        OpId::Native(NativeOp::JobsSettle),
-        &format!(r#"{{"id":"{id}","outcome":{{"state":"exited","code":0}},"text":"done"}}"#),
-    )
-    .await;
-    let OpOutcome::Ok { .. } = outcome else {
-        panic!("jobs.settle reaches the table: {outcome:?}");
-    };
-    let outcome = call_op(&host, &inv, OpId::Native(NativeOp::JobsList), "{}").await;
-    let OpOutcome::Ok { value, .. } = outcome else {
-        panic!("jobs.list answers: {outcome:?}");
-    };
-    let OpValue::Json(raw) = value else {
-        panic!("jobs.list answers raw JSON: {value:?}");
-    };
-    assert!(
-        raw.as_str().contains("exited"),
-        "the settled outcome is observable: {}",
-        raw.as_str()
-    );
-}
-
-#[tokio::test]
-async fn an_unwired_native_op_still_fails_unavailable() {
-    let fx = fixture(Duration::ZERO).await;
-    let host = captured(&fx, &["state.read"]);
-    let inv = begin_eval(&host, None).expect("eval inherits A");
-    let outcome = call_op(
-        &host,
-        &inv,
-        OpId::Native(NativeOp::StateRead),
-        r#"{"key":"todos"}"#,
+        OpId::Native(NativeOp::McpCall),
+        r#"{"server":"fixture","tool":"probe","arguments":{}}"#,
     )
     .await;
     let OpOutcome::Failed { failure, .. } = outcome else {
-        panic!("state.read has no owner and fails closed: {outcome:?}");
+        panic!("mcp.call has no backend in this generation: {outcome:?}");
     };
     assert_eq!(failure.code, FailureCode::Unavailable);
 }

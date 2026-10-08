@@ -4,18 +4,18 @@
 //! service owns each backend. [`call`] decodes the request's raw arguments
 //! into the operation's typed wire shape, invokes the service under the
 //! caller's declared inject set and grants, and encodes the reply as the
-//! operation's raw JSON value. Operations with no landed owner — `state.*` —
-//! stay absent and keep the `unavailable` outcome.
+//! operation's raw JSON value.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use dal_core::ext::NativeOp;
 use dal_core::{
-    AgentStart, AgentsOp, Answer, CallId, Choice, FetchRequest, JobId, JobsOp, McpRequest, Name,
-    Preview, Question, RawJson, SessionId, TurnOp, Workspace,
+    AgentStart, AgentsOp, Answer, CallId, Choice, DenyReason, FetchRequest, JobId, JobsOp,
+    McpRequest, Name, Preview, Question, RawJson, Revision, Service, SessionId, StateError,
+    StateKey, StateNs, StateOp, StateRecord, TurnOp, Workspace,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::ServiceError;
 use crate::ext::{Caller, Services};
@@ -49,21 +49,20 @@ pub(super) fn wired(op: NativeOp) -> bool {
         | NativeOp::JobsCancel
         | NativeOp::JobsList
         | NativeOp::JobsText
-        | NativeOp::JobsSettle
         | NativeOp::TurnCancel
         | NativeOp::TurnSteer
         | NativeOp::TurnWake
         | NativeOp::TurnIsIdle
-        | NativeOp::McpCall => true,
+        | NativeOp::McpCall
+        | NativeOp::StateRead
+        | NativeOp::StateWrite
+        | NativeOp::StateDelete => true,
         NativeOp::ToolsRead
         | NativeOp::ToolsSearch
         | NativeOp::ToolsPatch
         | NativeOp::ToolsExec
         | NativeOp::ModelsInfer
-        | NativeOp::ModelsForward
-        | NativeOp::StateRead
-        | NativeOp::StateWrite
-        | NativeOp::StateDelete => false,
+        | NativeOp::ModelsForward => false,
     }
 }
 
@@ -268,22 +267,6 @@ pub(super) async fn call(
                     .map_err(CallError::Service)?,
             )
         }
-        NativeOp::JobsSettle => {
-            let args: SettleJobArgs = decode(args)?;
-            encode(
-                &services
-                    .jobs(
-                        who,
-                        JobsOp::Settle {
-                            id: args.id,
-                            outcome: args.outcome,
-                            text: args.text,
-                        },
-                    )
-                    .await
-                    .map_err(CallError::Service)?,
-            )
-        }
         NativeOp::TurnCancel => {
             decode::<Empty>(args)?;
             encode(
@@ -344,6 +327,59 @@ pub(super) async fn call(
                     .map_err(CallError::Service)?,
             )
         }
+        NativeOp::StateRead => {
+            let args: KeyArgs = decode(args)?;
+            let key = StateKey::parse(&args.key)
+                .map_err(|error| CallError::Args(error.to_string().into()))?;
+            state_reply(
+                services
+                    .state(
+                        who,
+                        StateOp::Read {
+                            ns: StateNs::Eval,
+                            key,
+                        },
+                    )
+                    .await,
+            )
+        }
+        NativeOp::StateWrite => {
+            let args: StateWriteArgs = decode(args)?;
+            let key = StateKey::parse(&args.key)
+                .map_err(|error| CallError::Args(error.to_string().into()))?;
+            let expected = revision(args.expected)?;
+            state_reply(
+                services
+                    .state(
+                        who,
+                        StateOp::Write {
+                            ns: StateNs::Eval,
+                            key,
+                            value: args.value,
+                            expected,
+                        },
+                    )
+                    .await,
+            )
+        }
+        NativeOp::StateDelete => {
+            let args: StateDeleteArgs = decode(args)?;
+            let key = StateKey::parse(&args.key)
+                .map_err(|error| CallError::Args(error.to_string().into()))?;
+            let expected = revision(args.expected)?;
+            state_reply(
+                services
+                    .state(
+                        who,
+                        StateOp::Delete {
+                            ns: StateNs::Eval,
+                            key,
+                            expected,
+                        },
+                    )
+                    .await,
+            )
+        }
         other => Err(CallError::Args(
             format!("operation {other} has no service dispatch")
                 .as_str()
@@ -372,6 +408,57 @@ fn answer(answer: Option<Answer>) -> Result<RawJson, CallError> {
     match answer {
         Some(Answer::Value(raw)) => Ok(raw),
         other => encode(&other),
+    }
+}
+
+/// Wraps the wire `expected` revision: the owner never mints zero, so a zero
+/// can only be a malformed argument (R08).
+fn revision(raw: u64) -> Result<Revision, CallError> {
+    std::num::NonZeroU64::new(raw)
+        .map(Revision::new)
+        .ok_or_else(|| CallError::Args("expected revision must be nonzero".into()))
+}
+
+/// Projects one state operation outcome: the record encodes its wire shape, a
+/// revision conflict is a catchable failure the script can retry, and an
+/// unavailable state store keeps its typed outcome (R08).
+fn state_reply(
+    result: Result<Result<StateRecord, StateError>, ServiceError>,
+) -> Result<RawJson, CallError> {
+    match result {
+        Err(error) => Err(CallError::Service(error)),
+        Ok(Err(StateError::Conflict)) => Err(CallError::Service(ServiceError::failed(
+            Some(Service::Sidecar),
+            StateError::Conflict.to_string(),
+        ))),
+        Ok(Err(StateError::Unavailable)) => Err(CallError::Service(ServiceError::Denied(
+            DenyReason::Unavailable {
+                what: "state".into(),
+            },
+        ))),
+        Ok(Ok(record)) => encode(&StateReply::from(record)),
+    }
+}
+
+/// The wire shape one state operation returns (R08).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StateReply {
+    /// Whether the key holds a value.
+    present: bool,
+    /// The stored value; `null` when absent or tombstoned.
+    value: Option<RawJson>,
+    /// The key's current revision.
+    revision: u64,
+}
+
+impl From<StateRecord> for StateReply {
+    fn from(record: StateRecord) -> Self {
+        Self {
+            present: record.present,
+            value: record.value,
+            revision: record.revision.get().get(),
+        }
     }
 }
 
@@ -459,20 +546,27 @@ struct SpawnJobArgs {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SettleJobArgs {
-    id: JobId,
-    outcome: dal_core::JobOutcome,
-    text: Box<str>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct WakeArgs {
     text: Box<str>,
     #[serde(default)]
     sources: Vec<Box<str>>,
     #[serde(default)]
     job_ids: Vec<JobId>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StateWriteArgs {
+    key: Box<str>,
+    value: RawJson,
+    expected: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StateDeleteArgs {
+    key: Box<str>,
+    expected: u64,
 }
 
 #[derive(Deserialize)]

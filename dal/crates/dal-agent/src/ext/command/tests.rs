@@ -12,7 +12,7 @@ use dal_core::{
     AgentsOp, AgentsReply, Answer, ApprovalMode, AutoCompaction, EntryId, EntryView, FetchRequest,
     FetchResponse, Inference, JobsOp, JobsReply, Mode, ModelRequest, ModelRoute, Name, Notice,
     Origin, Page, Question, RunOutput, RunRequest, ServiceSet, SessionId, SessionSummary,
-    SidecarOp, ThinkingLevel, TurnOp, TurnOpReply,
+    SidecarOp, StateError, StateOp, StateRecord, ThinkingLevel, TurnOp, TurnOpReply,
 };
 use dal_core::{SessionInfo, SettingsView, Stats, TreeOutline, TurnState, Usage, UsageView, View};
 use tokio::sync::watch;
@@ -93,6 +93,13 @@ impl Services for FakeServices {
         unreachable!("publish path never calls services")
     }
     fn sidecar(&self, _who: &Caller, _op: SidecarOp) -> ServiceFuture<'_, Option<Vec<u8>>> {
+        unreachable!("publish path never calls services")
+    }
+    fn state(
+        &self,
+        _who: &Caller,
+        _op: StateOp,
+    ) -> ServiceFuture<'_, Result<StateRecord, StateError>> {
         unreachable!("publish path never calls services")
     }
     fn infer(&self, _who: &Caller, _req: ModelRequest) -> ServiceFuture<'_, Inference> {

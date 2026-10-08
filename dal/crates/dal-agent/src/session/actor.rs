@@ -10,7 +10,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use dal_core::ext::{
-    BeforeTurn, HookEvent, HookOutcome, HookVerdict, InputEvent, Origin, Receipt, StreamVerdict,
+    BeforeTurn, HookEvent, HookOutcome, HookVerdict, InputEvent, Origin, Receipt, StateError,
+    StateKey, StateNs, StateOp, StateRecord, StreamVerdict,
 };
 use dal_core::{
     Answer, BlobId, ClientId, Command, CompactLimits, CompactionSummary, Effect, Emit, Event,
@@ -230,6 +231,11 @@ pub(crate) struct Actor {
     control: Arc<Mutex<ControlCell>>,
     workspace: Workspace,
     sidecar: HashMap<dal_core::Name, Vec<u8>>,
+    /// The session's R08 compare-and-swap state, loaded lazily from its
+    /// sidecar file on the first state operation.
+    state: Option<StateMap>,
+    /// The last revision the state owner minted; never reused (R08).
+    state_rev: u64,
     /// The child depth, zero for top-level sessions.
     depth: u32,
     parent: Option<SessionId>,
@@ -250,6 +256,60 @@ pub(crate) struct Actor {
 }
 
 type ReplyTx = oneshot::Sender<Result<Reply, AgentError>>;
+
+/// The sidecar file holding the session's R08 state map.
+const STATE_SIDECAR: &str = "state";
+
+/// The in-memory state map: one value-or-tombstone per (namespace, key).
+type StateMap = HashMap<(Box<str>, StateKey), (Option<dal_core::RawJson>, u64)>;
+
+/// The serialized state sidecar file.
+#[derive(Default, serde::Deserialize, serde::Serialize)]
+struct StateFile {
+    /// The last minted revision; never reused.
+    revisions: u64,
+    /// One entry per key, values and tombstones alike.
+    #[serde(default)]
+    entries: Vec<StateFileEntry>,
+}
+
+/// One serialized (namespace, key) record.
+#[derive(serde::Deserialize, serde::Serialize)]
+struct StateFileEntry {
+    /// The namespace label.
+    ns: Box<str>,
+    /// The key inside the namespace; validated again on load.
+    key: Box<str>,
+    /// The stored value, absent on a tombstone.
+    value: Option<dal_core::RawJson>,
+    /// The revision minted when this entry last changed.
+    revision: u64,
+}
+
+/// Labels one namespace for map and file keys (R08).
+fn ns_label(ns: &StateNs) -> Box<str> {
+    match ns {
+        StateNs::Eval => "eval".into(),
+        StateNs::Plugin {
+            origin,
+            plugin,
+            version,
+        } => {
+            let origin = match origin {
+                Origin::Builtin => "builtin",
+                Origin::Bundled => "bundled",
+                Origin::User => "user",
+                _ => "other",
+            };
+            format!("plugin:{origin}:{}:{version}", plugin.as_str()).into()
+        }
+    }
+}
+
+/// Wraps a counter value as a revision (R08).
+fn revision(at: u64) -> dal_core::ext::Revision {
+    dal_core::ext::Revision::new(NonZeroU64::new(at).unwrap_or(NonZeroU64::MIN))
+}
 
 /// Pages the session's journaled mail after a cursor.
 ///
@@ -354,6 +414,8 @@ pub(crate) fn spawn(deps: ActorDeps) -> (SessionHandle, DriverPorts, tokio::task
         control: Arc::clone(&control),
         workspace: deps.workspace,
         sidecar: HashMap::new(),
+        state: None,
+        state_rev: 0,
         depth: deps.depth,
         parent: deps.parent,
         rx,
@@ -522,6 +584,9 @@ impl Actor {
             }
             ActorRequest::Sidecar { op } => {
                 self.on_sidecar(op);
+            }
+            ActorRequest::State { req } => {
+                self.on_state(req);
             }
             ActorRequest::Mail { req } => {
                 self.on_mail(req).await;
@@ -1295,6 +1360,118 @@ impl Actor {
             },
             other => AgentError::Invalid(ValidationError::new(other.to_string())),
         })
+    }
+
+    /// Runs one compare-and-swap state operation against the actor-owned
+    /// map, persisted through the session's durable sidecar (R08).
+    fn on_state(&mut self, req: super::StateReq) {
+        let _ = req.reply.send(self.state_result(req.op));
+    }
+
+    /// Applies one state operation: the mutation is written to the
+    /// sidecar file before the reply acknowledges it, so an acknowledged
+    /// record always survives restart.
+    fn state_result(&mut self, op: StateOp) -> Result<StateRecord, StateError> {
+        let Some(sidecar) = self.journal.sidecar() else {
+            return Err(StateError::Unavailable);
+        };
+        if self.state.is_none() {
+            let file = sidecar
+                .read(STATE_SIDECAR)
+                .ok()
+                .and_then(|bytes| sonic_rs::from_slice::<StateFile>(&bytes).ok())
+                .unwrap_or_default();
+            self.state_rev = file.revisions;
+            self.state = Some(
+                file.entries
+                    .into_iter()
+                    .filter_map(|entry| {
+                        let key = StateKey::parse(&entry.key).ok()?;
+                        Some(((entry.ns, key), (entry.value, entry.revision)))
+                    })
+                    .collect(),
+            );
+        }
+        let Some(map) = self.state.as_mut() else {
+            return Err(StateError::Unavailable);
+        };
+        let (ns, key) = match &op {
+            StateOp::Read { ns, key }
+            | StateOp::Write { ns, key, .. }
+            | StateOp::Delete { ns, key, .. } => (ns, key),
+        };
+        let slot = (ns_label(ns), key.clone());
+        let record = match op {
+            StateOp::Read { .. } => {
+                if let Some((value, at)) = map.get(&slot) {
+                    StateRecord {
+                        present: value.is_some(),
+                        value: value.clone(),
+                        revision: revision(*at),
+                    }
+                } else {
+                    // A missing key still mints a revision so the caller can
+                    // compare-and-swap its first write (R08).
+                    self.state_rev += 1;
+                    let minted = self.state_rev;
+                    map.insert(slot, (None, minted));
+                    StateRecord {
+                        present: false,
+                        value: None,
+                        revision: revision(minted),
+                    }
+                }
+            }
+            StateOp::Write {
+                value, expected, ..
+            } => {
+                match map.get(&slot) {
+                    Some((_, current)) if *current == expected.get().get() => {}
+                    _ => return Err(StateError::Conflict),
+                }
+                self.state_rev += 1;
+                let minted = self.state_rev;
+                map.insert(slot, (Some(value.clone()), minted));
+                StateRecord {
+                    present: true,
+                    value: Some(value),
+                    revision: revision(minted),
+                }
+            }
+            StateOp::Delete { expected, .. } => {
+                match map.get(&slot) {
+                    Some((_, current)) if *current == expected.get().get() => {}
+                    _ => return Err(StateError::Conflict),
+                }
+                self.state_rev += 1;
+                let minted = self.state_rev;
+                map.insert(slot, (None, minted));
+                StateRecord {
+                    present: false,
+                    value: None,
+                    revision: revision(minted),
+                }
+            }
+        };
+        let file = StateFile {
+            revisions: self.state_rev,
+            entries: map
+                .iter()
+                .map(|((ns, key), (value, at))| StateFileEntry {
+                    ns: ns.clone(),
+                    key: key.as_str().into(),
+                    value: value.clone(),
+                    revision: *at,
+                })
+                .collect(),
+        };
+        let Ok(bytes) = sonic_rs::to_string(&file) else {
+            return Err(StateError::Unavailable);
+        };
+        if sidecar.write(STATE_SIDECAR, bytes.as_bytes()).is_err() {
+            return Err(StateError::Unavailable);
+        }
+        Ok(record)
     }
 
     /// Reads or writes one actor-owned sidecar value.

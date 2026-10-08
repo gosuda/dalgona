@@ -10,7 +10,8 @@ use dal_core::ext::{BeforeRequest, BeforeTurn};
 use dal_core::{CallId, TurnId};
 use dal_core::{
     Caps, Channel, InputEvent, InputVerdict, ModelInfo, ModelRoute, Name, Origin, Part, RawJson,
-    RequestParams, ServiceSet, SessionId, StreamVerdict, ToolCallEvent, ToolCallVerdict,
+    RequestParams, ServiceSet, SessionId, StateError, StateOp, StateRecord, StreamVerdict,
+    ToolCallEvent, ToolCallVerdict,
 };
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -92,6 +93,13 @@ impl Services for NoSvcs {
         unreachable!("hooks tests never call services")
     }
     fn sidecar(&self, _who: &Caller, _op: SidecarOp) -> ServiceFuture<'_, Option<Vec<u8>>> {
+        unreachable!("hooks tests never call services")
+    }
+    fn state(
+        &self,
+        _who: &Caller,
+        _op: StateOp,
+    ) -> ServiceFuture<'_, Result<StateRecord, StateError>> {
         unreachable!("hooks tests never call services")
     }
     fn infer(&self, _who: &Caller, _req: ModelRequest) -> ServiceFuture<'_, Inference> {

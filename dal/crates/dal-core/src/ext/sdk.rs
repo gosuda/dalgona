@@ -61,8 +61,6 @@ pub enum NativeOp {
     JobsList,
     /// Read the collected output text of a background job.
     JobsText,
-    /// Settle a job the caller spawned with one terminal outcome.
-    JobsSettle,
     /// Cancel the active turn.
     TurnCancel,
     /// Add steering text to the active turn.
@@ -79,7 +77,7 @@ pub enum NativeOp {
 
 impl NativeOp {
     /// Every native operation, in catalog order.
-    pub const ALL: [Self; 29] = [
+    pub const ALL: [Self; 28] = [
         Self::ToolsRead,
         Self::ToolsSearch,
         Self::ToolsPatch,
@@ -102,7 +100,6 @@ impl NativeOp {
         Self::JobsCancel,
         Self::JobsList,
         Self::JobsText,
-        Self::JobsSettle,
         Self::TurnCancel,
         Self::TurnSteer,
         Self::TurnWake,
@@ -137,7 +134,6 @@ impl NativeOp {
             Self::JobsCancel => "jobs.cancel",
             Self::JobsList => "jobs.list",
             Self::JobsText => "jobs.text",
-            Self::JobsSettle => "jobs.settle",
             Self::TurnCancel => "turn.cancel",
             Self::TurnSteer => "turn.steer",
             Self::TurnWake => "turn.wake",
@@ -176,8 +172,7 @@ impl NativeOp {
             | Self::JobsWait
             | Self::JobsCancel
             | Self::JobsList
-            | Self::JobsText
-            | Self::JobsSettle => Some(Service::Jobs),
+            | Self::JobsText => Some(Service::Jobs),
             Self::TurnCancel | Self::TurnSteer | Self::TurnWake | Self::TurnIsIdle => {
                 Some(Service::Turn)
             }

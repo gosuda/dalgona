@@ -51,8 +51,8 @@ use dal_core::ext::{McpDeclaration, McpRequest, McpResponse};
 use dal_core::{
     AgentsOp, AgentsReply, Answer, CallId, ClientId, DenyReason, EntryId, FetchRequest,
     FetchResponse, Inference, JobsOp, JobsReply, ModelRequest, Name, Notice, Origin, Owner,
-    Preview, Question, RequestId, RunOutput, RunRequest, Service, SidecarOp, Site, TurnOp,
-    TurnOpReply, Visibility, Workspace,
+    Preview, Question, RequestId, RunOutput, RunRequest, Service, SidecarOp, Site, StateError,
+    StateNs, StateOp, StateRecord, TurnOp, TurnOpReply, Visibility, Workspace,
 };
 use dal_provider::EventStream;
 use tokio::sync::watch;
@@ -127,6 +127,34 @@ impl Drop for AskSlot<'_> {
 }
 
 impl SessionServices {
+    /// Derives the caller's state namespace (R08): eval cells share the
+    /// session eval namespace; every other caller owns the namespace its
+    /// extension's `origin`, name, and `state_version` isolate.
+    pub(crate) fn state_ns(&self, who: &Caller) -> Result<StateNs, ServiceError> {
+        if who.cell() {
+            return Ok(StateNs::Eval);
+        }
+        let generation = Arc::clone(&self.generation.borrow());
+        let ext = generation
+            .extensions
+            .iter()
+            .find(|ext| ext.name() == who.ext().as_str());
+        ext.map(|ext| StateNs::Plugin {
+            origin: who.origin(),
+            plugin: who.ext().clone(),
+            version: ext.state_version(),
+        })
+        .ok_or_else(|| {
+            ServiceError::failed(
+                Some(Service::Sidecar),
+                format!(
+                    "extension \"{}\" is not in the current generation",
+                    who.ext()
+                ),
+            )
+        })
+    }
+
     /// Builds the session services from host-owned pieces.
     pub(crate) fn new(deps: SessionServicesDeps) -> Self {
         let grants = deps.grants;
@@ -591,6 +619,37 @@ impl Services for SessionServices {
                     "unsupported sidecar operation",
                 )),
             }
+        })
+    }
+
+    fn state(
+        &self,
+        who: &Caller,
+        op: StateOp,
+    ) -> ServiceFuture<'_, Result<StateRecord, StateError>> {
+        let who = who.clone();
+        Box::pin(async move {
+            Self::check_inject(&who, Service::Sidecar)?;
+            self.gated(&who, Service::Sidecar).await?;
+            let ns = self.state_ns(&who)?;
+            // The caller never names its namespace: it is derived here so a
+            // script cannot reach another plugin's state.
+            let op = match op {
+                StateOp::Read { key, .. } => StateOp::Read { ns, key },
+                StateOp::Write {
+                    key,
+                    value,
+                    expected,
+                    ..
+                } => StateOp::Write {
+                    ns,
+                    key,
+                    value,
+                    expected,
+                },
+                StateOp::Delete { key, expected, .. } => StateOp::Delete { ns, key, expected },
+            };
+            self.backend.state(op).await
         })
     }
 
