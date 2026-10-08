@@ -80,7 +80,6 @@ fn owner_path(path: &Path) -> std::path::PathBuf {
 
 fn read_pid_until(path: &Path) -> Result<Option<u32>, StoreError> {
     let deadline = Instant::now() + PID_WAIT;
-    let mut previous = None;
     loop {
         let current = match fs::read(path) {
             Ok(bytes) => parse_pid(&bytes),
@@ -90,10 +89,12 @@ fn read_pid_until(path: &Path) -> Result<Option<u32>, StoreError> {
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => None,
             Err(source) => return Err(util::io_err(path, source)),
         };
-        if current.is_some() && current == previous {
+        // A parseable `pid\n` line is complete — the single-syscall write
+        // cannot tear it — so the first complete read settles the poll. Only
+        // missing or unparsable content keeps polling until the deadline.
+        if current.is_some() {
             return Ok(current);
         }
-        previous = current;
         let now = Instant::now();
         if now >= deadline {
             return Ok(None);
