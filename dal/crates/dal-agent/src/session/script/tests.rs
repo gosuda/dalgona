@@ -631,6 +631,86 @@ async fn a_backendless_native_op_fails_unavailable_without_effect() {
 }
 
 #[tokio::test]
+async fn a_service_op_reaches_the_typed_service() {
+    let fx = fixture(Duration::ZERO).await;
+    let host = captured(&fx, &["env.read"]);
+    let inv = begin_eval(&host, None).expect("eval inherits A");
+    let outcome = call_op(
+        &host,
+        &inv,
+        OpId::Native(NativeOp::EnvRead),
+        r#"{"key":"DAL_TEST_KEY_ABSENT_9F4C"}"#,
+    )
+    .await;
+    let OpOutcome::Ok { value, .. } = outcome else {
+        panic!("env.read routes to the env service: {outcome:?}");
+    };
+    let OpValue::Json(raw) = value else {
+        panic!("env.read answers raw JSON: {value:?}");
+    };
+    assert_eq!(raw.as_str(), "null", "an absent key answers null");
+}
+
+#[tokio::test]
+async fn a_service_op_rejects_unknown_arguments() {
+    let fx = fixture(Duration::ZERO).await;
+    let host = captured(&fx, &["env.read"]);
+    let inv = begin_eval(&host, None).expect("eval inherits A");
+    let outcome = call_op(
+        &host,
+        &inv,
+        OpId::Native(NativeOp::EnvRead),
+        r#"{"key":"HOME","bogus":1}"#,
+    )
+    .await;
+    let OpOutcome::Failed { failure, .. } = outcome else {
+        panic!("unknown keys fail the strict decode: {outcome:?}");
+    };
+    assert_eq!(failure.code, FailureCode::Failed);
+    assert!(
+        failure.message.contains("invalid arguments"),
+        "the decode error names the contract: {failure:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_service_op_replies_in_the_wire_shape() {
+    let fx = fixture(Duration::ZERO).await;
+    let host = captured(&fx, &["jobs.list"]);
+    let inv = begin_eval(&host, None).expect("eval inherits A");
+    let outcome = call_op(&host, &inv, OpId::Native(NativeOp::JobsList), "{}").await;
+    let OpOutcome::Ok { value, .. } = outcome else {
+        panic!("jobs.list routes to the jobs service: {outcome:?}");
+    };
+    let OpValue::Json(raw) = value else {
+        panic!("jobs.list answers raw JSON: {value:?}");
+    };
+    assert_eq!(
+        raw.as_str(),
+        r#"{"type":"listed","value":[]}"#,
+        "an empty job table answers the tagged wire shape"
+    );
+}
+
+#[tokio::test]
+async fn an_unwired_native_op_still_fails_unavailable() {
+    let fx = fixture(Duration::ZERO).await;
+    let host = captured(&fx, &["state.read"]);
+    let inv = begin_eval(&host, None).expect("eval inherits A");
+    let outcome = call_op(
+        &host,
+        &inv,
+        OpId::Native(NativeOp::StateRead),
+        r#"{"key":"todos"}"#,
+    )
+    .await;
+    let OpOutcome::Failed { failure, .. } = outcome else {
+        panic!("state.read has no owner and fails closed: {outcome:?}");
+    };
+    assert_eq!(failure.code, FailureCode::Unavailable);
+}
+
+#[tokio::test]
 async fn scope_results_come_back_in_submission_order() {
     let fx = fixture(Duration::from_millis(250)).await;
     let host = captured(&fx, &["tools.fixture.slow", "tools.fixture.view"]);
