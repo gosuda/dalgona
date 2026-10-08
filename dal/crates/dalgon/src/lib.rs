@@ -234,7 +234,6 @@ async fn run_command(
 /// Runs one headless prompt turn over the host agent.
 #[expect(
     clippy::too_many_arguments,
-    clippy::too_many_lines,
     reason = "one headless run carries cli, vars, paths, and host state"
 )]
 async fn run_headless(
@@ -261,48 +260,7 @@ async fn run_headless(
     let parts =
         match print::assemble_prompt(&cli.prompts, &workspace_path, snapshot.stdin_tty).await {
             Ok(parts) => parts,
-            Err(print::PromptError::Empty) => {
-                return two_lines(
-                    [
-                        cli::texts::NO_PROMPT.into(),
-                        cli::texts::NO_PROMPT_HINT.into(),
-                    ],
-                    exit::ExitKind::RequestedFailure,
-                );
-            }
-            Err(print::PromptError::DashWithoutPipe) => {
-                return two_lines(
-                    [
-                        cli::texts::DASH_NEEDS_STDIN.into(),
-                        cli::texts::DASH_NEEDS_STDIN_HINT.into(),
-                    ],
-                    exit::ExitKind::Usage,
-                );
-            }
-            Err(print::PromptError::FileMissing { path, arg }) => {
-                return two_lines(
-                    cli::texts::prompt_file_not_found(&path, &arg),
-                    exit::ExitKind::RequestedFailure,
-                );
-            }
-            Err(print::PromptError::FileUnreadable { path, source }) => {
-                return two_lines(
-                    cli::texts::prompt_file_unreadable(&path, &source.to_string()),
-                    exit::ExitKind::RequestedFailure,
-                );
-            }
-            Err(print::PromptError::FileNotUtf8 { path }) => {
-                return two_lines(
-                    cli::texts::prompt_file_not_utf8(&path),
-                    exit::ExitKind::RequestedFailure,
-                );
-            }
-            Err(print::PromptError::Stdin(source)) => {
-                return two_lines(
-                    cli::texts::stdin_unreadable(&source.to_string()),
-                    exit::ExitKind::RequestedFailure,
-                );
-            }
+            Err(error) => return prompt_error_exit(error),
         };
     // Print mode runs without a terminal: under `ask` the run cannot answer
     // approval requests, so it emits the once-per-run headless notice and
@@ -368,6 +326,42 @@ async fn run_headless(
             exit::code(exit::ExitKind::RequestedFailure)
         }
         Err(code) => ExitCode::from(code),
+    }
+}
+
+/// Maps a prompt assembly failure to its usage diagnostics.
+fn prompt_error_exit(error: print::PromptError) -> ExitCode {
+    match error {
+        print::PromptError::Empty => two_lines(
+            [
+                cli::texts::NO_PROMPT.into(),
+                cli::texts::NO_PROMPT_HINT.into(),
+            ],
+            exit::ExitKind::RequestedFailure,
+        ),
+        print::PromptError::DashWithoutPipe => two_lines(
+            [
+                cli::texts::DASH_NEEDS_STDIN.into(),
+                cli::texts::DASH_NEEDS_STDIN_HINT.into(),
+            ],
+            exit::ExitKind::Usage,
+        ),
+        print::PromptError::FileMissing { path, arg } => two_lines(
+            cli::texts::prompt_file_not_found(&path, &arg),
+            exit::ExitKind::RequestedFailure,
+        ),
+        print::PromptError::FileUnreadable { path, source } => two_lines(
+            cli::texts::prompt_file_unreadable(&path, &source.to_string()),
+            exit::ExitKind::RequestedFailure,
+        ),
+        print::PromptError::FileNotUtf8 { path } => two_lines(
+            cli::texts::prompt_file_not_utf8(&path),
+            exit::ExitKind::RequestedFailure,
+        ),
+        print::PromptError::Stdin(source) => two_lines(
+            cli::texts::stdin_unreadable(&source.to_string()),
+            exit::ExitKind::RequestedFailure,
+        ),
     }
 }
 
