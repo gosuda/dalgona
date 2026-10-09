@@ -20,7 +20,7 @@ use crate::{
     error::{BlobError, OpenReport, StoreError},
     journal::{self, Faults, Journal as FileJournal, Receipt},
     layout::SessionPaths,
-    lock::LockGuard,
+    lock::{self, LockGuard},
     shard::Lane,
     sidecar::Sidecar,
     util,
@@ -1709,10 +1709,13 @@ fn write_failure(id: SessionId, error: StoreError) -> StoreError {
 ///
 /// The lock acquire and the scan/repair open both write and sync, so they
 /// run off the executor (R-perf). A lock held by this same process is
-/// retried briefly: it always signals another journal object inside the
-/// process — an owner still draining a first append or a shutdown still
-/// releasing handles — never a foreign process, so a bounded wait resolves
-/// the contention instead of reporting `Locked` for our own ownership.
+/// retried briefly — but only while no live object owns it: a contender in
+/// flight ahead of its registration or a shutdown still releasing handles
+/// resolves in milliseconds, so the bounded wait answers the transient
+/// instead of reporting `Locked` for our own ownership. A path registered
+/// in [`lock::held_in_process`] belongs to a live session that keeps its
+/// lock until close, so `Locked` returns at once rather than burning the
+/// whole budget — a held session makes every retry a guaranteed loss.
 /// The budget spans a convoyed first-append queue on slow filesystems.
 async fn open_locked_journal(
     paths: &SessionPaths,
@@ -1745,7 +1748,9 @@ async fn open_locked_journal(
         match attempt {
             Ok(Ok(pair)) => return Ok(pair),
             Ok(Err(StoreError::Locked { pid, .. }))
-                if lock_might_be_ours(pid) && tokio::time::Instant::now() < deadline =>
+                if lock_might_be_ours(pid)
+                    && !lock::held_in_process(&paths.lock())
+                    && tokio::time::Instant::now() < deadline =>
             {
                 tokio::time::sleep(RETRY_POLL).await;
             }

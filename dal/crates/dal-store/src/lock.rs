@@ -1,9 +1,11 @@
 //! Cross-process ownership of a session's journal.
 
 use std::{
+    collections::HashMap,
     fs::{self, File, TryLockError},
     io::{Seek, SeekFrom, Write},
     path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
     thread,
     time::{Duration, Instant},
 };
@@ -17,6 +19,44 @@ use crate::{
 
 const PID_WAIT: Duration = Duration::from_millis(100);
 const PID_POLL: Duration = Duration::from_millis(5);
+
+/// Every lock path this process currently holds, keyed by the path the
+/// holder acquired. A same-pid `Locked` contender uses it to tell a live
+/// in-process session (which keeps its lock for the session's whole life,
+/// so waiting never pays) from a mid-acquire or mid-release transient
+/// (which resolves in milliseconds and is worth a bounded retry).
+fn holders() -> &'static Mutex<HashMap<PathBuf, usize>> {
+    static HOLDERS: OnceLock<Mutex<HashMap<PathBuf, usize>>> = OnceLock::new();
+    HOLDERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn holders_map() -> std::sync::MutexGuard<'static, HashMap<PathBuf, usize>> {
+    holders()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn register(path: &Path) {
+    *holders_map().entry(path.to_path_buf()).or_default() += 1;
+}
+
+fn unregister(path: &Path) {
+    let mut map = holders_map();
+    if let Some(count) = map.get_mut(path) {
+        *count -= 1;
+        if *count == 0 {
+            map.remove(path);
+        }
+    }
+}
+
+/// `true` while a live object inside this process holds the OS lock for
+/// `path`. Registering happens only after `try_lock` and the owner sidecar
+/// publish, so a path still absent here is a transient — the acquire or
+/// release in flight — not a session that will outlive a retry budget.
+pub(crate) fn held_in_process(path: &Path) -> bool {
+    holders_map().contains_key(path)
+}
 
 /// Holds the operating-system lock for one session.
 ///
@@ -62,6 +102,10 @@ impl LockGuard {
                     format!("{}\n", std::process::id()).as_bytes(),
                 )
                 .map_err(|source| util::io_err(path, source))?;
+                // Registered last: the sidecar precedes it so a contender
+                // reading our pid always finds the live-holder flag instead
+                // of taking a needless retry pass.
+                register(path);
                 Ok(Self {
                     _file: file,
                     path: path.to_path_buf(),
@@ -78,9 +122,11 @@ impl LockGuard {
 
 impl Drop for LockGuard {
     fn drop(&mut self) {
-        // Remove the sidecar before `file` closes and the lock releases: a
-        // contender that loses `try_lock` to the next holder must not read a
-        // retired pid during the gap before that holder republishes its own.
+        // Unregister and remove the sidecar before `file` closes and the
+        // lock releases: a contender that loses `try_lock` to the next
+        // holder must not read a retired pid or a stale live-holder flag
+        // during the gap before that holder republishes its own.
+        unregister(&self.path);
         let _ = fs::remove_file(owner_path(&self.path));
     }
 }
@@ -285,6 +331,21 @@ mod tests {
         );
         let _next = LockGuard::acquire(&path, id).expect("lock released after guard drop");
         assert!(owner.exists(), "the next holder republishes its own pid");
+    }
+
+    #[test]
+    fn held_in_process_tracks_the_guard_lifetime() {
+        let dir = TestDir::new();
+        let id = SessionId::new_v7();
+        let path = dir.0.join("lock");
+        assert!(!super::held_in_process(&path));
+        {
+            let _guard = LockGuard::acquire(&path, id).expect("first lock acquisition");
+            assert!(super::held_in_process(&path));
+        }
+        assert!(!super::held_in_process(&path));
+        let _next = LockGuard::acquire(&path, id).expect("lock released after guard drop");
+        assert!(super::held_in_process(&path));
     }
 
     #[test]
