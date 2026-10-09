@@ -398,7 +398,7 @@ async fn reload_prefix_keeps_product_base() {
     });
     let cx = CommandCx::new(caller, session, None, services, host);
     let summary: ReloadSummary = cx
-        .publish_plugins(vec![ext("p2", Origin::User)])
+        .publish_plugins(vec![ext("p2", Origin::User)], vec![])
         .await
         .expect("reload publishes");
     assert_eq!(summary.plugins, 1);

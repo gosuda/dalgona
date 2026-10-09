@@ -71,14 +71,22 @@ fn next_id() -> GenerationId {
 /// carries [`Origin::User`] and nothing else mints it, so the kept
 /// prefix is every non-`User` extension in current canonical order
 /// (builtins in input order, then bundled by name) and only the
-/// trailing `User` run is replaced. Canonical validation re-sorts
+/// trailing `User` run is replaced. `replace` swaps same-named
+/// non-`User` records, so a reload can rebind per-generation state
+/// inside a builtin extension. Canonical validation re-sorts
 /// afterward, so the result order never depends on this filter.
-pub(crate) fn splice_plugins(current: &[Extension], plugins: Vec<Extension>) -> Vec<Extension> {
+pub(crate) fn splice_plugins(
+    current: &[Extension],
+    plugins: Vec<Extension>,
+    replace: Vec<Extension>,
+) -> Vec<Extension> {
+    let replaced: std::collections::BTreeSet<&str> = replace.iter().map(Extension::name).collect();
     let mut next: Vec<Extension> = current
         .iter()
-        .filter(|ext| ext.origin() != Origin::User)
+        .filter(|ext| ext.origin() != Origin::User && !replaced.contains(ext.name()))
         .cloned()
         .collect();
+    next.extend(replace);
     next.extend(plugins);
     next
 }

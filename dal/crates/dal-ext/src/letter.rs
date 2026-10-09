@@ -392,7 +392,8 @@ pub async fn handle_first_input(
     if cx.cancel.is_cancelled() {
         return Err(HookError::Cancelled);
     }
-    let assembly = match letters(&registry, &font) {
+    let registry = &*registry;
+    let assembly = match letters(registry, &font) {
         Ok(assembly) => assembly,
         Err(error) => {
             return Err(HookError::Failed {
@@ -425,8 +426,9 @@ pub async fn handle_first_input(
 ///
 /// Returns the runtime's typed build error when the builder rejects the
 /// registration.
-pub fn extension() -> Result<Extension, RegistrationError> {
-    let registry = Arc::new(crate::skills::SkillRegistry::empty());
+pub fn extension(
+    registry: Arc<crate::skills::SkillRegistry>,
+) -> Result<Extension, RegistrationError> {
     let font = Arc::new(Font::embedded());
     let resolver = LetterResolver::new();
     let hook = FirstInputHook { registry, font };

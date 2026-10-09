@@ -14,7 +14,7 @@ fn auto_thinking_changes_only_typed_request_params() -> support::TestResult<()> 
         ConfigProduct::Dalgona,
         &root,
         factory.defaults,
-        Some("[plugin.judged]\nmode = \"auto\"\n"),
+        Some("[plugin.judged]\nthinking = true\n"),
     )?;
     let cx = dalgon::BuildCx {
         data_root: root.clone(),
@@ -27,10 +27,10 @@ fn auto_thinking_changes_only_typed_request_params() -> support::TestResult<()> 
         .build()?;
     runtime.block_on(async {
         let host =
-            support::start_dalgona_with_config(root, Some("[plugin.judged]\nmode = \"auto\"\n"))
+            support::start_dalgona_with_config(root, Some("[plugin.judged]\nthinking = true\n"))
                 .await?;
         let doc = host.doc("dalgona://judged")?;
-        assert!(format!("{doc:?}").contains("before_request"));
+        assert!(format!("{doc:?}").contains("first request of a top-level turn"));
         let report = host.shutdown(Duration::from_secs(2)).await;
         assert_eq!(report.sessions_closed, 0);
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())

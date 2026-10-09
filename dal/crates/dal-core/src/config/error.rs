@@ -22,7 +22,7 @@ pub enum ConfigError {
         known_keys: Vec<Box<str>>,
     },
     /// A supported key has an invalid value.
-    #[error("invalid config value for {key}")]
+    #[error("invalid config value {value} for {key}: {expected}")]
     InvalidValue {
         /// Dotted path of the invalid value.
         key: Box<str>,

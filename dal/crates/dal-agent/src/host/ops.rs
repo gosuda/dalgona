@@ -124,6 +124,11 @@ impl Host {
             Err(_) => {}
         }
         let generation = self.state.shared.generation.borrow().clone();
+        if let Some(resolver) = generation.scheme(parsed.scheme)
+            && let Some(doc) = resolver.read_static(parsed.path)
+        {
+            return doc;
+        }
         let docs = generation.docs();
         if let Some(page) = docs.find(uri) {
             return Ok(Doc::new(page.uri.clone(), page.text.clone()));

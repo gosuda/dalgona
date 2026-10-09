@@ -63,6 +63,13 @@ pub trait SchemeResolver: Send + Sync + 'static {
         path: &'a str,
         cx: &'a SchemeCx<'a>,
     ) -> BoxFuture<'a, Result<Doc, SchemeError>>;
+
+    /// Reads `path` without a session, when the scheme's content is
+    /// generation-static. `None` means the scheme needs session context;
+    /// host-level `doc()` then falls back to the static page table.
+    fn read_static(&self, _path: &str) -> Option<Result<Doc, SchemeError>> {
+        None
+    }
 }
 
 /// Read-only cross-extension view for the shared `letter://` resolver.

@@ -146,6 +146,18 @@ impl ValidatedExtensions {
                 tables.seed(ext)?;
             }
         }
+        let mut claimed: std::collections::BTreeMap<Name, Claimant> =
+            std::collections::BTreeMap::new();
+        for ext in &sorted {
+            let (claimant, name) = claimant_of(ext)?;
+            if let Some(previous) = claimed.insert(name.clone(), claimant) {
+                return Err(RegistrationError::Conflict {
+                    kind: "extension",
+                    name,
+                    claimant: previous,
+                });
+            }
+        }
         for ext in &sorted {
             validate_mcp_skill_inject(ext)?;
         }

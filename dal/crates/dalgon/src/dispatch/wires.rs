@@ -80,6 +80,7 @@ async fn stdio(wire: Wire, startup: Startup, product: Product) -> ExitCode {
         cwd,
         config,
         data_root,
+        binary: _,
         helper,
         ..
     } = startup;
@@ -122,6 +123,7 @@ async fn local_socket(socket: Option<PathBuf>, startup: Startup, product: Produc
         cwd,
         config,
         data_root,
+        binary: _,
         helper,
         ..
     } = startup;

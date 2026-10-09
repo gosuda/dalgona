@@ -1,0 +1,26 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH dalgon-plugin 1  "dalgon-plugin " 
+.SH NAME
+dalgon\-plugin \- Manage configured plugin grants.
+.SH SYNOPSIS
+\fBdalgon\-plugin\fR [\fB\-h\fR|\fB\-\-help\fR] <\fIsubcommands\fR>
+.SH DESCRIPTION
+Manage configured plugin grants.
+.SH OPTIONS
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.SH SUBCOMMANDS
+.TP
+dalgon\-plugin\-grant(1)
+Grant the configured capabilities declared by NAME.
+.TP
+dalgon\-plugin\-revoke(1)
+Revoke every persistent grant for NAME.
+.TP
+dalgon\-plugin\-list(1)
+List configured plugins and their persistent grants.
+.TP
+dalgon\-plugin\-help(1)
+Print this message or the help of the given subcommand(s)

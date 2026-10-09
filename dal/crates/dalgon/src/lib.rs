@@ -102,6 +102,7 @@ pub(crate) struct Startup {
     pub(crate) config: Config,
     pub(crate) config_path: PathBuf,
     pub(crate) data_root: PathBuf,
+    pub(crate) binary: &'static str,
     pub(crate) helper: Option<PathBuf>,
 }
 
@@ -180,6 +181,7 @@ async fn run_command(
                 config,
                 config_path: _,
                 data_root,
+                binary: _,
                 helper,
             } = startup;
             run_headless(
@@ -641,6 +643,7 @@ fn assemble_startup(
         config,
         config_path,
         data_root: roots.data,
+        binary: factory.binary,
         helper: edge::current_exe(),
     };
     Ok(startup)

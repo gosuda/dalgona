@@ -297,11 +297,12 @@ fn write_exit(
         }
     }
     let line = if exit.ephemeral {
-        crate::copy::ids::EXIT_EPHEMERAL.to_owned()
+        crate::copy::render(crate::copy::ids::EXIT_EPHEMERAL, &[("bin", opts.binary)], 0)
     } else {
         crate::copy::render(
             crate::copy::ids::EXIT_SAVED,
             &[
+                ("bin", opts.binary),
                 ("name", exit.name.as_deref().unwrap_or("session")),
                 ("id", &session_id.to_string()),
                 ("n", &exit.messages.to_string()),

@@ -89,7 +89,10 @@ const MAN_PAGES: [&str; 19] = [
 ];
 
 fn dal_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf()
 }
 
 fn dist_ready() -> Result<bool, Box<dyn Error>> {

@@ -290,9 +290,9 @@ pub mod ids {
     pub const SETTINGS_HINT: &str = "arrows select · enter toggles or saves · esc close";
     /// Persisted-session exit line.
     pub const EXIT_SAVED: &str =
-        "dalgon: session \"{name}\" saved · {n} message|s · run dalgon -r {name} to resume";
+        "{bin}: session \"{name}\" saved · {n} message|s · run {bin} -r {name} to resume";
     /// Ephemeral-session exit line.
-    pub const EXIT_EPHEMERAL: &str = "dalgon: ephemeral session · nothing saved";
+    pub const EXIT_EPHEMERAL: &str = "{bin}: ephemeral session · nothing saved";
     /// Draft discard dialog title.
     pub const EXIT_DRAFT_TITLE: &str = "Discard the draft and quit";
     /// Keep-editing action.

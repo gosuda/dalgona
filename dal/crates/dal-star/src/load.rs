@@ -152,6 +152,16 @@ pub fn load(roots: &LoadRoots, cfg: &PluginsConfig) -> Result<PluginGeneration, 
             );
         }
     }
+    if let Some(missing) = cfg
+        .enabled
+        .iter()
+        .find(|name| !plugins.contains_key(name.as_str()))
+    {
+        return Err(LoadError::UnknownPlugin {
+            name: missing.clone().into_boxed_str(),
+            dir: plugins_dir,
+        });
+    }
     Ok(PluginGeneration::new(
         plugins.into_values().map(std::sync::Arc::new).collect(),
     ))
