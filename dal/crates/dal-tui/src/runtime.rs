@@ -1357,7 +1357,7 @@ fn jump_to_search_match(session: &mut Session, transcript: &Transcript, query: &
         .iter()
         .rposition(|row| row.to_lowercase().contains(&needle))
     {
-        session.viewport.jump_to(row);
+        session.viewport.jump_to(row, transcript.rows().len());
     }
 }
 
