@@ -16,6 +16,7 @@ use dal_core::{
 
 use super::projection::{Projection, SnapshotArgs};
 use super::ring::{Replay, ReplayRing, RingCaps};
+use super::service_grants::ServiceGrants;
 use super::subscriber::{Subscriber, SubscriberShared};
 use crate::agent::Delivery;
 use crate::ext::ExtRecord;
@@ -33,6 +34,7 @@ pub(crate) struct Shared {
     ext: Mutex<ExtSnap>,
     promoted: Mutex<Arc<BTreeSet<Name>>>,
     tool_allowlist: OnceLock<Arc<BTreeSet<Name>>>,
+    service_grants: ServiceGrants,
 }
 
 struct SharedInner {
@@ -82,6 +84,7 @@ impl Shared {
             }),
             promoted: Mutex::new(Arc::new(BTreeSet::new())),
             tool_allowlist: OnceLock::new(),
+            service_grants: ServiceGrants::default(),
         }
     }
 
@@ -105,6 +108,11 @@ impl Shared {
     /// The tool names the session may use; `None` means no restriction.
     pub(crate) fn tool_allowlist(&self) -> Option<Arc<BTreeSet<Name>>> {
         self.tool_allowlist.get().map(Arc::clone)
+    }
+
+    /// The run grants approved calls lent their extensions in this session.
+    pub(crate) fn service_grants(&self) -> &ServiceGrants {
+        &self.service_grants
     }
 
     /// The approval mode the session runs under now.

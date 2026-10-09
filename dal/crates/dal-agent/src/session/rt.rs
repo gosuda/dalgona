@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use dal_core::{
     ApprovalMode, BlobId, CallId, DenyReason, EntryId, EntryKind, EntryView, JobId, JournalPart,
-    Name, Policy, Preview, SessionId, ToolClass, Workspace,
+    Name, Policy, Preview, RunRequest, SessionId, ToolClass, Workspace,
 };
 use serde::Deserialize;
 use tokio::sync::{Mutex, OwnedSemaphorePermit};
@@ -23,11 +23,12 @@ use crate::error::{SchemeError, ToolError};
 use crate::ext::generation::Generation;
 use crate::ext::scheme::{LetterSourceIndex, SchemeCx, SchemeCxRuntime, SchemeResolveContext};
 use crate::ext::tool::{Approved, ToolCxRuntime};
-use crate::ext::{BoxFuture, Doc};
+use crate::ext::{BoxFuture, Caller, Doc};
 use crate::host::HostState;
 use crate::jobs::{JobRecord, JobTable};
 use crate::proc::{Launcher, Proc, SpawnOpts, spawn_process};
 use crate::session::dispatch::grant_covers;
+use crate::session::service_grants::{CallKey, Covering};
 use crate::session::tasks::SessionTasks;
 
 /// Session approval policy for the services `run` slot.
@@ -138,6 +139,19 @@ impl SessionRt {
         }
     }
 
+    /// The live grant that covers one `run` request `who` made, if any.
+    async fn covering(&self, who: &Caller, req: &RunRequest) -> Option<Covering> {
+        let key = CallKey::of(who)?;
+        let cwd = req
+            .cwd
+            .as_deref()
+            .unwrap_or_else(|| self.workspace.as_path());
+        let jobs = self.jobs.lock().await;
+        self.shared
+            .service_grants()
+            .cover(&key, &req.argv, cwd, &jobs)
+    }
+
     /// Acquires the process permit for one allowed services run.
     async fn acquire(
         &self,
@@ -200,7 +214,7 @@ impl SessionRt {
         self.proofs
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(call.clone(), (digest, permit, fds));
+            .insert(call.clone(), (digest, permit, fds, None));
         Ok(Approved::new(
             call.clone(),
             digest,
@@ -257,6 +271,44 @@ impl ToolCxRuntime for SessionRt {
         Box::pin(async move { self.mint_allow(&call, preview, &cancel).await })
     }
 
+    fn covered_run<'a>(
+        &'a self,
+        who: &'a Caller,
+        call: &'a CallId,
+        req: &'a RunRequest,
+        preview: &'a Preview,
+        cancel: &'a CancellationToken,
+    ) -> BoxFuture<'a, Result<Option<Approved>, DenyReason>> {
+        Box::pin(async move {
+            if self.covering(who, req).await.is_none() {
+                return Ok(None);
+            }
+            let (permit, fds) = self.acquire(cancel).await?;
+            // The wait for a slot may outlast the run that earned the grant.
+            let Some(covering) = self.covering(who, req).await else {
+                return Err(DenyReason::NotGranted);
+            };
+            let digest = preview.digest;
+            self.proofs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(call.clone(), (digest, permit, fds, CallKey::of(who)));
+            Ok(Some(Approved::new(
+                call.clone(),
+                digest,
+                covering.prefix,
+                covering.roots,
+                covering.job,
+            )))
+        })
+    }
+
+    fn job_started(&self, who: &Caller, job: JobId) {
+        if let Some(key) = CallKey::of(who) {
+            self.shared.service_grants().bind_job(&key, job);
+        }
+    }
+
     fn spawn(
         &self,
         argv: &[OsString],
@@ -268,9 +320,19 @@ impl ToolCxRuntime for SessionRt {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(approved.call());
-        let Some((digest, permit, fd_permit)) = proof else {
+        let Some((digest, permit, fd_permit, key)) = proof else {
             return Err(ToolError::Denied(DenyReason::NotGranted));
         };
+        if let Some(key) = key {
+            let Ok(jobs) = self.jobs.try_lock() else {
+                return Err(ToolError::Denied(DenyReason::NotGranted));
+            };
+            if approved.job().is_some_and(|job| !jobs.is_live(job))
+                || !self.shared.service_grants().is_live(&key, &jobs)
+            {
+                return Err(ToolError::Denied(DenyReason::NotGranted));
+            }
+        }
         let launcher = match &self.launcher {
             Ok(launcher) => launcher,
             Err(setup) => return Err(setup.tool_error()),
@@ -675,6 +737,7 @@ type SpawnProof = (
     Option<[u8; 32]>,
     OwnedSemaphorePermit,
     crate::admission::FdPermit,
+    Option<CallKey>,
 );
 
 pub(crate) fn resolve_extension_scheme(

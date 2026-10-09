@@ -484,6 +484,14 @@ impl Services for SessionServices {
                 .map_err(|error| ServiceError::failed(Some(Service::Run), error.to_string()))?;
             let preview = self.run_preview(&req);
             let call = self.next_call_id();
+            let covered = self
+                .rt
+                .covered_run(&who, &call, &req, &preview, &self.cancel)
+                .await
+                .map_err(Self::map_deny)?;
+            if let Some(approved) = covered {
+                return self.run_spawned(req, approved).await;
+            }
             match self.rt.decide_run() {
                 dal_core::Decision::Allow => {
                     let approved = self
@@ -639,7 +647,12 @@ impl Services for SessionServices {
         Box::pin(async move {
             Self::check_inject(&who, Service::Jobs)?;
             self.gated(&who, Service::Jobs).await?;
-            self.backend.jobs(&who.ext, op).await
+            let top_level = matches!(op, JobsOp::Spawn { parent: None, .. });
+            let reply = self.backend.jobs(&who.ext, op).await?;
+            if let (true, JobsReply::Spawned { id }) = (top_level, &reply) {
+                self.rt.job_started(&who, *id);
+            }
+            Ok(reply)
         })
     }
 

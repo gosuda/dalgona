@@ -99,6 +99,26 @@ fn service_error(error: ServiceError) -> ScopeError {
     }
 }
 
+/// Closes a member session whose wait failed, so no child outlives its
+/// failed handle. A close that fails too keeps both failures in the error.
+async fn close_after_failure(
+    services: &Arc<dyn Services>,
+    caller: &Caller,
+    id: SessionId,
+    wait_error: ServiceError,
+) -> ScopeError {
+    let failure = service_error(wait_error);
+    match services.agents(caller, AgentsOp::Cancel { id }).await {
+        Ok(AgentsReply::Cancelled { .. }) => failure,
+        Ok(_) => ScopeError::Failed(
+            format!("{failure}; closing child session {id} returned an unexpected reply. Retry cancelling that session.").into(),
+        ),
+        Err(close_error) => ScopeError::Failed(
+            format!("{failure}; closing child session {id} also failed: {close_error}. Retry cancelling that session.").into(),
+        ),
+    }
+}
+
 impl Runtime {
     fn price(&self, route: &ModelRoute) -> Option<ModelPrice> {
         match &self.price {
@@ -161,7 +181,10 @@ impl Runtime {
                     return Err(ScopeError::Cancelled);
                 }
             };
-            let mut awaited = awaited.map_err(service_error)?;
+            let mut awaited = match awaited {
+                Ok(reply) => reply,
+                Err(error) => return Err(close_after_failure(&services, &caller, id, error).await),
+            };
             loop {
                 match awaited {
                     AgentsReply::Await { report } => return Ok(report),
@@ -169,7 +192,12 @@ impl Runtime {
                     AgentsReply::Pending { id } => {
                         tokio::select! {
                             reply = services.agents(&caller, AgentsOp::Await { id, timeout: None }) => {
-                                awaited = reply.map_err(service_error)?;
+                                awaited = match reply {
+                                    Ok(reply) => reply,
+                                    Err(error) => {
+                                        return Err(close_after_failure(&services, &caller, id, error).await);
+                                    }
+                                };
                             }
                             () = cancel.cancelled() => {
                                 let _ = services.agents(&caller, AgentsOp::Cancel { id }).await;

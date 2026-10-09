@@ -35,6 +35,7 @@ use crate::jobs::JobTable;
 use crate::proc::{Proc, SpawnOpts, spawn_process};
 use crate::session::actor::TurnWork;
 use crate::session::contain::contained;
+use crate::session::service_grants::{CallKey, Invocation, scope_roots};
 use crate::session::tasks::SessionTasks;
 
 /// A call ready to run with its resolved details.
@@ -318,8 +319,16 @@ async fn run_one_inner(
             });
         }
     }
-    let caller = tool_caller(ctx, ready);
-    let runtime = CallRuntime::new(ctx, ready, args.clone(), Arc::clone(reports));
+    let invocation = Invocation::next();
+    let caller = tool_caller(ctx, ready, invocation);
+    let runtime = CallRuntime::new(
+        ctx,
+        ready,
+        caller.ext().clone(),
+        invocation,
+        args.clone(),
+        Arc::clone(reports),
+    );
     let cx = ToolCx::new(
         caller,
         ready.call.clone(),
@@ -390,7 +399,7 @@ async fn run_hooks(ctx: &DispatchCtx, event: &ToolCallEvent, args: RawJson) -> H
 /// origin, and declared `inject` set, exactly as `run_hooks` mints a hook
 /// caller. A tool no extension owns keeps its own name, builtin origin, and
 /// an empty set.
-fn tool_caller(ctx: &DispatchCtx, ready: &ReadyCall) -> Caller {
+fn tool_caller(ctx: &DispatchCtx, ready: &ReadyCall, invocation: Invocation) -> Caller {
     let generation_owner = ctx
         .generation
         .tools
@@ -417,7 +426,7 @@ fn tool_caller(ctx: &DispatchCtx, ready: &ReadyCall) -> Caller {
                 dal_core::ext::ServiceSet::EMPTY,
             )
         });
-    Caller::new(ext, origin, inject, CallerKind::Tool, Some(ctx.turn))
+    Caller::new(ext, origin, inject, CallerKind::Tool, Some(ctx.turn)).with_invocation(invocation)
 }
 
 /// Runs one tool call and turns a panic into a visible tool error.
@@ -545,6 +554,12 @@ struct CallRuntime {
     call: CallId,
     /// The running tool.
     tool: Name,
+    /// The extension that owns the tool; its `run` service calls ride the
+    /// grant this call earns.
+    ext: Name,
+    invocation: Option<Invocation>,
+    /// The session the call runs in.
+    session: SessionId,
     /// The final arguments after hooks.
     args: RawJson,
     /// The ladder policy snapshot.
@@ -581,13 +596,6 @@ struct CallRuntime {
     ledger: Arc<Mutex<GrantLedger>>,
     /// The authorization proof state: the bound digest once approved.
     auth: Mutex<Option<AuthProof>>,
-    /// The pre-acquired process and fd permits for exec spawns.
-    permit: Mutex<
-        Option<(
-            tokio::sync::OwnedSemaphorePermit,
-            crate::admission::FdPermit,
-        )>,
-    >,
     /// The session owner for detached background work.
     tasks: SessionTasks,
     /// The cancellation token bounding this call.
@@ -606,6 +614,8 @@ impl CallRuntime {
     fn new(
         ctx: &DispatchCtx,
         ready: &ReadyCall,
+        ext: Name,
+        invocation: Invocation,
         args: RawJson,
         reports: Arc<Mutex<Vec<TurnWork>>>,
     ) -> Self {
@@ -613,6 +623,9 @@ impl CallRuntime {
             turn: Some(ctx.turn),
             call: ready.call.clone(),
             tool: ready.name.clone(),
+            ext,
+            invocation: Some(invocation),
+            session: ctx.session,
             args,
             policy: ctx.policy.clone(),
             broker: Arc::clone(&ctx.broker),
@@ -632,7 +645,6 @@ impl CallRuntime {
             tasks: ctx.backend.tasks().clone(),
             ledger: Arc::clone(&ctx.ledger),
             auth: Mutex::new(None),
-            permit: Mutex::new(None),
             cancel: ctx.cancel.clone(),
         }
     }
@@ -644,6 +656,49 @@ impl CallRuntime {
     /// mints on approval, records session grants, and denies with
     /// model-visible text otherwise.
     async fn authorize_inner(
+        &self,
+        call: &CallId,
+        preview: Preview,
+        cancel: &CancellationToken,
+    ) -> Result<Approved, dal_core::DenyReason> {
+        let approved = self.authorize_ladder(call, preview, cancel).await?;
+        self.lend_service_grant();
+        Ok(approved)
+    }
+
+    /// Lends the scoped grant a tool's classification carries to the `run`
+    /// calls its extension makes for this call. Any approval earns it, an
+    /// answered ask or an allow by policy alike.
+    fn lend_service_grant(&self) {
+        let Ok(ToolClass::Exec {
+            grant: Some(spec), ..
+        }) = self.approval_class()
+        else {
+            return;
+        };
+        let prefix = spec
+            .argv_prefix
+            .split_ascii_whitespace()
+            .map(std::ffi::OsString::from)
+            .collect();
+        let Some(invocation) = self.invocation else {
+            return;
+        };
+        let roots = scope_roots(
+            spec.roots,
+            &self.host.shared.data_root,
+            self.workspace.as_path(),
+            self.session,
+        );
+        self.shared.service_grants().register(
+            CallKey::new(self.ext.clone(), invocation),
+            prefix,
+            roots,
+        );
+    }
+
+    /// The approval ladder itself, before any grant lending.
+    async fn authorize_ladder(
         &self,
         call: &CallId,
         preview: Preview,
@@ -717,6 +772,7 @@ impl CallRuntime {
         cancel: &CancellationToken,
     ) -> Result<Approved, dal_core::DenyReason> {
         use dal_core::DenyReason;
+        let mut approved = Approved::new(self.call.clone(), digest, prefix, roots, job);
         if !job_is_live(&*self.jobs.lock().await, job) {
             return Err(DenyReason::NotGranted);
         }
@@ -763,10 +819,10 @@ impl CallRuntime {
                         what: "file descriptors unavailable".into(),
                     },
                 })?;
-            *self.permit.lock().await = Some((permit, fd_permit));
+            approved = approved.with_permits(permit, fd_permit);
         }
         *self.auth.lock().await = Some(AuthProof { digest });
-        Ok(Approved::new(self.call.clone(), digest, prefix, roots, job))
+        Ok(approved)
     }
 }
 
@@ -921,6 +977,17 @@ fn tool_owner(generation: &Generation, tools: &TurnTools, name: &Name) -> Owner 
     }
 }
 
+impl Drop for CallRuntime {
+    /// The call is over; the jobs it started now bound its run grant.
+    fn drop(&mut self) {
+        if let Some(invocation) = self.invocation {
+            self.shared
+                .service_grants()
+                .call_ended(&CallKey::new(self.ext.clone(), invocation));
+        }
+    }
+}
+
 impl ToolCxRuntime for CallRuntime {
     fn decide_run(&self) -> dal_core::Decision {
         self.policy
@@ -963,7 +1030,7 @@ impl ToolCxRuntime for CallRuntime {
         &self,
         argv: &[std::ffi::OsString],
         opts: SpawnOpts,
-        approved: Approved,
+        mut approved: Approved,
     ) -> Result<Proc, crate::error::ToolError> {
         use crate::error::ToolError;
         if let Some(job) = approved.job() {
@@ -987,10 +1054,7 @@ impl ToolCxRuntime for CallRuntime {
                 self.tool.as_str(),
             )));
         }
-        let permit = match self.permit.try_lock() {
-            Ok(mut guard) => guard.take(),
-            Err(_) => None,
-        };
+        let permit = approved.take_permits();
         let Some((permit, fd_permit)) = permit else {
             return Err(ToolError::Denied(dal_core::DenyReason::NotGranted));
         };
@@ -1266,6 +1330,9 @@ pub(crate) async fn direct_call_seeded(backend: &Backend, seed: NestedCall) -> T
         turn,
         call: call.clone(),
         tool: name.clone(),
+        ext: caller.ext().clone(),
+        invocation: None,
+        session: backend.session(),
         args: args.clone(),
         policy: Policy {
             mode: if approved_cell {
@@ -1293,7 +1360,6 @@ pub(crate) async fn direct_call_seeded(backend: &Backend, seed: NestedCall) -> T
         tasks: backend.tasks().clone(),
         ledger: Arc::new(Mutex::new(GrantLedger::new())),
         auth: Mutex::new(None),
-        permit: Mutex::new(None),
         cancel,
     };
     let cx = ToolCx::new(

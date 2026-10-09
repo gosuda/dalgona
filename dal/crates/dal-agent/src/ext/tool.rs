@@ -18,7 +18,7 @@ use std::sync::Arc;
 use dal_core::ext::{Consumer, ToolData};
 use dal_core::{
     CallId, DenyReason, GenerationId, JobId, ModelInfo, Name, Origin, Part, Preview, RawJson,
-    ServiceSet, SessionId, ToolClass, ToolSpec, TurnId, Workspace,
+    RunRequest, ServiceSet, SessionId, ToolClass, ToolSpec, TurnId, Workspace,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -150,18 +150,22 @@ struct Seal;
 /// [`ToolCx::spawn`] consumes the proof, so one approval spawns at most
 /// once. The type is deliberately not `Clone`.
 #[derive(Debug)]
+#[must_use = "dropping an approval releases its reserved process slot"]
 pub struct Approved {
     call: CallId,
     digest: Option<[u8; 32]>,
     prefix: Box<[OsString]>,
     roots: Box<[PathBuf]>,
     job: Option<JobId>,
+    permits: Option<(
+        tokio::sync::OwnedSemaphorePermit,
+        crate::admission::FdPermit,
+    )>,
     _seal: Seal,
 }
 
 impl Approved {
     /// Mints a proof; authorization alone calls this constructor.
-    #[must_use]
     pub(crate) fn new(
         call: CallId,
         digest: Option<[u8; 32]>,
@@ -175,8 +179,27 @@ impl Approved {
             prefix,
             roots,
             job,
+            permits: None,
             _seal: Seal,
         }
+    }
+
+    pub(crate) fn with_permits(
+        mut self,
+        permit: tokio::sync::OwnedSemaphorePermit,
+        fds: crate::admission::FdPermit,
+    ) -> Self {
+        self.permits = Some((permit, fds));
+        self
+    }
+
+    pub(crate) fn take_permits(
+        &mut self,
+    ) -> Option<(
+        tokio::sync::OwnedSemaphorePermit,
+        crate::admission::FdPermit,
+    )> {
+        self.permits.take()
     }
 
     /// Borrows the call this proof authorizes.
@@ -343,6 +366,24 @@ pub(crate) trait ToolCxRuntime: Send + Sync + 'static {
         preview: Preview,
         cancel: &CancellationToken,
     ) -> BoxFuture<'_, Result<Approved, DenyReason>>;
+    /// Mints the spawn proof for one `run` service request that a live run
+    /// grant of `who` covers. Returns `None` when no grant covers the
+    /// request; the caller then runs the approval ladder. The default keeps
+    /// no run grants.
+    fn covered_run<'a>(
+        &'a self,
+        _who: &'a Caller,
+        _call: &'a CallId,
+        _req: &'a RunRequest,
+        _preview: &'a Preview,
+        _cancel: &'a CancellationToken,
+    ) -> BoxFuture<'a, Result<Option<Approved>, DenyReason>> {
+        Box::pin(async { Ok(None) })
+    }
+    /// Notes that `who` started the top-level job `job`. A runtime that keeps
+    /// run grants ties the job to the call that started it; the default
+    /// keeps none.
+    fn job_started(&self, _who: &Caller, _job: JobId) {}
     /// Launches one checked child; consumes the approval proof.
     fn spawn(
         &self,
@@ -795,5 +836,41 @@ fn test_workspace() -> Workspace {
         Err(_) => loop {
             std::thread::park();
         },
+    }
+}
+
+#[cfg(test)]
+mod approval_tests {
+    use super::Approved;
+    use crate::admission::{Admission, Limits};
+    use crate::error::{AdmissionLimit, ToolError};
+    use dal_core::CallId;
+    use std::time::Duration;
+    use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn dropping_an_unused_approval_releases_its_only_process_slot() -> Result<(), ToolError> {
+        let admission = Admission::new(
+            Limits {
+                processes: 1,
+                admission_wait: Duration::from_millis(20),
+            },
+            128,
+        );
+        let cancel = CancellationToken::new();
+        let permit = admission.acquire_process(&cancel).await?;
+        let fds = admission.charge_fds(1, &cancel).await?;
+        let approved = Approved::new(CallId::new("call"), None, Box::new([]), Box::new([]), None)
+            .with_permits(permit, fds);
+        assert!(matches!(
+            admission.acquire_process(&cancel).await,
+            Err(ToolError::Admission {
+                limit: AdmissionLimit::Processes
+            })
+        ));
+        drop(approved);
+        let next = admission.acquire_process(&cancel).await?;
+        drop(next);
+        Ok(())
     }
 }

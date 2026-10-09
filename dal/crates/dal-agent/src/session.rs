@@ -12,6 +12,7 @@ pub(crate) mod projection;
 pub(crate) mod ring;
 pub(crate) mod rt;
 pub(crate) mod script;
+pub(crate) mod service_grants;
 #[cfg(test)]
 mod service_path_checks;
 pub(crate) mod shared;

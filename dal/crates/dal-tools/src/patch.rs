@@ -105,7 +105,7 @@ pub async fn apply_replacement(
         return Err(ApplyError::ObserverBlocked(blocked.clone()));
     }
     let preview = preview_for_plan(&plan);
-    cx.authorize(preview).await.map_err(ApplyError::Blocked)?;
+    let _approved = cx.authorize(preview).await.map_err(ApplyError::Blocked)?;
     let output = write::commit(&session, plan, observers).await;
     match output.error_class {
         Some(class) => Err(ApplyError::Engine(ir::EngineError::new(class, output.text))),

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Let an approved extension call run for its granted commands until its own run job ends. Other calls, other commands, and other directories still ask. A child session now closes after a failed wait.
 - Fix task artifacts written through the sidecar service: they now land in a directory named by the job id as it is displayed. Before, the directory used the debug form `JobId(...)`, so a reader given the job id could not find them.
 - Add `note` to `CoveredEntry`: a reminder in the covered span now reaches compactors as an entry that carries its text in `note` and no model context, so a compactor that draws the journal keeps the reminder's place. `covered_context()` still leaves reminders out, and a span that holds only reminders is still reported as nothing to compact.
 - Add `ExtensionBuilder::fallback_compactor`: a fallback compactor runs after every primary compactor, whatever the extension's origin, so a bundled battery's compactor gets its turn before dal's text summary. The built-in `summary` compactor is now a fallback; the chain is `remote`, then the batteries, then `summary`. `Extension::is_fallback_compactor` reports the registration.
