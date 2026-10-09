@@ -91,6 +91,10 @@ name = "dalgona-boot-11"
 path = "tests/dalgona-boot-11.rs"
 
 [[test]]
+name = "dalgona-boot-12"
+path = "tests/dalgona-boot-12.rs"
+
+[[test]]
 name = "dalgona-batteries-17"
 path = "tests/dalgona-batteries-17.rs"
 

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fix reading extension manuals with the `read` tool: an extension that registers doc pages now serves them at its own `<name>://` address through `ManualScheme`, which `dalgon` re-exports.
 - Fix the `run` service: it now keeps the stdout prefix a caller asks for. Before, every run reported an overflow with an empty prefix, so extensions that read command output, such as the review battery, could not read it.
 - Fix the WebSocket server for oversized messages: a message over 16 MiB now ends the connection without a close frame, as the protocol documents. Before, the server sent a normal close frame.
 - Fix the agents `cancel` operation: a failure to close the child session is now returned to the caller instead of being reported as a successful cancel.

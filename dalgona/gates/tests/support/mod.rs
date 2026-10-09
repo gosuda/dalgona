@@ -128,3 +128,111 @@ pub(crate) async fn start_dalgona_with_config(
     };
     Ok(dal_agent::Host::start(product, config, env).await?)
 }
+
+/// One scripted provider step that streams `text` and ends the turn.
+pub(crate) fn text_step(text: &str) -> String {
+    format!(
+        r#"{{"kind":"events","events":[{{"type":"text_delta","text":{}}},{{"type":"tool_calls_done","calls":[]}},{{"type":"usage","usage":{USAGE}}},{{"type":"stop","reason":"end_turn"}}]}}"#,
+        json_string(text)
+    )
+}
+
+/// One scripted provider step that calls a single tool with `args_json`.
+pub(crate) fn tool_step(id: &str, name: &str, args_json: &str) -> String {
+    format!(
+        r#"{{"kind":"events","events":[{{"type":"tool_call_started","id":{id},"name":{name}}},{{"type":"tool_calls_done","calls":[{{"id":{id},"name":{name},"args":{{"kind":"parsed","value":{args_json}}}}}]}},{{"type":"usage","usage":{USAGE}}},{{"type":"stop","reason":"tool_use"}}]}}"#,
+        id = json_string(id),
+        name = json_string(name),
+    )
+}
+
+const USAGE: &str = r#"{"input_tokens":12,"cached_input_tokens":0,"output_tokens":5,"reasoning_tokens":null,"cache_write_tokens":0,"cost_usd":null}"#;
+
+fn json_string(text: &str) -> String {
+    let mut quoted = String::with_capacity(text.len() + 2);
+    quoted.push('"');
+    for character in text.chars() {
+        match character {
+            '"' => quoted.push_str("\\\""),
+            '\\' => quoted.push_str("\\\\"),
+            '\n' => quoted.push_str("\\n"),
+            control if control.is_control() => {
+                quoted.push_str(&format!("\\u{:04x}", u32::from(control)));
+            }
+            other => quoted.push(other),
+        }
+    }
+    quoted.push('"');
+    quoted
+}
+
+/// Runs `dalgona -p` against a scripted provider in a temporary data root and
+/// returns the session journal, one record per line.
+///
+/// `top_level_toml` is appended to `dal.toml` before the provider table, so it
+/// can hold top-level keys such as `disabled_batteries`.
+pub(crate) fn run_scripted_print(
+    scratch: &Scratch,
+    top_level_toml: &str,
+    steps: &[String],
+    prompt: &str,
+) -> TestResult<String> {
+    let config_home = scratch.path().join("xdg-config");
+    let data_home = scratch.path().join("xdg-data");
+    std::fs::create_dir_all(config_home.join("dalgona"))?;
+    std::fs::create_dir_all(&data_home)?;
+    let fixture = scratch.path().join("scripted.jsonl");
+    std::fs::write(&fixture, steps.join("\n") + "\n")?;
+    std::fs::write(
+        config_home.join("dalgona/dal.toml"),
+        format!(
+            "model = \"openai-responses/gpt-6\"\n{top_level_toml}\n[providers.scripted]\nfixture = {:?}\n",
+            fixture.to_string_lossy()
+        ),
+    )?;
+    let output = run_command(
+        std::process::Command::new(dalgona_binary()?)
+            .args(["-p", "--json", "--approval", "all", prompt])
+            .current_dir(scratch.path())
+            .env_clear()
+            .env("HOME", scratch.path())
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("XDG_CONFIG_HOME", &config_home)
+            .env("XDG_DATA_HOME", &data_home),
+    )?;
+    if !output.status.success() {
+        return Err(format!(
+            "dalgona -p failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+    let mut journals = Vec::new();
+    collect_journals(&data_home.join("dalgona/sessions"), &mut journals)?;
+    match journals.as_slice() {
+        [journal] => Ok(std::fs::read_to_string(journal)?),
+        other => Err(format!("expected one session journal, found {}", other.len()).into()),
+    }
+}
+
+fn collect_journals(dir: &Path, found: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            collect_journals(&path, found)?;
+        } else if path.file_name().is_some_and(|name| name == "journal.jsonl") {
+            found.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// The journal records of one kind, in order.
+pub(crate) fn journal_records<'a>(journal: &'a str, kind: &str) -> Vec<&'a str> {
+    let marker = format!(r#""type":"{kind}""#);
+    journal
+        .lines()
+        .filter(|line| line.contains(&marker))
+        .collect()
+}

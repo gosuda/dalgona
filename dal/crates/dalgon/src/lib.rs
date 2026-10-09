@@ -22,6 +22,8 @@ pub use dal_core::ConfigError;
 pub use dal_core::RegistrationError;
 /// One first-party documentation scheme and its pages.
 pub use dal_ext::docs::Manual as ProductManual;
+/// The scheme resolver that serves an extension's doc pages to the `read` tool.
+pub use dal_ext::docs::ManualScheme;
 
 /// Captured inputs supplied to a product constructor.
 #[derive(Debug)]
