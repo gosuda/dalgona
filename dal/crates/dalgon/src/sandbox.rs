@@ -1031,8 +1031,12 @@ mod win {
                 if let Err(error) = write_label(path, true) {
                     // The grant is already live; undo it so a failed launch
                     // leaves no ACE its retired holder record cannot reap.
+                    // The label goes back only when this is the sole writer —
+                    // a surviving holder still needs the Low label.
                     let _ = edit_dacl(path, sid, access, REVOKE_ACCESS, false);
-                    if let Some(orig) = state.orig_label.get(&key).cloned() {
+                    if state.holders.get(&key).is_some_and(|h| h.len() == 1)
+                        && let Some(orig) = state.orig_label.get(&key).cloned()
+                    {
                         let _ = restore_label(path, orig);
                     }
                     return Err(error);
@@ -1049,12 +1053,17 @@ mod win {
                     // record. A revoke miss keeps the holder so the reaper
                     // can retry the lift later.
                     if edit_dacl(path, sid, access, REVOKE_ACCESS, false).is_ok() {
+                        // The shared snapshot stays while any holder survives:
+                        // restoring it now would switch the root off Low under
+                        // another live run's AppContainer.
+                        let last = state.holders.get(&key).is_some_and(|h| h.len() == 1);
                         if access == GENERIC_ALL_ACCESS
+                            && last
                             && let Some(orig) = state.orig_label.remove(&key)
                         {
                             let _ = restore_label(path, orig);
                         }
-                        if state.holders.get(&key).is_some_and(|h| h.len() == 1) {
+                        if last {
                             state.orig.remove(&key);
                         }
                         state.remove_holder(&key, guid, access);
@@ -1248,8 +1257,11 @@ mod win {
 
     /// Writes the object's integrity label: the Low label the sandboxed child
     /// needs to write inside a writable root, or an empty SACL to return the
-    /// object to unlabeled. The label ACE carries no inheritance flags, so
-    /// `SetNamedSecurityInfoW` writes the object alone without re-propagating.
+    /// object to unlabeled. The Low ACE is `(OI)(CI)` — files created later
+    /// must inherit it — so `SetNamedSecurityInfoW` propagates it through
+    /// every existing descendant. `plant_grants` snapshots each writable
+    /// root's label up front so a descendant root never records this
+    /// propagated Low as its own original.
     fn write_label(path: &Path, low: bool) -> Result<(), String> {
         let wide_path = wide_path(path);
         let mut acl_storage = [0u32; 32];
@@ -1527,6 +1539,12 @@ mod win {
                 if ace_flags & INHERIT_ONLY_ACE != 0 {
                     continue;
                 }
+                // A directory ACE that stops at the object grants nothing to
+                // the executables inside — the container could read the dir
+                // itself but not launch its files, so it does not count.
+                if path.is_dir() && ace_flags & OBJECT_INHERIT_ACE == 0 {
+                    continue;
+                }
                 if covers(mask) {
                     found = true;
                     break;
@@ -1650,9 +1668,25 @@ mod win {
         executable: &Path,
         profile: &Profile,
     ) -> Result<Vec<(PathBuf, u32)>, String> {
+        let plan = grant_plan(edge, roots, executable);
+        // Snapshot every writable root's label before the first `write_label`
+        // runs: the Low ACE is inheritable, so lowering an ancestor first
+        // would let a descendant that is also a root record the injected
+        // label as its original — cleanup would then leave it Low forever.
+        transact(edge, |state| {
+            for (dir, access, _) in &plan {
+                if *access == GENERIC_ALL_ACCESS
+                    && let std::collections::btree_map::Entry::Vacant(entry) =
+                        state.orig_label.entry(path_key(dir))
+                {
+                    entry.insert(read_label(dir)?);
+                }
+            }
+            Ok(())
+        })?;
         let mut planted: Vec<(PathBuf, u32)> = Vec::new();
         let result = (|| {
-            for (dir, access, optional) in grant_plan(edge, roots, executable) {
+            for (dir, access, optional) in plan {
                 if access == GENERIC_READ_EXECUTE {
                     if readable_by_packages(&dir) {
                         continue;
