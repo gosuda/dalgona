@@ -153,7 +153,15 @@ async fn login_stores_api_key_at_mode_0600() {
         sandbox_helper: None,
     };
     let host = Host::start(product, config, env).await.expect("host");
-    host.login("openai", "sk-test-key").await.expect("login");
+    let (key, pasted) = tokio::sync::oneshot::channel();
+    key.send("sk-test-key".to_owned()).expect("open channel");
+    let (io, _progress) = dal_agent::login::LoginIo::channel(
+        Some(pasted),
+        tokio_util::sync::CancellationToken::new(),
+    );
+    host.login("openai", dal_agent::login::Method::ApiKey, io)
+        .await
+        .expect("login");
     let path = data.join("auth.json");
     let text = std::fs::read_to_string(&path).expect("auth.json");
     assert!(text.contains("sk-test-key"), "key persists in the store");

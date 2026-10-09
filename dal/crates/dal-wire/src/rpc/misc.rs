@@ -248,7 +248,17 @@ pub(crate) async fn auth_login(host: &Host, params: &Value) -> Result<Value, Err
     let key = opt_string(params, "apiKey")
         .filter(|key| !key.is_empty())
         .ok_or_else(|| invalid_params("auth/login", r#"method "api_key" needs apiKey"#))?;
-    host.login(&provider, &key).await.map_err(host_error)?;
+    let (sender, pasted) = tokio::sync::oneshot::channel();
+    sender
+        .send(key)
+        .map_err(|_| invalid_params("auth/login", "the key channel closed"))?;
+    let (io, _progress) = dal_agent::login::LoginIo::channel(
+        Some(pasted),
+        tokio_util::sync::CancellationToken::new(),
+    );
+    host.login(&provider, dal_agent::login::Method::ApiKey, io)
+        .await
+        .map_err(host_error)?;
     Ok(sonic_rs::json!({"state": "ready"}))
 }
 

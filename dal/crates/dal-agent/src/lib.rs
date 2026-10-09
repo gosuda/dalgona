@@ -11,6 +11,8 @@ pub mod error;
 pub mod ext;
 mod host;
 pub(crate) mod jobs;
+#[cfg(any(test, feature = "test-support"))]
+pub mod login_fake;
 pub(crate) mod proc;
 mod scheme;
 pub(crate) mod session;
@@ -27,6 +29,21 @@ pub use proc::{
     FULL_OUTPUT_PREFIX, OUTPUT_FILE_CAP_BYTES, PREVIEW_BYTES, PROGRESS_LINES, PROGRESS_PERIOD,
     Proc, ProcResult, ProcStatus, SpawnOpts, StopReason, TRUNCATION_MARKER,
 };
+
+/// The sign-in vocabulary of [`Host::login`], [`Host::logout`], and
+/// [`Host::stored_credentials`], so front ends need no provider crate.
+pub mod login {
+    pub use crate::host::LoginOutcome;
+    pub use dal_provider::{
+        CredentialKind, LoginIo, LoginProgress, Method, PASTE_HINT, PROGRESS_CAPACITY,
+        StoredCredential, login_providers,
+    };
+
+    /// Loopback endpoints for tests that run every flow against a local
+    /// server through [`crate::Host::set_login_endpoints`].
+    #[cfg(any(test, feature = "test-support"))]
+    pub use dal_provider::LoginEndpoints;
+}
 
 /// Windows gate probe: number of live `Proc` objects. A stable nonzero
 /// count after shutdown means the leak lives in retained process state.

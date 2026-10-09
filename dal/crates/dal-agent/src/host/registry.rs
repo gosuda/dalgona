@@ -1076,7 +1076,7 @@ impl Host {
         workspaces
     }
 
-    fn publish(&self, update: &HostUpdate) {
+    pub(crate) fn publish(&self, update: &HostUpdate) {
         self.state
             .subscribers
             .lock()

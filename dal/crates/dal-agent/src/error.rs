@@ -244,6 +244,11 @@ pub enum HostError {
     /// The store failed. The display text is the store text.
     #[error(transparent)]
     Store(StoreError),
+    /// A sign-in, sign-out, or credential read failed. The display text is
+    /// the provider text; [`dal_provider::ProviderError::fix`] names the next
+    /// action.
+    #[error(transparent)]
+    Provider(dal_provider::ProviderError),
 }
 
 impl HostError {

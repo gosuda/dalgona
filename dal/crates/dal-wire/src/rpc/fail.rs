@@ -179,6 +179,15 @@ pub(crate) fn host_error(error: HostError) -> ErrorObject {
         },
         HostError::Closed => server_draining(),
         HostError::Store(error) => store_error(&error),
+        HostError::Provider(error) => ErrorObject {
+            code: -32603,
+            message: format!("internal error: {error}"),
+            data: Some(
+                error
+                    .fix()
+                    .map_or_else(hint_value, |fix| Value::from(fix.as_str())),
+            ),
+        },
         other => ErrorObject {
             code: -32603,
             message: format!("internal error: {other}"),

@@ -1,5 +1,6 @@
 //! Host-owned live sessions and their process-independent inputs.
 
+mod auth;
 mod history;
 pub(crate) mod ops;
 mod registry;
@@ -10,6 +11,7 @@ pub(crate) const CHILD_POLICY_EXT: &str = "dal-agent";
 /// Extension record kind for a child session's durable start policy.
 pub(crate) const CHILD_POLICY_KIND: &str = "child_policy";
 
+pub use auth::LoginOutcome;
 pub use ops::DocEntry;
 
 use std::collections::{BTreeMap, HashMap};
@@ -136,6 +138,15 @@ pub enum HostUpdate {
         /// The child stop reason.
         stop: Stop,
     },
+    /// A provider sign-in has reached its one terminal outcome.
+    LoginFinished {
+        /// The provider that was signed in to.
+        provider: Box<str>,
+        /// Whether the credential is stored and ready.
+        ready: bool,
+        /// The failure text, when the sign-in did not finish.
+        detail: Option<Box<str>>,
+    },
 }
 
 /// The aggregate outcome of orderly host shutdown.
@@ -230,6 +241,9 @@ pub(crate) struct HostShared {
     pub(crate) catalog: std::sync::RwLock<Option<dal_provider::Catalog>>,
     /// Non-plugin extension names in startup order; reloads preserve them.
     pub(crate) plugin_base: Vec<Box<str>>,
+    /// Where sign-in reads and writes: the credential file, the model cache,
+    /// and the endpoints. Only tests replace the endpoints.
+    pub(crate) login_site: std::sync::RwLock<dal_provider::LoginSite>,
 }
 
 impl HostShared {

@@ -1,11 +1,9 @@
-//! Host-level queries: commands, models, docs, login, relay, generation.
+//! Host-level queries: commands, models, docs, relay, generation.
 
 use std::sync::Arc;
 
 use dal_core::{ClientId, Family, GenerationId, ModelInfo, ModelRequest, ModelRoute, SessionId};
-use dal_provider::{
-    AuthStore, Catalog, CatalogEntry, Credential, SecretString, built_in_entries, resolve,
-};
+use dal_provider::{Catalog, CatalogEntry, built_in_entries, resolve};
 use tokio_util::sync::CancellationToken;
 
 use super::{Host, SessionEntry};
@@ -262,38 +260,6 @@ impl Host {
             .map_err(|error| HostError::Config {
                 message: error.to_string().into(),
             })
-    }
-
-    /// Stores one provider API key in the mode-0600 credential store.
-    ///
-    /// Loads `auth.json` under the data root (creating it when absent),
-    /// replaces the entry for `provider`, and writes the store back
-    /// atomically. Error texts never carry the key.
-    ///
-    /// # Errors
-    /// Returns [`HostError::Config`] when the store cannot be read or
-    /// written, or when `provider` takes no API key.
-    pub async fn login(&self, provider: &str, api_key: &str) -> Result<(), HostError> {
-        let path = self.state.shared.data_root.join("auth.json");
-        let provider = provider.to_owned();
-        let key = SecretString::from(api_key);
-        tokio::task::spawn_blocking(move || {
-            let mut store = AuthStore::load(&path).map_err(|error| HostError::Config {
-                message: error.to_string().into(),
-            })?;
-            store
-                .set(&provider, Credential::ApiKey { key })
-                .map_err(|error| HostError::Config {
-                    message: error.to_string().into(),
-                })?;
-            store.store().map_err(|error| HostError::Config {
-                message: error.to_string().into(),
-            })
-        })
-        .await
-        .map_err(|error| HostError::Config {
-            message: error.to_string().into(),
-        })?
     }
 
     /// Resolves the configured default model through aliases and the catalog.
