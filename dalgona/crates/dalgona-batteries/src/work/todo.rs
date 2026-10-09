@@ -25,6 +25,7 @@ pub(crate) enum TodoState {
     Cancelled,
 }
 
+#[cfg(test)]
 impl TodoState {
     pub(crate) const fn as_str(&self) -> &'static str {
         match self {
@@ -817,12 +818,9 @@ mod host_tests {
             "- [ ] Fix the parser (in progress)\n- [ ] Add tests\n- [x] Write the plan"
         );
 
-        let (quiet, status) = host.status()?;
+        let (quiet, status) = host.status();
         assert!(quiet);
-        assert_eq!(
-            status,
-            r#"{"plan_mode":false,"plan_state":"off","todos":[{"subject":"Fix the parser","state":"in_progress"},{"subject":"Add tests","state":"pending"},{"subject":"Write the plan","state":"done"}]}"#
-        );
+        assert_eq!(status.as_deref(), Some("1/3 done · Fix the parser"));
         Ok(())
     }
 

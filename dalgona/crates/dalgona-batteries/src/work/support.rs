@@ -137,7 +137,7 @@ impl FakeServices {
         clippy::vec_box,
         reason = "records() must yield Vec<Box<RawValue>> per the Services contract"
     )]
-    fn leaf_bodies(&self, kind: &str) -> Vec<Box<RawJson>> {
+    pub(crate) fn leaf_bodies(&self, kind: &str) -> Vec<Box<RawJson>> {
         let ledger = locked(&self.ledger);
         let mut bodies = Vec::new();
         let mut cursor = ledger.leaf;
@@ -402,12 +402,11 @@ impl ScriptedWorkHost {
             .map(|doc| doc.text.into())
     }
 
-    pub(crate) fn status(&self) -> Result<(bool, String), Box<dyn StdError>> {
+    pub(crate) fn status(&self) -> (bool, Option<String>) {
         let bodies = self.services.leaf_bodies(todo::TODO_KIND);
         let items = todo::fold(bodies.as_slice());
         let snapshot = super::status_snapshot(self.state.phase(self.session), &items);
-        let text = snapshot.text.ok_or("status text is missing")?;
-        Ok((snapshot.quiet, text.into()))
+        (snapshot.quiet, snapshot.text.map(Into::into))
     }
 
     pub(crate) async fn guard(

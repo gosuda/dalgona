@@ -319,7 +319,7 @@ impl StatusPoll for PlanStatus {
 fn status_snapshot(phase: plan::Phase, items: &[TodoItem]) -> StatusSnapshot {
     StatusSnapshot {
         quiet: status_quiet(phase),
-        text: status_json(phase, items).ok().map(String::into_boxed_str),
+        text: status_line(phase, items).map(String::into_boxed_str),
     }
 }
 
@@ -457,7 +457,12 @@ pub fn work(_config: PlanConfig) -> Result<Extension, RegistrationError> {
     .build()
 }
 
+/// Upper bound of the one-line status text shown in the activity row.
+const STATUS_LINE_LIMIT: usize = 120;
+
+#[cfg(test)]
 const STATUS_LIMIT: usize = 4096;
+#[cfg(test)]
 const STATUS_TRUNCATED: &str = "[...] status truncated";
 
 #[derive(serde::Serialize)]
@@ -468,6 +473,7 @@ struct TerminalPayload {
     first_titles: Vec<String>,
 }
 
+#[cfg(test)]
 #[derive(serde::Serialize)]
 struct StatusPayload<'a> {
     plan_mode: bool,
@@ -475,12 +481,14 @@ struct StatusPayload<'a> {
     todos: Vec<StatusTodo<'a>>,
 }
 
+#[cfg(test)]
 #[derive(serde::Serialize)]
 struct StatusTodo<'a> {
     subject: std::borrow::Cow<'a, str>,
     state: &'static str,
 }
 
+#[cfg(test)]
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum StatusError {
     #[error(transparent)]
@@ -503,6 +511,7 @@ pub(crate) fn status_quiet(phase: plan::Phase) -> bool {
     phase != plan::Phase::Awaiting
 }
 
+#[cfg(test)]
 pub(crate) fn status_json(phase: plan::Phase, items: &[TodoItem]) -> Result<String, StatusError> {
     let full = encode_status(phase, items, todo::MAX_SUBJECT_BYTES)?;
     if full.len() <= STATUS_LIMIT {
@@ -528,6 +537,7 @@ pub(crate) fn status_json(phase: plan::Phase, items: &[TodoItem]) -> Result<Stri
     Ok(best)
 }
 
+#[cfg(test)]
 fn encode_status(
     phase: plan::Phase,
     items: &[TodoItem],
@@ -547,6 +557,7 @@ fn encode_status(
     })
 }
 
+#[cfg(test)]
 fn status_subject(subject: &str, budget: usize) -> std::borrow::Cow<'_, str> {
     if subject.len() <= budget {
         return std::borrow::Cow::Borrowed(subject);
@@ -560,6 +571,48 @@ fn status_subject(subject: &str, budget: usize) -> std::borrow::Cow<'_, str> {
     truncated.push_str(&subject[..end]);
     truncated.push_str(STATUS_TRUNCATED);
     std::borrow::Cow::Owned(truncated)
+}
+
+/// Renders the one-line activity text: plan phase, `done/total done`, and the
+/// first in-progress subject. `None` when there is nothing to report.
+pub(crate) fn status_line(phase: plan::Phase, items: &[TodoItem]) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    match phase {
+        plan::Phase::Off => {}
+        plan::Phase::Planning => parts.push("planning".to_owned()),
+        plan::Phase::Awaiting => parts.push("awaiting approval".to_owned()),
+    }
+    if !items.is_empty() {
+        let done = items
+            .iter()
+            .filter(|item| item.state == todo::TodoState::Done)
+            .count();
+        parts.push(format!("{done}/{} done", items.len()));
+    }
+    if let Some(active) = items
+        .iter()
+        .find(|item| item.state == todo::TodoState::InProgress)
+    {
+        parts.push(line_subject(&active.subject));
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    let mut line = parts.join(" · ");
+    if line.len() > STATUS_LINE_LIMIT {
+        let mut end = STATUS_LINE_LIMIT - '…'.len_utf8();
+        while !line.is_char_boundary(end) {
+            end -= 1;
+        }
+        line.truncate(end);
+        line.push('…');
+    }
+    Some(line)
+}
+
+/// Collapses whitespace so a subject cannot break the one-line contract.
+fn line_subject(subject: &str) -> String {
+    subject.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(test)]
@@ -669,6 +722,67 @@ mod tests {
             let output = sonic_rs::from_str::<TerminalOutput>(&json);
             assert!(output.is_ok_and(|value| value.all_terminal));
         }
+    }
+
+    fn item(subject: &str, state: TodoState) -> TodoItem {
+        TodoItem {
+            subject: subject.to_owned(),
+            description: String::new(),
+            state,
+        }
+    }
+
+    #[test]
+    fn plan_status_text_is_one_human_line() {
+        let items = [
+            item("a", TodoState::Done),
+            item("b", TodoState::Done),
+            item("c", TodoState::Done),
+            item("writing tests", TodoState::InProgress),
+            item("e", TodoState::Pending),
+        ];
+        let snapshot = status_snapshot(plan::Phase::Planning, &items);
+        let text = snapshot.text.as_deref().unwrap_or_default();
+        assert!(!text.contains(['{', '}', '"']));
+        assert_eq!(text, "planning · 3/5 done · writing tests");
+        assert!(snapshot.quiet);
+
+        let awaiting = status_snapshot(plan::Phase::Awaiting, &items[..1]);
+        assert_eq!(
+            awaiting.text.as_deref(),
+            Some("awaiting approval · 1/1 done")
+        );
+        assert!(!awaiting.quiet);
+
+        assert_eq!(status_snapshot(plan::Phase::Off, &[]).text, None);
+        let off = status_snapshot(plan::Phase::Off, &items[3..4]);
+        assert_eq!(off.text.as_deref(), Some("0/1 done · writing tests"));
+    }
+
+    #[test]
+    fn plan_status_line_stays_bounded_and_keeps_counts() {
+        let long = format!("a{}\n{}", "界".repeat(100), "x".repeat(200));
+        let mut items = (0..todo::MAX_ITEMS - 1)
+            .map(|_| item("done", TodoState::Done))
+            .collect::<Vec<_>>();
+        items.push(item(&long, TodoState::InProgress));
+        let snapshot = status_snapshot(plan::Phase::Awaiting, &items);
+        let text = snapshot.text.as_deref().unwrap_or_default();
+        assert!(text.len() <= STATUS_LINE_LIMIT);
+        assert!(!text.contains(['\n', '{', '}']));
+        assert!(text.starts_with("awaiting approval · 25/26 done · "));
+        assert!(text.ends_with('…'));
+    }
+
+    #[test]
+    fn plan_status_line_cuts_on_a_char_boundary() {
+        let items = [item(
+            &format!("a{}", "界".repeat(100)),
+            TodoState::InProgress,
+        )];
+        let text = status_line(plan::Phase::Off, &items).unwrap_or_default();
+        assert!(text.len() <= STATUS_LINE_LIMIT);
+        assert!(text.ends_with("界…"));
     }
 
     #[test]
@@ -792,10 +906,16 @@ mod tests {
         let record_before = host.services.all_bodies(todo::TODO_KIND);
         assert_eq!(record_before.len(), 1);
 
-        let (quiet, status) = host.status()?;
+        let (quiet, status) = host.status();
         assert!(quiet);
-        assert!(status.len() <= STATUS_LIMIT);
-        let decoded = sonic_rs::from_str::<StatusOutput>(&status)?;
+        let status = status.unwrap_or_default();
+        assert_eq!(status, "0/26 done");
+        assert!(!status.contains(['{', '}', '"']));
+
+        let items = todo::fold(host.services.leaf_bodies(todo::TODO_KIND).as_slice());
+        let json = status_json(plan::Phase::Off, &items)?;
+        assert!(json.len() <= STATUS_LIMIT);
+        let decoded = sonic_rs::from_str::<StatusOutput>(&json)?;
         assert!(!decoded.plan_mode);
         assert_eq!(decoded.plan_state, "off");
         assert_eq!(decoded.todos.len(), todo::MAX_ITEMS);
