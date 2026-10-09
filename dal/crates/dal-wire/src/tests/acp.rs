@@ -273,6 +273,47 @@ async fn batch_prompt_rejected() {
 }
 
 #[tokio::test]
+async fn session_list_takes_null_filters_and_refuses_wrong_types() {
+    let rig = rig(&[]).await;
+    let ws = rig.ws();
+    for version in [1, 2] {
+        with_acp(&rig, async |mut acp| {
+            init(&mut acp, version).await;
+            let session = new_session(&mut acp, 2, &ws).await;
+            let nulls = acp
+                .call(
+                    3,
+                    "session/list",
+                    sonic_rs::json!({"cwd": null, "cursor": null}),
+                )
+                .await;
+            let listed = result(&nulls)["sessions"].as_array().is_some_and(|rows| {
+                rows.iter()
+                    .any(|row| row["sessionId"].as_str() == Some(session.as_str()))
+            });
+            assert!(listed, "{nulls}");
+            let cursor = acp
+                .call(4, "session/list", sonic_rs::json!({"cursor": 7}))
+                .await;
+            assert_error(
+                &cursor,
+                -32602,
+                "invalid params for session/list: member `cursor` must be a string",
+            );
+            let cwd = acp
+                .call(5, "session/list", sonic_rs::json!({"cwd": ["x"]}))
+                .await;
+            assert_error(
+                &cwd,
+                -32602,
+                "invalid params for session/list: member `cwd` must be a string",
+            );
+        })
+        .await;
+    }
+}
+
+#[tokio::test]
 async fn transport_end_cancels() {
     let rig = rig(&[gate_step("c1"), text_step(&["late"], 1, 1)]).await;
     let ws = rig.ws();

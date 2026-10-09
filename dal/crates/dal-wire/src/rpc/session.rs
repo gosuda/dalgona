@@ -15,8 +15,8 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    Conn, agent_error, decode_params, host_error, invalid_params, opt_i64, opt_string, send,
-    to_value,
+    Conn, agent_error, decode_params, host_error, invalid_params, opt_i64, opt_string, req_string,
+    send, to_value,
 };
 use crate::jsonrpc::{ErrorObject, Id, Message};
 use crate::transport::FrameWriter;
@@ -30,7 +30,7 @@ const VIEW_BYTE_CAP: usize = 1_048_576;
 
 /// Handles `session/list`: pages session rows across known workspaces.
 pub(crate) fn list(host: &Host, params: &Value) -> Result<Value, ErrorObject> {
-    let limit = match opt_i64(params, "limit") {
+    let limit = match opt_i64("session/list", params, "limit")? {
         None => 50,
         Some(number) if (1..=LIST_MAX).contains(&number) => {
             u32::try_from(number).map_err(|_| {
@@ -49,8 +49,8 @@ pub(crate) fn list(host: &Host, params: &Value) -> Result<Value, ErrorObject> {
     };
     let query = ListQuery {
         limit: Some(limit),
-        cursor: opt_string(params, "cursor").map(String::into_boxed_str),
-        search: opt_string(params, "search").map(String::into_boxed_str),
+        cursor: opt_string("session/list", params, "cursor")?.map(String::into_boxed_str),
+        search: opt_string("session/list", params, "search")?.map(String::into_boxed_str),
     };
     let page = host.sessions(query).map_err(host_error)?;
     let items = to_value(&page.items)?;
@@ -129,7 +129,7 @@ pub(crate) async fn view(
     params: &Value,
 ) -> Result<Value, ErrorObject> {
     let id = session_param("session/view", params)?;
-    let limit = match opt_i64(params, "limit") {
+    let limit = match opt_i64("session/view", params, "limit")? {
         None => 50,
         Some(number)
             if number >= 1
@@ -149,7 +149,7 @@ pub(crate) async fn view(
             ));
         }
     };
-    let before = match opt_string(params, "before") {
+    let before = match opt_string("session/view", params, "before")? {
         None => None,
         Some(text) => {
             let counter: u64 = text
@@ -222,9 +222,10 @@ pub(crate) async fn subscribe(
         Err(error) => return Some(fail(agent_error("session/subscribe", error))),
     };
     let (r#gen, head_seq) = (head.r#gen, head.seq);
-    let want_gen = match opt_i64(params, "gen") {
-        None => r#gen,
-        Some(number) => {
+    let want_gen = match opt_i64("session/subscribe", params, "gen") {
+        Err(error) => return Some(fail(error)),
+        Ok(None) => r#gen,
+        Ok(Some(number)) => {
             let counter = u64::try_from(number).ok().and_then(NonZeroU64::new);
             match counter {
                 Some(counter) => Gen::new(counter),
@@ -237,9 +238,10 @@ pub(crate) async fn subscribe(
             }
         }
     };
-    let after = match opt_i64(params, "after") {
-        None => None,
-        Some(number) => {
+    let after = match opt_i64("session/subscribe", params, "after") {
+        Err(error) => return Some(fail(error)),
+        Ok(None) => None,
+        Ok(Some(number)) => {
             let counter = u64::try_from(number).ok().and_then(NonZeroU64::new);
             match counter {
                 Some(counter) => Some(Seq::new(counter)),
@@ -368,8 +370,7 @@ pub(crate) async fn answer(
     params: &Value,
 ) -> Result<Value, ErrorObject> {
     let id = session_param("session/answer", params)?;
-    let request = opt_string(params, "requestId")
-        .ok_or_else(|| invalid_params("session/answer", "missing member `requestId`"))?;
+    let request = req_string("session/answer", params, "requestId")?;
     let request = RequestId::parse(&request)
         .map_err(|_| invalid_params("session/answer", "requestId is not valid"))?;
     let raw = params
@@ -394,8 +395,7 @@ pub(crate) async fn answer(
 
 /// Reads the `sessionId` member shared by session methods.
 pub(crate) fn session_param(method: &str, params: &Value) -> Result<SessionId, ErrorObject> {
-    let text = opt_string(params, "sessionId")
-        .ok_or_else(|| invalid_params(method, "missing member `sessionId`"))?;
+    let text = req_string(method, params, "sessionId")?;
     SessionId::parse(&text).map_err(|_| invalid_params(method, "sessionId is not valid"))
 }
 

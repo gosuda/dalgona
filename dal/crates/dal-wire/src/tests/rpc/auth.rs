@@ -287,6 +287,67 @@ async fn logout_removes_one_provider_or_all_and_revokes_codex() {
 }
 
 #[tokio::test]
+async fn logout_with_a_malformed_provider_removes_nothing() {
+    let rig = rig(&[]).await;
+    store(
+        &rig,
+        &[
+            (
+                "openai",
+                Credential::ApiKey {
+                    key: SecretString::from("sk-first"),
+                },
+            ),
+            (
+                "anthropic",
+                Credential::ApiKey {
+                    key: SecretString::from("sk-second"),
+                },
+            ),
+        ],
+    );
+    let auth = rig.data().join("auth.json");
+    let before = std::fs::read(&auth).expect("auth.json");
+    with_rpc(&rig, |mut rpc| async move {
+        initialize(&mut rpc).await;
+        let malformed = [
+            sonic_rs::json!({"provider": 123}),
+            sonic_rs::json!({"provider": ["openai"]}),
+            sonic_rs::json!({"provider": {"id": "openai"}}),
+            sonic_rs::json!({"provider": null}),
+            sonic_rs::json!({"provider": true}),
+        ];
+        for (id, params) in (1..).zip(malformed) {
+            let reply = rpc.call(id, "auth/logout", params).await;
+            assert_error(
+                &reply,
+                -32602,
+                "invalid params for auth/logout: member `provider` must be a string",
+            );
+        }
+        for (id, params) in (10..).zip([sonic_rs::json!([1]), sonic_rs::json!("openai")]) {
+            let reply = rpc.call(id, "auth/logout", params).await;
+            assert_error(
+                &reply,
+                -32602,
+                "invalid params for auth/logout: params must be an object",
+            );
+        }
+        assert_eq!(std::fs::read(&auth).expect("auth.json"), before);
+        let stored = AuthStore::load(&auth).expect("auth.json");
+        assert!(matches!(
+            stored.credential("openai"),
+            Some(Credential::ApiKey { key }) if key.expose() == "sk-first"
+        ));
+        assert!(matches!(
+            stored.credential("anthropic"),
+            Some(Credential::ApiKey { key }) if key.expose() == "sk-second"
+        ));
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn status_reports_expired_for_a_stored_oauth_credential_inside_the_refresh_window() {
     let (rig, _fake) = fake_rig(TokenReply::Issue).await;
     store(

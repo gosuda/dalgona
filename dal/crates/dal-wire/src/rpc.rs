@@ -579,15 +579,71 @@ pub(crate) fn crate_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-/// Reads an optional string member.
-pub(crate) fn opt_string(params: &Value, name: &str) -> Option<String> {
-    params
-        .get(name)
-        .and_then(|value| value.as_str())
-        .map(str::to_owned)
+/// Looks up one member of a method's params object.
+///
+/// An omitted member is `Ok(None)`. Params that are not an object are an
+/// error, so a caller never reads "no members" out of a malformed request.
+fn member<'a>(
+    method: &str,
+    params: &'a Value,
+    name: &str,
+) -> Result<Option<&'a Value>, ErrorObject> {
+    if !params.is_object() {
+        return Err(invalid_params(method, "params must be an object"));
+    }
+    Ok(params.get(name))
 }
 
-/// Reads an optional integer member.
-pub(crate) fn opt_i64(params: &Value, name: &str) -> Option<i64> {
-    params.get(name).and_then(Value::as_i64)
+/// Reads an optional string member.
+///
+/// Omitted is `Ok(None)`; a present member of any other type, `null`
+/// included, is `-32602`, so a malformed value never selects the default.
+pub(crate) fn opt_string(
+    method: &str,
+    params: &Value,
+    name: &str,
+) -> Result<Option<String>, ErrorObject> {
+    let Some(value) = member(method, params, name)? else {
+        return Ok(None);
+    };
+    let text = value
+        .as_str()
+        .ok_or_else(|| invalid_params(method, format!("member `{name}` must be a string")))?;
+    Ok(Some(text.to_owned()))
+}
+
+/// Reads an optional string member that a client may send as `null`.
+///
+/// Omitted and `null` are both `Ok(None)`; any other non-string is `-32602`.
+pub(crate) fn opt_nullable_string(
+    method: &str,
+    params: &Value,
+    name: &str,
+) -> Result<Option<String>, ErrorObject> {
+    if member(method, params, name)?.is_some_and(Value::is_null) {
+        return Ok(None);
+    }
+    opt_string(method, params, name)
+}
+
+/// Reads a required string member.
+pub(crate) fn req_string(method: &str, params: &Value, name: &str) -> Result<String, ErrorObject> {
+    opt_string(method, params, name)?
+        .ok_or_else(|| invalid_params(method, format!("missing member `{name}`")))
+}
+
+/// Reads an optional integer member; omitted is `Ok(None)`, any other
+/// non-integer is `-32602`.
+pub(crate) fn opt_i64(
+    method: &str,
+    params: &Value,
+    name: &str,
+) -> Result<Option<i64>, ErrorObject> {
+    let Some(value) = member(method, params, name)? else {
+        return Ok(None);
+    };
+    let number = value
+        .as_i64()
+        .ok_or_else(|| invalid_params(method, format!("member `{name}` must be an integer")))?;
+    Ok(Some(number))
 }

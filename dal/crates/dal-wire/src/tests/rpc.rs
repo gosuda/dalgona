@@ -234,6 +234,81 @@ async fn unknown_types_rejected() {
 }
 
 #[tokio::test]
+async fn malformed_optional_members_are_invalid_params() {
+    let rig = rig(&[]).await;
+    let ws = rig.ws();
+    with_rpc(&rig, async |mut rpc| {
+        initialize(&mut rpc).await;
+        let session = open(
+            &mut rpc,
+            1,
+            sonic_rs::json!({"type": "new", "workspace": ws}),
+        )
+        .await;
+        let cases = [
+            (
+                "session/list",
+                sonic_rs::json!({"limit": "10"}),
+                "limit",
+                "an integer",
+            ),
+            (
+                "session/list",
+                sonic_rs::json!({"limit": 1.5}),
+                "limit",
+                "an integer",
+            ),
+            (
+                "session/list",
+                sonic_rs::json!({"cursor": 7}),
+                "cursor",
+                "a string",
+            ),
+            (
+                "session/list",
+                sonic_rs::json!({"search": ["x"]}),
+                "search",
+                "a string",
+            ),
+            (
+                "session/view",
+                sonic_rs::json!({"sessionId": session, "before": 3}),
+                "before",
+                "a string",
+            ),
+            (
+                "session/subscribe",
+                sonic_rs::json!({"sessionId": session, "gen": "1"}),
+                "gen",
+                "an integer",
+            ),
+            (
+                "session/subscribe",
+                sonic_rs::json!({"sessionId": session, "after": "1"}),
+                "after",
+                "an integer",
+            ),
+            ("docs/read", sonic_rs::json!({"uri": 5}), "uri", "a string"),
+        ];
+        for (id, (method, params, member, kind)) in (2..).zip(cases) {
+            let reply = rpc.call(id, method, params).await;
+            assert_error(
+                &reply,
+                -32602,
+                &format!("invalid params for {method}: member `{member}` must be {kind}"),
+            );
+        }
+        let reply = rpc.call(50, "session/list", sonic_rs::json!([])).await;
+        assert_error(
+            &reply,
+            -32602,
+            "invalid params for session/list: params must be an object",
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn ephemeral_prompt_happy_path() {
     let rig = rig(&[text_step(&["Hel", "lo"], 10, 5)]).await;
     let ws = rig.ws();

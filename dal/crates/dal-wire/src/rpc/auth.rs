@@ -18,7 +18,7 @@ use tokio::sync::{Mutex, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use super::misc::route_identity;
-use super::{Conn, host_error, id_key, invalid_params, opt_string, to_value};
+use super::{Conn, host_error, id_key, invalid_params, opt_string, req_string, to_value};
 use crate::jsonrpc::{ErrorObject, Id, Message};
 use crate::transport::FrameWriter;
 
@@ -138,15 +138,13 @@ async fn login(
     id: &Id,
     params: &Value,
 ) -> Result<Option<Value>, ErrorObject> {
-    let provider = opt_string(params, "provider")
-        .ok_or_else(|| invalid_params("auth/login", "missing member `provider`"))?;
-    let word = opt_string(params, "method")
-        .ok_or_else(|| invalid_params("auth/login", "missing member `method`"))?;
+    let provider = req_string("auth/login", params, "provider")?;
+    let word = req_string("auth/login", params, "method")?;
     let method = parse_method(&word)
         .ok_or_else(|| invalid_params("auth/login", format!(r#"unknown login method "{word}""#)))?;
     let key = match method {
         Method::ApiKey => Some(
-            opt_string(params, "apiKey")
+            opt_string("auth/login", params, "apiKey")?
                 .filter(|key| !key.is_empty())
                 .ok_or_else(|| invalid_params("auth/login", r#"method "api_key" needs apiKey"#))?,
         ),
@@ -278,7 +276,7 @@ async fn run_oauth(
 
 /// Handles `auth/logout`: removes one provider's stored credential, or all.
 pub(crate) async fn auth_logout(host: &Host, params: &Value) -> Result<Value, ErrorObject> {
-    let provider = opt_string(params, "provider");
+    let provider = opt_string("auth/logout", params, "provider")?;
     if let Some(provider) = provider.as_deref()
         && !login_providers().iter().any(|def| def.id == provider)
     {

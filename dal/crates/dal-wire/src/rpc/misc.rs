@@ -9,7 +9,7 @@ use serde::Serialize;
 use sonic_rs::Value;
 use tokio::sync::Mutex;
 
-use super::{Conn, host_error, host_notifier, invalid_params, opt_string, to_value};
+use super::{Conn, host_error, host_notifier, invalid_params, opt_string, req_string, to_value};
 use crate::jsonrpc::{ErrorObject, Id, Message};
 use crate::transport::FrameWriter;
 
@@ -20,8 +20,7 @@ pub(crate) async fn blob_read(
     params: &Value,
 ) -> Result<Value, ErrorObject> {
     let id = super::session::session_param("blob/read", params)?;
-    let raw = opt_string(params, "blobId")
-        .ok_or_else(|| invalid_params("blob/read", "missing member `blobId`"))?;
+    let raw = req_string("blob/read", params, "blobId")?;
     let blob = dal_core::BlobId::parse(&raw)
         .map_err(|_| invalid_params("blob/read", "blobId is not valid"))?;
     let agent = super::session::agent_for(host, state, id).await?;
@@ -143,7 +142,7 @@ struct DocumentRow {
 
 /// Handles `docs/read`: reads one document, or lists known documents.
 pub(crate) fn docs_read(host: &Host, params: &Value) -> Result<Value, ErrorObject> {
-    match opt_string(params, "uri") {
+    match opt_string("docs/read", params, "uri")? {
         None => {
             let rows: Vec<DocumentRow> = host
                 .docs()
