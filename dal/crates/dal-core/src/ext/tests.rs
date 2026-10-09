@@ -245,7 +245,10 @@ fn service_set_has_stable_order_and_excludes_ask_from_grants() -> TestResult {
             .capabilities()
             .contains(Service::Ask)
     );
-    assert!(ServiceSet::from_names(["ask"])?.capabilities().is_empty());
+    assert_eq!(
+        ServiceSet::from_names(["ask"])?.capabilities(),
+        ServiceSet::EMPTY
+    );
 
     let unknown = ServiceSet::from_names(["nope"])
         .err()
@@ -387,11 +390,7 @@ fn run_request_environment_defaults_empty_and_validates_names() -> TestResult {
     let encoded = sonic_rs::to_string(&request)?;
     let without_env = encoded.replace("\"env\":[],", "");
     assert_ne!(without_env, encoded);
-    assert!(
-        sonic_rs::from_str::<RunRequest>(&without_env)?
-            .env
-            .is_empty()
-    );
+    assert_eq!(sonic_rs::from_str::<RunRequest>(&without_env)?.env, []);
 
     request.env = vec![("GIT_OPTIONAL_LOCKS".into(), "0".into())];
     assert_eq!(request.validate_env(), Ok(()));

@@ -46,7 +46,7 @@ reasoning = 3.0
     );
 
     let defaults = load(ConfigProduct::Dalgon, "").expect("built-in defaults");
-    assert!(defaults.serve().origins.is_empty());
+    assert_eq!(defaults.serve().origins, []);
     assert_eq!(defaults.serve().approval, ApprovalMode::Ask);
     assert_eq!(
         defaults.serve().token_file,

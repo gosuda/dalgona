@@ -156,7 +156,7 @@ fn deferred_overlay_tool_lists_only_after_promotion_at_a_turn_boundary() {
     let promoted = Arc::new(BTreeSet::from([name("mcp_web")]));
     let after = overlay.publish(&generation, promoted);
     assert_eq!(listed(&generation, &after), ["mcp_web", "native"]);
-    assert!(deferred_names(&generation, &after).is_empty());
+    assert_eq!(deferred_names(&generation, &after), [] as [String; 0]);
     assert_eq!(
         listed(&generation, &next),
         ["native", "tool_search"],

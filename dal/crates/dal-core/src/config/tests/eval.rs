@@ -1,6 +1,6 @@
 use super::super::{Config, ConfigError, ConfigProduct};
 use super::{DATA_ROOT, load};
-use crate::ext::{NativeOp, OpId};
+use crate::ext::{NativeOp, OpId, OpSet};
 use std::fmt::Write as _;
 use std::path::Path;
 
@@ -31,13 +31,13 @@ fn uses_toml(ids: &[String]) -> String {
 fn eval_unset_is_empty_and_pure_only() {
     for product in [ConfigProduct::Dalgon, ConfigProduct::Dalgona] {
         let config = load(product, "").expect("empty config loads");
-        assert!(config.eval_uses().is_empty());
+        assert_eq!(config.eval_uses(), &OpSet::default());
         assert_eq!(config.eval_uses().iter().count(), 0);
     }
     let bare = load(ConfigProduct::Dalgona, "[eval]").expect("bare eval table loads");
-    assert!(bare.eval_uses().is_empty());
+    assert_eq!(bare.eval_uses(), &OpSet::default());
     let empty = load(ConfigProduct::Dalgona, "[eval]\nuses = []").expect("empty uses loads");
-    assert!(empty.eval_uses().is_empty());
+    assert_eq!(empty.eval_uses(), &OpSet::default());
 }
 
 #[test]
@@ -201,7 +201,7 @@ fn eval_plugin_tables_are_kept_raw() {
     let (name, web) = config.plugin_configs().next().expect("plugin.web is kept");
     assert_eq!(name, "web");
     assert_eq!(web.get("mode").and_then(toml::Value::as_str), Some("grep"));
-    assert!(config.eval_uses().is_empty());
+    assert_eq!(config.eval_uses(), &OpSet::default());
     let scalar = load(ConfigProduct::Dalgona, "plugin = 3").expect("scalar plugin stays raw");
     assert_eq!(scalar.plugin_configs().count(), 0);
 }

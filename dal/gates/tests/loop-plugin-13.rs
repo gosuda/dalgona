@@ -487,7 +487,7 @@ async fn synthetic_cycle_depth_round_and_unpriced_errors_are_typed()
         assert_eq!(calls.load(Ordering::SeqCst), 9);
         assert_eq!(private_calls.load(Ordering::SeqCst), 8);
         assert_eq!(max_private_results.load(Ordering::SeqCst), 8);
-        assert!(session_calls.is_empty());
+        assert_eq!(session_calls, [] as [std::string::String; 0]);
         assert_eq!(assistant_text, "synthetic probes complete");
     }
     let _ = harness.host.shutdown(Duration::from_secs(1)).await;

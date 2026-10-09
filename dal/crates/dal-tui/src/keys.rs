@@ -336,7 +336,7 @@ mod tests {
     fn utf8_invalid_prefix_yields_one_replacement_and_replays_ascii() {
         let start = Instant::now();
         let mut decoder = KeyDecoder::default();
-        assert!(decoder.feed(&[0xe6, 0x97], start).is_empty());
+        assert_eq!(decoder.feed(&[0xe6, 0x97], start), []);
         assert_eq!(
             decoder.feed(b"a", start + Duration::from_millis(1)),
             [
@@ -367,20 +367,15 @@ mod tests {
     fn split_paste_start_and_bare_end_are_handled() {
         let start = Instant::now();
         let mut decoder = KeyDecoder::default();
-        assert!(decoder.feed(b"\x1b[20", start).is_empty());
-        assert!(
-            decoder
-                .feed(b"0~hi", start + Duration::from_millis(5))
-                .is_empty()
-        );
+        assert_eq!(decoder.feed(b"\x1b[20", start), []);
+        assert_eq!(decoder.feed(b"0~hi", start + Duration::from_millis(5)), []);
         assert_eq!(
             decoder.feed(b"\x1b[201~", start + Duration::from_millis(6)),
             [InputEvent::Paste(b"hi".to_vec())]
         );
-        assert!(
-            decoder
-                .feed(b"\x1b[201~", start + Duration::from_millis(7))
-                .is_empty()
+        assert_eq!(
+            decoder.feed(b"\x1b[201~", start + Duration::from_millis(7)),
+            []
         );
     }
 
@@ -388,7 +383,7 @@ mod tests {
     fn lone_escape_waits_fifty_milliseconds() {
         let start = Instant::now();
         let mut decoder = KeyDecoder::default();
-        assert!(decoder.feed(b"\x1b", start).is_empty());
+        assert_eq!(decoder.feed(b"\x1b", start), []);
         assert_eq!(
             decoder.tick(start + Duration::from_millis(50)),
             [InputEvent::Key(Key::new(KeyCode::Esc, KeyModifiers::NONE))]
@@ -399,7 +394,7 @@ mod tests {
     fn missing_paste_end_closes_at_two_seconds() {
         let start = Instant::now();
         let mut decoder = KeyDecoder::default();
-        assert!(decoder.feed(b"\x1b[200~hi", start).is_empty());
+        assert_eq!(decoder.feed(b"\x1b[200~hi", start), []);
         assert_eq!(
             decoder.tick(start + Duration::from_secs(2)),
             [InputEvent::Paste(b"hi".to_vec())]

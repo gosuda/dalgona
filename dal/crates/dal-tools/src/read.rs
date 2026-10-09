@@ -809,7 +809,7 @@ mod tests {
         assert_eq!(shown.text, format!("a{}...", "é".repeat(999)));
         assert_eq!(shown.text.len(), 1999 + 3);
         assert_eq!(window.next_offset, None);
-        assert!(window.intervals.is_empty());
+        assert_eq!(window.intervals, [] as [(u64, u64); 0]);
     }
 
     #[tokio::test]

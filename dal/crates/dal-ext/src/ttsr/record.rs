@@ -289,7 +289,7 @@ mod tests {
             ..record(&[r"\bsleep\s+[0-9]", "wait"])
         };
         let (rule, problems) = check(rec).expect("record is valid");
-        assert!(problems.is_empty());
+        assert_eq!(problems, []);
         assert_eq!(rule.name.as_str(), "no-sleep");
         assert_eq!(
             rule.origin,
@@ -378,7 +378,7 @@ mod tests {
     fn malformed_regex_is_left_to_the_set_build() {
         let (rule, problems) =
             check(record(&["(", "(?x)a", "(?=a)b"])).expect("regex is not compiled");
-        assert!(problems.is_empty());
+        assert_eq!(problems, []);
         assert_eq!(rule.conditions.len(), 3);
         assert_eq!(&*rule.conditions[0].src, "(");
     }
@@ -431,7 +431,7 @@ mod tests {
             ..record(&["todo", "src/*.rs"])
         };
         let (rule, problems) = check(rec).expect("record is valid");
-        assert!(problems.is_empty());
+        assert_eq!(problems, []);
         assert!(!rule.scope.text && rule.scope.thinking);
         let ToolScope::Tools(tools) = &rule.scope.tools else {
             panic!("named tools stay named");

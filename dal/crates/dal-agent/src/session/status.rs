@@ -140,13 +140,13 @@ mod tests {
     fn unchanged_polls_publish_nothing_and_quiet_baseline_is_silent() {
         let session = SessionId::new_v7();
         let quiet = generation(Some(Fixed(true, None)));
-        assert!(sweep(session, &quiet, &[], &BTreeMap::new()).is_empty());
+        assert_eq!(sweep(session, &quiet, &[], &BTreeMap::new()), []);
 
         let working = generation(Some(Fixed(false, Some("indexing".to_owned()))));
         let first = sweep(session, &working, &[], &BTreeMap::new());
         assert_eq!(first, vec![busy(Some("indexing"))]);
         let held = BTreeMap::from([("focus".into(), busy(Some("indexing")))]);
-        assert!(sweep(session, &working, &[], &held).is_empty());
+        assert_eq!(sweep(session, &working, &[], &held), []);
     }
 
     #[test]

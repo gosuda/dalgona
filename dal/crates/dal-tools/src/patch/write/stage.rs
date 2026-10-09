@@ -887,13 +887,13 @@ async fn prove_guard(
             }
             #[cfg(not(feature = "symbols"))]
             {
-                let _ = expected;
-                return Err(EngineError::new(
+                let _ = (canonical, expected);
+                Err(EngineError::new(
                     ErrorClass::Resolve,
                     format!(
                         "patch: changes[{index}]: symbol support is not enabled for this file."
                     ),
-                ));
+                ))
             }
         }
         Guard::Absent => {

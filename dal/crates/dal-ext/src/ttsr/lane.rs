@@ -435,7 +435,10 @@ mod tests {
     fn empty_replies_never_fire() {
         let lanes = Lanes::new();
         let session = SessionId::new_v7();
-        assert!(feed(&lanes, session, &["", "", "", "", "a b !?", ""]).is_empty());
+        assert_eq!(
+            feed(&lanes, session, &["", "", "", "", "a b !?", ""]),
+            [] as [u64; 0]
+        );
     }
 
     #[test]
@@ -449,7 +452,7 @@ mod tests {
             digest("Straße ÜBER über, 日本語! ab été_x Run42 run42"),
             words(&["straße", "über", "日本語", "été", "run42"])
         );
-        assert!(digest("a bc -- ?? 12").is_empty());
+        assert_eq!(digest("a bc -- ?? 12"), digest(""));
         assert!(digest("").is_empty());
     }
 
@@ -491,7 +494,7 @@ mod tests {
         assert_eq!(rule.body, LANE_BODY);
         assert!(rule.judge.is_none());
         assert!(!rule.report);
-        assert!(rule.conditions.is_empty());
+        assert_eq!(rule.conditions, []);
         assert!(!rule.scope.reaches_any());
     }
 }
