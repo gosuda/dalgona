@@ -16,6 +16,9 @@ pub(crate) struct Painter {
     previous: Vec<RenderRow>,
     size: (u16, u16),
     committed: usize,
+    /// Screen row, 1-based, where the live block starts: directly under the
+    /// last committed row, which is also where the next commit lands.
+    anchor: usize,
     sync: bool,
     initialized: bool,
     overlay: bool,
@@ -43,6 +46,7 @@ struct MainFrame {
     previous: Vec<RenderRow>,
     size: (u16, u16),
     initialized: bool,
+    anchor: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -108,6 +112,7 @@ impl Painter {
                     previous: std::mem::take(&mut self.previous),
                     size: self.size,
                     initialized: self.initialized,
+                    anchor: self.anchor,
                 });
                 self.initialized = false;
             } else {
@@ -116,6 +121,7 @@ impl Painter {
                     self.previous = main.previous;
                     self.size = main.size;
                     self.initialized = main.initialized;
+                    self.anchor = main.anchor;
                 } else {
                     self.previous.clear();
                     self.initialized = false;
@@ -146,7 +152,12 @@ impl Painter {
         if image_written && screen == Screen::Inline {
             bytes.extend_from_slice(format!("\x1b[{};1H", size.1).as_bytes());
         }
-        self.place_cursor(&mut bytes, size, &rows, overlay);
+        let top = if screen == Screen::Inline {
+            self.anchor.saturating_sub(1)
+        } else {
+            usize::from(size.1).saturating_sub(rows.len())
+        };
+        self.place_cursor(&mut bytes, size, top, &rows, overlay);
         self.theme_name = Some(theme.name());
         if !overlay {
             // Rows settled behind the overlay commit on the main screen once it returns.
@@ -187,6 +198,7 @@ impl Painter {
         &mut self,
         out: &mut Vec<u8>,
         size: (u16, u16),
+        top: usize,
         rows: &[RenderRow],
         overlay: bool,
     ) {
@@ -196,7 +208,6 @@ impl Painter {
             .find_map(|(index, row)| row.cursor.map(|column| (index, column)))
             .filter(|_| !overlay)
             .map(|(index, column)| {
-                let top = usize::from(size.1).saturating_sub(rows.len());
                 let last = usize::from(size.0).saturating_sub(1);
                 (top + index + 1, column.min(last) + 1)
             });
@@ -233,43 +244,64 @@ impl Painter {
         structural: bool,
         theme: &ResolvedTheme,
     ) {
+        let height = usize::from(size.1);
         let old_height = self.previous.len();
         let new_height = rows.len();
         let commit_len = transcript.rows().len().saturating_sub(commit_start);
         if structural || commit_len > 0 {
-            for (index, _) in self.previous.iter().enumerate() {
-                let y = usize::from(size.1).saturating_sub(old_height) + index + 1;
-                if y <= usize::from(size.1) {
+            // A fresh screen, or one whose height changed, knows no live
+            // block position: the block starts at the bottom, where the old
+            // one ended, and stays on the last rows. A width change keeps
+            // the tracked top.
+            let rebottom = !self.initialized || self.size.1 != size.1;
+            let old_top = if rebottom {
+                height.saturating_sub(old_height) + 1
+            } else {
+                self.anchor
+            };
+            for index in 0..old_height {
+                let y = old_top + index;
+                if y <= height {
                     out.extend_from_slice(format!("\x1b[{y};1H\x1b[2K").as_bytes());
                 }
             }
-            let reserve = if !self.initialized || commit_len > 0 {
-                new_height
-            } else {
-                new_height.saturating_sub(old_height)
-            };
+            let mut next = old_top;
             for index in commit_start..transcript.rows().len() {
-                if let Some(row) = transcript.render_row(index) {
-                    let image_top = size
-                        .1
-                        .saturating_sub(row.image.as_ref().map_or(1, |image| image.rows));
-                    let image_key = row
-                        .image
-                        .as_ref()
-                        .and_then(|image| self.prepare_image(image, image_top, size));
-                    out.extend_from_slice(format!("\x1b[{};1H", size.1).as_bytes());
-                    write_row(out, &row, theme, image_key.is_some());
-                    if let Some(key) = image_key {
-                        self.write_image(out, key, image_top);
-                    }
-                    out.extend_from_slice(b"\r\n");
+                let Some(row) = transcript.render_row(index) else {
+                    continue;
+                };
+                let card_rows = row
+                    .image
+                    .as_ref()
+                    .map_or(1, |image| usize::from(image.rows).max(1));
+                scroll_room(out, height, &mut next, card_rows);
+                let image_top = u16::try_from(next - 1).unwrap_or(size.1);
+                let image_key = row
+                    .image
+                    .as_ref()
+                    .and_then(|image| self.prepare_image(image, image_top, size));
+                out.extend_from_slice(format!("\x1b[{next};1H").as_bytes());
+                write_row(out, &row, theme, image_key.is_some());
+                if let Some(key) = image_key {
+                    self.write_image(out, key, image_top);
+                    out.extend_from_slice(format!("\x1b[{next};1H").as_bytes());
+                }
+                out.extend_from_slice(b"\r\n");
+                next = (next + 1).min(height);
+                if transcript.closes_block(index) {
+                    // One blank row after every settled block keeps the
+                    // spacing of every turn the same.
+                    out.extend_from_slice(format!("\x1b[{next};1H\r\n").as_bytes());
+                    next = (next + 1).min(height);
                 }
             }
-            for _ in 0..reserve {
-                out.extend_from_slice(format!("\x1b[{};1H\r\n", size.1).as_bytes());
+            scroll_room(out, height, &mut next, new_height);
+            if rebottom {
+                next = next.max(height.saturating_sub(new_height) + 1);
             }
+            self.anchor = next;
         }
-        let top = usize::from(size.1).saturating_sub(new_height) + 1;
+        let top = self.anchor;
         for (index, row) in rows.iter().enumerate() {
             if !structural && commit_len == 0 && self.previous.get(index) == Some(row) {
                 continue;
@@ -320,8 +352,7 @@ impl Painter {
         transcript_grew: bool,
     ) -> bool {
         let frame_top = if screen == Screen::Inline {
-            size.1
-                .saturating_sub(u16::try_from(rows.len()).unwrap_or(u16::MAX))
+            u16::try_from(self.anchor.saturating_sub(1)).unwrap_or(u16::MAX)
         } else {
             0
         };
@@ -411,6 +442,16 @@ impl Painter {
         out.extend_from_slice(&encoded);
         true
     }
+}
+
+/// Scrolls the screen up until `rows` rows fit from row `next` down, and
+/// moves `next` with the content it scrolled.
+fn scroll_room(out: &mut Vec<u8>, height: usize, next: &mut usize, rows: usize) {
+    let overflow = (*next + rows).saturating_sub(height + 1);
+    for _ in 0..overflow {
+        out.extend_from_slice(format!("\x1b[{height};1H\r\n").as_bytes());
+    }
+    *next = next.saturating_sub(overflow).max(1);
 }
 
 fn write_row(out: &mut Vec<u8>, row: &RenderRow, theme: &ResolvedTheme, image_supported: bool) {

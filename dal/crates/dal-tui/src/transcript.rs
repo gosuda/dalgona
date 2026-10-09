@@ -16,6 +16,9 @@ pub struct Transcript {
     links: Vec<Vec<RenderLink>>,
     images: Vec<Option<PixelImage>>,
     image_tails: Vec<bool>,
+    /// Marks the last row of each committed block; the inline screen sets
+    /// one blank row after every such row.
+    block_ends: Vec<bool>,
     committed: HashSet<String>,
     pending: Vec<(String, Vec<RenderRow>)>,
     tool_durations: HashMap<String, Duration>,
@@ -49,6 +52,8 @@ impl Transcript {
             .extend(rendered.iter().map(|row| row.links.clone()));
         self.images.extend((0..rows.len()).map(|_| None));
         self.image_tails.extend((0..rows.len()).map(|_| false));
+        self.block_ends
+            .extend((0..rows.len()).map(|index| index + 1 == rows.len()));
         rendered.into_iter().map(|row| row.text).collect()
     }
 
@@ -58,14 +63,20 @@ impl Transcript {
         if !self.committed.insert(entry_id.to_owned()) {
             return Vec::new();
         }
-        for row in rows {
+        for (index, row) in rows.iter().enumerate() {
             self.rows.push(row.text.clone());
             self.styles.push(row.spans.clone());
             self.links.push(row.links.clone());
             self.images.push(row.image.clone());
             self.image_tails.push(row.image_tail);
+            self.block_ends.push(index + 1 == rows.len());
         }
         rows.iter().map(|row| row.text.clone()).collect()
+    }
+
+    /// Reports whether row `index` is the last row of its committed block.
+    pub(crate) fn closes_block(&self, index: usize) -> bool {
+        self.block_ends.get(index).copied().unwrap_or(false)
     }
 
     pub(crate) fn set_pending(&mut self, entry_id: &str, rows: Vec<RenderRow>) {

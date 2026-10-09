@@ -41,6 +41,7 @@ const INVENTORIES: [(&str, &[&str]); 6] = [
             "loop-tui-10",
             "loop-tui-11",
             "loop-tui-12",
+            "loop-tui-13",
         ],
     ),
     (
