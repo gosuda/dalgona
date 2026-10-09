@@ -49,6 +49,15 @@ pub trait TermIo: Send {
     fn take_resize(&self) -> bool {
         false
     }
+    /// Asks the desktop to open `url` in a browser. The default declines, so
+    /// a terminal without a desktop edge only shows the URL.
+    ///
+    /// # Errors
+    /// Returns the error that kept the browser from starting.
+    fn open_url(&self, url: &str) -> io::Result<()> {
+        let _ = url;
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
 }
 
 /// Terminal modes captured for idempotent cleanup.

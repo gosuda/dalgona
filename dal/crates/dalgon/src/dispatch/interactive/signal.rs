@@ -144,4 +144,8 @@ impl TermIo for SignalTermIo {
     fn take_resize(&self) -> bool {
         self.resize.swap(false, Ordering::SeqCst)
     }
+
+    fn open_url(&self, url: &str) -> io::Result<()> {
+        crate::edge::open_browser(url)
+    }
 }

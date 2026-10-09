@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use dal_agent::login::{LoginIo, LoginOutcome, Method, StoredCredential};
 use dal_agent::{Agent, Delivery, Host, SessionRef, Subscription};
 use dal_core::{
     Answer, ClientId, Command, CommandSpec, ExtStatus, Gen, PageReq, Reply, RequestId, Seq,
@@ -61,7 +62,7 @@ pub trait TuiAgent: Clone + Send + Sync + 'static {
     async_fn_in_trait,
     reason = "the terminal drives these futures on a blocking runtime handle"
 )]
-pub trait TuiHost: Send + 'static {
+pub trait TuiHost: Clone + Send + Sync + 'static {
     /// The opened session handle.
     type Agent: TuiAgent;
 
@@ -71,6 +72,19 @@ pub trait TuiHost: Send + 'static {
     async fn commands(&self) -> Result<Arc<[CommandSpec]>, TuiError>;
     /// Releases the opened session after the terminal has been restored.
     async fn close(&self, id: SessionId) -> Result<(), TuiError>;
+    /// Signs in to one provider; the contract of [`Host::login`]. A remote
+    /// host answers with the URL, then waits for its `login_finished` update.
+    async fn login(
+        &self,
+        provider: &str,
+        method: Method,
+        io: LoginIo,
+    ) -> Result<LoginOutcome, TuiError>;
+    /// Removes one provider's stored credential, or every stored credential
+    /// when `provider` is `None`, and returns the providers that had one.
+    async fn logout(&self, provider: Option<&str>) -> Result<Vec<Box<str>>, TuiError>;
+    /// Lists the stored credentials without their secrets.
+    async fn stored_credentials(&self) -> Result<Vec<StoredCredential>, TuiError>;
 }
 
 impl TuiHost for Host {
@@ -86,6 +100,23 @@ impl TuiHost for Host {
 
     async fn close(&self, id: SessionId) -> Result<(), TuiError> {
         Ok(self.close(id).await?)
+    }
+
+    async fn login(
+        &self,
+        provider: &str,
+        method: Method,
+        io: LoginIo,
+    ) -> Result<LoginOutcome, TuiError> {
+        Ok(self.login(provider, method, io).await?)
+    }
+
+    async fn logout(&self, provider: Option<&str>) -> Result<Vec<Box<str>>, TuiError> {
+        Ok(self.logout(provider).await?)
+    }
+
+    async fn stored_credentials(&self) -> Result<Vec<StoredCredential>, TuiError> {
+        Ok(self.stored_credentials().await?)
     }
 }
 

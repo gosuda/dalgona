@@ -246,6 +246,7 @@ where
 
 mod render;
 mod runtime;
+mod signin;
 
 /// Draws one settled session frame into a ratatui test terminal.
 ///
@@ -300,6 +301,7 @@ pub fn draw_frame(
             live: &live,
             dialog: &dialog,
             picker: None,
+            signin: None,
             transcript: &transcript,
             viewport: &viewport,
             opts,

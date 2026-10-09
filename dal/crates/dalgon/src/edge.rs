@@ -102,6 +102,49 @@ pub(crate) fn process_cwd() -> io::Result<PathBuf> {
     std::env::current_dir()
 }
 
+#[cfg(feature = "tui")]
+/// Asks the desktop to open `url` in the user's browser, without a shell.
+///
+/// Only `http` and `https` URLs are passed on. The opener runs detached with
+/// its streams closed; a thread reaps it so no zombie outlives the call.
+///
+/// # Errors
+/// Returns the refusal for any other scheme, or the spawn error when the
+/// platform opener is missing.
+pub(crate) fn open_browser(url: &str) -> io::Result<()> {
+    use std::process::Stdio;
+
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "only http and https URLs open in a browser",
+        ));
+    }
+    let (program, prefix): (&str, &[&str]) = if cfg!(target_os = "macos") {
+        ("open", &[])
+    } else if cfg!(windows) {
+        ("rundll32", &["url.dll,FileProtocolHandler"])
+    } else {
+        ("xdg-open", &[])
+    };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "R4 edge: the process edge launches the desktop opener"
+    )]
+    let mut command = std::process::Command::new(program);
+    let mut child = command
+        .args(prefix)
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    std::thread::spawn(move || {
+        let _status = child.wait();
+    });
+    Ok(())
+}
+
 /// Captures the current executable path for the `__sandbox` helper launch.
 ///
 /// Returns `None` when the path is unresolvable; the sandbox backend fails

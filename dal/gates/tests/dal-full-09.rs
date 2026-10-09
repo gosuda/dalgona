@@ -11,7 +11,7 @@ use std::{
     process::Command,
 };
 
-const INVENTORIES: [(&str, &[&str]); 5] = [
+const INVENTORIES: [(&str, &[&str]); 6] = [
     (
         "loop-headless",
         &[
@@ -82,6 +82,7 @@ const INVENTORIES: [(&str, &[&str]); 5] = [
             "dal-full-09",
         ],
     ),
+    ("login", &["login-tui-01"]),
 ];
 
 const RELEASE_TARGETS: [&str; 4] = [

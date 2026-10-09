@@ -36,8 +36,10 @@ pub mod login {
     pub use crate::host::LoginOutcome;
     pub use dal_provider::{
         CredentialKind, LoginIo, LoginProgress, Method, PASTE_HINT, PROGRESS_CAPACITY,
-        StoredCredential, login_providers,
+        SecretString, StoredCredential, login_providers,
     };
+    /// The token that cancels a [`LoginIo`].
+    pub use tokio_util::sync::CancellationToken;
 
     /// Loopback endpoints for tests that run every flow against a local
     /// server through [`crate::Host::set_login_endpoints`].

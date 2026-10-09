@@ -20,7 +20,7 @@ workspace = true
 dal-core = { path = "../crates/dal-core" }
 dal-store = { path = "../crates/dal-store" }
 dal-provider = { path = "../crates/dal-provider" }
-dal-agent = { path = "../crates/dal-agent" }
+dal-agent = { path = "../crates/dal-agent", features = ["test-support"] }
 dal-tools = { path = "../crates/dal-tools", features = ["symbols"] }
 dal-ext = { path = "../crates/dal-ext" }
 dal-star = { path = "../crates/dal-star" }
@@ -80,6 +80,10 @@ path = "tests/loop-headless-08.rs"
 [[test]]
 name = "loop-headless-09"
 path = "tests/loop-headless-09.rs"
+
+[[test]]
+name = "login-tui-01"
+path = "tests/login-tui-01.rs"
 
 [[test]]
 name = "loop-tui-01"

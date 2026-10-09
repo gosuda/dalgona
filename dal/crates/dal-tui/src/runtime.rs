@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use dal_agent::SessionRef;
+use dal_agent::login::{Method, SecretString};
 use dal_core::{
     Answer, CancelScope, Chooser, ClientId, Command, Expect, FrontAction, Output, PageReq, Reply,
     RequestId, Stop, TurnId, TurnState, UpdateKind,
@@ -17,6 +18,7 @@ use crate::live::Live;
 use crate::picker::{ModelOption, PickerAction, PickerUi};
 use crate::render::{FrameInput, entry_rows_timed};
 use crate::screen::driver::Painter;
+use crate::signin::{self, KeyAction, SignIn};
 use crate::term::{ReplyParser, TermIo, TermState, restore, startup_probe};
 use crate::transcript::Transcript;
 use crate::{TuiError, TuiExit, TuiOptions};
@@ -50,14 +52,36 @@ struct Session {
     popup: Vec<String>,
     candidates: Vec<crate::popup::Candidate>,
     picker: Option<PickerUi>,
+    signin: Option<SignIn>,
+    front: Vec<FrontRequest>,
     cancelling: Option<TurnId>,
     cancel_settled: bool,
     cancel_deadline: Option<std::time::Instant>,
 }
 
-struct CommandContext<M> {
+/// A terminal-only request that needs the host; the loop runs it after the
+/// input pass.
+#[derive(Debug)]
+enum FrontRequest {
+    /// Sign in to a provider.
+    Login(Box<str>),
+    /// Start the API-key login with the typed key.
+    StartKey {
+        provider: Box<str>,
+        key: SecretString,
+    },
+    /// Open the logout picker with the stored credentials.
+    LogoutPicker(Box<str>),
+    /// Remove one provider's credential.
+    Logout(Box<str>),
+    /// Remove every credential after the confirmation.
+    LogoutAll,
+}
+
+struct CommandContext<H, M> {
     specs: std::sync::Arc<[dal_core::CommandSpec]>,
     model_source: M,
+    host: H,
 }
 
 impl Session {
@@ -134,6 +158,41 @@ impl Session {
         }
     }
 
+    /// Ctrl+C: stop a running sign-in, close a finished overlay or picker,
+    /// else interrupt the turn.
+    fn interrupt_or_dismiss(&mut self) {
+        if let Some(signin) = self.signin.as_mut() {
+            if signin.is_running() {
+                signin.cancel();
+            } else {
+                self.signin = None;
+            }
+        } else if self.picker.take().is_none() {
+            self.interrupt();
+        }
+    }
+
+    /// Applies one key to the open sign-in overlay.
+    fn apply_signin_key(&mut self, key: crate::keys::Key) {
+        let Some(signin) = self.signin.as_mut() else {
+            return;
+        };
+        match signin.key(key) {
+            KeyAction::None => {}
+            KeyAction::Close => self.signin = None,
+            KeyAction::StartKey(typed) => {
+                self.front.push(FrontRequest::StartKey {
+                    provider: signin.provider().into(),
+                    key: typed,
+                });
+            }
+            KeyAction::RemoveAll => {
+                self.signin = None;
+                self.front.push(FrontRequest::LogoutAll);
+            }
+        }
+    }
+
     fn accept_reply(&mut self, reply: Reply) -> Vec<String> {
         match reply {
             Reply::Accepted { turn, .. } => {
@@ -168,6 +227,14 @@ impl Session {
                 .into_iter()
                 .map(|(key, label)| format!("{key} {label}"))
                 .collect(),
+            Reply::Front(FrontAction::Login { provider }) => {
+                self.front.push(FrontRequest::Login(provider));
+                Vec::new()
+            }
+            Reply::Front(FrontAction::Logout { provider }) => {
+                self.front.push(FrontRequest::Logout(provider));
+                Vec::new()
+            }
             Reply::Front(action) => vec![crate::width::escape(&format!("{action:?}"))],
             Reply::Started(job) => vec![format!("Job {job} started.")],
             // A queued reply needs no row: the live block shows the queue.
@@ -175,6 +242,7 @@ impl Session {
         }
     }
 }
+
 pub(super) fn run<H, M, S>(
     host: &H,
     opts: &TuiOptions,
@@ -223,6 +291,7 @@ where
         CommandContext {
             specs: commands,
             model_source,
+            host: host.clone(),
         },
         save_diagrams,
         view,
@@ -480,24 +549,26 @@ fn boot<A: TuiAgent>(
     clippy::too_many_arguments,
     reason = "the loop's inputs are the run's own locals; grouping adds a shell"
 )]
-fn run_loop<A, M, S>(
+fn run_loop<A, H, M, S>(
     io: &dyn TermIo,
     opts: &TuiOptions,
     state: &Arc<Mutex<TermState>>,
     agent: &A,
     pump: &mut Pump<A::Subscription>,
-    commands: CommandContext<M>,
+    commands: CommandContext<H, M>,
     mut save_diagrams: S,
     view: dal_core::View,
 ) -> Result<(TuiExit, Option<TurnId>, Vec<String>), TuiError>
 where
     A: TuiAgent,
+    H: TuiHost,
     M: FnMut() -> Result<Vec<ModelOption>, TuiError>,
     S: FnMut(bool) -> Result<(), TuiError>,
 {
     let CommandContext {
         specs,
         mut model_source,
+        host,
     } = commands;
     state
         .lock()
@@ -552,6 +623,8 @@ where
         }
         surfaces.flush_answers(opts, agent);
         surfaces.submit_commands(opts, agent, &mut model_source)?;
+        surfaces.run_front(opts, &host);
+        surfaces.poll_signin(opts, io, &mut model_source);
         surfaces.write_copies(io);
         surfaces.apply_diagram_updates(opts, &mut painter, &probe, &mut save_diagrams);
         surfaces.drain(opts, agent, pump)?;
@@ -753,6 +826,7 @@ impl Surfaces {
                 live: &self.live,
                 dialog: &self.dialog,
                 picker: self.session.picker.as_ref(),
+                signin: self.session.signin.as_ref(),
                 transcript: &self.transcript,
                 viewport: &self.session.viewport,
                 opts,
@@ -957,6 +1031,11 @@ impl Surfaces {
                             self.diagram_settings.enabled,
                             &filter,
                         )),
+                        Chooser::Login => Some(signin::login_picker(&filter)),
+                        Chooser::Logout => {
+                            self.session.front.push(FrontRequest::LogoutPicker(filter));
+                            None
+                        }
                         _ => {
                             self.live
                                 .notice(crate::copy::ids::PICKER_UNSUPPORTED.to_owned());
@@ -971,17 +1050,126 @@ impl Surfaces {
             if queued {
                 self.view = opts.rt.block_on(agent.view(snapshot_page()?))?;
             }
-            if !reply_rows.is_empty() {
-                let reply_rows: Vec<String> =
-                    reply_rows.iter().map(|row| format!("  {row}")).collect();
-                self.session.command_seq = self.session.command_seq.saturating_add(1);
-                self.transcript.commit(
-                    &format!("command-{}", self.session.command_seq),
-                    &reply_rows,
-                );
-            }
+            self.print_rows(&reply_rows);
         }
         Ok(())
+    }
+
+    /// Commits output rows to the transcript under the next command id.
+    fn print_rows(&mut self, rows: &[String]) {
+        if rows.is_empty() {
+            return;
+        }
+        let rows: Vec<String> = rows.iter().map(|row| format!("  {row}")).collect();
+        self.session.command_seq = self.session.command_seq.saturating_add(1);
+        self.transcript
+            .commit(&format!("command-{}", self.session.command_seq), &rows);
+    }
+
+    /// Runs the host-backed requests the input pass queued.
+    fn run_front<H: TuiHost>(&mut self, opts: &TuiOptions, host: &H) {
+        for request in std::mem::take(&mut self.session.front) {
+            match request {
+                FrontRequest::Login(provider) => self.begin_login(opts, host, &provider),
+                FrontRequest::StartKey { provider, key } => {
+                    self.session.signin = Some(SignIn::flow(
+                        host,
+                        &opts.rt,
+                        &provider,
+                        Method::ApiKey,
+                        Some(key),
+                    ));
+                }
+                FrontRequest::LogoutPicker(filter) => self.logout_picker(opts, host, &filter),
+                FrontRequest::Logout(provider) => self.logout(opts, host, Some(&provider)),
+                FrontRequest::LogoutAll => self.logout(opts, host, None),
+            }
+        }
+    }
+
+    /// Opens the sign-in overlay for `provider`: the key prompt, or the flow.
+    fn begin_login<H: TuiHost>(&mut self, opts: &TuiOptions, host: &H, provider: &str) {
+        self.session.picker = None;
+        self.session.signin = match signin::preferred_method(provider) {
+            Some(Method::ApiKey) => Some(SignIn::key_prompt(provider)),
+            Some(method) => Some(SignIn::flow(host, &opts.rt, provider, method, None)),
+            None => {
+                self.live.notice(format!(
+                    "Unknown provider \"{}\".",
+                    crate::width::escape(provider)
+                ));
+                None
+            }
+        };
+    }
+
+    /// Opens the logout picker, or reports an empty store.
+    fn logout_picker<H: TuiHost>(&mut self, opts: &TuiOptions, host: &H, filter: &str) {
+        match opts.rt.block_on(host.stored_credentials()) {
+            Ok(stored) if stored.is_empty() => {
+                self.print_rows(&[crate::copy::ids::LOGOUT_NONE.to_owned()]);
+            }
+            Ok(stored) => self.session.picker = Some(signin::logout_picker(&stored, filter)),
+            Err(error) => self.print_rows(&signin::failure_rows(&error)),
+        }
+    }
+
+    /// Removes one provider's credential, or every credential.
+    fn logout<H: TuiHost>(&mut self, opts: &TuiOptions, host: &H, provider: Option<&str>) {
+        match opts.rt.block_on(host.logout(provider)) {
+            Ok(removed) => {
+                let saved = self
+                    .view
+                    .settings
+                    .model
+                    .as_ref()
+                    .map(crate::picker::route_label)
+                    .or_else(|| opts.default_model.as_deref().map(str::to_owned));
+                self.print_rows(&signin::logout_rows(provider, &removed, saved.as_deref()));
+            }
+            Err(error) => self.print_rows(&signin::failure_rows(&error)),
+        }
+    }
+
+    /// Drains the running sign-in and shows its one outcome.
+    fn poll_signin<M>(&mut self, opts: &TuiOptions, io: &dyn TermIo, model_source: &mut M)
+    where
+        M: FnMut() -> Result<Vec<ModelOption>, TuiError>,
+    {
+        let Some(finished) = self.session.signin.as_mut().and_then(|flow| flow.poll(io)) else {
+            return;
+        };
+        self.session.signin = None;
+        match finished.outcome {
+            Ok(_) => self.signed_in(opts, &finished.provider, model_source),
+            Err(error) => self.print_rows(&signin::failure_rows(&error)),
+        }
+    }
+
+    /// Refreshes the model list after a sign-in. With no saved model the
+    /// list opens as the model picker; otherwise the output is the
+    /// signed-in line.
+    fn signed_in<M>(&mut self, opts: &TuiOptions, provider: &str, model_source: &mut M)
+    where
+        M: FnMut() -> Result<Vec<ModelOption>, TuiError>,
+    {
+        let needs_model = self.view.settings.model.is_none() && opts.default_model.is_none();
+        let line = crate::copy::render(
+            crate::copy::ids::LOGIN_SIGNED_IN,
+            &[("provider", &crate::width::escape(provider))],
+            1,
+        );
+        match model_source() {
+            Ok(models) if needs_model => {
+                self.session.picker = Some(crate::picker::model_picker(&models, ""));
+            }
+            Ok(_) => self.print_rows(&[line]),
+            Err(_) => {
+                self.live
+                    .notice(crate::copy::ids::MODEL_PICKER_FAIL.to_owned());
+                self.print_rows(&[line]);
+            }
+        }
     }
 
     /// Sends each requested copy to the terminal clipboard (OSC 52) and
@@ -1436,6 +1624,8 @@ fn apply_event(
         if let InputEvent::Paste(bytes) = event {
             if dialog.is_open() {
                 dialog.paste(&bytes);
+            } else if let Some(signin) = session.signin.as_mut() {
+                signin.paste(&String::from_utf8_lossy(&bytes));
             } else if !session.overlay && session.dialog.is_none() && session.picker.is_none() {
                 session.composer.insert_paste(&bytes);
                 session.update_popup();
@@ -1444,9 +1634,7 @@ fn apply_event(
         return;
     };
     if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
-        if session.picker.take().is_none() {
-            session.interrupt();
-        }
+        session.interrupt_or_dismiss();
         return;
     }
     if let Some(ExitDialog::DiscardDraft) = session.dialog {
@@ -1463,6 +1651,10 @@ fn apply_event(
         if let Some(answer) = dialog.key(key) {
             session.pending_answers.push(answer);
         }
+        return;
+    }
+    if session.signin.is_some() {
+        session.apply_signin_key(key);
         return;
     }
     if session.picker.is_some() {
@@ -1543,6 +1735,10 @@ fn apply_picker_key(session: &mut Session, key: crate::keys::Key) {
             {
                 Some(PickerAction::Command(command)) => {
                     session.pending_commands.push(command);
+                    session.picker = None;
+                }
+                Some(PickerAction::ConfirmLogoutAll) => {
+                    session.signin = Some(SignIn::confirm_all());
                     session.picker = None;
                 }
                 Some(PickerAction::SetDiagrams { enabled, save }) => {

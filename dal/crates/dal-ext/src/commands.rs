@@ -833,9 +833,9 @@ pub fn complete_args(
                 detail: "thinking level".into(),
             })
             .collect(),
-        "login" | "logout" => ["anthropic", "openai", "openai-codex"]
+        "login" | "logout" => dal_agent::login::login_providers()
             .iter()
-            .map(|provider| dal_core::command::Completion {
+            .map(|(provider, _)| dal_core::command::Completion {
                 value: (*provider).into(),
                 label: (*provider).into(),
                 detail: "provider".into(),

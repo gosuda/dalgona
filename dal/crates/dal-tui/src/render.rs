@@ -33,6 +33,8 @@ pub(crate) struct FrameInput<'a> {
     pub(crate) live: &'a Live,
     pub(crate) dialog: &'a DialogUi,
     pub(crate) picker: Option<&'a PickerUi>,
+    /// The open sign-in overlay, which owns the composer and hint rows.
+    pub(crate) signin: Option<&'a crate::signin::SignIn>,
     pub(crate) transcript: &'a Transcript,
     /// The transcript viewport: follow state, frozen scroll window, search.
     pub(crate) viewport: &'a crate::screen::fullscreen::Viewport,
@@ -75,6 +77,7 @@ pub(crate) struct RenderSpan {
     pub(crate) role: Role,
     pub(crate) bold: bool,
 }
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RenderLink {
     pub(crate) range: Range<usize>,
@@ -157,16 +160,7 @@ pub(crate) fn frame_rows(input: FrameInput<'_>, width: u16, height: u16) -> Vec<
 
     let mut activity = activity_rows(&input, w, mode);
     let notices = input.live.notices();
-    let picker_rows = input
-        .picker
-        .map_or(0, |picker| picker.visible_len().max(1) + 2);
-    let overlay = if input.dialog.is_open() {
-        Some(6)
-    } else if input.exit_draft {
-        Some(1)
-    } else {
-        input.picker.map(|_| picker_rows)
-    };
+    let overlay = overlay_height(&input, w, mode);
     let laid = composer_layout(&input, w, mode);
     let budget = RegionBudget::allocate(
         width,
@@ -229,6 +223,21 @@ pub(crate) fn frame_rows(input: FrameInput<'_>, width: u16, height: u16) -> Vec<
         )
     };
     resolve_colors(rows, input.theme)
+}
+
+/// The rows the interactive tail takes in place of the composer, if any.
+fn overlay_height(input: &FrameInput<'_>, w: usize, mode: WidthMode) -> Option<usize> {
+    if input.dialog.is_open() {
+        Some(6)
+    } else if let Some(signin) = input.signin {
+        Some(signin.rows(w, mode, usize::MAX).len())
+    } else if let Some(picker) = input.picker {
+        Some(picker.visible_len().max(1) + 2)
+    } else if input.exit_draft {
+        Some(1)
+    } else {
+        None
+    }
 }
 
 /// The newest `count` notices as clipped dim rows.
@@ -311,6 +320,8 @@ fn overlay_rows(
             input.diagram_settings,
             input.diagram_cache,
         ));
+    } else if let Some(signin) = input.signin {
+        bottom.extend(signin.rows(w, mode, budget.overlay));
     } else if let Some(picker) = input.picker {
         bottom.push(RenderRow::new(picker.title.clone(), Role::Accent));
         if let Some(id) = picker.model_filter_fallback() {
@@ -565,6 +576,7 @@ fn status_line(
         .collect();
     row
 }
+
 fn queued_steer_row(turn: TurnState, count: u32) -> Option<RenderRow> {
     if count == 0 || !matches!(turn, TurnState::Running { .. } | TurnState::Settling { .. }) {
         return None;
