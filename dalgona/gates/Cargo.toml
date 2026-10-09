@@ -17,14 +17,14 @@ dalgon = "=0.1.0"
 dalgona = { path = "../crates/dalgona" }
 dal-agent = "=0.1.0"
 dal-core = "=0.1.0"
-uuid = { version = "=1.26.1", features = ["v7"] }
+uuid = { version = "=1.27.0", features = ["v7"] }
 
 [dev-dependencies]
 dalgona-batteries = { path = "../crates/dalgona-batteries" }
 dal-provider = "=0.1.0"
 dal-tui = "=0.1.0"
 dal-wire = "=0.1.0"
-tokio = { version = "=1.53.1", features = ["macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "=1.53.2", features = ["macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 proptest = "=1.11.0"
 
 
