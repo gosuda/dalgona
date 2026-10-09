@@ -75,10 +75,10 @@ impl Tool for ResolveTool {
                     });
                 }
             };
-            ToolOutcome::Ok(ToolOutput::from_text(format!(
+            ToolOutcome::Ok(Box::new(ToolOutput::from_text(format!(
                 "{}; unknown={unknown}",
                 doc.text
-            )))
+            ))))
         })
     }
 }

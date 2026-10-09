@@ -216,7 +216,7 @@ impl Tool for ReadTool {
                     let data = data.map(ToolData::Read);
                     let mut output = ToolOutput::new(reading.parts);
                     output.data = data;
-                    ToolOutcome::Ok(output)
+                    ToolOutcome::Ok(Box::new(output))
                 }
                 Err(error) => ToolOutcome::Err(error),
             }

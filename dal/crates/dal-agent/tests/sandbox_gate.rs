@@ -74,10 +74,10 @@ impl Tool for SpawnProbe {
                 Err(error) => return ToolOutcome::Err(error),
             };
             match proc.wait(cx.cancel()).await {
-                Ok(result) => ToolOutcome::Ok(ToolOutput::from_text(format!(
+                Ok(result) => ToolOutcome::Ok(Box::new(ToolOutput::from_text(format!(
                     "probe exit {status:?}",
                     status = result.status
-                ))),
+                )))),
                 Err(error) => ToolOutcome::Err(error),
             }
         })

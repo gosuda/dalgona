@@ -85,7 +85,7 @@ impl Tool for Todo {
                 .append_record(cx.caller(), "todo", Box::new(call.args))
                 .await
             {
-                Ok(_) => ToolOutcome::Ok(ToolOutput::from_text("recorded")),
+                Ok(_) => ToolOutcome::Ok(Box::new(ToolOutput::from_text("recorded"))),
                 Err(error) => ToolOutcome::Err(dal_agent::ToolError::message(error.to_string())),
             }
         })
@@ -127,7 +127,7 @@ impl Tool for Asker {
                 .seen
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(outcome);
-            ToolOutcome::Ok(ToolOutput::from_text("asked"))
+            ToolOutcome::Ok(Box::new(ToolOutput::from_text("asked")))
         })
     }
 }
@@ -172,7 +172,7 @@ impl Tool for Overflow {
                 .seen
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((refused, accepted));
-            ToolOutcome::Ok(ToolOutput::from_text("done"))
+            ToolOutcome::Ok(Box::new(ToolOutput::from_text("done")))
         })
     }
 }

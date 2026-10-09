@@ -199,13 +199,13 @@ fn tool_outcome(settled: Result<InvokeOutput, InvokeFailure>) -> ToolOutcome {
         (None, false) => Some(ToolData::Views(output.views)),
         (None, true) => None,
     };
-    ToolOutcome::Ok(ToolOutput {
+    ToolOutcome::Ok(Box::new(ToolOutput {
         parts: vec![Part::Text {
             text: value_text(&output.value),
         }],
         files_changed: Vec::new(),
         data,
-    })
+    }))
 }
 
 /// Maps one settled handler onto one command reply.

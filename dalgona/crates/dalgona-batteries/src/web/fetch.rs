@@ -169,7 +169,7 @@ fn convert_result(
         max_markdown_bytes,
     ) {
         Ok(result) => match sonic_rs::to_string(&result) {
-            Ok(text) => ToolOutcome::Ok(ToolOutput::from_text(text)),
+            Ok(text) => ToolOutcome::Ok(Box::new(ToolOutput::from_text(text))),
             Err(error) => ToolOutcome::Err(dal_agent::ToolError::message(format!(
                 "{TOOL_NAME}: {error}."
             ))),

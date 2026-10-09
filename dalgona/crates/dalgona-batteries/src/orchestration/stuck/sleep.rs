@@ -42,7 +42,7 @@ const LOOP: &str =
 const TRAILING: &str = r"[;&|]\s*(?:/(?:usr/)?bin/)?sleep\s+[0-9]+(?:\.[0-9]+)?\s*\)?\s*$";
 
 impl SleepClassifier {
-    pub(crate) fn new() -> Result<Self, regex_automata::meta::BuildError> {
+    pub(crate) fn new() -> Result<Self, Box<regex_automata::meta::BuildError>> {
         Ok(Self {
             wrapper: Regex::new(WRAPPER)?,
             power_management: Regex::new(POWER_MANAGEMENT)?,

@@ -542,7 +542,7 @@ impl ExecTool {
                 );
                 match outcome {
                     ExecOutcome::Exited(0) => {
-                        ToolOutcome::Ok(ToolOutput::from_text(text.into_boxed_str()))
+                        ToolOutcome::Ok(Box::new(ToolOutput::from_text(text.into_boxed_str())))
                     }
                     _ => ToolOutcome::Err(ToolError::message(text)),
                 }

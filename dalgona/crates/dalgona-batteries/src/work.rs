@@ -117,7 +117,7 @@ fn service_outcome(error: ServiceError) -> ToolOutcome {
 
 fn finished(result: Result<String, ToolOutcome>) -> ToolOutcome {
     match result {
-        Ok(text) => ToolOutcome::Ok(ToolOutput::from_text(text)),
+        Ok(text) => ToolOutcome::Ok(Box::new(ToolOutput::from_text(text))),
         Err(outcome) => outcome,
     }
 }

@@ -177,7 +177,7 @@ impl Tool for AskTool {
     }
 
     fn run<'a>(&'a self, _call: ToolCall, _cx: ToolCx<'a>) -> BoxFuture<'a, ToolOutcome> {
-        Box::pin(async { ToolOutcome::Ok(ToolOutput::from_text("asked-ok")) })
+        Box::pin(async { ToolOutcome::Ok(Box::new(ToolOutput::from_text("asked-ok"))) })
     }
 }
 
@@ -222,7 +222,7 @@ impl Tool for GateTool {
                 permit = self.gate.acquire() => match permit {
                     Ok(permit) => {
                         permit.forget();
-                        ToolOutcome::Ok(ToolOutput::from_text("opened"))
+                        ToolOutcome::Ok(Box::new(ToolOutput::from_text("opened")))
                     }
                     Err(_) => ToolOutcome::Interrupted,
                 },

@@ -356,11 +356,11 @@ fn reply((status, envelope, views): (Status, Value, Box<[ReadView]>)) -> ToolOut
     let text = envelope.to_json();
     match status {
         Status::Cancelled => ToolOutcome::Interrupted,
-        Status::Completed => ToolOutcome::Ok(ToolOutput {
+        Status::Completed => ToolOutcome::Ok(Box::new(ToolOutput {
             parts: vec![Part::Text { text: text.into() }],
             files_changed: Vec::new(),
             data: (!views.is_empty()).then_some(ToolData::Views(views)),
-        }),
+        })),
         _ => ToolOutcome::Err(ToolError::message(text)),
     }
 }

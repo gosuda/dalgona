@@ -83,7 +83,7 @@ impl Tool for SlowTool {
         Box::pin(async move {
             runs.fetch_add(1, Ordering::SeqCst);
             tokio::time::sleep(delay).await;
-            ToolOutcome::Ok(crate::ext::ToolOutput::from_text("slow done"))
+            ToolOutcome::Ok(Box::new(crate::ext::ToolOutput::from_text("slow done")))
         })
     }
 }
@@ -144,7 +144,7 @@ impl Tool for ViewTool {
             };
             let mut output = crate::ext::ToolOutput::from_text("alpha line\nbeta line");
             output.data = Some(ToolData::Read(view));
-            ToolOutcome::Ok(output)
+            ToolOutcome::Ok(Box::new(output))
         })
     }
 }

@@ -638,7 +638,7 @@ async fn call_mcp(key: &Key, remote: &str, arguments: RawJson, cx: ToolCx<'_>) -
     };
     match services.mcp(cx.caller(), req).await {
         Ok(response) if response.is_error => ToolOutcome::Err(ToolError::message(response.text)),
-        Ok(response) => ToolOutcome::Ok(ToolOutput::from_text(response.text)),
+        Ok(response) => ToolOutcome::Ok(Box::new(ToolOutput::from_text(response.text))),
         Err(ServiceError::Cancelled) => ToolOutcome::Interrupted,
         Err(ServiceError::Declined) => ToolOutcome::Err(ToolError::message(
             McpError::Declined {
