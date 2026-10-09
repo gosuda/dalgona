@@ -8,6 +8,10 @@ use dal_core::Family;
 use super::*;
 use crate::{AuthStyle, Transport};
 
+const OPENAI: &str = "openai";
+const ANTHROPIC: &str = "anthropic";
+const OPENAI_CODEX: &str = "openai-codex";
+
 struct TestDir(PathBuf);
 
 impl TestDir {
@@ -352,4 +356,103 @@ fn expiry_prefers_expires_in_then_jwt_exp_then_absent() {
     );
     assert_eq!(oauth_expires_at(1_000, None, &jwt(r#"{"sub":"x"}"#)), None);
     assert_eq!(oauth_expires_at(1_000, None, "opaque-token"), None);
+}
+
+/// Files written by the serializer before the member map replaced the three
+/// fixed fields, one per entry shape and two with several members.
+const FIXTURES: [(&str, &str); 8] = [
+    (
+        "openai_api_key",
+        include_str!("fixtures/openai_api_key.json"),
+    ),
+    (
+        "anthropic_api_key",
+        include_str!("fixtures/anthropic_api_key.json"),
+    ),
+    (
+        "anthropic_oauth",
+        include_str!("fixtures/anthropic_oauth.json"),
+    ),
+    (
+        "anthropic_oauth_no_expiry",
+        include_str!("fixtures/anthropic_oauth_no_expiry.json"),
+    ),
+    (
+        "openai_codex_oauth",
+        include_str!("fixtures/openai_codex_oauth.json"),
+    ),
+    (
+        "openai_codex_oauth_no_expiry",
+        include_str!("fixtures/openai_codex_oauth_no_expiry.json"),
+    ),
+    ("all_members", include_str!("fixtures/all_members.json")),
+    (
+        "api_keys_and_codex",
+        include_str!("fixtures/api_keys_and_codex.json"),
+    ),
+];
+
+#[test]
+fn every_stored_shape_loads_and_stores_to_the_same_bytes() {
+    for (name, text) in FIXTURES {
+        let dir = TestDir::new(name);
+        write_file(&dir.auth(), text, 0o600);
+        let store = AuthStore::load(dir.auth()).unwrap_or_else(|error| panic!("{name}: {error}"));
+        store.store().expect("store");
+        let written = fs::read_to_string(dir.auth()).expect("read back");
+        assert_eq!(written, text, "{name}");
+    }
+}
+
+#[test]
+fn members_are_written_in_the_canonical_order_whatever_the_set_order() {
+    let dir = TestDir::new("order");
+    let mut store = AuthStore::empty(dir.auth());
+    store
+        .set(OPENAI_CODEX, codex_oauth(None))
+        .expect("codex takes oauth");
+    store
+        .set(
+            ANTHROPIC,
+            Credential::ApiKey {
+                key: SecretString::from("sk-ant-fixture"),
+            },
+        )
+        .expect("anthropic takes a key");
+    store
+        .set(
+            OPENAI,
+            Credential::ApiKey {
+                key: SecretString::from("sk-fixture-openai"),
+            },
+        )
+        .expect("openai takes a key");
+    let names: Vec<_> = store.status().into_iter().map(|row| row.provider).collect();
+    assert_eq!(
+        names,
+        [OPENAI, ANTHROPIC, OPENAI_CODEX].map(Box::<str>::from)
+    );
+    let keys: Vec<_> = store.file.members.keys().map(|member| member.id).collect();
+    assert_eq!(keys, [OPENAI, ANTHROPIC, OPENAI_CODEX]);
+}
+
+#[test]
+fn an_unknown_or_repeated_member_is_refused_at_load() {
+    for text in [
+        r#"{"zenmux":{"kind":"api_key","key":"SECRET-1"}}"#,
+        r#"{"openai":{"kind":"api_key","key":"SECRET-2"},"zenmux":{"kind":"api_key","key":"SECRET-3"}}"#,
+        r#"{"openai":{"kind":"api_key","key":"SECRET-4"},"openai":{"kind":"api_key","key":"SECRET-5"}}"#,
+        r#"{"openai-codex":{"kind":"oauth","access_token":"SECRET-6","refresh_token":"r"}}"#,
+        r#"{"anthropic":{"kind":"oauth","access_token":"SECRET-7","refresh_token":"r","id_token":null}}"#,
+    ] {
+        let error = load_error(text);
+        assert!(
+            matches!(error, ProviderError::AuthFileInvalid { .. }),
+            "{text}: {error:?}"
+        );
+        let shown = error.to_string();
+        assert!(!shown.contains("SECRET"), "{shown}");
+    }
+    let unknown = load_error(r#"{"zenmux":{"kind":"api_key","key":"k"}}"#).to_string();
+    assert!(unknown.contains("unknown field `zenmux`"), "{unknown}");
 }
