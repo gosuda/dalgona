@@ -47,6 +47,18 @@ async fn open(rpc: &mut Rpc, id: i64, reference: Value) -> String {
         .to_owned()
 }
 
+/// Asserts a `-32602` refusal scoped to `method` that names the bad value.
+#[track_caller]
+fn assert_invalid_params(reply: &Value, method: &str, bad: &str) {
+    assert_eq!(reply["error"]["code"].as_i64(), Some(-32602), "{reply}");
+    let message = reply["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.starts_with(&format!("invalid params for {method}: ")),
+        "{reply}"
+    );
+    assert!(message.contains(bad), "{reply}");
+}
+
 /// Reads `session/update` notifications until the named update type.
 async fn until_update(rpc: &mut Rpc, kind: &str) -> Vec<Value> {
     let mut seen = Vec::new();
@@ -200,11 +212,7 @@ async fn unknown_types_rejected() {
                 sonic_rs::json!({"sessionId": session, "command": {"type": "frobnicate"}}),
             )
             .await;
-        assert_error(
-            &command,
-            -32602,
-            "invalid params for session/submit: unknown `type` variant `frobnicate`",
-        );
+        assert_invalid_params(&command, "session/submit", "frobnicate");
         let answer = rpc
             .call(
                 4,
@@ -216,11 +224,7 @@ async fn unknown_types_rejected() {
                 }),
             )
             .await;
-        assert_error(
-            &answer,
-            -32602,
-            "invalid params for session/answer: unknown `type` variant `maybe`",
-        );
+        assert_invalid_params(&answer, "session/answer", "maybe");
         let after = rpc
             .call(5, "session/view", sonic_rs::json!({"sessionId": session}))
             .await;
@@ -350,7 +354,7 @@ async fn every_command_tag_reaches_the_decoder() {
                 .await;
             let message = reply["error"]["message"].as_str().unwrap_or_default();
             assert!(
-                !message.contains("unknown"),
+                !message.contains(&format!("\"{tag}\"")),
                 "tag {tag} was refused before decoding: {reply}"
             );
         }
@@ -361,11 +365,7 @@ async fn every_command_tag_reaches_the_decoder() {
                 sonic_rs::json!({"sessionId": session, "command": {"type": "frobnicate"}}),
             )
             .await;
-        assert_error(
-            &unknown,
-            -32602,
-            "invalid params for session/submit: unknown `type` variant `frobnicate`",
-        );
+        assert_invalid_params(&unknown, "session/submit", "frobnicate");
     })
     .await;
 }
@@ -415,11 +415,89 @@ async fn commands_beyond_the_old_allowlist_run_over_rpc() {
                 }),
             )
             .await;
-        assert_error(
-            &queued,
-            -32602,
-            "invalid params for session/submit: turn 1 has no queued follow-up. If the follow-up already started, cancel its turn instead.",
+        assert_invalid_params(&queued, "session/submit", "turn 1");
+        let reload = rpc
+            .call(
+                5,
+                "session/submit",
+                sonic_rs::json!({"sessionId": session, "command": {"type": "reload_plugins"}}),
+            )
+            .await;
+        assert_invalid_params(&reload, "session/submit", "plugins cannot reload");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn session_submit_rejects_export_paths_outside_the_workspace() {
+    let rig = rig(&[]).await;
+    let ws = rig.ws();
+    let outside_absolute = rig.dir.path().join("rpc-absolute.md");
+    let outside_traversal = rig.dir.path().join("rpc-traversal.md");
+    with_rpc(&rig, async |mut rpc| {
+        initialize(&mut rpc).await;
+        let session = open(
+            &mut rpc,
+            1,
+            sonic_rs::json!({"type": "new", "workspace": ws}),
+        )
+        .await;
+        let absolute = rpc
+            .call(
+                2,
+                "session/submit",
+                sonic_rs::json!({
+                    "sessionId": session,
+                    "command": {
+                        "type": "export",
+                        "path": outside_absolute,
+                        "format": "markdown",
+                    },
+                }),
+            )
+            .await;
+        assert_eq!(
+            absolute["error"]["code"].as_i64(),
+            Some(-32602),
+            "{absolute}"
         );
+        let traversal = rpc
+            .call(
+                3,
+                "session/submit",
+                sonic_rs::json!({
+                    "sessionId": session,
+                    "command": {
+                        "type": "export",
+                        "path": "../rpc-traversal.md",
+                        "format": "markdown",
+                    },
+                }),
+            )
+            .await;
+        assert_eq!(
+            traversal["error"]["code"].as_i64(),
+            Some(-32602),
+            "{traversal}"
+        );
+        let relative = rpc
+            .call(
+                4,
+                "session/submit",
+                sonic_rs::json!({
+                    "sessionId": session,
+                    "command": {
+                        "type": "export",
+                        "path": "rpc-relative.md",
+                        "format": "markdown",
+                    },
+                }),
+            )
+            .await;
+        result(&relative);
+        assert!(!outside_absolute.exists());
+        assert!(!outside_traversal.exists());
+        assert!(rig.workspace.join("rpc-relative.md").exists());
     })
     .await;
 }

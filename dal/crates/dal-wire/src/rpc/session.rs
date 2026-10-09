@@ -6,6 +6,7 @@
 //! disconnect releases holds without cancelling turns.
 
 use std::num::{NonZeroU32, NonZeroU64};
+use std::path::Component;
 use std::sync::Arc;
 
 use dal_agent::{Agent, AnswerScope, Host, SessionRef};
@@ -347,6 +348,19 @@ pub(crate) async fn submit(
         .get("command")
         .ok_or_else(|| invalid_params("session/submit", "missing member `command`"))?;
     let command: Command = decode_params("session/submit", raw)?;
+    if let Command::Export {
+        path: Some(path), ..
+    } = &command
+        && (path.is_absolute()
+            || path
+                .components()
+                .any(|part| matches!(part, Component::ParentDir)))
+    {
+        return Err(invalid_params(
+            "session/submit",
+            "export paths outside the workspace require a built-in command",
+        ));
+    }
     let agent = agent_for(host, state, id).await?;
     let reply = agent
         .submit(command)
