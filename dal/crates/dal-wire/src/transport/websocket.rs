@@ -17,7 +17,7 @@ use futures::StreamExt;
 use hyper::header::HeaderValue;
 use hyper::upgrade::Upgraded;
 use hyper_util::rt::TokioIo;
-use tokio::io::AsyncWrite;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Role, frame::coding::CloseCode};
@@ -51,6 +51,8 @@ struct WsFlags {
     closed: AtomicBool,
     /// True when a binary frame arrived (close code 1003).
     binary: AtomicBool,
+    /// True when a message broke the size limit; the transport ends without a close frame.
+    overrun: AtomicBool,
 }
 
 impl WebSocketTransport {
@@ -74,15 +76,20 @@ impl WebSocketTransport {
 
     /// Builds a server transport from an upgraded stream with the frame cap applied.
     pub async fn accept(stream: Upgraded) -> Self {
+        Self::server(TokioIo::new(stream)).await
+    }
+
+    /// Builds a server transport over any byte stream with the frame cap applied.
+    pub(crate) async fn server<S>(io: S) -> Self
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
         let config = WebSocketConfig::default()
             .max_message_size(Some(WS_FRAME_CAP))
             .max_frame_size(Some(WS_FRAME_CAP));
-        let socket = tokio_tungstenite::WebSocketStream::from_raw_socket(
-            TokioIo::new(stream),
-            Role::Server,
-            Some(config),
-        )
-        .await;
+        let socket =
+            tokio_tungstenite::WebSocketStream::from_raw_socket(io, Role::Server, Some(config))
+                .await;
         let (sink, stream) = socket.split();
         Self::halves(Box::pin(stream), Box::pin(sink))
     }
@@ -155,7 +162,10 @@ impl WebSocketTransport {
                     self.flags.closed.store(true, Ordering::Release);
                     return Err(ReadFrameError::EndOfInput);
                 }
-                Some(Err(_)) => {
+                Some(Err(error)) => {
+                    if matches!(error, WsError::Capacity(_)) {
+                        self.flags.overrun.store(true, Ordering::Release);
+                    }
                     self.flags.closed.store(true, Ordering::Release);
                     return Err(ReadFrameError::Closed);
                 }
@@ -254,6 +264,11 @@ impl AsyncWrite for WsWrite {
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         let this = self.get_mut();
+        if this.flags.overrun.load(Ordering::Acquire) {
+            // The peer broke the size limit: end the transport without a close frame.
+            this.close_sent = true;
+            return Poll::Ready(Ok(()));
+        }
         if !this.close_sent {
             let code = if this.flags.binary.load(Ordering::Acquire) {
                 CloseCode::Unsupported
