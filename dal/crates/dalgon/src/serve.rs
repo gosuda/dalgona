@@ -141,30 +141,21 @@ pub async fn create_token(
 /// and sets the protected flag; `/grant:r` writes the explicit ACEs.
 /// SID spellings keep the grants locale-independent.
 #[cfg(windows)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "R4 edge: ACL hardening runs the OS utility"
+)]
 fn owner_only_acl(path: &Path) -> io::Result<()> {
-    let whoami = std::process::Command::new("whoami")
-        .args(["/user", "/fo", "csv", "/nh"])
-        .output()?;
-    if !whoami.status.success() {
-        return Err(io::Error::other(format!(
-            "whoami /user failed: {}",
-            String::from_utf8_lossy(&whoami.stderr)
-        )));
-    }
-    let text = String::from_utf8(whoami.stdout)
-        .map_err(|source| io::Error::new(io::ErrorKind::InvalidData, source))?;
-    let sid = text
-        .split(',')
-        .nth(1)
-        .map(|field| field.trim().trim_matches('"'))
-        .filter(|field| field.starts_with("S-1-"))
-        .ok_or_else(|| io::Error::other("whoami /user did not report a SID"))?;
+    let vars = crate::edge::snapshot_environment();
+    let sid = crate::edge::current_user_sid(&vars)
+        .map_err(|source| io::Error::other(format!("resolve the current user SID: {source}")))?
+        .ok_or_else(|| io::Error::other("resolve the current user SID: unavailable"))?;
     let output = std::process::Command::new("icacls")
         .arg(path)
         .args([
             "/inheritance:d",
             "/grant:r",
-            &format!("*{sid}:F"),
+            &format!("*{}:F", sid.as_str()),
             "*S-1-5-18:F",
             "*S-1-5-32-544:F",
         ])
