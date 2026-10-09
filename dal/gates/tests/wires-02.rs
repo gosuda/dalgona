@@ -80,8 +80,18 @@ $privileged = @($owner, 'S-1-5-18', 'S-1-5-32-544')
 if (-not $allowed.Contains($owner)) { exit 11 }
 if (@($allowed | Where-Object { $_ -notin $privileged }).Count -ne 0) { exit 12 }
 ";
+        // Runner images prepend PowerShell 7 module dirs to
+        // PSModulePath; inbox 5.1 then finds the PS7 manifest for
+        // Microsoft.PowerShell.Security and cannot load its managed
+        // assembly. Put the inbox modules dir first so autoload resolves
+        // the matching manifest.
+        let module_path = format!(
+            r"C:\Windows\system32\WindowsPowerShell\v1.0\Modules;{}",
+            std::env::var("PSModulePath").unwrap_or_default()
+        );
         let result = Command::new("powershell")
             .args(["-NoProfile", "-NonInteractive", "-Command", acl_check])
+            .env("PSModulePath", module_path)
             .env("DALGON_TOKEN_PATH", &token)
             .output()?;
         assert!(
