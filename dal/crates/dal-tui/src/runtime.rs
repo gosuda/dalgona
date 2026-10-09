@@ -14,7 +14,7 @@ use crate::dialog::DialogUi;
 use crate::keys::{Action, InputEvent, KeyDecoder, Owner, resolve_in};
 use crate::live::Live;
 use crate::picker::{ModelOption, PickerAction, PickerUi};
-use crate::render::{FrameInput, entry_rows};
+use crate::render::{FrameInput, entry_rows_timed};
 use crate::screen::driver::Painter;
 use crate::term::{ReplyParser, TermIo, TermState, restore, startup_probe};
 use crate::transcript::Transcript;
@@ -38,6 +38,8 @@ struct Session {
     overlay: bool,
     active_turn: Option<TurnId>,
     pending_commands: Vec<Command>,
+    /// Reply text a command asked the terminal to copy, in request order.
+    pending_copies: Vec<Box<str>>,
     pending_answers: Vec<(RequestId, Answer)>,
     pending_diagram_settings: Vec<(bool, dal_core::command::Save)>,
     command_seq: u64,
@@ -70,11 +72,17 @@ impl Session {
                 });
             }
             dal_core::command::Classify::Text => {
-                self.pending_commands.push(Command::Prompt {
-                    expect: Expect::Idle,
-                    content: vec![dal_core::Part::Text {
-                        text: line.to_owned().into_boxed_str(),
-                    }],
+                let content = vec![dal_core::Part::Text {
+                    text: line.to_owned().into_boxed_str(),
+                }];
+                // Text typed while a turn runs steers that turn at its next
+                // safe point; a prompt would be refused as a turn mismatch.
+                self.pending_commands.push(match self.active_turn {
+                    Some(turn) => Command::Steer { turn, content },
+                    None => Command::Prompt {
+                        expect: Expect::Idle,
+                        content,
+                    },
                 });
             }
         }
@@ -129,7 +137,6 @@ impl Session {
                 self.active_turn = Some(turn);
                 Vec::new()
             }
-            Reply::Queued { .. } => vec!["Message queued.".to_owned()],
             Reply::Done(Output::Text(text) | Output::Markdown(text)) => {
                 text.lines().map(crate::width::escape).collect()
             }
@@ -150,12 +157,17 @@ impl Session {
                 }
                 Vec::new()
             }
+            Reply::Front(FrontAction::CopyReply { text }) => {
+                self.pending_copies.push(text);
+                Vec::new()
+            }
             Reply::Front(FrontAction::ShowKeys) => crate::keys::help_labels()
                 .into_iter()
                 .map(|(key, label)| format!("{key} {label}"))
                 .collect(),
             Reply::Front(action) => vec![crate::width::escape(&format!("{action:?}"))],
             Reply::Started(job) => vec![format!("Job {job} started.")],
+            // A queued reply needs no row: the live block shows the queue.
             _ => Vec::new(),
         }
     }
@@ -289,11 +301,13 @@ fn write_exit(
     let line = if exit.ephemeral {
         crate::copy::ids::EXIT_EPHEMERAL.to_owned()
     } else {
+        // An unnamed session resumes by its id; a placeholder name resolves to nothing.
+        let session = session_id.to_string();
         crate::copy::render(
             crate::copy::ids::EXIT_SAVED,
             &[
-                ("name", exit.name.as_deref().unwrap_or("session")),
-                ("id", &session_id.to_string()),
+                ("name", exit.name.as_deref().unwrap_or(&session)),
+                ("id", &session),
                 ("n", &exit.messages.to_string()),
             ],
             exit.messages,
@@ -527,6 +541,7 @@ where
         }
         surfaces.flush_answers(opts, agent);
         surfaces.submit_commands(opts, agent, &mut model_source)?;
+        surfaces.write_copies(io);
         surfaces.apply_diagram_updates(opts, &mut painter, &probe, &mut save_diagrams);
         surfaces.drain(opts, agent, pump)?;
         surfaces.poll_resolution(opts, agent, &mut resolution_poll)?;
@@ -742,6 +757,13 @@ impl Surfaces {
         match &update.kind {
             UpdateKind::Tree(delta) => {
                 for entry in &delta.added {
+                    // The result entry lands before its settle update, so the
+                    // card takes the time elapsed since the call started.
+                    if let dal_core::EntryKind::ToolResult { call, .. } = &entry.kind
+                        && let Some(duration) = self.live.tool_elapsed(call.as_str())
+                    {
+                        self.transcript.note_tool_duration(call.as_str(), duration);
+                    }
                     commit_entry(
                         entry,
                         &mut self.transcript,
@@ -818,6 +840,7 @@ impl Surfaces {
             match delivery? {
                 TuiDelivery::Update(update) => {
                     self.live.apply_update(&update);
+
                     self.view.r#gen = update.r#gen;
                     self.view.seq = update.seq;
                     self.apply_update(opts, agent, &update)?;
@@ -918,6 +941,8 @@ impl Surfaces {
                 self.view = opts.rt.block_on(agent.view(snapshot_page()?))?;
             }
             if !reply_rows.is_empty() {
+                let reply_rows: Vec<String> =
+                    reply_rows.iter().map(|row| format!("  {row}")).collect();
                 self.session.command_seq = self.session.command_seq.saturating_add(1);
                 self.transcript.commit(
                     &format!("command-{}", self.session.command_seq),
@@ -926,6 +951,28 @@ impl Surfaces {
             }
         }
         Ok(())
+    }
+
+    /// Sends each requested copy to the terminal clipboard (OSC 52) and
+    /// reports the outcome in a notice.
+    fn write_copies(&mut self, io: &dyn TermIo) {
+        use base64::Engine as _;
+
+        for text in std::mem::take(&mut self.session.pending_copies) {
+            let payload = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+            let notice = match io.write(format!("\x1b]52;c;{payload}\x07").as_bytes()) {
+                Ok(()) => {
+                    let count = text.chars().count();
+                    crate::copy::render(
+                        crate::copy::ids::COPY_DONE,
+                        &[("n", &count.to_string())],
+                        u64::try_from(count).unwrap_or(u64::MAX),
+                    )
+                }
+                Err(_) => crate::copy::ids::COPY_FAILED.to_owned(),
+            };
+            self.live.notice(notice);
+        }
     }
 
     /// Applies queued diagram toggles: rung re-resolution and the optional
@@ -1063,7 +1110,18 @@ fn commit_entry(
         transcript.clear_pending(&entry_id);
         return;
     }
-    let rows = entry_rows(entry, columns, mode, diagram_settings, diagram_cache);
+    let duration = match &entry.kind {
+        dal_core::EntryKind::ToolResult { call, .. } => transcript.tool_duration(call.as_str()),
+        _ => None,
+    };
+    let rows = entry_rows_timed(
+        entry,
+        columns,
+        mode,
+        diagram_settings,
+        diagram_cache,
+        duration,
+    );
     let pending = rows.iter().any(|row| row.pending_diagram);
     if pending {
         transcript.set_pending(
@@ -1206,7 +1264,7 @@ fn apply_event(session: &mut Session, dialog: &mut DialogUi, event: InputEvent, 
             }
         }
         Some(Action::Help) => session.pending_commands.push(Command::Run {
-            name: "keys".into(),
+            name: "hotkeys".into(),
             args: "".into(),
             expected: None,
         }),
@@ -1435,6 +1493,71 @@ mod tests {
         assert!(!session.quit);
         session.accept_reply(dal_core::Reply::Front(dal_core::FrontAction::Quit));
         assert!(session.quit);
+    }
+
+    #[test]
+    fn text_typed_while_a_turn_runs_steers_that_turn() {
+        let turn = dal_core::TurnId::new(NonZeroU64::MIN);
+        let mut session = Session {
+            active_turn: Some(turn),
+            ..Session::default()
+        };
+        session.submit_line("also check the tests");
+        assert!(matches!(
+            &session.pending_commands[..],
+            [dal_core::Command::Steer { turn: steered, content }]
+                if *steered == turn && content.len() == 1
+        ));
+        assert!(session.composer.is_empty());
+        assert!(
+            session
+                .accept_reply(dal_core::Reply::Queued { turn: None })
+                .is_empty(),
+            "the live block shows the queue; no transcript row is written"
+        );
+    }
+
+    #[test]
+    fn slash_commands_typed_while_a_turn_runs_stay_commands() {
+        let mut session = Session {
+            active_turn: Some(dal_core::TurnId::new(NonZeroU64::MIN)),
+            ..Session::default()
+        };
+        session.submit_line("/session");
+        assert!(matches!(
+            &session.pending_commands[..],
+            [dal_core::Command::Run { name, .. }] if name.as_ref() == "session"
+        ));
+    }
+
+    #[test]
+    fn copy_reply_queues_the_text_for_the_clipboard_without_debug_rows() {
+        let mut session = Session::default();
+        let rows = session.accept_reply(dal_core::Reply::Front(dal_core::FrontAction::CopyReply {
+            text: "the reply".into(),
+        }));
+        assert!(rows.is_empty());
+        assert_eq!(session.pending_copies, vec!["the reply".into()]);
+    }
+
+    #[test]
+    fn help_key_runs_the_hotkeys_command() {
+        use crate::dialog::DialogUi;
+        use crate::keys::{InputEvent, Key};
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let mut session = Session::default();
+        let mut dialog = DialogUi::default();
+        apply_event(
+            &mut session,
+            &mut dialog,
+            InputEvent::Key(Key::new(KeyCode::F(1), KeyModifiers::NONE)),
+            false,
+        );
+        assert!(matches!(
+            &session.pending_commands[..],
+            [dal_core::Command::Run { name, .. }] if name.as_ref() == "hotkeys"
+        ));
     }
 
     #[test]

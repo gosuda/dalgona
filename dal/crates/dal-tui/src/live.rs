@@ -210,6 +210,14 @@ impl Live {
         std::mem::take(&mut self.assistant_text)
     }
 
+    /// Returns how long the tool call `call` has run: the settled duration, or
+    /// the time since it started when its settle update has not arrived yet.
+    #[must_use]
+    pub fn tool_elapsed(&self, call: &str) -> Option<Duration> {
+        let card = self.tool_cards.get(call)?;
+        Some(card.duration.unwrap_or_else(|| card.started.elapsed()))
+    }
+
     /// Returns running tool cards and their latest bounded progress.
     #[must_use]
     pub fn running_tool_rows(&self) -> Vec<String> {
@@ -218,11 +226,13 @@ impl Live {
             .filter_map(|id| {
                 let card = self.tool_cards.get(id)?;
                 (card.state == BlockState::Open).then(|| {
-                    format!(
-                        "working  {} · {}",
-                        crate::width::escape(&card.name),
-                        one_line(&card.tail)
-                    )
+                    let name = crate::width::escape(&card.name);
+                    let tail = one_line(&card.tail);
+                    if tail.is_empty() {
+                        format!("working  {name}")
+                    } else {
+                        format!("working  {name} · {tail}")
+                    }
                 })
             })
             .collect()
@@ -408,6 +418,35 @@ mod tests {
                 text: text.map(Into::into),
             }),
         }
+    }
+
+    #[test]
+    fn running_tool_row_has_no_dangling_separator_before_any_progress() {
+        let mut live = super::Live::default();
+        let seq = |value: u64| {
+            Seq::new(std::num::NonZeroU64::new(value).unwrap_or(std::num::NonZeroU64::MIN))
+        };
+        let started = Update {
+            r#gen: Gen::new(std::num::NonZeroU64::MIN),
+            seq: seq(1),
+            kind: UpdateKind::ToolStarted {
+                call: dal_core::CallId::new("call-1"),
+                tool: "exec".into(),
+                args: dal_core::RawJson::null(),
+            },
+        };
+        assert!(live.apply_update(&started));
+        assert_eq!(live.running_tool_rows(), ["working  exec"]);
+        let progress = Update {
+            r#gen: Gen::new(std::num::NonZeroU64::MIN),
+            seq: seq(2),
+            kind: UpdateKind::ToolProgress {
+                call: dal_core::CallId::new("call-1"),
+                tail: "compiling".into(),
+            },
+        };
+        assert!(live.apply_update(&progress));
+        assert_eq!(live.running_tool_rows(), ["working  exec · compiling"]);
     }
 
     #[test]

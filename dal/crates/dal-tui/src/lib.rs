@@ -87,6 +87,8 @@ pub struct EnvFacts {
     pub stdin_tty: bool,
     /// The `PATH` value captured at the process edge, preserving non-Unicode values.
     pub path: Option<OsString>,
+    /// The home directory captured at the process edge; paths under it show as `~`.
+    pub home: Option<String>,
     /// The `TERM` value, when present.
     pub term: Option<String>,
     /// The `TERM_PROGRAM` value, when present.
@@ -118,6 +120,9 @@ pub struct TuiOptions {
     pub screen: Screen,
     /// The theme selection.
     pub theme_request: ThemeRequest,
+    /// The model reference the configuration names. The status line shows it
+    /// until the session records a model of its own.
+    pub default_model: Option<Box<str>>,
     /// Whether protocol-gated inline images are enabled.
     pub images: bool,
     /// Whether supported fenced diagrams are rendered in text surfaces.

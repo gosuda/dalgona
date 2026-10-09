@@ -378,6 +378,7 @@ impl VtRecorder {
         }
         if self.wrap_pending || self.cursor_x + width > self.columns {
             self.cursor_x = 0;
+            self.wrap_pending = false;
             self.line_feed();
         }
         self.screen[self.cursor_y][self.cursor_x] = character.to_string();

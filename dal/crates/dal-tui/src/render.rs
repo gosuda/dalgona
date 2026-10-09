@@ -113,7 +113,8 @@ pub(crate) fn frame_rows(input: FrameInput<'_>, width: u16, height: u16) -> Vec<
         .settings
         .model
         .as_ref()
-        .map(|model| escape(model.id()));
+        .map(|model| escape(model.id()))
+        .or_else(|| input.opts.default_model.as_deref().map(escape));
     let status = status_line(&input, model.as_deref(), w, mode);
     if h < 8 {
         return resolve_colors(
@@ -150,7 +151,7 @@ pub(crate) fn frame_rows(input: FrameInput<'_>, width: u16, height: u16) -> Vec<
         RegionRequest {
             notices: notices.len(),
             activity: usize::MAX,
-            composer: 1,
+            composer: input.composer.split('\n').count(),
             hint: true,
             overlay,
         },
@@ -257,12 +258,23 @@ fn overlay_rows(
             Role::Dim,
         ));
     } else {
-        let draft = if input.composer.is_empty() {
-            crate::copy::ids::COMPOSER_PLACEHOLDER
+        if input.composer.is_empty() {
+            bottom.push(RenderRow::new(
+                format!("> {}", escape(crate::copy::ids::COMPOSER_PLACEHOLDER)),
+                Role::Text,
+            ));
         } else {
-            input.composer
-        };
-        bottom.push(RenderRow::new(format!("> {}", escape(draft)), Role::Text));
+            // A multiline draft shows its last rows, where the caret sits.
+            let lines: Vec<&str> = input.composer.split('\n').collect();
+            let start = lines.len() - budget.composer.clamp(1, lines.len());
+            for (index, line) in lines.iter().enumerate().skip(start) {
+                let mark = if index == 0 { "> " } else { "  " };
+                bottom.push(RenderRow::new(
+                    format!("{mark}{}", escape(line)),
+                    Role::Text,
+                ));
+            }
+        }
         if budget.hint > 0 {
             bottom.push(RenderRow::new(
                 crate::copy::ids::HINT_IDLE_LEGACY,
@@ -310,7 +322,22 @@ fn fullscreen_rows(
 
 /// The single status row text: turn state, spinner, model, path, context.
 fn status_line(input: &FrameInput<'_>, model: Option<&str>, w: usize, mode: WidthMode) -> String {
-    let path = escape(&input.view.session.workspace.as_path().display().to_string());
+    let path = escape(&crate::status::contract_home(
+        &input.view.session.workspace.as_path().display().to_string(),
+        input.opts.env.home.as_deref(),
+    ));
+    let usage = &input.view.usage.usage;
+    let tokens = (usage.input_tokens > 0 || usage.output_tokens > 0).then(|| {
+        crate::copy::render(
+            crate::copy::ids::STATUS_TOKENS,
+            &[
+                ("in", &crate::copy::tokens(usage.input_tokens)),
+                ("out", &crate::copy::tokens(usage.output_tokens)),
+            ],
+            1,
+        )
+    });
+    let cost = usage.cost_usd.map(|cost| format!("${cost:.3}"));
     let context = input
         .view
         .usage
@@ -346,7 +373,9 @@ fn status_line(input: &FrameInput<'_>, model: Option<&str>, w: usize, mode: Widt
             spinner,
             model,
             path: Some(&path),
+            tokens: tokens.as_deref(),
             context: context.as_deref(),
+            cost: cost.as_deref(),
             ..StatusData::default()
         },
         w,
@@ -372,7 +401,7 @@ fn queued_steer_row(turn: TurnState, count: u32) -> Option<RenderRow> {
 /// pending transcript rows, and streamed assistant text.
 fn activity_rows(input: &FrameInput<'_>, w: usize, mode: WidthMode) -> Vec<RenderRow> {
     let mut activity = Vec::new();
-    if input.view.settings.model.is_none() {
+    if input.view.settings.model.is_none() && input.opts.default_model.is_none() {
         activity.push(RenderRow::new(
             crate::copy::ids::FIRST_RUN_TITLE,
             Role::Accent,
@@ -394,13 +423,17 @@ fn activity_rows(input: &FrameInput<'_>, w: usize, mode: WidthMode) -> Vec<Rende
     );
     activity.extend(input.transcript.pending_rows().cloned());
     if !input.live.assistant_text().is_empty() {
-        activity.extend(text_rows(
-            input.live.assistant_text(),
-            prose_cap(w),
-            mode,
-            input.diagram_settings,
-            input.diagram_cache,
-        ));
+        activity.extend(
+            text_rows(
+                input.live.assistant_text(),
+                prose_cap(w),
+                mode,
+                input.diagram_settings,
+                input.diagram_cache,
+            )
+            .into_iter()
+            .map(gutter_row),
+        );
     }
     activity
 }
@@ -419,6 +452,18 @@ pub(crate) fn entry_rows(
     mode: WidthMode,
     diagram_settings: DiagramSettings,
     diagram_cache: &RenderCache,
+) -> Vec<RenderRow> {
+    entry_rows_timed(entry, columns, mode, diagram_settings, diagram_cache, None)
+}
+
+/// Renders one history entry; `duration` is how long a tool call ran.
+pub(crate) fn entry_rows_timed(
+    entry: &EntryView,
+    columns: u16,
+    mode: WidthMode,
+    diagram_settings: DiagramSettings,
+    diagram_cache: &RenderCache,
+    duration: Option<std::time::Duration>,
 ) -> Vec<RenderRow> {
     let cap = prose_cap(usize::from(columns));
     match &entry.kind {
@@ -453,13 +498,11 @@ pub(crate) fn entry_rows(
                         "Thinking · ctrl+o to show reasoning",
                         Role::Dim,
                     )),
-                    Block::ToolCall { name, .. } => rows.push(RenderRow::new(
-                        format!("working  {}", escape(name)),
-                        Role::Dim,
-                    )),
+                    // The call settles into one card from its result entry.
+                    Block::ToolCall { .. } => {}
                 }
             }
-            rows
+            rows.into_iter().map(gutter_row).collect()
         }
         EntryKind::ToolResult {
             name, error, parts, ..
@@ -471,18 +514,9 @@ pub(crate) fn entry_rows(
                     _ => None,
                 })
                 .unwrap_or("");
-            let word = if *error { "failed" } else { "ok" };
-            vec![
-                RenderRow::new(
-                    format!(
-                        "{word}  {} · {}",
-                        escape(name),
-                        escape(text.lines().next().unwrap_or(""))
-                    ),
-                    Role::Text,
-                )
-                .clipped(cap, mode),
-            ]
+            vec![gutter_row(
+                tool_card_row(name, *error, text, duration).clipped(cap, mode),
+            )]
         }
         _ => Vec::new(),
     }
@@ -822,15 +856,66 @@ fn art_row(cells: &[crate::diagram::ArtCell]) -> RenderRow {
     row
 }
 
-fn user_row(mut row: RenderRow) -> RenderRow {
-    row.text.insert_str(0, "> ");
+/// One settled tool card: `ok  {name} {summary} · {dur}` or
+/// `failed  {name} · {reason} · {dur}`; a call nobody timed omits the duration.
+fn tool_card_row(
+    name: &str,
+    error: bool,
+    text: &str,
+    duration: Option<std::time::Duration>,
+) -> RenderRow {
+    let detail = escape(
+        &text
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or("")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
+    let name = escape(name);
+    let dur = duration.map(crate::copy::dur).unwrap_or_default();
+    let (template, field) = if error {
+        (crate::copy::ids::TOOL_FAILED, "reason")
+    } else {
+        (crate::copy::ids::TOOL_OK, "summary")
+    };
+    let line = crate::copy::render(
+        template,
+        &[("name", &name), (field, &detail), ("dur", &dur)],
+        1,
+    );
+    let line = line.replace("  · ", " · ");
+    let line = if duration.is_none() {
+        line.strip_suffix(" · ").unwrap_or(&line).to_owned()
+    } else {
+        line
+    };
+    RenderRow::new(line, Role::Text)
+}
+
+fn user_row(row: RenderRow) -> RenderRow {
+    indent_row(row, "> ")
+}
+
+/// Reserves the 2-cell left gutter every transcript row keeps. Rows that carry
+/// pixels keep their columns.
+pub(crate) fn gutter_row(row: RenderRow) -> RenderRow {
+    if row.image.is_some() || row.image_tail {
+        return row;
+    }
+    indent_row(row, "  ")
+}
+
+fn indent_row(mut row: RenderRow, prefix: &str) -> RenderRow {
+    row.text.insert_str(0, prefix);
     for span in &mut row.spans {
-        span.range.start += 2;
-        span.range.end += 2;
+        span.range.start += prefix.len();
+        span.range.end += prefix.len();
     }
     for link in &mut row.links {
-        link.range.start += 2;
-        link.range.end += 2;
+        link.range.start += prefix.len();
+        link.range.end += prefix.len();
     }
     row
 }
@@ -855,6 +940,33 @@ mod tests {
     use crate::WidthMode;
     use crate::diagram::{DiagramSettings, RenderCache};
     use crate::transcript::Transcript;
+
+    #[test]
+    fn tool_cards_follow_the_copy_deck_with_a_clean_one_line_summary() {
+        use std::time::Duration;
+
+        let ok = super::tool_card_row(
+            "read",
+            false,
+            "1\talpha\n2\tbeta",
+            Some(Duration::from_millis(52)),
+        );
+        assert_eq!(ok.text, "ok  read 1 alpha · 52 ms");
+        let failed = super::tool_card_row(
+            "exec",
+            true,
+            "Permission denied: exec was declined.",
+            Some(Duration::from_millis(1_500)),
+        );
+        assert_eq!(
+            failed.text,
+            "failed  exec · Permission denied: exec was declined. · 1.5s"
+        );
+        let untimed = super::tool_card_row("exec", false, "done", None);
+        assert_eq!(untimed.text, "ok  exec done");
+        let silent = super::tool_card_row("exec", false, "", Some(Duration::from_secs(3)));
+        assert_eq!(silent.text, "ok  exec · 3.0s");
+    }
 
     #[test]
     fn transcript_diagram_rows_keep_source_off_and_render_art_when_enabled() {

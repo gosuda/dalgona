@@ -60,6 +60,7 @@ fn build_opts(
     let env = EnvFacts {
         stdin_tty: snapshot.stdin_tty,
         path: vars.get(OsStr::new("PATH")).cloned(),
+        home: owned(vars, "HOME").or_else(|| owned(vars, "USERPROFILE")),
         term: owned(vars, "TERM"),
         term_program: owned(vars, "TERM_PROGRAM"),
         colorterm: owned(vars, "COLORTERM"),
@@ -85,6 +86,10 @@ fn build_opts(
             ConfigScreen::Inline => Screen::Inline,
             ConfigScreen::Fullscreen => Screen::Fullscreen,
         },
+        default_model: config
+            .model()
+            .filter(|model| !model.is_empty())
+            .map(Into::into),
         theme_request: match config.theme() {
             "auto" => ThemeRequest::Auto,
             "palette" => ThemeRequest::Palette,

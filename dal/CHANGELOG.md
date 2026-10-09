@@ -5,6 +5,14 @@
 - Fix the question dialog for selections: a long preview no longer hides the choices, each choice shows its description, and Page Down and Page Up scroll the preview.
 - Fix reading extension manuals with the `read` tool: an extension that registers doc pages now serves them at its own `<name>://` address through `ManualScheme`, which `dalgon` re-exports.
 - Fix the `run` service: it now keeps the stdout prefix a caller asks for. Before, every run reported an overflow with an empty prefix, so extensions that read command output, such as the review battery, could not read it.
+- Fix the terminal help key and `/copy`: F1 now opens the key list instead of failing with "no command registered for keys", every key in the list shows its name, and `/copy` puts the last reply on the clipboard and reports `copied N characters` instead of printing debug text.
+- Fix text typed in the terminal while a turn runs: it now steers the turn at its next safe point and shows `1 message queued for the next reply`. Before, the terminal refused it with a turn mismatch error and dropped the text.
+- Fix the terminal status line and the first-run banner: a model named in `dal.toml` now shows in the status line and clears the sign-in banner. The status line also shows token use and cost, writes the workspace path with `~`, and shows `waiting for you` in full.
+- Fix settled tool cards in the terminal: each call shows one `ok  {name} {summary} · {duration}` card, or `failed  ...`, with no leftover `working` row and no `\t` in the summary.
+- Fix replies that stream in several parts: the journal now keeps adjacent text as one block, so the terminal shows one paragraph instead of one row per part.
+- Fix multiline drafts in the terminal: a pasted draft shows each line on its own row in the composer instead of one row with `\n` inside it.
+- Fix the saved-session line on exit: an unnamed session now shows its id in `run dalgon -r <id> to resume`. Before, the line named "session", which resumed nothing.
+
 - Fix the WebSocket server for oversized messages: a message over 16 MiB now ends the connection without a close frame, as the protocol documents. Before, the server sent a normal close frame.
 - Fix the agents `cancel` operation: a failure to close the child session is now returned to the caller instead of being reported as a successful cancel.
 - Fix turns that failed with "unknown model" when the configured model was written with a family prefix, such as `openai-responses/gpt-6`, and the provider's model list was not available. The turn now finds the model by its family and runs.

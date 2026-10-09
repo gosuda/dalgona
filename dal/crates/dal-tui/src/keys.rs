@@ -263,7 +263,7 @@ pub fn resolve_in(key: Key, kitty: bool, owners: &[Owner]) -> Option<Action> {
 
 /// Returns the compact action labels used by F1 help.
 #[must_use]
-pub fn help_labels() -> Vec<(&'static str, &'static str)> {
+pub fn help_labels() -> Vec<(String, &'static str)> {
     BINDINGS
         .iter()
         .filter(|binding| binding.owner == Owner::App)
@@ -271,24 +271,42 @@ pub fn help_labels() -> Vec<(&'static str, &'static str)> {
         .collect()
 }
 
-fn key_label(key: Key) -> &'static str {
-    match (key.code, key.modifiers) {
-        (KeyCode::F(1), _) => "f1",
-        (KeyCode::F(3), _) => "f3",
-        (KeyCode::Esc, _) => "esc",
-        (KeyCode::Enter, _) => "enter",
-        (KeyCode::Tab, _) => "tab",
-        (KeyCode::Char('c'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => "ctrl+c",
-        (KeyCode::Char('d'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => "ctrl+d",
-        (KeyCode::Char('o'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => "ctrl+o",
-        (KeyCode::Char('t'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => "ctrl+t",
-        (KeyCode::Char('l'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => "ctrl+l",
-        (KeyCode::Char('z'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => "ctrl+z",
-        (KeyCode::Char('f'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
-            "ctrl+shift+f"
+/// Names a key chord in lowercase, modifiers first: `ctrl+up`, `pgdn`, `f1`.
+fn key_label(key: Key) -> String {
+    let mut label = String::new();
+    for (modifier, name) in [
+        (KeyModifiers::CONTROL, "ctrl+"),
+        (KeyModifiers::ALT, "alt+"),
+        (KeyModifiers::SHIFT, "shift+"),
+    ] {
+        if key.modifiers.contains(modifier) {
+            label.push_str(name);
         }
-        _ => "key",
     }
+    match key.code {
+        KeyCode::Char(character) => label.extend(character.to_lowercase()),
+        KeyCode::F(number) => {
+            label.push('f');
+            label.push_str(&number.to_string());
+        }
+        KeyCode::Esc => label.push_str("esc"),
+        KeyCode::Enter => label.push_str("enter"),
+        KeyCode::Tab => label.push_str("tab"),
+        KeyCode::Backspace => label.push_str("backspace"),
+        KeyCode::Up => label.push_str("up"),
+        KeyCode::Down => label.push_str("down"),
+        KeyCode::Left => label.push_str("left"),
+        KeyCode::Right => label.push_str("right"),
+        KeyCode::Home => label.push_str("home"),
+        KeyCode::End => label.push_str("end"),
+        KeyCode::PageUp => label.push_str("pgup"),
+        KeyCode::PageDown => label.push_str("pgdn"),
+        other => {
+            let name = format!("{other:?}");
+            label.push_str(&name.to_lowercase());
+        }
+    }
+    label
 }
 
 #[cfg(test)]
@@ -307,8 +325,33 @@ mod tests {
         assert!(
             help_labels()
                 .iter()
-                .any(|(key, label)| *key == "f1" && *label == "Help")
+                .any(|(key, label)| key == "f1" && *label == "Help")
         );
+    }
+
+    #[test]
+    fn help_names_every_app_key_without_a_placeholder() {
+        let labels = help_labels();
+        assert!(!labels.is_empty());
+        for (key, label) in &labels {
+            assert!(
+                key != "key" && !key.is_empty(),
+                "{label} must show its real key, got {key:?}"
+            );
+        }
+        let named = |wanted: &str| labels.iter().any(|(key, _)| key == wanted);
+        for wanted in [
+            "ctrl+up",
+            "ctrl+down",
+            "ctrl+g",
+            "ctrl+r",
+            "pgup",
+            "pgdn",
+            "end",
+            "ctrl+shift+f",
+        ] {
+            assert!(named(wanted), "{wanted} is missing from {labels:?}");
+        }
     }
 
     #[test]

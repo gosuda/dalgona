@@ -80,6 +80,7 @@ fn tui_probe(agent: &Agent, session: SessionRef) -> Result<(), Box<dyn Error + S
         session,
         screen: Screen::Fullscreen,
         theme_request: ThemeRequest::Palette,
+        default_model: None,
         images: false,
         diagrams: false,
         motion: false,

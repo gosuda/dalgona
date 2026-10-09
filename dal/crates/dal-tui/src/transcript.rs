@@ -1,6 +1,7 @@
 //! Write-once settled transcript; committed rows are never repainted.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use dal_core::{Update, UpdateKind};
 
@@ -17,9 +18,20 @@ pub struct Transcript {
     image_tails: Vec<bool>,
     committed: HashSet<String>,
     pending: Vec<(String, Vec<RenderRow>)>,
+    tool_durations: HashMap<String, Duration>,
 }
 
 impl Transcript {
+    /// Remembers how long the tool call `call` ran, for its settled card.
+    pub(crate) fn note_tool_duration(&mut self, call: &str, duration: Duration) {
+        self.tool_durations.insert(call.to_owned(), duration);
+    }
+
+    /// Returns how long the tool call `call` ran, when this client watched it.
+    pub(crate) fn tool_duration(&self, call: &str) -> Option<Duration> {
+        self.tool_durations.get(call).copied()
+    }
+
     /// Appends settled rows for `entry_id` once; repeats return an empty vec.
     pub fn commit(&mut self, entry_id: &str, rows: &[String]) -> Vec<String> {
         if !self.committed.insert(entry_id.to_owned()) {

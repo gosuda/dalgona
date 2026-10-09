@@ -416,14 +416,15 @@ fn write_styled_text(
     out.extend_from_slice(b"\x1b[0m");
 }
 
+/// Opens an OSC 8 link and underlines it: underline is reserved for links.
 fn open_link(out: &mut Vec<u8>, url: &str) {
     out.extend_from_slice(b"\x1b]8;;");
     out.extend_from_slice(url.as_bytes());
-    out.extend_from_slice(b"\x1b\\");
+    out.extend_from_slice(b"\x1b\\\x1b[4m");
 }
 
 fn close_link(out: &mut Vec<u8>) {
-    out.extend_from_slice(b"\x1b]8;;\x1b\\");
+    out.extend_from_slice(b"\x1b[24m\x1b]8;;\x1b\\");
 }
 #[cfg(test)]
 mod tests {
@@ -486,7 +487,7 @@ mod tests {
         );
         let output = String::from_utf8(output).expect("terminal output is UTF-8");
         assert!(output.contains(
-            "\x1b]8;;file:///workspace/main.rs\x1b\\file:///workspace/main.rs\x1b]8;;\x1b\\"
+            "\x1b]8;;file:///workspace/main.rs\x1b\\\x1b[4mfile:///workspace/main.rs\x1b[24m\x1b]8;;\x1b\\"
         ));
     }
 }

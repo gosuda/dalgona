@@ -2,6 +2,9 @@
 
 use crate::width::{WidthMode, take_cells, width};
 
+/// Cells reserved for the spinner and state word.
+const STATE_SLOT: usize = 12;
+
 /// Values displayed by one status row.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StatusData<'a> {
@@ -30,9 +33,13 @@ pub struct StatusData<'a> {
 #[must_use]
 pub fn render(data: StatusData<'_>, columns: usize, mode: WidthMode) -> String {
     let state = state_slot(data.spinner, data.state);
+    // The state word never truncates: its slot widens to fit the longest word.
+    let state_width = state
+        .as_deref()
+        .map_or(STATE_SLOT, |text| width(text, mode).max(STATE_SLOT));
     let mut segments = Vec::new();
     if columns >= 120 {
-        push(&mut segments, state, 12, false, columns, mode);
+        push(&mut segments, state, state_width, false, columns, mode);
         push_opt(&mut segments, data.model, 24, false, columns, mode);
         push_opt(&mut segments, data.path, 24, false, columns, mode);
         push_opt(&mut segments, data.tokens, 13, true, columns, mode);
@@ -40,14 +47,14 @@ pub fn render(data: StatusData<'_>, columns: usize, mode: WidthMode) -> String {
         push_opt(&mut segments, data.agents, 10, true, columns, mode);
         push_opt(&mut segments, data.cost, 7, true, columns, mode);
     } else if columns >= 80 {
-        push(&mut segments, state, 12, false, columns, mode);
+        push(&mut segments, state, state_width, false, columns, mode);
         push_opt(&mut segments, data.model, 24, false, columns, mode);
         push_opt(&mut segments, data.path, 24, false, columns, mode);
         push_opt(&mut segments, data.tokens, 13, true, columns, mode);
         push_opt(&mut segments, data.context, 8, true, columns, mode);
         push_opt(&mut segments, data.agents, 10, true, columns, mode);
     } else if columns >= 60 {
-        push(&mut segments, state, 12, false, columns, mode);
+        push(&mut segments, state, state_width, false, columns, mode);
         push_opt(&mut segments, data.model, 24, false, columns, mode);
         push_opt(&mut segments, data.path, 24, false, columns, mode);
         let compact_tokens = data.tokens.map(compact_token_pair);
@@ -62,21 +69,21 @@ pub fn render(data: StatusData<'_>, columns: usize, mode: WidthMode) -> String {
         push_opt(&mut segments, data.context, 8, true, columns, mode);
         push_opt(&mut segments, data.agents, 10, true, columns, mode);
     } else if columns >= 40 {
-        push(&mut segments, state, 12, false, columns, mode);
+        push(&mut segments, state, state_width, false, columns, mode);
         push_opt(&mut segments, data.model, 24, false, columns, mode);
         let basename = data.path.map(path_basename);
         push_opt(&mut segments, basename.as_deref(), 24, false, columns, mode);
         push_opt(&mut segments, data.context, 8, true, columns, mode);
     } else if columns >= 20 {
-        push(&mut segments, state, 12, false, columns, mode);
+        push(&mut segments, state, state_width, false, columns, mode);
         push_opt(&mut segments, data.context, 8, true, columns, mode);
     } else {
-        let state_width = width(state.as_deref().unwrap_or(""), mode);
-        push(&mut segments, state, 12, false, columns, mode);
+        let state_cells = width(state.as_deref().unwrap_or(""), mode);
+        push(&mut segments, state, state_width, false, columns, mode);
         if segments.is_empty()
             && let Some(model) = data.model
         {
-            let available = columns.saturating_sub(state_width + 1);
+            let available = columns.saturating_sub(state_cells + 1);
             if available > 0 {
                 segments.push(format!(
                     "...{}",
@@ -88,6 +95,22 @@ pub fn render(data: StatusData<'_>, columns: usize, mode: WidthMode) -> String {
 
     let line = segments.join(" · ");
     take_cells(&line, columns, mode)
+}
+
+/// Writes `path` with a leading `~` when it sits at or under `home`.
+#[must_use]
+pub fn contract_home(path: &str, home: Option<&str>) -> String {
+    let Some(home) = home.map(|home| home.trim_end_matches('/')) else {
+        return path.to_owned();
+    };
+    if home.is_empty() {
+        return path.to_owned();
+    }
+    match path.strip_prefix(home) {
+        Some("") => "~".to_owned(),
+        Some(rest) if rest.starts_with('/') => format!("~{rest}"),
+        _ => path.to_owned(),
+    }
 }
 
 fn state_slot(spinner: Option<&str>, state: Option<&str>) -> Option<String> {
@@ -248,6 +271,37 @@ mod tests {
         let narrow = render(data, 15, WidthMode::Narrow);
         assert!(narrow.contains("working"));
         assert!(!narrow.contains("provider/model"));
+    }
+
+    #[test]
+    fn waiting_state_word_is_never_truncated() {
+        let data = StatusData {
+            state: Some("waiting for you"),
+            model: Some("provider/model"),
+            ..StatusData::default()
+        };
+        for columns in [40, 80, 120] {
+            let line = render(data, columns, WidthMode::Narrow);
+            assert!(
+                line.starts_with("waiting for you"),
+                "{columns} columns cut the state word: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn home_contraction_writes_tilde_only_on_a_path_boundary() {
+        use super::contract_home;
+
+        assert_eq!(contract_home("/home/ada/work", Some("/home/ada")), "~/work");
+        assert_eq!(contract_home("/home/ada", Some("/home/ada/")), "~");
+        assert_eq!(
+            contract_home("/home/adam/work", Some("/home/ada")),
+            "/home/adam/work"
+        );
+        assert_eq!(contract_home("/srv/work", Some("/home/ada")), "/srv/work");
+        assert_eq!(contract_home("/srv/work", None), "/srv/work");
+        assert_eq!(contract_home("/srv/work", Some("")), "/srv/work");
     }
 
     #[test]
