@@ -12,7 +12,8 @@ use dal_core::ext::Mail as ExtMail;
 use dal_core::{
     AgentInfo, AgentReport, AgentState, AgentsOp, AgentsReply, BlobId, EntryId, FetchMethod,
     FetchRequest, FetchResponse, Inference, JobsOp, JobsReply, MailMode, ModelRequest, Name,
-    Notice, Part, SessionId, StateError, StateOp, StateRecord, TurnOp, TurnOpReply, Workspace,
+    Notice, Part, Service, SessionId, StateError, StateOp, StateRecord, TurnOp, TurnOpReply,
+    Workspace,
 };
 use dal_provider::EventStream;
 use tokio::sync::oneshot;
@@ -434,7 +435,7 @@ impl SessionBackend for Backend {
     }
 
     fn agents(&self, op: AgentsOp) -> ServiceFuture<'_, AgentsReply> {
-        Box::pin(async move { Ok(self.agents_op(op).await) })
+        Box::pin(async move { self.agents_op(op).await })
     }
 
     fn jobs(&self, owner: &Name, op: JobsOp) -> ServiceFuture<'_, JobsReply> {
@@ -680,9 +681,9 @@ impl SessionBackend for Backend {
 }
 
 impl Backend {
-    async fn agents_op(&self, op: AgentsOp) -> AgentsReply {
-        match op {
-            AgentsOp::Start(start) => self.agent_start(start).await,
+    async fn agents_op(&self, op: AgentsOp) -> Result<AgentsReply, ServiceError> {
+        Ok(match op {
+            AgentsOp::Start(start) => return self.agent_start(start).await,
             AgentsOp::Await { id, timeout } => {
                 if self.is_child(id) {
                     self.agent_await(id, timeout).await
@@ -705,7 +706,7 @@ impl Backend {
             } => self.agent_send(to, text, mode, reply_to).await,
             AgentsOp::Recv { after, timeout } => self.agent_recv(after, timeout).await,
             _ => AgentsReply::Cancelled { id: self.session },
-        }
+        })
     }
 
     /// Returns whether `id` is a live child of this session: an agents
@@ -720,7 +721,7 @@ impl Backend {
             .is_some_and(|entry| entry.parent == Some(self.session))
     }
 
-    async fn agent_start(&self, start: dal_core::AgentStart) -> AgentsReply {
+    async fn agent_start(&self, start: dal_core::AgentStart) -> Result<AgentsReply, ServiceError> {
         let workspace = start
             .workspace
             .clone()
@@ -734,27 +735,47 @@ impl Backend {
         // receives: re-resolving the lexical spelling later would race a
         // swapped symlink into an outside root.
         let Some(child_root) = std::fs::canonicalize(workspace.as_path()).ok() else {
-            return AgentsReply::Cancelled { id: self.session };
+            return Err(ServiceError::failed(
+                Some(Service::Agents),
+                format!(
+                    "the child workspace {} does not exist or cannot be resolved",
+                    workspace.as_path().display()
+                ),
+            ));
         };
         // The containment root is the one `Backend::new` captured: a
         // replaceable symlink at the session workspace must not shift the
         // boundary a child is compared against mid-session.
         let parent_root = self.canonical_root.clone();
         if !child_root.starts_with(&parent_root) {
-            return AgentsReply::Cancelled { id: self.session };
+            return Err(ServiceError::Denied(dal_core::DenyReason::out_of_scope(
+                format!(
+                    "{} is outside the session workspace {}",
+                    child_root.display(),
+                    parent_root.display()
+                ),
+            )));
         }
-        let Ok(workspace) = Workspace::new(child_root) else {
-            return AgentsReply::Cancelled { id: self.session };
-        };
+        let workspace = Workspace::new(child_root).map_err(|error| {
+            ServiceError::failed(
+                Some(Service::Agents),
+                format!("the child workspace is not usable: {error}"),
+            )
+        })?;
         // An explicit child model the catalog cannot route refuses the
         // start; silently inheriting the caller's model would run a
         // different program than the one requested.
         let model = self.resolve_child_model(start.model.as_deref()).await;
-        if start.model.is_some() && model.is_none() {
-            return AgentsReply::Cancelled { id: self.session };
+        if let Some(reference) = start.model.as_deref()
+            && model.is_none()
+        {
+            return Err(ServiceError::failed(
+                Some(Service::Agents),
+                format!("the child model \"{reference}\" is not in the catalog or an alias"),
+            ));
         }
         let host = self.host();
-        let Ok(child) = host
+        let child = host
             .open(
                 crate::host::SessionRef::Child {
                     parent: self.session,
@@ -767,9 +788,12 @@ impl Backend {
                 dal_core::ClientId::new("core"),
             )
             .await
-        else {
-            return AgentsReply::Cancelled { id: self.session };
-        };
+            .map_err(|error| {
+                ServiceError::failed(
+                    Some(Service::Agents),
+                    format!("the child session could not start: {error}"),
+                )
+            })?;
         let child_id = child.inner.session;
         let mut prompt = start.prompt.to_string();
         if let Some(system) = start.system.as_ref().or(start.role.as_ref()) {
@@ -785,9 +809,14 @@ impl Backend {
                 .is_err()
         {
             let _ = host.close(child_id).await;
-            return AgentsReply::Cancelled { id: child_id };
+            return Err(ServiceError::failed(
+                Some(Service::Agents),
+                "the child session could not take its model; it was closed again",
+            ));
         }
-        if child
+        // A refused start must not collapse into `Cancelled`: the typed
+        // error is the only way a caller learns which precondition failed.
+        if let Err(error) = child
             .submit(dal_core::Command::Prompt {
                 expect: dal_core::Expect::Idle,
                 content: vec![Part::Text {
@@ -795,12 +824,14 @@ impl Backend {
                 }],
             })
             .await
-            .is_err()
         {
             let _ = host.close(child_id).await;
-            return AgentsReply::Cancelled { id: child_id };
+            return Err(ServiceError::failed(
+                Some(Service::Agents),
+                format!("the child session could not take its prompt: {error}"),
+            ));
         }
-        AgentsReply::Started { id: child_id }
+        Ok(AgentsReply::Started { id: child_id })
     }
 
     /// Resolves a child model reference; unresolvable keeps the default.
