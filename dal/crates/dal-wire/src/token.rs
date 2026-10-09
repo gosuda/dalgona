@@ -1,9 +1,12 @@
 use std::{
     fmt,
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{self, Read, Write},
     path::{Path, PathBuf},
 };
+
+#[cfg(unix)]
+use std::fs::OpenOptions;
 
 use thiserror::Error;
 use uuid::Uuid;
@@ -397,153 +400,163 @@ fn valid_token(token: &[u8]) -> bool {
 }
 
 fn open_exclusive(path: &Path) -> io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
+    #[cfg(windows)]
+    let file = win::create_exclusive(path)?;
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
+    let file = {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
         options.mode(0o600);
-    }
-    let file = options.open(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
+        let file = options.open(path)?;
         if let Err(error) = file.set_permissions(fs::Permissions::from_mode(0o600)) {
             drop(file);
             let _ = fs::remove_file(path);
             return Err(error);
         }
-    }
-    #[cfg(windows)]
-    {
-        if let Err(error) = win::restrict_owner_access(path) {
-            drop(file);
-            let _ = fs::remove_file(path);
-            return Err(error);
-        }
-    }
+        file
+    };
     Ok(file)
 }
 
 /// Windows carries no mode bits; the token file gets an explicit protected
 /// DACL instead — the POSIX 0600 grant for the owner plus the privileged
-/// system accounts, with inheritance cut so the grant set is exact.
+/// system accounts, with inheritance cut so the grant set is exact. The
+/// descriptor rides on the `CreateFile` call itself so the file never
+/// exists with a wider inherited DACL.
 #[cfg(windows)]
 #[expect(
     unsafe_code,
     reason = "token file DACL requires Win32 security descriptor calls"
 )]
 mod win {
-    use std::{io, os::windows::ffi::OsStrExt, path::Path, ptr};
+    use std::{
+        fs::File,
+        io,
+        os::windows::{ffi::OsStrExt, io::FromRawHandle},
+        path::Path,
+        ptr,
+    };
 
     use windows_sys::Win32::{
-        Foundation::{FALSE, LocalFree},
+        Foundation::{
+            CloseHandle, FALSE, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
+        },
         Security::{
-            ACL,
             Authorization::{
                 ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
-                GetNamedSecurityInfoW, SE_FILE_OBJECT, SetNamedSecurityInfoW,
             },
-            DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, OWNER_SECURITY_INFORMATION,
-            PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+            GetTokenInformation, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, TOKEN_QUERY,
+            TOKEN_USER, TokenUser,
         },
+        Storage::FileSystem::{
+            CREATE_NEW, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_DELETE, FILE_SHARE_READ,
+            FILE_SHARE_WRITE,
+        },
+        System::Threading::{GetCurrentProcess, OpenProcessToken},
     };
 
     fn wide(text: &str) -> Vec<u16> {
         text.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
-    fn wide_path(path: &Path) -> Vec<u16> {
-        path.as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect()
-    }
-
-    /// Stamps `path` with a protected DACL granting the file owner, SYSTEM,
-    /// and Administrators — the Windows counterpart of `chmod 600`.
-    pub(super) fn restrict_owner_access(path: &Path) -> io::Result<()> {
-        let wide_path = wide_path(path);
-        let mut owner: PSID = ptr::null_mut();
-        let mut holder_sd: PSECURITY_DESCRIPTOR = ptr::null_mut();
+    /// The process user's SID as SDDL text — the identity a newly created
+    /// file records as its owner, which is who the owner ACE must name.
+    fn user_sid() -> io::Result<String> {
+        let mut token: HANDLE = ptr::null_mut();
+        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token) } == FALSE {
+            return Err(io::Error::last_os_error());
+        }
+        let mut needed = 0u32;
+        unsafe {
+            GetTokenInformation(token, TokenUser, ptr::null_mut(), 0, &raw mut needed)
+        };
+        let mut buffer = vec![0u8; needed as usize];
         let queried = unsafe {
-            GetNamedSecurityInfoW(
-                wide_path.as_ptr(),
-                SE_FILE_OBJECT,
-                OWNER_SECURITY_INFORMATION,
-                &raw mut owner,
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                &raw mut holder_sd,
+            GetTokenInformation(
+                token,
+                TokenUser,
+                buffer.as_mut_ptr().cast(),
+                needed,
+                &raw mut needed,
             )
         };
-        if queried != 0 {
-            return Err(io::Error::from_raw_os_error(queried.cast_signed()));
+        unsafe { CloseHandle(token) };
+        if queried == FALSE {
+            return Err(io::Error::last_os_error());
         }
-        let mut owner_text = ptr::null_mut();
-        let converted = unsafe { ConvertSidToStringSidW(owner, &raw mut owner_text) };
-        if !holder_sd.is_null() {
-            unsafe { LocalFree(holder_sd) };
-        }
-        if converted == FALSE {
+        let sid: PSID = unsafe { buffer.as_ptr().cast::<TOKEN_USER>().read().User.Sid };
+        let mut text = ptr::null_mut();
+        if unsafe { ConvertSidToStringSidW(sid, &raw mut text) } == FALSE {
             return Err(io::Error::last_os_error());
         }
         let mut len = 0usize;
-        while unsafe { *owner_text.add(len) } != 0 {
+        while unsafe { *text.add(len) } != 0 {
             len += 1;
         }
-        let owner_sid =
-            String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(owner_text, len) });
-        unsafe { LocalFree(owner_text.cast()) };
+        let out = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(text, len) });
+        unsafe { LocalFree(text.cast()) };
+        Ok(out)
+    }
 
-        // `P` marks the DACL protected so inherited ACEs cannot widen the
-        // grant; SY and BA are the SDDL aliases for SYSTEM and Administrators.
+    /// Creates `path` with `CREATE_NEW` semantics and the protected DACL
+    /// attached, so the token file is born with the POSIX-0600-equivalent
+    /// grant set instead of briefly carrying a wider inherited DACL. The
+    /// descriptor must outlive the `CreateFileW` call, so it is created
+    /// and dropped inside this function.
+    pub(super) fn create_exclusive(path: &Path) -> io::Result<File> {
+        let (attrs, _descriptor) = create_security_attributes()?;
+        let wide_path = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<u16>>();
+        let raw = unsafe {
+            CreateFileW(
+                wide_path.as_ptr(),
+                GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                &raw const attrs,
+                CREATE_NEW,
+                FILE_ATTRIBUTE_NORMAL,
+                ptr::null_mut(),
+            )
+        };
+        if raw == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(unsafe { File::from_raw_handle(raw) })
+    }
+
+    /// `SECURITY_ATTRIBUTES` carrying a protected DACL granting the creating
+    /// user, SYSTEM, and Administrators — the Windows counterpart of
+    /// `O_CREAT` with mode 0600. The returned descriptor backs the
+    /// attributes and must outlive the open call that receives them.
+    /// `P` marks the DACL protected so inherited ACEs cannot widen the
+    /// grant; SY and BA are the SDDL aliases for SYSTEM and Administrators.
+    fn create_security_attributes() -> io::Result<(SECURITY_ATTRIBUTES, PSECURITY_DESCRIPTOR)> {
+        let owner_sid = user_sid()?;
         let sddl = wide(&format!("D:P(A;;FA;;;{owner_sid})(A;;FA;;;SY)(A;;FA;;;BA)"));
-        let mut described: PSECURITY_DESCRIPTOR = ptr::null_mut();
+        let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
         if unsafe {
             ConvertStringSecurityDescriptorToSecurityDescriptorW(
                 sddl.as_ptr(),
                 1,
-                &raw mut described,
+                &raw mut descriptor,
                 ptr::null_mut(),
             )
         } == FALSE
         {
             return Err(io::Error::last_os_error());
         }
-        let mut present = FALSE;
-        let mut defaulted = FALSE;
-        let mut dacl: *mut ACL = ptr::null_mut();
-        let described_ok = unsafe {
-            GetSecurityDescriptorDacl(
-                described,
-                &raw mut present,
-                &raw mut dacl,
-                &raw mut defaulted,
-            )
-        };
-        if described_ok == FALSE || present == FALSE || dacl.is_null() {
-            unsafe { LocalFree(described) };
-            return Err(io::Error::last_os_error());
-        }
-        let written = unsafe {
-            SetNamedSecurityInfoW(
-                wide_path.as_ptr(),
-                SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-                ptr::null_mut(),
-                ptr::null_mut(),
-                dacl,
-                ptr::null_mut(),
-            )
-        };
-        // `dacl` points into `described`; the descriptor must outlive the write.
-        unsafe { LocalFree(described) };
-        if written != 0 {
-            return Err(io::Error::from_raw_os_error(written.cast_signed()));
-        }
-        Ok(())
+        Ok((
+            SECURITY_ATTRIBUTES {
+                nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+                lpSecurityDescriptor: descriptor,
+                bInheritHandle: FALSE,
+            },
+            descriptor,
+        ))
     }
 }
 

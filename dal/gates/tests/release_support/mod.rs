@@ -25,11 +25,35 @@ fn shell() -> Command {
     #[cfg(windows)]
     {
         for key in ["ProgramFiles", "ProgramFiles(x86)"] {
-            if let Some(root) = std::env::var_os(key) {
-                let candidate = Path::new(&root).join(r"Git\bin\bash.exe");
+            if let Some(dir) = env::var_os(key) {
+                let candidate = Path::new(&dir).join(r"Git\bin\bash.exe");
                 if candidate.is_file() {
                     return Command::new(candidate);
                 }
+            }
+        }
+        // Per-user Git for Windows installs under LOCALAPPDATA\Programs.
+        if let Some(dir) = env::var_os("LOCALAPPDATA") {
+            let candidate = Path::new(&dir).join(r"Programs\Git\bin\bash.exe");
+            if candidate.is_file() {
+                return Command::new(candidate);
+            }
+        }
+        if let Some(paths) = env::var_os("PATH") {
+            let stub = env::var_os("SystemRoot")
+                .map(|root| Path::new(&root).join(r"System32\bash.exe"));
+            for candidate in env::split_paths(&paths).map(|dir| dir.join("bash.exe")) {
+                if !candidate.is_file() {
+                    continue;
+                }
+                // A WSL `bash.exe` wins on PATH but cannot open the `C:\`
+                // script paths the guards pass.
+                if stub.as_ref().is_some_and(|stub| {
+                    candidate.as_os_str().eq_ignore_ascii_case(stub.as_os_str())
+                }) {
+                    continue;
+                }
+                return Command::new(candidate);
             }
         }
     }
