@@ -510,6 +510,9 @@ pub enum Effect {
         turn: TurnId,
         /// The durable stop reason.
         stop: Stop,
+        /// Whether the turn ended because the context window overflowed, by
+        /// the fold's own classification of the provider reply.
+        overflowed: bool,
     },
 }
 
@@ -694,10 +697,22 @@ fn checked_add(total: u64, value: u64) -> Result<u64, Rejection> {
     })
 }
 
+/// How far the turn's context-overflow recovery has gone.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) enum Overflow {
+    /// No overflow this turn, or recovered after compaction.
+    #[default]
+    Clear,
+    /// A compaction is under way or done for this turn's overflow.
+    Compacted,
+    /// The overflow could not be recovered and the turn is ending on it.
+    Unrecovered,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct TurnFlags {
     pub(super) interrupts: u32,
-    pub(super) overflowed: bool,
+    pub(super) overflow: Overflow,
     pub(super) pending_suppressed: Vec<Box<str>>,
     pub(super) suppressed_notice: bool,
     pub(super) end_after_boundary: bool,

@@ -3,7 +3,7 @@ use crate::BEFORE_TURN_SOURCE;
 use super::helpers::{
     HookTarget, compact_notice, compaction_started_notice, invalid, part_to_journal, zero_usage,
 };
-use super::types::{MAX_INTERRUPTS, ManualCompletion, QueuedInput};
+use super::types::{MAX_INTERRUPTS, ManualCompletion, Overflow, QueuedInput};
 use super::{
     CallId, CancelScope, ClientId, Command, CompactionReason, Effect, Emit, Entry, EntryId,
     EntryKind, HookOutcome, HookVerdict, JobId, Notice, Output, Part, Phase, Record, Rejection,
@@ -319,7 +319,7 @@ impl Session {
             leaf: self.tree.leaf,
         }));
         self.turn_flags.interrupts = 0;
-        self.turn_flags.overflowed = false;
+        self.turn_flags.overflow = Overflow::Clear;
         self.turn_flags.suppressed_notice = false;
         self.argument_overrides.clear();
         self.phase = Phase::Running {

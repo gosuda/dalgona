@@ -2850,3 +2850,214 @@ fn tokens_since_compaction_estimate_uses_the_shared_character_rate() {
         crate::tokens::estimate_text_tokens(&text),
     );
 }
+
+#[test]
+fn overflow_failures_mark_turn_end_overflowed() {
+    let mut session = session();
+    send(&mut session, limits(0)).unwrap();
+    let turn = begin(&mut session);
+    let first = send(
+        &mut session,
+        Event::StreamEnded {
+            turn,
+            model: route(),
+            family: Family::Chat,
+            result: Err(InferFailure::Overflow {
+                code: "context".into(),
+                message: "too large".into(),
+            }),
+            partial: None,
+        },
+    )
+    .unwrap();
+    assert!(first.iter().any(
+        |effect| matches!(effect, Effect::Compact { turn: Some(active), .. } if *active == turn)
+    ));
+    send(
+        &mut session,
+        Event::CompactionSettled {
+            turn: Some(turn),
+            outcome: Ok(compact_summary(100, 50)),
+        },
+    )
+    .unwrap();
+    let failed = send(
+        &mut session,
+        Event::StreamEnded {
+            turn,
+            model: route(),
+            family: Family::Chat,
+            result: Err(InferFailure::Overflow {
+                code: "context".into(),
+                message: "still too large".into(),
+            }),
+            partial: None,
+        },
+    )
+    .unwrap();
+    assert!(
+        failed.iter().any(|effect| matches!(
+            effect,
+            Effect::Stop {
+                overflowed: true,
+                ..
+            }
+        )),
+        "a second overflow in one round ends the turn overflowed"
+    );
+}
+
+#[test]
+fn a_failure_that_is_not_overflow_leaves_the_mark_off() {
+    let mut session = session();
+    send(&mut session, limits(0)).unwrap();
+    let turn = begin(&mut session);
+    let failed = send(
+        &mut session,
+        Event::StreamEnded {
+            turn,
+            model: route(),
+            family: Family::Chat,
+            result: Err(InferFailure::Fatal {
+                message: "refused".into(),
+                fix: None,
+            }),
+            partial: None,
+        },
+    )
+    .unwrap();
+    assert!(
+        failed.iter().any(|effect| matches!(
+            effect,
+            Effect::Stop {
+                overflowed: false,
+                ..
+            }
+        )),
+        "a plain failure is not an overflow"
+    );
+}
+
+#[test]
+fn an_overflow_without_a_compactor_still_marks_the_turn() {
+    let mut session = session();
+    send(
+        &mut session,
+        Event::Limits {
+            window: 100_000,
+            max_steps: 0,
+            compact: CompactLimits {
+                threshold: 0.85,
+                min_tokens: 1,
+                keep_tokens: 20_000,
+                enabled: true,
+                compactor_available: false,
+            },
+        },
+    )
+    .unwrap();
+    let turn = begin(&mut session);
+    let failed = send(
+        &mut session,
+        Event::StreamEnded {
+            turn,
+            model: route(),
+            family: Family::Chat,
+            result: Err(InferFailure::Overflow {
+                code: "context".into(),
+                message: "too large".into(),
+            }),
+            partial: None,
+        },
+    )
+    .unwrap();
+    assert!(
+        failed.iter().any(|effect| matches!(
+            effect,
+            Effect::Stop {
+                overflowed: true,
+                ..
+            }
+        )),
+        "an overflow with no compactor ends the turn overflowed"
+    );
+}
+
+#[test]
+fn an_overflow_failure_journals_the_same_line_as_any_other_failure() {
+    let mut session = session();
+    send(&mut session, limits(0)).unwrap();
+    let turn = begin(&mut session);
+    let overflow = |message: &str| Event::StreamEnded {
+        turn,
+        model: route(),
+        family: Family::Chat,
+        result: Err(InferFailure::Overflow {
+            code: "context".into(),
+            message: message.into(),
+        }),
+        partial: None,
+    };
+    send(&mut session, overflow("too large")).unwrap();
+    send(
+        &mut session,
+        Event::CompactionSettled {
+            turn: Some(turn),
+            outcome: Ok(compact_summary(100, 50)),
+        },
+    )
+    .unwrap();
+    let failed = send(&mut session, overflow("still too large")).unwrap();
+    let mut journal = Vec::new();
+    append_emitted(&failed, &mut journal);
+    let Some(record @ Record::TurnEnd { .. }) = journal.last() else {
+        panic!("the failed turn wrote no turn_end record: {journal:?}");
+    };
+    let line = String::from_utf8(crate::journal::encode(record).unwrap()).unwrap();
+    assert!(
+        line.contains(
+            "\"stop\":{\"failed\":\"Context overflow recovery failed: still too large\"},"
+        ),
+        "the overflow mark never reaches the journal: {line}"
+    );
+    assert!(!line.contains("overflow\":"), "{line}");
+}
+
+#[test]
+fn a_failed_overflow_compaction_marks_the_turn_overflowed() {
+    let mut session = session();
+    send(&mut session, limits(0)).unwrap();
+    let turn = begin(&mut session);
+    send(
+        &mut session,
+        Event::StreamEnded {
+            turn,
+            model: route(),
+            family: Family::Chat,
+            result: Err(InferFailure::Overflow {
+                code: "context".into(),
+                message: "too large".into(),
+            }),
+            partial: None,
+        },
+    )
+    .unwrap();
+    let failed = send(
+        &mut session,
+        Event::CompactionSettled {
+            turn: Some(turn),
+            outcome: Err("compactor failed".into()),
+        },
+    )
+    .unwrap();
+    assert!(
+        failed.iter().any(|effect| matches!(
+            effect,
+            Effect::Stop {
+                overflowed: true,
+                ..
+            }
+        )),
+        "a compaction that fails while recovering an overflow ends the turn overflowed"
+    );
+}

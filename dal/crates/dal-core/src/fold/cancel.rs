@@ -1,7 +1,7 @@
 use super::helpers::{
     compact_notice, entry_weight, invalid, parts_to_text, wrong_turn, zero_usage,
 };
-use super::types::{ManualCompletion, QueuedInput};
+use super::types::{ManualCompletion, Overflow, QueuedInput};
 use super::{
     CancelScope, CompactionReason, CompactionSummary, Effect, Emit, Entry, EntryId, EntryKind,
     Expect, JournalPart, ModelRequestPlan, NonZeroU64, Notice, Output, Part, PartialResponse,
@@ -143,6 +143,7 @@ impl Session {
                     self.continue_after_compaction(turn, effects);
                     return Ok(());
                 };
+                self.turn_flags.overflow = Overflow::Unrecovered;
                 self.end_turn(
                     turn,
                     TurnEndStop::Failed { message },

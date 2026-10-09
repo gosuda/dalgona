@@ -204,8 +204,12 @@ impl Driver {
                     let route = self.last_model.clone().map(|(route, _)| route);
                     commands::run_command(&self.deps, &mut self.scoped, route, cmd, by).await;
                 }
-                dal_core::Effect::Stop { turn, stop } => {
-                    self.observe_turn_end(turn, stop).await;
+                dal_core::Effect::Stop {
+                    turn,
+                    stop,
+                    overflowed,
+                } => {
+                    self.observe_turn_end(turn, stop, overflowed).await;
                     self.observe_settled(turn).await;
                     self.stop(turn, stop).await;
                 }
@@ -1113,14 +1117,18 @@ impl Driver {
         }
     }
 
-    async fn observe_turn_end(&self, turn: TurnId, stop: Stop) {
+    async fn observe_turn_end(&self, turn: TurnId, stop: Stop, overflowed: bool) {
         let Some(state) = self.turns.get(&turn) else {
             return;
         };
         let generation = Arc::clone(&state.generation);
         let cancel = state.cancel.clone();
         let script = state.script.attach(None);
-        let event = TurnEnd { turn, stop };
+        let event = TurnEnd {
+            turn,
+            stop,
+            overflowed,
+        };
         let mut report = ObserverReport::default();
         let scope = HookScope {
             services: &self.deps.services,

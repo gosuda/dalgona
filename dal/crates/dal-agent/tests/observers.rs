@@ -45,6 +45,7 @@ enum Observed {
     TurnEnd {
         turn: TurnId,
         stop: Stop,
+        overflowed: bool,
     },
     Settled {
         turn: TurnId,
@@ -99,6 +100,7 @@ fn record_turn_end(event: &TurnEnd) -> Observed {
     Observed::TurnEnd {
         turn: event.turn,
         stop: event.stop,
+        overflowed: event.overflowed,
     }
 }
 
@@ -307,6 +309,7 @@ fn assert_settled_follows_tool_result(events: &Arc<Mutex<Vec<Observed>>>) {
             Observed::TurnEnd {
                 turn,
                 stop: Stop::EndTurn,
+                ..
             } => Some((position, *turn)),
             _ => None,
         })
@@ -476,4 +479,71 @@ async fn watcher_verdict_notice_names_its_owning_extension() {
     .expect("watcher notice arrived");
     assert!(notice.contains("Extension \"owner\""), "{notice}");
     host.close(session).await.expect("session close");
+}
+
+const STEP_TOO_LARGE: &str = "{\"kind\":\"fail\",\"message\":\"Request Entity Too Large\",\"status\":413,\"family\":\"openai_chat\"}\n";
+const STEP_REFUSED: &str = "{\"kind\":\"fail\",\"message\":\"the provider refused the request\"}\n";
+
+async fn failed_turn_end_overflowed(script: &str) -> bool {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let (_tmp, host, agent) =
+        start_session_with(vec![observer_extension(Arc::clone(&events))], script.into()).await;
+    let session = agent
+        .view(dal_core::PageReq::default())
+        .expect("view")
+        .session
+        .id;
+    let reply = agent
+        .submit(Command::Prompt {
+            expect: Expect::Idle,
+            content: vec![Part::Text {
+                text: "overflow the context".into(),
+            }],
+        })
+        .await
+        .expect("prompt accepted");
+    assert!(matches!(reply, dal_core::Reply::Accepted { .. }));
+    wait_for(&events, |seen| {
+        seen.iter().any(|event| {
+            matches!(
+                event,
+                Observed::TurnEnd {
+                    stop: Stop::Failed,
+                    ..
+                }
+            )
+        })
+    })
+    .await;
+    let overflowed = events
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .find_map(|event| match event {
+            Observed::TurnEnd {
+                stop: Stop::Failed,
+                overflowed,
+                ..
+            } => Some(*overflowed),
+            _ => None,
+        })
+        .expect("a failed turn end was observed");
+    host.close(session).await.expect("session close");
+    overflowed
+}
+
+#[tokio::test]
+async fn turn_end_observer_reports_a_context_overflow_failure() {
+    assert!(
+        failed_turn_end_overflowed(STEP_TOO_LARGE).await,
+        "a provider overflow that no compactor can recover ends the turn overflowed"
+    );
+}
+
+#[tokio::test]
+async fn turn_end_observer_leaves_other_failures_unmarked() {
+    assert!(
+        !failed_turn_end_overflowed(STEP_REFUSED).await,
+        "a plain provider failure is not an overflow"
+    );
 }

@@ -3,6 +3,7 @@ use super::helpers::{
     compact_notice, compaction_started_notice, invalid, resolution_failure, truncated_args,
     zero_usage,
 };
+use super::types::Overflow;
 use super::{
     CompactionReason, Effect, Emit, EntryKind, InferFailure, PartialResponse, PendingCall, Phase,
     PlannedCall, Record, Rejection, ResolvedCall, Session, Stop, StreamEvent, TreeDelta,
@@ -86,22 +87,30 @@ impl Session {
         emit: &mut Emit,
         effects: &mut Vec<Effect>,
     ) -> Result<(), Rejection> {
-        let message: Box<str> = match failure {
+        let (message, overflow): (Box<str>, bool) = match failure {
             InferFailure::Retryable { .. } => return Ok(()),
             InferFailure::Cancelled => {
                 return self.end_turn(turn, TurnEndStop::Cancelled, partial, now, emit, effects);
             }
             InferFailure::Overflow { message, .. } => {
-                if !self.turn_flags.overflowed && self.overflow_compaction(turn, emit, effects) {
+                if self.turn_flags.overflow == Overflow::Clear
+                    && self.overflow_compaction(turn, emit, effects)
+                {
                     return Ok(());
                 }
-                format!("Context overflow recovery failed: {message}").into()
+                (
+                    format!("Context overflow recovery failed: {message}").into_boxed_str(),
+                    true,
+                )
             }
-            InferFailure::Fatal { message, .. } => message,
+            InferFailure::Fatal { message, .. } => (message, false),
             error @ (InferFailure::SyntheticCycle { .. } | InferFailure::SyntheticDepth { .. }) => {
-                error.to_string().into()
+                (error.to_string().into_boxed_str(), false)
             }
         };
+        if overflow {
+            self.turn_flags.overflow = Overflow::Unrecovered;
+        }
         self.end_turn(
             turn,
             TurnEndStop::Failed { message },
@@ -130,7 +139,7 @@ impl Session {
             }
             return false;
         };
-        self.turn_flags.overflowed = true;
+        self.turn_flags.overflow = Overflow::Compacted;
         self.pending_compaction = Some(CompactionReason::Overflow);
         self.phase = Phase::Running {
             turn,
@@ -161,7 +170,7 @@ impl Session {
         emit: &mut Emit,
         effects: &mut Vec<Effect>,
     ) -> Result<(), Rejection> {
-        self.turn_flags.overflowed = false;
+        self.turn_flags.overflow = Overflow::Clear;
         let InferredResponse {
             blocks,
             calls,

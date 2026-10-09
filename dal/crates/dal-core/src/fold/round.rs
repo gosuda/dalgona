@@ -3,7 +3,7 @@ use super::helpers::{
     unsettled_calls, zero_usage,
 };
 use super::replay::TOOL_LOST;
-use super::types::TurnFlags;
+use super::types::{Overflow, TurnFlags};
 use super::{
     CallId, Effect, Emit, Entry, EntryKind, Notice, Part, PartialResponse, Phase, Record,
     Rejection, RequestParams, Session, SettledOutcome, Step, Stop, ToolOutcomeView, TreeDelta,
@@ -299,6 +299,12 @@ impl Session {
         emit: &mut Emit,
         effects: &mut Vec<Effect>,
     ) -> Result<(), Rejection> {
+        // The mark reaches only the in-memory stop effect, never the journal
+        // record, and is consumed here whether or not the turn is active.
+        let overflowed = self.turn_flags.overflow == Overflow::Unrecovered;
+        if overflowed {
+            self.turn_flags.overflow = Overflow::Clear;
+        }
         let stage = match &self.phase {
             Phase::Running {
                 turn: active,
@@ -329,7 +335,7 @@ impl Session {
             &stop,
             TurnEndStop::Done | TurnEndStop::Length | TurnEndStop::Filter | TurnEndStop::MaxSteps
         );
-        if let TurnEndStop::Failed { message } = &stop {
+        if let TurnEndStop::Failed { message, .. } = &stop {
             emit.updates.push(UpdateKind::Notice(Notice {
                 turn: Some(turn),
                 kind: "turn.failed".into(),
@@ -357,6 +363,7 @@ impl Session {
         effects.push(Effect::Stop {
             turn,
             stop: update_stop,
+            overflowed,
         });
         Ok(())
     }
