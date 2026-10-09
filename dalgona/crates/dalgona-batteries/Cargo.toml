@@ -10,7 +10,7 @@ repository.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
-base64 = "=0.23.1"
+base64 = "=0.22.1"
 blake3.workspace = true
 dal-agent = "=0.1.0"
 dal-core = "=0.1.0"
@@ -18,7 +18,7 @@ dal-ext = "=0.1.0"
 dal-store = "=0.1.0"
 dal-tools = { version = "=0.1.0", features = ["symbols"] }
 htmd = "=0.5.5"
-jiff = { version = "=0.2.38", features = ["serde"] }
+jiff = { version = "=0.2.37", features = ["serde"] }
 png = "=0.18.1"
 process-wrap = { version = "=10.0.1", features = ["tokio1", "process-group", "job-object", "kill-on-drop"] }
 regex-automata = "=0.4.18"
@@ -28,17 +28,17 @@ serde = { version = "=1.0.229", features = ["derive", "rc"] }
 sonic-rs = "=0.5.10"
 thiserror = "=2.0.21"
 toml.workspace = true
-tokio = { version = "=1.53.2", features = ["macros", "process", "rt", "rt-multi-thread", "sync", "time", "io-util", "net"] }
-tokio-util = { version = "=0.7.20", default-features = false, features = ["rt"] }
+tokio = { version = "=1.53.1", features = ["macros", "process", "rt", "rt-multi-thread", "sync", "time", "io-util", "net"] }
+tokio-util = { version = "=0.7.19", default-features = false, features = ["rt"] }
 unicode-width = "=0.2.2"
-uuid = { version = "=1.27.0", features = ["v4"] }
+uuid = { version = "=1.26.1", features = ["v4"] }
 
 [dev-dependencies]
 http-body-util = "=0.1.5"
-hyper = { version = "=1.12.0", features = ["full"] }
+hyper = { version = "=1.11.1", features = ["full"] }
 hyper-util = { version = "=0.1.21", features = ["full"] }
 proptest = "=1.11.0"
-shuttle = "=0.9.5"
+shuttle = "=0.9.4"
 
 [lints]
 workspace = true
