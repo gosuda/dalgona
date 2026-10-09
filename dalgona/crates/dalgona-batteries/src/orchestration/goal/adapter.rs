@@ -112,7 +112,8 @@ pub(crate) async fn tool(
     let reply = match name {
         "create_goal" => {
             let input = decode::<CreateArgs>(args, name)?;
-            create_goal(sidecar, ctx, &input.objective, now).map_err(goal_failure)?
+            create_goal(sidecar, ctx, &input.objective, now)
+                .map_err(|error| goal_failure(&error))?
         }
         "update_goal" => {
             let input = decode::<UpdateArgs>(args, name)?;
@@ -135,11 +136,11 @@ pub(crate) async fn tool(
                 inflight,
                 now,
             )
-            .map_err(goal_failure)?
+            .map_err(|error| goal_failure(&error))?
         }
         "get_goal" => {
             let _ = decode::<GetArgs>(args, name)?;
-            return get_goal(sidecar, ctx).map_err(goal_failure);
+            return get_goal(sidecar, ctx).map_err(|error| goal_failure(&error));
         }
         _ => {
             return Err(ServiceError::failed(
@@ -160,7 +161,7 @@ pub(crate) async fn command(
     caller: &Caller,
 ) -> Result<String, ServiceError> {
     if let Some(error) = store.error.as_ref() {
-        return Err(goal_failure(error.clone()));
+        return Err(goal_failure(&error));
     }
     let Some(sidecar) = store.sidecar.as_mut() else {
         return Err(ServiceError::failed(
@@ -182,7 +183,7 @@ pub(crate) async fn save(
     sidecar: &GoalSidecar,
 ) -> Result<(), ServiceError> {
     let name = Name::parse("goal.json").map_err(|_| ServiceError::sidecar_bad_name("goal.json"))?;
-    let bytes = encode_sidecar(sidecar).map_err(goal_failure)?;
+    let bytes = encode_sidecar(sidecar).map_err(|error| goal_failure(&error))?;
     services
         .sidecar(caller, SidecarOp::Write { name, bytes })
         .await
@@ -212,13 +213,13 @@ fn decode<T: for<'de> Deserialize<'de>>(args: &str, tool: &str) -> Result<T, Ser
         .map_err(|error| ServiceError::failed(None, format!("{tool}: invalid arguments: {error}")))
 }
 
-fn goal_failure(error: GoalError) -> ServiceError {
+fn goal_failure(error: &GoalError) -> ServiceError {
     ServiceError::failed(None, error.to_string())
 }
 
 fn service_failure(error: Option<&GoalError>) -> ServiceError {
     error.map_or_else(
         || ServiceError::failed(None, "goal: the goal sidecar is unavailable."),
-        |error| ServiceError::failed(None, error.to_string()),
+        |error: &GoalError| ServiceError::failed(None, error.to_string()),
     )
 }

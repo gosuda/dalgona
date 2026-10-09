@@ -83,7 +83,7 @@ struct Ready {
 
 enum Transport {
     Stdio(StdioTransport),
-    Http(HttpTransport),
+    Http(Box<HttpTransport>),
 }
 
 #[derive(Clone, Copy)]
@@ -538,7 +538,7 @@ impl Client {
                     self.config.client_version.clone(),
                     &self.budgets,
                 )?;
-                Transport::Http(transport)
+                Transport::Http(Box::new(transport))
             }
         };
         let started = self.handshake(&transport, instance, session, who).await;
@@ -1098,10 +1098,12 @@ fn call_params(
     let tool = sonic_rs::to_string(tool).map_err(|error| protocol_error(error.to_string()))?;
     let mut params = format!("{{\"name\":{tool},\"arguments\":{}", arguments.as_str());
     if let Some(responses) = responses {
-        params.push_str(&format!(",\"inputResponses\":{responses}"));
+        params.push_str(",\"inputResponses\":");
+        params.push_str(responses);
     }
     if let Some(state) = request_state {
-        params.push_str(&format!(",\"requestState\":{state}"));
+        params.push_str(",\"requestState\":");
+        params.push_str(state);
     }
     params.push('}');
     Ok(params)

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
 //! Protected-resource discovery, native OAuth authorization, and token refresh.
 
+use std::fmt::Write as _;
 use std::{net::IpAddr, time::Duration};
 
 use dal_agent::ext::{Caller, Services};
@@ -489,8 +490,9 @@ async fn ask_client_id(
             }
             Ok(client_id.trim().to_owned())
         }
-        Ok(None | Some(_)) => Err(McpError::NoAskFrontEnd),
-        Err(dal_agent::error::ServiceError::Denied(_)) => Err(McpError::NoAskFrontEnd),
+        Ok(None | Some(_)) | Err(dal_agent::error::ServiceError::Denied(_)) => {
+            Err(McpError::NoAskFrontEnd)
+        }
         Err(dal_agent::error::ServiceError::Cancelled) if cancel.is_cancelled() => {
             Err(McpError::NoAskFrontEnd)
         }
@@ -751,7 +753,7 @@ fn form_encode(value: &str, encoded: &mut String) {
             b' ' => encoded.push('+'),
             other => {
                 encoded.push('%');
-                encoded.push_str(&format!("{other:02X}"));
+                let _ = write!(encoded, "{other:02X}");
             }
         }
     }

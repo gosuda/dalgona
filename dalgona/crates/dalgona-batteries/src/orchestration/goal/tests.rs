@@ -74,7 +74,7 @@ fn sidecar_round_trip_matches_exact_shape() -> Result<(), Box<dyn Error>> {
             unattended: 0,
             length_recoveries: 0,
             toolless_streak: 0,
-            goal_turns: 0,
+            turns: 0,
             last_signature: None,
             recent_hashes: Vec::new(),
             blocked: None,
@@ -252,7 +252,7 @@ fn goal_turn_accounting_resets_consecutive_on_signature_change() -> Result<(), B
     }
     let goal = sidecar.goal.as_ref().ok_or("goal missing")?;
     assert_eq!(goal.consecutive, 8);
-    assert_eq!(goal.goal_turns, 8);
+    assert_eq!(goal.turns, 8);
     assert_eq!(goal.tokens_used, 80);
     assert_eq!(goal.time_used_s, 40);
     assert_eq!(goal.toolless_streak, 0);

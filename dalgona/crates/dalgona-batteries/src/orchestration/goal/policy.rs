@@ -223,7 +223,7 @@ pub(crate) fn record_goal_turn(
     }
     goal.consecutive = goal.consecutive.saturating_add(1);
     goal.unattended = goal.unattended.saturating_add(1);
-    goal.goal_turns = goal.goal_turns.saturating_add(1);
+    goal.turns = goal.turns.saturating_add(1);
     goal.last_signature = Some(signature.into());
     if prompt == PromptKind::Minimal {
         goal.length_recoveries = goal.length_recoveries.saturating_add(1);
@@ -257,6 +257,6 @@ pub(crate) fn on_user_prompt(goal: &mut Goal) {
         goal.blocked = None;
         goal.consecutive = 0;
         goal.unattended = 0;
-        goal.goal_turns = 0;
+        goal.turns = 0;
     }
 }

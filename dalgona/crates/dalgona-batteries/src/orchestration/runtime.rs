@@ -363,7 +363,7 @@ impl SessionState {
                 if self.config.loop_guard.enabled {
                     clear_pending_attempts(&mut self.guard);
                 }
-                self.last_stop = stop_kind(&event.stop);
+                self.last_stop = stop_kind(event.stop);
                 self.turn_tool_called = false;
                 self.publish_status();
                 let _ = reply.send(());
@@ -747,12 +747,6 @@ impl SessionState {
                 super::agents_tool::NO_NESTED_RUNS,
             ));
         }
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct ReportArgs {
-            status: String,
-            report: String,
-        }
         let input: ReportArgs = sonic_rs::from_str(args)
             .map_err(|error| ServiceError::failed(None, error.to_string()))?;
         let status = match input.status.as_str() {
@@ -1031,14 +1025,13 @@ impl SessionState {
     }
 
     async fn list_agents(&self, requested: Vec<String>) -> Result<String, ServiceError> {
-        let agents = match self.services.agents(&self.caller, AgentsOp::List).await? {
-            AgentsReply::Listed(agents) => agents,
-            _ => {
-                return Err(ServiceError::failed(
-                    None,
-                    "agents service returned an unexpected reply",
-                ));
-            }
+        let AgentsReply::Listed(agents) =
+            self.services.agents(&self.caller, AgentsOp::List).await?
+        else {
+            return Err(ServiceError::failed(
+                None,
+                "agents service returned an unexpected reply",
+            ));
         };
         let filtered = agents.iter().filter(|agent| {
             requested.is_empty() || requested.iter().any(|id| id == &agent.id.to_string())
@@ -1134,20 +1127,17 @@ impl SessionState {
                     tools: Some(tool_names.into_boxed_slice()),
                     workspace: None,
                 };
-                let child = match self
+                let AgentsReply::Started { id: child } = self
                     .services
                     .agents(&self.caller, AgentsOp::Start(start))
                     .await?
-                {
-                    AgentsReply::Started { id } => id,
-                    _ => {
-                        return Err(ServiceError::failed(
-                            None,
-                            "agents service did not start the child",
-                        ));
-                    }
+                else {
+                    return Err(ServiceError::failed(
+                        None,
+                        "agents service did not start the child",
+                    ));
                 };
-                let report = match self
+                let AgentsReply::Await { report } = self
                     .services
                     .agents(
                         &self.caller,
@@ -1157,14 +1147,11 @@ impl SessionState {
                         },
                     )
                     .await?
-                {
-                    AgentsReply::Await { report } => report,
-                    _ => {
-                        return Err(ServiceError::failed(
-                            None,
-                            "agents service did not return the child report",
-                        ));
-                    }
+                else {
+                    return Err(ServiceError::failed(
+                        None,
+                        "agents service did not return the child report",
+                    ));
                 };
                 if item.is_none() {
                     task_report = Some(report.text.clone());
@@ -1449,7 +1436,14 @@ impl StatusPoll for Status {
     }
 }
 
-fn stop_kind(stop: &dal_core::Stop) -> StopKind {
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReportArgs {
+    status: String,
+    report: String,
+}
+
+fn stop_kind(stop: dal_core::Stop) -> StopKind {
     match stop {
         dal_core::Stop::EndTurn => StopKind::Completed,
         dal_core::Stop::Length | dal_core::Stop::MaxSteps => StopKind::Length,

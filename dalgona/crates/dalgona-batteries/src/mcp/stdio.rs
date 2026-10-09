@@ -111,9 +111,7 @@ impl StdioTransport {
         wrapped.wrap(process_wrap::tokio::JobObject);
 
         let mut spawn_task = tokio::task::spawn_blocking(move || wrapped.spawn());
-        let spawn_result = if let Ok(result) = timeout(budgets.start, &mut spawn_task).await {
-            result
-        } else {
+        let Ok(spawn_result) = timeout(budgets.start, &mut spawn_task).await else {
             if let Ok(Ok(mut child)) = spawn_task.await {
                 let _ = child.start_kill();
                 let _ = child.wait().await;

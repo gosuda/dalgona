@@ -154,6 +154,14 @@ impl FakeServices {
 }
 
 impl Services for FakeServices {
+    fn state(
+        &self,
+        _who: &Caller,
+        _op: dal_core::StateOp,
+    ) -> ServiceFuture<'_, Result<dal_core::StateRecord, dal_core::StateError>> {
+        unavailable(&self.side_calls)
+    }
+
     fn fs_read(&self, _who: &Caller, _path: &str) -> ServiceFuture<'_, Option<Vec<u8>>> {
         unavailable(&self.side_calls)
     }
