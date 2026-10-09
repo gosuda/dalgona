@@ -135,7 +135,7 @@ fn bounded<T: TryFrom<i64>>(
     let number = value
         .as_integer()
         .filter(|number| (min..=max).contains(number))
-        .ok_or_else(&failure)?;
+        .ok_or_else(failure)?;
     T::try_from(number).map_err(|_| failure()).map(Some)
 }
 

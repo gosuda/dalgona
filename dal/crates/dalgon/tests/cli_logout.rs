@@ -36,7 +36,7 @@ fn logout_keeps_other_auth_and_suppresses_unrelated_warning() -> Result<(), Box<
 
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(output.stdout, b"Removed credentials for openai.\n");
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, [] as [u8; 0]);
     let auth = std::fs::read_to_string(fixture.auth_file())?;
     assert!(auth.contains("secret-anthropic-token"));
     assert!(!auth.contains("secret-openai-token"));
@@ -62,7 +62,7 @@ fn logout_without_provider_removes_every_credential() -> Result<(), Box<dyn Erro
 
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(output.stdout, b"Removed all credentials.\n");
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, [] as [u8; 0]);
     assert!(!fixture.auth_file().exists());
     Ok(())
 }
@@ -76,14 +76,14 @@ fn logout_removes_the_last_credential_and_auth_file() -> Result<(), Box<dyn Erro
 
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(output.stdout, b"Removed credentials for anthropic.\n");
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, [] as [u8; 0]);
     assert!(!String::from_utf8_lossy(&output.stdout).contains("secret-logout-token"));
     assert!(!String::from_utf8_lossy(&output.stderr).contains("secret-logout-token"));
     assert!(!fixture.auth_file().exists());
     let repeated = fixture.output(&["logout", "anthropic"])?;
     assert_eq!(repeated.status.code(), Some(0));
     assert_eq!(repeated.stdout, b"No stored credentials.\n");
-    assert!(repeated.stderr.is_empty());
+    assert_eq!(repeated.stderr, [] as [u8; 0]);
     assert!(!fixture.auth_file().exists());
     Ok(())
 }

@@ -167,7 +167,6 @@ impl SchemeCx<'_> {
     /// Returns `Ok(None)` for a missing blob so the resolver can map the
     /// absence to its own product text; store failures arrive as
     /// [`SchemeError`].
-    #[must_use]
     pub fn blob_get<'b>(
         &'b self,
         id: &'b BlobId,

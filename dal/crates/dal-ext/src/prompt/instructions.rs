@@ -332,7 +332,7 @@ mod tests {
         let mut reader = MemoryReader::default();
         reader.insert(agents(&root), b"valid\xFFinvalid".to_vec());
 
-        assert!(collect(&reader, &root, &root).is_empty());
+        assert_eq!(collect(&reader, &root, &root), []);
     }
 
     #[test]
@@ -343,7 +343,7 @@ mod tests {
         let mut reader = MemoryReader::default();
         reader.insert(agents(&root), bytes);
 
-        assert!(collect(&reader, &root, &root).is_empty());
+        assert_eq!(collect(&reader, &root, &root), []);
     }
 
     #[test]

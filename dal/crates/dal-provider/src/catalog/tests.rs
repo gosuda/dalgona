@@ -406,7 +406,7 @@ fn anthropic_effort_rows_keep_only_reported_supported_levels() {
     let ThinkingSupport::Adaptive { accepted, .. } = &page.rows[1].thinking else {
         panic!("second row should remain known adaptive");
     };
-    assert!(accepted.is_empty());
+    assert_eq!(accepted.as_slice(), []);
 }
 
 #[tokio::test]

@@ -895,7 +895,7 @@ fn branch_copies_path_and_labels() -> Result<(), Box<dyn std::error::Error>> {
         .filter_map(|record| record.entry().map(|entry| entry.id.get()))
         .collect();
     assert_eq!(ids, vec![1, 2, 3]);
-    assert!(cloned.anchor_parts.is_empty());
+    assert_eq!(cloned.anchor_parts, []);
     assert!(matches!(
         branch(&[], None, BranchMode::Clone, &header),
         Err(BranchError::NoEntries)

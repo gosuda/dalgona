@@ -1124,6 +1124,6 @@ mod tests {
                 ..
             }) if matches!(parts.first(), Some(JournalPart::Text { .. }))
         ));
-        assert!(named_blobs(&record).is_empty());
+        assert_eq!(named_blobs(&record), [] as [dal_core::BlobId; 0]);
     }
 }

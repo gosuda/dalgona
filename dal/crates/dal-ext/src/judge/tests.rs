@@ -517,7 +517,7 @@ async fn empty_batch() -> TestResult {
         Vec::new()
     );
     assert_eq!(services.completions(), 0);
-    assert!(services.rows().is_empty());
+    assert_eq!(services.rows(), []);
     Ok(())
 }
 
@@ -592,7 +592,7 @@ async fn zero_judge_requests() -> TestResult {
         .expect_err("off gate never judges");
     assert!(matches!(error, JudgeError::Unavailable));
     assert_eq!(services.completions(), 0);
-    assert!(services.rows().is_empty());
+    assert_eq!(services.rows(), []);
     Ok(())
 }
 
@@ -635,7 +635,7 @@ async fn auto_resolution() -> TestResult {
             .await,
         Err(JudgeError::Unavailable)
     ));
-    assert!(off.notices().is_empty());
+    assert_eq!(off.notices(), [] as [String; 0]);
 
     let ready = Arc::new(FakeServices::new(
         vec![ready_probe("judge-model")],
@@ -649,7 +649,7 @@ async fn auto_resolution() -> TestResult {
             .await?,
         Verdict::Bool(true)
     );
-    assert!(ready.notices().is_empty());
+    assert_eq!(ready.notices(), [] as [String; 0]);
     Ok(())
 }
 
@@ -689,7 +689,7 @@ async fn budget_exhausted_call() -> TestResult {
         JudgeError::BudgetExhausted { max_per_turn: 2 }
     ));
     assert_eq!(services.row_statuses(), ["ok", "ok", "budget"]);
-    assert!(services.notices().is_empty());
+    assert_eq!(services.notices(), [] as [String; 0]);
     assert_eq!(services.completions(), 2);
     Ok(())
 }
@@ -869,7 +869,7 @@ async fn shared_cap() -> TestResult {
         .expect_err("oversize shared context is rejected");
     assert!(matches!(error, JudgeError::SharedTooLarge { len: 16385 }));
     assert_eq!(services.completions(), 0);
-    assert!(services.rows().is_empty());
+    assert_eq!(services.rows(), []);
     Ok(())
 }
 
@@ -996,7 +996,7 @@ async fn construction_validation() -> TestResult {
         .expect_err("33 questions exceed the batch cap");
     assert!(matches!(error, JudgeError::InvalidQuestion { .. }));
     assert_eq!(services.completions(), 0);
-    assert!(services.rows().is_empty());
+    assert_eq!(services.rows(), []);
     Ok(())
 }
 
@@ -1017,7 +1017,7 @@ async fn provider_error() -> TestResult {
     assert!(matches!(error, JudgeError::Provider { .. }));
     assert!(error.to_string().contains("boom downstream"));
     assert_eq!(services.row_statuses(), ["provider"]);
-    assert!(services.notices().is_empty());
+    assert_eq!(services.notices(), [] as [String; 0]);
     Ok(())
 }
 

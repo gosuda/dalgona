@@ -41,7 +41,7 @@ fn reasons(text: &str) -> Vec<String> {
 fn parser_happy_path() {
     let text = "---\ndescription: Stops a patch that adds a bare TODO marker.\ncondition: [\"a,b\", \"c\\\\d\"]\nscope: tool:patch\ninterruptMode: tool-only\nrepeatMode: after-gap\nrepeatGap: 1\nreport: true\n---\n\nTOOL CALL BLOCKED BEFORE EXECUTION.\n\n";
     let (front, body, errs) = split(text);
-    assert!(errs.is_empty());
+    assert_eq!(errs, []);
     let keys: Vec<&str> = front.entries().iter().map(|e| e.key.as_str()).collect();
     assert_eq!(
         keys,
@@ -82,7 +82,7 @@ fn parser_errors() {
         ["line 1: the front matter is longer than 200 lines"]
     );
     let fits = format!("---\n{}---\nx", "# c\n".repeat(200));
-    assert!(errors(&fits).is_empty());
+    assert_eq!(errors(&fits), [] as [String; 0]);
     assert_eq!(
         errors("---\nx: \"ab\n---\nx"),
         ["unterminated quoted string"]
@@ -170,7 +170,7 @@ fn quoted_escapes_are_exact() {
     assert_eq!(errors("---\nx: \"a\\\"\n---\nb"), [UNTERMINATED_QUOTE]);
     assert_eq!(errors("---\nx: 'a'b\n---\nb"), [TEXT_AFTER_QUOTE]);
     assert_eq!(errors("---\nx: \"a\"#b\n---\nb"), [TEXT_AFTER_QUOTE]);
-    assert!(errors("---\nx: \"a\"  # b\n---\nb").is_empty());
+    assert_eq!(errors("---\nx: \"a\"  # b\n---\nb"), [] as [String; 0]);
 }
 
 #[test]
@@ -232,7 +232,7 @@ fn duplicate_keys_are_normalized() {
     );
     assert!(front.get("x").is_none());
     let (front, _, errs) = split("---\nx:\n  - \n  - b\n---\nb");
-    assert!(fails_errs(&errs).is_empty());
+    assert_eq!(fails_errs(&errs), [] as [String; 0]);
     assert_eq!(
         front.get("x").map(|e| &e.value),
         Some(&Value::List(vec!["b".to_owned()]))
@@ -354,7 +354,7 @@ fn valid_rule_fields_and_defaults() {
     let text = "---\ndescription: d\ncondition: '\\bTODO\\b'\nrepeat-mode: after-gap\nrepeatGap: 3\ninterrupt-mode: tool-only\nreport: true\n---\nBody\n";
     let (rule, notes) =
         parse_rulefile("guard.todo", origin(), text.as_bytes()).unwrap_or_else(|p| panic!("{p:?}"));
-    assert!(notes.is_empty());
+    assert_eq!(notes, []);
     assert_eq!(rule.name.as_str(), "guard.todo");
     assert_eq!(rule.origin, origin());
     assert_eq!(rule.description.as_deref(), Some("d"));

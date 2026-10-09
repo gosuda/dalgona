@@ -259,13 +259,18 @@ impl ScriptHost for RecordingHost {
 }
 
 fn allocate_id(counter: &AtomicU64, what: &'static str) -> Result<NonZeroU64, HostTerminal> {
-    counter
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-            value.checked_add(1)
-        })
-        .ok()
-        .and_then(NonZeroU64::new)
-        .ok_or(HostTerminal::LimitExceeded { what })
+    let mut current = counter.load(Ordering::Relaxed);
+    loop {
+        let Some(next) = current.checked_add(1) else {
+            return Err(HostTerminal::LimitExceeded { what });
+        };
+        match counter.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(previous) => {
+                return NonZeroU64::new(previous).ok_or(HostTerminal::LimitExceeded { what });
+            }
+            Err(actual) => current = actual,
+        }
+    }
 }
 
 pub(crate) fn failed(op: OpId, code: FailureCode, message: &str) -> OpOutcome {

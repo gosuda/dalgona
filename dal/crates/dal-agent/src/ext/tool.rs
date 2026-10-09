@@ -604,7 +604,6 @@ impl ToolCx<'_> {
     }
 
     /// Resolves one `scheme://` URI to its page text.
-    #[must_use]
     pub fn resolve(&self, uri: &str) -> BoxFuture<'_, Result<Doc, ToolError>> {
         self.rt.resolve(
             uri,

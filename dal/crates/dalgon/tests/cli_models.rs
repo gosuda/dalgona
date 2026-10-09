@@ -71,7 +71,7 @@ fn json_models_fetches_from_loopback_and_filters_catalog() -> Result<(), Box<dyn
         output.stdout,
         b"[{\"provider\":\"openai\",\"id\":\"local-test\",\"context\":null}]\n"
     );
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, [] as [u8; 0]);
     assert!(!String::from_utf8_lossy(&output.stdout).contains("secret-model-token"));
     assert!(!String::from_utf8_lossy(&output.stderr).contains("secret-model-token"));
     Ok(())
@@ -125,7 +125,7 @@ fn insecure_auth_permissions_keep_the_auth_repair_diagnostic() -> Result<(), Box
     let output = fixture.output(&["models"])?;
 
     assert_eq!(output.status.code(), Some(1));
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, [] as [u8; 0]);
     assert_eq!(
         output.stderr,
         format!(

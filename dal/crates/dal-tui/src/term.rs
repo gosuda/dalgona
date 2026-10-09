@@ -495,7 +495,7 @@ mod tests {
             b"\x1b[?2026;1$y\x1b[?2027;1$y\x1b[?1u\x1b]11;rgb:0000/0000/0000\x07\x1b[?1;2c",
         );
         assert!(probe.sync_update, "{probe:?}");
-        assert!(replay.is_empty());
+        assert_eq!(replay.len(), 0);
     }
 
     #[test]

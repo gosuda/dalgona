@@ -241,7 +241,10 @@ fn context_table_evicts_oldest_idle_context() {
     let mut table = A2aState::new();
     let sessions: Vec<SessionId> = (0..MAX_CONTEXTS).map(|_| SessionId::new_v7()).collect();
     for session in &sessions {
-        assert!(table.remember_context(*session).is_empty());
+        assert_eq!(
+            table.remember_context(*session),
+            [] as [dal_core::SessionId; 0]
+        );
     }
     let busy = TaskKey {
         session: sessions[0],
@@ -256,7 +259,10 @@ fn context_table_evicts_oldest_idle_context() {
     assert!(table.has_context(sessions[0]));
     assert!(!table.has_context(sessions[1]));
     assert!(table.has_context(fresh));
-    assert!(table.remember_context(fresh).is_empty());
+    assert_eq!(
+        table.remember_context(fresh),
+        [] as [dal_core::SessionId; 0]
+    );
 }
 
 #[test]

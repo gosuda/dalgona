@@ -61,7 +61,7 @@ fn rules_defaults_and_layer_precedence() {
         Some("[rules]\ndisabled = []"),
     )
     .unwrap();
-    assert!(replaced.rules().disabled.is_empty());
+    assert_eq!(replaced.rules().disabled, []);
     assert_eq!(replaced.rules().repeat_gap, 5);
 
     let top_level_judge = load(ConfigProduct::Dalgon, "[judge]\ngate = \"off\"").unwrap();

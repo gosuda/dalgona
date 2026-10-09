@@ -19,7 +19,7 @@ fn piped_api_key_is_stored_privately_without_echo() -> Result<(), Box<dyn Error>
         output.stdout,
         b"Saved Anthropic credentials. Run dal to pick a model.\n"
     );
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, [] as [u8; 0]);
     assert!(!String::from_utf8_lossy(&output.stdout).contains("secret-login-token"));
     assert!(!String::from_utf8_lossy(&output.stderr).contains("secret-login-token"));
     let saved = fs::read_to_string(fixture.auth_file())?;
@@ -38,7 +38,7 @@ fn piped_api_key_is_stored_privately_without_echo() -> Result<(), Box<dyn Error>
         status.stdout,
         b"anthropic     ready          api_key\nopenai        not configured\nopenai-codex  not configured\n"
     );
-    assert!(status.stderr.is_empty());
+    assert_eq!(status.stderr, [] as [u8; 0]);
     Ok(())
 }
 
@@ -66,7 +66,7 @@ fn headless_codex_login_uses_login_needs_terminal_error() -> Result<(), Box<dyn 
     let output = fixture.output(&["login", "openai-codex"])?;
 
     assert_eq!(output.status.code(), Some(1));
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, [] as [u8; 0]);
     assert_eq!(
         output.stderr,
         b"dalgon: login needs a terminal: no prompt can be shown\nRun it interactively, or pipe the key: printf %s \"$KEY\" | dalgon login anthropic --api-key\n"
@@ -88,7 +88,7 @@ fn status_reports_oauth_expiry_without_exposing_tokens() -> Result<(), Box<dyn E
         output.stdout,
         b"anthropic     not configured\nopenai        not configured\nopenai-codex  ready          oauth, expires 2026-09-26\n"
     );
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, [] as [u8; 0]);
     assert!(!String::from_utf8_lossy(&output.stdout).contains("secret"));
     assert!(!String::from_utf8_lossy(&output.stderr).contains("secret"));
     Ok(())

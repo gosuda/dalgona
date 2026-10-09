@@ -13,5 +13,5 @@ fn sandbox_writable_reads_through_toml_layer() {
         [Box::<str>::from("/srv/data"), Box::<str>::from("~/extra")].as_slice(),
     );
     let empty = load(ConfigProduct::Dalgona, "").expect("empty config loads");
-    assert!(empty.sandbox_writable().is_empty());
+    assert_eq!(empty.sandbox_writable(), []);
 }
