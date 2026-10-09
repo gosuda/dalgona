@@ -869,7 +869,7 @@ dependencies = [
 name = "dal-agent"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "blake3",
  "dal-core",
  "dal-provider",
@@ -933,7 +933,7 @@ dependencies = [
 name = "dal-provider"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "dal-core",
  "dal-store",
  "futures",
@@ -1035,7 +1035,7 @@ dependencies = [
 name = "dal-tui"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "blake3",
  "crossterm",
  "dal-agent",
@@ -1066,7 +1066,7 @@ dependencies = [
 name = "dal-wire"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "blake3",
  "bytes",
  "dal-agent",

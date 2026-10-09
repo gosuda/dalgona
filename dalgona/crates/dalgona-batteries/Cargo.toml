@@ -10,7 +10,7 @@ repository.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
-base64 = "=0.22.1"
+base64 = "=0.23.1"
 blake3.workspace = true
 dal-agent = "=0.1.0"
 dal-core = "=0.1.0"
