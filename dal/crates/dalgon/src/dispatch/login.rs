@@ -6,8 +6,8 @@ use std::{
 };
 
 use dal_provider::{
-    AuthStore, Credential, LoginIo, LoginProgress, LoginSite, Method, OAuthCredential,
-    ProviderError,
+    AuthStore, Credential, LoginIo, LoginProgress, LoginSite, Method, OAuthCredential, ProviderDef,
+    ProviderError, find,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -15,7 +15,9 @@ use crate::{Startup, cli, edge, exit, two_lines};
 
 /// The provider ids dal signs in to, in display order.
 pub(super) fn provider_ids() -> impl Iterator<Item = &'static str> {
-    dal_provider::login_providers().iter().map(|(id, _)| *id)
+    dal_provider::login_providers()
+        .into_iter()
+        .map(|def| def.id)
 }
 
 pub(super) fn is_login_provider(provider: &str) -> bool {
@@ -42,11 +44,20 @@ pub(crate) async fn run(args: cli::LoginArgs, startup: Startup) -> ExitCode {
     if args.command.is_some() {
         return status(&startup.data_root, &startup.vars);
     }
-    if args.device_auth && args.provider.as_deref() != Some("openai-codex") {
+    if args.device_auth
+        && !args
+            .provider
+            .as_deref()
+            .and_then(find)
+            .is_some_and(|def| def.offers(Method::Device))
+    {
+        let ids: Vec<&str> = device_providers().map(|def| def.id).collect();
         return two_lines(
             [
-                crate::cli::texts::DEVICE_AUTH_PROVIDER.into(),
-                crate::cli::texts::DEVICE_AUTH_PROVIDER_HINT.into(),
+                crate::cli::texts::device_auth_provider(&ids),
+                crate::cli::texts::device_auth_provider_hint(
+                    ids.first().copied().unwrap_or_default(),
+                ),
             ],
             exit::ExitKind::RequestedFailure,
         );
@@ -54,36 +65,60 @@ pub(crate) async fn run(args: cli::LoginArgs, startup: Startup) -> ExitCode {
     let Some(provider) = args.provider.as_deref() else {
         return choose_provider(startup, args.api_key).await;
     };
-    if !is_login_provider(provider) {
+    let Some(def) = find(provider).filter(|def| is_login_provider(def.id)) else {
+        return unknown_provider(provider);
+    };
+    if args.api_key {
+        return login_api_key_flag(startup, def).await;
+    }
+    login_default(startup, def, args.device_auth).await
+}
+
+pub(super) fn unknown_provider(provider: &str) -> ExitCode {
+    let ids: Vec<&str> = provider_ids().collect();
+    two_lines(
+        [
+            format!("dalgon: unknown provider \"{provider}\""),
+            crate::cli::texts::login_provider_hint(&ids),
+        ],
+        exit::ExitKind::Usage,
+    )
+}
+
+/// The providers with a device sign-in.
+fn device_providers() -> impl Iterator<Item = &'static ProviderDef> {
+    dal_provider::login_providers()
+        .into_iter()
+        .filter(|def| def.offers(Method::Device))
+}
+
+/// `--api-key`: read a piped key, for a provider that takes one.
+async fn login_api_key_flag(startup: Startup, def: &'static ProviderDef) -> ExitCode {
+    if !def.offers(Method::ApiKey) {
         return two_lines(
             [
-                format!("dalgon: unknown provider \"{provider}\""),
-                crate::cli::texts::LOGIN_PROVIDER_HINT.into(),
+                crate::cli::texts::CODEX_API_KEY_UNSUPPORTED.into(),
+                crate::cli::texts::CODEX_API_KEY_UNSUPPORTED_HINT.into(),
             ],
-            exit::ExitKind::Usage,
+            exit::ExitKind::RequestedFailure,
         );
     }
-    if args.api_key {
-        if provider == "openai-codex" {
-            return two_lines(
-                [
-                    crate::cli::texts::CODEX_API_KEY_UNSUPPORTED.into(),
-                    crate::cli::texts::CODEX_API_KEY_UNSUPPORTED_HINT.into(),
-                ],
-                exit::ExitKind::RequestedFailure,
-            );
-        }
-        return login_api_key(startup, provider).await;
+    login_api_key(startup, def).await
+}
+
+/// No flag: the device flow when asked, else the browser when the provider
+/// offers it, else a prompted key.
+async fn login_default(startup: Startup, def: &'static ProviderDef, device_auth: bool) -> ExitCode {
+    if device_auth {
+        return login_oauth(startup, def, Method::Device).await;
     }
-    match provider {
-        "openai" => login_openai_key(startup, provider).await,
-        "openai-codex" if args.device_auth => login_oauth(startup, provider, Method::Device).await,
-        "anthropic" | "openai-codex" if edge::terminal_snapshot().stdin_tty => {
-            login_oauth(startup, provider, Method::Browser).await
+    if def.offers(Method::Browser) {
+        if !edge::terminal_snapshot().stdin_tty {
+            return no_terminal();
         }
-        "openai-codex" | "anthropic" => no_terminal(),
-        _ => exit::code(exit::ExitKind::Usage),
+        return login_oauth(startup, def, Method::Browser).await;
     }
+    login_prompted_key(startup, def).await
 }
 
 async fn choose_provider(startup: Startup, api_key: bool) -> ExitCode {
@@ -121,35 +156,16 @@ async fn choose_provider(startup: Startup, api_key: bool) -> ExitCode {
         .and_then(|number| number.checked_sub(1))
         .and_then(|index| provider_ids().nth(index))
         .or_else(|| provider_ids().find(|id| *id == selection));
-    let Some(provider) = chosen else {
-        return two_lines(
-            [
-                format!("dalgon: unknown provider \"{selection}\""),
-                crate::cli::texts::LOGIN_PROVIDER_HINT.into(),
-            ],
-            exit::ExitKind::Usage,
-        );
+    let Some(def) = chosen.and_then(find) else {
+        return unknown_provider(selection);
     };
     if api_key {
-        if provider == "openai-codex" {
-            return two_lines(
-                [
-                    crate::cli::texts::CODEX_API_KEY_UNSUPPORTED.into(),
-                    crate::cli::texts::CODEX_API_KEY_UNSUPPORTED_HINT.into(),
-                ],
-                exit::ExitKind::RequestedFailure,
-            );
-        }
-        return login_api_key(startup, provider).await;
+        return login_api_key_flag(startup, def).await;
     }
-    if provider == "openai" {
-        login_openai_key(startup, provider).await
-    } else {
-        login_oauth(startup, provider, Method::Browser).await
-    }
+    login_default(startup, def, false).await
 }
 
-async fn login_api_key(startup: Startup, provider: &str) -> ExitCode {
+async fn login_api_key(startup: Startup, def: &'static ProviderDef) -> ExitCode {
     if edge::terminal_snapshot().stdin_tty {
         return no_terminal();
     }
@@ -174,14 +190,14 @@ async fn login_api_key(startup: Startup, provider: &str) -> ExitCode {
             );
         }
     };
-    store_api_key(startup, provider, key).await
+    store_api_key(startup, def, key).await
 }
 
-async fn login_openai_key(startup: Startup, provider: &str) -> ExitCode {
+async fn login_prompted_key(startup: Startup, def: &'static ProviderDef) -> ExitCode {
     if !edge::terminal_snapshot().stdin_tty {
         return no_terminal();
     }
-    let key = match prompt_for_key(provider).await {
+    let key = match prompt_for_key(def.id).await {
         Ok(key) if !key.is_empty() => key,
         Ok(_) => {
             return two_lines(
@@ -202,18 +218,14 @@ async fn login_openai_key(startup: Startup, provider: &str) -> ExitCode {
             );
         }
     };
-    store_api_key(startup, provider, key).await
+    store_api_key(startup, def, key).await
 }
 
-async fn store_api_key(startup: Startup, provider: &str, key: String) -> ExitCode {
+async fn store_api_key(startup: Startup, def: &'static ProviderDef, key: String) -> ExitCode {
     let path = startup.data_root.join("auth.json");
-    match dal_provider::store_api_key(&path, provider, key).await {
+    match dal_provider::store_api_key(&path, def.id, key).await {
         Ok(()) => {
-            let message = match provider {
-                "anthropic" => crate::cli::texts::SAVED_ANTHROPIC,
-                "openai" => crate::cli::texts::SAVED_OPENAI,
-                _ => crate::cli::texts::SAVED_PROVIDER,
-            };
+            let message = crate::cli::texts::saved_api_key(def.name);
             let _ = writeln!(std::io::stdout().lock(), "{message}");
             exit::code(exit::ExitKind::Success)
         }
@@ -221,7 +233,7 @@ async fn store_api_key(startup: Startup, provider: &str, key: String) -> ExitCod
     }
 }
 
-async fn login_oauth(startup: Startup, provider: &str, method: Method) -> ExitCode {
+async fn login_oauth(startup: Startup, def: &'static ProviderDef, method: Method) -> ExitCode {
     let auth_path = startup.data_root.join("auth.json");
     let site = match login_site(&startup) {
         Ok(site) => site,
@@ -232,13 +244,13 @@ async fn login_oauth(startup: Startup, provider: &str, method: Method) -> ExitCo
     let (io, events) = LoginIo::channel(Some(paste_receiver), cancel.clone());
     let outcome = super::drive(
         &cancel,
-        run_with_paste(provider, method, io, events, paste, &site),
+        run_with_paste(def.id, method, io, events, paste, &site),
     )
     .await;
     match outcome {
         Err(signal) => exit::code(exit::ExitKind::Signal(signal)),
         Ok(Ok(credential)) => {
-            let message = success_message(provider, &credential);
+            let message = success_message(def, &credential);
             let _ = writeln!(std::io::stdout().lock(), "{message}");
             exit::code(exit::ExitKind::Success)
         }
@@ -403,19 +415,13 @@ fn login_progress(progress: LoginProgress) {
     }
 }
 
-fn success_message(provider: &str, credential: &Credential) -> String {
-    match (provider, credential) {
-        (
-            "openai-codex",
-            Credential::OAuth(OAuthCredential {
-                account_id: Some(account),
-                ..
-            }),
-        ) => {
-            format!("Signed in with ChatGPT. Account {account}.")
-        }
-        ("anthropic", Credential::OAuth(_)) => crate::cli::texts::SAVED_CLAUDE.into(),
-        ("openai-codex", _) => crate::cli::texts::SAVED_CODEX.into(),
+fn success_message(def: &ProviderDef, credential: &Credential) -> String {
+    match credential {
+        Credential::OAuth(OAuthCredential {
+            account_id: Some(account),
+            ..
+        }) => format!("Signed in with ChatGPT. Account {account}."),
+        Credential::OAuth(_) => crate::cli::texts::signed_in(def.name),
         _ => crate::cli::texts::SAVED_PROVIDER.into(),
     }
 }
@@ -429,15 +435,15 @@ fn status(data_root: &Path, vars: &crate::VarsMap) -> ExitCode {
     let mut ready = false;
     let mut first_missing = None;
     let mut output = String::new();
-    for provider in provider_ids() {
+    for def in dal_provider::login_providers() {
+        let provider = def.id;
         let kind = stored_kind(&store, provider);
-        let environment_key = match provider {
-            "anthropic" => Some("ANTHROPIC_API_KEY"),
-            "openai" => Some("OPENAI_API_KEY"),
-            _ => None,
-        }
-        .and_then(|name| vars.get(std::ffi::OsStr::new(name)))
-        .is_some_and(|key| !key.is_empty());
+        let environment_key = def.key.is_some_and(|key| {
+            key.env.iter().any(|name| {
+                vars.get(std::ffi::OsStr::new(name))
+                    .is_some_and(|value| !value.is_empty())
+            })
+        });
         if let Some(kind) = kind {
             ready = true;
             let _ = std::fmt::Write::write_fmt(

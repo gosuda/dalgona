@@ -36,7 +36,7 @@ pub mod login {
     pub use crate::host::LoginOutcome;
     pub use dal_provider::{
         CredentialKind, LoginIo, LoginProgress, Method, PASTE_HINT, PROGRESS_CAPACITY,
-        SecretString, StoredCredential, login_providers,
+        SecretString, StoredCredential, find as find_provider, login_providers,
     };
     /// The token that cancels a [`LoginIo`].
     pub use tokio_util::sync::CancellationToken;

@@ -9,13 +9,7 @@ pub(crate) async fn run(args: cli::ProviderArgs, startup: Startup) -> ExitCode {
     if let Some(provider) = args.provider.as_deref()
         && !super::login::is_login_provider(provider)
     {
-        return two_lines(
-            [
-                format!("dalgon: unknown provider \"{provider}\""),
-                crate::cli::texts::LOGIN_PROVIDER_HINT.into(),
-            ],
-            exit::ExitKind::Usage,
-        );
+        return super::login::unknown_provider(provider);
     }
     let all = args.provider.is_none();
     let path = startup.data_root.join("auth.json");

@@ -7,13 +7,13 @@
 use std::fmt::Write as _;
 
 use dal_agent::ext::command::{CommandCx, SaveError};
-use dal_agent::login::login_providers;
+use dal_agent::login::{find_provider, login_providers};
 use dal_core::command::{Chooser, Command, ErrorTriple, FrontAction, Output, Reply};
 use dal_core::{Family, Mode, ModelRoute, ThinkingLevel};
 
 /// The provider ids dal signs in to, from the provider layer.
 fn providers() -> Vec<&'static str> {
-    login_providers().iter().map(|(id, _)| *id).collect()
+    login_providers().iter().map(|def| def.id).collect()
 }
 
 /// The provider ids as prose: `a, b, and c`.
@@ -270,12 +270,7 @@ pub(super) enum ModelResolution {
 
 /// Maps a provider id to the API family its models route through.
 fn provider_family(provider: &str) -> Family {
-    match provider {
-        "anthropic" => Family::Anthropic,
-        "openai-codex" => Family::Codex,
-        "openai" => Family::Responses,
-        _ => Family::Chat,
-    }
+    find_provider(provider).map_or(Family::Chat, |def| def.family)
 }
 
 /// Resolves a `/model` argument against cached `(provider, id)` rows.

@@ -14,10 +14,11 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     auth::{
         credential::{Credential, OAuthCredential},
-        refresh::{OAuthProvider, RefreshReason, Refresher},
+        refresh::{RefreshReason, Refresher},
     },
     error::{ProviderError, UsageCheckReason},
     family,
+    provider::{ProviderDef, ProviderEntry},
     stream::{EventStream, StreamEvent},
 };
 
@@ -281,39 +282,35 @@ pub(crate) fn hold_permit(stream: EventStream, permit: OwnedSemaphorePermit) -> 
 
 pub(crate) async fn refresh_expiring(
     refresher: &Refresher,
-    provider: &str,
-    family: Family,
+    entry: &ProviderEntry,
     credential: &Credential,
     cancel: &CancellationToken,
 ) -> Result<Credential, ProviderError> {
     let Credential::OAuth(held) = credential else {
         return Ok(credential.clone());
     };
-    let Some(provider_kind) = OAuthProvider::from_id(provider) else {
+    let Some(def) = entry.def.filter(|def| def.oauth.is_some()) else {
         return Ok(credential.clone());
     };
     tokio::select! {
         biased;
         () = cancel.cancelled() => Err(ProviderError::Transport {
-            family,
+            family: entry.family,
             reason: String::from("provider request cancelled while refreshing credentials"),
         }),
-        credential = refresher.refresh(provider_kind, held, RefreshReason::Expiring) => credential,
+        credential = refresher.refresh(def, held, RefreshReason::Expiring) => credential,
     }
 }
 pub(crate) async fn refresh_credential(
     refresher: Arc<Refresher>,
     provider: Box<str>,
+    def: Option<&'static ProviderDef>,
     held: OAuthCredential,
 ) -> Result<Credential, ProviderError> {
-    {
-        let Some(provider_kind) = OAuthProvider::from_id(&provider) else {
-            return Err(ProviderError::SignInExpired {
-                provider: provider.to_string(),
-            });
-        };
-        refresher
-            .refresh(provider_kind, &held, RefreshReason::Rejected)
-            .await
-    }
+    let Some(def) = def.filter(|def| def.oauth.is_some()) else {
+        return Err(ProviderError::SignInExpired {
+            provider: provider.to_string(),
+        });
+    };
+    refresher.refresh(def, &held, RefreshReason::Rejected).await
 }

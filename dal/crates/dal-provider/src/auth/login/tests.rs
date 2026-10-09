@@ -45,12 +45,16 @@ fn api_key_io(key: &str, cancel: CancellationToken) -> LoginIo {
 
 #[test]
 fn the_provider_list_names_the_methods_each_provider_offers() {
+    let listed: Vec<_> = login_providers()
+        .iter()
+        .map(|def| (def.id, def.methods().collect::<Vec<_>>()))
+        .collect();
     assert_eq!(
-        login_providers(),
-        &[
-            ("anthropic", &[Method::ApiKey, Method::Browser][..]),
-            ("openai", &[Method::ApiKey][..]),
-            ("openai-codex", &[Method::Browser, Method::Device][..]),
+        listed,
+        [
+            ("anthropic", vec![Method::ApiKey, Method::Browser]),
+            ("openai", vec![Method::ApiKey]),
+            ("openai-codex", vec![Method::Browser, Method::Device]),
         ]
     );
 }

@@ -135,6 +135,7 @@ fn entry(
 ) -> ProviderEntry {
     ProviderEntry {
         id: id.into(),
+        def: crate::find(id),
         family,
         base_url: base_url.into(),
         transport,

@@ -9,7 +9,11 @@ use dal_core::{Family, ModelRoute, ThinkingLevel};
 
 use super::compiled_temperature;
 use super::{Catalog, CatalogEntry, CatalogSource, Listing, ResolvedModel, ToolSupport};
-use crate::{error::ResolveError, provider::ProviderEntry, thinking::ThinkingSupport};
+use crate::{
+    error::ResolveError,
+    provider::{OPENAI, PROVIDERS, ProviderEntry},
+    thinking::ThinkingSupport,
+};
 
 /// Resolves a provider alias, qualified reference, harness mode, or bare id.
 ///
@@ -59,8 +63,10 @@ pub fn resolve_route(
     let prefix = match family {
         Family::Chat => "openai-chat",
         Family::Responses => "openai-responses",
-        Family::Codex => "openai-codex",
-        Family::Anthropic => "anthropic",
+        Family::Codex | Family::Anthropic => PROVIDERS
+            .iter()
+            .find(|def| def.family == *family)
+            .map_or("", |def| def.id),
     };
     resolve(catalog, aliases, &format!("{prefix}/{model}")).or(bare)
 }
@@ -96,8 +102,8 @@ fn resolve_expanded(catalog: &Catalog, reference: &str) -> Result<ResolvedModel,
 /// Maps a family-qualified route prefix to the provider that serves it.
 fn family_provider(prefix: &str) -> Option<(&'static str, Family)> {
     match prefix {
-        "openai-responses" => Some(("openai", Family::Responses)),
-        "openai-chat" => Some(("openai", Family::Chat)),
+        "openai-responses" => Some((OPENAI.id, Family::Responses)),
+        "openai-chat" => Some((OPENAI.id, Family::Chat)),
         _ => None,
     }
 }
@@ -239,9 +245,9 @@ pub(crate) fn capability_row<'a>(
             return Some(row);
         }
         if is_openai_family(provider.family)
-            && let Some(row) = rows
-                .iter()
-                .find(|entry| entry.provider.as_ref() == "openai" && entry.id.as_ref() == candidate)
+            && let Some(row) = rows.iter().find(|entry| {
+                entry.provider.as_ref() == OPENAI.id && entry.id.as_ref() == candidate
+            })
         {
             return Some(row);
         }

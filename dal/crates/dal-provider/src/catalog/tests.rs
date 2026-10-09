@@ -23,6 +23,7 @@ use crate::{
 fn provider(id: &str, family: Family, base_url: &str) -> ProviderEntry {
     ProviderEntry {
         id: id.into(),
+        def: crate::find(id),
         family,
         base_url: base_url.into(),
         transport: Transport::Https,

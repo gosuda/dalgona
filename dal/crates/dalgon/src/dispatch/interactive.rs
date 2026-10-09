@@ -317,11 +317,10 @@ fn remote_model_options(
     models
         .into_iter()
         .map(|model| {
-            let reference = match model.provider.as_str() {
-                "openai" | "openai-codex" | "anthropic" => {
-                    format!("{}/{}", model.provider, model.id)
-                }
-                _ => model.id,
+            let reference = if dal_provider::find(&model.provider).is_some() {
+                format!("{}/{}", model.provider, model.id)
+            } else {
+                model.id
             };
             dal_tui::picker::ModelOption {
                 label: format!("{} · {reference}", model.name),

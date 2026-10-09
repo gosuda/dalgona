@@ -50,7 +50,7 @@ pub(crate) async fn auth_status(host: &Host, params: &Value) -> Result<Value, Er
     let stored: Vec<StoredCredential> = host.stored_credentials().await.map_err(host_error)?;
     let mut names: Vec<String> = login_providers()
         .iter()
-        .map(|(id, _)| (*id).to_owned())
+        .map(|def| def.id.to_owned())
         .collect();
     for info in host.models(None).await.map_err(host_error)? {
         let (_, provider) = route_identity(&info.route);
@@ -86,10 +86,10 @@ fn parse_method(word: &str) -> Option<Method> {
 
 /// Checks that `provider` is a sign-in provider and offers `method`.
 fn check_offered(provider: &str, method: Method) -> Result<(), ErrorObject> {
-    let Some((_, methods)) = login_providers().iter().find(|(id, _)| *id == provider) else {
+    let Some(def) = login_providers().into_iter().find(|def| def.id == provider) else {
         return Err(unknown_provider("auth/login", provider));
     };
-    if methods.contains(&method) {
+    if def.offers(method) {
         return Ok(());
     }
     Err(invalid_params(
@@ -280,7 +280,7 @@ async fn run_oauth(
 pub(crate) async fn auth_logout(host: &Host, params: &Value) -> Result<Value, ErrorObject> {
     let provider = opt_string(params, "provider");
     if let Some(provider) = provider.as_deref()
-        && !login_providers().iter().any(|(id, _)| *id == provider)
+        && !login_providers().iter().any(|def| def.id == provider)
     {
         return Err(unknown_provider("auth/logout", provider));
     }

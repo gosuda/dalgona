@@ -171,10 +171,12 @@ impl std::fmt::Debug for SignIn {
 /// The method the terminal signs in with: the browser when the provider
 /// offers it, else a pasted key.
 pub(crate) fn preferred_method(provider: &str) -> Option<Method> {
-    let (_, methods) = login_providers().iter().find(|(id, _)| *id == provider)?;
+    let def = login_providers()
+        .into_iter()
+        .find(|def| def.id == provider)?;
     [Method::Browser, Method::ApiKey]
         .into_iter()
-        .find(|method| methods.contains(method))
+        .find(|method| def.offers(*method))
 }
 
 impl SignIn {
@@ -491,11 +493,11 @@ fn url_chunks(url: &str, width: usize, mode: WidthMode) -> Vec<String> {
 pub(crate) fn login_picker(filter: &str) -> PickerUi {
     let options = login_providers()
         .iter()
-        .map(|(id, _)| PickerOption {
-            label: (*id).to_owned(),
+        .map(|def| PickerOption {
+            label: def.id.to_owned(),
             action: PickerAction::Command(dal_core::Command::Run {
                 name: "login".into(),
-                args: (*id).into(),
+                args: def.id.into(),
                 expected: None,
             }),
         })

@@ -15,9 +15,10 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    AuthStore, Credential, CredentialKind, LoginEndpoints, LoginFlow, LoginProgress, ProviderError,
-    SecretString,
+    AuthStore, Credential, CredentialKind, LoginEndpoints, LoginFlow, LoginProgress, PROVIDERS,
+    ProviderDef, ProviderError, SecretString,
     auth::oauth::{logout_with, store_api_key, unix_now},
+    find,
     http::{LOGIN_WAIT, build_client},
 };
 
@@ -51,18 +52,17 @@ impl fmt::Display for Method {
     }
 }
 
-const LOGIN_PROVIDERS: &[(&str, &[Method])] = &[
-    ("anthropic", &[Method::ApiKey, Method::Browser]),
-    ("openai", &[Method::ApiKey]),
-    ("openai-codex", &[Method::Browser, Method::Device]),
-];
-
-/// The providers dal signs in to, in display order, with the methods each
-/// one offers. Front ends and wires read this list instead of keeping their
-/// own.
+/// The providers dal signs in to, in display order (by id). Each row names the
+/// methods it offers through [`ProviderDef::methods`]. Front ends and wires
+/// read this list instead of keeping their own.
 #[must_use]
-pub fn login_providers() -> &'static [(&'static str, &'static [Method])] {
-    LOGIN_PROVIDERS
+pub fn login_providers() -> Vec<&'static ProviderDef> {
+    let mut rows: Vec<_> = PROVIDERS
+        .iter()
+        .filter(|def| def.methods().next().is_some())
+        .collect();
+    rows.sort_by_key(|def| def.id);
+    rows
 }
 
 /// Capacity of the progress channel [`LoginIo::channel`] builds. A flow
@@ -171,9 +171,7 @@ pub async fn login(
     io: LoginIo,
     site: &LoginSite,
 ) -> Result<Credential, ProviderError> {
-    let offered = LOGIN_PROVIDERS
-        .iter()
-        .any(|(id, methods)| *id == provider && methods.contains(&method));
+    let offered = find(provider).is_some_and(|def| def.offers(method));
     if !offered {
         return Err(ProviderError::LoginInput {
             reason: format!("{provider} does not sign in with {method}."),

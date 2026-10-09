@@ -835,9 +835,9 @@ pub fn complete_args(
             .collect(),
         "login" | "logout" => dal_agent::login::login_providers()
             .iter()
-            .map(|(provider, _)| dal_core::command::Completion {
-                value: (*provider).into(),
-                label: (*provider).into(),
+            .map(|def| dal_core::command::Completion {
+                value: def.id.into(),
+                label: def.id.into(),
                 detail: "provider".into(),
             })
             .collect(),

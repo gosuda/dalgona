@@ -13,13 +13,15 @@ use std::{
 use serde::{Deserialize, Serialize};
 use sonic_rs::JsonValueTrait;
 use tokio::sync::Mutex;
+use url::Url;
 
 use super::{
     PERMANENT_CODES, RETRY_DELAY, blocking,
-    endpoints::{OAuthProvider, RefreshReason, TokenEndpoints},
+    endpoints::{RefreshReason, TokenEndpoints},
     lock_auth_file,
 };
 use crate::{
+    Hook, PROVIDERS, ProviderDef,
     auth::{
         credential::{
             AuthStore, Credential, OAuthCredential, SecretString, codex_identity, oauth_expires_at,
@@ -41,8 +43,7 @@ pub struct Refresher {
     user_agent: Box<str>,
     auth_path: PathBuf,
     endpoints: TokenEndpoints,
-    anthropic: RefreshSlot,
-    openai_codex: RefreshSlot,
+    slots: Vec<(&'static str, RefreshSlot)>,
 }
 
 #[derive(Debug)]
@@ -100,8 +101,11 @@ impl Refresher {
             user_agent: user_agent.into(),
             auth_path: auth_path.into(),
             endpoints,
-            anthropic: RefreshSlot::new(),
-            openai_codex: RefreshSlot::new(),
+            slots: PROVIDERS
+                .iter()
+                .filter(|def| def.oauth.is_some())
+                .map(|def| (def.id, RefreshSlot::new()))
+                .collect(),
         }
     }
 
@@ -151,14 +155,23 @@ impl Refresher {
     ///   HTTP layer, without retry.
     pub async fn refresh(
         &self,
-        provider: OAuthProvider,
+        provider: &'static ProviderDef,
         held: &OAuthCredential,
         reason: RefreshReason,
     ) -> Result<Credential, ProviderError> {
         if reason == RefreshReason::Expiring && !held.expiring(unix_now()) {
             return Ok(Credential::OAuth(held.clone()));
         }
-        let slot = self.slot(provider);
+        let (Some(oauth), Some(url), Some(slot)) = (
+            provider.oauth,
+            self.endpoints.url(provider),
+            self.slot(provider),
+        ) else {
+            return Err(ProviderError::SignInExpired {
+                provider: provider.id.to_owned(),
+            });
+        };
+        let client_id = oauth.client_id;
         let key = slot.key.lock().await;
         let mut in_flight = slot.in_flight.lock().await;
         if in_flight
@@ -176,7 +189,7 @@ impl Refresher {
                 // keep the fresh attempt single-flight.
                 Err(_) => {
                     tracing::debug!(
-                        provider = provider.id(),
+                        provider = provider.id,
                         "the joined refresh had already failed; starting a fresh one"
                     );
                 }
@@ -189,12 +202,12 @@ impl Refresher {
         let file = lock_auth_file(&self.auth_path).await?;
         let path = self.auth_path.clone();
         let mut store = blocking(move || AuthStore::load(path)).await?;
-        let stored = match store.credential(provider.id()) {
+        let stored = match store.credential(provider.id) {
             Some(Credential::OAuth(stored)) => stored,
             Some(other @ Credential::ApiKey { .. }) => return Ok(other),
             Some(Credential::None) | None => {
                 return Err(ProviderError::NoCredentials {
-                    provider: provider.id().to_owned(),
+                    provider: provider.id.to_owned(),
                 });
             }
         };
@@ -205,14 +218,15 @@ impl Refresher {
         }
         let client = (*self.client).clone();
         let user_agent = self.user_agent.clone();
-        let endpoints = self.endpoints.clone();
-        let id = provider.id();
+        let url = url.clone();
+        let id = provider.id;
         #[expect(
             clippy::disallowed_methods,
             reason = "the refresh task is stored in the per-key slot and must persist a rotated token after caller cancellation"
         )]
         let task = tokio::spawn(async move {
-            let fresh = Self::exchange(&client, &user_agent, &endpoints, provider, &stored).await?;
+            let fresh =
+                Self::exchange(&client, &user_agent, &url, provider, client_id, &stored).await?;
             let committed = Credential::OAuth(fresh.clone());
             blocking(move || {
                 // The file lock lives until the request and commit both finish.
@@ -228,11 +242,11 @@ impl Refresher {
         await_refresh(&mut in_flight).await
     }
 
-    const fn slot(&self, provider: OAuthProvider) -> &RefreshSlot {
-        match provider {
-            OAuthProvider::Anthropic => &self.anthropic,
-            OAuthProvider::OpenAiCodex => &self.openai_codex,
-        }
+    fn slot(&self, provider: &ProviderDef) -> Option<&RefreshSlot> {
+        self.slots
+            .iter()
+            .find(|(id, _)| *id == provider.id)
+            .map(|(_, slot)| slot)
     }
 }
 impl Refresher {
@@ -241,36 +255,28 @@ impl Refresher {
     async fn exchange(
         client: &reqwest::Client,
         user_agent: &str,
-        endpoints: &TokenEndpoints,
-        provider: OAuthProvider,
+        url: &Url,
+        provider: &ProviderDef,
+        client_id: &'static str,
         stored: &OAuthCredential,
     ) -> Result<OAuthCredential, ProviderError> {
         let body = sonic_rs::to_vec(&RefreshBody {
             grant_type: "refresh_token",
-            client_id: provider.client_id(),
+            client_id,
             refresh_token: stored.refresh_token.expose(),
         })
         .map_err(|_| ProviderError::Transport {
-            family: provider.family(),
+            family: provider.family,
             reason: String::from("could not encode the token refresh request"),
         })?;
         let mut retried = false;
         loop {
-            match Self::attempt(
-                client,
-                user_agent,
-                endpoints,
-                provider,
-                stored,
-                body.clone(),
-            )
-            .await
-            {
+            match Self::attempt(client, user_agent, url, provider, stored, body.clone()).await {
                 Ok(fresh) => return Ok(fresh),
                 Err(Failure::Transient(_)) if !retried => {
                     retried = true;
                     tracing::debug!(
-                        provider = provider.id(),
+                        provider = provider.id,
                         "token refresh failed transiently; retrying once"
                     );
                     tokio::time::sleep(RETRY_DELAY).await;
@@ -284,13 +290,13 @@ impl Refresher {
     async fn attempt(
         client: &reqwest::Client,
         user_agent: &str,
-        endpoints: &TokenEndpoints,
-        provider: OAuthProvider,
+        url: &Url,
+        provider: &ProviderDef,
         stored: &OAuthCredential,
         body: Vec<u8>,
     ) -> Result<OAuthCredential, Failure> {
-        let family = provider.family();
-        let request = client.post(endpoints.url(provider).clone()).body(body);
+        let family = provider.family;
+        let request = client.post(url.clone()).body(body);
         let exchange = Exchange::Json {
             total: OAUTH_TIMEOUT,
         };
@@ -374,13 +380,13 @@ struct TokenResponse {
 /// a refresh token or ID token keeps the stored one; the Codex account id
 /// follows the ID token when it names one.
 pub(crate) fn fresh_credential(
-    provider: OAuthProvider,
+    provider: &ProviderDef,
     stored: &OAuthCredential,
     body: &[u8],
     now: i64,
 ) -> Result<OAuthCredential, ProviderError> {
     let invalid = |detail: &str| ProviderError::Transport {
-        family: provider.family(),
+        family: provider.family,
         reason: format!("the token endpoint answered with an invalid body: {detail}"),
     };
     // The parser message may quote the body, which holds tokens: drop it.
@@ -394,20 +400,22 @@ pub(crate) fn fresh_credential(
         .refresh_token
         .filter(|token| !token.expose().is_empty())
         .unwrap_or_else(|| stored.refresh_token.clone());
-    let (id_token, account_id) = match provider {
-        OAuthProvider::Anthropic => (None, None),
-        OAuthProvider::OpenAiCodex => {
-            let id_token = tokens
-                .id_token
-                .map(|token| token.expose().to_owned())
-                .or_else(|| stored.id_token.clone());
-            let account_id = id_token
-                .as_deref()
-                .and_then(codex_identity)
-                .map(|identity| identity.account_id)
-                .or_else(|| stored.account_id.clone());
-            (id_token, account_id)
-        }
+    let (id_token, account_id) = if provider
+        .oauth
+        .is_some_and(|oauth| oauth.hook == Hook::CodexAccount)
+    {
+        let id_token = tokens
+            .id_token
+            .map(|token| token.expose().to_owned())
+            .or_else(|| stored.id_token.clone());
+        let account_id = id_token
+            .as_deref()
+            .and_then(codex_identity)
+            .map(|identity| identity.account_id)
+            .or_else(|| stored.account_id.clone());
+        (id_token, account_id)
+    } else {
+        (None, None)
     };
     Ok(OAuthCredential {
         access_token: tokens.access_token,
@@ -420,7 +428,7 @@ pub(crate) fn fresh_credential(
 
 /// Classifies a non-success token response.
 fn rejection(
-    provider: OAuthProvider,
+    provider: &ProviderDef,
     status: u16,
     body: &[u8],
     stored: &OAuthCredential,
@@ -434,11 +442,11 @@ fn rejection(
     });
     if (400..500).contains(&status) && permanent {
         return Failure::Final(ProviderError::SignInExpired {
-            provider: provider.id().to_owned(),
+            provider: provider.id.to_owned(),
         });
     }
     let error = ProviderError::Status {
-        family: provider.family(),
+        family: provider.family,
         status,
         message: redact(&error_message(value.as_ref(), body), stored),
     };

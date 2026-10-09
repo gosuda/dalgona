@@ -20,13 +20,22 @@ use tokio::{
 use super::engine::fresh_credential;
 use super::*;
 use crate::auth::credential::{AuthStore, Credential, OAuthCredential, SecretString};
-use crate::auth::oauth::{CODEX_CLIENT_ID, unix_now};
+use crate::auth::oauth::unix_now;
+use crate::{ProviderDef, find};
 
 const OLD_ACCESS: &str = "old-access-secret";
 const OLD_REFRESH: &str = "old-refresh-secret";
 const NEW_ACCESS: &str = "new-access-secret";
 const NEW_REFRESH: &str = "new-refresh-secret";
 const NEW_TOKENS: &str = r#"{"access_token":"new-access-secret","refresh_token":"new-refresh-secret","expires_in":3600,"token_type":"Bearer"}"#;
+
+fn codex_def() -> &'static ProviderDef {
+    find("openai-codex").expect("the table has the openai-codex row")
+}
+
+fn claude_def() -> &'static ProviderDef {
+    find("anthropic").expect("the table has the anthropic row")
+}
 
 struct TestDir(PathBuf);
 
@@ -218,7 +227,7 @@ async fn sixty_four_callers_across_two_refreshers_send_one_request() {
     let second = refresher(&dir.auth(), &base);
     let callers = (0..64).map(|index| {
         let refresher = if index % 2 == 0 { &first } else { &second };
-        refresher.refresh(OAuthProvider::OpenAiCodex, &held, RefreshReason::Expiring)
+        refresher.refresh(codex_def(), &held, RefreshReason::Expiring)
     });
     let replies = vec![Reply::Json(200, String::from(NEW_TOKENS))];
     let (results, seen) = with_server(listener, replies, join_all(callers)).await;
@@ -232,7 +241,7 @@ async fn sixty_four_callers_across_two_refreshers_send_one_request() {
     );
     assert_eq!(
         body.get("client_id").and_then(JsonValueTrait::as_str),
-        Some(CODEX_CLIENT_ID)
+        codex_def().oauth.map(|oauth| oauth.client_id)
     );
     assert_eq!(
         body.get("refresh_token").and_then(JsonValueTrait::as_str),
@@ -268,10 +277,8 @@ async fn external_writer_before_the_lock_prevents_any_request() {
     let external = open_lock_file(&lock_path(&dir.auth()).expect("lock path")).expect("open lock");
     external.try_lock().expect("external lock");
     let client = async {
-        let expiring =
-            refresher.refresh(OAuthProvider::OpenAiCodex, &held, RefreshReason::Expiring);
-        let rejected =
-            refresher.refresh(OAuthProvider::OpenAiCodex, &held, RefreshReason::Rejected);
+        let expiring = refresher.refresh(codex_def(), &held, RefreshReason::Expiring);
+        let rejected = refresher.refresh(codex_def(), &held, RefreshReason::Rejected);
         let writer = async {
             tokio::time::sleep(Duration::from_millis(100)).await;
             seed(
@@ -303,14 +310,14 @@ async fn forced_refresh_ignores_the_window_only_for_an_unchanged_token() {
     let refresher = refresher(&dir.auth(), &base);
     let client = async {
         let early = refresher
-            .refresh(OAuthProvider::OpenAiCodex, &held, RefreshReason::Expiring)
+            .refresh(codex_def(), &held, RefreshReason::Expiring)
             .await;
         let forced = refresher
-            .refresh(OAuthProvider::OpenAiCodex, &held, RefreshReason::Rejected)
+            .refresh(codex_def(), &held, RefreshReason::Rejected)
             .await;
         // A second 401 on the old token finds the changed token: no request.
         let again = refresher
-            .refresh(OAuthProvider::OpenAiCodex, &held, RefreshReason::Rejected)
+            .refresh(codex_def(), &held, RefreshReason::Rejected)
             .await;
         (early, forced, again)
     };
@@ -343,7 +350,7 @@ async fn transient_failure_retries_once_after_one_second() {
         Reply::Json(503, String::from(r#"{"error":"temporarily_unavailable"}"#)),
         Reply::Json(200, String::from(NEW_TOKENS)),
     ];
-    let client = refresher.refresh(OAuthProvider::OpenAiCodex, &held, RefreshReason::Expiring);
+    let client = refresher.refresh(codex_def(), &held, RefreshReason::Expiring);
     let (result, seen) = with_server(listener, replies, client).await;
 
     assert_eq!(
@@ -365,7 +372,7 @@ async fn repeated_transient_failure_gives_status_without_secrets() {
     let refresher = refresher(&dir.auth(), &base);
     let echo = format!("backend down for {OLD_REFRESH}");
     let replies = vec![Reply::Json(503, echo.clone()), Reply::Json(503, echo)];
-    let client = refresher.refresh(OAuthProvider::OpenAiCodex, &held, RefreshReason::Expiring);
+    let client = refresher.refresh(codex_def(), &held, RefreshReason::Expiring);
     let (result, seen) = with_server(listener, replies, client).await;
 
     let error = result.expect_err("two 503 fail");
@@ -394,7 +401,7 @@ async fn rejected_refresh_token_is_sign_in_expired_after_one_request() {
         let (listener, base) = listen().await;
         let refresher = refresher(&dir.auth(), &base);
         let replies = vec![Reply::Json(400, String::from(body))];
-        let client = refresher.refresh(OAuthProvider::OpenAiCodex, &held, RefreshReason::Rejected);
+        let client = refresher.refresh(codex_def(), &held, RefreshReason::Rejected);
         let (result, seen) = with_server(listener, replies, client).await;
 
         let error = result.expect_err("rejected refresh token");
@@ -421,12 +428,12 @@ async fn cancelled_refresh_persists_rotated_credential() {
         tokio::select! {
             biased;
             () = started.notified() => {}
-            _ = refresher.refresh(OAuthProvider::OpenAiCodex, &held, RefreshReason::Expiring) => {
+            _ = refresher.refresh(codex_def(), &held, RefreshReason::Expiring) => {
                 panic!("the refresh completed before cancellation")
             }
         }
         // The second caller must join while the first request is still waiting.
-        let second = refresher.refresh(OAuthProvider::OpenAiCodex, &held, RefreshReason::Expiring);
+        let second = refresher.refresh(codex_def(), &held, RefreshReason::Expiring);
         tokio::pin!(second);
         futures::future::poll_fn(|cx| {
             let _ = second.as_mut().poll(cx);
@@ -477,7 +484,7 @@ async fn failed_in_flight_refresh_gives_a_later_caller_a_fresh_attempt() {
         tokio::select! {
             biased;
             () = started.notified() => {}
-            _ = refresher.refresh(OAuthProvider::OpenAiCodex, &held, RefreshReason::Expiring) => {
+            _ = refresher.refresh(codex_def(), &held, RefreshReason::Expiring) => {
                 panic!("the refresh completed before cancellation")
             }
         }
@@ -496,7 +503,7 @@ async fn failed_in_flight_refresh_gives_a_later_caller_a_fresh_attempt() {
         // The server now succeeds. The new caller must run a fresh refresh
         // instead of receiving the finished task's stale error.
         let result = refresher
-            .refresh(OAuthProvider::OpenAiCodex, &held, RefreshReason::Expiring)
+            .refresh(codex_def(), &held, RefreshReason::Expiring)
             .await
             .expect("a finished failed task must be retried fresh");
         let fresh = oauth(result);
@@ -533,12 +540,12 @@ async fn failed_in_flight_refresh_gives_a_later_caller_a_fresh_attempt() {
 fn production_endpoints_are_the_documented_urls() {
     let endpoints = TokenEndpoints::production();
     assert_eq!(
-        endpoints.url(OAuthProvider::Anthropic).as_str(),
-        "https://platform.claude.com/v1/oauth/token"
+        endpoints.url(claude_def()).map(url::Url::as_str),
+        Some("https://platform.claude.com/v1/oauth/token")
     );
     assert_eq!(
-        endpoints.url(OAuthProvider::OpenAiCodex).as_str(),
-        "https://auth.openai.com/oauth/token"
+        endpoints.url(codex_def()).map(url::Url::as_str),
+        Some("https://auth.openai.com/oauth/token")
     );
 }
 
@@ -552,13 +559,12 @@ fn anthropic_refresh_keeps_no_codex_identity_and_old_refresh_token_when_omitted(
         account_id: None,
     };
     let body = br#"{"access_token":"a2","expires_in":60}"#;
-    let fresh =
-        fresh_credential(OAuthProvider::Anthropic, &stored, body, 1_000).expect("valid body");
+    let fresh = fresh_credential(claude_def(), &stored, body, 1_000).expect("valid body");
     assert_eq!(fresh.access_token.expose(), "a2");
     assert_eq!(fresh.refresh_token.expose(), OLD_REFRESH);
     assert_eq!(fresh.expires_at, Some(1_060));
     assert_eq!((fresh.id_token, fresh.account_id), (None, None));
-    let error = fresh_credential(OAuthProvider::Anthropic, &stored, br#"{"access_token":"#, 0)
+    let error = fresh_credential(claude_def(), &stored, br#"{"access_token":"#, 0)
         .expect_err("truncated body");
     assert!(matches!(
         error,
@@ -586,7 +592,7 @@ async fn the_proactive_window_holds_for_skewed_and_extreme_expiry() {
         seed(&dir.auth(), codex(NEW_ACCESS, NEW_REFRESH, Some(i64::MAX)));
         let held = codex(OLD_ACCESS, OLD_REFRESH, expires_at);
         let credential = refresher(&dir.auth(), "http://127.0.0.1:1")
-            .refresh(OAuthProvider::OpenAiCodex, &held, RefreshReason::Expiring)
+            .refresh(codex_def(), &held, RefreshReason::Expiring)
             .await
             .expect("no request is needed");
         let expected = if inside { NEW_ACCESS } else { OLD_ACCESS };
@@ -612,8 +618,8 @@ fn hostile_token_responses_are_typed_errors_and_never_echo_the_body() {
         b"",
     ];
     for body in hostile {
-        let error = fresh_credential(OAuthProvider::OpenAiCodex, &stored, body, 0)
-            .expect_err("not a token response");
+        let error =
+            fresh_credential(codex_def(), &stored, body, 0).expect_err("not a token response");
         assert!(matches!(error, ProviderError::Transport { .. }), "{body:?}");
         assert!(!error.to_string().contains("leaked-body-secret"), "{error}");
     }
@@ -624,7 +630,7 @@ fn extreme_expires_in_saturates_and_negative_is_already_expired() {
     let stored = codex(OLD_ACCESS, OLD_REFRESH, Some(1));
     let at = |expires_in: i64| {
         let body = format!(r#"{{"access_token":"a","expires_in":{expires_in}}}"#);
-        fresh_credential(OAuthProvider::OpenAiCodex, &stored, body.as_bytes(), 1_000)
+        fresh_credential(codex_def(), &stored, body.as_bytes(), 1_000)
             .expect("valid body")
             .expires_at
     };

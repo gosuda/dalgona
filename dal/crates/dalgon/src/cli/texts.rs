@@ -40,7 +40,16 @@ pub(crate) const RULES_HELP: &str = "Inspect or test stream rules.";
 pub(crate) const LOGIN_API_KEY_HELP: &str = "Read an API key from standard input.";
 pub(crate) const LOGIN_DEVICE_AUTH_HELP: &str = "Use the provider device-auth flow.";
 pub(crate) const LOGIN_STATUS_HELP: &str = "Show provider sign-in state.";
-pub(crate) const LOGIN_PROVIDER_HINT: &str = "Use one of anthropic, openai, or openai-codex.";
+/// The hint that lists the provider ids: `Use one of a, b, or c.`
+pub(crate) fn login_provider_hint(ids: &[&str]) -> String {
+    let list = match ids {
+        [] => String::new(),
+        [only] => (*only).to_owned(),
+        [first, second] => format!("{first} or {second}"),
+        [rest @ .., last] => format!("{}, or {last}", rest.join(", ")),
+    };
+    format!("Use one of {list}.")
+}
 pub(crate) const LOGIN_NEEDS_TERMINAL: &str =
     "dalgon: login needs a terminal: no prompt can be shown";
 pub(crate) const LOGIN_NEEDS_TERMINAL_HINT: &str =
@@ -50,11 +59,13 @@ pub(crate) const LOGIN_PIPE_KEY_HINT: &str =
     "Pipe the key: printf %s \"$KEY\" | dalgon login PROVIDER --api-key";
 pub(crate) const LOGIN_EMPTY_KEY_HINT: &str =
     "Enter a non-empty API key, or pipe one with --api-key.";
-pub(crate) const SAVED_ANTHROPIC: &str = "Saved Anthropic credentials. Run dal to pick a model.";
-pub(crate) const SAVED_OPENAI: &str = "Saved OpenAI credentials. Run dal to pick a model.";
+pub(crate) fn saved_api_key(name: &str) -> String {
+    format!("Saved {name} credentials. Run dal to pick a model.")
+}
+pub(crate) fn signed_in(name: &str) -> String {
+    format!("Signed in to {name}.")
+}
 pub(crate) const SAVED_PROVIDER: &str = "Saved provider credentials.";
-pub(crate) const SAVED_CLAUDE: &str = "Signed in to Anthropic.";
-pub(crate) const SAVED_CODEX: &str = "Signed in to OpenAI Codex.";
 pub(crate) const LOGOUT_ALL: &str = "Removed all credentials.";
 pub(crate) const LOGOUT_NONE: &str = "No stored credentials.";
 pub(crate) fn saved_model_provider_warning(model: &str, provider: &str) -> String {
@@ -62,10 +73,15 @@ pub(crate) fn saved_model_provider_warning(model: &str, provider: &str) -> Strin
         "The saved model \"{model}\" needs {provider} credentials. Run dal to pick another model."
     )
 }
-pub(crate) const DEVICE_AUTH_PROVIDER: &str =
-    "dalgon: --device-auth is only valid for openai-codex";
-pub(crate) const DEVICE_AUTH_PROVIDER_HINT: &str =
-    "Run dalgon login PROVIDER, or dalgon login openai-codex --device-auth.";
+pub(crate) fn device_auth_provider(ids: &[&str]) -> String {
+    format!(
+        "dalgon: --device-auth is only valid for {}",
+        ids.join(" or ")
+    )
+}
+pub(crate) fn device_auth_provider_hint(id: &str) -> String {
+    format!("Run dalgon login PROVIDER, or dalgon login {id} --device-auth.")
+}
 pub(crate) const CODEX_API_KEY_UNSUPPORTED: &str =
     "dalgon: openai-codex uses ChatGPT sign-in: API keys are not accepted";
 pub(crate) const CODEX_API_KEY_UNSUPPORTED_HINT: &str =

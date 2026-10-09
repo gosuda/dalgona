@@ -309,8 +309,7 @@ impl ProviderSet {
         let refresh_cancel = tokio_util::sync::CancellationToken::new();
         let credential = super::transport::refresh_expiring(
             &self.inner.refresher,
-            provider_id,
-            slot.entry.family,
+            &slot.entry,
             &credential,
             &refresh_cancel,
         )

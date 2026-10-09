@@ -49,6 +49,7 @@ fn write_file(path: &Path, text: &str, _mode: u32) {
 fn entry(id: &str, key_env: Option<&str>) -> ProviderEntry {
     ProviderEntry {
         id: Box::from(id),
+        def: crate::find(id),
         family: Family::Chat,
         base_url: Box::from("https://example.test"),
         transport: Transport::Https,

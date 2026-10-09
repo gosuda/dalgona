@@ -30,7 +30,7 @@ pub use auth::oauth::{
     LoginEndpoints, LoginFlow, LoginProgress, PASTE_HINT, logout, logout_with, store_api_key,
 };
 pub use auth::refresh::{
-    OAuthProvider, PROACTIVE_WINDOW_SECS, RETRY_DELAY, RefreshReason, Refresher, TokenEndpoints,
+    PROACTIVE_WINDOW_SECS, RETRY_DELAY, RefreshReason, Refresher, TokenEndpoints,
 };
 pub use catalog::{
     Catalog, CatalogEntry, CatalogFetch, CatalogSource, ImageProfile, Listing, ModelFetch,
@@ -45,8 +45,9 @@ pub use http::{
     build_client, check_base_url, endpoint, read_body, send, user_agent,
 };
 pub use provider::{
-    AuthStyle, Http, Provider, ProviderConfig, ProviderConfigError, ProviderEntry,
-    ProviderIdentity, ProviderSet, ScriptedSelection, Transport,
+    AuthStyle, Completion, Device, Hook, Http, KeySpec, OAuthSpec, PROVIDERS, Provider,
+    ProviderConfig, ProviderConfigError, ProviderDef, ProviderEntry, ProviderIdentity, ProviderSet,
+    QueryValue, Redirect, ScriptedSelection, Shape, Transport, find,
 };
 pub use retry::{
     MAX_RETRY_WAIT, RequestState, RetryAfterTooLong, RetryDecision, classify, delay_for_attempt,

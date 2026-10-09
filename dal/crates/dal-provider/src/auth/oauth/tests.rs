@@ -979,7 +979,11 @@ fn authorization_url_scopes_use_each_wire_encoding() {
     let Some(claude_base) = claude_base.ok() else {
         return;
     };
-    let claude = super::claude_authorize_url(
+    let claude = super::authorize_url(
+        Family::Anthropic,
+        &crate::find("anthropic")
+            .and_then(|def| def.oauth)
+            .expect("claude row"),
         &claude_base,
         "http://localhost:53692/callback",
         "challenge",
@@ -1000,7 +1004,11 @@ fn authorization_url_scopes_use_each_wire_encoding() {
     let Some(codex_base) = codex_base.ok() else {
         return;
     };
-    let codex = super::codex_authorize_url(
+    let codex = super::authorize_url(
+        Family::Codex,
+        &crate::find("openai-codex")
+            .and_then(|def| def.oauth)
+            .expect("codex row"),
         &codex_base,
         "http://localhost:1455/auth/callback",
         "challenge",
@@ -1014,6 +1022,42 @@ fn authorization_url_scopes_use_each_wire_encoding() {
     assert!(codex_query.contains(
             "scope=openid%20profile%20email%20offline_access%20api.connectors.read%20api.connectors.invoke"
         ));
+}
+
+#[test]
+fn authorization_urls_keep_each_vendor_parameter_order_and_encoding() {
+    let url = |id: &str, base: &str, redirect: &str| {
+        let family = crate::find(id).map(|def| def.family).expect("table row");
+        let oauth = crate::find(id)
+            .and_then(|def| def.oauth)
+            .expect("oauth row");
+        super::authorize_url(
+            family,
+            &oauth,
+            &Url::parse(base).expect("base"),
+            redirect,
+            "challenge",
+            "state",
+        )
+        .expect("authorize url")
+        .to_string()
+    };
+    assert_eq!(
+        url(
+            "anthropic",
+            "https://claude.ai/oauth/authorize",
+            "http://localhost:53692/callback"
+        ),
+        "https://claude.ai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code&redirect_uri=http%3A%2F%2Flocalhost%3A53692%2Fcallback&scope=org%3Acreate_api_key+user%3Aprofile+user%3Ainference+user%3Asessions%3Aclaude_code+user%3Amcp_servers+user%3Afile_upload&code_challenge=challenge&code_challenge_method=S256&state=state"
+    );
+    assert_eq!(
+        url(
+            "openai-codex",
+            "https://auth.openai.com/oauth/authorize",
+            "http://localhost:1455/auth/callback"
+        ),
+        "https://auth.openai.com/oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&scope=openid%20profile%20email%20offline_access%20api.connectors.read%20api.connectors.invoke&code_challenge=challenge&code_challenge_method=S256&state=state&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=dalgon"
+    );
 }
 
 #[test]

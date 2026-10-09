@@ -31,8 +31,6 @@ use crate::{ProviderEntry, ProviderError};
 const OPENAI: &str = "openai";
 const ANTHROPIC: &str = "anthropic";
 const OPENAI_CODEX: &str = "openai-codex";
-const OPENAI_KEY_ENV: &str = "OPENAI_API_KEY";
-const ANTHROPIC_KEY_ENV: &str = "ANTHROPIC_API_KEY";
 
 /// A secret text value: an API key, access token, refresh token, or ID token.
 ///
@@ -270,9 +268,9 @@ pub fn oauth_expires_at(now: i64, expires_in: Option<i64>, access_token: &str) -
 /// Picks the credential for `provider`: the `auth.json` entry, then the
 /// environment snapshot, then [`ProviderError::NoCredentials`].
 ///
-/// The environment variable is the provider's configured `key_env`; the
-/// built-in `openai` and `anthropic` providers fall back to
-/// `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`. An empty value counts as unset.
+/// The environment variable is the provider's configured `key_env`; a
+/// built-in provider with an API-key row falls back to the row's variables.
+/// An empty value counts as unset.
 ///
 /// # Errors
 /// Returns [`ProviderError::NoCredentials`] when neither source has a
@@ -285,15 +283,16 @@ pub fn resolve(
     if let Some(credential) = store.credential(&provider.id) {
         return Ok(credential);
     }
-    let key_env = provider.key_env.as_deref().or(match &*provider.id {
-        OPENAI => Some(OPENAI_KEY_ENV),
-        ANTHROPIC => Some(ANTHROPIC_KEY_ENV),
-        _ => None,
-    });
-    if let Some(key) = key_env
-        .and_then(|name| env.get(name))
-        .filter(|key| !key.is_empty())
-    {
+    let name_found = |name: &str| env.get(name).filter(|key| !key.is_empty());
+    let key = match (
+        provider.key_env.as_deref(),
+        provider.def.and_then(|def| def.key),
+    ) {
+        (Some(name), _) => name_found(name),
+        (None, Some(spec)) => spec.env.iter().find_map(|name| name_found(name)),
+        (None, None) => None,
+    };
+    if let Some(key) = key {
         return Ok(Credential::ApiKey {
             key: SecretString::from(key),
         });
