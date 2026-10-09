@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Bound history reuse reads: compaction now indexes prior metadata, fetches only matching PNG blobs after acquiring the shared render budget, and excludes skill and dream records from image counts.
 - Fix `/goal` on a fresh install: the orchestration battery no longer keeps the denial from its session-start goal load, so the first goal command asks for the battery's grant and then works, and a declined grant stops the battery's idle poll from asking again until the next goal command, prompt, or tool call.
 - Continue an active goal on its own: the continuation now fires right after an automatic turn, ten seconds after a user turn, at idle wakes for other sources, and after a provider error once the user speaks again, while `/goal clear` on a damaged goal file repairs it in place. A goal turn is now counted when its continuation is delivered, not when it is scheduled, so a prompt that cancels a waiting continuation leaves the counters unchanged, and a turn that ends on a context overflow blocks the goal with that reason.
 - Show the exact reason when an orchestration child cannot start, such as the child depth limit, instead of a bare failure.

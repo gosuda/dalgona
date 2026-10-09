@@ -96,6 +96,12 @@ letter whose cell pitch differs or whose image exceeds the current grid is
 stale; it stays listed and resolvable, and its content is drawn again under
 a fresh id.
 
+Before rendering, history indexes prior compaction metadata without loading
+their PNG blobs. It fetches a blob only for a matching reusable span after
+acquiring the shared render budget; a missing or damaged blob falls back to
+redrawing exact source text. Skill captures and dream summaries are not
+counted as history images.
+
 ## Letters and ids
 
 History record ids use `history/<ordinal>.<index>` for compaction images,

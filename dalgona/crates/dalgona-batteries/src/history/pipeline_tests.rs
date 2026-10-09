@@ -4,19 +4,28 @@
 
 use std::collections::HashMap;
 use std::num::NonZeroU64;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use dal_agent::ext::{BoxFuture, CompactError, Compaction, CoveredEntry};
+use dal_agent::error::ServiceError;
+use dal_agent::ext::services::ServiceFuture;
+use dal_agent::ext::{
+    BoxFuture, Caller, CompactError, CompactInput, Compaction, Compactor, CoveredEntry, Doc,
+    EventStream, RawValue, Services, Tool, ToolCx, ToolOutcome,
+};
+use dal_core::ext::{McpDeclaration, McpRequest, McpResponse, Visibility};
 use dal_core::{
-    AssistantPart, BlobId, CallId, ContextItem, EntryId, Family, Part, RawJson, ReplaySource,
-    SessionId,
+    AgentsOp, AgentsReply, Answer, AssistantPart, BlobId, CallId, ContextItem, EntryId, Family,
+    FetchRequest, FetchResponse, Inference, JobsOp, JobsReply, ModelRequest, ModelRoute, Notice,
+    Part, Question, RawJson, ReplaySource, RequestParams, RunOutput, RunRequest, SessionId,
+    SidecarOp, StateError, StateOp, StateRecord, TurnOp, TurnOpReply,
 };
 use dal_ext::Font;
 use tokio::sync::Semaphore;
 
 use super::CARRIED_PREFIX;
-use super::compact::{BlobStore, PartsSink};
+use super::compact::{BlobStore, HistoryCompactor, ImageHost, PartsSink};
 use super::pipeline::{
     Budget, Commit, Drawn, Engine, ImageProfile, KnownLetter, Limits, Request, Slot, SourceReader,
 };
@@ -1114,6 +1123,7 @@ async fn stale_known_letters_are_listed_and_redrawn_fresh() {
 #[derive(Default)]
 struct MapStore {
     blobs: Mutex<HashMap<[u8; 32], Vec<u8>>>,
+    gets: AtomicUsize,
 }
 
 impl BlobStore for MapStore {
@@ -1122,6 +1132,114 @@ impl BlobStore for MapStore {
         self.blobs.lock().expect("store lock").insert(digest, png);
         Box::pin(std::future::ready(Ok(digest)))
     }
+
+    fn get(&self, digest: [u8; 32]) -> BoxFuture<'static, Result<Option<Vec<u8>>, CompactError>> {
+        self.gets.fetch_add(1, Ordering::SeqCst);
+        let png = self.blobs.lock().expect("store lock").get(&digest).cloned();
+        Box::pin(std::future::ready(Ok(png)))
+    }
+}
+#[tokio::test]
+async fn lazy_reuse_reads_only_matching_pngs() {
+    let entries = covered();
+    let first = drawn_unbounded(&entries).await;
+    let store = Arc::new(MapStore::default());
+    for letter in &first.letters {
+        store
+            .put(letter.png.clone())
+            .await
+            .expect("fixture PNG stores");
+    }
+    let mut known = stored_letters(&first);
+    for letter in &mut known {
+        letter.png = None;
+    }
+    let template = known.first().cloned().expect("fixture letter");
+    for number in 0..100_u64 {
+        let mut unrelated = template.clone();
+        if let LetterRecord::Compaction { id, spans, .. } = &mut unrelated.record {
+            *id = format!("history/9{number:03}.1");
+            *spans = vec![Span {
+                entry: entry(10_000 + number),
+                part: 0,
+                off: 0,
+                len: 1,
+            }];
+        }
+        known.push(unrelated);
+    }
+    let request =
+        second_request(&entries, known).with_blob_store(Arc::clone(&store) as Arc<dyn BlobStore>);
+    let (result, drawn) = run(limits(), profile(1000), request).await;
+    assert!(result.expect("second run succeeds").is_some());
+    let drawn = drawn.expect("drawn");
+    assert_eq!(
+        store.gets.load(Ordering::SeqCst),
+        first.letters.len(),
+        "unrelated metadata never reaches blob_get"
+    );
+    assert_eq!(drawn.letters.len(), first.letters.len());
+    assert!(drawn.letters.iter().all(|letter| letter.reused));
+    let small = stored_letters(&first);
+    let (_, small_drawn) = run(limits(), profile(1000), second_request(&entries, small)).await;
+    let small_drawn = small_drawn.expect("small history draws");
+    assert_eq!(
+        drawn.letters, small_drawn.letters,
+        "large history reuses the same images as small history"
+    );
+    assert_eq!(
+        drawn.index[..small_drawn.index.len()],
+        small_drawn.index,
+        "large history keeps the small-history index lines first"
+    );
+    assert!(
+        drawn.index.len() > small_drawn.index.len(),
+        "unrelated compaction letters stay listed as not drawn"
+    );
+}
+#[tokio::test]
+async fn missing_reused_blob_redraws_the_same_source() {
+    let entries = covered();
+    let first = drawn_unbounded(&entries).await;
+    let store = Arc::new(MapStore::default());
+    for letter in &first.letters {
+        store
+            .put(letter.png.clone())
+            .await
+            .expect("fixture PNG stores");
+    }
+    let target = first.letters.first().expect("fixture letter");
+    let target_id = target.record.id().to_owned();
+    let target_spans = target.record.spans().to_vec();
+    let LetterRecord::Compaction { png_blob, .. } = &target.record else {
+        panic!("fixture compaction letter");
+    };
+    let digest = blake3::Hash::from_hex(png_blob).expect("fixture digest");
+    store
+        .blobs
+        .lock()
+        .expect("store lock")
+        .remove(digest.as_bytes());
+    let mut known = stored_letters(&first);
+    for letter in &mut known {
+        letter.png = None;
+    }
+    let request =
+        second_request(&entries, known).with_blob_store(Arc::clone(&store) as Arc<dyn BlobStore>);
+    let (result, drawn) = run(limits(), profile(1000), request).await;
+    assert!(result.expect("second run succeeds").is_some());
+    let drawn = drawn.expect("drawn");
+    let replacement = drawn
+        .letters
+        .iter()
+        .find(|letter| letter.record.spans() == target_spans)
+        .expect("missing image source is redrawn");
+    assert_ne!(replacement.record.id(), target_id);
+    assert!(!replacement.reused);
+    assert_eq!(
+        replacement.png, target.png,
+        "the redrawn bytes match the exact source text"
+    );
 }
 
 #[tokio::test]
@@ -1158,4 +1276,364 @@ async fn the_sink_stores_each_png_and_returns_image_parts() {
         assert!(matches!(body, LetterRecord::Compaction { .. }));
         assert!(body.id().starts_with("history/1."));
     }
+}
+fn unavailable<T: Send + 'static>() -> ServiceFuture<'static, T> {
+    Box::pin(async {
+        Err(ServiceError::failed(
+            None,
+            "unused in the history service-boundary test",
+        ))
+    })
+}
+
+#[derive(Default)]
+struct CountingServices {
+    records: Vec<RawJson>,
+    blobs: Mutex<HashMap<[u8; 32], Vec<u8>>>,
+    blob_gets: AtomicUsize,
+}
+
+impl CountingServices {
+    fn locked_blobs(&self) -> std::sync::MutexGuard<'_, HashMap<[u8; 32], Vec<u8>>> {
+        self.blobs.lock().expect("store lock")
+    }
+}
+
+struct ServiceBlobs {
+    services: Arc<dyn Services>,
+    caller: Caller,
+}
+
+impl BlobStore for ServiceBlobs {
+    fn put(&self, png: Vec<u8>) -> BoxFuture<'_, Result<[u8; 32], CompactError>> {
+        let put = self.services.blob_put(&self.caller, png);
+        Box::pin(async move { put.await.map_err(CompactError::from) })
+    }
+
+    fn get(&self, digest: [u8; 32]) -> BoxFuture<'_, Result<Option<Vec<u8>>, CompactError>> {
+        let get = self.services.blob_get(&self.caller, digest);
+        Box::pin(async move { get.await.map_err(CompactError::from) })
+    }
+}
+
+impl Services for CountingServices {
+    fn fs_read(&self, _who: &Caller, _path: &str) -> ServiceFuture<'_, Option<Vec<u8>>> {
+        unavailable()
+    }
+    fn fs_write(&self, _who: &Caller, _path: &str, _bytes: Vec<u8>) -> ServiceFuture<'_, ()> {
+        unavailable()
+    }
+    fn net(&self, _who: &Caller, _req: FetchRequest) -> ServiceFuture<'_, FetchResponse> {
+        unavailable()
+    }
+    fn run(&self, _who: &Caller, _req: RunRequest) -> ServiceFuture<'_, RunOutput> {
+        unavailable()
+    }
+    fn env(&self, _who: &Caller, _key: &str) -> ServiceFuture<'_, Option<String>> {
+        unavailable()
+    }
+    fn ask(&self, _who: &Caller, _question: Question) -> ServiceFuture<'_, Option<Answer>> {
+        unavailable()
+    }
+    fn mcp(&self, _who: &Caller, _req: McpRequest) -> ServiceFuture<'_, McpResponse> {
+        unavailable()
+    }
+    fn mcp_declarations(&self, _who: &Caller) -> ServiceFuture<'_, Vec<McpDeclaration>> {
+        unavailable()
+    }
+    fn add_session_tools(
+        &self,
+        _who: &Caller,
+        _tools: Vec<(Arc<dyn Tool>, Visibility)>,
+    ) -> ServiceFuture<'_, ()> {
+        unavailable()
+    }
+    fn history_texts(&self, _who: &Caller) -> ServiceFuture<'_, Vec<String>> {
+        unavailable()
+    }
+    fn agents(&self, _who: &Caller, _op: AgentsOp) -> ServiceFuture<'_, AgentsReply> {
+        unavailable()
+    }
+    fn jobs(&self, _who: &Caller, _op: JobsOp) -> ServiceFuture<'_, JobsReply> {
+        unavailable()
+    }
+    fn open_asks(&self, _who: &Caller) -> ServiceFuture<'_, usize> {
+        unavailable()
+    }
+    fn scheme(&self, _who: &Caller, _uri: &str) -> ServiceFuture<'_, Option<Doc>> {
+        unavailable()
+    }
+    fn turn(&self, _who: &Caller, _op: TurnOp) -> ServiceFuture<'_, TurnOpReply> {
+        unavailable()
+    }
+    fn sidecar(&self, _who: &Caller, _op: SidecarOp) -> ServiceFuture<'_, Option<Vec<u8>>> {
+        unavailable()
+    }
+    fn state(
+        &self,
+        _who: &Caller,
+        _op: StateOp,
+    ) -> ServiceFuture<'_, Result<StateRecord, StateError>> {
+        unavailable()
+    }
+    fn infer(&self, _who: &Caller, _req: ModelRequest) -> ServiceFuture<'_, Inference> {
+        unavailable()
+    }
+    fn infer_stream(&self, _who: &Caller, _req: ModelRequest) -> ServiceFuture<'_, EventStream> {
+        unavailable()
+    }
+    fn call_tool(
+        &self,
+        _who: &Caller,
+        _name: &str,
+        _args: Box<RawValue>,
+    ) -> ServiceFuture<'_, ToolOutcome> {
+        unavailable()
+    }
+    fn notify(&self, _who: &Caller, _notice: Notice) {}
+    fn append_record(
+        &self,
+        _who: &Caller,
+        _kind: &str,
+        _body: Box<RawValue>,
+    ) -> ServiceFuture<'_, EntryId> {
+        unavailable()
+    }
+    fn records(&self, _who: &Caller, _kind: &str) -> ServiceFuture<'_, Vec<Box<RawValue>>> {
+        let records = self.records.iter().cloned().map(Box::new).collect();
+        Box::pin(async move { Ok(records) })
+    }
+    fn blob_put(&self, _who: &Caller, bytes: Vec<u8>) -> ServiceFuture<'_, [u8; 32]> {
+        let digest = *blake3::hash(&bytes).as_bytes();
+        self.locked_blobs().insert(digest, bytes);
+        Box::pin(async move { Ok(digest) })
+    }
+    fn blob_get(&self, _who: &Caller, digest: [u8; 32]) -> ServiceFuture<'_, Option<Vec<u8>>> {
+        self.blob_gets.fetch_add(1, Ordering::SeqCst);
+        let png = self.locked_blobs().get(&digest).cloned();
+        Box::pin(async move { Ok(png) })
+    }
+}
+
+struct FixedHost {
+    pieces: Vec<CompactPiece>,
+    source: Arc<FixtureSource>,
+    blobs: Arc<ServiceBlobs>,
+}
+
+impl ImageHost for FixedHost {
+    fn source<'a>(
+        &'a self,
+        _input: &'a CompactInput<'_>,
+        _services: &'a Arc<dyn Services>,
+        _caller: &'a Caller,
+    ) -> BoxFuture<'a, Result<(Vec<CompactPiece>, Arc<dyn SourceReader>), CompactError>> {
+        let pieces = self.pieces.clone();
+        let source = Arc::clone(&self.source) as Arc<dyn SourceReader>;
+        Box::pin(async move { Ok((pieces, source)) })
+    }
+
+    fn blob_store(
+        &self,
+        _services: &Arc<dyn Services>,
+        _caller: &Caller,
+    ) -> Option<Arc<dyn BlobStore>> {
+        Some(Arc::clone(&self.blobs) as Arc<dyn BlobStore>)
+    }
+
+    fn sink(&self, _services: &Arc<dyn Services>, caller: &Caller) -> Option<Arc<dyn Commit>> {
+        Some(Arc::new(PartsSink::new(
+            Arc::clone(&self.blobs) as Arc<dyn BlobStore>,
+            caller.ext().clone(),
+        )))
+    }
+}
+
+fn boundary_records(first: &Drawn) -> Vec<RawJson> {
+    let digest = "a".repeat(64);
+    let mut records: Vec<RawJson> = Vec::with_capacity(103);
+    for letter in &first.letters {
+        let body = sonic_rs::to_string(&letter.record).expect("record encodes");
+        records.push(RawJson::parse(&body).expect("record parses"));
+    }
+    for ordinal in 1000..1100 {
+        records.push(
+            RawJson::parse(&format!(
+                r#"{{"v":1,"id":"history/{ordinal}.1","kind":"compaction","png_blob":"{digest}","png_bytes":1,"width":136,"height":16,"cell":[8,16],"spans":[[1,0,0,1]],"letters":[1]}}"#
+            ))
+            .expect("unrelated record parses"),
+        );
+    }
+    records.push(
+        RawJson::parse(
+            r#"{"v":1,"id":"capture","kind":"skill","png_blob":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","png_bytes":1,"width":136,"height":16,"cell":[8,16],"spans":[]}"#,
+        )
+        .expect("skill record parses"),
+    );
+    records.push(
+        RawJson::parse(
+            r#"{"v":1,"id":"dream/1","kind":"dream","letters":["history/1.1"],"summary":"old"}"#,
+        )
+        .expect("dream record parses"),
+    );
+    records
+}
+
+fn assert_reused_compaction(compaction: &Compaction, services: &CountingServices, first: &Drawn) {
+    assert_eq!(
+        services.blob_gets.load(Ordering::SeqCst),
+        first.letters.len(),
+        "only matching PNGs cross the service boundary"
+    );
+    let dal_agent::ext::Replacement::Parts {
+        parts,
+        letters,
+        parts_tokens,
+    } = &compaction.replacement
+    else {
+        panic!("the replacement carries image parts");
+    };
+    assert!(*parts_tokens > 0);
+    assert!(
+        letters.is_empty(),
+        "full reuse appends no fresh letter records"
+    );
+    let mut images: Vec<Vec<u8>> = parts
+        .iter()
+        .filter_map(|part| match part {
+            Part::Image { bytes, .. } => Some(bytes.to_vec()),
+            Part::Text { .. } | Part::Blob { .. } => None,
+        })
+        .collect();
+    let mut expected: Vec<Vec<u8>> = first
+        .letters
+        .iter()
+        .map(|letter| letter.png.clone())
+        .collect();
+    images.sort();
+    expected.sort();
+    assert_eq!(images, expected, "reused bytes match the stored PNGs");
+    let text: String = parts
+        .iter()
+        .filter_map(|part| match part {
+            Part::Text { text } => Some(text.to_string()),
+            Part::Image { .. } | Part::Blob { .. } => None,
+        })
+        .collect();
+    assert!(
+        !text.contains("dream/"),
+        "dream summaries stay out of the image index"
+    );
+    assert!(
+        text.contains("history/1000.1"),
+        "unrelated compaction letters stay listed as not drawn"
+    );
+    assert!(
+        !text.contains("letter://capture"),
+        "skill captures stay out of the image index"
+    );
+}
+
+#[tokio::test]
+async fn compactor_reuses_matching_images_without_fetching_unrelated_pngs() {
+    let entries = covered();
+    let first = drawn_unbounded(&entries).await;
+    assert!(
+        first.letters.len() > 1,
+        "the fixture draws reusable letters"
+    );
+
+    let records = boundary_records(&first);
+    let services = Arc::new(CountingServices {
+        records,
+        blobs: Mutex::new(HashMap::new()),
+        blob_gets: AtomicUsize::new(0),
+    });
+    for letter in &first.letters {
+        services
+            .locked_blobs()
+            .insert(*blake3::hash(&letter.png).as_bytes(), letter.png.clone());
+    }
+    let (pieces, source) = pieces(&entries);
+    let service_arc = Arc::clone(&services) as Arc<dyn Services>;
+    let cx = ToolCx::for_test(Arc::clone(&service_arc));
+    let host = FixedHost {
+        pieces,
+        source: Arc::new(source),
+        blobs: Arc::new(ServiceBlobs {
+            services: Arc::clone(&service_arc),
+            caller: cx.caller().clone(),
+        }),
+    };
+    let compactor = HistoryCompactor::with_host(0.7, Arc::new(host), limits());
+    let input = CompactInput {
+        caller: cx.caller(),
+        model: ModelRoute::Api {
+            family: Family::Chat,
+            model: "test".into(),
+        },
+        session: SessionId::new_v7(),
+        instructions: "",
+        covered: &entries,
+        span: (entry(1), entry(2)),
+        first_kept: None,
+        context_window: Some(u64::MAX / 4),
+        image_profile: Some(profile(1000)),
+        images_elsewhere: 0,
+        image_bytes_elsewhere: 0,
+        carried: None,
+        total_tokens: 2_100_000,
+        params: RequestParams::default(),
+    };
+    let compaction = compactor
+        .compact(input, Arc::clone(&services) as Arc<dyn Services>)
+        .await
+        .expect("compaction runs")
+        .expect("compaction emits");
+    assert_reused_compaction(&compaction, &services, &first);
+}
+
+#[tokio::test]
+async fn corrupt_reused_blob_redraws_the_same_source() {
+    let entries = covered();
+    let first = drawn_unbounded(&entries).await;
+    let store = Arc::new(MapStore::default());
+    for letter in &first.letters {
+        store
+            .put(letter.png.clone())
+            .await
+            .expect("fixture PNG stores");
+    }
+    let target = first.letters.first().expect("fixture letter");
+    let target_id = target.record.id().to_owned();
+    let target_spans = target.record.spans().to_vec();
+    let LetterRecord::Compaction { png_blob, .. } = &target.record else {
+        panic!("fixture compaction letter");
+    };
+    let digest = blake3::Hash::from_hex(png_blob).expect("fixture digest");
+    store
+        .blobs
+        .lock()
+        .expect("store lock")
+        .insert(*digest.as_bytes(), vec![0_u8; 16]);
+    let mut known = stored_letters(&first);
+    for letter in &mut known {
+        letter.png = None;
+    }
+    let request =
+        second_request(&entries, known).with_blob_store(Arc::clone(&store) as Arc<dyn BlobStore>);
+    let (result, drawn) = run(limits(), profile(1000), request).await;
+    assert!(result.expect("second run succeeds").is_some());
+    let drawn = drawn.expect("drawn");
+    let replacement = drawn
+        .letters
+        .iter()
+        .find(|letter| letter.record.spans() == target_spans)
+        .expect("corrupt image source is redrawn");
+    assert_ne!(replacement.record.id(), target_id);
+    assert!(!replacement.reused);
+    assert_eq!(
+        replacement.png, target.png,
+        "the redrawn bytes match the exact source text"
+    );
 }
