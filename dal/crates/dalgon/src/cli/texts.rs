@@ -28,7 +28,7 @@ pub(crate) const LOGIN_HELP: &str = "Sign in to a provider or inspect sign-in st
 pub(crate) const LOGOUT_HELP: &str = "Sign out from a provider.";
 pub(crate) const MODELS_HELP: &str =
     "List models and show built-in prices, price source, and fetch date when available.";
-pub(crate) const DOCS_HELP: &str = "Read a dalgon documentation page.";
+pub(crate) const DOCS_HELP: &str = "Read a documentation page.";
 pub(crate) const SERVE_HELP: &str = "Start the local control server or create its token.";
 pub(crate) const RPC_HELP: &str = "Serve the JSON-RPC protocol on standard input and output.";
 pub(crate) const ACP_HELP: &str = "Serve the Agent Client Protocol on standard input and output.";
