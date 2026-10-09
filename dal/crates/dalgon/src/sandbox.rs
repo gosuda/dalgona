@@ -1965,13 +1965,41 @@ mod win {
         None
     }
 
-    /// The only exit code that identifies a runtime-initialization failure
-    /// is `STATUS_DLL_INIT_FAILED` (`0xC0000142`) — and even it only says
-    /// some DLL failed to initialize, not which runtime. Any lower code is
-    /// an application's own status and must pass through unlabeled; the
-    /// POSIX-runtime hint stays a suggestion, not a diagnosis, because an
-    /// arbitrary executable can legitimately exit with the same code.
+    /// The POSIX-runtime link the executable pulls in: its own `msys-*`/
+    /// `cygwin*` import, or the one in its `..\usr\bin` twin — thin
+    /// launchers like `Git\bin\bash.exe` carry no msys import themselves
+    /// but exec the msys binary at `<root>\usr\bin\<name>`, so the
+    /// launcher is refused like the binary it forwards to.
+    fn posix_runtime_link(path: &Path) -> Option<String> {
+        if let Some(dll) = posix_runtime_import(path) {
+            return Some(dll);
+        }
+        let (dir, name) = path.parent().zip(path.file_name())?;
+        let twin = dir.join("..").join("usr").join("bin").join(name);
+        let twin = twin.canonicalize().ok()?;
+        if twin == path {
+            return None;
+        }
+        posix_runtime_import(&twin).map(|dll| format!("{dll} (via {})", twin.display()))
+    }
+
+    /// Any nonzero exit from a binary that links an MSYS/cygwin runtime is
+    /// the early-init death — the run was doomed before `main`, and the
+    /// launcher propagates whatever the runtime died with (0xC0000142 on
+    /// x64, smaller codes elsewhere), so the import check decides the
+    /// diagnosis, not the code. For unlinked binaries only
+    /// `STATUS_DLL_INIT_FAILED` itself counts: a lower code is the
+    /// application's own status and passes through unlabeled.
     fn runtime_init_failure(executable: &OsStr, code: u32) -> Option<String> {
+        if code == 0 {
+            return None;
+        }
+        if let Some(dll) = posix_runtime_link(Path::new(executable)) {
+            return Some(format!(
+                "dalgon sandbox: {} loads {dll}; MSYS/cygwin runtimes cannot run inside the Windows sandbox (AppContainer namespaces are private).",
+                executable.to_string_lossy()
+            ));
+        }
         (code == 0xC000_0142).then(|| {
             format!(
                 "dalgon sandbox: {} exited {code:#x} (STATUS_DLL_INIT_FAILED) inside AppContainer; a runtime DLL failed to initialize — POSIX runtimes such as MSYS/cygwin cannot run inside the Windows sandbox.",
@@ -1991,7 +2019,7 @@ mod win {
         executable: &OsStr,
         run_args: &[OsString],
     ) -> Result<ExitCode, String> {
-        if let Some(dll) = posix_runtime_import(Path::new(executable)) {
+        if let Some(dll) = posix_runtime_link(Path::new(executable)) {
             return Err(format!(
                 "dalgon sandbox: {} loads {dll}; MSYS/cygwin runtimes cannot run inside the Windows sandbox (AppContainer namespaces are private).",
                 executable.to_string_lossy()
