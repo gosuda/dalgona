@@ -43,7 +43,7 @@ unicode-width = { workspace = true }
 # corosensei (inside shuttle) has no ARM64-Windows implementation, so the
 # schedule-proof side of dal-full-01 is compiled out on that target.
 [target.'cfg(not(all(windows, target_arch = "aarch64")))'.dev-dependencies]
-shuttle = "=0.9.4"
+shuttle = "=0.9.5"
 
 [[test]]
 name = "loop-headless-01"
