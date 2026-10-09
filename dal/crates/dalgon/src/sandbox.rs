@@ -2264,9 +2264,11 @@ mod win {
             // SAFETY: serialized by ENV_LOCK; PATH is restored before the
             // assert — `remove_var` when it was originally absent so no
             // empty PATH leaks out either.
-            let old_path = std::env::var_os("PATH");
-            let system32 =
-                Path::new(&std::env::var_os("SystemRoot").expect("SystemRoot")).join("System32");
+            let env: std::collections::HashMap<OsString, OsString> =
+                std::env::vars_os().collect();
+            let old_path = env.get(OsStr::new("PATH")).cloned();
+            let system32 = Path::new(env.get(OsStr::new("SystemRoot")).expect("SystemRoot"))
+                .join("System32");
             unsafe { std::env::set_var("PATH", &system32) };
             let root = tempfile::tempdir().expect("temp root");
             let whoami = system32.join("whoami.exe");
@@ -2282,7 +2284,7 @@ mod win {
             match result {
                 // Client editions launch the container child.
                 Ok(code) => {
-                    assert_eq!(code, ExitCode::SUCCESS, "sandboxed whoami exited {code:?}")
+                    assert_eq!(code, ExitCode::SUCCESS, "sandboxed whoami exited {code:?}");
                 }
                 // Windows Server accepts the AppContainer profile/SID calls
                 // but rejects the child launch — that refusal must stay
