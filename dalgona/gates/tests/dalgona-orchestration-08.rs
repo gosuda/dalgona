@@ -15,6 +15,8 @@ const TITLE: &str = "Allow orchestration to use";
 const ANSWERED: &str = "answered \"Allow orchestration";
 const READY: &str = "Ask dal to change code.";
 const WAIT: Duration = Duration::from_secs(60);
+const ARMED_HINT: &str = "y allow · a session · n deny";
+const LOCKED_HINT: &str = "esc denies · answer keys ready in a moment";
 
 /// One fresh-install run of the real binary.
 struct Run {
@@ -27,6 +29,20 @@ struct Run {
 fn question_open(text: &str) -> bool {
     text.lines()
         .any(|line| line.trim_start().starts_with(TITLE))
+}
+
+/// Whether the dialog lists its answer keys, which only an armed dialog does.
+fn question_armed(text: &str) -> bool {
+    text.lines()
+        .any(|line| line.trim_start().starts_with(ARMED_HINT))
+}
+
+/// Whether the dialog is on screen and still ignores answer keys.
+fn question_unarmed(text: &str) -> bool {
+    question_open(text)
+        && text
+            .lines()
+            .any(|line| line.trim_start().starts_with(LOCKED_HINT))
 }
 
 impl Run {
@@ -57,14 +73,16 @@ impl Run {
         }
     }
 
-    /// Presses `key` for the open question once its predecessor's answer is
-    /// acknowledged on screen.
+    /// Presses `key` for the open question once the question lists its answer
+    /// keys and its predecessor's answer is acknowledged on screen.
     fn answer(&mut self, key: &str) -> support::TestResult<()> {
         let text = self.pane.text()?;
-        if question_open(&text) && text.matches(ANSWERED).count() == self.answers {
-            self.pane.type_text(key)?;
-            self.answers += 1;
+        if !question_open(&text) || text.matches(ANSWERED).count() != self.answers {
+            return Ok(());
         }
+        self.until(question_armed)?;
+        self.pane.type_text(key)?;
+        self.answers += 1;
         Ok(())
     }
 
@@ -162,5 +180,46 @@ fn a_declined_grant_question_fails_closed_and_stores_nothing() -> support::TestR
         text.contains("the user declined the request"),
         "the denial names the decline:\n{text}"
     );
+    Ok(())
+}
+
+#[test]
+fn keys_typed_as_the_grant_question_opens_answer_nothing() -> support::TestResult<()> {
+    let mut run = Run::start()?;
+    run.pane.type_text("/goal write the parser")?;
+    run.pane.enter()?;
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let text = run.pane.text()?;
+        if text.contains(ANSWERED) {
+            return Err(format!("a key typed as the question opened answered it:\n{text}").into());
+        }
+        if question_unarmed(&text) {
+            break;
+        }
+        if Instant::now() > deadline {
+            return Err(format!("the question never showed locked answer keys:\n{text}").into());
+        }
+        run.pane.type_text("a")?;
+    }
+    let grants = run
+        .pane
+        .scratch()
+        .path()
+        .join("xdg-data/dalgona/grants.toml");
+    assert!(!grants.exists(), "type-ahead stored a grant");
+
+    run.until(question_armed)?;
+    let text = run.pane.text()?;
+    assert!(
+        question_open(&text) && text.matches(ANSWERED).count() == 0,
+        "keys dropped while the question was locked must not answer it later:\n{text}"
+    );
+    assert!(!grants.exists(), "type-ahead stored a grant");
+
+    run.answer("y")?;
+    run.until(|text| text.contains("goal g1: active"))?;
+    let stored = std::fs::read_to_string(&grants)?;
+    assert!(stored.contains("ext = \"orchestration\""), "{stored}");
     Ok(())
 }
