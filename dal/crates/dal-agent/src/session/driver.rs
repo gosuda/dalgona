@@ -546,28 +546,23 @@ struct ResolvedRequest {
 impl Driver {
     /// Resolves the request route through the catalog, caching it for commands.
     async fn resolve_model(&self, turn: TurnId) -> Result<ResolvedRequest, Box<str>> {
-        let reference = match self.turn_model(turn) {
-            Some(route) => match (
-                &route,
-                self.turns
-                    .get(&turn)
-                    .and_then(|state| state.provider.as_deref()),
-            ) {
-                (ModelRoute::Api { model, .. }, Some(provider)) => {
-                    format!("{provider}/{model}")
-                }
-                _ => crate::host::ops::request_reference(&route),
-            },
-            None => self
-                .deps
-                .host
-                .shared
-                .config
-                .model()
-                .unwrap_or("")
-                .to_owned(),
+        let Some(route) = self.turn_model(turn) else {
+            return self.resolve_default_model().await;
         };
-        self.resolve_reference(&reference).await
+        let provider = self
+            .turns
+            .get(&turn)
+            .and_then(|state| state.provider.as_deref());
+        match (&route, provider) {
+            (ModelRoute::Api { model, .. }, Some(provider)) => {
+                self.resolve_reference(&format!("{provider}/{model}"), None)
+                    .await
+            }
+            _ => {
+                self.resolve_reference(&crate::host::ops::request_reference(&route), Some(&route))
+                    .await
+            }
+        }
     }
 
     async fn resolve_default_model(&self) -> Result<ResolvedRequest, Box<str>> {
@@ -579,10 +574,15 @@ impl Driver {
             .model()
             .unwrap_or("")
             .to_owned();
-        self.resolve_reference(&reference).await
+        self.resolve_reference(&reference, None).await
     }
 
-    async fn resolve_reference(&self, reference: &str) -> Result<ResolvedRequest, Box<str>> {
+    /// Resolves `reference`, or the model `route` names when one is given.
+    async fn resolve_reference(
+        &self,
+        reference: &str,
+        route: Option<&ModelRoute>,
+    ) -> Result<ResolvedRequest, Box<str>> {
         if reference.is_empty() {
             return Err("no model configured: set dal.toml [models] default.".into());
         }
@@ -609,9 +609,11 @@ impl Driver {
             .iter()
             .map(|(name, target)| (name.clone(), target.clone()))
             .collect();
-        let resolved = dal_provider::resolve(&catalog, &aliases, reference).map_err(|error| {
-            format!("model {reference} did not resolve: {error}").into_boxed_str()
-        })?;
+        let resolved = match route {
+            Some(route) => dal_provider::resolve_route(&catalog, &aliases, route),
+            None => dal_provider::resolve(&catalog, &aliases, reference),
+        }
+        .map_err(|error| format!("model {reference} did not resolve: {error}").into_boxed_str())?;
         Ok(ResolvedRequest {
             family: api_family(&resolved.route).unwrap_or(Family::Chat),
             provider: resolved.provider.clone(),

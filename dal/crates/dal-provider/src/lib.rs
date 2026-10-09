@@ -31,7 +31,7 @@ pub use auth::refresh::{
 pub use catalog::{
     Catalog, CatalogEntry, CatalogFetch, CatalogSource, ImageProfile, Listing, ModelFetch,
     ResolvedModel, ToolSupport, built_in_entries, compiled_price, compiled_temperature,
-    load_models, price_source, resolve,
+    load_models, price_source, resolve, resolve_route,
 };
 pub use compact::{CompactOutcome, CompactedHistory, items_for};
 pub use error::{LimitError, ProviderError, ResolveError, UsageCheckReason};

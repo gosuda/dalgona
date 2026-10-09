@@ -1,4 +1,5 @@
 //! A scripted provider drives one real turn through the public API.
+#![expect(clippy::expect_used, reason = "test assertions abort on failure")]
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::time::Duration;
@@ -150,4 +151,105 @@ async fn login_stores_api_key_at_mode_0600() {
             .mode();
         assert_eq!(mode & 0o777, 0o600, "store is owner-only");
     }
+}
+
+/// A host whose only provider is the scripted fixture and whose default model
+/// is the family-qualified `openai-responses/gpt-6`, which no catalog lists.
+async fn qualified_model_host() -> (Host, Workspace, tempfile::TempDir) {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let data = tmp.path().join("data");
+    let workspace_dir = tmp.path().join("w");
+    std::fs::create_dir_all(&data).expect("data dir");
+    std::fs::create_dir_all(&workspace_dir).expect("workspace dir");
+    let fixture = data.join("script.jsonl");
+    std::fs::write(&fixture, FIXTURE).expect("fixture");
+    let user = format!(
+        "model = \"openai-responses/gpt-6\"\n\n[providers.scripted]\nfixture = \"{}\"\n",
+        fixture.to_string_lossy().replace('\\', "\\\\")
+    );
+    let config =
+        Config::load(ConfigProduct::Dalgon, &data, "", Some(user.as_str())).expect("config");
+    let product = Product {
+        name: "dal",
+        data_root: data,
+        defaults: "",
+        extensions: Vec::new(),
+        bundled: Vec::new(),
+    };
+    let env = Env {
+        vars: BTreeMap::new(),
+        cwd: workspace_dir.clone(),
+        sandbox_helper: None,
+    };
+    let host = Host::start(product, config, env).await.expect("host");
+    let workspace = Workspace::new(workspace_dir).expect("workspace");
+    (host, workspace, tmp)
+}
+
+/// A family-qualified model id the catalog never lists still reaches the
+/// scripted provider: the default route keeps its family but not its prefix.
+#[tokio::test]
+async fn scripted_turn_ends_on_a_family_qualified_unlisted_model() {
+    let (host, workspace, _tmp) = qualified_model_host().await;
+    let agent = host
+        .open(SessionRef::Ephemeral { workspace }, ClientId::new("probe"))
+        .await
+        .expect("open");
+    let mut subscription = agent.subscribe(None).expect("subscribe");
+    agent
+        .submit(Command::Prompt {
+            expect: Expect::Idle,
+            content: vec![Part::Text { text: "hi".into() }],
+        })
+        .await
+        .expect("submit");
+    let stop = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let delivery = subscription.next().await.expect("stream open");
+            if let dal_agent::Delivery::Update(update) = delivery
+                && let dal_core::UpdateKind::TurnEnded { stop, .. } = update.kind
+            {
+                break stop;
+            }
+        }
+    })
+    .await
+    .expect("turn ends");
+    assert_eq!(stop, dal_core::Stop::EndTurn);
+}
+
+/// The router relay resolves a route by the same rule as a session turn: a
+/// route that names an unlisted model by family reaches its provider.
+#[tokio::test]
+async fn relay_opens_a_family_route_for_an_unlisted_model() {
+    let (host, _workspace, _tmp) = qualified_model_host().await;
+    let route = dal_core::ModelRoute::Api {
+        family: dal_core::Family::Responses,
+        model: "gpt-6".into(),
+    };
+    let request = dal_core::ModelRequest {
+        purpose: dal_core::Purpose::Turn,
+        model: route.clone(),
+        system: "".into(),
+        tools: std::sync::Arc::from(Vec::new()),
+        context: std::sync::Arc::from(vec![dal_core::ContextItem::User {
+            parts: vec![Part::Text { text: "hi".into() }],
+        }]),
+        params: dal_core::RequestParams::default(),
+        cache_key: None,
+    };
+    let mut stream = host
+        .relay(ClientId::new("router"), route, request)
+        .await
+        .expect("relay resolves the unlisted model");
+    let mut text = String::new();
+    while let Some(item) = tokio::time::timeout(Duration::from_secs(10), stream.next())
+        .await
+        .expect("stream item in time")
+    {
+        if let dal_provider::StreamEvent::TextDelta { text: delta } = item.expect("event") {
+            text.push_str(&delta);
+        }
+    }
+    assert_eq!(text, "Hello");
 }

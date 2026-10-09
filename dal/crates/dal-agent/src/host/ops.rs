@@ -229,7 +229,6 @@ impl Host {
             .map_err(|error| HostError::Config {
                 message: error.to_string().into(),
             })?;
-        let reference = request_reference(&request.model);
         let aliases: Vec<(Box<str>, Box<str>)> = shared
             .config
             .aliases()
@@ -237,8 +236,10 @@ impl Host {
             .map(|(name, target)| (name.clone(), target.clone()))
             .collect();
         let resolved =
-            resolve(&catalog, &aliases, &reference).map_err(|error| HostError::Config {
-                message: error.to_string().into(),
+            dal_provider::resolve_route(&catalog, &aliases, &request.model).map_err(|error| {
+                HostError::Config {
+                    message: error.to_string().into(),
+                }
             })?;
         if !route_matches(&route, &resolved.route) {
             return Err(HostError::Config {

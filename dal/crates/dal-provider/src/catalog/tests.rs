@@ -108,6 +108,61 @@ fn qualified_cache_miss_is_unknown_but_typed_source_accepts_new_ids() {
 }
 
 #[test]
+fn route_resolution_retries_an_unlisted_id_under_its_family_provider() {
+    let route = ModelRoute::Api {
+        family: Family::Responses,
+        model: "gpt-6".into(),
+    };
+    let typed = Catalog::with_sources(
+        vec![(
+            provider("openai", Family::Responses, "https://api.openai.com/v1"),
+            CatalogSource::Typed,
+        )],
+        Vec::new(),
+    );
+    assert!(resolve(&typed, &[], "gpt-6").is_err(), "bare id is unknown");
+    let resolved = resolve_route(&typed, &[], &route).expect("family provider serves the id");
+    assert_eq!(resolved.provider.as_ref(), "openai");
+    assert_eq!(resolved.route, route);
+
+    let cached = Catalog::with_sources(
+        vec![(
+            provider("openai", Family::Responses, "https://api.openai.com/v1"),
+            CatalogSource::Cache,
+        )],
+        vec![row("openai", "known-model", Some(10_000))],
+    );
+    assert_eq!(
+        resolve_route(&cached, &[], &route).unwrap_err().to_string(),
+        "unknown model gpt-6",
+        "a listed catalog still rejects an id it does not list",
+    );
+}
+
+#[test]
+fn route_resolution_prefers_the_listed_bare_id() {
+    let catalog = Catalog::with_sources(
+        vec![
+            (
+                provider("openai", Family::Responses, "https://api.openai.com/v1"),
+                CatalogSource::Typed,
+            ),
+            (
+                provider("acme", Family::Chat, "https://acme.test/v1"),
+                CatalogSource::Live,
+            ),
+        ],
+        vec![row("acme", "gpt-6", Some(42))],
+    );
+    let route = ModelRoute::Api {
+        family: Family::Chat,
+        model: "gpt-6".into(),
+    };
+    let resolved = resolve_route(&catalog, &[], &route).expect("listed id resolves");
+    assert_eq!(resolved.provider.as_ref(), "acme");
+}
+
+#[test]
 fn bare_id_collision_names_candidates_in_catalog_order() {
     let catalog = Catalog::with_sources(
         vec![

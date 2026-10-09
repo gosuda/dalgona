@@ -68,12 +68,12 @@ async fn open_stream(
         .iter()
         .map(|(name, target)| (name.clone(), target.clone()))
         .collect();
-    let reference = crate::host::ops::request_reference(&req.model);
-    let resolved = dal_provider::resolve(&catalog, &aliases, &reference).map_err(|error| {
-        dal_provider::ProviderError::InvalidRequest {
-            message: error.to_string(),
-        }
-    })?;
+    let resolved =
+        dal_provider::resolve_route(&catalog, &aliases, &req.model).map_err(|error| {
+            dal_provider::ProviderError::InvalidRequest {
+                message: error.to_string(),
+            }
+        })?;
     let provider = providers.provider(resolved)?;
     provider
         .open(deps.session, req, &[], Arc::new(|_: String| {}), cancel)

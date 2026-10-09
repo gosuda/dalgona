@@ -33,6 +33,38 @@ pub fn resolve(
     resolve_expanded(catalog, expanded)
 }
 
+/// Resolves the model a route names.
+///
+/// A route keeps its API family but not the provider prefix its model was
+/// configured with, so `openai-responses/gpt-6` becomes the bare id `gpt-6`.
+/// A catalog built without a model list resolves only provider-qualified
+/// ids. The bare id therefore resolves first, and an unknown bare id retries
+/// under the family's own provider prefix. Synthetic and harness routes
+/// resolve by their id.
+///
+/// # Errors
+/// Returns the bare-id error when both spellings fail.
+pub fn resolve_route(
+    catalog: &Catalog,
+    aliases: &[(Box<str>, Box<str>)],
+    route: &ModelRoute,
+) -> Result<ResolvedModel, ResolveError> {
+    let ModelRoute::Api { family, model } = route else {
+        return resolve(catalog, aliases, route.id());
+    };
+    let bare = resolve(catalog, aliases, model);
+    if !matches!(bare, Err(ResolveError::UnknownModel { .. })) {
+        return bare;
+    }
+    let prefix = match family {
+        Family::Chat => "openai-chat",
+        Family::Responses => "openai-responses",
+        Family::Codex => "openai-codex",
+        Family::Anthropic => "anthropic",
+    };
+    resolve(catalog, aliases, &format!("{prefix}/{model}")).or(bare)
+}
+
 fn resolve_expanded(catalog: &Catalog, reference: &str) -> Result<ResolvedModel, ResolveError> {
     if reference.starts_with("dalgon/") {
         return resolve_harness(reference);
