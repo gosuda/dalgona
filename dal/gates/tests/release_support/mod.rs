@@ -2,6 +2,8 @@
     clippy::disallowed_methods,
     reason = "release support runs the publish and semver shell scripts"
 )]
+#[cfg(windows)]
+use std::env;
 use std::{
     error::Error,
     io::{self, Write},
@@ -25,11 +27,35 @@ fn shell() -> Command {
     #[cfg(windows)]
     {
         for key in ["ProgramFiles", "ProgramFiles(x86)"] {
-            if let Some(root) = std::env::var_os(key) {
-                let candidate = Path::new(&root).join(r"Git\bin\bash.exe");
+            if let Some(dir) = env::var_os(key) {
+                let candidate = Path::new(&dir).join(r"Git\bin\bash.exe");
                 if candidate.is_file() {
                     return Command::new(candidate);
                 }
+            }
+        }
+        // Per-user Git for Windows installs under LOCALAPPDATA\Programs.
+        if let Some(dir) = env::var_os("LOCALAPPDATA") {
+            let candidate = Path::new(&dir).join(r"Programs\Git\bin\bash.exe");
+            if candidate.is_file() {
+                return Command::new(candidate);
+            }
+        }
+        if let Some(paths) = env::var_os("PATH") {
+            let stub =
+                env::var_os("SystemRoot").map(|root| Path::new(&root).join(r"System32\bash.exe"));
+            for candidate in env::split_paths(&paths).map(|dir| dir.join("bash.exe")) {
+                if !candidate.is_file() {
+                    continue;
+                }
+                // A WSL `bash.exe` wins on PATH but cannot open the `C:\`
+                // script paths the guards pass.
+                if stub.as_ref().is_some_and(|stub| {
+                    candidate.as_os_str().eq_ignore_ascii_case(stub.as_os_str())
+                }) {
+                    continue;
+                }
+                return Command::new(candidate);
             }
         }
     }
@@ -56,10 +82,12 @@ fn captured(command: &mut Command, input: Option<&str>) -> Run {
         .status
         .code()
         .ok_or_else(|| io::Error::other("child process terminated without an exit code"))?;
+    // Windows interpreters emit CRLF on their standard streams; normalize so
+    // the guards' assertions compare the same logical lines on every OS.
     Ok((
         code,
-        String::from_utf8(output.stdout)?,
-        String::from_utf8(output.stderr)?,
+        String::from_utf8(output.stdout)?.replace("\r\n", "\n"),
+        String::from_utf8(output.stderr)?.replace("\r\n", "\n"),
     ))
 }
 

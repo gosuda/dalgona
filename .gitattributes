@@ -1,3 +1,7 @@
 # Assets embedded with include_bytes! must check out byte-identically on every
 # platform; Windows line-ending conversion corrupts the line-strict hex grammar.
 dal/crates/dal-ext/assets/*.hex -text
+
+# POSIX shell scripts must keep LF line endings; a CRLF checkout breaks
+# builtins such as `set -euo pipefail` on Windows Git Bash (MSYS).
+*.sh text eol=lf

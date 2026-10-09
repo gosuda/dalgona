@@ -73,6 +73,8 @@ fn default_ladder(environment: &BTreeMap<OsString, OsString>) -> Result<Resolved
     default_windows_ladder(
         env_value(environment, "ProgramFiles"),
         env_value(environment, "ProgramFiles(x86)"),
+        env_value(environment, "LOCALAPPDATA"),
+        env_value(environment, "SystemRoot"),
         env_value(environment, "PATH"),
     )
 }
@@ -95,6 +97,8 @@ fn env_value<'a>(environment: &'a BTreeMap<OsString, OsString>, name: &str) -> O
 fn default_windows_ladder(
     program_files: Option<&OsStr>,
     program_files_x86: Option<&OsStr>,
+    local_app_data: Option<&OsStr>,
+    system_root: Option<&OsStr>,
     path: Option<&OsStr>,
 ) -> Result<ResolvedShell, ExecError> {
     for program_files in [program_files, program_files_x86].into_iter().flatten() {
@@ -103,19 +107,35 @@ fn default_windows_ladder(
             return Ok(ResolvedShell { program: candidate });
         }
     }
+    // Per-user Git for Windows installs under LOCALAPPDATA\Programs.
+    if let Some(local_app_data) = local_app_data {
+        let candidate = Path::new(local_app_data).join(r"Programs\Git\bin\bash.exe");
+        if is_executable_file(&candidate) {
+            return Ok(ResolvedShell { program: candidate });
+        }
+    }
     if let Some(path) = path
-        && let Some(program) = find_in_path("bash.exe", path)
+        && let Some(program) = find_in_path("bash.exe", path, system_root)
     {
         return Ok(ResolvedShell { program });
     }
     Err(ExecError::NoBash)
 }
 
+/// Finds `executable` on PATH, skipping the WSL `bash.exe` stub in
+/// System32 — it resolves first on a default PATH but cannot open the
+/// `C:\` paths an exec call passes it.
 #[cfg(windows)]
-fn find_in_path(executable: &str, path: &OsStr) -> Option<PathBuf> {
+fn find_in_path(executable: &str, path: &OsStr, system_root: Option<&OsStr>) -> Option<PathBuf> {
+    let wsl_stub = system_root.map(|root| Path::new(root).join(r"System32\bash.exe"));
     std::env::split_paths(path)
         .map(|directory| directory.join(executable))
-        .find(|candidate| is_executable_file(candidate))
+        .find(|candidate| {
+            is_executable_file(candidate)
+                && !wsl_stub.as_ref().is_some_and(|stub| {
+                    candidate.as_os_str().eq_ignore_ascii_case(stub.as_os_str())
+                })
+        })
 }
 
 #[cfg(unix)]
@@ -177,7 +197,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_without_git_bash_returns_the_named_error() {
-        let error = super::default_windows_ladder(None, None, None)
+        let error = super::default_windows_ladder(None, None, None, None, None)
             .expect_err("an empty captured environment must fail closed");
         assert_eq!(
             error.to_string(),

@@ -3,7 +3,7 @@
 //! This crate keeps protocol framing and transport conversion at the edge. It reuses
 //! `dal-core` values and the public host operations from `dal-agent`.
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 /// A2A task states, transitions, and stable error mapping.
 pub mod a2a;
 /// Agent Client Protocol branches, versions 1 and 2.
