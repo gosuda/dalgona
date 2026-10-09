@@ -41,4 +41,3 @@ pub(crate) trait JobsView {
     /// Reports whether the job is a live top-level exec job in this session.
     fn is_live_top_level_exec(&self, job: dal_core::JobId) -> bool;
 }
-

@@ -2,4 +2,3 @@
 //! Pool index-ordering tests: the last item may finish first.
 
 use super::*;
-
