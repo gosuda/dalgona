@@ -86,15 +86,16 @@ fn parse_child_policy_tool(name: &str) -> Result<Name, HostError> {
     })
 }
 
-/// Reads the newest child-policy record a journal carries; a journal
-/// without one leaves the session unrestricted and on the configured mode.
+/// Reads the newest host-owned child-policy record a journal carries; a
+/// journal without one leaves the session unrestricted and on the configured
+/// mode. Provenance is enforced when records are constructed; the journal
+/// format does not carry a second authentication field.
 fn replay_child_policy(records: &[Record]) -> Result<Option<ChildPolicy>, HostError> {
     let found = records.iter().rev().find(|record| {
         matches!(
             record,
             Record::Ext { ext, kind, .. }
-                if ext.as_ref() == super::CHILD_POLICY_EXT
-                    && kind.as_ref() == super::CHILD_POLICY_KIND
+                if super::is_child_policy_record(ext.as_ref(), kind.as_ref())
         )
     });
     let Some(Record::Ext { body, .. }) = found else {

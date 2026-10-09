@@ -11,6 +11,11 @@ pub(crate) const CHILD_POLICY_EXT: &str = "dal-agent";
 /// Extension record kind for a child session's durable start policy.
 pub(crate) const CHILD_POLICY_KIND: &str = "child_policy";
 
+/// Reports whether an extension record uses the host-owned child-policy identity.
+pub(crate) fn is_child_policy_record(ext: &str, kind: &str) -> bool {
+    ext == CHILD_POLICY_EXT && kind == CHILD_POLICY_KIND
+}
+
 pub use auth::LoginOutcome;
 pub use ops::DocEntry;
 

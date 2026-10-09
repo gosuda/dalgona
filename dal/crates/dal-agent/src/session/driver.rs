@@ -1442,6 +1442,13 @@ impl Driver {
                 .await
             {
                 Ok(Some(compaction)) => {
+                    if compaction_has_reserved_policy_record(&compaction) {
+                        refused = Some(
+                            "compactor attempted to write the host-owned child policy record."
+                                .into(),
+                        );
+                        continue;
+                    }
                     return Ok(summarize(
                         &entry.name,
                         measured.unwrap_or(total),
@@ -1461,6 +1468,15 @@ impl Driver {
         }
         Err(refused.unwrap_or_else(|| "no compactor registered.".into()))
     }
+}
+
+fn compaction_has_reserved_policy_record(compaction: &crate::ext::compact::Compaction) -> bool {
+    let crate::ext::compact::Replacement::Parts { letters, .. } = &compaction.replacement else {
+        return false;
+    };
+    letters.iter().any(|letter| {
+        crate::host::is_child_policy_record(letter.ext.as_str(), letter.kind.as_ref())
+    })
 }
 
 fn settled_reply_text(entries: &[EntryView]) -> Box<str> {
@@ -1833,5 +1849,45 @@ fn compactor_name(
         parts,
         parts_tokens,
         letters,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroU64;
+
+    use super::*;
+    use crate::ext::ExtRecord;
+    use dal_core::EntryId;
+
+    fn letter(kind: &str) -> ExtRecord {
+        ExtRecord {
+            ext: Name::parse(crate::host::CHILD_POLICY_EXT).expect("reserved name parses"),
+            kind: kind.into(),
+            body: RawJson::parse("{}").expect("record body parses"),
+        }
+    }
+
+    fn parts(letter: ExtRecord) -> crate::ext::compact::Compaction {
+        let entry = EntryId::new(NonZeroU64::MIN);
+        crate::ext::compact::Compaction {
+            span: (entry, entry),
+            replacement: crate::ext::compact::Replacement::Parts {
+                parts: Vec::new(),
+                letters: vec![letter],
+                parts_tokens: 0,
+            },
+            usage: None,
+        }
+    }
+
+    #[test]
+    fn compaction_rejects_host_policy_identity_but_allows_ordinary_record_kind() {
+        assert!(compaction_has_reserved_policy_record(&parts(letter(
+            crate::host::CHILD_POLICY_KIND,
+        ))));
+        assert!(!compaction_has_reserved_policy_record(&parts(letter(
+            "ordinary",
+        ))));
     }
 }
