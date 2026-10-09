@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Report a context overflow on the turn-end hook: a turn that ends failed because the provider rejected the request for size, and compaction did not recover, now sets `overflowed` on the turn-end event and its script payload. The journal record is unchanged.
+- Fix sign-in and sign-out in the terminal and over RPC: `/login` and `/logout` in the terminal now open a provider picker and run the sign-in (API key, browser, or device code) instead of printing a notice, and `auth/status`, `auth/login`, and `auth/logout` work over RPC v1. The terminal and RPC reach one provider login runner, `dal_provider::login`, through `Host::login` and `Host::logout`; the command line calls the same runner.
 - Add the `agents.prompt` service operation: a parent can give an idle child one final prompt and interrupt it after a bounded grace period.
 - Add a typed `refused` reply to `agents.start`, with the reason a child could not start (`max_depth`, `workspace_unresolved`, `workspace_outside_root`, or `model_unroutable`). The reason text now reaches the parent, the model, and the orchestration report instead of a bare `cancelled`.
 - Persist child tool restrictions and inherited approval modes so a resumed child keeps the same trust boundary after a host restart.
