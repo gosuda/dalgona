@@ -460,41 +460,12 @@ pub fn work(_config: PlanConfig) -> Result<Extension, RegistrationError> {
 /// Upper bound of the one-line status text shown in the activity row.
 const STATUS_LINE_LIMIT: usize = 120;
 
-#[cfg(test)]
-const STATUS_LIMIT: usize = 4096;
-#[cfg(test)]
-const STATUS_TRUNCATED: &str = "[...] status truncated";
-
 #[derive(serde::Serialize)]
 struct TerminalPayload {
     all_terminal: bool,
     open: usize,
     total: usize,
     first_titles: Vec<String>,
-}
-
-#[cfg(test)]
-#[derive(serde::Serialize)]
-struct StatusPayload<'a> {
-    plan_mode: bool,
-    plan_state: &'static str,
-    todos: Vec<StatusTodo<'a>>,
-}
-
-#[cfg(test)]
-#[derive(serde::Serialize)]
-struct StatusTodo<'a> {
-    subject: std::borrow::Cow<'a, str>,
-    state: &'static str,
-}
-
-#[cfg(test)]
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum StatusError {
-    #[error(transparent)]
-    Serialize(#[from] sonic_rs::Error),
-    #[error("plan status cannot fit within 4096 bytes")]
-    TooLarge,
 }
 
 pub(crate) fn todo_terminal_json(items: &[TodoItem]) -> Result<String, sonic_rs::Error> {
@@ -509,68 +480,6 @@ pub(crate) fn todo_terminal_json(items: &[TodoItem]) -> Result<String, sonic_rs:
 
 pub(crate) fn status_quiet(phase: plan::Phase) -> bool {
     phase != plan::Phase::Awaiting
-}
-
-#[cfg(test)]
-pub(crate) fn status_json(phase: plan::Phase, items: &[TodoItem]) -> Result<String, StatusError> {
-    let full = encode_status(phase, items, todo::MAX_SUBJECT_BYTES)?;
-    if full.len() <= STATUS_LIMIT {
-        return Ok(full);
-    }
-
-    let mut low = 0;
-    let mut high = todo::MAX_SUBJECT_BYTES;
-    let mut best = encode_status(phase, items, 0)?;
-    if best.len() > STATUS_LIMIT {
-        return Err(StatusError::TooLarge);
-    }
-    while low + 1 < high {
-        let budget = low + (high - low) / 2;
-        let candidate = encode_status(phase, items, budget)?;
-        if candidate.len() <= STATUS_LIMIT {
-            low = budget;
-            best = candidate;
-        } else {
-            high = budget;
-        }
-    }
-    Ok(best)
-}
-
-#[cfg(test)]
-fn encode_status(
-    phase: plan::Phase,
-    items: &[TodoItem],
-    subject_budget: usize,
-) -> Result<String, sonic_rs::Error> {
-    let todos = items
-        .iter()
-        .map(|item| StatusTodo {
-            subject: status_subject(&item.subject, subject_budget),
-            state: item.state.as_str(),
-        })
-        .collect();
-    sonic_rs::to_string(&StatusPayload {
-        plan_mode: phase != plan::Phase::Off,
-        plan_state: phase.as_str(),
-        todos,
-    })
-}
-
-#[cfg(test)]
-fn status_subject(subject: &str, budget: usize) -> std::borrow::Cow<'_, str> {
-    if subject.len() <= budget {
-        return std::borrow::Cow::Borrowed(subject);
-    }
-    let prefix_budget = budget.saturating_sub(STATUS_TRUNCATED.len());
-    let mut end = subject.len().min(prefix_budget);
-    while !subject.is_char_boundary(end) {
-        end -= 1;
-    }
-    let mut truncated = String::with_capacity(end + STATUS_TRUNCATED.len());
-    truncated.push_str(&subject[..end]);
-    truncated.push_str(STATUS_TRUNCATED);
-    std::borrow::Cow::Owned(truncated)
 }
 
 /// Renders the one-line activity text: plan phase, `done/total done`, and the
@@ -626,19 +535,6 @@ mod tests {
         open: usize,
         total: usize,
         first_titles: Vec<String>,
-    }
-
-    #[derive(serde::Deserialize)]
-    struct StatusOutput {
-        plan_mode: bool,
-        plan_state: String,
-        todos: Vec<StatusTodoOutput>,
-    }
-
-    #[derive(serde::Deserialize)]
-    struct StatusTodoOutput {
-        subject: String,
-        state: String,
     }
 
     #[test]
@@ -785,105 +681,6 @@ mod tests {
         assert!(text.ends_with("界…"));
     }
 
-    #[test]
-    fn plan_status_json_stays_bounded_and_keeps_every_todo() {
-        let items = (0..todo::MAX_ITEMS)
-            .map(|_| TodoItem {
-                subject: format!("{}{}", "\"".repeat(50), "界".repeat(50)),
-                description: String::new(),
-                state: TodoState::Pending,
-            })
-            .collect::<Vec<_>>();
-        let original = items.clone();
-        let status = status_json(plan::Phase::Planning, &items);
-
-        assert!(status.is_ok());
-        if let Ok(status) = status {
-            assert!(status.len() <= STATUS_LIMIT);
-            let decoded = sonic_rs::from_str::<StatusOutput>(&status);
-            assert!(decoded.is_ok());
-            if let Ok(decoded) = decoded {
-                assert_eq!(decoded.todos.len(), todo::MAX_ITEMS);
-                assert!(
-                    decoded
-                        .todos
-                        .iter()
-                        .any(|item| item.subject.contains(STATUS_TRUNCATED))
-                );
-                assert!(decoded.plan_mode);
-                assert_eq!(decoded.plan_state, "planning");
-                assert!(decoded.todos.iter().all(|item| item.state == "pending"));
-            }
-        }
-        assert_eq!(items, original);
-        assert!(status_quiet(plan::Phase::Planning));
-        assert!(!status_quiet(plan::Phase::Awaiting));
-    }
-
-    fn padded_items(padding: usize) -> Vec<TodoItem> {
-        let mut items = vec![
-            TodoItem {
-                subject: String::new(),
-                description: String::new(),
-                state: TodoState::Pending,
-            };
-            todo::MAX_ITEMS
-        ];
-        let mut left = padding;
-        for item in &mut items {
-            let take = left.min(todo::MAX_SUBJECT_BYTES);
-            item.subject = "a".repeat(take);
-            left -= take;
-        }
-        items
-    }
-
-    #[test]
-    fn plan_status_truncation_boundary() -> Result<(), Box<dyn std::error::Error>> {
-        let base =
-            encode_status(plan::Phase::Off, &padded_items(0), todo::MAX_SUBJECT_BYTES)?.len();
-        let padding = STATUS_LIMIT - base;
-
-        let exact = status_json(plan::Phase::Off, &padded_items(padding))?;
-        assert_eq!(exact.len(), STATUS_LIMIT);
-        assert!(!exact.contains(STATUS_TRUNCATED));
-
-        let over = status_json(plan::Phase::Off, &padded_items(padding + 1))?;
-        assert!(over.len() <= STATUS_LIMIT);
-        let decoded = sonic_rs::from_str::<StatusOutput>(&over)?;
-        assert_eq!(decoded.todos.len(), todo::MAX_ITEMS);
-        assert!(
-            decoded
-                .todos
-                .iter()
-                .any(|item| item.subject.ends_with(STATUS_TRUNCATED))
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn plan_status_truncation_keeps_multibyte_subjects_whole() {
-        let items = (0..todo::MAX_ITEMS)
-            .map(|_| TodoItem {
-                subject: "界".repeat(66),
-                description: String::new(),
-                state: TodoState::Done,
-            })
-            .collect::<Vec<_>>();
-
-        let status = status_json(plan::Phase::Planning, &items);
-
-        assert!(status.as_ref().is_ok_and(|text| text.len() <= STATUS_LIMIT));
-        let decoded = status
-            .and_then(|text| sonic_rs::from_str::<StatusOutput>(&text).map_err(StatusError::from));
-        assert!(decoded.is_ok_and(|output| {
-            output
-                .todos
-                .iter()
-                .all(|item| item.subject.ends_with(STATUS_TRUNCATED))
-        }));
-    }
-
     #[tokio::test]
     async fn plan_status_bound() -> Result<(), Box<dyn std::error::Error>> {
         let host = support::ScriptedWorkHost::open();
@@ -912,20 +709,6 @@ mod tests {
         assert_eq!(status, "0/26 done");
         assert!(!status.contains(['{', '}', '"']));
 
-        let items = todo::fold(host.services.leaf_bodies(todo::TODO_KIND).as_slice());
-        let json = status_json(plan::Phase::Off, &items)?;
-        assert!(json.len() <= STATUS_LIMIT);
-        let decoded = sonic_rs::from_str::<StatusOutput>(&json)?;
-        assert!(!decoded.plan_mode);
-        assert_eq!(decoded.plan_state, "off");
-        assert_eq!(decoded.todos.len(), todo::MAX_ITEMS);
-        assert!(
-            decoded
-                .todos
-                .iter()
-                .any(|item| item.subject.contains(STATUS_TRUNCATED))
-        );
-        assert!(decoded.todos.iter().all(|item| item.state == "pending"));
         assert!(record_before[0].contains(&encoded_subject));
         assert_eq!(host.services.all_bodies(todo::TODO_KIND), record_before);
         Ok(())

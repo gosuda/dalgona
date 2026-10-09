@@ -535,7 +535,6 @@ mod tests {
         state.set_sync_open(true);
         let expected = b"\x1b[?2026l\x1b[<u\x1b[<u\x1b[>4;0m\x1b[?2004l\x1b[?2027l\x1b[?25h\x1b[0m\x1b[r\x1b[?1049l";
         assert_eq!(restore_bytes(&state), expected);
-        assert_eq!(restore_bytes(&state), expected);
     }
 
     #[test]

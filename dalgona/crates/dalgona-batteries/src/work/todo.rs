@@ -25,18 +25,6 @@ pub(crate) enum TodoState {
     Cancelled,
 }
 
-#[cfg(test)]
-impl TodoState {
-    pub(crate) const fn as_str(&self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::InProgress => "in_progress",
-            Self::Done => "done",
-            Self::Cancelled => "cancelled",
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct TodoItem {
     pub subject: String,

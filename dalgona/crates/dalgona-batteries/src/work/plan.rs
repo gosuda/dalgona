@@ -35,17 +35,6 @@ pub(crate) enum Phase {
     Awaiting,
 }
 
-#[cfg(test)]
-impl Phase {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Off => "off",
-            Self::Planning => "planning",
-            Self::Awaiting => "awaiting",
-        }
-    }
-}
-
 #[derive(Debug, Default)]
 pub(crate) struct BatteryState {
     phases: Mutex<HashMap<SessionId, Phase>>,
