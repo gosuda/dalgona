@@ -259,6 +259,10 @@ path = "tests/dalgona-orchestration-06.rs"
 name = "dalgona-orchestration-07"
 path = "tests/dalgona-orchestration-07.rs"
 
+[[test]]
+name = "dalgona-orchestration-08"
+path = "tests/dalgona-orchestration-08.rs"
+
 
 [lints]
 workspace = true
