@@ -127,7 +127,7 @@ impl Judge {
             services,
             caller,
             session_route,
-            session_model_id: _,
+            session_model_id,
         } = open;
         let model = if config.model.is_empty() {
             session_route
@@ -146,8 +146,15 @@ impl Judge {
         let probe_result = services.infer(&caller, probe).await;
         let (gate, model_id) = match probe_result {
             Ok(_) if config.gate == GateSetting::Off => (Gate::Off, Box::from("")),
-            Ok(inference) => {
-                let model_id = Box::<str>::from(inference_text(inference).trim());
+            Ok(_) => {
+                // The probe reply is model output, never an identity: the
+                // ledger names the configured judge model, else the
+                // session's resolved model.
+                let model_id = if config.model.is_empty() {
+                    session_model_id
+                } else {
+                    Box::<str>::from(&*config.model)
+                };
                 (
                     Gate::Ready {
                         model_id: model_id.clone(),
@@ -488,10 +495,6 @@ fn split_inference(inference: Inference) -> (String, u64, u64) {
         }
     }
     (text, input_tokens, output_tokens)
-}
-
-fn inference_text(inference: Inference) -> String {
-    split_inference(inference).0
 }
 
 fn provider_error(error: &ServiceError) -> JudgeError {
