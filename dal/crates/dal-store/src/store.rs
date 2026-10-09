@@ -1473,9 +1473,21 @@ impl Journal {
         if file_backed {
             self.refresh_from_records();
         }
-        self.state = State::Closed;
+        // The locks are about to drop with the state: flip them back to
+        // transient first so a same-process reopen keeps its bounded
+        // retry through the release instead of reporting Locked against a
+        // flag the guards only carry for the release itself.
+        let lock = match &mut self.state {
+            State::File { lock, .. } => Some(lock),
+            State::Broken { lock, .. } => lock.as_mut(),
+            _ => None,
+        };
+        for guard in lock.into_iter().chain(self.prelocked.iter_mut()) {
+            guard.mark_detached();
+        }
         self.prelocked = None;
         self.pending = None;
+        self.state = State::Closed;
         settled
     }
 

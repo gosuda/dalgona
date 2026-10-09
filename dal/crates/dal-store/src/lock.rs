@@ -62,9 +62,13 @@ fn unregister(path: &Path) {
 
 /// `true` while a live journal inside this process owns the OS lock for
 /// `path` — as opposed to a transient guard mid-acquire or mid-release,
-/// which registers too but is worth retrying through.
+/// which registers too but is worth retrying through. The query path is
+/// canonicalized the same way the holder's registry key was, so two
+/// stores that reach the lock through symlinked and real spellings of
+/// the data root still see the same holder.
 pub(crate) fn live_in_process(path: &Path) -> bool {
-    holders_map().get(path).is_some_and(|holder| holder.live)
+    let key = util::canonical_path(path);
+    holders_map().get(&key).is_some_and(|holder| holder.live)
 }
 
 /// Holds the operating-system lock for one session.
@@ -77,6 +81,10 @@ pub(crate) fn live_in_process(path: &Path) -> bool {
 pub(crate) struct LockGuard {
     _file: File,
     path: PathBuf,
+    /// The canonical spelling of `path` under which this guard is
+    /// registered — two stores that alias the same data root through a
+    /// symlink land on one key, and a drop can recompute nothing.
+    key: PathBuf,
 }
 
 impl LockGuard {
@@ -115,10 +123,12 @@ impl LockGuard {
                 // so a contender reading our pid always finds the holder
                 // entry instead of taking a needless retry pass; a journal
                 // flips it to live only once it parks the guard.
-                register(path);
+                let key = util::canonical_path(path);
+                register(&key);
                 Ok(Self {
                     _file: file,
                     path: path.to_path_buf(),
+                    key,
                 })
             }
             Err(TryLockError::WouldBlock) => {
@@ -134,8 +144,19 @@ impl LockGuard {
     /// contender then reports immediately instead of burning its retry
     /// budget on a lock that outlives it.
     pub(crate) fn mark_live(&self) {
-        if let Some(holder) = holders_map().get_mut(&self.path) {
+        if let Some(holder) = holders_map().get_mut(&self.key) {
             holder.live = true;
+        }
+    }
+
+    /// Marks this held lock back as transient. Call when a journal begins
+    /// retiring the guard (close, or dropping without close); a contender
+    /// reopening the same session then keeps its bounded retry through
+    /// the release instead of failing on a `live` flag the guard only
+    /// carries for the last instructions it owns.
+    pub(crate) fn mark_detached(&self) {
+        if let Some(holder) = holders_map().get_mut(&self.key) {
+            holder.live = false;
         }
     }
 }
@@ -146,7 +167,7 @@ impl Drop for LockGuard {
         // lock releases: a contender that loses `try_lock` to the next
         // holder must not read a retired pid or a stale live-holder flag
         // during the gap before that holder republishes its own.
-        unregister(&self.path);
+        unregister(&self.key);
         let _ = fs::remove_file(owner_path(&self.path));
     }
 }
@@ -358,11 +379,21 @@ mod tests {
         let dir = TestDir::new();
         let id = SessionId::new_v7();
         let path = dir.0.join("lock");
+        // The same lock file spelled through a different path — a store
+        // whose data root reaches the file another way must still see the
+        // holder.
+        let alias = dir.0.join("sub").join("..").join("lock");
+        fs::create_dir(dir.0.join("sub")).expect("create alias prefix");
         assert!(!super::live_in_process(&path));
         {
             let guard = LockGuard::acquire(&path, id).expect("first lock acquisition");
             // A fresh guard is transient: a detached first-append setup or
             // an in-flight open holds it without a live journal behind it.
+            assert!(!super::live_in_process(&path));
+            guard.mark_live();
+            assert!(super::live_in_process(&path));
+            assert!(super::live_in_process(&alias));
+            guard.mark_detached();
             assert!(!super::live_in_process(&path));
             guard.mark_live();
             assert!(super::live_in_process(&path));
