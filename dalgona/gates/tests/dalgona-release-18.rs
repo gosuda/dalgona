@@ -31,7 +31,7 @@ fn sul_license_is_the_only_product_license() -> support::TestResult<()> {
     let root = support::repo_root();
     let mut sources = Vec::new();
     rust_sources(&root.join("dalgona"), &mut sources)?;
-    assert!(!sources.is_empty());
+    assert_ne!(sources.len(), 0);
     for source in sources {
         let text = fs::read_to_string(source)?;
         assert!(text.starts_with("// SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0\n"));

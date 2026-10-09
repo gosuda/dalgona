@@ -262,6 +262,7 @@ impl CommandCx<'_> {
     ///
     /// The future resolves once the effect is durable; it never blocks a
     /// thread while waiting.
+    #[must_use = "await it to make the command durable"]
     pub fn submit_wait(&self, command: Command) -> BoxFuture<'_, Result<(), SaveError>> {
         self.host
             .submit_wait(&self.caller, self.session, self.turn, command)
@@ -387,6 +388,7 @@ impl CommandCx<'_> {
     ///
     /// Unlike [`CommandCx::leaf_entries`], pages walk the whole branch
     /// through `query`; the host hydrates text blobs as it does for leaves.
+    #[must_use = "await it to receive the page"]
     pub fn history_page(
         &self,
         query: PageReq,
@@ -405,6 +407,7 @@ impl CommandCx<'_> {
     /// sender. A validation failure publishes nothing, so the old
     /// generation stays live; a turn that started before the publish
     /// keeps dispatching on its captured generation.
+    #[must_use = "await it to publish the generation"]
     pub fn publish_plugins(
         &self,
         plugins: Vec<Extension>,
