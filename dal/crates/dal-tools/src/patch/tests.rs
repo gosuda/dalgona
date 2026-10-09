@@ -25,6 +25,7 @@ use super::{
 };
 
 mod observation;
+mod rename_containment;
 
 fn change_edit(path: &str, locator: Locator, action: Action, body: &str) -> Edit {
     change_edit_guard(path, locator, action, Guard::Quoted, body)
@@ -1410,10 +1411,9 @@ async fn stage_classify_create_delete_rename() {
     .await
     .expect("rename plans");
     assert_eq!(staged.op, Operation::Rename);
-    assert_eq!(
-        staged.renamed_to.as_deref(),
-        Some(std::path::Path::new("b.txt"))
-    );
+    let dest = staged.renamed_to.as_ref().expect("rename destination");
+    assert_eq!(dest.path, std::path::Path::new("b.txt"));
+    assert_eq!(dest.absolute_path, dir.path().join("b.txt"));
     assert_eq!(&*staged.after.expect("after"), b"P\nb\n");
     // Two renames in one payload conflict.
     let error = stage_one(

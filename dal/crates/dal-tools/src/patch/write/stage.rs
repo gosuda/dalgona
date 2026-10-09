@@ -1,16 +1,13 @@
 //! Staging: guards, proofs, and before/after image construction.
 
-use std::{
-    borrow::Cow,
-    path::{Path, PathBuf},
-};
+use std::{borrow::Cow, path::Path};
 
 use super::super::{
     ir::{
         Action, DiffHunk, DiffLine, DiffLineKind, Edit, EngineError, ErrorClass, Guard, Locator,
-        Operation, StagedFileOwned,
+        Operation, RenameTarget, StagedFileOwned,
     },
-    resolve::{decode, line_count},
+    resolve::{decode, line_count, resolve_path},
 };
 
 use super::{PatchSession, ensure_regular_target, non_regular_target};
@@ -120,7 +117,7 @@ enum StagePlan {
     Ready(StagedFileOwned),
     Changes {
         content_edits: Vec<Edit>,
-        rename_to: Option<PathBuf>,
+        rename_to: Option<RenameTarget>,
     },
 }
 pub(crate) async fn stage_file(
@@ -200,7 +197,7 @@ async fn classify_edits(
     canonical: &Path,
     edits: Vec<Edit>,
 ) -> Result<StagePlan, EngineError> {
-    let mut rename_to: Option<PathBuf> = None;
+    let mut rename_to: Option<RenameTarget> = None;
     let mut content_edits = Vec::new();
     for edit in edits {
         match edit {
@@ -211,6 +208,7 @@ async fn classify_edits(
                         "patch: overlapping rename in one file.".to_owned(),
                     ));
                 }
+                let (dest_display, dest_canonical) = resolve_path(&session.workspace, &to)?;
                 if let Some(reference) = reference {
                     prove_reference(
                         session,
@@ -223,7 +221,10 @@ async fn classify_edits(
                     )
                     .await?;
                 }
-                rename_to = Some(to);
+                rename_to = Some(RenameTarget {
+                    path: dest_display,
+                    absolute_path: dest_canonical,
+                });
             }
             Edit::Create { path, body, .. } => {
                 if let Ok(metadata) = tokio::fs::metadata(canonical).await {

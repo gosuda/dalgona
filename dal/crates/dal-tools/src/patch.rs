@@ -332,7 +332,7 @@ fn preview_for_plan(plan: &ir::Plan) -> Preview {
             after_hex
         ));
         if let Some(dest) = file.renamed_to.as_ref() {
-            preview_lines.push(format!("  -> {}", dest.display()));
+            preview_lines.push(format!("  -> {}", dest.path.display()));
         }
         for hunk in &file.hunks {
             preview_lines.push(format!(

@@ -7,6 +7,7 @@ use super::super::ir::{
     StagedFileOwned,
 };
 
+use super::super::resolve::revalidate_path;
 use super::{PatchSession, ensure_regular_target, non_regular_target};
 
 fn lock_table()
@@ -41,7 +42,7 @@ async fn prepare_write_set(
         if file.op == super::super::ir::Operation::Rename
             && let Some(dest) = file.renamed_to.as_ref()
         {
-            lock_paths.push(session.workspace.join(dest));
+            lock_paths.push(dest.absolute_path.clone());
         }
     }
     lock_paths.sort_by(|left, right| {
@@ -62,6 +63,12 @@ async fn prepare_write_set(
                 .clone()
         };
         guards.push(guard.lock_owned().await);
+    }
+    for file in &ordered {
+        revalidate_path(&session.workspace, &file.path, &file.absolute_path)?;
+        if let Some(dest) = file.renamed_to.as_ref() {
+            revalidate_path(&session.workspace, &dest.path, &dest.absolute_path)?;
+        }
     }
     for file in &ordered {
         if let Some(expected) = file.before.as_deref() {
@@ -113,7 +120,7 @@ pub(crate) async fn apply_files(
     for file in &plan.files {
         session.index.dirty(&session.workspace, &file.path);
         if let Some(renamed_to) = file.renamed_to.as_ref() {
-            session.index.dirty(&session.workspace, renamed_to);
+            session.index.dirty(&session.workspace, &renamed_to.path);
         }
     }
     // Phase B: ordered target operations (updates, deletes, renames).
@@ -217,7 +224,7 @@ async fn stage_temp(
     };
     let target_abs = if file.op == super::super::ir::Operation::Rename {
         match file.renamed_to.as_ref() {
-            Some(dest) => session.workspace.join(dest),
+            Some(dest) => dest.absolute_path.clone(),
             None => file.absolute_path.clone(),
         }
     } else {
@@ -228,7 +235,10 @@ async fn stage_temp(
         && let Ok(metadata) = tokio::fs::metadata(&target_abs).await
     {
         cleanup_temps(temps).await;
-        let dest = file.renamed_to.as_deref().unwrap_or(file.path.as_path());
+        let dest = file
+            .renamed_to
+            .as_ref()
+            .map_or(file.path.as_path(), |dest| dest.path.as_path());
         if !metadata.is_file() {
             return Err(non_regular_target(dest));
         }
@@ -280,9 +290,7 @@ async fn stage_temp(
         ));
     }
     temps.push((target_abs.clone(), temp));
-    if let Some(parent) = file.absolute_path.parent() {
-        seen_dirs.insert(parent.to_path_buf());
-    }
+    seen_dirs.insert(parent.to_path_buf());
     Ok(())
 }
 
@@ -293,6 +301,20 @@ async fn restore_completed(plan: &Plan, completed: &[PathBuf]) {
             && let Some(before) = file.before.as_deref()
         {
             let _ = tokio::fs::write(&file.absolute_path, before).await;
+        }
+    }
+    remove_installed_destinations(plan, completed).await;
+}
+
+/// Best-effort removal of rename destinations that were installed before a
+/// later failure; destinations were proven absent, so removal restores them.
+async fn remove_installed_destinations(plan: &Plan, completed: &[PathBuf]) {
+    for file in &plan.files {
+        if file.op == super::super::ir::Operation::Rename
+            && let Some(dest) = file.renamed_to.as_ref()
+            && completed.contains(&dest.absolute_path)
+        {
+            let _ = tokio::fs::remove_file(&dest.absolute_path).await;
         }
     }
 }
@@ -324,6 +346,7 @@ async fn trash_rename_source(
                 }
             }
         }
+        remove_installed_destinations(plan, completed).await;
         for (src, trash) in trash_moves.iter().rev() {
             let _ = tokio::fs::rename(trash, src).await;
         }
@@ -356,7 +379,7 @@ fn report_output(session: &PatchSession, plan: &Plan) -> Output {
             renamed_to: file
                 .renamed_to
                 .as_ref()
-                .map(|path| path.to_string_lossy().replace('\\', "/").into()),
+                .map(|dest| dest.path.to_string_lossy().replace('\\', "/").into()),
         });
         display_files.push(DiffFile {
             path: file.path.to_string_lossy().replace('\\', "/").into(),
@@ -364,7 +387,7 @@ fn report_output(session: &PatchSession, plan: &Plan) -> Output {
             renamed_to: file
                 .renamed_to
                 .as_ref()
-                .map(|path| path.to_string_lossy().replace('\\', "/").into()),
+                .map(|dest| dest.path.to_string_lossy().replace('\\', "/").into()),
             hunks: file.hunks.clone(),
         });
         // Register echo rows under the new digest for Seen transfer.

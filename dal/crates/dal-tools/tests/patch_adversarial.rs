@@ -187,3 +187,15 @@ fn resolve_path_rejects_an_outside_alias_through_a_created_link() {
         .expect_err("the alias chain must not hide the escape");
     assert!(error.message.contains("outside the workspace"));
 }
+
+#[test]
+fn missing_directories_below_an_escaping_link_are_denied() {
+    let workspace = tempfile::tempdir().expect("workspace root");
+    let outside = outside_dir(&workspace);
+    std::os::unix::fs::symlink(outside.path(), workspace.path().join("link")).expect("escape link");
+    for raw in ["link/new.txt", "link/missing/new.txt", "link/a/b/c/new.txt"] {
+        let error = resolve_path(workspace.path(), Path::new(raw))
+            .expect_err("a link to an outside directory must not hide behind missing directories");
+        assert!(error.message.contains("outside the workspace"), "{raw}");
+    }
+}

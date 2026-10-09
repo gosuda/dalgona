@@ -135,17 +135,15 @@ pub async fn plan(
                 .saturating_add(staged.after.as_ref().map_or(0, |bytes| bytes.len())),
         );
         if let Some(dest) = staged.renamed_to.as_ref()
-            && tokio::fs::metadata(session.workspace.join(dest))
-                .await
-                .is_ok()
+            && tokio::fs::metadata(&dest.absolute_path).await.is_ok()
         {
             return Err(EngineError::new(
                 ErrorClass::File,
                 format!(
                     "patch: cannot rename {} to {}: {} already exists.",
                     display.display(),
-                    dest.display(),
-                    dest.display()
+                    dest.path.display(),
+                    dest.path.display()
                 ),
             ));
         }

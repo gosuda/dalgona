@@ -396,6 +396,15 @@ pub trait EditObserver: Send + Sync + 'static {
     fn inspect(&self, batch: &StagedBatch<'_>) -> Vec<EditFinding>;
 }
 
+/// A rename destination resolved through the workspace containment rules.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RenameTarget {
+    /// Workspace-relative normalized display path.
+    pub path: PathBuf,
+    /// Canonical absolute path used for the write.
+    pub absolute_path: PathBuf,
+}
+
 /// A staged file owned by a complete plan.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StagedFileOwned {
@@ -409,8 +418,8 @@ pub struct StagedFileOwned {
     pub after: Option<Box<[u8]>>,
     /// Operation represented by this staged target.
     pub op: Operation,
-    /// Rename destination, when present.
-    pub renamed_to: Option<PathBuf>,
+    /// Resolved rename destination, when present.
+    pub renamed_to: Option<RenameTarget>,
     /// Display hunks computed from the immutable images.
     pub hunks: Vec<DiffHunk>,
 }
