@@ -702,6 +702,109 @@ async fn services_use_one_shared_capability_gate() {
     }
 }
 
+fn sidecar_read() -> SidecarOp {
+    SidecarOp::Read {
+        name: "slot".parse().unwrap(),
+    }
+}
+
+#[tokio::test]
+async fn a_command_caller_without_a_turn_is_asked_for_the_grant_it_lacks() {
+    let fx = fixture(Duration::from_secs(30));
+    *fx.backend.sidecar_value.lock().unwrap() = Some(b"value".to_vec());
+    let who = caller("focus", &["sidecar"], None);
+
+    let services = Arc::clone(&fx.services);
+    let first = {
+        let who = who.clone();
+        spawn(async move { services.sidecar(&who, sidecar_read()).await })
+    };
+    await_open(&fx.broker).await;
+    let open = fx.broker.open_requests();
+    assert_eq!(open.len(), 1);
+    assert_eq!(
+        open[0].turn, None,
+        "a command question has no turn to end with"
+    );
+    assert!(
+        matches!(&open[0].question, Question::Grant { ext, capabilities, .. }
+            if &**ext == "focus" && capabilities.iter().map(|c| &**c).eq(["sidecar"])),
+        "the question names the plugin and its declared services: {:?}",
+        open[0].question
+    );
+    answer_next(&fx.broker, Answer::Approve);
+    assert_eq!(first.join().await.unwrap(), Some(b"value".to_vec()));
+
+    let again = fx.services.sidecar(&who, sidecar_read()).await.unwrap();
+    assert_eq!(again, Some(b"value".to_vec()));
+    assert_eq!(
+        open_count(&fx.broker),
+        0,
+        "the approval is stored: no second ask"
+    );
+}
+
+#[tokio::test]
+async fn a_declined_command_grant_denies_and_asks_again_next_time() {
+    let fx = fixture(Duration::from_secs(30));
+    let who = caller("focus", &["sidecar"], None);
+
+    let services = Arc::clone(&fx.services);
+    let declined = {
+        let who = who.clone();
+        spawn(async move { services.sidecar(&who, sidecar_read()).await })
+    };
+    await_open(&fx.broker).await;
+    answer_next(&fx.broker, Answer::Decline);
+    assert!(matches!(declined.join().await, Err(ServiceError::Declined)));
+
+    let services = Arc::clone(&fx.services);
+    let retried = spawn(async move { services.sidecar(&who, sidecar_read()).await });
+    await_open(&fx.broker).await;
+    answer_next(&fx.broker, Answer::Decline);
+    assert!(matches!(retried.join().await, Err(ServiceError::Declined)));
+}
+
+#[tokio::test]
+async fn a_grant_question_with_no_answering_front_end_is_denied_at_once() {
+    for turn in [None, Some(turn())] {
+        let fx = fixture(Duration::from_secs(30));
+        fx.backend
+            .headless
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let who = caller("focus", &["sidecar"], turn);
+        let denied = tokio::time::timeout(
+            Duration::from_secs(5),
+            fx.services.sidecar(&who, sidecar_read()),
+        )
+        .await
+        .expect("a headless grant question never waits out its timeout");
+        assert!(
+            matches!(
+                &denied,
+                Err(ServiceError::Denied(DenyReason::ServiceNotGranted { service, plugin }))
+                    if *service == Service::Sidecar && &**plugin == "focus"
+            ),
+            "{denied:?}"
+        );
+        assert_eq!(open_count(&fx.broker), 0, "no request opens for nobody");
+
+        fx.backend
+            .headless
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        *fx.backend.sidecar_value.lock().unwrap() = Some(b"value".to_vec());
+        let services = Arc::clone(&fx.services);
+        let asked = spawn(async move { services.sidecar(&who, sidecar_read()).await });
+        await_open(&fx.broker).await;
+        answer_next(&fx.broker, Answer::Approve);
+        assert_eq!(
+            asked.join().await.unwrap(),
+            Some(b"value".to_vec()),
+            "the denial does not strand the key: a front end attached later is asked"
+        );
+    }
+}
+
 #[tokio::test]
 async fn sidecar_rejects_values_over_limit() {
     let fx = fixture(Duration::from_secs(30));

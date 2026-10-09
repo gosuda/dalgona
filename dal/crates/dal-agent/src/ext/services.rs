@@ -175,6 +175,8 @@ impl SessionServices {
                 let _ = backend.request_opened(request).await;
             })
         }));
+        let answerer_backend = Arc::clone(&backend);
+        grants.set_answerer(Arc::new(move || answerer_backend.answerer_attached()));
         Self {
             grants,
             broker: deps.broker,

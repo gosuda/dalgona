@@ -115,23 +115,26 @@ impl Broker {
         }
     }
 
-    /// Opens a broker-owned request and returns its waiter.
+    /// Opens a broker-owned request and returns its waiter. A request with
+    /// a turn ends with that turn; one without (a slash command's grant
+    /// question) ends only by answer, deadline, or its caller giving up.
     pub(crate) fn open(
         &self,
         owner: Owner,
         question: Question,
-        turn: TurnId,
+        turn: impl Into<Option<TurnId>>,
         deadline: Instant,
     ) -> (Request, AnswerWait) {
+        let turn = turn.into();
         let request = Request {
             id: RequestId::new_v7(),
-            turn: Some(turn),
+            turn,
             owner,
             default: default_for(&question),
             timeout: deadline.saturating_duration_since(Instant::now()),
             question,
         };
-        let (waiter, slot) = slot_for(&request, Some(turn), deadline);
+        let (waiter, slot) = slot_for(&request, turn, deadline);
         let mut state = self
             .state
             .lock()

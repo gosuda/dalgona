@@ -57,6 +57,8 @@ struct Session {
     cancelling: Option<TurnId>,
     cancel_settled: bool,
     cancel_deadline: Option<std::time::Instant>,
+    /// The reply of the one `Run` command still executing off this thread.
+    inflight: Option<std::sync::mpsc::Receiver<Result<Reply, TuiError>>>,
 }
 
 /// A terminal-only request that needs the host; the loop runs it after the
@@ -241,6 +243,39 @@ impl Session {
             _ => Vec::new(),
         }
     }
+
+    /// Takes the reply of the in-flight `Run` command once it has settled.
+    fn settled_run(&mut self) -> Option<Result<Reply, TuiError>> {
+        use std::sync::mpsc::TryRecvError;
+        let settled = match self.inflight.as_ref()?.try_recv() {
+            Ok(reply) => reply,
+            Err(TryRecvError::Empty) => return None,
+            Err(TryRecvError::Disconnected) => Err(TuiError::Terminal(
+                "the command stopped without a reply".to_owned(),
+            )),
+        };
+        self.inflight = None;
+        Some(settled)
+    }
+}
+
+/// Runs one `Run` command on its own thread and returns the channel that
+/// carries its single reply. The thread blocks on the same runtime handle
+/// the loop uses for every other host call.
+fn start_run<A: TuiAgent>(
+    runtime: &tokio::runtime::Handle,
+    agent: &A,
+    command: Command,
+) -> std::io::Result<std::sync::mpsc::Receiver<Result<Reply, TuiError>>> {
+    let (reply, settled) = std::sync::mpsc::channel();
+    let runtime = runtime.clone();
+    let agent = agent.clone();
+    std::thread::Builder::new()
+        .name("dal-tui-command".to_owned())
+        .spawn(move || {
+            let _ = reply.send(runtime.block_on(agent.submit(command)));
+        })?;
+    Ok(settled)
 }
 
 pub(super) fn run<H, M, S>(
@@ -985,8 +1020,14 @@ impl Surfaces {
         Ok(())
     }
 
-    /// Submits every command the input map queued, folding the host reply into
-    /// a picker, transcript rows, or the session reply path.
+    /// Submits the commands the input map queued, folding each host reply
+    /// into a picker, transcript rows, or the session reply path.
+    ///
+    /// A `Run` command goes to its own thread, one at a time: a plugin
+    /// handler may raise a question (a grant, an ask) that only this loop can
+    /// show and answer, so waiting inline for its reply would keep the
+    /// question off screen until it timed out. Later commands wait behind it;
+    /// `Cancel` never waits.
     fn submit_commands<A, M>(
         &mut self,
         opts: &TuiOptions,
@@ -997,61 +1038,94 @@ impl Surfaces {
         A: TuiAgent,
         M: FnMut() -> Result<Vec<ModelOption>, TuiError>,
     {
+        if let Some(settled) = self.session.settled_run() {
+            self.fold_submit_reply(opts, agent, model_source, settled)?;
+        }
         for command in std::mem::take(&mut self.session.pending_commands) {
             if let Command::Cancel { .. } = command {
                 self.session.cancelling = None;
+            } else if self.session.inflight.is_some() {
+                self.session.pending_commands.push(command);
+                continue;
             }
-            let submit_reply = match opts.rt.block_on(agent.submit(command)) {
-                Ok(submit_reply) => submit_reply,
-                Err(error) => {
-                    self.live.notice(error.to_string());
-                    continue;
+            if let Command::Run { .. } = command {
+                match start_run(&opts.rt, agent, command) {
+                    Ok(settled) => self.session.inflight = Some(settled),
+                    Err(error) => self
+                        .live
+                        .notice(format!("note: cannot start the command: {error}")),
                 }
-            };
-            let queued = matches!(&submit_reply, Reply::Queued { .. });
-            let reply_rows = match submit_reply {
-                Reply::Choose { chooser, filter } => {
-                    self.session.picker = None;
-                    let picker = match chooser {
-                        Chooser::Tree => Some(crate::picker::tree_picker(&self.view, &filter)),
-                        Chooser::ForkPoint => {
-                            let entries = fork_entries(opts, agent)?;
-                            Some(crate::picker::fork_picker(&entries, &filter))
-                        }
-                        Chooser::Model => {
-                            if let Ok(models) = model_source() {
-                                Some(crate::picker::model_picker(&models, &filter))
-                            } else {
-                                self.live
-                                    .notice(crate::copy::ids::MODEL_PICKER_FAIL.to_owned());
-                                None
-                            }
-                        }
-                        Chooser::Settings => Some(crate::picker::settings_picker(
-                            self.diagram_settings.enabled,
-                            &filter,
-                        )),
-                        Chooser::Login => Some(signin::login_picker(&filter)),
-                        Chooser::Logout => {
-                            self.session.front.push(FrontRequest::LogoutPicker(filter));
-                            None
-                        }
-                        _ => {
-                            self.live
-                                .notice(crate::copy::ids::PICKER_UNSUPPORTED.to_owned());
-                            None
-                        }
-                    };
-                    self.session.picker = picker;
-                    Vec::new()
-                }
-                other => self.session.accept_reply(other),
-            };
-            if queued {
-                self.view = opts.rt.block_on(agent.view(snapshot_page()?))?;
+                continue;
             }
-            self.print_rows(&reply_rows);
+            let submit_reply = opts.rt.block_on(agent.submit(command));
+            self.fold_submit_reply(opts, agent, model_source, submit_reply)?;
         }
+        Ok(())
+    }
+
+    /// Folds one host reply into a picker, transcript rows, or the session
+    /// reply path.
+    fn fold_submit_reply<A, M>(
+        &mut self,
+        opts: &TuiOptions,
+        agent: &A,
+        model_source: &mut M,
+        submit_reply: Result<Reply, TuiError>,
+    ) -> Result<(), TuiError>
+    where
+        A: TuiAgent,
+        M: FnMut() -> Result<Vec<ModelOption>, TuiError>,
+    {
+        let submit_reply = match submit_reply {
+            Ok(submit_reply) => submit_reply,
+            Err(error) => {
+                self.live.notice(error.to_string());
+                return Ok(());
+            }
+        };
+        let queued = matches!(&submit_reply, Reply::Queued { .. });
+        let reply_rows = match submit_reply {
+            Reply::Choose { chooser, filter } => {
+                self.session.picker = None;
+                let picker = match chooser {
+                    Chooser::Tree => Some(crate::picker::tree_picker(&self.view, &filter)),
+                    Chooser::ForkPoint => {
+                        let entries = fork_entries(opts, agent)?;
+                        Some(crate::picker::fork_picker(&entries, &filter))
+                    }
+                    Chooser::Model => {
+                        if let Ok(models) = model_source() {
+                            Some(crate::picker::model_picker(&models, &filter))
+                        } else {
+                            self.live
+                                .notice(crate::copy::ids::MODEL_PICKER_FAIL.to_owned());
+                            None
+                        }
+                    }
+                    Chooser::Settings => Some(crate::picker::settings_picker(
+                        self.diagram_settings.enabled,
+                        &filter,
+                    )),
+                    Chooser::Login => Some(signin::login_picker(&filter)),
+                    Chooser::Logout => {
+                        self.session.front.push(FrontRequest::LogoutPicker(filter));
+                        None
+                    }
+                    _ => {
+                        self.live
+                            .notice(crate::copy::ids::PICKER_UNSUPPORTED.to_owned());
+                        None
+                    }
+                };
+                self.session.picker = picker;
+                Vec::new()
+            }
+            other => self.session.accept_reply(other),
+        };
+        if queued {
+            self.view = opts.rt.block_on(agent.view(snapshot_page()?))?;
+        }
+        self.print_rows(&reply_rows);
         Ok(())
     }
 
@@ -1996,5 +2070,128 @@ mod tests {
             assert_eq!(content.len(), 1);
         }
         assert_eq!(session.composer.text(), "");
+    }
+}
+
+#[cfg(test)]
+mod run_command_tests {
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use dal_core::{Answer, Command, Gen, Output, PageReq, Reply, RequestId, Seq, View};
+    use tokio::sync::Notify;
+
+    use super::{Session, start_run};
+    use crate::TuiError;
+    use crate::backend::{TuiAgent, TuiDelivery, TuiSubscription};
+
+    /// An agent whose `submit` waits for the test, like a plugin command
+    /// holding on a grant question that only the terminal can answer.
+    #[derive(Clone)]
+    struct Held(Arc<Notify>);
+
+    struct Silent;
+
+    impl TuiSubscription for Silent {
+        fn next(
+            &mut self,
+        ) -> impl std::future::Future<Output = Result<Option<TuiDelivery>, TuiError>> {
+            std::future::ready(Ok(None))
+        }
+    }
+
+    impl TuiAgent for Held {
+        type Subscription = Silent;
+
+        fn view(
+            &self,
+            _page: PageReq,
+        ) -> impl std::future::Future<Output = Result<View, TuiError>> {
+            std::future::ready(Err(TuiError::Terminal(
+                "the run helper reads no view".into(),
+            )))
+        }
+
+        fn subscribe(
+            &self,
+            _after: Option<(Gen, Seq)>,
+        ) -> impl std::future::Future<Output = Result<Silent, TuiError>> {
+            std::future::ready(Ok(Silent))
+        }
+
+        async fn submit(&self, _command: Command) -> Result<Reply, TuiError> {
+            self.0.notified().await;
+            Ok(Reply::Done(Output::Nothing))
+        }
+
+        fn answer(
+            &self,
+            _id: RequestId,
+            _answer: Answer,
+        ) -> impl std::future::Future<Output = Result<(), TuiError>> {
+            std::future::ready(Ok(()))
+        }
+
+        fn ext_status(&self) -> Vec<dal_core::ExtStatus> {
+            Vec::new()
+        }
+    }
+
+    fn run_command() -> Command {
+        Command::Run {
+            name: "goal".into(),
+            args: "".into(),
+            expected: None,
+        }
+    }
+
+    #[test]
+    fn a_run_command_waits_off_the_loop_thread_for_its_reply() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        let held = Held(Arc::new(Notify::new()));
+        let mut session = Session {
+            inflight: Some(
+                start_run(runtime.handle(), &held, run_command())
+                    .expect("the worker thread starts"),
+            ),
+            ..Session::default()
+        };
+        assert!(
+            session.settled_run().is_none(),
+            "the loop is free while the command still waits"
+        );
+        assert!(session.inflight.is_some());
+
+        held.0.notify_one();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let settled = loop {
+            if let Some(settled) = session.settled_run() {
+                break settled;
+            }
+            assert!(Instant::now() < deadline, "the reply never arrived");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert!(
+            matches!(settled, Ok(Reply::Done(Output::Nothing))),
+            "{settled:?}"
+        );
+        assert!(session.inflight.is_none(), "one settle clears the slot");
+    }
+
+    #[test]
+    fn a_worker_that_ends_without_a_reply_settles_as_an_error() {
+        let (reply, settled) = std::sync::mpsc::channel();
+        drop(reply);
+        let mut session = Session {
+            inflight: Some(settled),
+            ..Session::default()
+        };
+        assert!(matches!(
+            session.settled_run(),
+            Some(Err(TuiError::Terminal(_)))
+        ));
+        assert!(session.inflight.is_none());
     }
 }

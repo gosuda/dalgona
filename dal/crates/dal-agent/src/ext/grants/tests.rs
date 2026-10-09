@@ -456,14 +456,120 @@ async fn mcp_grant_misses_coalesce_and_publish_request_updates() {
     assert_eq!(opened.id, answered);
 }
 
+fn command_caller(ext: &str, inject: ServiceSet) -> Caller {
+    Caller::new(
+        ext.parse::<Name>().expect("name"),
+        Origin::Bundled,
+        inject,
+        std::num::NonZeroU32::MIN,
+        CallerKind::Handler,
+        None,
+    )
+}
+
 #[tokio::test]
-async fn a_turnless_caller_rides_a_persisted_grant_but_cannot_ask() {
+async fn a_turnless_caller_asks_once_and_rides_the_stored_answer() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (store, broker) = open_store(&dir, Duration::from_secs(30));
-    let inject = ServiceSet::from_names(["env"]).expect("inject");
-    let caller = test_caller(inject);
+    let inject = ServiceSet::from_names(["sidecar", "turn"]).expect("inject");
     let cancel = CancellationToken::new();
-    let (grant, ()) = futures::join!(store.ensure(&caller, Service::Env, &cancel), async {
+    let command = command_caller("orchestration", inject);
+
+    let (grant, ()) = futures::join!(store.ensure(&command, Service::Sidecar, &cancel), async {
+        let request = loop {
+            if let Some(req) = broker.open_requests().into_iter().next() {
+                break req;
+            }
+            tokio::task::yield_now().await;
+        };
+        assert_eq!(request.turn, None, "a command question has no turn");
+        assert!(
+            matches!(&request.question, dal_core::Question::Grant { origin, .. }
+                if &**origin == "bundled"),
+            "a bundled plugin is asked like any other: {:?}",
+            request.question
+        );
+        answer_and_release(&broker, request.id, Answer::Approve, tui());
+    });
+    assert!(grant.expect("the approved command is granted").persistent());
+    let text = std::fs::read_to_string(dir.path().join("grants.toml")).expect("row persisted");
+    assert!(text.contains("ext = \"orchestration\""), "{text}");
+    assert!(text.contains("origin = \"bundled\""), "{text}");
+
+    // The same command, and another service under the same key, ride the
+    // stored row without a second question.
+    for service in [Service::Sidecar, Service::Turn] {
+        let grant = store
+            .ensure(&command, service, &cancel)
+            .await
+            .expect("the stored row satisfies the command");
+        assert!(grant.persistent());
+    }
+    assert_eq!(broker.open_requests().len(), 0, "no second question");
+}
+
+#[tokio::test]
+async fn a_turnless_question_survives_turn_ends_and_declines_fail_closed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (store, broker) = open_store(&dir, Duration::from_secs(30));
+    let inject = ServiceSet::from_names(["net"]).expect("inject");
+    let cancel = CancellationToken::new();
+    let command = command_caller("focus", inject);
+
+    let (grant, ()) = futures::join!(store.ensure(&command, Service::Net, &cancel), async {
+        let id = loop {
+            if let Some(req) = broker.open_requests().into_iter().next() {
+                break req.id;
+            }
+            tokio::task::yield_now().await;
+        };
+        // A turn ending cancels that turn's requests only; this one has none.
+        let ended = broker.resolve_turn(
+            TurnId::new(std::num::NonZeroU64::MIN),
+            Answer::Cancel,
+            tui(),
+        );
+        assert_eq!(ended.len(), 0, "a turnless question belongs to no turn");
+        answer_and_release(&broker, id, Answer::Decline, tui());
+    });
+    assert!(matches!(grant, Err(ServiceError::Declined)), "{grant:?}");
+    assert!(
+        !dir.path().join("grants.toml").exists(),
+        "a decline stores nothing"
+    );
+}
+
+#[tokio::test]
+async fn a_question_with_no_answerer_attached_is_denied_without_a_request() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (store, broker) = open_store(&dir, Duration::from_secs(30));
+    let attached = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let probe = Arc::clone(&attached);
+    store.set_answerer(Arc::new(move || {
+        probe.load(std::sync::atomic::Ordering::SeqCst)
+    }));
+    let inject = ServiceSet::from_names(["net"]).expect("inject");
+    let cancel = CancellationToken::new();
+
+    for caller in [command_caller("focus", inject), test_caller(inject)] {
+        let denied = tokio::time::timeout(
+            Duration::from_secs(5),
+            store.ensure(&caller, Service::Net, &cancel),
+        )
+        .await
+        .expect("a headless question never waits out its timeout");
+        assert!(
+            matches!(denied, Err(ServiceError::Denied(DenyReason::NotGranted))),
+            "{denied:?}"
+        );
+        assert_eq!(broker.open_requests().len(), 0, "no request for nobody");
+    }
+
+    // The denial releases the reservation: a front end that attaches
+    // later is asked and its approval is stored.
+    attached.store(true, std::sync::atomic::Ordering::SeqCst);
+    let caller = command_caller("focus", inject);
+    let (grant, ()) = futures::join!(store.ensure(&caller, Service::Net, &cancel), async {
         let id = loop {
             if let Some(req) = broker.open_requests().into_iter().next() {
                 break req.id;
@@ -472,64 +578,50 @@ async fn a_turnless_caller_rides_a_persisted_grant_but_cannot_ask() {
         };
         answer_and_release(&broker, id, Answer::Approve, tui());
     });
-    grant.expect("granted");
-
-    let turnless = Caller::new(
-        "focus".parse::<Name>().expect("name"),
-        Origin::User,
-        inject,
-        std::num::NonZeroU32::MIN,
-        CallerKind::Handler,
-        None,
-    );
-    let grant = store
-        .ensure(&turnless, Service::Env, &cancel)
-        .await
-        .expect("a persisted grant satisfies a turnless caller");
-    assert!(grant.persistent());
-
-    let ungranted = Caller::new(
-        "focus".parse::<Name>().expect("name"),
-        Origin::User,
-        ServiceSet::from_names(["net"]).expect("inject"),
-        std::num::NonZeroU32::MIN,
-        CallerKind::Handler,
-        None,
-    );
-    let denied = store.ensure(&ungranted, Service::Net, &cancel).await;
     assert!(
-        matches!(denied, Err(ServiceError::Denied(DenyReason::NotGranted))),
-        "a grant question still needs a turn: {denied:?}"
+        grant
+            .expect("granted once an answerer attaches")
+            .persistent()
     );
-    assert!(broker.open_requests().is_empty(), "no request may open");
+}
 
-    // The turnless probe must not strand the reservation: a caller with a
-    // turn still reaches the broker and answers normally.
-    let turned = Caller::new(
-        "focus".parse::<Name>().expect("name"),
-        Origin::User,
-        ServiceSet::from_names(["net"]).expect("inject"),
-        std::num::NonZeroU32::MIN,
-        CallerKind::Handler,
-        Some(TurnId::new(std::num::NonZeroU64::MIN)),
+#[tokio::test]
+async fn an_approval_before_the_data_root_exists_is_stored() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let data = dir.path().join("fresh").join("data");
+    let broker = Arc::new(Broker::new());
+    let store = Arc::new(
+        GrantStore::with_runtime(data.clone(), Duration::from_secs(30), broker.clone())
+            .expect("a missing grants file loads empty"),
     );
-    let (grant, ()) = futures::join!(
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            store.ensure(&turned, Service::Net, &cancel)
-        ),
-        async {
-            let id = loop {
-                if let Some(req) = broker.open_requests().into_iter().next() {
-                    break req.id;
-                }
-                tokio::task::yield_now().await;
-            };
-            answer_and_release(&broker, id, Answer::Decline, tui());
-        }
-    );
+    let inject = ServiceSet::from_names(["sidecar"]).expect("inject");
+    let cancel = CancellationToken::new();
+    let command = command_caller("orchestration", inject);
+    let (grant, ()) = futures::join!(store.ensure(&command, Service::Sidecar, &cancel), async {
+        let id = loop {
+            if let Some(req) = broker.open_requests().into_iter().next() {
+                break req.id;
+            }
+            tokio::task::yield_now().await;
+        };
+        answer_and_release(&broker, id, Answer::Approve, tui());
+    });
     assert!(
-        matches!(grant, Ok(Err(ServiceError::Declined))),
-        "a turned caller after a turnless probe must be asked, not stranded: {grant:?}"
+        grant
+            .expect("the approval is stored, not lost")
+            .persistent()
     );
+    let path = data.join("grants.toml");
+    assert!(
+        path.is_file(),
+        "the grants file was created with its parent"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode =
+            |p: &std::path::Path| std::fs::metadata(p).expect("meta").permissions().mode() & 0o777;
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(mode(&data), 0o700);
+    }
 }
