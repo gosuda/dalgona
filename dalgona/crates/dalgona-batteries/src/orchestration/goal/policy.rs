@@ -3,7 +3,6 @@
 //! goal-turn accounting, and mechanical blocks.
 
 use super::super::StopKind;
-use super::super::monitor::InflightCounts;
 use super::sidecar::Goal;
 
 /// Milliseconds after a user-started turn before a continuation may run.

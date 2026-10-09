@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     ffi::{OsStr, OsString},
     io,
     process::Stdio,
@@ -20,7 +20,7 @@ use tokio::{
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 
 use crate::mcp::{
-    Budgets, McpError, STDERR_RING, TransportError,
+    Budgets, McpError, TransportError,
     tools::{Key, ServerDecl, resolve_executable},
 };
 
@@ -136,7 +136,7 @@ impl StdioTransport {
         let stdin = child.stdin().take();
         let stdout = child.stdout().take();
         let stderr = child.stderr().take();
-        let (Some(stdin), Some(stdout), Some(stderr)) = (stdin, stdout, stderr) else {
+        let (Some(stdin), Some(stdout), Some(_stderr)) = (stdin, stdout, stderr) else {
             let _ = child.start_kill();
             let _ = child.wait().await;
             return Err(McpError::Start {
@@ -551,23 +551,4 @@ async fn clear_pending(
     pending: &Arc<Mutex<HashMap<u64, mpsc::Sender<Result<RawJson, McpError>>>>>,
 ) {
     pending.lock().await.clear();
-}
-
-async fn read_stderr(mut stderr: ChildStderr, tail: Arc<Mutex<VecDeque<u8>>>) {
-    let mut buffer = [0_u8; 4096];
-    loop {
-        let count = match stderr.read(&mut buffer).await {
-            Ok(0) | Err(_) => return,
-            Ok(count) => count,
-        };
-        let mut tail = tail.lock().await;
-        if count >= STDERR_RING {
-            tail.clear();
-            tail.extend(&buffer[count - STDERR_RING..count]);
-            continue;
-        }
-        let excess = tail.len().saturating_add(count).saturating_sub(STDERR_RING);
-        tail.drain(..excess);
-        tail.extend(&buffer[..count]);
-    }
 }

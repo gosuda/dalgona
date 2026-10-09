@@ -33,8 +33,6 @@ pub const MRTR_MAX: u32 = 4;
 pub const STEPUP_MAX: u32 = 2;
 /// Maximum number of tools/list pages accepted from one server.
 pub const LIST_PAGE_MAX: usize = 50;
-/// Maximum amount of child stderr retained for crash diagnostics.
-pub const STDERR_RING: usize = 65_536;
 /// Default time-to-live for a tools/list response.
 pub const TOOL_CACHE_DEFAULT: Duration = Duration::from_secs(60);
 /// Maximum time-to-live accepted for a tools/list response.

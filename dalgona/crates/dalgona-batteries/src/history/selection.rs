@@ -59,7 +59,7 @@ pub(crate) fn history_index_line(
     last: u64,
     visibility: LetterVisibility,
 ) -> String {
-    let mut line = format!("letter://{id}  history image, entries {first}-{last}");
+    let line = format!("letter://{id}  history image, entries {first}-{last}");
     match visibility {
         LetterVisibility::Drawn => {}
     }
