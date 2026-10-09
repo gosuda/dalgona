@@ -13,7 +13,9 @@ use sonic_rs::{JsonContainerTrait, JsonValueMutTrait, JsonValueTrait, Value};
 use super::agent::RemoteAgent;
 use super::conn::Shared;
 use super::decode::{decode, encode, malformed, opt_string, session_id, string};
-use super::{RemoteEndpoint, RemoteHostUpdate, RemoteLogin, RemoteLoginMethod, RemoteModel};
+use super::{
+    RemoteAuthRow, RemoteEndpoint, RemoteHostUpdate, RemoteLogin, RemoteLoginMethod, RemoteModel,
+};
 use crate::error::WireError;
 
 /// A remote host speaking the version-1 protocol.
@@ -182,6 +184,25 @@ impl RemoteHost {
                     provider: string(row, "provider")?.to_owned(),
                     name: string(row, "name")?.to_owned(),
                     context_window,
+                })
+            })
+            .collect()
+    }
+
+    /// Reads every provider's sign-in state through `auth/status`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WireError`] when the call fails or a row is malformed.
+    pub async fn auth_status(&self) -> Result<Vec<RemoteAuthRow>, WireError> {
+        let result = self.shared.call("auth/status", sonic_rs::json!({})).await?;
+        rows(&result, "providers")?
+            .iter()
+            .map(|row| {
+                Ok(RemoteAuthRow {
+                    provider: string(row, "provider")?.to_owned(),
+                    state: string(row, "state")?.to_owned(),
+                    detail: opt_string(row, "detail"),
                 })
             })
             .collect()

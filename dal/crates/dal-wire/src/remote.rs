@@ -96,6 +96,19 @@ pub struct RemoteModel {
     pub context_window: Option<u32>,
 }
 
+/// One `auth/status` provider row.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoteAuthRow {
+    /// The provider id.
+    pub provider: String,
+    /// `ready`, `not_configured`, or `expired`.
+    pub state: String,
+    /// The stored credential kind (`api_key` or `oauth`) when `auth.json`
+    /// holds one, and absent when the provider is ready from the environment
+    /// or not configured.
+    pub detail: Option<String>,
+}
+
 /// One `auth/login` method.
 pub enum RemoteLoginMethod {
     /// Stores the given API key.

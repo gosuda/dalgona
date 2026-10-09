@@ -22,6 +22,7 @@ use crate::jsonrpc::{ErrorObject, Id, Message, decode_jsonrpc, encode_jsonrpc};
 use crate::protocol::{capability_error, mint_client_id, negotiate_capabilities};
 use crate::transport::{FrameWriter, ReadFrameError, Transport};
 
+mod auth;
 mod fail;
 mod misc;
 pub(crate) mod session;
@@ -67,6 +68,9 @@ pub(crate) struct Conn {
     pub host_sub: Option<CancellationToken>,
     /// Cancel token per in-flight request id for `$/cancel_request`.
     pub inflight: HashMap<String, CancellationToken>,
+    /// Running OAuth logins by request key; closing the connection cancels
+    /// them.
+    pub logins: HashMap<String, CancellationToken>,
     /// Next subscription fence value.
     pub fence: u64,
 }
@@ -83,6 +87,7 @@ impl Conn {
             subs: HashMap::new(),
             host_sub: None,
             inflight: HashMap::new(),
+            logins: HashMap::new(),
             fence: 0,
         }
     }
@@ -167,6 +172,7 @@ pub async fn serve_rpc_draining(
         }
     }
 
+    cancel_logins(&state).await;
     if !pending.is_empty() {
         let grace = draining_until.map_or(DRAIN_GRACE, |until| {
             until.saturating_duration_since(tokio::time::Instant::now())
@@ -363,6 +369,14 @@ async fn cancel_all(state: &Arc<Mutex<Conn>>) {
     }
 }
 
+/// Cancels every running OAuth login so the flows end and publish their
+/// outcome while the connection drains.
+async fn cancel_logins(state: &Arc<Mutex<Conn>>) {
+    for token in state.lock().await.logins.values() {
+        token.cancel();
+    }
+}
+
 /// Queues one message for the serving task to write; producers never block
 /// on the writer lock, so the returned future is already resolved. A failed
 /// enqueue only logs, the read loop observes closure.
@@ -433,9 +447,12 @@ async fn dispatch(
         "host/unsubscribe" => {
             run!("host.updates", || misc::host_unsubscribe(state, params))
         }
-        "auth/status" => run!("auth", || misc::auth_status(host, params)),
-        "auth/login" => run!("auth", || misc::auth_login(host, params)),
-        "auth/logout" => run!("auth", || async { misc::auth_logout() }),
+        "auth/status" => run!("auth", || auth::auth_status(host, params)),
+        "auth/login" => match require_cap(state, "auth").await {
+            Err(error) => fail(error),
+            Ok(()) => auth::auth_login(host, state, writer, id, params).await,
+        },
+        "auth/logout" => run!("auth", || auth::auth_logout(host, params)),
         _ => fail(ErrorObject {
             code: -32601,
             message: format!(r#"unknown method "{method}""#),

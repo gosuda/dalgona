@@ -34,6 +34,7 @@ interprocess = { version = "=2.4.4", features = ["tokio"] }
 windows-sys.workspace = true
 
 [dev-dependencies]
+dal-agent = { path = "../dal-agent", version = "=0.1.0", features = ["test-support"] }
 dal-ext = { path = "../dal-ext" }
 proptest.workspace = true
 tempfile.workspace = true
