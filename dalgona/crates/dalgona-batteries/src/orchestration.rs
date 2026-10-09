@@ -115,8 +115,6 @@ pub struct OrchestrationConfig {
     pub arbiter: BatteryConfig,
     /// Child-agent workflow configuration.
     pub agents: OrchestrationAgentsConfig,
-    /// Worktree isolation sub-battery.
-    pub isolation: BatteryConfig,
     /// Optional named saved workflows.
     pub workflows: Option<toml::Value>,
 }
@@ -174,8 +172,6 @@ pub fn parse_config(
         #[serde(default)]
         agents: OrchestrationAgentsConfig,
         #[serde(default)]
-        isolation: BatteryConfig,
-        #[serde(default)]
         workflows: Option<toml::Value>,
     }
 
@@ -221,7 +217,6 @@ pub fn parse_config(
         goal: raw.goal,
         arbiter: raw.arbiter,
         agents: raw.agents,
-        isolation: raw.isolation,
         workflows: raw.workflows,
     })
 }
@@ -240,8 +235,7 @@ pub fn orchestration(config: OrchestrationConfig) -> Result<Extension, Registrat
         || config.inflight.enabled
         || config.goal.enabled
         || config.arbiter.enabled
-        || config.agents.enabled
-        || config.isolation.enabled;
+        || config.agents.enabled;
     let input_enabled = config.loop_guard.enabled || config.goal.enabled || config.arbiter.enabled;
     let tool_hook_enabled = config.loop_guard.enabled
         || config.sleep.enabled

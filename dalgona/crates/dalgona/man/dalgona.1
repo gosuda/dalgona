@@ -1,0 +1,175 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH dalgona 1  "dalgona 0.1.0" 
+.SH NAME
+dalgona \- Run the dal coding agent.
+.SH SYNOPSIS
+\fBdalgona\fR [\fB\-p\fR|\fB\-\-print\fR] [\fB\-\-json\fR] [\fB\-o\fR|\fB\-\-output\-last\-message\fR] [\fB\-c\fR|\fB\-\-continue\fR] [\fB\-r\fR|\fB\-\-resume\fR] [\fB\-n\fR|\fB\-\-name\fR] [\fB\-m\fR|\fB\-\-model\fR] [\fB\-\-mode\fR] [\fB\-\-thinking\fR] [\fB\-\-approval\fR] [\fB\-\-sandbox\fR] [\fB\-\-no\-session\fR] [\fB\-\-screen\fR] [\fB\-\-color\fR] [\fB\-C\fR|\fB\-\-cd\fR] [\fB\-\-connect\fR] [\fB\-\-token\-file\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fIPROMPT\fR] [\fIsubcommands\fR]
+.SH DESCRIPTION
+Run the dal coding agent.
+.SH OPTIONS
+.TP
+\fB\-p\fR, \fB\-\-print\fR
+Print the assistant response and exit.
+.TP
+\fB\-\-json\fR
+Print one JSON result object or error object; exit 1 on error.
+.TP
+\fB\-o\fR, \fB\-\-output\-last\-message\fR \fI<FILE>\fR
+Write the last assistant message to FILE after a successful run.
+.TP
+\fB\-c\fR, \fB\-\-continue\fR
+Continue the newest session in this workspace.
+.TP
+\fB\-r\fR, \fB\-\-resume\fR [\fI<RESUME>\fR]
+Resume a session by id or name, or open the session picker.
+.TP
+\fB\-n\fR, \fB\-\-name\fR \fI<NAME>\fR
+Name the session.
+.TP
+\fB\-m\fR, \fB\-\-model\fR \fI<ID>\fR
+Use model ID for this run. ID may name a provider route, an alias, a registered synthetic model, or a dalgon mode.
+.TP
+\fB\-\-mode\fR \fI<MODE>\fR
+Harness mode for this run: normal, eval\-first, or eval\-only. The ids dalgon/normal, dalgon/eval\-first, and dalgon/eval\-only in \-\-model select the same modes.
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+normal
+.IP \(bu 2
+eval\-first
+.IP \(bu 2
+eval\-only
+.RE
+.TP
+\fB\-\-thinking\fR \fI<THINKING>\fR
+Set the provider reasoning level.
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+off
+.IP \(bu 2
+minimal
+.IP \(bu 2
+low
+.IP \(bu 2
+medium
+.IP \(bu 2
+high
+.IP \(bu 2
+xhigh
+.IP \(bu 2
+max
+.RE
+.TP
+\fB\-\-approval\fR \fI<APPROVAL>\fR
+Approval policy for patch and exec tool calls: ask, edits, or all. ask asks in the UI and denies calls in headless runs. edits approves edit calls without asking and asks for exec. all approves every call; use it only inside an external sandbox.
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+ask
+.IP \(bu 2
+edits
+.IP \(bu 2
+all
+.RE
+.TP
+\fB\-\-sandbox\fR
+Enable the configured sandbox.
+.TP
+\fB\-\-no\-session\fR
+Do not persist this session.
+.TP
+\fB\-\-screen\fR \fI<SCREEN>\fR
+Select the terminal screen mode.
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+inline
+.IP \(bu 2
+fullscreen
+.RE
+.TP
+\fB\-\-color\fR \fI<COLOR>\fR
+Select terminal color behavior.
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+auto
+.IP \(bu 2
+always
+.IP \(bu 2
+never
+.RE
+.TP
+\fB\-C\fR, \fB\-\-cd\fR \fI<DIR>\fR
+Use DIR as the workspace without changing the process working directory.
+.TP
+\fB\-\-connect\fR \fI<ADDR>\fR
+Connect to a remote dalgon host and run the interactive terminal UI. Without this option, dalgon uses a host in this process.
+.TP
+\fB\-\-token\-file\fR \fI<FILE>\fR
+Read the bearer token from FILE; it is sent only to non\-loopback WebSocket endpoints. No token file is inferred.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+\fB\-V\fR, \fB\-\-version\fR
+Print version
+.TP
+[\fIPROMPT\fR]
+Attach text, image, or piped standard\-input content to the first user message.
+.SH SUBCOMMANDS
+.TP
+dalgona\-login(1)
+Sign in to a provider or inspect sign\-in state.
+.TP
+dalgona\-logout(1)
+Sign out from a provider.
+.TP
+dalgona\-models(1)
+List models and show built\-in prices, price source, and fetch date when available.
+.TP
+dalgona\-docs(1)
+Read a documentation page.
+.TP
+dalgona\-serve(1)
+Start the local control server or create its token.
+.TP
+dalgona\-rpc(1)
+Serve the JSON\-RPC protocol on standard input and output.
+.TP
+dalgona\-acp(1)
+Serve the Agent Client Protocol on standard input and output.
+.TP
+dalgona\-app\-server(1)
+Serve the Codex app\-server protocol on standard input and output.
+.TP
+dalgona\-completion(1)
+Generate shell completion scripts.
+.TP
+dalgona\-plugin(1)
+Manage configured plugin grants.
+.TP
+dalgona\-rules(1)
+Inspect or test stream rules.
+.TP
+dalgona\-help(1)
+Print this message or the help of the given subcommand(s)
+.SH VERSION
+v0.1.0
