@@ -20,42 +20,51 @@ use crate::{
 const PID_WAIT: Duration = Duration::from_millis(100);
 const PID_POLL: Duration = Duration::from_millis(5);
 
-/// Every lock path this process currently holds, keyed by the path the
-/// holder acquired. A same-pid `Locked` contender uses it to tell a live
-/// in-process session (which keeps its lock for the session's whole life,
-/// so waiting never pays) from a mid-acquire or mid-release transient
-/// (which resolves in milliseconds and is worth a bounded retry).
-fn holders() -> &'static Mutex<HashMap<PathBuf, usize>> {
-    static HOLDERS: OnceLock<Mutex<HashMap<PathBuf, usize>>> = OnceLock::new();
+/// One process-held lock path: every guard taken on it plus whether a
+/// live journal owns them.
+///
+/// A fresh acquire always lands `live: false` (transient — the opening
+/// scan/repair, a detached first-append setup, or a mid-release drop, all
+/// resolving in bounded time and worth a bounded retry); a journal parks
+/// the guard into its state via [`LockGuard::mark_live`] and only then
+/// does `live` go up, telling a same-pid `Locked` contender that waiting
+/// never pays because a session holds the lock for its whole life.
+#[derive(Debug, Default)]
+struct Holder {
+    count: usize,
+    live: bool,
+}
+
+fn holders() -> &'static Mutex<HashMap<PathBuf, Holder>> {
+    static HOLDERS: OnceLock<Mutex<HashMap<PathBuf, Holder>>> = OnceLock::new();
     HOLDERS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn holders_map() -> std::sync::MutexGuard<'static, HashMap<PathBuf, usize>> {
+fn holders_map() -> std::sync::MutexGuard<'static, HashMap<PathBuf, Holder>> {
     holders()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn register(path: &Path) {
-    *holders_map().entry(path.to_path_buf()).or_default() += 1;
+    holders_map().entry(path.to_path_buf()).or_default().count += 1;
 }
 
 fn unregister(path: &Path) {
     let mut map = holders_map();
-    if let Some(count) = map.get_mut(path) {
-        *count -= 1;
-        if *count == 0 {
+    if let Some(holder) = map.get_mut(path) {
+        holder.count -= 1;
+        if holder.count == 0 {
             map.remove(path);
         }
     }
 }
 
-/// `true` while a live object inside this process holds the OS lock for
-/// `path`. Registering happens only after `try_lock` and the owner sidecar
-/// publish, so a path still absent here is a transient — the acquire or
-/// release in flight — not a session that will outlive a retry budget.
-pub(crate) fn held_in_process(path: &Path) -> bool {
-    holders_map().contains_key(path)
+/// `true` while a live journal inside this process owns the OS lock for
+/// `path` — as opposed to a transient guard mid-acquire or mid-release,
+/// which registers too but is worth retrying through.
+pub(crate) fn live_in_process(path: &Path) -> bool {
+    holders_map().get(path).is_some_and(|holder| holder.live)
 }
 
 /// Holds the operating-system lock for one session.
@@ -102,9 +111,10 @@ impl LockGuard {
                     format!("{}\n", std::process::id()).as_bytes(),
                 )
                 .map_err(|source| util::io_err(path, source))?;
-                // Registered last: the sidecar precedes it so a contender
-                // reading our pid always finds the live-holder flag instead
-                // of taking a needless retry pass.
+                // Registered last, as transient: the sidecar precedes it
+                // so a contender reading our pid always finds the holder
+                // entry instead of taking a needless retry pass; a journal
+                // flips it to live only once it parks the guard.
                 register(path);
                 Ok(Self {
                     _file: file,
@@ -116,6 +126,16 @@ impl LockGuard {
                 Err(StoreError::Locked { session, pid })
             }
             Err(TryLockError::Error(source)) => Err(util::io_err(path, source)),
+        }
+    }
+
+    /// Marks this held lock as owned by a live journal. Call when the
+    /// guard is parked into a journal's state; a same-process `Locked`
+    /// contender then reports immediately instead of burning its retry
+    /// budget on a lock that outlives it.
+    pub(crate) fn mark_live(&self) {
+        if let Some(holder) = holders_map().get_mut(&self.path) {
+            holder.live = true;
         }
     }
 }
@@ -334,18 +354,24 @@ mod tests {
     }
 
     #[test]
-    fn held_in_process_tracks_the_guard_lifetime() {
+    fn live_in_process_follows_journal_parking() {
         let dir = TestDir::new();
         let id = SessionId::new_v7();
         let path = dir.0.join("lock");
-        assert!(!super::held_in_process(&path));
+        assert!(!super::live_in_process(&path));
         {
-            let _guard = LockGuard::acquire(&path, id).expect("first lock acquisition");
-            assert!(super::held_in_process(&path));
+            let guard = LockGuard::acquire(&path, id).expect("first lock acquisition");
+            // A fresh guard is transient: a detached first-append setup or
+            // an in-flight open holds it without a live journal behind it.
+            assert!(!super::live_in_process(&path));
+            guard.mark_live();
+            assert!(super::live_in_process(&path));
         }
-        assert!(!super::held_in_process(&path));
-        let _next = LockGuard::acquire(&path, id).expect("lock released after guard drop");
-        assert!(super::held_in_process(&path));
+        assert!(!super::live_in_process(&path));
+        let next = LockGuard::acquire(&path, id).expect("lock released after guard drop");
+        assert!(!super::live_in_process(&path));
+        next.mark_live();
+        assert!(super::live_in_process(&path));
     }
 
     #[test]
