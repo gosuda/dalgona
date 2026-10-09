@@ -93,7 +93,7 @@ fn sidecar_round_trip_matches_exact_shape() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn decode_rejects_bad_documents_with_exact_texts() -> Result<(), Box<dyn Error>> {
+fn decode_rejects_bad_documents_with_exact_texts() {
     let session_mismatch =
         b"{\"v\":1,\"session\":\"other\",\"controller\":\"run\",\"next_goal\":1,\"goal\":null}\n";
     assert_eq!(
@@ -124,7 +124,6 @@ fn decode_rejects_bad_documents_with_exact_texts() -> Result<(), Box<dyn Error>>
             "unexpected damage text: {error}"
         );
     }
-    Ok(())
 }
 
 #[test]

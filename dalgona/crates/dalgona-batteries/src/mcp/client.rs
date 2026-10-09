@@ -180,18 +180,21 @@ impl Transport {
                 response
             }
             Self::Http(transport) => {
+                let call = super::http::CallCx {
+                    method,
+                    version,
+                    services: ctx.session.services.as_ref(),
+                    who: ctx.who,
+                    cancel: &ctx.instance.cancel,
+                };
                 transport
                     .exchange(
                         id,
                         &ctx.instance.next_id,
-                        method,
                         params,
                         annotations,
                         arguments,
-                        version,
-                        ctx.session.services.as_ref(),
-                        ctx.who,
-                        &ctx.instance.cancel,
+                        &call,
                     )
                     .await
             }
@@ -210,16 +213,14 @@ impl Transport {
                 transport.notify(&body, &ctx.instance.cancel).await
             }
             Self::Http(transport) => {
-                transport
-                    .notify(
-                        &ctx.instance.next_id,
-                        method,
-                        version,
-                        ctx.session.services.as_ref(),
-                        ctx.who,
-                        &ctx.instance.cancel,
-                    )
-                    .await
+                let call = super::http::CallCx {
+                    method,
+                    version,
+                    services: ctx.session.services.as_ref(),
+                    who: ctx.who,
+                    cancel: &ctx.instance.cancel,
+                };
+                transport.notify(&ctx.instance.next_id, &call).await
             }
         }
     }

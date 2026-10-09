@@ -522,10 +522,10 @@ mod host_tests {
         ))
     }
 
-    fn blocked(tool: &str) -> Option<String> {
-        Some(format!(
+    fn blocked(tool: &str) -> String {
+        format!(
             "plan mode is on: \"{tool}\" may change the workspace; submit a plan with the plan tool, or ask the user to run /plan off"
-        ))
+        )
     }
 
     #[derive(serde::Deserialize)]
@@ -561,7 +561,7 @@ mod host_tests {
             ("custom", ToolClass::Other),
         ];
         for (tool, class) in refused {
-            assert_eq!(host.guard(tool, class).await?, blocked(tool));
+            assert_eq!(host.guard(tool, class).await?, Some(blocked(tool)));
         }
         let allowed = [
             ("read", ToolClass::Read),
@@ -675,7 +675,7 @@ mod host_tests {
         assert_eq!(host.state.phase(host.session), Phase::Planning);
         assert_eq!(
             host.guard("patch", ToolClass::Patch).await?,
-            blocked("patch")
+            Some(blocked("patch"))
         );
         Ok(())
     }

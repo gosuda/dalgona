@@ -118,16 +118,19 @@ async fn posts_mcp_headers_and_correlates_a_retried_id() {
         std::time::Duration::from_secs(5),
     );
     let cancel = CancellationToken::new();
+    let send_cx = super::SendCx {
+        version: PROTOCOL_VERSION,
+        token: None,
+        cancel: &cancel,
+        deadline: &deadline,
+    };
     let (response, (headers, sent_body)) = tokio::join!(
         transport.send_once(
             request.as_str(),
             Some("tools/call"),
             Some("echo"),
             &extra,
-            PROTOCOL_VERSION,
-            None,
-            &cancel,
-            &deadline,
+            &send_cx,
         ),
         server,
     );
@@ -203,16 +206,19 @@ async fn consumes_request_scoped_sse_incrementally_and_extends_on_progress() {
         std::time::Duration::from_secs(2),
         std::time::Duration::from_secs(4),
     );
+    let cancel = CancellationToken::new();
     let initial_deadline = deadline.expires;
     let response = transport
         .read_event_stream(
             response,
-            9,
-            4,
-            &CancellationToken::new(),
-            &mut deadline,
-            PROTOCOL_VERSION,
-            None,
+            &mut super::StreamCx {
+                request_id: 9,
+                original_id: 4,
+                version: PROTOCOL_VERSION,
+                token: None,
+                cancel: &cancel,
+                deadline: &mut deadline,
+            },
         )
         .await
         .expect("SSE reply");
