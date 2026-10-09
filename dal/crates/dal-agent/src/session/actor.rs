@@ -246,6 +246,8 @@ pub(crate) struct Actor {
     driver_tx: mpsc::Sender<TurnBatch>,
     host: Arc<crate::host::HostState>,
     pending_commands: VecDeque<ReplyTx>,
+    /// Broker resolutions held until their journal emit has been observed.
+    pending_releases: Vec<Resolved>,
     pending_compact: bool,
     closing: bool,
     broken: Option<Box<str>>,
@@ -496,6 +498,7 @@ pub(crate) fn spawn(deps: ActorDeps) -> (SessionHandle, DriverPorts, tokio::task
         driver_tx,
         host: deps.host,
         pending_commands: VecDeque::new(),
+        pending_releases: Vec::new(),
         pending_compact: false,
         closing: false,
         broken: None,
@@ -998,7 +1001,9 @@ impl Actor {
                 let error = map_rejection(rejection, self.session, &self.control());
                 let _ = reply.send(Err(error));
             }
-            Ok(()) => self.execute(effects, Some(reply)).await,
+            Ok(()) => {
+                let _ = self.execute(effects, Some(reply)).await;
+            }
         }
     }
 
@@ -1011,9 +1016,10 @@ impl Actor {
         }
     }
 
-    async fn execute(&mut self, effects: Vec<Effect>, reply: Option<ReplyTx>) {
+    async fn execute(&mut self, effects: Vec<Effect>, reply: Option<ReplyTx>) -> bool {
         let mut queue: VecDeque<Effect> = effects.into();
         let mut reply = reply;
+        let mut durable = true;
         loop {
             let mut driver_effects = Vec::new();
             let mut asks = Vec::new();
@@ -1024,8 +1030,10 @@ impl Actor {
                             if let Some(tx) = reply.take() {
                                 let _ = tx.send(Err(error));
                             }
+                            durable = false;
                             if self.broken.is_some() {
-                                return;
+                                self.release_pending(false);
+                                return false;
                             }
                         }
                     }
@@ -1100,6 +1108,19 @@ impl Actor {
             };
             let Some(more) = more else { break };
             queue.extend(more);
+        }
+        self.release_pending(durable);
+        durable
+    }
+
+    /// Delivers answers only after every queued resolution has been appended.
+    fn release_pending(&mut self, durable: bool) {
+        for resolved in self.pending_releases.drain(..) {
+            if durable {
+                self.broker.release(&resolved);
+            } else {
+                self.broker.cancel(&resolved);
+            }
         }
     }
     /// Bound for one opening-hook drive.
@@ -1274,14 +1295,18 @@ impl Actor {
     }
 
     /// Steps one broker resolution into queued effects without recursing.
-    fn queue_resolved(&mut self, item: &Resolved, queue: &mut VecDeque<Effect>) {
+    ///
+    /// Returns whether the fold accepted the resolution; a rejected
+    /// resolution must fail closed through [`Broker::cancel`] instead of
+    /// waiting for a release that would carry an unjournaled answer.
+    fn queue_resolved(&mut self, item: &Resolved, queue: &mut VecDeque<Effect>) -> bool {
         let by = if item.was_default {
             None
         } else {
             Some(item.by.clone())
         };
         let mut effects = Vec::new();
-        if self
+        let stepped = self
             .fold
             .step(
                 Event::GrantResolved {
@@ -1293,10 +1318,12 @@ impl Actor {
                 Timestamp::now(),
                 &mut effects,
             )
-            .is_ok()
-        {
+            .is_ok();
+        if stepped {
             queue.extend(effects);
+            self.pending_releases.push(item.clone());
         }
+        stepped
     }
 
     /// Publishes one update to the shared snapshot and its subscribers.
@@ -1364,7 +1391,12 @@ impl Actor {
         by: ClientId,
     ) -> Result<(), AgentError> {
         let resolved = self.broker.answer(id, answer, by)?;
-        self.journal_resolved(&resolved).await;
+        let mut queue = VecDeque::new();
+        if !self.queue_resolved(&resolved, &mut queue) {
+            self.broker.cancel(&resolved);
+            return Ok(());
+        }
+        self.execute(queue.into_iter().collect(), None).await;
         Ok(())
     }
 
@@ -1378,6 +1410,14 @@ impl Actor {
             self.publish(UpdateKind::RequestOpened(request));
             return;
         }
+        let mut effects = Vec::new();
+        let _ = self.fold.step(
+            Event::RequestOpened {
+                request: request.clone(),
+            },
+            Timestamp::now(),
+            &mut effects,
+        );
         let deadline = Instant::now() + default_timeout(&request.question);
         let waiter = self.broker.track(request.clone(), deadline);
         asks.push((request.clone(), waiter));
@@ -1385,33 +1425,18 @@ impl Actor {
     }
 
     async fn sweep_expiry(&mut self) {
-        for item in self.broker.expire(Instant::now()) {
-            self.journal_resolved(&item).await;
+        let expired = self.broker.expire(Instant::now());
+        if expired.is_empty() {
+            return;
         }
-    }
-
-    async fn journal_resolved(&mut self, item: &Resolved) {
-        let by = if item.was_default {
-            None
-        } else {
-            Some(item.by.clone())
-        };
-        let mut effects = Vec::new();
-        let stepped = self.fold.step(
-            Event::GrantResolved {
-                request: item.request.id,
-                answer: item.answer.clone(),
-                by,
-                was_default: item.was_default,
-            },
-            Timestamp::now(),
-            &mut effects,
-        );
-        if stepped.is_ok() {
-            self.execute(effects, None).await;
+        let mut queue = VecDeque::new();
+        for item in &expired {
+            if !self.queue_resolved(item, &mut queue) {
+                self.broker.cancel(item);
+            }
         }
+        self.execute(queue.into_iter().collect(), None).await;
     }
-
     /// Publishes one content-addressed blob through the journal.
     fn put_blob(&mut self, bytes: Vec<u8>) -> Result<BlobId, AgentError> {
         self.journal.put_blob(bytes).map_err(|error| match error {

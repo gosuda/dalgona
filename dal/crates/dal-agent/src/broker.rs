@@ -26,7 +26,8 @@ fn core_client() -> ClientId {
 /// Resolved slots older than their deadline plus this grace are pruned.
 const RETENTION_GRACE: Duration = Duration::from_secs(3600);
 
-/// Coordinates request ownership, answer attribution, deadlines, and turn cancellation.
+/// Coordinates request ownership, answer attribution, deadlines, and durable
+/// resolution delivery.
 pub struct Broker {
     pub(crate) state: Mutex<BrokerState>,
 }
@@ -97,6 +98,8 @@ pub(crate) struct Resolved {
     pub(crate) answer: Answer,
     /// The winning client, `core` for deadlines and cancellation.
     pub(crate) by: ClientId,
+    /// How the broker reached this resolution.
+    pub(crate) resolution: Resolution,
     /// Whether the broker selected the request default.
     pub(crate) was_default: bool,
 }
@@ -178,17 +181,11 @@ impl Broker {
             )));
         }
         slot.resolved_by = Some(by.clone());
-        if let Some(sender) = slot.answer.take() {
-            let _ = sender.send(Settled {
-                answer: answer.clone(),
-                by: by.clone(),
-                resolution: Resolution::Answered,
-            });
-        }
         Ok(Resolved {
             request: slot.request.clone(),
             answer,
             by,
+            resolution: Resolution::Answered,
             was_default: false,
         })
     }
@@ -209,17 +206,11 @@ impl Broker {
                 continue;
             }
             slot.resolved_by = Some(by.clone());
-            if let Some(sender) = slot.answer.take() {
-                let _ = sender.send(Settled {
-                    answer: answer.clone(),
-                    by: by.clone(),
-                    resolution: Resolution::Cancelled,
-                });
-            }
             resolved.push(Resolved {
                 request: slot.request.clone(),
                 answer: answer.clone(),
                 by: by.clone(),
+                resolution: Resolution::Cancelled,
                 was_default: false,
             });
         }
@@ -243,17 +234,11 @@ impl Broker {
             let by = core_client();
             slot.resolved_by = Some(by.clone());
             let answer = slot.request.default.clone();
-            if let Some(sender) = slot.answer.take() {
-                let _ = sender.send(Settled {
-                    answer: answer.clone(),
-                    by: by.clone(),
-                    resolution: Resolution::Unavailable,
-                });
-            }
             resolved.push(Resolved {
                 request: slot.request.clone(),
                 answer,
                 by,
+                resolution: Resolution::Unavailable,
                 was_default: true,
             });
         }
@@ -272,6 +257,44 @@ impl Broker {
         let BrokerState { slots, open_order } = &mut *state;
         open_order.retain(|id| slots.contains_key(id));
         resolved
+    }
+
+    /// Delivers a broker resolution after the owning actor has journaled it.
+    pub(crate) fn release(&self, resolved: &Resolved) {
+        let sender = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .slots
+            .get_mut(&resolved.request.id)
+            .and_then(|slot| slot.answer.take());
+        let Some(sender) = sender else {
+            return;
+        };
+        let _ = sender.send(Settled {
+            answer: resolved.answer.clone(),
+            by: resolved.by.clone(),
+            resolution: resolved.resolution,
+        });
+    }
+
+    /// Cancels a waiter whose answer could not be made durable.
+    pub(crate) fn cancel(&self, resolved: &Resolved) {
+        let sender = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .slots
+            .get_mut(&resolved.request.id)
+            .and_then(|slot| slot.answer.take());
+        let Some(sender) = sender else {
+            return;
+        };
+        let _ = sender.send(Settled {
+            answer: Answer::Cancel,
+            by: core_client(),
+            resolution: Resolution::Cancelled,
+        });
     }
 
     /// Lists unresolved requests, oldest first.

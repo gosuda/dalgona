@@ -12,7 +12,8 @@ use dal_core::ext::{Mail as ExtMail, Service};
 use dal_core::{
     AgentInfo, AgentReport, AgentState, AgentsOp, AgentsReply, BlobId, EntryId, FetchMethod,
     FetchRequest, FetchResponse, Inference, JobsOp, JobsReply, MailMode, ModelRequest, Name,
-    Notice, Part, SessionId, StateError, StateOp, StateRecord, TurnOp, TurnOpReply, Workspace,
+    Notice, Part, Request, SessionId, StateError, StateOp, StateRecord, TurnOp, TurnOpReply,
+    Workspace,
 };
 use dal_provider::EventStream;
 use tokio::sync::oneshot;
@@ -542,6 +543,20 @@ impl SessionBackend for Backend {
                 .map_err(|_| record_session_closed())?;
             rx.await.map_err(|_| record_session_closed())?
         })
+    }
+    fn request_opened(&self, request: Request) -> ServiceFuture<'_, ()> {
+        let handle = self.handle.clone();
+        Box::pin(async move {
+            handle
+                .work(crate::session::actor::TurnWork::Asked { request })
+                .await
+                .map_err(|error| ServiceError::failed(None, error.to_string()))
+        })
+    }
+
+    fn request_resolved(&self, resolved: crate::broker::Resolved) {
+        self.handle
+            .work_detached(crate::session::actor::TurnWork::Answered { resolved });
     }
 
     fn ext_records(&self) -> Arc<[ExtRecord]> {

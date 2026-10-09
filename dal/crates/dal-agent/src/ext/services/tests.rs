@@ -50,6 +50,8 @@ struct FakeBackend {
     rows: Mutex<Vec<crate::ext::ExtRecord>>,
     blobs: Mutex<HashMap<[u8; 32], Vec<u8>>>,
     updates: Mutex<Vec<dal_core::UpdateKind>>,
+    /// Resolutions the ask guard asked the actor to journal.
+    resolved: Mutex<Vec<crate::broker::Resolved>>,
     headless: std::sync::atomic::AtomicBool,
 }
 
@@ -177,6 +179,15 @@ impl SessionBackend for FakeBackend {
 
     fn publish_update(&self, update: dal_core::UpdateKind) {
         self.updates.lock().unwrap().push(update);
+    }
+    fn request_opened(&self, _request: dal_core::Request) -> ServiceFuture<'_, ()> {
+        Box::pin(async { Ok(()) })
+    }
+    fn request_resolved(&self, resolved: crate::broker::Resolved) {
+        self.resolved
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(resolved);
     }
 
     fn answerer_attached(&self) -> bool {
@@ -450,9 +461,11 @@ fn answer_next(broker: &Broker, answer: Answer) {
         .next()
         .expect("an open request")
         .id;
-    broker
+    let resolved = broker
         .answer(id, answer, ClientId::new("test-front-end"))
         .expect("answer sends");
+    // The helper stands in for the actor's journal-then-release step.
+    broker.release(&resolved);
     broker
         .state
         .lock()
@@ -1214,13 +1227,13 @@ async fn a_dropped_ask_resolves_its_broker_request() {
             .any(|u| matches!(u, dal_core::UpdateKind::RequestOpened(_))),
         "the question was published: {updates:?}"
     );
+    drop(updates);
+    let resolved = fx.backend.resolved.lock().unwrap();
     assert!(
-        updates.iter().any(|u| matches!(
-            u,
-            dal_core::UpdateKind::RequestResolved { answer, .. }
-                if *answer == dal_core::Answer::Cancel
-        )),
-        "the retired question resolves as Cancel: {updates:?}"
+        resolved
+            .iter()
+            .any(|r| r.answer == dal_core::Answer::Cancel),
+        "the retired question was routed to the actor as Cancel: {resolved:?}"
     );
 }
 

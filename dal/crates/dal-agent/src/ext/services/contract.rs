@@ -8,8 +8,8 @@
 use dal_core::ext::{McpDeclaration, McpRequest, McpResponse};
 use dal_core::{
     AgentsOp, AgentsReply, Answer, EntryId, FetchRequest, FetchResponse, Inference, JobsOp,
-    JobsReply, ModelRequest, Name, Notice, Question, RunOutput, RunRequest, SidecarOp, Site,
-    StateError, StateOp, StateRecord, TurnOp, TurnOpReply, Visibility, Workspace,
+    JobsReply, ModelRequest, Name, Notice, Question, Request, RunOutput, RunRequest, SidecarOp,
+    Site, StateError, StateOp, StateRecord, TurnOp, TurnOpReply, Visibility, Workspace,
 };
 use dal_provider::EventStream;
 use std::collections::HashMap;
@@ -271,6 +271,12 @@ pub(crate) trait SessionBackend: Send + Sync + 'static {
     ) -> ServiceFuture<'_, ()>;
     /// Runs one turn operation.
     fn turn(&self, op: TurnOp) -> ServiceFuture<'_, TurnOpReply>;
+    /// Routes an opened request through the session actor's fold.
+    fn request_opened(&self, request: Request) -> ServiceFuture<'_, ()>;
+    /// Hands one broker resolution to the session actor, which journals it
+    /// before any waiter sees the answer. Sync like [`SessionBackend::publish_update`]:
+    /// the actor owns the awaiting.
+    fn request_resolved(&self, resolved: crate::broker::Resolved);
     /// Journals one extension record on the current leaf and returns its
     /// journal position after the receipt.
     fn append_record(&self, ext: &Name, kind: &str, body: RawValue) -> ServiceFuture<'_, EntryId>;

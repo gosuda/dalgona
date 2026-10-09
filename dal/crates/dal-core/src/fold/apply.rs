@@ -2,9 +2,9 @@ use super::helpers::{HookTarget, StreamEnd, invalid};
 use super::round::Settlement;
 use super::types::{QuestionRef, QueuedInput};
 use super::{
-    Answer, CompactLimits, Effect, Emit, Event, Family, JobId, JobKind, JobOutcome, Limits,
-    ModelRoute, Name, Part, Phase, Question, Rejection, Reply, Request, RequestId, Session, TurnId,
-    UpdateKind,
+    Answer, ClientId, CompactLimits, Effect, Emit, Event, Family, JobId, JobKind, JobOutcome,
+    Limits, ModelRoute, Name, Part, Phase, Question, Record, Rejection, Reply, Request, RequestId,
+    Session, TurnId, UpdateKind,
 };
 
 impl Session {
@@ -44,7 +44,7 @@ impl Session {
                 answer,
                 by,
                 was_default,
-            } => return self.grant_resolved(request, &answer, by.is_some(), was_default),
+            } => return self.grant_resolved(request, &answer, by, was_default, now, emit),
             Event::JobStarted { job, kind } => self.job_started(job, kind, emit),
             Event::JobSettled { job, outcome } => self.job_settled(job, outcome, emit),
             Event::Wake {
@@ -131,12 +131,14 @@ impl Session {
     }
 
     pub(super) fn request_opened(&mut self, request: &Request) {
-        if let Question::Approval { tool, .. } = &request.question {
-            let question = QuestionRef {
-                tool: Some(tool.clone()),
-            };
-            self.open_questions.push((request.id, question));
-        }
+        let tool = match &request.question {
+            Question::Approval { tool, .. } => Some(tool.clone()),
+            Question::Grant { .. }
+            | Question::Select { .. }
+            | Question::Confirm { .. }
+            | Question::Text { .. } => None,
+        };
+        self.open_questions.push((request.id, QuestionRef { tool }));
     }
 
     pub(super) fn queue_steer(&mut self, text: Box<str>, effects: &mut Vec<Effect>) {
@@ -169,8 +171,10 @@ impl Session {
         &mut self,
         request: RequestId,
         answer: &Answer,
-        attributed: bool,
+        by: Option<ClientId>,
         was_default: bool,
+        now: jiff::Timestamp,
+        emit: &mut Emit,
     ) -> Result<(), Rejection> {
         let Some(index) = self
             .open_questions
@@ -179,7 +183,7 @@ impl Session {
         else {
             return Ok(());
         };
-        let grant = if *answer == Answer::ApproveForSession && !was_default && attributed {
+        let grant = if *answer == Answer::ApproveForSession && !was_default && by.is_some() {
             self.open_questions[index]
                 .1
                 .tool
@@ -196,6 +200,19 @@ impl Session {
         if let Some(name) = grant {
             self.allow_always.insert(name);
         }
+        let by = by.unwrap_or_else(|| ClientId::new("core"));
+        emit.records.push(Record::Resolved {
+            at: now,
+            request,
+            answer: answer.clone(),
+            by: by.clone(),
+            was_default,
+        });
+        emit.updates.push(UpdateKind::RequestResolved {
+            id: request,
+            answer: answer.clone(),
+            by,
+        });
         Ok(())
     }
 

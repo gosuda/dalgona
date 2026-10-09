@@ -302,8 +302,16 @@ fn session_grant_accepts_a_mapped_tool_name() {
         },
     ));
     session.preflight_session_grant(request).unwrap();
+    let mut emit = Emit::default();
     session
-        .grant_resolved(request, &Answer::ApproveForSession, true, false)
+        .grant_resolved(
+            request,
+            &Answer::ApproveForSession,
+            Some(client()),
+            false,
+            stamp(),
+            &mut emit,
+        )
         .unwrap();
     assert!(
         session

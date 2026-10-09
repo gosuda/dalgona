@@ -83,6 +83,13 @@ fn tui() -> ClientId {
     ClientId::new("tui")
 }
 
+/// Answers and delivers the resolution, standing in for the session
+/// actor's journal-then-release step that wakes the waiting gate.
+fn answer_and_release(broker: &Broker, id: dal_core::RequestId, answer: Answer, by: ClientId) {
+    let resolved = broker.answer(id, answer, by).expect("answer");
+    broker.release(&resolved);
+}
+
 #[tokio::test]
 async fn grant_misses_coalesce_and_revoke_invalidates_late_answer() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -128,7 +135,7 @@ async fn grant_approve_persists_exact_row_and_session_approve_does_not() {
             }
             tokio::task::yield_now().await;
         };
-        broker.answer(id, Answer::Approve, tui()).expect("approve");
+        answer_and_release(&broker, id, Answer::Approve, tui());
     });
     let grant = grant.expect("granted");
     assert!(grant.persistent());
@@ -177,9 +184,7 @@ async fn grant_approve_persists_exact_row_and_session_approve_does_not() {
                 }
                 tokio::task::yield_now().await;
             };
-            broker
-                .answer(id, Answer::ApproveForSession, tui())
-                .expect("session approve");
+            answer_and_release(&broker, id, Answer::ApproveForSession, tui());
         });
     let session_grant = session_grant.expect("session");
     assert!(!session_grant.persistent());
@@ -225,7 +230,7 @@ async fn grant_denials_are_distinct() {
                 }
                 tokio::task::yield_now().await;
             };
-            broker.answer(id, answer, tui()).expect("answer");
+            answer_and_release(&broker, id, answer, tui());
         });
         match probe {
             Answer::Decline => assert!(matches!(outcome, Err(ServiceError::Declined))),
@@ -340,9 +345,7 @@ async fn mcp_grants_persist_for_exact_declared_set_and_reask_after_change() {
                 detail.as_deref(),
                 Some("search: URL https://mcp.example/search")
             );
-            broker
-                .answer(request.id, Answer::Approve, tui())
-                .expect("approve");
+            answer_and_release(&broker, request.id, Answer::Approve, tui());
         }
     );
     assert!(approved.expect("approved").persistent());
@@ -380,9 +383,7 @@ async fn mcp_grants_persist_for_exact_declared_set_and_reask_after_change() {
                 }
                 tokio::task::yield_now().await;
             };
-            broker
-                .answer(request.id, Answer::ApproveForSession, tui())
-                .expect("session approve");
+            answer_and_release(&broker, request.id, Answer::ApproveForSession, tui());
         }
     );
     assert!(!changed.expect("changed set approved").persistent());
@@ -399,16 +400,14 @@ async fn mcp_grant_misses_coalesce_and_publish_request_updates() {
     let cancel = CancellationToken::new();
     let updates = Arc::new(tokio::sync::Mutex::new(Vec::new()));
     let published = Arc::clone(&updates);
-    let grant_file = dir.path().join("grants.toml");
     store.set_request_update(Arc::new(move |update| {
-        if matches!(&update, dal_core::UpdateKind::RequestResolved { .. }) {
-            assert!(grant_file.exists());
-        }
         published
             .try_lock()
             .expect("request update callbacks do not overlap")
             .push(update);
     }));
+    let answered = Arc::new(tokio::sync::Mutex::new(None));
+    let answered_cell = Arc::clone(&answered);
 
     let (first, second, ()) = futures::join!(
         store.ensure_declared_mcp(
@@ -436,25 +435,25 @@ async fn mcp_grant_misses_coalesce_and_publish_request_updates() {
                 tokio::task::yield_now().await;
             }
             assert_eq!(broker.open_requests().len(), 1);
-            broker
-                .answer(request.id, Answer::Approve, tui())
-                .expect("approve");
+            *answered_cell.lock().await = Some(request.id);
+            answer_and_release(&broker, request.id, Answer::Approve, tui());
         }
     );
     assert!(first.expect("first granted").persistent());
     assert!(second.expect("second granted").persistent());
 
     let updates = updates.lock().await;
-    assert_eq!(updates.len(), 2);
+    // The store owns only the open broadcast: the resolution broadcast and
+    // its record belong to the session actor, which this fixture omits.
+    assert_eq!(updates.len(), 1);
     let dal_core::UpdateKind::RequestOpened(opened) = &updates[0] else {
         panic!("grant request must be published when opened");
     };
-    let dal_core::UpdateKind::RequestResolved { id, answer, by } = &updates[1] else {
-        panic!("grant answer must be published when resolved");
-    };
-    assert_eq!(opened.id, *id);
-    assert_eq!(*answer, Answer::Approve);
-    assert_eq!(by, &tui());
+    let answered = answered
+        .lock()
+        .await
+        .expect("the answered request id is recorded");
+    assert_eq!(opened.id, answered);
 }
 
 #[tokio::test]
@@ -471,7 +470,7 @@ async fn a_turnless_caller_rides_a_persisted_grant_but_cannot_ask() {
             }
             tokio::task::yield_now().await;
         };
-        broker.answer(id, Answer::Approve, tui()).expect("approve");
+        answer_and_release(&broker, id, Answer::Approve, tui());
     });
     grant.expect("granted");
 
@@ -526,7 +525,7 @@ async fn a_turnless_caller_rides_a_persisted_grant_but_cannot_ask() {
                 }
                 tokio::task::yield_now().await;
             };
-            broker.answer(id, Answer::Decline, tui()).expect("decline");
+            answer_and_release(&broker, id, Answer::Decline, tui());
         }
     );
     assert!(

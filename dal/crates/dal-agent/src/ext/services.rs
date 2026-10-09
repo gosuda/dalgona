@@ -52,8 +52,8 @@ use dal_core::ext::{McpDeclaration, McpRequest, McpResponse};
 use dal_core::{
     AgentsOp, AgentsReply, Answer, CallId, ClientId, DenyReason, EntryId, FetchRequest,
     FetchResponse, Inference, JobsOp, JobsReply, ModelRequest, Name, Notice, Origin, Owner,
-    Preview, Question, RequestId, RunOutput, RunRequest, Service, SidecarOp, Site, StateError,
-    StateNs, StateOp, StateRecord, TurnOp, TurnOpReply, Visibility, Workspace,
+    Preview, Question, Request, RequestId, RunOutput, RunRequest, Service, SidecarOp, Site,
+    StateError, StateNs, StateOp, StateRecord, TurnOp, TurnOpReply, Visibility, Workspace,
 };
 use dal_provider::EventStream;
 use tokio::sync::watch;
@@ -93,12 +93,14 @@ pub struct SessionServices {
 /// caller dropping the future — frees the next ask and retires the
 /// question it published. A stranded slot would deny every later ask as
 /// busy; a stranded request would stay answerable on every front end
-/// while nobody consumes its reply.
+/// while nobody consumes its reply. The withdrawal is the request's first
+/// resolution: the broker mark here wins late answers, and the actor
+/// journals it so the fold broadcasts the retirement after the record.
 struct AskSlot<'a> {
     slot: &'a Mutex<Option<RequestId>>,
     broker: &'a Broker,
-    backend: &'a dyn SessionBackend,
-    request: RequestId,
+    backend: Arc<dyn SessionBackend>,
+    request: Request,
     armed: bool,
 }
 
@@ -108,22 +110,35 @@ impl Drop for AskSlot<'_> {
             .slot
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-        if !self.armed {
+        let Some(resolved) = self.withdrawn() else {
             return;
+        };
+        // Bounded shed, no detached task: a full command queue drops the
+        // report, and the broker mark above already denied late answers.
+        self.backend.request_resolved(resolved);
+    }
+}
+
+impl AskSlot<'_> {
+    /// Marks the withdrawal in the broker and renders the resolution to
+    /// journal, or `None` when the guard was disarmed or the request was
+    /// already resolved.
+    fn withdrawn(&mut self) -> Option<crate::broker::Resolved> {
+        if !self.armed {
+            return None;
         }
         let by = ClientId::new("core");
-        if self
+        let answered = self
             .broker
-            .answer(self.request, Answer::Cancel, by.clone())
-            .is_ok()
-        {
-            self.backend
-                .publish_update(dal_core::UpdateKind::RequestResolved {
-                    id: self.request,
-                    answer: Answer::Cancel,
-                    by,
-                });
-        }
+            .answer(self.request.id, Answer::Cancel, by.clone())
+            .is_ok();
+        answered.then(|| crate::broker::Resolved {
+            request: self.request.clone(),
+            answer: Answer::Cancel,
+            by,
+            resolution: Resolution::Cancelled,
+            was_default: false,
+        })
     }
 }
 
@@ -152,6 +167,13 @@ impl SessionServices {
         let update_backend = Arc::clone(&backend);
         grants.set_request_update(Arc::new(move |update| {
             update_backend.publish_update(update);
+        }));
+        let open_backend = Arc::clone(&backend);
+        grants.set_request_open(Arc::new(move |request| {
+            let backend = Arc::clone(&open_backend);
+            Box::pin(async move {
+                let _ = backend.request_opened(request).await;
+            })
         }));
         Self {
             grants,
@@ -338,9 +360,12 @@ impl SessionServices {
         let deadline = Instant::now() + crate::broker::default_timeout(&question);
         let (request, waiter) = self.broker.open(owner, question, turn, deadline);
         self.backend
+            .request_opened(request.clone())
+            .await
+            .map_err(|error| ServiceError::failed(Some(Service::Run), error.to_string()))?;
+        self.backend
             .publish_update(dal_core::UpdateKind::RequestOpened(request.clone()));
         let settled = tokio::select! {
-            biased;
             () = self.cancel.cancelled() => None,
             outcome = waiter => Some(outcome),
         };
@@ -352,12 +377,6 @@ impl SessionServices {
         else {
             return Err(ServiceError::Cancelled);
         };
-        self.backend
-            .publish_update(dal_core::UpdateKind::RequestResolved {
-                id: request.id,
-                answer: answer.clone(),
-                by: by.clone(),
-            });
         match (resolution, answer) {
             (_, Answer::Approve | Answer::ApproveForSession) => {
                 let approved = self
@@ -556,7 +575,7 @@ impl Services for SessionServices {
             }
             // One guard across check, open, and set: `open` is synchronous,
             // so two concurrent asks cannot both slip through.
-            let (request_id, answer) = {
+            let (request, answer) = {
                 let mut open = self
                     .ask_open
                     .lock()
@@ -571,35 +590,35 @@ impl Services for SessionServices {
                 let deadline = Instant::now() + self.ask_timeout;
                 let (request, answer) = self.broker.open(owner, question, turn, deadline);
                 *open = Some(request.id);
-                // Front ends learn a request exists only from this update:
-                // without it the question is unanswerable and the caller
-                // waits out the timeout for nothing.
-                self.backend
-                    .publish_update(dal_core::UpdateKind::RequestOpened(request.clone()));
-                (request.id, answer)
+                (request, answer)
             };
             // The guard clears the slot on every exit — including the
             // caller dropping this future — so a cancellation can strand
             // neither the session's one open ask nor its broker request.
+            // It guards the actor route too: a failed route drops the
+            // guard, which withdraws the never-published question.
             let mut guard = AskSlot {
                 slot: &self.ask_open,
                 broker: &self.broker,
-                backend: self.backend.as_ref(),
-                request: request_id,
+                backend: Arc::clone(&self.backend),
+                request: request.clone(),
                 armed: true,
             };
+            self.backend
+                .request_opened(request.clone())
+                .await
+                .map_err(|error| ServiceError::failed(Some(Service::Ask), error.to_string()))?;
+            // Front ends learn a request exists only from this update:
+            // without it the question is unanswerable and the caller
+            // waits out the timeout for nothing.
+            self.backend
+                .publish_update(dal_core::UpdateKind::RequestOpened(request.clone()));
             tokio::select! {
                 biased;
                 () = self.cancel.cancelled() => Err(ServiceError::Cancelled),
                 () = sleep(self.ask_timeout) => Ok(None),
-                Settled { answer, by, resolution } = answer => {
+                Settled { answer, resolution, .. } = answer => {
                     guard.armed = false;
-                    self.backend
-                        .publish_update(dal_core::UpdateKind::RequestResolved {
-                            id: request_id,
-                            answer: answer.clone(),
-                            by,
-                        });
                     match (resolution, answer) {
                         // No controller answered: the fail-closed default,
                         // never a dismissal and never an interruption.

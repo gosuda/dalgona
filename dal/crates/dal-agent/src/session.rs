@@ -335,6 +335,13 @@ impl SessionHandle {
             .map_err(|_| AgentError::SessionClosed { id: self.session })
     }
 
+    /// Reports driver work without waiting. A closed or full command
+    /// channel sheds the report: callers that drop in-flight work on this
+    /// path already hold the broker-side fail-closed mark.
+    pub(crate) fn work_detached(&self, work: actor::TurnWork) {
+        let _ = self.tx.try_send(ActorRequest::Work { work });
+    }
+
     /// Reads or writes one sidecar value.
     pub(crate) async fn sidecar(&self, op: SidecarOp) -> Result<(), AgentError> {
         self.tx

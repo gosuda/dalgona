@@ -43,6 +43,8 @@ async fn a_deadline_with_no_answer_is_unavailable_not_a_decision() {
     let resolved = broker.expire(Instant::now());
     assert_eq!(resolved.len(), 1);
     assert!(resolved[0].was_default);
+    // Delivery waits for the actor's post-journal release.
+    broker.release(&resolved[0]);
     let end = settled(waiter).await;
     assert_eq!(end.resolution, Resolution::Unavailable);
     assert_eq!(end.by, client("core"));
@@ -53,9 +55,10 @@ async fn a_deadline_with_no_answer_is_unavailable_not_a_decision() {
 async fn a_client_answer_and_a_turn_cancel_are_not_unavailable() {
     let broker = Broker::new();
     let (id, waiter) = open_text(&broker);
-    broker
+    let resolved = broker
         .answer(id, Answer::Decline, client("tui"))
         .expect("the first answer wins");
+    broker.release(&resolved);
     let answered = settled(waiter).await;
     assert_eq!(answered.resolution, Resolution::Answered);
     assert_eq!(answered.by, client("tui"));
@@ -63,6 +66,9 @@ async fn a_client_answer_and_a_turn_cancel_are_not_unavailable() {
     let (_, waiter) = open_text(&broker);
     let cancelled = broker.resolve_turn(turn(), Answer::Cancel, client("core"));
     assert_eq!(cancelled.len(), 1);
+    for resolved in &cancelled {
+        broker.release(resolved);
+    }
     assert_eq!(settled(waiter).await.resolution, Resolution::Cancelled);
 }
 
@@ -76,6 +82,8 @@ async fn the_deadline_is_absolute_from_raise() {
         "the request is open until its deadline"
     );
     tokio::time::advance(Duration::from_secs(1)).await;
-    assert_eq!(broker.expire(Instant::now()).len(), 1);
+    let resolved = broker.expire(Instant::now());
+    assert_eq!(resolved.len(), 1);
+    broker.release(&resolved[0]);
     assert_eq!(settled(waiter).await.resolution, Resolution::Unavailable);
 }

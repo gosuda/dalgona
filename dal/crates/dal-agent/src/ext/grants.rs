@@ -193,10 +193,17 @@ pub struct GrantStore {
     inner: Mutex<Inner>,
     persist_lock: tokio::sync::Mutex<()>,
     request_update: Mutex<Option<UpdatePublisher>>,
+    request_open: Mutex<Option<RequestOpenPublisher>>,
 }
 
 /// The update publisher a session installs on its grant store.
 pub type UpdatePublisher = Arc<dyn Fn(dal_core::UpdateKind) + Send + Sync>;
+
+/// The actor route a session installs on its grant store: it folds
+/// `Event::RequestOpened` for grant questions before they are published,
+/// so every settlement journals a record.
+pub(crate) type RequestOpenPublisher =
+    Arc<dyn Fn(dal_core::Request) -> crate::ext::BoxFuture<'static, ()> + Send + Sync>;
 
 /// Typed grant administration failure.
 #[derive(Debug, thiserror::Error)]
@@ -240,6 +247,32 @@ impl GrantStore {
             .unwrap_or_else(PoisonError::into_inner) = Some(publisher);
     }
 
+    /// Installs the actor route for grant questions.
+    ///
+    /// The route folds `Event::RequestOpened` in the session actor before
+    /// the question is published, so every settlement journals a record.
+    pub(crate) fn set_request_open(&self, publisher: RequestOpenPublisher) {
+        *self
+            .request_open
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(publisher);
+    }
+
+    /// Routes one opened grant question through the session actor before
+    /// it is published. A dead session skips the route: the question then
+    /// expires fail-closed with no answerer.
+    async fn open_request(&self, request: &dal_core::Request) {
+        let publisher = self
+            .request_open
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .map(Arc::clone);
+        if let Some(publisher) = publisher {
+            publisher(request.clone()).await;
+        }
+    }
+
     fn publish_request_update(&self, update: dal_core::UpdateKind) {
         let publisher = self
             .request_update
@@ -270,6 +303,7 @@ impl GrantStore {
             ask_timeout,
             broker,
             request_update: Mutex::new(None),
+            request_open: Mutex::new(None),
             persist_lock: tokio::sync::Mutex::new(()),
             inner: Mutex::new(Inner {
                 persistent: Vec::new(),
@@ -379,6 +413,7 @@ impl GrantStore {
             return Err(ServiceError::failed(None, "grant store has no broker"));
         };
         let (request, answer) = broker.open(owner, question, turn, deadline);
+        self.open_request(&request).await;
         self.publish_request_update(dal_core::UpdateKind::RequestOpened(request.clone()));
         tokio::select! {
             biased;
@@ -406,13 +441,7 @@ impl GrantStore {
                 if let Some(row) = &mut row {
                     row.mcp_set = Some(key.set.clone());
                 }
-                let result = self.finalize_mcp(&key, outcome, row, &notify).await;
-                self.publish_request_update(dal_core::UpdateKind::RequestResolved {
-                    id: request.id,
-                    answer,
-                    by,
-                });
-                result
+                self.finalize_mcp(&key, outcome, row, &notify).await
             }
         }
     }
@@ -506,6 +535,7 @@ impl GrantStore {
             return Err(ServiceError::failed(None, "grant store has no broker"));
         };
         let (request, answer) = broker.open(owner, question, turn, deadline);
+        self.open_request(&request).await;
         self.publish_request_update(dal_core::UpdateKind::RequestOpened(request.clone()));
         tokio::select! {
             biased;
@@ -518,13 +548,7 @@ impl GrantStore {
             () = notify.notified() => self.take(&key),
             Settled { answer, by, .. } = answer => {
                 let (outcome, row) = GrantStore::decide(&key, &answer, by.clone());
-                let result = self.finalize(&key, service, outcome, row, &notify).await;
-                self.publish_request_update(dal_core::UpdateKind::RequestResolved {
-                    id: request.id,
-                    answer,
-                    by,
-                });
-                result
+                self.finalize(&key, service, outcome, row, &notify).await
             }
         }
     }

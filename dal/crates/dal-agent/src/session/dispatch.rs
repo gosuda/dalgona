@@ -924,7 +924,8 @@ impl CallRuntime {
                 what: "turn cancelled".into(),
             });
         };
-        self.report_answered(&request, &answer, &by, false).await;
+        self.report_answered(&request, &answer, &by, resolution, false)
+            .await;
         match answer {
             Answer::Approve | Answer::ApproveForSession => {
                 let roots = grant.clone().map_or_else(
@@ -989,6 +990,7 @@ impl CallRuntime {
         request: &Request,
         answer: &Answer,
         by: &ClientId,
+        resolution: Resolution,
         was_default: bool,
     ) {
         self.reports.lock().await.push(TurnWork::Answered {
@@ -996,6 +998,7 @@ impl CallRuntime {
                 request: request.clone(),
                 answer: answer.clone(),
                 by: by.clone(),
+                resolution,
                 was_default,
             },
         });

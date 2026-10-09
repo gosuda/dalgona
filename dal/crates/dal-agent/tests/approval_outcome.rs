@@ -14,9 +14,10 @@ use dal_agent::ext::{
 use dal_agent::{Agent, Delivery, Env, Host, Product, SessionRef, Subscription, ToolError};
 use dal_core::ext::{ExportId, ExportKind, OpSet};
 use dal_core::{
-    Answer, ClientId, Command, Config, ConfigProduct, Expect, ModelInfo, Name, Part, Preview,
-    RawJson, ToolClass, ToolSpec, UpdateKind, Visibility, Workspace,
+    Answer, ClientId, Command, Config, ConfigProduct, EntryKind, Expect, ModelInfo, Name, Part,
+    Preview, RawJson, Record, SessionId, ToolClass, ToolSpec, UpdateKind, Visibility, Workspace,
 };
+use dal_store::Store;
 
 /// Bounds each real-clock wait in the approval tests.
 const WAIT: Duration = Duration::from_secs(3600);
@@ -65,9 +66,10 @@ impl Tool for ApprovalProbe {
 }
 
 struct Session {
+    host: Host,
     agent: Agent,
     subscription: Subscription,
-    _tmp: tempfile::TempDir,
+    tmp: tempfile::TempDir,
 }
 
 /// Starts one host with an answering client attached and one scripted turn
@@ -156,9 +158,10 @@ async fn start_turn() -> Result<Session, Box<dyn std::error::Error>> {
         "prompt not accepted: {reply:?}"
     );
     Ok(Session {
+        host,
         agent,
         subscription,
-        _tmp: tmp,
+        tmp,
     })
 }
 
@@ -248,4 +251,183 @@ async fn an_approval_nobody_answers_is_reported_as_unanswered_and_fails_closed()
     assert!(!dump.contains("the probe ran"), "{dump}");
     assert!(!dump.contains("was declined by"), "{dump}");
     Ok(())
+}
+
+/// Reads one closed session's journal records from disk.
+async fn journal_records(
+    tmp: &tempfile::TempDir,
+    session: SessionId,
+) -> Result<Vec<Record>, Box<dyn std::error::Error>> {
+    let store = Store::new(
+        tmp.path().join("data"),
+        Workspace::new(tmp.path().join("w"))?,
+        dal_core::Product::Dal,
+    );
+    let (journal, _) = store.open_session(session).await?;
+    Ok(journal.records().to_vec())
+}
+
+/// The journaled resolution of `request` with its record position.
+fn journaled_resolution(
+    records: &[Record],
+    request: dal_core::RequestId,
+) -> Option<(usize, Answer, ClientId, bool)> {
+    records
+        .iter()
+        .enumerate()
+        .find_map(|(index, record)| match record {
+            Record::Resolved {
+                request: answered,
+                answer,
+                by,
+                was_default,
+                ..
+            } if *answered == request => Some((index, answer.clone(), by.clone(), *was_default)),
+            _ => None,
+        })
+}
+
+/// Position of the probe tool's settled result record.
+fn probe_result(records: &[Record]) -> Option<usize> {
+    records.iter().position(|record| {
+        matches!(record, Record::ToolResult(entry)
+            if matches!(&entry.kind, EntryKind::ToolResult { name, .. } if &**name == "fixture__probe"))
+    })
+}
+
+/// Requires the closed session to resume with `request`'s resolution still
+/// journaled, then closes it again.
+async fn resumed_shows(
+    session: &Session,
+    id: SessionId,
+    request: dal_core::RequestId,
+) -> TestResult {
+    let agent = session
+        .host
+        .open(
+            SessionRef::Resume {
+                key: id.to_string().into(),
+                workspace: Workspace::new(session.tmp.path().join("w"))?,
+            },
+            ClientId::new("probe"),
+        )
+        .await?;
+    agent.view(dal_core::PageReq::default())?;
+    session.host.close(id).await?;
+    let records = journal_records(&session.tmp, id).await?;
+    assert!(
+        journaled_resolution(&records, request).is_some(),
+        "the resumed session lost the resolution record"
+    );
+    Ok(())
+}
+
+/// The answer the broadcast carries must sit in the journal before the
+/// settled result that consumed it, and a resumed session still shows it.
+#[tokio::test]
+async fn an_approved_tool_call_journals_the_answer_before_its_effect() -> TestResult {
+    let mut session = start_turn().await?;
+    let request = next_request(&session.agent, &mut session.subscription, WAIT).await?;
+    session.agent.answer(request, Answer::Approve).await?;
+    let dump = finish_turn(&mut session, WAIT).await?;
+    assert!(dump.contains("the probe ran"), "{dump}");
+    let id = session.agent.view(dal_core::PageReq::default())?.session.id;
+    session.host.close(id).await?;
+    let records = journal_records(&session.tmp, id).await?;
+    let Some((resolved_at, answer, by, was_default)) = journaled_resolution(&records, request)
+    else {
+        return Err("the approved answer is not journaled".into());
+    };
+    assert!(matches!(answer, Answer::Approve), "{answer:?}");
+    assert_eq!(by.as_str(), "probe");
+    assert!(!was_default);
+    let Some(effect_at) = probe_result(&records) else {
+        return Err("the probe result is not journaled".into());
+    };
+    assert!(
+        resolved_at < effect_at,
+        "the answer must land in the journal before the result that used it"
+    );
+    resumed_shows(&session, id, request).await?;
+    Ok(())
+}
+
+/// A declined tool call journals the decline before the denial result,
+/// and a resumed session still shows the record.
+#[tokio::test]
+async fn a_declined_tool_call_journals_the_answer_before_its_denial() -> TestResult {
+    let mut session = start_turn().await?;
+    let request = next_request(&session.agent, &mut session.subscription, WAIT).await?;
+    session.agent.answer(request, Answer::Decline).await?;
+    let dump = finish_turn(&mut session, WAIT).await?;
+    assert!(dump.contains("was declined by probe"), "{dump}");
+    assert!(!dump.contains("the probe ran"), "{dump}");
+    let id = session.agent.view(dal_core::PageReq::default())?.session.id;
+    session.host.close(id).await?;
+    let records = journal_records(&session.tmp, id).await?;
+    let Some((resolved_at, answer, by, was_default)) = journaled_resolution(&records, request)
+    else {
+        return Err("the declined answer is not journaled".into());
+    };
+    assert!(matches!(answer, Answer::Decline), "{answer:?}");
+    assert_eq!(by.as_str(), "probe");
+    assert!(!was_default);
+    let Some(effect_at) = probe_result(&records) else {
+        return Err("the denial result is not journaled".into());
+    };
+    assert!(
+        resolved_at < effect_at,
+        "the decline must land in the journal before the denial it produced"
+    );
+    resumed_shows(&session, id, request).await?;
+    Ok(())
+}
+
+/// An approval nobody answers broadcasts its fail-closed default and
+/// journals exactly that record: nothing is published as resolved that
+/// the journal does not hold.
+#[tokio::test]
+async fn an_unanswered_tool_approval_journals_the_default_it_broadcasts() -> TestResult {
+    let mut session = start_turn().await?;
+    let request = next_request(&session.agent, &mut session.subscription, WAIT).await?;
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(300)).await;
+    tokio::time::resume();
+    let broadcast = wait_for_resolved(&mut session.subscription, request).await?;
+    assert!(matches!(broadcast, Answer::Decline), "{broadcast:?}");
+    let dump = finish_turn(&mut session, WAIT).await?;
+    assert!(dump.contains("no one answered within 300 s."), "{dump}");
+    assert!(!dump.contains("the probe ran"), "{dump}");
+    let id = session.agent.view(dal_core::PageReq::default())?.session.id;
+    session.host.close(id).await?;
+    let records = journal_records(&session.tmp, id).await?;
+    let Some((_, answer, by, was_default)) = journaled_resolution(&records, request) else {
+        return Err("the broadcast default is not journaled".into());
+    };
+    assert!(matches!(answer, Answer::Decline), "{answer:?}");
+    assert_eq!(by.as_str(), "core");
+    assert!(was_default);
+    Ok(())
+}
+
+/// Reads updates until `request`'s resolution is broadcast. One bounded
+/// wait: nothing at HEAD broadcasts, so an unbounded read would stall the
+/// whole RED run.
+async fn wait_for_resolved(
+    subscription: &mut Subscription,
+    request: dal_core::RequestId,
+) -> Result<Answer, Box<dyn std::error::Error>> {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            let delivery = next_delivery(subscription, WAIT).await?;
+            if let Delivery::Update(update) = &delivery
+                && let UpdateKind::RequestResolved { id, answer, .. } = &update.kind
+                && *id == request
+            {
+                return Ok(answer.clone());
+            }
+        }
+    })
+    .await
+    .map_err(|_| "no resolution broadcast arrived within 60 s")?
 }
