@@ -440,17 +440,24 @@ pub const BINDINGS: &[Binding] = &[
         legacy: Some(key(KeyCode::Char('l'), CTRL)),
     },
     Binding {
-        owner: Owner::App,
+        owner: Owner::Transcript,
         action: Action::TranscriptPageUp,
         label: "Transcript page up",
         default: key(KeyCode::PageUp, NONE),
         legacy: Some(key(KeyCode::Char('b'), CTRL)),
     },
     Binding {
-        owner: Owner::App,
+        owner: Owner::Transcript,
         action: Action::TranscriptPageDown,
         label: "Transcript page down",
         default: key(KeyCode::PageDown, NONE),
         legacy: Some(key(KeyCode::Char('f'), CTRL)),
+    },
+    Binding {
+        owner: Owner::Transcript,
+        action: Action::TranscriptJumpLatest,
+        label: "Jump to latest",
+        default: key(KeyCode::End, NONE),
+        legacy: Some(key(KeyCode::End, NONE)),
     },
 ];

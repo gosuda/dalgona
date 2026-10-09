@@ -13,6 +13,8 @@ pub enum Owner {
     Picker,
     /// Global application actions.
     App,
+    /// Transcript scrolling and jumping while a viewport owns them.
+    Transcript,
     /// Composer editing and submission.
     Composer,
     /// Text cursor movement and editing.
@@ -144,6 +146,8 @@ pub enum Action {
     TranscriptPageUp,
     /// Scroll the transcript downward.
     TranscriptPageDown,
+    /// Jump the transcript to the latest entry.
+    TranscriptJumpLatest,
 }
 
 /// A normalized key code and modifier set.
@@ -204,6 +208,7 @@ pub fn validate(table: &[Binding]) -> Result<(), TuiError> {
             Owner::Dialog => "dialog",
             Owner::Picker => "picker",
             Owner::App => "app",
+            Owner::Transcript => "transcript",
             Owner::Composer => "composer",
             Owner::Editor => "editor",
         };
@@ -264,7 +269,7 @@ pub fn resolve_in(key: Key, kitty: bool, owners: &[Owner]) -> Option<Action> {
 pub fn help_labels() -> Vec<(String, &'static str)> {
     BINDINGS
         .iter()
-        .filter(|binding| binding.owner == Owner::App)
+        .filter(|binding| matches!(binding.owner, Owner::App | Owner::Transcript))
         .map(|binding| (key_label(binding.default), binding.label))
         .collect()
 }
@@ -352,13 +357,13 @@ mod tests {
     }
 
     #[test]
-    fn end_is_a_composer_and_editor_key_with_no_dead_app_claim() {
+    fn end_is_a_composer_key_and_the_viewport_jump_key() {
         let end = Key::new(KeyCode::End, KeyModifiers::NONE);
         let composer_context = [Owner::App, Owner::Composer, Owner::Editor];
         assert_eq!(
             resolve_in(end, false, &composer_context),
             Some(Action::LineEnd),
-            "End belongs to the composer line end; no app action claims it"
+            "End belongs to the composer line end outside a viewport"
         );
         assert_eq!(
             resolve_in(end, true, &composer_context),
@@ -369,10 +374,16 @@ mod tests {
             Some(Action::PickerLast),
             "a picker keeps its own End binding"
         );
-        assert!(
-            !help_labels().iter().any(|(key, _)| key == "end"),
-            "F1 help must not list an End action that nothing dispatches"
+        assert_eq!(
+            resolve_in(end, false, &[Owner::App, Owner::Transcript]),
+            Some(Action::TranscriptJumpLatest),
+            "a viewport owns End for jump to latest"
         );
+        let jump = help_labels()
+            .into_iter()
+            .find(|(key, _)| key == "end")
+            .map(|(_, label)| label);
+        assert_eq!(jump, Some("Jump to latest"));
     }
 
     #[test]
