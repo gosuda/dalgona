@@ -317,7 +317,7 @@ impl CommandHost for DriverHost {
                 .await
                 .unwrap_or_default()
                 .into_boxed_slice();
-            jobs.lock().await.settle_durably(id, outcome, tail);
+            jobs.lock().await.settle_durably(id, outcome, tail).await;
         });
         id
     }
