@@ -276,19 +276,23 @@ pub(super) fn blocks_from_inference(inference: Inference) -> Result<InferredResp
     let mut usage = None;
     let mut stop = None;
     let mut current_reasoning = None;
+    // Adjacent text deltas are one run of prose: a block per token would split
+    // a reply into one transcript row per delta.
+    let mut text_run = String::new();
     for event in inference.events {
         match event {
             StreamEvent::Delta {
                 channel: StreamChannel::Text,
                 text,
             } => {
-                blocks.push(Block::Text { text });
                 current_reasoning = None;
+                text_run.push_str(&text);
             }
             StreamEvent::Delta {
                 channel: StreamChannel::Thinking,
                 text,
             } => {
+                flush_text_run(&mut blocks, &mut text_run);
                 if let Some(index) = current_reasoning {
                     if let Some(Block::Reasoning { text: previous, .. }) = blocks.get_mut(index) {
                         let mut combined = previous.to_string();
@@ -304,6 +308,7 @@ pub(super) fn blocks_from_inference(inference: Inference) -> Result<InferredResp
                 }
             }
             StreamEvent::ThinkingReplay { payload } => {
+                flush_text_run(&mut blocks, &mut text_run);
                 if let Some(index) = current_reasoning {
                     if let Some(Block::Reasoning { replay, .. }) = blocks.get_mut(index) {
                         *replay = payload;
@@ -321,6 +326,7 @@ pub(super) fn blocks_from_inference(inference: Inference) -> Result<InferredResp
                 ..
             } => {}
             StreamEvent::ToolCall { call, name, args } => {
+                flush_text_run(&mut blocks, &mut text_run);
                 current_reasoning = None;
                 calls.push((call.clone(), name.clone()));
                 blocks.push(Block::ToolCall {
@@ -338,12 +344,22 @@ pub(super) fn blocks_from_inference(inference: Inference) -> Result<InferredResp
             }
         }
     }
+    flush_text_run(&mut blocks, &mut text_run);
     Ok(InferredResponse {
         blocks,
         calls,
         usage,
         stop,
     })
+}
+
+/// Closes the pending run of text deltas as one block.
+fn flush_text_run(blocks: &mut Vec<Block>, text_run: &mut String) {
+    if !text_run.is_empty() {
+        blocks.push(Block::Text {
+            text: std::mem::take(text_run).into_boxed_str(),
+        });
+    }
 }
 pub(super) fn hex(bytes: &[u8]) -> Box<str> {
     let mut out = String::with_capacity(bytes.len() * 2);

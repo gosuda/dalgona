@@ -324,6 +324,44 @@ fn steer_cell_holds_16() {
 }
 
 #[test]
+fn adjacent_text_deltas_journal_as_one_block() {
+    let mut session = session();
+    let turn = begin(&mut session);
+    let delta = |text: &str| StreamEvent::Delta {
+        channel: StreamChannel::Text,
+        text: text.into(),
+    };
+    let response = Inference {
+        events: vec![
+            delta("Hello "),
+            delta("streamed "),
+            delta("world."),
+            StreamEvent::Usage(usage(10)),
+            StreamEvent::Stop(Stop::EndTurn),
+        ],
+    };
+    let out = stream_result(&mut session, turn, response);
+    let mut records = Vec::new();
+    append_emitted(&out, &mut records);
+    let content = records
+        .iter()
+        .find_map(|record| match record {
+            Record::Assistant(entry) => match &entry.kind {
+                EntryKind::Assistant { content, .. } => Some(content.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("the stream journals one assistant entry");
+    assert_eq!(
+        content,
+        vec![Block::Text {
+            text: "Hello streamed world.".into()
+        }]
+    );
+}
+
+#[test]
 fn steer_at_final_response_extends_turn() {
     let mut session = session();
     let turn = begin(&mut session);
