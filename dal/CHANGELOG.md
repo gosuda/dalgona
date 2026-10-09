@@ -13,6 +13,7 @@
 - Fix multiline drafts in the terminal: a pasted draft shows each line on its own row in the composer instead of one row with `\n` inside it.
 - Fix the saved-session line on exit: an unnamed session now shows its id in `run dalgon -r <id> to resume`. Before, the line named "session", which resumed nothing.
 
+- Fix the services `run` operation under an `ask` approval policy: it now opens an approval request like the exec tool does, runs after approval, and fails closed with a clear message when no front end can answer. Before, it skipped the approval question and ran, or failed with a bare denial.
 - Fix the WebSocket server for oversized messages: a message over 16 MiB now ends the connection without a close frame, as the protocol documents. Before, the server sent a normal close frame.
 - Fix the agents `cancel` operation: a failure to close the child session is now returned to the caller instead of being reported as a successful cancel.
 - Fix turns that failed with "unknown model" when the configured model was written with a family prefix, such as `openai-responses/gpt-6`, and the provider's model list was not available. The turn now finds the model by its family and runs.

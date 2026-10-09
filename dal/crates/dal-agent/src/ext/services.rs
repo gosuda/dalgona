@@ -275,6 +275,126 @@ impl SessionServices {
             other => ServiceError::failed(Some(Service::Run), other.to_string()),
         }
     }
+
+    /// Maps a ladder denial onto the service error surface. A call with no
+    /// one to ask fails closed with the shared headless text that names
+    /// the fix, exactly like a gated tool call.
+    fn map_deny(reason: DenyReason) -> ServiceError {
+        ServiceError::Denied(match reason {
+            DenyReason::NoFrontEnd => {
+                DenyReason::out_of_scope(dal_core::headless_denial_text("run", dal_core::Rung::All))
+            }
+            reason => reason,
+        })
+    }
+
+    /// Opens one exec approval for a services `run` call and runs it after
+    /// approval, exactly like the exec tool ladder: answerable by attached
+    /// front ends, fail closed with a clear message when none can answer.
+    async fn run_with_approval(
+        &self,
+        who: &Caller,
+        call: &CallId,
+        preview: Preview,
+        req: RunRequest,
+    ) -> Result<RunOutput, ServiceError> {
+        let Some(turn) = who.turn else {
+            return Err(ServiceError::Denied(DenyReason::out_of_scope(
+                dal_core::headless_denial_text("run", dal_core::Rung::All),
+            )));
+        };
+        let question = Question::Approval {
+            tool: "run".into(),
+            preview: preview.clone(),
+            grant: None,
+            call: Some(call.clone()),
+        };
+        let secs = crate::broker::default_timeout(&question).as_secs();
+        let owner = Owner::Extension {
+            name: who.ext.as_str().into(),
+            origin: origin_name(who.origin).into(),
+        };
+        let deadline = Instant::now() + crate::broker::default_timeout(&question);
+        let (request, waiter) = self.broker.open(owner, question, turn, deadline);
+        self.backend
+            .publish_update(dal_core::UpdateKind::RequestOpened(request.clone()));
+        let settled = tokio::select! {
+            biased;
+            () = self.cancel.cancelled() => None,
+            outcome = waiter => Some(outcome),
+        };
+        let Some(Settled {
+            answer,
+            by,
+            resolution,
+        }) = settled
+        else {
+            return Err(ServiceError::Cancelled);
+        };
+        self.backend
+            .publish_update(dal_core::UpdateKind::RequestResolved {
+                id: request.id,
+                answer: answer.clone(),
+                by: by.clone(),
+            });
+        match (resolution, answer) {
+            (_, Answer::Approve | Answer::ApproveForSession) => {
+                let approved = self
+                    .rt
+                    .authorize_approved(call, preview, &self.cancel)
+                    .await
+                    .map_err(Self::map_deny)?;
+                self.run_spawned(req, approved).await
+            }
+            (_, Answer::Decline) => Err(ServiceError::Denied(DenyReason::out_of_scope(
+                match resolution {
+                    Resolution::Unavailable => format!(
+                        "Permission denied: run needed approval and no one answered within {secs} s."
+                    ),
+                    Resolution::Answered | Resolution::Cancelled => {
+                        format!("Permission denied: run was declined by {}.", by.as_str())
+                    }
+                },
+            ))),
+            (_, Answer::Cancel) => Err(ServiceError::Denied(DenyReason::Unavailable {
+                what: "approval cancelled".into(),
+            })),
+            _ => Err(ServiceError::Denied(DenyReason::out_of_scope(
+                "Permission denied: run.",
+            ))),
+        }
+    }
+
+    /// Spawns one approved services run and waits for its output.
+    async fn run_spawned(
+        &self,
+        req: RunRequest,
+        approved: crate::ext::tool::Approved,
+    ) -> Result<RunOutput, ServiceError> {
+        let opts = SpawnOpts {
+            cwd: req
+                .cwd
+                .unwrap_or_else(|| self.workspace.as_path().to_path_buf()),
+            timeout: req.timeout,
+            env: req
+                .env
+                .into_iter()
+                .map(|(key, value)| {
+                    (
+                        std::ffi::OsString::from(String::from(key)),
+                        std::ffi::OsString::from(String::from(value)),
+                    )
+                })
+                .collect(),
+            stdout_prefix_limit: usize::try_from(req.stdout_prefix_limit).unwrap_or(usize::MAX),
+        };
+        let mut child = self
+            .rt
+            .spawn(&req.argv, opts, approved)
+            .map_err(Self::run_failure)?;
+        let result = child.wait(&self.cancel).await.map_err(Self::run_failure)?;
+        Ok(run_output_of(&result))
+    }
 }
 
 /// Maps a finished child onto the run service output.
@@ -360,34 +480,21 @@ impl Services for SessionServices {
                 .map_err(|error| ServiceError::failed(Some(Service::Run), error.to_string()))?;
             let preview = self.run_preview(&req);
             let call = self.next_call_id();
-            let approved = self
-                .rt
-                .authorize(&call, preview, &self.cancel)
-                .await
-                .map_err(ServiceError::Denied)?;
-            let opts = SpawnOpts {
-                cwd: req
-                    .cwd
-                    .unwrap_or_else(|| self.workspace.as_path().to_path_buf()),
-                timeout: req.timeout,
-                env: req
-                    .env
-                    .into_iter()
-                    .map(|(key, value)| {
-                        (
-                            std::ffi::OsString::from(String::from(key)),
-                            std::ffi::OsString::from(String::from(value)),
-                        )
-                    })
-                    .collect(),
-                stdout_prefix_limit: usize::try_from(req.stdout_prefix_limit).unwrap_or(usize::MAX),
-            };
-            let mut child = self
-                .rt
-                .spawn(&req.argv, opts, approved)
-                .map_err(Self::run_failure)?;
-            let result = child.wait(&self.cancel).await.map_err(Self::run_failure)?;
-            Ok(run_output_of(&result))
+            match self.rt.decide_run() {
+                dal_core::Decision::Allow => {
+                    let approved = self
+                        .rt
+                        .authorize(&call, preview, &self.cancel)
+                        .await
+                        .map_err(Self::map_deny)?;
+                    self.run_spawned(req, approved).await
+                }
+                dal_core::Decision::Deny { reason } => Err(Self::map_deny(reason)),
+                dal_core::Decision::Ask { .. } => {
+                    self.run_with_approval(&who, &call, preview, req).await
+                }
+                _ => Err(ServiceError::Denied(DenyReason::out_of_scope("run"))),
+            }
         })
     }
 

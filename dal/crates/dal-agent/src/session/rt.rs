@@ -44,12 +44,12 @@ fn service_policy(mode: ApprovalMode) -> Policy {
     clippy::expect_used,
     reason = "\"run\" is a fixed literal that always satisfies the name grammar"
 )]
-fn service_tool() -> Name {
+pub(crate) fn service_tool() -> Name {
     Name::parse("run").expect("literal service tool name parses")
 }
 
 /// Class of the services `run` slot: an impure process execution.
-fn service_class() -> ToolClass {
+pub(crate) fn service_class() -> ToolClass {
     ToolClass::Exec {
         read_only: false,
         grant: None,
@@ -187,9 +187,40 @@ impl SessionRt {
             })?;
         Ok((process, fds))
     }
+    /// Mints the spawn proof for one allowed services run: process and fd
+    /// permits plus the digest-bound proof the spawn door consumes.
+    async fn mint_allow(
+        &self,
+        call: &CallId,
+        preview: Preview,
+        cancel: &CancellationToken,
+    ) -> Result<Approved, DenyReason> {
+        let (permit, fds) = self.acquire(cancel).await?;
+        let digest = preview.digest;
+        self.proofs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(call.clone(), (digest, permit, fds));
+        Ok(Approved::new(
+            call.clone(),
+            digest,
+            Box::new([]),
+            Box::new([self.workspace.as_path().to_path_buf()]),
+            None,
+        ))
+    }
 }
 
 impl ToolCxRuntime for SessionRt {
+    fn decide_run(&self) -> dal_core::Decision {
+        let policy = Policy {
+            mode: self.policy.mode,
+            answerer_attached: self.shared.attached_approval(),
+            allow_always: self.policy.allow_always.clone(),
+        };
+        policy.decide(&service_tool(), &service_class())
+    }
+
     fn authorize(
         &self,
         call: &CallId,
@@ -199,28 +230,31 @@ impl ToolCxRuntime for SessionRt {
         let call = call.clone();
         let cancel = cancel.clone();
         Box::pin(async move {
-            let tool = service_tool();
-            match self.policy.decide(&tool, &service_class()) {
-                dal_core::Decision::Allow => {
-                    let (permit, fds) = self.acquire(&cancel).await?;
-                    let digest = preview.digest;
-                    self.proofs
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .insert(call.clone(), (digest, permit, fds));
-                    Ok(Approved::new(
-                        call,
-                        digest,
-                        Box::new([]),
-                        Box::new([self.workspace.as_path().to_path_buf()]),
-                        None,
-                    ))
-                }
-                dal_core::Decision::Deny { reason } => Err(reason),
+            match self.decide_run() {
+                dal_core::Decision::Allow => self.mint_allow(&call, preview, &cancel).await,
+                dal_core::Decision::Deny { reason } => Err(match reason {
+                    DenyReason::NoFrontEnd => DenyReason::out_of_scope(
+                        dal_core::headless_denial_text("run", dal_core::rung(&service_class())),
+                    ),
+                    reason => reason,
+                }),
+                // The services layer routes `Ask` through the session
+                // broker; a direct authorize has no question to open.
                 dal_core::Decision::Ask { .. } => Err(DenyReason::NoFrontEnd),
-                _ => Err(DenyReason::out_of_scope(tool.as_str())),
+                _ => Err(DenyReason::out_of_scope(service_tool().as_str())),
             }
         })
+    }
+
+    fn authorize_approved(
+        &self,
+        call: &CallId,
+        preview: Preview,
+        cancel: &CancellationToken,
+    ) -> BoxFuture<'_, Result<Approved, DenyReason>> {
+        let call = call.clone();
+        let cancel = cancel.clone();
+        Box::pin(async move { self.mint_allow(&call, preview, &cancel).await })
     }
 
     fn spawn(

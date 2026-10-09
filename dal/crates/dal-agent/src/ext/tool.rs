@@ -325,8 +325,19 @@ fn floor_char_boundary(line: &str, max: usize) -> &str {
 /// This seam keeps all execution host-driven: the trait performs no
 /// spawning, no channels, and no blocking waits of its own.
 pub(crate) trait ToolCxRuntime: Send + Sync + 'static {
+    /// Reads the exec-ladder decision for one services `run` call under
+    /// the live approval-answerer state, without minting any proof.
+    fn decide_run(&self) -> dal_core::Decision;
     /// Runs the approval ladder for `call` over `preview`.
     fn authorize(
+        &self,
+        call: &CallId,
+        preview: Preview,
+        cancel: &CancellationToken,
+    ) -> BoxFuture<'_, Result<Approved, DenyReason>>;
+    /// Mints the spawn proof after an out-of-band approval, skipping the
+    /// ladder: the caller already asked through the session broker.
+    fn authorize_approved(
         &self,
         call: &CallId,
         preview: Preview,
@@ -690,6 +701,25 @@ struct ForTestRuntime {
 }
 
 impl ToolCxRuntime for ForTestRuntime {
+    fn decide_run(&self) -> dal_core::Decision {
+        if self.approve {
+            dal_core::Decision::Allow
+        } else {
+            dal_core::Decision::Deny {
+                reason: DenyReason::NoFrontEnd,
+            }
+        }
+    }
+
+    fn authorize_approved(
+        &self,
+        call: &CallId,
+        preview: Preview,
+        cancel: &CancellationToken,
+    ) -> BoxFuture<'_, Result<Approved, DenyReason>> {
+        self.authorize(call, preview, cancel)
+    }
+
     fn authorize(
         &self,
         call: &CallId,

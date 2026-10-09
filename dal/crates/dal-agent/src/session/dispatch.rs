@@ -922,6 +922,11 @@ fn tool_owner(generation: &Generation, tools: &TurnTools, name: &Name) -> Owner 
 }
 
 impl ToolCxRuntime for CallRuntime {
+    fn decide_run(&self) -> dal_core::Decision {
+        self.policy
+            .decide(&super::rt::service_tool(), &super::rt::service_class())
+    }
+
     fn authorize(
         &self,
         call: &CallId,
@@ -931,6 +936,27 @@ impl ToolCxRuntime for CallRuntime {
         let call = call.clone();
         let cancel = cancel.clone();
         Box::pin(async move { self.authorize_inner(&call, preview, &cancel).await })
+    }
+
+    fn authorize_approved(
+        &self,
+        _call: &CallId,
+        preview: Preview,
+        cancel: &CancellationToken,
+    ) -> BoxFuture<'_, Result<Approved, dal_core::DenyReason>> {
+        let cancel = cancel.clone();
+        Box::pin(async move {
+            let class = self.approval_class()?;
+            self.finish_approval(
+                preview.digest,
+                Box::new([]),
+                Box::new([self.workspace.as_path().to_path_buf()]),
+                None,
+                &class,
+                &cancel,
+            )
+            .await
+        })
     }
 
     fn spawn(

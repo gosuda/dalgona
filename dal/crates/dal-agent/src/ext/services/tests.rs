@@ -259,6 +259,18 @@ impl Default for FakeRt {
 }
 
 impl ToolCxRuntime for FakeRt {
+    fn decide_run(&self) -> dal_core::Decision {
+        dal_core::Decision::Allow
+    }
+
+    fn authorize_approved(
+        &self,
+        call: &CallId,
+        preview: dal_core::Preview,
+        cancel: &CancellationToken,
+    ) -> crate::ext::BoxFuture<'_, Result<Approved, DenyReason>> {
+        self.authorize(call, preview, cancel)
+    }
     fn workspace(&self) -> &Workspace {
         &self.workspace
     }
