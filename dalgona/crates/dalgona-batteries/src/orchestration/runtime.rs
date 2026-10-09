@@ -1069,7 +1069,7 @@ impl SessionState {
     ) -> Result<String, ServiceError> {
         let mut reports = Vec::new();
         for (step_index, step) in workflow.steps.iter().enumerate() {
-            let mut from_items = Vec::new();
+            let from_items;
             let items = match &step.items {
                 super::workflow::Items::Task => vec![None],
                 super::workflow::Items::Literal(items) => items.iter().map(Some).collect(),

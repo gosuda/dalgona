@@ -149,10 +149,6 @@ impl StdioTransport {
         let stdin = Arc::new(Mutex::new(Some(stdin)));
         let pending = Arc::new(Mutex::new(HashMap::new()));
         let cancel = CancellationToken::new();
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "stdio server owns the abort-on-drop reader task"
-        )]
         let reader_task = AbortOnDropHandle::new(tokio::spawn(read_stdout(
             stdout,
             Arc::clone(&child),
@@ -161,10 +157,6 @@ impl StdioTransport {
             key.clone(),
             cancel.clone(),
         )));
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "stdio server owns the abort-on-drop stderr drain"
-        )]
         Ok(Self {
             key,
             child,
