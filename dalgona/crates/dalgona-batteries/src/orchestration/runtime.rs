@@ -48,8 +48,10 @@ pub(crate) const CANCEL_SWEEP_PASS_LIMIT: usize = 64;
 
 /// Name the jobs service records one workflow run under.
 const RUN_JOB_NAME: &str = "agents-run";
+
 /// Name the jobs service records one workflow task under.
 const TASK_JOB_NAME: &str = "agents-task";
+
 /// Deadline for one git call of the isolation backend.
 const GIT_CALL_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -109,6 +111,7 @@ enum Message {
     },
     Close(oneshot::Sender<()>),
 }
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReportArgs {
@@ -930,7 +933,15 @@ impl SessionState {
             saved: store.saved,
             depth: 0,
         };
-        adapter::command(args, store, &ctx, self.services.as_ref(), &self.caller).await
+        let mode = self.arbiter.mode();
+        let cleared =
+            super::goal::ops::parse_goal_command(args) == super::goal::ops::GoalCommand::Clear;
+        let reply = adapter::command(args, store, &ctx, self.services.as_ref(), &self.caller, mode).await;
+        // A clear leaves no goal for a scheduled continuation.
+        if cleared {
+            self.goal_timer = None;
+        }
+        reply
     }
 
     async fn continuation_command(&mut self, args: &str) -> Result<String, ServiceError> {
@@ -3381,6 +3392,7 @@ impl StepOutcome {
         }
     }
 }
+
 fn failed(message: &str) -> HookError {
     HookError::Failed {
         message: message.into(),

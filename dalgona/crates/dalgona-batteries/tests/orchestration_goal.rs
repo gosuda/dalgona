@@ -18,6 +18,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use sonic_rs::{JsonContainerTrait, JsonValueTrait};
+
 fn goal_config() -> OrchestrationConfig {
     OrchestrationConfig {
         loop_guard: BatteryConfig { enabled: false },
@@ -190,5 +192,72 @@ async fn failed_goal_sidecar_write_is_reported() -> Result<(), Box<dyn Error>> {
     host.close(session).await?;
     host.shutdown(Duration::from_secs(5)).await;
     let _ = workspace;
+    Ok(())
+}
+
+#[tokio::test]
+async fn clear_replaces_a_damaged_goal_file_with_the_recovery_document()
+-> Result<(), Box<dyn Error>> {
+    let (root, host, workspace, agent) = fixture().await?;
+    let session = agent.view(dal_core::PageReq::default())?.session.id;
+    output_text(run_goal(&agent, "write the parser").await?)?;
+    let goal_file = find_session_dir(&root.0.join("data"), &session)?
+        .join("sidecar")
+        .join("orchestration")
+        .join("goal.json");
+    host.close(session).await?;
+    // Damage only the goal status; `next_goal` stays readable for salvage.
+    let bytes = fs::read_to_string(&goal_file)?;
+    let damaged = bytes.replace("\"status\":\"active\"", "\"status\":\"running\"");
+    assert_ne!(bytes, damaged, "the damage did not change the document");
+    fs::write(&goal_file, damaged)?;
+    let reopened = host
+        .open(
+            SessionRef::Resume {
+                key: session.to_string().into(),
+                workspace: Workspace::new(workspace.clone())?,
+            },
+            ClientId::new("goal-recovery"),
+        )
+        .await?;
+    // The damaged document arms nothing and refuses every goal operation.
+    let error = run_goal(&reopened, "").await.expect_err("show must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("goal: the goal file is damaged:"),
+        "{error}"
+    );
+    // Only the person's `/goal clear` replaces the document.
+    let cleared = output_text(run_goal(&reopened, "clear").await?)?;
+    assert_eq!(cleared, "No goal.");
+    host.close(session).await?;
+    let repaired = host
+        .open(
+            SessionRef::Resume {
+                key: session.to_string().into(),
+                workspace: Workspace::new(workspace.clone())?,
+            },
+            ClientId::new("goal-repaired"),
+        )
+        .await?;
+    let shown = output_text(run_goal(&repaired, "").await?)?;
+    assert_eq!(shown, "No goal.");
+    let recovered = fs::read_to_string(&goal_file)?;
+    let doc: sonic_rs::Value = sonic_rs::from_str(recovered.trim_end())?;
+    let object = doc
+        .as_object()
+        .ok_or_else(|| format!("recovery document is not an object: {recovered}"))?;
+    assert_eq!(
+        object.get(&"next_goal").and_then(sonic_rs::Value::as_u64),
+        Some(2),
+        "{recovered}"
+    );
+    assert!(object.get(&"goal").is_some_and(sonic_rs::Value::is_null));
+    // The salvaged counter keeps session-local ids stable across the repair.
+    let created = output_text(run_goal(&repaired, "parse faster").await?)?;
+    assert!(created.contains("goal g2: active"), "{created}");
+    host.close(session).await?;
+    host.shutdown(Duration::from_secs(5)).await;
     Ok(())
 }

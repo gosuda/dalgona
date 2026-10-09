@@ -431,13 +431,6 @@ pub(crate) fn continuation_unsaved(reply: &str, message: &str) -> String {
 /// Builds the `/goal clear` recovery document: a valid empty goal document
 /// with the current in-memory controller mode and next id. Arms no P4.
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "goal recovery entry waits on durable goal sidecar persistence"
-    )
-)]
 pub(crate) fn clear_recovery_doc(
     session: &str,
     controller: ControllerMode,
@@ -461,13 +454,6 @@ pub(crate) fn clear_recovery_doc(
 
 /// Recovers the prior next id from a damaged document, if one decodes.
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "goal recovery entry waits on durable goal sidecar persistence"
-    )
-)]
 pub(crate) fn salvage_next_goal(bytes: &[u8]) -> Option<u64> {
     let text = core::str::from_utf8(bytes).ok()?;
     let value: Value = sonic_rs::from_str(text.strip_suffix('\n').unwrap_or(text)).ok()?;

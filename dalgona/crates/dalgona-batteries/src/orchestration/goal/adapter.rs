@@ -8,8 +8,8 @@ use serde::Deserialize;
 use super::super::ControllerMode;
 use super::super::monitor::status::InflightCounts;
 use super::ops::{
-    GoalCommand, GoalScope, TodoSummary, UpdateTarget, apply_goal_command, create_goal, get_goal,
-    parse_goal_command, update_goal,
+    GoalCommand, GoalScope, TodoSummary, UpdateTarget, apply_goal_command, clear_recovery_doc,
+    create_goal, get_goal, parse_goal_command, salvage_next_goal, update_goal,
 };
 use super::sidecar::{GoalError, GoalSidecar, controller_wire, decode_sidecar, encode_sidecar};
 
@@ -18,6 +18,9 @@ pub(crate) struct GoalStore {
     pub sidecar: Option<GoalSidecar>,
     pub saved: bool,
     pub error: Option<GoalError>,
+    /// The bytes that failed to decode, kept until the recovery clear
+    /// replaces the document.
+    pub damaged: Option<Box<[u8]>>,
 }
 
 impl GoalStore {
@@ -32,6 +35,7 @@ impl GoalStore {
             }),
             saved: false,
             error: None,
+            damaged: None,
         }
     }
 }
@@ -74,11 +78,13 @@ pub(crate) async fn load(services: &dyn Services, caller: &Caller, session: &str
                 sidecar: Some(sidecar),
                 saved: true,
                 error: None,
+                damaged: None,
             },
             Err(error) => GoalStore {
                 sidecar: None,
                 saved: true,
                 error: Some(error),
+                damaged: Some(bytes.into_boxed_slice()),
             },
         },
         Err(error) => failed_store(GoalError::StoreUnavailable {
@@ -92,6 +98,7 @@ fn failed_store(error: GoalError) -> GoalStore {
         sidecar: None,
         saved: false,
         error: Some(error),
+        damaged: None,
     }
 }
 
@@ -163,8 +170,17 @@ pub(crate) async fn command(
     ctx: &GoalScope<'_>,
     services: &dyn Services,
     caller: &Caller,
+    mode: ControllerMode,
 ) -> Result<String, ServiceError> {
+    let action = parse_goal_command(args);
     if let Some(error) = store.error.as_ref() {
+        let recoverable = matches!(
+            error,
+            GoalError::Damaged { .. } | GoalError::BadVersion { .. }
+        );
+        if action == GoalCommand::Clear && recoverable && ctx.saved && ctx.depth == 0 {
+            return clear_damaged(store, ctx.session, mode, services, caller).await;
+        }
         return Err(goal_failure(error));
     }
     let Some(sidecar) = store.sidecar.as_mut() else {
@@ -173,12 +189,59 @@ pub(crate) async fn command(
             "goal: the goal sidecar is unavailable.",
         ));
     };
-    let action = parse_goal_command(args);
     let reply = apply_goal_command(sidecar, ctx, &action, Timestamp::now());
     if action != GoalCommand::Show {
         save(services, caller, sidecar).await?;
     }
     Ok(reply)
+}
+
+/// Replaces a damaged or foreign-version document with the valid empty
+/// recovery document: the current in-memory controller mode, no goal, and
+/// the next id salvaged from the damaged bytes. Arms no continuation. The
+/// store works again once the write lands; every other failure keeps it
+/// fail-closed.
+async fn clear_damaged(
+    store: &mut GoalStore,
+    session: &str,
+    mode: ControllerMode,
+    services: &dyn Services,
+    caller: &Caller,
+) -> Result<String, ServiceError> {
+    let next = store
+        .damaged
+        .as_deref()
+        .and_then(salvage_next_goal)
+        .unwrap_or(1);
+    let name =
+        SidecarName::parse("goal.json").map_err(|_| ServiceError::sidecar_bad_name("goal.json"))?;
+    services
+        .sidecar(
+            caller,
+            SidecarOp::Write {
+                name,
+                bytes: clear_recovery_doc(session, mode, next),
+            },
+        )
+        .await
+        .map_err(|error| {
+            goal_failure(&GoalError::SaveFailed {
+                message: error.to_string().into(),
+            })
+        })?;
+    *store = GoalStore {
+        sidecar: Some(GoalSidecar {
+            v: 1,
+            session: session.into(),
+            controller: mode,
+            next_goal: next,
+            goal: None,
+        }),
+        saved: true,
+        error: None,
+        damaged: None,
+    };
+    Ok("No goal.".to_owned())
 }
 
 pub(crate) async fn save(
