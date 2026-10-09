@@ -27,6 +27,22 @@ pub mod ids {
     pub const HINT_IDLE_LEGACY: &str = "enter send · ctrl+j newline · esc interrupt · f1 help";
     /// Short idle hint for narrow layouts.
     pub const HINT_IDLE_SHORT: &str = "enter send · f1 help";
+    /// Submit entry of the folded hint row.
+    pub const HINT_SEND: &str = "enter send";
+    /// Newline entry of the folded hint row on kitty-keyboard terminals.
+    pub const HINT_NEWLINE: &str = "shift+enter newline";
+    /// Newline entry of the folded hint row on legacy terminals.
+    pub const HINT_NEWLINE_LEGACY: &str = "ctrl+j newline";
+    /// Interrupt entry of the folded hint row.
+    pub const HINT_INTERRUPT: &str = "esc interrupt";
+    /// Help entry of the folded hint row.
+    pub const HINT_HELP: &str = "f1 help";
+    /// Transcript navigation entries shown while a viewport owns scrolling.
+    pub const HINT_TRANSCRIPT: &str = "pgup pgdn page · end latest";
+    /// Search filter-row match count.
+    pub const SEARCH_MATCHES: &str = "· {n} hit|s";
+    /// Search filter-row empty result.
+    pub const SEARCH_NO_MATCHES: &str = "no matches";
     /// Empty composer placeholder.
     pub const COMPOSER_PLACEHOLDER: &str = "Ask dal to change code. / for commands.";
     /// Status shown without a selected model.
@@ -330,6 +346,14 @@ pub const DECK: &[(&str, &str)] = &[
     ("hint.idle", ids::HINT_IDLE),
     ("hint.idle.legacy", ids::HINT_IDLE_LEGACY),
     ("hint.idle.short", ids::HINT_IDLE_SHORT),
+    ("hint.send", ids::HINT_SEND),
+    ("hint.newline", ids::HINT_NEWLINE),
+    ("hint.newline.legacy", ids::HINT_NEWLINE_LEGACY),
+    ("hint.interrupt", ids::HINT_INTERRUPT),
+    ("hint.help", ids::HINT_HELP),
+    ("hint.transcript", ids::HINT_TRANSCRIPT),
+    ("search.matches", ids::SEARCH_MATCHES),
+    ("search.noMatches", ids::SEARCH_NO_MATCHES),
     ("composer.placeholder", ids::COMPOSER_PLACEHOLDER),
     ("status.nomodel", ids::STATUS_NO_MODEL),
     ("status.signedin", ids::STATUS_SIGNED_IN),

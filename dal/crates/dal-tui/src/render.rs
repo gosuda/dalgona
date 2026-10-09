@@ -34,6 +34,8 @@ pub(crate) struct FrameInput<'a> {
     pub(crate) dialog: &'a DialogUi,
     pub(crate) picker: Option<&'a PickerUi>,
     pub(crate) transcript: &'a Transcript,
+    /// The transcript viewport: follow state, frozen scroll window, search.
+    pub(crate) viewport: &'a crate::screen::fullscreen::Viewport,
     pub(crate) opts: &'a TuiOptions,
     /// Whether the terminal confirmed kitty keyboard encoding, so the hint
     /// can advertise the kitty column of the key map.
@@ -136,19 +138,17 @@ pub(crate) fn frame_rows(input: FrameInput<'_>, width: u16, height: u16) -> Vec<
         .map(|model| escape(model.id()))
         .or_else(|| input.opts.default_model.as_deref().map(escape));
     let status = status_line(&input, model.as_deref(), w, mode);
-    if h < 8 {
+    let floor = if h < 8 {
+        Some(crate::copy::ids::NARROW_ROWS)
+    } else if w < 12 {
+        Some(crate::copy::ids::NARROW_COLS)
+    } else {
+        None
+    };
+    if let Some(warning) = floor {
         return resolve_colors(
             vec![
-                RenderRow::new(crate::copy::ids::NARROW_ROWS, Role::Warning).clipped(w, mode),
-                status.clipped(w, mode),
-            ],
-            input.theme,
-        );
-    }
-    if w < 12 {
-        return resolve_colors(
-            vec![
-                RenderRow::new(crate::copy::ids::NARROW_COLS, Role::Warning).clipped(w, mode),
+                RenderRow::new(warning, Role::Warning).clipped(w, mode),
                 status.clipped(w, mode),
             ],
             input.theme,
@@ -206,14 +206,11 @@ pub(crate) fn frame_rows(input: FrameInput<'_>, width: u16, height: u16) -> Vec<
         );
     }
     let mut bottom = Vec::with_capacity(budget.cap);
-    bottom.extend(
-        notices
-            .iter()
-            .rev()
-            .take(budget.notices)
-            .rev()
-            .map(|row| RenderRow::new(escape(row), Role::Dim)),
-    );
+    let notice_rows = notice_rows(notices, budget.notices, w, mode);
+    if input.screen == Screen::Inline {
+        // The inline live block opens with its notices.
+        bottom.extend(notice_rows.iter().cloned());
+    }
     bottom.extend(activity.into_iter().rev().take(budget.activity).rev());
     overlay_rows(&input, &budget, &laid, w, mode, &mut bottom);
     bottom.push(status);
@@ -221,9 +218,28 @@ pub(crate) fn frame_rows(input: FrameInput<'_>, width: u16, height: u16) -> Vec<
     let rows = if input.screen == Screen::Inline {
         bottom
     } else {
-        fullscreen_rows(&input, bottom, model.as_deref(), width, height, mode)
+        fullscreen_rows(
+            &input,
+            notice_rows,
+            bottom,
+            model.as_deref(),
+            width,
+            height,
+            mode,
+        )
     };
     resolve_colors(rows, input.theme)
+}
+
+/// The newest `count` notices as clipped dim rows.
+fn notice_rows(notices: &[String], count: usize, w: usize, mode: WidthMode) -> Vec<RenderRow> {
+    notices
+        .iter()
+        .rev()
+        .take(count)
+        .rev()
+        .map(|row| RenderRow::new(escape(row), Role::Dim).clipped(w, mode))
+        .collect()
 }
 
 /// Wraps the draft inside the 2-cell prompt gutter and finds the caret.
@@ -231,19 +247,51 @@ fn composer_layout(input: &FrameInput<'_>, w: usize, mode: WidthMode) -> crate::
     crate::composer::layout(input.composer, input.cursor, w.saturating_sub(2), mode)
 }
 
-/// The idle hint that fits the terminal: the kitty column only when the
-/// terminal confirmed kitty keys, the legacy column otherwise, folding to the
-/// short form when the row cannot hold the full text.
-fn idle_hint(kitty: bool, w: usize, mode: WidthMode) -> &'static str {
+/// The deck entries of the plain hint row; the newline entry shows the
+/// working key for the terminal's keyboard encoding.
+fn hint_entries(kitty: bool) -> Vec<&'static str> {
     use crate::copy::ids;
-    let fits = |text: &str| crate::width::width(text, mode) <= w;
-    if kitty && fits(ids::HINT_IDLE) {
-        ids::HINT_IDLE
-    } else if fits(ids::HINT_IDLE_LEGACY) {
-        ids::HINT_IDLE_LEGACY
-    } else {
-        ids::HINT_IDLE_SHORT
+    vec![
+        ids::HINT_SEND,
+        if kitty {
+            ids::HINT_NEWLINE
+        } else {
+            ids::HINT_NEWLINE_LEGACY
+        },
+        ids::HINT_INTERRUPT,
+        ids::HINT_HELP,
+    ]
+}
+
+/// Folds a hint row to `w` with the copy deck's fold priority: navigation
+/// keys drop first, then help, then newline, then interrupt, then send. The
+/// newline entry degrades to the working key before anything drops; state
+/// cues never fold away and replace the hint entirely at the smallest
+/// budgets.
+fn fold_hint(segments: Vec<&'static str>, w: usize, mode: WidthMode) -> String {
+    use crate::copy::ids;
+    let fits = |segments: &[&str]| crate::width::width(&segments.join(" · "), mode) <= w;
+    let mut segments = segments;
+    let kitty_newline = segments.contains(&ids::HINT_NEWLINE);
+    if kitty_newline && !fits(&segments) {
+        for entry in &mut segments {
+            if *entry == ids::HINT_NEWLINE {
+                *entry = ids::HINT_NEWLINE_LEGACY;
+            }
+        }
     }
+    for entry in [
+        ids::HINT_TRANSCRIPT,
+        ids::HINT_HELP,
+        ids::HINT_NEWLINE_LEGACY,
+        ids::HINT_INTERRUPT,
+        ids::HINT_SEND,
+    ] {
+        if !fits(&segments) {
+            segments.retain(|candidate| *candidate != entry);
+        }
+    }
+    segments.join(" · ")
 }
 
 /// The interactive tail: an open dialog, a picker, or the composer and hint.
@@ -332,17 +380,24 @@ fn overlay_rows(
             }
         }
         if budget.hint > 0 {
-            bottom.push(RenderRow::new(
-                idle_hint(input.kitty_keyboard, w, mode),
-                Role::Dim,
-            ));
+            let viewport_live = input.screen == Screen::Fullscreen;
+            let mut segments = hint_entries(input.kitty_keyboard);
+            if let Some(cue) = viewport_live.then(|| input.viewport.cue()).flatten() {
+                segments.insert(0, cue);
+            }
+            if viewport_live {
+                segments.push(crate::copy::ids::HINT_TRANSCRIPT);
+            }
+            bottom.push(RenderRow::new(fold_hint(segments, w, mode), Role::Dim));
         }
     }
 }
 
-/// Fullscreen layout: header, padded transcript tail, then the bottom block.
+/// Fullscreen layout: header, notices, the search row over the viewport
+/// top, the transcript window, then the bottom block.
 fn fullscreen_rows(
     input: &FrameInput<'_>,
+    notices: Vec<RenderRow>,
     bottom: Vec<RenderRow>,
     model: Option<&str>,
     width: u16,
@@ -352,7 +407,13 @@ fn fullscreen_rows(
     let w = usize::from(width);
     let h = usize::from(height);
     let header = crate::screen::fullscreen::header_rows(width, height);
-    let available = h.saturating_sub(header + bottom.len());
+    let search_rows = usize::from(input.viewport.search_text().is_some());
+    let above = header + notices.len() + search_rows;
+    let available = h.saturating_sub(above + bottom.len());
+    let transcript_len = input.transcript.rows().len();
+    input.viewport.observe(available);
+    let window_top = input.viewport.window_top(transcript_len, available);
+    let window_end = (window_top + available).min(transcript_len);
     let mut rows = Vec::with_capacity(h);
     if header > 0 {
         rows.push(RenderRow::new(
@@ -364,16 +425,43 @@ fn fullscreen_rows(
             Role::Accent,
         ));
     }
-    let transcript_len = input.transcript.rows().len();
-    let transcript_start = transcript_len.saturating_sub(available);
-    rows.extend(
-        (transcript_start..transcript_len).filter_map(|index| input.transcript.render_row(index)),
-    );
-    rows.resize_with(header + available, || {
+    rows.extend(notices);
+    if let Some(query) = input.viewport.search_text() {
+        rows.push(search_row(input, query));
+    }
+    rows.extend((window_top..window_end).filter_map(|index| input.transcript.render_row(index)));
+    rows.resize_with(above + available, || {
         RenderRow::new(String::new(), Role::Text)
     });
     rows.extend(bottom);
     rows.into_iter().map(|row| row.clipped(w, mode)).collect()
+}
+
+/// The filter row over the viewport top: the query and its live match count.
+fn search_row(input: &FrameInput<'_>, query: &str) -> RenderRow {
+    use crate::copy::ids;
+    let mut suffix = String::new();
+    if !query.is_empty() {
+        let needle = query.to_lowercase();
+        let matches = input
+            .transcript
+            .rows()
+            .iter()
+            .filter(|row| row.to_lowercase().contains(&needle))
+            .count();
+        suffix = match matches {
+            0 => format!(" · {}", ids::SEARCH_NO_MATCHES),
+            count => {
+                let count = u64::try_from(count).unwrap_or(u64::MAX);
+                format!(
+                    " {}",
+                    crate::copy::render(ids::SEARCH_MATCHES, &[("n", &count.to_string())], count)
+                )
+            }
+        };
+    }
+    let text = format!("/{query}{suffix}");
+    RenderRow::new(text, Role::Accent)
 }
 
 /// The single status row: turn state, spinner, model, path, context.
@@ -1141,41 +1229,66 @@ mod tests {
         assert_eq!(on_cache.renders(), 1);
     }
     #[test]
-    fn the_idle_hint_picks_the_kitty_legacy_or_short_column_by_width() {
+    fn the_hint_row_folds_by_the_deck_priority() {
         use crate::copy::ids;
         use crate::width::WidthMode;
 
         // Kitty keys confirmed and wide enough: the kitty column.
         assert_eq!(
-            super::idle_hint(true, 80, WidthMode::Narrow),
+            super::fold_hint(super::hint_entries(true), 80, WidthMode::Narrow),
             ids::HINT_IDLE
         );
         // Without kitty keys the hint never promises shift+enter.
         assert_eq!(
-            super::idle_hint(false, 80, WidthMode::Narrow),
+            super::fold_hint(super::hint_entries(false), 80, WidthMode::Narrow),
             ids::HINT_IDLE_LEGACY
         );
+        // The newline key degrades to the working key before entries drop.
         assert_eq!(
-            super::idle_hint(false, 80, WidthMode::Cjk),
+            super::fold_hint(super::hint_entries(true), 54, WidthMode::Narrow),
             ids::HINT_IDLE_LEGACY
         );
-        // Narrow rows fold to the short hint; ambiguous glyphs count in CJK mode.
+        // Then help folds first, per the deck fold priority.
         assert_eq!(
-            super::idle_hint(true, 54, WidthMode::Narrow),
+            super::fold_hint(super::hint_entries(true), 44, WidthMode::Narrow),
+            "enter send · ctrl+j newline · esc interrupt"
+        );
+        assert_eq!(
+            super::fold_hint(super::hint_entries(false), 21, WidthMode::Narrow),
+            ids::HINT_SEND
+        );
+        // Ambiguous glyphs count wide in CJK mode.
+        assert_eq!(
+            super::fold_hint(super::hint_entries(true), 56, WidthMode::Cjk),
             ids::HINT_IDLE_LEGACY
         );
-        assert_eq!(
-            super::idle_hint(true, 44, WidthMode::Narrow),
-            ids::HINT_IDLE_SHORT
-        );
-        assert_eq!(
-            super::idle_hint(false, 21, WidthMode::Narrow),
-            ids::HINT_IDLE_SHORT
-        );
-        assert_eq!(
-            super::idle_hint(true, 56, WidthMode::Cjk),
-            ids::HINT_IDLE_LEGACY
-        );
+    }
+
+    #[test]
+    fn hint_fold_priority() {
+        use crate::copy::ids;
+        use crate::width::WidthMode;
+
+        // T-15: fullscreen, detached scroll, width 40 — the state cue
+        // replaces the hint entirely and navigation keys are gone.
+        let mut detached = super::hint_entries(false);
+        detached.insert(0, ids::FOLLOW_STOPPED);
+        detached.push(ids::HINT_TRANSCRIPT);
+        let detached = super::fold_hint(detached, 40, WidthMode::Narrow);
+        assert_eq!(detached, ids::FOLLOW_STOPPED);
+        assert!(!detached.contains("pgup"), "{detached}");
+        // Attached at the same width, navigation keys still fold first.
+        let mut attached = super::hint_entries(false);
+        attached.push(ids::HINT_TRANSCRIPT);
+        let attached = super::fold_hint(attached, 40, WidthMode::Narrow);
+        assert_eq!(attached, "enter send · esc interrupt");
+        // Wide rows keep the cue ahead of every deck entry.
+        let mut wide = super::hint_entries(false);
+        wide.insert(0, ids::FOLLOW_STOPPED);
+        wide.push(ids::HINT_TRANSCRIPT);
+        let wide = super::fold_hint(wide, 140, WidthMode::Narrow);
+        assert!(wide.starts_with(ids::FOLLOW_STOPPED), "{wide}");
+        assert!(wide.ends_with(ids::HINT_TRANSCRIPT), "{wide}");
     }
 
     #[test]

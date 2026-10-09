@@ -37,6 +37,8 @@ struct Session {
     dialog: Option<ExitDialog>,
     quit: bool,
     overlay: bool,
+    /// Fullscreen transcript viewport: follow, frozen scroll window, search.
+    viewport: crate::screen::fullscreen::Viewport,
     active_turn: Option<TurnId>,
     pending_commands: Vec<Command>,
     /// Reply text a command asked the terminal to copy, in request order.
@@ -750,6 +752,7 @@ impl Surfaces {
                 dialog: &self.dialog,
                 picker: self.session.picker.as_ref(),
                 transcript: &self.transcript,
+                viewport: &self.session.viewport,
                 opts,
                 kitty_keyboard: terminal_kitty(state),
                 theme,

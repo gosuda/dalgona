@@ -281,6 +281,7 @@ pub fn draw_frame(
     let mut dialog = dialog::DialogUi::default();
     dialog.resync(view.open.clone());
     let live = live::Live::default();
+    let viewport = screen::fullscreen::Viewport::following();
     let theme = theme::load(
         &opts.theme_request,
         opts.color,
@@ -300,6 +301,7 @@ pub fn draw_frame(
             dialog: &dialog,
             picker: None,
             transcript: &transcript,
+            viewport: &viewport,
             opts,
             kitty_keyboard: false,
             theme: &theme,
