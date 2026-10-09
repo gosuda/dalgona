@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
+//! This test verifies TTSR rule packs, conditions, and defaults.
 use std::collections::BTreeSet;
 use std::error::Error;
 use std::io;

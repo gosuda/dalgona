@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
+//! This gate verifies that experimental battery settings do not change the product.
 #[path = "support/mod.rs"]
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
 #[test]

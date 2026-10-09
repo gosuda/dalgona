@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
+#![expect(
+    clippy::disallowed_methods,
+    reason = "gate support drives real binaries, scripts, and toolchain commands"
+)]
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 pub(crate) type TestResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -157,7 +162,7 @@ fn json_string(text: &str) -> String {
             '\\' => quoted.push_str("\\\\"),
             '\n' => quoted.push_str("\\n"),
             control if control.is_control() => {
-                quoted.push_str(&format!("\\u{:04x}", u32::from(control)));
+                let _ = write!(quoted, "\\u{:04x}", u32::from(control));
             }
             other => quoted.push(other),
         }

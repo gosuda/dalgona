@@ -1,5 +1,14 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
+//! This gate verifies diamond publish order is stable and topological.
+#![expect(
+    clippy::disallowed_methods,
+    reason = "release gate drives real release commands"
+)]
 #[path = "support/mod.rs"]
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
 use std::process::Command;

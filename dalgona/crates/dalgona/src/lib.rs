@@ -144,7 +144,7 @@ fn compose(
         batteries.push(mcp::mcp(&client)?);
     }
     if selected(cx, "orchestration") {
-        orchestration_config.data_root = Some(cx.data_root.to_path_buf());
+        orchestration_config.data_root = Some(cx.data_root.clone());
         batteries.push(orchestration::orchestration(orchestration_config)?);
     }
     if selected(cx, "quality") {

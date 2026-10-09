@@ -1,5 +1,14 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
+//! This gate verifies generated publish order preserves every dependency edge.
+#![expect(
+    clippy::disallowed_methods,
+    reason = "release gate drives real release commands"
+)]
 #[path = "support/mod.rs"]
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
 use proptest::{
@@ -8,7 +17,8 @@ use proptest::{
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
+    fmt::Write as _,
+    fs, io,
     process::Command,
 };
 
@@ -16,7 +26,8 @@ fn check_generated_graph(seed: u64) -> support::TestResult<()> {
     let root = support::repo_root();
     let scratch = support::Scratch::new("publish-order-property")?;
     let workspace = scratch.path();
-    let count = 2 + (seed as usize % 7);
+    let count = 2 + usize::try_from(seed % 7)
+        .map_err(|_| io::Error::other("seed remainder is too large"))?;
     let mut edges = BTreeSet::new();
     for index in 0..count - 1 {
         edges.insert((index, index + 1));
@@ -59,9 +70,10 @@ fn check_generated_graph(seed: u64) -> support::TestResult<()> {
         if !dependencies.is_empty() {
             manifest.push_str("\n[dependencies]\n");
             for (from, _) in dependencies {
-                manifest.push_str(&format!(
-                    "crate{from} = {{ path = \"../crate{from}\", version = \"=0.1.0\" }}\n"
-                ));
+                let _ = writeln!(
+                    &mut manifest,
+                    "crate{from} = {{ path = \"../crate{from}\", version = \"=0.1.0\" }}"
+                );
             }
         }
         fs::write(directory.join("Cargo.toml"), manifest)?;

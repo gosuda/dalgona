@@ -1,5 +1,14 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
+//! This gate verifies the Linux archive contains only expected product files.
+#![expect(
+    clippy::disallowed_methods,
+    reason = "release gate drives real release commands"
+)]
 #[path = "support/mod.rs"]
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
 use std::{collections::BTreeSet, fs, process::Command};
@@ -19,8 +28,7 @@ fn dalgona_linux_archive_has_only_binaries_metadata_and_man_pages() -> support::
         String::from_utf8_lossy(&build.stderr)
     );
     let target = std::env::var_os("CARGO_TARGET_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| workspace.join("target"));
+        .map_or_else(|| workspace.join("target"), std::path::PathBuf::from);
     let distrib = target.join("distrib");
     let archive = fs::read_dir(&distrib)?
         .filter_map(Result::ok)

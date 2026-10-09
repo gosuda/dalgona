@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
+//! This gate verifies bundled rule sets and their records.
 #[path = "support/mod.rs"]
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
 use std::{collections::BTreeSet, io};
@@ -165,12 +170,16 @@ fn bundled_rule_sets_gate() -> support::TestResult<()> {
             tokens.iter().any(|token| token.starts_with("tool")),
             "{name}"
         );
-        let named: Vec<&str> = tokens
+        let named_tools: Vec<&str> = tokens
             .iter()
             .filter_map(|token| token.strip_prefix("tool:"))
             .collect();
-        let actual: Vec<&str> = scope.named_tools.iter().map(|tool| tool.as_str()).collect();
-        assert_eq!(actual, named, "{name}");
+        let actual: Vec<&str> = scope
+            .named_tools
+            .iter()
+            .map(dal_core::Name::as_str)
+            .collect();
+        assert_eq!(actual, named_tools, "{name}");
         assert_eq!(record.mode, Some(mode), "{name}");
         assert_eq!(record.repeat_mode, Some(RepeatMode::AfterGap), "{name}");
         assert_eq!(record.repeat_gap, Some(gap), "{name}");

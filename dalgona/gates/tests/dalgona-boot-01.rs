@@ -1,10 +1,28 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
+//! This gate verifies the complete bundled battery inventory and origins.
 #[path = "support/mod.rs"]
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
 use dal_core::{Config, ConfigProduct, Origin};
 use std::{collections::BTreeSet, time::Duration};
 
+const BATTERIES: [&str; 11] = [
+    "ask",
+    "history",
+    "judged",
+    "mcp",
+    "orchestration",
+    "quality",
+    "review",
+    "skills",
+    "ttsr-rules",
+    "web",
+    "work",
+];
 #[test]
 fn product_registers_all_eleven_batteries() -> support::TestResult<()> {
     let scratch = support::Scratch::new("dalgona-battery-set")?;
@@ -16,23 +34,10 @@ fn product_registers_all_eleven_batteries() -> support::TestResult<()> {
         config: &config,
     };
     let product = dalgona::build(&cx)?;
-    const BATTERIES: [&str; 11] = [
-        "ask",
-        "history",
-        "judged",
-        "mcp",
-        "orchestration",
-        "quality",
-        "review",
-        "skills",
-        "ttsr-rules",
-        "web",
-        "work",
-    ];
     let battery_names: BTreeSet<_> = product
         .extensions
         .iter()
-        .map(|extension| extension.name())
+        .map(dal_agent::ext::Extension::name)
         .filter(|name| BATTERIES.contains(name))
         .collect();
     assert_eq!(battery_names, BTreeSet::from(BATTERIES));

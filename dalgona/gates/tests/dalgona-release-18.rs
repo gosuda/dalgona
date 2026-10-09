@@ -1,5 +1,14 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
+//! This gate verifies the Sustainable Use license is the only product license.
+#![expect(
+    clippy::disallowed_methods,
+    reason = "release gate drives real release commands"
+)]
 #[path = "support/mod.rs"]
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
 use std::{fs, path::Path};

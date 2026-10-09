@@ -1,8 +1,17 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
+//! This gate verifies publish failures return the wrapper error literal.
+#![expect(
+    clippy::disallowed_methods,
+    reason = "release gate drives real release commands"
+)]
 #[path = "support/mod.rs"]
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
-use std::{env, fs, io, process::Command};
+use std::{env, fs, process::Command};
 
 #[test]
 fn publish_failure_returns_the_wrapper_literal() -> support::TestResult<()> {

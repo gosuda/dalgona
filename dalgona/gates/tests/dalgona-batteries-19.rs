@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
 //! History image compaction through the real product, journal, restart, and read tool.
 #[path = "support/mod.rs"]
+#[expect(
+    dead_code,
+    reason = "gate support helpers are shared across independent test targets"
+)]
 mod support;
 
 use std::path::Path;
@@ -141,12 +145,27 @@ fn image_parts(agent: &Agent) -> TestResult<Vec<JournalPart>> {
     }
 }
 
-#[tokio::test]
-async fn history_commits_image_parts_letters_and_resume_replays_them() -> TestResult<()> {
-    let scratch = support::Scratch::new("history-images")?;
-    let root = scratch.path();
-    std::fs::create_dir_all(root.join("workspace"))?;
-    let long = "the quick brown fox jumps over the lazy dog. ".repeat(700);
+fn text_parts(parts: &[JournalPart]) -> Vec<String> {
+    parts
+        .iter()
+        .filter_map(|part| match part {
+            JournalPart::Text { text } => Some(text.to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn first_image(parts: &[JournalPart]) -> Option<JournalPart> {
+    parts.windows(2).find_map(|pair| match pair {
+        [
+            JournalPart::Text { text },
+            image @ JournalPart::Image { .. },
+        ] if text.as_ref() == "letter://history/1.1" => Some(image.clone()),
+        _ => None,
+    })
+}
+
+async fn create_history_image(root: &Path, long: &str) -> TestResult<(Vec<JournalPart>, String)> {
     let mut steps: Vec<String> = (0..4).map(|_| text_step("reply")).collect();
     steps.push(text_step("remote attempt"));
     steps.extend(read_steps("letter://history/1.1"));
@@ -160,7 +179,7 @@ async fn history_commits_image_parts_letters_and_resume_replays_them() -> TestRe
     )
     .await?;
     for _ in 0..4 {
-        prompt(&agent, &mut subscription, &long).await?;
+        prompt(&agent, &mut subscription, long).await?;
     }
     let notice = compact(&agent, &mut subscription).await?;
     assert!(
@@ -195,7 +214,15 @@ async fn history_commits_image_parts_letters_and_resume_replays_them() -> TestRe
     drop(subscription);
     drop(agent);
     host.shutdown(Duration::from_secs(2)).await;
+    Ok((parts, first_letter))
+}
 
+async fn resume_history_image(
+    root: &Path,
+    long: &str,
+    parts: &[JournalPart],
+    first_letter: &str,
+) -> TestResult<()> {
     let mut steps = Vec::from(read_steps("letter://history/1.1"));
     steps.extend((0..4).map(|_| text_step("reply")));
     steps.push(text_step("remote attempt"));
@@ -210,18 +237,9 @@ async fn history_commits_image_parts_letters_and_resume_replays_them() -> TestRe
     )
     .await?;
     let resumed_parts = image_parts(&agent)?;
-    let text_parts = |parts: &[JournalPart]| {
-        parts
-            .iter()
-            .filter_map(|part| match part {
-                JournalPart::Text { text } => Some(text.to_string()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-    };
     assert_eq!(
         text_parts(&resumed_parts),
-        text_parts(&parts),
+        text_parts(parts),
         "resume preserves image labels and part order"
     );
     assert!(
@@ -237,7 +255,7 @@ async fn history_commits_image_parts_letters_and_resume_replays_them() -> TestRe
         "the letter text is byte-equal after restart"
     );
     for _ in 0..4 {
-        prompt(&agent, &mut subscription, &long).await?;
+        prompt(&agent, &mut subscription, long).await?;
     }
     let notice = compact(&agent, &mut subscription).await?;
     assert!(
@@ -245,20 +263,11 @@ async fn history_commits_image_parts_letters_and_resume_replays_them() -> TestRe
         "second compaction commits images: {notice}"
     );
     let second_parts = image_parts(&agent)?;
-    let first_image = |parts: &[JournalPart]| {
-        parts.windows(2).find_map(|pair| match pair {
-            [
-                JournalPart::Text { text },
-                image @ JournalPart::Image { .. },
-            ] if text.as_ref() == "letter://history/1.1" => Some(image.clone()),
-            _ => None,
-        })
-    };
     let reused =
         first_image(&second_parts).ok_or("the first known letter was not reused as an image")?;
     assert_eq!(
         Some(reused),
-        first_image(&parts),
+        first_image(parts),
         "known letters keep the same label and PNG bytes"
     );
     prompt(&agent, &mut subscription, "read the letter index").await?;
@@ -271,7 +280,18 @@ async fn history_commits_image_parts_letters_and_resume_replays_them() -> TestRe
         index.contains("history/2."),
         "new history has a fresh ordinal: {index}"
     );
+    let key = agent.view(PageReq::default())?.session.id;
     host.close(key).await?;
     host.shutdown(Duration::from_secs(2)).await;
     Ok(())
+}
+
+#[tokio::test]
+async fn history_commits_image_parts_letters_and_resume_replays_them() -> TestResult<()> {
+    let scratch = support::Scratch::new("history-images")?;
+    let root = scratch.path();
+    std::fs::create_dir_all(root.join("workspace"))?;
+    let long = "the quick brown fox jumps over the lazy dog. ".repeat(700);
+    let (parts, first_letter) = create_history_image(root, &long).await?;
+    resume_history_image(root, &long, &parts, &first_letter).await
 }
