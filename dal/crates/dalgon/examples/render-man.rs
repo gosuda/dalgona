@@ -7,7 +7,9 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     };
     let out = Path::new(&out);
-    match fs::create_dir_all(out).and_then(|()| render(&dalgon::cli::command(), "", out)) {
+    let mut command = dalgon::cli::command();
+    command.build();
+    match fs::create_dir_all(out).and_then(|()| render(&command, "", out)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("render-man failed: {error}");
