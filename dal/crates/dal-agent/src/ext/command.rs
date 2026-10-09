@@ -401,7 +401,8 @@ impl CommandCx<'_> {
     /// product set: the one publication point for `/reload`.
     ///
     /// Takes the current generation's `Builtin` and `Bundled` extensions,
-    /// appends `plugins`, validates the complete set standalone, builds
+    /// swaps out same-named non-`User` records for `replace`, appends
+    /// `plugins`, validates the complete set standalone, builds
     /// the new generation, and publishes it through the host-owned watch
     /// sender. A validation failure publishes nothing, so the old
     /// generation stays live; a turn that started before the publish
@@ -410,11 +411,12 @@ impl CommandCx<'_> {
     pub fn publish_plugins(
         &self,
         plugins: Vec<Extension>,
+        replace: Vec<Extension>,
     ) -> BoxFuture<'_, Result<ReloadSummary, BuildError>> {
         let current = self
             .host
             .current_extensions(&self.caller, self.session, self.turn);
-        let extensions = splice_plugins(&current, plugins);
+        let extensions = splice_plugins(&current, plugins, replace);
         let validated = ValidatedExtensions::validate(extensions, None);
         Box::pin(async move {
             let generation = Generation::build(validated.map_err(BuildError::validation)?);

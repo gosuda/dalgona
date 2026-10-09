@@ -452,6 +452,7 @@ fn reload_splice_replaces_only_the_plugin_tail() {
             splice_plugins(
                 &current.extensions,
                 vec![ext("p2", Origin::User).build().expect("plugin p2")],
+                Vec::new(),
             ),
             None,
         )

@@ -75,7 +75,6 @@ pub fn parts(cx: &BuildCx<'_>) -> Result<Parts, BuildError> {
 
 struct ReloadPlugins {
     system: Arc<dal_star::PluginSystem>,
-    skills: dal_ext::skills::SharedSkillRegistry,
     /// Skill records of the non-user extensions, in assembly order. They
     /// survive every reload unchanged, so the merge only re-reads the user
     /// plugin set.
@@ -151,21 +150,29 @@ impl dal_ext::commands::PluginReload for ReloadPlugins {
                 .iter()
                 .map(|(name, skills)| (name.as_ref(), skills.clone()))
                 .collect();
-            let skills = dal_ext::skills::SkillRegistry::merge(&borrowed).map_err(|error| {
-                dal_core::command::ErrorTriple {
-                    what: "plugin reload".into(),
-                    why: error.to_string().into(),
-                    fix: "rename the colliding skill and run /reload again".into(),
-                }
+            let skills =
+                std::sync::Arc::new(dal_ext::skills::SkillRegistry::merge(&borrowed).map_err(
+                    |error| dal_core::command::ErrorTriple {
+                        what: "plugin reload".into(),
+                        why: error.to_string().into(),
+                        fix: "rename the colliding skill and run /reload again".into(),
+                    },
+                )?);
+            let replace = [
+                dal_ext::skills::extension(std::sync::Arc::clone(&skills)),
+                dal_ext::letter::extension(std::sync::Arc::clone(&skills)),
+            ]
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| dal_core::command::ErrorTriple {
+                what: "plugin reload".into(),
+                why: error.to_string().into(),
+                fix: "report the broken skills or letter registration".into(),
             })?;
             let summary = cx
-                .publish_plugins(set)
+                .publish_plugins(set, replace)
                 .await
                 .map_err(|error| dal_ext::commands::misc::publish_failure(&error))?;
-            *self
-                .skills
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = skills;
             Ok(summary)
         })
     }
@@ -210,10 +217,8 @@ pub fn assemble(cx: &BuildCx<'_>, parts: Parts) -> Result<Product, BuildError> {
         source: Box::new(source),
     })?;
     let system = Arc::new(dal_star::PluginSystem::new(generation, roots, plugincfg));
-    let skills_registry = dal_ext::skills::shared_registry();
     let reload = Arc::new(ReloadPlugins {
         system: Arc::clone(&system),
-        skills: std::sync::Arc::clone(&skills_registry),
         kept: std::sync::Mutex::new(Vec::new()),
     });
     let reload_dyn: Arc<dyn dal_ext::commands::PluginReload> = reload.clone();
@@ -221,8 +226,6 @@ pub fn assemble(cx: &BuildCx<'_>, parts: Parts) -> Result<Product, BuildError> {
         dal_tools::extension(parts.tools)?,
         parts.guard,
         dal_ext::prompt::extension()?,
-        dal_ext::skills::extension(std::sync::Arc::clone(&skills_registry))?,
-        dal_ext::letter::extension(std::sync::Arc::clone(&skills_registry))?,
         dal_ext::ttsr::extension()?,
         dal_ext::compact::extension()?,
         dal_ext::commands::extension(&reload_dyn)?,
@@ -250,19 +253,29 @@ pub fn assemble(cx: &BuildCx<'_>, parts: Parts) -> Result<Product, BuildError> {
     })?;
     extensions.extend(batch);
 
-    reject_duplicate_extension_names(&extensions)?;
-    reload.capture_kept(&extensions);
-
-    let skills =
+    // The skill and letter extensions bind this generation's registry as an
+    // immutable snapshot, so /reload republishes fresh copies instead of
+    // mutating state older turns still read. Their own `skills` records are
+    // empty, so the merge result is the same with or without them.
+    let skills = std::sync::Arc::new(
         dal_ext::skills::SkillRegistry::merge_extensions(&extensions).map_err(|source| {
             BuildError::Section {
                 section: "skills".into(),
                 source: Box::new(source),
             }
-        })?;
-    *skills_registry
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = skills;
+        })?,
+    );
+    extensions.insert(
+        3,
+        dal_ext::skills::extension(std::sync::Arc::clone(&skills))?,
+    );
+    extensions.insert(
+        4,
+        dal_ext::letter::extension(std::sync::Arc::clone(&skills))?,
+    );
+
+    reject_duplicate_extension_names(&extensions)?;
+    reload.capture_kept(&extensions);
 
     Ok(Product {
         name: NAME,

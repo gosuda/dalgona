@@ -9,13 +9,14 @@
 //! read is the strict `mcp` object ([`dal_core::ext::decode_skill_mcp`]); the
 //! body keeps every byte of the file, front matter included.
 //! [`SkillRegistry::merge`] then settles name claims once, in plugin
-//! directory-name order, and the result never changes for the life of the
-//! process.
+//! directory-name order, and the result never changes for the life of its
+//! generation: a reload publishes a new registry inside the new generation
+//! snapshot instead of mutating state older turns still read.
 
 use std::collections::BTreeSet;
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use dal_agent::error::SchemeError;
 use dal_agent::ext::{
@@ -314,30 +315,6 @@ impl fmt::Display for SkillConflict {
 
 impl std::error::Error for SkillConflict {}
 
-/// The skills slot shared by the `skill` resolver, the skills prompt
-/// section, and the letter first-input hook.
-///
-/// Extensions capture the handle at registration while it still holds an
-/// empty registry; the composition edge installs the merged registry once
-/// the full extension batch exists. A poisoned lock still yields its
-/// registry: skill reads are pure, so a panicking writer leaves a usable
-/// value.
-pub type SharedSkillRegistry = Arc<RwLock<SkillRegistry>>;
-
-/// Returns an empty shared skills slot for the composition edge.
-#[must_use]
-pub fn shared_registry() -> SharedSkillRegistry {
-    Arc::new(RwLock::new(SkillRegistry::empty()))
-}
-
-pub(crate) fn registry_snapshot(
-    registry: &RwLock<SkillRegistry>,
-) -> std::sync::RwLockReadGuard<'_, SkillRegistry> {
-    registry
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
 /// The immutable set of registered skills, sorted bytewise by name.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SkillRegistry {
@@ -522,21 +499,21 @@ pub fn section(registry: &SkillRegistry, assembly: &LetterAssembly) -> Option<Bo
     registry.section(assembly)
 }
 
-/// Reads skill bodies from the immutable registry: `skill://<name>`.
+/// Reads skill bodies from its generation's immutable registry:
+/// `skill://<name>`.
 ///
 /// Bodies are served byte-exact from load time; the resolver never reads the
-/// disk again. The host builds loaded registries through
-/// [`SkillRegistry::merge`]; [`extension`] registers this resolver with an
-/// empty registry as its structural starting point.
+/// disk again. Each generation binds its own registry, so a reload cannot
+/// leak new skill bodies into a turn still running on the old generation.
 #[derive(Debug)]
 pub struct SkillResolver {
-    registry: SharedSkillRegistry,
+    registry: Arc<SkillRegistry>,
 }
 
 impl SkillResolver {
-    /// Builds a resolver over the shared skills slot.
+    /// Builds a resolver over one generation's registry.
     #[must_use]
-    pub fn new(registry: SharedSkillRegistry) -> Self {
+    pub fn new(registry: Arc<SkillRegistry>) -> Self {
         Self { registry }
     }
 }
@@ -544,13 +521,9 @@ impl SkillResolver {
 impl SkillResolver {
     /// Resolves one `skill://` body or reports the unknown skill.
     fn lookup(&self, path: &str) -> Result<Doc, SchemeError> {
-        let registry = registry_snapshot(&self.registry);
-        if let Some(body) = registry.body(path) {
-            let body = body.to_string();
-            drop(registry);
-            return Ok(Doc::new(format!("skill://{path}"), body));
+        if let Some(body) = self.registry.body(path) {
+            return Ok(Doc::new(format!("skill://{path}"), body.to_string()));
         }
-        drop(registry);
         Err(SchemeError::Failed {
             message: format!("unknown skill: {path}").into(),
         })
@@ -572,7 +545,7 @@ impl SchemeResolver for SkillResolver {
     }
 }
 
-/// Dynamic `skills` prompt section over one immutable registry.
+/// Dynamic `skills` prompt section over one generation's immutable registry.
 ///
 /// Renders [`section`] against the letter assembly drawn from the captured
 /// font; returns `None` when no skill is loaded or the font fails to parse.
@@ -580,15 +553,15 @@ impl SchemeResolver for SkillResolver {
 /// loaded registry.
 #[derive(Debug, Clone)]
 struct SkillsSectionFn {
-    registry: SharedSkillRegistry,
+    registry: Arc<SkillRegistry>,
     font: Arc<Font>,
 }
 
 impl SectionFn for SkillsSectionFn {
     fn render(&self, _cx: &SectionCx<'_>) -> Option<String> {
-        let registry = registry_snapshot(&self.registry);
-        let assembly = crate::letter::letters(&registry, &self.font).ok()?;
-        section(&registry, &assembly).map(str::into_string)
+        let registry = &*self.registry;
+        let assembly = crate::letter::letters(registry, &self.font).ok()?;
+        section(registry, &assembly).map(str::into_string)
     }
 }
 
@@ -599,7 +572,7 @@ impl SectionFn for SkillsSectionFn {
 ///
 /// Returns the runtime's typed build error when the builder rejects the
 /// registration.
-pub fn extension(registry: SharedSkillRegistry) -> Result<Extension, RegistrationError> {
+pub fn extension(registry: Arc<SkillRegistry>) -> Result<Extension, RegistrationError> {
     let resolver = SkillResolver::new(Arc::clone(&registry));
     let section = PromptSection::session(
         PromptOrder::Skills,
