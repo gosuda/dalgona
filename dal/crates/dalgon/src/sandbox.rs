@@ -1649,12 +1649,14 @@ mod win {
     /// Program files under a `PATH` dir the container may still resolve —
     /// executables and the DLLs loaders pull from the same dir. Coverage
     /// is top-level only and capped by `PATH_GRANT_LIMIT`: every entry
-    /// costs a real DACL write, and the only alternative (an inheritable
-    /// RX ACE via `SetNamedSecurityInfoW`) re-propagates the dir's whole
-    /// inherited set through every existing descendant — minutes on large
-    /// trees. The bound is sorted, so which files miss a grant is
-    /// deterministic rather than enumeration-dependent.
-    const PATH_GRANT_LIMIT: usize = 128;
+    /// costs a real DACL write (~150 ms each), and the only alternative
+    /// (an inheritable RX ACE via `SetNamedSecurityInfoW`) re-propagates
+    /// the dir's whole inherited set through every existing descendant —
+    /// minutes on large trees, ~11 min for a recursive pass on a real
+    /// PATH set. 512 keeps the common tool dirs fully covered while the
+    /// bound stays sorted, so which files miss a grant is deterministic
+    /// rather than enumeration-dependent.
+    const PATH_GRANT_LIMIT: usize = 512;
     fn path_grant_files(dir: &Path) -> Vec<PathBuf> {
         let Ok(read_dir) = std::fs::read_dir(dir) else {
             return Vec::new();
