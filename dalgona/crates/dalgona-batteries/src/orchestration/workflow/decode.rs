@@ -239,10 +239,13 @@ fn decode_workers(raw: &[RawStep], items: &[Items]) -> Result<Vec<u8>, WorkflowE
     Ok(workers)
 }
 
+/// Name and index forms of each step's `after` edges.
+type DecodedDependencies = (Vec<Vec<String>>, Vec<Vec<usize>>);
+
 fn decode_dependencies(
     raw: &[RawStep],
     names: &HashMap<&str, usize>,
-) -> Result<(Vec<Vec<String>>, Vec<Vec<usize>>), WorkflowError> {
+) -> Result<DecodedDependencies, WorkflowError> {
     let mut after_names = Vec::with_capacity(raw.len());
     let mut after = Vec::with_capacity(raw.len());
     for step in raw {

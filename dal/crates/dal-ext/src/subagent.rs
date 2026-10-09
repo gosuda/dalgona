@@ -181,12 +181,12 @@ impl AgentTool {
                 match services.agents(caller, operation).await {
                     Ok(AgentsReply::Started { id }) => {
                         cx.output().push(&format!("child {name} started"));
-                        ToolOutcome::Ok(ToolOutput::from_text(
+                        ToolOutcome::Ok(Box::new(ToolOutput::from_text(
                             format!(
                                 "spawned child {name} ({id}); call agent with action=\"wait\" and id=\"{id}\" for its report."
                             )
                             .into_boxed_str(),
-                        ))
+                        )))
                     }
                     Ok(_) => ToolOutcome::Err(ToolError::message(
                         "agents service returned an unexpected reply",
@@ -220,7 +220,9 @@ impl AgentTool {
                             },
                         );
                         cx.output().push(&format!("child {name} finished"));
-                        ToolOutcome::Ok(ToolOutput::from_text(report_text(report).into_boxed_str()))
+                        ToolOutcome::Ok(Box::new(ToolOutput::from_text(
+                            report_text(report).into_boxed_str(),
+                        )))
                     }
                     Ok(_) => ToolOutcome::Err(ToolError::message(
                         "agents service returned an unexpected reply",
@@ -239,9 +241,9 @@ impl AgentTool {
                 {
                     Ok(AgentsReply::Cancelled { id }) => {
                         cx.output().push(&format!("child {id} cancelled"));
-                        ToolOutcome::Ok(ToolOutput::from_text(
+                        ToolOutcome::Ok(Box::new(ToolOutput::from_text(
                             format!("cancelled child \"{id}\".").into_boxed_str(),
-                        ))
+                        )))
                     }
                     Ok(_) => ToolOutcome::Err(ToolError::message(
                         "agents service returned an unexpected reply",
@@ -251,7 +253,9 @@ impl AgentTool {
             }
             AgentAction::List => match services.agents(caller, AgentsOp::List).await {
                 Ok(AgentsReply::Listed(children)) => match list_children(&children) {
-                    Ok(text) => ToolOutcome::Ok(ToolOutput::from_text(text.into_boxed_str())),
+                    Ok(text) => {
+                        ToolOutcome::Ok(Box::new(ToolOutput::from_text(text.into_boxed_str())))
+                    }
                     Err(error) => ToolOutcome::Err(ToolError::message(error.to_string())),
                 },
                 Ok(_) => ToolOutcome::Err(ToolError::message(

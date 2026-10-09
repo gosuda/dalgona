@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
 //! Protected-resource discovery, native OAuth authorization, and token refresh.
 
+use std::fmt::Write as _;
 use std::{net::IpAddr, time::Duration};
 
 use dal_agent::ext::{Caller, Services};
@@ -168,18 +169,29 @@ pub(crate) async fn refresh(
     Ok(Some(token))
 }
 
+/// The endpoint, discovery document, and token history one authorization runs over.
+pub(crate) struct AuthorizePlan<'a> {
+    pub target: &'a Url,
+    pub discovery: &'a Discovery,
+    pub existing: Option<&'a TokenRecord>,
+    pub requested_scope: Option<&'a str>,
+    pub client_version: &'a str,
+}
+
 pub(crate) async fn authorize(
     client: &Client,
-    target: &Url,
-    _tokens_path: &std::path::Path,
-    discovery: &Discovery,
-    existing: Option<&TokenRecord>,
-    requested_scope: Option<&str>,
-    client_version: &str,
+    plan: &AuthorizePlan<'_>,
     services: &dyn Services,
     who: &Caller,
     cancel: &CancellationToken,
 ) -> Result<TokenRecord, McpError> {
+    let AuthorizePlan {
+        target,
+        discovery,
+        existing,
+        requested_scope,
+        client_version: _,
+    } = *plan;
     if cancel.is_cancelled() {
         return Err(McpError::NoAskFrontEnd);
     }
@@ -191,39 +203,21 @@ pub(crate) async fn authorize(
         .local_addr()
         .map_err(|_| auth_error("could not read OAuth loopback address"))?;
     let redirect_uri = format!("http://127.0.0.1:{}/callback", address.port());
-    let client_id = match discovery.registration_endpoint.as_ref() {
-        Some(endpoint) => {
-            register_client(client, endpoint, &redirect_uri, client_version, cancel).await?
-        }
-        None => None,
-    };
-    let client_id = match client_id {
-        Some(client_id) => client_id,
-        None => match existing {
-            Some(record) if !record.client_id.is_empty() => record.client_id.clone(),
-            _ => ask_client_id(services, who, cancel).await?,
-        },
-    };
+    let client_id =
+        registered_or_stored_client_id(client, plan, &redirect_uri, services, who, cancel).await?;
     let scopes = requested_scopes(existing, requested_scope, &discovery.scopes);
     let scope_value = scopes.join(" ");
     let verifier = format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
     let challenge = auth::pkce_challenge(&verifier);
     let state = uuid::Uuid::new_v4().to_string();
-    let mut authorization_url = discovery.authorization_endpoint.clone();
-    {
-        let mut query = authorization_url.query_pairs_mut();
-        query
-            .append_pair("client_id", &client_id)
-            .append_pair("response_type", "code")
-            .append_pair("redirect_uri", &redirect_uri)
-            .append_pair("state", &state)
-            .append_pair("code_challenge", &challenge)
-            .append_pair("code_challenge_method", "S256")
-            .append_pair("resource", &discovery.resource);
-        if !scope_value.is_empty() {
-            query.append_pair("scope", &scope_value);
-        }
-    }
+    let authorization_url = authorization_url(
+        discovery,
+        &client_id,
+        &scope_value,
+        &redirect_uri,
+        &challenge,
+        &state,
+    );
     let callback = await_callback(
         listener,
         &state,
@@ -280,6 +274,58 @@ pub(crate) async fn authorize(
     }
     let value = response_json(response, Duration::from_secs(15), cancel).await?;
     token_from_response(&value, &client_id, &scopes, None)
+}
+
+/// Resolves the OAuth client identifier: dynamic registration, a stored
+/// record, or a user prompt, in that order.
+async fn registered_or_stored_client_id(
+    client: &Client,
+    plan: &AuthorizePlan<'_>,
+    redirect_uri: &str,
+    services: &dyn Services,
+    who: &Caller,
+    cancel: &CancellationToken,
+) -> Result<String, McpError> {
+    let registered = match plan.discovery.registration_endpoint.as_ref() {
+        Some(endpoint) => {
+            register_client(client, endpoint, redirect_uri, plan.client_version, cancel).await?
+        }
+        None => None,
+    };
+    match registered {
+        Some(client_id) => Ok(client_id),
+        None => match plan.existing {
+            Some(record) if !record.client_id.is_empty() => Ok(record.client_id.clone()),
+            _ => ask_client_id(services, who, cancel).await,
+        },
+    }
+}
+
+/// Builds the authorization endpoint URL with PKCE and resource parameters.
+fn authorization_url(
+    discovery: &Discovery,
+    client_id: &str,
+    scope_value: &str,
+    redirect_uri: &str,
+    challenge: &str,
+    state: &str,
+) -> Url {
+    let mut url = discovery.authorization_endpoint.clone();
+    {
+        let mut query = url.query_pairs_mut();
+        query
+            .append_pair("client_id", client_id)
+            .append_pair("response_type", "code")
+            .append_pair("redirect_uri", redirect_uri)
+            .append_pair("state", state)
+            .append_pair("code_challenge", challenge)
+            .append_pair("code_challenge_method", "S256")
+            .append_pair("resource", &discovery.resource);
+        if !scope_value.is_empty() {
+            query.append_pair("scope", scope_value);
+        }
+    }
+    url
 }
 
 async fn fetch_resource_metadata(
@@ -489,8 +535,9 @@ async fn ask_client_id(
             }
             Ok(client_id.trim().to_owned())
         }
-        Ok(None | Some(_)) => Err(McpError::NoAskFrontEnd),
-        Err(dal_agent::error::ServiceError::Denied(_)) => Err(McpError::NoAskFrontEnd),
+        Ok(None | Some(_)) | Err(dal_agent::error::ServiceError::Denied(_)) => {
+            Err(McpError::NoAskFrontEnd)
+        }
         Err(dal_agent::error::ServiceError::Cancelled) if cancel.is_cancelled() => {
             Err(McpError::NoAskFrontEnd)
         }
@@ -751,7 +798,7 @@ fn form_encode(value: &str, encoded: &mut String) {
             b' ' => encoded.push('+'),
             other => {
                 encoded.push('%');
-                encoded.push_str(&format!("{other:02X}"));
+                let _ = write!(encoded, "{other:02X}");
             }
         }
     }

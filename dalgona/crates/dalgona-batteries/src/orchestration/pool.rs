@@ -3,12 +3,6 @@
 //! than finish order. Everything here is pure: prompts, item labels, and
 //! the `items_from` split.
 
-use std::path::PathBuf;
-
-use dal_core::JobId;
-
-use super::agents_tool::Report;
-
 /// Characters per `items_from` line.
 pub(crate) const ITEM_LINE_LIMIT: usize = 2000;
 
@@ -17,21 +11,6 @@ pub(crate) const ITEM_LINES_LIMIT: usize = 1024;
 
 /// Bytes of the item shown in a pool item label.
 pub(crate) const ITEM_LABEL_LIMIT: usize = 40;
-
-/// How one task ended. Every task contributes a final result; one failure
-/// never erases sibling reports.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum TaskState {
-    Done(Report),
-}
-
-/// One settled task with its recorded paths and isolation outcome.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct TaskResult {
-    pub id: JobId,
-    pub state: TaskState,
-    pub changed: Vec<PathBuf>,
-}
 
 /// Builds the exact subagent preamble for one task label.
 pub(crate) fn preamble(label: &str, rendered: &str) -> String {

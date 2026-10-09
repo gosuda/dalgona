@@ -4,6 +4,7 @@
 use super::render::render;
 use super::*;
 use dal_core::{JobId, RawJson};
+use std::fmt::Write as _;
 
 fn decode(raw: &str, input: Option<&str>) -> Result<Workflow, WorkflowError> {
     let raw = RawJson::parse(raw).expect("test input is valid JSON");
@@ -83,14 +84,15 @@ fn workflow_cycles_reference() {
             if index != 0 {
                 json.push(',');
             }
-            json.push_str(&format!(
+            let _ = write!(
+                json,
                 "{{\"name\":\"s{index}\",\"prompt\":\"work\",\"after\":["
-            ));
+            );
             for (position, dependency) in dependencies.iter().enumerate() {
                 if position != 0 {
                     json.push(',');
                 }
-                json.push_str(&format!("\"s{dependency}\""));
+                let _ = write!(json, "\"s{dependency}\"");
             }
             json.push_str("]}");
         }

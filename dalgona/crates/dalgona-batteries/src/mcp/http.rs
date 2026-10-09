@@ -70,6 +70,66 @@ impl CallDeadline {
     }
 }
 
+/// The method, protocol version, and service boundary one request runs under.
+pub(crate) struct CallCx<'a> {
+    pub method: &'a str,
+    pub version: &'a str,
+    pub services: &'a dyn dal_agent::ext::Services,
+    pub who: &'a dal_agent::ext::Caller,
+    pub cancel: &'a CancellationToken,
+}
+
+/// One request loop's retry and authentication ledger.
+struct AuthLedger {
+    request_id: u64,
+    used_token: Option<String>,
+    attempts: u32,
+    step_ups: u32,
+    stored_token_attempted: bool,
+    refresh_attempted: bool,
+    interactive_attempted: bool,
+}
+
+impl AuthLedger {
+    fn new(request_id: u64) -> Self {
+        Self {
+            request_id,
+            used_token: None,
+            attempts: 0,
+            step_ups: 0,
+            stored_token_attempted: false,
+            refresh_attempted: false,
+            interactive_attempted: false,
+        }
+    }
+}
+
+/// One pass over a rejected response.
+enum AuthStep {
+    /// Retry the request; `reset_deadline` is set when authorization completed.
+    Retry { reset_deadline: bool },
+    /// Surface this terminal failure.
+    Fail(TransportError),
+}
+
+/// One POST's protocol version, bearer token, and deadline.
+struct SendCx<'a> {
+    version: &'a str,
+    token: Option<String>,
+    cancel: &'a CancellationToken,
+    deadline: &'a CallDeadline,
+}
+
+/// Correlation and budget context for one streamed reply.
+struct StreamCx<'a> {
+    request_id: u64,
+    original_id: u64,
+    version: &'a str,
+    token: Option<String>,
+    cancel: &'a CancellationToken,
+    deadline: &'a mut CallDeadline,
+}
+
 /// Streamable-HTTP transport state for one MCP server instance.
 pub(crate) struct HttpTransport {
     key: Key,
@@ -129,160 +189,60 @@ impl HttpTransport {
         &self,
         id: u64,
         ids: &AtomicU64,
-        method: &str,
         params: &str,
         headers: &[HeaderAnnotation],
         arguments: Option<&RawJson>,
-        version: &str,
-        services: &dyn dal_agent::ext::Services,
-        who: &dal_agent::ext::Caller,
-        cancel: &CancellationToken,
+        call: &CallCx<'_>,
     ) -> Result<RawJson, TransportError> {
-        let params_value = sonic_rs::from_str::<Value>(params)
-            .map_err(|_| TransportError::Mcp(protocol_error("invalid MCP params".to_owned())))?;
-        if params_value.as_object().is_none() {
-            return Err(TransportError::Mcp(protocol_error(
-                "MCP params must be a JSON object".to_owned(),
-            )));
-        }
-        let extra = match arguments {
-            Some(arguments) => parameter_headers(headers, arguments)
-                .map_err(|error| TransportError::Mcp(protocol_error(error.to_string())))?,
-            None => Vec::new(),
-        };
-        let tool_name = if method == "tools/call" {
-            params_value
-                .get("name")
-                .and_then(JsonValueTrait::as_str)
-                .map(protocol::escape_name)
-        } else {
-            None
-        };
+        let ExchangeHead { extra, tool_name } =
+            exchange_preamble(params, headers, arguments, call.method)?;
         let mut deadline = CallDeadline::new(self.call_timeout, self.call_max);
-        let mut request_id = id;
-        let mut used_token = None;
-        let mut auth_attempts = 0_u32;
-        let mut step_ups = 0_u32;
-        let mut stored_token_attempted = false;
-        let mut refresh_attempted = false;
-        let mut interactive_attempted = false;
+        let mut ledger = AuthLedger::new(id);
         loop {
-            if cancel.is_cancelled() {
+            if call.cancel.is_cancelled() {
                 return Err(TransportError::Cancelled);
             }
-            let body = request_body(request_id, method, params, version, &self.client_version)
-                .map_err(TransportError::Mcp)?;
-            let token = self.bearer().await;
-            used_token.clone_from(&token);
+            let body = request_body(
+                ledger.request_id,
+                call.method,
+                params,
+                call.version,
+                &self.client_version,
+            )
+            .map_err(TransportError::Mcp)?;
+            let send = self.send_frame(&mut ledger, call, &deadline).await;
             let response = self
                 .send_once(
                     body.as_str(),
-                    Some(method),
+                    Some(call.method),
                     tool_name.as_deref(),
                     &extra,
-                    version,
-                    token.as_deref(),
-                    cancel,
-                    &deadline,
+                    &send,
                 )
                 .await?;
             self.capture_session(&response).await?;
             let status = response.status();
             if status == StatusCode::UNAUTHORIZED {
-                if auth_attempts >= 3 {
-                    return Err(TransportError::Mcp(McpError::HttpAuth {
-                        code: status.as_u16(),
-                        n: auth_attempts,
-                    }));
-                }
-                auth_attempts += 1;
-                let challenge = oauth::challenge(response.headers());
-                let _authorization = self.authorization.lock().await;
-                if self.bearer().await != used_token {
-                    request_id = ids.fetch_add(1, Ordering::Relaxed);
-                    continue;
-                }
-                let discovery = self.discover(&challenge, cancel).await?;
-                self.set_issuer(&discovery.issuer).await;
-                let existing = self.record(&discovery.issuer, &discovery.resource).await?;
-                if used_token.is_none()
-                    && !stored_token_attempted
-                    && let Some(record) = existing.as_ref()
-                    && !record.access_token.is_empty()
-                {
-                    stored_token_attempted = true;
-                    request_id = ids.fetch_add(1, Ordering::Relaxed);
-                    continue;
-                }
-                if !refresh_attempted
-                    && let Some(record) = existing.as_ref()
-                    && record.refresh_token.is_some()
-                {
-                    refresh_attempted = true;
-                    if let Some(updated) = oauth::refresh(
-                        &self.client,
-                        &discovery,
-                        record,
-                        self.connect_timeout,
-                        cancel,
-                    )
-                    .await?
-                    {
-                        self.persist(&discovery, updated).await?;
-                        request_id = ids.fetch_add(1, Ordering::Relaxed);
+                match self.unauthorized(&response, &mut ledger, call, ids).await? {
+                    AuthStep::Retry { reset_deadline } => {
+                        if reset_deadline {
+                            deadline = CallDeadline::new(self.call_timeout, self.call_max);
+                        }
                         continue;
                     }
+                    AuthStep::Fail(error) => return Err(error),
                 }
-                if interactive_attempted {
-                    return Err(TransportError::Mcp(McpError::HttpAuth {
-                        code: status.as_u16(),
-                        n: auth_attempts,
-                    }));
-                }
-                interactive_attempted = true;
-                refresh_attempted = true;
-                let updated = self
-                    .authorize(&discovery, existing.as_ref(), None, services, who, cancel)
-                    .await?;
-                self.persist(&discovery, updated).await?;
-                deadline = CallDeadline::new(self.call_timeout, self.call_max);
-                request_id = ids.fetch_add(1, Ordering::Relaxed);
-                continue;
             }
             if status == StatusCode::FORBIDDEN {
-                let challenge = oauth::challenge(response.headers());
-                if !challenge.insufficient_scope {
-                    return Err(TransportError::Mcp(McpError::HttpAuth {
-                        code: status.as_u16(),
-                        n: auth_attempts,
-                    }));
+                match self.forbidden(&response, &mut ledger, call, ids).await? {
+                    AuthStep::Retry { reset_deadline } => {
+                        if reset_deadline {
+                            deadline = CallDeadline::new(self.call_timeout, self.call_max);
+                        }
+                        continue;
+                    }
+                    AuthStep::Fail(error) => return Err(error),
                 }
-                if step_ups >= STEPUP_MAX {
-                    return Err(TransportError::Mcp(McpError::StepUpLimit));
-                }
-                step_ups += 1;
-                let _authorization = self.authorization.lock().await;
-                if self.bearer().await != used_token && challenge.scope.is_none() {
-                    request_id = ids.fetch_add(1, Ordering::Relaxed);
-                    continue;
-                }
-                let discovery = self.discover(&challenge, cancel).await?;
-                self.set_issuer(&discovery.issuer).await;
-                let existing = self.record(&discovery.issuer, &discovery.resource).await?;
-                let updated = self
-                    .authorize(
-                        &discovery,
-                        existing.as_ref(),
-                        challenge.scope.as_deref(),
-                        services,
-                        who,
-                        cancel,
-                    )
-                    .await?;
-                self.persist(&discovery, updated).await?;
-                deadline = CallDeadline::new(self.call_timeout, self.call_max);
-                request_id = ids.fetch_add(1, Ordering::Relaxed);
-                continue;
             }
             if status == StatusCode::ACCEPTED || status == StatusCode::NO_CONTENT {
                 return Err(TransportError::Mcp(protocol_error(
@@ -291,30 +251,17 @@ impl HttpTransport {
             }
             if !status.is_success() {
                 let body = self
-                    .read_body(response, ERROR_BODY_MAX, cancel, &deadline)
+                    .read_body(response, ERROR_BODY_MAX, call.cancel, &deadline)
                     .await?;
                 let text = String::from_utf8_lossy(&body).into_owned();
-                if recognizes_modern_error(&text) {
-                    return response_for_id(&text, request_id, id).map_err(TransportError::Mcp);
-                }
-                if matches!(
+                return error_status(
                     status,
-                    StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
-                ) {
-                    if version == LEGACY_PROTOCOL_VERSION {
-                        return Err(TransportError::Mcp(McpError::Auth {
-                            cause: "unsupported HTTP+SSE-only transport".to_owned(),
-                        }));
-                    }
-                    return Err(TransportError::Mcp(McpError::Protocol {
-                        code: -32601,
-                        message: format!("HTTP endpoint returned {}", status.as_u16()),
-                    }));
-                }
-                return Err(TransportError::Mcp(McpError::HttpAuth {
-                    code: status.as_u16(),
-                    n: auth_attempts,
-                }));
+                    call.version,
+                    ledger.request_id,
+                    id,
+                    &text,
+                    ledger.attempts,
+                );
             }
             let content_type = response
                 .headers()
@@ -323,164 +270,225 @@ impl HttpTransport {
                 .unwrap_or_default()
                 .to_ascii_lowercase();
             if content_type.starts_with("text/event-stream") {
-                return self
-                    .read_event_stream(
-                        response,
-                        request_id,
-                        id,
-                        cancel,
-                        &mut deadline,
-                        version,
-                        token.as_deref(),
-                    )
-                    .await;
+                let mut stream = StreamCx {
+                    request_id: ledger.request_id,
+                    original_id: id,
+                    version: call.version,
+                    token: send.token.clone(),
+                    cancel: call.cancel,
+                    deadline: &mut deadline,
+                };
+                return self.read_event_stream(response, &mut stream).await;
             }
             let body = self
-                .read_body(response, RESPONSE_MAX, cancel, &deadline)
+                .read_body(response, RESPONSE_MAX, call.cancel, &deadline)
                 .await?;
             let text = std::str::from_utf8(&body).map_err(|_| {
                 TransportError::Mcp(protocol_error("invalid MCP response encoding".to_owned()))
             })?;
-            return response_for_id(text, request_id, id).map_err(TransportError::Mcp);
+            return response_for_id(text, ledger.request_id, id).map_err(TransportError::Mcp);
         }
+    }
+
+    /// Refreshes the bearer token and assembles this attempt's send context.
+    async fn send_frame<'a>(
+        &self,
+        ledger: &mut AuthLedger,
+        call: &CallCx<'a>,
+        deadline: &'a CallDeadline,
+    ) -> SendCx<'a> {
+        let token = self.bearer().await;
+        ledger.used_token.clone_from(&token);
+        SendCx {
+            version: call.version,
+            token: ledger.used_token.clone(),
+            cancel: call.cancel,
+            deadline,
+        }
+    }
+
+    /// Runs the 401 ladder: fresh-token recheck, stored token, refresh, then interactive authorize.
+    async fn unauthorized(
+        &self,
+        response: &Response,
+        ledger: &mut AuthLedger,
+        call: &CallCx<'_>,
+        ids: &AtomicU64,
+    ) -> Result<AuthStep, TransportError> {
+        if ledger.attempts >= 3 {
+            return Ok(AuthStep::Fail(TransportError::Mcp(McpError::HttpAuth {
+                code: StatusCode::UNAUTHORIZED.as_u16(),
+                n: ledger.attempts,
+            })));
+        }
+        ledger.attempts += 1;
+        let challenge = oauth::challenge(response.headers());
+        let _authorization = self.authorization.lock().await;
+        if self.bearer().await != ledger.used_token {
+            ledger.request_id = ids.fetch_add(1, Ordering::Relaxed);
+            return Ok(AuthStep::Retry {
+                reset_deadline: false,
+            });
+        }
+        let discovery = self.discover(&challenge, call.cancel).await?;
+        self.set_issuer(&discovery.issuer).await;
+        let existing = self.record(&discovery.issuer, &discovery.resource).await?;
+        if ledger.used_token.is_none()
+            && !ledger.stored_token_attempted
+            && let Some(record) = existing.as_ref()
+            && !record.access_token.is_empty()
+        {
+            ledger.stored_token_attempted = true;
+            ledger.request_id = ids.fetch_add(1, Ordering::Relaxed);
+            return Ok(AuthStep::Retry {
+                reset_deadline: false,
+            });
+        }
+        if !ledger.refresh_attempted
+            && let Some(record) = existing.as_ref()
+            && record.refresh_token.is_some()
+        {
+            ledger.refresh_attempted = true;
+            if let Some(updated) = oauth::refresh(
+                &self.client,
+                &discovery,
+                record,
+                self.connect_timeout,
+                call.cancel,
+            )
+            .await?
+            {
+                self.persist(&discovery, updated).await?;
+                ledger.request_id = ids.fetch_add(1, Ordering::Relaxed);
+                return Ok(AuthStep::Retry {
+                    reset_deadline: false,
+                });
+            }
+        }
+        if ledger.interactive_attempted {
+            return Ok(AuthStep::Fail(TransportError::Mcp(McpError::HttpAuth {
+                code: StatusCode::UNAUTHORIZED.as_u16(),
+                n: ledger.attempts,
+            })));
+        }
+        ledger.interactive_attempted = true;
+        ledger.refresh_attempted = true;
+        let updated = self
+            .authorize(&discovery, existing.as_ref(), None, call)
+            .await?;
+        self.persist(&discovery, updated).await?;
+        ledger.request_id = ids.fetch_add(1, Ordering::Relaxed);
+        Ok(AuthStep::Retry {
+            reset_deadline: true,
+        })
+    }
+
+    /// Runs the 403 insufficient-scope ladder toward one interactive step-up.
+    async fn forbidden(
+        &self,
+        response: &Response,
+        ledger: &mut AuthLedger,
+        call: &CallCx<'_>,
+        ids: &AtomicU64,
+    ) -> Result<AuthStep, TransportError> {
+        let challenge = oauth::challenge(response.headers());
+        if !challenge.insufficient_scope {
+            return Ok(AuthStep::Fail(TransportError::Mcp(McpError::HttpAuth {
+                code: StatusCode::FORBIDDEN.as_u16(),
+                n: ledger.attempts,
+            })));
+        }
+        if ledger.step_ups >= STEPUP_MAX {
+            return Ok(AuthStep::Fail(TransportError::Mcp(McpError::StepUpLimit)));
+        }
+        ledger.step_ups += 1;
+        let _authorization = self.authorization.lock().await;
+        if self.bearer().await != ledger.used_token && challenge.scope.is_none() {
+            ledger.request_id = ids.fetch_add(1, Ordering::Relaxed);
+            return Ok(AuthStep::Retry {
+                reset_deadline: false,
+            });
+        }
+        let discovery = self.discover(&challenge, call.cancel).await?;
+        self.set_issuer(&discovery.issuer).await;
+        let existing = self.record(&discovery.issuer, &discovery.resource).await?;
+        let updated = self
+            .authorize(
+                &discovery,
+                existing.as_ref(),
+                challenge.scope.as_deref(),
+                call,
+            )
+            .await?;
+        self.persist(&discovery, updated).await?;
+        ledger.request_id = ids.fetch_add(1, Ordering::Relaxed);
+        Ok(AuthStep::Retry {
+            reset_deadline: true,
+        })
     }
 
     /// Posts a JSON-RPC notification, including authentication retries.
     pub(crate) async fn notify(
         &self,
-        _ids: &AtomicU64,
-        method: &str,
-        version: &str,
-        services: &dyn dal_agent::ext::Services,
-        who: &dal_agent::ext::Caller,
-        cancel: &CancellationToken,
+        ids: &AtomicU64,
+        call: &CallCx<'_>,
     ) -> Result<(), TransportError> {
-        let body = notification_body(method, version, &self.client_version)
+        let body = notification_body(call.method, call.version, &self.client_version)
             .map_err(TransportError::Mcp)?;
         let deadline = CallDeadline::new(self.call_timeout, self.call_timeout);
-        let mut auth_attempts = 0_u32;
-        let mut step_ups = 0_u32;
-        let mut interactive_attempted = false;
+        let mut ledger = AuthLedger::new(0);
         loop {
-            if cancel.is_cancelled() {
+            if call.cancel.is_cancelled() {
                 return Err(TransportError::Cancelled);
             }
             let token = self.bearer().await;
+            ledger.used_token.clone_from(&token);
+            let send = SendCx {
+                version: call.version,
+                token,
+                cancel: call.cancel,
+                deadline: &deadline,
+            };
             let response = self
-                .send_once(
-                    body.as_str(),
-                    Some(method),
-                    None,
-                    &[],
-                    version,
-                    token.as_deref(),
-                    cancel,
-                    &deadline,
-                )
+                .send_once(body.as_str(), Some(call.method), None, &[], &send)
                 .await?;
             self.capture_session(&response).await?;
-            if response.status() == StatusCode::UNAUTHORIZED {
-                if auth_attempts >= 3 {
-                    return Err(TransportError::Mcp(McpError::HttpAuth {
-                        code: 401,
-                        n: auth_attempts,
-                    }));
+            let status = response.status();
+            if status == StatusCode::UNAUTHORIZED {
+                match self.unauthorized(&response, &mut ledger, call, ids).await? {
+                    AuthStep::Retry { .. } => continue,
+                    AuthStep::Fail(error) => return Err(error),
                 }
-                auth_attempts += 1;
-                let challenge = oauth::challenge(response.headers());
-                let _authorization = self.authorization.lock().await;
-                if self.bearer().await != token {
-                    continue;
-                }
-                let discovery = self.discover(&challenge, cancel).await?;
-                self.set_issuer(&discovery.issuer).await;
-                let existing = self.record(&discovery.issuer, &discovery.resource).await?;
-                if token.is_none()
-                    && let Some(record) = existing.as_ref()
-                    && !record.access_token.is_empty()
-                {
-                    continue;
-                }
-                if let Some(record) = existing.as_ref()
-                    && record.refresh_token.is_some()
-                    && let Some(updated) = oauth::refresh(
-                        &self.client,
-                        &discovery,
-                        record,
-                        self.connect_timeout,
-                        cancel,
-                    )
-                    .await?
-                {
-                    self.persist(&discovery, updated).await?;
-                    continue;
-                }
-                if interactive_attempted {
-                    return Err(TransportError::Mcp(McpError::HttpAuth {
-                        code: 401,
-                        n: auth_attempts,
-                    }));
-                }
-                interactive_attempted = true;
-                let updated = self
-                    .authorize(&discovery, existing.as_ref(), None, services, who, cancel)
-                    .await?;
-                self.persist(&discovery, updated).await?;
-                continue;
             }
-            if response.status() == StatusCode::FORBIDDEN {
-                let challenge = oauth::challenge(response.headers());
-                if !challenge.insufficient_scope {
-                    return Err(TransportError::Mcp(McpError::HttpAuth {
-                        code: 403,
-                        n: auth_attempts,
-                    }));
+            if status == StatusCode::FORBIDDEN {
+                match self.forbidden(&response, &mut ledger, call, ids).await? {
+                    AuthStep::Retry { .. } => continue,
+                    AuthStep::Fail(error) => return Err(error),
                 }
-                if step_ups >= STEPUP_MAX {
-                    return Err(TransportError::Mcp(McpError::StepUpLimit));
-                }
-                step_ups += 1;
-                let _authorization = self.authorization.lock().await;
-                let discovery = self.discover(&challenge, cancel).await?;
-                self.set_issuer(&discovery.issuer).await;
-                let existing = self.record(&discovery.issuer, &discovery.resource).await?;
-                let updated = self
-                    .authorize(
-                        &discovery,
-                        existing.as_ref(),
-                        challenge.scope.as_deref(),
-                        services,
-                        who,
-                        cancel,
-                    )
-                    .await?;
-                self.persist(&discovery, updated).await?;
-                continue;
             }
-            if response.status().is_success() || response.status() == StatusCode::ACCEPTED {
+            if status.is_success() || status == StatusCode::ACCEPTED {
                 return Ok(());
             }
             if matches!(
-                response.status(),
-                StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
-            ) && version == LEGACY_PROTOCOL_VERSION
-            {
-                return Err(TransportError::Mcp(McpError::Auth {
-                    cause: "unsupported HTTP+SSE-only transport".to_owned(),
-                }));
-            }
-            if matches!(
-                response.status(),
+                status,
                 StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
             ) {
-                return Err(TransportError::Mcp(McpError::Protocol {
-                    code: -32601,
-                    message: format!("HTTP endpoint returned {}", response.status().as_u16()),
-                }));
+                return Err(TransportError::Mcp(
+                    if call.version == LEGACY_PROTOCOL_VERSION {
+                        McpError::Auth {
+                            cause: "unsupported HTTP+SSE-only transport".to_owned(),
+                        }
+                    } else {
+                        McpError::Protocol {
+                            code: -32601,
+                            message: format!("HTTP endpoint returned {}", status.as_u16()),
+                        }
+                    },
+                ));
             }
             return Err(TransportError::Mcp(McpError::HttpAuth {
-                code: response.status().as_u16(),
-                n: auth_attempts,
+                code: status.as_u16(),
+                n: ledger.attempts,
             }));
         }
     }
@@ -521,34 +529,31 @@ impl HttpTransport {
         method: Option<&str>,
         name: Option<&str>,
         extra: &[(HeaderName, HeaderValue)],
-        version: &str,
-        token: Option<&str>,
-        cancel: &CancellationToken,
-        deadline: &CallDeadline,
+        send: &SendCx<'_>,
     ) -> Result<Response, TransportError> {
-        if cancel.is_cancelled() {
+        if send.cancel.is_cancelled() {
             return Err(TransportError::Cancelled);
         }
         let session = self.session_id.lock().await.clone();
-        let headers = outbound_headers(version, method, name, extra, session.as_deref())
+        let headers = outbound_headers(send.version, method, name, extra, session.as_deref())
             .map_err(TransportError::Mcp)?;
         let mut request = self
             .client
             .post(self.url.clone())
             .headers(headers)
             .body(body.to_owned());
-        if let Some(token) = token {
+        if let Some(token) = send.token.as_deref() {
             request = request.bearer_auth(token);
         }
         tokio::select! {
-            () = cancel.cancelled() => Err(TransportError::Cancelled),
-            response = tokio::time::timeout_at(deadline.expires, request.send()) => match response {
+            () = send.cancel.cancelled() => Err(TransportError::Cancelled),
+            response = tokio::time::timeout_at(send.deadline.expires, request.send()) => match response {
                 Ok(Ok(response)) => Ok(response),
                 Ok(Err(_)) => Err(TransportError::Mcp(protocol_error(format!(
                     "HTTP request failed for {}",
                     self.key.display()
                 )))),
-                Err(_) => Err(deadline.timeout_error()),
+                Err(_) => Err(send.deadline.timeout_error()),
             },
         }
     }
@@ -585,56 +590,29 @@ impl HttpTransport {
     async fn read_event_stream(
         &self,
         mut response: Response,
-        request_id: u64,
-        original_id: u64,
-        cancel: &CancellationToken,
-        deadline: &mut CallDeadline,
-        version: &str,
-        token: Option<&str>,
+        stream: &mut StreamCx<'_>,
     ) -> Result<RawJson, TransportError> {
         let mut parser = SseParser::default();
         loop {
             let chunk = tokio::select! {
-                () = cancel.cancelled() => return Err(TransportError::Cancelled),
-                chunk = tokio::time::timeout_at(deadline.expires, response.chunk()) => match chunk {
+                () = stream.cancel.cancelled() => return Err(TransportError::Cancelled),
+                chunk = tokio::time::timeout_at(stream.deadline.expires, response.chunk()) => match chunk {
                     Ok(Ok(chunk)) => chunk,
                     Ok(Err(_)) => return Err(TransportError::Mcp(protocol_error("HTTP event stream read failed".to_owned()))),
-                    Err(_) => return Err(deadline.timeout_error()),
+                    Err(_) => return Err(stream.deadline.timeout_error()),
                 },
             };
             let Some(chunk) = chunk else {
                 break;
             };
             for event in parser.push(&chunk).map_err(TransportError::Mcp)? {
-                if let Some(reply) = self
-                    .process_event(
-                        &event,
-                        request_id,
-                        original_id,
-                        cancel,
-                        deadline,
-                        version,
-                        token,
-                    )
-                    .await?
-                {
+                if let Some(reply) = self.process_event(&event, stream).await? {
                     return Ok(reply);
                 }
             }
         }
         for event in parser.finish().map_err(TransportError::Mcp)? {
-            if let Some(reply) = self
-                .process_event(
-                    &event,
-                    request_id,
-                    original_id,
-                    cancel,
-                    deadline,
-                    version,
-                    token,
-                )
-                .await?
-            {
+            if let Some(reply) = self.process_event(&event, stream).await? {
                 return Ok(reply);
             }
         }
@@ -646,12 +624,7 @@ impl HttpTransport {
     async fn process_event(
         &self,
         event: &str,
-        request_id: u64,
-        original_id: u64,
-        cancel: &CancellationToken,
-        deadline: &mut CallDeadline,
-        version: &str,
-        token: Option<&str>,
+        stream: &mut StreamCx<'_>,
     ) -> Result<Option<RawJson>, TransportError> {
         if event.is_empty() || event == "[DONE]" {
             return Ok(None);
@@ -671,32 +644,25 @@ impl HttpTransport {
                     .and_then(|params| params.get("_meta"))
                     .and_then(|meta| meta.get("progressToken"))
                     .and_then(JsonValueTrait::as_str);
-                if token == Some(&format!("t-{request_id}")) {
-                    deadline.extend();
+                if token == Some(&format!("t-{}", stream.request_id)) {
+                    stream.deadline.extend();
                 }
                 return Ok(None);
             }
             if value.get("id").is_some() {
-                self.answer_server_request(&value, version, token, cancel)
-                    .await;
+                self.answer_server_request(&value, stream).await;
             }
             return Ok(None);
         }
-        if value.get("id").and_then(JsonValueTrait::as_u64) == Some(request_id) {
-            return response_for_id(event, request_id, original_id)
+        if value.get("id").and_then(JsonValueTrait::as_u64) == Some(stream.request_id) {
+            return response_for_id(event, stream.request_id, stream.original_id)
                 .map(Some)
                 .map_err(TransportError::Mcp);
         }
         Ok(None)
     }
 
-    async fn answer_server_request(
-        &self,
-        value: &Value,
-        version: &str,
-        token: Option<&str>,
-        cancel: &CancellationToken,
-    ) {
+    async fn answer_server_request(&self, value: &Value, stream: &StreamCx<'_>) {
         let Some(id) = value.get("id") else {
             return;
         };
@@ -714,7 +680,8 @@ impl HttpTransport {
             return;
         };
         let session = self.session_id.lock().await.clone();
-        let Ok(headers) = outbound_headers(version, None, None, &[], session.as_deref()) else {
+        let Ok(headers) = outbound_headers(stream.version, None, None, &[], session.as_deref())
+        else {
             return;
         };
         let mut request = self
@@ -722,11 +689,11 @@ impl HttpTransport {
             .post(self.url.clone())
             .headers(headers)
             .body(body.as_str().to_owned());
-        if let Some(token) = token {
+        if let Some(token) = stream.token.as_deref() {
             request = request.bearer_auth(token);
         }
         let _ = tokio::select! {
-            () = cancel.cancelled() => None,
+            () = stream.cancel.cancelled() => None,
             response = request.send() => response.ok(),
         };
     }
@@ -829,23 +796,22 @@ impl HttpTransport {
         discovery: &Discovery,
         existing: Option<&token_auth::TokenRecord>,
         scope: Option<&str>,
-        services: &dyn dal_agent::ext::Services,
-        who: &dal_agent::ext::Caller,
-        cancel: &CancellationToken,
+        call: &CallCx<'_>,
     ) -> Result<token_auth::TokenRecord, TransportError> {
         tokio::time::timeout(
             self.stepup_timeout,
             oauth::authorize(
                 &self.client,
-                &self.url,
-                &self.tokens_path,
-                discovery,
-                existing,
-                scope,
-                &self.client_version,
-                services,
-                who,
-                cancel,
+                &oauth::AuthorizePlan {
+                    target: &self.url,
+                    discovery,
+                    existing,
+                    requested_scope: scope,
+                    client_version: &self.client_version,
+                },
+                call.services,
+                call.who,
+                call.cancel,
             ),
         )
         .await
@@ -856,6 +822,75 @@ impl HttpTransport {
         })?
         .map_err(TransportError::Mcp)
     }
+}
+
+/// The per-request headers and escaped tool name one exchange resolves once.
+struct ExchangeHead {
+    extra: Vec<(HeaderName, HeaderValue)>,
+    tool_name: Option<String>,
+}
+
+/// Validates params and derives headers plus the escaped tool name.
+fn exchange_preamble(
+    params: &str,
+    headers: &[HeaderAnnotation],
+    arguments: Option<&RawJson>,
+    method: &str,
+) -> Result<ExchangeHead, TransportError> {
+    let params_value = sonic_rs::from_str::<Value>(params)
+        .map_err(|_| TransportError::Mcp(protocol_error("invalid MCP params".to_owned())))?;
+    if params_value.as_object().is_none() {
+        return Err(TransportError::Mcp(protocol_error(
+            "MCP params must be a JSON object".to_owned(),
+        )));
+    }
+    let extra = match arguments {
+        Some(arguments) => parameter_headers(headers, arguments)
+            .map_err(|error| TransportError::Mcp(protocol_error(error.to_string())))?,
+        None => Vec::new(),
+    };
+    let tool_name = if method == "tools/call" {
+        params_value
+            .get("name")
+            .and_then(JsonValueTrait::as_str)
+            .map(protocol::escape_name)
+    } else {
+        None
+    };
+    Ok(ExchangeHead { extra, tool_name })
+}
+
+/// Maps a non-success reply to the surfaced outcome or transport error.
+fn error_status(
+    status: StatusCode,
+    version: &str,
+    request_id: u64,
+    id: u64,
+    text: &str,
+    attempts: u32,
+) -> Result<RawJson, TransportError> {
+    if recognizes_modern_error(text) {
+        return response_for_id(text, request_id, id).map_err(TransportError::Mcp);
+    }
+    if matches!(
+        status,
+        StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+    ) {
+        return Err(TransportError::Mcp(if version == LEGACY_PROTOCOL_VERSION {
+            McpError::Auth {
+                cause: "unsupported HTTP+SSE-only transport".to_owned(),
+            }
+        } else {
+            McpError::Protocol {
+                code: -32601,
+                message: format!("HTTP endpoint returned {}", status.as_u16()),
+            }
+        }));
+    }
+    Err(TransportError::Mcp(McpError::HttpAuth {
+        code: status.as_u16(),
+        n: attempts,
+    }))
 }
 
 fn validate_endpoint(url: &Url) -> Result<(), McpError> {

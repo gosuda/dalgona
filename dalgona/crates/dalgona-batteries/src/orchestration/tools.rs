@@ -67,7 +67,7 @@ impl Tool for OrchestrationTool {
                 )
                 .await
             {
-                Ok(text) => ToolOutcome::Ok(ToolOutput::from_text(text.into_boxed_str())),
+                Ok(text) => ToolOutcome::Ok(Box::new(ToolOutput::from_text(text.into_boxed_str()))),
                 Err(error) => service_failure(error),
             }
         })

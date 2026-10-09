@@ -856,7 +856,7 @@ mod host_tests {
         ];
         for (args, expected) in cases {
             assert_eq!(host.tool("todo", &args).await?, expected);
-            assert!(host.services.all_bodies("todo").is_empty());
+            assert_eq!(host.services.all_bodies("todo").len(), 0);
         }
 
         let boundary = write_args(&[(&"a".repeat(200), &"d".repeat(2000), "pending")])?;

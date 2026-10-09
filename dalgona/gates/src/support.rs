@@ -1,20 +1,30 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
+//! Shared helpers for the gate test binaries.
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-pub(crate) type TestResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-pub(crate) struct Scratch {
+/// The gate-wide result type: any error fails the criterion.
+pub type TestResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+/// A unique temporary directory removed on drop.
+pub struct Scratch {
     path: PathBuf,
 }
 
 impl Scratch {
-    pub(crate) fn new(label: &str) -> std::io::Result<Self> {
+    /// Creates a temp directory named `label-<uuid>`.
+    ///
+    /// # Errors
+    /// Returns the directory-creation error.
+    pub fn new(label: &str) -> std::io::Result<Self> {
         let path = std::env::temp_dir().join(format!("{label}-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&path)?;
         Ok(Self { path })
     }
 
-    pub(crate) fn path(&self) -> &Path {
+    /// The scratch directory path.
+    #[must_use]
+    pub fn path(&self) -> &Path {
         &self.path
     }
 }
@@ -25,17 +35,22 @@ impl Drop for Scratch {
     }
 }
 
-pub(crate) fn repo_root() -> PathBuf {
+/// The repository root two levels above this crate's manifest directory.
+#[must_use]
+pub fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-pub(crate) fn run_command(
-    command: &mut std::process::Command,
-) -> std::io::Result<std::process::Output> {
+/// Runs `command` to completion and returns its captured output.
+///
+/// # Errors
+/// Returns the spawn or wait error.
+pub fn run_command(command: &mut std::process::Command) -> std::io::Result<std::process::Output> {
     command.output()
 }
 
-pub(crate) const BATTERIES: [&str; 11] = [
+/// The eleven battery extension names the product registers.
+pub const BATTERIES: [&str; 11] = [
     "ask",
     "history",
     "judged",
@@ -49,10 +64,11 @@ pub(crate) const BATTERIES: [&str; 11] = [
     "work",
 ];
 
-pub(crate) fn build_product(
-    root: PathBuf,
-    user_toml: Option<&str>,
-) -> TestResult<dal_agent::Product> {
+/// Builds the dalgona product against `root` with optional user config.
+///
+/// # Errors
+/// Returns config-load or product-build failures.
+pub fn build_product(root: PathBuf, user_toml: Option<&str>) -> TestResult<dal_agent::Product> {
     let factory = dalgona::product();
     let config = dal_core::Config::load(
         dal_core::ConfigProduct::Dalgona,
@@ -67,7 +83,8 @@ pub(crate) fn build_product(
     Ok(dalgona::build(&cx)?)
 }
 
-pub(crate) fn battery_names(product: &dal_agent::Product) -> std::collections::BTreeSet<&str> {
+/// The names of `product`'s extensions that are registered batteries.
+pub fn battery_names(product: &dal_agent::Product) -> std::collections::BTreeSet<&str> {
     product
         .extensions
         .iter()
@@ -76,7 +93,11 @@ pub(crate) fn battery_names(product: &dal_agent::Product) -> std::collections::B
         .collect()
 }
 
-pub(crate) fn dalgona_binary() -> TestResult<PathBuf> {
+/// The compiled `dalgona` binary beside the test binary.
+///
+/// # Errors
+/// Returns an error when the binary is not built or the target directory is missing.
+pub fn dalgona_binary() -> TestResult<PathBuf> {
     let suffix = std::env::consts::EXE_SUFFIX;
     let exe = std::env::current_exe()?;
     let target_profile = exe
@@ -94,11 +115,19 @@ pub(crate) fn dalgona_binary() -> TestResult<PathBuf> {
     .into())
 }
 
-pub(crate) async fn start_dalgona(root: PathBuf) -> TestResult<dal_agent::Host> {
+/// Starts a dalgona `Host` on `root` with default configuration.
+///
+/// # Errors
+/// Returns config-load, product-build, or host-start failures.
+pub async fn start_dalgona(root: PathBuf) -> TestResult<dal_agent::Host> {
     start_dalgona_with_config(root, None).await
 }
 
-pub(crate) async fn start_dalgona_with_config(
+/// Starts a dalgona `Host` on `root` with optional user config.
+///
+/// # Errors
+/// Returns config-load, product-build, or host-start failures.
+pub async fn start_dalgona_with_config(
     root: PathBuf,
     user_toml: Option<&str>,
 ) -> TestResult<dal_agent::Host> {

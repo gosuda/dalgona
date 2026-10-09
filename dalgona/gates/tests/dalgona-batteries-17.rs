@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
-#[path = "support/mod.rs"]
-mod support;
+//! dalgona success-criterion gate tests.
 
+use gates::support;
 use std::{collections::BTreeSet, io};
 
 use dal_core::Origin;
@@ -165,12 +165,16 @@ fn bundled_rule_sets_gate() -> support::TestResult<()> {
             tokens.iter().any(|token| token.starts_with("tool")),
             "{name}"
         );
-        let named: Vec<&str> = tokens
+        let expected: Vec<&str> = tokens
             .iter()
             .filter_map(|token| token.strip_prefix("tool:"))
             .collect();
-        let actual: Vec<&str> = scope.named_tools.iter().map(|tool| tool.as_str()).collect();
-        assert_eq!(actual, named, "{name}");
+        let actual: Vec<&str> = scope
+            .named_tools
+            .iter()
+            .map(dal_core::Name::as_str)
+            .collect();
+        assert_eq!(actual, expected, "{name}");
         assert_eq!(record.mode, Some(mode), "{name}");
         assert_eq!(record.repeat_mode, Some(RepeatMode::AfterGap), "{name}");
         assert_eq!(record.repeat_gap, Some(gap), "{name}");

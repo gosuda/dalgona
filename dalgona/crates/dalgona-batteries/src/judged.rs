@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
+//! Judged battery: judge-fed reminders deduplicated through one admission path.
+
 mod anchor;
 mod claim;
 mod config;

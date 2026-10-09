@@ -83,7 +83,7 @@ struct Ready {
 
 enum Transport {
     Stdio(StdioTransport),
-    Http(HttpTransport),
+    Http(Box<HttpTransport>),
 }
 
 #[derive(Clone, Copy)]
@@ -180,18 +180,21 @@ impl Transport {
                 response
             }
             Self::Http(transport) => {
+                let call = super::http::CallCx {
+                    method,
+                    version,
+                    services: ctx.session.services.as_ref(),
+                    who: ctx.who,
+                    cancel: &ctx.instance.cancel,
+                };
                 transport
                     .exchange(
                         id,
                         &ctx.instance.next_id,
-                        method,
                         params,
                         annotations,
                         arguments,
-                        version,
-                        ctx.session.services.as_ref(),
-                        ctx.who,
-                        &ctx.instance.cancel,
+                        &call,
                     )
                     .await
             }
@@ -210,16 +213,14 @@ impl Transport {
                 transport.notify(&body, &ctx.instance.cancel).await
             }
             Self::Http(transport) => {
-                transport
-                    .notify(
-                        &ctx.instance.next_id,
-                        method,
-                        version,
-                        ctx.session.services.as_ref(),
-                        ctx.who,
-                        &ctx.instance.cancel,
-                    )
-                    .await
+                let call = super::http::CallCx {
+                    method,
+                    version,
+                    services: ctx.session.services.as_ref(),
+                    who: ctx.who,
+                    cancel: &ctx.instance.cancel,
+                };
+                transport.notify(&ctx.instance.next_id, &call).await
             }
         }
     }
@@ -538,7 +539,7 @@ impl Client {
                     self.config.client_version.clone(),
                     &self.budgets,
                 )?;
-                Transport::Http(transport)
+                Transport::Http(Box::new(transport))
             }
         };
         let started = self.handshake(&transport, instance, session, who).await;
@@ -1098,10 +1099,12 @@ fn call_params(
     let tool = sonic_rs::to_string(tool).map_err(|error| protocol_error(error.to_string()))?;
     let mut params = format!("{{\"name\":{tool},\"arguments\":{}", arguments.as_str());
     if let Some(responses) = responses {
-        params.push_str(&format!(",\"inputResponses\":{responses}"));
+        params.push_str(",\"inputResponses\":");
+        params.push_str(responses);
     }
     if let Some(state) = request_state {
-        params.push_str(&format!(",\"requestState\":{state}"));
+        params.push_str(",\"requestState\":");
+        params.push_str(state);
     }
     params.push('}');
     Ok(params)

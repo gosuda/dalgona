@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
 use serde::Deserialize;
 
 /// Feature switches for the judged battery. Every feature defaults to enabled.

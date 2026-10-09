@@ -20,7 +20,7 @@ use dal_core::ext::{
 use dal_core::{
     AgentsOp, AgentsReply, Answer, CallId, EntryId, FetchRequest, FetchResponse, Inference, JobsOp,
     JobsReply, ModelRequest, Name, Notice, Question, RawJson, RunOutput, RunRequest, SessionId,
-    SidecarOp, StateError, StateOp, StateRecord, ToolClass, TurnId, TurnOp, TurnOpReply,
+    SidecarOp, ToolClass, TurnId, TurnOp, TurnOpReply,
 };
 
 use super::plan::{self, BatteryState, Host};
@@ -154,6 +154,14 @@ impl FakeServices {
 }
 
 impl Services for FakeServices {
+    fn state(
+        &self,
+        _who: &Caller,
+        _op: dal_core::StateOp,
+    ) -> ServiceFuture<'_, Result<dal_core::StateRecord, dal_core::StateError>> {
+        unavailable(&self.side_calls)
+    }
+
     fn fs_read(&self, _who: &Caller, _path: &str) -> ServiceFuture<'_, Option<Vec<u8>>> {
         unavailable(&self.side_calls)
     }
@@ -245,14 +253,6 @@ impl Services for FakeServices {
     }
 
     fn sidecar(&self, _who: &Caller, _op: SidecarOp) -> ServiceFuture<'_, Option<Vec<u8>>> {
-        unavailable(&self.side_calls)
-    }
-
-    fn state(
-        &self,
-        _who: &Caller,
-        _op: StateOp,
-    ) -> ServiceFuture<'_, Result<StateRecord, StateError>> {
         unavailable(&self.side_calls)
     }
 

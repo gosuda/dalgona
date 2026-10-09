@@ -130,7 +130,7 @@ impl fmt::Display for ToolOutput {
 #[derive(Debug)]
 pub enum ToolOutcome {
     /// The tool returned successfully.
-    Ok(ToolOutput),
+    Ok(Box<ToolOutput>),
     /// The tool returned an error.
     Err(ToolError),
     /// Cancellation arrived before the tool settled.

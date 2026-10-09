@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
-#[path = "support/mod.rs"]
-mod support;
+//! dalgona success-criterion gate tests.
+use gates::support;
 
 use dal_core::{Config, ConfigProduct};
 

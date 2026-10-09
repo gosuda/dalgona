@@ -42,10 +42,13 @@ pub(crate) struct StdioTransport {
     key: Key,
     child: Arc<Mutex<Box<dyn ChildWrapper>>>,
     stdin: Arc<Mutex<Option<ChildStdin>>>,
-    pending: Arc<Mutex<HashMap<u64, mpsc::Sender<Result<RawJson, McpError>>>>>,
+    pending: Pending,
     reader_task: AbortOnDropHandle<()>,
     cancel: CancellationToken,
 }
+
+/// Reply channels for in-flight requests, keyed by wire id.
+type Pending = Arc<Mutex<HashMap<u64, mpsc::Sender<Result<RawJson, McpError>>>>>;
 
 impl StdioTransport {
     /// Spawns a declared command without a shell and with only the captured env allowlist.
@@ -61,78 +64,8 @@ impl StdioTransport {
                 cause: "stdio transport received an HTTP declaration".to_owned(),
             });
         };
-        let program = command.first().ok_or_else(|| McpError::Start {
-            key: key.display(),
-            cause: "stdio command has no argv[0]".to_owned(),
-        })?;
-        let path = environment.path.clone();
-        let lookup_program = program.clone();
-        let resolved = tokio::task::spawn_blocking(move || {
-            resolve_executable(&lookup_program, path.as_deref())
-        })
-        .await
-        .map_err(|error| McpError::Start {
-            key: key.display(),
-            cause: format!("command lookup failed: {error}"),
-        })?
-        .ok_or_else(|| McpError::Start {
-            key: key.display(),
-            cause: format!("command {program:?} was not found on PATH"),
-        })?;
-
-        let program_args = command
-            .iter()
-            .skip(1)
-            .map(|arg| OsString::from(arg.as_ref()))
-            .collect::<Vec<_>>();
-        let declarations = env
-            .iter()
-            .map(|(key, value)| (OsString::from(key.as_ref()), OsString::from(value.as_ref())))
-            .collect::<Vec<_>>();
-        let path = environment.path.clone();
-        let home = environment.home.clone();
-        let tmpdir = environment.tmpdir.clone();
-        let mut wrapped = CommandWrap::with_new(resolved, move |command: &mut Command| {
-            command
-                .args(program_args)
-                .env_clear()
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
-            set_env(command, "PATH", path.as_deref());
-            set_env(command, "HOME", home.as_deref());
-            set_env(command, "TMPDIR", tmpdir.as_deref());
-            command.envs(declarations);
-        });
-        wrapped.wrap(KillOnDrop);
-        #[cfg(unix)]
-        wrapped.wrap(process_wrap::tokio::ProcessGroup::leader());
-        #[cfg(windows)]
-        wrapped.wrap(process_wrap::tokio::JobObject);
-
-        let mut spawn_task = tokio::task::spawn_blocking(move || wrapped.spawn());
-        let spawn_result = if let Ok(result) = timeout(budgets.start, &mut spawn_task).await {
-            result
-        } else {
-            if let Ok(Ok(mut child)) = spawn_task.await {
-                let _ = child.start_kill();
-                let _ = child.wait().await;
-            }
-            return Err(McpError::Start {
-                key: key.display(),
-                cause: format!("timed out after {} s", budgets.start.as_secs()),
-            });
-        };
-        let mut child = spawn_result
-            .map_err(|error| McpError::Start {
-                key: key.display(),
-                cause: format!("process spawn task failed: {error}"),
-            })?
-            .map_err(|error| McpError::Start {
-                key: key.display(),
-                cause: error.to_string(),
-            })?;
-
+        let resolved = resolve_program(&key, command, environment).await?;
+        let mut child = spawn_child(&key, resolved, command, env, environment, budgets).await?;
         let stdin = child.stdin().take();
         let stdout = child.stdout().take();
         let stderr = child.stderr().take();
@@ -350,11 +283,96 @@ async fn process_status(child: &Arc<Mutex<Box<dyn ChildWrapper>>>) -> i32 {
     child.try_wait().ok().flatten().map_or(-1, exit_code)
 }
 
+/// Resolves the declared argv[0] on the captured PATH snapshot.
+async fn resolve_program(
+    key: &Key,
+    command: &[Box<str>],
+    environment: &ProcessEnvironment,
+) -> Result<std::path::PathBuf, McpError> {
+    let program = command.first().ok_or_else(|| McpError::Start {
+        key: key.display(),
+        cause: "stdio command has no argv[0]".to_owned(),
+    })?;
+    let path = environment.path.clone();
+    let lookup_program = program.clone();
+    tokio::task::spawn_blocking(move || resolve_executable(&lookup_program, path.as_deref()))
+        .await
+        .map_err(|error| McpError::Start {
+            key: key.display(),
+            cause: format!("command lookup failed: {error}"),
+        })?
+        .ok_or_else(|| McpError::Start {
+            key: key.display(),
+            cause: format!("command {program:?} was not found on PATH"),
+        })
+}
+
+/// Spawns the wrapped process with cleared env, declared vars, and kill ownership.
+async fn spawn_child(
+    key: &Key,
+    resolved: std::path::PathBuf,
+    command: &[Box<str>],
+    env: &std::collections::BTreeMap<Box<str>, Box<str>>,
+    environment: &ProcessEnvironment,
+    budgets: &Budgets,
+) -> Result<Box<dyn ChildWrapper>, McpError> {
+    let program_args = command
+        .iter()
+        .skip(1)
+        .map(|arg| OsString::from(&**arg))
+        .collect::<Vec<_>>();
+    let declarations = env
+        .iter()
+        .map(|(key, value)| (OsString::from(&**key), OsString::from(&**value)))
+        .collect::<Vec<_>>();
+    let path = environment.path.clone();
+    let home = environment.home.clone();
+    let tmpdir = environment.tmpdir.clone();
+    let mut wrapped = CommandWrap::with_new(resolved, move |command: &mut Command| {
+        command
+            .args(program_args)
+            .env_clear()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        set_env(command, "PATH", path.as_deref());
+        set_env(command, "HOME", home.as_deref());
+        set_env(command, "TMPDIR", tmpdir.as_deref());
+        command.envs(declarations);
+    });
+    wrapped.wrap(KillOnDrop);
+    #[cfg(unix)]
+    wrapped.wrap(process_wrap::tokio::ProcessGroup::leader());
+    #[cfg(windows)]
+    wrapped.wrap(process_wrap::tokio::JobObject);
+
+    let mut spawn_task = tokio::task::spawn_blocking(move || wrapped.spawn());
+    let Ok(spawn_result) = timeout(budgets.start, &mut spawn_task).await else {
+        if let Ok(Ok(mut child)) = spawn_task.await {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+        }
+        return Err(McpError::Start {
+            key: key.display(),
+            cause: format!("timed out after {} s", budgets.start.as_secs()),
+        });
+    };
+    spawn_result
+        .map_err(|error| McpError::Start {
+            key: key.display(),
+            cause: format!("process spawn task failed: {error}"),
+        })?
+        .map_err(|error| McpError::Start {
+            key: key.display(),
+            cause: error.to_string(),
+        })
+}
+
 async fn read_stdout(
     stdout: ChildStdout,
     child: Arc<Mutex<Box<dyn ChildWrapper>>>,
     stdin: Arc<Mutex<Option<ChildStdin>>>,
-    pending: Arc<Mutex<HashMap<u64, mpsc::Sender<Result<RawJson, McpError>>>>>,
+    pending: Pending,
     key: Key,
     cancel: CancellationToken,
 ) {
@@ -527,21 +545,14 @@ fn unsupported_request(value: &sonic_rs::Value) -> Result<String, McpError> {
     ))
 }
 
-async fn deliver(
-    pending: &Arc<Mutex<HashMap<u64, mpsc::Sender<Result<RawJson, McpError>>>>>,
-    id: u64,
-    result: Result<RawJson, McpError>,
-) {
+async fn deliver(pending: &Pending, id: u64, result: Result<RawJson, McpError>) {
     let sender = pending.lock().await.get(&id).cloned();
     if let Some(sender) = sender {
         let _ = sender.send(result).await;
     }
 }
 
-async fn fail_pending(
-    pending: &Arc<Mutex<HashMap<u64, mpsc::Sender<Result<RawJson, McpError>>>>>,
-    error: McpError,
-) {
+async fn fail_pending(pending: &Pending, error: McpError) {
     let mut pending = pending.lock().await;
     let senders = pending.values().cloned().collect::<Vec<_>>();
     pending.clear();
@@ -551,8 +562,6 @@ async fn fail_pending(
     }
 }
 
-async fn clear_pending(
-    pending: &Arc<Mutex<HashMap<u64, mpsc::Sender<Result<RawJson, McpError>>>>>,
-) {
+async fn clear_pending(pending: &Pending) {
     pending.lock().await.clear();
 }

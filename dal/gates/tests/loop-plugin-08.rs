@@ -49,7 +49,9 @@ impl Tool for DeferredLookup {
     }
 
     fn run<'a>(&'a self, _call: ToolCall, _cx: ToolCx<'a>) -> BoxFuture<'a, ToolOutcome> {
-        Box::pin(async { ToolOutcome::Ok(ToolOutput::from_text("deferred lookup result")) })
+        Box::pin(async {
+            ToolOutcome::Ok(Box::new(ToolOutput::from_text("deferred lookup result")))
+        })
     }
 }
 

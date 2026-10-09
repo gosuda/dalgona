@@ -7,6 +7,7 @@
 //! whose display text is the exact refusal notice, so the chain can fall
 //! through to the text summary.
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -394,7 +395,7 @@ impl Engine {
         if pool.is_empty() {
             return Err(Decline::NothingToDraw.into());
         }
-        let selected = self.select(&request, &profile, window, &candidates, pool)?;
+        let selected = self.select(&request, &profile, window, &candidates, &pool)?;
         let drawn = assemble(&request, &profile, &mut candidates, &selected)?;
         drawn.verify()?;
         sink.commit(request.span, drawn).await
@@ -429,12 +430,12 @@ impl Engine {
         profile: &ImageProfile,
         window: u64,
         candidates: &[Candidate],
-        pool: Vec<usize>,
+        pool: &[usize],
     ) -> Result<Vec<usize>, Decline> {
         let tokens = profile.image_tokens;
         let share_cap = scaled(request.budget.share, window);
         let mut used = 0_u64;
-        let pool = keep(&pool, |_| take(&mut used, tokens, share_cap));
+        let pool = keep(pool, |_| take(&mut used, tokens, share_cap));
         if pool.is_empty() {
             return Err(Decline::NoTokenRoom {
                 stay: request
@@ -712,10 +713,11 @@ fn hidden_ranges(ordinal: u32, hidden: &[(usize, (u64, u64))]) -> String {
         .collect();
     let mut text = named.join(", ");
     if groups.len() > MAX_HIDDEN_GROUPS {
-        text.push_str(&format!(
+        let _ = write!(
+            text,
             "; and {} more ranges",
             groups.len() - MAX_HIDDEN_GROUPS
-        ));
+        );
     }
     text
 }

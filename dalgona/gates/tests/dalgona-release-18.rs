@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
-#[path = "support/mod.rs"]
-mod support;
+//! dalgona success-criterion gate tests.
+#![expect(
+    clippy::disallowed_methods,
+    reason = "gate runs the real product binaries"
+)]
+use gates::support;
 
 use std::{fs, path::Path};
 
@@ -8,7 +12,10 @@ fn rust_sources(path: &Path, output: &mut Vec<std::path::PathBuf>) -> std::io::R
     for entry in fs::read_dir(path)? {
         let path = entry?.path();
         if path.is_dir() {
-            if path.file_name().is_some_and(|name| name == "target") {
+            if path
+                .file_name()
+                .is_some_and(|name| name == "target" || name == "fixtures")
+            {
                 continue;
             }
             rust_sources(&path, output)?;

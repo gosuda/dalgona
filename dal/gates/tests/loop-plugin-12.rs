@@ -178,7 +178,7 @@ impl Tool for EchoPrivateTool {
         _cx: ToolCx<'a>,
     ) -> BoxFuture<'a, ToolOutcome> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        Box::pin(async { ToolOutcome::Ok(ToolOutput::from_text("private result")) })
+        Box::pin(async { ToolOutcome::Ok(Box::new(ToolOutput::from_text("private result"))) })
     }
 }
 

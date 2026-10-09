@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 

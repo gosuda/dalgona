@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
-#[path = "support/mod.rs"]
-mod support;
+//! dalgona success-criterion gate tests.
+#![expect(
+    clippy::disallowed_methods,
+    reason = "gate runs the real product binaries"
+)]
+use gates::support;
 
 use std::{
     io::Write,

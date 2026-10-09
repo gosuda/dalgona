@@ -522,10 +522,10 @@ mod host_tests {
         ))
     }
 
-    fn blocked(tool: &str) -> Option<String> {
-        Some(format!(
+    fn blocked(tool: &str) -> String {
+        format!(
             "plan mode is on: \"{tool}\" may change the workspace; submit a plan with the plan tool, or ask the user to run /plan off"
-        ))
+        )
     }
 
     #[derive(serde::Deserialize)]
@@ -561,7 +561,7 @@ mod host_tests {
             ("custom", ToolClass::Other),
         ];
         for (tool, class) in refused {
-            assert_eq!(host.guard(tool, class).await?, blocked(tool));
+            assert_eq!(host.guard(tool, class).await?, Some(blocked(tool)));
         }
         let allowed = [
             ("read", ToolClass::Read),
@@ -675,7 +675,7 @@ mod host_tests {
         assert_eq!(host.state.phase(host.session), Phase::Planning);
         assert_eq!(
             host.guard("patch", ToolClass::Patch).await?,
-            blocked("patch")
+            Some(blocked("patch"))
         );
         Ok(())
     }
@@ -724,7 +724,7 @@ mod host_tests {
             "the plan tool runs only while plan mode is on"
         );
         assert_eq!(host.services.asked_count(), 0);
-        assert!(host.services.all_bodies("plan").is_empty());
+        assert_eq!(host.services.all_bodies("plan").len(), 0);
 
         host.plan_command("on");
         host.services.script([Scripted::Held]);
@@ -799,7 +799,7 @@ mod host_tests {
             assert_eq!(host.plan(&args).await, expected);
         }
         assert_eq!(host.services.asked_count(), 0);
-        assert!(host.services.all_bodies("plan").is_empty());
+        assert_eq!(host.services.all_bodies("plan").len(), 0);
         assert_eq!(host.state.phase(host.session), Phase::Planning);
 
         host.services.script([Scripted::Label("Approve")]);
@@ -889,7 +889,7 @@ mod host_tests {
         let args = plan_args("# Plan", "Ship it")?;
         assert_eq!(host.plan(&args).await, "the journal write failed");
         assert_eq!(host.services.asked_count(), 0);
-        assert!(host.services.all_bodies("plan").is_empty());
+        assert_eq!(host.services.all_bodies("plan").len(), 0);
         assert_eq!(host.state.phase(host.session), Phase::Planning);
 
         host.services.script([Scripted::Label("Approve")]);

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
 use dal_agent::ext::HookCx;
 use dal_core::{ToolCallEvent, ToolCallVerdict};
 use dal_ext::judge::{Gate, JudgeQuestion, Verdict};

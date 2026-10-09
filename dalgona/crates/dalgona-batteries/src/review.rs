@@ -292,7 +292,7 @@ async fn review_round(
     }
     let (diff_text, diff_truncated) = git::cap_diff(&diff.text, diff.overflowed);
     if diff_text.is_empty() && git_status.text.trim().is_empty() {
-        return ToolOutcome::Ok(ToolOutput::from_text("No changes to review."));
+        return ToolOutcome::Ok(Box::new(ToolOutput::from_text("No changes to review.")));
     }
     let earlier = rounds::earlier_identities(&records, work_round.session);
     let content = reply::review_content(
@@ -348,7 +348,7 @@ async fn review_round(
         new,
         diff_truncated,
     ) {
-        Ok(text) => ToolOutcome::Ok(ToolOutput::from_text(text)),
+        Ok(text) => ToolOutcome::Ok(Box::new(ToolOutput::from_text(text))),
         Err(error) => ToolOutcome::Err(dal_agent::ToolError::message(error.to_string())),
     }
 }

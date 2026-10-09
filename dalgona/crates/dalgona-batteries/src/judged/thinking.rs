@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
 use dal_agent::ext::HookCx;
 use dal_core::ext::BeforeRequest;
 use dal_core::{Notice, RequestParams, ThinkingLevel};

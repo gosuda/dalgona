@@ -363,7 +363,7 @@ impl SessionState {
                 if self.config.loop_guard.enabled {
                     clear_pending_attempts(&mut self.guard);
                 }
-                self.last_stop = stop_kind(&event.stop);
+                self.last_stop = stop_kind(event.stop);
                 self.turn_tool_called = false;
                 self.publish_status();
                 let _ = reply.send(());
@@ -707,11 +707,13 @@ impl SessionState {
             name,
             args,
             store,
-            &ctx,
-            &todos,
-            &inflight,
-            self.services.as_ref(),
-            &self.caller,
+            &adapter::GoalCx {
+                ctx: &ctx,
+                todos: &todos,
+                inflight: &inflight,
+                services: self.services.as_ref(),
+                caller: &self.caller,
+            },
         )
         .await
     }
@@ -746,12 +748,6 @@ impl SessionState {
                 None,
                 super::agents_tool::NO_NESTED_RUNS,
             ));
-        }
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct ReportArgs {
-            status: String,
-            report: String,
         }
         let input: ReportArgs = sonic_rs::from_str(args)
             .map_err(|error| ServiceError::failed(None, error.to_string()))?;
@@ -1031,14 +1027,13 @@ impl SessionState {
     }
 
     async fn list_agents(&self, requested: Vec<String>) -> Result<String, ServiceError> {
-        let agents = match self.services.agents(&self.caller, AgentsOp::List).await? {
-            AgentsReply::Listed(agents) => agents,
-            _ => {
-                return Err(ServiceError::failed(
-                    None,
-                    "agents service returned an unexpected reply",
-                ));
-            }
+        let AgentsReply::Listed(agents) =
+            self.services.agents(&self.caller, AgentsOp::List).await?
+        else {
+            return Err(ServiceError::failed(
+                None,
+                "agents service returned an unexpected reply",
+            ));
         };
         let filtered = agents.iter().filter(|agent| {
             requested.is_empty() || requested.iter().any(|id| id == &agent.id.to_string())
@@ -1053,6 +1048,96 @@ impl SessionState {
         })
     }
 
+    /// Resolves one step's item list from literals or an earlier step's report.
+    fn step_items(
+        step: &super::workflow::Step,
+        reports: &[super::workflow::StepResult],
+    ) -> Result<Vec<Option<String>>, ServiceError> {
+        match &step.items {
+            super::workflow::Items::Task => Ok(vec![None]),
+            super::workflow::Items::Literal(items) => {
+                Ok(items.iter().map(|item| Some(item.clone())).collect())
+            }
+            super::workflow::Items::From(source_name) => {
+                let source = reports.iter().find(|result| result.name == *source_name);
+                let Some(text) = source.and_then(|found| found.task_report.as_deref()) else {
+                    return Ok(Vec::new());
+                };
+                let items = super::pool::split_items(text);
+                if items.len() > super::pool::ITEM_LINES_LIMIT {
+                    return Err(ServiceError::failed(
+                        None,
+                        super::pool::too_many_items(source_name.as_str(), items.len()),
+                    ));
+                }
+                Ok(items.into_iter().map(Some).collect())
+            }
+        }
+    }
+
+    /// Runs one workflow item as a named child and returns its report text.
+    async fn run_item(
+        &mut self,
+        call: CallId,
+        step: &super::workflow::Step,
+        item: Option<&str>,
+        item_index: usize,
+        reports: &[super::workflow::StepResult],
+    ) -> Result<String, ServiceError> {
+        let prompt = super::workflow::render::render(step, item, reports, None, JobId::new_v7());
+        let task_name = item.map_or_else(
+            || step.name.clone(),
+            |item| super::pool::item_label(&step.name, item_index, item),
+        );
+        let preamble = super::pool::preamble(&task_name, &prompt);
+        let mut tool_names = Vec::new();
+        for tool in &step.tools {
+            tool_names.push(
+                Name::parse(tool).map_err(|error| ServiceError::failed(None, error.to_string()))?,
+            );
+        }
+        tool_names.push(
+            Name::parse("report").map_err(|error| ServiceError::failed(None, error.to_string()))?,
+        );
+        let start = dal_core::AgentStart {
+            call,
+            name: task_name.clone().into_boxed_str(),
+            prompt: preamble.into_boxed_str(),
+            model: step.model.clone().map(String::into_boxed_str),
+            role: step.role.clone().map(String::into_boxed_str),
+            system: step.system.clone().map(String::into_boxed_str),
+            tools: Some(tool_names.into_boxed_slice()),
+            workspace: None,
+        };
+        let AgentsReply::Started { id: child } = self
+            .services
+            .agents(&self.caller, AgentsOp::Start(start))
+            .await?
+        else {
+            return Err(ServiceError::failed(
+                None,
+                "agents service did not start the child",
+            ));
+        };
+        let AgentsReply::Await { report } = self
+            .services
+            .agents(
+                &self.caller,
+                AgentsOp::Await {
+                    id: child,
+                    timeout: None,
+                },
+            )
+            .await?
+        else {
+            return Err(ServiceError::failed(
+                None,
+                "agents service did not return the child report",
+            ));
+        };
+        Ok(report.text.to_string())
+    }
+
     async fn run_workflow(
         &mut self,
         call: CallId,
@@ -1060,132 +1145,34 @@ impl SessionState {
         workflow: super::workflow::Workflow,
     ) -> Result<String, ServiceError> {
         let mut reports = Vec::new();
-        for (step_index, step) in workflow.steps.iter().enumerate() {
-            let from_items;
-            let items = match &step.items {
-                super::workflow::Items::Task => vec![None],
-                super::workflow::Items::Literal(items) => items.iter().map(Some).collect(),
-                super::workflow::Items::From(source) => {
-                    let source = reports
-                        .iter()
-                        .find(|result: &&super::workflow::StepResult| result.name == *source);
-                    let Some(source) = source else {
-                        reports.push(super::workflow::StepResult {
-                            name: step.name.clone(),
-                            task_report: None,
-                            pool_items: Some(Vec::new()),
-                        });
-                        continue;
-                    };
-                    let Some(text) = source.task_report.as_deref() else {
-                        reports.push(super::workflow::StepResult {
-                            name: step.name.clone(),
-                            task_report: None,
-                            pool_items: Some(Vec::new()),
-                        });
-                        continue;
-                    };
-                    let items = super::pool::split_items(text);
-                    if items.len() > super::pool::ITEM_LINES_LIMIT {
-                        return Err(ServiceError::failed(
-                            None,
-                            super::pool::too_many_items(source.name.as_str(), items.len()),
-                        ));
-                    }
-                    from_items = items;
-                    from_items.iter().map(Some).collect()
-                }
-            };
+        for step in &workflow.steps {
+            let items = Self::step_items(step, &reports)?;
+            if items.is_empty() && matches!(step.items, super::workflow::Items::From(_)) {
+                reports.push(super::workflow::StepResult {
+                    name: step.name.clone(),
+                    task_report: None,
+                    pool_items: Some(Vec::new()),
+                });
+                continue;
+            }
             let mut item_results = Vec::new();
             let mut task_report = None;
             for (item_index, item) in items.iter().enumerate() {
-                let dependency_reports = reports.clone();
-                let prompt = super::workflow::render::render(
-                    step,
-                    item.map(String::as_str),
-                    &dependency_reports,
-                    None,
-                    JobId::new_v7(),
-                );
-                let task_name = item.map_or_else(
-                    || step.name.clone(),
-                    |item| super::pool::item_label(&step.name, item_index, item),
-                );
-                let preamble = super::pool::preamble(&task_name, &prompt);
-                let mut tool_names = Vec::new();
-                for tool in &step.tools {
-                    tool_names.push(
-                        Name::parse(tool)
-                            .map_err(|error| ServiceError::failed(None, error.to_string()))?,
-                    );
-                }
-                tool_names.push(
-                    Name::parse("report")
-                        .map_err(|error| ServiceError::failed(None, error.to_string()))?,
-                );
                 let child_call = CallId::new(format!("{call}-{}-{item_index}", step.name));
-                let start = dal_core::AgentStart {
-                    call: child_call,
-                    name: task_name.clone().into_boxed_str(),
-                    prompt: preamble.into_boxed_str(),
-                    model: step.model.clone().map(String::into_boxed_str),
-                    role: step.role.clone().map(String::into_boxed_str),
-                    system: step.system.clone().map(String::into_boxed_str),
-                    tools: Some(tool_names.into_boxed_slice()),
-                    workspace: None,
-                };
-                let child = match self
-                    .services
-                    .agents(&self.caller, AgentsOp::Start(start))
-                    .await?
-                {
-                    AgentsReply::Started { id } => id,
-                    _ => {
-                        return Err(ServiceError::failed(
-                            None,
-                            "agents service did not start the child",
-                        ));
-                    }
-                };
-                let report = match self
-                    .services
-                    .agents(
-                        &self.caller,
-                        AgentsOp::Await {
-                            id: child,
-                            timeout: None,
-                        },
-                    )
-                    .await?
-                {
-                    AgentsReply::Await { report } => report,
-                    _ => {
-                        return Err(ServiceError::failed(
-                            None,
-                            "agents service did not return the child report",
-                        ));
-                    }
-                };
+                let report = self
+                    .run_item(child_call, step, item.as_deref(), item_index, &reports)
+                    .await?;
                 if item.is_none() {
-                    task_report = Some(report.text.clone());
+                    task_report = Some(report.clone().into_boxed_str());
                 }
                 item_results.push(super::workflow::PoolItemResult {
-                    item: item.map_or_else(
-                        || step.name.clone().into_boxed_str(),
-                        |item| item.clone().into_boxed_str(),
-                    ),
+                    item: item
+                        .clone()
+                        .unwrap_or_else(|| step.name.clone())
+                        .into_boxed_str(),
                     state: "done".into(),
-                    summary: super::delivery::preview(&report.text, 200).into_boxed_str(),
+                    summary: super::delivery::preview(&report, 200).into_boxed_str(),
                 });
-                let result = super::pool::TaskResult {
-                    id: JobId::new_v7(),
-                    state: super::pool::TaskState::Done(super::agents_tool::Report {
-                        status: ReportStatus::Done,
-                        text: report.text.to_string(),
-                    }),
-                    changed: Vec::new(),
-                };
-                let _ = result;
             }
             reports.push(super::workflow::StepResult {
                 name: step.name.clone(),
@@ -1195,7 +1182,6 @@ impl SessionState {
                     _ => Some(item_results),
                 },
             });
-            let _ = step_index;
         }
         let full = reports
             .iter()
@@ -1449,7 +1435,14 @@ impl StatusPoll for Status {
     }
 }
 
-fn stop_kind(stop: &dal_core::Stop) -> StopKind {
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReportArgs {
+    status: String,
+    report: String,
+}
+
+fn stop_kind(stop: dal_core::Stop) -> StopKind {
     match stop {
         dal_core::Stop::EndTurn => StopKind::Completed,
         dal_core::Stop::Length | dal_core::Stop::MaxSteps => StopKind::Length,

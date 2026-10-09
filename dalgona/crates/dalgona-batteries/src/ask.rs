@@ -333,18 +333,18 @@ async fn run(call: ToolCall, cx: ToolCx<'_>) -> ToolOutcome {
         };
         let Some(answer) = answer else {
             if lines.is_empty() {
-                return ToolOutcome::Ok(ToolOutput::from_text(NO_ANSWER));
+                return ToolOutcome::Ok(Box::new(ToolOutput::from_text(NO_ANSWER)));
             }
             let rest: Vec<&str> = args.questions[index..]
                 .iter()
                 .map(|question| question.header.as_str())
                 .collect();
             lines.push(format!("Unanswered: {}", rest.join(", ")));
-            return ToolOutcome::Ok(ToolOutput::from_text(lines.join("\n")));
+            return ToolOutcome::Ok(Box::new(ToolOutput::from_text(lines.join("\n"))));
         };
         lines.push(format!("{}: {}", question.header, answer));
     }
-    ToolOutcome::Ok(ToolOutput::from_text(lines.join("\n")))
+    ToolOutcome::Ok(Box::new(ToolOutput::from_text(lines.join("\n"))))
 }
 
 /// Builds the bundled ask extension. Registration performs no I/O.

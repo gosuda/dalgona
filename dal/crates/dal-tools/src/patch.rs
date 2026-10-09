@@ -260,7 +260,7 @@ impl PatchTool {
         let mut plan = match write::plan(&session, style, &payload).await {
             Ok(plan) => plan,
             Err(error) => {
-                return ToolOutcome::Ok(ToolOutput::from_text(error.message.as_str()));
+                return ToolOutcome::Ok(Box::new(ToolOutput::from_text(error.message.as_str())));
             }
         };
         let observers: Vec<Arc<dyn ir::EditObserver>> = self.observer.clone().into_iter().collect();
@@ -270,7 +270,7 @@ impl PatchTool {
             .iter()
             .find(|finding| finding.severity == ir::FindingSeverity::Block)
         {
-            return ToolOutcome::Ok(ToolOutput::from_text(blocked.text.as_ref()));
+            return ToolOutcome::Ok(Box::new(ToolOutput::from_text(blocked.text.as_ref())));
         }
         // Staged observers run inside commit; approval binds the exact plan.
         // Preview carries paths, operations, before/after digests, hunks,
@@ -284,7 +284,7 @@ impl PatchTool {
                 let text = output.text.clone();
                 // Dirty the search index before returning (best-effort; index
                 // owner supplies the exact dirty handle once its public API lands).
-                ToolOutcome::Ok(ToolOutput::from_text(text.as_str()))
+                ToolOutcome::Ok(Box::new(ToolOutput::from_text(text.as_str())))
             }
             Err(deny) => ToolOutcome::Err(dal_agent::ToolError::Denied(deny)),
         }
