@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
 use std::sync::Arc;
 
 use dal_agent::ext::BoxFuture;

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
-#[path = "support/mod.rs"]
-use gates::support::*;
+//! dalgona success-criterion gate tests.
 
+use gates::support;
 use std::time::Duration;
 
 #[test]

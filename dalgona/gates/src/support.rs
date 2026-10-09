@@ -1,5 +1,5 @@
-//! Shared helpers for the gate test binaries.
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
+//! Shared helpers for the gate test binaries.
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 

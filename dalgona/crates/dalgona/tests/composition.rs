@@ -1,5 +1,9 @@
-//! Composition gates for the dalgona product.
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
+//! Composition gates for the dalgona product.
+#![expect(
+    clippy::disallowed_methods,
+    reason = "gate runs the real product binaries"
+)]
 use std::collections::BTreeSet;
 use std::error::Error;
 use std::fs;

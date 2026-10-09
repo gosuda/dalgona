@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
-#[path = "support/mod.rs"]
-use gates::support::*;
+//! dalgona success-criterion gate tests.
+use gates::support;
 
 #[test]
 fn experimental_battery_is_a_no_op() -> support::TestResult<()> {
