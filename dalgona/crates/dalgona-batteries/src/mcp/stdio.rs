@@ -12,8 +12,8 @@ use dal_core::RawJson;
 use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
 use sonic_rs::JsonValueTrait;
 use tokio::{
-    io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
-    process::{ChildStderr, ChildStdin, ChildStdout, Command},
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader},
+    process::{ChildStdin, ChildStdout, Command},
     sync::{Mutex, mpsc},
     time::timeout,
 };
@@ -149,6 +149,10 @@ impl StdioTransport {
         let stdin = Arc::new(Mutex::new(Some(stdin)));
         let pending = Arc::new(Mutex::new(HashMap::new()));
         let cancel = CancellationToken::new();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "stdio server owns the abort-on-drop stdout drain"
+        )]
         let reader_task = AbortOnDropHandle::new(tokio::spawn(read_stdout(
             stdout,
             Arc::clone(&child),

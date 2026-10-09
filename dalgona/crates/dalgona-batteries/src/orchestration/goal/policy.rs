@@ -97,8 +97,6 @@ pub(crate) struct VerdictInput<'a> {
     pub(crate) goal: &'a Goal,
     /// Where the decision runs.
     pub(crate) path: GoalPath,
-    /// Whether the session is idle.
-    pub(crate) idle: bool,
     /// Whether a user message is pending.
     pub(crate) pending_user_messages: bool,
     /// Whether a continuation is already scheduled.

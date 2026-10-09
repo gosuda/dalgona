@@ -868,10 +868,6 @@ impl SessionState {
         }
         let todos = self.todo_summary().await?;
         let inflight = self.inflight_counts().await?;
-        let idle = match self.services.turn(&self.caller, TurnOp::IsIdle).await? {
-            dal_core::TurnOpReply::Idle(value) => value,
-            _ => false,
-        };
         let now = dal_core::Timestamp::now();
         let signature = {
             let Some(goal) = self
@@ -904,7 +900,6 @@ impl SessionState {
             let input = super::goal::policy::VerdictInput {
                 goal,
                 path: super::goal::policy::GoalPath::AfterTurn,
-                idle,
                 pending_user_messages: false,
                 continuation_pending: self.goal_timer.is_some(),
                 last_turn_context_overflow: false,
@@ -913,7 +908,6 @@ impl SessionState {
             };
             super::goal::policy::verdict(&input)
         };
-        let mut prompt_text = None;
         if let Some(store) = self.goal.as_mut()
             && let Some(sidecar) = store.sidecar.as_mut()
             && let Some(goal) = sidecar.goal.as_mut()
@@ -922,12 +916,12 @@ impl SessionState {
                 super::goal::policy::Verdict::Continue { prompt, stall } => {
                     let live_parts = Self::live_parts(&inflight);
                     let number = goal.unattended.saturating_add(1);
-                    prompt_text = Some(super::goal::prompt::build_prompt(
+                    let prompt_text = super::goal::prompt::build_prompt(
                         goal,
                         prompt,
                         number,
                         if stall { &live_parts } else { &[] },
-                    ));
+                    );
                     super::goal::policy::record_goal_turn(
                         goal,
                         &event.reply_text,
@@ -938,15 +932,13 @@ impl SessionState {
                         prompt,
                     );
                     goal.updated_at = now;
-                    self.goal_timer = prompt_text.take().map(|text| {
-                        (
-                            TokioInstant::now()
-                                + std::time::Duration::from_millis(
-                                    super::goal::policy::CONTINUATION_DELAY_MS,
-                                ),
-                            text,
-                        )
-                    });
+                    self.goal_timer = Some((
+                        TokioInstant::now()
+                            + std::time::Duration::from_millis(
+                                super::goal::policy::CONTINUATION_DELAY_MS,
+                            ),
+                        prompt_text,
+                    ));
                 }
                 super::goal::policy::Verdict::Deny(reason) => {
                     if let Some(blocked) = reason.mechanical_reason() {
