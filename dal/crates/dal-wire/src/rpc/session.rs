@@ -346,14 +346,6 @@ pub(crate) async fn submit(
     let raw = params
         .get("command")
         .ok_or_else(|| invalid_params("session/submit", "missing member `command`"))?;
-    if let Some(tag) = raw.get("type").and_then(|value| value.as_str())
-        && !is_command(tag)
-    {
-        return Err(invalid_params(
-            "session/submit",
-            format!(r#"unknown command type "{tag}""#),
-        ));
-    }
     let command: Command = decode_params("session/submit", raw)?;
     let agent = agent_for(host, state, id).await?;
     let reply = agent
@@ -376,14 +368,6 @@ pub(crate) async fn answer(
     let raw = params
         .get("answer")
         .ok_or_else(|| invalid_params("session/answer", "missing member `answer`"))?;
-    if let Some(tag) = raw.get("type").and_then(|value| value.as_str())
-        && !is_answer(tag)
-    {
-        return Err(invalid_params(
-            "session/answer",
-            format!(r#"unknown answer type "{tag}""#),
-        ));
-    }
     let answer: dal_core::Answer = decode_params("session/answer", raw)?;
     let agent = agent_for(host, state, id).await?;
     agent
@@ -464,32 +448,4 @@ async fn replace_sub(state: &Arc<Mutex<Conn>>, id: SessionId) -> u64 {
         token.cancel();
     }
     fence
-}
-
-/// Known command discriminator values.
-fn is_command(tag: &str) -> bool {
-    matches!(
-        tag,
-        "prompt"
-            | "steer"
-            | "follow_up"
-            | "cancel"
-            | "set_model"
-            | "set_thinking"
-            | "set_approval"
-            | "compact"
-            | "move_leaf"
-            | "fork"
-            | "clone"
-            | "rename"
-            | "run"
-    )
-}
-
-/// Known answer discriminator values.
-fn is_answer(tag: &str) -> bool {
-    matches!(
-        tag,
-        "approve" | "approve_for_session" | "decline" | "cancel" | "value"
-    )
 }

@@ -203,7 +203,7 @@ async fn unknown_types_rejected() {
         assert_error(
             &command,
             -32602,
-            r#"invalid params for session/submit: unknown command type "frobnicate""#,
+            "invalid params for session/submit: unknown `type` variant `frobnicate`",
         );
         let answer = rpc
             .call(
@@ -219,7 +219,7 @@ async fn unknown_types_rejected() {
         assert_error(
             &answer,
             -32602,
-            r#"invalid params for session/answer: unknown answer type "maybe""#,
+            "invalid params for session/answer: unknown `type` variant `maybe`",
         );
         let after = rpc
             .call(5, "session/view", sonic_rs::json!({"sessionId": session}))
@@ -303,6 +303,122 @@ async fn malformed_optional_members_are_invalid_params() {
             &reply,
             -32602,
             "invalid params for session/list: params must be an object",
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn every_command_tag_reaches_the_decoder() {
+    let rig = rig(&[]).await;
+    let ws = rig.ws();
+    let tags = [
+        "prompt",
+        "steer",
+        "follow_up",
+        "cancel_queued",
+        "cancel",
+        "set_model",
+        "set_thinking",
+        "set_approval",
+        "set_mode",
+        "compact",
+        "move_leaf",
+        "fork",
+        "clone",
+        "rename",
+        "set_scoped_models",
+        "export",
+        "reload_plugins",
+        "run",
+    ];
+    with_rpc(&rig, async |mut rpc| {
+        initialize(&mut rpc).await;
+        let session = open(
+            &mut rpc,
+            1,
+            sonic_rs::json!({"type": "new", "workspace": ws}),
+        )
+        .await;
+        for (id, tag) in (2..).zip(tags) {
+            let reply = rpc
+                .call(
+                    id,
+                    "session/submit",
+                    sonic_rs::json!({"sessionId": session, "command": {"type": tag}}),
+                )
+                .await;
+            let message = reply["error"]["message"].as_str().unwrap_or_default();
+            assert!(
+                !message.contains("unknown"),
+                "tag {tag} was refused before decoding: {reply}"
+            );
+        }
+        let unknown = rpc
+            .call(
+                100,
+                "session/submit",
+                sonic_rs::json!({"sessionId": session, "command": {"type": "frobnicate"}}),
+            )
+            .await;
+        assert_error(
+            &unknown,
+            -32602,
+            "invalid params for session/submit: unknown `type` variant `frobnicate`",
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn commands_beyond_the_old_allowlist_run_over_rpc() {
+    let rig = rig(&[]).await;
+    let ws = rig.ws();
+    with_rpc(&rig, async |mut rpc| {
+        initialize(&mut rpc).await;
+        let session = open(
+            &mut rpc,
+            1,
+            sonic_rs::json!({"type": "new", "workspace": ws}),
+        )
+        .await;
+        let done = sonic_rs::json!({"type": "done", "output": {"type": "nothing"}});
+        let mode = rpc
+            .call(
+                2,
+                "session/submit",
+                sonic_rs::json!({
+                    "sessionId": session,
+                    "command": {"type": "set_mode", "mode": "normal", "save": "session_only"},
+                }),
+            )
+            .await;
+        assert_eq!(result(&mode), &done);
+        let scoped = rpc
+            .call(
+                3,
+                "session/submit",
+                sonic_rs::json!({
+                    "sessionId": session,
+                    "command": {"type": "set_scoped_models", "scopedModels": []},
+                }),
+            )
+            .await;
+        assert_eq!(result(&scoped), &done);
+        let queued = rpc
+            .call(
+                4,
+                "session/submit",
+                sonic_rs::json!({
+                    "sessionId": session,
+                    "command": {"type": "cancel_queued", "turn": 1},
+                }),
+            )
+            .await;
+        assert_error(
+            &queued,
+            -32602,
+            "invalid params for session/submit: turn 1 has no queued follow-up. If the follow-up already started, cancel its turn instead.",
         );
     })
     .await;
