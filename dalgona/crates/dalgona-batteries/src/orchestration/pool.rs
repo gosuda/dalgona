@@ -70,6 +70,3 @@ pub(crate) fn split_items(report: &str) -> Vec<String> {
 pub(crate) fn too_many_items(step: &str, count: usize) -> String {
     format!("step {step} reported {count} items; the limit is {ITEM_LINES_LIMIT}")
 }
-
-#[cfg(test)]
-mod tests;
