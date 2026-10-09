@@ -517,6 +517,7 @@ impl ExecTool {
             cwd: validated.cwd.clone(),
             timeout: validated.timeout,
             env: shell::provenance_environment(&thread_id, call.id.as_str()),
+            stdout_prefix_limit: 0,
         };
         let mut proc = match cx.spawn(&spawn_argv, opts, approved) {
             Ok(proc) => proc,

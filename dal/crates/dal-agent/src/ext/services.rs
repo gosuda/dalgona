@@ -380,6 +380,7 @@ impl Services for SessionServices {
                         )
                     })
                     .collect(),
+                stdout_prefix_limit: usize::try_from(req.stdout_prefix_limit).unwrap_or(usize::MAX),
             };
             let mut child = self
                 .rt

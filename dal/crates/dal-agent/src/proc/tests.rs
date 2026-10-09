@@ -54,6 +54,7 @@ async fn proc_spawns_captures_output_and_reports_bounded_env() {
         cwd: temp.path().to_path_buf(),
         timeout: None,
         env: Vec::new(),
+        stdout_prefix_limit: 0,
     };
     let mut proc = launch(
         &shell_argv("printf 'a\\nb\\nc\\n'; printf \"NO_COLOR=$NO_COLOR TERM=$TERM PAGER=$PAGER DAL_NESTED=$DAL_NESTED\"; read line || true"),
@@ -115,6 +116,7 @@ async fn proc_timeout_uses_stop_ladder_and_reports_timed_out() {
         cwd: temp.path().to_path_buf(),
         timeout: Some(Duration::from_secs(1)),
         env: Vec::new(),
+        stdout_prefix_limit: 0,
     };
     let mut proc = launch(
         &shell_argv("sleep 30"),
@@ -148,6 +150,7 @@ async fn proc_cancellation_kills_tree_and_settles_once() {
         cwd: temp.path().to_path_buf(),
         timeout: None,
         env: Vec::new(),
+        stdout_prefix_limit: 0,
     };
     let mut proc = launch(
         &shell_argv("sleep 30 & wait"),
@@ -186,6 +189,7 @@ async fn proc_wait_sweeps_grandchild_holding_pipe_before_capture_join() {
         cwd: temp.path().to_path_buf(),
         timeout: None,
         env: Vec::new(),
+        stdout_prefix_limit: 0,
     };
     // The background sleeper inherits the pipe write ends while the leader
     // exits 0 at once. Without the wait-path sweep, capture would hold EOF
@@ -242,6 +246,7 @@ async fn approved_scope_allows_matching_call_digest_and_roots() {
         cwd: temp.path().to_path_buf(),
         timeout: None,
         env: Vec::new(),
+        stdout_prefix_limit: 0,
     };
     let mut proc = spawn_process(
         &shell_argv("true"),
@@ -266,6 +271,44 @@ async fn approved_scope_allows_matching_call_digest_and_roots() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn spawn_keeps_the_requested_stdout_prefix_and_flags_only_real_overflow() {
+    let temp = tempfile::tempdir().expect("temp workspace");
+    let workspace = test_workspace(&temp);
+    let mut results = Vec::new();
+    for (name, limit) in [("fits", 64), ("overflows", 4)] {
+        let call = CallId::new(format!("test-prefix-{name}"));
+        let digest = Some([3_u8; 32]);
+        let approved = approved_for(&call, digest, vec![temp.path().to_path_buf()]);
+        let opts = SpawnOpts {
+            cwd: temp.path().to_path_buf(),
+            timeout: None,
+            env: Vec::new(),
+            stdout_prefix_limit: limit,
+        };
+        let mut proc = spawn_process(
+            &shell_argv("printf ' M a.rs\\n'"),
+            call,
+            opts,
+            &approved,
+            digest,
+            &workspace,
+            &temp.path().join("jobs"),
+            &[],
+            &Launcher::Direct,
+            test_permit().await,
+            None,
+        )
+        .expect("spawn with a prefix limit starts");
+        results.push(proc.wait(&CancellationToken::new()).await.expect("wait"));
+    }
+    assert_eq!(results[0].stdout_prefix.as_ref(), b" M a.rs\n");
+    assert!(!results[0].stdout_prefix_overflowed);
+    assert_eq!(results[1].stdout_prefix.as_ref(), b" M a");
+    assert!(results[1].stdout_prefix_overflowed);
+}
+
 #[tokio::test]
 async fn approved_scope_denies_digest_mismatch_without_spawning() {
     let temp = tempfile::tempdir().expect("temp workspace");
@@ -277,6 +320,7 @@ async fn approved_scope_denies_digest_mismatch_without_spawning() {
         cwd: temp.path().to_path_buf(),
         timeout: None,
         env: Vec::new(),
+        stdout_prefix_limit: 0,
     };
     let result = spawn_process(
         &shell_argv("true"),
@@ -309,6 +353,7 @@ async fn approved_scope_denies_foreign_call_without_spawning() {
         cwd: temp.path().to_path_buf(),
         timeout: None,
         env: Vec::new(),
+        stdout_prefix_limit: 0,
     };
     let result = spawn_process(
         &shell_argv("true"),
@@ -340,6 +385,7 @@ async fn approved_scope_denies_cwd_outside_roots_without_spawning() {
         cwd: temp.path().to_path_buf(),
         timeout: None,
         env: Vec::new(),
+        stdout_prefix_limit: 0,
     };
     let result = spawn_process(
         &shell_argv("true"),

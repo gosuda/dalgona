@@ -209,6 +209,7 @@ struct SpawnRecord {
     argv: Vec<OsString>,
     cwd: PathBuf,
     env: Vec<(OsString, OsString)>,
+    stdout_prefix_limit: usize,
 }
 
 type SpawnLog = Mutex<Vec<SpawnRecord>>;
@@ -314,6 +315,7 @@ impl ToolCxRuntime for FakeRt {
             argv: argv.to_vec(),
             cwd: opts.cwd,
             env: opts.env,
+            stdout_prefix_limit: opts.stdout_prefix_limit,
         });
         Err(crate::error::ToolError::Spawn {
             path: argv.first().map(PathBuf::from).unwrap_or_default(),
@@ -826,6 +828,35 @@ async fn run_checks_call_grant_then_exec_ladder() {
     assert!(matches!(error, ServiceError::Failed { .. }));
     assert_eq!(*fx.rt.ladder_asks.lock().unwrap(), 3);
     assert_eq!(fx.rt.spawns.lock().unwrap().len(), 4);
+}
+
+#[tokio::test]
+async fn run_hands_the_requested_stdout_prefix_limit_to_the_spawn() {
+    let fx = fixture(Duration::from_secs(30));
+    let workspace = fx.temp.path().to_path_buf();
+    fx.rt
+        .script
+        .lock()
+        .unwrap()
+        .push_back(AuthorizeScript::AskThenApprove {
+            prefix: vec![OsString::from("git")],
+            roots: vec![workspace.clone()],
+        });
+    let who = caller("focus", &["run"], Some(turn()));
+    let mut request = run_request(&["git", "status"], workspace);
+    request.stdout_prefix_limit = 4096;
+    let services = Arc::clone(&fx.services);
+    let call = spawn(async move { services.run(&who, request).await });
+    await_open(&fx.broker).await;
+    answer_next(&fx.broker, Answer::Approve);
+    let error = call.join().await.unwrap_err();
+    assert!(matches!(error, ServiceError::Failed { .. }));
+    let spawns = fx.rt.spawns.lock().unwrap();
+    assert_eq!(spawns.len(), 1);
+    assert_eq!(
+        spawns[0].stdout_prefix_limit, 4096,
+        "the child keeps the stdout prefix the caller asked for"
+    );
 }
 
 #[tokio::test]

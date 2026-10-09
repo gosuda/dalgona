@@ -115,6 +115,7 @@ impl GrantTool {
             cwd,
             timeout: None,
             env: Vec::new(),
+            stdout_prefix_limit: 0,
         }
     }
 
