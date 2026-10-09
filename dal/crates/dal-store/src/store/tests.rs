@@ -357,15 +357,13 @@ async fn live_journal_locks_at_once_for_same_process_open_and_aliased_store() {
 
     // The same data root reached through another spelling owns the same
     // holder: the registry keys canonicalize, so the aliased store fails
-    // fast instead of retrying the budget against an unseen lock.
-    let data = temp.path().join("data");
-    let alias = temp.path().join("data-alias");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&data, &alias).expect("alias the data root");
-    #[cfg(windows)]
-    std::os::windows::fs::symlink_dir(&data, &alias).expect("alias the data root");
+    // fast instead of retrying the budget against an unseen lock. The
+    // `..` alias needs an existing intermediate component but no symlink
+    // rights, so it works unprivileged on every runner.
+    let via = temp.path().join("via");
+    fs::create_dir(&via).expect("create alias intermediate");
     let aliased = Store::new(
-        alias,
+        via.join("..").join("data"),
         Workspace::new(temp.path().join("workspace")).expect("workspace path"),
         Product::Dalgona,
     );
