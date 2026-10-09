@@ -1,0 +1,35 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH dalgona-serve 1  "dalgona-serve " 
+.SH NAME
+dalgona\-serve \- Start the local control server or create its token.
+.SH SYNOPSIS
+\fBdalgona\-serve\fR [\fB\-\-bind\fR] [\fB\-\-port\fR] [\fB\-\-public\fR] [\fB\-\-token\-file\fR] [\fB\-\-a2a\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fIsubcommands\fR]
+.SH DESCRIPTION
+Start the local control server or create its token.
+.SH OPTIONS
+.TP
+\fB\-\-bind\fR \fI<ADDR>\fR
+Bind to ADDR instead of the configured address.
+.TP
+\fB\-\-port\fR \fI<PORT>\fR
+Listen on PORT instead of the configured port.
+.TP
+\fB\-\-public\fR
+Expose the listener beyond loopback; clients must use the token.
+.TP
+\fB\-\-token\-file\fR \fI<FILE>\fR
+Read the serve token from FILE.
+.TP
+\fB\-\-a2a\fR
+Enable the A2A surface.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.SH SUBCOMMANDS
+.TP
+dalgona\-serve\-token(1)
+Create or replace the serve bearer token.
+.TP
+dalgona\-serve\-help(1)
+Print this message or the help of the given subcommand(s)

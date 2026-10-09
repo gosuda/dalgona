@@ -22,6 +22,8 @@ dalgona-batteries = { version = "=0.1.0", path = "../dalgona-batteries" }
 thiserror = "=2.0.21"
 toml.workspace = true
 [dev-dependencies]
+clap = { version = "=4.6.7", features = ["derive", "string"] }
+clap_mangen = "=0.3.3"
 regex = "=1.13.1"
 
 [[bin]]
