@@ -45,7 +45,7 @@ use super::tool::{RawValue, Tool, ToolCxRuntime, ToolOutcome};
 use super::{Caller, CallerKind};
 use crate::Broker;
 use crate::broker::{Resolution, Settled};
-use crate::error::{ServiceError, ToolError};
+use crate::error::{SIDECAR_VALUE_LIMIT, ServiceError, ToolError};
 use crate::proc::{ProcResult, ProcStatus, SpawnOpts};
 use dal_core::ExitStatusKind;
 use dal_core::ext::{McpDeclaration, McpRequest, McpResponse};
@@ -468,7 +468,7 @@ pub const MCP_UNAVAILABLE_TEXT: &str =
 /// Fixed surface text for sidecar use in an ephemeral session.
 ///
 /// [`Services::sidecar`] returns the machine-readable
-/// `Denied(Unavailable { what: "sidecar" })`; front ends render this text
+/// `Denied(Unavailable { what: "sidecar (ephemeral session)" })`; front ends render this text
 /// next to it.
 pub const SIDECAR_EPHEMERAL_TEXT: &str = "sidecar is unavailable for ephemeral sessions";
 
@@ -745,16 +745,21 @@ impl Services for SessionServices {
             self.gated(&who, Service::Sidecar).await?;
             if self.ephemeral {
                 return Err(ServiceError::Denied(DenyReason::Unavailable {
-                    what: "sidecar".into(),
+                    what: "sidecar (ephemeral session)".into(),
                 }));
             }
             match op {
-                SidecarOp::Read { name } => self.backend.sidecar_read(&name).await,
-                SidecarOp::Write { name, bytes } => self
-                    .backend
-                    .sidecar_write(&name, bytes)
-                    .await
-                    .map(|()| None),
+                SidecarOp::Read { name } => self.backend.sidecar_read(who.ext(), &name).await,
+                SidecarOp::Write { name, bytes } => {
+                    let size = bytes.len() as u64;
+                    if size > SIDECAR_VALUE_LIMIT {
+                        return Err(ServiceError::sidecar_too_large(name.as_str(), size));
+                    }
+                    self.backend
+                        .sidecar_write(who.ext(), &name, bytes)
+                        .await
+                        .map(|()| None)
+                }
                 SidecarOp::Artifact { job, file, bytes } => self
                     .backend
                     .sidecar_artifact(job, file, bytes)

@@ -8,8 +8,8 @@
 use dal_core::ext::{McpDeclaration, McpRequest, McpResponse};
 use dal_core::{
     AgentsOp, AgentsReply, Answer, EntryId, FetchRequest, FetchResponse, Inference, JobsOp,
-    JobsReply, ModelRequest, Name, Notice, Question, Request, RunOutput, RunRequest, SidecarOp,
-    Site, StateError, StateOp, StateRecord, TurnOp, TurnOpReply, Visibility, Workspace,
+    JobsReply, ModelRequest, Name, Notice, Question, Request, RunOutput, RunRequest, SidecarName,
+    SidecarOp, Site, StateError, StateOp, StateRecord, TurnOp, TurnOpReply, Visibility, Workspace,
 };
 use dal_provider::EventStream;
 use std::collections::HashMap;
@@ -289,9 +289,14 @@ pub(crate) trait SessionBackend: Send + Sync + 'static {
     /// Reads a session blob by its raw BLAKE3 digest; missing content is `None`.
     fn blob_get(&self, digest: [u8; 32]) -> ServiceFuture<'_, Option<Vec<u8>>>;
     /// Reads one sidecar value, or `None` when absent.
-    fn sidecar_read(&self, name: &Name) -> ServiceFuture<'_, Option<Vec<u8>>>;
+    fn sidecar_read(&self, ext: &Name, name: &SidecarName) -> ServiceFuture<'_, Option<Vec<u8>>>;
     /// Writes one sidecar value atomically.
-    fn sidecar_write(&self, name: &Name, bytes: Vec<u8>) -> ServiceFuture<'_, ()>;
+    fn sidecar_write(
+        &self,
+        ext: &Name,
+        name: &SidecarName,
+        bytes: Vec<u8>,
+    ) -> ServiceFuture<'_, ()>;
     /// Applies one state operation inside the actor-owned map (R08).
     fn state(&self, op: StateOp) -> ServiceFuture<'_, Result<StateRecord, StateError>>;
     /// Runs one inference to completion.

@@ -17,8 +17,8 @@ use dal_core::ext::{McpBlock, McpDeclaration, McpServerDecl};
 use dal_core::{
     AgentsOp, AgentsReply, Answer, Budget, CallId, ClientId, DenyReason, EntryId, Inference, JobId,
     JobsOp, JobsReply, ModelRequest, ModelRoute, Name, OnError, Origin, Purpose, Question, RawJson,
-    RequestParams, ScopeSpec, Service, ServiceSet, SessionId, SidecarOp, Site, StateError, StateOp,
-    StateRecord, TurnId, TurnOp, TurnOpReply, Workspace,
+    RequestParams, ScopeSpec, Service, ServiceSet, SessionId, SidecarName, SidecarOp, Site,
+    StateError, StateOp, StateRecord, TurnId, TurnOp, TurnOpReply, Workspace,
 };
 use tokio::sync::watch;
 use tokio::task::JoinSet;
@@ -137,12 +137,17 @@ impl SessionBackend for FakeBackend {
         Box::pin(async move { Ok(reply) })
     }
 
-    fn sidecar_read(&self, _name: &Name) -> ServiceFuture<'_, Option<Vec<u8>>> {
+    fn sidecar_read(&self, _ext: &Name, _name: &SidecarName) -> ServiceFuture<'_, Option<Vec<u8>>> {
         let value = self.sidecar_value.lock().unwrap().clone();
         Box::pin(async move { Ok(value) })
     }
 
-    fn sidecar_write(&self, name: &Name, bytes: Vec<u8>) -> ServiceFuture<'_, ()> {
+    fn sidecar_write(
+        &self,
+        _ext: &Name,
+        name: &SidecarName,
+        bytes: Vec<u8>,
+    ) -> ServiceFuture<'_, ()> {
         assert!(
             !name.as_str().is_empty(),
             "sidecar name travels with the write"
@@ -686,7 +691,7 @@ async fn services_use_one_shared_capability_gate() {
     answer_next(&ghost.broker, Answer::Approve);
     match ephemeral.join().await {
         Err(ServiceError::Denied(DenyReason::Unavailable { what })) => {
-            assert_eq!(&*what, "sidecar");
+            assert_eq!(&*what, "sidecar (ephemeral session)");
             assert_eq!(
                 super::SIDECAR_EPHEMERAL_TEXT,
                 "sidecar is unavailable for ephemeral sessions",
@@ -695,6 +700,34 @@ async fn services_use_one_shared_capability_gate() {
         Err(other) => panic!("the denial names the wrong resource: {other:?}"),
         Ok(_) => panic!("expected an unavailable sidecar"),
     }
+}
+
+#[tokio::test]
+async fn sidecar_rejects_values_over_limit() {
+    let fx = fixture(Duration::from_secs(30));
+    let who = caller("focus", &["sidecar"], Some(turn()));
+    let services = Arc::clone(&fx.services);
+    let operation = spawn(async move {
+        services
+            .sidecar(
+                &who,
+                SidecarOp::Write {
+                    name: "large".parse().unwrap(),
+                    bytes: vec![0; 1_048_577],
+                },
+            )
+            .await
+    });
+    await_open(&fx.broker).await;
+    answer_next(&fx.broker, Answer::Approve);
+    let error = operation
+        .join()
+        .await
+        .expect_err("oversized sidecar refused");
+    assert_eq!(
+        error.to_string(),
+        ServiceError::sidecar_too_large("large", 1_048_577).to_string()
+    );
 }
 
 #[tokio::test]

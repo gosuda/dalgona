@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Keep goals across session reopen and report failed goal saves.
 - Show orchestration status as a short human-readable line in the activity row instead of a raw JSON object.
 - Show the plan battery status as one short line in the activity row, such as `planning · 3/5 done · writing tests`, instead of a raw JSON object.
 - Draw compacted history as images: for a model that reads images, compaction now emits the older journal as labeled PNG images with exact-text `letter://` records, reuses stored letters across compactions, and keeps stored text as text. The text summary still runs whenever the image path declines.

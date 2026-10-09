@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use dal_core::ext::{Mail as ExtMail, Service};
+use dal_core::ext::{Mail as ExtMail, Service, SidecarName};
 use dal_core::{
     AgentInfo, AgentReport, AgentState, AgentsOp, AgentsReply, BlobId, EntryId, FetchMethod,
     FetchRequest, FetchResponse, Inference, JobsOp, JobsReply, MailMode, ModelRequest, Name,
@@ -584,32 +584,45 @@ impl SessionBackend for Backend {
         })
     }
 
-    fn sidecar_read(&self, name: &Name) -> ServiceFuture<'_, Option<Vec<u8>>> {
+    fn sidecar_read(&self, ext: &Name, name: &SidecarName) -> ServiceFuture<'_, Option<Vec<u8>>> {
+        let ext = ext.clone();
         let name = name.clone();
         Box::pin(async move {
             let (tx, rx) = oneshot::channel();
-            let _ = self
-                .handle
-                .sidecar(crate::session::SidecarOp::Read { name, reply: tx })
-                .await;
-            Ok(rx.await.unwrap_or(None))
+            self.handle
+                .sidecar(crate::session::SidecarOp::Read {
+                    ext,
+                    name,
+                    reply: tx,
+                })
+                .await
+                .map_err(|error| ServiceError::failed(None, error.to_string()))?;
+            let result = rx.await.map_err(|_| record_session_closed())?;
+            result.map_err(|error| ServiceError::failed(Some(Service::Sidecar), error))
         })
     }
 
-    fn sidecar_write(&self, name: &Name, bytes: Vec<u8>) -> ServiceFuture<'_, ()> {
+    fn sidecar_write(
+        &self,
+        ext: &Name,
+        name: &SidecarName,
+        bytes: Vec<u8>,
+    ) -> ServiceFuture<'_, ()> {
+        let ext = ext.clone();
         let name = name.clone();
         Box::pin(async move {
             let (tx, rx) = oneshot::channel();
-            let _ = self
-                .handle
+            self.handle
                 .sidecar(crate::session::SidecarOp::Write {
+                    ext,
                     name,
                     bytes,
                     reply: tx,
                 })
-                .await;
-            let _ = rx.await;
-            Ok(())
+                .await
+                .map_err(|error| ServiceError::failed(None, error.to_string()))?;
+            let result = rx.await.map_err(|_| record_session_closed())?;
+            result.map_err(|error| ServiceError::failed(Some(Service::Sidecar), error))
         })
     }
 

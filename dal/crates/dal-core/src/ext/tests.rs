@@ -3,7 +3,7 @@ use super::{
     CommandName, EntryId, FetchMethod, FetchRequest, FetchResponse, HookEvent, HookMismatch,
     HookOutcome, HookVerdict, InputVerdict, JobId, Mail, MailMode, McpRequest, McpResponse, Name,
     Part, RUST_STREAM_EVENT, RawJson, RegistrationError, RepeatMode, RuleRecord, RunRequest,
-    RunRequestError, STAR_EVENTS, Service, ServiceSet, SessionId, Stop, StreamVerdict,
+    RunRequestError, STAR_EVENTS, Service, ServiceSet, SessionId, SidecarName, Stop, StreamVerdict,
     ToolCallEvent, ToolCallVerdict, ToolClass, TurnId, valid_tool_parameters, valid_version,
 };
 
@@ -29,6 +29,35 @@ fn rule_record(patterns: Vec<Box<str>>, repeat_gap: Option<u16>) -> RuleRecord {
         report: false,
         enabled: true,
     }
+}
+
+#[test]
+fn sidecar_name_enforces_file_name_grammar_and_serde() -> TestResult {
+    let maximum = "a".repeat(64);
+    assert_eq!(SidecarName::parse(&maximum)?.as_str(), maximum);
+    assert_eq!(SidecarName::parse("goal.json")?.as_str(), "goal.json");
+    assert_eq!(SidecarName::parse("a..b")?.as_str(), "a..b");
+    for invalid in [
+        "",
+        ".hidden",
+        "-leading-dash",
+        "..",
+        "bad/name",
+        "Bad.json",
+        &"a".repeat(65),
+    ] {
+        assert!(SidecarName::parse(invalid).is_err(), "{invalid:?}");
+        assert!(
+            sonic_rs::from_str::<SidecarName>(&format!("{invalid:?}")).is_err(),
+            "{invalid:?} must be rejected by serde"
+        );
+    }
+    let encoded = sonic_rs::to_string(&SidecarName::parse("goal.json")?)?;
+    assert_eq!(
+        sonic_rs::from_str::<SidecarName>(&encoded)?,
+        SidecarName::parse("goal.json")?
+    );
+    Ok(())
 }
 
 #[test]

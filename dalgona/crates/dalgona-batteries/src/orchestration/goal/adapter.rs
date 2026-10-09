@@ -2,7 +2,7 @@
 
 use dal_agent::error::ServiceError;
 use dal_agent::ext::{Caller, Services};
-use dal_core::{Name, SidecarOp, Timestamp};
+use dal_core::{SidecarName, SidecarOp, Timestamp};
 use serde::Deserialize;
 
 use super::super::ControllerMode;
@@ -54,7 +54,7 @@ struct UpdateArgs {
 struct GetArgs {}
 
 pub(crate) async fn load(services: &dyn Services, caller: &Caller, session: &str) -> GoalStore {
-    let Ok(name) = Name::parse("goal.json") else {
+    let Ok(name) = SidecarName::parse("goal.json") else {
         return failed_store(GoalError::StoreUnavailable {
             message: "the goal sidecar name is invalid".into(),
         });
@@ -186,7 +186,8 @@ pub(crate) async fn save(
     caller: &Caller,
     sidecar: &GoalSidecar,
 ) -> Result<(), ServiceError> {
-    let name = Name::parse("goal.json").map_err(|_| ServiceError::sidecar_bad_name("goal.json"))?;
+    let name =
+        SidecarName::parse("goal.json").map_err(|_| ServiceError::sidecar_bad_name("goal.json"))?;
     let bytes = encode_sidecar(sidecar).map_err(|error| goal_failure(&error))?;
     services
         .sidecar(caller, SidecarOp::Write { name, bytes })

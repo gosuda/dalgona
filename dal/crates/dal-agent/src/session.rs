@@ -20,7 +20,7 @@ pub(crate) mod status;
 pub(crate) mod subscriber;
 pub(crate) mod tasks;
 pub(crate) mod turn;
-use dal_core::ext::{Mail as ExtMail, Receipt};
+use dal_core::ext::{Mail as ExtMail, Receipt, SidecarName};
 use dal_core::{
     Answer, BlobId, ClientId, Command, EntryId, Name, Reply, RequestId, SessionId, TurnOp,
     TurnOpReply,
@@ -146,19 +146,23 @@ pub(crate) struct StateReq {
 pub(crate) enum SidecarOp {
     /// Read one sidecar value.
     Read {
+        /// The extension that owns the sidecar.
+        ext: Name,
         /// The sidecar name.
-        name: Name,
+        name: SidecarName,
         /// The stored bytes, absent when never written.
-        reply: oneshot::Sender<Option<Vec<u8>>>,
+        reply: oneshot::Sender<Result<Option<Vec<u8>>, Box<str>>>,
     },
     /// Write one sidecar value.
     Write {
+        /// The extension that owns the sidecar.
+        ext: Name,
         /// The sidecar name.
-        name: Name,
+        name: SidecarName,
         /// The bytes to store.
         bytes: Vec<u8>,
-        /// Write acknowledgement.
-        reply: oneshot::Sender<()>,
+        /// Write acknowledgement or storage error.
+        reply: oneshot::Sender<Result<(), Box<str>>>,
     },
 }
 

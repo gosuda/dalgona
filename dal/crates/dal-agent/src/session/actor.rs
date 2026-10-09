@@ -37,6 +37,7 @@ use crate::ext::hooks::{
 
 /// Bound for actor-to-driver effect batches.
 const DRIVER_CHANNEL: usize = 256;
+
 /// Fallback expiry sweep when no actor event arrives.
 const EXPIRY_TICK: Duration = Duration::from_secs(1);
 
@@ -233,7 +234,6 @@ pub(crate) struct Actor {
     shared: Arc<Shared>,
     control: Arc<Mutex<ControlCell>>,
     workspace: Workspace,
-    sidecar: HashMap<dal_core::Name, Vec<u8>>,
     /// The session's R08 compare-and-swap state, loaded lazily from its
     /// sidecar file on the first state operation.
     state: Option<StateMap>,
@@ -489,7 +489,6 @@ pub(crate) fn spawn(deps: ActorDeps) -> (SessionHandle, DriverPorts, tokio::task
         shared: deps.shared,
         control: Arc::clone(&control),
         workspace: deps.workspace,
-        sidecar: HashMap::new(),
         state: None,
         state_rev: 0,
         depth: deps.depth,
@@ -660,7 +659,7 @@ impl Actor {
                 self.on_work(work).await;
             }
             ActorRequest::Sidecar { op } => {
-                self.on_sidecar(op);
+                self.on_sidecar(op).await;
             }
             ActorRequest::State { req } => {
                 self.on_state(req).await;
@@ -1612,17 +1611,54 @@ impl Actor {
         Ok(record)
     }
 
-    /// Reads or writes one actor-owned sidecar value.
-    fn on_sidecar(&mut self, op: super::SidecarOp) {
+    /// Reads or writes one extension-scoped sidecar file.
+    async fn on_sidecar(&mut self, op: super::SidecarOp) {
         match op {
-            super::SidecarOp::Read { name, reply } => {
-                let _ = reply.send(self.sidecar.get(&name).cloned());
+            super::SidecarOp::Read { ext, name, reply } => {
+                let result = match self.journal.sidecar() {
+                    None => Err("the session has no sidecar store".into()),
+                    Some(sidecar) => {
+                        let sidecar = sidecar.for_extension(&ext);
+                        match sidecar.read(&name) {
+                            Ok(bytes) => Ok(Some(bytes)),
+                            Err(dal_store::StoreError::NotFound { .. }) => Ok(None),
+                            Err(error) => Err(error.to_string().into()),
+                        }
+                    }
+                };
+                let _ = reply.send(result);
             }
-            super::SidecarOp::Write { name, bytes, reply } => {
-                self.sidecar.insert(name, bytes);
-                let _ = reply.send(());
+            super::SidecarOp::Write {
+                ext,
+                name,
+                bytes,
+                reply,
+            } => {
+                let result = self.write_sidecar(&ext, &name, &bytes).await;
+                let _ = reply.send(result);
             }
         }
+    }
+
+    async fn write_sidecar(
+        &mut self,
+        ext: &dal_core::Name,
+        name: &dal_core::SidecarName,
+        bytes: &[u8],
+    ) -> Result<(), Box<str>> {
+        if self.journal.is_lazy() {
+            self.journal
+                .materialize()
+                .await
+                .map_err(|error| error.to_string().into_boxed_str())?;
+        }
+        let Some(sidecar) = self.journal.sidecar() else {
+            return Err("the session has no sidecar store".into());
+        };
+        sidecar
+            .for_extension(ext)
+            .write(name, bytes)
+            .map_err(|error| error.to_string().into_boxed_str())
     }
 
     /// Stores one mailbox message and reports its receipt.
@@ -1799,6 +1835,7 @@ fn local_runtime() -> Result<tokio::runtime::Runtime, AgentError> {
         .build()
         .map_err(|error| AgentError::Invalid(ValidationError::new(error.to_string())))
 }
+
 /// Core attribution for deadline and cancellation resolutions.
 fn core_client() -> ClientId {
     ClientId::new("core")

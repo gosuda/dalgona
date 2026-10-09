@@ -20,7 +20,7 @@ use dal_store::{BlobError, StoreError};
 const WAKE_LIMIT: u32 = 20;
 
 /// The most bytes one sidecar value may hold.
-const SIDECAR_VALUE_LIMIT: u64 = 1_048_576;
+pub(crate) const SIDECAR_VALUE_LIMIT: u64 = 1_048_576;
 
 /// The bounded resource an admission wait was waiting for.
 #[non_exhaustive]

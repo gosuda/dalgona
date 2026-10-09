@@ -42,10 +42,10 @@ pub use ext::{
     RUST_STREAM_EVENT, ReadView, Receipt, RegistrationError, RepeatMode, Revision, RuleFile,
     RuleRecord, RunOutput, RunRequest, RunRequestError, STAR_EVENTS, Scope, ScopeSpec,
     ScopeSpecError, ScopeUsage, SearchHit, SearchPage, Service, ServiceSet, SessionEnd,
-    SessionStart, Settled, SidecarOp, Site, SkillRecord, SourceRow, StateError, StateKey,
-    StateKeyError, StateNs, StateOp, StateRecord, StreamVerdict, SymbolHit, SymbolPage,
-    ToolCallEvent, ToolCallVerdict, ToolData, ToolResultEvent, ToolSpec, TurnOp, TurnOpReply,
-    UsesError, ViewNode, Visibility, WakeError, valid_tool_parameters, valid_version,
+    SessionStart, Settled, SidecarName, SidecarNameError, SidecarOp, Site, SkillRecord, SourceRow,
+    StateError, StateKey, StateKeyError, StateNs, StateOp, StateRecord, StreamVerdict, SymbolHit,
+    SymbolPage, ToolCallEvent, ToolCallVerdict, ToolData, ToolResultEvent, ToolSpec, TurnOp,
+    TurnOpReply, UsesError, ViewNode, Visibility, WakeError, valid_tool_parameters, valid_version,
 };
 pub use fold::{
     CompactLimits, CompactionExtRecord, CompactionReason, CompactionSummary, Effect, Emit, Event,

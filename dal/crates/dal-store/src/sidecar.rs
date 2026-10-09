@@ -2,6 +2,8 @@
 
 use std::{fs, io, path::PathBuf};
 
+use dal_core::{Name, SidecarName};
+
 use crate::{
     error::StoreError,
     layout::SessionPaths,
@@ -16,10 +18,25 @@ const RESERVED: [&str; 5] = ["journal.jsonl", "lock", "info.json", "blobs", "job
 pub struct Sidecar<'session> {
     paths: &'session SessionPaths,
 }
+/// Reads and atomically writes sidecars under one extension's private directory.
+#[derive(Debug)]
+pub struct ExtensionSidecar<'session> {
+    paths: &'session SessionPaths,
+    extension: Name,
+}
 
 impl<'session> Sidecar<'session> {
     pub(crate) fn new(paths: &'session SessionPaths) -> Self {
         Self { paths }
+    }
+
+    /// Returns a handle restricted to one extension's sidecar directory.
+    #[must_use]
+    pub fn for_extension(&self, extension: &Name) -> ExtensionSidecar<'_> {
+        ExtensionSidecar {
+            paths: self.paths,
+            extension: extension.clone(),
+        }
     }
 
     /// Atomically replaces the named sidecar with `bytes`, using mode 0600.
@@ -79,6 +96,45 @@ impl<'session> Sidecar<'session> {
             });
         }
         Ok(self.paths.sidecar(name))
+    }
+}
+
+impl ExtensionSidecar<'_> {
+    /// Atomically replaces the named extension sidecar with `bytes`, using mode 0600.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Io`] when atomic publication fails.
+    pub fn write(&self, name: &SidecarName, bytes: &[u8]) -> Result<(), StoreError> {
+        let directory = self.directory();
+        util::create_private_dir_all(&directory)
+            .map_err(|source| util::io_err(&directory, source))?;
+        util::sync_dir(self.paths.directory())?;
+        util::sync_dir(&self.paths.sidecar_dir())?;
+        util::write_atomic(&self.path(name), bytes, FileMode::Mode0600)
+    }
+
+    /// Reads the named extension sidecar bytes without decoding its payload.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::NotFound`] with the sidecar path when it is missing,
+    /// or [`StoreError::Io`] for another read failure.
+    pub fn read(&self, name: &SidecarName) -> Result<Vec<u8>, StoreError> {
+        let path = self.path(name);
+        match fs::read(&path) {
+            Ok(bytes) => Ok(bytes),
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                Err(StoreError::NotFound { path })
+            }
+            Err(source) => Err(util::io_err(&path, source)),
+        }
+    }
+
+    fn directory(&self) -> PathBuf {
+        self.paths.sidecar_dir().join(self.extension.as_str())
+    }
+
+    fn path(&self, name: &SidecarName) -> PathBuf {
+        self.directory().join(name.as_str())
     }
 }
 
@@ -192,6 +248,49 @@ mod tests {
             sidecar.read("state").expect("read replacement"),
             b"new value"
         );
+    }
+
+    #[test]
+    fn extension_sidecars_are_scoped_away_from_session_state() {
+        let (_root, paths) = sidecar();
+        let root = Sidecar::new(&paths);
+        let first_name = Name::parse("first").expect("valid extension name");
+        let second_name = Name::parse("second").expect("valid extension name");
+        let shared = SidecarName::parse("shared").expect("valid sidecar name");
+        let state = SidecarName::parse("state").expect("valid sidecar name");
+        let first = root.for_extension(&first_name);
+        let second = root.for_extension(&second_name);
+
+        root.write("state", b"session state")
+            .expect("write session state");
+        first
+            .write(&shared, b"first value")
+            .expect("write first value");
+        second
+            .write(&shared, b"second value")
+            .expect("write second value");
+        first
+            .write(&state, b"extension state")
+            .expect("write extension state");
+
+        assert_eq!(
+            first.read(&shared).expect("read first value"),
+            b"first value"
+        );
+        assert_eq!(
+            second.read(&shared).expect("read second value"),
+            b"second value"
+        );
+        assert_eq!(
+            root.read("state").expect("read session state"),
+            b"session state"
+        );
+        assert_eq!(
+            fs::read(paths.sidecar_dir().join("first").join("state"))
+                .expect("read extension state path"),
+            b"extension state"
+        );
+        assert!(!paths.directory().join("sidecar").join("state").exists());
     }
 
     #[test]

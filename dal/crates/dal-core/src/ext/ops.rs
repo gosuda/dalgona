@@ -1,6 +1,6 @@
 use super::{
     CallId, Deserialize, Deserializer, Duration, EntryId, JobId, JobOutcome, Name, RawJson,
-    Serialize, SessionId, Stop, Tagged, Workspace, de,
+    Serialize, SessionId, SidecarName, Stop, Tagged, Workspace, de,
 };
 
 /// Configuration for starting a child agent session.
@@ -457,12 +457,12 @@ pub enum SidecarOp {
     /// Reads a named sidecar value.
     Read {
         /// The sidecar name.
-        name: Name,
+        name: SidecarName,
     },
     /// Writes bytes to a named sidecar value.
     Write {
         /// The sidecar name.
-        name: Name,
+        name: SidecarName,
         /// The bytes to store.
         bytes: Vec<u8>,
     },
