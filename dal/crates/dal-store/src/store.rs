@@ -1470,15 +1470,26 @@ impl Journal {
         // lane close await so a same-process reopen keeps its bounded
         // retry through the whole release — not just the guard drop —
         // instead of reporting Locked while retirement queues behind
-        // slow shard work. Restored below if retirement fails.
-        let lock = match &self.state {
-            State::File { lock, .. } => Some(lock),
-            State::Broken { lock, .. } => lock.as_ref(),
-            _ => None,
+        // slow shard work.
+        let guards: Vec<&LockGuard> = {
+            let lock = match &self.state {
+                State::File { lock, .. } => Some(lock),
+                State::Broken { lock, .. } => lock.as_ref(),
+                _ => None,
+            };
+            lock.into_iter().chain(self.prelocked.iter()).collect()
         };
-        for guard in lock.into_iter().chain(self.prelocked.iter()) {
+        for guard in &guards {
             guard.mark_detached();
         }
+        // A cancelled or failed close leaves this journal owning the
+        // guards, so the detached flags restore on this future's drop
+        // unless the lane retires cleanly and the scopeguard is disarmed.
+        let restore = lock::ReliveOnDrop::arm(
+            guards
+                .iter()
+                .map(|guard| guard.registry_key().to_path_buf()),
+        );
         let retired = match &mut self.state {
             State::File { lane, .. }
             | State::Broken {
@@ -1487,19 +1498,9 @@ impl Journal {
             _ => None,
         };
         if let Some(Err(error)) = retired {
-            // Retirement failed: the journal still owns its lock, so the
-            // guards go back to live and same-process opens keep
-            // reporting Locked at once.
-            let lock = match &self.state {
-                State::File { lock, .. } => Some(lock),
-                State::Broken { lock, .. } => lock.as_ref(),
-                _ => None,
-            };
-            for guard in lock.into_iter().chain(self.prelocked.iter()) {
-                guard.mark_live();
-            }
             return Err(StoreError::from(error));
         }
+        restore.disarm();
         if file_backed {
             self.refresh_from_records();
         }

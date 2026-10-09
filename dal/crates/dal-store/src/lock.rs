@@ -167,6 +167,41 @@ impl LockGuard {
             holder.live = false;
         }
     }
+
+    /// The registry key this guard was acquired under.
+    pub(crate) fn registry_key(&self) -> &Path {
+        &self.key
+    }
+}
+
+/// Re-marks registry keys live when dropped while armed — a scopeguard
+/// for the window where a journal has detached its guards for retirement
+/// but an `await` can still cancel or fail the close: no code resumes on
+/// a cancelled future, so the restore has to ride `Drop`. Disarm once
+/// retirement succeeded so the transient flag carries into the guard
+/// drop itself.
+pub(crate) struct ReliveOnDrop(Vec<PathBuf>);
+
+impl ReliveOnDrop {
+    /// Arms a restore for each registry key.
+    pub(crate) fn arm(keys: impl IntoIterator<Item = PathBuf>) -> Self {
+        Self(keys.into_iter().collect())
+    }
+
+    /// Retirement finished: the detach is final, nothing restores.
+    pub(crate) fn disarm(mut self) {
+        self.0.clear();
+    }
+}
+
+impl Drop for ReliveOnDrop {
+    fn drop(&mut self) {
+        for key in &self.0 {
+            if let Some(holder) = holders_map().get_mut(key) {
+                holder.live = true;
+            }
+        }
+    }
 }
 
 impl Drop for LockGuard {
@@ -445,5 +480,30 @@ mod tests {
             read_pid_until(&dir.0).is_err(),
             "non-NotFound read errors must surface, not be swallowed by the poll"
         );
+    }
+
+    #[test]
+    fn relive_on_drop_restores_detached_holders_until_disarmed() {
+        let dir = TestDir::new();
+        let id = SessionId::new_v7();
+        let path = dir.0.join("lock");
+        let guard = LockGuard::acquire(&path, id).expect("lock acquisition");
+        guard.mark_live();
+        guard.mark_detached();
+        assert!(!super::live_in_process(&path));
+        // A cancelled or failed close drops its restore armed: the journal
+        // still owns the lock, so the live flag comes back.
+        {
+            let _restore = super::ReliveOnDrop::arm([guard.registry_key().to_path_buf()]);
+        }
+        assert!(super::live_in_process(&path));
+        // A cleanly retired close disarms instead: the transient flag
+        // survives through the guard drop.
+        guard.mark_detached();
+        let restore = super::ReliveOnDrop::arm([guard.registry_key().to_path_buf()]);
+        restore.disarm();
+        assert!(!super::live_in_process(&path));
+        drop(guard);
+        assert!(!super::live_in_process(&path));
     }
 }
