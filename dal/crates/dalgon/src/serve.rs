@@ -115,6 +115,15 @@ pub async fn create_token(
         Err(error) => return Err(ServeCommandError::Token(error)),
     };
 
+    #[cfg(windows)]
+    if let Err(source) = owner_only_acl(token_file) {
+        let _ = fs::remove_file(token_file);
+        return Err(ServeCommandError::Token(dal_wire::token::TokenError::Io {
+            path: token_file.to_path_buf(),
+            source,
+        }));
+    }
+
     writeln!(stdout, "{token}")?;
     if stderr_is_tty {
         writeln!(
@@ -124,6 +133,41 @@ pub async fn create_token(
         )?;
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Windows parity for the POSIX 0600 edge: the token file carries a
+/// protected DACL that grants the current user, SYSTEM, and
+/// Administrators only. `icacls /inheritance:r` removes inherited ACEs
+/// and sets the protected flag — `d` would copy them into explicit
+/// grants that survive the fix; `/grant:r` writes the three ACEs.
+/// SID spellings keep the grants locale-independent.
+#[cfg(windows)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "R4 edge: ACL hardening runs the OS utility"
+)]
+fn owner_only_acl(path: &Path) -> io::Result<()> {
+    let vars = crate::edge::snapshot_environment();
+    let sid = crate::edge::current_user_sid(&vars)
+        .map_err(|source| io::Error::other(format!("resolve the current user SID: {source}")))?
+        .ok_or_else(|| io::Error::other("resolve the current user SID: unavailable"))?;
+    let output = std::process::Command::new("icacls")
+        .arg(path)
+        .args([
+            "/inheritance:r",
+            "/grant:r",
+            &format!("*{}:F", sid.as_str()),
+            "*S-1-5-18:F",
+            "*S-1-5-32-544:F",
+        ])
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "icacls could not protect the token file: {}",
+            String::from_utf8_lossy(&output.stdout)
+        )));
+    }
+    Ok(())
 }
 
 /// Runs the single-listener dal server and its three protocol surfaces.

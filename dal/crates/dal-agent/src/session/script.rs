@@ -296,7 +296,18 @@ impl SessionScriptHost {
             .find(|ext| ext.name() == id.plugin.as_str());
         let origin = extension.map_or(Origin::User, crate::ext::Extension::origin);
         let inject = extension.map_or(ServiceSet::EMPTY, crate::ext::Extension::inject);
-        Caller::new(id.plugin.clone(), origin, inject, CallerKind::Handler, turn)
+        let state_version = extension.map_or(
+            std::num::NonZeroU32::MIN,
+            crate::ext::Extension::state_version,
+        );
+        Caller::new(
+            id.plugin.clone(),
+            origin,
+            inject,
+            state_version,
+            CallerKind::Handler,
+            turn,
+        )
     }
 
     /// The catalog declaration of one export, denied when unknown (R03).
@@ -381,6 +392,7 @@ impl SessionScriptHost {
                             .map_err(|_| HostTerminal::LimitExceeded { what: "identities" })?,
                         Origin::Builtin,
                         inject,
+                        std::num::NonZeroU32::MIN,
                         CallerKind::Cell { approved: true },
                         captured.turn,
                     ),
@@ -571,11 +583,26 @@ impl SessionScriptHost {
         };
         match result {
             Ok(value) => {
-                let bytes = value.as_str().len();
+                let (value, bytes) = match value {
+                    service::CallOutput::Json(value) => {
+                        (OpValue::Json(value.clone()), value.as_str().len())
+                    }
+                    service::CallOutput::State(record) => {
+                        // The scope budget charges retained bytes; a large
+                        // state value counts against the same caps as a
+                        // JSON result, so measure it before the record
+                        // moves into `OpValue`.
+                        let bytes = record
+                            .value
+                            .as_ref()
+                            .map_or(0, |value| value.as_str().len());
+                        (OpValue::State(record), bytes)
+                    }
+                };
                 (
                     op.clone(),
                     OpOutcome::Ok {
-                        value: OpValue::Json(value),
+                        value,
                         record: OpRecord {
                             call,
                             op,
@@ -597,6 +624,22 @@ impl SessionScriptHost {
             Err(service::CallError::Service(error)) => {
                 (op.clone(), service_outcome(&call, &op, error), 0)
             }
+            Err(service::CallError::Failed { code, message }) => (
+                op.clone(),
+                OpOutcome::Failed {
+                    failure: OpFailure {
+                        code,
+                        message,
+                        details: None,
+                    },
+                    record: OpRecord {
+                        call,
+                        op,
+                        status: EffectStatus::Failed,
+                    },
+                },
+                0,
+            ),
         }
     }
 

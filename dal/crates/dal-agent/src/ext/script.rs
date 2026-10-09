@@ -245,6 +245,7 @@ impl Invocation {
                 dal_core::Name::test(),
                 dal_core::Origin::Builtin,
                 dal_core::ServiceSet::EMPTY,
+                std::num::NonZeroU32::MIN,
                 super::CallerKind::Handler,
                 None,
             ),

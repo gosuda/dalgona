@@ -153,6 +153,7 @@ pub(crate) fn hook_caller(extension: &Extension, turn: Option<TurnId>) -> Option
         name,
         extension.origin(),
         extension.inject(),
+        extension.state_version(),
         CallerKind::Hook,
         turn,
     ))

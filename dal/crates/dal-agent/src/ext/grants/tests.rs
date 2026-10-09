@@ -55,6 +55,7 @@ fn test_caller(inject: ServiceSet) -> Caller {
         "focus".parse::<Name>().expect("name"),
         Origin::User,
         inject,
+        std::num::NonZeroU32::MIN,
         CallerKind::Hook,
         Some(TurnId::new(std::num::NonZeroU64::MIN)),
     )
@@ -64,6 +65,7 @@ fn test_mcp_caller(inject: ServiceSet) -> Caller {
         "focus".parse::<Name>().expect("name"),
         Origin::User,
         inject,
+        std::num::NonZeroU32::MIN,
         CallerKind::Tool,
         Some(TurnId::new(std::num::NonZeroU64::MIN)),
     )
@@ -163,6 +165,7 @@ async fn grant_approve_persists_exact_row_and_session_approve_does_not() {
         "focus".parse::<Name>().expect("name"),
         Origin::User,
         ServiceSet::from_names(["net"]).expect("net"),
+        std::num::NonZeroU32::MIN,
         CallerKind::Hook,
         Some(TurnId::new(std::num::NonZeroU64::MIN)),
     );
@@ -476,6 +479,7 @@ async fn a_turnless_caller_rides_a_persisted_grant_but_cannot_ask() {
         "focus".parse::<Name>().expect("name"),
         Origin::User,
         inject,
+        std::num::NonZeroU32::MIN,
         CallerKind::Handler,
         None,
     );
@@ -489,6 +493,7 @@ async fn a_turnless_caller_rides_a_persisted_grant_but_cannot_ask() {
         "focus".parse::<Name>().expect("name"),
         Origin::User,
         ServiceSet::from_names(["net"]).expect("inject"),
+        std::num::NonZeroU32::MIN,
         CallerKind::Handler,
         None,
     );
@@ -505,6 +510,7 @@ async fn a_turnless_caller_rides_a_persisted_grant_but_cannot_ask() {
         "focus".parse::<Name>().expect("name"),
         Origin::User,
         ServiceSet::from_names(["net"]).expect("inject"),
+        std::num::NonZeroU32::MIN,
         CallerKind::Handler,
         Some(TurnId::new(std::num::NonZeroU64::MIN)),
     );

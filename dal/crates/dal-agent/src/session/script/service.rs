@@ -4,20 +4,21 @@
 //! service owns each backend. [`call`] decodes the request's raw arguments
 //! into the operation's typed wire shape, invokes the service under the
 //! caller's declared inject set and grants, and encodes the reply as the
-//! operation's raw JSON value. Operations with no landed owner — `state.*` —
-//! stay absent and keep the `unavailable` outcome.
+//! operation's raw JSON value.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use dal_core::ext::NativeOp;
 use dal_core::{
-    AgentStart, AgentsOp, Answer, CallId, Choice, FetchRequest, JobId, JobsOp, McpRequest, Name,
-    Preview, Question, RawJson, SessionId, TurnOp, Workspace,
+    AgentStart, AgentsOp, Answer, CallId, Choice, DenyReason, FetchRequest, JobId, JobsOp,
+    McpRequest, Name, Preview, Question, RawJson, Revision, SessionId, StateError, StateKey,
+    StateNs, StateOp, StateRecord, TurnOp, Workspace,
 };
 use serde::Deserialize;
 
 use crate::error::ServiceError;
+use crate::ext::script::FailureCode;
 use crate::ext::{Caller, Services};
 
 /// How a service operation failed: strict argument decode, or the service.
@@ -26,6 +27,13 @@ pub(super) enum CallError {
     Args(Box<str>),
     /// The typed service returned its own error.
     Service(ServiceError),
+    /// A catchable failure carrying its typed code.
+    Failed {
+        /// The failure code the script sees.
+        code: FailureCode,
+        /// The failure message.
+        message: Box<str>,
+    },
 }
 
 /// Reports whether `op` dispatches through the typed service seam.
@@ -53,16 +61,16 @@ pub(super) fn wired(op: NativeOp) -> bool {
         | NativeOp::TurnSteer
         | NativeOp::TurnWake
         | NativeOp::TurnIsIdle
-        | NativeOp::McpCall => true,
+        | NativeOp::McpCall
+        | NativeOp::StateRead
+        | NativeOp::StateWrite
+        | NativeOp::StateDelete => true,
         NativeOp::ToolsRead
         | NativeOp::ToolsSearch
         | NativeOp::ToolsPatch
         | NativeOp::ToolsExec
         | NativeOp::ModelsInfer
-        | NativeOp::ModelsForward
-        | NativeOp::StateRead
-        | NativeOp::StateWrite
-        | NativeOp::StateDelete => false,
+        | NativeOp::ModelsForward => false,
     }
 }
 
@@ -87,8 +95,11 @@ pub(super) async fn call(
     call: &CallId,
     op: NativeOp,
     args: &RawJson,
-) -> Result<RawJson, CallError> {
-    match op {
+) -> Result<CallOutput, CallError> {
+    let out = match op {
+        NativeOp::StateRead | NativeOp::StateWrite | NativeOp::StateDelete => {
+            return call_state(services, who, op, args).await;
+        }
         NativeOp::EnvRead => {
             let args: KeyArgs = decode(args)?;
             encode(
@@ -150,6 +161,12 @@ pub(super) async fn call(
         }
         NativeOp::AgentsStart => {
             let args: AgentStartArgs = decode(args)?;
+            // The child session has no per-session tool allowlist, so a
+            // supplied list cannot be honored; refuse rather than run
+            // wider authority than the caller asked for.
+            if args.tools.is_some() {
+                return Err(CallError::Args("agents.start does not accept tools".into()));
+            }
             let start = AgentStart {
                 call: call.clone(),
                 name: args.name.unwrap_or_else(|| who.ext().as_str().into()),
@@ -326,6 +343,79 @@ pub(super) async fn call(
                 .as_str()
                 .into(),
         )),
+    };
+    out.map(CallOutput::Json)
+}
+
+/// Runs one `state.*` operation and returns its typed record: the record
+/// must cross the op boundary as [`OpValue::State`] so the Starlark adapter
+/// mints an opaque, generation-bound revision token the script can only
+/// compare — never a raw counter it could fabricate (R08).
+async fn call_state(
+    services: &Arc<dyn Services>,
+    who: &Caller,
+    op: NativeOp,
+    args: &RawJson,
+) -> Result<CallOutput, CallError> {
+    match op {
+        NativeOp::StateRead => {
+            let args: KeyArgs = decode(args)?;
+            let key = StateKey::parse(&args.key)
+                .map_err(|error| CallError::Args(error.to_string().into()))?;
+            state_reply(
+                services
+                    .state(
+                        who,
+                        StateOp::Read {
+                            ns: StateNs::Eval,
+                            key,
+                        },
+                    )
+                    .await,
+            )
+        }
+        NativeOp::StateWrite => {
+            let args: StateWriteArgs = decode(args)?;
+            let key = StateKey::parse(&args.key)
+                .map_err(|error| CallError::Args(error.to_string().into()))?;
+            let expected = revision(args.expected)?;
+            state_reply(
+                services
+                    .state(
+                        who,
+                        StateOp::Write {
+                            ns: StateNs::Eval,
+                            key,
+                            value: args.value,
+                            expected,
+                        },
+                    )
+                    .await,
+            )
+        }
+        NativeOp::StateDelete => {
+            let args: StateDeleteArgs = decode(args)?;
+            let key = StateKey::parse(&args.key)
+                .map_err(|error| CallError::Args(error.to_string().into()))?;
+            let expected = revision(args.expected)?;
+            state_reply(
+                services
+                    .state(
+                        who,
+                        StateOp::Delete {
+                            ns: StateNs::Eval,
+                            key,
+                            expected,
+                        },
+                    )
+                    .await,
+            )
+        }
+        other => Err(CallError::Args(
+            format!("operation {other} has no state dispatch")
+                .as_str()
+                .into(),
+        )),
     }
 }
 
@@ -350,6 +440,47 @@ fn answer(answer: Option<Answer>) -> Result<RawJson, CallError> {
         Some(Answer::Value(raw)) => Ok(raw),
         other => encode(&other),
     }
+}
+
+/// Wraps the wire `expected` revision: the owner never mints zero, so a zero
+/// can only be a malformed argument (R08).
+fn revision(raw: u64) -> Result<Revision, CallError> {
+    std::num::NonZeroU64::new(raw)
+        .map(Revision::new)
+        .ok_or_else(|| CallError::Args("expected revision must be nonzero".into()))
+}
+
+/// Projects one state operation outcome: the record encodes its wire shape, a
+/// revision conflict is a catchable failure the script can retry, and an
+/// unavailable state store keeps its typed outcome (R08).
+fn state_reply(
+    result: Result<Result<StateRecord, StateError>, ServiceError>,
+) -> Result<CallOutput, CallError> {
+    match result {
+        Err(error) => Err(CallError::Service(error)),
+        // A stale revision keeps its typed `conflict` code so a script can
+        // tell a retryable CAS race from an ordinary service failure.
+        Ok(Err(StateError::Conflict)) => Err(CallError::Failed {
+            code: FailureCode::Conflict,
+            message: StateError::Conflict.to_string().into(),
+        }),
+        Ok(Err(StateError::Unavailable)) => Err(CallError::Service(ServiceError::Denied(
+            DenyReason::Unavailable {
+                what: "state".into(),
+            },
+        ))),
+        Ok(Ok(record)) => Ok(CallOutput::State(record)),
+    }
+}
+
+/// What one service call returns: a JSON payload for ordinary operations,
+/// or the typed `StateRecord` for `state.*` so the op boundary mints the
+/// opaque revision token instead of encoding the counter (R08).
+pub(super) enum CallOutput {
+    /// An ordinary JSON result.
+    Json(RawJson),
+    /// A typed state record; revisions cross only as opaque tokens.
+    State(StateRecord),
 }
 
 #[derive(Deserialize)]
@@ -442,6 +573,21 @@ struct WakeArgs {
     sources: Vec<Box<str>>,
     #[serde(default)]
     job_ids: Vec<JobId>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StateWriteArgs {
+    key: Box<str>,
+    value: RawJson,
+    expected: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StateDeleteArgs {
+    key: Box<str>,
+    expected: u64,
 }
 
 #[derive(Deserialize)]

@@ -18,7 +18,8 @@ use dal_core::ext::{McpRequest, McpResponse};
 use dal_core::{
     AgentsOp, AgentsReply, Answer, ContextItem, EntryId, FetchRequest, FetchResponse, Inference,
     JobsOp, JobsReply, ModelRequest, Notice, Part, Question, RunOutput, RunRequest, SessionId,
-    SidecarOp, StreamChannel, StreamEvent, TurnId, TurnOp, TurnOpReply, Usage,
+    SidecarOp, StateError, StateOp, StateRecord, StreamChannel, StreamEvent, TurnId, TurnOp,
+    TurnOpReply, Usage,
 };
 use proptest::prelude::*;
 use sonic_rs::{JsonContainerTrait, JsonValueTrait};
@@ -251,6 +252,14 @@ impl Services for FakeServices {
 
     fn sidecar(&self, _who: &Caller, _op: SidecarOp) -> ServiceFuture<'_, Option<Vec<u8>>> {
         Box::pin(async move { Err(FakeServices::failing("judge fake never touches sidecar")) })
+    }
+
+    fn state(
+        &self,
+        _who: &Caller,
+        _op: StateOp,
+    ) -> ServiceFuture<'_, Result<StateRecord, StateError>> {
+        Box::pin(async move { Err(FakeServices::failing("judge fake never touches state")) })
     }
 
     fn infer(&self, _who: &Caller, req: ModelRequest) -> ServiceFuture<'_, Inference> {

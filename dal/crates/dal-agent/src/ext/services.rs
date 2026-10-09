@@ -51,8 +51,8 @@ use dal_core::ext::{McpDeclaration, McpRequest, McpResponse};
 use dal_core::{
     AgentsOp, AgentsReply, Answer, CallId, ClientId, DenyReason, EntryId, FetchRequest,
     FetchResponse, Inference, JobsOp, JobsReply, ModelRequest, Name, Notice, Origin, Owner,
-    Preview, Question, RequestId, RunOutput, RunRequest, Service, SidecarOp, Site, TurnOp,
-    TurnOpReply, Visibility, Workspace,
+    Preview, Question, RequestId, RunOutput, RunRequest, Service, SidecarOp, Site, StateError,
+    StateNs, StateOp, StateRecord, TurnOp, TurnOpReply, Visibility, Workspace,
 };
 use dal_provider::EventStream;
 use tokio::sync::watch;
@@ -127,6 +127,23 @@ impl Drop for AskSlot<'_> {
 }
 
 impl SessionServices {
+    /// Derives the caller's state namespace (R08): eval cells share the
+    /// session eval namespace; every other caller owns the namespace its
+    /// extension's `origin`, name, and `state_version` isolate.
+    pub(crate) fn state_ns(who: &Caller) -> StateNs {
+        if who.cell() {
+            return StateNs::Eval;
+        }
+        // The caller carries its extension's `state_version` minted at
+        // dispatch: an in-flight invocation keeps the namespace its own
+        // generation snapshot gave it across a plugin reload.
+        StateNs::Plugin {
+            origin: who.origin(),
+            plugin: who.ext().clone(),
+            version: who.state_version(),
+        }
+    }
+
     /// Builds the session services from host-owned pieces.
     pub(crate) fn new(deps: SessionServicesDeps) -> Self {
         let grants = deps.grants;
@@ -401,6 +418,7 @@ impl Services for SessionServices {
 
     fn ask(&self, who: &Caller, question: Question) -> ServiceFuture<'_, Option<Answer>> {
         let who = who.clone();
+        let confirm = matches!(question, Question::Confirm { .. });
         Box::pin(async move {
             Self::check_inject(&who, Service::Ask)?;
             let Some(turn) = who.turn else {
@@ -454,6 +472,17 @@ impl Services for SessionServices {
                         });
                     match answer {
                         value @ Answer::Value(_) => Ok(Some(value)),
+                        // Confirmation front ends answer with approve and
+                        // decline rather than typed booleans; normalize
+                        // both before the script sees them.
+                        Answer::Approve if confirm => Ok(Some(Answer::Value(
+                            dal_core::RawJson::parse("true")
+                                .map_err(|error| ServiceError::failed(Some(Service::Ask), error.to_string()))?,
+                        ))),
+                        Answer::Decline if confirm => Ok(Some(Answer::Value(
+                            dal_core::RawJson::parse("false")
+                                .map_err(|error| ServiceError::failed(Some(Service::Ask), error.to_string()))?,
+                        ))),
                         // Turn cancellation resolves the open request as
                         // `Cancel`; dismissal arrives as `Decline`.
                         Answer::Cancel => Err(ServiceError::Cancelled),
@@ -579,6 +608,37 @@ impl Services for SessionServices {
                     "unsupported sidecar operation",
                 )),
             }
+        })
+    }
+
+    fn state(
+        &self,
+        who: &Caller,
+        op: StateOp,
+    ) -> ServiceFuture<'_, Result<StateRecord, StateError>> {
+        let who = who.clone();
+        Box::pin(async move {
+            Self::check_inject(&who, Service::Sidecar)?;
+            self.gated(&who, Service::Sidecar).await?;
+            let ns = Self::state_ns(&who);
+            // The caller never names its namespace: it is derived here so a
+            // script cannot reach another plugin's state.
+            let op = match op {
+                StateOp::Read { key, .. } => StateOp::Read { ns, key },
+                StateOp::Write {
+                    key,
+                    value,
+                    expected,
+                    ..
+                } => StateOp::Write {
+                    ns,
+                    key,
+                    value,
+                    expected,
+                },
+                StateOp::Delete { key, expected, .. } => StateOp::Delete { ns, key, expected },
+            };
+            self.backend.state(op).await
         })
     }
 

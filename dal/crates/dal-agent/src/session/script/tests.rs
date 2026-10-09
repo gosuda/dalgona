@@ -152,6 +152,7 @@ impl Tool for ViewTool {
 /// The started host with the product tools extension and the fixture exports.
 struct Fixture {
     _host: Host,
+    data: std::path::PathBuf,
     session: SessionId,
     backend: Arc<Backend>,
     interpreters: Arc<Interpreters>,
@@ -160,11 +161,20 @@ struct Fixture {
 }
 
 /// Starts one real session with the product tools and the fixture export.
+async fn fixture(delay: Duration) -> Fixture {
+    fixture_kind(delay, false).await
+}
+
+/// The fixture against a durable session whose store keeps a sidecar.
+async fn durable_fixture(delay: Duration) -> Fixture {
+    fixture_kind(delay, true).await
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "test fixture builds one real session"
 )]
-async fn fixture(delay: Duration) -> Fixture {
+async fn fixture_kind(delay: Duration, durable: bool) -> Fixture {
     let tmp = tempfile::tempdir().expect("tempdir");
     let data = tmp.path().join("data");
     let workspace_dir = tmp.path().join("w");
@@ -265,13 +275,18 @@ async fn fixture(delay: Duration) -> Fixture {
     };
     let host = Host::start(product, config, env).await.expect("host");
     let workspace = Workspace::new(workspace_dir).expect("workspace");
+    let reference = if durable {
+        SessionRef::New {
+            workspace: workspace.clone(),
+            name: None,
+        }
+    } else {
+        SessionRef::Ephemeral {
+            workspace: workspace.clone(),
+        }
+    };
     let _agent = host
-        .open(
-            SessionRef::Ephemeral {
-                workspace: workspace.clone(),
-            },
-            ClientId::new("probe"),
-        )
+        .open(reference, ClientId::new("probe"))
         .await
         .expect("open");
     let session = *host
@@ -300,7 +315,7 @@ async fn fixture(delay: Duration) -> Fixture {
     // The fixture's job table is the data-plane's own; the actor keeps the
     // session table internally.
     let jobs = Arc::new(tokio::sync::Mutex::new(crate::jobs::JobTable::new()));
-    let ephemeral = true;
+    let ephemeral = !durable;
     let tasks = crate::session::tasks::SessionTasks::new();
     let backend = Arc::new(Backend::new(crate::session::backend::BackendDeps {
         session,
@@ -318,7 +333,7 @@ async fn fixture(delay: Duration) -> Fixture {
     // published; build the same wiring the registry uses at session start.
     let grants = Arc::new(
         crate::ext::grants::GrantStore::with_runtime(
-            data_root,
+            data_root.clone(),
             Duration::from_secs(30),
             Arc::clone(&broker),
         )
@@ -364,6 +379,7 @@ async fn fixture(delay: Duration) -> Fixture {
     let generation = host.state.shared.generation.borrow().clone();
     Fixture {
         _host: host,
+        data: data_root,
         session,
         backend,
         interpreters,
@@ -693,7 +709,229 @@ async fn a_service_op_replies_in_the_wire_shape() {
 }
 
 #[tokio::test]
-async fn an_unwired_native_op_still_fails_unavailable() {
+async fn state_ops_compare_and_swap_through_the_actor() {
+    let fx = durable_fixture(Duration::ZERO).await;
+    let host = captured(&fx, &["state.read", "state.write", "state.delete"]);
+    let inv = begin_eval(&host, None).expect("eval inherits A");
+    let read = call_op(
+        &host,
+        &inv,
+        OpId::Native(NativeOp::StateRead),
+        r#"{"key":"counter"}"#,
+    )
+    .await;
+    let OpOutcome::Ok { value, .. } = read else {
+        panic!("state.read reaches the state owner: {read:?}");
+    };
+    let OpValue::State(record) = value else {
+        panic!("state.read answers a typed record: {value:?}");
+    };
+    assert!(
+        !record.present && record.value.is_none() && record.revision.get().get() == 1,
+        "an absent key mints its first revision: {record:?}"
+    );
+    let write = call_op(
+        &host,
+        &inv,
+        OpId::Native(NativeOp::StateWrite),
+        r#"{"key":"counter","value":41,"expected":1}"#,
+    )
+    .await;
+    let OpOutcome::Ok { value, .. } = write else {
+        panic!("state.write with the minted revision commits: {write:?}");
+    };
+    let OpValue::State(record) = value else {
+        panic!("state.write answers a typed record: {value:?}");
+    };
+    assert!(
+        record.present
+            && record.value.as_ref().map(dal_core::RawJson::as_str) == Some("41")
+            && record.revision.get().get() == 2,
+        "the committed record carries the next revision: {record:?}"
+    );
+    let stale = call_op(
+        &host,
+        &inv,
+        OpId::Native(NativeOp::StateWrite),
+        r#"{"key":"counter","value":99,"expected":1}"#,
+    )
+    .await;
+    let OpOutcome::Failed { failure, .. } = stale else {
+        panic!("a stale revision is a catchable conflict: {stale:?}");
+    };
+    assert!(
+        failure.message.contains("state revision conflict"),
+        "the conflict keeps the R08 wording: {failure:?}"
+    );
+    assert_eq!(
+        failure.code,
+        crate::ext::script::FailureCode::Conflict,
+        "a stale revision carries the retryable conflict code"
+    );
+    let recheck = call_op(
+        &host,
+        &inv,
+        OpId::Native(NativeOp::StateRead),
+        r#"{"key":"counter"}"#,
+    )
+    .await;
+    let OpOutcome::Ok { value, .. } = recheck else {
+        panic!("the conflicting write touched nothing: {recheck:?}");
+    };
+    let OpValue::State(record) = value else {
+        panic!("state.read answers a typed record: {value:?}");
+    };
+    assert!(
+        record.present
+            && record.value.as_ref().map(dal_core::RawJson::as_str) == Some("41")
+            && record.revision.get().get() == 2,
+        "the rejected write left the committed value and revision: {record:?}"
+    );
+    let delete = call_op(
+        &host,
+        &inv,
+        OpId::Native(NativeOp::StateDelete),
+        r#"{"key":"counter","expected":2}"#,
+    )
+    .await;
+    let OpOutcome::Ok { value, .. } = delete else {
+        panic!("state.delete with the minted revision tombstones: {delete:?}");
+    };
+    let OpValue::State(record) = value else {
+        panic!("state.delete answers a typed record: {value:?}");
+    };
+    assert!(
+        !record.present && record.value.is_none() && record.revision.get().get() == 3,
+        "the tombstone mints a fresh revision a stale token cannot reuse: {record:?}"
+    );
+}
+
+/// The session's `state` sidecar path under the fixture's data root:
+/// `data/sessions/<workspace>/<session>/state`.
+#[cfg(unix)]
+fn state_sidecar(data: &std::path::Path) -> std::path::PathBuf {
+    let sessions = std::fs::read_dir(data.join("sessions")).expect("sessions dir");
+    for ws in sessions {
+        let ws = ws.expect("ws entry").path();
+        if let Some(sid) = std::fs::read_dir(ws).expect("session dir").next() {
+            return sid.expect("sid entry").path().join("state");
+        }
+    }
+    panic!("the durable session owns a state sidecar path")
+}
+
+/// A failed durable write must publish nothing: the map rolls back so the
+/// same `expected` revision still commits once storage recovers (R08 —
+/// memory may never run ahead of the sidecar).
+#[cfg(unix)]
+#[tokio::test]
+async fn a_failed_sidecar_write_rolls_the_map_back() {
+    use std::os::unix::fs::PermissionsExt;
+    let fx = durable_fixture(Duration::ZERO).await;
+    let host = captured(&fx, &["state.read", "state.write"]);
+    let inv = begin_eval(&host, None).expect("eval inherits A");
+    // Mint the first revision so the session dir and state file exist.
+    let first = call_op(
+        &host,
+        &inv,
+        OpId::Native(NativeOp::StateRead),
+        r#"{"key":"counter"}"#,
+    )
+    .await;
+    let OpOutcome::Ok { .. } = first else {
+        panic!("the first read minted a revision: {first:?}");
+    };
+    let dir = state_sidecar(&fx.data)
+        .parent()
+        .expect("session dir")
+        .to_path_buf();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).expect("read only");
+    let failed = call_op(
+        &host,
+        &inv,
+        OpId::Native(NativeOp::StateWrite),
+        r#"{"key":"counter","value":99,"expected":1}"#,
+    )
+    .await;
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).expect("restore");
+    let OpOutcome::Terminal(HostTerminal::Denied { reason, .. }) = failed else {
+        panic!("a failed durable write denies the op: {failed:?}");
+    };
+    let DenyReason::Unavailable { what } = reason else {
+        panic!("the sidecar is the unavailable piece: {reason:?}");
+    };
+    assert_eq!(what.as_ref(), "state");
+    // The rolled-back op never minted a revision or wrote a value: the same
+    // `expected` still commits, and no phantom record appears.
+    let commit = call_op(
+        &host,
+        &inv,
+        OpId::Native(NativeOp::StateWrite),
+        r#"{"key":"counter","value":99,"expected":1}"#,
+    )
+    .await;
+    let OpOutcome::Ok { value, .. } = commit else {
+        panic!("the rolled-back map still accepts the original CAS: {commit:?}");
+    };
+    let OpValue::State(record) = value else {
+        panic!("state.write answers a typed record: {value:?}");
+    };
+    assert!(
+        record.present
+            && record.value.as_ref().map(dal_core::RawJson::as_str) == Some("99")
+            && record.revision.get().get() == 2,
+        "the failed write minted nothing: {record:?}"
+    );
+}
+
+/// A `state.read` of an existing key never touches the sidecar: the
+/// session dir can be readable-but-unwritable and the read still answers
+/// (R08 — reads mint nothing durable).
+#[cfg(unix)]
+#[tokio::test]
+async fn a_read_on_an_existing_key_needs_no_write() {
+    use std::os::unix::fs::PermissionsExt;
+    let fx = durable_fixture(Duration::ZERO).await;
+    let host = captured(&fx, &["state.read", "state.write"]);
+    let inv = begin_eval(&host, None).expect("eval inherits A");
+    let _ = call_op(
+        &host,
+        &inv,
+        OpId::Native(NativeOp::StateRead),
+        r#"{"key":"counter"}"#,
+    )
+    .await;
+    let committed = call_op(
+        &host,
+        &inv,
+        OpId::Native(NativeOp::StateWrite),
+        r#"{"key":"counter","value":41,"expected":1}"#,
+    )
+    .await;
+    let OpOutcome::Ok { .. } = committed else {
+        panic!("the record committed before the directory locked: {committed:?}");
+    };
+    let dir = state_sidecar(&fx.data)
+        .parent()
+        .expect("session dir")
+        .to_path_buf();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).expect("read only");
+    let read = call_op(
+        &host,
+        &inv,
+        OpId::Native(NativeOp::StateRead),
+        r#"{"key":"counter"}"#,
+    )
+    .await;
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).expect("restore");
+    let OpOutcome::Ok { value, .. } = read else {
+        panic!("an existing-key read needs no write and still answers: {read:?}");
+    };
+    assert!(matches!(value, OpValue::State(..)));
+}
+
+#[tokio::test]
+async fn state_ops_fail_closed_on_an_ephemeral_session() {
     let fx = fixture(Duration::ZERO).await;
     let host = captured(&fx, &["state.read"]);
     let inv = begin_eval(&host, None).expect("eval inherits A");
@@ -701,11 +939,241 @@ async fn an_unwired_native_op_still_fails_unavailable() {
         &host,
         &inv,
         OpId::Native(NativeOp::StateRead),
-        r#"{"key":"todos"}"#,
+        r#"{"key":"counter"}"#,
+    )
+    .await;
+    let OpOutcome::Terminal(HostTerminal::Denied { reason, .. }) = outcome else {
+        panic!("an ephemeral session keeps the typed outcome: {outcome:?}");
+    };
+    let DenyReason::Unavailable { what } = reason else {
+        panic!("the state store is the unavailable piece: {reason:?}");
+    };
+    assert_eq!(what.as_ref(), "state");
+}
+
+#[tokio::test]
+async fn a_state_op_rejects_a_zero_revision() {
+    let fx = durable_fixture(Duration::ZERO).await;
+    let host = captured(&fx, &["state.write"]);
+    let inv = begin_eval(&host, None).expect("eval inherits A");
+    let outcome = call_op(
+        &host,
+        &inv,
+        OpId::Native(NativeOp::StateWrite),
+        r#"{"key":"counter","value":1,"expected":0}"#,
     )
     .await;
     let OpOutcome::Failed { failure, .. } = outcome else {
-        panic!("state.read has no owner and fails closed: {outcome:?}");
+        panic!("revision zero is an argument failure: {outcome:?}");
+    };
+    assert!(
+        failure.message.contains("invalid arguments"),
+        "the decode error names the contract: {failure:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_state_namespace_derives_from_the_caller() {
+    use crate::ext::{Caller, CallerKind};
+    use dal_core::StateNs;
+    let fx = durable_fixture(Duration::ZERO).await;
+    fx.backend
+        .script_services()
+        .expect("the fixture published services");
+    let cell = Caller::new(
+        Name::parse("fixture").expect("plugin"),
+        dal_core::Origin::User,
+        dal_core::ServiceSet::EMPTY,
+        std::num::NonZeroU32::MIN,
+        CallerKind::Cell { approved: false },
+        None,
+    );
+    assert_eq!(
+        crate::ext::services::SessionServices::state_ns(&cell),
+        StateNs::Eval
+    );
+    // A minted caller carries its extension's declared state_version: the
+    // namespace binds to the caller's generation snapshot, not a later reload.
+    let minted = std::num::NonZeroU32::new(7).expect("nonzero");
+    let who = Caller::new(
+        Name::parse("fixture").expect("plugin"),
+        dal_core::Origin::User,
+        dal_core::ServiceSet::EMPTY,
+        minted,
+        CallerKind::Tool,
+        None,
+    );
+    assert_eq!(
+        crate::ext::services::SessionServices::state_ns(&who),
+        StateNs::Plugin {
+            origin: dal_core::Origin::User,
+            plugin: Name::parse("fixture").expect("plugin"),
+            version: minted,
+        },
+        "a tool caller owns its plugin's isolated namespace"
+    );
+}
+
+#[tokio::test]
+async fn agents_start_refuses_a_tools_allowlist() {
+    let fx = fixture(Duration::ZERO).await;
+    let host = captured(&fx, &["agents.start"]);
+    let inv = begin_eval(&host, None).expect("eval inherits A");
+    let outcome = call_op(
+        &host,
+        &inv,
+        OpId::Native(NativeOp::AgentsStart),
+        r#"{"prompt":"work","tools":["bash"]}"#,
+    )
+    .await;
+    let OpOutcome::Failed { failure, .. } = outcome else {
+        panic!("an unhonorable allowlist fails rather than widens: {outcome:?}");
+    };
+    assert!(
+        failure.message.contains("does not accept tools"),
+        "the refusal names the unsupported field: {failure:?}"
+    );
+}
+
+/// A child workspace spelled through an in-root symlink resolves outside
+/// it; containment must be checked on canonical paths or `agents.start`
+/// widens into tool access across the filesystem.
+#[cfg(unix)]
+#[tokio::test]
+async fn agents_start_cannot_escape_the_workspace_through_a_link() {
+    let fx = fixture(Duration::ZERO).await;
+    let host = captured(&fx, &["agents.start"]);
+    let inv = begin_eval(&host, None).expect("eval inherits A");
+    let outside = fx.data.join("outside");
+    std::fs::create_dir_all(&outside).expect("outside dir");
+    // The fixture's tempdir root is reaped with it; recreate the workspace
+    // before planting the link inside it.
+    let workspace = fx.backend.workspace().as_path().to_path_buf();
+    std::fs::create_dir_all(&workspace).expect("workspace dir");
+    let link = workspace.join("link");
+    std::os::unix::fs::symlink(&outside, &link).expect("workspace link");
+    let outcome = call_op(
+        &host,
+        &inv,
+        OpId::Native(NativeOp::AgentsStart),
+        &format!(r#"{{"prompt":"work","workspace":"{}"}}"#, link.display()),
+    )
+    .await;
+    let OpOutcome::Ok { value, .. } = outcome else {
+        panic!("agents.start answers a typed reply: {outcome:?}");
+    };
+    let OpValue::Json(raw) = value else {
+        panic!("agents.start answers raw JSON: {value:?}");
+    };
+    let reply = raw.as_str();
+    assert!(
+        reply.contains(r#""type":"cancelled""#),
+        "a link resolving outside the workspace is refused: {reply}"
+    );
+}
+
+#[derive(serde::Deserialize)]
+struct AgentsStarted {
+    #[serde(rename = "type")]
+    kind: Box<str>,
+    value: AgentsStartedValue,
+}
+
+#[derive(serde::Deserialize)]
+struct AgentsStartedValue {
+    id: Box<str>,
+}
+
+#[derive(serde::Deserialize)]
+struct AgentsAwaited {
+    #[serde(rename = "type")]
+    kind: Box<str>,
+    value: AgentsAwaitedValue,
+}
+
+#[derive(serde::Deserialize)]
+struct AgentsAwaitedValue {
+    report: AgentsAwaitedReport,
+}
+
+#[derive(serde::Deserialize)]
+struct AgentsAwaitedReport {
+    stop: Box<str>,
+}
+
+/// A runnable `agents.start` must answer `started` and let its child finish:
+/// submitting any command that the fold rejects mid-turn (e.g. a rename while
+/// the accepted prompt is still running) would close the child instead and
+/// turn every start into `cancelled`.
+#[tokio::test]
+async fn agents_start_returns_started_and_the_child_completes() {
+    let fx = fixture(Duration::ZERO).await;
+    let host = captured(&fx, &["agents.start", "agents.wait"]);
+    let inv = begin_eval(&host, None).expect("eval inherits A");
+    // The fixture's tempdir root is reaped with it; the durable child needs
+    // its workspace and store root to exist on disk again.
+    std::fs::create_dir_all(&fx.data).expect("data dir");
+    let workspace = fx.backend.workspace().as_path().to_path_buf();
+    std::fs::create_dir_all(&workspace).expect("workspace dir");
+    let outcome = call_op(
+        &host,
+        &inv,
+        OpId::Native(NativeOp::AgentsStart),
+        r#"{"name":"probe","prompt":"reply"}"#,
+    )
+    .await;
+    let OpOutcome::Ok { value, .. } = outcome else {
+        panic!("agents.start answers a typed reply: {outcome:?}");
+    };
+    let OpValue::Json(raw) = value else {
+        panic!("agents.start answers raw JSON: {value:?}");
+    };
+    let started: AgentsStarted = raw.decode_as().expect("started reply decodes");
+    assert_eq!(
+        started.kind.as_ref(),
+        "started",
+        "a runnable child starts: {raw:?}"
+    );
+    let outcome = call_op(
+        &host,
+        &inv,
+        OpId::Native(NativeOp::AgentsWait),
+        &format!(r#"{{"id":"{}"}}"#, started.value.id),
+    )
+    .await;
+    let OpOutcome::Ok { value, .. } = outcome else {
+        panic!("agents.await answers a typed reply: {outcome:?}");
+    };
+    let OpValue::Json(raw) = value else {
+        panic!("agents.await answers raw JSON: {value:?}");
+    };
+    let report: AgentsAwaited = raw.decode_as().expect("await reply decodes");
+    assert_eq!(
+        report.kind.as_ref(),
+        "await",
+        "the child completes: {raw:?}"
+    );
+    assert_eq!(
+        report.value.report.stop.as_ref(),
+        "end_turn",
+        "the report carries the durable terminal stop: {raw:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_unbacked_native_op_still_fails_unavailable() {
+    let fx = fixture(Duration::ZERO).await;
+    let host = captured(&fx, &["mcp.call"]);
+    let inv = begin_eval(&host, None).expect("eval inherits A");
+    let outcome = call_op(
+        &host,
+        &inv,
+        OpId::Native(NativeOp::McpCall),
+        r#"{"server":"fixture","tool":"probe","arguments":{}}"#,
+    )
+    .await;
+    let OpOutcome::Failed { failure, .. } = outcome else {
+        panic!("mcp.call has no backend in this generation: {outcome:?}");
     };
     assert_eq!(failure.code, FailureCode::Unavailable);
 }

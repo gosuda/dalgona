@@ -11,7 +11,7 @@ use dal_core::ext::{McpRequest, McpResponse};
 use dal_core::{
     AgentInfo, AgentReport, AgentState, AgentsOp, AgentsReply, Answer, EntryId, FetchRequest,
     FetchResponse, Inference, JobsOp, JobsReply, ModelRequest, Name, Question, RunOutput,
-    RunRequest, Service, SidecarOp, Stop, TurnOp, TurnOpReply,
+    RunRequest, Service, SidecarOp, StateError, StateOp, StateRecord, Stop, TurnOp, TurnOpReply,
 };
 use dal_provider::EventStream;
 
@@ -149,6 +149,14 @@ impl Services for FakeServices {
 
     fn sidecar(&self, _who: &Caller, _op: SidecarOp) -> ServiceFuture<'_, Option<Vec<u8>>> {
         Box::pin(async { Ok(None) })
+    }
+
+    fn state(
+        &self,
+        _who: &Caller,
+        _op: StateOp,
+    ) -> ServiceFuture<'_, Result<StateRecord, StateError>> {
+        Box::pin(async { Ok(Err(StateError::Unavailable)) })
     }
 
     fn infer(&self, _who: &Caller, _req: ModelRequest) -> ServiceFuture<'_, Inference> {

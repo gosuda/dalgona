@@ -378,19 +378,32 @@ fn tool_caller(ctx: &DispatchCtx, ready: &ReadyCall) -> Caller {
             .find(|extension| extension.name() == owner.as_str())
     });
     let owner = generation_owner.or(overlay_owner);
-    let (ext, origin, inject) = owner
+    let (ext, origin, inject, state_version) = owner
         .and_then(|extension| {
             let name = extension.name().parse::<Name>().ok()?;
-            Some((name, extension.origin(), extension.inject()))
+            Some((
+                name,
+                extension.origin(),
+                extension.inject(),
+                extension.state_version(),
+            ))
         })
         .unwrap_or_else(|| {
             (
                 ready.name.clone(),
                 dal_core::Origin::Builtin,
                 dal_core::ext::ServiceSet::EMPTY,
+                std::num::NonZeroU32::MIN,
             )
         });
-    Caller::new(ext, origin, inject, CallerKind::Tool, Some(ctx.turn))
+    Caller::new(
+        ext,
+        origin,
+        inject,
+        state_version,
+        CallerKind::Tool,
+        Some(ctx.turn),
+    )
 }
 
 /// Maps one terminal tool outcome to its settlement.
@@ -1104,6 +1117,7 @@ pub(crate) async fn direct_call(backend: &Backend, name: &str, args: RawJson) ->
         tool_name.clone(),
         dal_core::Origin::Builtin,
         dal_core::ext::ServiceSet::EMPTY,
+        std::num::NonZeroU32::MIN,
         CallerKind::Tool,
         None,
     );

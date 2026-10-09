@@ -7,8 +7,8 @@ use dal_agent::ext::{Caller, EventStream, RawValue, Services, Tool, ToolCx, Tool
 use dal_core::ext::{McpDeclaration, McpRequest, McpResponse};
 use dal_core::{
     AgentsOp, AgentsReply, Answer, EntryId, FetchRequest, FetchResponse, Inference, JobsOp,
-    JobsReply, ModelRequest, Notice, Question, RunOutput, RunRequest, SidecarOp, TurnOp,
-    TurnOpReply, Visibility,
+    JobsReply, ModelRequest, Notice, Question, RunOutput, RunRequest, SidecarOp, StateError,
+    StateOp, StateRecord, TurnOp, TurnOpReply, Visibility,
 };
 
 use dal_core::{CallId, GenerationId, SessionId, TurnId};
@@ -643,6 +643,14 @@ impl Services for NeverServices {
     }
 
     fn sidecar(&self, _who: &Caller, _op: SidecarOp) -> ServiceFuture<'_, Option<Vec<u8>>> {
+        unreachable!("replacement test does not use services")
+    }
+
+    fn state(
+        &self,
+        _who: &Caller,
+        _op: StateOp,
+    ) -> ServiceFuture<'_, Result<StateRecord, StateError>> {
         unreachable!("replacement test does not use services")
     }
 

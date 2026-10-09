@@ -73,6 +73,8 @@ pub enum SessionRef {
         call: CallId,
         /// The child workspace.
         workspace: Workspace,
+        /// An optional display name for the child session.
+        name: Option<Box<str>>,
     },
 }
 

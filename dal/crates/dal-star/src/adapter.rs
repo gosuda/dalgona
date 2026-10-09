@@ -155,12 +155,30 @@ impl OpAdapter {
         names: &SmallMap<StringValue<'v>, Value<'v>>,
     ) -> starlark::Result<value::Value> {
         let mut map: Vec<(Box<str>, value::Value)> = Vec::new();
+        let wants_revision = matches!(
+            self.op,
+            OpId::Native(NativeOp::StateWrite | NativeOp::StateDelete)
+        );
         for (name, item) in names {
-            map.push((
-                name.as_str().into(),
+            // `expected` crosses only as the host-minted token a `state.*`
+            // reply returned: the serial alone would let a script fabricate
+            // revisions it never observed (R08).
+            let bound = if wants_revision && name.as_str() == "expected" {
+                let revision = crate::record::revision_of(*item).ok_or_else(|| {
+                    api_error(format!("{}: expected must be a revision", self.op))
+                })?;
+                if revision.generation != self.invocation.generation().get() {
+                    return Err(api_error(format!(
+                        "{}: expected revision is stale",
+                        self.op
+                    )));
+                }
+                value::Value::Int(revision.serial.cast_signed())
+            } else {
                 value::Value::from_starlark(*item)
-                    .map_err(|e| api_error(format!("{}: {e}", self.op)))?,
-            ));
+                    .map_err(|e| api_error(format!("{}: {e}", self.op)))?
+            };
+            map.push((name.as_str().into(), bound));
         }
         match &self.op {
             OpId::Native(native) => self.bind_native(*native, positions, &mut map)?,
