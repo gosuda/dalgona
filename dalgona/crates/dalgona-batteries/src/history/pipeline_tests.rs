@@ -244,7 +244,7 @@ async fn rendered_image_spans_resolve_in_the_source_fixture() {
                 .index_line
                 .starts_with(&format!("letter://{id}  "))
         );
-        assert!(!spans.is_empty());
+        assert_ne!(spans.len(), 0);
         for span in spans {
             let bytes = source
                 .read(*span)
@@ -494,7 +494,7 @@ async fn undrawable_letter_is_shown_as_its_exact_text_without_an_image() {
         assert!(!text.starts_with(&format!("letter://history/1.{} ", position + 1)));
     }
     for letter in &drawn.letters {
-        assert!(!letter.png.is_empty());
+        assert_ne!(letter.png.len(), 0);
     }
 }
 

@@ -184,7 +184,7 @@ mod tests {
 
     #[test]
     fn fewer_words_than_the_shingle_width_has_no_shingles() {
-        assert!(shingles("one two", 8).is_empty());
+        assert_eq!(shingles("one two", 8).len(), 0);
     }
 
     #[test]

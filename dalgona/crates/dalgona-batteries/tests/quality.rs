@@ -151,9 +151,9 @@ fn commented_code_offers_cover_complete_comment_lines_in_supported_grammars() ->
 #[test]
 fn shared_code_and_prose_comments_do_not_create_delete_offers() -> TestResult {
     let shared = b"let g () = 1  (* let h = 2 *)\n";
-    assert!(comments_offered("src/a.ml", shared)?.is_empty());
+    assert_eq!(comments_offered("src/a.ml", shared)?.len(), 0);
     let prose = b"(* this helper normalizes the input *)\n";
-    assert!(comments_offered("src/a.ml", prose)?.is_empty());
+    assert_eq!(comments_offered("src/a.ml", prose)?.len(), 0);
     Ok(())
 }
 
@@ -208,6 +208,6 @@ fn empty_catch_offers_produce_language_specific_rethrow_edits() -> TestResult {
         assert_eq!(applied, case.expected, "{}", case.path);
     }
     let shared_line = b"void example() { try { run(); } catch (...) {} }\n";
-    assert!(empty_catch_offers("src/a.cpp", shared_line)?.is_empty());
+    assert_eq!(empty_catch_offers("src/a.cpp", shared_line)?.len(), 0);
     Ok(())
 }

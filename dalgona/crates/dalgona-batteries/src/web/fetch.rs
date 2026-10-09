@@ -331,7 +331,7 @@ mod tests {
 
         assert!(matches!(request.method, dal_core::ext::FetchMethod::Get));
         assert_eq!(request.url.as_ref(), "http://example.test/page");
-        assert!(request.body.is_empty());
+        assert_eq!(request.body.len(), 0);
         assert!(request.headers.iter().any(|(name, value)| {
             name.eq_ignore_ascii_case("User-Agent") && value.as_ref().starts_with("dalgona-web/")
         }));
