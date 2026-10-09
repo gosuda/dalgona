@@ -14,7 +14,10 @@ use dal_core::{
 };
 
 use super::super::tool::{ArgError, RawValue, Tool, ToolCall, ToolCx, ToolOutcome};
-use super::super::{BoxFuture, ExtensionBuilder, Hook, HookCx, HookError};
+use super::super::{
+    BoxFuture, CompactError, CompactInput, Compaction, Compactor, ExtensionBuilder, Hook, HookCx,
+    HookError, Services,
+};
 use super::{Generation, ValidatedExtensions};
 
 /// One test tool with a fixed spec; every instance stays live through the
@@ -528,6 +531,62 @@ fn generation_bars_user_manual_schemes_but_keeps_builtin_manuals() {
                 .docs()
                 .find(&format!("{scheme}://index"))
                 .is_some()
+        );
+    }
+}
+
+/// A compactor that always declines; only its place in the chain matters.
+struct DecliningCompactor;
+
+impl Compactor for DecliningCompactor {
+    fn compact<'a>(
+        &'a self,
+        _input: CompactInput<'a>,
+        _services: Arc<dyn Services>,
+    ) -> BoxFuture<'a, Result<Option<Compaction>, CompactError>> {
+        Box::pin(std::future::ready(Ok(None)))
+    }
+}
+
+#[test]
+fn compaction_chain_runs_every_primary_before_any_fallback() {
+    let builtin = ext("core", Origin::Builtin)
+        .compactor("remote", Arc::new(DecliningCompactor))
+        .fallback_compactor("summary", Arc::new(DecliningCompactor))
+        .build()
+        .expect("valid builtin extension");
+    let bundled = ext("battery", Origin::Bundled)
+        .compactor("images", Arc::new(DecliningCompactor))
+        .fallback_compactor("last-bundled", Arc::new(DecliningCompactor))
+        .build()
+        .expect("valid bundled extension");
+    let user = ext("plugin", Origin::User)
+        .compactor("custom", Arc::new(DecliningCompactor))
+        .build()
+        .expect("valid user extension");
+    assert!(builtin.is_fallback_compactor("summary"));
+    assert!(!builtin.is_fallback_compactor("remote"));
+
+    let generation = Generation::build(
+        ValidatedExtensions::validate(vec![user, bundled, builtin], None)
+            .expect("extensions validate"),
+    );
+
+    let chain: Vec<&str> = generation
+        .compactors
+        .entries()
+        .iter()
+        .map(|entry| entry.name.as_ref())
+        .collect();
+    assert_eq!(
+        chain,
+        ["remote", "images", "custom", "summary", "last-bundled"],
+        "primaries keep origin order, then fallbacks keep origin order"
+    );
+    for name in &chain {
+        assert!(
+            generation.compactor(name).is_some(),
+            "{name} resolves to its compactor after regrouping"
         );
     }
 }

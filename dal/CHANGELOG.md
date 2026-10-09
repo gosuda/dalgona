@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add `ExtensionBuilder::fallback_compactor`: a fallback compactor runs after every primary compactor, whatever the extension's origin, so a bundled battery's compactor gets its turn before dal's text summary. The built-in `summary` compactor is now a fallback; the chain is `remote`, then the batteries, then `summary`. `Extension::is_fallback_compactor` reports the registration.
 - Fix the question dialog for selections: a long preview no longer hides the choices, each choice shows its description, and Page Down and Page Up scroll the preview.
 - Fix reading extension manuals with the `read` tool: an extension that registers doc pages now serves them at its own `<name>://` address through `ManualScheme`, which `dalgon` re-exports.
 - Fix the `run` service: it now keeps the stdout prefix a caller asks for. Before, every run reported an overflow with an empty prefix, so extensions that read command output, such as the review battery, could not read it.

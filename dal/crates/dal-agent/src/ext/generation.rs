@@ -127,6 +127,7 @@ impl Generation {
         let mut prompt_sections = Vec::new();
         let mut schemes = Vec::new();
         let mut compactors = Vec::new();
+        let mut fallback_compactors = Vec::new();
         let mut status_kinds = Vec::new();
         let mut mcp_client: Option<(usize, Arc<dyn McpClient>)> = None;
         let mut pages = Vec::new();
@@ -163,7 +164,12 @@ impl Generation {
                 });
             }
             for (record, (name, _)) in ext.compactors().iter().enumerate() {
-                compactors.push(NamedEntry {
+                let group = if ext.fallback_compactors.contains(&record) {
+                    &mut fallback_compactors
+                } else {
+                    &mut compactors
+                };
+                group.push(NamedEntry {
                     name: name.clone(),
                     ext: index,
                     record,
@@ -197,9 +203,7 @@ impl Generation {
             schemes: SchemeTable {
                 entries: schemes.into(),
             },
-            compactors: CompactorTable {
-                entries: compactors.into(),
-            },
+            compactors: CompactorTable::new(compactors, fallback_compactors),
             mcp_client,
             status_kinds: status_kinds.into(),
             docs: Arc::new(DocTable::publish(pages)),

@@ -345,12 +345,26 @@ impl SchemeTable {
     }
 }
 
-/// Compactor index in canonical order with name lookup.
+/// Compactor index with name lookup, in the order the compaction chain runs.
+///
+/// Every primary compactor comes before every fallback compactor (see
+/// `ExtensionBuilder::fallback_compactor`). Inside each group the entries keep
+/// canonical extension order, so a bundled battery's primary compactor runs
+/// ahead of a built-in fallback even though built-ins sort first.
 pub(crate) struct CompactorTable {
-    pub(crate) entries: Box<[NamedEntry]>,
+    entries: Box<[NamedEntry]>,
 }
 
 impl CompactorTable {
+    /// Orders `primary` before `fallback`, keeping each group's own order.
+    pub(crate) fn new(primary: Vec<NamedEntry>, fallback: Vec<NamedEntry>) -> Self {
+        let mut entries = primary;
+        entries.extend(fallback);
+        Self {
+            entries: entries.into(),
+        }
+    }
+
     /// Returns the entry for `name`, when registered.
     pub(crate) fn find(&self, name: &str) -> Option<&NamedEntry> {
         self.entries

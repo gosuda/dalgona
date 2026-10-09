@@ -65,6 +65,7 @@ pub struct ExtensionBuilder {
     watches: Vec<Arc<dyn WatchFactory>>,
     schemes: Vec<(Box<str>, Arc<dyn SchemeResolver>)>,
     compactors: Vec<(Box<str>, Arc<dyn Compactor>)>,
+    fallback_compactors: Vec<usize>,
     mcp_clients: Vec<Arc<dyn McpClient>>,
     attaches: Vec<Attach>,
     statuses: Vec<(Box<str>, Arc<dyn StatusPoll>)>,
@@ -118,6 +119,7 @@ impl ExtensionBuilder {
             watches: Vec::new(),
             schemes: Vec::new(),
             compactors: Vec::new(),
+            fallback_compactors: Vec::new(),
             mcp_clients: Vec::new(),
             attaches: Vec::new(),
             statuses: Vec::new(),
@@ -304,8 +306,24 @@ impl ExtensionBuilder {
         self
     }
     /// Registers a named compactor.
+    ///
+    /// Primary compactors run in canonical extension order; every
+    /// [`fallback_compactor`](Self::fallback_compactor) runs after all of them.
     #[must_use]
     pub fn compactor(mut self, name: &str, compactor: Arc<dyn Compactor>) -> Self {
+        self.compactors.push((name.into(), compactor));
+        self
+    }
+    /// Registers a named compactor of last resort.
+    ///
+    /// The compaction chain tries every primary compactor, from any
+    /// extension and of any origin, before the first fallback compactor.
+    /// Fallbacks keep canonical extension order among themselves. A compactor
+    /// that always commits, such as a plain-text summary, belongs here so
+    /// that a battery's compactor still gets its turn.
+    #[must_use]
+    pub fn fallback_compactor(mut self, name: &str, compactor: Arc<dyn Compactor>) -> Self {
+        self.fallback_compactors.push(self.compactors.len());
         self.compactors.push((name.into(), compactor));
         self
     }
@@ -409,6 +427,7 @@ impl ExtensionBuilder {
             watches: self.watches,
             schemes: self.schemes,
             compactors: self.compactors,
+            fallback_compactors: self.fallback_compactors,
             mcp_clients: self.mcp_clients,
             attaches: Arc::new(Mutex::new(self.attaches)),
             statuses: self.statuses,
@@ -535,6 +554,7 @@ pub struct Extension {
     pub(super) watches: Vec<Arc<dyn WatchFactory>>,
     pub(super) schemes: Vec<(Box<str>, Arc<dyn SchemeResolver>)>,
     pub(super) compactors: Vec<(Box<str>, Arc<dyn Compactor>)>,
+    pub(super) fallback_compactors: Vec<usize>,
     pub(super) mcp_clients: Vec<Arc<dyn McpClient>>,
     pub(super) attaches: Arc<Mutex<Vec<Attach>>>,
     pub(super) statuses: Vec<(Box<str>, Arc<dyn StatusPoll>)>,
@@ -610,10 +630,19 @@ impl Extension {
     pub fn schemes(&self) -> &[(Box<str>, Arc<dyn SchemeResolver>)] {
         &self.schemes
     }
-    /// Borrows the registered compactors.
+    /// Borrows the registered compactors, primary and fallback.
     #[must_use]
     pub fn compactors(&self) -> &[(Box<str>, Arc<dyn Compactor>)] {
         &self.compactors
+    }
+    /// Reports whether `name` was registered with
+    /// [`ExtensionBuilder::fallback_compactor`].
+    #[must_use]
+    pub fn is_fallback_compactor(&self, name: &str) -> bool {
+        self.compactors
+            .iter()
+            .position(|(registered, _)| registered.as_ref() == name)
+            .is_some_and(|record| self.fallback_compactors.contains(&record))
     }
     /// Borrows the registered MCP clients.
     #[must_use]
