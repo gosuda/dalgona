@@ -1,20 +1,21 @@
+//! Shared helpers for the gate test binaries.
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-pub(crate) type TestResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+pub type TestResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-pub(crate) struct Scratch {
+pub struct Scratch {
     path: PathBuf,
 }
 
 impl Scratch {
-    pub(crate) fn new(label: &str) -> std::io::Result<Self> {
+    pub fn new(label: &str) -> std::io::Result<Self> {
         let path = std::env::temp_dir().join(format!("{label}-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&path)?;
         Ok(Self { path })
     }
 
-    pub(crate) fn path(&self) -> &Path {
+    pub fn path(&self) -> &Path {
         &self.path
     }
 }
@@ -25,17 +26,17 @@ impl Drop for Scratch {
     }
 }
 
-pub(crate) fn repo_root() -> PathBuf {
+pub fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-pub(crate) fn run_command(
+pub fn run_command(
     command: &mut std::process::Command,
 ) -> std::io::Result<std::process::Output> {
     command.output()
 }
 
-pub(crate) const BATTERIES: [&str; 11] = [
+pub const BATTERIES: [&str; 11] = [
     "ask",
     "history",
     "judged",
@@ -49,7 +50,7 @@ pub(crate) const BATTERIES: [&str; 11] = [
     "work",
 ];
 
-pub(crate) fn build_product(
+pub fn build_product(
     root: PathBuf,
     user_toml: Option<&str>,
 ) -> TestResult<dal_agent::Product> {
@@ -67,7 +68,7 @@ pub(crate) fn build_product(
     Ok(dalgona::build(&cx)?)
 }
 
-pub(crate) fn battery_names(product: &dal_agent::Product) -> std::collections::BTreeSet<&str> {
+pub fn battery_names(product: &dal_agent::Product) -> std::collections::BTreeSet<&str> {
     product
         .extensions
         .iter()
@@ -76,7 +77,7 @@ pub(crate) fn battery_names(product: &dal_agent::Product) -> std::collections::B
         .collect()
 }
 
-pub(crate) fn dalgona_binary() -> TestResult<PathBuf> {
+pub fn dalgona_binary() -> TestResult<PathBuf> {
     let suffix = std::env::consts::EXE_SUFFIX;
     let exe = std::env::current_exe()?;
     let target_profile = exe
@@ -94,11 +95,11 @@ pub(crate) fn dalgona_binary() -> TestResult<PathBuf> {
     .into())
 }
 
-pub(crate) async fn start_dalgona(root: PathBuf) -> TestResult<dal_agent::Host> {
+pub async fn start_dalgona(root: PathBuf) -> TestResult<dal_agent::Host> {
     start_dalgona_with_config(root, None).await
 }
 
-pub(crate) async fn start_dalgona_with_config(
+pub async fn start_dalgona_with_config(
     root: PathBuf,
     user_toml: Option<&str>,
 ) -> TestResult<dal_agent::Host> {

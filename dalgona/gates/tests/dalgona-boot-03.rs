@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
 #[path = "support/mod.rs"]
-mod support;
+use gates::support::*;
 
 #[test]
 fn disabled_mcp_removes_its_records_and_nothing_else() -> support::TestResult<()> {

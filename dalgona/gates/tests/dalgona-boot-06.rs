@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
 #[path = "support/mod.rs"]
-mod support;
+use gates::support::*;
 
 use std::{fs, process::Command};
 
