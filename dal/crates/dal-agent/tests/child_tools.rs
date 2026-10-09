@@ -291,6 +291,10 @@ struct Rig {
     host: Host,
     root: Agent,
     workspace: PathBuf,
+    data_root: PathBuf,
+    config: Config,
+    env: Env,
+    extensions: Vec<dal_agent::ext::Extension>,
     probe: Arc<Probe>,
     children: Arc<Mutex<Vec<SessionId>>>,
     beta_runs: Arc<AtomicUsize>,
@@ -306,6 +310,66 @@ fn command(name: &str) -> CommandSpec {
 }
 
 async fn rig() -> Rig {
+    rig_with_extra_tools(&[]).await
+}
+
+async fn rig_with_deferred() -> Rig {
+    rig_with_extra_tools(&["delta"]).await
+}
+
+/// Builds the `kit` extension the rig spawns children through: the
+/// counter tools, the spawn commands, the nested-caller hook, and the
+/// probe model. `extra` names deferred tools added before the build.
+fn kit_extension(
+    extra: &[&str],
+    children: Arc<Mutex<Vec<SessionId>>>,
+    next_name: Arc<AtomicUsize>,
+    beta_runs: Arc<AtomicUsize>,
+    gamma_runs: Arc<AtomicUsize>,
+    probe: &Arc<Probe>,
+) -> dal_agent::ext::Extension {
+    let inject = ServiceSet::from_names(["agents"]).expect("inject set");
+    let mut builder = ExtensionBuilder::new("kit", "0.1.0", inject)
+        .expect("builder")
+        .tool(
+            Counter::new("alpha", Arc::new(AtomicUsize::new(0))),
+            Visibility::Model,
+        )
+        .tool(Counter::new("beta", beta_runs), Visibility::Model)
+        .command(
+            command("spawn"),
+            Arc::new(Spawn {
+                children: Arc::clone(&children),
+                next_name: Arc::clone(&next_name),
+                fixed_name: None,
+            }),
+        )
+        .command(
+            command("spawn_same"),
+            Arc::new(Spawn {
+                children,
+                next_name,
+                fixed_name: Some("member".into()),
+            }),
+        )
+        .command(command("recompose"), Arc::new(Recompose { gamma_runs }))
+        .on_before_turn(NestedCaller)
+        .model(ModelRecord {
+            id: ModelId::parse(PROBE_MODEL).expect("model id"),
+            caps: caps(),
+            handler: Arc::clone(probe) as Arc<dyn ModelHandler>,
+            export: None,
+        });
+    for name in extra {
+        builder = builder.tool(
+            Counter::new(name, Arc::new(AtomicUsize::new(0))),
+            Visibility::Deferred,
+        );
+    }
+    builder.build().expect("extension")
+}
+
+async fn rig_with_extra_tools(extra: &[&str]) -> Rig {
     let tmp = tempfile::tempdir().expect("tempdir");
     let data = tmp.path().join("data");
     let workspace = tmp.path().join("w");
@@ -325,53 +389,22 @@ async fn rig() -> Rig {
     });
     let children = Arc::new(Mutex::new(Vec::new()));
     let next_name = Arc::new(AtomicUsize::new(0));
-    let alpha_runs = Arc::new(AtomicUsize::new(0));
     let beta_runs = Arc::new(AtomicUsize::new(0));
     let gamma_runs = Arc::new(AtomicUsize::new(0));
-    let inject = ServiceSet::from_names(["agents"]).expect("inject set");
-    let extension = ExtensionBuilder::new("kit", "0.1.0", inject)
-        .expect("builder")
-        .tool(Counter::new("alpha", alpha_runs), Visibility::Model)
-        .tool(
-            Counter::new("beta", Arc::clone(&beta_runs)),
-            Visibility::Model,
-        )
-        .command(
-            command("spawn"),
-            Arc::new(Spawn {
-                children: Arc::clone(&children),
-                next_name: Arc::clone(&next_name),
-                fixed_name: None,
-            }),
-        )
-        .command(
-            command("spawn_same"),
-            Arc::new(Spawn {
-                children: Arc::clone(&children),
-                next_name: Arc::clone(&next_name),
-                fixed_name: Some("member".into()),
-            }),
-        )
-        .command(
-            command("recompose"),
-            Arc::new(Recompose {
-                gamma_runs: Arc::clone(&gamma_runs),
-            }),
-        )
-        .on_before_turn(NestedCaller)
-        .model(ModelRecord {
-            id: ModelId::parse(PROBE_MODEL).expect("model id"),
-            caps: caps(),
-            handler: Arc::clone(&probe) as Arc<dyn ModelHandler>,
-            export: None,
-        })
-        .build()
-        .expect("extension");
+    let extension = kit_extension(
+        extra,
+        Arc::clone(&children),
+        next_name,
+        Arc::clone(&beta_runs),
+        gamma_runs.clone(),
+        &probe,
+    );
+    let extensions = vec![extension];
     let product = Product {
         name: "dal",
-        data_root: data,
+        data_root: data.clone(),
         defaults: "",
-        extensions: vec![extension],
+        extensions: extensions.clone(),
         bundled: Vec::new(),
     };
     let env = Env {
@@ -379,7 +412,9 @@ async fn rig() -> Rig {
         cwd: workspace.clone(),
         sandbox_helper: None,
     };
-    let host = Host::start(product, config, env).await.expect("host");
+    let host = Host::start(product, config.clone(), env.clone())
+        .await
+        .expect("host");
     let root = host
         .open(
             SessionRef::New {
@@ -395,6 +430,10 @@ async fn rig() -> Rig {
         host,
         root,
         workspace,
+        data_root: data,
+        config,
+        env,
+        extensions,
         probe,
         children,
         beta_runs,
@@ -403,6 +442,37 @@ async fn rig() -> Rig {
 }
 
 impl Rig {
+    /// Closes the child and the root, then builds a second Host over the
+    /// same data root: the state a restart leaves behind.
+    async fn restart(&mut self, child: SessionId) {
+        self.host
+            .close(child)
+            .await
+            .expect("close child before restart");
+        let root_id = self
+            .root
+            .view(dal_core::PageReq::default())
+            .expect("root view")
+            .session
+            .id;
+        self.host
+            .close(root_id)
+            .await
+            .expect("close root before restart");
+        let product = Product {
+            name: "dal",
+            data_root: self.data_root.clone(),
+            defaults: "",
+            extensions: self.extensions.clone(),
+            bundled: Vec::new(),
+        };
+        let replacement = Host::start(product, self.config.clone(), self.env.clone())
+            .await
+            .expect("restart host");
+        let old = std::mem::replace(&mut self.host, replacement);
+        drop(old);
+    }
+
     async fn run(&self, name: &str, args: &str) {
         tokio::time::timeout(
             Duration::from_secs(10),
@@ -615,6 +685,48 @@ async fn a_child_starts_with_its_parents_approval_mode() {
         child.settings.approval,
         ApprovalMode::All,
         "the child keeps the approval the user gave its parent"
+    );
+}
+
+#[tokio::test]
+async fn a_reopened_child_keeps_its_tool_allowlist() {
+    let mut rig = rig().await;
+    rig.root
+        .submit(Command::SetApproval {
+            mode: ApprovalMode::All,
+            save: Save::SessionOnly,
+        })
+        .await
+        .expect("parent approval set");
+    rig.run("spawn", "alpha").await;
+    let child = rig.child(0);
+    rig.settled(child, 1).await;
+    rig.restart(child).await;
+    rig.prompt_child(child).await;
+    assert_eq!(
+        rig.probe.requests()[1],
+        ["alpha"],
+        "the allowlist remains after reopening the child"
+    );
+    assert_eq!(
+        rig.child_view(child).await.settings.approval,
+        ApprovalMode::All,
+        "the inherited approval mode remains after reopening the child"
+    );
+}
+
+#[tokio::test]
+async fn a_reopened_child_filters_deferred_tools() {
+    let mut rig = rig_with_deferred().await;
+    rig.run("spawn", "alpha").await;
+    let child = rig.child(0);
+    rig.settled(child, 1).await;
+    rig.restart(child).await;
+    rig.prompt_child(child).await;
+    assert_eq!(
+        rig.probe.requests()[1],
+        ["alpha"],
+        "replay keeps deferred tools and tool_search outside the allowlist"
     );
 }
 

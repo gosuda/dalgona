@@ -10,10 +10,10 @@ use std::sync::Arc;
 
 use dal_core::ext::{Mail as ExtMail, Service, SidecarName};
 use dal_core::{
-    AgentInfo, AgentReport, AgentState, AgentsOp, AgentsReply, BlobId, EntryId, FetchMethod,
-    FetchRequest, FetchResponse, Inference, JobsOp, JobsReply, MailMode, ModelRequest, Name,
-    Notice, Part, Request, SessionId, StateError, StateOp, StateRecord, TurnOp, TurnOpReply,
-    Workspace,
+    AgentInfo, AgentReport, AgentState, AgentsOp, AgentsReply, ApprovalMode, BlobId, EntryId,
+    FetchMethod, FetchRequest, FetchResponse, Inference, JobsOp, JobsReply, MailMode, ModelRequest,
+    Name, Notice, Part, RawJson, Request, SessionId, StateError, StateOp, StateRecord, TurnOp,
+    TurnOpReply, Workspace,
 };
 use dal_provider::EventStream;
 use tokio::sync::oneshot;
@@ -25,9 +25,9 @@ use crate::ext::ExtRecord;
 use crate::ext::services::{ServiceFuture, SessionBackend, SessionServices};
 use crate::ext::tool::RawValue;
 use crate::host::HostState;
-use crate::session::SessionHandle;
 use crate::session::shared::Shared;
 use crate::session::tasks::SessionTasks;
+use crate::session::{ExtRecordRequest, SessionHandle};
 
 /// Inputs for one session data-plane.
 pub(crate) struct BackendDeps {
@@ -55,6 +55,41 @@ pub(crate) struct BackendDeps {
 
 fn record_session_closed() -> ServiceError {
     ServiceError::failed(None, "the session closed before the record was journaled.")
+}
+
+/// Encodes the durable start policy of one child session: its tool
+/// allowlist and the approval mode it inherits from its parent.
+fn child_policy_body(
+    tools: Option<&[Name]>,
+    approval: ApprovalMode,
+) -> Result<RawJson, ServiceError> {
+    #[derive(serde::Serialize)]
+    struct Policy<'a> {
+        tools: Option<Vec<&'a str>>,
+        approval: ApprovalMode,
+    }
+    let tools = tools.map(|names| names.iter().map(Name::as_str).collect());
+    let body = sonic_rs::to_string(&Policy { tools, approval })
+        .map_err(|error| ServiceError::failed(None, error.to_string()))?;
+    RawJson::parse(&body).map_err(|error| ServiceError::failed(None, error.to_string()))
+}
+
+/// Moves the child onto the parent's approval mode; a no-op when they
+/// already agree.
+async fn copy_child_approval(
+    child: &crate::agent::Agent,
+    approval: ApprovalMode,
+) -> Result<(), AgentError> {
+    if child.inner.shared.approval() == approval {
+        return Ok(());
+    }
+    child
+        .submit(dal_core::Command::SetApproval {
+            mode: approval,
+            save: dal_core::Save::SessionOnly,
+        })
+        .await
+        .map(|_| ())
 }
 
 fn write_isolation_artifact(
@@ -823,6 +858,38 @@ impl Backend {
         // The child is restricted before its first turn: a start that sets
         // `tools` runs with exactly those tools, on every turn and across
         // reloads, and an absent list leaves the child unrestricted.
+        // The restriction and the inherited approval mode are journaled
+        // through the child's actor first: a start whose policy cannot be
+        // recorded leaves no half-restricted child behind.
+        let Ok(body) = child_policy_body(start.tools.as_deref(), self.shared.approval()) else {
+            let _ = self.host().close(child_id).await;
+            return Err(child_start_error("could not encode the child start policy"));
+        };
+        let Ok(ext) = Name::parse(crate::host::CHILD_POLICY_EXT) else {
+            let _ = self.host().close(child_id).await;
+            return Err(child_start_error("could not encode the child start policy"));
+        };
+        let (reply, receipt) = oneshot::channel();
+        let queued = child
+            .inner
+            .handle
+            .ext_record(ExtRecordRequest {
+                ext,
+                kind: crate::host::CHILD_POLICY_KIND.into(),
+                body,
+                reply,
+            })
+            .await
+            .is_ok();
+        let persisted = queued && receipt.await.is_ok_and(|result| result.is_ok());
+        if !persisted {
+            let _ = self.host().close(child_id).await;
+            return Err(child_start_error(
+                "could not journal the child start policy",
+            ));
+        }
+        // Keep the live snapshot in step with the durable policy before the
+        // first prompt enters the child.
         if let Some(names) = &start.tools {
             child.inner.shared.restrict_tools(names);
         }
@@ -830,14 +897,7 @@ impl Backend {
         // not the configured default. When the mode cannot be set the child
         // does not start.
         let approval = self.shared.approval();
-        if child.inner.shared.approval() != approval
-            && let Err(error) = child
-                .submit(dal_core::Command::SetApproval {
-                    mode: approval,
-                    save: dal_core::Save::SessionOnly,
-                })
-                .await
-        {
+        if let Err(error) = copy_child_approval(&child, approval).await {
             let _ = self.host().close(child_id).await;
             return Err(child_start_error(error));
         }
@@ -1136,6 +1196,8 @@ impl Backend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::host::{Env, Host, Product, SessionRef};
+    use dal_core::{ApprovalMode, CallId, ClientId, Config, ConfigProduct, Workspace};
 
     #[test]
     fn cancel_child_reports_non_lifecycle_close_failures() {
@@ -1148,5 +1210,60 @@ mod tests {
             result.to_string(),
             format!("could not cancel child session {id}: close refused")
         );
+    }
+
+    #[tokio::test]
+    async fn closed_child_refuses_approval_copy() {
+        let temp = tempfile::tempdir().expect("temporary data root");
+        let data = temp.path().join("data");
+        let workspace_path = temp.path().join("workspace");
+        std::fs::create_dir_all(&data).expect("data root");
+        std::fs::create_dir_all(&workspace_path).expect("workspace");
+        let config = Config::load(ConfigProduct::Dalgon, &data, "", None).expect("config");
+        let workspace = Workspace::new(workspace_path.clone()).expect("workspace value");
+        let env = Env::data_root(workspace_path);
+        let host = Host::start(
+            Product {
+                name: "dal",
+                data_root: data,
+                defaults: "",
+                extensions: Vec::new(),
+                bundled: Vec::new(),
+            },
+            config,
+            env,
+        )
+        .await
+        .expect("host");
+        let root = host
+            .open(
+                SessionRef::New {
+                    workspace: workspace.clone(),
+                    name: None,
+                },
+                ClientId::new("backend-test"),
+            )
+            .await
+            .expect("root");
+        let child = host
+            .open(
+                SessionRef::Child {
+                    parent: root.inner.session,
+                    call: CallId::new("approval-copy"),
+                    workspace,
+                    name: None,
+                },
+                ClientId::new("backend-test"),
+            )
+            .await
+            .expect("child");
+        host.close(child.inner.session).await.expect("close child");
+        assert!(
+            copy_child_approval(&child, ApprovalMode::All)
+                .await
+                .is_err(),
+            "a closed child must refuse the approval copy"
+        );
+        host.close(root.inner.session).await.expect("close root");
     }
 }

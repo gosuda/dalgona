@@ -5,10 +5,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dal_core::{
-    ClientId, Effect, Gen, ListQuery, Page, PageReq, Session, SessionEnd, SessionId, SessionInfo,
-    SessionStart, Timestamp, UpdateKind, Workspace,
+    ApprovalMode, ClientId, Effect, Gen, ListQuery, Name, Page, PageReq, Record, Session,
+    SessionEnd, SessionId, SessionInfo, SessionStart, Timestamp, UpdateKind, Workspace,
 };
 use dal_store::{Journal, Store};
+use serde::Deserialize;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
@@ -66,6 +67,57 @@ const ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// Sweep interval of the shutdown quiet wait; polls are bounded reads.
 const STATUS_QUIET_POLL: Duration = Duration::from_millis(50);
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChildPolicyBody {
+    tools: Option<Vec<Box<str>>>,
+    approval: ApprovalMode,
+}
+
+struct ChildPolicy {
+    tools: Option<Vec<Name>>,
+    approval: ApprovalMode,
+}
+
+fn parse_child_policy_tool(name: &str) -> Result<Name, HostError> {
+    Name::parse_mapped_tool(name).map_err(|error| HostError::Config {
+        message: format!("invalid child policy tool {name:?}: {error}").into(),
+    })
+}
+
+/// Reads the newest child-policy record a journal carries; a journal
+/// without one leaves the session unrestricted and on the configured mode.
+fn replay_child_policy(records: &[Record]) -> Result<Option<ChildPolicy>, HostError> {
+    let found = records.iter().rev().find(|record| {
+        matches!(
+            record,
+            Record::Ext { ext, kind, .. }
+                if ext.as_ref() == super::CHILD_POLICY_EXT
+                    && kind.as_ref() == super::CHILD_POLICY_KIND
+        )
+    });
+    let Some(Record::Ext { body, .. }) = found else {
+        return Ok(None);
+    };
+    let body: ChildPolicyBody =
+        sonic_rs::from_str(body.as_str()).map_err(|error| HostError::Config {
+            message: format!("invalid child policy record: {error}").into(),
+        })?;
+    let tools = body
+        .tools
+        .map(|names| {
+            names
+                .into_iter()
+                .map(|name| parse_child_policy_tool(&name))
+                .collect()
+        })
+        .transpose()?;
+    Ok(Some(ChildPolicy {
+        tools,
+        approval: body.approval,
+    }))
+}
 
 /// The replayed state a spawned session starts from.
 struct ReplayedSession {
@@ -560,7 +612,11 @@ impl Host {
     ) -> Result<ReplayedSession, HostError> {
         let generation = journal.generation();
         let thinking = self.state.shared.config.thinking();
-        let approval = self.state.shared.config.approval();
+        let policy = replay_child_policy(journal.records())?;
+        let approval = policy.as_ref().map_or_else(
+            || self.state.shared.config.approval(),
+            |policy| policy.approval,
+        );
         let mode = self.state.shared.config.mode();
         let (fold, effects) = Session::replay_with(
             dal_core::Settings {
@@ -591,6 +647,11 @@ impl Host {
             mode,
         ));
         shared.restore_fold(&fold);
+        if let Some(policy) = &policy
+            && let Some(tools) = &policy.tools
+        {
+            shared.restrict_tools(tools);
+        }
         let initial_entries: Arc<[dal_core::EntryView]> = shared.leaf_entries().into();
         let jobs_table = if resolved.ephemeral {
             crate::jobs::JobTable::new()

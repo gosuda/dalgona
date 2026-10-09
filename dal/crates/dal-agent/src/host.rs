@@ -5,6 +5,11 @@ pub(crate) mod ops;
 mod registry;
 mod start;
 
+/// Extension record identity for a child session's durable start policy.
+pub(crate) const CHILD_POLICY_EXT: &str = "dal-agent";
+/// Extension record kind for a child session's durable start policy.
+pub(crate) const CHILD_POLICY_KIND: &str = "child_policy";
+
 pub use ops::DocEntry;
 
 use std::collections::{BTreeMap, HashMap};
