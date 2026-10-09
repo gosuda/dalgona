@@ -617,3 +617,30 @@ async fn a_child_starts_with_its_parents_approval_mode() {
         "the child keeps the approval the user gave its parent"
     );
 }
+
+#[tokio::test]
+async fn a_tool_result_records_how_long_its_tool_ran() {
+    let rig = rig().await;
+    rig.probe.queue("alpha");
+    rig.probe.queue("ghost");
+    rig.run("spawn", "alpha").await;
+    rig.settled(rig.child(0), 3).await;
+
+    let view = rig.child_view(rig.child(0)).await;
+    let results: Vec<_> = view
+        .entries
+        .items
+        .iter()
+        .filter_map(|entry| match &entry.kind {
+            dal_core::EntryKind::ToolResult {
+                name, elapsed_ms, ..
+            } => Some((name.to_string(), *elapsed_ms)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results.len(), 2, "{results:?}");
+    assert_eq!(results[0].0, "alpha");
+    assert!(results[0].1.is_some(), "a tool that ran has a duration");
+    assert_eq!(results[1].0, "ghost");
+    assert_eq!(results[1].1, None, "a call that never ran has none");
+}

@@ -115,6 +115,7 @@ fn corpus() -> Vec<Record> {
                 error: false,
                 parts: vec![JournalPart::Text { text: "out".into() }],
                 changes: vec![],
+                elapsed_ms: Some(1234),
             },
         }),
         Record::Reminder(Entry {

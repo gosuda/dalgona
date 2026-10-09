@@ -608,3 +608,32 @@ fn invalid_utf8_in_a_delta_is_replaced_not_fatal() {
         Some(Err(ProviderError::StreamCut))
     ));
 }
+
+#[test]
+fn before_turn_text_follows_its_user_message_in_the_body() -> TestResult {
+    let mut request = request()?;
+    request.context = Arc::from([
+        ContextItem::User {
+            parts: vec![Part::Text {
+                text: "question".into(),
+            }],
+        },
+        ContextItem::User {
+            parts: vec![Part::Text {
+                text: "first\nsecond".into(),
+            }],
+        },
+    ]);
+    let high = WireThinking::OpenAi {
+        effort: Some("high"),
+    };
+    let body = String::from_utf8(request_body(&request, high, true)?)?;
+    assert!(
+        body.contains(concat!(
+            r#"{"type":"message","role":"user","content":[{"type":"input_text","text":"question"}]},"#,
+            r#"{"type":"message","role":"user","content":[{"type":"input_text","text":"first\nsecond"}]}"#,
+        )),
+        "{body}"
+    );
+    Ok(())
+}

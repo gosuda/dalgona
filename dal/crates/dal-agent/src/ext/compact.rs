@@ -42,8 +42,8 @@ pub struct CoveredEntry {
     /// Model context content for this entry.
     pub content: ContextItem,
     /// Reminder text carried outside the model context when this entry is a
-    /// reminder. Compactors that draw the journal keep the reminder's place
-    /// and text; the context itself stays empty.
+    /// reminder that is not model context. Compactors that draw the journal
+    /// keep the reminder's place and text; the context itself stays empty.
     pub note: Option<Box<str>>,
 }
 
@@ -101,7 +101,8 @@ pub struct CompactInput<'a> {
 impl CompactInput<'_> {
     /// Returns the selected model context; never re-runs the cut.
     ///
-    /// Reminder entries are not model context and are left out.
+    /// Reminder entries other than the text a `before_turn` hook added are not
+    /// model context and are left out.
     #[must_use]
     pub fn covered_context(&self) -> Arc<[ContextItem]> {
         self.covered

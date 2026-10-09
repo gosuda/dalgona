@@ -1,8 +1,10 @@
 use super::helpers::{HookTarget, StreamEnd, invalid};
+use super::round::Settlement;
 use super::types::{QuestionRef, QueuedInput};
 use super::{
     Answer, CompactLimits, Effect, Emit, Event, Family, JobId, JobKind, JobOutcome, Limits,
     ModelRoute, Name, Part, Phase, Question, Rejection, Reply, Request, RequestId, Session, TurnId,
+    UpdateKind,
 };
 
 impl Session {
@@ -35,17 +37,7 @@ impl Session {
                 who,
                 purpose,
                 usage,
-            } => {
-                if matches!(&self.phase, Phase::Running { .. }) {
-                    self.turn_totals.add_usage(usage)?;
-                }
-                emit.records.push(super::Record::Inferred {
-                    at,
-                    who,
-                    purpose,
-                    usage,
-                });
-            }
+            } => return self.inferred(at, who, purpose, usage, emit),
             Event::RequestOpened { request } => self.request_opened(&request),
             Event::GrantResolved {
                 request,
@@ -53,8 +45,8 @@ impl Session {
                 by,
                 was_default,
             } => return self.grant_resolved(request, &answer, by.is_some(), was_default),
-            Event::JobStarted { job, kind } => self.job_started(job, kind),
-            Event::JobSettled { job, outcome } => self.job_settled(job, outcome),
+            Event::JobStarted { job, kind } => self.job_started(job, kind, emit),
+            Event::JobSettled { job, outcome } => self.job_settled(job, outcome, emit),
             Event::Wake {
                 text,
                 sources,
@@ -95,7 +87,15 @@ impl Session {
                 turn,
                 call,
                 outcome,
-            } => return self.settled(turn, &call, outcome, now, emit, effects),
+                elapsed_ms,
+            } => {
+                let settlement = Settlement {
+                    call,
+                    outcome,
+                    elapsed_ms,
+                };
+                return self.settled(turn, settlement, now, emit, effects);
+            }
             Event::Boundary { turn } => return self.boundary(turn, now, true, emit, effects),
             Event::Limits {
                 window,
@@ -107,6 +107,26 @@ impl Session {
             }
             Event::Close => self.close(),
         }
+        Ok(())
+    }
+
+    fn inferred(
+        &mut self,
+        at: jiff::Timestamp,
+        who: crate::Owner,
+        purpose: crate::InferredPurpose,
+        usage: super::Usage,
+        emit: &mut Emit,
+    ) -> Result<(), Rejection> {
+        if matches!(&self.phase, Phase::Running { .. }) {
+            self.turn_totals.add_usage(usage)?;
+        }
+        emit.records.push(super::Record::Inferred {
+            at,
+            who,
+            purpose,
+            usage,
+        });
         Ok(())
     }
 
@@ -179,23 +199,32 @@ impl Session {
         Ok(())
     }
 
-    pub(super) fn job_started(&mut self, job: JobId, kind: JobKind) {
+    /// Records a started job and tells clients once.
+    ///
+    /// A manual compaction is a phase of the session, not a job a client counts.
+    pub(super) fn job_started(&mut self, job: JobId, kind: JobKind, emit: &mut Emit) {
         if self.live_jobs.iter().any(|(id, _)| *id == job) {
             return;
         }
         self.live_jobs.push((job, Some(kind)));
-        if kind == JobKind::Compaction && matches!(&self.phase, Phase::Compacting { job: None }) {
-            self.phase = Phase::Compacting { job: Some(job) };
+        if kind == JobKind::Compaction {
+            if matches!(&self.phase, Phase::Compacting { job: None }) {
+                self.phase = Phase::Compacting { job: Some(job) };
+            }
+            return;
         }
+        emit.updates.push(UpdateKind::JobStarted { job });
     }
 
-    pub(super) fn job_settled(&mut self, job: JobId, outcome: JobOutcome) {
+    /// Records a settled job and tells clients once.
+    pub(super) fn job_settled(&mut self, job: JobId, outcome: JobOutcome, emit: &mut Emit) {
         let Some(index) = self.live_jobs.iter().position(|(id, _)| *id == job) else {
             return;
         };
         let (_, kind) = self.live_jobs.remove(index);
         if kind != Some(JobKind::Compaction) {
             self.ended_jobs.push((job, outcome));
+            emit.updates.push(UpdateKind::JobSettled { job });
             return;
         }
         if matches!(&self.phase, Phase::Compacting { job: Some(active) } if *active == job) {

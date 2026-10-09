@@ -10,6 +10,13 @@ use super::{
     TurnEndStop, TurnId, TurnSource, TurnStage, UpdateKind,
 };
 
+/// One dispatcher result: the call, how it ended, and how long its tool ran.
+pub(super) struct Settlement {
+    pub(super) call: CallId,
+    pub(super) outcome: SettledOutcome,
+    pub(super) elapsed_ms: Option<u64>,
+}
+
 impl Session {
     pub(super) fn call_started(
         &mut self,
@@ -46,8 +53,7 @@ impl Session {
     pub(super) fn settled(
         &mut self,
         turn: TurnId,
-        call: &CallId,
-        outcome: SettledOutcome,
+        settlement: Settlement,
         now: jiff::Timestamp,
         emit: &mut Emit,
         effects: &mut Vec<Effect>,
@@ -60,7 +66,12 @@ impl Session {
             } if *active == turn => (*round, pending.clone()),
             _ => return Ok(()),
         };
-        let Some(index) = pending.iter().position(|item| item.call == *call) else {
+        let Settlement {
+            call,
+            outcome,
+            elapsed_ms,
+        } = settlement;
+        let Some(index) = pending.iter().position(|item| item.call == call) else {
             return Ok(());
         };
         let item = pending.remove(index);
@@ -74,7 +85,7 @@ impl Session {
                 false,
             ),
         };
-        self.result_entry(&item.call, &item.name, text.clone(), is_error, now, emit)?;
+        self.result_entry(&item, text.clone(), is_error, elapsed_ms, now, emit)?;
         if succeeded
             && let Some(tool) = item.promotes
             && !self.promoted.contains(&tool)
@@ -93,6 +104,7 @@ impl Session {
                 is_error,
                 text,
                 images: Vec::new(),
+                elapsed_ms,
             },
         });
         if pending.is_empty() {

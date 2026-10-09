@@ -9,6 +9,8 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use dal_core::ext::ToolCallEvent;
 use dal_core::{
@@ -103,6 +105,9 @@ pub(crate) struct SettledCall {
     pub call: CallId,
     /// The call's terminal outcome.
     pub outcome: SettledOutcome,
+    /// Milliseconds the tool ran, approval waits excluded; `None` when the
+    /// call never ran.
+    pub elapsed_ms: Option<u64>,
     /// Journal reports in the order the call produced them.
     pub reports: Vec<TurnWork>,
 }
@@ -199,6 +204,7 @@ pub(crate) async fn run_unit(
             turn: ctx.turn,
             call: item.call.clone(),
             outcome: item.outcome.clone(),
+            elapsed_ms: item.elapsed_ms,
         });
     }
     settled
@@ -239,35 +245,54 @@ async fn run_one_owned(ctx: DispatchCtx, ready: ReadyCall) -> SettledCall {
 /// runtime; the ladder denial text rides the denial reason.
 async fn run_one(ctx: &DispatchCtx, ready: &ReadyCall) -> SettledCall {
     let reports = Arc::new(Mutex::new(Vec::new()));
-    let outcome = run_one_inner(ctx, ready, &reports).await;
+    let mut elapsed_ms = None;
+    let outcome = run_one_inner(ctx, ready, &reports, &mut elapsed_ms).await;
     let buffered = std::mem::take(&mut *reports.lock().await);
     SettledCall {
         call: ready.call.clone(),
         outcome,
+        elapsed_ms,
         reports: buffered,
     }
 }
 
-/// Runs one call body, buffering its journal reports.
+/// Milliseconds a tool ran since `started`, minus the `waited` time it spent
+/// on approval answers. The clock is monotonic, so wall-clock steps never
+/// show up in the result.
+fn execution_ms(started: Instant, waited: Duration) -> u64 {
+    u64::try_from(started.elapsed().saturating_sub(waited).as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Answers a `tool_search` call from the deferred tool catalog.
+fn tool_search_outcome(ctx: &DispatchCtx, ready: &ReadyCall) -> SettledOutcome {
+    match tool_search_query(&ready.args) {
+        Ok(query) => SettledOutcome::Ok {
+            text: tool_search_results(&query, &ctx.deferred_search),
+            data: None,
+        },
+        Err(error) => SettledOutcome::Err {
+            text: format!("invalid arguments for tool_search: {error}").into(),
+        },
+    }
+}
+
+/// Runs one call body, buffering its journal reports. `elapsed_ms` is set
+/// only when a tool ran: calls blocked before execution leave it unset.
 async fn run_one_inner(
     ctx: &DispatchCtx,
     ready: &ReadyCall,
     reports: &Arc<Mutex<Vec<TurnWork>>>,
+    elapsed_ms: &mut Option<u64>,
 ) -> SettledOutcome {
     if is_core_tool_search(&ctx.generation, &ctx.tools, &ready.name) {
         reports.lock().await.push(TurnWork::CallStarted {
             turn: ctx.turn,
             call: ready.call.clone(),
         });
-        return match tool_search_query(&ready.args) {
-            Ok(query) => SettledOutcome::Ok {
-                text: tool_search_results(&query, &ctx.deferred_search),
-                data: None,
-            },
-            Err(error) => SettledOutcome::Err {
-                text: format!("invalid arguments for tool_search: {error}").into(),
-            },
-        };
+        let started = Instant::now();
+        let outcome = tool_search_outcome(ctx, ready);
+        *elapsed_ms = Some(execution_ms(started, Duration::ZERO));
+        return outcome;
     }
     let Some((tool, _)) = ctx.tools.tool(&ctx.generation, &ready.name) else {
         return SettledOutcome::Err {
@@ -321,6 +346,7 @@ async fn run_one_inner(
     }
     let invocation = Invocation::next();
     let caller = tool_caller(ctx, ready, invocation);
+    let approval_wait = Arc::new(AtomicU64::new(0));
     let runtime = CallRuntime::new(
         ctx,
         ready,
@@ -328,6 +354,7 @@ async fn run_one_inner(
         invocation,
         args.clone(),
         Arc::clone(reports),
+        Arc::clone(&approval_wait),
     );
     let cx = ToolCx::new(
         caller,
@@ -347,7 +374,11 @@ async fn run_one_inner(
         None => cx,
     };
     let call = ToolCall::new(ready.call.as_str(), args);
-    map_outcome(run_contained(&*tool, call, cx).await)
+    let started = Instant::now();
+    let outcome = run_contained(&*tool, call, cx).await;
+    let waited = Duration::from_nanos(approval_wait.load(Ordering::Relaxed));
+    *elapsed_ms = Some(execution_ms(started, waited));
+    map_outcome(outcome)
 }
 
 /// Hook outcome for one call's arguments.
@@ -606,6 +637,9 @@ struct CallRuntime {
     handle: crate::session::SessionHandle,
     /// Journal reports buffered for the driver to forward in order.
     reports: Arc<Mutex<Vec<TurnWork>>>,
+    /// Nanoseconds this call spent waiting for approval answers, which the
+    /// dispatcher subtracts from the tool's run time.
+    approval_wait: Arc<AtomicU64>,
     /// Turn approval grants.
     ledger: Arc<Mutex<GrantLedger>>,
     /// The authorization proof state: the bound digest once approved.
@@ -632,6 +666,7 @@ impl CallRuntime {
         invocation: Invocation,
         args: RawJson,
         reports: Arc<Mutex<Vec<TurnWork>>>,
+        approval_wait: Arc<AtomicU64>,
     ) -> Self {
         Self {
             turn: Some(ctx.turn),
@@ -656,6 +691,7 @@ impl CallRuntime {
             host: Arc::clone(ctx.backend.host_state()),
             handle: ctx.backend.handle().clone(),
             reports,
+            approval_wait,
             tasks: ctx.backend.tasks().clone(),
             ledger: Arc::clone(&ctx.ledger),
             auth: Mutex::new(None),
@@ -869,12 +905,15 @@ impl CallRuntime {
         let owner = tool_owner(&self.generation, &self.tools, &self.tool);
         let (request, waiter) = self.broker.open(owner, question, turn, deadline);
         self.report_asked(&request).await;
+        let asked_at = Instant::now();
         let answered = tokio::select! {
             biased;
             () = cancel.cancelled() => None,
             () = self.cancel.cancelled() => None,
             outcome = waiter => Some(outcome),
         };
+        let blocked = u64::try_from(asked_at.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        self.approval_wait.fetch_add(blocked, Ordering::Relaxed);
         let Some(Settled {
             answer,
             by,
@@ -1301,7 +1340,7 @@ fn nested_tool<'a>(
 
 /// Runs one seeded nested call through the checked tool path (R03 R04).
 pub(crate) async fn direct_call_seeded(backend: &Backend, seed: NestedCall) -> ToolOutcome {
-    use dal_core::{ApprovalMode, DenyReason};
+    use dal_core::DenyReason;
     let NestedCall {
         name,
         args,
@@ -1338,10 +1377,11 @@ pub(crate) async fn direct_call_seeded(backend: &Backend, seed: NestedCall) -> T
         },
         |(broker, shared)| (broker, shared, true),
     );
-    let approved_cell = caller.cell_approved();
+    let policy = nested_policy(caller.cell_approved(), attached);
     let tool = Arc::clone(tool);
     let reports = Arc::new(Mutex::new(Vec::new()));
     let runtime = CallRuntime {
+        approval_wait: Arc::default(),
         turn,
         call: call.clone(),
         tool: name.clone(),
@@ -1349,15 +1389,7 @@ pub(crate) async fn direct_call_seeded(backend: &Backend, seed: NestedCall) -> T
         invocation: None,
         session: backend.session(),
         args: args.clone(),
-        policy: Policy {
-            mode: if approved_cell {
-                ApprovalMode::All
-            } else {
-                ApprovalMode::Ask
-            },
-            answerer_attached: attached,
-            allow_always: std::collections::BTreeSet::new(),
-        },
+        policy,
         broker,
         generation: Arc::clone(&generation),
         tools: TurnTools::empty(),
@@ -1401,6 +1433,21 @@ pub(crate) async fn direct_call_seeded(backend: &Backend, seed: NestedCall) -> T
     outcome
 }
 
+/// The approval policy of one nested call: an approved eval cell runs
+/// without asking; every other nested call asks.
+fn nested_policy(approved_cell: bool, answerer_attached: bool) -> Policy {
+    let mode = if approved_cell {
+        dal_core::ApprovalMode::All
+    } else {
+        dal_core::ApprovalMode::Ask
+    };
+    Policy {
+        mode,
+        answerer_attached,
+        allow_always: std::collections::BTreeSet::new(),
+    }
+}
+
 /// Mints a unique call identity for one turn-less direct call.
 fn direct_call_id() -> CallId {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -1412,6 +1459,15 @@ fn direct_call_id() -> CallId {
 mod tests {
     use super::*;
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn execution_time_excludes_approval_waits() {
+        let started = Instant::now()
+            .checked_sub(Duration::from_millis(500))
+            .expect("monotonic clock has run for half a second");
+        let ms = execution_ms(started, Duration::from_millis(200));
+        assert!((300..500).contains(&ms), "{ms}");
+    }
 
     #[test]
     fn job_scoped_grant_requires_a_live_job() -> Result<(), crate::error::ToolError> {

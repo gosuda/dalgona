@@ -1434,6 +1434,7 @@ fn tool_result(
             error: true,
             parts: vec![dal_core::JournalPart::Text { text }],
             changes: Vec::new(),
+            elapsed_ms: None,
         },
     })
 }
@@ -1592,6 +1593,7 @@ mod tests {
                     added,
                     removed,
                 }],
+                elapsed_ms: None,
             },
         })
     }

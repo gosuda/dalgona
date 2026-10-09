@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fix text that `before_turn` hooks add to a turn: the journal now keeps it as its own reminder entry after the user message instead of joining it to the message text, and the model still reads it as user text right after that message. Compaction counts it as user text, and the terminal draws no row for it. Other reminders stay out of the model context.
+- Add `elapsed_ms` to tool results: a tool result entry and the `tool_settled` update now carry the milliseconds the tool ran, measured on a monotonic clock and without the time spent waiting for an approval answer. It is absent for a call that never ran and for sessions written before this change.
 - Fix starting a child session that cannot open: the agents service now returns the cause, such as a child name already used in the workspace, instead of a bare cancelled reply. Two children started at the same time with the same name can no longer both claim it.
 - Let an approved extension call run for its granted commands until its own run job ends. Other calls, other commands, and other directories still ask. A child session now closes after a failed wait.
 - Fix task artifacts written through the sidecar service: they now land in a directory named by the job id as it is displayed. Before, the directory used the debug form `JobId(...)`, so a reader given the job id could not find them.

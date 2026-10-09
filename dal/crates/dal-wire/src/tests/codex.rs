@@ -197,6 +197,7 @@ fn item_and_turn_notifications_match_pinned_schema() {
                     is_error: true,
                     text: "exit 2".into(),
                     images: Vec::new(),
+                    elapsed_ms: None,
                 },
             },
             UpdateKind::TurnEnded {

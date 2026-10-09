@@ -86,6 +86,7 @@ fn tool_result(id: u64, call: &str, text: &str) -> Record {
             error: false,
             parts: vec![JournalPart::Text { text: text.into() }],
             changes: vec![],
+            elapsed_ms: None,
         },
     })
 }

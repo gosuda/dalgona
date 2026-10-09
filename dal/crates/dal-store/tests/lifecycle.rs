@@ -80,6 +80,7 @@ fn tool_result(id: u64, call: &str) -> Record {
                 text: "done".into(),
             }],
             changes: vec![],
+            elapsed_ms: None,
         },
     })
 }

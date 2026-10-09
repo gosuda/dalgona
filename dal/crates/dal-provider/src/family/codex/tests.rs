@@ -24,6 +24,14 @@ fn wire(reasoning_summaries: bool) -> super::CodexWire {
 }
 
 fn wire_for_model(model: &str, reasoning_summaries: bool) -> super::CodexWire {
+    wire_with_context(model, reasoning_summaries, Vec::new())
+}
+
+fn wire_with_context(
+    model: &str,
+    reasoning_summaries: bool,
+    context: Vec<ContextItem>,
+) -> super::CodexWire {
     let session_id = SessionId::new_v7();
     let request = dal_core::ModelRequest {
         purpose: Purpose::Turn,
@@ -33,7 +41,7 @@ fn wire_for_model(model: &str, reasoning_summaries: bool) -> super::CodexWire {
         },
         system: Arc::from("system"),
         tools: Vec::<ModelToolSpec>::new().into(),
-        context: Vec::<ContextItem>::new().into(),
+        context: context.into(),
         params: RequestParams {
             thinking: ThinkingLevel::High,
             effort: None,
@@ -345,6 +353,26 @@ fn websocket_frame_prepends_create_and_removes_stream_without_reencoding() {
     assert_eq!(
         std::str::from_utf8(&frame).expect("JSON frame is UTF-8"),
         r#"{"type":"response.create","model":"gpt-6-luna","input":[],"tools":[{"parameters":{"type":"object","properties":{"x":{"type":"string"}}}}],"store":false,"include":["reasoning.encrypted_content"],"prompt_cache_key":"session"}"#
+    );
+}
+
+#[test]
+fn before_turn_text_follows_its_user_message_in_the_body() {
+    let user = |text: &str| ContextItem::User {
+        parts: vec![dal_core::Part::Text { text: text.into() }],
+    };
+    let wire = wire_with_context(
+        "gpt-test",
+        true,
+        vec![user("question"), user("first\nsecond")],
+    );
+    let body = String::from_utf8(wire.body).expect("Codex body is UTF-8");
+    assert!(
+        body.contains(concat!(
+            r#"{"type":"message","role":"user","content":[{"type":"input_text","text":"question"}]},"#,
+            r#"{"type":"message","role":"user","content":[{"type":"input_text","text":"first\nsecond"}]}"#,
+        )),
+        "{body}"
     );
 }
 

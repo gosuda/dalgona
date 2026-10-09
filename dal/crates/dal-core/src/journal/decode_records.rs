@@ -1,8 +1,8 @@
 use super::decode::{
-    blocks_member, bool_member, entry_id_member, i32_member, invalid, json_member, model_id_member,
-    model_route_members, need, object_members, opt_entry_id_member, opt_raw_json_member,
-    opt_text_member, owner_member, parts_member, purpose_member, text_member, u64_member,
-    usage_member, want,
+    blocks_member, bool_member, entry_id_member, i32_member, invalid, is_null, json_member,
+    model_id_member, model_route_members, need, object_members, opt_entry_id_member,
+    opt_raw_json_member, opt_text_member, owner_member, parts_member, purpose_member, text_member,
+    u64_member, usage_member, want,
 };
 use super::scan::{Member, Members};
 use super::{
@@ -601,6 +601,10 @@ pub(super) fn decode_entry_kind(
             error: bool_member(&need(members, "error")?, "error")?,
             parts: parts_member(&need(members, "parts")?)?,
             changes: json_member(&need(members, "changes")?)?,
+            elapsed_ms: want(members, "elapsed_ms")
+                .filter(|member| !is_null(member))
+                .map(|member| u64_member(&member, "elapsed_ms"))
+                .transpose()?,
         },
         "reminder" => EntryKind::Reminder {
             source: text_member(&need(members, "source")?, "source")?,

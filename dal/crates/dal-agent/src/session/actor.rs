@@ -134,6 +134,9 @@ pub(crate) enum TurnWork {
         call: dal_core::CallId,
         /// The call's terminal outcome.
         outcome: dal_core::SettledOutcome,
+        /// Milliseconds the tool ran, approval waits excluded; `None` when
+        /// the call never ran.
+        elapsed_ms: Option<u64>,
     },
     /// The driver selected the model route opening one request stream.
     RequestStarted {
@@ -787,12 +790,14 @@ impl Actor {
                 turn,
                 call,
                 outcome: settled,
+                elapsed_ms,
             } => {
                 outcome.delivered = read_views(&settled);
                 Some(Event::Settled {
                     turn,
                     call,
                     outcome: settled,
+                    elapsed_ms,
                 })
             }
             TurnWork::Streamed { turn, event } => Some(Event::Stream { turn, event }),

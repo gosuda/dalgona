@@ -182,6 +182,7 @@ fn one_read_round(session: &mut Session, turn: TurnId, call: &str, tokens: u64) 
                 text: "read".into(),
                 data: None,
             },
+            elapsed_ms: None,
         },
     )
     .unwrap()
@@ -228,6 +229,65 @@ fn settle_manual_compaction(session: &mut Session, before: u64, after: u64) -> V
     )
     .unwrap();
     out
+}
+
+fn job_updates(effects: &[Effect]) -> Vec<&UpdateKind> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Emit(emit) => Some(emit.updates.iter()),
+            _ => None,
+        })
+        .flatten()
+        .collect()
+}
+
+#[test]
+fn running_jobs_publish_start_and_settle_once_and_compaction_stays_private() {
+    let mut session = session();
+    let exec = JobId::parse("01890f47-36b0-7cc4-8000-000000000011").unwrap();
+    let started = Event::JobStarted {
+        job: exec,
+        kind: JobKind::Exec,
+    };
+    let out = send(&mut session, started.clone()).unwrap();
+    assert!(matches!(
+        job_updates(&out)[..],
+        [UpdateKind::JobStarted { job }] if *job == exec
+    ));
+    let repeat = send(&mut session, started).unwrap();
+    assert!(
+        job_updates(&repeat).is_empty(),
+        "a repeated start is silent"
+    );
+    let settled = Event::JobSettled {
+        job: exec,
+        outcome: JobOutcome::Exited { code: 0 },
+    };
+    let out = send(&mut session, settled.clone()).unwrap();
+    assert!(matches!(
+        job_updates(&out)[..],
+        [UpdateKind::JobSettled { job }] if *job == exec
+    ));
+    let repeat = send(&mut session, settled).unwrap();
+    assert!(
+        job_updates(&repeat).is_empty(),
+        "an unknown settle is silent"
+    );
+
+    let compaction = JobId::parse("01890f47-36b0-7cc4-8000-000000000012").unwrap();
+    let out = send(
+        &mut session,
+        Event::JobStarted {
+            job: compaction,
+            kind: JobKind::Compaction,
+        },
+    )
+    .unwrap();
+    assert!(
+        job_updates(&out).is_empty(),
+        "compaction is a phase, not a job"
+    );
 }
 
 #[test]
@@ -1165,6 +1225,7 @@ fn result_record(entry_id: u64, call: &str) -> Record {
             error: false,
             parts: text_part("ok"),
             changes: Vec::new(),
+            elapsed_ms: None,
         },
     })
 }
@@ -1253,6 +1314,7 @@ fn promoted_call_runs_and_promotes_only_after_success() {
                     text: "found".into(),
                     data: None,
                 },
+                elapsed_ms: None,
             },
         )
         .unwrap();
@@ -1353,6 +1415,7 @@ fn unsuccessful_promoting_calls_do_not_promote() {
                     turn,
                     call: CallId::new("call"),
                     outcome,
+                    elapsed_ms: None,
                 },
             )
             .unwrap(),
@@ -1432,6 +1495,7 @@ fn every_resolved_call_gets_exactly_one_result() {
                 text: call.into(),
                 data: None,
             },
+            elapsed_ms: None,
         };
         append_emitted(&send(&mut session, settled).unwrap(), &mut journal);
     }
@@ -1747,6 +1811,7 @@ fn cloned_entries_without_turn_records_replay() {
                     text: "read".into(),
                     data: None,
                 },
+                elapsed_ms: None,
             },
         )
         .unwrap(),
@@ -2140,6 +2205,7 @@ proptest::proptest! {
                 turn,
                 call: CallId::new(call.as_str()),
                 outcome: SettledOutcome::Ok { text: "result".into(), data: None },
+                elapsed_ms: None,
             }).unwrap();
             append_emitted(&settled, &mut journal);
         }
@@ -2253,7 +2319,7 @@ fn wake_opens_with_wake_source() {
 }
 
 #[test]
-fn before_turn_texts_join_into_user_entry() {
+fn before_turn_text_journals_its_own_reminder_after_user_entry() {
     let mut session = session();
     send(&mut session, prompt("question")).unwrap();
     let turn = match session.phase() {
@@ -2281,26 +2347,30 @@ fn before_turn_texts_join_into_user_entry() {
             _ => None,
         })
         .expect("before_turn verdict emits records");
-    assert!(matches!(
-        emit.records.as_slice(),
-        [Record::TurnStart { turn: started, .. }, Record::User(_)]
-        if *started == turn
-    ));
-    let entry = emit
-        .records
-        .iter()
-        .find_map(|record| match record {
-            Record::User(entry) => Some(entry),
-            _ => None,
-        })
-        .expect("user entry journaled");
-    let EntryKind::User { parts } = &entry.kind else {
+    let [
+        Record::TurnStart { turn: started, .. },
+        Record::User(user),
+        Record::Reminder(reminder),
+    ] = emit.records.as_slice()
+    else {
+        panic!(
+            "opening journals turn start, user, reminder: {:?}",
+            emit.records
+        );
+    };
+    assert_eq!(*started, turn);
+    let EntryKind::User { parts } = &user.kind else {
         panic!("user record holds a user entry");
     };
     assert!(matches!(
         parts.as_slice(),
-        [JournalPart::Text { text: first }, JournalPart::Text { text: second }]
-        if first.as_ref() == "question" && second.as_ref() == "\n\nfirst\nsecond"
+        [JournalPart::Text { text }] if text.as_ref() == "question"
+    ));
+    assert_eq!(reminder.parent, Some(user.id));
+    assert!(matches!(
+        &reminder.kind,
+        EntryKind::Reminder { source, text }
+        if source.as_ref() == crate::BEFORE_TURN_SOURCE && text.as_ref() == "first\nsecond"
     ));
     assert!(emit.updates.iter().any(
         |update| matches!(update, UpdateKind::TurnStarted { turn: started, .. } if *started == turn)
@@ -2311,6 +2381,108 @@ fn before_turn_texts_join_into_user_entry() {
             .any(|update| matches!(update, UpdateKind::Tree(_)))
     );
     assert!(matches!(session.phase(), Phase::Running { .. }));
+}
+
+#[test]
+fn before_turn_text_without_a_free_entry_id_is_rejected_before_the_phase_moves() {
+    let mut session = session();
+    send(&mut session, prompt("question")).unwrap();
+    let turn = match session.phase() {
+        Phase::Opening { turn, .. } => *turn,
+        phase => panic!("prompt did not open a turn: {phase:?}"),
+    };
+    session.next_entry = None;
+    let guard = |text: Option<&str>| Event::Guard {
+        turn,
+        call: None,
+        extension: None,
+        outcome: HookOutcome::new(
+            HookEvent::BeforeTurn,
+            HookVerdict::BeforeTurn(text.map(Into::into)),
+        )
+        .unwrap(),
+    };
+    assert!(matches!(
+        send(&mut session, guard(Some("hint"))),
+        Err(Rejection::Invalid { .. })
+    ));
+    assert!(matches!(session.phase(), Phase::Opening { .. }));
+    send(&mut session, guard(None)).unwrap();
+    assert!(matches!(session.phase(), Phase::Running { .. }));
+}
+
+#[test]
+fn settled_elapsed_reaches_the_journal_the_update_and_the_replayed_view() {
+    let mut session = session();
+    let mut journal = Vec::new();
+    let turn = open_turn(&mut session, &mut journal);
+    let streamed = stream_result(
+        &mut session,
+        turn,
+        inference(Stop::EndTurn, &[("call", "read_file")], 10),
+    );
+    append_emitted(&streamed, &mut journal);
+    let resolved = send(
+        &mut session,
+        Event::Resolved {
+            turn,
+            calls: vec![resolved_call(
+                "call",
+                "read_file",
+                false,
+                Ok(ToolClass::Read),
+            )],
+            answerer_attached: false,
+        },
+    )
+    .unwrap();
+    append_emitted(&resolved, &mut journal);
+    let started = send(
+        &mut session,
+        Event::CallStarted {
+            turn,
+            call: CallId::new("call"),
+        },
+    )
+    .unwrap();
+    append_emitted(&started, &mut journal);
+    let settled = send(
+        &mut session,
+        Event::Settled {
+            turn,
+            call: CallId::new("call"),
+            outcome: SettledOutcome::Ok {
+                text: "read".into(),
+                data: None,
+            },
+            elapsed_ms: Some(42),
+        },
+    )
+    .unwrap();
+    append_emitted(&settled, &mut journal);
+
+    assert!(matches!(
+        &only_tool_result(&journal).kind,
+        EntryKind::ToolResult {
+            elapsed_ms: Some(42),
+            ..
+        }
+    ));
+    let outcome = settled
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Emit(emit) => Some(emit),
+            _ => None,
+        })
+        .flat_map(|emit| emit.updates.iter())
+        .find_map(|update| match update {
+            UpdateKind::ToolSettled { outcome, .. } => Some(outcome),
+            _ => None,
+        })
+        .expect("settling a call publishes its outcome");
+    assert_eq!(outcome.elapsed_ms, Some(42));
+    let replayed = Session::replay(journal.iter().cloned(), stamp()).unwrap().0;
+    assert_eq!(replayed.tree, session.tree);
 }
 
 #[test]
@@ -2390,6 +2562,7 @@ fn turn_end_sums_usage_across_tool_rounds() {
                 text: "result".into(),
                 data: None,
             },
+            elapsed_ms: None,
         },
     )
     .unwrap();

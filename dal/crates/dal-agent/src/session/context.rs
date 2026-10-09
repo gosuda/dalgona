@@ -8,9 +8,9 @@ use std::collections::HashSet;
 use std::sync::{Arc, LazyLock};
 
 use dal_core::{
-    AssistantPart, Block, CallId, Caps, ContextItem, EntryKind, EntryView, Family, JournalPart,
-    Mode, ModelId, ModelInfo, ModelRoute, ModelToolSpec, Name, Part, RawJson, ReplaySource,
-    ResolveError, ResolvedCall, ThinkingLevel, ToolClass, Visibility, Workspace,
+    AssistantPart, BEFORE_TURN_SOURCE, Block, CallId, Caps, ContextItem, EntryKind, EntryView,
+    Family, JournalPart, Mode, ModelId, ModelInfo, ModelRoute, ModelToolSpec, Name, Part, RawJson,
+    ReplaySource, ResolveError, ResolvedCall, ThinkingLevel, ToolClass, Visibility, Workspace,
 };
 use dal_provider::{CatalogEntry, clamp, levels_for};
 
@@ -400,8 +400,9 @@ fn sanitized_name(raw: &str) -> Option<Name> {
 
 /// Builds provider context messages from leaf entries in order.
 ///
-/// Conversation entries map to their message shape; settings entries carry
-/// no conversation content and are skipped. Blob parts stay references;
+/// Conversation entries map to their message shape, and so does the text a
+/// `before_turn` hook added to a turn; settings entries and other reminders
+/// carry no conversation content and are skipped. Blob parts stay references;
 /// inline images decode from base64, and undecodable bytes skip the part.
 /// A journal that holds several results for one tool call yields only the
 /// first, because providers reject a second result for the same call.
@@ -516,6 +517,11 @@ fn context_item(entry: &EntryView) -> Option<ContextItem> {
                 parts.iter().filter_map(content_part).collect()
             };
             (!parts.is_empty()).then_some(ContextItem::User { parts })
+        }
+        EntryKind::Reminder { source, text } if source.as_ref() == BEFORE_TURN_SOURCE => {
+            Some(ContextItem::User {
+                parts: vec![Part::Text { text: text.clone() }],
+            })
         }
         _ => None,
     }
@@ -687,6 +693,7 @@ mod tests {
                 error: false,
                 parts: vec![JournalPart::Text { text: text.into() }],
                 changes: Vec::new(),
+                elapsed_ms: None,
             },
         )
     }
@@ -708,6 +715,50 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    fn text_item(item: &ContextItem) -> Option<&str> {
+        match item {
+            ContextItem::User { parts } => match parts.as_slice() {
+                [Part::Text { text }] => Some(text.as_ref()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn before_turn_reminder_is_user_context_after_its_user_entry() {
+        let user = entry(
+            1,
+            None,
+            EntryKind::User {
+                parts: vec![JournalPart::Text {
+                    text: "question".into(),
+                }],
+            },
+        );
+        let hook = entry(
+            2,
+            Some(user.id),
+            EntryKind::Reminder {
+                source: dal_core::BEFORE_TURN_SOURCE.into(),
+                text: "first\nsecond".into(),
+            },
+        );
+        let rule = entry(
+            3,
+            Some(hook.id),
+            EntryKind::Reminder {
+                source: "rule:gate".into(),
+                text: "not model context".into(),
+            },
+        );
+
+        let context = context_items(&[user, hook, rule]);
+
+        let texts: Vec<_> = context.iter().map(text_item).collect();
+        assert_eq!(texts, vec![Some("question"), Some("first\nsecond")]);
     }
 
     #[test]

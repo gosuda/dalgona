@@ -424,6 +424,9 @@ pub enum Event {
         call: CallId,
         /// The call's terminal outcome.
         outcome: SettledOutcome,
+        /// Milliseconds the tool ran on a monotonic clock, approval waits
+        /// excluded; `None` when the call never ran.
+        elapsed_ms: Option<u64>,
     },
     /// Begin the next request at a turn boundary.
     Boundary {

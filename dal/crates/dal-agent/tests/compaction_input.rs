@@ -33,6 +33,7 @@ struct Captured {
     covered_span: (EntryId, EntryId),
     covered: Vec<(EntryId, Option<Box<str>>)>,
     context_items: usize,
+    estimated_tokens: Vec<u64>,
 }
 
 struct CaptureCompactor(Arc<Mutex<Option<Captured>>>);
@@ -57,6 +58,11 @@ impl Compactor for CaptureCompactor {
                 .covered
                 .iter()
                 .map(|covered| (covered.entry, covered.note.clone()))
+                .collect(),
+            estimated_tokens: input
+                .covered
+                .iter()
+                .map(|covered| covered.estimated_tokens)
                 .collect(),
             context_items: input.covered_context().len(),
         });
@@ -342,6 +348,46 @@ async fn driver_hands_reminders_to_compactors_as_notes_outside_the_context() {
     assert_eq!(
         captured.context_items, 1,
         "the reminder is not model context"
+    );
+    host.close(session).await.expect("close session");
+}
+
+#[tokio::test]
+async fn driver_hands_before_turn_text_to_compactors_as_user_context() {
+    let records = vec![
+        user(
+            1,
+            None,
+            vec![JournalPart::Text {
+                text: "old prefix".into(),
+            }],
+        ),
+        Record::Reminder(Entry {
+            id: entry(2),
+            parent: Some(entry(1)),
+            at: jiff::Timestamp::UNIX_EPOCH,
+            kind: EntryKind::Reminder {
+                source: dal_core::BEFORE_TURN_SOURCE.into(),
+                text: "old prefix".into(),
+            },
+        }),
+        user(
+            3,
+            Some(entry(2)),
+            vec![JournalPart::Text {
+                text: "retained".repeat(20_000).into(),
+            }],
+        ),
+    ];
+    let (_temp, agent, host, seen, session) = compact_fixture_with(records, None).await;
+    let captured = warm_then_compact(&agent, &seen).await;
+    assert_eq!(captured.covered_span, (entry(1), entry(2)));
+    assert_eq!(captured.covered, vec![(entry(1), None), (entry(2), None)]);
+    assert_eq!(captured.context_items, 2, "the hook text is user context");
+    assert_ne!(captured.estimated_tokens[1], 0);
+    assert_eq!(
+        captured.estimated_tokens[1], captured.estimated_tokens[0],
+        "the hook text weighs as the same text in a user entry"
     );
     host.close(session).await.expect("close session");
 }

@@ -1064,6 +1064,7 @@ mod tests {
                 error: false,
                 parts: vec![JournalPart::Text { text: path.into() }],
                 changes: Vec::new(),
+                elapsed_ms: None,
             },
         };
         let rows = entry_rows(

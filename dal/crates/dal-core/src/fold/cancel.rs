@@ -3,10 +3,10 @@ use super::helpers::{
 };
 use super::types::{ManualCompletion, QueuedInput};
 use super::{
-    CallId, CancelScope, CompactionReason, CompactionSummary, Effect, Emit, Entry, EntryId,
-    EntryKind, Expect, JournalPart, ModelRequestPlan, NonZeroU64, Notice, Output, Part,
-    PartialResponse, PendingCall, Phase, Record, Rejection, Reply, Session, SettingsView, Step,
-    TreeDelta, TurnEndStop, TurnId, TurnSource, TurnStage, UpdateKind,
+    CancelScope, CompactionReason, CompactionSummary, Effect, Emit, Entry, EntryId, EntryKind,
+    Expect, JournalPart, ModelRequestPlan, NonZeroU64, Notice, Output, Part, PartialResponse,
+    PendingCall, Phase, Record, Rejection, Reply, Session, SettingsView, Step, TreeDelta,
+    TurnEndStop, TurnId, TurnSource, TurnStage, UpdateKind,
 };
 
 impl Session {
@@ -302,28 +302,29 @@ impl Session {
         emit: &mut Emit,
     ) -> Result<(), Rejection> {
         for item in calls {
-            self.result_entry(&item.call, &item.name, render(&item.name), true, now, emit)?;
+            self.result_entry(item, render(&item.name), true, None, now, emit)?;
         }
         Ok(())
     }
 
     pub(super) fn result_entry(
         &mut self,
-        call: &CallId,
-        name: &str,
+        item: &PendingCall,
         text: Box<str>,
         error: bool,
+        elapsed_ms: Option<u64>,
         now: jiff::Timestamp,
         emit: &mut Emit,
     ) -> Result<(), Rejection> {
         let entry = self.entry(
             now,
             EntryKind::ToolResult {
-                call: call.clone(),
-                name: name.into(),
+                call: item.call.clone(),
+                name: item.name.clone(),
                 error,
                 parts: vec![JournalPart::Text { text }],
                 changes: Vec::new(),
+                elapsed_ms,
             },
         )?;
         let view = self.tree.append(entry.clone());

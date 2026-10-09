@@ -933,3 +933,64 @@ fn text_part_with_escapes_round_trips() -> Result<(), Box<dyn std::error::Error>
     assert_eq!(&**text, "first line\nquoted \"word\" and a \\backslash");
     Ok(())
 }
+
+const OLD_TOOL_RESULT: &str = "{\"v\":1,\"type\":\"tool_result\",\"id\":6,\"parent\":5,\"at\":\"2026-09-25T10:15:35.431Z\",\"call\":\"toolu_01\",\"name\":\"read\",\"error\":false,\"parts\":[{\"type\":\"text\",\"text\":\"ok\"}],\"changes\":[]";
+
+fn tool_result_elapsed(line: &str) -> Result<Option<u64>, DecodeError> {
+    match decode(line.as_bytes())?.record {
+        Record::ToolResult(Entry {
+            kind: EntryKind::ToolResult { elapsed_ms, .. },
+            ..
+        }) => Ok(elapsed_ms),
+        other => panic!("decoded record is not a tool result: {other:?}"),
+    }
+}
+
+#[test]
+fn tool_result_elapsed_round_trips_and_old_lines_decode_without_it()
+-> Result<(), Box<dyn std::error::Error>> {
+    let old = format!("{OLD_TOOL_RESULT}}}\n");
+    assert_eq!(tool_result_elapsed(&old)?, None);
+    assert_eq!(
+        String::from_utf8(encode(&decode(old.as_bytes())?.record)?)?,
+        old
+    );
+
+    let timed = format!("{OLD_TOOL_RESULT},\"elapsed_ms\":1234}}\n");
+    assert_eq!(tool_result_elapsed(&timed)?, Some(1234));
+    assert_eq!(
+        String::from_utf8(encode(&decode(timed.as_bytes())?.record)?)?,
+        timed
+    );
+
+    let null = format!("{OLD_TOOL_RESULT},\"elapsed_ms\":null}}\n");
+    assert_eq!(tool_result_elapsed(&null)?, None);
+
+    let bad = format!("{OLD_TOOL_RESULT},\"elapsed_ms\":\"slow\"}}\n");
+    assert!(matches!(
+        decode(bad.as_bytes()),
+        Err(DecodeError::Invalid { .. })
+    ));
+    Ok(())
+}
+
+#[test]
+fn tool_result_kind_json_carries_elapsed_only_when_measured()
+-> Result<(), Box<dyn std::error::Error>> {
+    let kind = |elapsed_ms| EntryKind::ToolResult {
+        call: CallId::new("call_1"),
+        name: "read".into(),
+        error: false,
+        parts: Vec::new(),
+        changes: Vec::new(),
+        elapsed_ms,
+    };
+    let timed = sonic_rs::to_string(&kind(Some(7)))?;
+    assert!(timed.contains("\"elapsed_ms\":7"), "{timed}");
+    assert_eq!(sonic_rs::from_str::<EntryKind>(&timed)?, kind(Some(7)));
+
+    let untimed = sonic_rs::to_string(&kind(None))?;
+    assert!(!untimed.contains("elapsed_ms"), "{untimed}");
+    assert_eq!(sonic_rs::from_str::<EntryKind>(&untimed)?, kind(None));
+    Ok(())
+}

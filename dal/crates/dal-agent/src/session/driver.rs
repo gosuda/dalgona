@@ -1498,7 +1498,9 @@ fn covered_entries(items: &[EntryView]) -> Vec<crate::ext::compact::CoveredEntry
             user_open = false;
             continue;
         }
-        if let dal_core::EntryKind::Reminder { text, .. } = &item.kind {
+        if let dal_core::EntryKind::Reminder { source, text } = &item.kind
+            && source.as_ref() != dal_core::BEFORE_TURN_SOURCE
+        {
             let mut entry = crate::ext::compact::CoveredEntry::new(
                 item.id,
                 false,

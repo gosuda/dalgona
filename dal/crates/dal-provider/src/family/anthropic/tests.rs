@@ -1289,3 +1289,18 @@ fn malformed_json_mid_stream_ends_in_one_protocol_error() {
         }))
     ));
 }
+
+#[test]
+fn before_turn_text_joins_its_user_message_in_the_body() {
+    let user = |text: &str| ContextItem::User {
+        parts: vec![Part::Text { text: text.into() }],
+    };
+    let body = anthropic_body(&request(
+        vec![user("question"), user("first\nsecond")],
+        Vec::new(),
+    ));
+    let question = body.find(r#""text":"question""#).expect("user text");
+    let hook = body.find(r#""text":"first\nsecond""#).expect("hook text");
+    assert!(question < hook, "{body}");
+    assert_eq!(body.matches(r#""role":"user""#).count(), 1, "{body}");
+}

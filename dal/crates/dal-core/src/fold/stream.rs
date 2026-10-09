@@ -315,7 +315,7 @@ impl Session {
                 continue;
             };
             if let Some(text) = resolution_failure(call, matching.next().is_some()) {
-                self.result_entry(&item.call, &item.name, text, true, now, emit)?;
+                self.result_entry(item, text, true, None, now, emit)?;
                 continue;
             }
             let Ok(class) = &call.result else {

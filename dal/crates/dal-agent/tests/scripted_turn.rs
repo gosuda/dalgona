@@ -21,6 +21,25 @@ impl dal_agent::ext::Hook<dal_core::ext::BeforeTurn, Option<String>> for NoteHoo
     }
 }
 
+/// The `before_turn` text sits in its own reminder right after the user entry.
+fn assert_hook_text_is_its_own_reminder(view: &dal_core::View) {
+    let items = &view.entries.items;
+    let user = items.first().expect("the prompt journals a user entry");
+    let hook = items.get(1).expect("the hook text journals a reminder");
+    assert!(
+        matches!(&user.kind, dal_core::EntryKind::User { parts } if parts.len() == 1),
+        "the hook text is not joined to the user entry: {user:?}"
+    );
+    assert!(
+        matches!(
+            &hook.kind,
+            dal_core::EntryKind::Reminder { source, text }
+                if source.as_ref() == dal_core::BEFORE_TURN_SOURCE && text.as_ref() == "hook-note"
+        ),
+        "the hook text follows as a reminder: {hook:?}"
+    );
+}
+
 #[tokio::test]
 async fn scripted_prompt_runs_a_turn() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -113,11 +132,7 @@ async fn scripted_prompt_runs_a_turn() {
         "turn runs to TurnEnded on the scripted fixture ({last})"
     );
     let view = agent.view(dal_core::PageReq::default()).expect("view");
-    let dump = format!("{view:?}");
-    assert!(
-        dump.contains("hook-note"),
-        "before_turn text joins the journaled entry ({dump})"
-    );
+    assert_hook_text_is_its_own_reminder(&view);
 }
 #[tokio::test]
 async fn login_stores_api_key_at_mode_0600() {

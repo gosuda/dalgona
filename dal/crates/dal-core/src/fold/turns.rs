@@ -1,3 +1,5 @@
+use crate::BEFORE_TURN_SOURCE;
+
 use super::helpers::{
     HookTarget, compact_notice, compaction_started_notice, invalid, part_to_journal, zero_usage,
 };
@@ -279,7 +281,7 @@ impl Session {
             return Ok(());
         };
         self.turn_totals.reset();
-        let (mut content, cause) = match source {
+        let (content, cause) = match source {
             TurnSource::Prompt { content, .. } => (content, TurnCause::User),
             TurnSource::Wake { content, .. } => (content, TurnCause::Wake),
             TurnSource::FollowUp { content, .. } => (content, TurnCause::FollowUp),
@@ -292,21 +294,6 @@ impl Session {
             self.wake_run = 0;
             self.wake_attempt_turn = None;
         }
-        if let Some(text) = add
-            && !text.is_empty()
-        {
-            let separator = if content
-                .iter()
-                .any(|part| matches!(part, Part::Text { text } if !text.is_empty()))
-            {
-                "\n\n"
-            } else {
-                ""
-            };
-            content.push(Part::Text {
-                text: format!("{separator}{text}").into(),
-            });
-        }
         let entry_record = self.entry_at(
             entry,
             now,
@@ -314,12 +301,21 @@ impl Session {
                 parts: content.iter().map(part_to_journal).collect(),
             },
         );
-        let view = self.tree.append(entry_record.clone());
+        let mut added = vec![self.tree.append(entry_record.clone())];
         emit.records.push(Record::TurnStart { at: now, turn });
         emit.records.push(Record::User(entry_record));
+        if let Some(text) = add.filter(|text| !text.is_empty()) {
+            let kind = EntryKind::Reminder {
+                source: BEFORE_TURN_SOURCE.into(),
+                text,
+            };
+            let reminder = self.entry(now, kind)?;
+            added.push(self.tree.append(reminder.clone()));
+            emit.records.push(Record::Reminder(reminder));
+        }
         emit.updates.push(UpdateKind::TurnStarted { turn, cause });
         emit.updates.push(UpdateKind::Tree(TreeDelta {
-            added: vec![view],
+            added,
             leaf: self.tree.leaf,
         }));
         self.turn_flags.interrupts = 0;
@@ -394,7 +390,7 @@ impl Session {
             return Ok(());
         };
         let item = pending.remove(index);
-        self.result_entry(&item.call, &item.name, text, true, now, emit)?;
+        self.result_entry(&item, text, true, None, now, emit)?;
         if pending.is_empty() {
             self.phase = Phase::Running {
                 turn,

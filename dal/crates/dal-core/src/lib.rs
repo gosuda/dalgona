@@ -58,10 +58,10 @@ pub use id::{
 };
 pub use jiff::Timestamp;
 pub use journal::{
-    AssistantStop, Block, Branch, BranchError, BranchMode, DecodeError, Decoded, EncodeError,
-    Entry, EntryKind, Header, InferredPurpose, JobEvent, JobKind, JobOutcome, JournalPart, Mail,
-    Product, Record, ScannedHead, Source, TreeKind, TurnEndStop, VERSION as JOURNAL_VERSION,
-    branch, decode, encode, scan_head,
+    AssistantStop, BEFORE_TURN_SOURCE, Block, Branch, BranchError, BranchMode, DecodeError,
+    Decoded, EncodeError, Entry, EntryKind, Header, InferredPurpose, JobEvent, JobKind, JobOutcome,
+    JournalPart, Mail, Product, Record, ScannedHead, Source, TreeKind, TurnEndStop,
+    VERSION as JOURNAL_VERSION, branch, decode, encode, scan_head,
 };
 pub use model::{
     AssistantPart, Caps, CompactOutcome, CompactedHistory, ContextItem, Family, InferFailure,
