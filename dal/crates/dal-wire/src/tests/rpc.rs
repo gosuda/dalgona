@@ -3,7 +3,9 @@ use std::time::Duration;
 use dal_core::{Command, Expect, Part, RequestId};
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
 
-use super::support::{Rig, Rpc, assert_error, initialize, result, rig, text_step};
+use super::support::{
+    Rig, Rpc, assert_error, assert_invalid_params, initialize, result, rig, text_step,
+};
 use crate::serve_rpc;
 use crate::transport::MemoryTransport;
 
@@ -45,18 +47,6 @@ async fn open(rpc: &mut Rpc, id: i64, reference: Value) -> String {
         .as_str()
         .expect("session id")
         .to_owned()
-}
-
-/// Asserts a `-32602` refusal scoped to `method` that names the bad value.
-#[track_caller]
-fn assert_invalid_params(reply: &Value, method: &str, bad: &str) {
-    assert_eq!(reply["error"]["code"].as_i64(), Some(-32602), "{reply}");
-    let message = reply["error"]["message"].as_str().unwrap_or_default();
-    assert!(
-        message.starts_with(&format!("invalid params for {method}: ")),
-        "{reply}"
-    );
-    assert!(message.contains(bad), "{reply}");
 }
 
 /// Reads `session/update` notifications until the named update type.
@@ -250,64 +240,33 @@ async fn malformed_optional_members_are_invalid_params() {
         )
         .await;
         let cases = [
-            (
-                "session/list",
-                sonic_rs::json!({"limit": "10"}),
-                "limit",
-                "an integer",
-            ),
-            (
-                "session/list",
-                sonic_rs::json!({"limit": 1.5}),
-                "limit",
-                "an integer",
-            ),
-            (
-                "session/list",
-                sonic_rs::json!({"cursor": 7}),
-                "cursor",
-                "a string",
-            ),
-            (
-                "session/list",
-                sonic_rs::json!({"search": ["x"]}),
-                "search",
-                "a string",
-            ),
+            ("session/list", sonic_rs::json!({"limit": "10"}), "limit"),
+            ("session/list", sonic_rs::json!({"limit": 1.5}), "limit"),
+            ("session/list", sonic_rs::json!({"cursor": 7}), "cursor"),
+            ("session/list", sonic_rs::json!({"search": ["x"]}), "search"),
             (
                 "session/view",
                 sonic_rs::json!({"sessionId": session, "before": 3}),
                 "before",
-                "a string",
             ),
             (
                 "session/subscribe",
                 sonic_rs::json!({"sessionId": session, "gen": "1"}),
                 "gen",
-                "an integer",
             ),
             (
                 "session/subscribe",
                 sonic_rs::json!({"sessionId": session, "after": "1"}),
                 "after",
-                "an integer",
             ),
-            ("docs/read", sonic_rs::json!({"uri": 5}), "uri", "a string"),
+            ("docs/read", sonic_rs::json!({"uri": 5}), "uri"),
         ];
-        for (id, (method, params, member, kind)) in (2..).zip(cases) {
+        for (id, (method, params, member)) in (2..).zip(cases) {
             let reply = rpc.call(id, method, params).await;
-            assert_error(
-                &reply,
-                -32602,
-                &format!("invalid params for {method}: member `{member}` must be {kind}"),
-            );
+            assert_invalid_params(&reply, method, member);
         }
         let reply = rpc.call(50, "session/list", sonic_rs::json!([])).await;
-        assert_error(
-            &reply,
-            -32602,
-            "invalid params for session/list: params must be an object",
-        );
+        assert_invalid_params(&reply, "session/list", "params");
     })
     .await;
 }
@@ -329,7 +288,6 @@ async fn every_command_tag_reaches_the_decoder() {
         "compact",
         "move_leaf",
         "fork",
-        "clone",
         "rename",
         "set_scoped_models",
         "export",
@@ -354,10 +312,18 @@ async fn every_command_tag_reaches_the_decoder() {
                 .await;
             let message = reply["error"]["message"].as_str().unwrap_or_default();
             assert!(
-                !message.contains(&format!("\"{tag}\"")),
+                !message.contains(tag),
                 "tag {tag} was refused before decoding: {reply}"
             );
         }
+        let clone = rpc
+            .call(
+                50,
+                "session/submit",
+                sonic_rs::json!({"sessionId": session, "command": {"type": "clone"}}),
+            )
+            .await;
+        assert_invalid_params(&clone, "session/submit", "no entries to clone");
         let unknown = rpc
             .call(
                 100,

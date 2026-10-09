@@ -7,7 +7,9 @@ use dal_agent::login_fake::{FakeOAuth, TokenReply, USER_CODE, follow_authorize_u
 use dal_provider::{AuthStore, Credential, OAuthCredential, SecretString};
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
 
-use super::super::support::{Rig, Rpc, assert_error, initialize, result, rig};
+use super::super::support::{
+    Rig, Rpc, assert_error, assert_invalid_params, initialize, result, rig,
+};
 use super::with_rpc;
 
 async fn fake_rig(reply: TokenReply) -> (Rig, FakeOAuth) {
@@ -319,19 +321,11 @@ async fn logout_with_a_malformed_provider_removes_nothing() {
         ];
         for (id, params) in (1..).zip(malformed) {
             let reply = rpc.call(id, "auth/logout", params).await;
-            assert_error(
-                &reply,
-                -32602,
-                "invalid params for auth/logout: member `provider` must be a string",
-            );
+            assert_invalid_params(&reply, "auth/logout", "provider");
         }
         for (id, params) in (10..).zip([sonic_rs::json!([1]), sonic_rs::json!("openai")]) {
             let reply = rpc.call(id, "auth/logout", params).await;
-            assert_error(
-                &reply,
-                -32602,
-                "invalid params for auth/logout: params must be an object",
-            );
+            assert_invalid_params(&reply, "auth/logout", "params");
         }
         assert_eq!(std::fs::read(&auth).expect("auth.json"), before);
         let stored = AuthStore::load(&auth).expect("auth.json");

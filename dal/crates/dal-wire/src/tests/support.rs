@@ -402,6 +402,18 @@ pub(super) fn assert_error(reply: &Value, code: i64, message: &str) {
     );
 }
 
+/// Asserts a `-32602` refusal scoped to `method` that names the bad value.
+#[track_caller]
+pub(super) fn assert_invalid_params(reply: &Value, method: &str, bad: &str) {
+    assert_eq!(reply["error"]["code"].as_i64(), Some(-32602), "{reply}");
+    let message = reply["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.starts_with(&format!("invalid params for {method}: ")),
+        "{reply}"
+    );
+    assert!(message.contains(bad), "{reply}");
+}
+
 /// Returns a successful reply's result, failing on an error reply.
 #[track_caller]
 pub(super) fn result(reply: &Value) -> &Value {

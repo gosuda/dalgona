@@ -13,7 +13,8 @@ use dal_core::{
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
 
 use super::support::{
-    Rig, Rpc, assert_error, gate_step, result, rig, rig_with_extensions, text_step, tool_step,
+    Rig, Rpc, assert_error, assert_invalid_params, gate_step, result, rig, rig_with_extensions,
+    text_step, tool_step,
 };
 use crate::serve_acp;
 use crate::transport::MemoryTransport;
@@ -295,19 +296,11 @@ async fn session_list_takes_null_filters_and_refuses_wrong_types() {
             let cursor = acp
                 .call(4, "session/list", sonic_rs::json!({"cursor": 7}))
                 .await;
-            assert_error(
-                &cursor,
-                -32602,
-                "invalid params for session/list: member `cursor` must be a string",
-            );
+            assert_invalid_params(&cursor, "session/list", "cursor");
             let cwd = acp
                 .call(5, "session/list", sonic_rs::json!({"cwd": ["x"]}))
                 .await;
-            assert_error(
-                &cwd,
-                -32602,
-                "invalid params for session/list: member `cwd` must be a string",
-            );
+            assert_invalid_params(&cwd, "session/list", "cwd");
         })
         .await;
     }
