@@ -29,7 +29,7 @@ use crate::mcp::{
     Budgets, McpError, STEPUP_MAX, TransportError,
     http::{
         auth as token_auth,
-        oauth::{Challenge, Discovery},
+        oauth::{Challenge, Discovery, NetworkPolicy, OAuthClient},
         protocol::{
             LEGACY_PROTOCOL_VERSION, PROTOCOL_VERSION, notification_body, outbound_headers,
             protocol_error, recognizes_modern_error, request_body, session_from,
@@ -146,6 +146,7 @@ pub(crate) struct HttpTransport {
     key: Key,
     url: Url,
     client: Client,
+    oauth: OAuthClient,
     tokens_path: PathBuf,
     client_version: String,
     connect_timeout: Duration,
@@ -171,6 +172,7 @@ impl HttpTransport {
         refreshes: Arc<token_auth::RefreshCoordinator>,
     ) -> Result<Self, McpError> {
         validate_endpoint(&url)?;
+        let oauth_policy = NetworkPolicy::for_target(&url);
         let client = Client::builder()
             .connect_timeout(budgets.start)
             .redirect(Policy::none())
@@ -179,10 +181,25 @@ impl HttpTransport {
                 key: key.display(),
                 cause: "HTTP client creation failed".to_owned(),
             })?;
+        let oauth_client = Client::builder()
+            .connect_timeout(budgets.start)
+            .redirect(Policy::none())
+            .no_proxy()
+            .dns_resolver(oauth_policy.resolver())
+            .build()
+            .map_err(|_| McpError::Start {
+                key: key.display(),
+                cause: "OAuth HTTP client creation failed".to_owned(),
+            })?;
+        let oauth = OAuthClient {
+            client: oauth_client,
+            policy: oauth_policy,
+        };
         Ok(Self {
             key,
             url,
             client,
+            oauth,
             tokens_path,
             client_version,
             connect_timeout: budgets.start,
@@ -480,10 +497,6 @@ impl HttpTransport {
                 self.persist(&discovery, updated).await.map_err(to_mcp)
             })
             .await;
-        if matches!(result, Err(McpError::NoAskFrontEnd)) {
-            let mut authorization = self.authorization.lock().await;
-            authorization.cancelled = true;
-        }
         result.map_err(TransportError::Mcp)?;
         let mut authorization = self.authorization.lock().await;
         *authorization = token_auth::AuthorizationState::default();
@@ -848,7 +861,7 @@ impl HttpTransport {
         };
         let updated = oauth::refresh(
             &self.refreshes,
-            &self.client,
+            &self.oauth,
             discovery,
             record,
             self.connect_timeout,
@@ -862,7 +875,6 @@ impl HttpTransport {
         }
         Ok(updated)
     }
-
     /// Persists an interactively authorized record and publishes it to the
     /// refresh coordinator, so a transport still holding an older access
     /// token adopts it instead of a stale cached refresh result.
@@ -890,7 +902,6 @@ impl HttpTransport {
         self.remember(discovery, record).await;
         Ok(())
     }
-
     async fn remember(&self, discovery: &Discovery, record: token_auth::TokenRecord) {
         let mut tokens = self.load_tokens().await;
         tokens
@@ -908,7 +919,7 @@ impl HttpTransport {
         cancel: &CancellationToken,
     ) -> Result<Discovery, TransportError> {
         oauth::discover(
-            &self.client,
+            &self.oauth,
             &self.url,
             challenge,
             self.connect_timeout,
@@ -928,7 +939,7 @@ impl HttpTransport {
         tokio::time::timeout(
             self.stepup_timeout,
             oauth::authorize(
-                &self.client,
+                &self.oauth,
                 &oauth::AuthorizePlan {
                     target: &self.url,
                     discovery,

@@ -647,8 +647,18 @@ mod unauthorized_recovery {
 
         /// Discovers the fixture's metadata through the real discovery path.
         async fn discovery(&self) -> Discovery {
+            let policy = oauth::NetworkPolicy::for_target(&self.url);
+            let oauth = oauth::OAuthClient {
+                client: reqwest::Client::builder()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .no_proxy()
+                    .dns_resolver(policy.resolver())
+                    .build()
+                    .expect("fixture OAuth client"),
+                policy,
+            };
             oauth::discover(
-                &reqwest::Client::new(),
+                &oauth,
                 &self.url,
                 &Challenge::default(),
                 Duration::from_secs(5),

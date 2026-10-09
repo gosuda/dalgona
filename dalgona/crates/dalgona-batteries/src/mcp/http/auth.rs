@@ -4,7 +4,16 @@
 //! This module owns the mode-0600 token file, per-resource binding, scope
 //! parsing, and the private SHA-256 used for PKCE S256.
 
-use std::{collections::BTreeMap, fmt, future::Future, path::Path, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    fmt,
+    future::Future,
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU32, Ordering},
+    },
+};
 
 use dal_store::{FileMode, write_atomic};
 use reqwest::Url;
@@ -63,10 +72,10 @@ pub(crate) struct RefreshCoordinator {
 
 struct RefreshSlot {
     state: Mutex<RefreshSlotState>,
+    prompts: AtomicU32,
+    cancelled: AtomicBool,
 }
-
 impl RefreshSlot {
-    /// Clears a finished flight, keeping its fresh record unless an
     /// interactive record superseded it while it ran.
     async fn settle(&self, flight: &Arc<RefreshFlight>) {
         let fresh = flight.fresh().await;
@@ -85,6 +94,7 @@ impl RefreshSlot {
         }
         state.flight = None;
         state.task = None;
+        state.superseded = false;
     }
 }
 
@@ -96,12 +106,30 @@ struct RefreshSlotState {
     /// Set when an interactive record replaced `last` while a flight was
     /// still running, so the older flight cannot overwrite it.
     superseded: bool,
-    /// Interactive authorization prompts already in flight for this
-    /// credential, so concurrent callers prompt once.
-    prompts: u32,
-    /// Set when a prompt was declined or cancelled, so later failures
-    /// answer without asking again until a fresh token publishes.
-    cancelled: bool,
+}
+
+struct PromptLease {
+    slot: Arc<RefreshSlot>,
+    released: bool,
+}
+
+impl PromptLease {
+    fn finish(mut self, outcome: &Result<impl Sized, McpError>) {
+        if matches!(outcome, Err(McpError::NoAskFrontEnd)) {
+            self.slot.cancelled.store(true, Ordering::SeqCst);
+        }
+        self.released = true;
+        self.slot.prompts.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl Drop for PromptLease {
+    fn drop(&mut self) {
+        if self.released {
+            return;
+        }
+        self.slot.prompts.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 struct RefreshFlight {
@@ -130,6 +158,8 @@ impl RefreshCoordinator {
             .or_insert_with(|| {
                 Arc::new(RefreshSlot {
                     state: Mutex::new(RefreshSlotState::default()),
+                    prompts: AtomicU32::new(0),
+                    cancelled: AtomicBool::new(false),
                 })
             })
             .clone()
@@ -143,7 +173,7 @@ impl RefreshCoordinator {
         let mut state = slot.state.lock().await;
         state.superseded = state.flight.is_some();
         state.last = Some(record);
-        state.cancelled = false;
+        slot.cancelled.store(false, Ordering::SeqCst);
     }
 
     /// Runs one interactive authorization prompt for the credential.
@@ -166,18 +196,18 @@ impl RefreshCoordinator {
     {
         let slot = self.slot(key).await;
         {
-            let mut state = slot.state.lock().await;
-            if state.cancelled || state.prompts > 0 {
+            let _state = slot.state.lock().await;
+            if slot.cancelled.load(Ordering::SeqCst) || slot.prompts.load(Ordering::SeqCst) > 0 {
                 return Err(McpError::NoAskFrontEnd);
             }
-            state.prompts += 1;
+            slot.prompts.fetch_add(1, Ordering::SeqCst);
         }
+        let lease = PromptLease {
+            slot,
+            released: false,
+        };
         let outcome = work().await;
-        let mut state = slot.state.lock().await;
-        state.prompts -= 1;
-        if let Err(McpError::NoAskFrontEnd) = &outcome {
-            state.cancelled = true;
-        }
+        lease.finish(&outcome);
         outcome
     }
 
@@ -195,6 +225,7 @@ impl RefreshCoordinator {
         let flight = {
             let mut state = slot.state.lock().await;
             if state.superseded
+                && state.flight.is_some()
                 && let Some(record) = state.last.as_ref()
             {
                 return Ok(Some(record.clone()));
@@ -654,6 +685,26 @@ mod tests {
         let rendered = format!("{record:?}");
         assert!(!rendered.contains("sekret"));
         assert!(rendered.contains("client"));
+    }
+
+    #[tokio::test]
+    async fn interactive_section_releases_prompt_lease_when_dropped() {
+        use std::future::pending;
+
+        let coordinator = RefreshCoordinator::new();
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            coordinator
+                .interactive_section("key", || async { pending::<Result<(), McpError>>().await }),
+        )
+        .await;
+        tokio::task::yield_now().await;
+        let slot = coordinator.slot("key").await;
+        assert_eq!(slot.prompts.load(Ordering::SeqCst), 0);
+        let second = coordinator
+            .interactive_section("key", || async { Ok::<_, McpError>(()) })
+            .await;
+        assert!(second.is_ok());
     }
 
     #[tokio::test]

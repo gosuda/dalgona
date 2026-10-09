@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Harden MCP HTTP OAuth: require both an affirmative confirmation and a validated callback before exchanging credentials, and enforce resolved-address boundaries for discovery and token requests without following redirects.
 
 - Bound history reuse reads: compaction now indexes prior metadata, fetches only matching PNG blobs after acquiring the shared render budget, and excludes skill and dream records from image counts.
 - Fix `/goal` on a fresh install: the orchestration battery no longer keeps the denial from its session-start goal load, so the first goal command asks for the battery's grant and then works, and a declined grant stops the battery's idle poll from asking again until the next goal command, prompt, or tool call.
