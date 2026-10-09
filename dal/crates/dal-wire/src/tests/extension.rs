@@ -315,7 +315,9 @@ async fn router_scenario(rig: &Rig, gauge: &Arc<Gauge>) {
         )
         .await
     };
-    let driver = async {
+    // The driver future is large; boxing it keeps the closure that
+    // `with_serve` holds small enough for `clippy::large_futures`.
+    let driver = Box::pin(async {
         let session = loop {
             let update = tokio::time::timeout(super::support::WAIT, host_updates.next())
                 .await
@@ -353,9 +355,7 @@ async fn router_scenario(rig: &Rig, gauge: &Arc<Gauge>) {
             }
         }
         assert_eq!(seen, 2, "the session published busy then quiet");
-    };
-    // The driver future above is ~26 KB; boxing keeps the future passed to
-    // `with_serve` small enough for `clippy::large_futures`.
+    });
     with_serve(rig, router_options(rig), |addr| {
         Box::pin(async move {
             let (reply, ()) = tokio::join!(request(addr), driver);

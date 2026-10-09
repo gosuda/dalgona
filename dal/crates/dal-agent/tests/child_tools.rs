@@ -545,6 +545,27 @@ async fn a_childs_tool_list_survives_an_extension_reload() {
 }
 
 #[tokio::test]
+async fn a_duplicate_child_name_reports_the_host_error() {
+    let rig = rig().await;
+    rig.run("spawn_same", "*").await;
+    let error = tokio::time::timeout(
+        Duration::from_secs(10),
+        rig.root.submit(Command::Run {
+            name: "spawn_same".into(),
+            args: "*".into(),
+            expected: None,
+        }),
+    )
+    .await
+    .expect("duplicate spawn answered")
+    .expect_err("duplicate child names must fail");
+    let text = error.to_string();
+    assert!(
+        text.contains("already used") && text.contains("member"),
+        "duplicate child name should explain the conflict: {text}"
+    );
+}
+#[tokio::test]
 async fn a_child_cannot_call_a_tool_outside_its_allowlist() {
     let rig = rig().await;
     rig.run("recompose", "").await;

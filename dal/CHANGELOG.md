@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fix starting a child session that cannot open: the agents service now returns the cause, such as a child name already used in the workspace, instead of a bare cancelled reply. Two children started at the same time with the same name can no longer both claim it.
 - Let an approved extension call run for its granted commands until its own run job ends. Other calls, other commands, and other directories still ask. A child session now closes after a failed wait.
 - Fix task artifacts written through the sidecar service: they now land in a directory named by the job id as it is displayed. Before, the directory used the debug form `JobId(...)`, so a reader given the job id could not find them.
 - Add `note` to `CoveredEntry`: a reminder in the covered span now reaches compactors as an entry that carries its text in `note` and no model context, so a compactor that draws the journal keeps the reminder's place. `covered_context()` still leaves reminders out, and a span that holds only reminders is still reported as nothing to compact.

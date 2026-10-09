@@ -694,10 +694,17 @@ fn cancel_child(id: SessionId, result: Result<(), HostError>) -> Result<AgentsRe
         })
 }
 
+fn child_start_error(error: impl std::fmt::Display) -> ServiceError {
+    ServiceError::failed(
+        Some(Service::Agents),
+        format!("could not start child session: {error}"),
+    )
+}
+
 impl Backend {
     async fn agents_op(&self, op: AgentsOp) -> Result<AgentsReply, ServiceError> {
         match op {
-            AgentsOp::Start(start) => Ok(self.agent_start(start).await),
+            AgentsOp::Start(start) => self.agent_start(start).await,
             AgentsOp::Await { id, timeout } => {
                 if self.is_child(id) {
                     Ok(self.agent_await(id, timeout).await)
@@ -736,7 +743,7 @@ impl Backend {
             .is_some_and(|entry| entry.parent == Some(self.session))
     }
 
-    async fn agent_start(&self, start: dal_core::AgentStart) -> AgentsReply {
+    async fn agent_start(&self, start: dal_core::AgentStart) -> Result<AgentsReply, ServiceError> {
         let workspace = start
             .workspace
             .clone()
@@ -750,27 +757,27 @@ impl Backend {
         // receives: re-resolving the lexical spelling later would race a
         // swapped symlink into an outside root.
         let Some(child_root) = std::fs::canonicalize(workspace.as_path()).ok() else {
-            return AgentsReply::Cancelled { id: self.session };
+            return Ok(AgentsReply::Cancelled { id: self.session });
         };
         // The containment root is the one `Backend::new` captured: a
         // replaceable symlink at the session workspace must not shift the
         // boundary a child is compared against mid-session.
         let parent_root = self.canonical_root.clone();
         if !child_root.starts_with(&parent_root) {
-            return AgentsReply::Cancelled { id: self.session };
+            return Ok(AgentsReply::Cancelled { id: self.session });
         }
         let Ok(workspace) = Workspace::new(child_root) else {
-            return AgentsReply::Cancelled { id: self.session };
+            return Ok(AgentsReply::Cancelled { id: self.session });
         };
         // An explicit child model the catalog cannot route refuses the
         // start; silently inheriting the caller's model would run a
         // different program than the one requested.
         let model = self.resolve_child_model(start.model.as_deref()).await;
         if start.model.is_some() && model.is_none() {
-            return AgentsReply::Cancelled { id: self.session };
+            return Ok(AgentsReply::Cancelled { id: self.session });
         }
         let host = self.host();
-        let Ok(child) = host
+        let child = host
             .open(
                 crate::host::SessionRef::Child {
                     parent: self.session,
@@ -783,9 +790,7 @@ impl Backend {
                 dal_core::ClientId::new("core"),
             )
             .await
-        else {
-            return AgentsReply::Cancelled { id: self.session };
-        };
+            .map_err(child_start_error)?;
         let child_id = child.inner.session;
         // The child is restricted before its first turn: a start that sets
         // `tools` runs with exactly those tools, on every turn and across
@@ -798,34 +803,32 @@ impl Backend {
         // does not start.
         let approval = self.shared.approval();
         if child.inner.shared.approval() != approval
-            && child
+            && let Err(error) = child
                 .submit(dal_core::Command::SetApproval {
                     mode: approval,
                     save: dal_core::Save::SessionOnly,
                 })
                 .await
-                .is_err()
         {
             let _ = self.host().close(child_id).await;
-            return AgentsReply::Cancelled { id: self.session };
+            return Err(child_start_error(error));
         }
         let mut prompt = start.prompt.to_string();
         if let Some(system) = start.system.as_ref().or(start.role.as_ref()) {
             prompt = format!("System: {system}\n\n{prompt}");
         }
         if let Some(model) = model
-            && child
+            && let Err(error) = child
                 .submit(dal_core::Command::SetModel {
                     model,
                     save: dal_core::Save::SessionOnly,
                 })
                 .await
-                .is_err()
         {
             let _ = host.close(child_id).await;
-            return AgentsReply::Cancelled { id: child_id };
+            return Err(child_start_error(error));
         }
-        if child
+        if let Err(error) = child
             .submit(dal_core::Command::Prompt {
                 expect: dal_core::Expect::Idle,
                 content: vec![Part::Text {
@@ -833,12 +836,11 @@ impl Backend {
                 }],
             })
             .await
-            .is_err()
         {
             let _ = host.close(child_id).await;
-            return AgentsReply::Cancelled { id: child_id };
+            return Err(child_start_error(error));
         }
-        AgentsReply::Started { id: child_id }
+        Ok(AgentsReply::Started { id: child_id })
     }
 
     /// Resolves a child model reference; unresolvable keeps the default.

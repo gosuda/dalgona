@@ -12,7 +12,9 @@ use dal_store::{Journal, Store};
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
-use super::{Host, HostSubscription, HostUpdate, SessionEntry, SessionRef, ShutdownReport};
+use super::{
+    Host, HostSubscription, HostUpdate, NameClaim, SessionEntry, SessionRef, ShutdownReport,
+};
 use crate::agent::{Agent, AgentInner};
 use crate::broker::Broker;
 use crate::error::HostError;
@@ -130,7 +132,8 @@ impl Host {
         if let Some(entry) = self.entry_of(resolved.id) {
             return Ok(Self::bind(&entry, resolved.id, by));
         }
-        self.spawn_session(resolved, by, None).await
+        let name_claim = self.claim_name(&resolved)?;
+        self.spawn_session(resolved, by, None, name_claim).await
     }
 
     /// Flushes one session, stops its actor, and removes it from the table.
@@ -468,6 +471,61 @@ impl Host {
         }
     }
 
+    fn claim_name(&self, resolved: &ResolvedRef) -> Result<Option<NameClaim>, HostError> {
+        let Some(name) = resolved.name.as_ref() else {
+            return Ok(None);
+        };
+        let key = (resolved.workspace.clone(), name.clone());
+        let mut claims = self
+            .state
+            .name_claims
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let name_taken = |id| {
+            dal_store::StoreError::NameTaken {
+                name: name.clone(),
+                id,
+            }
+            .into()
+        };
+        if let Some(id) = claims.get(&key).copied() {
+            return Err(name_taken(id));
+        }
+        {
+            let sessions = self
+                .state
+                .sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let live = sessions.iter().find_map(|(id, entry)| {
+                if entry.workspace != resolved.workspace {
+                    return None;
+                }
+                let view = entry
+                    .shared
+                    .snapshot(crate::session::projection::SnapshotArgs {
+                        generation: entry.generation,
+                        id: *id,
+                        workspace: entry.workspace.clone(),
+                        open: Vec::new(),
+                        updated_at: Timestamp::now(),
+                        created_at: None,
+                        archived: None,
+                        page: PageReq::default(),
+                    });
+                (view.session.name.as_deref() == Some(name)).then_some(*id)
+            });
+            if let Some(id) = live {
+                return Err(name_taken(id));
+            }
+        }
+        claims.insert(key.clone(), resolved.id);
+        Ok(Some(NameClaim {
+            state: Arc::clone(&self.state),
+            key,
+            id: resolved.id,
+        }))
+    }
     /// Opens or creates the journal for `resolved` and applies its name.
     async fn open_session_journal(
         &self,
@@ -724,6 +782,7 @@ impl Host {
         cancel: CancellationToken,
         tasks: &SessionTasks,
         by: ClientId,
+        name_claim: Option<NameClaim>,
     ) -> Agent {
         let id = resolved.id;
         let control = wired.ports.control.clone();
@@ -769,6 +828,7 @@ impl Host {
                     broker: ports.broker,
                     services: wired.services.clone(),
                     tasks: tasks.clone(),
+                    _name_claim: name_claim,
                     workspace: ports.workspace,
                     depth: resolved.depth,
                     parent: resolved.parent,
@@ -799,6 +859,7 @@ impl Host {
         resolved: ResolvedRef,
         by: ClientId,
         journal: Option<Journal>,
+        name_claim: Option<NameClaim>,
     ) -> Result<Agent, HostError> {
         let (mut journal, resumed) = self.open_session_journal(&resolved, journal).await?;
         let replayed = self.replay_session(&resolved, &mut journal).await?;
@@ -809,7 +870,7 @@ impl Host {
             .await?;
         self.observe_start(&resolved, &wired, &cancel, resumed)
             .await;
-        Ok(self.activate_session(&resolved, wired, cancel, &tasks, by))
+        Ok(self.activate_session(&resolved, wired, cancel, &tasks, by, name_claim))
     }
 
     /// Launches a pre-branched journal as a child session of `parent`.
@@ -835,7 +896,8 @@ impl Host {
             parent: Some(parent),
             name: None,
         };
-        self.spawn_session(resolved, by, Some(journal)).await?;
+        self.spawn_session(resolved, by, Some(journal), None)
+            .await?;
         Ok(id)
     }
 

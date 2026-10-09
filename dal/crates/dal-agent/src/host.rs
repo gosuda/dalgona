@@ -174,10 +174,31 @@ pub struct Host {
 
 pub(crate) struct HostState {
     pub(crate) sessions: Mutex<HashMap<SessionId, SessionEntry>>,
+    /// Names reserved while a new session is being opened.
+    pub(crate) name_claims: Mutex<HashMap<(Workspace, Box<str>), SessionId>>,
     pub(crate) subscribers: Mutex<Vec<mpsc::UnboundedSender<HostUpdate>>>,
     pub(crate) shared: Arc<HostShared>,
     /// The futures of the extensions' `Attach` controllers; shutdown aborts them.
     pub(crate) attached: Mutex<tokio::task::JoinSet<()>>,
+}
+
+pub(crate) struct NameClaim {
+    pub(crate) state: Arc<HostState>,
+    pub(crate) key: (Workspace, Box<str>),
+    pub(crate) id: SessionId,
+}
+
+impl Drop for NameClaim {
+    fn drop(&mut self) {
+        let mut claims = self
+            .state
+            .name_claims
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if claims.get(&self.key).is_some_and(|id| *id == self.id) {
+            claims.remove(&self.key);
+        }
+    }
 }
 
 /// Product, configuration, and runtime handles shared by every session.
@@ -244,6 +265,8 @@ pub(crate) struct SessionEntry {
     pub(crate) tasks: crate::session::tasks::SessionTasks,
     /// The session workspace.
     pub(crate) workspace: Workspace,
+    /// The reservation that keeps this session's display name unique while live.
+    pub(crate) _name_claim: Option<NameClaim>,
     /// The child depth, zero for top-level sessions.
     pub(crate) depth: u32,
     /// The parent session, when this session is a subagent.

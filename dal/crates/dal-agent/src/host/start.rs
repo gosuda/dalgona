@@ -67,6 +67,7 @@ impl Host {
         let host = Self {
             state: Arc::new(HostState {
                 sessions: std::sync::Mutex::default(),
+                name_claims: std::sync::Mutex::default(),
                 subscribers: std::sync::Mutex::default(),
                 shared,
                 attached: std::sync::Mutex::default(),
