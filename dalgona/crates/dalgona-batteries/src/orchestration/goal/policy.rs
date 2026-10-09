@@ -245,18 +245,11 @@ pub(crate) fn progress_signature(
     format!("{goal_id}:{open_todos}/{total_todos}:{hash}")
 }
 
-/// Records one goal turn: delivery counters and signature on P4 arrival,
-/// tool-less streak and output hash at turn end, plus turn usage. The output
-/// hash history retains only the last three entries.
-pub(crate) fn record_goal_turn(
-    goal: &mut Goal,
-    output_text: &str,
-    tool_called: bool,
-    tokens: u64,
-    elapsed_seconds: u64,
-    signature: &str,
-    prompt: PromptKind,
-) {
+/// Counts one delivered continuation: one more consecutive, unattended, and
+/// goal turn, the delivered signature, and the length-recovery count. Call it
+/// once per continuation, when its wake is accepted; a continuation that a
+/// user prompt drops or that never delivers leaves these counters unchanged.
+pub(crate) fn record_delivery(goal: &mut Goal, signature: &str, prompt: PromptKind) {
     if goal.last_signature.as_deref() != Some(signature) {
         goal.consecutive = 0;
     }
@@ -269,6 +262,18 @@ pub(crate) fn record_goal_turn(
     } else {
         goal.length_recoveries = 0;
     }
+}
+
+/// Records the facts of one finished turn: the tool-less streak, the output
+/// hash, and the turn usage. The output hash history retains only the last
+/// three entries.
+pub(crate) fn record_turn_output(
+    goal: &mut Goal,
+    output_text: &str,
+    tool_called: bool,
+    tokens: u64,
+    elapsed_seconds: u64,
+) {
     if tool_called {
         goal.toolless_streak = 0;
     } else {

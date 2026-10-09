@@ -89,9 +89,9 @@ impl Arbiter {
         self.last_activity = Some(now);
     }
 
-    /// Whether a goal continuation text waits for a wake.
-    pub(crate) fn goal_pending(&self) -> bool {
-        self.goal.is_some()
+    /// Drops a goal continuation text that no wake has taken.
+    pub(crate) fn drop_goal(&mut self) {
+        self.goal = None;
     }
 
     /// Whether the next wake carries a source other than the goal: the

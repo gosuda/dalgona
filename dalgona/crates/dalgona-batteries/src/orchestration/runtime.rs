@@ -119,6 +119,13 @@ struct ReportArgs {
     report: String,
 }
 
+/// One granted continuation: the progress signature and prompt kind that the
+/// goal counters record once, when the continuation is delivered.
+struct GoalGrant {
+    signature: String,
+    prompt: super::goal::policy::PromptKind,
+}
+
 #[expect(
     clippy::struct_excessive_bools,
     reason = "the owner task's latches are flat flags: guard cancellation, turn tool use, turn activity, prompt provenance, and the recovery arm"
@@ -158,6 +165,11 @@ struct SessionState {
     /// verdict on the Recovery path.
     goal_recovery: bool,
     goal_timer: Option<(TokioInstant, String)>,
+    /// The continuation granted by a verdict and not yet delivered, dropped,
+    /// or voided. It carries what delivery records.
+    goal_grant: Option<GoalGrant>,
+    /// The last turn ended because the context window overflowed.
+    last_turn_overflowed: bool,
     /// One merge lock per workspace: every run of this session applies its
     /// patches to the same checkout one at a time.
     merge_lock: Arc<tokio::sync::Mutex<()>>,
@@ -390,6 +402,8 @@ impl Runtime {
             turn_user_started: false,
             goal_recovery: false,
             goal_timer: None,
+            goal_grant: None,
+            last_turn_overflowed: false,
             merge_lock: self.merge_lock(start.workspace.as_path()),
             reports: Arc::clone(&self.reports),
             waits: tokio::task::JoinSet::new(),
@@ -511,12 +525,12 @@ impl SessionState {
                 if event.stop == dal_core::Stop::Cancelled && !self.guard_cancel {
                     self.arbiter.on_user_cancel();
                 }
-                if event.stop == dal_core::Stop::Failed {
+                if event.stop == dal_core::Stop::Failed && !event.overflowed {
                     self.block_goal_on_provider_error().await;
                 }
                 self.last_stop = stop_kind(event.stop);
+                self.last_turn_overflowed = event.overflowed;
                 self.guard_cancel = false;
-                self.turn_tool_called = false;
                 self.turn_active = false;
                 self.publish_status();
                 let _ = reply.send(());
@@ -562,6 +576,7 @@ impl SessionState {
     }
 
     async fn tick(&mut self) {
+        self.void_stale_goal_grant();
         if let Some((deadline, prompt)) = self.goal_timer.as_ref()
             && TokioInstant::now() >= *deadline
         {
@@ -575,6 +590,7 @@ impl SessionState {
     }
 
     async fn deliver_ready(&mut self) -> Result<(), ServiceError> {
+        self.void_stale_goal_grant();
         if self.arbiter.mode() != super::ControllerMode::Run {
             return Ok(());
         }
@@ -617,6 +633,7 @@ impl SessionState {
             return Ok(());
         }
         let monitor_only = !sources.is_empty() && sources.iter().all(|source| *source == "monitor");
+        let carries_goal = sources.contains(&"goal");
         let sources = sources.into_iter().map(Into::into).collect();
         let delivered = self
             .services
@@ -631,29 +648,21 @@ impl SessionState {
             .await;
         match delivered {
             Ok(dal_core::TurnOpReply::Woken) => {
-                if !job_ids.is_empty() {
-                    let committed = self
-                        .services
-                        .jobs(
-                            &self.caller,
-                            JobsOp::Commit {
-                                ids: job_ids.clone(),
-                            },
-                        )
-                        .await?;
-                    if !matches!(committed, JobsReply::Committed { .. }) {
-                        return Err(ServiceError::failed(
-                            None,
-                            "job reports could not be committed",
-                        ));
-                    }
+                // The wake is out, so the grant is spent even if the job
+                // commit below fails.
+                if carries_goal {
+                    self.record_goal_delivery();
                 }
+                self.commit_wake_jobs(&job_ids).await?;
                 self.arbiter.commit(&job_ids);
                 for id in &job_ids {
                     self.run_reports.remove(id);
                 }
                 self.settle_monitor_wake(monitor_only, monitor_batches);
                 self.requeue_monitor_remainder(&ready, monitor_batches);
+                if carries_goal {
+                    self.save_goal().await?;
+                }
             }
             Ok(_) => {
                 self.release_reports(job_ids.clone()).await?;
@@ -672,6 +681,29 @@ impl SessionState {
                 self.requeue_ready(&ready);
                 return Err(error);
             }
+        }
+        Ok(())
+    }
+
+    /// Commits the job reports a delivered wake carried.
+    async fn commit_wake_jobs(&self, job_ids: &[JobId]) -> Result<(), ServiceError> {
+        if job_ids.is_empty() {
+            return Ok(());
+        }
+        let committed = self
+            .services
+            .jobs(
+                &self.caller,
+                JobsOp::Commit {
+                    ids: job_ids.to_vec(),
+                },
+            )
+            .await?;
+        if !matches!(committed, JobsReply::Committed { .. }) {
+            return Err(ServiceError::failed(
+                None,
+                "job reports could not be committed",
+            ));
         }
         Ok(())
     }
@@ -714,6 +746,7 @@ impl SessionState {
         else {
             return Ok(());
         };
+        self.goal_grant = Some(GoalGrant { signature, prompt });
         self.arbiter.admit_goal(prompt_text, Instant::now());
         Ok(())
     }
@@ -927,6 +960,9 @@ impl SessionState {
         // Wake openings skip the input hook, so the latch is set only when a
         // user prompt opened this turn.
         self.turn_user_started = std::mem::take(&mut self.prompt_seen);
+        // The settled hook reads this turn's tool use after the turn-end hook,
+        // so the next turn opening clears it.
+        self.turn_tool_called = false;
         self.publish_status();
         let _ = reply.send(());
     }
@@ -938,8 +974,9 @@ impl SessionState {
         }
         self.prompt_seen = true;
         self.arbiter.on_user_prompt();
-        // A prompt in the grace window drops the scheduled continuation.
-        self.goal_timer = None;
+        // A prompt drops the scheduled continuation; the turn it starts
+        // evaluates the goal again at its own end.
+        self.drop_goal_continuation();
         if let Some(store) = self.goal.as_mut() {
             let mode = self.arbiter.mode();
             let should_save = store.saved && store.sidecar.is_some();
@@ -1036,7 +1073,7 @@ impl SessionState {
         .await;
         // A clear leaves no goal for a scheduled continuation.
         if cleared {
-            self.goal_timer = None;
+            self.drop_goal_continuation();
         }
         reply
     }
@@ -1134,7 +1171,7 @@ impl SessionState {
         }
         let monitors_stopped = super::monitor::state::stop_all(&mut self.monitors);
         let sweep = cancel_descendants(self.services.as_ref(), &self.caller).await;
-        self.goal_timer = None;
+        self.drop_goal_continuation();
         self.arbiter.on_abort();
         let mut reply =
             super::monitor::status::abort_reply(turn_was_running, jobs_cancelled, monitors_stopped);
@@ -1337,7 +1374,7 @@ impl SessionState {
             self.inflight_jobs,
             self.monitors.live_count(),
             self.open_asks.len(),
-            self.goal_timer.is_some(),
+            self.goal_grant.is_some(),
             self.guard.episode.is_some(),
         ))
     }
@@ -1348,7 +1385,7 @@ impl SessionState {
         }
         // A provider-error stop already blocked the goal mechanically at
         // the turn end; no verdict runs for it.
-        if self.last_stop == StopKind::Error {
+        if self.last_stop == StopKind::Error && !self.last_turn_overflowed {
             return Ok(());
         }
         let recovery = std::mem::take(&mut self.goal_recovery);
@@ -1452,8 +1489,8 @@ impl SessionState {
             path,
             idle,
             pending_user_messages: !self.open_asks.is_empty(),
-            continuation_pending: self.goal_timer.is_some() || self.arbiter.goal_pending(),
-            last_turn_context_overflow: false,
+            continuation_pending: self.goal_grant.is_some(),
+            last_turn_context_overflow: self.last_turn_overflowed,
             last_stop: self.last_stop,
             signature,
             open_todos: todos.open,
@@ -1480,16 +1517,12 @@ impl SessionState {
                 else {
                     return;
                 };
-                super::goal::policy::record_goal_turn(
-                    goal,
-                    reply_text,
-                    tool_called,
-                    0,
-                    0,
-                    signature,
-                    prompt,
-                );
+                super::goal::policy::record_turn_output(goal, reply_text, tool_called, 0, 0);
                 goal.updated_at = now;
+                self.goal_grant = Some(GoalGrant {
+                    signature: signature.to_owned(),
+                    prompt,
+                });
                 self.schedule_goal(prompt_text);
             }
             super::goal::policy::Verdict::Deny(reason) => self.deny_goal(reason, now),
@@ -1521,6 +1554,49 @@ impl SessionState {
             TokioInstant::now() + std::time::Duration::from_millis(delay),
             prompt_text,
         ));
+    }
+
+    /// Counts the continuation that a accepted wake just delivered, exactly
+    /// once: the grant is consumed here.
+    fn record_goal_delivery(&mut self) {
+        let Some(grant) = self.goal_grant.take() else {
+            return;
+        };
+        let Some(goal) = self
+            .goal
+            .as_mut()
+            .and_then(|store| store.sidecar.as_mut())
+            .and_then(|sidecar| sidecar.goal.as_mut())
+        else {
+            return;
+        };
+        super::goal::policy::record_delivery(goal, &grant.signature, grant.prompt);
+        goal.updated_at = dal_core::Timestamp::now();
+    }
+
+    /// Drops every trace of a granted continuation: the timer, the grant, and
+    /// the text that waits in the arbiter. Nothing is counted.
+    fn drop_goal_continuation(&mut self) {
+        self.goal_timer = None;
+        self.goal_grant = None;
+        self.arbiter.drop_goal();
+    }
+
+    /// Drops a granted continuation whose goal is no longer active, such as
+    /// one that `/goal pause` or a block reached after the grant.
+    fn void_stale_goal_grant(&mut self) {
+        if self.goal_grant.is_none() {
+            return;
+        }
+        let active = self
+            .goal
+            .as_ref()
+            .and_then(|store| store.sidecar.as_ref())
+            .and_then(|sidecar| sidecar.goal.as_ref())
+            .is_some_and(|goal| goal.status == super::GoalStatus::Active);
+        if !active {
+            self.drop_goal_continuation();
+        }
     }
 
     /// Applies a mechanical deny: blocks the goal with the deny's exact
@@ -2063,7 +2139,7 @@ impl SessionState {
             self.inflight_jobs,
             self.monitors.live_count(),
             self.open_asks.len(),
-            self.goal_timer.is_some(),
+            self.goal_grant.is_some(),
             self.guard.episode.is_some(),
         );
         let session_idle = !self.turn_active;

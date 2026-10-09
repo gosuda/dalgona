@@ -15,7 +15,7 @@ use super::ops::{
 };
 use super::policy::{
     DenyReason, GoalPath, PromptKind, Verdict, VerdictInput, on_user_prompt, progress_signature,
-    provider_block_active, record_goal_turn, verdict,
+    provider_block_active, record_delivery, record_turn_output, verdict,
 };
 use super::prompt::{build_prompt, escape_objective};
 use super::sidecar::{BlockedReason, Goal, GoalSidecar, decode_sidecar, encode_sidecar};
@@ -611,15 +611,8 @@ fn goal_turn_accounting_resets_consecutive_on_signature_change() -> Result<(), B
     let (mut sidecar, _) = active_sidecar()?;
     for turn in 0..8 {
         let goal = sidecar.goal.as_mut().ok_or("goal missing")?;
-        record_goal_turn(
-            goal,
-            &format!("output {turn}"),
-            true,
-            10,
-            5,
-            "g1:0/0:same",
-            PromptKind::Full,
-        );
+        record_delivery(goal, "g1:0/0:same", PromptKind::Full);
+        record_turn_output(goal, &format!("output {turn}"), true, 10, 5);
     }
     let goal = sidecar.goal.as_ref().ok_or("goal missing")?;
     assert_eq!(goal.consecutive, 8);
@@ -629,15 +622,8 @@ fn goal_turn_accounting_resets_consecutive_on_signature_change() -> Result<(), B
     assert_eq!(goal.toolless_streak, 0);
     assert_eq!(goal.recent_hashes.len(), 3);
     let goal = sidecar.goal.as_mut().ok_or("goal missing")?;
-    record_goal_turn(
-        goal,
-        "new work",
-        false,
-        1,
-        1,
-        "g1:0/0:changed",
-        PromptKind::Full,
-    );
+    record_delivery(goal, "g1:0/0:changed", PromptKind::Full);
+    record_turn_output(goal, "new work", false, 1, 1);
     let goal = sidecar.goal.as_ref().ok_or("goal missing")?;
     assert_eq!(goal.consecutive, 1);
     assert_eq!(goal.toolless_streak, 1);

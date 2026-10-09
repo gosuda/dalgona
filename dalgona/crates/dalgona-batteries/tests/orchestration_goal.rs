@@ -43,16 +43,26 @@ impl Drop for TestRoot {
     }
 }
 
+const READY_STEP: &str = r#"{"kind":"events","events":[{"type":"text_delta","text":"ready"},{"type":"tool_calls_done","calls":[]},{"type":"usage","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":5,"reasoning_tokens":null,"cache_write_tokens":0,"cost_usd":null}},{"type":"stop","reason":"end_turn"}]}"#;
+
+const TOO_LARGE_STEP: &str =
+    r#"{"kind":"fail","message":"Request Entity Too Large","status":413,"family":"openai_chat"}"#;
+
 async fn fixture() -> Result<(TestRoot, Host, PathBuf, dal_agent::Agent), Box<dyn Error>> {
+    fixture_with(&[READY_STEP]).await
+}
+
+/// Opens a goal session whose scripted provider answers one step per
+/// request, then runs the first step through an initial prompt.
+async fn fixture_with(
+    steps: &[&str],
+) -> Result<(TestRoot, Host, PathBuf, dal_agent::Agent), Box<dyn Error>> {
     let root = TestRoot(std::env::temp_dir().join(format!("dalgona-goal-{}", SessionId::new_v7())));
     let data = root.0.join("data");
     let workspace = root.0.join("workspace");
     fs::create_dir_all(&data)?;
     let fixture = data.join("script.jsonl");
-    fs::write(
-        &fixture,
-        r#"{"kind":"events","events":[{"type":"text_delta","text":"ready"},{"type":"tool_calls_done","calls":[]},{"type":"usage","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":5,"reasoning_tokens":null,"cache_write_tokens":0,"cost_usd":null}},{"type":"stop","reason":"end_turn"}]}"#,
-    )?;
+    fs::write(&fixture, steps.join("\n"))?;
     let user = format!(
         "model = \"openai/gpt-6-luna\"\n\n[providers.scripted]\nfixture = \"{}\"\n",
         fixture.display()
@@ -258,6 +268,53 @@ async fn clear_replaces_a_damaged_goal_file_with_the_recovery_document()
     let created = output_text(run_goal(&repaired, "parse faster").await?)?;
     assert!(created.contains("goal g2: active"), "{created}");
     host.close(session).await?;
+    host.shutdown(Duration::from_secs(5)).await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_overflowed_turn_blocks_the_goal_through_the_real_host() -> Result<(), Box<dyn Error>> {
+    let (_root, host, _workspace, agent) = fixture_with(&[READY_STEP, TOO_LARGE_STEP]).await?;
+    let created = output_text(run_goal(&agent, "write the parser").await?)?;
+    assert!(created.contains("goal g1: active"), "{created}");
+    let mut subscription = agent.subscribe(None)?;
+    let reply = agent
+        .submit(Command::Prompt {
+            expect: Expect::Idle,
+            content: vec![Part::Text {
+                text: "keep going".into(),
+            }],
+        })
+        .await?;
+    assert!(matches!(reply, Reply::Accepted { .. }), "{reply:?}");
+    let mut ended = false;
+    for _ in 0..20 {
+        let delivery = tokio::time::timeout(Duration::from_secs(30), subscription.next()).await?;
+        let Some(delivery) = delivery else {
+            break;
+        };
+        if let Delivery::Update(update) = delivery
+            && matches!(update.kind, UpdateKind::TurnEnded { .. })
+        {
+            ended = true;
+            break;
+        }
+    }
+    assert!(ended, "the rejected request did not end the turn");
+    drop(subscription);
+    // The turn-end hook may run just after the turn-ended update.
+    let mut shown = String::new();
+    for _ in 0..50 {
+        shown = output_text(run_goal(&agent, "").await?)?;
+        if shown.contains("blocked:") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        shown.contains("blocked: context overflow ended the turn (compaction did not recover)"),
+        "{shown}"
+    );
     host.shutdown(Duration::from_secs(5)).await;
     Ok(())
 }

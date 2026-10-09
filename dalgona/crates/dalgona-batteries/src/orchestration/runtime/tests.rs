@@ -52,6 +52,8 @@ struct Script {
     delivered: HashSet<JobId>,
     lines: VecDeque<dal_core::JobLines>,
     line_reads: Vec<Option<u64>>,
+    /// The sidecar files the session wrote, by name.
+    sidecar_files: std::collections::HashMap<String, Vec<u8>>,
     /// A refusal the host answers every start with.
     refuse_start: Option<dal_core::AgentRefusal>,
     /// Whether awaited children end without storing a report.
@@ -448,10 +450,20 @@ impl Services for Host {
         }
     }
     fn sidecar(&self, _who: &Caller, op: SidecarOp) -> ServiceFuture<'_, Option<Vec<u8>>> {
-        if let SidecarOp::Artifact { job, file, bytes } = op {
-            locked(&self.script).artifacts.push((job, file, bytes));
-        }
-        Box::pin(async { Ok(None) })
+        let mut script = locked(&self.script);
+        let reply = match op {
+            SidecarOp::Artifact { job, file, bytes } => {
+                script.artifacts.push((job, file, bytes));
+                None
+            }
+            SidecarOp::Write { name, bytes } => {
+                script.sidecar_files.insert(name.to_string(), bytes);
+                None
+            }
+            SidecarOp::Read { name } => script.sidecar_files.get(&name.to_string()).cloned(),
+            _ => None,
+        };
+        Box::pin(async move { Ok(reply) })
     }
 
     fn infer(&self, _who: &Caller, _req: ModelRequest) -> ServiceFuture<'_, Inference> {
@@ -641,10 +653,26 @@ impl Fixture {
 
     /// Ends the active turn: the turn-end hook, then the settled hook.
     async fn end_turn(&self, turn: dal_core::TurnId, stop: Stop, reply_text: &str) -> TestResult {
+        self.end_turn_with(turn, stop, false, reply_text).await
+    }
+
+    /// Ends the active turn as `end_turn` does, stating whether the core
+    /// reported a context overflow.
+    async fn end_turn_with(
+        &self,
+        turn: dal_core::TurnId,
+        stop: Stop,
+        overflowed: bool,
+        reply_text: &str,
+    ) -> TestResult {
         use dal_agent::ext::ObserveHook as _;
         super::TurnEndHook(self.runtime.clone())
             .call(
-                dal_core::ext::TurnEnd { turn, stop },
+                dal_core::ext::TurnEnd {
+                    turn,
+                    stop,
+                    overflowed,
+                },
                 HookCx::for_test(self.host.clone(), self.session, Some(turn)),
             )
             .await?;
@@ -1424,6 +1452,7 @@ async fn user_cancel_pauses_automatic_work_but_guard_pause_reason_wins() -> Test
             TurnEnd {
                 turn,
                 stop: Stop::Cancelled,
+                overflowed: false,
             },
             HookCx::for_test(fixture.host.clone(), fixture.session, Some(turn)),
         )
@@ -1442,6 +1471,7 @@ async fn user_cancel_pauses_automatic_work_but_guard_pause_reason_wins() -> Test
             TurnEnd {
                 turn,
                 stop: Stop::Cancelled,
+                overflowed: false,
             },
             HookCx::for_test(fixture.host.clone(), fixture.session, None),
         )
@@ -1790,6 +1820,7 @@ async fn paused_and_stopped_controllers_keep_reports_queued_until_resumed() -> T
                     dal_core::ext::TurnEnd {
                         turn: dal_core::TurnId::new(std::num::NonZeroU64::MIN),
                         stop: Stop::Cancelled,
+                        overflowed: false,
                     },
                     HookCx::for_test(fixture.host.clone(), fixture.session, None),
                 )
@@ -1858,6 +1889,65 @@ fn goal_turn() -> dal_core::TurnId {
 
 const GOAL_PROMPT_HEAD: &str = "Continue working toward the active goal.";
 
+/// The delivery counters the goal file holds.
+#[derive(Debug, Eq, PartialEq)]
+struct Counters {
+    consecutive: u32,
+    unattended: u32,
+    goal_turns: u32,
+    toolless_streak: u32,
+}
+
+impl Fixture {
+    /// Reads the goal counters from the goal file the session last wrote.
+    fn counters(&self) -> Result<Counters, Box<dyn std::error::Error>> {
+        let bytes = self
+            .script()
+            .sidecar_files
+            .get("goal.json")
+            .cloned()
+            .ok_or("the session wrote no goal file")?;
+        let sidecar =
+            crate::orchestration::goal::sidecar::decode_sidecar(&bytes, &self.session.to_string())?;
+        let goal = sidecar.goal.ok_or("the goal file holds no goal")?;
+        Ok(Counters {
+            consecutive: goal.consecutive,
+            unattended: goal.unattended,
+            goal_turns: goal.goal_turns,
+            toolless_streak: goal.toolless_streak,
+        })
+    }
+
+    fn wake_count(&self) -> usize {
+        self.script().wakes.len()
+    }
+
+    /// One tool call inside the active turn.
+    async fn call_tool(&self, turn: dal_core::TurnId, id: &str) -> TestResult {
+        use dal_agent::ext::Hook as _;
+        super::ToolCallHook(self.runtime.clone())
+            .call(
+                dal_core::ext::ToolCallEvent {
+                    turn,
+                    call: CallId::new(id),
+                    tool: dal_core::Name::parse("read")?,
+                    class: dal_core::ToolClass::Read,
+                    args: RawJson::parse(r#"{"path":"a"}"#)?,
+                },
+                HookCx::for_test(self.host.clone(), self.session, Some(turn)),
+            )
+            .await?;
+        Ok(())
+    }
+}
+
+const NO_COUNTS: Counters = Counters {
+    consecutive: 0,
+    unattended: 0,
+    goal_turns: 0,
+    toolless_streak: 0,
+};
+
 #[tokio::test(start_paused = true)]
 async fn user_grace_fires_at_ten_seconds_and_a_prompt_drops_it() -> TestResult {
     let fixture = Fixture::open_goal().await?;
@@ -1867,32 +1957,23 @@ async fn user_grace_fires_at_ten_seconds_and_a_prompt_drops_it() -> TestResult {
         .user_turn(turn, Stop::EndTurn, "made progress")
         .await?;
     fixture.pump().await;
-    assert!(
-        fixture.script().wakes.is_empty(),
-        "the grace scheduled no wake yet"
-    );
+    assert_eq!(fixture.wake_count(), 0, "the grace scheduled no wake yet");
     tokio::time::advance(std::time::Duration::from_millis(9_900)).await;
     fixture.pump().await;
-    {
-        let script = fixture.script();
-        assert!(
-            script.wakes.is_empty(),
-            "no continuation before ten seconds: {:?}",
-            script.wakes
-        );
-    }
+    assert_eq!(
+        fixture.wake_count(),
+        0,
+        "no continuation before ten seconds"
+    );
     // A prompt inside the window drops the scheduled continuation.
     fixture.user_input().await?;
-    tokio::time::advance(std::time::Duration::from_millis(1_000)).await;
+    tokio::time::advance(std::time::Duration::from_secs(1)).await;
     fixture.pump().await;
-    {
-        let script = fixture.script();
-        assert!(
-            script.wakes.is_empty(),
-            "the prompt dropped the scheduled continuation: {:?}",
-            script.wakes
-        );
-    }
+    assert_eq!(
+        fixture.wake_count(),
+        0,
+        "the prompt dropped the continuation"
+    );
     // The dropped prompt's own turn schedules a fresh grace, which fires.
     fixture.begin_turn(turn).await?;
     fixture
@@ -1900,15 +1981,66 @@ async fn user_grace_fires_at_ten_seconds_and_a_prompt_drops_it() -> TestResult {
         .await?;
     tokio::time::advance(std::time::Duration::from_millis(10_100)).await;
     fixture.pump().await;
-    {
-        let script = fixture.script();
-        assert_eq!(script.wakes.len(), 1, "{:?}", script.wakes);
-        assert!(
-            script.wakes[0].starts_with(GOAL_PROMPT_HEAD),
-            "{}",
-            script.wakes[0]
-        );
-    }
+    assert_eq!(fixture.wake_count(), 1);
+    assert!(
+        fixture.script().wakes[0].starts_with(GOAL_PROMPT_HEAD),
+        "{}",
+        fixture.script().wakes[0]
+    );
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_dropped_continuation_leaves_the_counters_and_a_delivered_one_counts_once() -> TestResult
+{
+    let fixture = Fixture::open_goal().await?;
+    fixture.create_goal("write the parser").await?;
+    let turn = goal_turn();
+    fixture
+        .user_turn(turn, Stop::EndTurn, "first attempt")
+        .await?;
+    assert_eq!(
+        fixture.counters()?,
+        Counters {
+            toolless_streak: 1,
+            ..NO_COUNTS
+        },
+        "a grant counts the turn's output but no delivery"
+    );
+    // The prompt drops the grant at nine seconds: still nothing counted.
+    tokio::time::advance(std::time::Duration::from_secs(9)).await;
+    fixture.pump().await;
+    fixture.user_input().await?;
+    tokio::time::advance(std::time::Duration::from_secs(5)).await;
+    fixture.pump().await;
+    assert_eq!(fixture.wake_count(), 0);
+    assert_eq!(
+        fixture.counters()?.goal_turns,
+        0,
+        "a dropped continuation was never delivered"
+    );
+    fixture.begin_turn(turn).await?;
+    fixture
+        .end_turn(turn, Stop::EndTurn, "second attempt")
+        .await?;
+    tokio::time::advance(std::time::Duration::from_millis(10_100)).await;
+    fixture.pump().await;
+    assert_eq!(fixture.wake_count(), 1);
+    let delivered = fixture.counters()?;
+    assert_eq!(
+        (
+            delivered.consecutive,
+            delivered.unattended,
+            delivered.goal_turns
+        ),
+        (1, 1, 1),
+        "one delivered continuation counts once"
+    );
+    // Nothing else is pending, so more time delivers and counts nothing.
+    tokio::time::advance(std::time::Duration::from_secs(30)).await;
+    fixture.pump().await;
+    assert_eq!(fixture.wake_count(), 1);
+    assert_eq!(fixture.counters()?.goal_turns, 1);
     Ok(())
 }
 
@@ -1921,18 +2053,25 @@ async fn idle_wake_joins_the_goal_continuation_to_job_reports() -> TestResult {
     fixture.done_job("server exited: 2 problems left");
     tokio::time::advance(std::time::Duration::from_millis(300)).await;
     fixture.pump().await;
-    {
-        let script = fixture.script();
-        assert_eq!(script.wakes.len(), 1, "{:?}", script.wakes);
-        let report = &script.wakes[0];
-        let Some(goal_at) = report.find(GOAL_PROMPT_HEAD) else {
-            return Err(format!("the wake carries no goal prompt: {report}").into());
-        };
-        let Some(jobs_at) = report.find("server exited: 2 problems left") else {
-            return Err(format!("the wake carries no job report: {report}").into());
-        };
-        assert!(jobs_at < goal_at, "P2 precedes P4: {report}");
-    }
+    assert_eq!(fixture.wake_count(), 1);
+    let wake = fixture.script().wakes[0].clone();
+    let Some(goal_at) = wake.find(GOAL_PROMPT_HEAD) else {
+        return Err(format!("the wake carries no goal prompt: {wake}").into());
+    };
+    let Some(jobs_at) = wake.find("server exited: 2 problems left") else {
+        return Err(format!("the wake carries no job report: {wake}").into());
+    };
+    assert!(jobs_at < goal_at, "P2 precedes P4: {wake}");
+    let counted = fixture.counters()?;
+    assert_eq!(
+        (counted.consecutive, counted.unattended, counted.goal_turns),
+        (1, 1, 1),
+        "the delivered idle continuation counts once"
+    );
+    assert_eq!(
+        counted.toolless_streak, 0,
+        "an idle admission records no turn output"
+    );
     Ok(())
 }
 
@@ -1944,14 +2083,7 @@ async fn provider_error_blocks_and_the_next_prompt_recovers() -> TestResult {
     fixture.user_turn(turn, Stop::Failed, "").await?;
     tokio::time::advance(std::time::Duration::from_secs(12)).await;
     fixture.pump().await;
-    {
-        let script = fixture.script();
-        assert!(
-            script.wakes.is_empty(),
-            "a failed turn schedules no continuation: {:?}",
-            script.wakes
-        );
-    }
+    assert_eq!(fixture.wake_count(), 0, "a failed turn schedules nothing");
     let shown = fixture.runtime.command(fixture.session, "goal", "").await?;
     assert!(
         shown.contains("blocked: provider error ended the turn (retries exhausted)"),
@@ -1964,12 +2096,41 @@ async fn provider_error_blocks_and_the_next_prompt_recovers() -> TestResult {
     assert!(shown.contains("g1: active"), "{shown}");
     tokio::time::advance(std::time::Duration::from_millis(10_100)).await;
     fixture.pump().await;
-    let script = fixture.script();
-    assert_eq!(script.wakes.len(), 1, "{:?}", script.wakes);
+    assert_eq!(fixture.wake_count(), 1);
     assert!(
-        script.wakes[0].starts_with(GOAL_PROMPT_HEAD),
+        fixture.script().wakes[0].starts_with(GOAL_PROMPT_HEAD),
         "{}",
-        script.wakes[0]
+        fixture.script().wakes[0]
+    );
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_overflowed_turn_blocks_with_the_overflow_reason_and_a_plain_failure_does_not()
+-> TestResult {
+    let fixture = Fixture::open_goal().await?;
+    fixture.create_goal("write the parser").await?;
+    let turn = goal_turn();
+    fixture.user_input().await?;
+    fixture.begin_turn(turn).await?;
+    fixture.end_turn_with(turn, Stop::Failed, true, "").await?;
+    let shown = fixture.runtime.command(fixture.session, "goal", "").await?;
+    assert!(
+        shown.contains("blocked: context overflow ended the turn (compaction did not recover)"),
+        "{shown}"
+    );
+    tokio::time::advance(std::time::Duration::from_secs(12)).await;
+    fixture.pump().await;
+    assert_eq!(fixture.wake_count(), 0, "an overflow schedules nothing");
+    // The same stop without the core's overflow mark is a provider error.
+    fixture.user_turn(turn, Stop::EndTurn, "retry").await?;
+    fixture.user_input().await?;
+    fixture.begin_turn(turn).await?;
+    fixture.end_turn(turn, Stop::Failed, "").await?;
+    let shown = fixture.runtime.command(fixture.session, "goal", "").await?;
+    assert!(
+        shown.contains("blocked: provider error ended the turn (retries exhausted)"),
+        "{shown}"
     );
     Ok(())
 }
@@ -1984,7 +2145,7 @@ async fn automatic_turn_continuation_is_ready_at_once() -> TestResult {
         .await?;
     tokio::time::advance(std::time::Duration::from_millis(10_100)).await;
     fixture.pump().await;
-    assert_eq!(fixture.script().wakes.len(), 1);
+    assert_eq!(fixture.wake_count(), 1);
     // The wake turn was automatic: its opening runs before_turn, which
     // clears the prompt latch, and its continuation waits no grace.
     fixture.begin_turn(turn).await?;
@@ -1993,9 +2154,33 @@ async fn automatic_turn_continuation_is_ready_at_once() -> TestResult {
         .await?;
     tokio::time::advance(std::time::Duration::from_millis(300)).await;
     fixture.pump().await;
-    {
-        let script = fixture.script();
-        assert_eq!(script.wakes.len(), 2, "{:?}", script.wakes);
-    }
+    assert_eq!(fixture.wake_count(), 2);
+    let counted = fixture.counters()?;
+    assert_eq!(
+        (counted.unattended, counted.goal_turns),
+        (2, 2),
+        "each delivered continuation counts once"
+    );
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_turn_that_called_a_tool_resets_the_toolless_streak() -> TestResult {
+    let fixture = Fixture::open_goal().await?;
+    fixture.create_goal("write the parser").await?;
+    let turn = goal_turn();
+    fixture.user_input().await?;
+    fixture.begin_turn(turn).await?;
+    fixture.end_turn(turn, Stop::EndTurn, "thinking").await?;
+    assert_eq!(fixture.counters()?.toolless_streak, 1);
+    fixture.user_input().await?;
+    fixture.begin_turn(turn).await?;
+    fixture.call_tool(turn, "read-1").await?;
+    fixture.end_turn(turn, Stop::EndTurn, "read a file").await?;
+    assert_eq!(
+        fixture.counters()?.toolless_streak,
+        0,
+        "the settled hook sees the tool call the turn made"
+    );
     Ok(())
 }
