@@ -1407,7 +1407,9 @@ fn apply_viewport_action(
     match action {
         // The overlay is an inline-mode surface; fullscreen is already one.
         Action::TranscriptOverlay if screen == crate::Screen::Inline => {
-            session.overlay = !session.overlay;
+            // Each opening starts at the live edge.
+            session.viewport = crate::screen::fullscreen::Viewport::following();
+            session.overlay = true;
         }
         Action::SearchTranscript if screen == crate::Screen::Fullscreen => {
             session.viewport.open_search();
