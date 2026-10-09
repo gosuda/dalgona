@@ -736,9 +736,10 @@ impl Backend {
         let Some(child_root) = std::fs::canonicalize(workspace.as_path()).ok() else {
             return AgentsReply::Cancelled { id: self.session };
         };
-        let Some(parent_root) = std::fs::canonicalize(self.workspace.as_path()).ok() else {
-            return AgentsReply::Cancelled { id: self.session };
-        };
+        // The containment root is the one `Backend::new` captured: a
+        // replaceable symlink at the session workspace must not shift the
+        // boundary a child is compared against mid-session.
+        let parent_root = self.canonical_root.clone();
         if !child_root.starts_with(&parent_root) {
             return AgentsReply::Cancelled { id: self.session };
         }

@@ -352,12 +352,17 @@ fn load_state_map(
         return Err(StateError::Unavailable);
     }
     let mut map = StateMap::new();
+    let mut seen_revisions = std::collections::HashSet::with_capacity(file.entries.len());
     for entry in file.entries {
         // Reject a damaged file rather than publish it: a zero revision
         // mints a key that can never satisfy its own CAS, a revision ahead
-        // of the counter can be re-minted, and a duplicate slot makes the
-        // stored order load-bearing.
-        if entry.revision == 0 || entry.revision > file.revisions {
+        // of the counter can be re-minted, a duplicate slot makes the
+        // stored order load-bearing, and a reused revision lets one key's
+        // token satisfy another key's CAS.
+        if entry.revision == 0
+            || entry.revision > file.revisions
+            || !seen_revisions.insert(entry.revision)
+        {
             return Err(StateError::Unavailable);
         }
         let key = StateKey::parse(&entry.key).map_err(|_| StateError::Unavailable)?;
@@ -1937,6 +1942,14 @@ mod tests {
         assert!(
             matches!(dupe, Err(StateError::Unavailable)),
             "a duplicate slot fails closed: {dupe:?}"
+        );
+        let reused = load_state_map(Ok(
+            br#"{"format":1,"revisions":4,"entries":[{"ns":"eval","key":"a","present":true,"value":0,"revision":2},{"ns":"eval","key":"b","present":true,"value":1,"revision":2}]}"#
+                .to_vec(),
+        ));
+        assert!(
+            matches!(reused, Err(StateError::Unavailable)),
+            "a revision reused across slots fails closed: {reused:?}"
         );
         let armed = load_state_map(Ok(
             br#"{"format":1,"revisions":3,"entries":[{"ns":"eval","key":"k","present":false,"value":0,"revision":2}]}"#

@@ -587,7 +587,17 @@ impl SessionScriptHost {
                     service::CallOutput::Json(value) => {
                         (OpValue::Json(value.clone()), value.as_str().len())
                     }
-                    service::CallOutput::State(record) => (OpValue::State(record), 0),
+                    service::CallOutput::State(record) => {
+                        // The scope budget charges retained bytes; a large
+                        // state value counts against the same caps as a
+                        // JSON result, so measure it before the record
+                        // moves into `OpValue`.
+                        let bytes = record
+                            .value
+                            .as_ref()
+                            .map_or(0, |value| value.as_str().len());
+                        (OpValue::State(record), bytes)
+                    }
                 };
                 (
                     op.clone(),
