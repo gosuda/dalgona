@@ -136,7 +136,7 @@ pub(crate) mod render;
 pub(crate) mod saved;
 
 pub(crate) use decode::decode_steps;
-pub(crate) use saved::find_saved;
+pub(crate) use saved::{find_saved, saved_names};
 impl Workflow {
     /// Counts the statically known child sessions planned by the workflow.
     #[must_use]

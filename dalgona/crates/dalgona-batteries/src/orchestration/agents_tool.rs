@@ -3,9 +3,10 @@
 //! Tool registration wires these pure items once the runtime tool group lands.
 
 use std::fmt::Write as _;
+use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
-use dal_core::{RawJson, ToolClass};
+use dal_core::{GrantSpec, Preview, RawJson, ToolClass};
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
 
 use super::workflow::{Isolation, Workflow, find_saved};
@@ -25,6 +26,9 @@ pub(crate) const AGENTS_SCHEMA: &str = "{\"type\":\"object\",\"properties\":{\"a
 /// approval class derives from each tool's spec at admission; this is the
 /// fallback for names the registry does not know.
 const READ_ONLY_TOOLS: [&str; 2] = ["read", "search"];
+
+/// Live runs and tasks one `agents list` reply shows.
+pub(crate) const LIST_RUNS_LIMIT: usize = 20;
 
 /// Subagents are switched off for the session.
 pub(crate) const SUBAGENTS_OFF: &str = "agents: subagents are off (agents = false in config.toml).";
@@ -101,37 +105,81 @@ pub(crate) fn submit(
 /// the session owner and never cross session boundaries.
 #[derive(Clone, Debug)]
 pub(crate) enum AgentAction {
-    Run { label: String, workflow: Workflow },
-    Wait { ids: Vec<String>, timeout_s: u16 },
-    Cancel { ids: Vec<String> },
-    List { ids: Vec<String> },
+    Run {
+        label: String,
+        workflow: Workflow,
+        input: Option<String>,
+    },
+    Wait {
+        ids: Vec<String>,
+        timeout_s: u16,
+    },
+    Cancel {
+        ids: Vec<String>,
+    },
+    List {
+        ids: Vec<String>,
+    },
 }
 
 /// Classifies one action for the approval ladder. A run is read-only only
-/// when every step is shared and lists read-only tools; waiting, cancelling,
-/// and listing never mutate.
-pub(crate) fn approval_class(action: &AgentAction) -> ToolClass {
-    match action {
-        AgentAction::Run { workflow, .. } => {
-            let read_only = workflow.steps.iter().all(|step| {
-                step.isolation == Isolation::Shared
-                    && step
-                        .tools
-                        .iter()
-                        .all(|tool| READ_ONLY_TOOLS.contains(&tool.as_str()))
-            });
-            if read_only {
-                ToolClass::Read
-            } else {
-                ToolClass::Exec {
-                    read_only: false,
-                    grant: None,
-                }
-            }
-        }
-        AgentAction::Wait { .. } | AgentAction::Cancel { .. } | AgentAction::List { .. } => {
-            ToolClass::Read
-        }
+/// when every step is shared and lists read-only tools; otherwise it is an
+/// execution whose one approval carries the scoped `git` grant of the run:
+/// the workspace root, and under the host data root the shared worktree and
+/// isolation trees (the core narrows those to this session). Waiting,
+/// cancelling, and listing never mutate.
+pub(crate) fn approval_class(
+    action: &AgentAction,
+    workspace: &Path,
+    data_root: Option<&Path>,
+) -> ToolClass {
+    let AgentAction::Run { workflow, .. } = action else {
+        return ToolClass::Read;
+    };
+    let read_only = workflow.steps.iter().all(|step| {
+        step.isolation == Isolation::Shared
+            && step
+                .tools
+                .iter()
+                .all(|tool| READ_ONLY_TOOLS.contains(&tool.as_str()))
+    });
+    if read_only {
+        return ToolClass::Read;
+    }
+    let mut roots = vec![workspace.to_path_buf()];
+    if let Some(data_root) = data_root {
+        roots.push(data_root.join("worktrees"));
+        roots.push(data_root.join("isolation"));
+    }
+    ToolClass::Exec {
+        read_only: false,
+        grant: Some(GrantSpec {
+            argv_prefix: "git".into(),
+            roots,
+        }),
+    }
+}
+
+/// The approval preview of one run: what the user is asked to allow.
+pub(crate) fn approval_preview(label: &str, workflow: &Workflow) -> Preview {
+    let mut body = String::new();
+    for step in &workflow.steps {
+        let isolation = match step.isolation {
+            Isolation::Shared => "shared checkout",
+            Isolation::Worktree => "own git worktree",
+        };
+        let _ = writeln!(
+            body,
+            "step {}: {isolation}, tools {}",
+            step.name,
+            step.tools.join(", ")
+        );
+    }
+    body.push_str("Runs git in the workspace and in its own worktrees until the run ends.");
+    Preview {
+        title: format!("agents run {label}").into(),
+        body: body.into(),
+        digest: None,
     }
 }
 
@@ -291,7 +339,11 @@ pub(crate) fn decode_action(
                     .map(|step| step.name.clone())
                     .unwrap_or_default(),
             };
-            Ok(AgentAction::Run { label, workflow })
+            Ok(AgentAction::Run {
+                label,
+                workflow,
+                input,
+            })
         }
         "wait" => {
             reject_unused(&parsed, "wait", &["ids", "timeout"])?;

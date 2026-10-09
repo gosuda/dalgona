@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
 
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
 use dal_agent::error::ServiceError;
 use dal_agent::ext::{
-    BoxFuture, Caller, Hook, HookCx, HookError, ObserveHook, Services, StatusCx, StatusPoll,
+    BoxFuture, Caller, Hook, HookCx, HookError, ObserveHook, Scope, Services, StatusCx, StatusPoll,
     StatusSnapshot,
 };
 use dal_core::ext::{
@@ -16,33 +18,52 @@ use dal_core::ext::{
     ToolResultEvent, TurnEnd,
 };
 use dal_core::{
-    AgentReport, AgentState, AgentsOp, AgentsReply, CallId, JobId, JobStateView, JobsOp, JobsReply,
-    Name, Notice, RawJson, SessionId, TurnOp,
+    AgentState, AgentsOp, AgentsReply, ArtifactFile, Budget, CallId, ExitStatusKind, JobId,
+    JobOutcome, JobStateView, JobsOp, JobsReply, Name, Notice, OnError, RawJson, RunOutput,
+    RunRequest, ScopeSpec, SessionId, SidecarOp, TurnOp,
 };
 use sonic_rs::JsonContainerTrait;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant as TokioInstant, timeout_at};
+use tokio_util::sync::CancellationToken;
 
-use super::agents_tool::{ReportCell, ReportOutcome, ReportStatus, submit};
+use super::agents_tool::{Report, ReportCell, ReportOutcome, ReportStatus, submit};
 use super::arbiter::Arbiter;
 use super::goal::adapter::{self, GoalStore};
-use super::goal::ops::{GoalScope, TodoSummary};
+use super::goal::ops::{GoalScope, TodoSummary, format_duration};
 use super::monitor::state::{MonitorConfig, MonitorState};
 use super::monitor::status::{InflightCounts, status_json, status_payload};
+use super::pool::{IndexCollector, TaskResult, TaskState};
 use super::stuck::{
     GuardState, GuardVerdict, SleepClassifier, clear_pending_attempts, on_tool_call, reset,
     rewrite_exec_args,
 };
+use super::worktree::{Base, IsolationRefusal};
 use super::{JobsView, OrchestrationConfig, StopKind};
 /// Maximum number of list-and-cancel passes during descendant shutdown.
 pub(crate) const CANCEL_SWEEP_PASS_LIMIT: usize = 64;
 
+/// Name the jobs service records one workflow run under.
+const RUN_JOB_NAME: &str = "agents-run";
+/// Name the jobs service records one workflow task under.
+const TASK_JOB_NAME: &str = "agents-task";
+/// Deadline for one git call of the isolation backend.
+const GIT_CALL_TIMEOUT: Duration = Duration::from_secs(60);
+
 #[cfg(test)]
 mod tests;
+
+/// The report cells of child sessions by session id.
+type ReportCells = Arc<Mutex<HashMap<SessionId, ReportCell>>>;
 
 #[derive(Clone)]
 pub(crate) struct Runtime {
     owners: Arc<Mutex<HashMap<SessionId, Owner>>>,
+    /// One merge lock per workspace path, shared by every session on it.
+    merge_locks: Arc<Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>>,
+    /// The report cell of each live child session, read by its parent's run
+    /// when the child ends.
+    reports: ReportCells,
     config: Arc<OrchestrationConfig>,
     sleep: Option<Arc<SleepClassifier>>,
 }
@@ -57,6 +78,7 @@ enum Message {
     Input(oneshot::Sender<Result<(), ServiceError>>),
     ToolCall(ToolCallEvent, oneshot::Sender<ToolCallVerdict>),
     Tool {
+        caller: Caller,
         call: CallId,
         name: Box<str>,
         args: RawJson,
@@ -69,6 +91,17 @@ enum Message {
         name: Box<str>,
         args: Box<str>,
         reply: oneshot::Sender<Result<String, ServiceError>>,
+    },
+    RunTask {
+        run: JobId,
+        task: JobId,
+    },
+    RunEnd {
+        run: JobId,
+    },
+    ReserveChildren {
+        count: usize,
+        reply: oneshot::Sender<Result<(), u32>>,
     },
     Close(oneshot::Sender<()>),
 }
@@ -84,10 +117,13 @@ struct SessionState {
     parent: Option<SessionId>,
     caller: Caller,
     services: Arc<dyn Services>,
+    sender: mpsc::Sender<Message>,
     receiver: mpsc::Receiver<Message>,
+    workspace: PathBuf,
     snapshot: Arc<Mutex<StatusSnapshot>>,
     config: Arc<OrchestrationConfig>,
     guard: GuardState,
+    guard_cancel: bool,
     arbiter: Arbiter,
     sleep: Option<Arc<SleepClassifier>>,
     goal: Option<GoalStore>,
@@ -95,9 +131,38 @@ struct SessionState {
     monitors: MonitorState,
     open_asks: HashSet<CallId>,
     inflight_jobs: usize,
+    runs: HashMap<JobId, RunHandle>,
+    run_reports: HashSet<JobId>,
+    children_started: u32,
+    monitor_wake_ids: Vec<super::monitor::state::MonitorId>,
+    line_cursors: HashMap<JobId, u64>,
     last_stop: StopKind,
     turn_tool_called: bool,
     goal_timer: Option<(TokioInstant, String)>,
+    /// One merge lock per workspace: every run of this session applies its
+    /// patches to the same checkout one at a time.
+    merge_lock: Arc<tokio::sync::Mutex<()>>,
+    /// The report cells of the child sessions this runtime hosts.
+    reports: ReportCells,
+    /// Waits the owner answers without blocking its message loop; dropping
+    /// the state aborts them.
+    waits: tokio::task::JoinSet<()>,
+}
+
+/// One live workflow run the owner task tracks on behalf of its
+/// coordinator. The token cancels the run; the control channel carries
+/// per-task cancels; dropping the handle aborts a wedged coordinator.
+struct RunHandle {
+    cancel: CancellationToken,
+    control: mpsc::Sender<RunControl>,
+    tasks: HashSet<JobId>,
+    _coordinator: tokio_util::task::AbortOnDropHandle<()>,
+}
+
+/// A coordinator control message.
+#[derive(Clone, Copy)]
+enum RunControl {
+    CancelTask(JobId),
 }
 
 impl Runtime {
@@ -111,6 +176,8 @@ impl Runtime {
         };
         Ok(Self {
             owners: Arc::new(Mutex::new(HashMap::new())),
+            merge_locks: Arc::new(Mutex::new(HashMap::new())),
+            reports: Arc::new(Mutex::new(HashMap::new())),
             config: Arc::new(config),
             sleep,
         })
@@ -165,6 +232,7 @@ impl Runtime {
     pub(crate) async fn tool(
         &self,
         session: SessionId,
+        caller: Caller,
         call: CallId,
         name: &str,
         args: RawJson,
@@ -178,6 +246,7 @@ impl Runtime {
         };
         let (reply, response) = oneshot::channel();
         let message = Message::Tool {
+            caller,
             call,
             name: name.into(),
             args,
@@ -234,7 +303,19 @@ impl Runtime {
             .map_err(|_| ServiceError::failed(None, "orchestration owner is closed"))?
     }
 
-    async fn open(&self, _start: SessionStart, cx: HookCx) -> Result<(), HookError> {
+    /// The one merge lock of a workspace: every session on the same checkout
+    /// applies its patches through it, one at a time.
+    fn merge_lock(&self, workspace: &Path) -> Arc<tokio::sync::Mutex<()>> {
+        let key = workspace
+            .canonicalize()
+            .unwrap_or_else(|_| workspace.to_path_buf());
+        let mut locks = self
+            .merge_locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Arc::clone(locks.entry(key).or_default())
+    }
+    async fn open(&self, start: SessionStart, cx: HookCx) -> Result<(), HookError> {
         let session = cx.session;
         let parent = cx.parent;
         let caller = cx.caller.clone();
@@ -247,6 +328,13 @@ impl Runtime {
                 .await
                 .map_err(|error| failed(&error.to_string()))?;
         }
+        let report = ReportCell::default();
+        if parent.is_some() {
+            self.reports
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(session, report.clone());
+        }
         let (sender, receiver) = mpsc::channel(256);
         let snapshot = Arc::new(Mutex::new(StatusSnapshot {
             quiet: true,
@@ -256,21 +344,32 @@ impl Runtime {
             session,
             parent,
             caller,
-            services,
+            services: Arc::clone(&services),
+            sender: sender.clone(),
             receiver,
+            workspace: start.workspace.as_path().to_path_buf(),
             snapshot: Arc::clone(&snapshot),
             config: Arc::clone(&self.config),
             guard: GuardState::default(),
+            guard_cancel: false,
             arbiter: Arbiter::new(),
             sleep: self.sleep.clone(),
             goal: None,
-            report: ReportCell::default(),
+            report,
             monitors: MonitorState::default(),
             open_asks: HashSet::new(),
             inflight_jobs: 0,
+            runs: HashMap::new(),
+            run_reports: HashSet::new(),
+            children_started: 0,
+            monitor_wake_ids: Vec::new(),
+            line_cursors: HashMap::new(),
             last_stop: StopKind::Completed,
             turn_tool_called: false,
             goal_timer: None,
+            merge_lock: self.merge_lock(start.workspace.as_path()),
+            reports: Arc::clone(&self.reports),
+            waits: tokio::task::JoinSet::new(),
         };
         #[expect(
             clippy::disallowed_methods,
@@ -304,6 +403,10 @@ impl Runtime {
         if let Ok(mut owners) = self.owners.lock() {
             owners.remove(&session);
         }
+        self.reports
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&session);
     }
 
     fn snapshot(&self, session: SessionId) -> Option<StatusSnapshot> {
@@ -354,15 +457,24 @@ impl SessionState {
                 let _ = reply.send(verdict);
             }
             Message::Tool {
+                caller,
                 call,
                 name,
                 args,
                 reply,
-            } => {
-                let result = self.tool(call, &name, &args).await;
-                self.publish_status();
-                let _ = reply.send(result);
-            }
+            } => match self.tool(caller, call, &name, &args).await {
+                ToolReply::Done(result) => {
+                    self.publish_status();
+                    let _ = reply.send(result);
+                }
+                ToolReply::Wait(plan) => {
+                    while self.waits.try_join_next().is_some() {}
+                    self.waits.spawn(async move {
+                        let _ = reply.send(wait_for_jobs(plan).await);
+                    });
+                    self.publish_status();
+                }
+            },
             Message::ToolResult(event, reply) => {
                 self.open_asks.remove(&event.call);
                 self.publish_status();
@@ -372,7 +484,14 @@ impl SessionState {
                 if self.config.loop_guard.enabled {
                     clear_pending_attempts(&mut self.guard);
                 }
+                if event.stop == dal_core::Stop::Cancelled && !self.guard_cancel {
+                    self.arbiter.on_user_cancel();
+                }
+                if event.stop == dal_core::Stop::Failed {
+                    self.block_goal_on_provider_error().await;
+                }
                 self.last_stop = stop_kind(event.stop);
+                self.guard_cancel = false;
                 self.turn_tool_called = false;
                 self.publish_status();
                 let _ = reply.send(());
@@ -385,6 +504,27 @@ impl SessionState {
             Message::Command { name, args, reply } => {
                 let result = self.command(&name, &args).await;
                 self.publish_status();
+                let _ = reply.send(result);
+            }
+            Message::RunTask { run, task } => {
+                if let Some(handle) = self.runs.get_mut(&run) {
+                    handle.tasks.insert(task);
+                }
+            }
+            Message::RunEnd { run } => {
+                self.runs.remove(&run);
+                self.inflight_jobs = self.inflight_jobs.saturating_sub(1);
+            }
+            Message::ReserveChildren { count, reply } => {
+                let left =
+                    super::admission::AGENTS_PER_SESSION.saturating_sub(self.children_started);
+                let result = match u32::try_from(count) {
+                    Ok(count) if count <= left => {
+                        self.children_started += count;
+                        Ok(())
+                    }
+                    _ => Err(left),
+                };
                 let _ = reply.send(result);
             }
             Message::Close(reply) => {
@@ -404,11 +544,15 @@ impl SessionState {
             self.goal_timer = None;
             self.arbiter.admit_goal(prompt, Instant::now());
         }
+        let _ = self.poll_monitors().await;
         let _ = self.deliver_ready().await;
         self.publish_status();
     }
 
     async fn deliver_ready(&mut self) -> Result<(), ServiceError> {
+        if self.arbiter.mode() != super::ControllerMode::Run {
+            return Ok(());
+        }
         if !self.open_asks.is_empty() {
             return Ok(());
         }
@@ -420,19 +564,27 @@ impl SessionState {
             return Ok(());
         }
         let jobs = self.completed_jobs().await?;
+        let taken: Vec<_> = jobs.iter().map(|job| job.id).collect();
         let ready = self.arbiter.collect(jobs);
         if ready.is_empty() {
+            self.release_reports(taken).await?;
             return Ok(());
         }
-        let (text, sources, job_ids) = self
+        let (text, sources, job_ids, monitor_batches) = self
             .arbiter
             .compose(&ready, super::arbiter::INJECTION_BUDGET);
+        let omitted = taken
+            .into_iter()
+            .filter(|id| !job_ids.contains(id))
+            .collect();
+        self.release_reports(omitted).await?;
         if text.is_empty() {
             self.requeue_ready(&ready);
             return Ok(());
         }
+        let monitor_only = !sources.is_empty() && sources.iter().all(|source| *source == "monitor");
         let sources = sources.into_iter().map(Into::into).collect();
-        match self
+        let delivered = self
             .services
             .turn(
                 &self.caller,
@@ -442,19 +594,46 @@ impl SessionState {
                     job_ids: job_ids.clone(),
                 },
             )
-            .await
-        {
-            Ok(dal_core::TurnOpReply::Woken) => self.arbiter.commit(&job_ids),
+            .await;
+        match delivered {
+            Ok(dal_core::TurnOpReply::Woken) => {
+                if !job_ids.is_empty() {
+                    let committed = self
+                        .services
+                        .jobs(
+                            &self.caller,
+                            JobsOp::Commit {
+                                ids: job_ids.clone(),
+                            },
+                        )
+                        .await?;
+                    if !matches!(committed, JobsReply::Committed { .. }) {
+                        return Err(ServiceError::failed(
+                            None,
+                            "job reports could not be committed",
+                        ));
+                    }
+                }
+                self.arbiter.commit(&job_ids);
+                for id in &job_ids {
+                    self.run_reports.remove(id);
+                }
+                self.settle_monitor_wake(monitor_only, monitor_batches);
+                self.requeue_monitor_remainder(&ready, monitor_batches);
+            }
             Ok(_) => {
+                self.release_reports(job_ids.clone()).await?;
                 self.arbiter.release(&job_ids);
                 self.requeue_ready(&ready);
             }
             Err(ServiceError::Denied(dal_core::DenyReason::WakeLimit)) => {
+                self.release_reports(job_ids.clone()).await?;
                 self.arbiter.stop();
                 self.arbiter.release(&job_ids);
                 self.requeue_ready(&ready);
             }
             Err(error) => {
+                self.release_reports(job_ids.clone()).await?;
                 self.arbiter.release(&job_ids);
                 self.requeue_ready(&ready);
                 return Err(error);
@@ -463,29 +642,162 @@ impl SessionState {
         Ok(())
     }
 
-    async fn completed_jobs(&mut self) -> Result<Vec<super::arbiter::JobReport>, ServiceError> {
-        let jobs = self.jobs_list().await?;
-        let mut reports = Vec::new();
-        for job in jobs {
-            if let JobStateView::Done(_) = job.state
-                && !self.arbiter.is_committed(&job.id)
-            {
-                let text = match self
-                    .services
-                    .jobs(&self.caller, JobsOp::Text { id: job.id })
-                    .await?
-                {
-                    JobsReply::Text { text, .. } => text.to_string(),
-                    _ => String::new(),
-                };
-                reports.push(super::arbiter::JobReport {
-                    id: job.id,
+    /// Applies the monitor-only wake budget after a committed wake.
+    fn settle_monitor_wake(&mut self, monitor_only: bool, count: usize) {
+        let config = self.monitor_config();
+        let delivered: Vec<_> = self
+            .monitor_wake_ids
+            .drain(..count.min(self.monitor_wake_ids.len()))
+            .collect();
+        for effect in super::monitor::delivery::update_monitor_only_wake(
+            &mut self.monitors,
+            &delivered,
+            monitor_only,
+            &config,
+        ) {
+            self.apply_monitor_effect(effect);
+        }
+    }
+
+    fn requeue_monitor_remainder(&mut self, ready: &[super::arbiter::Ready], count: usize) {
+        for batch in ready
+            .iter()
+            .filter_map(|item| match item {
+                super::arbiter::Ready::Monitor(batches) => Some(batches),
+                _ => None,
+            })
+            .flatten()
+            .skip(count)
+        {
+            self.arbiter.push_monitor(batch.clone(), Instant::now());
+        }
+    }
+
+    fn monitor_config(&self) -> MonitorConfig {
+        MonitorConfig {
+            enabled: self.config.monitor.enabled,
+            coalesce_ms: self.config.monitor.coalesce_ms,
+            rate_limit_ms: self.config.monitor.rate_limit_ms,
+            max_lines: self.config.monitor.max_lines,
+            max_chars: self.config.monitor.max_chars,
+            wake_budget: self.config.monitor.wake_budget,
+        }
+    }
+
+    fn apply_monitor_effect(&mut self, effect: super::monitor::state::MonitorEffect) {
+        match effect {
+            super::monitor::state::MonitorEffect::Batch(batch) => {
+                self.monitor_wake_ids.push(batch.monitor);
+                self.arbiter.push_monitor(batch.text(), Instant::now());
+            }
+            super::monitor::state::MonitorEffect::Notice(text) => self.services.notify(
+                &self.caller,
+                Notice {
+                    turn: None,
+                    kind: "orchestration.monitor".into(),
                     text,
-                    from_run: false,
-                });
+                },
+            ),
+            super::monitor::state::MonitorEffect::Stopped(_) => {}
+        }
+    }
+
+    /// Polls every watched job's output lines and flushes deliverable
+    /// monitor batches to the arbiter as P3.
+    async fn poll_monitors(&mut self) -> Result<(), ServiceError> {
+        if !self.config.monitor.enabled {
+            return Ok(());
+        }
+        let config = self.monitor_config();
+        let mut effects = Vec::new();
+        for job in self.monitors.job_ids() {
+            let read = self.read_job_lines(job).await?;
+            for line in &read.lines {
+                effects.extend(super::monitor::delivery::on_output(
+                    &mut self.monitors,
+                    job,
+                    &line.text,
+                    dal_core::Timestamp::now(),
+                    &config,
+                ));
+            }
+            if read.ended {
+                super::monitor::state::on_job_end(&mut self.monitors, job);
+                self.line_cursors.remove(&job);
             }
         }
-        Ok(reports)
+        effects.extend(super::monitor::delivery::flush(
+            &mut self.monitors,
+            dal_core::Timestamp::now(),
+            &config,
+        ));
+        for effect in effects {
+            self.apply_monitor_effect(effect);
+        }
+        Ok(())
+    }
+
+    /// Reads one watched job's new lines without waiting.
+    async fn read_job_lines(&mut self, job: JobId) -> Result<dal_core::JobLines, ServiceError> {
+        let after = self.line_cursors.get(&job).copied();
+        let reply = self
+            .services
+            .jobs(
+                &self.caller,
+                JobsOp::Lines {
+                    id: job,
+                    after,
+                    timeout: Some(Duration::ZERO),
+                },
+            )
+            .await?;
+        let JobsReply::Lines(lines) = reply else {
+            return Err(ServiceError::failed(
+                None,
+                "jobs service returned an unexpected reply to a line read",
+            ));
+        };
+        self.line_cursors.insert(job, lines.next);
+        Ok(lines)
+    }
+
+    async fn completed_jobs(&self) -> Result<Vec<super::arbiter::JobReport>, ServiceError> {
+        let reply = self
+            .services
+            .jobs(&self.caller, JobsOp::Take { limit: 512 })
+            .await?;
+        let JobsReply::Taken(reports) = reply else {
+            return Err(ServiceError::failed(
+                None,
+                "jobs service returned no ended reports",
+            ));
+        };
+        Ok(reports
+            .into_iter()
+            .filter(|report| !self.arbiter.is_committed(&report.id))
+            .map(|report| super::arbiter::JobReport {
+                id: report.id,
+                text: report.text.into(),
+                from_run: self.run_reports.contains(&report.id),
+            })
+            .collect())
+    }
+
+    async fn release_reports(&self, ids: Vec<JobId>) -> Result<(), ServiceError> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        match self
+            .services
+            .jobs(&self.caller, JobsOp::Release { ids })
+            .await?
+        {
+            JobsReply::Released { .. } => Ok(()),
+            _ => Err(ServiceError::failed(
+                None,
+                "job reports could not be released",
+            )),
+        }
     }
 
     fn requeue_ready(&mut self, ready: &[super::arbiter::Ready]) {
@@ -520,6 +832,7 @@ impl SessionState {
     }
 
     async fn input(&mut self) -> Result<(), ServiceError> {
+        self.guard_cancel = false;
         if self.config.loop_guard.enabled {
             reset(&mut self.guard);
         }
@@ -545,6 +858,25 @@ impl SessionState {
 
     async fn close(&mut self) {
         self.goal_timer = None;
+        for handle in self.runs.values() {
+            handle.cancel.cancel();
+        }
+        let deadline = TokioInstant::now() + Duration::from_secs(4);
+        while !self.runs.is_empty() {
+            match timeout_at(deadline, self.receiver.recv()).await {
+                Ok(Some(Message::RunEnd { run })) => {
+                    self.runs.remove(&run);
+                }
+                Ok(Some(Message::ReserveChildren { reply, .. })) => {
+                    let _ = reply.send(Err(0));
+                }
+                Ok(Some(_)) => {}
+                Ok(None) | Err(_) => {
+                    self.runs.clear();
+                    break;
+                }
+            }
+        }
         super::monitor::state::stop_all(&mut self.monitors);
         let sweep = cancel_descendants(self.services.as_ref(), &self.caller).await;
         if let Some(failures) = sweep.failure_text() {
@@ -670,18 +1002,13 @@ impl SessionState {
             .iter()
             .filter(|job| matches!(job.state, JobStateView::Running | JobStateView::Detached))
         {
-            match self
-                .services
-                .jobs(&self.caller, JobsOp::Cancel { id: job.id })
-                .await
-            {
-                Ok(JobsReply::Cancelled { .. }) => jobs_cancelled += 1,
-                Ok(_) => failures.push(format!(
-                    "{}: the jobs service returned an unexpected reply to a cancel request",
-                    job.id
-                )),
+            match self.cancel_one_job(job.id).await {
+                Ok(()) => jobs_cancelled += 1,
                 Err(error) => failures.push(format!("{}: {error}", job.id)),
             }
+        }
+        for handle in self.runs.values() {
+            handle.cancel.cancel();
         }
         let monitors_stopped = super::monitor::state::stop_all(&mut self.monitors);
         let sweep = cancel_descendants(self.services.as_ref(), &self.caller).await;
@@ -704,17 +1031,20 @@ impl SessionState {
 
     async fn tool(
         &mut self,
+        caller: Caller,
         call: CallId,
         name: &str,
         args: &RawJson,
-    ) -> Result<String, ServiceError> {
-        match name {
+    ) -> ToolReply {
+        if name == "agents" {
+            return self.agents_tool(caller, call, args).await;
+        }
+        ToolReply::Done(match name {
             "create_goal" | "update_goal" | "get_goal" => self.goal_tool(name, args.as_str()).await,
             "monitor" => self.monitor_tool(args).await,
             "report" => self.report_tool(args.as_str()),
-            "agents" => self.agents_tool(call, args).await,
             _ => Err(ServiceError::failed(None, "unknown orchestration tool")),
-        }
+        })
     }
 
     async fn goal_tool(&mut self, name: &str, args: &str) -> Result<String, ServiceError> {
@@ -881,17 +1211,22 @@ impl SessionState {
 
     async fn inflight_counts(&mut self) -> Result<InflightCounts, ServiceError> {
         let _ = self.jobs_list().await?;
-        Ok(InflightCounts {
-            jobs: self.inflight_jobs,
-            monitors: self.monitors.live_count(),
-            asks: self.open_asks.len(),
-            goal_timer: u8::from(self.goal_timer.is_some()),
-            loop_guard: u8::from(self.guard.episode.is_some()),
-        })
+        Ok(super::monitor::status::inflight_counts(
+            self.inflight_jobs,
+            self.monitors.live_count(),
+            self.open_asks.len(),
+            self.goal_timer.is_some(),
+            self.guard.episode.is_some(),
+        ))
     }
 
     async fn settled(&mut self, event: Settled) -> Result<(), ServiceError> {
         if self.parent.is_some() || self.goal.is_none() {
+            return Ok(());
+        }
+        // A provider-error stop already blocked the goal mechanically at
+        // the turn end; no verdict runs for it.
+        if self.last_stop == StopKind::Error {
             return Ok(());
         }
         let todos = self.todo_summary().await?;
@@ -911,6 +1246,11 @@ impl SessionState {
             &inflight,
             dal_core::Timestamp::now(),
         );
+        self.save_goal().await
+    }
+
+    /// Writes the goal sidecar when the store persists.
+    async fn save_goal(&mut self) -> Result<(), ServiceError> {
         if let Some(store) = self.goal.as_ref()
             && store.saved
             && let Some(sidecar) = store.sidecar.as_ref()
@@ -918,6 +1258,28 @@ impl SessionState {
             adapter::save(self.services.as_ref(), &self.caller, sidecar).await?;
         }
         Ok(())
+    }
+
+    /// Blocks an active goal mechanically after a provider-error stop.
+    async fn block_goal_on_provider_error(&mut self) {
+        let now = dal_core::Timestamp::now();
+        let Some(store) = self.goal.as_mut() else {
+            return;
+        };
+        let Some(goal) = store.sidecar.as_mut().and_then(|side| side.goal.as_mut()) else {
+            return;
+        };
+        if goal.status != super::GoalStatus::Active {
+            return;
+        }
+        goal.status = super::GoalStatus::Blocked;
+        goal.blocked = Some(super::goal::sidecar::BlockedReason {
+            reason: super::goal::policy::PROVIDER_REASON.into(),
+            at: now,
+            mechanical: true,
+        });
+        goal.updated_at = now;
+        let _ = self.save_goal().await;
     }
 
     fn goal_signature(&self, reply_text: &str, todos: &TodoSummary) -> Option<String> {
@@ -1025,12 +1387,12 @@ impl SessionState {
         }
     }
 
-    async fn agents_tool(&mut self, call: CallId, args: &RawJson) -> Result<String, ServiceError> {
+    async fn agents_tool(&mut self, caller: Caller, call: CallId, args: &RawJson) -> ToolReply {
         if self.parent.is_some() {
-            return Err(ServiceError::failed(
+            return ToolReply::Done(Err(ServiceError::failed(
                 None,
                 super::agents_tool::NO_NESTED_RUNS,
-            ));
+            )));
         }
         let saved = self
             .config
@@ -1038,56 +1400,147 @@ impl SessionState {
             .as_ref()
             .and_then(|workflows| sonic_rs::to_string(workflows).ok())
             .and_then(|text| RawJson::parse(&text).ok());
-        let action = super::agents_tool::decode_action(args, saved.as_ref())
-            .map_err(|error| ServiceError::failed(None, error.to_string()))?;
-        match action {
+        let action = match super::agents_tool::decode_action(args, saved.as_ref()) {
+            Ok(action) => action,
+            Err(error) => {
+                return ToolReply::Done(Err(ServiceError::failed(None, error.to_string())));
+            }
+        };
+        ToolReply::Done(match action {
             super::agents_tool::AgentAction::Wait { ids, timeout_s } => {
-                let mut reports = Vec::new();
-                for display in ids {
-                    let id = SessionId::parse(&display).map_err(|_| {
-                        ServiceError::failed(None, super::agents_tool::unknown_id(&display))
-                    })?;
-                    match self
-                        .services
-                        .agents(
-                            &self.caller,
-                            AgentsOp::Await {
-                                id,
-                                timeout: Some(std::time::Duration::from_secs(u64::from(timeout_s))),
-                            },
-                        )
-                        .await?
-                    {
-                        AgentsReply::Await { report } => reports.push(report.text.to_string()),
-                        _ => {
-                            return Err(ServiceError::failed(
-                                None,
-                                super::agents_tool::unknown_id(&display),
-                            ));
-                        }
-                    }
-                }
-                Ok(reports.join("\n\n"))
+                return ToolReply::Wait(WaitPlan {
+                    services: Arc::clone(&self.services),
+                    caller,
+                    ids,
+                    timeout_s,
+                });
             }
-            super::agents_tool::AgentAction::Cancel { ids } => {
-                let ids = ids
-                    .iter()
-                    .map(|display| {
-                        SessionId::parse(display).map_err(|_| {
-                            ServiceError::failed(None, super::agents_tool::unknown_id(display))
-                        })
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                cancel_listed(self.services.as_ref(), &self.caller, &ids).await
-            }
+            super::agents_tool::AgentAction::Cancel { ids } => self.cancel_ids(ids).await,
             super::agents_tool::AgentAction::List { ids } => self.list_agents(ids).await,
-            super::agents_tool::AgentAction::Run { label, workflow } => {
-                self.run_workflow(call, &label, workflow).await
+            super::agents_tool::AgentAction::Run {
+                label,
+                workflow,
+                input,
+            } => {
+                self.run_workflow(&caller, call, &label, workflow, input)
+                    .await
             }
+        })
+    }
+
+    /// Cancels run jobs, single tasks of live runs, known background jobs,
+    /// and child sessions the model named.
+    async fn cancel_ids(&mut self, ids: Vec<String>) -> Result<String, ServiceError> {
+        let mut sessions = Vec::new();
+        let mut cancelled = 0;
+        let mut failures = Vec::new();
+        let mut seen_jobs = HashSet::new();
+        let mut seen_sessions = HashSet::new();
+        for display in &ids {
+            let Ok(job) = JobId::parse(display) else {
+                failures.push(super::agents_tool::unknown_id(display));
+                continue;
+            };
+            let known = self
+                .services
+                .jobs(&self.caller, JobsOp::Find { id: job })
+                .await?;
+            if matches!(known, JobsReply::Found(None)) {
+                let session = SessionId::parse(display)
+                    .map_err(|error| ServiceError::failed(None, error.to_string()))?;
+                if seen_sessions.insert(session) {
+                    sessions.push(session);
+                }
+                continue;
+            }
+            if !seen_jobs.insert(job) {
+                continue;
+            }
+            match self.cancel_one_job(job).await {
+                Ok(()) => cancelled += 1,
+                Err(error) => failures.push(format!("{job}: {error}")),
+            }
+        }
+        for &session in &sessions {
+            match self
+                .services
+                .agents(&self.caller, AgentsOp::Cancel { id: session })
+                .await
+            {
+                Ok(AgentsReply::Cancelled { .. }) => cancelled += 1,
+                Ok(_) => failures.push(format!(
+                    "{session}: the agents service returned an unexpected reply to a cancel request"
+                )),
+                Err(error) => failures.push(format!("{session}: {error}")),
+            }
+        }
+        if failures.is_empty() {
+            return Ok(format!("cancelled {cancelled} jobs and child sessions."));
+        }
+        Err(ServiceError::failed(
+            None,
+            format!(
+                "cancelled {cancelled} jobs and child sessions; could not cancel {}.",
+                failures.join("; ")
+            ),
+        ))
+    }
+
+    /// Cancels one run, task, or known background job. A run cancel also
+    /// stops its coordinator; a task cancel reaches the coordinator, which
+    /// ends that child alone.
+    async fn cancel_one_job(&mut self, job: JobId) -> Result<(), ServiceError> {
+        if let Some(handle) = self.runs.get(&job) {
+            handle.cancel.cancel();
+            return Ok(());
+        }
+        let owner = self
+            .runs
+            .iter()
+            .find(|(_, handle)| handle.tasks.contains(&job))
+            .map(|(run, handle)| (*run, handle.control.clone()));
+        if let Some((_, control)) = owner {
+            control
+                .send(RunControl::CancelTask(job))
+                .await
+                .map_err(|_| {
+                    ServiceError::failed(None, "the run ended before the task could be cancelled")
+                })?;
+            return Ok(());
+        }
+        let known = matches!(
+            self.services
+                .jobs(&self.caller, JobsOp::Find { id: job })
+                .await?,
+            JobsReply::Found(Some(_))
+        );
+        if !known {
+            return Err(ServiceError::failed(
+                None,
+                super::agents_tool::unknown_id(&job.to_string()),
+            ));
+        }
+        self.jobs_cancel(job).await
+    }
+
+    async fn jobs_cancel(&mut self, job: JobId) -> Result<(), ServiceError> {
+        match self
+            .services
+            .jobs(&self.caller, JobsOp::Cancel { id: job })
+            .await?
+        {
+            JobsReply::Cancelled { .. } => Ok(()),
+            JobsReply::Refused(error) => Err(ServiceError::failed(None, error.to_string())),
+            _ => Err(ServiceError::failed(
+                None,
+                "jobs service returned an unexpected reply to a cancel request",
+            )),
         }
     }
 
-    async fn list_agents(&self, requested: Vec<String>) -> Result<String, ServiceError> {
+    /// Lists child sessions, then live run and task jobs. Live jobs idle
+    /// for more than ten minutes carry their silence suffix.
+    async fn list_agents(&mut self, requested: Vec<String>) -> Result<String, ServiceError> {
         let AgentsReply::Listed(agents) =
             self.services.agents(&self.caller, AgentsOp::List).await?
         else {
@@ -1096,12 +1549,40 @@ impl SessionState {
                 "agents service returned an unexpected reply",
             ));
         };
-        let filtered = agents.iter().filter(|agent| {
-            requested.is_empty() || requested.iter().any(|id| id == &agent.id.to_string())
-        });
-        let lines = filtered
+        let mut lines: Vec<String> = agents
+            .iter()
+            .filter(|agent| {
+                requested.is_empty() || requested.iter().any(|id| id == &agent.id.to_string())
+            })
             .map(|agent| format!("{} {} {:?}", agent.id, agent.name, agent.state))
-            .collect::<Vec<_>>();
+            .collect();
+        let jobs = self.jobs_list().await?;
+        let now = dal_core::Timestamp::now();
+        for job in jobs
+            .iter()
+            .filter(|job| matches!(job.state, JobStateView::Running | JobStateView::Detached))
+            .take(super::agents_tool::LIST_RUNS_LIMIT)
+        {
+            let mut line = format!("{} {}: running", job.id, job.label);
+            if let Some(suffix) = super::stuck::silence_suffix(job.last_activity_at, now) {
+                line.push_str(&suffix);
+            }
+            lines.push(line);
+        }
+        if let Some(table) = self
+            .config
+            .workflows
+            .as_ref()
+            .and_then(|workflows| sonic_rs::to_string(workflows).ok())
+            .and_then(|text| RawJson::parse(&text).ok())
+        {
+            for (name, invalid) in super::workflow::saved_names(&table) {
+                match invalid {
+                    None => lines.push(format!("workflow {name}")),
+                    Some(reason) => lines.push(format!("workflow {name}: invalid: {reason}")),
+                }
+            }
+        }
         Ok(if lines.is_empty() {
             "No child sessions.".to_owned()
         } else {
@@ -1109,137 +1590,250 @@ impl SessionState {
         })
     }
 
-    async fn run_workflow_items(
-        &mut self,
-        call: &CallId,
-        step: &super::workflow::Step,
-        items: &[Option<String>],
-        reports: &[super::workflow::StepResult],
-    ) -> Result<(Option<Box<str>>, Vec<super::workflow::PoolItemResult>), ServiceError> {
-        let mut item_results = Vec::new();
-        let mut task_report = None;
-        for (item_index, item) in items.iter().enumerate() {
-            let dependency_reports = reports.to_vec();
-            let prompt = super::workflow::render::render(
-                step,
-                item.as_deref(),
-                &dependency_reports,
-                None,
-                JobId::new_v7(),
-            );
-            let task_name = item.as_deref().map_or_else(
-                || step.name.clone(),
-                |item| super::pool::item_label(&step.name, item_index, item),
-            );
-            let preamble = super::pool::preamble(&task_name, &prompt);
-            let mut tool_names = Vec::new();
-            for tool in &step.tools {
-                tool_names.push(
-                    Name::parse(tool)
-                        .map_err(|error| ServiceError::failed(None, error.to_string()))?,
-                );
-            }
-            tool_names.push(
-                Name::parse("report")
-                    .map_err(|error| ServiceError::failed(None, error.to_string()))?,
-            );
-            let child_call = CallId::new(format!("{call}-{}-{item_index}", step.name));
-            let start = dal_core::AgentStart {
-                call: child_call,
-                name: task_name.clone().into_boxed_str(),
-                prompt: preamble.into_boxed_str(),
-                model: step.model.clone().map(String::into_boxed_str),
-                role: step.role.clone().map(String::into_boxed_str),
-                system: step.system.clone().map(String::into_boxed_str),
-                tools: Some(tool_names.into_boxed_slice()),
-                workspace: None,
-            };
-            let AgentsReply::Started { id: child } = self
-                .services
-                .agents(&self.caller, AgentsOp::Start(start))
-                .await?
-            else {
-                return Err(ServiceError::failed(
-                    None,
-                    "agents service did not start the child",
-                ));
-            };
-            let report = await_child(self.services.as_ref(), &self.caller, child).await?;
-            release_child(self.services.as_ref(), &self.caller, child).await;
-            if item.is_none() {
-                task_report = Some(report.text.clone());
-            }
-            item_results.push(super::workflow::PoolItemResult {
-                item: item.as_deref().map_or_else(
-                    || step.name.clone().into_boxed_str(),
-                    |item| item.to_owned().into_boxed_str(),
-                ),
-                state: "done".into(),
-                summary: super::delivery::preview(&report.text, 200).into_boxed_str(),
-            });
-        }
-        Ok((task_report, item_results))
-    }
+    /// Runs one workflow in the background: admission, worktree preflight,
+    /// one run job, then a coordinator task that owns the children and
+    /// settles the single top-level report.
     async fn run_workflow(
         &mut self,
+        caller: &Caller,
         call: CallId,
         label: &str,
         workflow: super::workflow::Workflow,
+        input: Option<String>,
     ) -> Result<String, ServiceError> {
-        let mut reports = Vec::new();
-        for step in &workflow.steps {
-            let items = match &step.items {
-                super::workflow::Items::Task => vec![None],
-                super::workflow::Items::Literal(items) => items.iter().cloned().map(Some).collect(),
-                super::workflow::Items::From(source) => {
-                    let Some(source) = reports
-                        .iter()
-                        .find(|result: &&super::workflow::StepResult| result.name == *source)
-                    else {
-                        reports.push(super::workflow::StepResult {
-                            name: step.name.clone(),
-                            task_report: None,
-                            pool_items: Some(Vec::new()),
-                        });
-                        continue;
-                    };
-                    let Some(text) = source.task_report.as_deref() else {
-                        reports.push(super::workflow::StepResult {
-                            name: step.name.clone(),
-                            task_report: None,
-                            pool_items: Some(Vec::new()),
-                        });
-                        continue;
-                    };
-                    let parts = super::pool::split_items(text);
-                    if parts.len() > super::pool::ITEM_LINES_LIMIT {
-                        return Err(ServiceError::failed(
-                            None,
-                            super::pool::too_many_items(source.name.as_str(), parts.len()),
-                        ));
-                    }
-                    parts.into_iter().map(Some).collect()
-                }
-            };
-            let (task_report, item_results) = self
-                .run_workflow_items(&call, step, &items, &reports)
-                .await?;
-            reports.push(super::workflow::StepResult {
-                name: step.name.clone(),
-                task_report,
-                pool_items: match &step.items {
-                    super::workflow::Items::Task => None,
-                    _ => Some(item_results),
-                },
-            });
+        if !self.config.agents.enabled {
+            return Err(ServiceError::failed(
+                None,
+                super::agents_tool::SUBAGENTS_OFF,
+            ));
         }
-        let full = reports
+        let limits = super::admission::Limits {
+            max_runs: self.config.agents.max_runs as usize,
+            agents_per_session: super::admission::AGENTS_PER_SESSION,
+            session_used: self.children_started,
+        };
+        let planned = super::admission::admit(&workflow, self.runs.len(), &limits, |step| {
+            let tools = step
+                .tools
+                .iter()
+                .map(|name| Name::parse(name))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?;
+            dal_core::AgentStart {
+                call: call.clone(),
+                name: step.name.clone().into(),
+                prompt: step.prompt.clone().into(),
+                model: step.model.clone().map(String::into_boxed_str),
+                role: step.role.clone().map(String::into_boxed_str),
+                system: step.system.clone().map(String::into_boxed_str),
+                tools: Some(tools.into_boxed_slice()),
+                workspace: None,
+            }
+            .validate()
+            .map_err(|error| error.to_string())
+        })
+        .map_err(|error| ServiceError::failed(None, error.to_string()))?;
+        let base = self.worktree_base(caller, &workflow).await?;
+        let run = self
+            .spawn_job(caller, RUN_JOB_NAME, label)
+            .await
+            .map_err(|error| grant_failure("jobs", error))?;
+        self.children_started += u32::try_from(planned)
+            .map_err(|error| ServiceError::failed(None, error.to_string()))?;
+        let steps = workflow.steps.len();
+        let items_from = workflow
+            .steps
             .iter()
-            .filter_map(|report| report.task_report.as_deref())
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        Ok(format!("run {label} completed.\n\n{full}"))
+            .filter_map(|step| match &step.items {
+                super::workflow::Items::From(source) => Some(source.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let (control, control_receiver) = mpsc::channel(16);
+        let cancel = CancellationToken::new();
+        let coordinator = Coordinator {
+            services: Arc::clone(&self.services),
+            caller: caller.clone(),
+            sender: self.sender.clone(),
+            session: self.session,
+            workspace: self.workspace.clone(),
+            data_root: self.config.data_root.clone(),
+            base,
+            run,
+            call,
+            label: label.to_owned(),
+            input,
+            cancel: cancel.clone(),
+            live_tasks: Mutex::new(HashMap::new()),
+            merge_lock: Arc::clone(&self.merge_lock),
+            reports: Arc::clone(&self.reports),
+        }
+        .spawn(workflow, control_receiver);
+        self.runs.insert(
+            run,
+            RunHandle {
+                cancel,
+                control,
+                tasks: HashSet::new(),
+                _coordinator: coordinator,
+            },
+        );
+        self.run_reports.insert(run);
+        self.inflight_jobs += 1;
+        let items_from = items_from.iter().map(String::as_str).collect::<Vec<_>>();
+        Ok(super::agents_tool::run_result_text(
+            &run.to_string(),
+            label,
+            steps,
+            planned,
+            &items_from,
+        ))
     }
+
+    /// Spawns one job row the orchestration extension owns and settles.
+    async fn spawn_job(
+        &self,
+        caller: &Caller,
+        name: &str,
+        label: &str,
+    ) -> Result<JobId, ServiceError> {
+        let name =
+            Name::parse(name).map_err(|error| ServiceError::failed(None, error.to_string()))?;
+        let payload = RawJson::parse(&format!(
+            "{{\"label\":{}}}",
+            sonic_rs::to_string(label)
+                .map_err(|error| ServiceError::failed(None, error.to_string()))?
+        ))
+        .map_err(|error| ServiceError::failed(None, error.to_string()))?;
+        match self
+            .services
+            .jobs(
+                caller,
+                JobsOp::Spawn {
+                    name,
+                    payload,
+                    parent: None,
+                },
+            )
+            .await?
+        {
+            JobsReply::Spawned { id } => Ok(id),
+            JobsReply::Unavailable { reason } => Err(ServiceError::failed(None, reason)),
+            _ => Err(ServiceError::failed(
+                None,
+                "jobs service returned an unexpected reply to a spawn request",
+            )),
+        }
+    }
+
+    /// Resolves the shared base commit for every worktree task of the run,
+    /// or `None` when no step isolates. A refusal fails the whole run
+    /// before any job starts.
+    async fn worktree_base(
+        &self,
+        caller: &Caller,
+        workflow: &super::workflow::Workflow,
+    ) -> Result<Option<Base>, ServiceError> {
+        let Some(step) = workflow
+            .steps
+            .iter()
+            .find(|step| step.isolation == super::workflow::Isolation::Worktree)
+        else {
+            return Ok(None);
+        };
+        let workspace_text = self.workspace.display().to_string();
+        let refuse = |refusal: IsolationRefusal| {
+            ServiceError::failed(None, refusal.text(&step.name, &workspace_text))
+        };
+        if self.config.data_root.is_none() {
+            return Err(refuse(IsolationRefusal::NoDataRoot));
+        }
+        let version = git(
+            self.services.as_ref(),
+            caller,
+            &self.workspace,
+            super::worktree::argv_version()
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+        )
+        .await
+        .map_err(|error| refuse(denied_refusal(&error)))?;
+        if version.status != ExitStatusKind::Exited(0) {
+            return Err(refuse(IsolationRefusal::NoGit));
+        }
+        let text = String::from_utf8_lossy(&version.stdout_prefix);
+        let found =
+            super::worktree::parse_version(&text).ok_or_else(|| refuse(IsolationRefusal::NoGit))?;
+        if found < super::worktree::MIN_GIT_VERSION {
+            return Err(refuse(IsolationRefusal::TooOld {
+                version: text.trim().to_owned(),
+            }));
+        }
+        let top = match git(
+            self.services.as_ref(),
+            caller,
+            &self.workspace,
+            super::worktree::argv_toplevel(&self.workspace.display().to_string()),
+        )
+        .await
+        {
+            Ok(output) if output.status == ExitStatusKind::Exited(0) => {
+                PathBuf::from(String::from_utf8_lossy(&output.stdout_prefix).trim())
+            }
+            Ok(_) => {
+                return Err(refuse(super::worktree::IsolationRefusal::NotARepository));
+            }
+            Err(error) => return Err(refuse(denied_refusal(&error))),
+        };
+        let head = match git(
+            self.services.as_ref(),
+            caller,
+            &self.workspace,
+            super::worktree::argv_verify_head(&top.display().to_string()),
+        )
+        .await
+        {
+            Ok(output) if output.status == ExitStatusKind::Exited(0) => {
+                String::from_utf8_lossy(&output.stdout_prefix)
+                    .trim()
+                    .to_owned()
+            }
+            Ok(_) => return Err(refuse(super::worktree::IsolationRefusal::NoHead)),
+            Err(error) => return Err(refuse(denied_refusal(&error))),
+        };
+        let stash = match git(
+            self.services.as_ref(),
+            caller,
+            &self.workspace,
+            super::worktree::argv_stash_create(&top.display().to_string()),
+        )
+        .await
+        {
+            Ok(output) if output.status == ExitStatusKind::Exited(0) => {
+                String::from_utf8_lossy(&output.stdout_prefix)
+                    .trim()
+                    .to_owned()
+            }
+            Ok(output) => {
+                return Err(refuse(super::worktree::IsolationRefusal::NoBase {
+                    reason: stderr_line(&output),
+                }));
+            }
+            Err(error) => return Err(refuse(denied_refusal(&error))),
+        };
+        let relative_workspace = self
+            .workspace
+            .strip_prefix(&top)
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
+        Ok(Some(Base {
+            top,
+            commit: if stash.is_empty() { head } else { stash },
+            relative_workspace,
+        }))
+    }
+
     async fn tool_call(&mut self, event: ToolCallEvent) -> ToolCallVerdict {
         let mut verdict = ToolCallVerdict::Allow;
         if self.config.loop_guard.enabled {
@@ -1268,6 +1862,7 @@ impl SessionState {
                         self.arbiter.pause(reason);
                     }
                     if effects.cancel_turn {
+                        self.guard_cancel = true;
                         let _ = self.services.turn(&self.caller, TurnOp::Cancel).await;
                     }
                     if let GuardVerdict::Block { reason } = effects.verdict {
@@ -1303,13 +1898,13 @@ impl SessionState {
     }
 
     fn publish_status(&self) {
-        let inflight = InflightCounts {
-            jobs: self.inflight_jobs,
-            monitors: self.monitors.live_count(),
-            asks: self.open_asks.len(),
-            goal_timer: u8::from(self.goal_timer.is_some()),
-            loop_guard: u8::from(self.guard.episode.is_some()),
-        };
+        let inflight = super::monitor::status::inflight_counts(
+            self.inflight_jobs,
+            self.monitors.live_count(),
+            self.open_asks.len(),
+            self.goal_timer.is_some(),
+            self.guard.episode.is_some(),
+        );
         let others = inflight.jobs + inflight.monitors + usize::from(inflight.goal_timer > 0);
         let quiet = self.arbiter.quiet(true, others, 0, Instant::now());
         let goal = self.goal.as_ref().and_then(adapter::preview);
@@ -1338,6 +1933,1296 @@ impl JobsView for SessionJobsView<'_> {
     }
 }
 
+/// What a `wait` needs once the owner hands it off its message loop.
+struct WaitPlan {
+    services: Arc<dyn Services>,
+    caller: Caller,
+    ids: Vec<String>,
+    timeout_s: u16,
+}
+
+/// The answer to one orchestration tool call: now, or after a wait the owner
+/// runs beside its message loop so coordinator messages keep flowing.
+enum ToolReply {
+    Done(Result<String, ServiceError>),
+    Wait(WaitPlan),
+}
+
+/// Waits for run and task jobs, returning the ended reports and a
+/// still-running line whose live jobs carry their silence suffix.
+async fn wait_for_jobs(plan: WaitPlan) -> Result<String, ServiceError> {
+    let WaitPlan {
+        services,
+        caller,
+        ids,
+        timeout_s,
+    } = plan;
+    let timeout = Duration::from_secs(u64::from(timeout_s));
+    let mut texts = Vec::new();
+    let mut still_running = Vec::new();
+    for display in &ids {
+        let id = JobId::parse(display).map_err(|_| unknown_id_error(display))?;
+        let wait = JobsOp::Wait {
+            id,
+            timeout: Some(timeout),
+        };
+        match services.jobs(&caller, wait).await? {
+            JobsReply::Waited { .. } => {
+                texts.push(ended_job_text(services.as_ref(), &caller, id).await?);
+            }
+            JobsReply::Status(status) => {
+                still_running.push(running_line(display, &status));
+            }
+            JobsReply::Refused(_) => return Err(unknown_id_error(display)),
+            _ => {
+                return Err(ServiceError::failed(
+                    None,
+                    "jobs service returned an unexpected reply to a wait request",
+                ));
+            }
+        }
+    }
+    if !still_running.is_empty() {
+        texts.push(format!("still running: {}", still_running.join(", ")));
+    }
+    Ok(texts.join("\n\n"))
+}
+
+/// The settled report text of one ended job.
+async fn ended_job_text(
+    services: &dyn Services,
+    caller: &Caller,
+    id: JobId,
+) -> Result<String, ServiceError> {
+    match services.jobs(caller, JobsOp::Text { id }).await? {
+        JobsReply::Text { text, .. } => Ok(text.to_string()),
+        _ => Ok(String::new()),
+    }
+}
+
+/// One live job id with its silence suffix, when it has been quiet long.
+fn running_line(display: &str, status: &dal_core::JobStatus) -> String {
+    let mut line = display.to_owned();
+    if let Some(suffix) =
+        super::stuck::silence_suffix(status.last_activity_at, dal_core::Timestamp::now())
+    {
+        line.push_str(&suffix);
+    }
+    line
+}
+
+/// The error a wait or cancel returns for an id the session does not know.
+fn unknown_id_error(display: &str) -> ServiceError {
+    ServiceError::failed(None, super::agents_tool::unknown_id(display))
+}
+
+/// Runs one git argv through the granted run service with an explicit
+/// working directory and a bounded deadline.
+async fn git(
+    services: &dyn Services,
+    caller: &Caller,
+    cwd: &Path,
+    argv: Vec<String>,
+) -> Result<RunOutput, ServiceError> {
+    let request = RunRequest {
+        argv: argv.into_iter().map(std::ffi::OsString::from).collect(),
+        cwd: Some(cwd.to_path_buf()),
+        stdin: None,
+        timeout: Some(GIT_CALL_TIMEOUT),
+        env: vec![(Box::from("GIT_OPTIONAL_LOCKS"), Box::from("0"))],
+        stdout_prefix_limit: 1 << 20,
+    };
+    services.run(caller, request).await
+}
+
+/// Maps a denied git call to its isolation refusal.
+fn denied_refusal(error: &ServiceError) -> super::worktree::IsolationRefusal {
+    let reason = match error {
+        ServiceError::Denied(reason) => format!("{reason:?}"),
+        other => other.to_string(),
+    };
+    super::worktree::IsolationRefusal::Denied { reason }
+}
+
+/// Renders the missing-grant error for one service the run path needs.
+fn grant_failure(service: &str, error: ServiceError) -> ServiceError {
+    match error {
+        ServiceError::Denied(reason) => ServiceError::failed(
+            None,
+            super::agents_tool::service_denied(service, &format!("{reason:?}")),
+        ),
+        other => other,
+    }
+}
+
+/// The first stderr line of a failed git call, for task failure texts.
+fn stderr_line(output: &RunOutput) -> String {
+    String::from_utf8_lossy(&output.stderr_tail)
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// The task state a child's stored report gives. A child that ended without
+/// calling `report` failed; its last message stays visible.
+fn state_of_report(stored: Option<Report>, last_message: &str) -> TaskState {
+    match stored {
+        Some(report) => match report.status {
+            ReportStatus::Done => TaskState::Done(report),
+            ReportStatus::Blocked => TaskState::Blocked(report),
+            ReportStatus::Failed => TaskState::Failed(report.text),
+        },
+        None if last_message.trim().is_empty() => {
+            TaskState::Failed("the subagent ended without calling report.".into())
+        }
+        None => TaskState::Failed(format!(
+            "the subagent ended without calling report. Its last message: {last_message}"
+        )),
+    }
+}
+
+/// Whether a git call exited cleanly with all of its stdout kept.
+fn complete(output: &RunOutput) -> bool {
+    output.status == ExitStatusKind::Exited(0) && !output.stdout_prefix_overflowed
+}
+
+/// Why a git call did not succeed: the service error, or the first stderr
+/// line of a call that exited badly. `None` means it succeeded.
+fn git_refusal(result: &Result<RunOutput, ServiceError>) -> Option<String> {
+    match result {
+        Ok(output) if output.status == ExitStatusKind::Exited(0) => None,
+        Ok(output) => Some(stderr_line(output)),
+        Err(error) => Some(error.to_string()),
+    }
+}
+
+/// The kept outcome when staging, diffing, or saving the patch failed: the
+/// tree stays in place and no patch exists.
+fn kept_without_patch(reason: &str) -> WorktreeEnd {
+    WorktreeEnd {
+        isolation: Some(super::worktree::IsolationOutcome::Kept {
+            patch: None,
+            reason: Some(reason.to_owned()),
+        }),
+        changed: Vec::new(),
+        notice: String::new(),
+    }
+}
+
+/// One in-flight task of a pool or single step.
+struct PendingTask {
+    index: usize,
+    task: JobId,
+    label: String,
+    item: Box<str>,
+    dir: Option<PathBuf>,
+    started: Instant,
+    handle: dal_agent::ext::ScopeHandle,
+}
+
+/// One step's contribution to the run result.
+enum StepOutcome {
+    Tasks {
+        name: String,
+        pool: bool,
+        results: Vec<TaskResult>,
+    },
+    Skipped {
+        name: String,
+        reason: String,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+enum ItemError {
+    #[error("{0}")]
+    Skip(String),
+    #[error("{0}")]
+    Failed(String),
+}
+
+/// One background workflow run: owns its children through a scope, applies
+/// the worktree isolation policy, settles every task job, and settles the
+/// run's single top-level report. The owner task hears every task job and
+/// the run end through its mailbox; nothing else shares battery state.
+struct Coordinator {
+    services: Arc<dyn Services>,
+    caller: Caller,
+    sender: mpsc::Sender<Message>,
+    session: SessionId,
+    workspace: PathBuf,
+    data_root: Option<PathBuf>,
+    base: Option<Base>,
+    run: JobId,
+    call: CallId,
+    label: String,
+    input: Option<String>,
+    cancel: CancellationToken,
+    live_tasks: Mutex<HashMap<JobId, dal_agent::ext::ScopeHandle>>,
+    merge_lock: Arc<tokio::sync::Mutex<()>>,
+    reports: ReportCells,
+}
+
+/// The worktree outcome of one ended task plus its notice lines.
+struct WorktreeEnd {
+    isolation: Option<super::worktree::IsolationOutcome>,
+    changed: Vec<PathBuf>,
+    notice: String,
+}
+
+impl Coordinator {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the owning RunHandle holds this task and aborts it when the run map drops"
+    )]
+    fn spawn(
+        self,
+        workflow: super::workflow::Workflow,
+        control: mpsc::Receiver<RunControl>,
+    ) -> tokio_util::task::AbortOnDropHandle<()> {
+        tokio_util::task::AbortOnDropHandle::new(tokio::spawn(
+            Arc::new(self).execute(workflow, control),
+        ))
+    }
+
+    async fn execute(
+        self: Arc<Self>,
+        workflow: super::workflow::Workflow,
+        control: mpsc::Receiver<RunControl>,
+    ) {
+        let started = Instant::now();
+        let outcome = self.run_steps(&workflow, control).await;
+        match outcome {
+            Ok(steps) => self.finish(steps, started).await,
+            Err(message) => self.fail(message).await,
+        }
+        let _ = self.sender.send(Message::RunEnd { run: self.run }).await;
+    }
+
+    async fn run_steps(
+        self: &Arc<Self>,
+        workflow: &super::workflow::Workflow,
+        mut control: mpsc::Receiver<RunControl>,
+    ) -> Result<Vec<StepOutcome>, String> {
+        let mut reports: Vec<super::workflow::StepResult> = Vec::new();
+        let mut outcomes: Vec<Option<StepOutcome>> =
+            (0..workflow.steps.len()).map(|_| None).collect();
+        let mut started = vec![false; workflow.steps.len()];
+        let mut ended = vec![false; workflow.steps.len()];
+        let mut active = tokio::task::JoinSet::new();
+        let mut failure = None;
+        while ended.iter().any(|done| !done) {
+            for (index, step) in workflow.steps.iter().enumerate() {
+                if started[index] || !step.after.iter().all(|&dep| ended[dep]) {
+                    continue;
+                }
+                started[index] = true;
+                let coordinator = Arc::clone(self);
+                let step = step.clone();
+                let reports = reports.clone();
+                active.spawn(async move {
+                    let result = coordinator.run_step(&step, &reports).await;
+                    (index, step, result)
+                });
+            }
+            tokio::select! {
+                Some(control) = control.recv() => {
+                    self.on_control(control);
+                }
+                joined = active.join_next() => {
+                    match joined {
+                        Some(Ok((index, step, Ok(outcome)))) => {
+                            let report = match &outcome {
+                                StepOutcome::Tasks { results, .. } => Self::step_report(&step, results),
+                                StepOutcome::Skipped { .. } => super::workflow::StepResult {
+                                    name: step.name,
+                                    task_report: None,
+                                    pool_items: None,
+                                },
+                            };
+                            reports.push(report);
+                            ended[index] = true;
+                            outcomes[index] = Some(outcome);
+                        }
+                        Some(Ok((index, _, Err(message)))) => {
+                            ended[index] = true;
+                            self.cancel.cancel();
+                            failure.get_or_insert(message);
+                        }
+                        Some(Err(error)) => {
+                            self.cancel.cancel();
+                            while active.join_next().await.is_some() {}
+                            return Err(format!("a workflow step stopped unexpectedly: {error}"));
+                        }
+                        None => return Err("the workflow has unresolved dependencies".into()),
+                    }
+                }
+            }
+        }
+        match failure {
+            Some(message) => Err(message),
+            None => Ok(outcomes.into_iter().flatten().collect()),
+        }
+    }
+
+    async fn run_step(
+        &self,
+        step: &super::workflow::Step,
+        reports: &[super::workflow::StepResult],
+    ) -> Result<StepOutcome, String> {
+        match Self::resolve_items(step, reports) {
+            Ok(items) => {
+                if matches!(step.items, super::workflow::Items::From(_)) {
+                    let (reply, result) = oneshot::channel();
+                    self.sender
+                        .send(Message::ReserveChildren {
+                            count: items.len(),
+                            reply,
+                        })
+                        .await
+                        .map_err(|_| "the orchestration owner closed".to_owned())?;
+                    if let Err(left) = result
+                        .await
+                        .map_err(|_| "the orchestration owner closed".to_owned())?
+                    {
+                        return Err(super::pool::pool_budget_short(
+                            &step.name,
+                            items.len(),
+                            left,
+                        ));
+                    }
+                }
+                Ok(StepOutcome::Tasks {
+                    name: step.name.clone(),
+                    pool: !matches!(step.items, super::workflow::Items::Task),
+                    results: self.execute_step(step, &items, reports).await?,
+                })
+            }
+            Err(ItemError::Skip(reason)) => Ok(StepOutcome::Skipped {
+                name: step.name.clone(),
+                reason,
+            }),
+            Err(ItemError::Failed(reason)) => Err(reason),
+        }
+    }
+
+    /// Resolves one step's items, or the skip reason when the step never
+    /// starts.
+    fn resolve_items(
+        step: &super::workflow::Step,
+        reports: &[super::workflow::StepResult],
+    ) -> Result<Vec<Option<String>>, ItemError> {
+        match &step.items {
+            super::workflow::Items::Task => Ok(vec![None]),
+            super::workflow::Items::Literal(items) => Ok(items.iter().cloned().map(Some).collect()),
+            super::workflow::Items::From(source) => Self::resolve_from(source, reports),
+        }
+    }
+
+    fn resolve_from(
+        source: &str,
+        reports: &[super::workflow::StepResult],
+    ) -> Result<Vec<Option<String>>, ItemError> {
+        let Some(found) = reports
+            .iter()
+            .find(|report| report.name == source)
+            .and_then(|report| report.task_report.as_deref())
+        else {
+            return Err(ItemError::Skip(skip_text(super::pool::unresolved_skip(
+                source,
+            ))));
+        };
+        let parts = super::pool::split_items(found);
+        if parts.len() > super::pool::ITEM_LINES_LIMIT {
+            return Err(ItemError::Failed(super::pool::too_many_items(
+                source,
+                parts.len(),
+            )));
+        }
+        if parts.is_empty() {
+            return Err(ItemError::Skip(skip_text(super::pool::no_items_skip(
+                source,
+            ))));
+        }
+        Ok(parts.into_iter().map(Some).collect())
+    }
+
+    /// Records one finished step for downstream `{{step:name}}` rendering.
+    fn step_report(
+        step: &super::workflow::Step,
+        results: &[TaskResult],
+    ) -> super::workflow::StepResult {
+        let is_task = matches!(step.items, super::workflow::Items::Task);
+        let task_report = match results.first() {
+            Some(TaskResult {
+                state: TaskState::Done(report),
+                ..
+            }) if is_task => Some(report.text.clone().into()),
+            _ => None,
+        };
+        let pool_items = (!is_task).then(|| {
+            results
+                .iter()
+                .map(|result| super::workflow::PoolItemResult {
+                    item: result.item.clone(),
+                    state: result.state.word().into(),
+                    summary: super::delivery::preview(&result.body, 200).into_boxed_str(),
+                })
+                .collect()
+        });
+        super::workflow::StepResult {
+            name: step.name.clone(),
+            task_report,
+            pool_items,
+        }
+    }
+
+    /// Starts every child of one step under a scope of `workers` handles
+    /// and stores results by item index, not finish order.
+    async fn execute_step(
+        &self,
+        step: &super::workflow::Step,
+        items: &[Option<String>],
+        reports: &[super::workflow::StepResult],
+    ) -> Result<Vec<TaskResult>, String> {
+        let mut collector = IndexCollector::new(items.len());
+        let spec = ScopeSpec {
+            limit: u16::from(step.workers),
+            on_error: OnError::Settle,
+            budget: Budget::default(),
+        };
+        let scope = Scope::over(
+            Arc::clone(&self.services),
+            &self.caller,
+            self.cancel.child_token(),
+            spec,
+        )
+        .map_err(|error| error.to_string())?;
+        let mut pending: HashMap<dal_agent::ext::ScopeHandleId, PendingTask> = HashMap::new();
+        for (index, item) in items.iter().enumerate() {
+            if let Err(error) = self
+                .start_item(
+                    step,
+                    reports,
+                    (index, item.as_deref()),
+                    &scope,
+                    &mut collector,
+                    &mut pending,
+                )
+                .await
+            {
+                for task in pending.values() {
+                    task.handle.cancel();
+                }
+                self.await_items(&scope, &mut pending, &mut collector).await;
+                return Err(error);
+            }
+        }
+        self.await_items(&scope, &mut pending, &mut collector).await;
+        Ok(collector.into_ordered())
+    }
+
+    /// Starts one item: its task job, its worktree when the step isolates,
+    /// and its child session inside the scope.
+    async fn start_item(
+        &self,
+        step: &super::workflow::Step,
+        reports: &[super::workflow::StepResult],
+        member: (usize, Option<&str>),
+        scope: &Scope,
+        collector: &mut IndexCollector,
+        pending: &mut HashMap<dal_agent::ext::ScopeHandleId, PendingTask>,
+    ) -> Result<(), String> {
+        let (index, item) = member;
+        let task = self
+            .spawn_task_job()
+            .await
+            .map_err(|error| error.to_string())?;
+        let _ = self
+            .sender
+            .send(Message::RunTask {
+                run: self.run,
+                task,
+            })
+            .await;
+        let label = item.map_or_else(
+            || step.name.clone(),
+            |item| super::pool::item_label(&step.name, index, item),
+        );
+        if self.cancel.is_cancelled() {
+            self.finish_unstarted_task(task, index, item, label, TaskState::Cancelled, collector)
+                .await;
+            return Ok(());
+        }
+        let dir = if step.isolation == super::workflow::Isolation::Worktree {
+            match self.add_worktree(task).await {
+                Ok(dir) => Some(dir),
+                Err(reason) => {
+                    self.finish_unstarted_task(
+                        task,
+                        index,
+                        item,
+                        label,
+                        TaskState::Failed(format!("worktree: {reason}")),
+                        collector,
+                    )
+                    .await;
+                    return Ok(());
+                }
+            }
+        } else {
+            None
+        };
+        let handle = self
+            .child_start(step, item, reports, index, &label, dir.as_deref())
+            .and_then(|start| scope.agent(start).map_err(|error| error.to_string()));
+        let handle = match handle {
+            Ok(handle) => handle,
+            Err(reason) => {
+                let state = if self.cancel.is_cancelled() {
+                    TaskState::Cancelled
+                } else {
+                    TaskState::Failed(reason.clone())
+                };
+                let end = self
+                    .end_worktree(task, dir.as_deref(), &state, &reason, "0.0s", &label)
+                    .await;
+                let text = super::delivery::task_text(
+                    task,
+                    &label,
+                    self.run,
+                    state.word(),
+                    "0.0s",
+                    &end.changed,
+                    &reason,
+                );
+                self.settle_job(task, job_outcome(&state), &text).await;
+                collector.insert(
+                    index,
+                    TaskResult {
+                        id: task,
+                        state,
+                        changed: end.changed,
+                        isolation: end.isolation,
+                        body: reason.into_boxed_str(),
+                        item: item.unwrap_or_default().into(),
+                    },
+                );
+                return Ok(());
+            }
+        };
+        self.live_tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(task, handle.clone());
+        pending.insert(
+            handle.id(),
+            PendingTask {
+                index,
+                task,
+                label,
+                item: item.unwrap_or_default().into(),
+                dir,
+                started: Instant::now(),
+                handle,
+            },
+        );
+        Ok(())
+    }
+
+    /// Awaits every started child, honouring per-task cancels and the run
+    /// cancellation.
+    async fn await_items(
+        &self,
+        scope: &Scope,
+        pending: &mut HashMap<dal_agent::ext::ScopeHandleId, PendingTask>,
+        collector: &mut IndexCollector,
+    ) {
+        while !pending.is_empty() {
+            let Some(handle) = scope.next().await else {
+                break;
+            };
+            let Some(task) = pending.remove(&handle.id()) else {
+                continue;
+            };
+            self.live_tasks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&task.task);
+            let index = task.index;
+            let result = self.finish_child(task, handle).await;
+            collector.insert(index, result);
+        }
+    }
+
+    fn on_control(&self, control: RunControl) {
+        let RunControl::CancelTask(job) = control;
+        if let Some(handle) = self
+            .live_tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&job)
+        {
+            handle.cancel();
+        }
+    }
+
+    /// Builds one child's start spec; the scope starts and awaits it.
+    fn child_start(
+        &self,
+        step: &super::workflow::Step,
+        item: Option<&str>,
+        reports: &[super::workflow::StepResult],
+        index: usize,
+        label: &str,
+        dir: Option<&Path>,
+    ) -> Result<dal_core::AgentStart, String> {
+        let prompt =
+            super::workflow::render::render(step, item, reports, self.input.as_deref(), self.run);
+        let preamble = super::pool::preamble(label, &prompt);
+        let mut tool_names = Vec::with_capacity(step.tools.len() + 1);
+        for tool in &step.tools {
+            let name = Name::parse(tool).map_err(|error| error.to_string())?;
+            tool_names.push(name);
+        }
+        tool_names.push(Name::parse("report").map_err(|error| error.to_string())?);
+        let workspace = dir.map(|dir| {
+            self.base.as_ref().map_or_else(
+                || dir.to_path_buf(),
+                |base| dir.join(&base.relative_workspace),
+            )
+        });
+        let workspace = workspace
+            .map(dal_core::Workspace::new)
+            .transpose()
+            .map_err(|error| error.to_string())?;
+        Ok(dal_core::AgentStart {
+            call: CallId::new(format!("{}-{}-{index}", self.call, step.name)),
+            name: label.to_owned().into_boxed_str(),
+            prompt: preamble.into_boxed_str(),
+            model: step.model.clone().map(String::into_boxed_str),
+            role: step.role.clone().map(String::into_boxed_str),
+            system: step.system.clone().map(String::into_boxed_str),
+            tools: Some(tool_names.into_boxed_slice()),
+            workspace,
+        })
+    }
+
+    /// Settles one cancelled or failed task before any child starts.
+    async fn finish_unstarted_task(
+        &self,
+        task: JobId,
+        index: usize,
+        item: Option<&str>,
+        label: String,
+        state: TaskState,
+        collector: &mut IndexCollector,
+    ) {
+        let body = match &state {
+            TaskState::Failed(reason) => reason.clone().into_boxed_str(),
+            _ => state.word().into(),
+        };
+        let result = TaskResult {
+            id: task,
+            state,
+            changed: Vec::new(),
+            isolation: None,
+            body,
+            item: item.unwrap_or(&label).into(),
+        };
+        let outcome = job_outcome(&result.state);
+        let text = super::delivery::task_text(
+            task,
+            &label,
+            self.run,
+            result.state.word(),
+            "0.0s",
+            &[],
+            &result.body,
+        );
+        self.settle_job(task, outcome, &text).await;
+        collector.insert(index, result);
+    }
+
+    /// Maps one finished child to its task result, ends its worktree, and
+    /// settles its task job with the full task text.
+    async fn finish_child(
+        &self,
+        task: PendingTask,
+        handle: dal_agent::ext::ScopeHandle,
+    ) -> TaskResult {
+        let state = match handle.result().await {
+            Ok(dal_agent::ext::ScopeValue::Agent(report)) => {
+                let stored = self.take_report(report.session);
+                release_child(self.services.as_ref(), &self.caller, report.session).await;
+                state_of_report(stored, &report.text)
+            }
+            Err(dal_agent::ext::ScopeError::Cancelled) => TaskState::Cancelled,
+            Err(other) => TaskState::Failed(other.to_string()),
+            Ok(_) => TaskState::Failed("the child returned no agent report".into()),
+        };
+        let body = match &state {
+            TaskState::Done(report) | TaskState::Blocked(report) => report.text.clone(),
+            TaskState::Failed(text) => text.clone(),
+            _ => String::new(),
+        };
+        let duration = format_duration(task.started.elapsed().as_secs());
+        let end = self
+            .end_worktree(
+                task.task,
+                task.dir.as_deref(),
+                &state,
+                &body,
+                &duration,
+                &task.label,
+            )
+            .await;
+        let (state, body) = match (&state, &end.isolation) {
+            (
+                TaskState::Done(_),
+                Some(super::worktree::IsolationOutcome::Kept {
+                    patch: None,
+                    reason: Some(why),
+                }),
+            ) => {
+                let lost = format!("the subagent finished, but its changes were not kept: {why}.");
+                (TaskState::Failed(lost.clone()), format!("{lost}\n\n{body}"))
+            }
+            _ => (state, body),
+        };
+        let mut text = super::delivery::task_text(
+            task.task,
+            &task.label,
+            self.run,
+            state.word(),
+            &duration,
+            &end.changed,
+            &body,
+        );
+        if !end.notice.is_empty() {
+            text.push('\n');
+            text.push_str(&end.notice);
+        }
+        self.settle_job(task.task, job_outcome(&state), &text).await;
+        TaskResult {
+            id: task.task,
+            state,
+            changed: end.changed,
+            isolation: end.isolation,
+            body: body.into_boxed_str(),
+            item: task.item,
+        }
+    }
+
+    /// Takes the report a child stored through its own `report` tool.
+    fn take_report(&self, child: SessionId) -> Option<Report> {
+        self.reports
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&child)
+            .and_then(|cell| cell.get())
+    }
+
+    /// Runs one git argv from `cwd` under the run's scoped grant.
+    async fn git_in(&self, cwd: &Path, argv: Vec<String>) -> Result<RunOutput, ServiceError> {
+        git(self.services.as_ref(), &self.caller, cwd, argv).await
+    }
+
+    /// Applies the worktree end policy of one ended task.
+    async fn end_worktree(
+        &self,
+        task: JobId,
+        dir: Option<&Path>,
+        state: &TaskState,
+        body: &str,
+        duration: &str,
+        label: &str,
+    ) -> WorktreeEnd {
+        let (Some(dir), Some(base), Some(root)) =
+            (dir, self.base.as_ref(), self.data_root.as_ref())
+        else {
+            return WorktreeEnd {
+                isolation: None,
+                changed: Vec::new(),
+                notice: String::new(),
+            };
+        };
+        let dir_text = dir.display().to_string();
+        let staged = self
+            .git_in(dir, super::worktree::argv_add_all(&dir_text))
+            .await;
+        if !matches!(&staged, Ok(output) if complete(output)) {
+            return kept_without_patch("the changes could not be staged");
+        }
+        let diff = self
+            .git_in(
+                dir,
+                super::worktree::argv_cached_diff(&dir_text, &base.commit),
+            )
+            .await;
+        let names = self
+            .git_in(
+                dir,
+                super::worktree::argv_cached_names(&dir_text, &base.commit),
+            )
+            .await;
+        let (diff, names) = match (diff, names) {
+            (Ok(diff), Ok(names)) if complete(&diff) && complete(&names) => (diff, names),
+            (Ok(diff), Ok(names))
+                if diff.stdout_prefix_overflowed || names.stdout_prefix_overflowed =>
+            {
+                return kept_without_patch("the changes are larger than this run can save");
+            }
+            _ => return kept_without_patch("the changes could not be computed"),
+        };
+        let changed = String::from_utf8_lossy(&names.stdout_prefix)
+            .lines()
+            .map(PathBuf::from)
+            .collect::<Vec<_>>();
+        if !super::delivery::changed_paths_valid(&changed) {
+            return kept_without_patch("the changed paths were not relative");
+        }
+        if diff.stdout_prefix.is_empty() {
+            let notice = self.remove_worktree(&base.top, dir).await;
+            return WorktreeEnd {
+                isolation: Some(super::worktree::IsolationOutcome::Clean),
+                changed,
+                notice,
+            };
+        }
+        let patch_path = root
+            .join("isolation")
+            .join(self.session.to_string())
+            .join(task.to_string())
+            .join("delta.patch");
+        if let Err(error) = self
+            .write_artifact(task, ArtifactFile::DeltaPatch, diff.stdout_prefix)
+            .await
+        {
+            return kept_without_patch(&format!("the patch could not be saved: {error}"));
+        }
+        let summary = super::delivery::task_text(
+            task,
+            label,
+            self.run,
+            state.word(),
+            duration,
+            &changed,
+            body,
+        );
+        let mut notice = match self
+            .write_artifact(task, ArtifactFile::SummaryTxt, summary.into_bytes())
+            .await
+        {
+            Ok(()) => String::new(),
+            Err(error) => format!(" (summary.txt could not be saved: {error})"),
+        };
+        if !state.is_done() {
+            notice.push_str(&self.remove_worktree(&base.top, dir).await);
+            return WorktreeEnd {
+                isolation: Some(super::worktree::IsolationOutcome::Kept {
+                    patch: Some(patch_path),
+                    reason: None,
+                }),
+                changed,
+                notice,
+            };
+        }
+        let mut merged = self
+            .merge_worktree(task, &base.top, dir, &patch_path, &changed)
+            .await;
+        merged.notice.push_str(&notice);
+        merged
+    }
+
+    /// Applies or retains one done task's delta under the merge lock.
+    async fn merge_worktree(
+        &self,
+        task: JobId,
+        top: &Path,
+        dir: &Path,
+        patch: &Path,
+        changed: &[PathBuf],
+    ) -> WorktreeEnd {
+        let _guard = self.merge_lock.lock().await;
+        let top_text = top.display().to_string();
+        let patch_text = patch.display().to_string();
+        let checked = self
+            .git_in(
+                &self.workspace,
+                super::worktree::argv_apply_check(&top_text, &patch_text),
+            )
+            .await;
+        if let Some(why) = git_refusal(&checked) {
+            return self
+                .retain_worktree(task, top, dir, patch, &why, changed)
+                .await;
+        }
+        let applied = self
+            .git_in(
+                &self.workspace,
+                super::worktree::argv_apply(&top_text, &patch_text),
+            )
+            .await;
+        if let Some(why) = git_refusal(&applied) {
+            return self
+                .retain_worktree(task, top, dir, patch, &why, changed)
+                .await;
+        }
+        let notice = self.remove_worktree(top, dir).await;
+        WorktreeEnd {
+            isolation: Some(super::worktree::IsolationOutcome::Merged),
+            changed: changed.to_vec(),
+            notice,
+        }
+    }
+
+    /// Retains one unmergeable worktree and records why. A move that fails
+    /// leaves the tree where it is and says so.
+    async fn retain_worktree(
+        &self,
+        task: JobId,
+        top: &Path,
+        dir: &Path,
+        patch: &Path,
+        why: &str,
+        changed: &[PathBuf],
+    ) -> WorktreeEnd {
+        let millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis())
+            .unwrap_or_default();
+        let target = PathBuf::from(format!("{}.retained-{millis}", dir.display()));
+        let top_text = top.display().to_string();
+        let moved = self
+            .git_in(
+                &self.workspace,
+                super::worktree::argv_worktree_move(
+                    &top_text,
+                    &dir.display().to_string(),
+                    &target.display().to_string(),
+                ),
+            )
+            .await;
+        let mut notes = String::new();
+        let worktree = if let Some(failure) = git_refusal(&moved) {
+            let _ = write!(notes, " (the worktree could not be moved: {failure})");
+            dir.to_path_buf()
+        } else {
+            let pruned = self
+                .git_in(
+                    &self.workspace,
+                    super::worktree::argv_worktree_prune(&top_text),
+                )
+                .await;
+            if let Some(failure) = git_refusal(&pruned) {
+                let _ = write!(notes, " (stale worktree records remain: {failure})");
+            }
+            target
+        };
+        let reason = format!("the changes did not apply cleanly ({why})");
+        let at = super::goal::sidecar::format_millis(dal_core::Timestamp::now());
+        let base = self
+            .base
+            .as_ref()
+            .map(|base| base.commit.clone())
+            .unwrap_or_default();
+        let record =
+            super::worktree::retained_body(&reason, &base, &worktree.display().to_string(), &at);
+        if let Err(error) = self
+            .write_artifact(task, ArtifactFile::RetainedJson, record.into_bytes())
+            .await
+        {
+            let _ = write!(notes, " (retained.json could not be saved: {error})");
+        }
+        let mut notice = super::worktree::retained_notice(
+            &worktree.display().to_string(),
+            why,
+            &self.workspace.display().to_string(),
+            &patch.display().to_string(),
+        );
+        notice.push_str(&notes);
+        WorktreeEnd {
+            isolation: Some(super::worktree::IsolationOutcome::Retained {
+                worktree,
+                patch: patch.to_path_buf(),
+                reason,
+            }),
+            changed: changed.to_vec(),
+            notice,
+        }
+    }
+
+    /// Removes one worktree; a refusal keeps the outcome and appends its
+    /// notice line.
+    async fn remove_worktree(&self, top: &Path, dir: &Path) -> String {
+        let removed = self
+            .git_in(
+                &self.workspace,
+                super::worktree::argv_worktree_remove(
+                    &top.display().to_string(),
+                    &dir.display().to_string(),
+                ),
+            )
+            .await;
+        match git_refusal(&removed) {
+            Some(why) => format!(" (worktree left at {}: {why})", dir.display()),
+            None => String::new(),
+        }
+    }
+
+    /// Writes one isolation artifact through the sidecar service.
+    async fn write_artifact(
+        &self,
+        task: JobId,
+        file: ArtifactFile,
+        bytes: Vec<u8>,
+    ) -> Result<(), ServiceError> {
+        match self
+            .services
+            .sidecar(
+                &self.caller,
+                SidecarOp::Artifact {
+                    job: task,
+                    file,
+                    bytes,
+                },
+            )
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(error) => Err(ServiceError::failed(
+                Some(dal_core::Service::Sidecar),
+                error.to_string(),
+            )),
+        }
+    }
+
+    /// Spawns one task job under the run job.
+    async fn spawn_task_job(&self) -> Result<JobId, ServiceError> {
+        let name = Name::parse(TASK_JOB_NAME)
+            .map_err(|error| ServiceError::failed(None, error.to_string()))?;
+        let payload =
+            RawJson::parse("{}").map_err(|error| ServiceError::failed(None, error.to_string()))?;
+        match self
+            .services
+            .jobs(
+                &self.caller,
+                JobsOp::Spawn {
+                    name,
+                    payload,
+                    parent: Some(self.run),
+                },
+            )
+            .await?
+        {
+            JobsReply::Spawned { id } => Ok(id),
+            JobsReply::Unavailable { reason } => Err(ServiceError::failed(None, reason)),
+            JobsReply::Refused(error) => Err(ServiceError::failed(None, error.to_string())),
+            _ => Err(ServiceError::failed(
+                None,
+                "jobs service returned an unexpected reply to a spawn request",
+            )),
+        }
+    }
+
+    /// Creates one detached worktree for a task at the run base.
+    async fn add_worktree(&self, task: JobId) -> Result<PathBuf, String> {
+        let (Some(root), Some(base)) = (self.data_root.as_ref(), self.base.as_ref()) else {
+            return Err("no isolated worktree root is available".into());
+        };
+        let dir = root
+            .join("worktrees")
+            .join(self.session.to_string())
+            .join(task.to_string());
+        let output = git(
+            self.services.as_ref(),
+            &self.caller,
+            &self.workspace,
+            super::worktree::argv_worktree_add(
+                &base.top.display().to_string(),
+                &dir.display().to_string(),
+                &base.commit,
+            ),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        if output.status != ExitStatusKind::Exited(0) {
+            return Err(stderr_line(&output));
+        }
+        Ok(dir)
+    }
+
+    /// Settles the run's single top-level report.
+    async fn finish(&self, steps: Vec<StepOutcome>, started: Instant) {
+        let duration = format_duration(started.elapsed().as_secs());
+        let result = super::delivery::RunResult {
+            id: self.run,
+            label: self.label.clone(),
+            tasks: steps
+                .iter()
+                .flat_map(StepOutcome::results)
+                .cloned()
+                .collect(),
+        };
+        let total = result.tasks.len();
+        let unfinished = result.unfinished();
+        let sections = sections_of(&steps);
+        let cancelled = self.cancel.is_cancelled();
+        let (text, outcome) = if result.is_done() {
+            (
+                super::delivery::run_notice(
+                    self.run,
+                    &self.label,
+                    "done",
+                    &duration,
+                    &sections,
+                    super::delivery::RUN_NOTICE_LIMIT,
+                ),
+                JobOutcome::Exited { code: 0 },
+            )
+        } else if cancelled {
+            (
+                super::delivery::cancel_summary(
+                    self.run,
+                    &self.label,
+                    &duration,
+                    &sections,
+                    super::delivery::RUN_NOTICE_LIMIT,
+                ),
+                JobOutcome::Cancelled,
+            )
+        } else {
+            let message = super::pool::unfinished_text(unfinished, total)
+                .unwrap_or_else(|| "tasks did not finish".to_owned());
+            (
+                super::delivery::run_notice(
+                    self.run,
+                    &self.label,
+                    "failed",
+                    &duration,
+                    &sections,
+                    super::delivery::RUN_NOTICE_LIMIT,
+                ),
+                JobOutcome::Failed {
+                    message: message.into(),
+                },
+            )
+        };
+        self.settle_job(self.run, outcome, &text).await;
+    }
+
+    /// Fails the whole run before its report renders.
+    async fn fail(&self, message: String) {
+        let text = format!("run {} \"{}\" failed: {message}", self.run, self.label);
+        self.settle_job(
+            self.run,
+            JobOutcome::Failed {
+                message: message.into(),
+            },
+            &text,
+        )
+        .await;
+    }
+
+    /// Ends one owned job through the jobs service; a failure at run end
+    /// has no caller left, so it becomes a notice.
+    async fn settle_job(&self, job: JobId, outcome: JobOutcome, text: &str) {
+        let reply = self
+            .services
+            .jobs(
+                &self.caller,
+                JobsOp::Settle {
+                    id: job,
+                    outcome,
+                    text: text.into(),
+                },
+            )
+            .await;
+        let failure = match reply {
+            Ok(JobsReply::Settled { .. }) => None,
+            Ok(JobsReply::Refused(error)) => Some(error.to_string()),
+            Ok(JobsReply::Unavailable { reason }) => Some(reason.to_string()),
+            Ok(_) => Some("unexpected reply".to_owned()),
+            Err(error) => Some(error.to_string()),
+        };
+        if let Some(failure) = failure {
+            self.services.notify(
+                &self.caller,
+                Notice {
+                    turn: None,
+                    kind: "orchestration.run".into(),
+                    text: format!("The job {job} could not be recorded: {failure}.").into(),
+                },
+            );
+        }
+    }
+}
+
+/// The skip text of one skip helper's task state.
+fn skip_text(state: TaskState) -> String {
+    match state {
+        TaskState::Skipped(text) => text,
+        _ => String::new(),
+    }
+}
+
+/// Maps one task state to its job outcome.
+fn job_outcome(state: &TaskState) -> JobOutcome {
+    match state {
+        TaskState::Done(_) | TaskState::Blocked(_) => JobOutcome::Exited { code: 0 },
+        TaskState::Cancelled => JobOutcome::Cancelled,
+        TaskState::Lost => JobOutcome::Lost,
+        TaskState::Failed(message) | TaskState::Skipped(message) => JobOutcome::Failed {
+            message: message.clone().into(),
+        },
+    }
+}
+
+/// Builds the notice sections of one run from its step outcomes.
+fn sections_of(steps: &[StepOutcome]) -> Vec<super::delivery::StepNotice<'_>> {
+    steps
+        .iter()
+        .map(|step| match step {
+            StepOutcome::Skipped { name, reason } => super::delivery::StepNotice {
+                name,
+                tasks: Vec::new(),
+                pool: false,
+                skipped: Some(reason),
+            },
+            StepOutcome::Tasks {
+                name,
+                pool,
+                results,
+            } => super::delivery::StepNotice {
+                name,
+                pool: *pool,
+                skipped: None,
+                tasks: results
+                    .iter()
+                    .map(|result| super::delivery::TaskNotice {
+                        id: result.id,
+                        label: &result.item,
+                        state: &result.state,
+                        changed: &result.changed,
+                        preview_text: &result.body,
+                        suffix: super::delivery::isolation_suffix(result.isolation.as_ref()),
+                    })
+                    .collect(),
+            },
+        })
+        .collect()
+}
+
+impl StepOutcome {
+    fn results(&self) -> &[TaskResult] {
+        match self {
+            StepOutcome::Tasks { results, .. } => results,
+            StepOutcome::Skipped { .. } => &[],
+        }
+    }
+}
 fn failed(message: &str) -> HookError {
     HookError::Failed {
         message: message.into(),
@@ -1435,72 +3320,6 @@ async fn cancel_descendants(services: &dyn Services, caller: &Caller) -> Sweep {
         }
     }
     sweep
-}
-
-/// Cancels the sessions the model named. A session the host refuses to
-/// cancel does not stop the others: every id is tried once, and the refusals
-/// are reported together with the count that did close.
-async fn cancel_listed(
-    services: &dyn Services,
-    caller: &Caller,
-    ids: &[SessionId],
-) -> Result<String, ServiceError> {
-    let mut seen = HashSet::new();
-    let mut cancelled = 0;
-    let mut failures = Vec::new();
-    for &id in ids.iter().filter(|id| seen.insert(**id)) {
-        match services.agents(caller, AgentsOp::Cancel { id }).await {
-            Ok(AgentsReply::Cancelled { .. }) => cancelled += 1,
-            Ok(_) => failures.push(format!(
-                "{id}: the agents service returned an unexpected reply to a cancel request"
-            )),
-            Err(error) => failures.push(format!("{id}: {error}")),
-        }
-    }
-    if failures.is_empty() {
-        return Ok(format!("cancelled {cancelled} child sessions."));
-    }
-    Err(ServiceError::failed(
-        None,
-        format!(
-            "cancelled {cancelled} child sessions; could not cancel {}.",
-            failures.join("; ")
-        ),
-    ))
-}
-
-/// Waits for one child's report. When the wait fails, the child is closed
-/// so it cannot keep running unseen, and a failed close stays next to the
-/// wait failure instead of replacing it.
-async fn await_child(
-    services: &dyn Services,
-    caller: &Caller,
-    child: SessionId,
-) -> Result<AgentReport, ServiceError> {
-    let failure = match services
-        .agents(
-            caller,
-            AgentsOp::Await {
-                id: child,
-                timeout: None,
-            },
-        )
-        .await
-    {
-        Ok(AgentsReply::Await { report }) => return Ok(report),
-        Ok(_) => ServiceError::failed(None, "agents service did not return the child report"),
-        Err(error) => error,
-    };
-    match services
-        .agents(caller, AgentsOp::Cancel { id: child })
-        .await
-    {
-        Ok(_) => Err(failure),
-        Err(teardown) => Err(ServiceError::failed(
-            None,
-            super::pool::failure_with_teardown(&failure.to_string(), &teardown.to_string()),
-        )),
-    }
 }
 
 /// Closes a run child whose report has been taken. The run owns the child

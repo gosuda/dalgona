@@ -1,91 +1,28 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
 //! Orchestration battery: one owner task per session, strict session-start config.
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "run-admission checks land with the orchestration run-start rows"
-    )
-)]
 pub(crate) mod admission;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "agents tool helpers land with the orchestration agents rows"
-    )
-)]
 pub(crate) mod agents_tool;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "arbiter cancel hooks land with the orchestration arbiter rows"
-    )
-)]
 pub(crate) mod arbiter;
 mod commands;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "run and task notice renderers land with the orchestration delivery rows"
-    )
-)]
 pub(crate) mod delivery;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "goal policy and sidecar producers land with the orchestration goal rows"
-    )
-)]
 pub(crate) mod goal;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "monitor delivery producers land with the orchestration monitor rows"
-    )
-)]
 pub(crate) mod monitor;
 #[cfg_attr(
     not(test),
     expect(
         dead_code,
-        reason = "pool decision, grace, and skip producers land with the orchestration pool rows"
+        reason = "the grace-turn decision is pending; the grace items stay reserved"
     )
 )]
 pub(crate) mod pool;
 mod runtime;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "loop-guard suffix and argument canonicalization land with the orchestration stuck rows"
-    )
-)]
 pub(crate) mod stuck;
 #[cfg(test)]
 mod tests;
 mod tools;
 pub(crate) mod types;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "saved-workflow listing lands with the orchestration workflow rows"
-    )
-)]
 pub(crate) mod workflow;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "worktree argv builders and retained-notice producers land with the orchestration worktree rows"
-    )
-)]
 pub(crate) mod worktree;
 
 pub(crate) use types::{ControllerMode, GoalStatus, JobsView, StopKind};
@@ -217,6 +154,11 @@ pub struct OrchestrationConfig {
     pub isolation: BatteryConfig,
     /// Optional named saved workflows.
     pub workflows: Option<toml::Value>,
+    /// Host data root for isolated task worktrees and artifacts. The entry
+    /// supplies it at assembly; without it a worktree step refuses the run
+    /// before any job starts, because the battery never falls back to the
+    /// real checkout.
+    pub data_root: Option<std::path::PathBuf>,
 }
 
 /// Configuration decode error for the orchestration battery.
@@ -229,13 +171,12 @@ enum ConfigErrorKind {
     /// Configuration could not be decoded from TOML.
     #[error("plugin.orchestration: {0}")]
     Decode(#[from] toml::de::Error),
-    /// A numeric configuration value was outside its accepted range.
-    #[error("plugin.orchestration.{key} must be an integer from {min} to {max}")]
-    Range {
-        key: &'static str,
-        min: u32,
-        max: u32,
-    },
+    /// A run setting was outside its accepted range.
+    #[error("{0}")]
+    Agents(String),
+    /// A sub-battery was disabled while a dependent sub-battery is on.
+    #[error("{0}")]
+    Coherence(String),
     /// The monitor sub-battery configuration was invalid.
     #[error(transparent)]
     Monitor(#[from] monitor::state::MonitorConfigError),
@@ -289,29 +230,8 @@ pub fn parse_config(
     };
     let raw: RawConfig = section.clone().try_into()?;
     let monitor = monitor::state::parse_config(raw.monitor.as_ref())?;
-    let agents = &raw.agents;
-    if !(1..=1_000).contains(&agents.child_max_steps) {
-        return Err(OrchestrationConfigError(ConfigErrorKind::Range {
-            key: "agents.child_max_steps",
-            min: 1,
-            max: 1_000,
-        }));
-    }
-    if !(1..=600).contains(&agents.child_max_minutes) {
-        return Err(OrchestrationConfigError(ConfigErrorKind::Range {
-            key: "agents.child_max_minutes",
-            min: 1,
-            max: 600,
-        }));
-    }
-    if !(1..=64).contains(&agents.max_runs) {
-        return Err(OrchestrationConfigError(ConfigErrorKind::Range {
-            key: "agents.max_runs",
-            min: 1,
-            max: 64,
-        }));
-    }
-    Ok(OrchestrationConfig {
+    let agents = decode_agents_settings(&raw.agents)?;
+    let config = OrchestrationConfig {
         loop_guard: raw.loop_guard,
         sleep: raw.sleep,
         monitor: OrchestrationMonitorConfig {
@@ -325,10 +245,50 @@ pub fn parse_config(
         inflight: raw.inflight,
         goal: raw.goal,
         arbiter: raw.arbiter,
-        agents: raw.agents,
+        agents,
         isolation: raw.isolation,
         workflows: raw.workflows,
-    })
+        data_root: None,
+    };
+    if let Some(text) = coherence_refusal(&config) {
+        return Err(OrchestrationConfigError(ConfigErrorKind::Coherence(text)));
+    }
+    Ok(config)
+}
+
+/// Decodes and validates the run settings table through the admission
+/// module, which owns the exact range texts.
+fn decode_agents_settings(
+    table: &OrchestrationAgentsConfig,
+) -> Result<OrchestrationAgentsConfig, OrchestrationConfigError> {
+    let encoded = format!(
+        "{{\"child_max_steps\":{},\"child_max_minutes\":{},\"max_runs\":{}}}",
+        table.child_max_steps, table.child_max_minutes, table.max_runs
+    );
+    let raw = dal_core::RawJson::parse(&encoded)
+        .map_err(|error| OrchestrationConfigError(ConfigErrorKind::Agents(error.to_string())))?;
+    admission::decode_settings(&raw)
+        .map_err(|text| OrchestrationConfigError(ConfigErrorKind::Agents(text)))?;
+    Ok(table.clone())
+}
+
+/// Names the first cross-table coherence refusal, if any: `arbiter` and
+/// `inflight` cannot be off while `goal`, `monitor`, or `agents` is on.
+fn coherence_refusal(config: &OrchestrationConfig) -> Option<String> {
+    let on = [
+        ("goal", config.goal.enabled),
+        ("monitor", config.monitor.enabled),
+        ("agents", config.agents.enabled),
+    ]
+    .into_iter()
+    .find_map(|(name, on)| on.then_some(name))?;
+    if !config.arbiter.enabled {
+        return Some(monitor::state::coherence_error("arbiter", on));
+    }
+    if !config.inflight.enabled {
+        return Some(monitor::state::coherence_error("inflight", on));
+    }
+    None
 }
 
 /// Builds the orchestration extension registration. Effects begin only after

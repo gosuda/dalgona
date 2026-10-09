@@ -9,11 +9,17 @@ use std::path::PathBuf;
 mod tests;
 
 /// Minimum git version that supports detached worktrees for this battery.
-#[expect(
-    dead_code,
-    reason = "the worktree isolation contract fixes the minimum git version"
-)]
 pub(crate) const MIN_GIT_VERSION: (u32, u32) = (2, 17);
+
+/// Parses `git version <major>.<minor>...` output into `(major, minor)`.
+/// Anything else (including a missing git) is `None`.
+pub(crate) fn parse_version(stdout: &str) -> Option<(u32, u32)> {
+    let rest = stdout.trim().strip_prefix("git version ")?;
+    let mut parts = rest.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    Some((major, minor))
+}
 
 /// Suffix appended to every isolation refusal naming the shared escape.
 pub(crate) const SHARED_SUFFIX: &str =
@@ -25,10 +31,6 @@ fn shared_suffix(step: &str) -> String {
 
 /// How one task's delta resolved against the run base.
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[expect(
-    dead_code,
-    reason = "the worktree isolation contract fixes the outcome vocabulary"
-)]
 pub(crate) enum IsolationOutcome {
     /// The task left no delta.
     Clean,
@@ -49,10 +51,6 @@ pub(crate) enum IsolationOutcome {
 
 /// The base commit every task worktree of one run starts from.
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[expect(
-    dead_code,
-    reason = "the worktree isolation contract fixes the base commit record"
-)]
 pub(crate) struct Base {
     /// Repository top-level directory.
     pub top: PathBuf,
@@ -67,9 +65,22 @@ pub(crate) struct Base {
 pub(crate) enum IsolationRefusal {
     NotARepository,
     NoGit,
-    TooOld { version: String },
+    TooOld {
+        version: String,
+    },
     NoHead,
-    Denied { reason: String },
+    Denied {
+        reason: String,
+    },
+    /// The host did not supply its data root, so the battery cannot create
+    /// isolated worktrees under it. Not a spec-pinned refusal: it names a
+    /// missing host surface, and the run stops before any job starts.
+    NoDataRoot,
+    /// `git stash create` failed, so the base would silently drop the
+    /// checkout's tracked changes.
+    NoBase {
+        reason: String,
+    },
 }
 
 impl IsolationRefusal {
@@ -90,6 +101,12 @@ impl IsolationRefusal {
             ),
             IsolationRefusal::Denied { reason } => format!(
                 "agents: step {step} needs a git worktree, but running git was denied: {reason}."
+            ),
+            IsolationRefusal::NoBase { reason } => format!(
+                "agents: step {step} needs a git worktree, but the checkout's tracked changes could not be captured: {reason}."
+            ),
+            IsolationRefusal::NoDataRoot => format!(
+                "agents: step {step} needs a git worktree, but this host provides no isolated worktree root. Set data_root for the orchestration battery."
             ),
         };
         format!("{base}{}", shared_suffix(step))

@@ -138,18 +138,13 @@ pub(super) fn parse_args(args: &RawJson) -> Result<Value, GuardError> {
 }
 
 /// Canonicalizes one parsed value; a top-level JSON `null` maps to `{}`.
-fn canonical_value(value: &Value) -> Result<Box<str>, GuardError> {
+pub(crate) fn canonical_args(value: &Value) -> Result<Box<str>, GuardError> {
     if value.is_null() {
         return Ok("{}".into());
     }
     let mut canonical = String::new();
     append_canonical(value, &mut canonical)?;
     Ok(canonical.into_boxed_str())
-}
-
-/// Parses raw tool arguments once and emits their canonical form.
-pub(crate) fn canonical_args(args: &RawJson) -> Result<Box<str>, GuardError> {
-    canonical_value(&parse_args(args)?)
 }
 
 /// Records one tool call and returns its guard effects. Blocked calls stay
@@ -160,7 +155,7 @@ pub(crate) fn on_tool_call(
     args: &RawJson,
 ) -> Result<GuardEffects, GuardError> {
     let parsed = parse_args(args)?;
-    let canonical = canonical_value(&parsed)?;
+    let canonical = canonical_args(&parsed)?;
     let mut signature = String::with_capacity(tool.len() + canonical.len() + 1);
     signature.push_str(tool);
     signature.push('\0');

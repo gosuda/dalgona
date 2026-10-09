@@ -64,3 +64,64 @@ fn orchestration_config_keeps_saved_workflow_names_as_data() {
     let parsed = parse_config(Some(&config));
     assert!(parsed.is_ok_and(|config: OrchestrationConfig| config.workflows.is_some()));
 }
+
+#[test]
+fn orchestration_config_refuses_a_dependent_battery_turned_off() {
+    let arbiter = table([("enabled".to_owned(), toml::Value::Boolean(false))]);
+    let config = table([("arbiter".to_owned(), arbiter)]);
+    assert_eq!(
+        parse_config(Some(&config)).unwrap_err().to_string(),
+        "orchestration: [plugin.orchestration.arbiter] cannot be off while goal is on."
+    );
+
+    let inflight = table([("enabled".to_owned(), toml::Value::Boolean(false))]);
+    let config = table([
+        ("inflight".to_owned(), inflight),
+        (
+            "goal".to_owned(),
+            table([("enabled".to_owned(), toml::Value::Boolean(false))]),
+        ),
+        (
+            "monitor".to_owned(),
+            table([("enabled".to_owned(), toml::Value::Boolean(false))]),
+        ),
+        (
+            "agents".to_owned(),
+            toml::Value::Table(toml::map::Map::new()),
+        ),
+    ]);
+    assert_eq!(
+        parse_config(Some(&config)).unwrap_err().to_string(),
+        "orchestration: [plugin.orchestration.inflight] cannot be off while agents is on."
+    );
+}
+
+#[test]
+fn orchestration_config_allows_disabling_the_watch_dogs_alone() {
+    for battery in ["arbiter", "inflight"] {
+        let battery_off = table([("enabled".to_owned(), toml::Value::Boolean(false))]);
+        let config = toml::Value::Table(
+            [
+                (battery.to_owned(), battery_off),
+                (
+                    "goal".to_owned(),
+                    table([("enabled".to_owned(), toml::Value::Boolean(false))]),
+                ),
+                (
+                    "monitor".to_owned(),
+                    table([("enabled".to_owned(), toml::Value::Boolean(false))]),
+                ),
+                (
+                    "agents".to_owned(),
+                    table([("enabled".to_owned(), toml::Value::Boolean(false))]),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        assert!(
+            parse_config(Some(&config)).is_ok(),
+            "{battery} alone must be disableable"
+        );
+    }
+}

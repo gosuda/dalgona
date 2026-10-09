@@ -150,11 +150,12 @@ impl Arbiter {
         &self,
         items: &[Ready],
         max_bytes: usize,
-    ) -> (String, Vec<&'static str>, Vec<JobId>) {
+    ) -> (String, Vec<&'static str>, Vec<JobId>, usize) {
         let mut text = String::new();
         let mut sources = Vec::new();
         let mut included = Vec::new();
         let mut run_report_included = false;
+        let mut monitor_batches = 0;
         for item in items {
             let (source, body, ids) = match item {
                 Ready::Recovery(body) => ("loop_guard", body.clone(), Vec::new()),
@@ -183,6 +184,7 @@ impl Arbiter {
                     if take == 0 {
                         continue;
                     }
+                    monitor_batches += take;
                     let mut body = String::new();
                     for batch in &batches[..take] {
                         body.push('\n');
@@ -206,7 +208,7 @@ impl Arbiter {
             text.push('\n');
             text.push_str(CLAIM_HONESTY);
         }
-        (text, sources, included)
+        (text, sources, included, monitor_batches)
     }
 
     /// Counts how many leading monitor batches fit in the remaining budget

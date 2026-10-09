@@ -19,6 +19,11 @@ pub(crate) struct Limits {
     pub session_used: u32,
 }
 
+/// The per-session child ceiling the battery checks before a run starts.
+/// The host does not expose a configured per-session child ceiling through
+/// extension services, so the battery uses the product's fixed ceiling.
+pub(crate) const AGENTS_PER_SESSION: u32 = 1024;
+
 /// A failed admission check, rendered with the exact model-facing text.
 #[derive(Debug, thiserror::Error, Eq, PartialEq)]
 pub(crate) enum AdmissionError {
@@ -98,16 +103,19 @@ fn setting(
         return Ok(default);
     };
     let Ok(number) = u32::try_from(number) else {
-        return Err(format!(
-            "plugin.orchestration.{key} must be an integer from {min} to {max}."
-        ));
+        return Err(setting_text(key, min, max));
     };
     if !(min..=max).contains(&number) {
-        return Err(format!(
-            "plugin.orchestration.{key} must be an integer from {min} to {max}."
-        ));
+        return Err(setting_text(key, min, max));
     }
     Ok(number)
+}
+
+/// The exact out-of-range text for one run setting.
+fn setting_text(key: &str, min: u32, max: u32) -> String {
+    format!(
+        "orchestration: [plugin.orchestration.agents].{key} must be an integer from {min} to {max}."
+    )
 }
 
 /// Decodes the run settings from the orchestration configuration table.

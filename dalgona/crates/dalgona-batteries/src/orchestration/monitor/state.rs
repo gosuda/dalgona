@@ -69,10 +69,6 @@ impl MonitorState {
             .count()
     }
 
-    #[expect(
-        dead_code,
-        reason = "the monitor wake contract exposes job ids for report delivery"
-    )]
     pub(crate) fn job_ids(&self) -> Vec<JobId> {
         self.monitors.values().map(|monitor| monitor.job).collect()
     }
@@ -234,10 +230,6 @@ fn checked_integer(
 
 /// Renders the cross-table coherence error for session-start validation,
 /// which the orchestration core owns across all its tables.
-#[expect(
-    dead_code,
-    reason = "the configuration contract fixes this cross-table error text"
-)]
 pub(crate) fn coherence_error(off_table: &str, on_table: &str) -> String {
     format!(
         "orchestration: [plugin.orchestration.{off_table}] cannot be off while {on_table} is on."

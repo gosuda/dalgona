@@ -98,7 +98,7 @@ mod controller_serde {
 
 /// Renders one timestamp as RFC 3339 UTC with exactly three fractional
 /// digits and `Z`, truncating sub-millisecond precision.
-fn format_millis(stamp: Timestamp) -> String {
+pub(crate) fn format_millis(stamp: Timestamp) -> String {
     let text = stamp.to_string();
     let body = text.strip_suffix('Z').unwrap_or(&text);
     match body.split_once('.') {

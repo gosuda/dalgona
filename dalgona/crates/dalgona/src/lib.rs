@@ -117,7 +117,7 @@ fn compose(
         history: history_config,
         judged: judged_config,
         mcp: mcp_settings,
-        orchestration: orchestration_config,
+        orchestration: mut orchestration_config,
         quality: quality_config,
         review: review_config,
         plan: plan_config,
@@ -144,6 +144,7 @@ fn compose(
         batteries.push(mcp::mcp(&client)?);
     }
     if selected(cx, "orchestration") {
+        orchestration_config.data_root = Some(cx.data_root.to_path_buf());
         batteries.push(orchestration::orchestration(orchestration_config)?);
     }
     if selected(cx, "quality") {

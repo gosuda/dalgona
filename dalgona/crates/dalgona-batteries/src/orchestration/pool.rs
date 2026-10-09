@@ -59,13 +59,18 @@ impl TaskState {
     }
 }
 
-/// One settled task with its recorded paths and isolation outcome.
+/// One settled task with its recorded paths, isolation outcome, report
+/// body, and item label.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TaskResult {
     pub id: JobId,
     pub state: TaskState,
     pub changed: Vec<PathBuf>,
     pub isolation: Option<IsolationOutcome>,
+    /// The task's report body, kept for previews and downstream steps.
+    pub body: Box<str>,
+    /// The item label shown in notices and downstream pool reports.
+    pub item: Box<str>,
 }
 
 /// Collects pool results by item index. Workers finish in any order; the
@@ -205,11 +210,6 @@ pub(crate) struct ChildEnd {
 pub(crate) struct Settled {
     pub state: TaskState,
     pub note: Option<String>,
-}
-/// Joins a result failure with the failure of the teardown that followed
-/// it, so neither hides the other.
-pub(crate) fn failure_with_teardown(result: &str, teardown: &str) -> String {
-    format!("{result}; the child could not be closed afterwards: {teardown}")
 }
 
 /// The verdict for one finished child turn: settle now or grant one grace.

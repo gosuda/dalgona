@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
 //! Report cell and approval-class tests.
 
+use std::path::{Path, PathBuf};
+
 use super::*;
+use dal_core::GrantSpec;
 use dal_core::RawJson;
 
 fn workflow(json: &str) -> Workflow {
@@ -52,26 +55,64 @@ fn report_first_valid_only() {
 fn admission_read_vs_exec() {
     let shared = workflow(r#"[{"name":"task","prompt":"work"}]"#);
     assert_eq!(
-        approval_class(&AgentAction::Run {
-            label: "run".to_owned(),
-            workflow: shared,
-        }),
+        approval_class(
+            &AgentAction::Run {
+                label: "run".to_owned(),
+                workflow: shared,
+                input: None,
+            },
+            Path::new("/ws"),
+            None,
+        ),
         ToolClass::Read
     );
     let worktree = workflow(r#"[{"name":"task","prompt":"work","tools":["read","patch"]}]"#);
+    let run = AgentAction::Run {
+        label: "run".to_owned(),
+        workflow: worktree,
+        input: None,
+    };
     assert_eq!(
-        approval_class(&AgentAction::Run {
-            label: "run".to_owned(),
-            workflow: worktree,
-        }),
+        approval_class(&run, Path::new("/ws"), None),
         ToolClass::Exec {
             read_only: false,
-            grant: None,
+            grant: Some(GrantSpec {
+                argv_prefix: "git".into(),
+                roots: vec![PathBuf::from("/ws")],
+            }),
         }
     );
     assert_eq!(
-        approval_class(&AgentAction::List { ids: Vec::new() }),
+        approval_class(
+            &AgentAction::List { ids: Vec::new() },
+            Path::new("/ws"),
+            None,
+        ),
         ToolClass::Read
+    );
+}
+
+#[test]
+fn exec_grant_roots_add_the_shared_data_root_trees() {
+    let worktree = workflow(r#"[{"name":"task","prompt":"work","isolation":"worktree"}]"#);
+    let run = AgentAction::Run {
+        label: "run".to_owned(),
+        workflow: worktree,
+        input: None,
+    };
+    assert_eq!(
+        approval_class(&run, Path::new("/ws"), Some(Path::new("/data"))),
+        ToolClass::Exec {
+            read_only: false,
+            grant: Some(GrantSpec {
+                argv_prefix: "git".into(),
+                roots: vec![
+                    PathBuf::from("/ws"),
+                    PathBuf::from("/data/worktrees"),
+                    PathBuf::from("/data/isolation"),
+                ],
+            }),
+        }
     );
 }
 
@@ -86,7 +127,10 @@ fn agents_decode_run_inline_defaults_label() {
         None,
     )
     .expect("inline run decodes");
-    let AgentAction::Run { label, workflow } = action else {
+    let AgentAction::Run {
+        label, workflow, ..
+    } = action
+    else {
         panic!("expected a run");
     };
     assert_eq!(label, "find");

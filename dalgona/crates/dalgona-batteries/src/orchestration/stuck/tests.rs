@@ -6,7 +6,9 @@ use std::error::Error;
 use dal_core::{RawJson, Timestamp};
 use sonic_rs::{JsonValueTrait, Value};
 
-use super::guard::{GuardEffects, GuardState, GuardVerdict, canonical_args, on_tool_call, reset};
+use super::guard::{
+    GuardEffects, GuardState, GuardVerdict, canonical_args, on_tool_call, parse_args, reset,
+};
 use super::rewrite::rewrite_exec_args;
 use super::sleep::{SleepClassifier, SleepRule, SleepWait};
 use super::{LOOP_HARD_STOP_REASON, silence_suffix};
@@ -17,9 +19,9 @@ fn raw(value: &str) -> Result<RawJson, Box<dyn Error>> {
 
 #[test]
 fn canonical_args_sort_nested_keys_and_map_null_to_object() -> Result<(), Box<dyn Error>> {
-    let canonical = canonical_args(&raw(r#"{"z":1,"a":{"y":2,"x":[3,4]}}"#)?)?;
+    let canonical = canonical_args(&parse_args(&raw(r#"{"z":1,"a":{"y":2,"x":[3,4]}}"#)?)?)?;
     assert_eq!(canonical.as_ref(), r#"{"a":{"x":[3,4],"y":2},"z":1}"#);
-    assert_eq!(canonical_args(&raw("null")?)?.as_ref(), "{}");
+    assert_eq!(canonical_args(&parse_args(&raw("null")?)?)?.as_ref(), "{}");
     Ok(())
 }
 

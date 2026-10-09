@@ -25,10 +25,6 @@ pub(crate) const CHANGED_SHOWN: usize = 3;
 /// fits: `(<n> more tasks: read job://<id>)` stays under this bound.
 const OVERFLOW_RESERVE: usize = 96;
 
-#[expect(
-    dead_code,
-    reason = "the delivery contract reserves completed run snapshots"
-)]
 /// One completed run ready for its single top-level job report.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RunResult {
@@ -39,10 +35,6 @@ pub(crate) struct RunResult {
 
 impl RunResult {
     /// Counts tasks that did not finish done.
-    #[expect(
-        dead_code,
-        reason = "the delivery contract reserves unfinished task counts"
-    )]
     pub(crate) fn unfinished(&self) -> usize {
         self.tasks
             .iter()
@@ -51,10 +43,6 @@ impl RunResult {
     }
 
     /// Whether every task ended done.
-    #[expect(
-        dead_code,
-        reason = "the delivery contract reserves completed-run status checks"
-    )]
     pub(crate) fn is_done(&self) -> bool {
         !self.tasks.is_empty() && self.unfinished() == 0
     }
@@ -146,10 +134,6 @@ pub(crate) fn changed_all(changed: &[PathBuf]) -> String {
         .join(", ")
 }
 
-#[expect(
-    dead_code,
-    reason = "the delivery contract fixes the isolation status suffix"
-)]
 pub(crate) fn isolation_suffix(outcome: Option<&IsolationOutcome>) -> &'static str {
     match outcome {
         None => "",

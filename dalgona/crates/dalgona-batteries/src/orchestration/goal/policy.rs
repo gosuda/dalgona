@@ -18,10 +18,6 @@ pub(crate) const LENGTH_REASON: &str = "output truncation repeated";
 /// Mechanical block reason for the unattended limit.
 pub(crate) const UNATTENDED_REASON: &str = "unattended continuation limit reached";
 /// Mechanical block reason for an exhausted provider.
-#[expect(
-    dead_code,
-    reason = "the goal behavior contract fixes the provider-stop mechanical reason"
-)]
 pub(crate) const PROVIDER_REASON: &str = "provider error ended the turn (retries exhausted)";
 /// Mechanical block reason for an unrecovered context overflow.
 pub(crate) const OVERFLOW_REASON: &str =
@@ -38,16 +34,30 @@ pub(crate) const STALL_TURNS: u32 = 3;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum GoalPath {
     /// A recovery turn after an interruption.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "goal recovery entry waits on durable goal sidecar persistence"
+        )
+    )]
     Recovery,
     /// The wake after a turn ended.
     AfterTurn,
     /// The grace window after a user-started turn.
     #[expect(
         dead_code,
-        reason = "the continuation behavior contract fixes the user-grace decision path"
+        reason = "goal recovery entry waits on durable goal sidecar persistence"
     )]
     UserGrace,
     /// An idle wake with no turn behind it.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "goal recovery entry waits on durable goal sidecar persistence"
+        )
+    )]
     Idle,
 }
 

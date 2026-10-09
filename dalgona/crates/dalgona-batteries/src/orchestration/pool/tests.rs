@@ -10,6 +10,8 @@ fn result(state: TaskState) -> TaskResult {
         state,
         changed: Vec::new(),
         isolation: None,
+        body: "".into(),
+        item: "".into(),
     }
 }
 

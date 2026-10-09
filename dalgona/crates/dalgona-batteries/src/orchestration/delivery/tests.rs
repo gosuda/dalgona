@@ -13,6 +13,8 @@ fn done_task(report: &str, changed: &[&str]) -> TaskResult {
         state: TaskState::Done(cell.get().expect("report stored")),
         changed: changed.iter().map(PathBuf::from).collect(),
         isolation: None,
+        body: report.into(),
+        item: report.into(),
     }
 }
 
@@ -33,6 +35,8 @@ fn delivery_report_paths_from_records() {
         state: TaskState::Failed("boom".to_owned()),
         changed: Vec::new(),
         isolation: None,
+        body: "boom".into(),
+        item: "boom".into(),
     };
     let tasks = [
         TaskNotice {

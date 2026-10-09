@@ -87,11 +87,11 @@ fn admission_settings_defaults_and_ranges() {
     );
     assert_eq!(
         settings(r#"{"max_runs": 0}"#).unwrap_err(),
-        "plugin.orchestration.max_runs must be an integer from 1 to 64."
+        "orchestration: [plugin.orchestration.agents].max_runs must be an integer from 1 to 64."
     );
     assert_eq!(
         settings(r#"{"child_max_steps": 1001}"#).unwrap_err(),
-        "plugin.orchestration.child_max_steps must be an integer from 1 to 1000."
+        "orchestration: [plugin.orchestration.agents].child_max_steps must be an integer from 1 to 1000."
     );
     assert_eq!(
         settings(r#"{"child_max_minutes": "soon"}"#)
