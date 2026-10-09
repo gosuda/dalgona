@@ -1471,14 +1471,7 @@ impl Journal {
         // retry through the whole release — not just the guard drop —
         // instead of reporting Locked while retirement queues behind
         // slow shard work.
-        let guards: Vec<&LockGuard> = {
-            let lock = match &self.state {
-                State::File { lock, .. } => Some(lock),
-                State::Broken { lock, .. } => lock.as_ref(),
-                _ => None,
-            };
-            lock.into_iter().chain(self.prelocked.iter()).collect()
-        };
+        let guards = self.guards();
         for guard in &guards {
             guard.mark_detached();
         }
@@ -1521,6 +1514,29 @@ impl Journal {
             &self.records,
             self.journal_bytes,
         );
+    }
+
+    /// Every lock this journal owns — the state's guard plus a prelocked
+    /// guard still waiting to be parked.
+    fn guards(&self) -> Vec<&LockGuard> {
+        let lock = match &self.state {
+            State::File { lock, .. } => Some(lock),
+            State::Broken { lock, .. } => lock.as_ref(),
+            _ => None,
+        };
+        lock.into_iter().chain(self.prelocked.iter()).collect()
+    }
+}
+
+impl Drop for Journal {
+    fn drop(&mut self) {
+        // Dropped without close: the guards release when `state` drops,
+        // which can trail the teardown of earlier fields by a while —
+        // mark them transient now or a same-process reopen reads `live`
+        // against a journal that no longer exists.
+        for guard in self.guards() {
+            guard.mark_detached();
+        }
     }
 }
 fn boot_record(generation: Gen) -> Record {
