@@ -497,7 +497,7 @@ impl SessionBackend for Backend {
     ) -> ServiceFuture<'_, ()> {
         let data_root = self.host.shared.data_root.clone();
         let session = self.session.to_string();
-        let task = format!("{job:?}");
+        let task = job.to_string();
         Box::pin(async move {
             tokio::task::spawn_blocking(move || {
                 write_isolation_artifact(&data_root, &session, &task, file.file_name(), &bytes)
