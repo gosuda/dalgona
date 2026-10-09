@@ -115,6 +115,15 @@ pub async fn create_token(
         Err(error) => return Err(ServeCommandError::Token(error)),
     };
 
+    #[cfg(windows)]
+    if let Err(source) = owner_only_acl(token_file) {
+        let _ = fs::remove_file(token_file);
+        return Err(ServeCommandError::Token(dal_wire::token::TokenError::Io {
+            path: token_file.to_path_buf(),
+            source,
+        }));
+    }
+
     writeln!(stdout, "{token}")?;
     if stderr_is_tty {
         writeln!(
@@ -124,6 +133,49 @@ pub async fn create_token(
         )?;
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Windows parity for the POSIX 0600 edge: the token file carries a
+/// protected DACL that grants the current user, SYSTEM, and
+/// Administrators only. `icacls /inheritance:d` drops inherited ACEs
+/// and sets the protected flag; `/grant:r` writes the explicit ACEs.
+/// SID spellings keep the grants locale-independent.
+#[cfg(windows)]
+fn owner_only_acl(path: &Path) -> io::Result<()> {
+    let whoami = std::process::Command::new("whoami")
+        .args(["/user", "/fo", "csv", "/nh"])
+        .output()?;
+    if !whoami.status.success() {
+        return Err(io::Error::other(format!(
+            "whoami /user failed: {}",
+            String::from_utf8_lossy(&whoami.stderr)
+        )));
+    }
+    let text = String::from_utf8(whoami.stdout)
+        .map_err(|source| io::Error::new(io::ErrorKind::InvalidData, source))?;
+    let sid = text
+        .split(',')
+        .nth(1)
+        .map(|field| field.trim().trim_matches('"'))
+        .filter(|field| field.starts_with("S-1-"))
+        .ok_or_else(|| io::Error::other("whoami /user did not report a SID"))?;
+    let output = std::process::Command::new("icacls")
+        .arg(path)
+        .args([
+            "/inheritance:d",
+            "/grant:r",
+            &format!("*{sid}:F"),
+            "*S-1-5-18:F",
+            "*S-1-5-32-544:F",
+        ])
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "icacls could not protect the token file: {}",
+            String::from_utf8_lossy(&output.stdout)
+        )));
+    }
+    Ok(())
 }
 
 /// Runs the single-listener dal server and its three protocol surfaces.
