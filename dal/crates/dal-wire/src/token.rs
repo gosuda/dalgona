@@ -510,7 +510,7 @@ mod win {
     /// descriptor must outlive the `CreateFileW` call, so it is created
     /// and dropped inside this function.
     pub(super) fn create_exclusive(path: &Path) -> io::Result<File> {
-        let (attrs, _descriptor) = create_security_attributes()?;
+        let (attrs, descriptor) = create_security_attributes()?;
         let wide_path = path
             .as_os_str()
             .encode_wide()
@@ -527,6 +527,9 @@ mod win {
                 ptr::null_mut(),
             )
         };
+        // The descriptor only had to outlive `CreateFileW` — free it on
+        // both exit paths or every token creation leaks the LocalAlloc.
+        unsafe { LocalFree(descriptor) };
         if raw == INVALID_HANDLE_VALUE {
             return Err(io::Error::last_os_error());
         }
