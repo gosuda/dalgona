@@ -6,7 +6,7 @@
 #![deny(missing_docs)]
 
 pub mod backend;
-pub mod composer;
+mod composer;
 pub mod copy;
 pub mod debug;
 pub mod diagram;

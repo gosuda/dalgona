@@ -8,28 +8,6 @@ use crate::render::{
 use crate::theme::Role;
 use crate::width::{WidthMode, escape, wrap};
 
-/// Renders markdown prose to wrapped terminal rows, as plain text.
-#[must_use]
-pub fn render_prose(text: &str, cap: usize, mode: WidthMode) -> Vec<String> {
-    markdown_rows(text, cap, cap, mode)
-        .into_iter()
-        .map(|row| row.text)
-        .collect()
-}
-
-/// Renders a fenced code block full width with a faint ASCII left rule.
-#[must_use]
-pub fn render_code_block(info: &str, source: &str, width: usize, mode: WidthMode) -> Vec<String> {
-    let mut rows = Vec::new();
-    if !info.is_empty() {
-        rows.push(info.to_owned());
-    }
-    for line in source.lines() {
-        rows.extend(code_rows(line, width, mode).into_iter().map(|row| row.text));
-    }
-    rows
-}
-
 /// Renders markdown `text`: prose wraps at `cap` cells, code and tables at `full`.
 pub(crate) fn markdown_rows(
     text: &str,
@@ -360,7 +338,7 @@ fn push(line: &mut RichLine, piece: &str, style: Style) {
 
 #[cfg(test)]
 mod tests {
-    use super::{markdown_rows, render_code_block, render_prose};
+    use super::markdown_rows;
     use crate::render::RenderRow;
     use crate::theme::Role;
     use crate::width::WidthMode;
@@ -378,18 +356,6 @@ mod tests {
             .iter()
             .map(|span| (&row.text[span.range.clone()], span.role, span.bold))
             .collect()
-    }
-
-    #[test]
-    fn headings_and_lists_wrap_without_italics() {
-        let rows = render_prose("# Title\n- item one\nplain", 40, WidthMode::Narrow);
-        assert_eq!(rows, ["Title", "- item one", "plain"]);
-    }
-
-    #[test]
-    fn code_blocks_keep_full_width_with_left_rule() {
-        let rows = render_code_block("rust", "let x = 1;", 80, WidthMode::Narrow);
-        assert_eq!(rows, ["rust", "| let x = 1;"]);
     }
 
     #[test]

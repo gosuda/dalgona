@@ -12,7 +12,7 @@ const UNDO_DEPTH: usize = 64;
 ///
 /// `cursor` is a byte index that always sits on a grapheme boundary of `text`.
 #[derive(Debug, Default, Clone)]
-pub struct Composer {
+pub(crate) struct Composer {
     text: String,
     cursor: usize,
     history: Vec<String>,
@@ -25,36 +25,28 @@ pub struct Composer {
 }
 
 impl Composer {
-    /// A composer holding `text` with the caret at its end.
-    #[must_use]
-    pub fn with_text(text: &str) -> Self {
-        let mut composer = Self::default();
-        composer.set(text);
-        composer
-    }
-
     /// Whether the draft holds no text.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.text.is_empty()
     }
 
     /// Replaces the draft and puts the caret at its end.
-    pub fn set(&mut self, text: &str) {
+    pub(crate) fn set(&mut self, text: &str) {
         self.checkpoint();
         text.clone_into(&mut self.text);
         self.cursor = self.text.len();
     }
 
     /// Drops the draft without recording it in history.
-    pub fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.checkpoint();
         self.text.clear();
         self.cursor = 0;
     }
 
     /// Inserts text at the grapheme cursor, snapping forward to boundaries.
-    pub fn insert(&mut self, text: &str) {
+    pub(crate) fn insert(&mut self, text: &str) {
         if !self.typing || text.chars().any(char::is_whitespace) {
             self.checkpoint();
         }
@@ -66,72 +58,72 @@ impl Composer {
     }
 
     /// Inserts a raw paste as content.
-    pub fn insert_paste(&mut self, bytes: &[u8]) {
+    pub(crate) fn insert_paste(&mut self, bytes: &[u8]) {
         self.insert(&String::from_utf8_lossy(bytes));
     }
 
     /// Deletes the grapheme before the caret.
-    pub fn backspace(&mut self) {
+    pub(crate) fn backspace(&mut self) {
         let start = self.previous_boundary(self.cursor);
         self.remove(start..self.cursor);
     }
 
     /// Deletes the grapheme under the caret.
-    pub fn delete(&mut self) {
+    pub(crate) fn delete(&mut self) {
         let end = self.next_boundary(self.cursor);
         self.remove(self.cursor..end);
     }
 
     /// Moves the cursor left by one grapheme.
-    pub fn move_left(&mut self) {
+    pub(crate) fn move_left(&mut self) {
         self.typing = false;
         self.cursor = self.previous_boundary(self.cursor);
     }
 
     /// Moves the cursor right by one grapheme.
-    pub fn move_right(&mut self) {
+    pub(crate) fn move_right(&mut self) {
         self.typing = false;
         self.cursor = self.next_boundary(self.cursor);
     }
 
     /// Moves the cursor to the start of the previous word.
-    pub fn word_left(&mut self) {
+    pub(crate) fn word_left(&mut self) {
         self.typing = false;
         self.cursor = self.word_start(self.cursor);
     }
 
     /// Moves the cursor past the end of the next word.
-    pub fn word_right(&mut self) {
+    pub(crate) fn word_right(&mut self) {
         self.typing = false;
         self.cursor = self.word_end(self.cursor);
     }
 
     /// Moves the cursor to the start of its line.
-    pub fn line_start(&mut self) {
+    pub(crate) fn line_start(&mut self) {
         self.typing = false;
         self.cursor = self.line_bounds(self.cursor).0;
     }
 
     /// Moves the cursor to the end of its line.
-    pub fn line_end(&mut self) {
+    pub(crate) fn line_end(&mut self) {
         self.typing = false;
         self.cursor = self.line_bounds(self.cursor).1;
     }
 
     /// Whether the cursor sits on the first line of the draft.
     #[must_use]
-    pub fn on_first_line(&self) -> bool {
+    pub(crate) fn on_first_line(&self) -> bool {
         !self.text[..self.cursor].contains('\n')
     }
 
     /// Whether the cursor sits on the last line of the draft.
     #[must_use]
-    pub fn on_last_line(&self) -> bool {
+    pub(crate) fn on_last_line(&self) -> bool {
         !self.text[self.cursor..].contains('\n')
     }
 
     /// Moves the cursor up one line, keeping its grapheme column.
-    pub fn move_up(&mut self) {
+    pub(crate) fn move_up(&mut self) {
         self.typing = false;
         let (start, _) = self.line_bounds(self.cursor);
         if start == 0 {
@@ -143,7 +135,7 @@ impl Composer {
     }
 
     /// Moves the cursor down one line, keeping its grapheme column.
-    pub fn move_down(&mut self) {
+    pub(crate) fn move_down(&mut self) {
         self.typing = false;
         let (start, end) = self.line_bounds(self.cursor);
         if end == self.text.len() {
@@ -155,13 +147,13 @@ impl Composer {
     }
 
     /// Deletes from the start of the line to the caret into the kill buffer.
-    pub fn kill_line_start(&mut self) {
+    pub(crate) fn kill_line_start(&mut self) {
         let start = self.line_bounds(self.cursor).0;
         self.kill(start..self.cursor);
     }
 
     /// Deletes from the caret to the end of the line into the kill buffer.
-    pub fn kill_line_end(&mut self) {
+    pub(crate) fn kill_line_end(&mut self) {
         let (_, end) = self.line_bounds(self.cursor);
         let end = if end == self.cursor && end < self.text.len() {
             end + 1
@@ -172,19 +164,19 @@ impl Composer {
     }
 
     /// Deletes the word before the caret into the kill buffer.
-    pub fn delete_word_back(&mut self) {
+    pub(crate) fn delete_word_back(&mut self) {
         let start = self.word_start(self.cursor);
         self.kill(start..self.cursor);
     }
 
     /// Deletes the word after the caret into the kill buffer.
-    pub fn delete_word_forward(&mut self) {
+    pub(crate) fn delete_word_forward(&mut self) {
         let end = self.word_end(self.cursor);
         self.kill(self.cursor..end);
     }
 
     /// Inserts the last killed text at the caret.
-    pub fn yank(&mut self) {
+    pub(crate) fn yank(&mut self) {
         let killed = self.killed.clone();
         if !killed.is_empty() {
             self.checkpoint();
@@ -194,7 +186,7 @@ impl Composer {
     }
 
     /// Restores the draft before the latest edit.
-    pub fn undo(&mut self) {
+    pub(crate) fn undo(&mut self) {
         self.typing = false;
         if let Some((text, cursor)) = self.undo.pop() {
             self.text = text;
@@ -203,7 +195,7 @@ impl Composer {
     }
 
     /// Recalls the previous history entry at the upper boundary.
-    pub fn history_prev(&mut self) {
+    pub(crate) fn history_prev(&mut self) {
         if self.history.is_empty() {
             return;
         }
@@ -220,7 +212,7 @@ impl Composer {
     }
 
     /// Recalls the next history entry; past the newest, the draft returns.
-    pub fn history_next(&mut self) {
+    pub(crate) fn history_next(&mut self) {
         let Some(index) = self.history_index else {
             return;
         };
@@ -236,7 +228,7 @@ impl Composer {
     }
 
     /// Submits the draft, recording history and clearing the buffer.
-    pub fn take(&mut self) -> String {
+    pub(crate) fn take(&mut self) -> String {
         let line = std::mem::take(&mut self.text);
         self.cursor = 0;
         self.history_index = None;
@@ -251,13 +243,13 @@ impl Composer {
 
     /// Borrows the draft text.
     #[must_use]
-    pub fn text(&self) -> &str {
+    pub(crate) fn text(&self) -> &str {
         &self.text
     }
 
     /// Returns the grapheme cursor as a byte index on a boundary.
     #[must_use]
-    pub const fn cursor(&self) -> usize {
+    pub(crate) const fn cursor(&self) -> usize {
         self.cursor
     }
 
@@ -451,11 +443,11 @@ pub(crate) fn pop_grapheme(text: &mut String) {
 
 /// The slash command and partial argument under the cursor.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SlashCompletion {
+pub(crate) struct SlashCompletion {
     /// The command name as written, without the leading slash.
-    pub name: String,
+    pub(crate) name: String,
     /// The partial argument being typed.
-    pub prefix: String,
+    pub(crate) prefix: String,
 }
 
 /// Splits a `/name tail` draft into its command name and partial argument.
@@ -466,7 +458,7 @@ pub struct SlashCompletion {
 /// unclosed quote still completes its intended value. Plain text drafts
 /// complete nothing.
 #[must_use]
-pub fn slash_completion(draft: &str) -> Option<SlashCompletion> {
+pub(crate) fn slash_completion(draft: &str) -> Option<SlashCompletion> {
     let Classify::Command { name, args } = classify(draft) else {
         return None;
     };
@@ -641,7 +633,8 @@ mod tests {
 
     #[test]
     fn typing_and_deleting_happen_at_the_caret() {
-        let mut composer = Composer::with_text("abcdef");
+        let mut composer = Composer::default();
+        composer.set("abcdef");
         composer.move_left();
         composer.move_left();
         composer.insert("X");
@@ -658,11 +651,13 @@ mod tests {
 
     #[test]
     fn deleting_never_splits_a_cluster() {
-        let mut composer = Composer::with_text("a🇯🇵b");
+        let mut composer = Composer::default();
+        composer.set("a🇯🇵b");
         composer.move_left();
         composer.backspace();
         assert_eq!(composer.text(), "ab");
-        let mut composer = Composer::with_text("e\u{301}x");
+        let mut composer = Composer::default();
+        composer.set("e\u{301}x");
         composer.line_start();
         composer.delete();
         assert_eq!(composer.text(), "x");
@@ -670,7 +665,8 @@ mod tests {
 
     #[test]
     fn words_kills_yank_and_undo() {
-        let mut composer = Composer::with_text("one two three");
+        let mut composer = Composer::default();
+        composer.set("one two three");
         composer.word_left();
         composer.delete_word_back();
         assert_eq!(composer.text(), "one three");
@@ -690,7 +686,8 @@ mod tests {
 
     #[test]
     fn up_and_down_keep_the_column_across_lines() {
-        let mut composer = Composer::with_text("abcd\nef\ngh");
+        let mut composer = Composer::default();
+        composer.set("abcd\nef\ngh");
         composer.move_left();
         composer.move_up();
         assert_eq!(&composer.text()[composer.cursor()..], "f\ngh");

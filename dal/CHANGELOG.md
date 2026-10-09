@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Remove unused public TUI items: the `composer` module, `markdown::render_prose`, and `markdown::render_code_block`.
 - Journal every approval answer: an answer to a tool-call, service-run, extension-ask, or plugin-grant question is now written to the session journal before it takes effect, the resolution broadcast follows that record, and a resumed session shows which question was answered, by whom, and how. Before, answers reached only the front ends that were watching and never survived a restart.
 - Fix terminal typing during startup: keys written while the capability probe runs now reach the composer as they are typed, instead of appearing only after the probe window ends.
 - Fix the terminal status context slot: from 70% of the context window it reads `ctx {n}% · rising` and from 90% `ctx {n}% · high`, with the word carrying a warning or error role.

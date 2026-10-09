@@ -1557,8 +1557,10 @@ mod tests {
 
     #[test]
     fn quit_with_draft_requires_confirmation() {
+        let mut composer = crate::composer::Composer::default();
+        composer.set("rewrite the query");
         let mut session = Session {
-            composer: crate::composer::Composer::with_text("rewrite the query"),
+            composer,
             ..Session::default()
         };
         session.accept_reply(dal_core::Reply::Front(dal_core::FrontAction::Quit));
