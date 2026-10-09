@@ -19,6 +19,8 @@ pub(crate) struct Painter {
     sync: bool,
     initialized: bool,
     overlay: bool,
+    /// Terminal cell (row, column), 1-based, where the caret was last placed.
+    cursor: Option<(usize, usize)>,
     #[expect(
         clippy::option_option,
         reason = "outer None records unset, inner None records the default theme"
@@ -121,6 +123,7 @@ impl Painter {
         if image_written && screen == Screen::Inline {
             bytes.extend_from_slice(format!("\x1b[{};1H", size.1).as_bytes());
         }
+        self.place_cursor(&mut bytes, size, &rows, overlay);
         self.theme_name = Some(theme.name());
         self.committed = committed_len;
         self.size = size;
@@ -150,6 +153,44 @@ impl Painter {
             modes.set_transcript_overlay(overlay);
         }
         result
+    }
+
+    /// Moves the terminal caret onto the row that holds it, and hides the caret while
+    /// no row does (a dialog or the transcript overlay owns the input).
+    fn place_cursor(
+        &mut self,
+        out: &mut Vec<u8>,
+        size: (u16, u16),
+        rows: &[RenderRow],
+        overlay: bool,
+    ) {
+        let place = rows
+            .iter()
+            .enumerate()
+            .find_map(|(index, row)| row.cursor.map(|column| (index, column)))
+            .filter(|_| !overlay)
+            .map(|(index, column)| {
+                let top = usize::from(size.1).saturating_sub(rows.len());
+                let last = usize::from(size.0).saturating_sub(1);
+                (top + index + 1, column.min(last) + 1)
+            });
+        if overlay {
+            // Entering the overlay already hid the caret.
+            self.cursor = None;
+        }
+        if place != self.cursor || (place.is_some() && !out.is_empty()) {
+            match place {
+                Some((row, column)) => {
+                    if self.cursor.is_none() {
+                        out.extend_from_slice(b"\x1b[?25h");
+                    }
+                    out.extend_from_slice(format!("\x1b[{row};{column}H").as_bytes());
+                }
+                None if self.cursor.is_some() => out.extend_from_slice(b"\x1b[?25l"),
+                None => {}
+            }
+        }
+        self.cursor = place;
     }
 
     #[expect(
@@ -376,6 +417,7 @@ fn write_styled_text(
     boundaries.sort_unstable();
     boundaries.dedup();
 
+    let mut painted = false;
     let mut active: Option<&RenderLink> = None;
     for window in boundaries.windows(2) {
         let [start, end] = window else {
@@ -383,6 +425,11 @@ fn write_styled_text(
         };
         if start == end {
             continue;
+        }
+        // A styled run ends before the next run starts, so no attribute leaks.
+        let reset = std::mem::take(&mut painted);
+        if reset {
+            out.extend_from_slice(b"\x1b[0m");
         }
         let next = links
             .iter()
@@ -397,17 +444,24 @@ fn write_styled_text(
             close_link(out);
             active = None;
         }
+        let mut opened = false;
         if active.is_none()
             && let Some(link) = next
         {
             open_link(out, &link.url);
             active = Some(link);
+            opened = true;
         }
-        let role = spans
+        if reset && active.is_some() && !opened {
+            out.extend_from_slice(b"\x1b[4m");
+        }
+        let (role, bold) = spans
             .iter()
             .find(|span| span.range.start <= *start && *start < span.range.end)
-            .map_or(fallback, |span| span.role);
-        out.extend_from_slice(crate::status::role_sgr(theme, role).as_bytes());
+            .map_or((fallback, false), |span| (span.role, span.bold));
+        let sgr = crate::status::style_sgr(theme, role, bold);
+        painted = !sgr.is_empty();
+        out.extend_from_slice(sgr.as_bytes());
         out.extend_from_slice(&text.as_bytes()[*start..*end]);
     }
     if active.is_some() {

@@ -109,6 +109,7 @@ impl Transcript {
             pending_diagram: false,
             image: self.images.get(index).cloned().flatten(),
             image_tail: self.image_tails.get(index).copied().unwrap_or(false),
+            cursor: None,
         })
     }
 

@@ -145,6 +145,12 @@ impl VtRecorder {
             .collect()
     }
 
+    /// Returns the cursor's zero-based column and row.
+    #[must_use]
+    pub const fn cursor(&self) -> (usize, usize) {
+        (self.cursor_x, self.cursor_y)
+    }
+
     /// Returns whether the output currently has an unclosed synchronized update.
     #[must_use]
     pub const fn sync_is_open(&self) -> bool {

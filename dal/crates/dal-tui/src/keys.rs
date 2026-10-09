@@ -144,8 +144,6 @@ pub enum Action {
     TranscriptPageUp,
     /// Scroll the transcript downward.
     TranscriptPageDown,
-    /// Jump to the latest transcript entry.
-    JumpLatest,
 }
 
 /// A normalized key code and modifier set.
@@ -313,7 +311,7 @@ fn key_label(key: Key) -> String {
 mod tests {
     use super::{
         Action, BINDINGS, Binding, InputEvent, Key, KeyDecoder, Owner, help_labels, resolve,
-        validate,
+        resolve_in, validate,
     };
     use crossterm::event::{KeyCode, KeyModifiers};
     use std::time::{Duration, Instant};
@@ -347,11 +345,34 @@ mod tests {
             "ctrl+r",
             "pgup",
             "pgdn",
-            "end",
             "ctrl+shift+f",
         ] {
             assert!(named(wanted), "{wanted} is missing from {labels:?}");
         }
+    }
+
+    #[test]
+    fn end_is_a_composer_and_editor_key_with_no_dead_app_claim() {
+        let end = Key::new(KeyCode::End, KeyModifiers::NONE);
+        let composer_context = [Owner::App, Owner::Composer, Owner::Editor];
+        assert_eq!(
+            resolve_in(end, false, &composer_context),
+            Some(Action::LineEnd),
+            "End belongs to the composer line end; no app action claims it"
+        );
+        assert_eq!(
+            resolve_in(end, true, &composer_context),
+            Some(Action::LineEnd)
+        );
+        assert_eq!(
+            resolve_in(end, false, &[Owner::Dialog, Owner::Picker]),
+            Some(Action::PickerLast),
+            "a picker keeps its own End binding"
+        );
+        assert!(
+            !help_labels().iter().any(|(key, _)| key == "end"),
+            "F1 help must not list an End action that nothing dispatches"
+        );
     }
 
     #[test]
@@ -403,6 +424,18 @@ mod tests {
                 InputEvent::Key(Key::new(KeyCode::Up, KeyModifiers::CONTROL)),
                 InputEvent::Key(Key::new(KeyCode::Enter, KeyModifiers::SHIFT)),
             ]
+        );
+    }
+
+    #[test]
+    fn the_delete_key_decodes_from_the_legacy_tilde_form() {
+        let mut decoder = KeyDecoder::default();
+        assert_eq!(
+            decoder.feed(b"\x1b[3~", Instant::now()),
+            [InputEvent::Key(Key::new(
+                KeyCode::Delete,
+                KeyModifiers::NONE
+            ))]
         );
     }
 

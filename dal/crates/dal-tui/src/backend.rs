@@ -48,6 +48,12 @@ pub trait TuiAgent: Clone + Send + Sync + 'static {
     async fn answer(&self, id: RequestId, answer: Answer) -> Result<(), TuiError>;
     /// Returns busy extension status rows already published at attach time.
     fn ext_status(&self) -> Vec<ExtStatus>;
+    /// Whether the session workspace lives on this machine's disk. A remote
+    /// host's workspace path names the host's disk, so the default denies and
+    /// no client reads a workspace it does not own; the in-process host allows.
+    fn workspace_is_local(&self) -> bool {
+        false
+    }
 }
 
 /// A host that can open a session and expose its command registry.
@@ -104,6 +110,10 @@ impl TuiAgent for Agent {
 
     fn ext_status(&self) -> Vec<ExtStatus> {
         self.ext_status()
+    }
+
+    fn workspace_is_local(&self) -> bool {
+        true
     }
 }
 

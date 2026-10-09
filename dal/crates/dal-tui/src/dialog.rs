@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use dal_core::{Answer, CallGrant, Question, RawJson, Request};
 
 use crate::diagram::{DiagramSettings, RenderCache};
-use crate::render::{RenderRow, prose_rows, text_rows};
+use crate::render::{Prose, RenderRow, prose_rows, text_rows};
 use crate::theme::Role;
 
 /// Pending requests in open order with sent-answer tracking.
@@ -471,13 +471,14 @@ impl DialogUi {
         cache: &RenderCache,
     ) -> (Vec<RenderRow>, Vec<RenderRow>) {
         let mut pinned = Vec::new();
+        let rows_of = |body: &str, prose| text_rows(body, width, mode, prose, settings, cache);
         let mut rows = match question {
             Question::Approval { preview, grant, .. } => {
                 let mut rows = Vec::new();
                 if let Some(grant) = grant {
                     rows.push(RenderRow::new(grant_clause(grant), Role::Text));
                 }
-                rows.extend(text_rows(&preview.body, width, mode, settings, cache));
+                rows.extend(rows_of(&preview.body, Prose::Verbatim));
                 rows
             }
             Question::Grant {
@@ -514,17 +515,14 @@ impl DialogUi {
             } => {
                 let rows = preview
                     .iter()
-                    .flat_map(|preview| text_rows(&preview.body, width, mode, settings, cache))
+                    .flat_map(|preview| rows_of(&preview.body, Prose::Markdown { full: width }))
                     .collect::<Vec<_>>();
                 pinned.extend(options.iter().enumerate().map(|(index, option)| {
                     let checked =
                         self.checked.contains(&index) || (!*multi && index == self.focused);
-                    let marker = match (*multi, checked) {
-                        (true, true) => "[x]",
-                        (true, false) => "[ ]",
-                        (false, true) => "(*)",
-                        (false, false) => "( )",
-                    };
+                    // Rows: single-select (unchecked, checked), then multi-select likewise.
+                    let marker = ["( )", "(*)", "[ ]", "[x]"]
+                        [usize::from(*multi) * 2 + usize::from(checked)];
                     let description = option
                         .description
                         .as_deref()

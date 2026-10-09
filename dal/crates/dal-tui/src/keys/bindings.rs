@@ -453,11 +453,4 @@ pub const BINDINGS: &[Binding] = &[
         default: key(KeyCode::PageDown, NONE),
         legacy: Some(key(KeyCode::Char('f'), CTRL)),
     },
-    Binding {
-        owner: Owner::App,
-        action: Action::JumpLatest,
-        label: "Jump to latest",
-        default: key(KeyCode::End, NONE),
-        legacy: Some(key(KeyCode::End, NONE)),
-    },
 ];

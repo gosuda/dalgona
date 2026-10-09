@@ -292,12 +292,16 @@ pub fn draw_frame(
             view,
             screen,
             composer: "",
+            cursor: 0,
+            exit_draft: false,
+            branch: None,
             popup: &[],
             live: &live,
             dialog: &dialog,
             picker: None,
             transcript: &transcript,
             opts,
+            kitty_keyboard: false,
             theme: &theme,
             diagram_settings,
             diagram_cache: &diagram_cache,
@@ -319,10 +323,13 @@ pub fn draw_frame(
                         .spans
                         .iter()
                         .map(|span| {
-                            ratatui::text::Span::styled(
-                                &row.text[span.range.clone()],
-                                row_style(theme.color(span.role), span.role),
-                            )
+                            let style = row_style(theme.color(span.role), span.role);
+                            let style = if span.bold {
+                                style.add_modifier(ratatui::style::Modifier::BOLD)
+                            } else {
+                                style
+                            };
+                            ratatui::text::Span::styled(&row.text[span.range.clone()], style)
                         })
                         .collect::<Vec<_>>();
                     ratatui::widgets::Paragraph::new(ratatui::text::Line::from(spans))

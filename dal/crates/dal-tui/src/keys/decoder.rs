@@ -320,6 +320,7 @@ fn parse_csi_key(parameters: &[u8], final_byte: u8) -> Option<(Option<KeyCode>, 
         b'F' => Some(KeyCode::End),
         b'Z' => Some(KeyCode::BackTab),
         b'~' => match first.parse::<u8>().ok()? {
+            3 => Some(KeyCode::Delete),
             5 => Some(KeyCode::PageUp),
             6 => Some(KeyCode::PageDown),
             1 | 7 => Some(KeyCode::Home),

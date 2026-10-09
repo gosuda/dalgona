@@ -11,7 +11,7 @@ use crate::dialog::DialogUi;
 use crate::frame::{RegionBudget, RegionRequest};
 use crate::live::Live;
 use crate::picker::PickerUi;
-use crate::status::{self, StatusData};
+use crate::status::StatusData;
 use crate::theme::{ResolvedTheme, Role};
 use crate::transcript::Transcript;
 use crate::width::{WidthMode, escape, take_cells};
@@ -23,12 +23,21 @@ pub(crate) struct FrameInput<'a> {
     pub(crate) view: &'a View,
     pub(crate) screen: Screen,
     pub(crate) composer: &'a str,
+    /// Byte offset of the caret within `composer`.
+    pub(crate) cursor: usize,
+    /// Whether the discard-draft question owns the composer and hint rows.
+    pub(crate) exit_draft: bool,
+    /// The checked-out git branch of the workspace, when it has one.
+    pub(crate) branch: Option<&'a str>,
     pub(crate) popup: &'a [String],
     pub(crate) live: &'a Live,
     pub(crate) dialog: &'a DialogUi,
     pub(crate) picker: Option<&'a PickerUi>,
     pub(crate) transcript: &'a Transcript,
     pub(crate) opts: &'a TuiOptions,
+    /// Whether the terminal confirmed kitty keyboard encoding, so the hint
+    /// can advertise the kitty column of the key map.
+    pub(crate) kitty_keyboard: bool,
     pub(crate) theme: &'a ResolvedTheme,
     pub(crate) diagram_settings: DiagramSettings,
     pub(crate) diagram_cache: &'a RenderCache,
@@ -54,12 +63,15 @@ pub(crate) struct RenderRow {
     pub(crate) pending_diagram: bool,
     pub(crate) image: Option<PixelImage>,
     pub(crate) image_tail: bool,
+    /// Cell column of the caret when this row holds it.
+    pub(crate) cursor: Option<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RenderSpan {
     pub(crate) range: Range<usize>,
     pub(crate) role: Role,
+    pub(crate) bold: bool,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RenderLink {
@@ -70,15 +82,23 @@ pub(crate) struct RenderLink {
 impl RenderRow {
     pub(crate) fn new(text: impl Into<String>, role: Role) -> Self {
         let (text, links) = linked_text(&text.into());
+        let mut row = Self::plain(text, role);
+        row.links = links;
+        row
+    }
+
+    /// A row whose text is shown exactly as given: link markup is not read.
+    pub(crate) fn plain(text: impl Into<String>, role: Role) -> Self {
         Self {
-            text,
+            text: text.into(),
             role,
             color: ratatui::style::Color::Reset,
             spans: Vec::new(),
-            links,
+            links: Vec::new(),
             pending_diagram: false,
             image: None,
             image_tail: false,
+            cursor: None,
         }
     }
 
@@ -120,7 +140,7 @@ pub(crate) fn frame_rows(input: FrameInput<'_>, width: u16, height: u16) -> Vec<
         return resolve_colors(
             vec![
                 RenderRow::new(crate::copy::ids::NARROW_ROWS, Role::Warning).clipped(w, mode),
-                RenderRow::new(status, Role::Dim).clipped(w, mode),
+                status.clipped(w, mode),
             ],
             input.theme,
         );
@@ -129,7 +149,7 @@ pub(crate) fn frame_rows(input: FrameInput<'_>, width: u16, height: u16) -> Vec<
         return resolve_colors(
             vec![
                 RenderRow::new(crate::copy::ids::NARROW_COLS, Role::Warning).clipped(w, mode),
-                RenderRow::new(status, Role::Dim).clipped(w, mode),
+                status.clipped(w, mode),
             ],
             input.theme,
         );
@@ -142,16 +162,19 @@ pub(crate) fn frame_rows(input: FrameInput<'_>, width: u16, height: u16) -> Vec<
         .map_or(0, |picker| picker.visible_len().max(1) + 2);
     let overlay = if input.dialog.is_open() {
         Some(6)
+    } else if input.exit_draft {
+        Some(1)
     } else {
         input.picker.map(|_| picker_rows)
     };
+    let laid = composer_layout(&input, w, mode);
     let budget = RegionBudget::allocate(
         width,
         height,
         RegionRequest {
             notices: notices.len(),
             activity: usize::MAX,
-            composer: input.composer.split('\n').count(),
+            composer: laid.rows.len(),
             hint: true,
             overlay,
         },
@@ -192,8 +215,8 @@ pub(crate) fn frame_rows(input: FrameInput<'_>, width: u16, height: u16) -> Vec<
             .map(|row| RenderRow::new(escape(row), Role::Dim)),
     );
     bottom.extend(activity.into_iter().rev().take(budget.activity).rev());
-    overlay_rows(&input, &budget, w, mode, &mut bottom);
-    bottom.push(RenderRow::new(status, Role::Dim));
+    overlay_rows(&input, &budget, &laid, w, mode, &mut bottom);
+    bottom.push(status);
     let bottom: Vec<RenderRow> = bottom.into_iter().map(|row| row.clipped(w, mode)).collect();
     let rows = if input.screen == Screen::Inline {
         bottom
@@ -203,10 +226,31 @@ pub(crate) fn frame_rows(input: FrameInput<'_>, width: u16, height: u16) -> Vec<
     resolve_colors(rows, input.theme)
 }
 
+/// Wraps the draft inside the 2-cell prompt gutter and finds the caret.
+fn composer_layout(input: &FrameInput<'_>, w: usize, mode: WidthMode) -> crate::composer::Laid {
+    crate::composer::layout(input.composer, input.cursor, w.saturating_sub(2), mode)
+}
+
+/// The idle hint that fits the terminal: the kitty column only when the
+/// terminal confirmed kitty keys, the legacy column otherwise, folding to the
+/// short form when the row cannot hold the full text.
+fn idle_hint(kitty: bool, w: usize, mode: WidthMode) -> &'static str {
+    use crate::copy::ids;
+    let fits = |text: &str| crate::width::width(text, mode) <= w;
+    if kitty && fits(ids::HINT_IDLE) {
+        ids::HINT_IDLE
+    } else if fits(ids::HINT_IDLE_LEGACY) {
+        ids::HINT_IDLE_LEGACY
+    } else {
+        ids::HINT_IDLE_SHORT
+    }
+}
+
 /// The interactive tail: an open dialog, a picker, or the composer and hint.
 fn overlay_rows(
     input: &FrameInput<'_>,
     budget: &RegionBudget,
+    laid: &crate::composer::Laid,
     w: usize,
     mode: WidthMode,
     bottom: &mut Vec<RenderRow>,
@@ -257,27 +301,39 @@ fn overlay_rows(
             },
             Role::Dim,
         ));
+    } else if input.exit_draft {
+        bottom.push(RenderRow::plain(
+            format!(
+                "[y] {}   [n] {}",
+                crate::copy::ids::EXIT_DRAFT_TITLE,
+                crate::copy::ids::EXIT_KEEP_EDITING
+            ),
+            Role::Accent,
+        ));
     } else {
         if input.composer.is_empty() {
-            bottom.push(RenderRow::new(
+            let mut row = RenderRow::new(
                 format!("> {}", escape(crate::copy::ids::COMPOSER_PLACEHOLDER)),
                 Role::Text,
-            ));
+            );
+            row.cursor = Some(2);
+            bottom.push(row);
         } else {
-            // A multiline draft shows its last rows, where the caret sits.
-            let lines: Vec<&str> = input.composer.split('\n').collect();
-            let start = lines.len() - budget.composer.clamp(1, lines.len());
-            for (index, line) in lines.iter().enumerate().skip(start) {
+            // The shown rows end at the caret's row, so the caret is always on screen.
+            let shown = budget.composer.clamp(1, laid.rows.len());
+            let start = (laid.caret.0 + 1).saturating_sub(shown);
+            for (index, text) in laid.rows.iter().enumerate().skip(start).take(shown) {
                 let mark = if index == 0 { "> " } else { "  " };
-                bottom.push(RenderRow::new(
-                    format!("{mark}{}", escape(line)),
-                    Role::Text,
-                ));
+                let mut row = RenderRow::plain(format!("{mark}{text}"), Role::Text);
+                if index == laid.caret.0 {
+                    row.cursor = Some(2 + laid.caret.1);
+                }
+                bottom.push(row);
             }
         }
         if budget.hint > 0 {
             bottom.push(RenderRow::new(
-                crate::copy::ids::HINT_IDLE_LEGACY,
+                idle_hint(input.kitty_keyboard, w, mode),
                 Role::Dim,
             ));
         }
@@ -320,12 +376,24 @@ fn fullscreen_rows(
     rows.into_iter().map(|row| row.clipped(w, mode)).collect()
 }
 
-/// The single status row text: turn state, spinner, model, path, context.
-fn status_line(input: &FrameInput<'_>, model: Option<&str>, w: usize, mode: WidthMode) -> String {
-    let path = escape(&crate::status::contract_home(
+/// The single status row: turn state, spinner, model, path, context.
+///
+/// The context slot carries its own word (`rising` at 70%, `high` at 90%) and
+/// the matching role, so the state survives without color.
+fn status_line(
+    input: &FrameInput<'_>,
+    model: Option<&str>,
+    w: usize,
+    mode: WidthMode,
+) -> RenderRow {
+    let home = escape(&crate::status::contract_home(
         &input.view.session.workspace.as_path().display().to_string(),
         input.opts.env.home.as_deref(),
     ));
+    let path = match input.branch {
+        Some(branch) => format!("{home} ({})", escape(branch)),
+        None => home,
+    };
     let usage = &input.view.usage.usage;
     let tokens = (usage.input_tokens > 0 || usage.output_tokens > 0).then(|| {
         crate::copy::render(
@@ -344,7 +412,7 @@ fn status_line(input: &FrameInput<'_>, model: Option<&str>, w: usize, mode: Widt
         .context_tokens
         .saturating_mul(100)
         .checked_div(input.view.usage.context_window)
-        .map(|percent| format!("ctx {percent}%"));
+        .map(crate::status::context_slot);
     let waiting = input.dialog.is_open();
     let running = matches!(
         input.view.turn,
@@ -362,25 +430,52 @@ fn status_line(input: &FrameInput<'_>, model: Option<&str>, w: usize, mode: Widt
     } else {
         None
     };
+    // Motion advances the braille frames; `DAL_NO_MOTION` freezes the first.
     let spinner = if running && !waiting {
-        Some(if input.opts.motion { "⠋" } else { "*" })
+        Some(if input.opts.motion {
+            input.live.spinner_cell()
+        } else {
+            crate::live::SPINNER_FRAMES[0]
+        })
     } else {
         None
     };
-    status::render(
+    let jobs = match input.live.running_jobs() {
+        0 => None,
+        count => {
+            let count = u64::try_from(count).unwrap_or(u64::MAX);
+            Some(crate::copy::render(
+                crate::copy::ids::STATUS_JOBS,
+                &[("n", &count.to_string())],
+                count,
+            ))
+        }
+    };
+    let (line, spans) = crate::status::render_with_roles(
         StatusData {
             state,
             spinner,
             model,
             path: Some(&path),
             tokens: tokens.as_deref(),
-            context: context.as_deref(),
+            context: context.as_ref().map(|(text, _)| text.as_str()),
+            context_role: context.as_ref().and_then(|(_, role)| *role),
+            agents: jobs.as_deref(),
             cost: cost.as_deref(),
-            ..StatusData::default()
         },
         w,
         mode,
-    )
+    );
+    let mut row = RenderRow::new(line, Role::Dim);
+    row.spans = spans
+        .into_iter()
+        .map(|(range, role)| RenderSpan {
+            range,
+            role,
+            bold: false,
+        })
+        .collect();
+    row
 }
 fn queued_steer_row(turn: TurnState, count: u32) -> Option<RenderRow> {
     if count == 0 || !matches!(turn, TurnState::Running { .. } | TurnState::Settling { .. }) {
@@ -428,6 +523,9 @@ fn activity_rows(input: &FrameInput<'_>, w: usize, mode: WidthMode) -> Vec<Rende
                 input.live.assistant_text(),
                 prose_cap(w),
                 mode,
+                Prose::Markdown {
+                    full: w.saturating_sub(2),
+                },
                 input.diagram_settings,
                 input.diagram_cache,
             )
@@ -480,6 +578,7 @@ pub(crate) fn entry_rows_timed(
                 &text,
                 cap.saturating_sub(2),
                 mode,
+                Prose::Verbatim,
                 diagram_settings,
                 diagram_cache,
             )
@@ -492,7 +591,16 @@ pub(crate) fn entry_rows_timed(
             for block in content {
                 match block {
                     Block::Text { text } => {
-                        rows.extend(text_rows(text, cap, mode, diagram_settings, diagram_cache));
+                        rows.extend(text_rows(
+                            text,
+                            cap,
+                            mode,
+                            Prose::Markdown {
+                                full: usize::from(columns).saturating_sub(2),
+                            },
+                            diagram_settings,
+                            diagram_cache,
+                        ));
                     }
                     Block::Reasoning { .. } => rows.push(RenderRow::new(
                         "Thinking · ctrl+o to show reasoning",
@@ -523,12 +631,13 @@ pub(crate) fn entry_rows_timed(
 }
 
 #[derive(Debug)]
-struct RichLine {
-    text: String,
-    links: Vec<RenderLink>,
+pub(crate) struct RichLine {
+    pub(crate) text: String,
+    pub(crate) links: Vec<RenderLink>,
+    pub(crate) spans: Vec<RenderSpan>,
 }
 
-fn linked_text(text: &str) -> (String, Vec<RenderLink>) {
+pub(crate) fn linked_text(text: &str) -> (String, Vec<RenderLink>) {
     let mut visible = String::with_capacity(text.len());
     let mut links = Vec::new();
     let mut cursor = 0;
@@ -656,25 +765,16 @@ fn escape_linked(text: &str, links: Vec<RenderLink>) -> (String, Vec<RenderLink>
     (escaped, links)
 }
 
+/// Wraps `text` as written; no markdown is read.
 pub(crate) fn prose_rows(text: &str, cap: usize, mode: WidthMode) -> Vec<RenderRow> {
     let mut rows = Vec::new();
     for logical in text.split('\n') {
-        let (line_text, line_links) = linked_text(logical);
-        let mut line = RichLine {
-            text: line_text,
-            links: line_links,
+        let (text, links) = linked_text(logical);
+        let line = RichLine {
+            text,
+            links,
+            spans: Vec::new(),
         };
-        for prefix in ["### ", "## ", "# "] {
-            if line.text.starts_with(prefix) {
-                line.text.drain(..prefix.len());
-                for link in &mut line.links {
-                    link.range.start = link.range.start.saturating_sub(prefix.len());
-                    link.range.end = link.range.end.saturating_sub(prefix.len());
-                }
-                line.links.retain(|link| link.range.start < link.range.end);
-                break;
-            }
-        }
         rows.extend(wrap_rich_line(&line, cap, mode));
     }
     if rows.is_empty() {
@@ -683,7 +783,7 @@ pub(crate) fn prose_rows(text: &str, cap: usize, mode: WidthMode) -> Vec<RenderR
     rows
 }
 
-fn wrap_rich_line(line: &RichLine, cap: usize, mode: WidthMode) -> Vec<RenderRow> {
+pub(crate) fn wrap_rich_line(line: &RichLine, cap: usize, mode: WidthMode) -> Vec<RenderRow> {
     if line.text.is_empty() {
         return vec![RenderRow::new(String::new(), Role::Text)];
     }
@@ -728,27 +828,46 @@ fn linked_row(line: &RichLine, start: usize, end: usize) -> RenderRow {
             })
         })
         .collect();
-    RenderRow {
-        text: line.text[start..end].to_owned(),
-        role: Role::Text,
-        color: ratatui::style::Color::Reset,
-        spans: Vec::new(),
-        links,
-        pending_diagram: false,
-        image: None,
-        image_tail: false,
-    }
+    let spans = line
+        .spans
+        .iter()
+        .filter_map(|span| {
+            let span_start = span.range.start.max(start);
+            let span_end = span.range.end.min(end);
+            (span_start < span_end).then(|| RenderSpan {
+                range: span_start - start..span_end - start,
+                ..span.clone()
+            })
+        })
+        .collect();
+    let mut row = RenderRow::plain(line.text[start..end].to_owned(), Role::Text);
+    row.links = links;
+    row.spans = spans;
+    row
+}
+
+/// How text that is not a diagram becomes rows.
+#[derive(Clone, Copy)]
+pub(crate) enum Prose {
+    /// Shown exactly as written, wrapped at the cap.
+    Verbatim,
+    /// Markdown: prose wraps at the cap; code blocks and tables wrap at `full` cells.
+    Markdown { full: usize },
 }
 
 pub(crate) fn text_rows(
     text: &str,
     cap: usize,
     mode: WidthMode,
+    prose: Prose,
     settings: DiagramSettings,
     cache: &RenderCache,
 ) -> Vec<RenderRow> {
     let Some(wired) = wire_block(&settings, cache, text, cap) else {
-        return prose_rows(text, cap, mode);
+        return match prose {
+            Prose::Verbatim => prose_rows(text, cap, mode),
+            Prose::Markdown { full } => crate::markdown::markdown_rows(text, cap, full, mode),
+        };
     };
     match wired {
         WiredBlock::Art(art) => art.rows.iter().map(|cells| art_row(cells)).collect(),
@@ -850,6 +969,7 @@ fn art_row(cells: &[crate::diagram::ArtCell]) -> RenderRow {
             row.spans.push(RenderSpan {
                 range: start..row.text.len(),
                 role,
+                bold: false,
             });
         }
     }
@@ -907,7 +1027,7 @@ pub(crate) fn gutter_row(row: RenderRow) -> RenderRow {
     indent_row(row, "  ")
 }
 
-fn indent_row(mut row: RenderRow, prefix: &str) -> RenderRow {
+pub(crate) fn indent_row(mut row: RenderRow, prefix: &str) -> RenderRow {
     row.text.insert_str(0, prefix);
     for span in &mut row.spans {
         span.range.start += prefix.len();
@@ -1021,6 +1141,44 @@ mod tests {
         assert_eq!(on_cache.renders(), 1);
     }
     #[test]
+    fn the_idle_hint_picks_the_kitty_legacy_or_short_column_by_width() {
+        use crate::copy::ids;
+        use crate::width::WidthMode;
+
+        // Kitty keys confirmed and wide enough: the kitty column.
+        assert_eq!(
+            super::idle_hint(true, 80, WidthMode::Narrow),
+            ids::HINT_IDLE
+        );
+        // Without kitty keys the hint never promises shift+enter.
+        assert_eq!(
+            super::idle_hint(false, 80, WidthMode::Narrow),
+            ids::HINT_IDLE_LEGACY
+        );
+        assert_eq!(
+            super::idle_hint(false, 80, WidthMode::Cjk),
+            ids::HINT_IDLE_LEGACY
+        );
+        // Narrow rows fold to the short hint; ambiguous glyphs count in CJK mode.
+        assert_eq!(
+            super::idle_hint(true, 54, WidthMode::Narrow),
+            ids::HINT_IDLE_LEGACY
+        );
+        assert_eq!(
+            super::idle_hint(true, 44, WidthMode::Narrow),
+            ids::HINT_IDLE_SHORT
+        );
+        assert_eq!(
+            super::idle_hint(false, 21, WidthMode::Narrow),
+            ids::HINT_IDLE_SHORT
+        );
+        assert_eq!(
+            super::idle_hint(true, 56, WidthMode::Cjk),
+            ids::HINT_IDLE_LEGACY
+        );
+    }
+
+    #[test]
     fn queued_steer_rows_follow_the_authoritative_turn_state() {
         use dal_core::{TurnId, TurnState};
 
@@ -1036,6 +1194,7 @@ mod tests {
             "before [docs](file:///workspace/reference) after",
             10,
             WidthMode::Narrow,
+            super::Prose::Verbatim,
             DiagramSettings::default(),
             &RenderCache::default(),
         );

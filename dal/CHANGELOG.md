@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Fix terminal typing during startup: keys written while the capability probe runs now reach the composer as they are typed, instead of appearing only after the probe window ends.
+- Fix the terminal status context slot: from 70% of the context window it reads `ctx {n}% · rising` and from 90% `ctx {n}% · high`, with the word carrying a warning or error role.
+- Fix the idle hint: kitty-keyboard terminals show `shift+enter newline`, other terminals keep `ctrl+j newline`, and narrow rows fold to `enter send · f1 help`.
+- Fix the working spinner: it now animates through braille frames while a turn runs; under `DAL_NO_MOTION` it stays frozen on its first frame.
+- Fix the End key: it moves the composer caret to the line end again; the keyboard help no longer lists a jump-to-latest action that nothing dispatched.
+- Fix `--connect` sessions: the status line hides the git branch, because a remote host's workspace path does not name a directory on this machine.
+- Fix the terminal against its design contract: replies now render bold text, inline code, dashed lists, task boxes, and fenced code behind a rule; the status line shows the git branch after the path, the running job count, and the `{in}/{out}` token form at 60 to 79 columns; the composer edits at the caret with Left, Right, Home, End, Delete, word, kill, yank, undo, and history keys, wraps long drafts, and places the terminal caret; a cancelled tool call no longer leaves a `working` row; and a quit with an unsent draft shows the `[y] Discard the draft and quit   [n] Keep editing` question. The session now tells clients when a background job starts and settles.
 - Fix text that `before_turn` hooks add to a turn: the journal now keeps it as its own reminder entry after the user message instead of joining it to the message text, and the model still reads it as user text right after that message. Compaction counts it as user text, and the terminal draws no row for it. Other reminders stay out of the model context.
 - Add `elapsed_ms` to tool results: a tool result entry and the `tool_settled` update now carry the milliseconds the tool ran, measured on a monotonic clock and without the time spent waiting for an approval answer. It is absent for a call that never ran and for sessions written before this change.
 - Fix starting a child session that cannot open: the agents service now returns the cause, such as a child name already used in the workspace, instead of a bare cancelled reply. Two children started at the same time with the same name can no longer both claim it.

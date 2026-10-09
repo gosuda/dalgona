@@ -10,6 +10,7 @@ use dal_core::{
 };
 
 use crate::backend::{TuiAgent, TuiDelivery, TuiHost, TuiSubscription};
+use crate::composer::Composer;
 use crate::dialog::DialogUi;
 use crate::keys::{Action, InputEvent, KeyDecoder, Owner, resolve_in};
 use crate::live::Live;
@@ -32,7 +33,7 @@ const RESOLUTION_POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// Local composer and exit state; transport to `Agent::submit` lands with `Host::open`.
 #[derive(Debug, Default)]
 struct Session {
-    composer: String,
+    composer: Composer,
     dialog: Option<ExitDialog>,
     quit: bool,
     overlay: bool,
@@ -60,7 +61,7 @@ struct CommandContext<M> {
 impl Session {
     fn submit_line(&mut self, line: &str) {
         if line.trim().is_empty() {
-            self.composer.clear();
+            self.composer.take();
             return;
         }
         match dal_core::command::classify(line) {
@@ -86,14 +87,14 @@ impl Session {
                 });
             }
         }
-        self.composer.clear();
+        self.composer.take();
         self.update_popup();
     }
 
     fn update_popup(&mut self) {
         self.popup.clear();
         self.candidates.clear();
-        match crate::popup::complete_draft(&self.commands, &self.composer) {
+        match crate::popup::complete_draft(&self.commands, self.composer.text()) {
             crate::popup::DraftCompletion::Names(candidates) => {
                 self.candidates = candidates.into_iter().take(5).collect();
                 self.popup.extend(self.candidates.iter().map(|item| {
@@ -150,7 +151,7 @@ impl Session {
                 })
                 .collect(),
             Reply::Front(FrontAction::Quit) => {
-                if self.composer.trim().is_empty() {
+                if self.composer.text().trim().is_empty() {
                     self.quit = true;
                 } else {
                     self.dialog = Some(ExitDialog::DiscardDraft);
@@ -390,6 +391,10 @@ fn boot<A: TuiAgent>(
 > {
     let mut decoder = KeyDecoder::default();
     let diagram_cache = crate::diagram::RenderCache::with_path(opts.env.path.clone());
+    let branch = crate::status::workspace_branch(
+        agent.workspace_is_local(),
+        view.session.workspace.as_path(),
+    );
     let mut surfaces = Surfaces {
         session: Session {
             active_turn: match view.turn {
@@ -408,6 +413,7 @@ fn boot<A: TuiAgent>(
         diagram_generation: diagram_cache.generation(),
         diagram_cache,
         columns: io.size().map_or(80, |(columns, _)| columns),
+        branch,
         view,
     };
     surfaces.dialog.resync(surfaces.view.open.clone());
@@ -421,7 +427,15 @@ fn boot<A: TuiAgent>(
         eprintln!("[t0] pre-paint {}ms", debug_start.elapsed().as_millis());
     }
     surfaces.paint(io, state, &mut painter, opts, &palette)?;
-    let (probe, replay) = read_probe(io)?;
+    let probe = probe_terminal(
+        io,
+        state,
+        opts,
+        &palette,
+        &mut painter,
+        &mut decoder,
+        &mut surfaces,
+    )?;
     if opts.env.debug {
         eprintln!("[t0] probe done {}ms", debug_start.elapsed().as_millis());
     }
@@ -457,14 +471,6 @@ fn boot<A: TuiAgent>(
             .set_grapheme(true);
     }
     painter.set_sync(probe.sync_update);
-    for event in decoder.feed(&replay, Instant::now()) {
-        apply_event(
-            &mut surfaces.session,
-            &mut surfaces.dialog,
-            event,
-            probe.kitty_keyboard,
-        );
-    }
     Ok((surfaces, painter, theme, probe, decoder))
 }
 
@@ -550,6 +556,7 @@ where
         if surfaces.request_quit() {
             break;
         }
+        surfaces.live.spin(now);
         surfaces.paint(io, state, &mut painter, opts, &theme)?;
         if surfaces.session.cancel_settled
             || surfaces
@@ -666,6 +673,14 @@ impl<S: TuiSubscription> Drop for Pump<S> {
     }
 }
 
+/// Reads the kitty keyboard flag out of the shared terminal state.
+fn terminal_kitty(state: &std::sync::Mutex<TermState>) -> bool {
+    state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .kitty()
+}
+
 /// The live surfaces the loop mutates — view, interaction state, and render
 /// inputs move together through every drain.
 struct Surfaces {
@@ -678,6 +693,7 @@ struct Surfaces {
     diagram_settings: crate::diagram::DiagramSettings,
     diagram_cache: crate::diagram::RenderCache,
     diagram_generation: u64,
+    branch: Option<String>,
 }
 
 impl Surfaces {
@@ -725,13 +741,17 @@ impl Surfaces {
             FrameInput {
                 view: &self.view,
                 screen: opts.screen,
-                composer: &self.session.composer,
+                composer: self.session.composer.text(),
+                cursor: self.session.composer.cursor(),
+                exit_draft: self.session.dialog.is_some(),
+                branch: self.branch.as_deref(),
                 popup: &self.session.popup,
                 live: &self.live,
                 dialog: &self.dialog,
                 picker: self.session.picker.as_ref(),
                 transcript: &self.transcript,
                 opts,
+                kitty_keyboard: terminal_kitty(state),
                 theme,
                 diagram_settings: self.diagram_settings,
                 diagram_cache: &self.diagram_cache,
@@ -806,6 +826,11 @@ impl Surfaces {
                 self.session.active_turn = Some(*turn);
             }
             UpdateKind::TurnEnded { stop, .. } => {
+                // A turn may have switched branches; the file read is one short line.
+                self.branch = crate::status::workspace_branch(
+                    agent.workspace_is_local(),
+                    self.view.session.workspace.as_path(),
+                );
                 self.session.active_turn = None;
                 if self.session.cancelling.is_some() && *stop == Stop::Cancelled {
                     self.session.cancel_settled = true;
@@ -1112,7 +1137,11 @@ fn commit_entry(
         return;
     }
     let duration = match &entry.kind {
-        dal_core::EntryKind::ToolResult { call, .. } => transcript.tool_duration(call.as_str()),
+        dal_core::EntryKind::ToolResult {
+            call, elapsed_ms, ..
+        } => transcript
+            .tool_duration(call.as_str())
+            .or_else(|| elapsed_ms.map(Duration::from_millis)),
         _ => None,
     };
     let rows = entry_rows_timed(
@@ -1168,15 +1197,33 @@ fn fork_entries<A: TuiAgent>(
     Ok(entries)
 }
 
-fn read_probe(io: &dyn TermIo) -> Result<(crate::term::Probe, Vec<u8>), TuiError> {
+/// Reads the startup probe window, streaming type-ahead into the decoder as
+/// each read lands and painting an immediate frame for the keys it applies,
+/// so bytes typed during the probe show at once instead of after the
+/// deadline. Probe replies never reach the decoder, and the kitty switch
+/// happens only after the probe, so window bytes decode under the
+/// terminal's current encoding.
+fn probe_terminal(
+    io: &dyn TermIo,
+    state: &Arc<Mutex<TermState>>,
+    opts: &TuiOptions,
+    palette: &ResolvedTheme,
+    painter: &mut Painter,
+    decoder: &mut KeyDecoder,
+    surfaces: &mut Surfaces,
+) -> Result<crate::term::Probe, TuiError> {
     let deadline = Instant::now() + Duration::from_millis(300);
     let mut parser = ReplyParser::default();
     let mut probe = crate::term::Probe::default();
-    let mut replay = Vec::new();
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            replay.extend(parser.finish());
+            apply_type_ahead(
+                decoder,
+                &mut surfaces.session,
+                &mut surfaces.dialog,
+                &parser.finish(),
+            );
             break;
         }
         let bytes = io
@@ -1195,12 +1242,34 @@ fn read_probe(io: &dyn TermIo) -> Result<(crate::term::Probe, Vec<u8>), TuiError
         if next.background_luminance.is_some() {
             probe.background_luminance = next.background_luminance;
         }
-        replay.extend(keys);
+        if !keys.is_empty() {
+            apply_type_ahead(decoder, &mut surfaces.session, &mut surfaces.dialog, &keys);
+            // A key event requests an immediate frame that bypasses the batch.
+            surfaces.paint(io, state, painter, opts, palette)?;
+        }
         if probe.da1 {
+            let held = parser.finish();
+            apply_type_ahead(decoder, &mut surfaces.session, &mut surfaces.dialog, &held);
             break;
         }
     }
-    Ok((probe, replay))
+    Ok(probe)
+}
+
+/// Decodes terminal bytes into key events and applies them to the session.
+/// Probe-window bytes predate the kitty switch, so they decode as legacy.
+fn apply_type_ahead(
+    decoder: &mut KeyDecoder,
+    session: &mut Session,
+    dialog: &mut DialogUi,
+    bytes: &[u8],
+) {
+    if bytes.is_empty() {
+        return;
+    }
+    for event in decoder.feed(bytes, Instant::now()) {
+        apply_event(session, dialog, event, false);
+    }
 }
 
 fn apply_event(session: &mut Session, dialog: &mut DialogUi, event: InputEvent, kitty: bool) {
@@ -1211,7 +1280,7 @@ fn apply_event(session: &mut Session, dialog: &mut DialogUi, event: InputEvent, 
             if dialog.is_open() {
                 dialog.paste(&bytes);
             } else if session.dialog.is_none() && session.picker.is_none() {
-                session.composer.push_str(&String::from_utf8_lossy(&bytes));
+                session.composer.insert_paste(&bytes);
                 session.update_popup();
             }
         }
@@ -1250,18 +1319,21 @@ fn apply_event(session: &mut Session, dialog: &mut DialogUi, event: InputEvent, 
     let action = resolve_in(key, kitty, &[Owner::App, Owner::Composer, Owner::Editor]);
     match action {
         Some(Action::QuitEmptyComposer) if session.composer.is_empty() => session.quit = true,
+        // Ctrl+D with a draft deletes the character under the caret.
+        Some(Action::QuitEmptyComposer) => session.composer.delete(),
         Some(Action::Submit) => {
-            let line = session.composer.clone();
+            let line = session.composer.text().to_owned();
             session.submit_line(&line);
         }
         Some(Action::CloseOverlayOrInterrupt | Action::Interrupt) => session.interrupt(),
-        Some(Action::Newline) => session.composer.push('\n'),
+        Some(Action::Newline) => session.composer.insert("\n"),
         Some(Action::TranscriptOverlay) => session.overlay = !session.overlay,
         Some(Action::AcceptCycleCompletion) => {
             if let Some(candidate) = session.candidates.first() {
-                session.composer = format!("/{} ", candidate.name);
+                let completed = format!("/{} ", candidate.name);
+                session.composer.set(&completed);
             } else {
-                session.composer.push_str("  ");
+                session.composer.insert("  ");
             }
         }
         Some(Action::Help) => session.pending_commands.push(Command::Run {
@@ -1269,12 +1341,31 @@ fn apply_event(session: &mut Session, dialog: &mut DialogUi, event: InputEvent, 
             args: "".into(),
             expected: None,
         }),
-        None if key.code == KeyCode::Backspace => {
-            crate::composer::pop_grapheme(&mut session.composer);
+        Some(Action::CharLeft) => session.composer.move_left(),
+        Some(Action::CharRight) => session.composer.move_right(),
+        Some(Action::WordLeft) => session.composer.word_left(),
+        Some(Action::WordRight) => session.composer.word_right(),
+        Some(Action::LineStart) => session.composer.line_start(),
+        Some(Action::LineEnd) => session.composer.line_end(),
+        Some(Action::DeleteWordBack) => session.composer.delete_word_back(),
+        Some(Action::DeleteWordForward) => session.composer.delete_word_forward(),
+        Some(Action::KillLineStart) => session.composer.kill_line_start(),
+        Some(Action::KillLineEnd) => session.composer.kill_line_end(),
+        Some(Action::Yank) => session.composer.yank(),
+        Some(Action::Undo) => session.composer.undo(),
+        Some(Action::HistoryPrev) if session.composer.on_first_line() => {
+            session.composer.history_prev();
         }
+        Some(Action::HistoryPrev) => session.composer.move_up(),
+        Some(Action::HistoryNext) if session.composer.on_last_line() => {
+            session.composer.history_next();
+        }
+        Some(Action::HistoryNext) => session.composer.move_down(),
+        None if key.code == KeyCode::Backspace => session.composer.backspace(),
+        None if key.code == KeyCode::Delete => session.composer.delete(),
         None if key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT => {
             if let KeyCode::Char(character) = key.code {
-                session.composer.push(character);
+                session.composer.insert(character.encode_utf8(&mut [0; 4]));
             }
         }
         _ => {}
@@ -1467,7 +1558,7 @@ mod tests {
     #[test]
     fn quit_with_draft_requires_confirmation() {
         let mut session = Session {
-            composer: "rewrite the query".to_owned(),
+            composer: crate::composer::Composer::with_text("rewrite the query"),
             ..Session::default()
         };
         session.accept_reply(dal_core::Reply::Front(dal_core::FrontAction::Quit));
@@ -1476,7 +1567,7 @@ mod tests {
         session.answer_dialog('n');
         assert_eq!(session.dialog, None);
         assert!(!session.quit);
-        assert_eq!(session.composer, "rewrite the query");
+        assert_eq!(session.composer.text(), "rewrite the query");
         session.accept_reply(dal_core::Reply::Front(dal_core::FrontAction::Quit));
         session.answer_dialog('y');
         assert!(session.quit);

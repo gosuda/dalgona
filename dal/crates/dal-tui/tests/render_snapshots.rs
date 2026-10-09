@@ -12,6 +12,7 @@ fn idle() -> StatusData<'static> {
         path: Some("~/work/shop (main)"),
         tokens: Some("in 14k out 4k"),
         context: Some("ctx 47%"),
+        context_role: None,
         agents: Some("3 agents"),
         cost: Some("$0.42"),
     }

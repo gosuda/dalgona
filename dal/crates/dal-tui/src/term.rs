@@ -97,6 +97,12 @@ impl TermState {
         self.kitty = enabled;
     }
 
+    /// Reports whether kitty keyboard mode is active.
+    #[must_use]
+    pub const fn kitty(&self) -> bool {
+        self.kitty
+    }
+
     /// Records grapheme-width terminal mode.
     pub fn set_grapheme(&mut self, enabled: bool) {
         self.grapheme = enabled;
