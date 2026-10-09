@@ -2255,31 +2255,37 @@ mod win {
 
         /// The full plant→spawn→lift pipeline must actually run a
         /// permitted program — every existing gate only asserts denial, so
-        /// a sandbox that cannot launch anything would still pass. PATH is
-        /// clamped to `System32` so the grant phase stays a handful of
-        /// ACEs; the assertion is on the child really running.
+        /// a sandbox that cannot launch anything would still pass. The
+        /// program runs from a test-owned dir rather than `System32`:
+        /// Server DACLs neither carry `ALL APPLICATION PACKAGES` there nor
+        /// let an administrator `WRITE_DAC` it, so the real directory
+        /// cannot be granted on those images at all. PATH is clamped to
+        /// the fixture dir so the grant phase stays a handful of ACEs; the
+        /// assertion is on the child really running.
         #[test]
         fn sandboxed_program_runs_to_success() {
             let _env = ENV_LOCK.lock().expect("env lock poisoned");
             // SAFETY: serialized by ENV_LOCK; PATH is restored before the
             // assert — `remove_var` when it was originally absent so no
             // empty PATH leaks out either.
-            let env: std::collections::HashMap<OsString, OsString> =
-                std::env::vars_os().collect();
+            let env: std::collections::HashMap<OsString, OsString> = std::env::vars_os().collect();
             // Windows env names are case-insensitive but `vars_os` keeps
             // the stored case (`SYSTEMROOT` here), so compare folded.
             let get = |name: &str| {
                 env.iter()
-                    .find(|(key, _)| {
-                        key.as_os_str().eq_ignore_ascii_case(OsStr::new(name))
-                    })
+                    .find(|(key, _)| key.as_os_str().eq_ignore_ascii_case(OsStr::new(name)))
                     .map(|(_, value)| value.clone())
             };
+            let dir = tempfile::tempdir().expect("program dir");
+            let whoami = dir.path().join("whoami.exe");
+            std::fs::copy(
+                Path::new(&get("SystemRoot").expect("SystemRoot")).join("System32\\whoami.exe"),
+                &whoami,
+            )
+            .expect("copy whoami");
             let old_path = get("PATH");
-            let system32 = Path::new(&get("SystemRoot").expect("SystemRoot")).join("System32");
-            unsafe { std::env::set_var("PATH", &system32) };
+            unsafe { std::env::set_var("PATH", dir.path()) };
             let root = tempfile::tempdir().expect("temp root");
-            let whoami = system32.join("whoami.exe");
             let result = spawn(
                 &[root.path().to_path_buf()],
                 whoami.as_os_str(),
