@@ -285,11 +285,21 @@ fn export_temp_path(target: &Path, sequence: u64) -> io::Result<PathBuf> {
 
 async fn open_export_temp(target: &Path) -> io::Result<(PathBuf, tokio::fs::File)> {
     loop {
-        let sequence = NEXT_EXPORT_TEMP
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-                value.checked_add(1)
-            })
-            .map_err(|_| io::Error::other("export temporary-file sequence exhausted"))?;
+        let mut current = NEXT_EXPORT_TEMP.load(Ordering::Relaxed);
+        let sequence = loop {
+            let Some(next) = current.checked_add(1) else {
+                return Err(io::Error::other("export temporary-file sequence exhausted"));
+            };
+            match NEXT_EXPORT_TEMP.compare_exchange_weak(
+                current,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(previous) => break previous,
+                Err(actual) => current = actual,
+            }
+        };
         let temp = export_temp_path(target, sequence)?;
         match tokio::fs::OpenOptions::new()
             .write(true)

@@ -41,8 +41,8 @@ sonic-rs.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "macros", "rt", "rt-multi-thread", "sync", "time"] }
 tokio-util = { workspace = true, features = ["rt"] }
-tree-sitter = { version = "=0.27.0", optional = true }
-tree-sitter-language = { version = "=0.1.8", optional = true }
+tree-sitter = { version = "=0.27.1", optional = true }
+tree-sitter-language = { version = "=0.1.9", optional = true }
 tree-sitter-rust = { version = "=0.24.2", optional = true }
 tree-sitter-ocaml = { version = "=0.26.0", optional = true }
 tree-sitter-python = { version = "=0.25.0", optional = true }

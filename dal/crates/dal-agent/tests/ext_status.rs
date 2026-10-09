@@ -107,9 +107,12 @@ async fn ext_status_publishes_changes_once_and_tracks_quiet() {
     });
     let (_tmp, host, agent) = open(&poll).await;
     let mut subscription = agent.subscribe(None).expect("subscribe");
-    assert!(drain(&mut subscription).await.is_empty());
+    assert_eq!(
+        drain(&mut subscription).await,
+        [] as [dal_core::ExtStatus; 0]
+    );
     assert!(agent.is_quiet().await.expect("quiet predicate"));
-    assert!(agent.ext_status().is_empty());
+    assert_eq!(agent.ext_status(), [] as [dal_core::ExtStatus; 0]);
 
     poll.set(false, Some("indexing"));
     tokio::time::sleep(Duration::from_millis(400)).await;
@@ -121,7 +124,7 @@ async fn ext_status_publishes_changes_once_and_tracks_quiet() {
     poll.set(true, None);
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert!(agent.is_quiet().await.expect("quiet predicate"));
-    assert!(agent.ext_status().is_empty());
+    assert_eq!(agent.ext_status(), [] as [dal_core::ExtStatus; 0]);
 
     let seen = drain(&mut subscription).await;
     assert_eq!(
@@ -145,7 +148,10 @@ async fn poll_status_reads_a_fresh_state_without_waiting_for_the_tick() {
         state: Mutex::new((true, None)),
     });
     let (_tmp, host, agent) = open(&poll).await;
-    assert!(agent.poll_status().await.expect("poll").is_empty());
+    assert_eq!(
+        agent.poll_status().await.expect("poll"),
+        [] as [dal_core::ExtStatus; 0]
+    );
     poll.set(false, None);
     let busy = agent.poll_status().await.expect("poll");
     assert_eq!(
@@ -158,7 +164,10 @@ async fn poll_status_reads_a_fresh_state_without_waiting_for_the_tick() {
     );
     assert!(!agent.is_quiet().await.expect("quiet predicate"));
     poll.set(true, None);
-    assert!(agent.poll_status().await.expect("poll").is_empty());
+    assert_eq!(
+        agent.poll_status().await.expect("poll"),
+        [] as [dal_core::ExtStatus; 0]
+    );
     assert!(agent.is_quiet().await.expect("quiet predicate"));
     host.shutdown(Duration::from_secs(1)).await;
 }

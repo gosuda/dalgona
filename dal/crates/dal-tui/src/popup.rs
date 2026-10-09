@@ -105,7 +105,7 @@ mod tests {
 
     #[test]
     fn empty_command_list_renders_nothing() {
-        assert!(complete_commands(&[], "mod").is_empty());
+        assert_eq!(complete_commands(&[], "mod"), []);
     }
 
     #[test]

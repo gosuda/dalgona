@@ -134,7 +134,7 @@ mod tests {
         match outcome {
             DiagramOutcome::Art(art) => {
                 assert!(art.width_cells <= 80);
-                assert!(!art.rows.is_empty());
+                assert_ne!(art.rows.len(), 0);
             }
             DiagramOutcome::Fallback { .. } | DiagramOutcome::Pixels(_) => {}
         }

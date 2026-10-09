@@ -549,7 +549,7 @@ fn contract_enumeration() {
                 }
                 _ => error.message.clone(),
             };
-            assert!(!rendered.is_empty());
+            assert_ne!(rendered, "");
             if class == super::ir::ErrorClass::Parse {
                 assert!(rendered.contains("Current edit_style is"), "{rendered}");
             }

@@ -184,7 +184,7 @@ mod tests {
                 model: "chat-model".into(),
             }
         );
-        assert!(request.system.is_empty());
+        assert_eq!(request.system.as_ref(), "");
         assert!(request.tools.is_empty());
         assert!(request.context.is_empty());
         assert_eq!(request.params, RequestParams::default());

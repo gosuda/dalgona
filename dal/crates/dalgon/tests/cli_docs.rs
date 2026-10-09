@@ -17,17 +17,17 @@ fn docs_lists_pages_reads_config_and_suggests_nearest_page() -> Result<(), Box<d
     let listing = fixture.output(&["docs"])?;
     assert_eq!(listing.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&listing.stdout).contains("dal://config"));
-    assert!(listing.stderr.is_empty());
+    assert_eq!(listing.stderr, [] as [u8; 0]);
 
     let page = fixture.output(&["docs", "dal://config"])?;
     assert_eq!(page.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&page.stdout).starts_with("# Settings in dal.toml\n"));
-    assert!(page.stderr.is_empty());
+    assert_eq!(page.stderr, [] as [u8; 0]);
 
     let typo_uri = ["dal", "://", "confg"].concat();
     let miss = fixture.output(&["docs", &typo_uri])?;
     assert_eq!(miss.status.code(), Some(1));
-    assert!(miss.stdout.is_empty());
+    assert_eq!(miss.stdout, [] as [u8; 0]);
     let expected = [
         "dalgon: no dal document at dal",
         "://",

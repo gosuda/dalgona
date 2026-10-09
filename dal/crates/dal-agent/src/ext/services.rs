@@ -201,7 +201,6 @@ impl SessionServices {
     /// # Errors
     ///
     /// Returns the inject, grant, or backend failure.
-    #[must_use]
     pub fn script_infer(&self, who: &Caller, req: ModelRequest) -> ServiceFuture<'_, Inference> {
         self.script_infer_with(who, req, None, self.cancel.clone())
     }

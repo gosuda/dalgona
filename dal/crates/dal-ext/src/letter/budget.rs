@@ -440,6 +440,6 @@ mod tests {
                 );
             }
         }
-        assert!(image_parts(&[]).is_empty());
+        assert_eq!(image_parts(&[]), []);
     }
 }

@@ -292,7 +292,7 @@ mod tests {
         #[cfg(unix)]
         {
             let before = fs::read(&path).expect("read owner pid");
-            assert!(!before.is_empty());
+            assert_ne!(before, [] as [u8; 0]);
             assert_eq!(fs::read(&path).expect("read unchanged owner pid"), before);
         }
     }
@@ -351,7 +351,7 @@ mod tests {
             fs::read(&path).expect("new owner pid"),
             format!("{}\n", std::process::id()).as_bytes()
         );
-        assert!(!stale_pid.is_empty());
+        assert_ne!(stale_pid, [] as [u8; 0]);
     }
 
     #[test]

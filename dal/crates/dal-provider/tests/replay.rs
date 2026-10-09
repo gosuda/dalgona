@@ -138,7 +138,7 @@ async fn chat_text_turn() {
         match event.expect("no stream error") {
             StreamEvent::TextDelta { text } => texts.push_str(&text),
             StreamEvent::ToolCallsDone { calls } => {
-                assert!(calls.is_empty());
+                assert_eq!(calls, [] as [dal_provider::ToolCall; 0]);
                 saw_done = true;
             }
             StreamEvent::Usage { usage } => {
@@ -153,7 +153,7 @@ async fn chat_text_turn() {
     assert!(saw_done && saw_usage);
     assert!(matches!(stop, Some(StopReason::EndTurn)));
     assert_eq!(server.addr().ip().to_string(), "127.0.0.1");
-    assert!(server.mismatches().is_empty());
+    assert_eq!(server.mismatches(), [] as [std::string::String; 0]);
     assert_eq!(server.consumed(), 1);
     assert_eq!(server.open_requests(), 0);
     assert!(server.max_open_requests() >= 1);

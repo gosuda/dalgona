@@ -376,7 +376,7 @@ mod tests {
         assert_eq!(built.name, "dal");
         assert_eq!(built.data_root, data_root);
         assert_eq!(built.defaults, "");
-        assert!(built.bundled.is_empty());
+        assert_eq!(built.bundled, [] as [dal_core::PluginSource; 0]);
         assert!(!config.search_symbols());
         assert!(!config.guard().enabled);
 
@@ -478,7 +478,7 @@ mod tests {
 
         let mut partial = parts(&cx).unwrap();
         assert!(partial.batteries.is_empty());
-        assert!(partial.bundled.is_empty());
+        assert_eq!(partial.bundled, [] as [dal_core::PluginSource; 0]);
         let battery =
             dal_agent::ext::ExtensionBuilder::new("battery", "0.1.0", dal_core::ServiceSet::EMPTY)
                 .unwrap()

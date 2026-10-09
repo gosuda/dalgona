@@ -75,7 +75,7 @@ fn e01_uses_list_rejects_duplicates_and_oversize() -> TestResult {
             .count(),
         64
     );
-    assert!(OpSet::parse([])?.is_empty());
+    assert_eq!(OpSet::parse([])?, OpSet::EMPTY);
     assert_eq!(OpSet::parse([])?, OpSet::EMPTY);
     assert_eq!(OpSet::default(), OpSet::EMPTY);
     Ok(())

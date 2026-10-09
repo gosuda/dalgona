@@ -261,7 +261,7 @@ async fn helper_skips_tests_and_reuse() {
     let post = parsed("/ws/src/tests/a.rs", post_src).await;
     let pre_metrics = metrics::measure(parse::Language::Rust, &pre.tree, pre_src.as_bytes());
     let post_metrics = metrics::measure(parse::Language::Rust, &post.tree, post_src.as_bytes());
-    assert!(
+    assert_eq!(
         checks::helper(
             parse::Language::Rust,
             "src/tests/a.rs",
@@ -269,8 +269,8 @@ async fn helper_skips_tests_and_reuse() {
             &post,
             post_src.as_bytes(),
             &post_metrics,
-        )
-        .is_empty()
+        ),
+        []
     );
     let post_twice_src = "fn h() -> i32 {\n 1\n}\nfn main() {\n let _ = h();\n let _ = h();\n}\n";
     let post_twice = parsed("/ws/src/a.rs", post_twice_src).await;
@@ -279,7 +279,7 @@ async fn helper_skips_tests_and_reuse() {
         &post_twice.tree,
         post_twice_src.as_bytes(),
     );
-    assert!(
+    assert_eq!(
         checks::helper(
             parse::Language::Rust,
             "src/a.rs",
@@ -287,8 +287,8 @@ async fn helper_skips_tests_and_reuse() {
             &post_twice,
             post_twice_src.as_bytes(),
             &post_twice_metrics,
-        )
-        .is_empty()
+        ),
+        []
     );
 }
 
@@ -629,7 +629,7 @@ fn dal_default_off() {
         call: CallId::new("c1"),
         files: Vec::new(),
     };
-    assert!(engine.inspect(&batch).is_empty());
+    assert_eq!(engine.inspect(&batch), []);
     let router = super::stream::Router::new(Arc::new(Engine::new(GuardConfig::disabled())));
     assert!(
         router

@@ -429,13 +429,19 @@ mod tests {
         for index in 0..257 {
             seen.show(session, &format!("path-{index}"), digest, 1, 1);
         }
-        assert!(seen.intervals(session, "path-0", digest).is_empty());
+        assert_eq!(
+            seen.intervals(session, "path-0", digest),
+            [] as [(u64, u64); 0]
+        );
         assert_eq!(seen.intervals(session, "path-1", digest), [(1, 1)]);
 
         for version in 0..17 {
             seen.show(session, "one-path", [version; 32], 1, 1);
         }
-        assert!(seen.intervals(session, "one-path", [0; 32]).is_empty());
+        assert_eq!(
+            seen.intervals(session, "one-path", [0; 32]),
+            [] as [(u64, u64); 0]
+        );
         assert_eq!(seen.intervals(session, "one-path", [1; 32]), [(1, 1)]);
 
         let session_store = Seen::new();
@@ -449,10 +455,9 @@ mod tests {
             [(1, 4)]
         );
         session_store.show(SessionId::new_v7(), "newest", digest, 1, 1);
-        assert!(
-            session_store
-                .intervals(oldest, "retained", digest)
-                .is_empty()
+        assert_eq!(
+            session_store.intervals(oldest, "retained", digest),
+            [] as [(u64, u64); 0]
         );
     }
 
