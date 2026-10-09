@@ -26,7 +26,7 @@ use tokio_util::sync::CancellationToken;
 use super::{
     Budgets, LIST_PAGE_MAX, MRTR_MAX, McpConfig, McpError, RESTART_BUDGET, TransportError,
     http::{
-        HttpTransport,
+        ExchangeRequest, HttpTransport,
         auth::RefreshCoordinator,
         protocol::{self, LEGACY_PROTOCOL_VERSION, PROTOCOL_VERSION},
     },
@@ -182,18 +182,18 @@ impl Transport {
             }
             Self::Http(transport) => {
                 transport
-                    .exchange(
+                    .exchange(ExchangeRequest {
                         id,
-                        &ctx.instance.next_id,
+                        ids: &ctx.instance.next_id,
                         method,
                         params,
-                        annotations,
+                        headers: annotations,
                         arguments,
                         version,
-                        ctx.session.services.as_ref(),
-                        ctx.who,
-                        &ctx.instance.cancel,
-                    )
+                        services: ctx.session.services.as_ref(),
+                        who: ctx.who,
+                        cancel: &ctx.instance.cancel,
+                    })
                     .await
             }
         }

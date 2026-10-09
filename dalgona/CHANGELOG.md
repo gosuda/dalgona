@@ -14,6 +14,7 @@
 - Assemble Dalgona's batteries as bundled Rust extensions through dal's public extension API.
 - Stop the review tool at the round cap and list the findings still open; running `/review` after the cap starts a new session through the new `restart` argument, which never discards rounds in progress.
 - Fix MCP servers that use OAuth when several calls get a 401 at once: one token refresh serves all of them. A refresh that fails for a temporary reason, such as a network error or a server error, no longer forces a new login, and a token from a new login replaces the old token for every connection.
+- Fix MCP step-up authorization prompts repeated by concurrent tool calls: the server's "insufficient scope" reply now prompts the user once for the extra permission, and a declined or cancelled prompt answers later calls without asking again until a fresh token is stored.
 - Fix `/abort` and session end with orchestration children: every queued or running child and its descendants are cancelled, and a failed cancel or list no longer stops the sweep. `/abort` reports each failure with the child id, and `agents cancel` tries every named id and reports each refusal.
 
 ## 0.1.0 (2026-09-26)

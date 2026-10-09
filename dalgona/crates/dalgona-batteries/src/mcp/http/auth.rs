@@ -96,6 +96,12 @@ struct RefreshSlotState {
     /// Set when an interactive record replaced `last` while a flight was
     /// still running, so the older flight cannot overwrite it.
     superseded: bool,
+    /// Interactive authorization prompts already in flight for this
+    /// credential, so concurrent callers prompt once.
+    prompts: u32,
+    /// Set when a prompt was declined or cancelled, so later failures
+    /// answer without asking again until a fresh token publishes.
+    cancelled: bool,
 }
 
 struct RefreshFlight {
@@ -137,6 +143,42 @@ impl RefreshCoordinator {
         let mut state = slot.state.lock().await;
         state.superseded = state.flight.is_some();
         state.last = Some(record);
+        state.cancelled = false;
+    }
+
+    /// Runs one interactive authorization prompt for the credential.
+    ///
+    /// The in-flight counter serializes prompts across transports: a second
+    /// caller refuses without asking while one prompt runs, and a declined
+    /// or cancelled prompt latches until a fresh token publishes.
+    ///
+    /// # Errors
+    /// Returns [`McpError::NoAskFrontEnd`] when a prompt is already in
+    /// flight or was declined, and any prompt error unchanged.
+    pub(crate) async fn interactive_section<T, F, Fut>(
+        &self,
+        key: &str,
+        work: F,
+    ) -> Result<T, McpError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<T, McpError>> + Send,
+    {
+        let slot = self.slot(key).await;
+        {
+            let mut state = slot.state.lock().await;
+            if state.cancelled || state.prompts > 0 {
+                return Err(McpError::NoAskFrontEnd);
+            }
+            state.prompts += 1;
+        }
+        let outcome = work().await;
+        let mut state = slot.state.lock().await;
+        state.prompts -= 1;
+        if let Err(McpError::NoAskFrontEnd) = &outcome {
+            state.cancelled = true;
+        }
+        outcome
     }
 
     pub(crate) async fn run<F, Fut>(
@@ -152,14 +194,19 @@ impl RefreshCoordinator {
         let slot = self.slot(key).await;
         let flight = {
             let mut state = slot.state.lock().await;
-            if (state.flight.is_none() || state.superseded)
+            if state.superseded
+                && let Some(record) = state.last.as_ref()
+            {
+                return Ok(Some(record.clone()));
+            }
+            if state.flight.is_none()
                 && let Some(record) = state.last.as_ref()
                 && record.access_token != held_access
             {
                 return Ok(Some(record.clone()));
             }
-            if let Some(flight) = state.flight.as_ref() {
-                Arc::clone(flight)
+            if let Some(existing) = state.flight.as_ref() {
+                Arc::clone(existing)
             } else {
                 let flight = Arc::new(RefreshFlight {
                     result: Mutex::new(None),
@@ -322,75 +369,136 @@ pub(crate) fn pkce_challenge(verifier: &str) -> String {
     URL_SAFE_NO_PAD.encode(sha256(verifier.as_bytes()))
 }
 
+/// FIPS 180-4 round constants for SHA-256.
+const SHA256_K: [u32; 64] = [
+    0x428a_2f98,
+    0x7137_4491,
+    0xb5c0_fbcf,
+    0xe9b5_dba5,
+    0x3956_c25b,
+    0x59f1_11f1,
+    0x923f_82a4,
+    0xab1c_5ed5,
+    0xd807_aa98,
+    0x1283_5b01,
+    0x2431_85be,
+    0x550c_7dc3,
+    0x72be_5d74,
+    0x80de_b1fe,
+    0x9bdc_06a7,
+    0xc19b_f174,
+    0xe49b_69c1,
+    0xefbe_4786,
+    0x0fc1_9dc6,
+    0x240c_a1cc,
+    0x2de9_2c6f,
+    0x4a74_84aa,
+    0x5cb0_a9dc,
+    0x76f9_88da,
+    0x983e_5152,
+    0xa831_c66d,
+    0xb003_27c8,
+    0xbf59_7fc7,
+    0xc6e0_0bf3,
+    0xd5a7_9147,
+    0x06ca_6351,
+    0x1429_2967,
+    0x27b7_0a85,
+    0x2e1b_2138,
+    0x4d2c_6dfc,
+    0x5338_0d13,
+    0x650a_7354,
+    0x766a_0abb,
+    0x81c2_c92e,
+    0x9272_2c85,
+    0xa2bf_e8a1,
+    0xa81a_664b,
+    0xc24b_8b70,
+    0xc76c_51a3,
+    0xd192_e819,
+    0xd699_0624,
+    0xf40e_3585,
+    0x106a_a070,
+    0x19a4_c116,
+    0x1e37_6c08,
+    0x2748_774c,
+    0x34b0_bcb5,
+    0x391c_0cb3,
+    0x4ed8_aa4a,
+    0x5b9c_ca4f,
+    0x682e_6ff3,
+    0x748f_82ee,
+    0x78a5_636f,
+    0x84c8_7814,
+    0x8cc7_0208,
+    0x90be_fffa,
+    0xa450_6ceb,
+    0xbef9_a3f7,
+    0xc671_78f2,
+];
+
+/// Compresses one padded 64-byte block into `state`, per FIPS 180-4.
+fn sha256_block(state: &mut [u32; 8], chunk: &[u8]) {
+    let mut schedule = [0_u32; 64];
+    for (index, word) in schedule.iter_mut().enumerate().take(16) {
+        let at = index * 4;
+        *word = u32::from_be_bytes([chunk[at], chunk[at + 1], chunk[at + 2], chunk[at + 3]]);
+    }
+    for index in 16..64 {
+        let small0 = schedule[index - 15].rotate_right(7)
+            ^ schedule[index - 15].rotate_right(18)
+            ^ (schedule[index - 15] >> 3);
+        let small1 = schedule[index - 2].rotate_right(17)
+            ^ schedule[index - 2].rotate_right(19)
+            ^ (schedule[index - 2] >> 10);
+        schedule[index] = schedule[index - 16]
+            .wrapping_add(small0)
+            .wrapping_add(schedule[index - 7])
+            .wrapping_add(small1);
+    }
+    let [
+        mut work_a,
+        mut work_b,
+        mut work_c,
+        mut work_d,
+        mut work_e,
+        mut work_f,
+        mut work_g,
+        mut work_h,
+    ] = *state;
+    for round in 0..64 {
+        let big1 = work_e.rotate_right(6) ^ work_e.rotate_right(11) ^ work_e.rotate_right(25);
+        let choice = (work_e & work_f) ^ ((!work_e) & work_g);
+        let temp1 = work_h
+            .wrapping_add(big1)
+            .wrapping_add(choice)
+            .wrapping_add(SHA256_K[round])
+            .wrapping_add(schedule[round]);
+        let big0 = work_a.rotate_right(2) ^ work_a.rotate_right(13) ^ work_a.rotate_right(22);
+        let majority = (work_a & work_b) ^ (work_a & work_c) ^ (work_b & work_c);
+        let temp2 = big0.wrapping_add(majority);
+        work_h = work_g;
+        work_g = work_f;
+        work_f = work_e;
+        work_e = work_d.wrapping_add(temp1);
+        work_d = work_c;
+        work_c = work_b;
+        work_b = work_a;
+        work_a = temp1.wrapping_add(temp2);
+    }
+    state[0] = state[0].wrapping_add(work_a);
+    state[1] = state[1].wrapping_add(work_b);
+    state[2] = state[2].wrapping_add(work_c);
+    state[3] = state[3].wrapping_add(work_d);
+    state[4] = state[4].wrapping_add(work_e);
+    state[5] = state[5].wrapping_add(work_f);
+    state[6] = state[6].wrapping_add(work_g);
+    state[7] = state[7].wrapping_add(work_h);
+}
+
 /// Private SHA-256 over bytes, per FIPS 180-4. No hashing crate is added for
 /// the one MCP PKCE challenge.
 pub(crate) fn sha256(bytes: &[u8]) -> [u8; 32] {
-    const K: [u32; 64] = [
-        0x428a_2f98,
-        0x7137_4491,
-        0xb5c0_fbcf,
-        0xe9b5_dba5,
-        0x3956_c25b,
-        0x59f1_11f1,
-        0x923f_82a4,
-        0xab1c_5ed5,
-        0xd807_aa98,
-        0x1283_5b01,
-        0x2431_85be,
-        0x550c_7dc3,
-        0x72be_5d74,
-        0x80de_b1fe,
-        0x9bdc_06a7,
-        0xc19b_f174,
-        0xe49b_69c1,
-        0xefbe_4786,
-        0x0fc1_9dc6,
-        0x240c_a1cc,
-        0x2de9_2c6f,
-        0x4a74_84aa,
-        0x5cb0_a9dc,
-        0x76f9_88da,
-        0x983e_5152,
-        0xa831_c66d,
-        0xb003_27c8,
-        0xbf59_7fc7,
-        0xc6e0_0bf3,
-        0xd5a7_9147,
-        0x06ca_6351,
-        0x1429_2967,
-        0x27b7_0a85,
-        0x2e1b_2138,
-        0x4d2c_6dfc,
-        0x5338_0d13,
-        0x650a_7354,
-        0x766a_0abb,
-        0x81c2_c92e,
-        0x9272_2c85,
-        0xa2bf_e8a1,
-        0xa81a_664b,
-        0xc24b_8b70,
-        0xc76c_51a3,
-        0xd192_e819,
-        0xd699_0624,
-        0xf40e_3585,
-        0x106a_a070,
-        0x19a4_c116,
-        0x1e37_6c08,
-        0x2748_774c,
-        0x34b0_bcb5,
-        0x391c_0cb3,
-        0x4ed8_aa4a,
-        0x5b9c_ca4f,
-        0x682e_6ff3,
-        0x748f_82ee,
-        0x78a5_636f,
-        0x84c8_7814,
-        0x8cc7_0208,
-        0x90be_fffa,
-        0xa450_6ceb,
-        0xbef9_a3f7,
-        0xc671_78f2,
-    ];
     let mut state: [u32; 8] = [
         0x6a09_e667,
         0xbb67_ae85,
@@ -409,61 +517,7 @@ pub(crate) fn sha256(bytes: &[u8]) -> [u8; 32] {
     }
     padded.extend_from_slice(&bit_len.to_be_bytes());
     for chunk in padded.as_chunks::<64>().0 {
-        let mut schedule = [0_u32; 64];
-        for (index, word) in schedule.iter_mut().enumerate().take(16) {
-            let at = index * 4;
-            *word = u32::from_be_bytes([chunk[at], chunk[at + 1], chunk[at + 2], chunk[at + 3]]);
-        }
-        for index in 16..64 {
-            let small0 = schedule[index - 15].rotate_right(7)
-                ^ schedule[index - 15].rotate_right(18)
-                ^ (schedule[index - 15] >> 3);
-            let small1 = schedule[index - 2].rotate_right(17)
-                ^ schedule[index - 2].rotate_right(19)
-                ^ (schedule[index - 2] >> 10);
-            schedule[index] = schedule[index - 16]
-                .wrapping_add(small0)
-                .wrapping_add(schedule[index - 7])
-                .wrapping_add(small1);
-        }
-        let [
-            mut work_a,
-            mut work_b,
-            mut work_c,
-            mut work_d,
-            mut work_e,
-            mut work_f,
-            mut work_g,
-            mut work_h,
-        ] = state;
-        for round in 0..64 {
-            let big1 = work_e.rotate_right(6) ^ work_e.rotate_right(11) ^ work_e.rotate_right(25);
-            let choice = (work_e & work_f) ^ ((!work_e) & work_g);
-            let temp1 = work_h
-                .wrapping_add(big1)
-                .wrapping_add(choice)
-                .wrapping_add(K[round])
-                .wrapping_add(schedule[round]);
-            let big0 = work_a.rotate_right(2) ^ work_a.rotate_right(13) ^ work_a.rotate_right(22);
-            let majority = (work_a & work_b) ^ (work_a & work_c) ^ (work_b & work_c);
-            let temp2 = big0.wrapping_add(majority);
-            work_h = work_g;
-            work_g = work_f;
-            work_f = work_e;
-            work_e = work_d.wrapping_add(temp1);
-            work_d = work_c;
-            work_c = work_b;
-            work_b = work_a;
-            work_a = temp1.wrapping_add(temp2);
-        }
-        state[0] = state[0].wrapping_add(work_a);
-        state[1] = state[1].wrapping_add(work_b);
-        state[2] = state[2].wrapping_add(work_c);
-        state[3] = state[3].wrapping_add(work_d);
-        state[4] = state[4].wrapping_add(work_e);
-        state[5] = state[5].wrapping_add(work_f);
-        state[6] = state[6].wrapping_add(work_g);
-        state[7] = state[7].wrapping_add(work_h);
+        sha256_block(&mut state, chunk);
     }
     let mut digest = [0_u8; 32];
     for (index, word) in state.iter().enumerate() {
@@ -477,7 +531,12 @@ mod tests {
     use super::*;
 
     fn hex(digest: [u8; 32]) -> String {
-        digest.iter().map(|byte| format!("{byte:02x}")).collect()
+        use std::fmt::Write as _;
+        let mut rendered = String::with_capacity(64);
+        for byte in digest {
+            let _ = write!(rendered, "{byte:02x}");
+        }
+        rendered
     }
 
     #[test]
@@ -602,5 +661,46 @@ mod tests {
         let rendered = format!("{record:?}");
         assert!(!rendered.contains("sekret"));
         assert!(rendered.contains("client"));
+    }
+
+    #[tokio::test]
+    async fn run_adopts_a_published_record_while_a_superseded_flight_runs() {
+        use std::future::pending;
+
+        let coordinator = RefreshCoordinator::new();
+        // A caller holding an older token starts a refresh flight; the
+        // operation never finishes, so the flight stays in the slot. The
+        // future is dropped at the timeout while the flight task keeps the
+        // slot occupied.
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(200),
+                coordinator.run("key", "old-access", || async { pending().await }),
+            )
+            .await
+            .is_err(),
+            "the flight keeps running"
+        );
+        // An interactive login publishes while that flight is running.
+        let published = TokenRecord {
+            client_id: "client".to_owned(),
+            access_token: "new-access".to_owned(),
+            refresh_token: None,
+            scopes: Vec::new(),
+        };
+        coordinator.publish("key", published).await;
+        // A caller holding the published token itself must adopt it without
+        // waiting on the superseded flight started for the older token.
+        let adopted = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            coordinator.run("key", "new-access", || async { pending().await }),
+        )
+        .await
+        .expect("the second caller returns without waiting")
+        .expect("adoption succeeds");
+        assert_eq!(
+            adopted.map(|record| record.access_token),
+            Some("new-access".to_owned())
+        );
     }
 }

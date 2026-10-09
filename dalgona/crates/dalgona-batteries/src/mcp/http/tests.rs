@@ -13,7 +13,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    CallDeadline, HttpTransport,
+    CallDeadline, HttpCall, HttpTransport, StreamContext,
     auth::RefreshCoordinator,
     protocol::{PROTOCOL_VERSION, outbound_headers, request_body},
 };
@@ -126,12 +126,14 @@ async fn posts_mcp_headers_and_correlates_a_retried_id() {
     let cancel = CancellationToken::new();
     let (response, (headers, sent_body)) = tokio::join!(
         transport.send_once(
-            request.as_str(),
-            Some("tools/call"),
-            Some("echo"),
-            &extra,
-            PROTOCOL_VERSION,
-            None,
+            HttpCall {
+                body: request.as_str(),
+                method: Some("tools/call"),
+                name: Some("echo"),
+                extra: &extra,
+                version: PROTOCOL_VERSION,
+                token: None,
+            },
             &cancel,
             &deadline,
         ),
@@ -213,12 +215,14 @@ async fn consumes_request_scoped_sse_incrementally_and_extends_on_progress() {
     let response = transport
         .read_event_stream(
             response,
-            9,
-            4,
-            &CancellationToken::new(),
-            &mut deadline,
-            PROTOCOL_VERSION,
-            None,
+            StreamContext {
+                request_id: 9,
+                original_id: 4,
+                cancel: &CancellationToken::new(),
+                deadline: &mut deadline,
+                version: PROTOCOL_VERSION,
+                token: None,
+            },
         )
         .await
         .expect("SSE reply");
@@ -247,7 +251,7 @@ mod unauthorized_recovery {
         path::PathBuf,
         sync::{
             Arc, Mutex,
-            atomic::{AtomicU64, AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         },
         time::Duration,
     };
@@ -274,7 +278,7 @@ mod unauthorized_recovery {
     use crate::mcp::{
         Budgets, McpError, TransportError,
         http::{
-            HttpTransport,
+            ExchangeRequest, HttpTransport,
             auth::{self, RefreshCoordinator, TokenRecord},
             oauth::{self, Challenge, Discovery},
             protocol::PROTOCOL_VERSION,
@@ -287,6 +291,7 @@ mod unauthorized_recovery {
     #[derive(Default)]
     struct CountingServices {
         asked: AtomicUsize,
+        answer: Mutex<Option<Answer>>,
     }
 
     fn unavailable<T: Send + 'static>() -> ServiceFuture<'static, T> {
@@ -321,7 +326,8 @@ mod unauthorized_recovery {
 
         fn ask(&self, _who: &Caller, _question: Question) -> ServiceFuture<'_, Option<Answer>> {
             self.asked.fetch_add(1, Ordering::SeqCst);
-            Box::pin(async { Ok(None) })
+            let answer = self.answer.lock().expect("answer").clone();
+            Box::pin(async move { Ok(answer) })
         }
 
         fn mcp(&self, _who: &Caller, _req: McpRequest) -> ServiceFuture<'_, McpResponse> {
@@ -420,6 +426,7 @@ mod unauthorized_recovery {
         accepted: Mutex<String>,
         token_replies: Mutex<VecDeque<(u16, String)>>,
         token_requests: AtomicUsize,
+        step_up: AtomicBool,
     }
 
     fn reply(status: u16, body: &str) -> String {
@@ -441,6 +448,10 @@ mod unauthorized_recovery {
     impl Server {
         fn token_requests(&self) -> usize {
             self.token_requests.load(Ordering::SeqCst)
+        }
+
+        fn require_step_up(&self) {
+            self.step_up.store(true, Ordering::SeqCst);
         }
 
         fn accept_only(&self, token: &str) {
@@ -485,6 +496,9 @@ mod unauthorized_recovery {
             }
             if !line.starts_with("POST /mcp") {
                 return reply(404, "{}");
+            }
+            if self.step_up.load(Ordering::SeqCst) {
+                return "HTTP/1.1 403 Forbidden\r\nWWW-Authenticate: Bearer error=\"insufficient_scope\", scope=\"write\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned();
             }
             let bearer = headers.lines().find_map(|line| {
                 let (name, value) = line.split_once(':')?;
@@ -585,6 +599,7 @@ mod unauthorized_recovery {
                 accepted: Mutex::new(accepted.to_owned()),
                 token_replies: Mutex::new(replies.into()),
                 token_requests: AtomicUsize::new(0),
+                step_up: AtomicBool::new(false),
             });
             let fixture = Self {
                 server,
@@ -629,6 +644,10 @@ mod unauthorized_recovery {
             self.services.asked.load(Ordering::SeqCst)
         }
 
+        fn answer(&self, answer: Answer) {
+            *self.services.answer.lock().expect("answer") = Some(answer);
+        }
+
         /// Issues one tool call through the real exchange path.
         fn call(
             &self,
@@ -640,18 +659,18 @@ mod unauthorized_recovery {
             async move {
                 let ids = AtomicU64::new(1000);
                 transport
-                    .exchange(
-                        1,
-                        &ids,
-                        "tools/call",
-                        "{\"name\":\"echo\"}",
-                        &[],
-                        None,
-                        PROTOCOL_VERSION,
-                        services.as_ref(),
-                        &who,
-                        &CancellationToken::new(),
-                    )
+                    .exchange(ExchangeRequest {
+                        id: 1,
+                        ids: &ids,
+                        method: "tools/call",
+                        params: "{\"name\":\"echo\"}",
+                        headers: &[],
+                        arguments: None,
+                        version: PROTOCOL_VERSION,
+                        services: services.as_ref(),
+                        who: &who,
+                        cancel: &CancellationToken::new(),
+                    })
                     .await
             }
         }
@@ -683,7 +702,7 @@ mod unauthorized_recovery {
     #[tokio::test]
     async fn a_transient_refresh_failure_does_not_block_a_later_refresh() {
         let replies = vec![
-            (503, "{}".to_owned()),
+            (304, "{}".to_owned()),
             tokens_reply("fresh-access", "fresh-refresh"),
         ];
         let (fixture, listener) = Fixture::start("fresh-access", replies).await;
@@ -692,7 +711,7 @@ mod unauthorized_recovery {
             let first = fixture.call(&transport).await;
             assert!(
                 matches!(first, Err(TransportError::Mcp(McpError::Auth { .. }))),
-                "a 503 from the token endpoint is an error, not a refusal: {first:?}"
+                "a 304 from the token endpoint is an error, not a refusal: {first:?}"
             );
             assert_eq!(fixture.server.token_requests(), 1);
             assert_eq!(fixture.asked(), 0, "a transient failure must not prompt");
@@ -714,10 +733,16 @@ mod unauthorized_recovery {
         let transport = fixture.transport();
         let scenario = async {
             let first = fixture.call(&transport).await;
-            assert!(first.is_err());
+            assert!(matches!(
+                first,
+                Err(TransportError::Mcp(McpError::Auth { .. }))
+            ));
             assert_eq!(fixture.asked(), 1, "a refusal falls back to the prompt");
             let second = fixture.call(&transport).await;
-            assert!(second.is_err());
+            assert!(matches!(
+                second,
+                Err(TransportError::Mcp(McpError::Auth { .. }))
+            ));
         };
         with_server(listener, &fixture.server, scenario).await;
         assert_eq!(
@@ -764,5 +789,50 @@ mod unauthorized_recovery {
         let response = with_server(listener, &fixture.server, scenario).await;
         assert!(response.as_str().contains("interactive-access"));
         assert_eq!(fixture.server.token_requests(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_authorization_latches_later_401s_without_another_prompt() {
+        let replies = vec![(400, "{\"error\":\"invalid_grant\"}".to_owned())];
+        let (fixture, listener) = Fixture::start("fresh-access", replies).await;
+        fixture.answer(Answer::Cancel);
+        let transport = fixture.transport();
+        let scenario = async {
+            let first = fixture.call(&transport).await;
+            assert!(matches!(
+                first,
+                Err(TransportError::Mcp(McpError::NoAskFrontEnd))
+            ));
+            let second = fixture.call(&transport).await;
+            assert!(matches!(
+                second,
+                Err(TransportError::Mcp(McpError::NoAskFrontEnd))
+            ));
+        };
+        with_server(listener, &fixture.server, scenario).await;
+        assert_eq!(fixture.server.token_requests(), 1);
+        assert_eq!(fixture.asked(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_step_up_cancellation_prompts_once_and_latches() {
+        let (fixture, listener) = Fixture::start("fresh-access", Vec::new()).await;
+        fixture.server.require_step_up();
+        fixture.answer(Answer::Cancel);
+        let mut calls = JoinSet::new();
+        for _ in 0..2 {
+            calls.spawn(fixture.call(&fixture.transport()));
+        }
+        let drain = async {
+            while let Some(joined) = calls.join_next().await {
+                let result = joined.expect("step-up task");
+                assert!(matches!(
+                    result,
+                    Err(TransportError::Mcp(McpError::NoAskFrontEnd))
+                ));
+            }
+        };
+        with_server(listener, &fixture.server, drain).await;
+        assert_eq!(fixture.asked(), 1);
     }
 }

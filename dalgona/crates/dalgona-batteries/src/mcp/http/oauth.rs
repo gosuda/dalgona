@@ -204,18 +204,13 @@ where
 /// A server error, timeout, or rate limit is transient: it reports an error
 /// so a later request may refresh again.
 fn refresh_refusal(status: StatusCode) -> Result<Option<TokenRecord>, McpError> {
-    let transient = status.is_server_error()
-        || matches!(
-            status,
-            StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_MANY_REQUESTS
-        );
-    if transient {
-        return Err(auth_error(&format!(
-            "OAuth token endpoint is unavailable (HTTP {}); try again later",
-            status.as_u16()
-        )));
+    if status.is_client_error() {
+        return Ok(None);
     }
-    Ok(None)
+    Err(auth_error(&format!(
+        "OAuth token endpoint is unavailable (HTTP {}); try again later",
+        status.as_u16()
+    )))
 }
 
 pub(crate) struct AuthorizeSpec<'a> {
