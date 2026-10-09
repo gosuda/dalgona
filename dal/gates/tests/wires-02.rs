@@ -66,13 +66,16 @@ async fn public_serve_requires_owner_only_token_and_force_to_replace()
     assert_eq!(fs::metadata(&token)?.permissions().mode() & 0o777, 0o600);
     #[cfg(windows)]
     {
+        // `[System.IO.File]::GetAccessControl` needs no module autoload —
+        // `Get-Acl` lives in `Microsoft.PowerShell.Security`, which fails
+        // to load on runners without a complete `PSModulePath`.
         let acl_check = r"
-$acl = Get-Acl -LiteralPath $env:DALGON_TOKEN_PATH
+$acl = [System.IO.File]::GetAccessControl($env:DALGON_TOKEN_PATH)
 if (-not $acl.AreAccessRulesProtected) { exit 10 }
 $owner = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-$allowed = @($acl.Access |
+$allowed = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) |
   Where-Object { $_.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow } |
-  ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value })
+  ForEach-Object { $_.IdentityReference.Value })
 $privileged = @($owner, 'S-1-5-18', 'S-1-5-32-544')
 if (-not $allowed.Contains($owner)) { exit 11 }
 if (@($allowed | Where-Object { $_ -notin $privileged }).Count -ne 0) { exit 12 }
