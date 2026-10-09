@@ -454,6 +454,7 @@ fn child_agent_replies_preserve_typed_state_and_report_pointer() -> TestResult {
     };
     let replies = [
         AgentsReply::Started { id },
+        AgentsReply::Prompted { id },
         AgentsReply::Await { report },
         AgentsReply::Cancelled { id },
         AgentsReply::Listed(vec![info]),
@@ -574,6 +575,19 @@ fn mailbox_values_keep_mode_and_cursor() -> TestResult {
     let encoded = sonic_rs::to_string(&reply)?;
     assert_eq!(sonic_rs::from_str::<AgentsReply>(&encoded)?, reply);
 
+    Ok(())
+}
+
+#[test]
+fn child_prompt_operation_round_trips_interrupt_deadline() -> TestResult {
+    let prompt = AgentsOp::Prompt {
+        id: SessionId::new_v7(),
+        text: "Call report with the work you completed.".into(),
+        interrupt: Some(Duration::from_secs(60)),
+        max_steps: std::num::NonZeroU32::new(1),
+    };
+    let encoded = sonic_rs::to_string(&prompt)?;
+    assert_eq!(sonic_rs::from_str::<AgentsOp>(&encoded)?, prompt);
     Ok(())
 }
 

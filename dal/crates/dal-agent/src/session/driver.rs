@@ -120,6 +120,8 @@ struct TurnState {
     provider: Option<Box<str>>,
     image_profile: Option<dal_provider::ImageProfile>,
     context_window: Option<u64>,
+    /// The most tool rounds this turn may run, when a prompt bounded it.
+    step_cap: Option<std::num::NonZeroU32>,
     /// The request round within the turn.
     round: u32,
     /// Streamed tool calls in response order.
@@ -294,6 +296,7 @@ impl Driver {
                 provider: None,
                 image_profile: None,
                 context_window: None,
+                step_cap: deps.shared.take_next_turn_step_cap(),
                 round: 0,
                 calls: Vec::new(),
                 resolved: Vec::new(),
@@ -391,12 +394,16 @@ impl Driver {
             enabled: true,
             compactor_available: !self.turn(turn).generation.compactors.entries().is_empty(),
         };
+        let max_steps = self
+            .turn(turn)
+            .step_cap
+            .map_or(0, std::num::NonZeroU32::get);
         self.report(TurnWork::RequestStarted {
             turn,
             model: resolved.route.clone(),
             family: resolved.family,
             window: resolved.entry.context_window.map_or(0, u64::from),
-            max_steps: 0,
+            max_steps,
             compact,
         })
         .await;

@@ -112,17 +112,16 @@ fn delivery_preview_cut_is_utf8_safe() {
 }
 
 #[test]
-fn delivery_counts_split_states_and_skip_words() {
+fn delivery_counts_split_states() {
     let states = [
         TaskState::Done(stored_done()),
         TaskState::Blocked(stored_done()),
         TaskState::Failed("x".to_owned()),
         TaskState::Cancelled,
-        TaskState::Lost,
         TaskState::Skipped("why".to_owned()),
     ];
     let refs: Vec<&TaskState> = states.iter().collect();
-    assert_eq!(counts_line(refs), "1 done, 2 failed, 1 cancelled, 1 lost");
+    assert_eq!(counts_line(refs), "1 done, 2 failed, 1 cancelled");
 }
 
 fn stored_done() -> crate::orchestration::agents_tool::Report {

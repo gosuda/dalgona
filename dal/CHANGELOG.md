@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add the `agents.prompt` service operation: a parent can give an idle child one final prompt and interrupt it after a bounded grace period.
 - Persist child tool restrictions and inherited approval modes so a resumed child keeps the same trust boundary after a host restart.
 - Remove unused public TUI items: the `composer` module, `markdown::render_prose`, and `markdown::render_code_block`.
 - Journal every approval answer: an answer to a tool-call, service-run, extension-ask, or plugin-grant question is now written to the session journal before it takes effect, the resolution broadcast follows that record, and a resumed session shows which question was answered, by whom, and how. Before, answers reached only the front ends that were watching and never survived a restart.

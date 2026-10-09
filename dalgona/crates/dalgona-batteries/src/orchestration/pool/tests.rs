@@ -49,13 +49,9 @@ fn pool_state_words_cover_every_ending() {
         TaskState::Blocked(report).word(),
         TaskState::Failed(String::new()).word(),
         TaskState::Cancelled.word(),
-        TaskState::Lost.word(),
         TaskState::Skipped(String::new()).word(),
     ];
-    assert_eq!(
-        words,
-        ["done", "blocked", "failed", "cancelled", "lost", "skipped"]
-    );
+    assert_eq!(words, ["done", "blocked", "failed", "cancelled", "skipped"]);
 }
 
 fn stored(status: ReportStatus, text: &str) -> Report {
@@ -116,7 +112,10 @@ fn child_grace_endings() {
         silent.state,
         TaskState::Failed("no report after the last turn".to_owned())
     );
-    assert!(last_message_text("tried hard").starts_with("last message (not a report): "));
+    assert_eq!(
+        last_message_text("tried hard"),
+        "last message (not a report): tried hard"
+    );
     // (d) Tool rounds earn grace with the round reason.
     let ChildDecision::Grace(cause) = decide(&ended(None, StopReason::MaxSteps)) else {
         panic!("max steps earns grace");
@@ -178,4 +177,24 @@ fn pool_text_builders_match_contract() {
         Some("2 of 3 tasks did not finish")
     );
     assert!((GRACE_SECONDS - 60.0).abs() < f64::EPSILON);
+}
+
+#[test]
+fn last_message_cut_never_splits_a_character_at_the_byte_limit() {
+    // 599 ASCII bytes, then a two-byte character straddling byte 600.
+    let text = format!("{}é tail", "a".repeat(LAST_MESSAGE_LIMIT - 1));
+    let shown = last_message_text(&text);
+    let excerpt = shown
+        .strip_prefix("last message (not a report): ")
+        .expect("the excerpt keeps its prefix");
+    assert_eq!(
+        excerpt.len(),
+        LAST_MESSAGE_LIMIT - 1,
+        "the straddling char is dropped whole"
+    );
+    assert!(excerpt.chars().all(|c| c == 'a'));
+    // A character that ends exactly on the limit stays.
+    let text = format!("{}é", "a".repeat(LAST_MESSAGE_LIMIT - 2));
+    let shown = last_message_text(&text);
+    assert!(shown.ends_with('é'));
 }

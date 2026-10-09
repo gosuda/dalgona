@@ -8,13 +8,6 @@ mod commands;
 pub(crate) mod delivery;
 pub(crate) mod goal;
 pub(crate) mod monitor;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the grace-turn decision is pending; the grace items stay reserved"
-    )
-)]
 pub(crate) mod pool;
 mod runtime;
 pub(crate) mod stuck;

@@ -202,6 +202,11 @@ pub enum AgentsReply {
         /// The new child session.
         id: SessionId,
     },
+    /// A prompt turn was started on an idle child.
+    Prompted {
+        /// The prompted child session.
+        id: SessionId,
+    },
     /// A child session finished with its report.
     Await {
         /// The completed child report and journal pointer.

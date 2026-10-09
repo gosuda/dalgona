@@ -901,6 +901,7 @@ impl Host {
                     backend: Arc::clone(&wired.backend),
                     overlay: wired.overlay,
                     reported: std::sync::atomic::AtomicBool::new(false),
+                    prompted: std::sync::atomic::AtomicBool::new(false),
                 },
             );
         if let Some(parent) = resolved.parent {

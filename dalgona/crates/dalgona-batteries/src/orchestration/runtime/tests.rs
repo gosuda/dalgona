@@ -52,6 +52,12 @@ struct Script {
     delivered: HashSet<JobId>,
     lines: VecDeque<dal_core::JobLines>,
     line_reads: Vec<Option<u64>>,
+    /// Whether awaited children end without storing a report.
+    silent: bool,
+    /// Grace prompts the host accepted, in order.
+    prompts: Vec<(SessionId, String)>,
+    /// Await calls served so far; each later one reports a new entry.
+    awaits: u64,
 }
 
 /// A host that answers only the services a session owner uses when it
@@ -80,6 +86,10 @@ fn unavailable<T: Send + 'static>() -> ServiceFuture<'static, T> {
 impl Host {
     fn cancels(&self) -> Vec<SessionId> {
         locked(&self.script).cancels.clone()
+    }
+
+    fn prompts(&self) -> Vec<(SessionId, String)> {
+        locked(&self.script).prompts.clone()
     }
 
     fn notices(&self) -> Vec<Notice> {
@@ -243,12 +253,21 @@ impl Services for Host {
                 self.changed.notify_waiters();
                 return self.start_child(start, id);
             }
+            AgentsOp::Prompt { id, text, .. } => {
+                script.prompts.push((id, text.to_string()));
+                Ok(AgentsReply::Prompted { id })
+            }
             AgentsOp::Await { id, .. } => {
-                let (error, text, status, hold) = (
+                script.awaits += 1;
+                let entry = EntryId::new(
+                    std::num::NonZeroU64::new(script.awaits).expect("an await count above zero"),
+                );
+                let (error, text, status, hold, silent) = (
                     script.await_error,
                     script.report.clone(),
                     script.report_status,
                     script.hold.clone(),
+                    script.silent,
                 );
                 drop(script);
                 let binding = locked(&self.runtime).clone();
@@ -262,7 +281,7 @@ impl Services for Host {
                         return Err(ServiceError::failed(None, message));
                     }
                     let text = text.unwrap_or_else(|| "scan finished".to_owned());
-                    if let (Some((runtime, _)), Some(services)) = (binding, services) {
+                    if !silent && let (Some((runtime, _)), Some(services)) = (binding, services) {
                         let caller = ToolCx::for_test(services).caller().clone();
                         let args = sonic_rs::to_string(&sonic_rs::json!({
                             "status": status.unwrap_or("done"), "report": text,
@@ -286,7 +305,7 @@ impl Services for Host {
                             stop: Stop::EndTurn,
                             text: text.into(),
                             session: id,
-                            entry: EntryId::new(std::num::NonZeroU64::MIN),
+                            entry,
                         },
                     })
                 });
@@ -724,6 +743,74 @@ async fn failed_wait_with_clean_teardown_keeps_only_the_result_failure() -> Test
     assert_eq!(fixture.host.cancels(), vec![child]);
     assert!(error.contains("the provider stopped answering"), "{error}");
     assert!(!error.contains(CLOSE_REFUSED), "{error}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_silent_child_shows_its_last_message_with_the_failure() -> TestResult {
+    let fixture = Fixture::open().await?;
+    {
+        let mut script = fixture.script();
+        script.started = Some(SessionId::new_v7());
+        script.silent = true;
+        script.report = Some("tried hard".into());
+    }
+    let reply = run_one_step(&fixture).await?;
+    assert!(
+        reply.contains("no report after the last turn")
+            && reply.contains("last message (not a report): tried hard"),
+        "the failure shows the last message: {reply}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_silent_child_with_no_text_shows_no_last_message() -> TestResult {
+    let fixture = Fixture::open().await?;
+    {
+        let mut script = fixture.script();
+        script.started = Some(SessionId::new_v7());
+        script.silent = true;
+        script.report = Some(String::new());
+    }
+    let reply = run_one_step(&fixture).await?;
+    assert!(reply.contains("no report after the last turn"), "{reply}");
+    assert!(
+        !reply.contains("last message"),
+        "nothing extra shows: {reply}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_child_without_a_report_gets_one_grace_turn_then_fails() -> TestResult {
+    let fixture = Fixture::open().await?;
+    let child = SessionId::new_v7();
+    {
+        let mut script = fixture.script();
+        script.started = Some(child);
+        script.silent = true;
+    }
+    let reply = run_one_step(&fixture).await?;
+    assert!(
+        reply.contains("no report after the last turn"),
+        "silence after grace fails the task: {reply}"
+    );
+    assert_eq!(
+        fixture.host.prompts(),
+        vec![(
+            child,
+            crate::orchestration::pool::grace_text(
+                crate::orchestration::pool::GraceCause::NoReport
+            )
+        )],
+        "the silent child earned exactly one grace prompt"
+    );
+    assert_eq!(
+        fixture.host.cancels(),
+        vec![child],
+        "the settled child is released after its grace turn"
+    );
     Ok(())
 }
 
@@ -1253,6 +1340,7 @@ async fn user_cancel_pauses_automatic_work_but_guard_pause_reason_wins() -> Test
     assert!(status.ends_with(" · paused"), "{status}");
     Ok(())
 }
+
 #[tokio::test]
 async fn status_reports_working_after_before_turn() -> TestResult {
     use dal_agent::ext::Hook as _;

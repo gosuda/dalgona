@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Give each orchestration child one final grace prompt when it ends without a report, then fail it clearly if it stays silent.
 - Keep goals across session reopen and report failed goal saves.
 - Show orchestration status as a short human-readable line in the activity row instead of a raw JSON object.
 - Show the plan battery status as one short line in the activity row, such as `planning · 3/5 done · writing tests`, instead of a raw JSON object.

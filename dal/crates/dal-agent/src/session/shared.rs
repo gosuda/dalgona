@@ -34,6 +34,8 @@ pub(crate) struct Shared {
     ext: Mutex<ExtSnap>,
     promoted: Mutex<Arc<BTreeSet<Name>>>,
     tool_allowlist: OnceLock<Arc<BTreeSet<Name>>>,
+    /// The tool-round bound the next turn takes; the turn consumes it.
+    next_turn_step_cap: Mutex<Option<std::num::NonZeroU32>>,
     service_grants: ServiceGrants,
 }
 
@@ -84,6 +86,7 @@ impl Shared {
             }),
             promoted: Mutex::new(Arc::new(BTreeSet::new())),
             tool_allowlist: OnceLock::new(),
+            next_turn_step_cap: Mutex::new(None),
             service_grants: ServiceGrants::default(),
         }
     }
@@ -103,6 +106,23 @@ impl Shared {
     pub(crate) fn restrict_tools(&self, names: &[Name]) {
         self.tool_allowlist
             .get_or_init(|| Arc::new(names.iter().cloned().collect()));
+    }
+
+    /// Sets the tool-round bound the next turn takes, or clears it.
+    pub(crate) fn set_next_turn_step_cap(&self, cap: Option<std::num::NonZeroU32>) {
+        *self
+            .next_turn_step_cap
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = cap;
+    }
+
+    /// Takes the tool-round bound for the turn that is starting: a bound
+    /// applies to one turn and never to a later one.
+    pub(crate) fn take_next_turn_step_cap(&self) -> Option<std::num::NonZeroU32> {
+        self.next_turn_step_cap
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
     }
 
     /// The tool names the session may use; `None` means no restriction.

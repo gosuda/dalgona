@@ -293,6 +293,8 @@ pub(crate) struct SessionEntry {
     /// The member report has been taken: a set flag ends the member for
     /// mailbox addressing even though its session stays listable.
     pub(crate) reported: std::sync::atomic::AtomicBool,
+    /// Whether the one grace prompt has already been consumed.
+    pub(crate) prompted: std::sync::atomic::AtomicBool,
 }
 
 /// The architecture product passed to [`Host::start`].

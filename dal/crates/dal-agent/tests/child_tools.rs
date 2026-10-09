@@ -43,6 +43,10 @@ impl Probe {
         self.requests.lock().expect("probe lock").clone()
     }
 
+    fn script_left(&self) -> usize {
+        self.script.lock().expect("probe lock").len()
+    }
+
     fn queue(&self, tool: &'static str) {
         self.script.lock().expect("probe lock").push_back(tool);
     }
@@ -78,6 +82,11 @@ fn text_stream() -> EventStream {
 }
 
 fn call_stream(name: &str) -> EventStream {
+    let args = if name == "report" {
+        RawJson::parse(r#"{"status":"done","report":"reported"}"#).expect("report args")
+    } else {
+        RawJson::parse("{}").expect("args json")
+    };
     stream(vec![
         StreamEvent::ToolCallStarted {
             id: "c1".into(),
@@ -87,7 +96,7 @@ fn call_stream(name: &str) -> EventStream {
             calls: vec![dal_provider::ToolCall {
                 id: "c1".into(),
                 name: name.into(),
-                args: ToolArgs::Parsed(RawJson::parse("{}").expect("args json")),
+                args: ToolArgs::Parsed(args),
             }],
         },
         StreamEvent::Usage { usage: usage() },
@@ -229,6 +238,77 @@ impl CommandHandler for Spawn {
     }
 }
 
+/// `/collect-report <child>`: awaits the child again and stores what the
+/// parent's await reports, so a test can read the report text.
+struct CollectReport {
+    reports: Arc<Mutex<Vec<String>>>,
+}
+
+impl CommandHandler for CollectReport {
+    fn run<'a>(
+        &'a self,
+        args: &'a str,
+        cx: CommandCx<'a>,
+    ) -> BoxFuture<'a, Result<Reply, ServiceError>> {
+        Box::pin(async move {
+            let id = SessionId::parse(args.trim())
+                .map_err(|error| ServiceError::failed(None, error.to_string()))?;
+            let reply = cx
+                .services()
+                .agents(cx.caller(), AgentsOp::Await { id, timeout: None })
+                .await?;
+            let AgentsReply::Await { report } = reply else {
+                return Err(ServiceError::failed(
+                    None,
+                    format!("the child did not report: {reply:?}"),
+                ));
+            };
+            self.reports
+                .lock()
+                .expect("reports lock")
+                .push(report.text.to_string());
+            Ok(Reply::Done(Output::Nothing))
+        })
+    }
+}
+
+/// `/prompt-child <child>`: gives an idle child one grace prompt.
+struct PromptChild;
+
+impl CommandHandler for PromptChild {
+    fn run<'a>(
+        &'a self,
+        args: &'a str,
+        cx: CommandCx<'a>,
+    ) -> BoxFuture<'a, Result<Reply, ServiceError>> {
+        Box::pin(async move {
+            let mut words = args.split_whitespace();
+            let id = SessionId::parse(words.next().unwrap_or_default())
+                .map_err(|error| ServiceError::failed(None, error.to_string()))?;
+            let max_steps = words.next().and_then(|steps| steps.parse().ok());
+            let reply = cx
+                .services()
+                .agents(
+                    cx.caller(),
+                    AgentsOp::Prompt {
+                        id,
+                        text: "Call report with your final result.".into(),
+                        interrupt: Some(Duration::from_millis(50)),
+                        max_steps,
+                    },
+                )
+                .await?;
+            if !matches!(reply, AgentsReply::Prompted { .. }) {
+                return Err(ServiceError::failed(
+                    None,
+                    format!("the child prompt was refused: {reply:?}"),
+                ));
+            }
+            Ok(Reply::Done(Output::Nothing))
+        })
+    }
+}
+
 /// `/recompose`: publishes a plugin that adds the tool `gamma`, the same
 /// publication `/reload` performs.
 struct Recompose {
@@ -297,6 +377,7 @@ struct Rig {
     extensions: Vec<dal_agent::ext::Extension>,
     probe: Arc<Probe>,
     children: Arc<Mutex<Vec<SessionId>>>,
+    reports: Arc<Mutex<Vec<String>>>,
     beta_runs: Arc<AtomicUsize>,
     gamma_runs: Arc<AtomicUsize>,
 }
@@ -326,11 +407,16 @@ fn kit_extension(
     next_name: Arc<AtomicUsize>,
     beta_runs: Arc<AtomicUsize>,
     gamma_runs: Arc<AtomicUsize>,
+    reports: &Arc<Mutex<Vec<String>>>,
     probe: &Arc<Probe>,
 ) -> dal_agent::ext::Extension {
     let inject = ServiceSet::from_names(["agents"]).expect("inject set");
     let mut builder = ExtensionBuilder::new("kit", "0.1.0", inject)
         .expect("builder")
+        .tool(
+            Counter::new("report", Arc::new(AtomicUsize::new(0))),
+            Visibility::Model,
+        )
         .tool(
             Counter::new("alpha", Arc::new(AtomicUsize::new(0))),
             Visibility::Model,
@@ -352,6 +438,13 @@ fn kit_extension(
                 fixed_name: Some("member".into()),
             }),
         )
+        .command(
+            command("collect-report"),
+            Arc::new(CollectReport {
+                reports: Arc::clone(reports),
+            }),
+        )
+        .command(command("prompt-child"), Arc::new(PromptChild))
         .command(command("recompose"), Arc::new(Recompose { gamma_runs }))
         .on_before_turn(NestedCaller)
         .model(ModelRecord {
@@ -391,12 +484,14 @@ async fn rig_with_extra_tools(extra: &[&str]) -> Rig {
     let next_name = Arc::new(AtomicUsize::new(0));
     let beta_runs = Arc::new(AtomicUsize::new(0));
     let gamma_runs = Arc::new(AtomicUsize::new(0));
+    let reports = Arc::new(Mutex::new(Vec::new()));
     let extension = kit_extension(
         extra,
         Arc::clone(&children),
         next_name,
         Arc::clone(&beta_runs),
         gamma_runs.clone(),
+        &reports,
         &probe,
     );
     let extensions = vec![extension];
@@ -436,6 +531,7 @@ async fn rig_with_extra_tools(extra: &[&str]) -> Rig {
         extensions,
         probe,
         children,
+        reports,
         beta_runs,
         gamma_runs,
     }
@@ -584,7 +680,7 @@ async fn a_childs_tool_list_survives_an_extension_reload() {
     // below really adds `gamma` to what a session may see.
     rig.run("spawn", "*").await;
     rig.settled(rig.child(0), 1).await;
-    assert_eq!(rig.probe.requests()[0], ["alpha", "beta"]);
+    assert_eq!(rig.probe.requests()[0], ["alpha", "beta", "report"]);
 
     rig.run("spawn", "alpha").await;
     rig.settled(rig.child(1), 2).await;
@@ -609,7 +705,7 @@ async fn a_childs_tool_list_survives_an_extension_reload() {
     rig.settled(rig.child(2), 4).await;
     assert_eq!(
         rig.probe.requests()[3],
-        ["alpha", "beta", "gamma"],
+        ["alpha", "beta", "gamma", "report"],
         "an unrestricted child sees the recomposed tools"
     );
 }
@@ -685,6 +781,79 @@ async fn a_child_starts_with_its_parents_approval_mode() {
         child.settings.approval,
         ApprovalMode::All,
         "the child keeps the approval the user gave its parent"
+    );
+}
+
+#[tokio::test]
+async fn parent_can_prompt_an_idle_child_once() {
+    let rig = rig().await;
+    rig.run("spawn", "*").await;
+    let child = rig.child(0);
+    rig.settled(child, 1).await;
+    rig.run("prompt-child", &child.to_string()).await;
+    rig.settled(child, 2).await;
+    assert_eq!(
+        rig.probe.requests().len(),
+        2,
+        "the prompted child receives a second real turn"
+    );
+}
+
+#[tokio::test]
+async fn a_bounded_prompt_stops_the_prompted_turn_after_one_step() {
+    let rig = rig().await;
+    rig.run("spawn", "*").await;
+    let child = rig.child(0);
+    rig.settled(child, 1).await;
+    rig.probe.queue("alpha");
+    rig.probe.queue("alpha");
+    rig.run("prompt-child", &format!("{child} 1")).await;
+    rig.settled(child, 2).await;
+    // Give a wrongly continuing turn time to open its second request.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        rig.probe.requests().len(),
+        2,
+        "one tool round ran, then the bound ended the turn"
+    );
+    assert_eq!(rig.probe.script_left(), 1, "the second step never ran");
+}
+
+#[tokio::test]
+async fn an_unbounded_prompt_runs_every_step_and_the_bound_does_not_carry_over() {
+    let rig = rig().await;
+    rig.run("spawn", "*").await;
+    let child = rig.child(0);
+    rig.settled(child, 1).await;
+    rig.probe.queue("alpha");
+    rig.probe.queue("alpha");
+    rig.run("prompt-child", &child.to_string()).await;
+    rig.settled(child, 4).await;
+    assert_eq!(
+        rig.probe.requests().len(),
+        4,
+        "two tool rounds and a closing reply ran without a bound"
+    );
+}
+
+#[tokio::test]
+async fn parent_await_reads_report_tool_without_grace() {
+    let rig = rig().await;
+    rig.probe.queue("report");
+    rig.run("spawn", "report").await;
+    let child = rig.child(0);
+    rig.settled(child, 1).await;
+    rig.run("collect-report", &child.to_string()).await;
+    let dump = rig.child_view(child).await;
+    assert_eq!(
+        rig.reports.lock().expect("reports lock").as_slice(),
+        ["reported"],
+        "the report tool body reaches the parent await\n{dump:?}"
+    );
+    assert_eq!(
+        rig.probe.requests().len(),
+        2,
+        "the report call and its tool result complete one child turn"
     );
 }
 

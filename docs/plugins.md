@@ -192,7 +192,7 @@ These are the operations. A handler may call only those in its `uses`.
 | `net` | `fetch` | make an HTTP request to an allowed destination |
 | `ask` | `confirm`, `select`, `text` | ask the user a question |
 | `state` | `read`, `write`, `delete` | keep data for this plugin and session |
-| `agents` | `start`, `wait`, `cancel`, `list` | run child sessions |
+| `agents` | `start`, `wait`, `prompt`, `cancel`, `list` | run child sessions and give one final grace prompt |
 | `jobs` | `start`, `wait`, `cancel`, `list`, `text` | run background jobs |
 | `turn` | `cancel`, `steer`, `wake`, `is_idle` | steer the running turn or start one |
 | `env` | `read` | read an allowed environment variable |

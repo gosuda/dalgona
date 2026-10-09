@@ -36,7 +36,6 @@ pub(crate) enum TaskState {
     Blocked(Report),
     Failed(String),
     Cancelled,
-    Lost,
     Skipped(String),
 }
 
@@ -48,7 +47,6 @@ impl TaskState {
             TaskState::Blocked(_) => "blocked",
             TaskState::Failed(_) => "failed",
             TaskState::Cancelled => "cancelled",
-            TaskState::Lost => "lost",
             TaskState::Skipped(_) => "skipped",
         }
     }
@@ -184,7 +182,6 @@ pub(crate) enum StopReason {
     Cancelled,
     Error(String),
     Filter,
-    Gone(String),
 }
 
 /// One finished child turn awaiting its verdict.
@@ -243,10 +240,6 @@ pub(crate) fn decide(end: &ChildEnd) -> ChildDecision {
             state: TaskState::Failed("the provider filtered the reply".to_owned()),
             note: None,
         }),
-        StopReason::Gone(reason) => ChildDecision::Settle(Settled {
-            state: TaskState::Failed(reason.clone()),
-            note: None,
-        }),
         StopReason::EndTurn => ChildDecision::Grace(GraceCause::NoReport),
         StopReason::MaxSteps => ChildDecision::Grace(GraceCause::ToolRounds(end.max_rounds)),
         StopReason::Length => ChildDecision::Grace(GraceCause::OutputLimit),
@@ -276,7 +269,8 @@ pub(crate) fn decide_grace(report: Option<&Report>, cause: GraceCause) -> Settle
     }
 }
 
-/// Renders the last assistant text shown with a no-report failure.
+/// Renders the last assistant text shown with a no-report failure: the
+/// first 600 bytes, cut on a character boundary.
 pub(crate) fn last_message_text(text: &str) -> String {
     let mut end = LAST_MESSAGE_LIMIT.min(text.len());
     while !text.is_char_boundary(end) {

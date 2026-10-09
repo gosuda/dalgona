@@ -18,9 +18,9 @@ use dal_core::ext::{
     ToolCallVerdict, ToolResultEvent, TurnEnd,
 };
 use dal_core::{
-    AgentState, AgentsOp, AgentsReply, ArtifactFile, Budget, CallId, ExitStatusKind, JobId,
-    JobOutcome, JobStateView, JobsOp, JobsReply, Name, Notice, OnError, RawJson, RunOutput,
-    RunRequest, ScopeSpec, SessionId, SidecarOp, TurnOp,
+    AgentReport, AgentState, AgentsOp, AgentsReply, ArtifactFile, Budget, CallId, EntryId,
+    ExitStatusKind, JobId, JobOutcome, JobStateView, JobsOp, JobsReply, Name, Notice, OnError,
+    RawJson, RunOutput, RunRequest, ScopeSpec, SessionId, SidecarOp, Stop, TurnOp,
 };
 use sonic_rs::JsonContainerTrait;
 use tokio::sync::{mpsc, oneshot};
@@ -33,7 +33,10 @@ use super::goal::adapter::{self, GoalStore};
 use super::goal::ops::{GoalScope, TodoSummary, format_duration};
 use super::monitor::state::{MonitorConfig, MonitorState};
 use super::monitor::status::{InflightCounts, status_line};
-use super::pool::{IndexCollector, TaskResult, TaskState};
+use super::pool::{
+    ChildDecision, ChildEnd, GRACE_SECONDS, GraceCause, IndexCollector, StopReason, TaskResult,
+    TaskState, decide, decide_grace, grace_text, last_message_text,
+};
 use super::stuck::{
     GuardState, GuardVerdict, SleepClassifier, clear_pending_attempts, on_tool_call, reset,
     rewrite_exec_args,
@@ -1678,6 +1681,8 @@ impl SessionState {
             live_tasks: Mutex::new(HashMap::new()),
             merge_lock: Arc::clone(&self.merge_lock),
             reports: Arc::clone(&self.reports),
+            child_max_steps: self.config.agents.child_max_steps,
+            child_max_minutes: self.config.agents.child_max_minutes,
         }
         .spawn(workflow, control_receiver);
         self.runs.insert(
@@ -2075,21 +2080,39 @@ fn stderr_line(output: &RunOutput) -> String {
         .to_owned()
 }
 
-/// The task state a child's stored report gives. A child that ended without
-/// calling `report` failed; its last message stays visible.
-fn state_of_report(stored: Option<Report>, last_message: &str) -> TaskState {
-    match stored {
-        Some(report) => match report.status {
-            ReportStatus::Done => TaskState::Done(report),
-            ReportStatus::Blocked => TaskState::Blocked(report),
-            ReportStatus::Failed => TaskState::Failed(report.text),
-        },
-        None if last_message.trim().is_empty() => {
-            TaskState::Failed("the subagent ended without calling report.".into())
-        }
-        None => TaskState::Failed(format!(
-            "the subagent ended without calling report. Its last message: {last_message}"
-        )),
+/// The settled verdict for a child whose grace turn never started: it
+/// failed without a report, and the reason says why.
+fn refused_grace(reason: String) -> super::pool::Settled {
+    super::pool::Settled {
+        state: TaskState::Failed(reason),
+        note: None,
+    }
+}
+
+/// Builds the pool's verdict input for one ended child turn from its
+/// stored report and terminal stop. The first turn never counts the
+/// deadline as fired; only the grace interrupt ends a turn that way.
+fn child_end(
+    stored: Option<Report>,
+    report: &AgentReport,
+    max_rounds: u32,
+    max_minutes: u32,
+) -> ChildEnd {
+    let stop = match report.stop {
+        Stop::EndTurn => StopReason::EndTurn,
+        Stop::MaxSteps => StopReason::MaxSteps,
+        Stop::Length => StopReason::Length,
+        Stop::Cancelled => StopReason::Cancelled,
+        Stop::Filter => StopReason::Filter,
+        Stop::Failed => StopReason::Error("the child turn failed".to_owned()),
+    };
+    ChildEnd {
+        report: stored,
+        stop,
+        deadline_hit: false,
+        max_rounds,
+        max_minutes,
+        last_text: report.text.to_string(),
     }
 }
 
@@ -2173,6 +2196,10 @@ struct Coordinator {
     live_tasks: Mutex<HashMap<JobId, dal_agent::ext::ScopeHandle>>,
     merge_lock: Arc<tokio::sync::Mutex<()>>,
     reports: ReportCells,
+    /// Tool rounds one child turn may use, for the grace reason.
+    child_max_steps: u32,
+    /// Minutes one child turn may run, for the grace reason.
+    child_max_minutes: u32,
 }
 
 /// The worktree outcome of one ended task plus its notice lines.
@@ -2663,21 +2690,32 @@ impl Coordinator {
         task: PendingTask,
         handle: dal_agent::ext::ScopeHandle,
     ) -> TaskResult {
-        let state = match handle.result().await {
-            Ok(dal_agent::ext::ScopeValue::Agent(report)) => {
-                let stored = self.take_report(report.session);
-                release_child(self.services.as_ref(), &self.caller, report.session).await;
-                state_of_report(stored, &report.text)
-            }
-            Err(dal_agent::ext::ScopeError::Cancelled) => TaskState::Cancelled,
-            Err(other) => TaskState::Failed(other.to_string()),
-            Ok(_) => TaskState::Failed("the child returned no agent report".into()),
+        let settled = match handle.result().await {
+            Ok(dal_agent::ext::ScopeValue::Agent(report)) => self.settle_child(report).await,
+            Err(dal_agent::ext::ScopeError::Cancelled) => super::pool::Settled {
+                state: TaskState::Cancelled,
+                note: None,
+            },
+            Err(other) => super::pool::Settled {
+                state: TaskState::Failed(other.to_string()),
+                note: None,
+            },
+            Ok(_) => super::pool::Settled {
+                state: TaskState::Failed("the child returned no agent report".into()),
+                note: None,
+            },
         };
-        let body = match &state {
+        let state = settled.state;
+        let mut body = match &state {
             TaskState::Done(report) | TaskState::Blocked(report) => report.text.clone(),
             TaskState::Failed(text) => text.clone(),
             _ => String::new(),
         };
+        if let Some(note) = &settled.note {
+            body.push_str(" (");
+            body.push_str(note);
+            body.push(')');
+        }
         let duration = format_duration(task.started.elapsed().as_secs());
         let end = self
             .end_worktree(
@@ -2733,6 +2771,116 @@ impl Coordinator {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&child)
             .and_then(|cell| cell.get())
+    }
+
+    /// Settles one ended child: a stored report settles at once, and a
+    /// child that ended without one earns a single grace prompt whose
+    /// silence fails it. The child stays live across the grace turn and
+    /// is released only once its verdict is in hand.
+    async fn settle_child(&self, report: AgentReport) -> super::pool::Settled {
+        let child = report.session;
+        let stored = self.take_report(child);
+        let end = child_end(
+            stored,
+            &report,
+            self.child_max_steps,
+            self.child_max_minutes,
+        );
+        let settled = match decide(&end) {
+            ChildDecision::Settle(settled) => settled,
+            ChildDecision::Grace(cause) => {
+                self.run_grace_turn(child, report.entry, cause, &end.last_text)
+                    .await
+            }
+        };
+        release_child(self.services.as_ref(), &self.caller, child).await;
+        settled
+    }
+
+    /// Runs the one grace turn: prompts the silent child with an interrupt
+    /// deadline, then settles with the report that turn leaves. A prompt
+    /// the agents service refuses fails the task without a report.
+    async fn run_grace_turn(
+        &self,
+        child: SessionId,
+        previous: EntryId,
+        cause: GraceCause,
+        first_text: &str,
+    ) -> super::pool::Settled {
+        let prompted = self
+            .services
+            .agents(
+                &self.caller,
+                AgentsOp::Prompt {
+                    id: child,
+                    text: grace_text(cause).into_boxed_str(),
+                    interrupt: Some(Duration::from_secs_f64(GRACE_SECONDS)),
+                    max_steps: std::num::NonZeroU32::new(1),
+                },
+            )
+            .await;
+        match prompted {
+            Ok(AgentsReply::Prompted { .. }) => {
+                let (late, grace_text) = self.await_grace_report(child, previous).await;
+                let mut settled = decide_grace(late.as_ref(), cause);
+                // Silence through grace shows the child's last message, from
+                // the grace turn when it said something, else the first turn.
+                let shown = if grace_text.trim().is_empty() {
+                    first_text
+                } else {
+                    &grace_text
+                };
+                if late.is_none()
+                    && !shown.trim().is_empty()
+                    && let TaskState::Failed(text) = &mut settled.state
+                {
+                    text.push('\n');
+                    text.push_str(&last_message_text(shown));
+                }
+                settled
+            }
+            Ok(reply) => refused_grace(format!(
+                "the agents service refused the grace turn: {reply:?}"
+            )),
+            Err(error) => refused_grace(format!("the grace turn did not start: {error}")),
+        }
+    }
+
+    /// Waits for the grace turn to end and reads the report it stored and
+    /// its last assistant text; `previous` is the entry the first turn
+    /// ended on. A wait that never moves past it, or dies early, reads as
+    /// silence with no text.
+    async fn await_grace_report(
+        &self,
+        child: SessionId,
+        previous: EntryId,
+    ) -> (Option<Report>, String) {
+        let wait = async {
+            loop {
+                let waited = self
+                    .services
+                    .agents(
+                        &self.caller,
+                        AgentsOp::Await {
+                            id: child,
+                            timeout: None,
+                        },
+                    )
+                    .await;
+                match waited {
+                    Ok(AgentsReply::Await { report }) if report.entry != previous => {
+                        break (self.take_report(child), report.text.to_string());
+                    }
+                    Ok(_) => {}
+                    Err(_) => break (self.take_report(child), String::new()),
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        };
+        match tokio::time::timeout(Duration::from_secs_f64(GRACE_SECONDS + 5.0), wait).await {
+            Ok(waited) => waited,
+            Err(_) => (self.take_report(child), String::new()),
+        }
     }
 
     /// Runs one git argv from `cwd` under the run's scoped grant.
@@ -3184,7 +3332,6 @@ fn job_outcome(state: &TaskState) -> JobOutcome {
     match state {
         TaskState::Done(_) | TaskState::Blocked(_) => JobOutcome::Exited { code: 0 },
         TaskState::Cancelled => JobOutcome::Cancelled,
-        TaskState::Lost => JobOutcome::Lost,
         TaskState::Failed(message) | TaskState::Skipped(message) => JobOutcome::Failed {
             message: message.clone().into(),
         },

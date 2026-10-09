@@ -53,23 +53,21 @@ pub(crate) fn report_uri(id: JobId) -> String {
     format!("job://{id}")
 }
 
-/// Renders the task tally: `done`, `failed`, `cancelled`, `lost` in order,
-/// zeros omitted; `blocked` counts as failed, `skipped` never counts.
+/// Renders the task tally: `done`, `failed`, and `cancelled` in order;
+/// zeros omitted; `blocked` counts as failed and `skipped` never counts.
 pub(crate) fn counts_line<'a>(states: impl IntoIterator<Item = &'a TaskState>) -> String {
     let mut done = 0;
     let mut failed = 0;
     let mut cancelled = 0;
-    let mut lost = 0;
     for state in states {
         match state {
             TaskState::Done(_) => done += 1,
             TaskState::Blocked(_) | TaskState::Failed(_) => failed += 1,
             TaskState::Cancelled => cancelled += 1,
-            TaskState::Lost => lost += 1,
             TaskState::Skipped(_) => {}
         }
     }
-    let mut parts = Vec::with_capacity(4);
+    let mut parts = Vec::with_capacity(3);
     if done > 0 {
         parts.push(format!("{done} done"));
     }
@@ -78,9 +76,6 @@ pub(crate) fn counts_line<'a>(states: impl IntoIterator<Item = &'a TaskState>) -
     }
     if cancelled > 0 {
         parts.push(format!("{cancelled} cancelled"));
-    }
-    if lost > 0 {
-        parts.push(format!("{lost} lost"));
     }
     parts.join(", ")
 }
@@ -221,9 +216,8 @@ fn severity(state: &TaskState) -> u8 {
         TaskState::Failed(_) => 0,
         TaskState::Blocked(_) => 1,
         TaskState::Cancelled => 2,
-        TaskState::Lost => 3,
-        TaskState::Done(_) => 4,
-        TaskState::Skipped(_) => 5,
+        TaskState::Done(_) => 3,
+        TaskState::Skipped(_) => 4,
     }
 }
 

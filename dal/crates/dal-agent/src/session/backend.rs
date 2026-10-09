@@ -10,10 +10,10 @@ use std::sync::Arc;
 
 use dal_core::ext::{Mail as ExtMail, Service, SidecarName};
 use dal_core::{
-    AgentInfo, AgentReport, AgentState, AgentsOp, AgentsReply, ApprovalMode, BlobId, EntryId,
-    FetchMethod, FetchRequest, FetchResponse, Inference, JobsOp, JobsReply, MailMode, ModelRequest,
-    Name, Notice, Part, RawJson, Request, SessionId, StateError, StateOp, StateRecord, TurnOp,
-    TurnOpReply, Workspace,
+    AgentInfo, AgentReport, AgentState, AgentsOp, AgentsReply, ApprovalMode, BlobId, Command,
+    EntryId, Expect, FetchMethod, FetchRequest, FetchResponse, Inference, JobsOp, JobsReply,
+    MailMode, ModelRequest, Name, Notice, Part, RawJson, Reply, Request, SessionId, StateError,
+    StateOp, StateRecord, TurnOp, TurnOpReply, Workspace,
 };
 use dal_provider::EventStream;
 use tokio::sync::oneshot;
@@ -90,6 +90,25 @@ async fn copy_child_approval(
         })
         .await
         .map(|_| ())
+}
+
+/// Runs the prompted turn's interrupt inside the child's task group: after
+/// `delay` the turn is cancelled, and the timer dies with the session.
+fn spawn_prompt_interrupt(tasks: &SessionTasks, handle: SessionHandle, delay: std::time::Duration) {
+    tasks.spawn(async move {
+        tokio::time::sleep(delay).await;
+        let (reply, receipt) = oneshot::channel();
+        if handle
+            .turn(crate::session::TurnRequest {
+                op: TurnOp::Cancel,
+                reply,
+            })
+            .await
+            .is_ok()
+        {
+            let _ = receipt.await;
+        }
+    });
 }
 
 fn write_isolation_artifact(
@@ -768,6 +787,12 @@ impl Backend {
     async fn agents_op(&self, op: AgentsOp) -> Result<AgentsReply, ServiceError> {
         match op {
             AgentsOp::Start(start) => self.agent_start(start).await,
+            AgentsOp::Prompt {
+                id,
+                text,
+                interrupt,
+                max_steps,
+            } => Ok(self.agent_prompt(id, text, interrupt, max_steps).await),
             AgentsOp::Await { id, timeout } => {
                 if self.is_child(id) {
                     Ok(self.agent_await(id, timeout).await)
@@ -931,6 +956,90 @@ impl Backend {
         Ok(AgentsReply::Started { id: child_id })
     }
 
+    /// Starts one prompt turn on an idle child of this session and
+    /// optionally interrupts it after `interrupt`. A child takes one
+    /// prompt this way: the slot is claimed before the turn starts and
+    /// released only when the child refuses it.
+    async fn agent_prompt(
+        &self,
+        id: SessionId,
+        text: Box<str>,
+        interrupt: Option<std::time::Duration>,
+        max_steps: Option<std::num::NonZeroU32>,
+    ) -> AgentsReply {
+        let Some((handle, child_tasks, child_shared)) = self.claim_prompt_slot(id) else {
+            return AgentsReply::Cancelled { id };
+        };
+        // The bound belongs to the one turn this prompt starts: the turn
+        // takes it when it begins, and a refused prompt clears it.
+        child_shared.set_next_turn_step_cap(max_steps);
+        let reply = handle
+            .submit(
+                Command::Prompt {
+                    expect: Expect::Idle,
+                    content: vec![Part::Text { text }],
+                },
+                dal_core::ClientId::new("core"),
+            )
+            .await;
+        if !matches!(reply, Ok(Reply::Accepted { .. })) {
+            child_shared.set_next_turn_step_cap(None);
+            self.release_prompt_slot(id);
+            return AgentsReply::Cancelled { id };
+        }
+        if let Some(delay) = interrupt {
+            spawn_prompt_interrupt(&child_tasks, handle, delay);
+        }
+        AgentsReply::Prompted { id }
+    }
+
+    /// Claims the child's single prompt slot: only the caller's own live
+    /// child, and only the first time.
+    fn claim_prompt_slot(
+        &self,
+        id: SessionId,
+    ) -> Option<(SessionHandle, SessionTasks, Arc<Shared>)> {
+        let sessions = self
+            .host
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = sessions
+            .get(&id)
+            .filter(|entry| entry.parent == Some(self.session))?;
+        entry
+            .prompted
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .is_ok()
+            .then(|| {
+                (
+                    entry.handle.clone(),
+                    entry.tasks.clone(),
+                    Arc::clone(&entry.shared),
+                )
+            })
+    }
+
+    /// Gives back the prompt slot after the child refused the prompt.
+    fn release_prompt_slot(&self, id: SessionId) {
+        if let Some(entry) = self
+            .host
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&id)
+        {
+            entry
+                .prompted
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
     /// Resolves a child model reference; unresolvable keeps the default.
     async fn resolve_child_model(&self, reference: Option<&str>) -> Option<dal_core::ModelRoute> {
         let reference = reference?;
@@ -1020,18 +1129,41 @@ impl Backend {
 
     /// Builds the completion report from the child's last assistant entry.
     /// `stop` is the child's durable terminal stop, read off its projection;
-    /// `view.turn` alone only knows the turn ended, not why.
+    /// `view.turn` alone only knows the turn ended, not why. An explicit
+    /// `report` tool call on any assistant entry wins over the last text.
     fn child_report(id: SessionId, view: &dal_core::View, stop: dal_core::Stop) -> AgentsReply {
+        #[derive(serde::Deserialize)]
+        struct ReportInput {
+            report: Box<str>,
+        }
+
         let mut text = String::new();
+        let mut reported_text = None;
         let mut entry = view.entries.items.last().map(|item| item.id);
+        let mut latest_assistant = true;
         for item in view.entries.items.iter().rev() {
-            if let dal_core::EntryKind::Assistant { content, .. } = &item.kind {
+            let dal_core::EntryKind::Assistant { content, .. } = &item.kind else {
+                continue;
+            };
+            if latest_assistant {
                 for block in content.iter().rev() {
                     if let dal_core::Block::Text { text: chunk } = block {
                         text.insert_str(0, chunk);
                     }
                 }
                 entry = Some(item.id);
+                latest_assistant = false;
+            }
+            reported_text = content.iter().rev().find_map(|block| {
+                let dal_core::Block::ToolCall { name, input, .. } = block else {
+                    return None;
+                };
+                (name.as_ref() == "report")
+                    .then_some(input)
+                    .and_then(|input| sonic_rs::from_str::<ReportInput>(input.as_str()).ok())
+                    .map(|fields| fields.report)
+            });
+            if reported_text.is_some() {
                 break;
             }
         }
@@ -1040,7 +1172,7 @@ impl Backend {
         AgentsReply::Await {
             report: AgentReport {
                 stop,
-                text: text.into(),
+                text: reported_text.unwrap_or_else(|| text.into_boxed_str()),
                 session: id,
                 entry,
             },

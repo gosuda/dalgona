@@ -146,6 +146,19 @@ pub enum Receipt {
 pub enum AgentsOp {
     /// Starts a child agent session.
     Start(AgentStart),
+    /// Starts one prompt turn on an idle child and optionally interrupts it
+    /// after the supplied grace duration.
+    Prompt {
+        /// The child session to prompt.
+        id: SessionId,
+        /// The prompt content.
+        text: Box<str>,
+        /// The duration after which the prompted turn is interrupted.
+        interrupt: Option<Duration>,
+        /// The most tool rounds the prompted turn may run; absent leaves
+        /// the turn unbounded. It bounds that one turn only.
+        max_steps: Option<std::num::NonZeroU32>,
+    },
     /// Waits for a child session to finish.
     Await {
         /// The child session to await.
