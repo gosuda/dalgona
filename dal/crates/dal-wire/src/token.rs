@@ -439,9 +439,7 @@ mod win {
     };
 
     use windows_sys::Win32::{
-        Foundation::{
-            CloseHandle, FALSE, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
-        },
+        Foundation::{CloseHandle, FALSE, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, LocalFree},
         Security::{
             Authorization::{
                 ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
@@ -468,9 +466,7 @@ mod win {
             return Err(io::Error::last_os_error());
         }
         let mut needed = 0u32;
-        unsafe {
-            GetTokenInformation(token, TokenUser, ptr::null_mut(), 0, &raw mut needed)
-        };
+        unsafe { GetTokenInformation(token, TokenUser, ptr::null_mut(), 0, &raw mut needed) };
         let mut buffer = vec![0u8; needed as usize];
         let queried = unsafe {
             GetTokenInformation(
@@ -485,7 +481,16 @@ mod win {
         if queried == FALSE {
             return Err(io::Error::last_os_error());
         }
-        let sid: PSID = unsafe { buffer.as_ptr().cast::<TOKEN_USER>().read().User.Sid };
+        // The token buffer is only byte-aligned, so the header must be
+        // read unaligned rather than reinterpreted as a `TOKEN_USER`.
+        let sid: PSID = unsafe {
+            buffer
+                .as_ptr()
+                .cast::<TOKEN_USER>()
+                .read_unaligned()
+                .User
+                .Sid
+        };
         let mut text = ptr::null_mut();
         if unsafe { ConvertSidToStringSidW(sid, &raw mut text) } == FALSE {
             return Err(io::Error::last_os_error());
@@ -551,7 +556,7 @@ mod win {
         }
         Ok((
             SECURITY_ATTRIBUTES {
-                nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+                nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>()).unwrap_or(u32::MAX),
                 lpSecurityDescriptor: descriptor,
                 bInheritHandle: FALSE,
             },

@@ -452,6 +452,7 @@ mod win {
     use std::process::ExitCode;
     use std::ptr;
 
+    use windows_sys::Wdk::Storage::FileSystem::NtSetSecurityObject;
     use windows_sys::Win32::Foundation::{
         CloseHandle, FALSE, GetLastError, LocalFree, WAIT_OBJECT_0,
     };
@@ -465,7 +466,6 @@ mod win {
         CreateAppContainerProfile, DeleteAppContainerProfile,
         DeriveAppContainerSidFromAppContainerName,
     };
-    use windows_sys::Wdk::Storage::FileSystem::NtSetSecurityObject;
     use windows_sys::Win32::Security::{
         ACE_HEADER, ACL, ACL_REVISION, AddMandatoryAce, DACL_SECURITY_INFORMATION, EqualSid,
         FreeSid, GetAce, GetSecurityDescriptorDacl, GetSecurityDescriptorSacl, InitializeAcl,
@@ -778,8 +778,7 @@ mod win {
                     ["L", path, label] => {
                         state.orig_label.insert(
                             (*path).to_string(),
-                            (*label != "-")
-                                .then(|| ((*label).to_string(), 0, LABEL_NO_WRITE_UP)),
+                            (*label != "-").then(|| ((*label).to_string(), 0, LABEL_NO_WRITE_UP)),
                         );
                     }
                     ["L", path, label, flags, policy] => {
@@ -1241,8 +1240,7 @@ mod win {
             if unsafe { ConvertStringSidToSidW(name.as_ptr(), &raw mut sid) } == FALSE {
                 return Err(last_error(&format!("build label for {}", path.display())));
             }
-            let added =
-                unsafe { AddMandatoryAce(acl, ACL_REVISION, 0, LABEL_NO_WRITE_UP, sid) };
+            let added = unsafe { AddMandatoryAce(acl, ACL_REVISION, 0, LABEL_NO_WRITE_UP, sid) };
             unsafe { LocalFree(sid.cast()) };
             if added == FALSE {
                 return Err(last_error(&format!("build label for {}", path.display())));
@@ -1289,9 +1287,8 @@ mod win {
                 if unsafe { ConvertStringSidToSidW(name.as_ptr(), &raw mut sid) } == FALSE {
                     return Err(last_error(&format!("build label for {}", path.display())));
                 }
-                let added = unsafe {
-                    AddMandatoryAce(acl, ACL_REVISION, u32::from(flags), policy, sid)
-                };
+                let added =
+                    unsafe { AddMandatoryAce(acl, ACL_REVISION, u32::from(flags), policy, sid) };
                 unsafe { LocalFree(sid.cast()) };
                 if added == FALSE {
                     return Err(last_error(&format!("build label for {}", path.display())));
@@ -1477,8 +1474,7 @@ mod win {
                     break;
                 }
                 let header = ace.cast::<ACE_HEADER>();
-                let (ace_type, ace_flags) =
-                    unsafe { ((*header).AceType, (*header).AceFlags) };
+                let (ace_type, ace_flags) = unsafe { ((*header).AceType, (*header).AceFlags) };
                 if ace_type != ALLOWED_ACE_TYPE && ace_type != DENIED_ACE_TYPE {
                     continue;
                 }
@@ -1586,14 +1582,12 @@ mod win {
             .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
             .map(|entry| entry.path())
             .filter(|path| {
-                path.extension()
-                    .and_then(OsStr::to_str)
-                    .is_some_and(|ext| {
-                        matches!(
-                            ext.to_ascii_lowercase().as_str(),
-                            "exe" | "dll" | "bat" | "cmd" | "ps1" | "com"
-                        )
-                    })
+                path.extension().and_then(OsStr::to_str).is_some_and(|ext| {
+                    matches!(
+                        ext.to_ascii_lowercase().as_str(),
+                        "exe" | "dll" | "bat" | "cmd" | "ps1" | "com"
+                    )
+                })
             })
             .take(PATH_GRANT_LIMIT)
             .collect()
@@ -1632,13 +1626,7 @@ mod win {
                             Err(error) => return Err(error),
                         }
                     }
-                    match plant_files(
-                        edge,
-                        &files,
-                        profile.sid.0,
-                        &profile.guid,
-                        access,
-                    ) {
+                    match plant_files(edge, &files, profile.sid.0, &profile.guid, access) {
                         Ok(done) => planted.extend(done.into_iter().map(|f| (f, access))),
                         Err(error) if !optional => return Err(error),
                         Err(_) => {}

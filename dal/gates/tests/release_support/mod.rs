@@ -40,8 +40,8 @@ fn shell() -> Command {
             }
         }
         if let Some(paths) = env::var_os("PATH") {
-            let stub = env::var_os("SystemRoot")
-                .map(|root| Path::new(&root).join(r"System32\bash.exe"));
+            let stub =
+                env::var_os("SystemRoot").map(|root| Path::new(&root).join(r"System32\bash.exe"));
             for candidate in env::split_paths(&paths).map(|dir| dir.join("bash.exe")) {
                 if !candidate.is_file() {
                     continue;
