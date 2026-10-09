@@ -469,6 +469,7 @@ impl TurnTools {
             .ensure_declared_mcp(&caller, set, detail, &runtime.cancel)
             .await
             .map(|_| ())
+            .map_err(|error| error.naming_grant(Service::Mcp, declaration.plugin.as_str()))
     }
 
     /// The published overlay entries in name order.

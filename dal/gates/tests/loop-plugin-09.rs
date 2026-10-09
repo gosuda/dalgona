@@ -424,7 +424,10 @@ async fn each_extension_service_requires_its_own_grant() -> Result<(), Box<dyn E
             declared_states.get(&probe).unwrap(),
         )
         .await?;
-        if result != Err(ServiceError::Denied(DenyReason::NotGranted)) {
+        if !matches!(
+            result,
+            Err(ServiceError::Denied(DenyReason::ServiceNotGranted { .. }))
+        ) {
             failures.push(format!("{} without approval: {result:?}", probe.label()));
         }
     }

@@ -714,7 +714,7 @@ async fn rust_infer_is_trusted_and_script_infer_is_gated() {
         .unwrap_err();
     assert!(matches!(
         error,
-        ServiceError::Denied(DenyReason::NotGranted)
+        ServiceError::Denied(DenyReason::ServiceNotGranted { .. })
     ));
 
     let services = Arc::clone(&fx.services);

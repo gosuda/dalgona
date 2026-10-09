@@ -432,6 +432,25 @@ impl ServiceError {
             "another question is already open in this front end",
         )
     }
+
+    /// A grant denial for `service` that names the requesting `plugin`.
+    #[must_use]
+    pub(crate) fn service_not_granted(service: Service, plugin: &str) -> Self {
+        Self::Denied(DenyReason::ServiceNotGranted {
+            service,
+            plugin: plugin.into(),
+        })
+    }
+
+    /// Names `service` and `plugin` in a bare grant denial. Every other
+    /// error passes through unchanged.
+    #[must_use]
+    pub(crate) fn naming_grant(self, service: Service, plugin: &str) -> Self {
+        match self {
+            Self::Denied(DenyReason::NotGranted) => Self::service_not_granted(service, plugin),
+            error => error,
+        }
+    }
 }
 
 /// Renders a [`DenyReason`] from its owned data.
@@ -457,6 +476,10 @@ impl fmt::Display for DenyText<'_> {
             DenyReason::NotGranted => {
                 formatter.write_str("denied: the extension's services are not granted")
             }
+            DenyReason::ServiceNotGranted { service, plugin } => write!(
+                formatter,
+                "denied: plugin \"{plugin}\" has no grant for the \"{service}\" service; approve the plugin's grant request when it asks, then try again"
+            ),
             DenyReason::NoFrontEnd => formatter.write_str("denied: no front end can answer"),
             DenyReason::Unavailable { what } => write!(formatter, "denied: {what} is unavailable"),
             DenyReason::OutOfScope { what } => {
@@ -686,6 +709,18 @@ mod tests {
                 service: Some(Service::Ask),
                 message: "another question is already open in this front end".into(),
             }
+        );
+    }
+
+    #[test]
+    fn ungranted_service_names_plugin_and_fix() {
+        let error = ServiceError::Denied(DenyReason::ServiceNotGranted {
+            service: Service::Turn,
+            plugin: "orchestration".into(),
+        });
+        assert_eq!(
+            error.to_string(),
+            "denied: plugin \"orchestration\" has no grant for the \"turn\" service; approve the plugin's grant request when it asks, then try again"
         );
     }
 

@@ -235,11 +235,15 @@ impl SessionServices {
             if matches!(who.kind, CallerKind::Cell { .. }) || who.origin == Origin::Builtin {
                 return Ok(());
             }
-            let grant = self.grants.ensure(&who, service, &cancel).await?;
+            let grant = self
+                .grants
+                .ensure(&who, service, &cancel)
+                .await
+                .map_err(|error| error.naming_grant(service, who.ext.as_str()))?;
             if grant.key().allows(service) {
                 Ok(())
             } else {
-                Err(ServiceError::Denied(DenyReason::NotGranted))
+                Err(ServiceError::service_not_granted(service, who.ext.as_str()))
             }
         })
     }
