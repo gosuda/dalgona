@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fix goal saving errors: a failed write of the goal file now reports `goal: saving the goal failed: <message>` instead of a raw file error.
 - Make `/abort` continue cancelling child sessions when status checks fail, report unexpected replies, and stop after a bounded sweep with active session ids.
 - Fix finished orchestration children that kept their runtime until the session ended: a run now closes each child as soon as its report arrives, with or without a connected client, and shows a notice if the close fails.
 - Require the user to run `/review` before a capped review can restart, and clear unused restart grants when a session closes.

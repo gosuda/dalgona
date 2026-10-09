@@ -175,5 +175,5 @@ fn pool_text_builders_match_contract() {
         unfinished_text(2, 3).as_deref(),
         Some("2 of 3 tasks did not finish")
     );
-    assert_eq!(GRACE_SECONDS, 60.0);
+    assert!((GRACE_SECONDS - 60.0).abs() < f64::EPSILON);
 }

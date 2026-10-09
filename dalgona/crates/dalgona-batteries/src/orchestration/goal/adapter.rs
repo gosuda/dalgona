@@ -11,15 +11,12 @@ use super::ops::{
     GoalCommand, GoalScope, TodoSummary, UpdateTarget, apply_goal_command, create_goal, get_goal,
     parse_goal_command, update_goal,
 };
-use super::sidecar::{
-    Goal, GoalError, GoalSidecar, controller_wire, decode_sidecar, encode_sidecar,
-};
+use super::sidecar::{GoalError, GoalSidecar, controller_wire, decode_sidecar, encode_sidecar};
 
 #[derive(Clone, Debug)]
 pub(crate) struct GoalStore {
     pub sidecar: Option<GoalSidecar>,
     pub saved: bool,
-    pub raw: Option<Vec<u8>>,
     pub error: Option<GoalError>,
 }
 
@@ -34,7 +31,6 @@ impl GoalStore {
                 goal: None,
             }),
             saved: false,
-            raw: None,
             error: None,
         }
     }
@@ -77,13 +73,11 @@ pub(crate) async fn load(services: &dyn Services, caller: &Caller, session: &str
             Ok(sidecar) => GoalStore {
                 sidecar: Some(sidecar),
                 saved: true,
-                raw: Some(bytes),
                 error: None,
             },
             Err(error) => GoalStore {
                 sidecar: None,
                 saved: true,
-                raw: Some(bytes),
                 error: Some(error),
             },
         },
@@ -97,29 +91,33 @@ fn failed_store(error: GoalError) -> GoalStore {
     GoalStore {
         sidecar: None,
         saved: false,
-        raw: None,
         error: Some(error),
     }
+}
+
+pub(crate) struct ToolContext<'a, 'b> {
+    pub(crate) store: &'a mut GoalStore,
+    pub(crate) ctx: &'a GoalScope<'b>,
+    pub(crate) todos: &'a TodoSummary,
+    pub(crate) inflight: &'a InflightCounts,
+    pub(crate) services: &'a dyn Services,
+    pub(crate) caller: &'a Caller,
 }
 
 pub(crate) async fn tool(
     name: &str,
     args: &str,
-    store: &mut GoalStore,
-    ctx: &GoalScope<'_>,
-    todos: &TodoSummary,
-    inflight: &InflightCounts,
-    services: &dyn Services,
-    caller: &Caller,
+    context: ToolContext<'_, '_>,
 ) -> Result<String, ServiceError> {
-    let Some(sidecar) = store.sidecar.as_mut() else {
-        return Err(service_failure(store.error.as_ref()));
+    let Some(sidecar) = context.store.sidecar.as_mut() else {
+        return Err(service_failure(context.store.error.as_ref()));
     };
     let now = Timestamp::now();
     let reply = match name {
         "create_goal" => {
             let input = decode::<CreateArgs>(args, name)?;
-            create_goal(sidecar, ctx, &input.objective, now).map_err(goal_failure)?
+            create_goal(sidecar, context.ctx, &input.objective, now)
+                .map_err(|error| goal_failure(&error))?
         }
         "update_goal" => {
             let input = decode::<UpdateArgs>(args, name)?;
@@ -135,18 +133,18 @@ pub(crate) async fn tool(
             };
             update_goal(
                 sidecar,
-                ctx,
+                context.ctx,
                 target,
                 input.reason.as_deref(),
-                todos,
-                inflight,
+                context.todos,
+                context.inflight,
                 now,
             )
-            .map_err(goal_failure)?
+            .map_err(|error| goal_failure(&error))?
         }
         "get_goal" => {
             let _ = decode::<GetArgs>(args, name)?;
-            return get_goal(sidecar, ctx).map_err(goal_failure);
+            return get_goal(sidecar, context.ctx).map_err(|error| goal_failure(&error));
         }
         _ => {
             return Err(ServiceError::failed(
@@ -155,7 +153,7 @@ pub(crate) async fn tool(
             ));
         }
     };
-    save(services, caller, sidecar).await?;
+    save(context.services, context.caller, sidecar).await?;
     Ok(reply)
 }
 
@@ -167,7 +165,7 @@ pub(crate) async fn command(
     caller: &Caller,
 ) -> Result<String, ServiceError> {
     if let Some(error) = store.error.as_ref() {
-        return Err(goal_failure(error.clone()));
+        return Err(goal_failure(error));
     }
     let Some(sidecar) = store.sidecar.as_mut() else {
         return Err(ServiceError::failed(
@@ -189,11 +187,16 @@ pub(crate) async fn save(
     sidecar: &GoalSidecar,
 ) -> Result<(), ServiceError> {
     let name = Name::parse("goal.json").map_err(|_| ServiceError::sidecar_bad_name("goal.json"))?;
-    let bytes = encode_sidecar(sidecar).map_err(goal_failure)?;
+    let bytes = encode_sidecar(sidecar).map_err(|error| goal_failure(&error))?;
     services
         .sidecar(caller, SidecarOp::Write { name, bytes })
         .await
-        .map(|_| ())
+        .map_err(|error| {
+            goal_failure(&GoalError::SaveFailed {
+                message: error.to_string().into(),
+            })
+        })?;
+    Ok(())
 }
 
 pub(crate) fn update_mode(store: &mut GoalStore, mode: ControllerMode) {
@@ -201,13 +204,6 @@ pub(crate) fn update_mode(store: &mut GoalStore, mode: ControllerMode) {
         return;
     };
     sidecar.controller = mode;
-}
-
-pub(crate) fn projection(store: &GoalStore) -> Option<Goal> {
-    store
-        .sidecar
-        .as_ref()
-        .and_then(|sidecar| sidecar.goal.clone())
 }
 
 pub(crate) fn preview(store: &GoalStore) -> Option<super::super::monitor::status::GoalPreview> {
@@ -226,7 +222,7 @@ fn decode<T: for<'de> Deserialize<'de>>(args: &str, tool: &str) -> Result<T, Ser
         .map_err(|error| ServiceError::failed(None, format!("{tool}: invalid arguments: {error}")))
 }
 
-fn goal_failure(error: GoalError) -> ServiceError {
+fn goal_failure(error: &GoalError) -> ServiceError {
     ServiceError::failed(None, error.to_string())
 }
 

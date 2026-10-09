@@ -41,11 +41,19 @@ pub(crate) trait JobsView {
     /// Reports whether the job is a live top-level exec job in this session.
     fn is_live_top_level_exec(&self, job: dal_core::JobId) -> bool;
     /// Counts queued or running top-level jobs.
+    #[expect(
+        dead_code,
+        reason = "the orchestration contract fixes this jobs-view seam"
+    )]
     fn top_level_live_count(&self) -> usize;
 }
 
 /// Live per-session counts rendered into `orchestration.status`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[expect(
+    dead_code,
+    reason = "the orchestration status contract fixes the inflight projection surface"
+)]
 pub(crate) struct Inflight {
     /// Queued or running top-level jobs.
     pub jobs: usize,
@@ -61,6 +69,10 @@ pub(crate) struct Inflight {
 
 /// Read-only goal projection for status rendering.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[expect(
+    dead_code,
+    reason = "the orchestration status contract fixes the goal projection surface"
+)]
 pub(crate) struct GoalView {
     /// Session-local goal id (`g<n>`).
     pub id: String,

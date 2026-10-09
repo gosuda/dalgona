@@ -191,7 +191,7 @@ async fn run(
     (result, drawn)
 }
 
-fn is_refusal(result: Result<Option<Compaction>, CompactError>) -> bool {
+fn is_refusal(result: &Result<Option<Compaction>, CompactError>) -> bool {
     matches!(result, Err(CompactError::Fail(_)))
 }
 
@@ -313,7 +313,7 @@ async fn image_slots_are_the_catalog_maximum_minus_images_elsewhere() {
     assert_eq!(drawn.expect("drawn").letters.len(), 2);
     carried.images_elsewhere = 3;
     let (result, drawn) = run(limits(), profile(3), request(&covered(), carried)).await;
-    assert!(is_refusal(result));
+    assert!(is_refusal(&result));
     assert!(drawn.is_none());
 }
 
@@ -361,7 +361,7 @@ async fn png_budget_boundary_and_first_image_refusal() {
         request(&covered(), budget(u64::MAX / 4, 0.7)),
     )
     .await;
-    assert!(is_refusal(result));
+    assert!(is_refusal(&result));
     assert!(drawn.is_none());
 }
 
@@ -428,19 +428,19 @@ async fn declines_without_drawable_history_or_token_room() {
         request(&one_turn, budget(u64::MAX / 4, 0.7)),
     )
     .await;
-    assert!(is_refusal(result));
+    assert!(is_refusal(&result));
     assert!(drawn.is_none());
     let mut unknown = budget(1000, 0.4);
     unknown.window_tokens = None;
     let (result, _) = run(limits(), profile(10), request(&covered(), unknown)).await;
-    assert!(is_refusal(result));
+    assert!(is_refusal(&result));
     let (result, drawn) = run(
         limits(),
         profile(10),
         request(&covered(), budget(1000, 0.1)),
     )
     .await;
-    assert!(is_refusal(result));
+    assert!(is_refusal(&result));
     assert!(drawn.is_none());
 }
 
@@ -455,7 +455,7 @@ async fn timeouts_refuse_with_the_exact_notices_and_commit_nothing() {
         request(&entries, budget(u64::MAX / 4, 0.7)),
     )
     .await;
-    assert!(is_refusal(result));
+    assert!(is_refusal(&result));
     assert!(drawn.is_none());
     let mut chain = limits();
     chain.chain = Duration::ZERO;
@@ -465,7 +465,7 @@ async fn timeouts_refuse_with_the_exact_notices_and_commit_nothing() {
         request(&entries, budget(u64::MAX / 4, 0.7)),
     )
     .await;
-    assert!(is_refusal(result));
+    assert!(is_refusal(&result));
     assert!(drawn.is_none());
 }
 
@@ -573,11 +573,11 @@ async fn retained_image_bytes_use_the_png_budget() {
 
     carried.image_bytes_elsewhere = sum;
     let (result, drawn) = run(exact, profile(1000), request(&covered(), carried)).await;
-    assert!(is_refusal(result));
+    assert!(is_refusal(&result));
     assert!(drawn.is_none());
 
     carried.image_bytes_elsewhere = usize::MAX;
     let (result, drawn) = run(exact, profile(1000), request(&covered(), carried)).await;
-    assert!(is_refusal(result));
+    assert!(is_refusal(&result));
     assert!(drawn.is_none());
 }

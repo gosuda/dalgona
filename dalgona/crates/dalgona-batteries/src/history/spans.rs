@@ -270,13 +270,6 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// One journal source piece used to build history image items.
 ///
 /// The compaction host provides these exact source ranges.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the landed CompactInput has no journal-piece accessor yet"
-    )
-)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CompactPiece {
     /// Journal entry holding the source bytes.
@@ -296,13 +289,6 @@ pub(crate) struct CompactPiece {
 }
 
 /// A journal byte read failure.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the landed host cannot yet construct journal source-read failures"
-    )
-)]
 #[derive(Clone, Debug, Eq, PartialEq, Error)]
 #[error("{message}")]
 pub(crate) struct SourceError {

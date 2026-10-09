@@ -72,6 +72,12 @@ enum Message {
     },
     Close(oneshot::Sender<()>),
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReportArgs {
+    status: String,
+    report: String,
+}
 
 struct SessionState {
     session: SessionId,
@@ -228,7 +234,7 @@ impl Runtime {
             .map_err(|_| ServiceError::failed(None, "orchestration owner is closed"))?
     }
 
-    async fn open(&self, start: SessionStart, cx: HookCx) -> Result<(), HookError> {
+    async fn open(&self, _start: SessionStart, cx: HookCx) -> Result<(), HookError> {
         let session = cx.session;
         let parent = cx.parent;
         let caller = cx.caller.clone();
@@ -266,7 +272,6 @@ impl Runtime {
             turn_tool_called: false,
             goal_timer: None,
         };
-        let _ = start;
         #[expect(
             clippy::disallowed_methods,
             reason = "the session registry owns and cancels this per-session task"
@@ -282,7 +287,6 @@ impl Runtime {
                 },
             );
         }
-        let _ = start;
         Ok(())
     }
 
@@ -368,7 +372,7 @@ impl SessionState {
                 if self.config.loop_guard.enabled {
                     clear_pending_attempts(&mut self.guard);
                 }
-                self.last_stop = stop_kind(&event.stop);
+                self.last_stop = stop_kind(event.stop);
                 self.turn_tool_called = false;
                 self.publish_status();
                 let _ = reply.send(());
@@ -734,12 +738,14 @@ impl SessionState {
         adapter::tool(
             name,
             args,
-            store,
-            &ctx,
-            &todos,
-            &inflight,
-            self.services.as_ref(),
-            &self.caller,
+            adapter::ToolContext {
+                store,
+                ctx: &ctx,
+                todos: &todos,
+                inflight: &inflight,
+                services: self.services.as_ref(),
+                caller: &self.caller,
+            },
         )
         .await
     }
@@ -774,12 +780,6 @@ impl SessionState {
                 None,
                 super::agents_tool::NO_NESTED_RUNS,
             ));
-        }
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct ReportArgs {
-            status: String,
-            report: String,
         }
         let input: ReportArgs = sonic_rs::from_str(args)
             .map_err(|error| ServiceError::failed(None, error.to_string()))?;
@@ -896,61 +896,95 @@ impl SessionState {
         }
         let todos = self.todo_summary().await?;
         let inflight = self.inflight_counts().await?;
-        let idle = match self.services.turn(&self.caller, TurnOp::IsIdle).await? {
-            dal_core::TurnOpReply::Idle(value) => value,
-            _ => false,
+        let idle = matches!(
+            self.services.turn(&self.caller, TurnOp::IsIdle).await?,
+            dal_core::TurnOpReply::Idle(true)
+        );
+        let Some(signature) = self.goal_signature(&event.reply_text, &todos) else {
+            return Ok(());
         };
-        let now = dal_core::Timestamp::now();
-        let signature = {
-            let Some(goal) = self
-                .goal
-                .as_ref()
-                .and_then(|store| store.sidecar.as_ref())
-                .and_then(|sidecar| sidecar.goal.as_ref())
-            else {
-                return Ok(());
-            };
-            if goal.status != super::GoalStatus::Active {
-                return Ok(());
-            }
-            super::goal::policy::progress_signature(
-                &goal.id,
-                todos.open,
-                todos.total,
-                &event.reply_text,
-            )
+        let decision = self.goal_verdict(&signature, idle, &todos, &inflight);
+        self.apply_goal_verdict(
+            decision,
+            &event.reply_text,
+            &signature,
+            &inflight,
+            dal_core::Timestamp::now(),
+        );
+        if let Some(store) = self.goal.as_ref()
+            && store.saved
+            && let Some(sidecar) = store.sidecar.as_ref()
+        {
+            adapter::save(self.services.as_ref(), &self.caller, sidecar).await?;
+        }
+        Ok(())
+    }
+
+    fn goal_signature(&self, reply_text: &str, todos: &TodoSummary) -> Option<String> {
+        let goal = self
+            .goal
+            .as_ref()
+            .and_then(|store| store.sidecar.as_ref())
+            .and_then(|sidecar| sidecar.goal.as_ref())?;
+        if goal.status != super::GoalStatus::Active {
+            return None;
+        }
+        Some(super::goal::policy::progress_signature(
+            &goal.id,
+            todos.open,
+            todos.total,
+            reply_text,
+        ))
+    }
+
+    fn goal_verdict(
+        &self,
+        signature: &str,
+        idle: bool,
+        todos: &TodoSummary,
+        inflight: &InflightCounts,
+    ) -> super::goal::policy::Verdict {
+        let Some(goal) = self
+            .goal
+            .as_ref()
+            .and_then(|store| store.sidecar.as_ref())
+            .and_then(|sidecar| sidecar.goal.as_ref())
+        else {
+            return super::goal::policy::Verdict::Deny(
+                super::goal::policy::DenyReason::NotEligible,
+            );
         };
-        let decision = {
-            let Some(goal) = self
-                .goal
-                .as_ref()
-                .and_then(|store| store.sidecar.as_ref())
-                .and_then(|sidecar| sidecar.goal.as_ref())
-            else {
-                return Ok(());
-            };
-            let input = super::goal::policy::VerdictInput {
-                goal,
-                path: super::goal::policy::GoalPath::AfterTurn,
-                idle,
-                pending_user_messages: false,
-                continuation_pending: self.goal_timer.is_some(),
-                last_turn_context_overflow: false,
-                last_stop: self.last_stop,
-                signature: &signature,
-                open_todos: todos.open,
-                total_todos: todos.total,
-                inflight: &inflight,
-            };
-            super::goal::policy::verdict(&input)
+        let input = super::goal::policy::VerdictInput {
+            goal,
+            path: super::goal::policy::GoalPath::AfterTurn,
+            idle,
+            pending_user_messages: false,
+            continuation_pending: self.goal_timer.is_some(),
+            last_turn_context_overflow: false,
+            last_stop: self.last_stop,
+            signature,
+            open_todos: todos.open,
+            total_todos: todos.total,
+            inflight,
         };
+        super::goal::policy::verdict(&input)
+    }
+
+    fn apply_goal_verdict(
+        &mut self,
+        decision: super::goal::policy::Verdict,
+        reply_text: &str,
+        signature: &str,
+        inflight: &InflightCounts,
+        now: dal_core::Timestamp,
+    ) {
         if let Some(store) = self.goal.as_mut()
             && let Some(sidecar) = store.sidecar.as_mut()
             && let Some(goal) = sidecar.goal.as_mut()
         {
             match decision {
                 super::goal::policy::Verdict::Continue { prompt, stall } => {
-                    let live_parts = Self::live_parts(&inflight);
+                    let live_parts = Self::live_parts(inflight);
                     let number = goal.unattended.saturating_add(1);
                     let prompt_text = super::goal::prompt::build_prompt(
                         goal,
@@ -960,11 +994,11 @@ impl SessionState {
                     );
                     super::goal::policy::record_goal_turn(
                         goal,
-                        &event.reply_text,
+                        reply_text,
                         self.turn_tool_called,
                         0,
                         0,
-                        &signature,
+                        signature,
                         prompt,
                     );
                     goal.updated_at = now;
@@ -989,13 +1023,6 @@ impl SessionState {
                 }
             }
         }
-        if let Some(store) = self.goal.as_ref()
-            && store.saved
-            && let Some(sidecar) = store.sidecar.as_ref()
-        {
-            adapter::save(self.services.as_ref(), &self.caller, sidecar).await?;
-        }
-        Ok(())
     }
 
     async fn agents_tool(&mut self, call: CallId, args: &RawJson) -> Result<String, ServiceError> {
@@ -1061,14 +1088,13 @@ impl SessionState {
     }
 
     async fn list_agents(&self, requested: Vec<String>) -> Result<String, ServiceError> {
-        let agents = match self.services.agents(&self.caller, AgentsOp::List).await? {
-            AgentsReply::Listed(agents) => agents,
-            _ => {
-                return Err(ServiceError::failed(
-                    None,
-                    "agents service returned an unexpected reply",
-                ));
-            }
+        let AgentsReply::Listed(agents) =
+            self.services.agents(&self.caller, AgentsOp::List).await?
+        else {
+            return Err(ServiceError::failed(
+                None,
+                "agents service returned an unexpected reply",
+            ));
         };
         let filtered = agents.iter().filter(|agent| {
             requested.is_empty() || requested.iter().any(|id| id == &agent.id.to_string())
@@ -1083,6 +1109,77 @@ impl SessionState {
         })
     }
 
+    async fn run_workflow_items(
+        &mut self,
+        call: &CallId,
+        step: &super::workflow::Step,
+        items: &[Option<String>],
+        reports: &[super::workflow::StepResult],
+    ) -> Result<(Option<Box<str>>, Vec<super::workflow::PoolItemResult>), ServiceError> {
+        let mut item_results = Vec::new();
+        let mut task_report = None;
+        for (item_index, item) in items.iter().enumerate() {
+            let dependency_reports = reports.to_vec();
+            let prompt = super::workflow::render::render(
+                step,
+                item.as_deref(),
+                &dependency_reports,
+                None,
+                JobId::new_v7(),
+            );
+            let task_name = item.as_deref().map_or_else(
+                || step.name.clone(),
+                |item| super::pool::item_label(&step.name, item_index, item),
+            );
+            let preamble = super::pool::preamble(&task_name, &prompt);
+            let mut tool_names = Vec::new();
+            for tool in &step.tools {
+                tool_names.push(
+                    Name::parse(tool)
+                        .map_err(|error| ServiceError::failed(None, error.to_string()))?,
+                );
+            }
+            tool_names.push(
+                Name::parse("report")
+                    .map_err(|error| ServiceError::failed(None, error.to_string()))?,
+            );
+            let child_call = CallId::new(format!("{call}-{}-{item_index}", step.name));
+            let start = dal_core::AgentStart {
+                call: child_call,
+                name: task_name.clone().into_boxed_str(),
+                prompt: preamble.into_boxed_str(),
+                model: step.model.clone().map(String::into_boxed_str),
+                role: step.role.clone().map(String::into_boxed_str),
+                system: step.system.clone().map(String::into_boxed_str),
+                tools: Some(tool_names.into_boxed_slice()),
+                workspace: None,
+            };
+            let AgentsReply::Started { id: child } = self
+                .services
+                .agents(&self.caller, AgentsOp::Start(start))
+                .await?
+            else {
+                return Err(ServiceError::failed(
+                    None,
+                    "agents service did not start the child",
+                ));
+            };
+            let report = await_child(self.services.as_ref(), &self.caller, child).await?;
+            release_child(self.services.as_ref(), &self.caller, child).await;
+            if item.is_none() {
+                task_report = Some(report.text.clone());
+            }
+            item_results.push(super::workflow::PoolItemResult {
+                item: item.as_deref().map_or_else(
+                    || step.name.clone().into_boxed_str(),
+                    |item| item.to_owned().into_boxed_str(),
+                ),
+                state: "done".into(),
+                summary: super::delivery::preview(&report.text, 200).into_boxed_str(),
+            });
+        }
+        Ok((task_report, item_results))
+    }
     async fn run_workflow(
         &mut self,
         call: CallId,
@@ -1090,16 +1187,15 @@ impl SessionState {
         workflow: super::workflow::Workflow,
     ) -> Result<String, ServiceError> {
         let mut reports = Vec::new();
-        for (step_index, step) in workflow.steps.iter().enumerate() {
-            let from_items;
+        for step in &workflow.steps {
             let items = match &step.items {
                 super::workflow::Items::Task => vec![None],
-                super::workflow::Items::Literal(items) => items.iter().map(Some).collect(),
+                super::workflow::Items::Literal(items) => items.iter().cloned().map(Some).collect(),
                 super::workflow::Items::From(source) => {
-                    let source = reports
+                    let Some(source) = reports
                         .iter()
-                        .find(|result: &&super::workflow::StepResult| result.name == *source);
-                    let Some(source) = source else {
+                        .find(|result: &&super::workflow::StepResult| result.name == *source)
+                    else {
                         reports.push(super::workflow::StepResult {
                             name: step.name.clone(),
                             task_report: None,
@@ -1122,94 +1218,20 @@ impl SessionState {
                             super::pool::too_many_items(source.name.as_str(), parts.len()),
                         ));
                     }
-                    from_items = parts;
-                    from_items.iter().map(Some).collect()
+                    parts.into_iter().map(Some).collect()
                 }
             };
-            let mut item_results = Vec::new();
-            let mut task_report = None;
-            for (item_index, item) in items.iter().enumerate() {
-                let dependency_reports = reports.clone();
-                let prompt = super::workflow::render::render(
-                    step,
-                    item.map(String::as_str),
-                    &dependency_reports,
-                    None,
-                    JobId::new_v7(),
-                );
-                let task_name = item.map_or_else(
-                    || step.name.clone(),
-                    |item| super::pool::item_label(&step.name, item_index, item),
-                );
-                let preamble = super::pool::preamble(&task_name, &prompt);
-                let mut tool_names = Vec::new();
-                for tool in &step.tools {
-                    tool_names.push(
-                        Name::parse(tool)
-                            .map_err(|error| ServiceError::failed(None, error.to_string()))?,
-                    );
-                }
-                tool_names.push(
-                    Name::parse("report")
-                        .map_err(|error| ServiceError::failed(None, error.to_string()))?,
-                );
-                let child_call = CallId::new(format!("{call}-{}-{item_index}", step.name));
-                let start = dal_core::AgentStart {
-                    call: child_call,
-                    name: task_name.clone().into_boxed_str(),
-                    prompt: preamble.into_boxed_str(),
-                    model: step.model.clone().map(String::into_boxed_str),
-                    role: step.role.clone().map(String::into_boxed_str),
-                    system: step.system.clone().map(String::into_boxed_str),
-                    tools: Some(tool_names.into_boxed_slice()),
-                    workspace: None,
-                };
-                let child = match self
-                    .services
-                    .agents(&self.caller, AgentsOp::Start(start))
-                    .await?
-                {
-                    AgentsReply::Started { id } => id,
-                    _ => {
-                        return Err(ServiceError::failed(
-                            None,
-                            "agents service did not start the child",
-                        ));
-                    }
-                };
-                let report = await_child(self.services.as_ref(), &self.caller, child).await?;
-                release_child(self.services.as_ref(), &self.caller, child).await;
-                if item.is_none() {
-                    task_report = Some(report.text.clone());
-                }
-                item_results.push(super::workflow::PoolItemResult {
-                    item: item.map_or_else(
-                        || step.name.clone().into_boxed_str(),
-                        |item| item.clone().into_boxed_str(),
-                    ),
-                    state: "done".into(),
-                    summary: super::delivery::preview(&report.text, 200).into_boxed_str(),
-                });
-                let result = super::pool::TaskResult {
-                    id: JobId::new_v7(),
-                    state: super::pool::TaskState::Done(super::agents_tool::Report {
-                        status: ReportStatus::Done,
-                        text: report.text.to_string(),
-                    }),
-                    changed: Vec::new(),
-                    isolation: None,
-                };
-                let _ = result;
-            }
+            let (task_report, item_results) = self
+                .run_workflow_items(&call, step, &items, &reports)
+                .await?;
             reports.push(super::workflow::StepResult {
                 name: step.name.clone(),
                 task_report,
-                pool_items: match step.items {
+                pool_items: match &step.items {
                     super::workflow::Items::Task => None,
                     _ => Some(item_results),
                 },
             });
-            let _ = step_index;
         }
         let full = reports
             .iter()
@@ -1218,7 +1240,6 @@ impl SessionState {
             .join("\n\n");
         Ok(format!("run {label} completed.\n\n{full}"))
     }
-
     async fn tool_call(&mut self, event: ToolCallEvent) -> ToolCallVerdict {
         let mut verdict = ToolCallVerdict::Allow;
         if self.config.loop_guard.enabled {
@@ -1659,7 +1680,7 @@ impl StatusPoll for Status {
     }
 }
 
-fn stop_kind(stop: &dal_core::Stop) -> StopKind {
+fn stop_kind(stop: dal_core::Stop) -> StopKind {
     match stop {
         dal_core::Stop::EndTurn => StopKind::Completed,
         dal_core::Stop::Length | dal_core::Stop::MaxSteps => StopKind::Length,

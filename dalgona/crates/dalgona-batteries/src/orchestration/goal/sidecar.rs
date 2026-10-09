@@ -46,6 +46,10 @@ mod goal_status_serde {
     use super::{GoalStatus, parse_status};
     use serde::{Deserialize, Deserializer, Serializer};
 
+    #[expect(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "serde with adapters receive field references by contract"
+    )]
     pub(super) fn serialize<S: Serializer>(
         status: &GoalStatus,
         serializer: S,
@@ -137,6 +141,10 @@ mod ts_millis {
         use super::super::{Timestamp, format_millis};
         use serde::{Deserialize, Deserializer, Serializer};
 
+        #[expect(
+            clippy::ref_option,
+            reason = "serde with adapters receive optional field references by contract"
+        )]
         pub(in super::super) fn serialize<S: Serializer>(
             stamp: &Option<Timestamp>,
             serializer: S,
@@ -208,6 +216,10 @@ pub(crate) struct Goal {
     /// Consecutive tool-less goal turns.
     pub(crate) toolless_streak: u32,
     /// Goal turns since the goal became active or the user last spoke.
+    #[expect(
+        clippy::struct_field_names,
+        reason = "the persisted goal schema names its counters with the goal prefix"
+    )]
     pub(crate) goal_turns: u32,
     /// Progress signature delivered with the last continuation.
     pub(crate) last_signature: Option<Box<str>>,

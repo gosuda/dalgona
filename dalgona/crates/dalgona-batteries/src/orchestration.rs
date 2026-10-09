@@ -70,13 +70,6 @@ pub(crate) mod stuck;
 #[cfg(test)]
 mod tests;
 mod tools;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "view and collector types land with the orchestration delivery rows"
-    )
-)]
 pub(crate) mod types;
 #[cfg_attr(
     not(test),
@@ -233,14 +226,17 @@ pub struct OrchestrationConfigError(ConfigErrorKind);
 
 #[derive(Debug, thiserror::Error)]
 enum ConfigErrorKind {
+    /// Configuration could not be decoded from TOML.
     #[error("plugin.orchestration: {0}")]
     Decode(#[from] toml::de::Error),
+    /// A numeric configuration value was outside its accepted range.
     #[error("plugin.orchestration.{key} must be an integer from {min} to {max}")]
     Range {
         key: &'static str,
         min: u32,
         max: u32,
     },
+    /// The monitor sub-battery configuration was invalid.
     #[error(transparent)]
     Monitor(#[from] monitor::state::MonitorConfigError),
 }
@@ -258,6 +254,10 @@ impl From<monitor::state::MonitorConfigError> for OrchestrationConfigError {
 }
 
 /// Parses the strict `[plugin.orchestration]` table.
+/// # Errors
+///
+/// Returns [`OrchestrationConfigError`] when the table contains invalid
+/// values or an unknown key.
 pub fn parse_config(
     section: Option<&toml::Value>,
 ) -> Result<OrchestrationConfig, OrchestrationConfigError> {

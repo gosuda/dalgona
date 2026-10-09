@@ -319,7 +319,7 @@ fn wake_budget_pauses_on_fifth_monitor_only_wake() -> Result<(), Box<dyn Error>>
 }
 
 #[test]
-fn status_renders_waiting_parts_and_exact_json() -> Result<(), Box<dyn Error>> {
+fn status_renders_waiting_parts_and_exact_json() {
     let counts = inflight_counts(2, 1, 0, false, false);
     let payload = status_payload(ControllerMode::Run, false, counts, 0, None);
     assert_eq!(status_line(&payload, true), "waiting on 2 jobs · 1 monitor");
@@ -345,7 +345,6 @@ fn status_renders_waiting_parts_and_exact_json() -> Result<(), Box<dyn Error>> {
     assert!(!quiet(true, &paused.inflight, 0, 1_999));
     assert!(!quiet(false, &paused.inflight, 0, 5_000));
     assert!(!quiet(true, &counts, 1, 5_000));
-    Ok(())
 }
 
 #[test]

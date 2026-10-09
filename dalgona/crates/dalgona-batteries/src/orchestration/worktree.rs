@@ -9,6 +9,10 @@ use std::path::PathBuf;
 mod tests;
 
 /// Minimum git version that supports detached worktrees for this battery.
+#[expect(
+    dead_code,
+    reason = "the worktree isolation contract fixes the minimum git version"
+)]
 pub(crate) const MIN_GIT_VERSION: (u32, u32) = (2, 17);
 
 /// Suffix appended to every isolation refusal naming the shared escape.
@@ -21,6 +25,10 @@ fn shared_suffix(step: &str) -> String {
 
 /// How one task's delta resolved against the run base.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[expect(
+    dead_code,
+    reason = "the worktree isolation contract fixes the outcome vocabulary"
+)]
 pub(crate) enum IsolationOutcome {
     /// The task left no delta.
     Clean,
@@ -41,6 +49,10 @@ pub(crate) enum IsolationOutcome {
 
 /// The base commit every task worktree of one run starts from.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[expect(
+    dead_code,
+    reason = "the worktree isolation contract fixes the base commit record"
+)]
 pub(crate) struct Base {
     /// Repository top-level directory.
     pub top: PathBuf,

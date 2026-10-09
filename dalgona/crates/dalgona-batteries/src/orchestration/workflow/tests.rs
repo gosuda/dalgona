@@ -4,6 +4,7 @@
 use super::render::render;
 use super::*;
 use dal_core::{JobId, RawJson};
+use std::fmt::Write as _;
 
 fn decode(raw: &str, input: Option<&str>) -> Result<Workflow, WorkflowError> {
     let raw = RawJson::parse(raw).expect("test input is valid JSON");
@@ -83,14 +84,15 @@ fn workflow_cycles_reference() {
             if index != 0 {
                 json.push(',');
             }
-            json.push_str(&format!(
+            let _ = write!(
+                json,
                 "{{\"name\":\"s{index}\",\"prompt\":\"work\",\"after\":["
-            ));
+            );
             for (position, dependency) in dependencies.iter().enumerate() {
                 if position != 0 {
                     json.push(',');
                 }
-                json.push_str(&format!("\"s{dependency}\""));
+                let _ = write!(json, "\"s{dependency}\"");
             }
             json.push_str("]}");
         }
@@ -210,7 +212,7 @@ fn workflow_pool_dependency_cut_is_utf8_safe_and_bounded() {
     }];
     let rendered = render(&step, None, &reports, None, JobId::new_v7());
     assert!(rendered.len() <= POOL_REPORT_LIMIT);
-    assert!(rendered.ends_with("(cut; read job://") == false);
+    assert!(!rendered.ends_with("(cut; read job://"));
     assert!(rendered.contains("(cut; read job://"));
     assert!(rendered.is_char_boundary(rendered.len()));
 }

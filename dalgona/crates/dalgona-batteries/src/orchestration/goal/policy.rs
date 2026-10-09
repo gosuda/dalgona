@@ -18,6 +18,10 @@ pub(crate) const LENGTH_REASON: &str = "output truncation repeated";
 /// Mechanical block reason for the unattended limit.
 pub(crate) const UNATTENDED_REASON: &str = "unattended continuation limit reached";
 /// Mechanical block reason for an exhausted provider.
+#[expect(
+    dead_code,
+    reason = "the goal behavior contract fixes the provider-stop mechanical reason"
+)]
 pub(crate) const PROVIDER_REASON: &str = "provider error ended the turn (retries exhausted)";
 /// Mechanical block reason for an unrecovered context overflow.
 pub(crate) const OVERFLOW_REASON: &str =
@@ -38,6 +42,10 @@ pub(crate) enum GoalPath {
     /// The wake after a turn ended.
     AfterTurn,
     /// The grace window after a user-started turn.
+    #[expect(
+        dead_code,
+        reason = "the continuation behavior contract fixes the user-grace decision path"
+    )]
     UserGrace,
     /// An idle wake with no turn behind it.
     Idle,
@@ -101,6 +109,10 @@ pub(crate) enum Verdict {
 
 /// Everything the verdict reads: the goal, the wake path, turn facts, the
 /// progress signature, todo counts, and live inflight counts.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the continuation decision table fixes this input shape"
+)]
 pub(crate) struct VerdictInput<'a> {
     /// The goal under decision.
     pub(crate) goal: &'a Goal,
@@ -118,11 +130,23 @@ pub(crate) struct VerdictInput<'a> {
     pub(crate) last_stop: StopKind,
     /// Progress signature of the last assistant output.
     pub(crate) signature: &'a str,
-    /// Open todo tasks.
+    /// Open todo tasks from the session todo record.
+    #[expect(
+        dead_code,
+        reason = "the continuation decision table fixes this input shape"
+    )]
     pub(crate) open_todos: usize,
-    /// Total todo tasks.
+    /// Total todo tasks from the session todo record.
+    #[expect(
+        dead_code,
+        reason = "the continuation decision table fixes this input shape"
+    )]
     pub(crate) total_todos: usize,
-    /// Live inflight counts.
+    /// Live inflight counts from the session.
+    #[expect(
+        dead_code,
+        reason = "the continuation decision table fixes this input shape"
+    )]
     pub(crate) inflight: &'a InflightCounts,
 }
 
@@ -177,7 +201,7 @@ pub(crate) fn verdict(input: &VerdictInput<'_>) -> Verdict {
     if input.goal.consecutive >= CAP_TURNS {
         return Verdict::Deny(DenyReason::Cap);
     }
-    if matches!(input.path, GoalPath::AfterTurn | GoalPath::UserGrace)
+    if input.path == GoalPath::AfterTurn
         && input.goal.last_signature.as_deref() == Some(input.signature)
     {
         return Verdict::Deny(DenyReason::Stale);

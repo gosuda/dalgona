@@ -116,7 +116,7 @@ fn sidecar_round_trip_matches_exact_shape() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn decode_rejects_bad_documents_with_exact_texts() -> Result<(), Box<dyn Error>> {
+fn decode_rejects_bad_documents_with_exact_texts() {
     let session_mismatch =
         b"{\"v\":1,\"session\":\"other\",\"controller\":\"run\",\"next_goal\":1,\"goal\":null}\n";
     assert_eq!(
@@ -147,7 +147,6 @@ fn decode_rejects_bad_documents_with_exact_texts() -> Result<(), Box<dyn Error>>
             "unexpected damage text: {error}"
         );
     }
-    Ok(())
 }
 
 #[test]
@@ -219,10 +218,67 @@ fn create_goal_reports_exact_texts() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn assert_update_audit_errors(
+    sidecar: &mut GoalSidecar,
+    ctx: &GoalScope<'_>,
+    now: Timestamp,
+    todos: &TodoSummary,
+    quiet: &InflightCounts,
+) {
+    let busy_todos = TodoSummary {
+        open: 2,
+        total: 3,
+        first_titles: vec!["parse".into(), "test".into()],
+    };
+    assert_eq!(
+        update_goal(
+            sidecar,
+            ctx,
+            UpdateTarget::Complete,
+            None,
+            &busy_todos,
+            quiet,
+            now
+        )
+        .unwrap_err()
+        .to_string(),
+        "update_goal: 2 todo tasks are still open: parse; test."
+    );
+    let busy = inflight_counts(1, 0, 0, false, false);
+    assert_eq!(
+        update_goal(
+            sidecar,
+            ctx,
+            UpdateTarget::Blocked,
+            Some("need a fact"),
+            todos,
+            &busy,
+            now
+        )
+        .unwrap_err()
+        .to_string(),
+        "update_goal: blocked is rejected while 1 job can still deliver. End the turn and let them wake you."
+    );
+    assert_eq!(
+        update_goal(
+            sidecar,
+            ctx,
+            UpdateTarget::Blocked,
+            Some("need a fact"),
+            todos,
+            quiet,
+            now
+        )
+        .unwrap_err()
+        .to_string(),
+        "update_goal: blocked is rejected until the goal has had 3 goal turns since it became active or the user last spoke; it has had 0."
+    );
+}
+
 #[test]
-fn update_goal_reports_exact_ordered_errors() -> Result<(), Box<dyn Error>> {
-    let now = ts("2026-09-25T10:15:30.123Z")?;
-    let (mut sidecar, ctx) = active_sidecar()?;
+fn update_goal_reports_exact_ordered_errors() {
+    let now = ts("2026-09-25T10:15:30.123Z").expect("timestamp literal");
+    let (mut sidecar, ctx) = active_sidecar().expect("active goal");
     let todos = TodoSummary {
         open: 0,
         total: 0,
@@ -243,7 +299,7 @@ fn update_goal_reports_exact_ordered_errors() -> Result<(), Box<dyn Error>> {
         .to_string(),
         "update_goal: no goal in this session."
     );
-    sidecar.goal.as_mut().ok_or("goal missing")?.status = GoalStatus::Paused;
+    sidecar.goal.as_mut().expect("goal missing").status = GoalStatus::Paused;
     assert_eq!(
         update_goal(
             &mut sidecar,
@@ -258,7 +314,7 @@ fn update_goal_reports_exact_ordered_errors() -> Result<(), Box<dyn Error>> {
         .to_string(),
         "update_goal: the goal is paused, not active."
     );
-    sidecar.goal.as_mut().ok_or("goal missing")?.status = GoalStatus::Active;
+    sidecar.goal.as_mut().expect("goal missing").status = GoalStatus::Active;
     assert_eq!(
         update_goal(
             &mut sidecar,
@@ -301,55 +357,7 @@ fn update_goal_reports_exact_ordered_errors() -> Result<(), Box<dyn Error>> {
         .to_string(),
         "update_goal: reason must not be given when status is complete."
     );
-    let busy_todos = TodoSummary {
-        open: 2,
-        total: 3,
-        first_titles: vec!["parse".into(), "test".into()],
-    };
-    assert_eq!(
-        update_goal(
-            &mut sidecar,
-            &ctx,
-            UpdateTarget::Complete,
-            None,
-            &busy_todos,
-            &quiet,
-            now
-        )
-        .unwrap_err()
-        .to_string(),
-        "update_goal: 2 todo tasks are still open: parse; test."
-    );
-    let busy = inflight_counts(1, 0, 0, false, false);
-    assert_eq!(
-        update_goal(
-            &mut sidecar,
-            &ctx,
-            UpdateTarget::Blocked,
-            Some("need a fact"),
-            &todos,
-            &busy,
-            now
-        )
-        .unwrap_err()
-        .to_string(),
-        "update_goal: blocked is rejected while 1 job can still deliver. End the turn and let them wake you."
-    );
-    assert_eq!(
-        update_goal(
-            &mut sidecar,
-            &ctx,
-            UpdateTarget::Blocked,
-            Some("need a fact"),
-            &todos,
-            &quiet,
-            now
-        )
-        .unwrap_err()
-        .to_string(),
-        "update_goal: blocked is rejected until the goal has had 3 goal turns since it became active or the user last spoke; it has had 0."
-    );
-    Ok(())
+    assert_update_audit_errors(&mut sidecar, &ctx, now, &todos, &quiet);
 }
 
 #[test]

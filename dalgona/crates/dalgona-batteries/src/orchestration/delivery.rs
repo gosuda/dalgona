@@ -25,6 +25,10 @@ pub(crate) const CHANGED_SHOWN: usize = 3;
 /// fits: `(<n> more tasks: read job://<id>)` stays under this bound.
 const OVERFLOW_RESERVE: usize = 96;
 
+#[expect(
+    dead_code,
+    reason = "the delivery contract reserves completed run snapshots"
+)]
 /// One completed run ready for its single top-level job report.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RunResult {
@@ -35,6 +39,10 @@ pub(crate) struct RunResult {
 
 impl RunResult {
     /// Counts tasks that did not finish done.
+    #[expect(
+        dead_code,
+        reason = "the delivery contract reserves unfinished task counts"
+    )]
     pub(crate) fn unfinished(&self) -> usize {
         self.tasks
             .iter()
@@ -43,6 +51,10 @@ impl RunResult {
     }
 
     /// Whether every task ended done.
+    #[expect(
+        dead_code,
+        reason = "the delivery contract reserves completed-run status checks"
+    )]
     pub(crate) fn is_done(&self) -> bool {
         !self.tasks.is_empty() && self.unfinished() == 0
     }
@@ -133,6 +145,11 @@ pub(crate) fn changed_all(changed: &[PathBuf]) -> String {
         .collect::<Vec<_>>()
         .join(", ")
 }
+
+#[expect(
+    dead_code,
+    reason = "the delivery contract fixes the isolation status suffix"
+)]
 pub(crate) fn isolation_suffix(outcome: Option<&IsolationOutcome>) -> &'static str {
     match outcome {
         None => "",
@@ -189,7 +206,7 @@ pub(crate) fn step_skipped_line(step: &str, reason: &str) -> String {
 
 /// The overflow line hiding `hidden` tasks of one run.
 pub(crate) fn more_tasks_line(hidden: usize, run: JobId) -> String {
-    format!("({hidden} more tasks: read job://{run})")
+    format!("({hidden} more tasks: read {})", report_uri(run))
 }
 
 /// One task inside a notice section.
@@ -281,7 +298,10 @@ fn section_lines(section: &StepNotice, preview_mode: Preview) -> Vec<String> {
 
 /// The honesty tail: the report URI line plus its verification reminder.
 fn honesty_tail(run: JobId) -> String {
-    format!("Read job://{run} for the full report of the run or of one task.\n{CLAIM_HONESTY}")
+    format!(
+        "Read {} for the full report of the run or of one task.\n{CLAIM_HONESTY}",
+        report_uri(run)
+    )
 }
 
 /// Builds the notice body section by section until the budget is spent. A
