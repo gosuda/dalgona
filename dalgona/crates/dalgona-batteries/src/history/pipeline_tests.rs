@@ -253,7 +253,7 @@ async fn rendered_image_spans_resolve_in_the_source_fixture() {
             .expect("every drawn letter has an index line");
         assert_eq!(line.visibility, LetterVisibility::Drawn);
         assert!(line.text.starts_with(&format!("letter://{id}  ")));
-        assert!(!spans.is_empty());
+        assert_ne!(spans.len(), 0);
         for span in spans {
             let bytes = source
                 .read(*span)
@@ -503,7 +503,7 @@ async fn undrawable_letter_is_shown_as_its_exact_text_without_an_image() {
         assert!(!text.starts_with(&format!("letter://history/1.{} ", position + 1)));
     }
     for letter in &drawn.letters {
-        assert!(!letter.png.is_empty());
+        assert_ne!(letter.png.len(), 0);
     }
     let shown_as_text: Vec<_> = drawn
         .index
@@ -632,7 +632,7 @@ async fn index_names_every_letter_by_visibility_in_path_order() {
     let selected = positions(&drawn);
     let as_text = text_positions(&drawn);
     assert_eq!(selected.len(), 4);
-    assert!(!as_text.is_empty(), "the rocket letter is shown as text");
+    assert_ne!(as_text.len(), 0, "the rocket letter is shown as text");
     assert!(drawn.index.len() > selected.len() + as_text.len());
 
     for (position, line) in drawn.index.iter().enumerate() {
@@ -1148,7 +1148,7 @@ async fn the_sink_stores_each_png_and_returns_image_parts() {
         .iter()
         .filter(|part| matches!(part, Part::Image { .. }))
         .count();
-    assert!(!letters.is_empty());
+    assert_ne!(letters.len(), 0);
     assert_eq!(images, letters.len());
     assert!(parts_tokens > 0);
     for record in &letters {

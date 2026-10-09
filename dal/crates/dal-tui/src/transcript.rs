@@ -144,7 +144,7 @@ mod tests {
     fn unknown_updates_change_no_cell_and_raise_no_error() {
         let mut transcript = Transcript::default();
         assert!(!transcript.apply_update(&update(UpdateKind::Unknown)));
-        assert!(transcript.rows().is_empty());
+        assert_eq!(transcript.rows(), [] as [String; 0]);
     }
 
     #[test]
@@ -152,7 +152,7 @@ mod tests {
         let mut transcript = Transcript::default();
         let rows = vec!["hello".to_owned()];
         assert_eq!(transcript.commit("e1", &rows), rows);
-        assert!(transcript.commit("e1", &rows).is_empty());
+        assert_eq!(transcript.commit("e1", &rows), [] as [String; 0]);
         assert_eq!(transcript.rows(), &rows);
     }
     #[test]
@@ -162,7 +162,7 @@ mod tests {
         pending.pending_diagram = true;
         transcript.set_pending("e1", vec![pending]);
 
-        assert!(transcript.rows().is_empty());
+        assert_eq!(transcript.rows(), [] as [String; 0]);
         assert!(
             transcript
                 .pending_rows()

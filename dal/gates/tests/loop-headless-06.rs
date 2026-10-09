@@ -77,7 +77,7 @@ async fn empty_extension_list_produces_text_only_turn() -> Result<(), Box<dyn Er
         }
     }
     assert_eq!(assistant_text, "scripted assistant response");
-    assert!(model_tools.is_empty());
+    assert_eq!(model_tools, [] as [std::string::String; 0]);
     let _ = harness.host.shutdown(Duration::from_secs(1)).await;
     Ok(())
 }

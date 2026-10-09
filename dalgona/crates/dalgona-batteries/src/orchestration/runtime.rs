@@ -1227,8 +1227,8 @@ impl SessionState {
         adapter::tool(
             name,
             args,
-            adapter::ToolContext {
-                store,
+            store,
+            &adapter::GoalCx {
                 ctx: &ctx,
                 todos: &todos,
                 inflight: &inflight,

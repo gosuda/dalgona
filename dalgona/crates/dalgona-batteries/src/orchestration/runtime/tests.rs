@@ -885,7 +885,7 @@ async fn a_refused_child_start_shows_the_exact_reason_in_the_run() -> TestResult
         reply.contains("child sessions cannot start children here: agents.max_depth = 1."),
         "the refusal text reaches the run report: {reply}"
     );
-    assert!(fixture.host.prompts().is_empty());
+    assert_eq!(fixture.host.prompts().len(), 0);
     Ok(())
 }
 
@@ -979,7 +979,7 @@ async fn a_reported_child_is_released_with_no_client_attached() -> TestResult {
         vec![child],
         "the reported child is released once"
     );
-    assert!(fixture.host.notices().is_empty());
+    assert_eq!(fixture.host.notices().len(), 0);
     Ok(())
 }
 
@@ -1286,8 +1286,8 @@ async fn worktree_preflight_refuses_missing_root_before_jobs_start() -> TestResu
     let error = fixture.tool(r#"{"action":"run","steps":[{"name":"write","prompt":"write","tools":["patch"],"isolation":"worktree"}]}"#)
         .await.err().ok_or("worktree run needs the host data root")?;
     assert!(error.to_string().contains("data_root"), "{error}");
-    assert!(fixture.script().jobs.is_empty());
-    assert!(fixture.script().starts.is_empty());
+    assert_eq!(fixture.script().jobs.len(), 0);
+    assert_eq!(fixture.script().starts.len(), 0);
     Ok(())
 }
 
@@ -1326,8 +1326,8 @@ async fn failed_stash_preflight_cannot_silently_drop_tracked_changes() -> TestRe
             .contains("stash could not read tracked files"),
         "{error}"
     );
-    assert!(fixture.script().jobs.is_empty());
-    assert!(fixture.script().starts.is_empty());
+    assert_eq!(fixture.script().jobs.len(), 0);
+    assert_eq!(fixture.script().starts.len(), 0);
     Ok(())
 }
 
@@ -1913,7 +1913,7 @@ impl Fixture {
         Ok(Counters {
             consecutive: goal.consecutive,
             unattended: goal.unattended,
-            goal_turns: goal.goal_turns,
+            goal_turns: goal.turns,
             toolless_streak: goal.toolless_streak,
         })
     }

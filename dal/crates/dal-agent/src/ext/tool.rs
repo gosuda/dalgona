@@ -130,7 +130,7 @@ impl fmt::Display for ToolOutput {
 #[derive(Debug)]
 pub enum ToolOutcome {
     /// The tool returned successfully.
-    Ok(ToolOutput),
+    Ok(Box<ToolOutput>),
     /// The tool returned an error.
     Err(ToolError),
     /// Cancellation arrived before the tool settled.
@@ -656,7 +656,6 @@ impl ToolCx<'_> {
     }
 
     /// Resolves one `scheme://` URI to its page text.
-    #[must_use]
     pub fn resolve(&self, uri: &str) -> BoxFuture<'_, Result<Doc, ToolError>> {
         self.rt.resolve(
             uri,

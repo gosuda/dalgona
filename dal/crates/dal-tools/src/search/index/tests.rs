@@ -42,7 +42,10 @@ async fn freshness_after_patch() {
         [Path::new("a.rs")]
     );
     assert_eq!(index.ready(ws.path()), Some((2, BuildKind::Full)));
-    assert!(candidates(&index, ws.path(), "fn main").await.is_empty());
+    assert_eq!(
+        candidates(&index, ws.path(), "fn main").await,
+        [] as [std::path::PathBuf; 0]
+    );
 }
 
 #[tokio::test]
@@ -51,19 +54,17 @@ async fn freshness_after_exec() {
     let root = tempfile::tempdir().unwrap();
     fs::write(ws.path().join("old.txt"), "nothing here\n").unwrap();
     let index = Index::new(Some(root.path().to_path_buf()));
-    assert!(
-        candidates(&index, ws.path(), "kestrel_unique_77")
-            .await
-            .is_empty()
+    assert_eq!(
+        candidates(&index, ws.path(), "kestrel_unique_77").await,
+        [] as [std::path::PathBuf; 0]
     );
 
     // An exec writes behind the index's back; without the lever the
     // snapshot stays current for its epoch.
     fs::write(ws.path().join("new.txt"), "a kestrel_unique_77 token\n").unwrap();
-    assert!(
-        candidates(&index, ws.path(), "kestrel_unique_77")
-            .await
-            .is_empty()
+    assert_eq!(
+        candidates(&index, ws.path(), "kestrel_unique_77").await,
+        [] as [std::path::PathBuf; 0]
     );
 
     index.exec_ran();

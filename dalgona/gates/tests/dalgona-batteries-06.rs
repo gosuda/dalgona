@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
-//! This gate verifies local web fetch converts HTML to Markdown.
-#[path = "support/mod.rs"]
-#[expect(
-    dead_code,
-    reason = "gate support helpers are shared across independent test targets"
-)]
-mod support;
+//! dalgona success-criterion gate tests.
+use gates::support;
 
 use std::time::Duration;
 

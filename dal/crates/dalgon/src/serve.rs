@@ -608,7 +608,7 @@ mod tests {
 
         let created = create_token(&token_file, false, false, &mut stdout, &mut stderr).unwrap();
         assert_eq!(created, ExitCode::SUCCESS);
-        assert!(stderr.is_empty());
+        assert_eq!(stderr, [] as [u8; 0]);
         let token = String::from_utf8(stdout.clone()).unwrap();
         let token = token.strip_suffix('\n').unwrap();
         let payload = token.strip_prefix("dal_").unwrap();
@@ -632,7 +632,7 @@ mod tests {
         stdout.clear();
         let refused = create_token(&token_file, false, false, &mut stdout, &mut stderr).unwrap();
         assert_eq!(refused, ExitCode::FAILURE);
-        assert!(stdout.is_empty());
+        assert_eq!(stdout, [] as [u8; 0]);
         assert_eq!(
             stderr,
             format!(

@@ -13,6 +13,15 @@ use super::ops::{
 };
 use super::sidecar::{GoalError, GoalSidecar, controller_wire, decode_sidecar, encode_sidecar};
 
+/// Everything one goal tool call reads beside the sidecar.
+pub(crate) struct GoalCx<'a> {
+    pub ctx: &'a GoalScope<'a>,
+    pub todos: &'a TodoSummary,
+    pub inflight: &'a InflightCounts,
+    pub services: &'a dyn Services,
+    pub caller: &'a Caller,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct GoalStore {
     pub sidecar: Option<GoalSidecar>,
@@ -102,28 +111,20 @@ fn failed_store(error: GoalError) -> GoalStore {
     }
 }
 
-pub(crate) struct ToolContext<'a, 'b> {
-    pub(crate) store: &'a mut GoalStore,
-    pub(crate) ctx: &'a GoalScope<'b>,
-    pub(crate) todos: &'a TodoSummary,
-    pub(crate) inflight: &'a InflightCounts,
-    pub(crate) services: &'a dyn Services,
-    pub(crate) caller: &'a Caller,
-}
-
 pub(crate) async fn tool(
     name: &str,
     args: &str,
-    context: ToolContext<'_, '_>,
+    store: &mut GoalStore,
+    goal: &GoalCx<'_>,
 ) -> Result<String, ServiceError> {
-    let Some(sidecar) = context.store.sidecar.as_mut() else {
-        return Err(service_failure(context.store.error.as_ref()));
+    let Some(sidecar) = store.sidecar.as_mut() else {
+        return Err(service_failure(store.error.as_ref()));
     };
     let now = Timestamp::now();
     let reply = match name {
         "create_goal" => {
             let input = decode::<CreateArgs>(args, name)?;
-            create_goal(sidecar, context.ctx, &input.objective, now)
+            create_goal(sidecar, goal.ctx, &input.objective, now)
                 .map_err(|error| goal_failure(&error))?
         }
         "update_goal" => {
@@ -140,18 +141,18 @@ pub(crate) async fn tool(
             };
             update_goal(
                 sidecar,
-                context.ctx,
+                goal.ctx,
                 target,
                 input.reason.as_deref(),
-                context.todos,
-                context.inflight,
+                goal.todos,
+                goal.inflight,
                 now,
             )
             .map_err(|error| goal_failure(&error))?
         }
         "get_goal" => {
             let _ = decode::<GetArgs>(args, name)?;
-            return get_goal(sidecar, context.ctx).map_err(|error| goal_failure(&error));
+            return get_goal(sidecar, goal.ctx).map_err(|error| goal_failure(&error));
         }
         _ => {
             return Err(ServiceError::failed(
@@ -160,7 +161,7 @@ pub(crate) async fn tool(
             ));
         }
     };
-    save(context.services, context.caller, sidecar).await?;
+    save(goal.services, goal.caller, sidecar).await?;
     Ok(reply)
 }
 
@@ -289,6 +290,6 @@ fn goal_failure(error: &GoalError) -> ServiceError {
 fn service_failure(error: Option<&GoalError>) -> ServiceError {
     error.map_or_else(
         || ServiceError::failed(None, "goal: the goal sidecar is unavailable."),
-        |error| ServiceError::failed(None, error.to_string()),
+        |error: &GoalError| ServiceError::failed(None, error.to_string()),
     )
 }

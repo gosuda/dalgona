@@ -29,8 +29,6 @@ const PENDING_MAX: usize = 64;
 const EVENT_CAPACITY: usize = 8;
 const POST_KILL_WAIT: Duration = Duration::from_secs(1);
 
-type Pending = Arc<Mutex<HashMap<u64, mpsc::Sender<Result<RawJson, McpError>>>>>;
-
 /// The process environment allowlist captured through the host's env service.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ProcessEnvironment {
@@ -52,6 +50,9 @@ pub(crate) struct StdioTransport {
     cancel: CancellationToken,
 }
 
+/// Reply channels for in-flight requests, keyed by wire id.
+type Pending = Arc<Mutex<HashMap<u64, mpsc::Sender<Result<RawJson, McpError>>>>>;
+
 impl StdioTransport {
     /// Spawns a declared command without a shell and with only the captured env allowlist.
     pub(crate) async fn start(
@@ -66,27 +67,8 @@ impl StdioTransport {
                 cause: "stdio transport received an HTTP declaration".to_owned(),
             });
         };
-        let program = command.first().ok_or_else(|| McpError::Start {
-            key: key.display(),
-            cause: "stdio command has no argv[0]".to_owned(),
-        })?;
-        let path = environment.path.clone();
-        let lookup_program = program.clone();
-        let resolved = tokio::task::spawn_blocking(move || {
-            resolve_executable(&lookup_program, path.as_deref())
-        })
-        .await
-        .map_err(|error| McpError::Start {
-            key: key.display(),
-            cause: format!("command lookup failed: {error}"),
-        })?
-        .ok_or_else(|| McpError::Start {
-            key: key.display(),
-            cause: format!("command {program:?} was not found on PATH"),
-        })?;
-
-        let mut child =
-            Self::spawn_piped(key.clone(), resolved, command, env, environment, budgets).await?;
+        let resolved = resolve_program(&key, command, environment).await?;
+        let mut child = spawn_child(&key, resolved, command, env, environment, budgets).await?;
         let stdin = child.stdin().take();
         let stdout = child.stdout().take();
         let stderr = child.stderr().take();
@@ -140,66 +122,6 @@ impl StdioTransport {
             stderr_task,
             cancel,
         })
-    }
-
-    async fn spawn_piped(
-        key: Key,
-        resolved: std::path::PathBuf,
-        command: &[Box<str>],
-        env: &std::collections::BTreeMap<Box<str>, Box<str>>,
-        environment: &ProcessEnvironment,
-        budgets: &Budgets,
-    ) -> Result<Box<dyn ChildWrapper>, McpError> {
-        let program_args = command
-            .iter()
-            .skip(1)
-            .map(|arg| OsString::from(arg.as_ref()))
-            .collect::<Vec<_>>();
-        let declarations = env
-            .iter()
-            .map(|(key, value)| (OsString::from(key.as_ref()), OsString::from(value.as_ref())))
-            .collect::<Vec<_>>();
-        let path = environment.path.clone();
-        let home = environment.home.clone();
-        let tmpdir = environment.tmpdir.clone();
-        let mut wrapped = CommandWrap::with_new(resolved, move |command: &mut Command| {
-            command
-                .args(program_args)
-                .env_clear()
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
-            set_env(command, "PATH", path.as_deref());
-            set_env(command, "HOME", home.as_deref());
-            set_env(command, "TMPDIR", tmpdir.as_deref());
-            command.envs(declarations);
-        });
-        wrapped.wrap(KillOnDrop);
-        #[cfg(unix)]
-        wrapped.wrap(process_wrap::tokio::ProcessGroup::leader());
-        #[cfg(windows)]
-        wrapped.wrap(process_wrap::tokio::JobObject);
-
-        let mut spawn_task = tokio::task::spawn_blocking(move || wrapped.spawn());
-        let Ok(spawn_result) = timeout(budgets.start, &mut spawn_task).await else {
-            if let Ok(Ok(mut child)) = spawn_task.await {
-                let _ = child.start_kill();
-                let _ = child.wait().await;
-            }
-            return Err(McpError::Start {
-                key: key.display(),
-                cause: format!("timed out after {} s", budgets.start.as_secs()),
-            });
-        };
-        spawn_result
-            .map_err(|error| McpError::Start {
-                key: key.display(),
-                cause: format!("process spawn task failed: {error}"),
-            })?
-            .map_err(|error| McpError::Start {
-                key: key.display(),
-                cause: error.to_string(),
-            })
     }
 
     /// Writes one complete JSON-RPC line and returns its correlated event stream.
@@ -420,6 +342,91 @@ async fn crash_error(
         code,
         diagnostic: stderr_diagnostic(&excerpt),
     }
+}
+
+/// Resolves the declared argv[0] on the captured PATH snapshot.
+async fn resolve_program(
+    key: &Key,
+    command: &[Box<str>],
+    environment: &ProcessEnvironment,
+) -> Result<std::path::PathBuf, McpError> {
+    let program = command.first().ok_or_else(|| McpError::Start {
+        key: key.display(),
+        cause: "stdio command has no argv[0]".to_owned(),
+    })?;
+    let path = environment.path.clone();
+    let lookup_program = program.clone();
+    tokio::task::spawn_blocking(move || resolve_executable(&lookup_program, path.as_deref()))
+        .await
+        .map_err(|error| McpError::Start {
+            key: key.display(),
+            cause: format!("command lookup failed: {error}"),
+        })?
+        .ok_or_else(|| McpError::Start {
+            key: key.display(),
+            cause: format!("command {program:?} was not found on PATH"),
+        })
+}
+
+/// Spawns the wrapped process with cleared env, declared vars, and kill ownership.
+async fn spawn_child(
+    key: &Key,
+    resolved: std::path::PathBuf,
+    command: &[Box<str>],
+    env: &std::collections::BTreeMap<Box<str>, Box<str>>,
+    environment: &ProcessEnvironment,
+    budgets: &Budgets,
+) -> Result<Box<dyn ChildWrapper>, McpError> {
+    let program_args = command
+        .iter()
+        .skip(1)
+        .map(|arg| OsString::from(&**arg))
+        .collect::<Vec<_>>();
+    let declarations = env
+        .iter()
+        .map(|(key, value)| (OsString::from(&**key), OsString::from(&**value)))
+        .collect::<Vec<_>>();
+    let path = environment.path.clone();
+    let home = environment.home.clone();
+    let tmpdir = environment.tmpdir.clone();
+    let mut wrapped = CommandWrap::with_new(resolved, move |command: &mut Command| {
+        command
+            .args(program_args)
+            .env_clear()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        set_env(command, "PATH", path.as_deref());
+        set_env(command, "HOME", home.as_deref());
+        set_env(command, "TMPDIR", tmpdir.as_deref());
+        command.envs(declarations);
+    });
+    wrapped.wrap(KillOnDrop);
+    #[cfg(unix)]
+    wrapped.wrap(process_wrap::tokio::ProcessGroup::leader());
+    #[cfg(windows)]
+    wrapped.wrap(process_wrap::tokio::JobObject);
+
+    let mut spawn_task = tokio::task::spawn_blocking(move || wrapped.spawn());
+    let Ok(spawn_result) = timeout(budgets.start, &mut spawn_task).await else {
+        if let Ok(Ok(mut child)) = spawn_task.await {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+        }
+        return Err(McpError::Start {
+            key: key.display(),
+            cause: format!("timed out after {} s", budgets.start.as_secs()),
+        });
+    };
+    spawn_result
+        .map_err(|error| McpError::Start {
+            key: key.display(),
+            cause: format!("process spawn task failed: {error}"),
+        })?
+        .map_err(|error| McpError::Start {
+            key: key.display(),
+            cause: error.to_string(),
+        })
 }
 
 #[expect(

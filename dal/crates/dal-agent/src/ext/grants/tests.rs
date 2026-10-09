@@ -167,7 +167,7 @@ async fn grant_approve_persists_exact_row_and_session_approve_does_not() {
         .await
         .expect("cached");
     assert!(grant2.persistent());
-    assert!(broker.open_requests().is_empty());
+    assert_eq!(broker.open_requests(), []);
     let net_caller = Caller::new(
         "focus".parse::<Name>().expect("name"),
         Origin::User,
@@ -257,7 +257,7 @@ async fn facade_grant_contains_list_revoke_round_trip() {
         services: ServiceSet::from_names(["fs.read", "run"]).expect("set"),
     };
     assert!(!store.contains(&key).await.expect("contains"));
-    assert!(store.list().await.expect("list").is_empty());
+    assert_eq!(store.list().await.expect("list"), []);
     let at = Timestamp::now();
     assert!(store.grant(key.clone(), tui(), at).await.expect("grant"));
     assert!(
@@ -283,7 +283,7 @@ async fn facade_grant_contains_list_revoke_round_trip() {
     assert_eq!(listed[0].approved_at, at);
     assert_eq!(store.revoke(&name).await.expect("revoke"), 1);
     assert_eq!(store.revoke(&name).await.expect("revoke"), 0);
-    assert!(store.list().await.expect("list").is_empty());
+    assert_eq!(store.list().await.expect("list"), []);
 }
 
 #[tokio::test]
@@ -367,7 +367,7 @@ async fn mcp_grants_persist_for_exact_declared_set_and_reask_after_change() {
             .expect("same declaration is cached")
             .persistent()
     );
-    assert!(broker.open_requests().is_empty());
+    assert_eq!(broker.open_requests(), []);
 
     let (changed, ()) = futures::join!(
         store.ensure_declared_mcp(
@@ -387,7 +387,7 @@ async fn mcp_grants_persist_for_exact_declared_set_and_reask_after_change() {
         }
     );
     assert!(!changed.expect("changed set approved").persistent());
-    assert!(broker.open_requests().is_empty());
+    assert_eq!(broker.open_requests(), []);
 }
 
 #[tokio::test]

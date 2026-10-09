@@ -1,12 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
-//! This gate verifies bundled Rust extensions and reports command name clashes.
-#[path = "support/mod.rs"]
-#[expect(
-    dead_code,
-    reason = "gate support helpers are shared across independent test targets"
-)]
-mod support;
+//! dalgona success-criterion gate tests.
 
+use gates::support;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 

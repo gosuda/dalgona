@@ -26,7 +26,7 @@ use tokio_util::sync::CancellationToken;
 use super::{
     Budgets, LIST_PAGE_MAX, MRTR_MAX, McpConfig, McpError, RESTART_BUDGET, TransportError,
     http::{
-        ExchangeRequest, HttpTransport,
+        HttpTransport,
         auth::RefreshCoordinator,
         protocol::{self, LEGACY_PROTOCOL_VERSION, PROTOCOL_VERSION},
     },
@@ -181,19 +181,22 @@ impl Transport {
                 response
             }
             Self::Http(transport) => {
+                let call = super::http::CallCx {
+                    method,
+                    version,
+                    services: ctx.session.services.as_ref(),
+                    who: ctx.who,
+                    cancel: &ctx.instance.cancel,
+                };
                 transport
-                    .exchange(ExchangeRequest {
+                    .exchange(
                         id,
-                        ids: &ctx.instance.next_id,
-                        method,
+                        &ctx.instance.next_id,
                         params,
-                        headers: annotations,
+                        annotations,
                         arguments,
-                        version,
-                        services: ctx.session.services.as_ref(),
-                        who: ctx.who,
-                        cancel: &ctx.instance.cancel,
-                    })
+                        &call,
+                    )
                     .await
             }
         }
@@ -211,16 +214,14 @@ impl Transport {
                 transport.notify(&body, &ctx.instance.cancel).await
             }
             Self::Http(transport) => {
-                transport
-                    .notify(
-                        &ctx.instance.next_id,
-                        method,
-                        version,
-                        ctx.session.services.as_ref(),
-                        ctx.who,
-                        &ctx.instance.cancel,
-                    )
-                    .await
+                let call = super::http::CallCx {
+                    method,
+                    version,
+                    services: ctx.session.services.as_ref(),
+                    who: ctx.who,
+                    cancel: &ctx.instance.cancel,
+                };
+                transport.notify(&ctx.instance.next_id, &call).await
             }
         }
     }
@@ -1099,14 +1100,15 @@ fn call_params(
     responses: Option<&str>,
     request_state: Option<&str>,
 ) -> Result<String, McpError> {
-    use std::fmt::Write as _;
     let tool = sonic_rs::to_string(tool).map_err(|error| protocol_error(error.to_string()))?;
     let mut params = format!("{{\"name\":{tool},\"arguments\":{}", arguments.as_str());
     if let Some(responses) = responses {
-        let _ = write!(params, ",\"inputResponses\":{responses}");
+        params.push_str(",\"inputResponses\":");
+        params.push_str(responses);
     }
     if let Some(state) = request_state {
-        let _ = write!(params, ",\"requestState\":{state}");
+        params.push_str(",\"requestState\":");
+        params.push_str(state);
     }
     params.push('}');
     Ok(params)

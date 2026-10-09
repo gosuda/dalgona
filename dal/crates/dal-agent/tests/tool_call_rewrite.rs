@@ -69,7 +69,7 @@ impl Tool for Stat {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(call.args.as_str().to_owned());
-        Box::pin(async { ToolOutcome::Ok(ToolOutput::from_text("ran")) })
+        Box::pin(async { ToolOutcome::Ok(Box::new(ToolOutput::from_text("ran"))) })
     }
 }
 

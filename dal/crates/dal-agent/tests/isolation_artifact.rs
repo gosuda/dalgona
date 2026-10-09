@@ -65,7 +65,7 @@ impl Tool for ArtifactWriter {
                 bytes: b"diff".to_vec(),
             };
             match cx.services().sidecar(cx.caller(), op).await {
-                Ok(_) => ToolOutcome::Ok(ToolOutput::from_text("written")),
+                Ok(_) => ToolOutcome::Ok(Box::new(ToolOutput::from_text("written"))),
                 Err(error) => ToolOutcome::Err(ToolError::message(error.to_string())),
             }
         })

@@ -42,7 +42,7 @@ fn nested_punctuation_and_quotes_stay_inside_scope_tokens() {
         &extras,
     ));
 
-    assert!(problems.is_empty());
+    assert_eq!(problems, []);
     let ToolScope::Tools(tools) = scope.tools else {
         panic!("expected named tool scopes");
     };
@@ -162,7 +162,7 @@ fn core_scope_maps_text_thinking_and_named_tools() {
         &extras,
     ));
 
-    assert!(problems.is_empty());
+    assert_eq!(problems, []);
     assert!(scope.text && scope.thinking);
     let ToolScope::Tools(tools) = scope.tools else {
         panic!("expected the named core tool scope");
@@ -178,7 +178,7 @@ fn condition_scope_tokens_replace_the_missing_scope_default() {
     let extras = ["tool:patch(src/*.rs)".to_owned()];
     let (scope, problems) = parse_scope(input(&source, ScopeValue::Missing, Some(&known), &extras));
 
-    assert!(problems.is_empty());
+    assert_eq!(problems, []);
     assert!(!scope.text);
     assert!(matches!(scope.tools, ToolScope::Tools(_)));
 }
@@ -243,7 +243,7 @@ fn duplicate_and_empty_scope_tokens_are_discarded() {
         &extras,
     ));
 
-    assert!(problems.is_empty());
+    assert_eq!(problems, []);
     assert!(scope.text);
     let ToolScope::Tools(tools) = scope.tools else {
         panic!("expected a named tool scope");
@@ -264,7 +264,7 @@ fn duplicate_compiled_globs_deduplicate_by_original_pattern() {
         &extras,
     ));
 
-    assert!(problems.is_empty());
+    assert_eq!(problems, []);
     let ToolScope::Tools(patterns) = scope.tools else {
         panic!("expected a named tool scope");
     };
@@ -379,7 +379,7 @@ fn glob_star_does_not_cross_a_path_separator() {
         &extras,
     ));
 
-    assert!(problems.is_empty());
+    assert_eq!(problems, []);
     assert!(!admits_tool(
         &scope,
         "patch",
@@ -400,7 +400,7 @@ fn recursive_glob_matches_across_path_separators() {
         &extras,
     ));
 
-    assert!(problems.is_empty());
+    assert_eq!(problems, []);
     assert!(admits_tool(
         &scope,
         "PATCH",

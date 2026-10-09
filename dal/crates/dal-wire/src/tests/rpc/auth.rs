@@ -209,7 +209,7 @@ async fn login_params_are_validated_before_any_flow_starts() {
             -32602,
             r#"invalid params for auth/login: unknown login method "pigeon""#,
         );
-        assert!(fake.requests().is_empty());
+        assert_eq!(fake.requests(), [] as [dal_agent::login_fake::Recorded; 0]);
     })
     .await;
 }

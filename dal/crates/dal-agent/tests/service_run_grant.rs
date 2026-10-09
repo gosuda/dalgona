@@ -221,7 +221,7 @@ impl Tool for Runner {
                 .lock()
                 .expect("tasks lock")
                 .push(tokio_util::task::AbortOnDropHandle::new(worker));
-            ToolOutcome::Ok(ToolOutput::from_text("started"))
+            ToolOutcome::Ok(Box::new(ToolOutput::from_text("started")))
         })
     }
 }

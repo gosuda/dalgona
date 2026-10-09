@@ -581,7 +581,7 @@ mod tests {
             ["a: busy", "b: busy", "c: busy", "(1 more extension busy)"]
         );
         live.seed_ext_status(&[]);
-        assert!(live.ext_lines(3).is_empty());
+        assert_eq!(live.ext_lines(3), [] as [String; 0]);
     }
 
     #[test]
@@ -675,7 +675,7 @@ mod tests {
                 stop: dal_core::Stop::Cancelled,
             },
         )));
-        assert!(live.running_tool_rows().is_empty());
+        assert_eq!(live.running_tool_rows().len(), 0);
         assert_eq!(live.activity(), None);
     }
 

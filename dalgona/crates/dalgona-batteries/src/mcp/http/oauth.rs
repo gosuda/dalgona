@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
 //! Protected-resource discovery, native OAuth authorization, and token refresh.
 
+use std::fmt::Write as _;
 use std::{future::Future, net::IpAddr, time::Duration};
 
 use dal_agent::ext::{Caller, Services};
@@ -213,29 +214,33 @@ fn refresh_refusal(status: StatusCode) -> Result<Option<TokenRecord>, McpError> 
     )))
 }
 
-pub(crate) struct AuthorizeSpec<'a> {
-    pub(crate) client: &'a Client,
-    pub(crate) target: &'a Url,
-    pub(crate) discovery: &'a Discovery,
-    pub(crate) existing: Option<&'a TokenRecord>,
-    pub(crate) requested_scope: Option<&'a str>,
-    pub(crate) client_version: &'a str,
-    pub(crate) services: &'a dyn Services,
-    pub(crate) who: &'a Caller,
-    pub(crate) cancel: &'a CancellationToken,
+/// The endpoint, discovery document, and token history one authorization runs over.
+pub(crate) struct AuthorizePlan<'a> {
+    pub target: &'a Url,
+    pub discovery: &'a Discovery,
+    pub existing: Option<&'a TokenRecord>,
+    pub requested_scope: Option<&'a str>,
+    pub client_version: &'a str,
 }
 
-struct FlowStart {
-    listener: TcpListener,
-    redirect_uri: String,
-    client_id: String,
-    scopes: Vec<String>,
-    verifier: String,
-    state: String,
-    authorization_url: Url,
-}
+pub(crate) async fn authorize(
+    client: &Client,
+    plan: &AuthorizePlan<'_>,
+    services: &dyn Services,
+    who: &Caller,
+    cancel: &CancellationToken,
+) -> Result<TokenRecord, McpError> {
+    let AuthorizePlan {
+        target,
+        discovery,
+        existing,
+        requested_scope,
+        client_version: _,
+    } = *plan;
+    if cancel.is_cancelled() {
+        return Err(McpError::NoAskFrontEnd);
+    }
 
-async fn begin_flow(spec: &AuthorizeSpec<'_>) -> Result<FlowStart, McpError> {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .map_err(|_| auth_error("could not open OAuth loopback listener"))?;
@@ -243,140 +248,132 @@ async fn begin_flow(spec: &AuthorizeSpec<'_>) -> Result<FlowStart, McpError> {
         .local_addr()
         .map_err(|_| auth_error("could not read OAuth loopback address"))?;
     let redirect_uri = format!("http://127.0.0.1:{}/callback", address.port());
-    let registered = match spec.discovery.registration_endpoint.as_ref() {
-        Some(endpoint) => {
-            register_client(
-                spec.client,
-                endpoint,
-                &redirect_uri,
-                spec.client_version,
-                spec.cancel,
-            )
-            .await?
-        }
-        None => None,
-    };
-    let client_id = match registered {
-        Some(client_id) => client_id,
-        None => match spec.existing {
-            Some(record) if !record.client_id.is_empty() => record.client_id.clone(),
-            _ => ask_client_id(spec.services, spec.who, spec.cancel).await?,
-        },
-    };
-    let scopes = requested_scopes(spec.existing, spec.requested_scope, &spec.discovery.scopes);
+    let client_id =
+        registered_or_stored_client_id(client, plan, &redirect_uri, services, who, cancel).await?;
+    let scopes = requested_scopes(existing, requested_scope, &discovery.scopes);
     let scope_value = scopes.join(" ");
     let verifier = format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
     let challenge = auth::pkce_challenge(&verifier);
     let state = uuid::Uuid::new_v4().to_string();
-    let mut authorization_url = spec.discovery.authorization_endpoint.clone();
-    {
-        let mut query = authorization_url.query_pairs_mut();
-        query
-            .append_pair("client_id", &client_id)
-            .append_pair("response_type", "code")
-            .append_pair("redirect_uri", &redirect_uri)
-            .append_pair("state", &state)
-            .append_pair("code_challenge", &challenge)
-            .append_pair("code_challenge_method", "S256")
-            .append_pair("resource", &spec.discovery.resource);
-        if !scope_value.is_empty() {
-            query.append_pair("scope", &scope_value);
-        }
-    }
-    Ok(FlowStart {
-        listener,
-        redirect_uri,
-        client_id,
-        scopes,
-        verifier,
-        state,
-        authorization_url,
-    })
-}
-
-async fn exchange_code(
-    spec: &AuthorizeSpec<'_>,
-    code: &str,
-    redirect_uri: &str,
-    client_id: &str,
-    verifier: &str,
-    scopes: &[String],
-) -> Result<TokenRecord, McpError> {
-    let params = [
-        ("grant_type", "authorization_code"),
-        ("code", code),
-        ("redirect_uri", redirect_uri),
-        ("client_id", client_id),
-        ("code_verifier", verifier),
-        ("resource", spec.discovery.resource.as_str()),
-    ];
-    let response = post_form(
-        spec.client,
-        &spec.discovery.token_endpoint,
-        &params,
-        Duration::from_secs(15),
-        spec.cancel,
-    )
-    .await?;
-    if !response.status().is_success() {
-        return Err(auth_error("OAuth token exchange was rejected"));
-    }
-    let value = response_json(response, Duration::from_secs(15), spec.cancel).await?;
-    token_from_response(&value, client_id, scopes, None)
-}
-
-pub(crate) async fn authorize(spec: AuthorizeSpec<'_>) -> Result<TokenRecord, McpError> {
-    if spec.cancel.is_cancelled() {
-        return Err(McpError::NoAskFrontEnd);
-    }
-    let start = begin_flow(&spec).await?;
+    let authorization_url = authorization_url(
+        discovery,
+        &client_id,
+        &scope_value,
+        &redirect_uri,
+        &challenge,
+        &state,
+    );
     let callback = await_callback(
-        start.listener,
-        &start.state,
-        &spec.discovery.issuer,
-        spec.discovery.require_issuer_parameter,
-        spec.cancel,
+        listener,
+        &state,
+        &discovery.issuer,
+        discovery.require_issuer_parameter,
+        cancel,
     );
     tokio::pin!(callback);
-    let prompt = spec.services.ask(
-        spec.who,
+    let prompt = services.ask(
+        who,
         Question::Confirm {
             text: format!(
                 "Authorize the MCP server at {}. Open this URL to continue: {}",
-                spec.target.host_str().unwrap_or("server"),
-                start.authorization_url
+                target.host_str().unwrap_or("server"),
+                authorization_url
             )
             .into_boxed_str(),
         },
     );
     tokio::pin!(prompt);
     let callback_result = tokio::select! {
-        () = spec.cancel.cancelled() => return Err(McpError::NoAskFrontEnd),
+        () = cancel.cancelled() => return Err(McpError::NoAskFrontEnd),
         result = &mut callback => result?,
         answer = &mut prompt => {
             match answer {
-                Ok(Some(Answer::Value(value))) if value.decode_as::<bool>().unwrap_or(false) => {}
-                Ok(Some(Answer::Approve | Answer::ApproveForSession)) => {}
+                Ok(Some(Answer::Value(value))) if value.decode_as::<bool>().unwrap_or(false) => {},
+                Ok(Some(Answer::Approve | Answer::ApproveForSession)) => {},
                 Ok(Some(Answer::Decline | Answer::Cancel)) => {
                     return Err(McpError::NoAskFrontEnd);
                 }
-                Ok(_) => return Err(auth_error("OAuth authorization was declined")),
+                Ok(None | Some(_)) => return Err(auth_error("OAuth authorization was declined")),
                 Err(dal_agent::error::ServiceError::Denied(_)) => return Err(McpError::NoAskFrontEnd),
-                Err(dal_agent::error::ServiceError::Cancelled) if spec.cancel.is_cancelled() => return Err(McpError::NoAskFrontEnd),
+                Err(dal_agent::error::ServiceError::Cancelled) if cancel.is_cancelled() => return Err(McpError::NoAskFrontEnd),
                 Err(_) => return Err(auth_error("OAuth authorization prompt failed")),
             }
             callback.await?
         }
     };
-    exchange_code(
-        &spec,
-        &callback_result.code,
-        &start.redirect_uri,
-        &start.client_id,
-        &start.verifier,
-        &start.scopes,
+    let params = [
+        ("grant_type", "authorization_code"),
+        ("code", callback_result.code.as_str()),
+        ("redirect_uri", redirect_uri.as_str()),
+        ("client_id", client_id.as_str()),
+        ("code_verifier", verifier.as_str()),
+        ("resource", discovery.resource.as_str()),
+    ];
+    let response = post_form(
+        client,
+        &discovery.token_endpoint,
+        &params,
+        Duration::from_secs(15),
+        cancel,
     )
-    .await
+    .await?;
+    if !response.status().is_success() {
+        return Err(auth_error("OAuth token exchange was rejected"));
+    }
+    let value = response_json(response, Duration::from_secs(15), cancel).await?;
+    token_from_response(&value, &client_id, &scopes, None)
+}
+
+/// Resolves the OAuth client identifier: dynamic registration, a stored
+/// record, or a user prompt, in that order.
+async fn registered_or_stored_client_id(
+    client: &Client,
+    plan: &AuthorizePlan<'_>,
+    redirect_uri: &str,
+    services: &dyn Services,
+    who: &Caller,
+    cancel: &CancellationToken,
+) -> Result<String, McpError> {
+    let registered = match plan.discovery.registration_endpoint.as_ref() {
+        Some(endpoint) => {
+            register_client(client, endpoint, redirect_uri, plan.client_version, cancel).await?
+        }
+        None => None,
+    };
+    match registered {
+        Some(client_id) => Ok(client_id),
+        None => match plan.existing {
+            Some(record) if !record.client_id.is_empty() => Ok(record.client_id.clone()),
+            _ => ask_client_id(services, who, cancel).await,
+        },
+    }
+}
+
+/// Builds the authorization endpoint URL with PKCE and resource parameters.
+fn authorization_url(
+    discovery: &Discovery,
+    client_id: &str,
+    scope_value: &str,
+    redirect_uri: &str,
+    challenge: &str,
+    state: &str,
+) -> Url {
+    let mut url = discovery.authorization_endpoint.clone();
+    {
+        let mut query = url.query_pairs_mut();
+        query
+            .append_pair("client_id", client_id)
+            .append_pair("response_type", "code")
+            .append_pair("redirect_uri", redirect_uri)
+            .append_pair("state", state)
+            .append_pair("code_challenge", challenge)
+            .append_pair("code_challenge_method", "S256")
+            .append_pair("resource", &discovery.resource);
+        if !scope_value.is_empty() {
+            query.append_pair("scope", scope_value);
+        }
+    }
+    url
 }
 
 async fn fetch_resource_metadata(
@@ -586,7 +583,9 @@ async fn ask_client_id(
             }
             Ok(client_id.trim().to_owned())
         }
-        Ok(_) | Err(dal_agent::error::ServiceError::Denied(_)) => Err(McpError::NoAskFrontEnd),
+        Ok(None | Some(_)) | Err(dal_agent::error::ServiceError::Denied(_)) => {
+            Err(McpError::NoAskFrontEnd)
+        }
         Err(dal_agent::error::ServiceError::Cancelled) if cancel.is_cancelled() => {
             Err(McpError::NoAskFrontEnd)
         }
@@ -847,7 +846,7 @@ fn form_encode(value: &str, encoded: &mut String) {
             b' ' => encoded.push('+'),
             other => {
                 encoded.push('%');
-                let _ = std::fmt::Write::write_fmt(encoded, format_args!("{other:02X}"));
+                let _ = write!(encoded, "{other:02X}");
             }
         }
     }

@@ -7,6 +7,7 @@
 //! whose display text is the exact refusal notice, so the chain can fall
 //! through to the text summary.
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -852,7 +853,6 @@ fn hidden_ranges(hidden: &[(Box<str>, (u64, u64))]) -> String {
         .collect();
     let mut text = named.join(", ");
     if groups.len() > MAX_HIDDEN_GROUPS {
-        use std::fmt::Write as _;
         let _ = write!(
             text,
             "; and {} more ranges",

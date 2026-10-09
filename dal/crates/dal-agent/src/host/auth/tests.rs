@@ -215,7 +215,7 @@ async fn cancelling_a_pending_login_reports_cancellation_and_stores_nothing() {
         Err(HostError::Provider(ProviderError::LoginCancelled))
     ));
     assert!(!auth_json(dir.path()).exists());
-    assert!(server.requests_to("/oauth/token").is_empty());
+    assert_eq!(server.requests_to("/oauth/token").len(), 0);
     assert_eq!(
         finished(&mut subscription).await,
         [HostUpdate::LoginFinished {
@@ -362,7 +362,7 @@ async fn logout_revokes_a_codex_refresh_token_and_removes_only_that_entry() {
     assert!(after.credential("openai").is_some());
 
     let again = host.logout(Some("openai-codex")).await.expect("repeat");
-    assert!(again.is_empty());
+    assert_eq!(again.len(), 0);
     assert_eq!(server.requests_to("/oauth/revoke").len(), 1);
 
     let all = host.logout(None).await.expect("all");

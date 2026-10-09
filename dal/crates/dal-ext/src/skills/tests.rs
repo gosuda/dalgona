@@ -266,7 +266,7 @@ fn shared_body_does_not_excuse_duplicate_name() {
     let Err(conflict) = SkillRegistry::merge(&[("p", vec![a, b])]) else {
         panic!("duplicate name merged");
     };
-    assert!(conflict.registry.names().is_empty());
+    assert_eq!(conflict.registry.names(), []);
     assert!(conflict.registry.section(&empty()).is_none());
 }
 
@@ -280,14 +280,14 @@ fn foreign_record_rejects_submitting_plugin() {
         conflict.to_string(),
         "skill 'focus' was validated for plugin 'alpha', not 'beta'"
     );
-    assert!(conflict.registry.names().is_empty());
+    assert_eq!(conflict.registry.names(), []);
 }
 
 #[test]
 fn zero_skills_remove_section() {
     let registry = SkillRegistry::merge(&[("p", Vec::new())]).unwrap();
     assert_eq!(registry.section(&empty()), None);
-    assert!(registry.names().is_empty());
+    assert_eq!(registry.names(), []);
 }
 
 #[test]

@@ -715,7 +715,7 @@ async fn apply_offer<'a>(
         offer.codemod, offer.path, offer.line_start, offer.line_end
     ));
     output.files_changed.push(PathBuf::from(offer.path));
-    ToolOutcome::Ok(output)
+    ToolOutcome::Ok(Box::new(output))
 }
 
 fn decode_apply_args(args: &RawValue) -> Result<ApplyArgs, Box<ToolOutcome>> {

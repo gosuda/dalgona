@@ -747,7 +747,7 @@ impl Tool for SearchTool {
                 Ok((text, data)) => {
                     let mut output = ToolOutput::from_text(text);
                     output.data = Some(data);
-                    ToolOutcome::Ok(output)
+                    ToolOutcome::Ok(Box::new(output))
                 }
                 Err(error) => ToolOutcome::Err(ToolError::message(error.to_string())),
             }

@@ -315,7 +315,10 @@ fn escape_cancels_a_pending_login_and_stores_nothing() -> Fallible<()> {
     session.type_text("\u{1b}");
     session.wait_for("sign-in cancelled.", mark)?;
     assert!(!rig.data.path().join("auth.json").exists());
-    assert!(rig.fake.requests_to("/oauth/token").is_empty());
+    assert_eq!(
+        rig.fake.requests_to("/oauth/token"),
+        [] as [dal_agent::login_fake::Recorded; 0]
+    );
     session.finish()
 }
 

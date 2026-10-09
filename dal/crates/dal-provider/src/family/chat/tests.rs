@@ -390,7 +390,7 @@ fn final_arguments_parse_once_by_the_stop_reason() {
     let ToolArgs::Invalid { message } = single_call(r#""{\"a\":""#, "tool_calls") else {
         panic!("unparsable arguments must be Invalid");
     };
-    assert!(!message.is_empty());
+    assert_ne!(message, "");
     assert_eq!(
         single_call(r#""""#, "tool_calls"),
         ToolArgs::Parsed(raw("{}"))
@@ -452,7 +452,7 @@ fn in_stream_errors_and_malformed_chunks_end_the_stream() {
     ));
 
     let (events, error) = run(&sse(&["not json", "[DONE]"]), 64);
-    assert!(events.is_empty());
+    assert_eq!(events, []);
     assert!(matches!(
         error,
         Some(ProviderError::Protocol {

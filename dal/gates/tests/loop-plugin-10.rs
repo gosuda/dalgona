@@ -229,7 +229,7 @@ impl GrantTool {
         match proc.wait(cx.cancel()).await {
             Ok(result) if matches!(result.status, ProcStatus::Exited { code: 0 }) => {
                 self.state.push(CallResult::InRootExited);
-                ToolOutcome::Ok(ToolOutput::from_text("in-root process completed"))
+                ToolOutcome::Ok(Box::new(ToolOutput::from_text("in-root process completed")))
             }
             Ok(result) => {
                 let message = format!("in-root process exited with {:?}", result.status);

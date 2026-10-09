@@ -1,15 +1,10 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
-//! This gate verifies Dalgona accepts and rejects dal dependency versions.
+//! dalgona success-criterion gate tests.
 #![expect(
     clippy::disallowed_methods,
-    reason = "release gate drives real release commands"
+    reason = "gate runs the real product binaries"
 )]
-#[path = "support/mod.rs"]
-#[expect(
-    dead_code,
-    reason = "gate support helpers are shared across independent test targets"
-)]
-mod support;
+use gates::support;
 
 use std::{
     io::Write,

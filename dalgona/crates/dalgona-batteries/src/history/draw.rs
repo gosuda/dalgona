@@ -153,7 +153,7 @@ pub(crate) fn paginate(glyphs: &Glyphs, grid: Grid, items: &[Item]) -> Vec<Page>
                 grid,
                 &mut pages,
                 &mut page,
-                TextInput {
+                &TextInput {
                     item,
                     span: *span,
                     role,
@@ -257,9 +257,9 @@ fn add_text(
     grid: Grid,
     pages: &mut Vec<Page>,
     page: &mut PageBuilder,
-    input: TextInput<'_>,
+    input: &TextInput<'_>,
 ) {
-    let TextInput {
+    let &TextInput {
         item,
         span,
         role,

@@ -21,7 +21,7 @@ fn pool_fifo_result_index() {
     assert!(!collector.is_complete());
     collector.insert(2, result(TaskState::Cancelled));
     collector.insert(0, result(TaskState::Failed("boom".to_owned())));
-    assert!(collector.into_ordered().is_empty());
+    assert_eq!(collector.into_ordered().len(), 0);
     let mut collector = IndexCollector::new(3);
     collector.insert(2, result(TaskState::Cancelled));
     collector.insert(0, result(TaskState::Failed("boom".to_owned())));
@@ -157,7 +157,7 @@ fn pool_text_builders_match_contract() {
     assert!(preamble("audit", "Check.").contains("Task \"audit\":\nCheck."));
     assert_eq!(item_label("audit", 0, "routes"), "audit 1: routes");
     assert_eq!(split_items("  a  \n\nb\n"), ["a", "b"]);
-    assert!(split_items("").is_empty());
+    assert_eq!(split_items("").len(), 0);
     assert_eq!(
         unresolved_skip("b"),
         TaskState::Skipped("step b produced no result".to_owned())

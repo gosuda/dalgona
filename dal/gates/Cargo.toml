@@ -28,7 +28,7 @@ dal-tui = { path = "../crates/dal-tui" }
 dal-wire = { path = "../crates/dal-wire" }
 dalgon = { path = "../crates/dalgon", default-features = false }
 futures = { workspace = true }
-insta = "=1.48.0"
+insta = "=1.49.0"
 proptest = { workspace = true }
 ratatui = "=0.30.2"
 serde = { workspace = true }
@@ -43,7 +43,7 @@ unicode-width = { workspace = true }
 # corosensei (inside shuttle) has no ARM64-Windows implementation, so the
 # schedule-proof side of dal-full-01 is compiled out on that target.
 [target.'cfg(not(all(windows, target_arch = "aarch64")))'.dev-dependencies]
-shuttle = "=0.9.4"
+shuttle = "=0.9.5"
 
 [[test]]
 name = "loop-headless-01"

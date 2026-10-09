@@ -338,7 +338,7 @@ fn resolver_index_and_page_bytes() {
     match lookup(&snap, "dal://config") {
         Lookup::Page { uri, title, text } => {
             assert_eq!(uri, "dal://config");
-            assert!(!title.is_empty());
+            assert_ne!(title, "");
             assert!(text.starts_with("# "));
         }
         other => panic!("page expected, got {other:?}"),
@@ -441,7 +441,7 @@ fn prop_index_column() {
             let first_space = trimmed.find(' ').unwrap_or(trimmed.len());
             columns.insert(trimmed[..first_space].len());
         }
-        assert!(!columns.is_empty());
+        assert!(columns.iter().next().is_some());
     }
 }
 
@@ -604,7 +604,7 @@ fn truth_config_page() {
     assert_eq!(loaded.mode().as_str(), "normal");
     assert_eq!(loaded.model(), None);
     assert_eq!(loaded.theme(), "auto");
-    assert!(loaded.plugins().is_empty());
+    assert_eq!(loaded.plugins(), []);
 }
 
 /// Splits a markdown table row on unescaped `|` and unescapes `\|`.
@@ -898,7 +898,7 @@ fn reload_wording_has_no_stale_text() {
             push_md(&entry.path(), &mut files);
         }
     }
-    assert!(!files.is_empty());
+    assert_ne!(files, [] as [std::path::PathBuf; 0]);
     for path in files {
         let text = std::fs::read_to_string(&path)
             .unwrap_or_else(|_| panic!("readable: {}", path.display()));
@@ -984,7 +984,7 @@ fn miss_write_error_is_reported() {
     let text = listing(&snap);
     let mut sink = Failing;
     assert!(sink.write_all(text.as_bytes()).is_err());
-    assert!(!text.is_empty());
+    assert_ne!(text, "");
 }
 
 #[test]

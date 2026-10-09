@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
+//! Shared helpers for the gate test binaries.
 #![expect(
     clippy::disallowed_methods,
     reason = "gate support drives real binaries, scripts, and toolchain commands"
@@ -6,20 +7,29 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-pub(crate) type TestResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-pub(crate) struct Scratch {
+/// The gate-wide result type: any error fails the criterion.
+pub type TestResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+/// A unique temporary directory removed on drop.
+pub struct Scratch {
     path: PathBuf,
 }
 
 impl Scratch {
-    pub(crate) fn new(label: &str) -> std::io::Result<Self> {
+    /// Creates a temp directory named `label-<uuid>`.
+    ///
+    /// # Errors
+    /// Returns the directory-creation error.
+    pub fn new(label: &str) -> std::io::Result<Self> {
         let path = std::env::temp_dir().join(format!("{label}-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&path)?;
         Ok(Self { path })
     }
 
-    pub(crate) fn path(&self) -> &Path {
+    /// The scratch directory path.
+    #[must_use]
+    pub fn path(&self) -> &Path {
         &self.path
     }
 }
@@ -30,17 +40,22 @@ impl Drop for Scratch {
     }
 }
 
-pub(crate) fn repo_root() -> PathBuf {
+/// The repository root two levels above this crate's manifest directory.
+#[must_use]
+pub fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-pub(crate) fn run_command(
-    command: &mut std::process::Command,
-) -> std::io::Result<std::process::Output> {
+/// Runs `command` to completion and returns its captured output.
+///
+/// # Errors
+/// Returns the spawn or wait error.
+pub fn run_command(command: &mut std::process::Command) -> std::io::Result<std::process::Output> {
     command.output()
 }
 
-pub(crate) const BATTERIES: [&str; 11] = [
+/// The eleven battery extension names the product registers.
+pub const BATTERIES: [&str; 11] = [
     "ask",
     "history",
     "judged",
@@ -54,10 +69,11 @@ pub(crate) const BATTERIES: [&str; 11] = [
     "work",
 ];
 
-pub(crate) fn build_product(
-    root: PathBuf,
-    user_toml: Option<&str>,
-) -> TestResult<dal_agent::Product> {
+/// Builds the dalgona product against `root` with optional user config.
+///
+/// # Errors
+/// Returns config-load or product-build failures.
+pub fn build_product(root: PathBuf, user_toml: Option<&str>) -> TestResult<dal_agent::Product> {
     let factory = dalgona::product();
     let config = dal_core::Config::load(
         dal_core::ConfigProduct::Dalgona,
@@ -72,7 +88,8 @@ pub(crate) fn build_product(
     Ok(dalgona::build(&cx)?)
 }
 
-pub(crate) fn battery_names(product: &dal_agent::Product) -> std::collections::BTreeSet<&str> {
+/// The names of `product`'s extensions that are registered batteries.
+pub fn battery_names(product: &dal_agent::Product) -> std::collections::BTreeSet<&str> {
     product
         .extensions
         .iter()
@@ -81,10 +98,13 @@ pub(crate) fn battery_names(product: &dal_agent::Product) -> std::collections::B
         .collect()
 }
 
-/// Finds the prebuilt `dalgona` binary next to the test executable's profile
-/// directory, or under `CARGO_TARGET_DIR` when `build.build-dir` splits
-/// intermediate artifacts from final binaries.
-pub(crate) fn dalgona_binary() -> TestResult<PathBuf> {
+/// The compiled `dalgona` binary: beside the test binary's profile directory,
+/// or under `CARGO_TARGET_DIR` when `build.build-dir` splits intermediate
+/// artifacts from final binaries.
+///
+/// # Errors
+/// Returns an error when the binary is not built or the target directory is missing.
+pub fn dalgona_binary() -> TestResult<PathBuf> {
     let file = format!("dalgona{}", std::env::consts::EXE_SUFFIX);
     let exe = std::env::current_exe()?;
     let profile = exe
@@ -106,11 +126,19 @@ pub(crate) fn dalgona_binary() -> TestResult<PathBuf> {
     .into())
 }
 
-pub(crate) async fn start_dalgona(root: PathBuf) -> TestResult<dal_agent::Host> {
+/// Starts a dalgona `Host` on `root` with default configuration.
+///
+/// # Errors
+/// Returns config-load, product-build, or host-start failures.
+pub async fn start_dalgona(root: PathBuf) -> TestResult<dal_agent::Host> {
     start_dalgona_with_config(root, None).await
 }
 
-pub(crate) async fn start_dalgona_with_config(
+/// Starts a dalgona `Host` on `root` with optional user config.
+///
+/// # Errors
+/// Returns config-load, product-build, or host-start failures.
+pub async fn start_dalgona_with_config(
     root: PathBuf,
     user_toml: Option<&str>,
 ) -> TestResult<dal_agent::Host> {
@@ -135,7 +163,8 @@ pub(crate) async fn start_dalgona_with_config(
 }
 
 /// One scripted provider step that streams `text` and ends the turn.
-pub(crate) fn text_step(text: &str) -> String {
+#[must_use]
+pub fn text_step(text: &str) -> String {
     format!(
         r#"{{"kind":"events","events":[{{"type":"text_delta","text":{}}},{{"type":"tool_calls_done","calls":[]}},{{"type":"usage","usage":{USAGE}}},{{"type":"stop","reason":"end_turn"}}]}}"#,
         json_string(text)
@@ -143,7 +172,8 @@ pub(crate) fn text_step(text: &str) -> String {
 }
 
 /// One scripted provider step that calls a single tool with `args_json`.
-pub(crate) fn tool_step(id: &str, name: &str, args_json: &str) -> String {
+#[must_use]
+pub fn tool_step(id: &str, name: &str, args_json: &str) -> String {
     format!(
         r#"{{"kind":"events","events":[{{"type":"tool_call_started","id":{id},"name":{name}}},{{"type":"tool_calls_done","calls":[{{"id":{id},"name":{name},"args":{{"kind":"parsed","value":{args_json}}}}}]}},{{"type":"usage","usage":{USAGE}}},{{"type":"stop","reason":"tool_use"}}]}}"#,
         id = json_string(id),
@@ -176,7 +206,11 @@ fn json_string(text: &str) -> String {
 ///
 /// `top_level_toml` is appended to `dal.toml` before the provider table, so it
 /// can hold top-level keys such as `disabled_batteries`.
-pub(crate) fn run_scripted_print(
+///
+/// # Errors
+/// Returns setup failures, a failed `dalgona -p` run, or a journal count other
+/// than one.
+pub fn run_scripted_print(
     scratch: &Scratch,
     top_level_toml: &str,
     steps: &[String],
@@ -234,7 +268,8 @@ fn collect_journals(dir: &Path, found: &mut Vec<PathBuf>) -> std::io::Result<()>
 }
 
 /// The journal records of one kind, in order.
-pub(crate) fn journal_records<'a>(journal: &'a str, kind: &str) -> Vec<&'a str> {
+#[must_use]
+pub fn journal_records<'a>(journal: &'a str, kind: &str) -> Vec<&'a str> {
     let marker = format!(r#""type":"{kind}""#);
     journal
         .lines()

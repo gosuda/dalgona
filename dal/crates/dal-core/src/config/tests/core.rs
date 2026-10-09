@@ -117,7 +117,7 @@ reasoning = 5.0
     );
     assert!(!config.aliases.contains_key("slow"));
     assert_eq!(config.disabled_batteries, vec![Box::<str>::from("web")]);
-    assert!(config.experimental_batteries.is_empty());
+    assert_eq!(config.experimental_batteries, []);
     assert_eq!(
         config.serve().origins,
         vec![Box::<str>::from("https://user.example")]

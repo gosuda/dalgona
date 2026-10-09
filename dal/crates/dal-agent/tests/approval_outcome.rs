@@ -58,7 +58,7 @@ impl Tool for ApprovalProbe {
                 digest: None,
             };
             match cx.authorize(preview).await {
-                Ok(_) => ToolOutcome::Ok(ToolOutput::from_text("the probe ran")),
+                Ok(_) => ToolOutcome::Ok(Box::new(ToolOutput::from_text("the probe ran"))),
                 Err(reason) => ToolOutcome::Err(ToolError::Denied(reason)),
             }
         })

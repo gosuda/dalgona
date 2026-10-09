@@ -143,8 +143,6 @@ pub struct OrchestrationConfig {
     pub arbiter: BatteryConfig,
     /// Child-agent workflow configuration.
     pub agents: OrchestrationAgentsConfig,
-    /// Worktree isolation sub-battery.
-    pub isolation: BatteryConfig,
     /// Optional named saved workflows.
     pub workflows: Option<toml::Value>,
     /// Host data root for isolated task worktrees and artifacts. The entry
@@ -188,10 +186,9 @@ impl From<monitor::state::MonitorConfigError> for OrchestrationConfigError {
 }
 
 /// Parses the strict `[plugin.orchestration]` table.
-/// # Errors
 ///
-/// Returns [`OrchestrationConfigError`] when the table contains invalid
-/// values or an unknown key.
+/// # Errors
+/// Returns the first strict-decode failure.
 pub fn parse_config(
     section: Option<&toml::Value>,
 ) -> Result<OrchestrationConfig, OrchestrationConfigError> {
@@ -212,8 +209,6 @@ pub fn parse_config(
         arbiter: BatteryConfig,
         #[serde(default)]
         agents: OrchestrationAgentsConfig,
-        #[serde(default)]
-        isolation: BatteryConfig,
         #[serde(default)]
         workflows: Option<toml::Value>,
     }
@@ -239,7 +234,6 @@ pub fn parse_config(
         goal: raw.goal,
         arbiter: raw.arbiter,
         agents,
-        isolation: raw.isolation,
         workflows: raw.workflows,
         data_root: None,
     };
@@ -298,8 +292,7 @@ pub fn orchestration(config: OrchestrationConfig) -> Result<Extension, Registrat
         || config.inflight.enabled
         || config.goal.enabled
         || config.arbiter.enabled
-        || config.agents.enabled
-        || config.isolation.enabled;
+        || config.agents.enabled;
     let input_enabled = config.loop_guard.enabled || config.goal.enabled || config.arbiter.enabled;
     let tool_hook_enabled = config.loop_guard.enabled
         || config.sleep.enabled

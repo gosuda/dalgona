@@ -176,7 +176,7 @@ impl Tool for Counter {
     fn run<'a>(&'a self, _call: ToolCall, _cx: ToolCx<'a>) -> BoxFuture<'a, ToolOutcome> {
         Box::pin(async move {
             self.runs.fetch_add(1, Ordering::SeqCst);
-            ToolOutcome::Ok(ToolOutput::from_text("ran"))
+            ToolOutcome::Ok(Box::new(ToolOutput::from_text("ran")))
         })
     }
 }

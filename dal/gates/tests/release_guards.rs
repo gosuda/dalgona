@@ -17,8 +17,8 @@ fn release_presence_gate_accepts_matching_version() -> Result<(), Box<dyn Error>
     let (code, stdout, stderr) =
         support::run_gate_dep("dal-journal", "0.1", "{\"vers\":\"0.1.0\"}\n")?;
     assert_eq!(code, 0);
-    assert!(stdout.is_empty());
-    assert!(stderr.is_empty());
+    assert_eq!(stdout, "");
+    assert_eq!(stderr, "");
     Ok(())
 }
 
@@ -27,7 +27,7 @@ fn release_presence_gate_rejects_missing_version() -> Result<(), Box<dyn Error>>
     let (code, stdout, stderr) =
         support::run_gate_dep("dal-journal", "0.1", "{\"vers\":\"0.2.0\"}\n")?;
     assert_eq!(code, 3);
-    assert!(stdout.is_empty());
+    assert_eq!(stdout, "");
     assert_eq!(
         stderr,
         "dalgon dependency dal-journal \"0.1\" not on crates.io; release dal first\n"
@@ -45,7 +45,7 @@ fn release_lockstep_guard_names_the_member() -> Result<(), Box<dyn Error>> {
         ],
     )?;
     assert_eq!(code, 2);
-    assert!(stdout.is_empty());
+    assert_eq!(stdout, "");
     assert_eq!(
         stderr,
         "workspace member top does not inherit the workspace version; lockstep is broken\n"
@@ -64,7 +64,7 @@ fn release_path_dependency_guard_names_the_edge() -> Result<(), Box<dyn Error>> 
         ],
     )?;
     assert_eq!(code, 2);
-    assert!(stdout.is_empty());
+    assert_eq!(stdout, "");
     assert_eq!(
         stderr,
         "workspace member extra depends on fake-dal by path; dalgona builds only against published dal-* crates\n"
@@ -130,7 +130,7 @@ fn release_publish_failure_wraps_cargo_error() -> Result<(), Box<dyn Error>> {
         .output()?;
     let stderr = String::from_utf8(output.stderr)?;
     assert_eq!(output.status.code(), Some(5));
-    assert!(String::from_utf8(output.stdout)?.is_empty());
+    assert_eq!(String::from_utf8(output.stdout)?, "");
     assert!(stderr.contains("publish failed from fixture\n"));
     assert!(stderr.ends_with("cargo publish failed for tiny; see the output above\n"));
     Ok(())

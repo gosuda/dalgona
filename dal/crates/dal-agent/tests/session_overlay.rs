@@ -48,7 +48,7 @@ impl Tool for Echo {
     }
 
     fn run<'a>(&'a self, _call: ToolCall, _cx: ToolCx<'a>) -> BoxFuture<'a, ToolOutcome> {
-        Box::pin(async { ToolOutcome::Ok(ToolOutput::from_text("echoed")) })
+        Box::pin(async { ToolOutcome::Ok(Box::new(ToolOutput::from_text("echoed"))) })
     }
 }
 

@@ -185,7 +185,7 @@ impl Tool for AskTool {
                 digest: None,
             };
             match cx.authorize(preview).await {
-                Ok(_) => ToolOutcome::Ok(ToolOutput::from_text("asked-ok")),
+                Ok(_) => ToolOutcome::Ok(Box::new(ToolOutput::from_text("asked-ok"))),
                 Err(reason) => ToolOutcome::Err(ToolError::Denied(reason)),
             }
         })
@@ -233,7 +233,7 @@ impl Tool for GateTool {
                 permit = self.gate.acquire() => match permit {
                     Ok(permit) => {
                         permit.forget();
-                        ToolOutcome::Ok(ToolOutput::from_text("opened"))
+                        ToolOutcome::Ok(Box::new(ToolOutput::from_text("opened")))
                     }
                     Err(_) => ToolOutcome::Interrupted,
                 },
@@ -725,7 +725,7 @@ impl Tool for AskProbe {
                 Ok(None) => "default",
                 Err(_) => "failed",
             };
-            ToolOutcome::Ok(ToolOutput::from_text(text))
+            ToolOutcome::Ok(Box::new(ToolOutput::from_text(text)))
         })
     }
 }

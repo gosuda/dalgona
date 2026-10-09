@@ -68,29 +68,29 @@ pub enum McpError {
     /// The user declined the full MCP server-set grant.
     #[error("mcp service declined by user for {plugin}")]
     Declined {
-        /// The plugin whose server set the user declined.
+        /// The denied plugin.
         plugin: String,
     },
     /// The caller requested an undeclared server.
     #[error("mcp server {key} is not granted")]
     NotGranted {
-        /// The undeclared server key the caller requested.
+        /// The undeclared server key.
         key: String,
     },
     /// A declared server could not be started.
     #[error("mcp server {key} failed to start: {cause}")]
     Start {
-        /// The declared server key that failed to start.
+        /// The server that failed.
         key: String,
-        /// The start failure rendered for the user.
+        /// The launch failure.
         cause: String,
     },
     /// A stdio server exited while a request was in flight.
     #[error("mcp server {key} exited during the call with status {code}{diagnostic}")]
     Exited {
-        /// The server key that exited mid-call.
+        /// The server that exited.
         key: String,
-        /// The process exit status code.
+        /// Its exit status.
         code: i32,
         /// The optional formatted stderr diagnostic suffix.
         diagnostic: String,
@@ -98,13 +98,13 @@ pub enum McpError {
     /// A stdout protocol line was malformed and the server was treated as crashed.
     #[error("mcp server {key} wrote an invalid protocol line; treated as a crash")]
     InvalidLine {
-        /// The server key that wrote the malformed line.
+        /// The server that wrote the bad line.
         key: String,
     },
     /// The server exhausted its one-restart budget and is latched off for this session.
     #[error("mcp server {key} crashed twice in this session; it stays off until the session ends")]
     Latched {
-        /// The server key whose restart budget is exhausted.
+        /// The latched-off server.
         key: String,
     },
     /// An MCP call exceeded its effective deadline.
@@ -116,9 +116,9 @@ pub enum McpError {
     /// The requested remote tool is not in the server's current list.
     #[error("mcp tool {tool} not found on server {key}")]
     NotFound {
-        /// The remote tool name that is absent.
+        /// The missing tool name.
         tool: String,
-        /// The server key that lacks the tool.
+        /// The declaring server.
         key: String,
     },
     /// The server returned a JSON-RPC error response.
@@ -126,7 +126,7 @@ pub enum McpError {
     Protocol {
         /// The JSON-RPC error code.
         code: i64,
-        /// The JSON-RPC error message.
+        /// The server's error message.
         message: String,
     },
     /// The server returned an unsupported MCP result type.
@@ -135,7 +135,6 @@ pub enum McpError {
         /// The unsupported resultType value.
         value: String,
     },
-
     /// The server exceeded the tools/list page limit.
     #[error("mcp list exceeded 50 pages")]
     ListPages,
@@ -151,15 +150,15 @@ pub enum McpError {
     /// OAuth authorization failed for another reason.
     #[error("mcp authorization failed: {cause}")]
     Auth {
-        /// The authorization failure rendered for the user.
+        /// The authorization failure detail.
         cause: String,
     },
     /// The HTTP endpoint continued rejecting requests after authorization.
     #[error("mcp http status {code} after {n} authorization attempts")]
     HttpAuth {
-        /// The HTTP status the endpoint kept returning.
+        /// The HTTP status code.
         code: u16,
-        /// The number of authorization attempts made.
+        /// How many authorization attempts ran.
         n: u32,
     },
     /// The server repeatedly requested interactive input.
@@ -191,7 +190,7 @@ pub enum McpConfigError {
     /// The section names a key MCP does not read.
     #[error("unknown key \"plugin.mcp.{key}\"; MCP has no user settings")]
     UnknownKey {
-        /// The rejected `[plugin.mcp]` key name.
+        /// The rejected key.
         key: Box<str>,
     },
     /// The shared `enabled` switch is not a boolean.

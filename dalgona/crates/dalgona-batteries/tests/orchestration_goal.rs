@@ -29,7 +29,6 @@ fn goal_config() -> OrchestrationConfig {
         goal: BatteryConfig { enabled: true },
         arbiter: BatteryConfig { enabled: false },
         agents: OrchestrationAgentsConfig::default(),
-        isolation: BatteryConfig { enabled: false },
         workflows: None,
         data_root: None,
     }

@@ -1300,7 +1300,7 @@ fn promoted_call_runs_and_promotes_only_after_success() {
             if matches!(units.as_slice(), [Unit::Reads { calls }] if *calls == [CallId::new(call)]))));
         assert_eq!(promotions(&journal), round);
         assert_eq!(session.promoted().contains(&name("web_search")), round > 0);
-        assert!(results_of(&journal, call).is_empty());
+        assert_eq!(results_of(&journal, call), []);
 
         append_emitted(
             &send(
@@ -1435,7 +1435,7 @@ fn unsuccessful_promoting_calls_do_not_promote() {
                 .iter()
                 .any(|record| matches!(record, Record::ToolPromoted { .. }))
         );
-        assert!(session.promoted().is_empty());
+        assert_eq!(session.promoted(), &BTreeSet::new());
     }
 }
 
@@ -1652,7 +1652,7 @@ fn replay_repairs_every_open_call_once() {
         results_of(&repair.records, "queued"),
         vec![(true, text_part(LOST))]
     );
-    assert!(results_of(&repair.records, "failed").is_empty());
+    assert_eq!(results_of(&repair.records, "failed"), []);
     assert!(matches!(&repair.records[0], Record::ToolResult(entry)
         if matches!(&entry.kind, EntryKind::ToolResult { call, .. } if *call == CallId::new("ran"))));
 
@@ -1708,7 +1708,7 @@ fn promoted_call_lost_in_crash_is_repaired_once() {
     );
 
     let (replayed, effects) = Session::replay(journal.clone(), stamp()).unwrap();
-    assert!(replayed.promoted().is_empty());
+    assert_eq!(replayed.promoted(), &BTreeSet::new());
     assert!(
         !journal
             .iter()
@@ -1738,7 +1738,7 @@ fn promoted_call_lost_in_crash_is_repaired_once() {
     let [Effect::Emit(second)] = again.as_slice() else {
         panic!("replay must return one repair batch")
     };
-    assert!(results_of(&second.records, "call").is_empty());
+    assert_eq!(results_of(&second.records, "call"), []);
     assert_eq!(results_of(&journal, "call").len(), 1);
 }
 
@@ -1994,7 +1994,7 @@ fn interrupted_stream_records_partial_assistant_and_call_result_once() {
         },
     )
     .unwrap();
-    assert!(late.is_empty());
+    assert_eq!(late, []);
 }
 
 #[test]
@@ -2205,7 +2205,7 @@ proptest::proptest! {
                 turn,
                 call: CallId::new(call.as_str()),
             }).unwrap();
-            proptest::prop_assert!(duplicate.is_empty());
+            proptest::prop_assert_eq!(duplicate, []);
         }
 
         for call in &names {
@@ -2515,7 +2515,7 @@ fn turn_end_carries_accumulated_response_usage() {
         })
         .expect("turn ends with a TurnEnd record");
     assert_eq!(end.0, &Some(usage(10)));
-    assert!(end.1.is_empty());
+    assert_eq!(end.1.len(), 0);
     assert!(journal.iter().any(|record| matches!(
         record,
         Record::TurnEnd {
@@ -2682,7 +2682,7 @@ fn inferred_usage_overflow_is_rejected_without_mutating_totals() {
 fn turn_totals_merge_changes_and_track_known_flags() {
     let mut totals = super::types::TurnTotals::default();
     assert_eq!(totals.usage(), None);
-    assert!(totals.changes().is_empty());
+    assert_eq!(totals.changes(), []);
     totals.add_usage(usage(10)).unwrap();
     totals
         .add_usage(Usage {

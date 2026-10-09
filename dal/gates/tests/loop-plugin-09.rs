@@ -172,7 +172,7 @@ impl Tool for ProbeTool {
                 Err(error) => error.to_string(),
             };
             state.set(result);
-            ToolOutcome::Ok(ToolOutput::from_text(output))
+            ToolOutcome::Ok(Box::new(ToolOutput::from_text(output)))
         })
     }
 }

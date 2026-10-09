@@ -233,12 +233,12 @@ fn probe_that_ends_neutrally_returns_to_parked_with_streaks_kept() {
     assert_eq!(state.phase, DreamPhase::Parked);
     state.phase = DreamPhase::Probing;
     state.running = true;
-    assert!(transition(&mut state, DreamEvent::JobCancelled).is_empty());
+    assert_eq!(transition(&mut state, DreamEvent::JobCancelled).len(), 0);
     assert_eq!(state.phase, DreamPhase::Parked);
     assert!(!state.running);
     assert_eq!(state.transient_streak, 6);
     state.phase = DreamPhase::Probing;
-    assert!(transition(&mut state, DreamEvent::ProbeSucceeded).is_empty());
+    assert_eq!(transition(&mut state, DreamEvent::ProbeSucceeded).len(), 0);
     assert_eq!(state.phase, DreamPhase::Idle);
     assert_eq!(state.transient_streak, 0);
     assert!(!state.park_notified);
@@ -262,13 +262,13 @@ fn dream_neutral_events_keep_streaks() {
     state.running = true;
     state.phase = DreamPhase::Running;
     state.transient_streak = 2;
-    assert!(transition(&mut state, DreamEvent::JobCancelled).is_empty());
+    assert_eq!(transition(&mut state, DreamEvent::JobCancelled).len(), 0);
     assert!(!state.running);
     assert_eq!(state.phase, DreamPhase::Idle);
     assert_eq!(state.transient_streak, 2);
     state.running = true;
     state.phase = DreamPhase::Running;
-    assert!(transition(&mut state, DreamEvent::BudgetExhausted).is_empty());
+    assert_eq!(transition(&mut state, DreamEvent::BudgetExhausted).len(), 0);
     assert!(!state.running);
     assert_eq!(state.transient_streak, 2);
 }
@@ -428,7 +428,7 @@ fn selection_keeps_oldest_plus_newest() {
     let kept = select_oldest_plus_newest(25, |index| index == 0 || index >= 10);
     let expected: Vec<usize> = std::iter::once(0).chain(10..25).collect();
     assert_eq!(kept, expected);
-    assert!(select_oldest_plus_newest(0, |_| true).is_empty());
+    assert_eq!(select_oldest_plus_newest(0, |_| true).len(), 0);
     assert_eq!(select_oldest_plus_newest(3, |_| false), Vec::<usize>::new());
 }
 
@@ -595,6 +595,6 @@ fn draw_renders_deterministic_png_pages() {
     };
     let pages = paginate(glyphs, small, &built);
     let kept: usize = pages.iter().map(|page| page.items.len()).sum();
-    assert!(!pages.is_empty());
+    assert_ne!(pages.len(), 0);
     assert_eq!(kept, built.len());
 }

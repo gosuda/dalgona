@@ -369,8 +369,8 @@ pub(crate) fn pkce_challenge(verifier: &str) -> String {
     URL_SAFE_NO_PAD.encode(sha256(verifier.as_bytes()))
 }
 
-/// FIPS 180-4 round constants for SHA-256.
-const SHA256_K: [u32; 64] = [
+/// FIPS 180-4 round constants.
+const K: [u32; 64] = [
     0x428a_2f98,
     0x7137_4491,
     0xb5c0_fbcf,
@@ -437,65 +437,6 @@ const SHA256_K: [u32; 64] = [
     0xc671_78f2,
 ];
 
-/// Compresses one padded 64-byte block into `state`, per FIPS 180-4.
-fn sha256_block(state: &mut [u32; 8], chunk: &[u8]) {
-    let mut schedule = [0_u32; 64];
-    for (index, word) in schedule.iter_mut().enumerate().take(16) {
-        let at = index * 4;
-        *word = u32::from_be_bytes([chunk[at], chunk[at + 1], chunk[at + 2], chunk[at + 3]]);
-    }
-    for index in 16..64 {
-        let small0 = schedule[index - 15].rotate_right(7)
-            ^ schedule[index - 15].rotate_right(18)
-            ^ (schedule[index - 15] >> 3);
-        let small1 = schedule[index - 2].rotate_right(17)
-            ^ schedule[index - 2].rotate_right(19)
-            ^ (schedule[index - 2] >> 10);
-        schedule[index] = schedule[index - 16]
-            .wrapping_add(small0)
-            .wrapping_add(schedule[index - 7])
-            .wrapping_add(small1);
-    }
-    let [
-        mut work_a,
-        mut work_b,
-        mut work_c,
-        mut work_d,
-        mut work_e,
-        mut work_f,
-        mut work_g,
-        mut work_h,
-    ] = *state;
-    for round in 0..64 {
-        let big1 = work_e.rotate_right(6) ^ work_e.rotate_right(11) ^ work_e.rotate_right(25);
-        let choice = (work_e & work_f) ^ ((!work_e) & work_g);
-        let temp1 = work_h
-            .wrapping_add(big1)
-            .wrapping_add(choice)
-            .wrapping_add(SHA256_K[round])
-            .wrapping_add(schedule[round]);
-        let big0 = work_a.rotate_right(2) ^ work_a.rotate_right(13) ^ work_a.rotate_right(22);
-        let majority = (work_a & work_b) ^ (work_a & work_c) ^ (work_b & work_c);
-        let temp2 = big0.wrapping_add(majority);
-        work_h = work_g;
-        work_g = work_f;
-        work_f = work_e;
-        work_e = work_d.wrapping_add(temp1);
-        work_d = work_c;
-        work_c = work_b;
-        work_b = work_a;
-        work_a = temp1.wrapping_add(temp2);
-    }
-    state[0] = state[0].wrapping_add(work_a);
-    state[1] = state[1].wrapping_add(work_b);
-    state[2] = state[2].wrapping_add(work_c);
-    state[3] = state[3].wrapping_add(work_d);
-    state[4] = state[4].wrapping_add(work_e);
-    state[5] = state[5].wrapping_add(work_f);
-    state[6] = state[6].wrapping_add(work_g);
-    state[7] = state[7].wrapping_add(work_h);
-}
-
 /// Private SHA-256 over bytes, per FIPS 180-4. No hashing crate is added for
 /// the one MCP PKCE challenge.
 pub(crate) fn sha256(bytes: &[u8]) -> [u8; 32] {
@@ -517,7 +458,7 @@ pub(crate) fn sha256(bytes: &[u8]) -> [u8; 32] {
     }
     padded.extend_from_slice(&bit_len.to_be_bytes());
     for chunk in padded.as_chunks::<64>().0 {
-        sha256_block(&mut state, chunk);
+        compress(&mut state, &schedule(chunk));
     }
     let mut digest = [0_u8; 32];
     for (index, word) in state.iter().enumerate() {
@@ -526,17 +467,69 @@ pub(crate) fn sha256(bytes: &[u8]) -> [u8; 32] {
     digest
 }
 
+/// Builds the 64-word message schedule for one 512-bit chunk.
+fn schedule(chunk: &[u8; 64]) -> [u32; 64] {
+    let mut words = [0_u32; 64];
+    for (index, word) in words.iter_mut().enumerate().take(16) {
+        let at = index * 4;
+        *word = u32::from_be_bytes([chunk[at], chunk[at + 1], chunk[at + 2], chunk[at + 3]]);
+    }
+    for index in 16..64 {
+        let small0 = words[index - 15].rotate_right(7)
+            ^ words[index - 15].rotate_right(18)
+            ^ (words[index - 15] >> 3);
+        let small1 = words[index - 2].rotate_right(17)
+            ^ words[index - 2].rotate_right(19)
+            ^ (words[index - 2] >> 10);
+        words[index] = words[index - 16]
+            .wrapping_add(small0)
+            .wrapping_add(words[index - 7])
+            .wrapping_add(small1);
+    }
+    words
+}
+
+/// Runs the 64-round compression of one schedule into the state.
+fn compress(state: &mut [u32; 8], words: &[u32; 64]) {
+    let (mut w0, mut w1, mut w2, mut w3, mut w4, mut w5, mut w6, mut w7) = (
+        state[0], state[1], state[2], state[3], state[4], state[5], state[6], state[7],
+    );
+    for index in 0..64 {
+        let big1 = w4.rotate_right(6) ^ w4.rotate_right(11) ^ w4.rotate_right(25);
+        let choice = (w4 & w5) ^ ((!w4) & w6);
+        let temp1 = w7
+            .wrapping_add(big1)
+            .wrapping_add(choice)
+            .wrapping_add(K[index])
+            .wrapping_add(words[index]);
+        let big0 = w0.rotate_right(2) ^ w0.rotate_right(13) ^ w0.rotate_right(22);
+        let majority = (w0 & w1) ^ (w0 & w2) ^ (w1 & w2);
+        let temp2 = big0.wrapping_add(majority);
+        w7 = w6;
+        w6 = w5;
+        w5 = w4;
+        w4 = w3.wrapping_add(temp1);
+        w3 = w2;
+        w2 = w1;
+        w1 = w0;
+        w0 = temp1.wrapping_add(temp2);
+    }
+    for (word, w) in state.iter_mut().zip([w0, w1, w2, w3, w4, w5, w6, w7]) {
+        *word = word.wrapping_add(w);
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
     use super::*;
 
     fn hex(digest: [u8; 32]) -> String {
-        use std::fmt::Write as _;
-        let mut rendered = String::with_capacity(64);
-        for byte in digest {
-            let _ = write!(rendered, "{byte:02x}");
-        }
-        rendered
+        digest.iter().fold(String::new(), |mut text, byte| {
+            let _ = write!(text, "{byte:02x}");
+            text
+        })
     }
 
     #[test]

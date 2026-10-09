@@ -307,10 +307,6 @@ pub(crate) async fn load(
     Ok(fold(&records))
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "ToolOutcome::Ok holds the output inline; boxing it is a published-API shape decision"
-)]
 pub(crate) async fn tool(
     args: &str,
     services: &dyn Services,
@@ -846,7 +842,7 @@ mod host_tests {
         ];
         for (args, expected) in cases {
             assert_eq!(host.tool("todo", &args).await?, expected);
-            assert!(host.services.all_bodies("todo").is_empty());
+            assert_eq!(host.services.all_bodies("todo").len(), 0);
         }
 
         let boundary = write_args(&[(&"a".repeat(200), &"d".repeat(2000), "pending")])?;

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
-//! This test verifies Dalgona composition, configuration, and document behavior.
+//! Composition gates for the dalgona product.
 #![expect(
     clippy::disallowed_methods,
-    reason = "composition test drives the real Dalgona binary boundary"
+    reason = "gate runs the real product binaries"
 )]
 use std::collections::BTreeSet;
 use std::error::Error;
@@ -113,7 +113,7 @@ fn docs_command_serves_both_first_party_schemes() -> Result<(), Box<dyn Error>> 
     let page = command.args(["docs", "dalgona://config"]).output()?;
     assert_eq!(page.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&page.stdout).starts_with("# "));
-    assert!(page.stderr.is_empty());
+    assert_eq!(page.stderr, [] as [u8; 0]);
 
     let mut command = Command::new(env!("CARGO_BIN_EXE_dalgona"));
     command
@@ -126,7 +126,7 @@ fn docs_command_serves_both_first_party_schemes() -> Result<(), Box<dyn Error>> 
     let text = String::from_utf8_lossy(&listing.stdout);
     assert!(text.contains("dal://"));
     assert!(text.contains("dalgona://"));
-    assert!(listing.stderr.is_empty());
+    assert_eq!(listing.stderr, [] as [u8; 0]);
     Ok(())
 }
 

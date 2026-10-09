@@ -1,15 +1,10 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
-//! This gate verifies that a user plugin cannot reuse a bundled battery name.
+//! dalgona success-criterion gate tests.
 #![expect(
     clippy::disallowed_methods,
-    reason = "boot gate drives the real Dalgona binary boundary"
+    reason = "gate runs the real product binaries"
 )]
-#[path = "support/mod.rs"]
-#[expect(
-    dead_code,
-    reason = "gate support helpers are shared across independent test targets"
-)]
-mod support;
+use gates::support;
 
 use std::{fs, process::Command};
 

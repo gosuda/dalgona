@@ -1796,13 +1796,12 @@ mod tests {
     #[test]
     fn chooser_reply_is_not_rendered_as_debug_text() {
         let mut session = Session::default();
-        assert!(
-            session
-                .accept_reply(dal_core::Reply::Choose {
-                    chooser: dal_core::Chooser::ForkPoint,
-                    filter: "".into(),
-                })
-                .is_empty()
+        assert_eq!(
+            session.accept_reply(dal_core::Reply::Choose {
+                chooser: dal_core::Chooser::ForkPoint,
+                filter: "".into(),
+            }),
+            [] as [String; 0]
         );
     }
 
@@ -1873,7 +1872,7 @@ mod tests {
             session.pending_diagram_settings,
             [(true, dal_core::command::Save::SessionOnly)]
         );
-        assert!(session.pending_commands.is_empty());
+        assert_eq!(session.pending_commands, []);
         assert!(session.picker.is_some());
 
         session
@@ -1909,7 +1908,7 @@ mod tests {
         session.accept_reply(dal_core::Reply::Front(dal_core::FrontAction::Quit));
         session.answer_dialog('y');
         assert!(session.quit);
-        assert!(session.composer.is_empty());
+        assert_eq!(session.composer.text(), "");
     }
 
     #[test]
@@ -1966,7 +1965,7 @@ mod tests {
         let rows = session.accept_reply(dal_core::Reply::Front(dal_core::FrontAction::CopyReply {
             text: "the reply".into(),
         }));
-        assert!(rows.is_empty());
+        assert_eq!(rows.len(), 0);
         assert_eq!(session.pending_copies, vec!["the reply".into()]);
     }
 
@@ -1996,6 +1995,6 @@ mod tests {
             assert_eq!(expect, &dal_core::Expect::Idle);
             assert_eq!(content.len(), 1);
         }
-        assert!(session.composer.is_empty());
+        assert_eq!(session.composer.text(), "");
     }
 }

@@ -1,12 +1,5 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
 //! History image compaction through the real product, journal, restart, and read tool.
-#[path = "support/mod.rs"]
-#[expect(
-    dead_code,
-    reason = "gate support helpers are shared across independent test targets"
-)]
-mod support;
-
 use std::path::Path;
 use std::time::Duration;
 
@@ -15,7 +8,7 @@ use dal_core::{
     Command, EntryKind, Expect, JournalPart, PageReq, Part, Stop, UpdateKind, Workspace,
 };
 
-use support::TestResult;
+use gates::support::{self, TestResult};
 const WAIT: Duration = Duration::from_secs(30);
 
 /// One scripted turn. All strings used here are fixed, JSON-safe fixture text.

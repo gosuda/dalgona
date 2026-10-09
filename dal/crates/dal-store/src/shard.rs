@@ -1222,7 +1222,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, StoreError::Blob(BlobError::Io { .. })));
-        assert!(fs::read(path).unwrap().is_empty());
+        assert_eq!(fs::read(path).unwrap(), [] as [u8; 0]);
         lane.close().await.unwrap();
     }
 
@@ -1265,7 +1265,7 @@ mod tests {
             .expect("register replacement journal");
         assert_eq!(lane.slot, 0);
         lane.close().await.unwrap();
-        assert!(fs::read(temp.file(0)).unwrap().is_empty());
+        assert_eq!(fs::read(temp.file(0)).unwrap(), [] as [u8; 0]);
     }
 
     #[tokio::test]
@@ -1293,7 +1293,7 @@ mod tests {
             error,
             StoreError::Journal(JournalError::Io { op: "write", .. })
         ));
-        assert!(fs::read(path).unwrap().is_empty());
+        assert_eq!(fs::read(path).unwrap(), [] as [u8; 0]);
     }
 
     #[tokio::test]
@@ -1320,7 +1320,7 @@ mod tests {
             error,
             StoreError::Journal(JournalError::Io { op: "sync", .. })
         ));
-        assert!(fs::read(path).unwrap().is_empty());
+        assert_eq!(fs::read(path).unwrap(), [] as [u8; 0]);
     }
 
     #[expect(

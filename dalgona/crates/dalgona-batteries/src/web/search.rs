@@ -225,7 +225,7 @@ impl dal_agent::ext::Tool for SearchTool {
                 self.cfg.max_body_bytes,
             ) {
                 Ok(result) => match sonic_rs::to_string(&result) {
-                    Ok(text) => ToolOutcome::Ok(ToolOutput::from_text(text)),
+                    Ok(text) => ToolOutcome::Ok(Box::new(ToolOutput::from_text(text))),
                     Err(error) => ToolOutcome::Err(dal_agent::ToolError::message(format!(
                         "{TOOL_NAME}: {error}."
                     ))),
@@ -256,7 +256,7 @@ mod tests {
         let value: Value =
             sonic_rs::from_str(r#"{"web":{"results":[{"title":"missing url"},{"url":3}]}}"#)?;
 
-        assert!(brave_results(&value).is_empty());
+        assert_eq!(brave_results(&value).len(), 0);
         Ok(())
     }
 
@@ -329,7 +329,7 @@ mod tests {
         };
         let result = super::parse_search_response("q", "http://x/", &response, 1024)
             .expect("non-json is empty");
-        assert!(result.results.is_empty());
+        assert_eq!(result.results.len(), 0);
     }
 
     #[test]

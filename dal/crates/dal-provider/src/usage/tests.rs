@@ -674,7 +674,7 @@ async fn a_refused_connection_is_a_transport_reason() {
     let (_, outcome) = join(join_all(tasks), wait).await;
     match outcome {
         Err(UsageCheckReason::Transport { reason }) => {
-            assert!(!reason.is_empty());
+            assert_ne!(reason, "");
             assert!(
                 !reason.contains(ACCESS) && !reason.contains(REFRESH),
                 "{reason}"

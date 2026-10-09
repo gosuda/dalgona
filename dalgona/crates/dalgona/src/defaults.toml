@@ -50,9 +50,6 @@ child_max_steps = 50
 child_max_minutes = 30
 max_runs = 16
 
-[plugin.orchestration.isolation]
-enabled = true
-
 [plugin.plan]
 enabled = true
 

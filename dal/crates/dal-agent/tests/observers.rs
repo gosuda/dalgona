@@ -168,7 +168,10 @@ impl Tool for Probe {
 
     fn run<'a>(&'a self, _call: ToolCall, _cx: ToolCx<'a>) -> BoxFuture<'a, ToolOutcome> {
         Box::pin(async {
-            ToolOutcome::Ok(ToolOutput::from_text(format!("{}💥", "a".repeat(4095))))
+            ToolOutcome::Ok(Box::new(ToolOutput::from_text(format!(
+                "{}💥",
+                "a".repeat(4095)
+            ))))
         })
     }
 }

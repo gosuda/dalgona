@@ -66,11 +66,11 @@ impl Tool for RunProbe {
                 stdout_prefix_limit: 4096,
             };
             match cx.services().run(cx.caller(), request).await {
-                Ok(output) => ToolOutcome::Ok(ToolOutput::from_text(
+                Ok(output) => ToolOutcome::Ok(Box::new(ToolOutput::from_text(
                     String::from_utf8_lossy(&output.stdout_tail)
                         .into_owned()
                         .into_boxed_str(),
-                )),
+                ))),
                 Err(error) => ToolOutcome::Err(ToolError::message(error.to_string())),
             }
         })

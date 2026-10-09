@@ -169,7 +169,7 @@ fn convert_result(
         max_markdown_bytes,
     ) {
         Ok(result) => match sonic_rs::to_string(&result) {
-            Ok(text) => ToolOutcome::Ok(ToolOutput::from_text(text)),
+            Ok(text) => ToolOutcome::Ok(Box::new(ToolOutput::from_text(text))),
             Err(error) => ToolOutcome::Err(dal_agent::ToolError::message(format!(
                 "{TOOL_NAME}: {error}."
             ))),
@@ -331,7 +331,7 @@ mod tests {
 
         assert!(matches!(request.method, dal_core::ext::FetchMethod::Get));
         assert_eq!(request.url.as_ref(), "http://example.test/page");
-        assert!(request.body.is_empty());
+        assert_eq!(request.body.len(), 0);
         assert!(request.headers.iter().any(|(name, value)| {
             name.eq_ignore_ascii_case("User-Agent") && value.as_ref().starts_with("dalgona-web/")
         }));

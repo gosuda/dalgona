@@ -6,6 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use base64::{Engine, engine::general_purpose::STANDARD};
 use std::sync::Arc;
 
 use dal_agent::error::{ServiceError, ToolError};
@@ -231,7 +232,6 @@ pub(crate) enum ParameterHeaderError {
 }
 
 fn encode_header_value(value: &str) -> String {
-    use base64::{Engine, engine::general_purpose::STANDARD};
     let already_encoded = value.starts_with("=?base64?") && value.ends_with("?=");
     if value.is_ascii() && !already_encoded {
         return value.to_owned();
@@ -638,7 +638,7 @@ async fn call_mcp(key: &Key, remote: &str, arguments: RawJson, cx: ToolCx<'_>) -
     };
     match services.mcp(cx.caller(), req).await {
         Ok(response) if response.is_error => ToolOutcome::Err(ToolError::message(response.text)),
-        Ok(response) => ToolOutcome::Ok(ToolOutput::from_text(response.text)),
+        Ok(response) => ToolOutcome::Ok(Box::new(ToolOutput::from_text(response.text))),
         Err(ServiceError::Cancelled) => ToolOutcome::Interrupted,
         Err(ServiceError::Declined) => ToolOutcome::Err(ToolError::message(
             McpError::Declined {

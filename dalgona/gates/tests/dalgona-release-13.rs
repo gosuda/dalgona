@@ -1,15 +1,11 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
-//! This gate verifies generated publish order preserves every dependency edge.
+//! dalgona success-criterion gate tests.
 #![expect(
     clippy::disallowed_methods,
-    reason = "release gate drives real release commands"
+    reason = "gate runs the real product binaries"
 )]
-#[path = "support/mod.rs"]
-#[expect(
-    dead_code,
-    reason = "gate support helpers are shared across independent test targets"
-)]
-mod support;
+use gates::support;
+use std::fmt::Write as _;
 
 use proptest::{
     prelude::any,
@@ -17,8 +13,7 @@ use proptest::{
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fmt::Write as _,
-    fs, io,
+    fs,
     process::Command,
 };
 
@@ -26,8 +21,7 @@ fn check_generated_graph(seed: u64) -> support::TestResult<()> {
     let root = support::repo_root();
     let scratch = support::Scratch::new("publish-order-property")?;
     let workspace = scratch.path();
-    let count = 2 + usize::try_from(seed % 7)
-        .map_err(|_| io::Error::other("seed remainder is too large"))?;
+    let count = 2 + (usize::try_from(seed % 7).unwrap_or_default());
     let mut edges = BTreeSet::new();
     for index in 0..count - 1 {
         edges.insert((index, index + 1));
@@ -71,7 +65,7 @@ fn check_generated_graph(seed: u64) -> support::TestResult<()> {
             manifest.push_str("\n[dependencies]\n");
             for (from, _) in dependencies {
                 let _ = writeln!(
-                    &mut manifest,
+                    manifest,
                     "crate{from} = {{ path = \"../crate{from}\", version = \"=0.1.0\" }}"
                 );
             }

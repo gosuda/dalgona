@@ -180,6 +180,6 @@ mod tests {
 
     #[test]
     fn empty_candidates_have_an_empty_permutation() {
-        assert!(rank_order(&[], 0).is_empty());
+        assert_eq!(rank_order(&[], 0).len(), 0);
     }
 }

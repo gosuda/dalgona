@@ -199,16 +199,19 @@ async fn sign_out_removes_one_or_all_and_lists_only_stored_providers() {
         .expect("set openai");
     store.store().expect("store");
 
-    assert!(
+    assert_eq!(
         sign_out(Some("openai-codex"), &dir.site())
             .await
-            .expect("absent")
-            .is_empty()
+            .expect("absent"),
+        [] as [std::boxed::Box<str>; 0]
     );
     let removed = sign_out(Some("openai"), &dir.site()).await.expect("one");
     assert_eq!(removed, [Box::<str>::from("openai")]);
     let removed = sign_out(None, &dir.site()).await.expect("all");
     assert_eq!(removed, [Box::<str>::from("anthropic")]);
     assert!(!dir.0.join("auth.json").exists());
-    assert!(sign_out(None, &dir.site()).await.expect("empty").is_empty());
+    assert_eq!(
+        sign_out(None, &dir.site()).await.expect("empty"),
+        [] as [std::boxed::Box<str>; 0]
+    );
 }

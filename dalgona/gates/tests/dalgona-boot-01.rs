@@ -1,30 +1,25 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
-//! This gate verifies the complete bundled battery inventory and origins.
-#[path = "support/mod.rs"]
-#[expect(
-    dead_code,
-    reason = "gate support helpers are shared across independent test targets"
-)]
-mod support;
+//! dalgona success-criterion gate tests.
 
 use dal_core::{Config, ConfigProduct, Origin};
+use gates::support;
 use std::{collections::BTreeSet, time::Duration};
 
-const BATTERIES: [&str; 11] = [
-    "ask",
-    "history",
-    "judged",
-    "mcp",
-    "orchestration",
-    "quality",
-    "review",
-    "skills",
-    "ttsr-rules",
-    "web",
-    "work",
-];
 #[test]
 fn product_registers_all_eleven_batteries() -> support::TestResult<()> {
+    const BATTERIES: [&str; 11] = [
+        "ask",
+        "history",
+        "judged",
+        "mcp",
+        "orchestration",
+        "quality",
+        "review",
+        "skills",
+        "ttsr-rules",
+        "web",
+        "work",
+    ];
     let scratch = support::Scratch::new("dalgona-battery-set")?;
     let data_root = scratch.path().to_path_buf();
     let factory = dalgona::product();

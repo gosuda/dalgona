@@ -1,15 +1,10 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
-//! This gate verifies the Linux archive contains only expected product files.
+//! dalgona success-criterion gate tests.
 #![expect(
     clippy::disallowed_methods,
-    reason = "release gate drives real release commands"
+    reason = "gate runs the real product binaries"
 )]
-#[path = "support/mod.rs"]
-#[expect(
-    dead_code,
-    reason = "gate support helpers are shared across independent test targets"
-)]
-mod support;
+use gates::support;
 
 use std::{collections::BTreeSet, fs, process::Command};
 

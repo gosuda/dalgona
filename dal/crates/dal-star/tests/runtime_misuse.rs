@@ -1051,7 +1051,7 @@ async fn handlers_with_the_wrong_shape_fail_each_call_and_still_finish() {
     for run_source in cases {
         let run = run_plugin_tool(&plugin_with(run_source, "", ""), "{}").await;
         let message = failure_text(&run.outcome);
-        assert!(!message.is_empty());
+        assert_ne!(message, "");
         let finished = run
             .host
             .records()

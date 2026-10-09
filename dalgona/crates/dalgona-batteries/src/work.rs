@@ -19,7 +19,7 @@ use dal_core::{
 
 mod plan;
 #[cfg(test)]
-mod support;
+pub(crate) mod support;
 mod todo;
 
 pub use plan::PlanArgs;
@@ -44,7 +44,7 @@ impl PlanConfig {
     /// Decodes the strict `[plugin.plan]` section. The embedded default enables the battery.
     ///
     /// # Errors
-    /// Returns [`PlanConfigError`] when a present section fails strict decoding.
+    /// Returns the first strict-decode failure.
     pub fn parse_config(section: Option<&toml::Value>) -> Result<Self, PlanConfigError> {
         let Some(section) = section else {
             return Ok(Self { enabled: true });
@@ -117,7 +117,7 @@ fn service_outcome(error: ServiceError) -> ToolOutcome {
 
 fn finished(result: Result<String, ToolOutcome>) -> ToolOutcome {
     match result {
-        Ok(text) => ToolOutcome::Ok(ToolOutput::from_text(text)),
+        Ok(text) => ToolOutcome::Ok(Box::new(ToolOutput::from_text(text))),
         Err(outcome) => outcome,
     }
 }

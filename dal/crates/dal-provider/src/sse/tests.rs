@@ -180,7 +180,7 @@ fn sse_end_of_input() {
         decode_frames(vec![b"data: x\r".to_vec()]),
         vec![frame(None, "x")]
     );
-    assert!(decode_frames(vec![b"event: ping".to_vec()]).is_empty());
+    assert_eq!(decode_frames(vec![b"event: ping".to_vec()]), []);
 }
 
 #[test]
@@ -245,10 +245,10 @@ fn framing_fields_and_comments_keep_exact_values() {
 
 #[test]
 fn empty_data_semantics() {
-    assert!(decode_frames(vec![b"data:\n\n".to_vec()]).is_empty());
-    assert!(decode_frames(vec![b"data: \n\n".to_vec()]).is_empty());
-    assert!(decode_frames(vec![b"event: ping\n\n".to_vec()]).is_empty());
-    assert!(decode_frames(vec![b": comment\n\n".to_vec()]).is_empty());
+    assert_eq!(decode_frames(vec![b"data:\n\n".to_vec()]), []);
+    assert_eq!(decode_frames(vec![b"data: \n\n".to_vec()]), []);
+    assert_eq!(decode_frames(vec![b"event: ping\n\n".to_vec()]), []);
+    assert_eq!(decode_frames(vec![b": comment\n\n".to_vec()]), []);
     assert_eq!(
         decode_frames(vec![b"data:  \n\n".to_vec()]),
         vec![frame(None, " ")]
@@ -302,8 +302,8 @@ fn one_leading_byte_order_mark_is_stripped() {
         decode_frames(vec![prefixed.as_bytes().to_vec()]),
         vec![frame(None, "x")]
     );
-    assert!(decode_frames(vec![vec![0xEF, 0xBB, 0xBF]]).is_empty());
-    assert!(decode_frames(vec![vec![0xEF, 0xBB]]).is_empty());
+    assert_eq!(decode_frames(vec![vec![0xEF, 0xBB, 0xBF]]), []);
+    assert_eq!(decode_frames(vec![vec![0xEF, 0xBB]]), []);
 }
 
 #[test]

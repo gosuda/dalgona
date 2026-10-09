@@ -253,7 +253,7 @@ mod tests {
                 .await
         });
         tokio::task::yield_now().await;
-        assert!(!waiter.is_empty());
+        assert_ne!(waiter.len(), 0);
         drop(first);
         let second = waiter
             .join_next()

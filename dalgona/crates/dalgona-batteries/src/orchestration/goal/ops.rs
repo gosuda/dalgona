@@ -151,7 +151,7 @@ fn fresh_goal(id: Box<str>, objective: &str, now: Timestamp) -> Goal {
         unattended: 0,
         length_recoveries: 0,
         toolless_streak: 0,
-        goal_turns: 0,
+        turns: 0,
         last_signature: None,
         recent_hashes: Vec::new(),
         blocked: None,
@@ -269,10 +269,8 @@ pub(crate) fn update_goal(
                     parts: inflight_parts(inflight).into_boxed_str(),
                 });
             }
-            if goal.goal_turns < BLOCK_MIN_TURNS {
-                return Err(GoalError::UpdateTooEarly {
-                    turns: goal.goal_turns,
-                });
+            if goal.turns < BLOCK_MIN_TURNS {
+                return Err(GoalError::UpdateTooEarly { turns: goal.turns });
             }
             goal.status = GoalStatus::Blocked;
             goal.blocked = Some(BlockedReason {
@@ -389,7 +387,7 @@ pub(crate) fn apply_goal_command(
             goal.status = GoalStatus::Active;
             goal.consecutive = 0;
             goal.unattended = 0;
-            goal.goal_turns = 0;
+            goal.turns = 0;
             goal.blocked = None;
             goal.completed_at = None;
             goal.updated_at = now;

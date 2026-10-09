@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
-//! This gate verifies plan and todos commands use a real session journal.
-#[path = "support/mod.rs"]
-#[expect(
-    dead_code,
-    reason = "gate support helpers are shared across independent test targets"
-)]
-mod support;
+//! dalgona success-criterion gate tests.
+use gates::support;
 
 use std::{io, num::NonZeroU32, time::Duration};
 

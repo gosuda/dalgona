@@ -1,12 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
-//! This gate verifies bundled rule sets and their records.
-#[path = "support/mod.rs"]
-#[expect(
-    dead_code,
-    reason = "gate support helpers are shared across independent test targets"
-)]
-mod support;
+//! dalgona success-criterion gate tests.
 
+use gates::support;
 use std::{collections::BTreeSet, io};
 
 use dal_core::Origin;
@@ -146,7 +141,7 @@ fn bundled_rule_sets_gate() -> support::TestResult<()> {
     let scratch = support::Scratch::new("bundled-rule-sets")?;
     let data_root = scratch.path().to_path_buf();
     let product = support::build_product(data_root.clone(), None)?;
-    assert!(product.bundled.is_empty());
+    assert_eq!(product.bundled, [] as [dal_core::PluginSource; 0]);
     let all = rules(&product)?;
     let names: BTreeSet<&str> = all.iter().map(|rule| rule.name.as_str()).collect();
     assert_eq!(names, BTreeSet::from(RULES));
@@ -170,7 +165,7 @@ fn bundled_rule_sets_gate() -> support::TestResult<()> {
             tokens.iter().any(|token| token.starts_with("tool")),
             "{name}"
         );
-        let named_tools: Vec<&str> = tokens
+        let expected: Vec<&str> = tokens
             .iter()
             .filter_map(|token| token.strip_prefix("tool:"))
             .collect();
@@ -179,7 +174,7 @@ fn bundled_rule_sets_gate() -> support::TestResult<()> {
             .iter()
             .map(dal_core::Name::as_str)
             .collect();
-        assert_eq!(actual, named_tools, "{name}");
+        assert_eq!(actual, expected, "{name}");
         assert_eq!(record.mode, Some(mode), "{name}");
         assert_eq!(record.repeat_mode, Some(RepeatMode::AfterGap), "{name}");
         assert_eq!(record.repeat_gap, Some(gap), "{name}");

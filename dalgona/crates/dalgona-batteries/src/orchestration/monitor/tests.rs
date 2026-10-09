@@ -202,7 +202,7 @@ fn first_batch_coalesces_and_second_obeys_rate_limit() -> Result<(), Box<dyn Err
     on_output(&mut state, job, "ok 1", epoch, &config);
     on_output(&mut state, job, "ok 2", at_secs(epoch, 1), &config);
     on_output(&mut state, job, "nope", at_secs(epoch, 1), &config);
-    assert!(flush(&mut state, at_secs(epoch, 1), &config).is_empty());
+    assert_eq!(flush(&mut state, at_secs(epoch, 1), &config).len(), 0);
     let effects = flush(&mut state, at_secs(epoch, 2), &config);
     assert_eq!(effects.len(), 1);
     let MonitorEffect::Batch(batch) = &effects[0] else {
@@ -212,7 +212,7 @@ fn first_batch_coalesces_and_second_obeys_rate_limit() -> Result<(), Box<dyn Err
     assert!(batch.text().contains("Monitor event(job j1): ok 1"));
     // One second later the rate limit still holds; at seven seconds it lifts.
     on_output(&mut state, job, "ok 3", at_secs(epoch, 3), &config);
-    assert!(flush(&mut state, at_secs(epoch, 3), &config).is_empty());
+    assert_eq!(flush(&mut state, at_secs(epoch, 3), &config).len(), 0);
     let later = flush(&mut state, at_secs(epoch, 7), &config);
     assert_eq!(later.len(), 1);
     Ok(())
@@ -277,7 +277,7 @@ fn duplicate_batch_suppresses_second_delivery() -> Result<(), Box<dyn Error>> {
     watch(&mut state, &request, &live, epoch, &config)?;
     on_output(&mut state, job, "ok", epoch, &config);
     assert_eq!(flush(&mut state, at_secs(epoch, 2), &config).len(), 1);
-    assert!(flush(&mut state, at_secs(epoch, 8), &config).is_empty());
+    assert_eq!(flush(&mut state, at_secs(epoch, 8), &config).len(), 0);
     Ok(())
 }
 
@@ -293,10 +293,10 @@ fn wake_budget_pauses_on_fifth_monitor_only_wake() -> Result<(), Box<dyn Error>>
     for wake in 1..=5u64 {
         on_output(&mut state, job, "ok", at_secs(epoch, wake), &config);
         let effects = flush(&mut state, at_secs(epoch, 7 * wake - 3), &config);
-        assert!(!effects.is_empty());
+        assert_ne!(effects.len(), 0);
         let pause = update_monitor_only_wake(&mut state, &[monitor], true, &config);
         if wake < 5 {
-            assert!(pause.is_empty());
+            assert_eq!(pause.len(), 0);
         } else {
             assert_eq!(pause.len(), 1);
             assert_eq!(pause[0], MonitorEffect::Notice(PAUSE_NOTICE.into()));
