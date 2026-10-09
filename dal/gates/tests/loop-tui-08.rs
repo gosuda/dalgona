@@ -80,7 +80,10 @@ fn remote_tui_reattaches_after_dropped_websocket() -> Result<(), Box<dyn Error +
     }
     terminal.collect_for(Duration::from_millis(5))?;
     terminal.write(b"start the remote turn\r")?;
-    terminal.wait_for(b"Allow this command?", Duration::from_secs(15))?;
+    terminal.wait_for(
+        dal_tui::copy::ids::DIALOG_ACTIONS_SHORT.as_bytes(),
+        Duration::from_secs(15),
+    )?;
     terminal.write(b"y")?;
     wait_for_path(&marker, Duration::from_secs(10))?;
     terminal.wait_for(

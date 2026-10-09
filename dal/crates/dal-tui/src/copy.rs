@@ -199,6 +199,8 @@ pub mod ids {
         "The plugin {ext} from {origin} asks for these services. It gets only what you allow.";
     /// Short dialog action row.
     pub const DIALOG_ACTIONS_SHORT: &str = "y allow · a session · n deny";
+    /// Dialog hint while the answer keys are still locked.
+    pub const DIALOG_ARMING: &str = "answer keys ready in a moment";
     /// Dialog preview overflow footer.
     pub const DIALOG_BODY_MORE: &str = "... {n} more line|s · pgdn";
     /// Count of queued requests.
@@ -480,6 +482,7 @@ pub const DECK: &[(&str, &str)] = &[
     ("grant.title", ids::GRANT_TITLE),
     ("grant.body", ids::GRANT_BODY),
     ("dialog.actions.short", ids::DIALOG_ACTIONS_SHORT),
+    ("dialog.arming", ids::DIALOG_ARMING),
     ("dialog.bodyMore", ids::DIALOG_BODY_MORE),
     ("request.more", ids::REQUEST_MORE),
     ("request.resolvedBy", ids::REQUEST_RESOLVED_BY),

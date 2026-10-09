@@ -665,6 +665,7 @@ where
         surfaces.drain(opts, agent, pump)?;
         surfaces.poll_resolution(opts, agent, &mut resolution_poll)?;
         surfaces.reseed_diagrams(opts);
+        surfaces.dialog.tick(Instant::now());
         if surfaces.request_quit() {
             break;
         }

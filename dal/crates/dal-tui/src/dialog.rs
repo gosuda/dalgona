@@ -1,6 +1,7 @@
 //! One-dialog-at-a-time request queue with exactly-once answers.
 
 use std::collections::HashSet;
+use std::time::{Duration, Instant};
 
 use dal_core::{Answer, CallGrant, Question, RawJson, Request};
 
@@ -206,6 +207,27 @@ fn value_bool(value: bool) -> Answer {
     RawJson::parse(if value { "true" } else { "false" }).map_or(Answer::Cancel, Answer::Value)
 }
 
+/// How long a freshly shown dialog ignores every key but Esc.
+///
+/// Browsers hold the same line for dialogs that grant something: Firefox delays
+/// its install and permission buttons by 1000 ms (`security.dialog_enable_delay`).
+/// Keys already on their way when a dialog opens arrive within the gap between
+/// two strokes of a typist, under 200 ms at 60 words a minute, so 500 ms swallows
+/// that type-ahead and still passes a user who reads the question and answers.
+pub const ARM_DELAY: Duration = Duration::from_millis(500);
+
+/// Whether a dialog accepts answer keys yet.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum Arming {
+    /// No frame has shown the current dialog.
+    #[default]
+    Fresh,
+    /// The dialog has been shown since this instant and still ignores answer keys.
+    Shown(Instant),
+    /// The hint row lists the answer keys and they act.
+    Armed,
+}
+
 /// Keyboard and rendering state for the request currently at the queue head.
 #[derive(Debug, Default)]
 pub struct DialogUi {
@@ -218,6 +240,7 @@ pub struct DialogUi {
     scroll: usize,
     empty_hint: bool,
     active_id: Option<String>,
+    arming: Arming,
 }
 
 impl DialogUi {
@@ -252,22 +275,53 @@ impl DialogUi {
         self.queue.keys_disabled
     }
 
+    /// Advances the arming clock; call once per frame just before painting.
+    ///
+    /// The first call after a dialog appears starts the delay, and the call that
+    /// finds [`ARM_DELAY`] elapsed arms it, so the frame painted right after
+    /// shows the answer keys. A key counts only when the frame that lists the
+    /// keys has already been painted.
+    pub fn tick(&mut self, now: Instant) {
+        match self.arming {
+            Arming::Fresh if self.is_open() => self.arming = Arming::Shown(now),
+            Arming::Shown(since) if now.saturating_duration_since(since) >= ARM_DELAY => {
+                self.arming = Arming::Armed;
+            }
+            _ => {}
+        }
+    }
+
+    /// True once the shown dialog accepts answer keys.
+    #[must_use]
+    pub fn armed(&self) -> bool {
+        self.arming == Arming::Armed
+    }
+
     /// Inserts pasted content only into a live free-text question.
     pub fn paste(&mut self, bytes: &[u8]) {
         let Some((request, _)) = self.queue.shown() else {
             return;
         };
-        if matches!(request.question, Question::Text { .. }) && !self.queue.keys_disabled() {
+        let live = self.armed() && !self.queue.keys_disabled();
+        if live && matches!(request.question, Question::Text { .. }) {
             self.input.push_str(&String::from_utf8_lossy(bytes));
             self.empty_hint = false;
         }
     }
 
     /// Maps a key into an answer; an answered request disables its keys until resolution.
+    ///
+    /// Until the dialog is armed only an unmodified Esc acts: it is the one answer
+    /// that grants nothing, so a key typed before the dialog was visible can never
+    /// consent. Every other key is dropped, not queued.
     pub fn key(&mut self, key: crate::keys::Key) -> Option<(dal_core::RequestId, Answer)> {
         use crossterm::event::{KeyCode, KeyModifiers};
         let (request, _) = self.queue.shown()?;
         if self.queue.keys_disabled() {
+            return None;
+        }
+        let escape = key.code == KeyCode::Esc && key.modifiers == KeyModifiers::NONE;
+        if !self.armed() && !escape {
             return None;
         }
         let id = request.id;
@@ -571,14 +625,24 @@ impl DialogUi {
     }
 
     fn actions(&self, question: &Question) -> String {
+        let approving = matches!(question, Question::Approval { .. } | Question::Grant { .. });
+        if approving && self.queue.keys_disabled() {
+            return "Waiting for the request to settle...".to_owned();
+        }
+        if !self.armed() {
+            let esc = if approving {
+                crate::copy::ids::APPROVAL_ESC_DENIES
+            } else {
+                "esc dismiss"
+            };
+            return format!("{esc} · {}", crate::copy::ids::DIALOG_ARMING);
+        }
         match question {
-            Question::Approval { .. } | Question::Grant { .. } => {
-                if self.queue.keys_disabled() {
-                    "Waiting for the request to settle...".to_owned()
-                } else {
-                    "y allow · a session · n deny · v view · esc denies".to_owned()
-                }
-            }
+            Question::Approval { .. } | Question::Grant { .. } => format!(
+                "{} · v view · {}",
+                crate::copy::ids::DIALOG_ACTIONS_SHORT,
+                crate::copy::ids::APPROVAL_ESC_DENIES
+            ),
             Question::Select { multi: true, .. } => crate::copy::ids::ASK_HINT_MULTI.to_owned(),
             Question::Select { .. } => crate::copy::ids::ASK_HINT_SINGLE.to_owned(),
             Question::Text { .. } => crate::copy::ids::ASK_HINT_TEXT.to_owned(),
@@ -602,6 +666,7 @@ impl DialogUi {
         self.expanded = false;
         self.scroll = 0;
         self.empty_hint = false;
+        self.arming = Arming::Fresh;
     }
 }
 
@@ -613,6 +678,59 @@ mod tests {
     use crate::diagram::{DiagramSettings, RenderCache};
     use crate::theme::Role;
     use dal_core::Answer;
+    use std::time::Instant;
+
+    fn arm(dialog: &mut super::DialogUi) {
+        let start = Instant::now();
+        dialog.tick(start);
+        dialog.tick(start + super::ARM_DELAY);
+        assert!(dialog.armed());
+    }
+
+    fn press(
+        dialog: &mut super::DialogUi,
+        code: crossterm::event::KeyCode,
+    ) -> Option<(dal_core::RequestId, Answer)> {
+        dialog.key(crate::keys::Key::new(
+            code,
+            crossterm::event::KeyModifiers::NONE,
+        ))
+    }
+
+    fn approval(id: dal_core::RequestId) -> dal_core::Request {
+        dal_core::Request {
+            id,
+            turn: None,
+            owner: dal_core::Owner::Core,
+            question: dal_core::Question::Approval {
+                tool: "exec".into(),
+                preview: dal_core::Preview {
+                    title: "command".into(),
+                    body: "echo hi".into(),
+                    digest: None,
+                },
+                grant: None,
+                call: None,
+            },
+            timeout: std::time::Duration::from_secs(30),
+            default: Answer::Decline,
+        }
+    }
+
+    fn hint(dialog: &super::DialogUi) -> String {
+        dialog
+            .rendered_rows(
+                80,
+                12,
+                crate::WidthMode::Narrow,
+                DiagramSettings::default(),
+                &RenderCache::default(),
+            )
+            .into_iter()
+            .last()
+            .map(|row| row.text)
+            .unwrap_or_default()
+    }
 
     #[test]
     fn approval_keys_map_once_and_lock_until_resolved() {
@@ -787,6 +905,7 @@ mod tests {
             timeout: std::time::Duration::from_secs(30),
             default: Answer::Decline,
         });
+        arm(&mut dialog);
         assert!(
             dialog
                 .key(crate::keys::Key::new(
@@ -953,6 +1072,7 @@ mod tests {
         use crossterm::event::{KeyCode, KeyModifiers};
 
         let mut dialog = select_with_preview();
+        arm(&mut dialog);
         let before = select_rows(&dialog, 7);
         assert!(
             before.iter().any(|row| row.contains("line one")),
@@ -978,5 +1098,123 @@ mod tests {
             after.iter().any(|row| row.contains("Postgres")),
             "{after:?}"
         );
+    }
+
+    #[test]
+    fn a_fresh_dialog_drops_every_key_but_esc_until_armed() {
+        use crossterm::event::KeyCode;
+
+        let id = dal_core::RequestId::new_v7();
+        let mut dialog = super::DialogUi::default();
+        dialog.opened(approval(id));
+        let start = Instant::now();
+        dialog.tick(start);
+        for code in [KeyCode::Char('y'), KeyCode::Char('a'), KeyCode::Char('n')] {
+            assert!(press(&mut dialog, code).is_none());
+        }
+        dialog.tick(start + super::ARM_DELAY.saturating_sub(std::time::Duration::from_millis(1)));
+        assert!(!dialog.armed());
+        assert!(press(&mut dialog, KeyCode::Char('y')).is_none());
+        dialog.tick(start + super::ARM_DELAY);
+        assert!(matches!(
+            press(&mut dialog, KeyCode::Char('y')),
+            Some((answered, Answer::Approve)) if answered == id
+        ));
+    }
+
+    #[test]
+    fn keys_dropped_before_arming_are_not_replayed() {
+        use crossterm::event::KeyCode;
+
+        let id = dal_core::RequestId::new_v7();
+        let mut dialog = super::DialogUi::default();
+        dialog.opened(approval(id));
+        let start = Instant::now();
+        dialog.tick(start);
+        assert!(press(&mut dialog, KeyCode::Char('a')).is_none());
+        dialog.tick(start + super::ARM_DELAY);
+        assert!(dialog.queue.shown().is_some());
+        assert!(!dialog.awaiting_resolution());
+        assert!(matches!(
+            press(&mut dialog, KeyCode::Char('n')),
+            Some((answered, Answer::Decline)) if answered == id
+        ));
+    }
+
+    #[test]
+    fn esc_answers_a_dialog_that_is_not_armed() {
+        use crossterm::event::KeyCode;
+
+        let id = dal_core::RequestId::new_v7();
+        let mut dialog = super::DialogUi::default();
+        dialog.opened(approval(id));
+        assert!(matches!(
+            press(&mut dialog, KeyCode::Esc),
+            Some((answered, Answer::Decline)) if answered == id
+        ));
+    }
+
+    #[test]
+    fn the_hint_lists_answer_keys_only_once_armed() {
+        let mut dialog = super::DialogUi::default();
+        dialog.opened(approval(dal_core::RequestId::new_v7()));
+        let start = Instant::now();
+        dialog.tick(start);
+        assert_eq!(hint(&dialog), "esc denies · answer keys ready in a moment");
+        dialog.tick(start + super::ARM_DELAY);
+        assert_eq!(
+            hint(&dialog),
+            "y allow · a session · n deny · v view · esc denies"
+        );
+    }
+
+    #[test]
+    fn each_queued_request_arms_on_its_own() {
+        use crossterm::event::KeyCode;
+
+        let first = dal_core::RequestId::new_v7();
+        let second = dal_core::RequestId::new_v7();
+        let mut dialog = super::DialogUi::default();
+        dialog.opened(approval(first));
+        dialog.opened(approval(second));
+        arm(&mut dialog);
+        assert!(press(&mut dialog, KeyCode::Char('y')).is_some());
+        dialog.resolved(&first.to_string());
+        assert!(!dialog.armed());
+        assert!(press(&mut dialog, KeyCode::Char('y')).is_none());
+        arm(&mut dialog);
+        assert!(matches!(
+            press(&mut dialog, KeyCode::Char('y')),
+            Some((answered, Answer::Approve)) if answered == second
+        ));
+    }
+
+    #[test]
+    fn a_text_question_ignores_paste_and_typing_until_armed() {
+        use crossterm::event::KeyCode;
+        use dal_core::{Owner, Question, Request, RequestId};
+
+        let id = RequestId::new_v7();
+        let mut dialog = super::DialogUi::default();
+        dialog.opened(Request {
+            id,
+            turn: None,
+            owner: Owner::Core,
+            question: Question::Text {
+                prompt: "Name?".into(),
+                placeholder: None,
+            },
+            timeout: std::time::Duration::from_secs(30),
+            default: Answer::Cancel,
+        });
+        dialog.paste(b"early");
+        assert!(press(&mut dialog, KeyCode::Char('x')).is_none());
+        arm(&mut dialog);
+        assert!(press(&mut dialog, KeyCode::Enter).is_none());
+        assert!(press(&mut dialog, KeyCode::Char('z')).is_none());
+        assert!(matches!(
+            press(&mut dialog, KeyCode::Enter),
+            Some((answered, Answer::Value(_))) if answered == id
+        ));
     }
 }

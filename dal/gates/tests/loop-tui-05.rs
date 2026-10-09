@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use dal_core::{Answer, Owner, Preview, Question, Request, RequestId};
 use dal_tui::{
     WidthMode,
-    dialog::DialogUi,
+    dialog::{ARM_DELAY, DialogUi},
     keys::{InputEvent, KeyDecoder},
 };
 
@@ -18,6 +18,7 @@ fn tui_shows_two_requests_and_resolves_each_once() {
     let mut dialog = DialogUi::default();
     dialog.opened(first);
     dialog.opened(second);
+    arm(&mut dialog);
 
     let (shown, waiting) = dialog.queue.shown().unwrap();
     assert_eq!(shown.id, first_id);
@@ -48,6 +49,12 @@ fn tui_shows_two_requests_and_resolves_each_once() {
     assert_eq!(shown.id, second_id);
     assert_eq!(waiting, 0);
 
+    assert!(!dialog.armed(), "the next request starts unarmed");
+    assert!(
+        dialog.key(answer_key).is_none(),
+        "the next request ignores the key held over from the first"
+    );
+    arm(&mut dialog);
     let (answered, answer) = dialog
         .key(answer_key)
         .expect("the second request accepts an answer");
@@ -62,6 +69,13 @@ fn tui_shows_two_requests_and_resolves_each_once() {
         .resolved(&second_text)
         .expect("the second open request resolves");
     assert!(!dialog.is_open());
+}
+
+fn arm(dialog: &mut DialogUi) {
+    let start = Instant::now();
+    dialog.tick(start);
+    dialog.tick(start + ARM_DELAY);
+    assert!(dialog.armed());
 }
 
 fn approval_request() -> Request {

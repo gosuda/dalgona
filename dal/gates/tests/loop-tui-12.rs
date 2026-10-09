@@ -311,7 +311,7 @@ fn approving_for_the_session_skips_the_next_dialog_and_cards_settle_once() -> Te
     );
     let mut screen = Screen::start(dir.path(), &fixture, 100, 30)?;
     screen.send(b"run both\r")?;
-    screen.until(|text| text.contains("Allow this command?"))?;
+    screen.until(|text| text.contains(dal_tui::copy::ids::DIALOG_ACTIONS_SHORT))?;
     let rows = screen.visible();
     let status = rows.last().expect("the screen has rows");
     assert!(
@@ -365,7 +365,7 @@ fn denying_a_command_keeps_it_from_running_and_says_so() -> TestResult {
     );
     let mut screen = Screen::start(dir.path(), &fixture, 100, 30)?;
     screen.send(b"touch it\r")?;
-    screen.until(|text| text.contains("Allow this command?"))?;
+    screen.until(|text| text.contains(dal_tui::copy::ids::DIALOG_ACTIONS_SHORT))?;
     screen.send(b"n")?;
     screen.until(|text| text.contains("denied and moved on"))?;
     let text = screen.text();
@@ -415,7 +415,7 @@ fn typing_while_busy_queues_a_steer_and_the_turn_can_still_be_interrupted() -> T
     );
     let mut screen = Screen::start(dir.path(), &fixture, 100, 30)?;
     screen.send(b"start\r")?;
-    screen.until(|text| text.contains("Allow this command?"))?;
+    screen.until(|text| text.contains(dal_tui::copy::ids::DIALOG_ACTIONS_SHORT))?;
     screen.send(b"y")?;
     screen.until(|text| text.contains("working"))?;
     screen.send(b"steer later\r")?;
@@ -460,7 +460,7 @@ fn a_steer_typed_during_a_command_reaches_the_model_at_the_next_step() -> TestRe
     );
     let mut screen = Screen::start(dir.path(), &fixture, 100, 30)?;
     screen.send(b"start\r")?;
-    screen.until(|text| text.contains("Allow this command?"))?;
+    screen.until(|text| text.contains(dal_tui::copy::ids::DIALOG_ACTIONS_SHORT))?;
     screen.send(b"y")?;
     screen.until(|text| text.contains("working"))?;
     screen.send(b"and then this\r")?;
@@ -481,7 +481,7 @@ fn resizing_mid_turn_keeps_status_and_composer_on_the_last_rows() -> TestResult 
     );
     let mut screen = Screen::start(dir.path(), &fixture, 100, 30)?;
     screen.send(b"start\r")?;
-    screen.until(|text| text.contains("Allow this command?"))?;
+    screen.until(|text| text.contains(dal_tui::copy::ids::DIALOG_ACTIONS_SHORT))?;
     screen.send(b"y")?;
     screen.until(|text| text.contains("working"))?;
     for (columns, rows) in [(60_u16, 20_u16), (120, 40), (100, 30)] {
