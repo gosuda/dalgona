@@ -30,7 +30,7 @@ fn release_presence_gate_rejects_missing_version() -> Result<(), Box<dyn Error>>
     assert!(stdout.is_empty());
     assert_eq!(
         stderr,
-        "dalgon dependency dal-journal \"0.1\" not on crates.io; release dalgon first\n"
+        "dalgon dependency dal-journal \"0.1\" not on crates.io; release dal first\n"
     );
     Ok(())
 }

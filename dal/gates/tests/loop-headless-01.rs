@@ -94,11 +94,8 @@ async fn headless_tools_preserve_call_order_and_see_patch()
                     read_results.push(sonic_rs::to_string(outcome)?);
                 }
             }
-            UpdateKind::TurnEnded {
-                stop: Stop::EndTurn,
-                ..
-            } => {
-                ended = true;
+            UpdateKind::TurnEnded { stop, .. } => {
+                ended = *stop == Stop::EndTurn;
                 break;
             }
             _ => {}

@@ -84,8 +84,12 @@ const MAN_PAGES: [&str; 19] = [
     "man/dalgon-__sandbox.1",
 ];
 
-fn dal_root() -> PathBuf {
+fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+fn dal_root() -> PathBuf {
+    repo_root().join("dal")
 }
 
 #[expect(
@@ -293,10 +297,7 @@ fn release_dist_plan_validity() -> Result<(), Box<dyn Error>> {
         eprintln!("skipped release_dist_plan_validity: cargo-dist 0.32.0 is not installed");
         return Ok(());
     }
-    let repo = dal_root()
-        .parent()
-        .ok_or_else(|| io::Error::other("dal workspace has no repository parent"))?
-        .to_path_buf();
+    let repo = repo_root();
     let dal = match load_plan(&dal_root(), "release_dist_plan_validity dalgon")? {
         Plan::Ready(manifest) => manifest,
         Plan::Skip => return Ok(()),
@@ -315,10 +316,7 @@ fn release_binstall_url_expansion() -> Result<(), Box<dyn Error>> {
         eprintln!("skipped release_binstall_url_expansion: cargo-dist 0.32.0 is not installed");
         return Ok(());
     }
-    let repo = dal_root()
-        .parent()
-        .ok_or_else(|| io::Error::other("dal workspace has no repository parent"))?
-        .to_path_buf();
+    let repo = repo_root();
     let dal = match load_plan(&dal_root(), "release_binstall_url_expansion dalgon")? {
         Plan::Ready(manifest) => manifest,
         Plan::Skip => return Ok(()),
