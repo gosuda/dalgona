@@ -1336,13 +1336,6 @@ impl JobsView for SessionJobsView<'_> {
             job.id == id && matches!(job.state, JobStateView::Running | JobStateView::Detached)
         })
     }
-
-    fn top_level_live_count(&self) -> usize {
-        self.jobs
-            .iter()
-            .filter(|job| matches!(job.state, JobStateView::Running | JobStateView::Detached))
-            .count()
-    }
 }
 
 fn failed(message: &str) -> HookError {

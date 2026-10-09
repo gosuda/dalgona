@@ -212,6 +212,15 @@ impl Shared {
             .snapshot(args)
     }
 
+    /// The last terminal stop the projection recorded, when any.
+    pub(crate) fn last_stop(&self) -> Option<dal_core::Stop> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .projection
+            .last_stop
+    }
+
     pub(crate) fn leaf_entries(&self) -> Vec<EntryView> {
         self.inner
             .lock()

@@ -17,8 +17,8 @@ use dal_core::ext::{McpBlock, McpDeclaration, McpServerDecl};
 use dal_core::{
     AgentsOp, AgentsReply, Answer, Budget, CallId, ClientId, DenyReason, EntryId, Inference, JobId,
     JobsOp, JobsReply, ModelRequest, ModelRoute, Name, OnError, Origin, Purpose, Question, RawJson,
-    RequestParams, ScopeSpec, Service, ServiceSet, SessionId, SidecarOp, Site, TurnId, TurnOp,
-    TurnOpReply, Workspace,
+    RequestParams, ScopeSpec, Service, ServiceSet, SessionId, SidecarOp, Site, StateError, StateOp,
+    StateRecord, TurnId, TurnOp, TurnOpReply, Workspace,
 };
 use tokio::sync::watch;
 use tokio::task::JoinSet;
@@ -147,6 +147,10 @@ impl SessionBackend for FakeBackend {
         );
         assert!(!bytes.is_empty(), "sidecar bytes travel with the write");
         Box::pin(async move { Ok(()) })
+    }
+
+    fn state(&self, _op: StateOp) -> ServiceFuture<'_, Result<StateRecord, StateError>> {
+        Box::pin(async move { Ok(Err(StateError::Unavailable)) })
     }
 
     fn infer(&self, _req: ModelRequest) -> ServiceFuture<'_, Inference> {
@@ -428,6 +432,7 @@ fn caller(ext: &str, inject: &[&str], turn: Option<TurnId>) -> Caller {
         ext.parse::<Name>().unwrap(),
         Origin::User,
         ServiceSet::from_names(inject.iter().copied()).unwrap(),
+        std::num::NonZeroU32::MIN,
         CallerKind::Handler,
         turn,
     )

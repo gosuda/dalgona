@@ -12,7 +12,7 @@ use dal_core::ext::{Mail as ExtMail, Service};
 use dal_core::{
     AgentInfo, AgentReport, AgentState, AgentsOp, AgentsReply, BlobId, EntryId, FetchMethod,
     FetchRequest, FetchResponse, Inference, JobsOp, JobsReply, MailMode, ModelRequest, Name,
-    Notice, Part, SessionId, TurnOp, TurnOpReply, Workspace,
+    Notice, Part, SessionId, StateError, StateOp, StateRecord, TurnOp, TurnOpReply, Workspace,
 };
 use dal_provider::EventStream;
 use tokio::sync::oneshot;
@@ -409,7 +409,7 @@ impl SessionBackend for Backend {
                 headers: Vec::new(),
                 body: Vec::new(),
             };
-            let Ok(response) = outgoing.send().await else {
+            let Ok(mut response) = outgoing.send().await else {
                 return Ok(failure);
             };
             let status = response.status().as_u16();
@@ -418,9 +418,13 @@ impl SessionBackend for Backend {
                 .iter()
                 .map(|(name, value)| (name.as_str().into(), value.to_str().unwrap_or("").into()))
                 .collect();
-            let body = response.bytes().await.map_or(Vec::new(), |bytes| {
-                bytes.into_iter().take(dal_provider::BODY_LIMIT).collect()
-            });
+            let mut body = Vec::new();
+            while body.len() < dal_provider::BODY_LIMIT
+                && let Ok(Some(chunk)) = response.chunk().await
+            {
+                let room = dal_provider::BODY_LIMIT - body.len();
+                body.extend_from_slice(&chunk[..chunk.len().min(room)]);
+            }
             Ok(FetchResponse {
                 status,
                 headers,
@@ -594,6 +598,17 @@ impl SessionBackend for Backend {
         })
     }
 
+    fn state(&self, op: StateOp) -> ServiceFuture<'_, Result<StateRecord, StateError>> {
+        Box::pin(async move {
+            let (tx, rx) = oneshot::channel();
+            let _ = self
+                .handle
+                .state(crate::session::StateReq { op, reply: tx })
+                .await;
+            Ok(rx.await.unwrap_or(Err(StateError::Unavailable)))
+        })
+    }
+
     fn infer(&self, req: ModelRequest) -> ServiceFuture<'_, Inference> {
         Box::pin(async move {
             let deps = self.infer_deps();
@@ -726,6 +741,27 @@ impl Backend {
             .workspace
             .clone()
             .unwrap_or_else(|| self.workspace.clone());
+        // A child workspace must stay inside the caller's root: an
+        // absolute path outside it would widen the `agents` grant into
+        // tool access across the whole filesystem. The lexical spelling
+        // lies — `/root/../etc` starts with `/root` — so containment is
+        // checked on canonical paths; a workspace that cannot be resolved
+        // fails closed. The checked canonical path is the one the child
+        // receives: re-resolving the lexical spelling later would race a
+        // swapped symlink into an outside root.
+        let Some(child_root) = std::fs::canonicalize(workspace.as_path()).ok() else {
+            return AgentsReply::Cancelled { id: self.session };
+        };
+        // The containment root is the one `Backend::new` captured: a
+        // replaceable symlink at the session workspace must not shift the
+        // boundary a child is compared against mid-session.
+        let parent_root = self.canonical_root.clone();
+        if !child_root.starts_with(&parent_root) {
+            return AgentsReply::Cancelled { id: self.session };
+        }
+        let Ok(workspace) = Workspace::new(child_root) else {
+            return AgentsReply::Cancelled { id: self.session };
+        };
         // An explicit child model the catalog cannot route refuses the
         // start; silently inheriting the caller's model would run a
         // different program than the one requested.
@@ -740,6 +776,9 @@ impl Backend {
                     parent: self.session,
                     call: start.call.clone(),
                     workspace,
+                    // Queued for the first durable record: a start cancelled
+                    // before it records leaves no named session behind.
+                    name: Some(start.name.clone()),
                 },
                 dal_core::ClientId::new("core"),
             )
@@ -774,22 +813,31 @@ impl Backend {
         if let Some(system) = start.system.as_ref().or(start.role.as_ref()) {
             prompt = format!("System: {system}\n\n{prompt}");
         }
-        if let Some(model) = model {
-            let _ = child
+        if let Some(model) = model
+            && child
                 .submit(dal_core::Command::SetModel {
                     model,
                     save: dal_core::Save::SessionOnly,
                 })
-                .await;
+                .await
+                .is_err()
+        {
+            let _ = host.close(child_id).await;
+            return AgentsReply::Cancelled { id: child_id };
         }
-        let _ = child
+        if child
             .submit(dal_core::Command::Prompt {
                 expect: dal_core::Expect::Idle,
                 content: vec![Part::Text {
                     text: prompt.into(),
                 }],
             })
-            .await;
+            .await
+            .is_err()
+        {
+            let _ = host.close(child_id).await;
+            return AgentsReply::Cancelled { id: child_id };
+        }
         AgentsReply::Started { id: child_id }
     }
 
@@ -840,7 +888,15 @@ impl Backend {
                 return AgentsReply::Cancelled { id };
             };
             if matches!(view.turn, dal_core::TurnState::Idle) {
-                let report = Self::child_report(id, &view);
+                let stop = self
+                    .host
+                    .sessions
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get(&id)
+                    .and_then(|entry| entry.shared.last_stop())
+                    .unwrap_or(dal_core::Stop::EndTurn);
+                let report = Self::child_report(id, &view, stop);
                 if matches!(report, AgentsReply::Await { .. })
                     && let Some(entry) = self
                         .host
@@ -873,7 +929,9 @@ impl Backend {
     }
 
     /// Builds the completion report from the child's last assistant entry.
-    fn child_report(id: SessionId, view: &dal_core::View) -> AgentsReply {
+    /// `stop` is the child's durable terminal stop, read off its projection;
+    /// `view.turn` alone only knows the turn ended, not why.
+    fn child_report(id: SessionId, view: &dal_core::View, stop: dal_core::Stop) -> AgentsReply {
         let mut text = String::new();
         let mut entry = view.entries.items.last().map(|item| item.id);
         for item in view.entries.items.iter().rev() {
@@ -891,7 +949,7 @@ impl Backend {
         let entry = entry.unwrap_or_else(|| dal_core::EntryId::new(std::num::NonZeroU64::MIN));
         AgentsReply::Await {
             report: AgentReport {
-                stop: dal_core::Stop::EndTurn,
+                stop,
                 text: text.into(),
                 session: id,
                 entry,
@@ -912,7 +970,7 @@ impl Backend {
             // compounds to O(n²) closes across a shutdown cascade.
             .filter(|(_, entry)| entry.parent == Some(self.session))
             .map(|(id, entry)| {
-                let name = entry
+                let view = entry
                     .shared
                     .snapshot(crate::session::projection::SnapshotArgs {
                         generation: entry.generation,
@@ -923,14 +981,19 @@ impl Backend {
                         created_at: None,
                         archived: None,
                         page: dal_core::PageReq::default(),
-                    })
-                    .session
-                    .name
-                    .unwrap_or_default();
+                    });
+                let state = match view.turn {
+                    // `Idle` only means no turn is running; the terminal
+                    // reason survives on the projection's last-stop record.
+                    dal_core::TurnState::Idle => AgentState::Done(
+                        entry.shared.last_stop().unwrap_or(dal_core::Stop::EndTurn),
+                    ),
+                    _ => AgentState::Running,
+                };
                 AgentInfo {
                     id: *id,
-                    name,
-                    state: AgentState::Running,
+                    name: view.session.name.unwrap_or_default(),
+                    state,
                 }
             })
             .collect()

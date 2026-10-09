@@ -4,6 +4,8 @@
 //! runtime traits and the `ExtensionBuilder`/`Extension` pair. Host-wired
 //! behavior (grants, services, dispatch, generation) lands in `ext/*`.
 
+use std::num::NonZeroU32;
+
 use crate::Env;
 
 mod builder;
@@ -73,6 +75,7 @@ pub struct Caller {
     ext: Name,
     origin: Origin,
     inject: ServiceSet,
+    state_version: NonZeroU32,
     kind: CallerKind,
     turn: Option<TurnId>,
     invocation: Option<CallInvocation>,
@@ -99,6 +102,7 @@ impl Caller {
         ext: Name,
         origin: Origin,
         inject: ServiceSet,
+        state_version: NonZeroU32,
         kind: CallerKind,
         turn: Option<TurnId>,
     ) -> Self {
@@ -106,6 +110,7 @@ impl Caller {
             ext,
             origin,
             inject,
+            state_version,
             kind,
             turn,
             invocation: None,
@@ -134,6 +139,16 @@ impl Caller {
         &self.ext
     }
 
+    /// The `state_version` the caller's extension declared when the
+    /// caller was minted (R08). The mint site captures the generation
+    /// snapshot, so an in-flight invocation keeps its own namespace
+    /// across a plugin reload. Built-in and synthetic callers mint
+    /// [`NonZeroU32::MIN`].
+    #[must_use]
+    pub(crate) fn state_version(&self) -> NonZeroU32 {
+        self.state_version
+    }
+
     /// The origin class of the extension that made this caller.
     #[must_use]
     pub(crate) fn origin(&self) -> Origin {
@@ -151,6 +166,12 @@ impl Caller {
     #[must_use]
     pub(crate) fn cell_approved(&self) -> bool {
         matches!(self.kind, CallerKind::Cell { approved: true })
+    }
+
+    /// Reports whether this caller is an eval cell, approved or not.
+    #[must_use]
+    pub(crate) fn cell(&self) -> bool {
+        matches!(self.kind, CallerKind::Cell { .. })
     }
 }
 
@@ -412,6 +433,7 @@ impl HookCx {
                 Name::test(),
                 Origin::Builtin,
                 ServiceSet::EMPTY,
+                NonZeroU32::MIN,
                 CallerKind::Hook,
                 turn,
             ),

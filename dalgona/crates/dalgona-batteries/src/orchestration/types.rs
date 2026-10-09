@@ -40,12 +40,6 @@ pub(crate) trait JobsView {
     fn resolve_job(&self, display: &str) -> Option<dal_core::JobId>;
     /// Reports whether the job is a live top-level exec job in this session.
     fn is_live_top_level_exec(&self, job: dal_core::JobId) -> bool;
-    /// Counts queued or running top-level jobs.
-    #[expect(
-        dead_code,
-        reason = "the orchestration contract fixes this jobs-view seam"
-    )]
-    fn top_level_live_count(&self) -> usize;
 }
 
 /// Live per-session counts rendered into `orchestration.status`.

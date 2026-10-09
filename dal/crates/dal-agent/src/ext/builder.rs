@@ -1,5 +1,6 @@
 //! Extension registration: the builder and the sealed extension it produces.
 
+use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex};
 
 use dal_core::ext::{BeforeRequest, BeforeTurn, ExportId, ExportKind, OpId, TurnEnd};
@@ -41,6 +42,7 @@ pub struct ExtensionBuilder {
     name: Box<str>,
     version: Box<str>,
     inject: ServiceSet,
+    state_version: NonZeroU32,
     origin: Origin,
     site: Option<Site>,
     tools: Vec<(Arc<dyn Tool>, Visibility)>,
@@ -95,6 +97,7 @@ impl ExtensionBuilder {
             name: name.into(),
             version: version.into(),
             inject,
+            state_version: NonZeroU32::MIN,
             origin: Origin::Builtin,
             site: None,
             tools: Vec::new(),
@@ -135,6 +138,12 @@ impl ExtensionBuilder {
     pub fn with_origin(mut self, origin: Origin, site: Option<Site>) -> Self {
         self.origin = origin;
         self.site = site;
+        self
+    }
+    /// Sets the `state_version` isolating this extension's state namespace.
+    #[must_use]
+    pub fn with_state_version(mut self, state_version: NonZeroU32) -> Self {
+        self.state_version = state_version;
         self
     }
     /// Registers one model-callable tool with its visibility.
@@ -388,6 +397,7 @@ impl ExtensionBuilder {
                 version: self.version,
             });
         }
+        let state_version = self.state_version;
         let owner: Name = self.name.parse()?;
         self.check_duplicates(&owner)?;
         let exports =
@@ -403,6 +413,7 @@ impl ExtensionBuilder {
             name: self.name,
             version: self.version,
             inject: self.inject,
+            state_version,
             origin: self.origin,
             site: self.site,
             tools: self.tools,
@@ -530,6 +541,7 @@ pub struct Extension {
     pub(super) name: Box<str>,
     pub(super) version: Box<str>,
     pub(super) inject: ServiceSet,
+    pub(super) state_version: NonZeroU32,
     pub(super) origin: Origin,
     pub(super) site: Option<Site>,
     pub(super) tools: Vec<(Arc<dyn Tool>, Visibility)>,
@@ -579,6 +591,12 @@ impl Extension {
     #[must_use]
     pub fn inject(&self) -> ServiceSet {
         self.inject
+    }
+    /// Returns the declared `state_version` isolating this extension's
+    /// state namespace (R08).
+    #[must_use]
+    pub fn state_version(&self) -> NonZeroU32 {
+        self.state_version
     }
     /// Returns where the extension came from.
     #[must_use]

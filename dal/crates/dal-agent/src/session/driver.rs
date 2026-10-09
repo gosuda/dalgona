@@ -1397,6 +1397,7 @@ impl Driver {
                 ext,
                 owner.origin(),
                 owner.inject(),
+                owner.state_version(),
                 CallerKind::Handler,
                 turn,
             );
@@ -1619,6 +1620,7 @@ fn render_section(
         Name::parse("session").expect("literal session name parses"),
         dal_core::Origin::Builtin,
         dal_core::ext::ServiceSet::EMPTY,
+        std::num::NonZeroU32::MIN,
         CallerKind::Handler,
         Some(turn),
     );

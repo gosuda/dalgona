@@ -360,7 +360,7 @@ impl Hook<InputEvent, InputVerdict> for FirstInputHook {
         let registry = Arc::clone(&self.registry);
         let font = Arc::clone(&self.font);
         Box::pin(
-            async move { handle_first_input(&cx.session, &input.content, &registry, &font, &cx) },
+            async move { handle_first_input(cx.session, input.content, registry, font, cx).await },
         )
     }
 }
@@ -376,18 +376,24 @@ impl Hook<InputEvent, InputVerdict> for FirstInputHook {
 ///
 /// Returns [`HookError::Cancelled`] when the turn is cancelled and
 /// [`HookError::Failed`] when the font table fails to parse.
-pub fn handle_first_input(
-    session: &SessionId,
-    _user_parts: &[Part],
-    registry: &crate::skills::SkillRegistry,
-    font: &Font,
-    cx: &HookCx,
+#[expect(
+    clippy::unused_async,
+    reason = "hook boundary keeps the async shape of sibling handlers"
+)]
+pub async fn handle_first_input(
+    session: SessionId,
+    user_parts: Vec<Part>,
+    registry: Arc<crate::skills::SkillRegistry>,
+    font: Arc<Font>,
+    cx: HookCx,
 ) -> Result<InputVerdict, HookError> {
-    debug_assert_eq!(session, &cx.session);
+    debug_assert_eq!(session, cx.session);
+    let _ = user_parts;
     if cx.cancel.is_cancelled() {
         return Err(HookError::Cancelled);
     }
-    let assembly = match letters(registry, font) {
+    let registry = &*registry;
+    let assembly = match letters(registry, &font) {
         Ok(assembly) => assembly,
         Err(error) => {
             return Err(HookError::Failed {
@@ -420,8 +426,9 @@ pub fn handle_first_input(
 ///
 /// Returns the runtime's typed build error when the builder rejects the
 /// registration.
-pub fn extension() -> Result<Extension, RegistrationError> {
-    let registry = Arc::new(crate::skills::SkillRegistry::empty());
+pub fn extension(
+    registry: Arc<crate::skills::SkillRegistry>,
+) -> Result<Extension, RegistrationError> {
     let font = Arc::new(Font::embedded());
     let resolver = LetterResolver::new();
     let hook = FirstInputHook { registry, font };

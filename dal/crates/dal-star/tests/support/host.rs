@@ -26,7 +26,8 @@ use dal_core::ext::{NativeOp, OpId, OpSet, Phase};
 use dal_core::{
     AgentsOp, AgentsReply, Answer, CallId, EntryId, FetchRequest, FetchResponse, GenerationId,
     Inference, JobsOp, JobsReply, McpRequest, McpResponse, ModelRequest, Notice, Question, RawJson,
-    RunOutput, RunRequest, ScopeSpec, SidecarOp, TurnOp, TurnOpReply,
+    RunOutput, RunRequest, ScopeSpec, SidecarOp, StateError, StateOp, StateRecord, TurnOp,
+    TurnOpReply,
 };
 
 /// One host-facets interaction observed by `RecordingHost`, in call order.
@@ -460,6 +461,13 @@ impl Services for NoServices {
         unused()
     }
     fn sidecar(&self, _who: &Caller, _op: SidecarOp) -> ServiceFuture<'_, Option<Vec<u8>>> {
+        unused()
+    }
+    fn state(
+        &self,
+        _who: &Caller,
+        _op: StateOp,
+    ) -> ServiceFuture<'_, Result<StateRecord, StateError>> {
         unused()
     }
     fn blob_put(&self, _who: &Caller, _bytes: Vec<u8>) -> ServiceFuture<'_, [u8; 32]> {

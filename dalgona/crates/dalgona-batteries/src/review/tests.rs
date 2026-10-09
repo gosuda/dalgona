@@ -194,6 +194,17 @@ impl dal_agent::ext::Services for FakeReviewServices {
         unavailable()
     }
 
+    fn state(
+        &self,
+        _who: &dal_agent::ext::Caller,
+        _op: dal_core::ext::StateOp,
+    ) -> dal_agent::ext::services::ServiceFuture<
+        '_,
+        Result<dal_core::ext::StateRecord, dal_core::ext::StateError>,
+    > {
+        unavailable()
+    }
+
     fn sidecar(
         &self,
         _who: &dal_agent::ext::Caller,

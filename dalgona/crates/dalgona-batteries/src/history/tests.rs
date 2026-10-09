@@ -449,12 +449,8 @@ fn selection_trims_images_at_the_byte_budget_boundary() {
 #[test]
 fn history_index_lines_distinguish_visibility_states() {
     let drawn = history_index_line("history/2.3", 4, 7, LetterVisibility::Drawn);
-    let shown_as_text = history_index_line("history/2.3", 4, 7, LetterVisibility::ShownAsText);
-    let not_drawn = history_index_line("history/2.3", 4, 7, LetterVisibility::NotDrawn);
     assert!(drawn.starts_with("letter://history/2.3  "));
     assert!(drawn.ends_with("entries 4-7"));
-    assert!(shown_as_text.ends_with(", shown as text"));
-    assert!(not_drawn.ends_with(", not drawn"));
 }
 
 #[test]

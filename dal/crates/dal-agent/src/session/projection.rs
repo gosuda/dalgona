@@ -50,6 +50,9 @@ pub(crate) struct Projection {
     changes: Vec<FileChange>,
     preview: Box<str>,
     turn: TurnState,
+    /// The last terminal stop the turn driver published; `TurnState::Idle`
+    /// alone cannot tell `end_turn` from `cancelled` (durable turn outcome).
+    pub(crate) last_stop: Option<dal_core::Stop>,
     last_seq: Option<Seq>,
     steers_queued: u32,
     follow_ups_queued: u32,
@@ -88,6 +91,7 @@ impl Projection {
             changes: Vec::new(),
             preview: Box::default(),
             turn: TurnState::Idle,
+            last_stop: None,
             last_seq: None,
             steers_queued: 0,
             follow_ups_queued: 0,
@@ -154,9 +158,10 @@ impl Projection {
             UpdateKind::TurnStarted { turn, .. } => {
                 self.turn = TurnState::Running { turn: *turn };
             }
-            UpdateKind::TurnEnded { turn, .. } => {
+            UpdateKind::TurnEnded { turn, stop } => {
                 if matches!(self.turn, TurnState::Running { turn: held } if held == *turn) {
                     self.turn = TurnState::Idle;
+                    self.last_stop = Some(*stop);
                 }
             }
             UpdateKind::JobSettled { job } => {

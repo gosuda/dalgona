@@ -89,6 +89,11 @@ pub(crate) enum ActorRequest {
         /// The sidecar operation.
         op: SidecarOp,
     },
+    /// Run one compare-and-swap state operation (R08).
+    State {
+        /// The state request.
+        req: StateReq,
+    },
     /// Deliver one mailbox message to this session.
     Mail {
         /// The mail request.
@@ -127,6 +132,14 @@ pub(crate) enum ActorRequest {
         /// The session services.
         services: std::sync::Arc<dyn crate::ext::Services>,
     },
+}
+
+/// One actor-owned state operation with its reply channel (R08).
+pub(crate) struct StateReq {
+    /// The compare-and-swap operation.
+    pub op: dal_core::ext::StateOp,
+    /// The resulting record, or the expected failure.
+    pub reply: oneshot::Sender<Result<dal_core::ext::StateRecord, dal_core::ext::StateError>>,
 }
 
 /// One actor-owned sidecar read or write.
@@ -326,6 +339,14 @@ impl SessionHandle {
     pub(crate) async fn sidecar(&self, op: SidecarOp) -> Result<(), AgentError> {
         self.tx
             .send(ActorRequest::Sidecar { op })
+            .await
+            .map_err(|_| AgentError::SessionClosed { id: self.session })
+    }
+
+    /// Runs one compare-and-swap state operation (R08).
+    pub(crate) async fn state(&self, req: StateReq) -> Result<(), AgentError> {
+        self.tx
+            .send(ActorRequest::State { req })
             .await
             .map_err(|_| AgentError::SessionClosed { id: self.session })
     }

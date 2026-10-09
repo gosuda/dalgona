@@ -814,6 +814,7 @@ fn letter(
         letters: Vec::new(),
     };
     LetterRecord::check(&record, next)?;
+
     Ok(DrawnLetter {
         png,
         record,

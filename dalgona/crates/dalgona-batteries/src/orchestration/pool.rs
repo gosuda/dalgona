@@ -206,7 +206,6 @@ pub(crate) struct Settled {
     pub state: TaskState,
     pub note: Option<String>,
 }
-
 /// Joins a result failure with the failure of the teardown that followed
 /// it, so neither hides the other.
 pub(crate) fn failure_with_teardown(result: &str, teardown: &str) -> String {

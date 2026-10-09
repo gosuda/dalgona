@@ -10,7 +10,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use dal_core::ext::{
-    BeforeTurn, HookEvent, HookOutcome, HookVerdict, InputEvent, Origin, Receipt, StreamVerdict,
+    BeforeTurn, HookEvent, HookOutcome, HookVerdict, InputEvent, Origin, Receipt, StateError,
+    StateKey, StateNs, StateOp, StateRecord, StreamVerdict,
 };
 use dal_core::{
     Answer, BlobId, ClientId, Command, CompactLimits, CompactionSummary, Effect, Emit, Event,
@@ -230,6 +231,11 @@ pub(crate) struct Actor {
     control: Arc<Mutex<ControlCell>>,
     workspace: Workspace,
     sidecar: HashMap<dal_core::Name, Vec<u8>>,
+    /// The session's R08 compare-and-swap state, loaded lazily from its
+    /// sidecar file on the first state operation.
+    state: Option<StateMap>,
+    /// The last revision the state owner minted; never reused (R08).
+    state_rev: u64,
     /// The child depth, zero for top-level sessions.
     depth: u32,
     parent: Option<SessionId>,
@@ -250,6 +256,131 @@ pub(crate) struct Actor {
 }
 
 type ReplyTx = oneshot::Sender<Result<Reply, AgentError>>;
+
+/// The sidecar file holding the session's R08 state map.
+const STATE_SIDECAR: &str = "state";
+
+/// The in-memory state map: one value-or-tombstone per (namespace, key).
+type StateMap = HashMap<(Box<str>, StateKey), (Option<dal_core::RawJson>, u64)>;
+
+/// The current sidecar format version; unknown versions refuse to load
+/// rather than silently mis-decoding a newer file (strict stored formats).
+const STATE_FILE_FORMAT: u8 = 1;
+
+/// The serialized state sidecar file.
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct StateFile {
+    /// The stored format version.
+    format: u8,
+    /// The last minted revision; never reused.
+    revisions: u64,
+    /// One entry per key, values and tombstones alike.
+    entries: Vec<StateFileEntry>,
+}
+
+impl Default for StateFile {
+    fn default() -> Self {
+        Self {
+            format: STATE_FILE_FORMAT,
+            revisions: 0,
+            entries: Vec::new(),
+        }
+    }
+}
+
+/// One serialized (namespace, key) record.
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct StateFileEntry {
+    /// The namespace label.
+    ns: Box<str>,
+    /// The key inside the namespace; validated again on load.
+    key: Box<str>,
+    /// Whether this entry stores a value (false marks a tombstone).
+    /// `Option<RawJson>` alone cannot hold an explicit JSON `null`:
+    /// serde decodes `null` as `None`, the tombstone shape.
+    present: bool,
+    /// The stored value; `null` or absent when `present` is false.
+    value: Option<dal_core::RawJson>,
+    /// The revision minted when this entry last changed.
+    revision: u64,
+}
+
+/// Labels one namespace for map and file keys (R08).
+fn ns_label(ns: &StateNs) -> Box<str> {
+    match ns {
+        StateNs::Eval => "eval".into(),
+        StateNs::Plugin {
+            origin,
+            plugin,
+            version,
+        } => {
+            let origin = match origin {
+                Origin::Builtin => "builtin",
+                Origin::Bundled => "bundled",
+                Origin::User => "user",
+                _ => "other",
+            };
+            format!("plugin:{origin}:{}:{version}", plugin.as_str()).into()
+        }
+    }
+}
+
+/// Wraps a counter value as a revision (R08).
+fn revision(at: u64) -> dal_core::ext::Revision {
+    dal_core::ext::Revision::new(NonZeroU64::new(at).unwrap_or(NonZeroU64::MIN))
+}
+
+/// Loads the durable state map from one sidecar read (R08).
+///
+/// A missing file is an empty map. A read failure, malformed JSON, or an
+/// entry whose stored key no longer parses is surfaced as
+/// [`StateError::Unavailable`]: resetting to an empty map here would let
+/// the next write destroy every previously stored key.
+fn load_state_map(
+    read: Result<Vec<u8>, dal_store::StoreError>,
+) -> Result<(StateMap, u64), StateError> {
+    let file = match read {
+        Ok(bytes) => {
+            sonic_rs::from_slice::<StateFile>(&bytes).map_err(|_| StateError::Unavailable)?
+        }
+        Err(dal_store::StoreError::NotFound { .. }) => StateFile::default(),
+        Err(_) => return Err(StateError::Unavailable),
+    };
+    if file.format != STATE_FILE_FORMAT {
+        return Err(StateError::Unavailable);
+    }
+    let mut map = StateMap::new();
+    let mut seen_revisions = std::collections::HashSet::with_capacity(file.entries.len());
+    for entry in file.entries {
+        // Reject a damaged file rather than publish it: a zero revision
+        // mints a key that can never satisfy its own CAS, a revision ahead
+        // of the counter can be re-minted, a duplicate slot makes the
+        // stored order load-bearing, and a reused revision lets one key's
+        // token satisfy another key's CAS.
+        if entry.revision == 0
+            || entry.revision > file.revisions
+            || !seen_revisions.insert(entry.revision)
+        {
+            return Err(StateError::Unavailable);
+        }
+        let key = StateKey::parse(&entry.key).map_err(|_| StateError::Unavailable)?;
+        let value = match (entry.present, entry.value) {
+            (true, value) => Some(value.unwrap_or_else(dal_core::RawJson::null)),
+            (false, None) => None,
+            // A tombstone carrying a payload is not a file this code wrote.
+            (false, Some(_)) => return Err(StateError::Unavailable),
+        };
+        if map
+            .insert((entry.ns, key), (value, entry.revision))
+            .is_some()
+        {
+            return Err(StateError::Unavailable);
+        }
+    }
+    Ok((map, file.revisions))
+}
 
 /// Pages the session's journaled mail after a cursor.
 ///
@@ -354,6 +485,8 @@ pub(crate) fn spawn(deps: ActorDeps) -> (SessionHandle, DriverPorts, tokio::task
         control: Arc::clone(&control),
         workspace: deps.workspace,
         sidecar: HashMap::new(),
+        state: None,
+        state_rev: 0,
         depth: deps.depth,
         parent: deps.parent,
         rx,
@@ -522,6 +655,9 @@ impl Actor {
             }
             ActorRequest::Sidecar { op } => {
                 self.on_sidecar(op);
+            }
+            ActorRequest::State { req } => {
+                self.on_state(req).await;
             }
             ActorRequest::Mail { req } => {
                 self.on_mail(req).await;
@@ -1294,6 +1430,158 @@ impl Actor {
         })
     }
 
+    /// Runs one compare-and-swap state operation against the actor-owned
+    /// map, persisted through the session's durable sidecar (R08).
+    async fn on_state(&mut self, req: super::StateReq) {
+        let _ = req.reply.send(self.state_result(req.op).await);
+    }
+
+    /// Applies one state operation: the mutation is written to the
+    /// sidecar file before the reply acknowledges it, so an acknowledged
+    /// record always survives restart.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one match arm per op keeps the CAS table readable"
+    )]
+    async fn state_result(&mut self, op: StateOp) -> Result<StateRecord, StateError> {
+        if self.journal.sidecar().is_none() {
+            return Err(StateError::Unavailable);
+        }
+        if self.state.is_none() {
+            // A missing sidecar is an empty map; an unreadable or corrupt one
+            // must surface rather than silently reset every stored key.
+            let sidecar = self.journal.sidecar().ok_or(StateError::Unavailable)?;
+            let (map, revisions) = load_state_map(sidecar.read(STATE_SIDECAR))?;
+            self.state_rev = revisions;
+            self.state = Some(map);
+        }
+        let Some(map) = self.state.as_mut() else {
+            return Err(StateError::Unavailable);
+        };
+        let (ns, key) = match &op {
+            StateOp::Read { ns, key }
+            | StateOp::Write { ns, key, .. }
+            | StateOp::Delete { ns, key, .. } => (ns, key),
+        };
+        let slot = (ns_label(ns), key.clone());
+        // Build the prospective map and revision first, then publish them only
+        // after the sidecar write succeeds: memory must never run ahead of the
+        // journal (a failed write leaves the stored state untouched).
+        let mut next = map.clone();
+        let mut next_rev = self.state_rev;
+        // An unchanged map needs no write: a read of an existing key stays
+        // durable even when the sidecar directory is readable but unwritable.
+        let (record, changed) = match op {
+            StateOp::Read { .. } => {
+                if let Some((value, at)) = map.get(&slot) {
+                    (
+                        StateRecord {
+                            present: value.is_some(),
+                            value: value.clone(),
+                            revision: revision(*at),
+                        },
+                        false,
+                    )
+                } else {
+                    // A missing key still mints a revision so the caller can
+                    // compare-and-swap its first write (R08).
+                    next_rev += 1;
+                    let minted = next_rev;
+                    next.insert(slot, (None, minted));
+                    (
+                        StateRecord {
+                            present: false,
+                            value: None,
+                            revision: revision(minted),
+                        },
+                        true,
+                    )
+                }
+            }
+            StateOp::Write {
+                value, expected, ..
+            } => {
+                match map.get(&slot) {
+                    Some((_, current)) if *current == expected.get().get() => {}
+                    _ => return Err(StateError::Conflict),
+                }
+                next_rev += 1;
+                let minted = next_rev;
+                next.insert(slot, (Some(value.clone()), minted));
+                (
+                    StateRecord {
+                        present: true,
+                        value: Some(value),
+                        revision: revision(minted),
+                    },
+                    true,
+                )
+            }
+            StateOp::Delete { expected, .. } => {
+                match map.get(&slot) {
+                    Some((_, current)) if *current == expected.get().get() => {}
+                    _ => return Err(StateError::Conflict),
+                }
+                next_rev += 1;
+                let minted = next_rev;
+                next.insert(slot, (None, minted));
+                (
+                    StateRecord {
+                        present: false,
+                        value: None,
+                        revision: revision(minted),
+                    },
+                    true,
+                )
+            }
+        };
+        if !changed {
+            return Ok(record);
+        }
+        let file = StateFile {
+            format: STATE_FILE_FORMAT,
+            revisions: next_rev,
+            entries: next
+                .iter()
+                .map(|((ns, key), (value, at))| StateFileEntry {
+                    ns: ns.clone(),
+                    key: key.as_str().into(),
+                    present: value.is_some(),
+                    value: value.clone(),
+                    revision: *at,
+                })
+                .collect(),
+        };
+        let Ok(bytes) = sonic_rs::to_string(&file) else {
+            return Err(StateError::Unavailable);
+        };
+        if self.journal.is_lazy() {
+            // The state file is about to be durable; the session it belongs
+            // to must be recoverable first, or an acknowledged write is
+            // unreachable after restart. Memory state must never be more
+            // durable than the journal.
+            self.journal
+                .materialize()
+                .await
+                .map_err(|_| StateError::Unavailable)?;
+        }
+        let Some(sidecar) = self.journal.sidecar() else {
+            self.state = None;
+            return Err(StateError::Unavailable);
+        };
+        if sidecar.write(STATE_SIDECAR, bytes.as_bytes()).is_err() {
+            // The write's outcome is indeterminate (the rename may have
+            // published before the directory sync failed), so drop the
+            // cached map: the next operation reloads whatever is durable
+            // instead of serving a map the file may no longer match.
+            self.state = None;
+            return Err(StateError::Unavailable);
+        }
+        self.state_rev = next_rev;
+        self.state = Some(next);
+        Ok(record)
+    }
+
     /// Reads or writes one actor-owned sidecar value.
     fn on_sidecar(&mut self, op: super::SidecarOp) {
         match op {
@@ -1581,5 +1869,115 @@ fn map_turn_state(state: TurnState, control: &ControlCell) -> ActualTurn {
                     phase: TurnPhase::Compacting,
                 })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_state_map_treats_a_missing_file_as_empty() {
+        let (map, revisions) = load_state_map(Err(dal_store::StoreError::NotFound {
+            path: std::path::PathBuf::from("state"),
+        }))
+        .expect("missing is empty");
+        assert!(map.is_empty() && revisions == 0);
+    }
+
+    #[test]
+    fn load_state_map_surfaces_corruption_instead_of_resetting() {
+        let corrupt = load_state_map(Ok(b"{not json".to_vec()));
+        assert!(
+            matches!(corrupt, Err(StateError::Unavailable)),
+            "malformed JSON fails closed: {corrupt:?}"
+        );
+        let bad_key = load_state_map(Ok(
+            br#"{"format":1,"revisions":3,"entries":[{"ns":"eval","key":"BAD KEY","present":false,"value":null,"revision":3}]}"#
+                .to_vec(),
+        ));
+        assert!(
+            matches!(bad_key, Err(StateError::Unavailable)),
+            "an invalid stored key fails closed: {bad_key:?}"
+        );
+        let future = load_state_map(Ok(br#"{"format":2,"revisions":3,"entries":[]}"#.to_vec()));
+        assert!(
+            matches!(future, Err(StateError::Unavailable)),
+            "an unknown format version fails closed: {future:?}"
+        );
+        let unknown = load_state_map(Ok(
+            br#"{"format":1,"revisions":3,"entries":[],"extra":true}"#.to_vec(),
+        ));
+        assert!(
+            matches!(unknown, Err(StateError::Unavailable)),
+            "an unknown stored field fails closed: {unknown:?}"
+        );
+        let zero = load_state_map(Ok(
+            br#"{"format":1,"revisions":3,"entries":[{"ns":"eval","key":"k","present":true,"value":0,"revision":0}]}"#
+                .to_vec(),
+        ));
+        assert!(
+            matches!(zero, Err(StateError::Unavailable)),
+            "a zero stored revision fails closed: {zero:?}"
+        );
+        let ahead = load_state_map(Ok(
+            br#"{"format":1,"revisions":3,"entries":[{"ns":"eval","key":"k","present":true,"value":0,"revision":4}]}"#
+                .to_vec(),
+        ));
+        assert!(
+            matches!(ahead, Err(StateError::Unavailable)),
+            "a revision ahead of the counter fails closed: {ahead:?}"
+        );
+        let dupe = load_state_map(Ok(
+            br#"{"format":1,"revisions":4,"entries":[{"ns":"eval","key":"k","present":true,"value":0,"revision":2},{"ns":"eval","key":"k","present":true,"value":1,"revision":3}]}"#
+                .to_vec(),
+        ));
+        assert!(
+            matches!(dupe, Err(StateError::Unavailable)),
+            "a duplicate slot fails closed: {dupe:?}"
+        );
+        let reused = load_state_map(Ok(
+            br#"{"format":1,"revisions":4,"entries":[{"ns":"eval","key":"a","present":true,"value":0,"revision":2},{"ns":"eval","key":"b","present":true,"value":1,"revision":2}]}"#
+                .to_vec(),
+        ));
+        assert!(
+            matches!(reused, Err(StateError::Unavailable)),
+            "a revision reused across slots fails closed: {reused:?}"
+        );
+        let armed = load_state_map(Ok(
+            br#"{"format":1,"revisions":3,"entries":[{"ns":"eval","key":"k","present":false,"value":0,"revision":2}]}"#
+                .to_vec(),
+        ));
+        assert!(
+            matches!(armed, Err(StateError::Unavailable)),
+            "a tombstone carrying a payload fails closed: {armed:?}"
+        );
+    }
+
+    #[test]
+    fn load_state_map_preserves_an_explicit_null_value() {
+        // `value: null` with `present: true` is a stored JSON null, not a
+        // tombstone: serde cannot distinguish them without the flag.
+        let bytes = br#"{"format":1,"revisions":2,"entries":[{"ns":"eval","key":"k","present":true,"value":null,"revision":2}]}"#
+            .to_vec();
+        let (map, _) = load_state_map(Ok(bytes)).expect("stored map");
+        let Some((value, at)) = map.get(&("eval".into(), StateKey::parse("k").expect("key")))
+        else {
+            panic!("the null entry survives the load");
+        };
+        assert_eq!(*at, 2);
+        let Some(value) = value else {
+            panic!("an explicit null is present, not a tombstone");
+        };
+        assert_eq!(value.as_str(), "null");
+    }
+
+    #[test]
+    fn load_state_map_replays_stored_entries() {
+        let bytes = br#"{"format":1,"revisions":4,"entries":[{"ns":"eval","key":"counter","present":true,"value":"41","revision":2}]}"#
+            .to_vec();
+        let (map, revisions) = load_state_map(Ok(bytes)).expect("stored map");
+        assert_eq!(revisions, 4);
+        assert_eq!(map.len(), 1);
     }
 }

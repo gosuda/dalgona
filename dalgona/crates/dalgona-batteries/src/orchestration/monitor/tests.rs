@@ -12,7 +12,7 @@ use super::state::{
     MonitorConfig, MonitorEffect, MonitorId, MonitorRequest, MonitorState, PAUSE_NOTICE,
     on_job_end, parse_config, parse_request, stop_all, watch,
 };
-use super::status::{abort_reply, quiet, status_json, status_line, status_payload, subagent_reply};
+use super::status::{abort_reply, status_json, status_payload, subagent_reply};
 use super::*;
 
 fn raw(value: &str) -> Result<RawJson, Box<dyn Error>> {
@@ -49,10 +49,6 @@ impl JobsView for FakeJobs {
         self.jobs
             .values()
             .any(|(known, live)| *known == job && *live)
-    }
-
-    fn top_level_live_count(&self) -> usize {
-        self.jobs.values().filter(|(_, live)| *live).count()
     }
 }
 
@@ -322,29 +318,10 @@ fn wake_budget_pauses_on_fifth_monitor_only_wake() -> Result<(), Box<dyn Error>>
 fn status_renders_waiting_parts_and_exact_json() {
     let counts = inflight_counts(2, 1, 0, false, false);
     let payload = status_payload(ControllerMode::Run, false, counts, 0, None);
-    assert_eq!(status_line(&payload, true), "waiting on 2 jobs · 1 monitor");
     assert_eq!(
         status_json(&payload),
         "{\"mode\":\"run\",\"paused_reason\":null,\"quiet\":false,\"inflight\":{\"jobs\":2,\"monitors\":1,\"asks\":0,\"goal_timer\":0,\"loop_guard\":0},\"silent_jobs\":0,\"goal\":null}"
     );
-    let asking = inflight_counts(0, 0, 1, false, false);
-    let waiting = status_payload(ControllerMode::Run, false, asking, 0, None);
-    assert_eq!(status_line(&waiting, true), "waiting for you");
-    // Asks never enter the count predicate, but an outstanding ask keeps the
-    // session non-idle through its caller.
-    assert!(quiet(true, &asking, 0, 5_000));
-    let paused = status_payload(
-        ControllerMode::Paused { reason: "test" },
-        true,
-        inflight_counts(0, 0, 0, false, false),
-        0,
-        None,
-    );
-    assert_eq!(status_line(&paused, true), "idle · paused");
-    assert!(quiet(true, &paused.inflight, 0, 2_000));
-    assert!(!quiet(true, &paused.inflight, 0, 1_999));
-    assert!(!quiet(false, &paused.inflight, 0, 5_000));
-    assert!(!quiet(true, &counts, 1, 5_000));
 }
 
 #[test]

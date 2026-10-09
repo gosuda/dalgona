@@ -267,7 +267,9 @@ mod unauthorized_recovery {
         AgentsOp, AgentsReply, Answer, EntryId, FetchRequest, FetchResponse, Inference, JobsOp,
         JobsReply, ModelRequest, Notice, Question, RawJson, RunOutput, RunRequest, SessionId,
         SidecarOp, TurnOp, TurnOpReply,
-        ext::{McpDeclaration, McpRequest, McpResponse, Visibility},
+        ext::{
+            McpDeclaration, McpRequest, McpResponse, StateError, StateOp, StateRecord, Visibility,
+        },
     };
     use reqwest::Url;
     use sonic_rs::{JsonValueTrait, Value};
@@ -379,6 +381,14 @@ mod unauthorized_recovery {
         }
 
         fn sidecar(&self, _who: &Caller, _op: SidecarOp) -> ServiceFuture<'_, Option<Vec<u8>>> {
+            unavailable()
+        }
+
+        fn state(
+            &self,
+            _who: &Caller,
+            _op: StateOp,
+        ) -> ServiceFuture<'_, Result<StateRecord, StateError>> {
             unavailable()
         }
 

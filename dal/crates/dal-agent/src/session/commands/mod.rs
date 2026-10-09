@@ -118,6 +118,7 @@ async fn run_handler(
             .map_err(|_| invalid("command owner name is invalid."))?,
         owner.origin(),
         owner.inject(),
+        owner.state_version(),
         CallerKind::Handler,
         None,
     );

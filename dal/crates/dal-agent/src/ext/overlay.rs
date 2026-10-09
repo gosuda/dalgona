@@ -13,6 +13,7 @@
 mod tests;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use dal_core::ext::{McpBlock, McpDeclaration, McpServerDecl};
@@ -24,6 +25,7 @@ use super::grants::GrantStore;
 use super::tool::Tool;
 use super::{Caller, CallerKind};
 use crate::error::ServiceError;
+use crate::ext::Extension;
 
 /// One staged or published overlay tool.
 #[derive(Clone)]
@@ -457,10 +459,18 @@ impl TurnTools {
             ));
         };
         let (set, detail) = mcp_grant_request(generation, &declaration.plugin)?;
+        // The version binds to the generation this authorization ran in,
+        // not a later reload.
+        let state_version = generation
+            .extensions
+            .iter()
+            .find(|ext| ext.name() == declaration.plugin.as_str())
+            .map_or(NonZeroU32::MIN, Extension::state_version);
         let caller = Caller::new(
             declaration.plugin.clone(),
             declaration.origin,
             declaration.inject,
+            state_version,
             CallerKind::Tool,
             Some(turn),
         );

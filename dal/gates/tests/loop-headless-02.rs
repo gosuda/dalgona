@@ -73,7 +73,10 @@ async fn cancel_mid_exec_kills_grandchild_and_ends_once() -> Result<(), Box<dyn 
         match &update.kind {
             UpdateKind::ToolStarted { tool, .. } if tool.as_ref() == "exec" => {
                 tokio::time::timeout(Duration::from_secs(2), async {
-                    while !pid_file.exists() {
+                    loop {
+                        if fs::read_to_string(&pid_file).is_ok_and(|text| !text.trim().is_empty()) {
+                            break;
+                        }
                         tokio::time::sleep(Duration::from_millis(5)).await;
                     }
                 })

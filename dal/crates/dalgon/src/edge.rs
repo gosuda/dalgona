@@ -217,7 +217,7 @@ async fn wait_for_signal(signal: &mut Option<tokio::signal::unix::Signal>) {
 pub(crate) fn family_for_binary(binary: &str) -> Option<&'static str> {
     match binary {
         "dalgon" | "dal" | "dl" => Some("dal"),
-        "dalgona" => Some("dalgona"),
+        "dalgona" | "dg" => Some("dalgona"),
         _ => None,
     }
 }
@@ -718,6 +718,7 @@ mod tests {
         assert_eq!(super::family_for_binary("dal"), Some("dal"));
         assert_eq!(super::family_for_binary("dl"), Some("dal"));
         assert_eq!(super::family_for_binary("dalgona"), Some("dalgona"));
+        assert_eq!(super::family_for_binary("dg"), Some("dalgona"));
         assert_eq!(super::family_for_binary(""), None);
         assert_eq!(super::family_for_binary("dalgon/foo"), None);
         assert_eq!(super::CONFIG_FILE_NAME, "dal.toml");

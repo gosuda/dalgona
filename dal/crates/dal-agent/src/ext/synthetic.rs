@@ -346,6 +346,7 @@ pub(crate) async fn open(
             name.clone(),
             extension.origin(),
             extension.inject(),
+            extension.state_version(),
             kind,
             turn,
         )

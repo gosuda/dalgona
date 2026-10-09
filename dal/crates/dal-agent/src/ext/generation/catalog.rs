@@ -81,11 +81,11 @@ const fn host_backed(op: NativeOp) -> bool {
         | NativeOp::TurnSteer
         | NativeOp::TurnWake
         | NativeOp::TurnIsIdle
-        | NativeOp::EnvRead => true,
-        NativeOp::StateRead
+        | NativeOp::EnvRead
+        | NativeOp::StateRead
         | NativeOp::StateWrite
-        | NativeOp::StateDelete
-        | NativeOp::ToolsRead
+        | NativeOp::StateDelete => true,
+        NativeOp::ToolsRead
         | NativeOp::ToolsSearch
         | NativeOp::ToolsPatch
         | NativeOp::ToolsExec

@@ -13,12 +13,14 @@ use dal_core::{
     Workspace,
 };
 
+use super::super::scheme::{Doc, SchemeCx, SchemeResolver};
 use super::super::tool::{ArgError, RawValue, Tool, ToolCall, ToolCx, ToolOutcome};
 use super::super::{
     BoxFuture, CompactError, CompactInput, Compaction, Compactor, ExtensionBuilder, Hook, HookCx,
     HookError, Services,
 };
 use super::{Generation, ValidatedExtensions};
+use crate::error::SchemeError;
 
 /// One test tool with a fixed spec; every instance stays live through the
 /// `Arc` that holds its generation.
@@ -62,6 +64,23 @@ fn ext(name: &str, origin: Origin) -> ExtensionBuilder {
     ExtensionBuilder::new(name, "1.0.0", ServiceSet::EMPTY)
         .expect("valid extension identity")
         .with_origin(origin, None)
+}
+
+/// One scheme resolver whose reads never run; only its claim matters.
+struct StubScheme;
+
+impl SchemeResolver for StubScheme {
+    fn read<'a>(
+        &'a self,
+        _path: &'a str,
+        _cx: &'a SchemeCx<'a>,
+    ) -> BoxFuture<'a, Result<Doc, SchemeError>> {
+        Box::pin(async {
+            Err(SchemeError::NotFound {
+                uri: "stub://none".into(),
+            })
+        })
+    }
 }
 
 fn stub_tool(name: &str) -> Arc<StubTool> {
@@ -436,6 +455,7 @@ fn reload_splice_replaces_only_the_plugin_tail() {
             splice_plugins(
                 &current.extensions,
                 vec![ext("p2", Origin::User).build().expect("plugin p2")],
+                Vec::new(),
             ),
             None,
         )
@@ -464,8 +484,11 @@ fn generation_rejects_duplicate_doc_uris() {
 
 #[test]
 fn generation_rejects_second_doc_scheme_with_same_name() {
-    let first = ext("wiki", Origin::User)
-        .doc("a", "A", "first")
+    // Same-named extensions already fail the extension-name claim, so
+    // this scenario claims the scheme name directly: "alpha" registers
+    // `wiki://` before the "wiki" extension's docs scheme is checked.
+    let first = ext("alpha", Origin::User)
+        .scheme("wiki", Arc::new(StubScheme))
         .build()
         .expect("valid extension");
     let second = ext("wiki", Origin::User)

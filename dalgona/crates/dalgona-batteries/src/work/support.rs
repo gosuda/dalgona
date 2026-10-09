@@ -14,8 +14,8 @@ use dal_agent::ext::{
     ToolCx, ToolOutcome,
 };
 use dal_core::ext::{
-    BeforeTurn, McpDeclaration, McpRequest, McpResponse, SessionEnd, SessionStart, ToolCallEvent,
-    ToolCallVerdict, Visibility,
+    BeforeTurn, McpDeclaration, McpRequest, McpResponse, SessionEnd, SessionStart, StateError,
+    StateOp, StateRecord, ToolCallEvent, ToolCallVerdict, Visibility,
 };
 use dal_core::{
     AgentsOp, AgentsReply, Answer, CallId, EntryId, FetchRequest, FetchResponse, Inference, JobsOp,
@@ -241,6 +241,14 @@ impl Services for FakeServices {
     }
 
     fn blob_get(&self, _who: &Caller, _digest: [u8; 32]) -> ServiceFuture<'_, Option<Vec<u8>>> {
+        unavailable(&self.side_calls)
+    }
+
+    fn state(
+        &self,
+        _who: &Caller,
+        _op: StateOp,
+    ) -> ServiceFuture<'_, Result<StateRecord, StateError>> {
         unavailable(&self.side_calls)
     }
 

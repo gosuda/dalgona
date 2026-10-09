@@ -523,6 +523,7 @@ impl ToolCx<'_> {
             Name::test(),
             Origin::Builtin,
             ServiceSet::EMPTY,
+            std::num::NonZeroU32::MIN,
             CallerKind::Tool,
             None,
         );
@@ -563,6 +564,7 @@ impl ToolCx<'_> {
             Name::test(),
             Origin::Builtin,
             ServiceSet::EMPTY,
+            std::num::NonZeroU32::MIN,
             CallerKind::Tool,
             None,
         );

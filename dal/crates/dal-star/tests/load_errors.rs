@@ -489,43 +489,30 @@ fn unlisted_user_plugin_is_skipped_and_listed_one_loads() {
 
 // --- `enabled` names that match nothing ------------------------------------
 
-/// Records the fields of every WARN event on the current thread.
-struct WarnCapture(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
-
-struct Fields(String);
-
-impl tracing::field::Visit for Fields {
-    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        use std::fmt::Write as _;
-        write!(self.0, "{}={value:?} ", field.name()).expect("string write is infallible");
-    }
-}
-
-impl tracing::Subscriber for WarnCapture {
-    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-        true
-    }
-    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-        tracing::span::Id::from_u64(1)
-    }
-    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-    fn event(&self, event: &tracing::Event<'_>) {
-        if *event.metadata().level() != tracing::Level::WARN {
-            return;
-        }
-        let mut fields = Fields(String::new());
-        event.record(&mut fields);
-        self.0.lock().expect("warning log lock").push(fields.0);
-    }
-    fn enter(&self, _: &tracing::span::Id) {}
-    fn exit(&self, _: &tracing::span::Id) {}
-}
-
-fn warnings_while_loading(enabled: &[&str]) -> Vec<String> {
+#[test]
+fn misspelled_enabled_name_fails_the_load_and_names_the_fix() {
     let mut cfg = config();
-    cfg.enabled = enabled.iter().map(|name| (*name).to_owned()).collect();
-    let logs = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    cfg.enabled = vec!["alpha".to_owned(), "alhpa".to_owned()];
+    let (data, result) = load_with(
+        &[("alpha", "plugin.star", plugin_source("alpha").as_bytes())],
+        &cfg,
+    );
+    let error = result.expect_err("a name matching no plugin must fail the load");
+    let LoadError::UnknownPlugin { name, dir } = &error else {
+        panic!("expected UnknownPlugin, got {error:?}");
+    };
+    assert_eq!(&**name, "alhpa");
+    assert_eq!(dir, &data.path().join("plugins"));
+    assert!(
+        error.to_string().contains("remove it from `plugins`"),
+        "{error}"
+    );
+}
+
+#[test]
+fn enabled_names_matching_installed_or_bundled_plugins_load() {
+    let mut cfg = config();
+    cfg.enabled = vec!["alpha".to_owned(), "core".to_owned()];
     let data = tempfile::tempdir().expect("data root");
     write(data.path(), "alpha", "plugin.star", plugin_source("alpha"));
     let bundled_entry: &'static [u8] =
@@ -537,21 +524,8 @@ fn warnings_while_loading(enabled: &[&str]) -> Vec<String> {
             files: BTreeMap::from([(PathBuf::from("plugin.star"), bundled_entry)]),
         }],
     };
-    tracing::subscriber::with_default(WarnCapture(std::sync::Arc::clone(&logs)), || {
-        load(&roots, &cfg).expect("load succeeds");
-    });
-    logs.lock().expect("warning log lock").clone()
-}
-
-#[test]
-fn misspelled_enabled_name_is_logged_as_a_warning() {
-    let warnings = warnings_while_loading(&["alpha", "alhpa"]);
-    assert_eq!(warnings.len(), 1, "{warnings:?}");
-    assert!(warnings[0].contains("alhpa"), "{warnings:?}");
-}
-
-#[test]
-fn enabled_names_that_match_installed_or_bundled_plugins_do_not_warn() {
-    assert!(warnings_while_loading(&["alpha", "core"]).is_empty());
-    assert!(warnings_while_loading(&[]).is_empty());
+    let generation = load(&roots, &cfg).expect("both names resolve");
+    let mut names = generation.names().collect::<Vec<_>>();
+    names.sort_unstable();
+    assert_eq!(names, ["alpha", "core"]);
 }

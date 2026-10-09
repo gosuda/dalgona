@@ -61,6 +61,7 @@ async fn tui_backend_snapshots_inline_and_fullscreen() -> Result<(), Box<dyn Err
         motion: false,
         editor: "vi".into(),
         color: ColorMode::Never,
+        binary: "dalgon",
         env: EnvFacts {
             stdin_tty: true,
             term: Some("xterm-256color".to_owned()),

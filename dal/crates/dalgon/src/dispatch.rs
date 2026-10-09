@@ -97,6 +97,7 @@ pub(crate) async fn serve(
         workspace: _,
         config,
         data_root,
+        binary: _,
         helper,
         ..
     } = startup;

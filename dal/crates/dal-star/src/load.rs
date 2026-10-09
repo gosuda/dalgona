@@ -102,7 +102,6 @@ pub fn load(roots: &LoadRoots, cfg: &PluginsConfig) -> Result<PluginGeneration, 
         ));
     }
 
-    let mut discovered: Vec<String> = Vec::new();
     let plugins_dir = roots.data_root.join("plugins");
     match std::fs::read_dir(&plugins_dir) {
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
@@ -121,7 +120,6 @@ pub fn load(roots: &LoadRoots, cfg: &PluginsConfig) -> Result<PluginGeneration, 
                         name: name.into_boxed_str(),
                     });
                 }
-                discovered.push(name.clone());
                 if !cfg.enabled.is_empty() && !cfg.enabled.iter().any(|keep| keep == &name) {
                     continue;
                 }
@@ -134,7 +132,6 @@ pub fn load(roots: &LoadRoots, cfg: &PluginsConfig) -> Result<PluginGeneration, 
             }
         }
     }
-    warn_unmatched_enabled(roots, cfg, &discovered);
 
     ordered.sort_by(|left, right| {
         (origin_rank(left.1), &left.0).cmp(&(origin_rank(right.1), &right.0))
@@ -154,6 +151,16 @@ pub fn load(roots: &LoadRoots, cfg: &PluginsConfig) -> Result<PluginGeneration, 
                 "plugin shadows an earlier plugin with the same name"
             );
         }
+    }
+    if let Some(missing) = cfg
+        .enabled
+        .iter()
+        .find(|name| !plugins.contains_key(name.as_str()))
+    {
+        return Err(LoadError::UnknownPlugin {
+            name: missing.clone().into_boxed_str(),
+            dir: plugins_dir,
+        });
     }
     Ok(PluginGeneration::new(
         plugins.into_values().map(std::sync::Arc::new).collect(),
@@ -610,20 +617,4 @@ fn resolve_load<'f>(want: &str, files: &'f FileSet) -> Result<(PathBuf, &'f [u8]
         });
     };
     Ok((candidate, bytes.as_slice()))
-}
-
-/// Logs each `enabled` name that matches neither a bundled plugin nor an
-/// installed plugin directory: a misspelled name would otherwise disable
-/// that plugin with no signal.
-fn warn_unmatched_enabled(roots: &LoadRoots, cfg: &PluginsConfig, discovered: &[String]) {
-    for wanted in &cfg.enabled {
-        let known = discovered.contains(wanted)
-            || roots.bundled.iter().any(|bundled| &bundled.name == wanted);
-        if !known {
-            tracing::warn!(
-                plugin = %wanted,
-                "plugin listed in `enabled` matches no bundled or installed plugin"
-            );
-        }
-    }
 }

@@ -108,6 +108,7 @@ pub(crate) struct Startup {
     #[cfg(feature = "tui")]
     pub(crate) config_path: PathBuf,
     pub(crate) data_root: PathBuf,
+    pub(crate) binary: &'static str,
     pub(crate) helper: Option<PathBuf>,
 }
 
@@ -185,6 +186,7 @@ async fn run_command(
                 workspace,
                 config,
                 data_root,
+                binary: _,
                 helper,
                 ..
             } = startup;
@@ -648,6 +650,7 @@ fn assemble_startup(
         #[cfg(feature = "tui")]
         config_path,
         data_root: roots.data,
+        binary: factory.binary,
         helper: edge::current_exe(),
     };
     Ok(startup)

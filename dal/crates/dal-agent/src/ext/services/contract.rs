@@ -9,7 +9,7 @@ use dal_core::ext::{McpDeclaration, McpRequest, McpResponse};
 use dal_core::{
     AgentsOp, AgentsReply, Answer, EntryId, FetchRequest, FetchResponse, Inference, JobsOp,
     JobsReply, ModelRequest, Name, Notice, Question, RunOutput, RunRequest, SidecarOp, Site,
-    TurnOp, TurnOpReply, Visibility, Workspace,
+    StateError, StateOp, StateRecord, TurnOp, TurnOpReply, Visibility, Workspace,
 };
 use dal_provider::EventStream;
 use std::collections::HashMap;
@@ -157,6 +157,24 @@ pub trait Services: Send + Sync + 'static {
     ///
     /// Returns the inject, grant, availability, or backend failure.
     fn sidecar(&self, who: &Caller, op: SidecarOp) -> ServiceFuture<'_, Option<Vec<u8>>>;
+    /// Runs one compare-and-swap state operation (R08).
+    ///
+    /// The `ns` carried by `op` is ignored: the implementation derives the
+    /// authoritative namespace from `who` — eval cells own [`StateNs::Eval`],
+    /// every other caller owns its plugin's `origin`, name, and declared
+    /// `state_version`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the inject, grant, availability, or backend failure. The
+    /// returned [`Result`] carries the expected operation failure:
+    /// [`StateError::Conflict`] for a stale expected revision and
+    /// [`StateError::Unavailable`] when the session holds no durable state.
+    fn state(
+        &self,
+        who: &Caller,
+        op: StateOp,
+    ) -> ServiceFuture<'_, Result<StateRecord, StateError>>;
     /// Runs trusted Rust-only inference: no inject check and no grant.
     ///
     /// # Errors
@@ -268,6 +286,8 @@ pub(crate) trait SessionBackend: Send + Sync + 'static {
     fn sidecar_read(&self, name: &Name) -> ServiceFuture<'_, Option<Vec<u8>>>;
     /// Writes one sidecar value atomically.
     fn sidecar_write(&self, name: &Name, bytes: Vec<u8>) -> ServiceFuture<'_, ()>;
+    /// Applies one state operation inside the actor-owned map (R08).
+    fn state(&self, op: StateOp) -> ServiceFuture<'_, Result<StateRecord, StateError>>;
     /// Runs one inference to completion.
     fn infer(&self, req: ModelRequest) -> ServiceFuture<'_, Inference>;
     /// Runs one inference with the script host and invocation cancellation.

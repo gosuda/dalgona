@@ -135,9 +135,6 @@ pub(crate) mod decode;
 pub(crate) mod render;
 pub(crate) mod saved;
 
-#[cfg(test)]
-mod tests;
-
 pub(crate) use decode::decode_steps;
 pub(crate) use saved::find_saved;
 impl Workflow {
@@ -154,3 +151,6 @@ impl Workflow {
             .sum()
     }
 }
+
+#[cfg(test)]
+mod tests;

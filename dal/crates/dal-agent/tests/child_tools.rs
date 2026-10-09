@@ -176,6 +176,8 @@ impl Tool for Counter {
 /// tools (comma separated; `*` means no allowlist) and waits for its report.
 struct Spawn {
     children: Arc<Mutex<Vec<SessionId>>>,
+    next_name: Arc<AtomicUsize>,
+    fixed_name: Option<Box<str>>,
 }
 
 impl CommandHandler for Spawn {
@@ -197,9 +199,12 @@ impl CommandHandler for Spawn {
                 }
                 Some(names.into_boxed_slice())
             };
+            let name = self.fixed_name.clone().unwrap_or_else(|| {
+                format!("member-{}", self.next_name.fetch_add(1, Ordering::SeqCst)).into()
+            });
             let start = AgentStart {
                 call: CallId::new("spawn-call"),
-                name: "member".into(),
+                name,
                 prompt: "work".into(),
                 model: Some(PROBE_MODEL.into()),
                 role: None,
@@ -208,10 +213,12 @@ impl CommandHandler for Spawn {
                 workspace: None,
             };
             let services = cx.services();
-            let AgentsReply::Started { id } =
-                services.agents(cx.caller(), AgentsOp::Start(start)).await?
-            else {
-                return Err(ServiceError::failed(None, "the child did not start"));
+            let reply = services.agents(cx.caller(), AgentsOp::Start(start)).await?;
+            let AgentsReply::Started { id } = reply else {
+                return Err(ServiceError::failed(
+                    None,
+                    format!("the child did not start: {reply:?}"),
+                ));
             };
             self.children.lock().expect("children lock").push(id);
             services
@@ -244,7 +251,7 @@ impl CommandHandler for Recompose {
                 )
                 .build()
                 .map_err(|error| ServiceError::failed(None, error.to_string()))?;
-            cx.publish_plugins(vec![plugin])
+            cx.publish_plugins(vec![plugin], Vec::new())
                 .await
                 .map_err(|error| ServiceError::failed(None, error.to_string()))?;
             Ok(Reply::Done(Output::Nothing))
@@ -317,6 +324,7 @@ async fn rig() -> Rig {
         script: Mutex::new(VecDeque::new()),
     });
     let children = Arc::new(Mutex::new(Vec::new()));
+    let next_name = Arc::new(AtomicUsize::new(0));
     let alpha_runs = Arc::new(AtomicUsize::new(0));
     let beta_runs = Arc::new(AtomicUsize::new(0));
     let gamma_runs = Arc::new(AtomicUsize::new(0));
@@ -332,6 +340,16 @@ async fn rig() -> Rig {
             command("spawn"),
             Arc::new(Spawn {
                 children: Arc::clone(&children),
+                next_name: Arc::clone(&next_name),
+                fixed_name: None,
+            }),
+        )
+        .command(
+            command("spawn_same"),
+            Arc::new(Spawn {
+                children: Arc::clone(&children),
+                next_name: Arc::clone(&next_name),
+                fixed_name: Some("member".into()),
             }),
         )
         .command(

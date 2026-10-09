@@ -456,12 +456,14 @@ mod win {
     use std::process::ExitCode;
     use std::ptr;
 
+    use windows_sys::Wdk::Storage::FileSystem::NtSetSecurityObject;
     use windows_sys::Win32::Foundation::{
         CloseHandle, FALSE, GetLastError, LocalFree, WAIT_OBJECT_0,
     };
     use windows_sys::Win32::Security::Authorization::{
-        EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW, REVOKE_ACCESS, SE_FILE_OBJECT,
-        SetEntriesInAclW, SetNamedSecurityInfoW, TRUSTEE_IS_NAME, TRUSTEE_IS_SID, TRUSTEE_W,
+        ConvertSidToStringSidW, ConvertStringSidToSidW, EXPLICIT_ACCESS_W, GRANT_ACCESS,
+        GetNamedSecurityInfoW, REVOKE_ACCESS, SE_FILE_OBJECT, SetEntriesInAclW,
+        SetNamedSecurityInfoW, TRUSTEE_IS_NAME, TRUSTEE_IS_SID, TRUSTEE_W,
     };
     use windows_sys::Win32::Security::DeriveCapabilitySidsFromName;
     use windows_sys::Win32::Security::Isolation::{
@@ -469,8 +471,14 @@ mod win {
         DeriveAppContainerSidFromAppContainerName,
     };
     use windows_sys::Win32::Security::{
-        ACL, DACL_SECURITY_INFORMATION, FreeSid, GetSecurityDescriptorDacl, PSID,
-        SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES, SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+        ACE_HEADER, ACL, ACL_REVISION, AddMandatoryAce, DACL_SECURITY_INFORMATION, EqualSid,
+        FreeSid, GetAce, GetSecurityDescriptorDacl, GetSecurityDescriptorSacl, InitializeAcl,
+        InitializeSecurityDescriptor, LABEL_SECURITY_INFORMATION, PSID, SECURITY_CAPABILITIES,
+        SECURITY_DESCRIPTOR, SID_AND_ATTRIBUTES, SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+        SetSecurityDescriptorDacl,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, OPEN_EXISTING, WRITE_DAC,
     };
     use windows_sys::Win32::System::Com::CoCreateGuid;
     use windows_sys::Win32::System::Console::{
@@ -496,6 +504,34 @@ mod win {
     /// POSIX `+x` parity: traverse plus attribute reads, no listing or file
     /// contents — sibling names under an ancestor stay private.
     const TRAVERSE_ACCESS: u32 = 0xA0; // FILE_TRAVERSE | FILE_READ_ATTRIBUTES
+    /// `SYSTEM_MANDATORY_LABEL_ACE_TYPE` — windows-sys 0.61 does not name
+    /// the ACE-type constant.
+    const LABEL_ACE_TYPE: u8 = 0x11;
+    /// `SYSTEM_MANDATORY_LABEL_NO_WRITE_UP` — the mask
+    /// `AddMandatoryAce` writes into the label ACE.
+    const LABEL_NO_WRITE_UP: u32 = 0x1;
+    /// `ACCESS_ALLOWED_ACE_TYPE` for the DACL walk — same absence as the
+    /// label-ACE constant.
+    const ALLOWED_ACE_TYPE: u8 = 0x0;
+    /// `OBJECT_INHERIT_ACE` / `CONTAINER_INHERIT_ACE` — the label ACE
+    /// carries both so the write root's Low label propagates to its whole
+    /// subtree, matching the DACL grant's `(OI)(CI)` reach.
+    const OBJECT_INHERIT_ACE: u8 = 0x1;
+    const CONTAINER_INHERIT_ACE: u8 = 0x2;
+    /// `ACCESS_DENIED_ACE_TYPE` — a deny ACE touching the needed access
+    /// always wins over the sandbox's planted allow, so it ends the
+    /// packages-readability search.
+    const DENIED_ACE_TYPE: u8 = 0x1;
+    /// `INHERIT_ONLY_ACE` — an ACE marked so only covers descendants, not
+    /// the object carrying it.
+    const INHERIT_ONLY_ACE: u8 = 0x8;
+    /// `FILE_GENERIC_READ | FILE_GENERIC_EXECUTE` — the file-specific
+    /// expansion of the generic pair the plant would add.
+    const FILE_READ_EXECUTE: u32 = 0x0012_0089 | 0x0012_00A0;
+    /// `S-1-15-2-1` (`ALL APPLICATION PACKAGES`): the well-known SID whose
+    /// default RX grant on system directories the container can already
+    /// read and execute through.
+    const PACKAGES_SID: &str = "S-1-15-2-1";
 
     struct OwnedHandle(windows_sys::Win32::Foundation::HANDLE);
     impl OwnedHandle {
@@ -696,6 +732,10 @@ mod win {
     #[derive(Default)]
     struct DaclState {
         orig: std::collections::BTreeMap<String, bool>,
+        /// The integrity label ACE each writable root carried before the
+        /// run's Low label replaced it, as `(sid, ACE flags, policy mask)`;
+        /// `None` means the root was unlabeled (Medium).
+        orig_label: std::collections::BTreeMap<String, Option<(String, u8, u32)>>,
         holders: std::collections::BTreeMap<String, Vec<(String, u32)>>,
     }
 
@@ -750,6 +790,25 @@ mod win {
                                 .push(((*guid).to_string(), access));
                         }
                     }
+                    // `L` carries the full recorded label ACE as
+                    // `sid\tflags\tpolicy`; the three-field form from before
+                    // the policy fields existed restores the historical
+                    // defaults the writer then hard-coded.
+                    ["L", path, label] => {
+                        state.orig_label.insert(
+                            (*path).to_string(),
+                            (*label != "-").then(|| ((*label).to_string(), 0, LABEL_NO_WRITE_UP)),
+                        );
+                    }
+                    ["L", path, label, flags, policy] => {
+                        let entry = u8::from_str_radix(flags, 16)
+                            .ok()
+                            .zip(u32::from_str_radix(policy, 16).ok())
+                            .and_then(|(flags, policy)| {
+                                (*label != "-").then(|| ((*label).to_string(), flags, policy))
+                            });
+                        state.orig_label.insert((*path).to_string(), entry);
+                    }
                     _ => {}
                 }
             }
@@ -764,6 +823,16 @@ mod win {
             for (path, holders) in &self.holders {
                 for (guid, access) in holders {
                     let _ = writeln!(text, "H\t{path}\t{guid}\t{access:x}");
+                }
+            }
+            for (path, label) in &self.orig_label {
+                match label {
+                    Some((sid, flags, policy)) => {
+                        let _ = writeln!(text, "L\t{path}\t{sid}\t{flags:x}\t{policy:x}");
+                    }
+                    None => {
+                        let _ = writeln!(text, "L\t{path}\t-");
+                    }
                 }
             }
             let path = dacl_state_path(edge);
@@ -849,9 +918,13 @@ mod win {
             false
         };
         edit_dacl(&path, sid.0, access, REVOKE_ACCESS, last && was_open)?;
+        if last && let Some(orig) = state.orig_label.get(key).cloned() {
+            restore_label(&path, orig)?;
+        }
         state.remove_holder(key, guid, access);
         if last {
             state.orig.remove(key);
+            state.orig_label.remove(key);
         }
         Ok(())
     }
@@ -940,22 +1013,65 @@ mod win {
             if !state.holders.contains_key(&key) {
                 state.orig.insert(key.clone(), dacl_open(path)?);
             }
+            // The first write grant captures the label even when traverse
+            // or read holders already exist: lift restores whatever the
+            // first writer saw, so skipping it here would leave the root
+            // permanently Low after cleanup.
+            if access == GENERIC_ALL_ACCESS && !state.orig_label.contains_key(&key) {
+                state.orig_label.insert(key.clone(), read_label(path)?);
+            }
             state.add_holder(path, guid, access);
             Ok(true)
         })?;
         if !recorded {
             return Ok(false);
         }
-        match transact(edge, |_state| {
-            edit_dacl(path, sid, access, GRANT_ACCESS, false).map(|_| ())
+        match transact(edge, |state| {
+            edit_dacl(path, sid, access, GRANT_ACCESS, false).map(|_| ())?;
+            if access == GENERIC_ALL_ACCESS {
+                // DACL alone cannot make the root writable: the container
+                // child runs at Low integrity, so the root must carry the
+                // Low label for the write check to pass.
+                if let Err(error) = write_label(path, true) {
+                    // The grant is already live; undo it so a failed launch
+                    // leaves no ACE its retired holder record cannot reap.
+                    // The label goes back only when this is the sole writer —
+                    // a surviving holder still needs the Low label.
+                    let _ = edit_dacl(path, sid, access, REVOKE_ACCESS, false);
+                    if state.holders.get(&key).is_some_and(|h| h.len() == 1)
+                        && let Some(orig) = state.orig_label.get(&key).cloned()
+                    {
+                        let _ = restore_label(path, orig);
+                    }
+                    return Err(error);
+                }
+            }
+            Ok(())
         }) {
             Ok(()) => Ok(true),
             Err(error) => {
                 let _ = transact(edge, |state| {
-                    if state.holders.get(&key).is_some_and(|h| h.len() == 1) {
-                        state.orig.remove(&key);
+                    // The failed transact may have applied the ACE and label
+                    // but died in `state.save`; undo the filesystem side
+                    // before retiring the holder so nothing outlives its
+                    // record. A revoke miss keeps the holder so the reaper
+                    // can retry the lift later.
+                    if edit_dacl(path, sid, access, REVOKE_ACCESS, false).is_ok() {
+                        // The shared snapshot stays while any holder survives:
+                        // restoring it now would switch the root off Low under
+                        // another live run's AppContainer.
+                        let last = state.holders.get(&key).is_some_and(|h| h.len() == 1);
+                        if access == GENERIC_ALL_ACCESS
+                            && last
+                            && let Some(orig) = state.orig_label.remove(&key)
+                        {
+                            let _ = restore_label(path, orig);
+                        }
+                        if last {
+                            state.orig.remove(&key);
+                        }
+                        state.remove_holder(&key, guid, access);
                     }
-                    state.remove_holder(&key, guid, access);
                     Ok(())
                 });
                 Err(error)
@@ -983,10 +1099,19 @@ mod win {
         trustee.TrusteeForm = TRUSTEE_IS_SID;
         trustee.TrusteeType = TRUSTEE_IS_NAME;
         trustee.ptstrName = sid.cast();
+        // Traverse grants stay object-only: the container needs
+        // FILE_TRAVERSE on the ancestor directory itself, not on existing
+        // descendants — an inheritable ACE here would make
+        // `SetNamedSecurityInfoW` re-propagate it through the whole
+        // subtree (tens of thousands of children on e.g. `C:\Users\...`).
         let entry = EXPLICIT_ACCESS_W {
             grfAccessPermissions: access,
             grfAccessMode: mode,
-            grfInheritance: SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+            grfInheritance: if access == TRAVERSE_ACCESS {
+                0
+            } else {
+                SUB_CONTAINERS_AND_OBJECTS_INHERIT
+            },
             Trustee: trustee,
         };
         let mut old_dacl: *mut ACL = ptr::null_mut();
@@ -1033,22 +1158,210 @@ mod win {
             return Err(last_error(&format!("build ACL for {}", path.display())));
         }
         let restore = restore_open && (new_dacl.is_null() || unsafe { (*new_dacl).AceCount == 0 });
-        let write = unsafe {
-            SetNamedSecurityInfoW(
-                wide_path.as_ptr(),
-                SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION,
-                ptr::null_mut(),
-                ptr::null_mut(),
-                if restore { ptr::null_mut() } else { new_dacl },
-                ptr::null_mut(),
-            )
+        // Traverse grants write the object DACL alone via
+        // `NtSetSecurityObject`: `SetNamedSecurityInfoW` re-propagates every
+        // inheritable ACE already on a directory to its whole subtree, which
+        // costs tens of seconds on `C:\Users` even when the new ACE itself
+        // is non-inherited. Object-only writes skip the walk entirely.
+        let write = if access == TRAVERSE_ACCESS {
+            match write_dir_dacl(path, if restore { ptr::null_mut() } else { new_dacl }) {
+                Ok(()) => 0,
+                Err(error) => {
+                    unsafe { LocalFree(new_dacl.cast()) };
+                    return Err(error);
+                }
+            }
+        } else {
+            unsafe {
+                SetNamedSecurityInfoW(
+                    wide_path.as_ptr(),
+                    SE_FILE_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    if restore { ptr::null_mut() } else { new_dacl },
+                    ptr::null_mut(),
+                )
+            }
         };
         unsafe { LocalFree(new_dacl.cast()) };
         if write != 0 {
             return Err(last_error(&format!("write ACL on {}", path.display())));
         }
         Ok(was_open)
+    }
+
+    /// The integrity label ACE in `path`'s label as `(sid, ACE flags,
+    /// policy mask)`, or `None` when the object is unlabeled — which means
+    /// an effective Medium label, too high for the Low-integrity child to
+    /// write through.
+    fn read_label(path: &Path) -> Result<Option<(String, u8, u32)>, String> {
+        let wide_path = wide_path(path);
+        let mut sd = ptr::null_mut();
+        let mut sacl: *mut ACL = ptr::null_mut();
+        let read = unsafe {
+            GetNamedSecurityInfoW(
+                wide_path.as_ptr(),
+                SE_FILE_OBJECT,
+                LABEL_SECURITY_INFORMATION,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                &raw mut sacl,
+                &raw mut sd,
+            )
+        };
+        if read != 0 {
+            return Err(last_error(&format!("read label on {}", path.display())));
+        }
+        let mut present = FALSE;
+        let mut defaulted = FALSE;
+        let mut stored_sacl: *mut ACL = ptr::null_mut();
+        let described = unsafe {
+            GetSecurityDescriptorSacl(
+                sd,
+                &raw mut present,
+                &raw mut stored_sacl,
+                &raw mut defaulted,
+            )
+        };
+        if described == FALSE {
+            if !sd.is_null() {
+                unsafe { LocalFree(sd) };
+            }
+            return Err(last_error(&format!("describe label on {}", path.display())));
+        }
+        let mut out = None;
+        if present != FALSE && !stored_sacl.is_null() {
+            let count = unsafe { (*stored_sacl).AceCount };
+            for index in 0..u32::from(count) {
+                let mut ace = ptr::null_mut();
+                if unsafe { GetAce(stored_sacl, index, &raw mut ace) } == FALSE {
+                    break;
+                }
+                let header = ace.cast::<ACE_HEADER>();
+                if unsafe { (*header).AceType } != LABEL_ACE_TYPE {
+                    continue;
+                }
+                // SYSTEM_MANDATORY_LABEL_ACE layout: header, then the policy
+                // mask u32, then the SID — capture all three so the restore
+                // replays the original flags and policy, not just the SID.
+                let flags = unsafe { (*header).AceFlags };
+                let mask = unsafe { ace.cast::<u8>().add(4).cast::<u32>().read_unaligned() };
+                let sid = unsafe { ace.cast::<u8>().add(8).cast::<std::ffi::c_void>() };
+                out = sid_text(sid).map(|sid| (sid, flags, mask));
+                break;
+            }
+        }
+        if !sd.is_null() {
+            unsafe { LocalFree(sd) };
+        }
+        Ok(out)
+    }
+
+    /// Writes the object's integrity label: the Low label the sandboxed child
+    /// needs to write inside a writable root, or an empty SACL to return the
+    /// object to unlabeled. The Low ACE is `(OI)(CI)` — files created later
+    /// must inherit it — so `SetNamedSecurityInfoW` propagates it through
+    /// every existing descendant. `plant_grants` snapshots each writable
+    /// root's label up front so a descendant root never records this
+    /// propagated Low as its own original.
+    fn write_label(path: &Path, low: bool) -> Result<(), String> {
+        let wide_path = wide_path(path);
+        let mut acl_storage = [0u32; 32];
+        let acl = acl_storage.as_mut_ptr().cast::<ACL>();
+        if unsafe { InitializeAcl(acl, 128, ACL_REVISION) } == FALSE {
+            return Err(last_error(&format!(
+                "init label ACL for {}",
+                path.display()
+            )));
+        }
+        if low {
+            const LOW_LABEL: &str = "S-1-16-4096";
+            let name = wide(LOW_LABEL);
+            let mut sid: PSID = ptr::null_mut();
+            if unsafe { ConvertStringSidToSidW(name.as_ptr(), &raw mut sid) } == FALSE {
+                return Err(last_error(&format!("build label for {}", path.display())));
+            }
+            let added = unsafe {
+                AddMandatoryAce(
+                    acl,
+                    ACL_REVISION,
+                    u32::from(OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE),
+                    LABEL_NO_WRITE_UP,
+                    sid,
+                )
+            };
+            unsafe { LocalFree(sid.cast()) };
+            if added == FALSE {
+                return Err(last_error(&format!("build label for {}", path.display())));
+            }
+        }
+        let wrote = unsafe {
+            SetNamedSecurityInfoW(
+                wide_path.as_ptr(),
+                SE_FILE_OBJECT,
+                LABEL_SECURITY_INFORMATION,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                acl,
+            )
+        };
+        if wrote != 0 {
+            return Err(last_error(&format!("write label on {}", path.display())));
+        }
+        Ok(())
+    }
+
+    /// Restores `path`'s recorded label: the stored `(sid, flags, policy)`
+    /// ACE when the object had one, or clears the label when it was
+    /// unlabeled before this run.
+    fn restore_label(path: &Path, orig: Option<(String, u8, u32)>) -> Result<(), String> {
+        match orig {
+            Some((label, flags, policy)) => {
+                // Non-Low labels are not sandbox-created; restore by writing
+                // back the recorded ACE — flags and policy included, so a
+                // root that carried an inherited or non-default label gets
+                // its own policy back rather than the sandbox's defaults.
+                let wide_path = wide_path(path);
+                let mut acl_storage = [0u32; 32];
+                let acl = acl_storage.as_mut_ptr().cast::<ACL>();
+                if unsafe { InitializeAcl(acl, 128, ACL_REVISION) } == FALSE {
+                    return Err(last_error(&format!(
+                        "init label ACL for {}",
+                        path.display()
+                    )));
+                }
+                let name = wide(&label);
+                let mut sid: PSID = ptr::null_mut();
+                if unsafe { ConvertStringSidToSidW(name.as_ptr(), &raw mut sid) } == FALSE {
+                    return Err(last_error(&format!("build label for {}", path.display())));
+                }
+                let added =
+                    unsafe { AddMandatoryAce(acl, ACL_REVISION, u32::from(flags), policy, sid) };
+                unsafe { LocalFree(sid.cast()) };
+                if added == FALSE {
+                    return Err(last_error(&format!("build label for {}", path.display())));
+                }
+                let wrote = unsafe {
+                    SetNamedSecurityInfoW(
+                        wide_path.as_ptr(),
+                        SE_FILE_OBJECT,
+                        LABEL_SECURITY_INFORMATION,
+                        ptr::null_mut(),
+                        ptr::null_mut(),
+                        ptr::null_mut(),
+                        acl,
+                    )
+                };
+                if wrote != 0 {
+                    return Err(last_error(&format!("write label on {}", path.display())));
+                }
+                Ok(())
+            }
+            None => write_label(path, false),
+        }
     }
 
     /// The grant plan, matched to the POSIX read-open model: the container
@@ -1108,18 +1421,300 @@ mod win {
         plan
     }
 
+    /// Writes `path`'s DACL object-only — no subtree propagation. `None`
+    /// writes a null DACL (fully open). Used for traverse grants on
+    /// ancestors whose existing inheritable ACEs must not be re-propagated.
+    fn write_dir_dacl(path: &Path, new_dacl: *mut ACL) -> Result<(), String> {
+        let wide_path = wide_path(path);
+        let file = unsafe {
+            CreateFileW(
+                wide_path.as_ptr(),
+                WRITE_DAC,
+                0,
+                ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS,
+                ptr::null_mut(),
+            )
+        };
+        if file.is_null() || file == -1isize as _ {
+            return Err(last_error(&format!("open {}", path.display())));
+        }
+        let mut sd: SECURITY_DESCRIPTOR = unsafe { std::mem::zeroed() };
+        let built = unsafe {
+            InitializeSecurityDescriptor((&raw mut sd).cast(), 1) != FALSE
+                && SetSecurityDescriptorDacl((&raw mut sd).cast(), 1, new_dacl, 0) != FALSE
+        };
+        let status = if built {
+            unsafe { NtSetSecurityObject(file, DACL_SECURITY_INFORMATION, (&raw mut sd).cast()) }
+        } else {
+            -1
+        };
+        unsafe { CloseHandle(file) };
+        if status != 0 {
+            return Err(format!(
+                "dalgon sandbox: write ACL on {} failed ({status:#x}).",
+                path.display()
+            ));
+        }
+        Ok(())
+    }
+
+    /// `true` when `path`'s DACL already grants `ALL APPLICATION
+    /// PACKAGES` the read/execute access the sandbox would plant — the
+    /// container's built-in read/execute route. Planting another `(OI)(CI)`
+    /// RX ACE there adds nothing but forces `SetNamedSecurityInfoW` to
+    /// re-propagate it through every existing descendant, which runs for
+    /// minutes on system trees like `C:\Windows\system32`.
+    ///
+    /// An ACE only counts when it reaches the object itself — inherit-only
+    /// entries that solely cover descendants do not — and only when its
+    /// mask actually covers read/execute. A denied ACE that touches the
+    /// needed access makes the answer unconditionally `false`: denies
+    /// evaluate before allows in canonical ACL order, so a matching allow
+    /// cannot override it.
+    fn readable_by_packages(path: &Path) -> bool {
+        let wide_path = wide_path(path);
+        let mut sd = ptr::null_mut();
+        let mut dacl: *mut ACL = ptr::null_mut();
+        let read = unsafe {
+            GetNamedSecurityInfoW(
+                wide_path.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                &raw mut dacl,
+                ptr::null_mut(),
+                &raw mut sd,
+            )
+        };
+        if read != 0 || sd.is_null() {
+            return false;
+        }
+        let mut present = FALSE;
+        let mut defaulted = FALSE;
+        let mut stored: *mut ACL = ptr::null_mut();
+        let described = unsafe {
+            GetSecurityDescriptorDacl(sd, &raw mut present, &raw mut stored, &raw mut defaulted)
+        };
+        if described == FALSE || present == FALSE || stored.is_null() {
+            unsafe { LocalFree(sd) };
+            return false;
+        }
+        // A stored mask can carry the generic pair or its file-specific
+        // expansion; GENERIC_ALL subsumes either.
+        let covers = |mask: u32| {
+            mask & GENERIC_ALL_ACCESS == GENERIC_ALL_ACCESS
+                || mask & GENERIC_READ_EXECUTE == GENERIC_READ_EXECUTE
+                || mask & FILE_READ_EXECUTE == FILE_READ_EXECUTE
+        };
+        let name = wide(PACKAGES_SID);
+        let mut packages: PSID = ptr::null_mut();
+        let built = unsafe { ConvertStringSidToSidW(name.as_ptr(), &raw mut packages) };
+        let mut found = false;
+        if built != FALSE && !packages.is_null() {
+            let count = unsafe { (*stored).AceCount };
+            for index in 0..u32::from(count) {
+                let mut ace = ptr::null_mut();
+                if unsafe { GetAce(stored, index, &raw mut ace) } == FALSE {
+                    break;
+                }
+                let header = ace.cast::<ACE_HEADER>();
+                let (ace_type, ace_flags) = unsafe { ((*header).AceType, (*header).AceFlags) };
+                if ace_type != ALLOWED_ACE_TYPE && ace_type != DENIED_ACE_TYPE {
+                    continue;
+                }
+                // ACCESS_ALLOWED_ACE / ACCESS_DENIED_ACE layout: header,
+                // then the access mask u32, then the SID.
+                let mask = unsafe { ace.cast::<u8>().add(4).cast::<u32>().read_unaligned() };
+                let sid = unsafe { ace.cast::<u8>().add(8).cast::<std::ffi::c_void>() };
+                if unsafe { EqualSid(sid, packages) } == FALSE {
+                    continue;
+                }
+                if ace_type == DENIED_ACE_TYPE {
+                    // A matching deny touching needed access ends the search:
+                    // the sandbox's planted allow would never win.
+                    if mask & (GENERIC_READ_EXECUTE | FILE_READ_EXECUTE) != 0 {
+                        break;
+                    }
+                    continue;
+                }
+                if ace_flags & INHERIT_ONLY_ACE != 0 {
+                    continue;
+                }
+                // A directory ACE that stops at the object grants nothing to
+                // the executables inside — the container could read the dir
+                // itself but not launch its files, so it does not count.
+                if path.is_dir() && ace_flags & OBJECT_INHERIT_ACE == 0 {
+                    continue;
+                }
+                if covers(mask) {
+                    found = true;
+                    break;
+                }
+            }
+            unsafe { LocalFree(packages.cast()) };
+        }
+        unsafe { LocalFree(sd) };
+        found
+    }
+
+    /// Like `plant`, but for many files sharing one access mode: all intents
+    /// record in a single transact, the DACL edits then run inside a second
+    /// transact (so the `DaclLock` serializes them against every other
+    /// helper's read-modify-write of the same DACLs), and one closing
+    /// transact retires the intents of files whose edit never ran. Batched
+    /// so dozens of `PATH` program files do not each pay a load→edit→save
+    /// state round trip.
+    fn plant_files(
+        edge: &Edge,
+        paths: &[PathBuf],
+        sid: PSID,
+        guid: &str,
+        access: u32,
+    ) -> Result<Vec<PathBuf>, String> {
+        let recorded: Vec<PathBuf> = transact(edge, |state| {
+            let mut out = Vec::new();
+            for path in paths {
+                let key = path_key(path);
+                if state
+                    .holders
+                    .get(&key)
+                    .is_some_and(|h| h.iter().any(|(g, a)| g == guid && *a == access))
+                {
+                    continue;
+                }
+                if !state.holders.contains_key(&key) {
+                    state.orig.insert(key, dacl_open(path)?);
+                }
+                state.add_holder(path, guid, access);
+                out.push(path.clone());
+            }
+            Ok(out)
+        })?;
+        let (planted, first_error) = transact(edge, |_state| {
+            let mut planted = Vec::new();
+            let mut first_error = None;
+            for path in &recorded {
+                match edit_dacl(path, sid, access, GRANT_ACCESS, false) {
+                    Ok(_) => planted.push(path.clone()),
+                    Err(error) => {
+                        first_error = Some(error);
+                        break;
+                    }
+                }
+            }
+            Ok((planted, first_error))
+        })?;
+        if let Some(error) = first_error {
+            let _ = transact(edge, |state| {
+                // `Err` drops `planted`, so the caller can never lift those
+                // ACEs — revoke the successful prefix here, retiring each
+                // holder only once its edit is undone. The never-attempted
+                // suffix needs no undo; retire its holders outright.
+                for path in &planted {
+                    let key = path_key(path);
+                    if edit_dacl(path, sid, access, REVOKE_ACCESS, false).is_ok() {
+                        if state.holders.get(&key).is_some_and(|h| h.len() == 1) {
+                            state.orig.remove(&key);
+                        }
+                        state.remove_holder(&key, guid, access);
+                    }
+                }
+                for path in recorded.iter().skip(planted.len()) {
+                    let key = path_key(path);
+                    if state.holders.get(&key).is_some_and(|h| h.len() == 1) {
+                        state.orig.remove(&key);
+                    }
+                    state.remove_holder(&key, guid, access);
+                }
+                Ok::<(), String>(())
+            });
+            return Err(error);
+        }
+        Ok(planted)
+    }
+
+    /// Top-level program files under a `PATH` dir the container may still
+    /// resolve — executables and the DLLs loaders pull from the same dir.
+    const PATH_GRANT_LIMIT: usize = 128;
+    fn path_grant_files(dir: &Path) -> Vec<PathBuf> {
+        let Ok(read_dir) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        read_dir
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension().and_then(OsStr::to_str).is_some_and(|ext| {
+                    matches!(
+                        ext.to_ascii_lowercase().as_str(),
+                        "exe" | "dll" | "bat" | "cmd" | "ps1" | "com"
+                    )
+                })
+            })
+            .take(PATH_GRANT_LIMIT)
+            .collect()
+    }
+
     /// Plants the grant plan under per-edit transacts. A fatal (writable
     /// root) failure lifts what already planted and aborts; optional entries
-    /// tolerate the edit failing.
+    /// tolerate the edit failing. RX dirs the container already reaches via
+    /// `ALL APPLICATION PACKAGES` are skipped; RX dirs it cannot reach get
+    /// object-only traverse plus per-file grants on the top-level programs —
+    /// an inheritable RX ACE on the dir would re-propagate through every
+    /// existing descendant, which runs for minutes on large trees.
     fn plant_grants(
         edge: &Edge,
         roots: &[PathBuf],
         executable: &Path,
         profile: &Profile,
     ) -> Result<Vec<(PathBuf, u32)>, String> {
+        let plan = grant_plan(edge, roots, executable);
+        // Snapshot every writable root's label before the first `write_label`
+        // runs: the Low ACE is inheritable, so lowering an ancestor first
+        // would let a descendant that is also a root record the injected
+        // label as its original — cleanup would then leave it Low forever.
+        transact(edge, |state| {
+            for (dir, access, _) in &plan {
+                if *access == GENERIC_ALL_ACCESS
+                    && let std::collections::btree_map::Entry::Vacant(entry) =
+                        state.orig_label.entry(path_key(dir))
+                {
+                    entry.insert(read_label(dir)?);
+                }
+            }
+            Ok(())
+        })?;
         let mut planted: Vec<(PathBuf, u32)> = Vec::new();
         let result = (|| {
-            for (dir, access, optional) in grant_plan(edge, roots, executable) {
+            for (dir, access, optional) in plan {
+                if access == GENERIC_READ_EXECUTE {
+                    if readable_by_packages(&dir) {
+                        continue;
+                    }
+                    match plant(edge, &dir, profile.sid.0, &profile.guid, TRAVERSE_ACCESS) {
+                        Ok(_) => planted.push((dir.clone(), TRAVERSE_ACCESS)),
+                        Err(error) if !optional => return Err(error),
+                        Err(_) => continue,
+                    }
+                    let mut files = path_grant_files(&dir);
+                    if !optional && dir == executable.parent().unwrap_or(Path::new("")) {
+                        files.retain(|file| file != executable);
+                        match plant(edge, executable, profile.sid.0, &profile.guid, access) {
+                            Ok(_) => planted.push((executable.to_path_buf(), access)),
+                            Err(error) => return Err(error),
+                        }
+                    }
+                    match plant_files(edge, &files, profile.sid.0, &profile.guid, access) {
+                        Ok(done) => planted.extend(done.into_iter().map(|f| (f, access))),
+                        Err(error) if !optional => return Err(error),
+                        Err(_) => {}
+                    }
+                    continue;
+                }
                 match plant(edge, &dir, profile.sid.0, &profile.guid, access) {
                     Ok(_) => planted.push((dir, access)),
                     Err(error) if !optional => return Err(error),
@@ -1353,6 +1948,131 @@ mod win {
         Ok(AttrList(buffer))
     }
 
+    /// Renders a SID as its `S-1-...` text; `None` on conversion failure.
+    fn sid_text(sid: PSID) -> Option<String> {
+        unsafe {
+            let mut text = ptr::null_mut();
+            if ConvertSidToStringSidW(sid.cast(), &raw mut text) == FALSE {
+                return None;
+            }
+            let mut len = 0usize;
+            while *text.add(len) != 0 {
+                len += 1;
+            }
+            let out = String::from_utf16_lossy(std::slice::from_raw_parts(text, len));
+            LocalFree(text.cast());
+            Some(out)
+        }
+    }
+
+    /// Returns the first `msys-*`/`cygwin*` module the executable imports, or
+    /// `None`. MSYS/cygwin runtimes die inside a classic `AppContainer` — its
+    /// `\BaseNamedObjects` is package-private, so their early named-object
+    /// creation is denied and the process exits `STATUS_DLL_INIT_FAILED`
+    /// (0xC0000142). Detecting the import before spawn turns that runtime
+    /// death into a legible sandbox refusal.
+    fn posix_runtime_import(path: &Path) -> Option<String> {
+        let bytes = std::fs::read(path).ok()?;
+        let u16le = |at: usize| -> Option<usize> {
+            Some(u16::from_le_bytes(bytes.get(at..at + 2)?.try_into().ok()?) as usize)
+        };
+        let u32le = |at: usize| -> Option<usize> {
+            Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?) as usize)
+        };
+        let pe = u32le(0x3c)?;
+        if bytes.get(pe..pe + 4)? != b"PE\0\0" {
+            return None;
+        }
+        let sections = u16le(pe + 6)?;
+        let opt_size = u16le(pe + 20)?;
+        let opt = pe + 24;
+        let magic = u16le(opt)?;
+        let dd = opt
+            + match magic {
+                0x10b => 96,
+                0x20b => 112,
+                _ => return None,
+            };
+        let import_rva = u32le(dd + 8)?;
+        let table = opt + opt_size;
+        let rva_to_off = |rva: usize| -> Option<usize> {
+            (0..sections).find_map(|index| {
+                let section = table + index * 40;
+                let va = u32le(section + 12)?;
+                let raw_size = u32le(section + 16)?;
+                let raw = u32le(section + 20)?;
+                (va..va.saturating_add(raw_size.max(u32le(section + 8)?)))
+                    .contains(&rva)
+                    .then_some(raw + rva - va)
+            })
+        };
+        let base = rva_to_off(import_rva)?;
+        for index in 0..512usize {
+            let entry = base + index * 20;
+            if bytes.get(entry..entry + 20)?.iter().all(|b| *b == 0) {
+                return None;
+            }
+            let Some(name_at) = rva_to_off(u32le(entry + 12)?) else {
+                continue;
+            };
+            let name = bytes[name_at..]
+                .iter()
+                .take(64)
+                .take_while(|b| **b != 0)
+                .map(|b| char::from(*b).to_ascii_lowercase())
+                .collect::<String>();
+            if name.starts_with("msys-") || name.starts_with("cygwin") {
+                return Some(name);
+            }
+        }
+        None
+    }
+
+    /// The POSIX-runtime link the executable pulls in: its own `msys-*`/
+    /// `cygwin*` import, or the one in its `..\usr\bin` twin — thin
+    /// launchers like `Git\bin\bash.exe` carry no msys import themselves
+    /// but exec the msys binary at `<root>\usr\bin\<name>`, so the
+    /// launcher is refused like the binary it forwards to.
+    fn posix_runtime_link(path: &Path) -> Option<String> {
+        if let Some(dll) = posix_runtime_import(path) {
+            return Some(dll);
+        }
+        let (dir, name) = path.parent().zip(path.file_name())?;
+        let twin = dir.join("..").join("usr").join("bin").join(name);
+        let twin = twin.canonicalize().ok()?;
+        if twin == path {
+            return None;
+        }
+        posix_runtime_import(&twin).map(|dll| format!("{dll} (via {})", twin.display()))
+    }
+
+    /// Any nonzero exit from a binary that links an MSYS/cygwin runtime is
+    /// the early-init death — the run was doomed before `main`, and the
+    /// launcher propagates whatever the runtime died with (0xC0000142 on
+    /// x64, smaller codes elsewhere), so the import check decides the
+    /// diagnosis, not the code. For unlinked binaries only
+    /// `STATUS_DLL_INIT_FAILED` itself counts: a lower code is the
+    /// application's own status and passes through unlabeled.
+    fn runtime_init_failure(executable: &OsStr, code: u32) -> Option<String> {
+        if code == 0 {
+            return None;
+        }
+        if let Some(dll) = posix_runtime_link(Path::new(executable)) {
+            return Some(format!(
+                "dalgon sandbox: {} loads {dll}; MSYS/cygwin runtimes cannot run inside the Windows sandbox (AppContainer namespaces are private).",
+                executable.to_string_lossy()
+            ));
+        }
+        (code == 0xC000_0142).then(|| {
+            format!(
+                "dalgon sandbox: {} exited {code:#x} (STATUS_DLL_INIT_FAILED) inside AppContainer; a runtime DLL failed to initialize — POSIX runtimes such as MSYS/cygwin cannot run inside the Windows sandbox.",
+                executable.to_string_lossy()
+            )
+        })
+    }
+
+    /// Runs `executable` under the run's `AppContainer` profile and job and
+    /// returns its masked exit code; every exit path lifts planted grants.
     ///
     /// # Safety
     /// Win32 process launch; handles and the attribute list are closed on
@@ -1362,6 +2082,12 @@ mod win {
         executable: &OsStr,
         run_args: &[OsString],
     ) -> Result<ExitCode, String> {
+        if let Some(dll) = posix_runtime_link(Path::new(executable)) {
+            return Err(format!(
+                "dalgon sandbox: {} loads {dll}; MSYS/cygwin runtimes cannot run inside the Windows sandbox (AppContainer namespaces are private).",
+                executable.to_string_lossy()
+            ));
+        }
         let edge = Edge::capture();
         let (profile, capabilities) = container()?;
         // The run beacon lives for the whole plant→run→lift sequence: if this
@@ -1379,10 +2105,6 @@ mod win {
         let attrs = attributes(&profile, &capabilities, &std_handles)
             .inspect_err(|_| drop(lift_all(&edge, &planted, &profile)))?;
 
-        let mut application = Path::new(executable)
-            .parent()
-            .filter(|dir| !dir.as_os_str().is_empty())
-            .map(|_| wide_path(Path::new(executable)));
         let mut command: Vec<u16> = Vec::new();
         push_quoted(&mut command, executable);
         for arg in run_args {
@@ -1400,11 +2122,14 @@ mod win {
         info.StartupInfo.hStdError = std_handles[2];
         info.lpAttributeList = attrs.as_ptr();
         let mut process: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+        // `lpApplicationName` stays NULL: under an AppContainer token the
+        // loader resolves it through the container's filtered view and
+        // rejects paths it cannot map (e.g. `C:\Program Files` targets),
+        // while the quoted argv0 in `command` resolves through the normal
+        // argv path.
         let spawned = unsafe {
             CreateProcessW(
-                application
-                    .as_mut()
-                    .map_or(ptr::null(), |name| name.as_mut_ptr()),
+                ptr::null_mut(),
                 command.as_mut_ptr(),
                 ptr::null(),
                 ptr::null(),
@@ -1416,9 +2141,6 @@ mod win {
                 &raw mut process,
             )
         };
-        if let Some(name) = application.as_mut() {
-            name.clear();
-        }
         if spawned == FALSE {
             lift_all(&edge, &planted, &profile);
             return Err(last_error("spawn the sandboxed process"));
@@ -1456,6 +2178,9 @@ mod win {
         let revoke_error = lift_all(&edge, &planted, &profile);
         if let Some(error) = revoke_error {
             super::write_error(&error);
+        }
+        if let Some(error) = runtime_init_failure(executable, code) {
+            return Err(error);
         }
         u8::try_from(code & 0xFF).map_or(Ok(ExitCode::from(126)), |c| Ok(ExitCode::from(c)))
     }

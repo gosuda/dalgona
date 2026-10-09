@@ -16,7 +16,8 @@ use dal_core::ext::{
 use dal_core::{
     AgentInfo, AgentReport, AgentState, AgentsOp, AgentsReply, Answer, CallId, EntryId,
     FetchRequest, FetchResponse, Inference, JobsOp, JobsReply, ModelRequest, Notice, Question,
-    RawJson, RunOutput, RunRequest, SessionId, SidecarOp, Stop, TurnOp, TurnOpReply,
+    RawJson, RunOutput, RunRequest, SessionId, SidecarOp, StateError, StateOp, StateRecord, Stop,
+    TurnOp, TurnOpReply,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -97,6 +98,13 @@ impl Services for Host {
     }
 
     fn mcp(&self, _who: &Caller, _req: McpRequest) -> ServiceFuture<'_, McpResponse> {
+        unavailable()
+    }
+    fn state(
+        &self,
+        _who: &Caller,
+        _op: StateOp,
+    ) -> ServiceFuture<'_, Result<StateRecord, StateError>> {
         unavailable()
     }
 

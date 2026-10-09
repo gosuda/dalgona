@@ -174,6 +174,44 @@ async fn lazy_first_user_writes_one_durable_header_boot_and_user_batch() {
 }
 
 #[tokio::test]
+async fn materialize_flushes_a_lazy_journal_to_durable() {
+    let temp = TempDir::new();
+    let store = store(&temp);
+    let data_root = store.inner.data_root.clone();
+    let id = SessionId::new_v7();
+    let mut journal = store.create_session(id);
+    journal
+        .append(vec![Record::Name {
+            at: timestamp(),
+            name: Some("queued".into()),
+        }])
+        .await
+        .expect("buffer name");
+    assert!(journal.is_lazy() && !data_root.exists());
+
+    journal.materialize().await.expect("materialize lazy");
+    assert!(!journal.is_lazy());
+    let records = fs::read(journal.paths.journal())
+        .expect("read journal")
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| dal_core::decode(line).expect("decode complete line").record)
+        .collect::<Vec<_>>();
+    assert_eq!(records.len(), 3);
+    assert!(matches!(&records[2], Record::Name { .. }));
+    journal.materialize().await.expect("materialize is a no-op");
+
+    journal.close().await.expect("close file session");
+    let (reopened, _) = store.open_session(id).await.expect("reopen materialized");
+    assert!(
+        reopened
+            .records()
+            .iter()
+            .any(|record| matches!(record, Record::Name { .. }))
+    );
+}
+
+#[tokio::test]
 async fn reopened_records_end_with_recovery_boot() {
     let temp = TempDir::new();
     let store = store(&temp);

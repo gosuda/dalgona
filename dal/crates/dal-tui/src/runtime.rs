@@ -299,13 +299,14 @@ fn write_exit(
         }
     }
     let line = if exit.ephemeral {
-        crate::copy::ids::EXIT_EPHEMERAL.to_owned()
+        crate::copy::render(crate::copy::ids::EXIT_EPHEMERAL, &[("bin", opts.binary)], 0)
     } else {
         // An unnamed session resumes by its id; a placeholder name resolves to nothing.
         let session = session_id.to_string();
         crate::copy::render(
             crate::copy::ids::EXIT_SAVED,
             &[
+                ("bin", opts.binary),
                 ("name", exit.name.as_deref().unwrap_or(&session)),
                 ("id", &session),
                 ("n", &exit.messages.to_string()),

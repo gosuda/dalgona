@@ -270,6 +270,22 @@ impl JobTable {
         self.changed.send_modify(|version| *version += 1);
     }
 
+    /// Settles one job exactly once and writes the pending ledger lines
+    /// before returning: owners that settle outside `jobs.*` ops and the
+    /// reaper (the command-job task) must not leave the report buffered,
+    /// or a session that ends here loses it on reopen. A failed write
+    /// keeps the lines in the outbox for the next flush.
+    pub(crate) async fn settle_durably(
+        &mut self,
+        id: JobId,
+        outcome: JobOutcome,
+        tail: Box<[u8]>,
+    ) -> Option<FinishedJob> {
+        let finished = self.settle_once(id, outcome, tail);
+        let _ = self.flush().await;
+        finished
+    }
+
     /// Reserves one queued row behind the bounded FIFO.
     pub(crate) fn reserve(&mut self, record: JobRecord) -> Result<(), ToolError> {
         let id = record.id;
@@ -394,7 +410,6 @@ impl JobTable {
     }
 
     /// Refreshes the live tail snapshot for progress without settling.
-    #[cfg(test)]
     pub(crate) fn update_tail(&mut self, id: JobId, tail: Box<[u8]>) -> Result<(), ToolError> {
         let Some(record) = self.jobs.get_mut(&id) else {
             return Err(invalid_transition());
@@ -1021,6 +1036,41 @@ mod tests {
             .await
             .expect("reopen after journaled wake");
         assert!(jobs.take(1).is_empty());
+    }
+
+    #[tokio::test]
+    async fn settle_durably_writes_the_report_before_returning() {
+        let root = tempfile::tempdir().expect("temporary job report ledger");
+        let mut jobs = JobTable::open(root.path().to_path_buf(), &HashSet::new())
+            .await
+            .expect("open ledger");
+        let id = JobId::new_v7();
+        jobs.reserve(JobRecord::new(
+            id,
+            "export",
+            root.path().join("export.log"),
+            CancellationToken::new(),
+        ))
+        .expect("reserve command job");
+        let _ = jobs.mark_running(id);
+        jobs.settle_durably(
+            id,
+            JobOutcome::Exited { code: 0 },
+            Box::from(&b"report"[..]),
+        )
+        .await;
+        drop(jobs);
+
+        // No caller flushed after the settle: if the End line had stayed
+        // buffered, reopening would replay nothing.
+        let mut jobs = JobTable::open(root.path().to_path_buf(), &HashSet::new())
+            .await
+            .expect("reopen ledger");
+        assert_eq!(
+            jobs.take(1)[0].id,
+            id,
+            "the settled report is durable without a second flush"
+        );
     }
 
     #[test]

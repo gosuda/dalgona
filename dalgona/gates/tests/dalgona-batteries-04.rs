@@ -30,7 +30,7 @@ fn auto_thinking_changes_only_typed_request_params() -> support::TestResult<()> 
             support::start_dalgona_with_config(root, Some("[plugin.judged]\nthinking = true\n"))
                 .await?;
         let doc = host.doc("dalgona://judged")?;
-        assert!(format!("{doc:?}").contains("before_request"));
+        assert!(format!("{doc:?}").contains("first request of a top-level turn"));
         let report = host.shutdown(Duration::from_secs(2)).await;
         assert_eq!(report.sessions_closed, 0);
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())

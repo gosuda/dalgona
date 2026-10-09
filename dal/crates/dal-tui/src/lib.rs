@@ -133,6 +133,8 @@ pub struct TuiOptions {
     pub editor: Box<str>,
     /// The terminal color capability.
     pub color: ColorMode,
+    /// Binary-family name used in user-facing copy (`dal` or `dalgona`).
+    pub binary: &'static str,
     /// Environment facts captured once by the process edge.
     pub env: EnvFacts,
     /// Runtime handle created by the process edge.

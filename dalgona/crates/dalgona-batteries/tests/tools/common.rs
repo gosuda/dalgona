@@ -12,7 +12,9 @@ use dal_agent::ext::services::ServiceFuture;
 use dal_agent::ext::{
     Caller, Doc, EventStream, Extension, RawValue, Services, Tool, ToolCall, ToolCx, ToolOutcome,
 };
-use dal_core::ext::{McpDeclaration, McpRequest, McpResponse, Visibility};
+use dal_core::ext::{
+    McpDeclaration, McpRequest, McpResponse, StateError, StateOp, StateRecord, Visibility,
+};
 use dal_core::{
     AgentsOp, AgentsReply, Answer, EntryId, FetchRequest, FetchResponse, Inference, JobsOp,
     JobsReply, ModelRequest, Notice, Question, RawJson, RunOutput, RunRequest, SidecarOp, TurnOp,
@@ -185,6 +187,14 @@ impl Services for Host {
     }
 
     fn turn(&self, _who: &Caller, _op: TurnOp) -> ServiceFuture<'_, TurnOpReply> {
+        unavailable()
+    }
+
+    fn state(
+        &self,
+        _who: &Caller,
+        _op: StateOp,
+    ) -> ServiceFuture<'_, Result<StateRecord, StateError>> {
         unavailable()
     }
 
