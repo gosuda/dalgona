@@ -347,6 +347,15 @@ impl DialogUi {
                     self.expanded = !self.expanded;
                     None
                 }
+                KeyCode::PageDown => {
+                    self.expanded = true;
+                    self.scroll = self.scroll.saturating_add(1);
+                    None
+                }
+                KeyCode::PageUp => {
+                    self.scroll = self.scroll.saturating_sub(1);
+                    None
+                }
                 _ => None,
             },
             Question::Text { .. } => match key.code {
@@ -424,33 +433,44 @@ impl DialogUi {
             })
             .collect::<Vec<_>>();
         rows.truncate(height.saturating_sub(2).max(1));
-        let mut body = self.body(&request.question, width, mode, settings, cache);
+        let (mut body, pinned) = self.body_parts(&request.question, width, mode, settings, cache);
         let actions = self.actions(&request.question);
         let visible = height.saturating_sub(rows.len() + 1).max(1);
-        let hidden = body.len().saturating_sub(visible);
+        // Pinned rows (the choices of a selection) stay on screen; only the
+        // rows above them scroll.
+        let room = visible.saturating_sub(pinned.len()).max(1);
+        let hidden = body.len().saturating_sub(room);
+        let scroll = if self.expanded {
+            self.scroll.min(hidden)
+        } else {
+            self.scroll
+        };
         if hidden > 0 && !self.expanded {
-            let shown = visible.saturating_sub(1);
+            let shown = room.saturating_sub(1);
             body.truncate(shown);
             body.push(RenderRow::new(
                 format!("... {} more lines · pgdn", hidden + 1),
                 Role::Dim,
             ));
         }
-        rows.extend(body.into_iter().skip(self.scroll).take(visible));
+        rows.extend(body.into_iter().skip(scroll).take(room));
+        rows.extend(pinned);
         rows.push(RenderRow::new(actions, Role::Text));
         rows.into_iter()
             .map(|row| row.clipped(width, mode))
             .collect()
     }
 
-    fn body(
+    /// Splits the dialog body into scrollable rows and rows pinned below them.
+    fn body_parts(
         &self,
         question: &Question,
         width: usize,
         mode: crate::WidthMode,
         settings: DiagramSettings,
         cache: &RenderCache,
-    ) -> Vec<RenderRow> {
+    ) -> (Vec<RenderRow>, Vec<RenderRow>) {
+        let mut pinned = Vec::new();
         let mut rows = match question {
             Question::Approval { preview, grant, .. } => {
                 let mut rows = Vec::new();
@@ -492,11 +512,11 @@ impl DialogUi {
                 preview,
                 ..
             } => {
-                let mut rows = preview
+                let rows = preview
                     .iter()
                     .flat_map(|preview| text_rows(&preview.body, width, mode, settings, cache))
                     .collect::<Vec<_>>();
-                rows.extend(options.iter().enumerate().map(|(index, option)| {
+                pinned.extend(options.iter().enumerate().map(|(index, option)| {
                     let checked =
                         self.checked.contains(&index) || (!*multi && index == self.focused);
                     let marker = match (*multi, checked) {
@@ -505,9 +525,14 @@ impl DialogUi {
                         (false, true) => "(*)",
                         (false, false) => "( )",
                     };
+                    let description = option
+                        .description
+                        .as_deref()
+                        .map(|text| format!(" - {}", crate::width::escape(text)))
+                        .unwrap_or_default();
                     RenderRow::new(
                         format!(
-                            "{} {marker} {}",
+                            "{} {marker} {}{description}",
                             if index == self.focused { ">" } else { " " },
                             option.label
                         ),
@@ -541,10 +566,10 @@ impl DialogUi {
                 Role::Warning,
             ));
         }
-        if rows.is_empty() {
+        if rows.is_empty() && pinned.is_empty() {
             rows.push(RenderRow::new(String::new(), Role::Text));
         }
-        rows
+        (rows, pinned)
     }
 
     fn actions(&self, question: &Question) -> String {
@@ -859,5 +884,101 @@ mod tests {
         );
         assert_eq!(rows[0].text, "first line is long enough");
         assert_eq!(rows[1].text, "second line stays separate");
+    }
+
+    fn select_with_preview() -> super::DialogUi {
+        use dal_core::{Choice, Owner, Preview, Question, Request, RequestId};
+
+        let mut dialog = super::DialogUi::default();
+        dialog.opened(Request {
+            id: RequestId::new_v7(),
+            turn: None,
+            owner: Owner::Core,
+            question: Question::Select {
+                prompt: "Database: Which database?".into(),
+                options: vec![
+                    Choice {
+                        label: "SQLite".into(),
+                        description: Some("Embedded, zero config".into()),
+                    },
+                    Choice {
+                        label: "Postgres".into(),
+                        description: None,
+                    },
+                ],
+                multi: false,
+                preview: Some(Preview {
+                    title: "schema".into(),
+                    body: "line one\nline two\nline three\nline four\nline five".into(),
+                    digest: None,
+                }),
+            },
+            timeout: std::time::Duration::from_secs(30),
+            default: Answer::Cancel,
+        });
+        dialog
+    }
+
+    fn select_rows(dialog: &super::DialogUi, height: usize) -> Vec<String> {
+        dialog
+            .rendered_rows(
+                60,
+                height,
+                crate::WidthMode::Narrow,
+                DiagramSettings::default(),
+                &RenderCache::default(),
+            )
+            .into_iter()
+            .map(|row| row.text)
+            .collect()
+    }
+
+    #[test]
+    fn a_long_preview_never_hides_the_choices_or_their_descriptions() {
+        let dialog = select_with_preview();
+        let rows = select_rows(&dialog, 7);
+        assert!(rows.len() <= 7, "{rows:?}");
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("SQLite - Embedded, zero config")),
+            "{rows:?}"
+        );
+        assert!(rows.iter().any(|row| row.contains("Postgres")), "{rows:?}");
+        assert!(
+            rows.iter().any(|row| row.contains("more lines")),
+            "the clipped preview names how to read the rest: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn page_down_reads_further_into_a_clipped_preview() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let mut dialog = select_with_preview();
+        let before = select_rows(&dialog, 7);
+        assert!(
+            before.iter().any(|row| row.contains("line one")),
+            "{before:?}"
+        );
+        assert!(
+            !before.iter().any(|row| row.contains("line five")),
+            "{before:?}"
+        );
+        for _ in 0..5 {
+            assert!(
+                dialog
+                    .key(crate::keys::Key::new(KeyCode::PageDown, KeyModifiers::NONE))
+                    .is_none()
+            );
+        }
+        let after = select_rows(&dialog, 7);
+        assert!(
+            after.iter().any(|row| row.contains("line five")),
+            "{after:?}"
+        );
+        assert!(
+            after.iter().any(|row| row.contains("Postgres")),
+            "{after:?}"
+        );
     }
 }

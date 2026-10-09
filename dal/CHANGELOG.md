@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fix the question dialog for selections: a long preview no longer hides the choices, each choice shows its description, and Page Down and Page Up scroll the preview.
 - Fix reading extension manuals with the `read` tool: an extension that registers doc pages now serves them at its own `<name>://` address through `ManualScheme`, which `dalgon` re-exports.
 - Fix the `run` service: it now keeps the stdout prefix a caller asks for. Before, every run reported an overflow with an empty prefix, so extensions that read command output, such as the review battery, could not read it.
 - Fix the WebSocket server for oversized messages: a message over 16 MiB now ends the connection without a close frame, as the protocol documents. Before, the server sent a normal close frame.
