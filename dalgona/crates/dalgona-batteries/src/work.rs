@@ -19,7 +19,7 @@ use dal_core::{
 
 mod plan;
 #[cfg(test)]
-mod support;
+pub(crate) mod support;
 mod todo;
 
 pub use plan::PlanArgs;
