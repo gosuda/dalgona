@@ -1085,8 +1085,11 @@ impl SessionState {
         reports: &[super::workflow::StepResult],
     ) -> Result<String, ServiceError> {
         let prompt = super::workflow::render::render(step, item, reports, None, JobId::new_v7());
+        // The store rejects names composed only of session-id characters
+        // (`a`, `deed`, `0123`) as ambiguous with an id; numbering every
+        // task name keeps a hex-only step name usable.
         let task_name = item.map_or_else(
-            || step.name.clone(),
+            || format!("{} {}", step.name, item_index + 1),
             |item| super::pool::item_label(&step.name, item_index, item),
         );
         let preamble = super::pool::preamble(&task_name, &prompt);
@@ -1449,5 +1452,86 @@ fn stop_kind(stop: dal_core::Stop) -> StopKind {
         dal_core::Stop::Filter => StopKind::Filter,
         dal_core::Stop::Cancelled => StopKind::Cancelled,
         dal_core::Stop::Failed => StopKind::Error,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::workflow::{Isolation, Items, Step};
+    use super::*;
+    use crate::work::support::FakeServices;
+
+    fn task_step(name: &str) -> Step {
+        Step {
+            name: name.to_owned(),
+            prompt: "work".to_owned(),
+            items: Items::Task,
+            workers: 1,
+            after: Vec::new(),
+            tools: Vec::new(),
+            model: None,
+            role: None,
+            system: None,
+            isolation: Isolation::Shared,
+        }
+    }
+
+    fn state(services: Arc<FakeServices>) -> SessionState {
+        let caller = dal_agent::ext::ToolCx::for_test(services.clone())
+            .caller()
+            .clone();
+        let (_sender, receiver) = mpsc::channel(8);
+        SessionState {
+            session: SessionId::new_v7(),
+            parent: None,
+            caller,
+            services,
+            receiver,
+            snapshot: Arc::new(Mutex::new(StatusSnapshot {
+                quiet: true,
+                text: None,
+            })),
+            config: Arc::new(super::super::parse_config(None).unwrap()),
+            guard: GuardState::default(),
+            arbiter: Arbiter::new(),
+            sleep: None,
+            goal: None,
+            report: ReportCell::default(),
+            monitors: MonitorState::default(),
+            open_asks: HashSet::new(),
+            inflight_jobs: 0,
+            last_stop: StopKind::Completed,
+            turn_tool_called: false,
+            goal_timer: None,
+        }
+    }
+
+    /// The session store refuses names made only of session-id characters;
+    /// a Task step keeps its counter in the child name so a hex-only step
+    /// name still admits. A regression here returns `Cancelled` from the
+    /// real backend and the step never runs.
+    #[tokio::test]
+    async fn a_task_step_mints_a_numbered_child_name() {
+        let services = Arc::new(FakeServices::default());
+        let mut state = state(Arc::clone(&services));
+        let report = state
+            .run_item(CallId::new("c-task"), &task_step("a"), None, 0, &[])
+            .await
+            .expect("the child ran");
+        assert_eq!(report, "done");
+        assert_eq!(services.agent_start_names(), ["a 1"]);
+    }
+
+    #[tokio::test]
+    async fn pool_items_keep_the_item_label_shape() {
+        let services = Arc::new(FakeServices::default());
+        let mut state = state(Arc::clone(&services));
+        let mut step = task_step("a");
+        step.items = Items::Literal(vec!["one".to_owned(), "two".to_owned()]);
+        state
+            .run_item(CallId::new("c-pool"), &step, Some("one"), 0, &[])
+            .await
+            .expect("the child ran");
+        assert_eq!(services.agent_start_names(), ["a 1: one"]);
     }
 }
