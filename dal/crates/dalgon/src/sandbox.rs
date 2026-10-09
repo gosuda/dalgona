@@ -2189,19 +2189,26 @@ mod win {
             )
         };
         if spawned == FALSE {
-            // `last_error` first: the lift runs more API calls and would
-            // overwrite the failure code.
-            let error = last_error("spawn the sandboxed process");
+            // Both codes mean this Windows edition or policy refuses
+            // AppContainer child launches outright: `ERROR_INVALID_PARAMETER`
+            // on Windows Server (accepts the profile/SID calls but not the
+            // process token — verified by bisect) and
+            // `ERROR_APPCONTAINER_REQUIRED` on the windows-11-arm CI image.
+            const ERROR_INVALID_PARAMETER: u32 = 87;
+            const ERROR_APPCONTAINER_REQUIRED: u32 = 4250;
+            // The code first: the lift runs more API calls and would
+            // overwrite `GetLastError`.
+            let raw = unsafe { GetLastError() };
+            let error = format!("dalgon sandbox: spawn the sandboxed process failed ({raw}).");
             lift_all(&edge, &planted, &profile);
-            // `ERROR_INVALID_PARAMETER` from `CreateProcessW` under the
-            // capability attribute means this Windows edition rejects
-            // AppContainer child launches outright (Windows Server, which
-            // accepts the profile/SID calls but not the process token).
-            return Err(if error.contains("(87)") {
-                format!("{error}; this Windows edition cannot launch AppContainer processes")
-            } else {
-                error
-            });
+            // Name the cause rather than reporting a bare code.
+            return Err(
+                if raw == ERROR_INVALID_PARAMETER || raw == ERROR_APPCONTAINER_REQUIRED {
+                    format!("{error}; this Windows edition cannot launch AppContainer processes")
+                } else {
+                    error
+                },
+            );
         }
 
         let job = kill_on_close_job().and_then(|job| {
@@ -2300,9 +2307,10 @@ mod win {
                 Ok(code) => {
                     assert_eq!(code, ExitCode::SUCCESS, "sandboxed whoami exited {code:?}");
                 }
-                // Windows Server accepts the AppContainer profile/SID calls
-                // but rejects the child launch — that refusal must stay
-                // legible rather than a bare error code.
+                // Windows Server (87) and the windows-11-arm CI image
+                // (4250) accept the AppContainer setup calls but reject the
+                // child launch — that refusal must stay legible rather
+                // than a bare error code.
                 Err(message) => assert!(
                     message.contains("cannot launch AppContainer processes"),
                     "unexpected sandbox refusal: {message}"
