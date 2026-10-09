@@ -4,9 +4,9 @@
 //!
 //! The compactor asks its [`ImageHost`] for the model's complete catalog
 //! image profile and refuses with the exact no-image-profile notice when the
-//! host has none, so the local text summary runs. The landed dal API carries
-//! no catalog profile, no blob service, and no image-bearing replacement;
-//! [`LandedHost`] states exactly that.
+//! host has none, so the local text summary runs. [`LandedHost`] reads the
+//! journal text from the covered entries and has no sink for image parts, so
+//! it refuses with the cannot-commit notice.
 
 use std::num::NonZeroU64;
 use std::sync::{Arc, LazyLock};
@@ -20,7 +20,7 @@ use tokio::sync::Semaphore;
 
 use super::MAX_CONCURRENT_RENDERS;
 use super::pipeline::{Budget, Commit, Decline, Engine, Limits, Request, SourceReader};
-use super::records::LetterRecord;
+use super::records::{LetterRecord, journal_input};
 use super::spans::CompactPiece;
 
 /// Process-wide render gate: at most four concurrent renders across every
@@ -42,16 +42,18 @@ pub(crate) trait ImageHost: Send + Sync + 'static {
 
 /// The host as landed in dal today.
 ///
-/// dal supplies neither a catalog image profile nor a blob store nor an
-/// image-bearing replacement to compactors, so this host reports no profile.
+/// The covered journal entries supply the source pieces and their bytes.
+/// The host has no sink that commits image parts, so every compaction
+/// refuses with the cannot-commit notice before it reads any journal text.
 pub(crate) struct LandedHost;
 
 impl ImageHost for LandedHost {
     fn source(
         &self,
-        _input: &CompactInput<'_>,
+        input: &CompactInput<'_>,
     ) -> Option<(Vec<CompactPiece>, Arc<dyn SourceReader>)> {
-        None
+        let (pieces, source) = journal_input(input.covered)?;
+        Some((pieces, Arc::new(source)))
     }
 
     fn sink(&self, _services: &Arc<dyn Services>, _caller: &Caller) -> Option<Arc<dyn Commit>> {
@@ -92,6 +94,10 @@ impl Compactor for HistoryCompactor {
     ) -> BoxFuture<'a, Result<Option<Compaction>, CompactError>> {
         Box::pin(async move {
             let profile = input.image_profile.ok_or(Decline::NoImageProfile)?;
+            let sink = self
+                .host
+                .sink(&services, input.caller)
+                .ok_or(Decline::CannotCommit)?;
             let (pieces, source) = self.host.source(&input).ok_or(Decline::SourceUnavailable)?;
             let images_elsewhere = input.images_elsewhere;
             let ordinal = next_ordinal(&services, input.caller).await?;
@@ -115,10 +121,6 @@ impl Compactor for HistoryCompactor {
             if let Some(carried) = input.carried {
                 request = request.with_carried(carried);
             }
-            let sink = self
-                .host
-                .sink(&services, input.caller)
-                .ok_or(Decline::CannotCommit)?;
             self.engine.run(request, profile, sink).await
         })
     }

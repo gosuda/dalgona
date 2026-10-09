@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fix the history compaction notice for a model that reads images when this host cannot store them: it now says `history: this host cannot commit image parts.` instead of `history: the journal source is unavailable.`, and the text summary still runs.
 - Fix goal saving errors: a failed write of the goal file now reports `goal: saving the goal failed: <message>` instead of a raw file error.
 - Make `/abort` continue cancelling child sessions when status checks fail, report unexpected replies, and stop after a bounded sweep with active session ids.
 - Fix finished orchestration children that kept their runtime until the session ended: a run now closes each child as soon as its report arrives, with or without a connected client, and shows a notice if the close fails.

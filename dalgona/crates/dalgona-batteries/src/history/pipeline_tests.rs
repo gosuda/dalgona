@@ -8,7 +8,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use dal_agent::ext::{BoxFuture, CompactError, Compaction, CoveredEntry};
-use dal_core::{ContextItem, EntryId, Part, SessionId};
+use dal_core::{
+    AssistantPart, BlobId, CallId, ContextItem, EntryId, Family, Part, RawJson, ReplaySource,
+    SessionId,
+};
 use dal_ext::Font;
 use tokio::sync::Semaphore;
 
@@ -16,8 +19,9 @@ use super::CARRIED_PREFIX;
 use super::pipeline::{
     Budget, Commit, Drawn, Engine, ImageProfile, Limits, Request, Slot, SourceReader,
 };
-use super::records::LetterRecord;
-use super::spans::{CompactPiece, Role, SourceError, Span};
+use super::records::{LetterRecord, journal_input};
+use super::selection::LetterVisibility;
+use super::spans::{CompactPiece, Item, Role, SourceError, Span, items};
 
 const TOKENS: u64 = 4761;
 
@@ -240,11 +244,13 @@ async fn rendered_image_spans_resolve_in_the_source_fixture() {
             drawn.slots[index - 1],
             Slot::Text(format!("letter://{id}").into())
         );
-        assert!(
-            drawn.letters[*letter]
-                .index_line
-                .starts_with(&format!("letter://{id}  "))
-        );
+        let line = drawn
+            .index
+            .iter()
+            .find(|line| line.id.as_ref() == id.as_str())
+            .expect("every drawn letter has an index line");
+        assert_eq!(line.visibility, LetterVisibility::Drawn);
+        assert!(line.text.starts_with(&format!("letter://{id}  ")));
         assert!(!spans.is_empty());
         for span in spans {
             let bytes = source
@@ -497,6 +503,13 @@ async fn undrawable_letter_is_shown_as_its_exact_text_without_an_image() {
     for letter in &drawn.letters {
         assert!(!letter.png.is_empty());
     }
+    let shown_as_text: Vec<_> = drawn
+        .index
+        .iter()
+        .filter(|line| line.visibility == LetterVisibility::ShownAsText)
+        .collect();
+    assert_eq!(shown_as_text.len(), 1);
+    assert!(shown_as_text[0].text.ends_with(", shown as text"));
 }
 
 #[tokio::test]
@@ -580,4 +593,318 @@ async fn retained_image_bytes_use_the_png_budget() {
     let (result, drawn) = run(exact, profile(1000), request(&covered(), carried)).await;
     assert!(is_refusal(&result));
     assert!(drawn.is_none());
+}
+
+/// Positions of the letters that the draw path left as text.
+fn text_positions(drawn: &Drawn) -> Vec<usize> {
+    drawn
+        .slots
+        .iter()
+        .filter_map(|slot| match slot {
+            Slot::Text(text) => text
+                .strip_prefix("letter://history/1.")?
+                .split_once(' ')
+                .filter(|(_, rest)| rest.starts_with("is shown as text because"))
+                .and_then(|(index, _)| index.parse::<usize>().ok())
+                .map(|index| index - 1),
+            Slot::Image(_) => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn index_names_every_letter_by_visibility_in_path_order() {
+    let entries = vec![
+        user(1, true, &"a".repeat(120)),
+        user(2, true, &format!("smile \u{1F680} {}", "b".repeat(120))),
+    ];
+    let kept = 4_u64;
+    let (result, drawn) = run(
+        limits(),
+        profile(1000),
+        request(&entries, budget(TOKENS * kept * 2, 0.5)),
+    )
+    .await;
+    assert!(result.expect("run succeeds").is_some());
+    let drawn = drawn.expect("drawn");
+    let selected = positions(&drawn);
+    let as_text = text_positions(&drawn);
+    assert_eq!(selected.len(), 4);
+    assert!(!as_text.is_empty(), "the rocket letter is shown as text");
+    assert!(drawn.index.len() > selected.len() + as_text.len());
+
+    for (position, line) in drawn.index.iter().enumerate() {
+        assert_eq!(line.id.as_ref(), format!("history/1.{}", position + 1));
+        let (visibility, suffix) = if selected.contains(&position) {
+            (LetterVisibility::Drawn, "")
+        } else if as_text.contains(&position) {
+            (LetterVisibility::ShownAsText, ", shown as text")
+        } else {
+            (LetterVisibility::NotDrawn, ", not drawn")
+        };
+        assert_eq!(line.visibility, visibility, "letter {}", line.id);
+        let entries = line
+            .text
+            .strip_prefix(&format!("letter://{}  history image, entries ", line.id))
+            .and_then(|rest| rest.strip_suffix(suffix))
+            .expect("the index line names the letter and ends with its visibility suffix");
+        let (first, last) = entries.split_once('-').expect("entries a-b");
+        assert!(first.parse::<u64>().expect("first entry") <= last.parse::<u64>().expect("last"));
+    }
+
+    let hidden: Vec<usize> = (0..drawn.index.len())
+        .filter(|position| !selected.contains(position) && !as_text.contains(position))
+        .collect();
+    let index_text = drawn
+        .slots
+        .iter()
+        .rev()
+        .find_map(|slot| match slot {
+            Slot::Text(text) => Some(text.clone()),
+            Slot::Image(_) => None,
+        })
+        .expect("index text is last");
+    assert!(index_text.contains(&format!("letter://history/1.{}", hidden[0] + 1)));
+}
+
+fn covered_entry(entry_no: u64, turn: bool, content: ContextItem) -> CoveredEntry {
+    CoveredEntry {
+        entry: entry(entry_no),
+        starts_user_turn: turn,
+        estimated_tokens: 1_000_000,
+        content,
+    }
+}
+
+fn assistant(parts: Vec<AssistantPart>) -> ContextItem {
+    ContextItem::Assistant {
+        source: ReplaySource {
+            family: Family::Anthropic,
+            model: "claude".into(),
+        },
+        parts,
+    }
+}
+
+fn call(args: &str) -> AssistantPart {
+    AssistantPart::ToolCall {
+        call: CallId::new("c1"),
+        name: "read".into(),
+        args: RawJson::parse(args).expect("fixture JSON parses"),
+    }
+}
+
+fn tool_result(name: &str, is_error: bool, parts: Vec<Part>) -> ContextItem {
+    ContextItem::ToolResult {
+        call: CallId::new("c1"),
+        name: name.into(),
+        is_error,
+        parts,
+    }
+}
+
+fn text(text: &str) -> Part {
+    Part::Text { text: text.into() }
+}
+
+/// One entry per journal role, with images and a stored text blob.
+fn every_role() -> Vec<CoveredEntry> {
+    vec![
+        covered_entry(
+            1,
+            true,
+            ContextItem::User {
+                parts: vec![
+                    text("hello"),
+                    Part::Image {
+                        mime: "image/png".into(),
+                        bytes: vec![1, 2, 3].into(),
+                    },
+                ],
+            },
+        ),
+        covered_entry(
+            2,
+            false,
+            assistant(vec![
+                AssistantPart::Thinking {
+                    text: "private plan".into(),
+                    replay: None,
+                },
+                AssistantPart::Text {
+                    text: "on it".into(),
+                },
+                call(r#"{"path":"a.rs"}"#),
+            ]),
+        ),
+        covered_entry(
+            3,
+            false,
+            tool_result("read", false, vec![text("file text")]),
+        ),
+        covered_entry(
+            4,
+            false,
+            tool_result(
+                "bash",
+                true,
+                vec![
+                    text("boom"),
+                    Part::Blob {
+                        blob_id: BlobId::from_bytes(b"long output"),
+                        mime: "text/plain".into(),
+                        bytes: 20_000,
+                    },
+                ],
+            ),
+        ),
+    ]
+}
+
+#[test]
+fn journal_input_marks_every_role_and_keeps_journal_part_indexes() {
+    let (pieces, source) = journal_input(&every_role()).expect("journal input");
+    let built = items(&pieces, |span| source.read(span)).expect("items build");
+    let seen: Vec<String> = built
+        .iter()
+        .map(|item| match item {
+            Item::Mark(mark) => format!("mark {mark}"),
+            Item::Text {
+                span, role, text, ..
+            } => format!(
+                "text {}:{} {} {text}",
+                span.entry.get(),
+                span.part,
+                role.words()
+            ),
+            Item::Picture { span, mime, bytes } => {
+                format!("picture {}:{} {mime} {bytes}", span.entry.get(), span.part)
+            }
+        })
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            "mark ¶user: ",
+            "text 1:0 user hello",
+            "picture 1:1 image/png 3",
+            "mark ¶ai: ",
+            "text 2:1 assistant on it",
+            "mark ¶call:read ",
+            "text 2:2 call read {\"path\":\"a.rs\"}",
+            "mark ¶out:read ",
+            "text 3:0 output read file text",
+            "mark ¶failed:bash ",
+            "text 4:0 failed output bash boom",
+            "picture 4:1 text/plain 20000",
+        ]
+    );
+}
+
+#[test]
+fn journal_source_returns_exact_bytes_and_names_what_is_missing() {
+    let (_, source) = journal_input(&every_role()).expect("journal input");
+    let span = |entry_no: u64, part: u32, off: u32, len: u32| Span {
+        entry: entry(entry_no),
+        part,
+        off,
+        len,
+    };
+    assert_eq!(source.read(span(1, 0, 1, 3)).expect("inside"), b"ell");
+    assert_eq!(
+        source.read(span(2, 2, 0, 15)).expect("call arguments"),
+        br#"{"path":"a.rs"}"#
+    );
+    for missing in [
+        span(9, 0, 0, 1),
+        span(1, 0, 3, 10),
+        span(2, 0, 0, 1),
+        span(1, 0, u32::MAX, 2),
+    ] {
+        let error = source.read(missing).expect_err("the span has no bytes");
+        assert!(
+            error.message.contains(&format!("part {}", missing.part)),
+            "{}",
+            error.message
+        );
+    }
+}
+
+#[tokio::test]
+async fn journal_input_drives_the_pipeline_and_names_roles_in_letter_text() {
+    let entries = vec![
+        covered_entry(
+            1,
+            true,
+            ContextItem::User {
+                parts: vec![text("hello")],
+            },
+        ),
+        covered_entry(
+            2,
+            false,
+            assistant(vec![
+                AssistantPart::Text {
+                    text: "on it".into(),
+                },
+                call("{\"path\":\"\u{1F680}.rs\"}"),
+            ]),
+        ),
+        covered_entry(
+            3,
+            false,
+            tool_result("read", false, vec![text("file text")]),
+        ),
+        covered_entry(
+            4,
+            true,
+            ContextItem::User {
+                parts: vec![text("again")],
+            },
+        ),
+    ];
+    let (pieces, source) = journal_input(&entries).expect("journal input");
+    let source: Arc<dyn SourceReader> = Arc::new(source);
+    let request = Request::new(
+        SessionId::new_v7(),
+        &entries,
+        (entry(1), entry(4)),
+        1,
+        budget(u64::MAX / 4, 0.7),
+        pieces,
+        Arc::clone(&source),
+    );
+    let (result, drawn) = run(limits(), profile(1000), request).await;
+    assert!(result.expect("run succeeds").is_some());
+    let drawn = drawn.expect("drawn");
+
+    let mut drawn_bytes = Vec::new();
+    for letter in &drawn.letters {
+        for span in letter.record.spans() {
+            let bytes = source.read(*span).expect("the journal serves every span");
+            assert_eq!(bytes.len(), usize::try_from(span.len).expect("len"));
+            drawn_bytes.extend(bytes);
+        }
+    }
+    assert!(
+        String::from_utf8(drawn_bytes)
+            .expect("utf8")
+            .ends_with("file textagain")
+    );
+
+    let as_text = drawn
+        .slots
+        .iter()
+        .find_map(|slot| match slot {
+            Slot::Text(text) if text.contains("is shown as text because") => Some(text.clone()),
+            _ => None,
+        })
+        .expect("the rocket letter is shown as text");
+    assert!(as_text.contains("=== entry 2, call read, part 1, bytes 0-"));
+    assert!(
+        drawn
+            .index
+            .iter()
+            .any(|line| line.visibility == LetterVisibility::ShownAsText)
+    );
 }

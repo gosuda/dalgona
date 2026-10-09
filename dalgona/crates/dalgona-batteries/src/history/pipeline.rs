@@ -227,8 +227,17 @@ pub(crate) struct DrawnLetter {
     pub(crate) png: Vec<u8>,
     /// The `letter` record to commit with the compaction.
     pub(crate) record: LetterRecord,
-    /// The source index line to publish with the record.
-    pub(crate) index_line: Box<str>,
+}
+
+/// The `letter://` index line of one candidate letter.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct IndexLine {
+    /// Letter id, `history/<ordinal>.<index>`.
+    pub(crate) id: Box<str>,
+    /// How the compacted message shows the letter.
+    pub(crate) visibility: LetterVisibility,
+    /// The index line to publish for the letter.
+    pub(crate) text: Box<str>,
 }
 
 /// The committed shape of one history compaction.
@@ -238,6 +247,8 @@ pub(crate) struct Drawn {
     pub(crate) slots: Vec<Slot>,
     /// Letters whose images appear in `slots`.
     pub(crate) letters: Vec<DrawnLetter>,
+    /// The index line of every candidate letter, drawn or not, in path order.
+    pub(crate) index: Vec<IndexLine>,
     /// Image bill plus the text estimate of all text parts.
     pub(crate) parts_tokens: u64,
 }
@@ -262,12 +273,23 @@ impl Drawn {
         if bill > self.parts_tokens {
             return Err(Decline::Inconsistent);
         }
-        self.letters.iter().try_for_each(DrawnLetter::verify)
+        let drawn: Vec<&IndexLine> = self
+            .index
+            .iter()
+            .filter(|line| line.visibility == LetterVisibility::Drawn)
+            .collect();
+        if drawn.len() != self.letters.len() {
+            return Err(Decline::Inconsistent);
+        }
+        self.letters
+            .iter()
+            .zip(drawn)
+            .try_for_each(|(letter, line)| letter.verify(line))
     }
 }
 
 impl DrawnLetter {
-    fn verify(&self) -> Result<(), Decline> {
+    fn verify(&self, line: &IndexLine) -> Result<(), Decline> {
         let LetterRecord::Compaction {
             png_blob,
             png_bytes,
@@ -284,7 +306,8 @@ impl DrawnLetter {
         if digest.as_str() != png_blob
             || !same_size
             || self.record.spans().is_empty()
-            || self.index_line.as_ref() != expected_index
+            || line.id.as_ref() != id
+            || line.text.as_ref() != expected_index
         {
             return Err(Decline::Inconsistent);
         }
@@ -615,25 +638,40 @@ fn assemble(
         slots.push(Slot::Text(format!("{CARRIED_PREFIX}{carried}").into()));
     }
     let mut letters = Vec::new();
+    let mut index = Vec::with_capacity(candidates.len());
     let mut hidden = Vec::new();
     let mut shown_as_text = 0_usize;
     let total = candidates.len();
     for (position, candidate) in candidates.iter_mut().enumerate() {
-        let index = position + 1;
-        let id = format!("history/{}.{index}", request.ordinal);
-        if selected.contains(&position) {
-            slots.push(Slot::Text(format!("letter://{id}").into()));
-            slots.push(Slot::Image(letters.len()));
-            letters.push(letter(profile, candidate, &id, next)?);
-        } else if candidate.png.is_none() {
-            shown_as_text += 1;
-            let text = letter_text(&id, request.session, &candidate.items);
-            let lead = format!(
-                "letter://{id} is shown as text because it holds characters that the font cannot draw:\n{text}"
-            );
-            slots.push(Slot::Text(lead.into()));
+        let id = format!("history/{}.{}", request.ordinal, position + 1);
+        let visibility = if candidate.png.is_none() {
+            LetterVisibility::ShownAsText
+        } else if selected.contains(&position) {
+            LetterVisibility::Drawn
         } else {
-            hidden.push((position, entry_range(&candidate.spans)));
+            LetterVisibility::NotDrawn
+        };
+        let (first, last) = entry_range(&candidate.spans);
+        index.push(IndexLine {
+            id: Box::from(id.as_str()),
+            visibility,
+            text: history_index_line(&id, first, last, visibility).into(),
+        });
+        match visibility {
+            LetterVisibility::Drawn => {
+                slots.push(Slot::Text(format!("letter://{id}").into()));
+                slots.push(Slot::Image(letters.len()));
+                letters.push(letter(profile, candidate, &id, next)?);
+            }
+            LetterVisibility::ShownAsText => {
+                shown_as_text += 1;
+                let text = letter_text(&id, request.session, &candidate.items);
+                let lead = format!(
+                    "letter://{id} is shown as text because it holds characters that the font cannot draw:\n{text}"
+                );
+                slots.push(Slot::Text(lead.into()));
+            }
+            LetterVisibility::NotDrawn => hidden.push((position, (first, last))),
         }
     }
     let shown = letters.len() + shown_as_text;
@@ -652,6 +690,7 @@ fn assemble(
     Ok(Drawn {
         slots,
         letters,
+        index,
         parts_tokens: images
             .saturating_mul(profile.image_tokens)
             .saturating_add(text_tokens),
@@ -677,13 +716,7 @@ fn letter(
         letters: Vec::new(),
     };
     LetterRecord::check(&record, next)?;
-    let (first, last) = entry_range(&candidate.spans);
-    let index_line = history_index_line(record.id(), first, last, LetterVisibility::Drawn);
-    Ok(DrawnLetter {
-        png,
-        record,
-        index_line: index_line.into(),
-    })
+    Ok(DrawnLetter { png, record })
 }
 
 fn hidden_ranges(ordinal: u32, hidden: &[(usize, (u64, u64))]) -> String {

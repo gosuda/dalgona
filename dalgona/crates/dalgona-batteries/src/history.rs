@@ -82,11 +82,12 @@ the task.
 The chain order is `remote`, then `history`, then `summary`. History reads the
 catalog image profile supplied for the resolved model; it never infers image
 support or billing from a model name. Without a profile it refuses with
-`history: the model does not read images.` When the profile is present but a
-journal source or atomic image commit service is unavailable, history refuses
-and the local text summary runs. This host currently lacks those source and
-commit services, so it commits no history PNG. No image is emitted without
-durable source text readable through `letter://`.
+`history: the model does not read images.` When the profile is present but the
+atomic image commit service is unavailable, history refuses with `history:
+this host cannot commit image parts.` and the local text summary runs. This
+host reads the journal text from the covered entries but has no commit
+service, so it commits no history PNG. No image is emitted without durable
+source text readable through `letter://`.
 
 ## Letters and ids
 
