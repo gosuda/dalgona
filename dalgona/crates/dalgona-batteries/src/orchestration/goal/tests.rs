@@ -6,16 +6,11 @@ use std::error::Error;
 
 use dal_core::Timestamp;
 
-use super::super::{ControllerMode, GoalStatus, StopKind};
+use super::super::{ControllerMode, GoalStatus};
 use super::ops::{
-    GoalCommand, GoalScope, TodoSummary, UpdateTarget, apply_goal_command, continuation_line,
-    continuation_unknown, continuation_unsaved, create_goal, format_duration, get_goal,
-    parse_goal_command, update_goal,
+    GoalCommand, GoalScope, apply_goal_command, create_goal, get_goal, parse_goal_command,
 };
-use super::policy::{
-    DenyReason, GoalPath, PromptKind, Verdict, VerdictInput, on_user_prompt, progress_signature,
-    record_goal_turn, verdict,
-};
+use super::policy::{PromptKind, on_user_prompt, progress_signature, record_goal_turn};
 use super::prompt::{build_prompt, escape_objective};
 use super::sidecar::{BlockedReason, Goal, GoalSidecar, decode_sidecar, encode_sidecar};
 

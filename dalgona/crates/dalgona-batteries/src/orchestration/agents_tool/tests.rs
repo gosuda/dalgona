@@ -2,13 +2,6 @@
 //! Report cell and approval-class tests.
 
 use super::*;
-use dal_core::RawJson;
-
-fn workflow(json: &str) -> Workflow {
-    let raw = RawJson::parse(json).expect("test workflow is valid JSON");
-    super::super::workflow::decode_steps(&raw, None, "test").expect("test workflow validates")
-}
-
 fn args(json: &str) -> RawJson {
     RawJson::parse(json).expect("test args are valid JSON")
 }

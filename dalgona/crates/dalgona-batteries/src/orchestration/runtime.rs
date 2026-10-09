@@ -910,9 +910,6 @@ impl SessionState {
                 last_turn_context_overflow: false,
                 last_stop: self.last_stop,
                 signature: &signature,
-                open_todos: todos.open,
-                total_todos: todos.total,
-                inflight: &inflight,
             };
             super::goal::policy::verdict(&input)
         };
@@ -1195,7 +1192,6 @@ impl SessionState {
                         text: report.text.to_string(),
                     }),
                     changed: Vec::new(),
-                    isolation: None,
                 };
                 let _ = result;
             }

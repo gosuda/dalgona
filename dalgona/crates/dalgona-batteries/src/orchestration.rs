@@ -15,7 +15,6 @@ mod tests;
 mod tools;
 pub(crate) mod types;
 pub(crate) mod workflow;
-pub(crate) mod worktree;
 
 pub(crate) use types::{ControllerMode, GoalStatus, JobsView, StopKind};
 

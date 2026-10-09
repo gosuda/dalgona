@@ -49,10 +49,6 @@ pub(crate) fn index_text(shown: usize, total: usize, hidden: &str) -> String {
 pub(crate) enum LetterVisibility {
     /// The PNG is drawn in the compacted message.
     Drawn,
-    /// The source is shown as text because its glyph cannot be drawn.
-    ShownAsText,
-    /// The image is hidden by a compaction budget.
-    NotDrawn,
 }
 
 /// Returns the history index line for one letter.
@@ -66,8 +62,6 @@ pub(crate) fn history_index_line(
     let mut line = format!("letter://{id}  history image, entries {first}-{last}");
     match visibility {
         LetterVisibility::Drawn => {}
-        LetterVisibility::ShownAsText => line.push_str(", shown as text"),
-        LetterVisibility::NotDrawn => line.push_str(", not drawn"),
     }
     line
 }

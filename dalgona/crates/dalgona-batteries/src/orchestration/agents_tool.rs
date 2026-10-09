@@ -2,13 +2,12 @@
 //! Model-facing `agents` actions and the child-only `report` result cell.
 //! Tool registration wires these pure items once the runtime tool group lands.
 
-use std::fmt::Write as _;
 use std::sync::{Arc, OnceLock};
 
-use dal_core::{RawJson, ToolClass};
+use dal_core::RawJson;
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
 
-use super::workflow::{Isolation, Workflow, find_saved};
+use super::workflow::{Workflow, find_saved};
 
 pub(crate) const REPORT_DESCRIPTION: &str = "Send your final report to the agent that started you. Call it exactly once, when the task is done, blocked, or failed. Your turn ends after this call.";
 

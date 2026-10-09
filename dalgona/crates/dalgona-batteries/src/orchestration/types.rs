@@ -35,7 +35,7 @@ pub(crate) enum StopKind {
 /// The body adapts to the dispatch part's job API once it lands; this trait
 /// stays the single seam so no second view is introduced here.
 pub(crate) trait JobsView {
-    /// Parses a host-issued UUIDv7 job id.
+    /// Parses a host-issued `UUIDv7` job id.
     /// Returns `None` when no job with that id exists in this session.
     fn resolve_job(&self, display: &str) -> Option<dal_core::JobId>;
     /// Reports whether the job is a live top-level exec job in this session.

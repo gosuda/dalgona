@@ -234,7 +234,7 @@ pub(crate) fn sha256(bytes: &[u8]) -> [u8; 32] {
         padded.push(0);
     }
     padded.extend_from_slice(&bit_len.to_be_bytes());
-    for chunk in padded.chunks_exact(64) {
+    for chunk in padded.as_chunks::<64>().0 {
         let mut schedule = [0_u32; 64];
         for (index, word) in schedule.iter_mut().enumerate().take(16) {
             let at = index * 4;

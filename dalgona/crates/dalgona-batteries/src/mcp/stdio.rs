@@ -43,9 +43,7 @@ pub(crate) struct StdioTransport {
     child: Arc<Mutex<Box<dyn ChildWrapper>>>,
     stdin: Arc<Mutex<Option<ChildStdin>>>,
     pending: Arc<Mutex<HashMap<u64, mpsc::Sender<Result<RawJson, McpError>>>>>,
-    stderr_tail: Arc<Mutex<VecDeque<u8>>>,
     reader_task: AbortOnDropHandle<()>,
-    stderr_task: AbortOnDropHandle<()>,
     cancel: CancellationToken,
 }
 
@@ -113,18 +111,17 @@ impl StdioTransport {
         wrapped.wrap(process_wrap::tokio::JobObject);
 
         let mut spawn_task = tokio::task::spawn_blocking(move || wrapped.spawn());
-        let spawn_result = match timeout(budgets.start, &mut spawn_task).await {
-            Ok(result) => result,
-            Err(_) => {
-                if let Ok(Ok(mut child)) = spawn_task.await {
-                    let _ = child.start_kill();
-                    let _ = child.wait().await;
-                }
-                return Err(McpError::Start {
-                    key: key.display(),
-                    cause: format!("timed out after {} s", budgets.start.as_secs()),
-                });
+        let spawn_result = if let Ok(result) = timeout(budgets.start, &mut spawn_task).await {
+            result
+        } else {
+            if let Ok(Ok(mut child)) = spawn_task.await {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
             }
+            return Err(McpError::Start {
+                key: key.display(),
+                cause: format!("timed out after {} s", budgets.start.as_secs()),
+            });
         };
         let mut child = spawn_result
             .map_err(|error| McpError::Start {
@@ -151,7 +148,6 @@ impl StdioTransport {
         let child = Arc::new(Mutex::new(child));
         let stdin = Arc::new(Mutex::new(Some(stdin)));
         let pending = Arc::new(Mutex::new(HashMap::new()));
-        let stderr_tail = Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_RING)));
         let cancel = CancellationToken::new();
         #[expect(
             clippy::disallowed_methods,
@@ -169,17 +165,12 @@ impl StdioTransport {
             clippy::disallowed_methods,
             reason = "stdio server owns the abort-on-drop stderr drain"
         )]
-        let stderr_task =
-            AbortOnDropHandle::new(tokio::spawn(read_stderr(stderr, Arc::clone(&stderr_tail))));
-
         Ok(Self {
             key,
             child,
             stdin,
             pending,
-            stderr_tail,
             reader_task,
-            stderr_task,
             cancel,
         })
     }
@@ -286,7 +277,6 @@ impl StdioTransport {
         };
         drop(child);
         self.reader_task.abort();
-        self.stderr_task.abort();
         result
     }
 
@@ -351,7 +341,7 @@ fn exit_code(status: std::process::ExitStatus) -> i32 {
     #[cfg(unix)]
     {
         use std::os::unix::process::ExitStatusExt;
-        return status.signal().map_or(-1, |signal| 128 + signal);
+        status.signal().map_or(-1, |signal| 128 + signal)
     }
     #[cfg(not(unix))]
     {
@@ -361,7 +351,7 @@ fn exit_code(status: std::process::ExitStatus) -> i32 {
 
 async fn process_status(child: &Arc<Mutex<Box<dyn ChildWrapper>>>) -> i32 {
     let mut child = child.lock().await;
-    child.try_wait().ok().flatten().map(exit_code).unwrap_or(-1)
+    child.try_wait().ok().flatten().map_or(-1, exit_code)
 }
 
 async fn read_stdout(

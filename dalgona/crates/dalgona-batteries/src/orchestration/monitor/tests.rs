@@ -6,13 +6,11 @@ use std::error::Error;
 
 use dal_core::{JobId, RawJson, Timestamp};
 
-use super::super::{ControllerMode, JobsView};
+use super::super::JobsView;
 use super::state::{
-    MonitorConfig, MonitorId, MonitorRequest, MonitorState, parse_config, parse_request, stop_all,
-    watch,
+    MonitorConfig, MonitorId, MonitorRequest, MonitorState, parse_config, parse_request, watch,
 };
-use super::status::{abort_reply, status_json, status_payload, subagent_reply};
-use super::*;
+use super::status::{abort_reply, subagent_reply};
 
 fn raw(value: &str) -> Result<RawJson, Box<dyn Error>> {
     Ok(RawJson::parse(value)?)

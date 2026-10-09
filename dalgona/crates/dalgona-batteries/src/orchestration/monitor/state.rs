@@ -2,7 +2,7 @@
 //! Monitor lifecycle: the `monitor` tool contract, watch validation with the
 //! exact error texts, config parsing, and stop/rearm.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use dal_core::{JobId, RawJson, Timestamp};
@@ -17,7 +17,7 @@ pub(crate) const MONITOR_DESCRIPTION: &str = "Watch the output of one of your ba
 /// Input schema for the model-visible `monitor` tool.
 pub(crate) const MONITOR_SCHEMA: &str = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"enum\":[\"watch\",\"stop\",\"rearm\"]},\"job\":{\"type\":\"string\",\"description\":\"The UUIDv7 job id. watch only.\"},\"filter\":{\"type\":\"string\",\"description\":\"A regex; each matching output line is an event. watch only.\"},\"description\":{\"type\":\"string\",\"maxLength\":80},\"id\":{\"type\":\"string\",\"description\":\"The monitor id, m<n>. stop and rearm only.\"}},\"required\":[\"action\"],\"additionalProperties\":false}";
 
-/// Maximum live monitors per session, including paused and muted ones.
+/// Maximum live monitors per session, including paused ones.
 pub(crate) const MAX_LIVE_MONITORS: usize = 16;
 
 /// Monitor delivery state owned by the orchestration core's one task.
@@ -25,9 +25,6 @@ pub(crate) const MAX_LIVE_MONITORS: usize = 16;
 pub(crate) struct MonitorState {
     pub(super) next_id: u64,
     pub(super) monitors: HashMap<MonitorId, Monitor>,
-    pub(super) output: VecDeque<OutputLine>,
-    pub(super) last_flush: Option<Timestamp>,
-    pub(super) monitor_only_wakes: u16,
 }
 
 impl Default for MonitorState {
@@ -35,9 +32,6 @@ impl Default for MonitorState {
         Self {
             next_id: 1,
             monitors: HashMap::new(),
-            output: VecDeque::new(),
-            last_flush: None,
-            monitor_only_wakes: 0,
         }
     }
 }
@@ -50,7 +44,7 @@ impl MonitorState {
     pub(crate) fn live_count(&self) -> usize {
         self.monitors
             .values()
-            .filter(|monitor| !monitor.stopped && !monitor.paused && !monitor.muted)
+            .filter(|monitor| !monitor.stopped && !monitor.paused)
             .count()
     }
 }
@@ -83,20 +77,6 @@ pub(crate) struct Monitor {
     pub(super) description: Box<str>,
     pub(super) paused: bool,
     pub(super) stopped: bool,
-    pub(super) muted: bool,
-    pub(super) matched_at: VecDeque<Timestamp>,
-    pub(super) matched_lines: u32,
-    pub(super) last_batch_at: Option<Timestamp>,
-    pub(super) last_batch_fingerprint: Option<Box<str>>,
-    pub(super) overflow_lines: u32,
-}
-
-/// One queued matching output line.
-#[derive(Clone, Debug)]
-pub(crate) struct OutputLine {
-    pub(super) monitor: MonitorId,
-    pub(super) text: Box<str>,
-    pub(super) at: Timestamp,
 }
 
 /// Monitor table configuration with plan defaults.
@@ -285,18 +265,6 @@ impl MonitorReply {
     }
 }
 
-/// One deliverable P3 batch: event lines under one header.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct MonitorBatch {
-    pub monitor: MonitorId,
-    pub job_display: Box<str>,
-    pub description: Box<str>,
-    pub lines: Vec<Box<str>>,
-    pub dropped: u32,
-}
-
-impl MonitorBatch {}
-
 /// Reads one optional string member; a wrong-typed member counts as absent
 /// and surfaces as the missing-field error for its key.
 fn opt_string(object: &sonic_rs::Object, key: &str) -> Option<Box<str>> {
@@ -439,12 +407,6 @@ pub(crate) fn watch(
                     description: reply_description.clone(),
                     paused: false,
                     stopped: false,
-                    muted: false,
-                    matched_at: VecDeque::new(),
-                    matched_lines: 0,
-                    last_batch_at: None,
-                    last_batch_fingerprint: None,
-                    overflow_lines: 0,
                 },
             );
             Ok(MonitorReply::Watching {
@@ -478,7 +440,6 @@ pub(crate) fn watch(
                 });
             }
             monitor.stopped = false;
-            monitor.muted = false;
             monitor.paused = false;
             Ok(MonitorReply::Rearmed {
                 monitor: monitor_id,

@@ -8,7 +8,6 @@ use std::path::PathBuf;
 use dal_core::JobId;
 
 use super::agents_tool::Report;
-use super::worktree::IsolationOutcome;
 
 /// Characters per `items_from` line.
 pub(crate) const ITEM_LINE_LIMIT: usize = 2000;
@@ -32,7 +31,6 @@ pub(crate) struct TaskResult {
     pub id: JobId,
     pub state: TaskState,
     pub changed: Vec<PathBuf>,
-    pub isolation: Option<IsolationOutcome>,
 }
 
 /// Builds the exact subagent preamble for one task label.

@@ -3,7 +3,7 @@
 
 use std::error::Error;
 
-use dal_core::{RawJson, Timestamp};
+use dal_core::RawJson;
 use sonic_rs::{JsonValueTrait, Value};
 
 use super::LOOP_HARD_STOP_REASON;
@@ -193,7 +193,7 @@ fn rewrite_adds_and_clamps_foreground_window_to_five_seconds() -> Result<(), Box
         assert_eq!(
             value
                 .get("foreground_s")
-                .and_then(|seconds| seconds.as_u64()),
+                .and_then(sonic_rs::JsonValueTrait::as_u64),
             Some(5)
         );
     }

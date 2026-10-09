@@ -4,14 +4,11 @@
 //! recovery document.
 
 use dal_core::Timestamp;
-use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
 use std::fmt::Write as _;
 
 use super::super::monitor::InflightCounts;
 use super::super::{ControllerMode, GoalStatus};
-use super::sidecar::{
-    BlockedReason, Goal, GoalError, GoalSidecar, controller_wire, goal_status_wire,
-};
+use super::sidecar::{BlockedReason, Goal, GoalError, GoalSidecar, goal_status_wire};
 
 /// Description for the model-visible `create_goal` tool.
 pub(crate) const CREATE_GOAL_DESCRIPTION: &str = "Register a goal for work that outlives this turn: it waits on external state, or the requested outcome needs more than one verify-and-fix round. A single answer, lookup, or one-shot edit needs no goal. Objectives are limited to 4000 characters; put longer instructions in a file and name the file. Fails while an unfinished goal exists.";
