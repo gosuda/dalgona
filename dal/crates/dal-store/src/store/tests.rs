@@ -605,6 +605,66 @@ async fn cancelled_admitted_append_settles_before_the_next_append() {
 }
 
 #[tokio::test]
+async fn cancelled_close_restores_live_flag_and_reopen_reports_locked() {
+    let temp = TempDir::new();
+    let store = store(&temp);
+    let id = SessionId::new_v7();
+    let mut journal = store.create_session(id);
+    journal
+        .append(vec![user(1, "cancel-close test")])
+        .await
+        .expect("create file session");
+    let lock_path = journal.paths.lock();
+    assert!(lock::live_in_process(&lock_path));
+
+    // Hold the shard worker so the lane's Retire reply can never land:
+    // polling `close` then parks deterministically inside the window the
+    // flag names — guards already detached, `ReliveOnDrop` armed, the
+    // `lane.close().await` still pending.
+    let shards = crate::shard::shared().expect("start shard workers");
+    let (started, release) = shards.hold_worker_for_test(id).expect("queue worker hold");
+    tokio::task::spawn_blocking(move || started.recv())
+        .await
+        .expect("wait task")
+        .expect("worker started hold");
+
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    let mut close = Box::pin(journal.close());
+    assert!(matches!(close.as_mut().poll(&mut context), Poll::Pending));
+    assert!(
+        !lock::live_in_process(&lock_path),
+        "retirement detaches the guards before the lane await"
+    );
+
+    // Cancelling the close future must re-mark the holder live: the
+    // journal still owns the guards, so a same-process reopen reports
+    // Locked at once rather than retrying the release that never comes.
+    drop(close);
+    assert!(lock::live_in_process(&lock_path));
+    let started_at = std::time::Instant::now();
+    assert!(matches!(
+        store.open_session(id).await,
+        Err(StoreError::Locked { .. })
+    ));
+    assert!(
+        started_at.elapsed() < std::time::Duration::from_secs(30),
+        "a reopen against a cancelled close must not wait out the retry budget"
+    );
+
+    // Releasing the worker lets the queued Retire retire the lane; the
+    // journal's drop then marks the guard transient so the reopen
+    // retries through the real release and succeeds.
+    release.send(()).expect("release held shard");
+    drop(journal);
+    let (mut reopened, _) = store
+        .open_session(id)
+        .await
+        .expect("reopen after cancelled close and journal drop");
+    reopened.close().await.expect("close reopened session");
+}
+
+#[tokio::test]
 async fn blob_publish_failure_keeps_record_unpublished_and_marks_broken() {
     let temp = TempDir::new();
     let store = store(&temp);
