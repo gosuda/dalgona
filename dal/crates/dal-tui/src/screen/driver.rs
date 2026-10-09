@@ -19,6 +19,10 @@ pub(crate) struct Painter {
     sync: bool,
     initialized: bool,
     overlay: bool,
+    /// The main-screen frame parked while the transcript overlay owns the
+    /// alternate screen. The main buffer is never touched meanwhile, so
+    /// leaving the overlay diffs against it and repaints only what changed.
+    main: Option<MainFrame>,
     /// Terminal cell (row, column), 1-based, where the caret was last placed.
     cursor: Option<(usize, usize)>,
     #[expect(
@@ -33,6 +37,13 @@ pub(crate) struct Painter {
 }
 
 const IMAGE_PROTOCOL_CACHE_CAP: usize = 16;
+
+/// The main-screen state the painter parks across a transcript overlay.
+struct MainFrame {
+    previous: Vec<RenderRow>,
+    size: (u16, u16),
+    initialized: bool,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct ImageKey {
@@ -93,18 +104,30 @@ impl Painter {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .set_transcript_overlay(true);
                 bytes.extend_from_slice(b"\x1b[?1049h\x1b[?25l");
+                self.main = Some(MainFrame {
+                    previous: std::mem::take(&mut self.previous),
+                    size: self.size,
+                    initialized: self.initialized,
+                });
+                self.initialized = false;
             } else {
                 bytes.extend_from_slice(b"\x1b[r\x1b[?1049l");
+                if let Some(main) = self.main.take() {
+                    self.previous = main.previous;
+                    self.size = main.size;
+                    self.initialized = main.initialized;
+                } else {
+                    self.previous.clear();
+                    self.initialized = false;
+                }
             }
-            self.previous.clear();
-            self.initialized = false;
             self.overlay = overlay;
         }
         let structural = !self.initialized
             || self.size != size
             || self.previous.len() != rows.len()
             || self.theme_name != Some(theme.name());
-        let transcript_grew = committed_len > self.committed;
+        let transcript_grew = !overlay && committed_len > self.committed;
         if screen == Screen::Inline {
             self.inline_bytes(
                 &mut bytes,
@@ -125,7 +148,10 @@ impl Painter {
         }
         self.place_cursor(&mut bytes, size, &rows, overlay);
         self.theme_name = Some(theme.name());
-        self.committed = committed_len;
+        if !overlay {
+            // Rows settled behind the overlay commit on the main screen once it returns.
+            self.committed = committed_len;
+        }
         self.size = size;
         self.previous = rows;
         self.initialized = true;
