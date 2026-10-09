@@ -18,7 +18,7 @@ use dal_core::{
     RawJson, ToolClass, ToolSpec, UpdateKind, Visibility, Workspace,
 };
 
-/// Long enough that a paused clock reaches the 300 s approval deadline first.
+/// Bounds each real-clock wait in the approval tests.
 const WAIT: Duration = Duration::from_secs(3600);
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -162,29 +162,50 @@ async fn start_turn() -> Result<Session, Box<dyn std::error::Error>> {
     })
 }
 
+async fn next_delivery(
+    subscription: &mut Subscription,
+    wait: Duration,
+) -> Result<Delivery, Box<dyn std::error::Error>> {
+    tokio::time::timeout(wait, subscription.next())
+        .await?
+        .ok_or_else(|| "the session closed before the expected update".into())
+}
+
 /// Reads updates until the approval request opens and returns its id.
 async fn next_request(
+    agent: &Agent,
     subscription: &mut Subscription,
+    wait: Duration,
 ) -> Result<dal_core::RequestId, Box<dyn std::error::Error>> {
     for _ in 0..200 {
-        let delivery = tokio::time::timeout(WAIT, subscription.next())
-            .await?
-            .ok_or("the session closed before an approval opened")?;
+        let delivery = next_delivery(subscription, wait).await?;
         if let Delivery::Update(update) = &delivery
             && let UpdateKind::RequestOpened(request) = &update.kind
         {
-            return Ok(request.id);
+            for _ in 0..200 {
+                if agent
+                    .view(dal_core::PageReq::default())?
+                    .open
+                    .iter()
+                    .any(|open| open.id == request.id)
+                {
+                    return Ok(request.id);
+                }
+                tokio::task::yield_now().await;
+            }
+            return Err("the approval request did not enter the session view".into());
         }
     }
     Err("no approval request opened".into())
 }
 
 /// Reads updates until the turn ends and returns the final view text.
-async fn finish_turn(session: &mut Session) -> Result<String, Box<dyn std::error::Error>> {
+async fn finish_turn(
+    session: &mut Session,
+    wait: Duration,
+) -> Result<String, Box<dyn std::error::Error>> {
     for _ in 0..200 {
-        let delivery = tokio::time::timeout(WAIT, session.subscription.next())
-            .await?
-            .ok_or("the session closed before the turn ended")?;
+        let delivery = next_delivery(&mut session.subscription, wait).await?;
         if let Delivery::Update(update) = &delivery
             && matches!(update.kind, UpdateKind::TurnEnded { .. })
         {
@@ -198,9 +219,9 @@ async fn finish_turn(session: &mut Session) -> Result<String, Box<dyn std::error
 #[tokio::test]
 async fn a_client_decline_is_reported_as_a_decision_by_that_client() -> TestResult {
     let mut session = start_turn().await?;
-    let request = next_request(&mut session.subscription).await?;
+    let request = next_request(&session.agent, &mut session.subscription, WAIT).await?;
     session.agent.answer(request, Answer::Decline).await?;
-    let dump = finish_turn(&mut session).await?;
+    let dump = finish_turn(&mut session, WAIT).await?;
     assert!(
         dump.contains("Permission denied: fixture__probe was declined by probe."),
         "{dump}"
@@ -210,12 +231,14 @@ async fn a_client_decline_is_reported_as_a_decision_by_that_client() -> TestResu
     Ok(())
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn an_approval_nobody_answers_is_reported_as_unanswered_and_fails_closed() -> TestResult {
     let mut session = start_turn().await?;
-    next_request(&mut session.subscription).await?;
+    next_request(&session.agent, &mut session.subscription, WAIT).await?;
+    tokio::time::pause();
     tokio::time::advance(Duration::from_secs(300)).await;
-    let dump = finish_turn(&mut session).await?;
+    tokio::time::resume();
+    let dump = finish_turn(&mut session, WAIT).await?;
     assert!(
         dump.contains(
             "Permission denied: fixture__probe needed approval and no one answered within 300 s."
