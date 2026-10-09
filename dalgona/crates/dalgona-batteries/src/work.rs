@@ -42,6 +42,9 @@ pub struct PlanConfig {
 
 impl PlanConfig {
     /// Decodes the strict `[plugin.plan]` section. The embedded default enables the battery.
+    ///
+    /// # Errors
+    /// Returns the first strict-decode failure.
     pub fn parse_config(section: Option<&toml::Value>) -> Result<Self, PlanConfigError> {
         let Some(section) = section else {
             return Ok(Self { enabled: true });

@@ -151,6 +151,9 @@ impl From<monitor::state::MonitorConfigError> for OrchestrationConfigError {
 }
 
 /// Parses the strict `[plugin.orchestration]` table.
+///
+/// # Errors
+/// Returns the first strict-decode failure.
 pub fn parse_config(
     section: Option<&toml::Value>,
 ) -> Result<OrchestrationConfig, OrchestrationConfigError> {

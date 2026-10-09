@@ -57,22 +57,44 @@ pub struct McpConfig {
 pub enum McpError {
     /// The user declined the full MCP server-set grant.
     #[error("mcp service declined by user for {plugin}")]
-    Declined { plugin: String },
+    Declined {
+        /// The denied plugin.
+        plugin: String,
+    },
     /// The caller requested an undeclared server.
     #[error("mcp server {key} is not granted")]
-    NotGranted { key: String },
+    NotGranted {
+        /// The undeclared server key.
+        key: String,
+    },
     /// A declared server could not be started.
     #[error("mcp server {key} failed to start: {cause}")]
-    Start { key: String, cause: String },
+    Start {
+        /// The server that failed.
+        key: String,
+        /// The launch failure.
+        cause: String,
+    },
     /// A stdio server exited while a request was in flight.
     #[error("mcp server {key} exited during the call with status {code}")]
-    Exited { key: String, code: i32 },
+    Exited {
+        /// The server that exited.
+        key: String,
+        /// Its exit status.
+        code: i32,
+    },
     /// A stdout protocol line was malformed and the server was treated as crashed.
     #[error("mcp server {key} wrote an invalid protocol line; treated as a crash")]
-    InvalidLine { key: String },
+    InvalidLine {
+        /// The server that wrote the bad line.
+        key: String,
+    },
     /// The server exhausted its one-restart budget and is latched off for this session.
     #[error("mcp server {key} crashed twice in this session; it stays off until the session ends")]
-    Latched { key: String },
+    Latched {
+        /// The latched-off server.
+        key: String,
+    },
     /// An MCP call exceeded its effective deadline.
     #[error("mcp call timed out after {n} s")]
     Timeout {
