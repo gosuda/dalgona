@@ -22,6 +22,10 @@ pub use auth::credential::{
     AuthStatus, AuthStore, CodexIdentity, Credential, CredentialKind, EnvSnapshot, OAuthCredential,
     SecretString, codex_identity, oauth_expires_at, resolve as resolve_credential,
 };
+pub use auth::login::{
+    LoginIo, LoginSite, Method, PROGRESS_CAPACITY, StoredCredential, login, login_providers,
+    sign_out, stored_credentials,
+};
 pub use auth::oauth::{
     LoginEndpoints, LoginFlow, LoginProgress, PASTE_HINT, logout, logout_with, store_api_key,
 };

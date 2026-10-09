@@ -196,6 +196,17 @@ pub struct OAuthCredential {
     pub account_id: Option<String>,
 }
 
+impl OAuthCredential {
+    /// Whether the access token is inside the proactive refresh window at
+    /// `now` (Unix seconds). A credential without an expiry is refreshed
+    /// only after a 401, so it is never expiring.
+    #[must_use]
+    pub fn expiring(&self, now: i64) -> bool {
+        self.expires_at
+            .is_some_and(|at| at.saturating_sub(now) <= crate::auth::refresh::PROACTIVE_WINDOW_SECS)
+    }
+}
+
 impl fmt::Debug for OAuthCredential {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OAuthCredential")

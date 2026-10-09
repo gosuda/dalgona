@@ -15,7 +15,7 @@ use sonic_rs::JsonValueTrait;
 use tokio::sync::Mutex;
 
 use super::{
-    PERMANENT_CODES, PROACTIVE_WINDOW_SECS, RETRY_DELAY, blocking,
+    PERMANENT_CODES, RETRY_DELAY, blocking,
     endpoints::{OAuthProvider, RefreshReason, TokenEndpoints},
     lock_auth_file,
 };
@@ -155,7 +155,7 @@ impl Refresher {
         held: &OAuthCredential,
         reason: RefreshReason,
     ) -> Result<Credential, ProviderError> {
-        if reason == RefreshReason::Expiring && !expiring(held, unix_now()) {
+        if reason == RefreshReason::Expiring && !held.expiring(unix_now()) {
             return Ok(Credential::OAuth(held.clone()));
         }
         let slot = self.slot(provider);
@@ -199,7 +199,7 @@ impl Refresher {
             }
         };
         if stored.access_token != held.access_token
-            || (reason == RefreshReason::Expiring && !expiring(&stored, unix_now()))
+            || (reason == RefreshReason::Expiring && !stored.expiring(unix_now()))
         {
             return Ok(Credential::OAuth(stored));
         }
@@ -368,14 +368,6 @@ struct TokenResponse {
     expires_in: Option<i64>,
     #[serde(default)]
     id_token: Option<SecretString>,
-}
-
-/// Whether `credential` is inside the proactive window at `now`; a credential
-/// without expiry refreshes only after a 401.
-fn expiring(credential: &OAuthCredential, now: i64) -> bool {
-    credential
-        .expires_at
-        .is_some_and(|at| at.saturating_sub(now) <= PROACTIVE_WINDOW_SECS)
 }
 
 /// The new credential from a successful token response. A response without

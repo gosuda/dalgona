@@ -111,7 +111,7 @@ pub struct LoginEndpoints {
 }
 
 impl LoginEndpoints {
-    fn production() -> Result<Self, ProviderError> {
+    pub(crate) fn production() -> Result<Self, ProviderError> {
         let codex_auth = Url::parse(CODEX_AUTH_ORIGIN)
             .map_err(|error| endpoint_error(Family::Codex, error.to_string()))?;
         let codex_api = Url::parse(CODEX_API_BASE)
@@ -207,7 +207,7 @@ impl LoginEndpoints {
         self
     }
 
-    fn validate(&self) -> Result<(), ProviderError> {
+    pub(crate) fn validate(&self) -> Result<(), ProviderError> {
         validate_endpoint(Family::Codex, &self.codex_authorize, "auth.openai.com")?;
         validate_endpoint(Family::Codex, &self.codex_token, "auth.openai.com")?;
         validate_endpoint(
