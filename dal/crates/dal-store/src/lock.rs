@@ -65,10 +65,18 @@ fn unregister(path: &Path) {
 /// which registers too but is worth retrying through. The query path is
 /// canonicalized the same way the holder's registry key was, so two
 /// stores that reach the lock through symlinked and real spellings of
-/// the data root still see the same holder.
+/// the data root still see the same holder. Production callers use
+/// [`live_key`] with a key canonicalized off the async executor.
+#[cfg(test)]
 pub(crate) fn live_in_process(path: &Path) -> bool {
-    let key = util::canonical_path(path);
-    holders_map().get(&key).is_some_and(|holder| holder.live)
+    live_key(&util::canonical_path(path))
+}
+
+/// The same query under a key the caller already canonicalized — a pure
+/// map access for callers where filesystem work must not run, e.g. the
+/// async executor between bounded retries.
+pub(crate) fn live_key(key: &Path) -> bool {
+    holders_map().get(key).is_some_and(|holder| holder.live)
 }
 
 /// Holds the operating-system lock for one session.

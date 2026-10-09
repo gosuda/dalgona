@@ -1219,6 +1219,12 @@ impl Journal {
             let workspace = self.inner.workspace.clone();
             let inner = Arc::clone(&self.inner);
             let prelocked = self.prelocked.take();
+            if let Some(guard) = &prelocked {
+                // The blocking task may outlive a cancelled await, so the
+                // guard rides in as a transient holder; it is marked live
+                // again only when parked into the journal's Broken slot.
+                guard.mark_detached();
+            }
             move || {
                 first_append_setup(FirstAppendSetup {
                     directory,
@@ -1460,30 +1466,42 @@ impl Journal {
     async fn close_inner(&mut self) -> Result<(), StoreError> {
         let settled = self.settle_pending().await;
         let file_backed = matches!(&self.state, State::File { .. });
-        match &mut self.state {
+        // The locks retire next: flip them back to transient before the
+        // lane close await so a same-process reopen keeps its bounded
+        // retry through the whole release — not just the guard drop —
+        // instead of reporting Locked while retirement queues behind
+        // slow shard work. Restored below if retirement fails.
+        let lock = match &self.state {
+            State::File { lock, .. } => Some(lock),
+            State::Broken { lock, .. } => lock.as_ref(),
+            _ => None,
+        };
+        for guard in lock.into_iter().chain(self.prelocked.iter()) {
+            guard.mark_detached();
+        }
+        let retired = match &mut self.state {
             State::File { lane, .. }
             | State::Broken {
                 lane: Some(lane), ..
-            } => lane.close().await?,
-            State::Lazy { .. }
-            | State::Memory
-            | State::Broken { lane: None, .. }
-            | State::Closed => {}
+            } => Some(lane.close().await),
+            _ => None,
+        };
+        if let Some(Err(error)) = retired {
+            // Retirement failed: the journal still owns its lock, so the
+            // guards go back to live and same-process opens keep
+            // reporting Locked at once.
+            let lock = match &self.state {
+                State::File { lock, .. } => Some(lock),
+                State::Broken { lock, .. } => lock.as_ref(),
+                _ => None,
+            };
+            for guard in lock.into_iter().chain(self.prelocked.iter()) {
+                guard.mark_live();
+            }
+            return Err(StoreError::from(error));
         }
         if file_backed {
             self.refresh_from_records();
-        }
-        // The locks are about to drop with the state: flip them back to
-        // transient first so a same-process reopen keeps its bounded
-        // retry through the release instead of reporting Locked against a
-        // flag the guards only carry for the release itself.
-        let lock = match &mut self.state {
-            State::File { lock, .. } => Some(lock),
-            State::Broken { lock, .. } => lock.as_mut(),
-            _ => None,
-        };
-        for guard in lock.into_iter().chain(self.prelocked.iter_mut()) {
-            guard.mark_detached();
         }
         self.prelocked = None;
         self.pending = None;
@@ -1754,23 +1772,30 @@ async fn open_locked_journal(
         let lock_path = paths.lock();
         let faults = faults.clone();
         let attempt = tokio::task::spawn_blocking(move || {
-            let lock = LockGuard::acquire(&lock_path, id)?;
-            let opened = FileJournal::open(&journal_path, &faults)
-                .map_err(|failure| map_open_failure(&journal_path, failure))?;
-            Ok::<_, StoreError>((lock, opened))
+            // Canonicalizing the lock path is filesystem work, so it runs
+            // here on the blocking side; the retry arm below only needs
+            // the key for a map lookup and must not touch the disk per
+            // poll on the async executor.
+            let key = util::canonical_path(&lock_path);
+            let result = LockGuard::acquire(&lock_path, id).and_then(|lock| {
+                FileJournal::open(&journal_path, &faults)
+                    .map(|opened| (lock, opened))
+                    .map_err(|failure| map_open_failure(&journal_path, failure))
+            });
+            (key, result)
         })
         .await;
         lap("acquire-open", &mut mark);
         match attempt {
-            Ok(Ok(pair)) => return Ok(pair),
-            Ok(Err(StoreError::Locked { pid, .. }))
+            Ok((_, Ok(pair))) => return Ok(pair),
+            Ok((key, Err(StoreError::Locked { pid, .. })))
                 if lock_might_be_ours(pid)
-                    && !lock::live_in_process(&paths.lock())
+                    && !lock::live_key(&key)
                     && tokio::time::Instant::now() < deadline =>
             {
                 tokio::time::sleep(RETRY_POLL).await;
             }
-            Ok(Err(error)) => return Err(error),
+            Ok((_, Err(error))) => return Err(error),
             Err(join) => {
                 return Err(StoreError::Invalid {
                     reason: format!("journal open task failed to join: {join}").into(),
