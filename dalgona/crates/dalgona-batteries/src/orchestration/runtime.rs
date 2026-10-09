@@ -168,6 +168,9 @@ struct SessionState {
     /// The continuation granted by a verdict and not yet delivered, dropped,
     /// or voided. It carries what delivery records.
     goal_grant: Option<GoalGrant>,
+    /// The grant for the services the delivery poll uses was refused; the
+    /// poll stays off until a prompt, command, or tool call.
+    delivery_refused: bool,
     /// The last turn ended because the context window overflowed.
     last_turn_overflowed: bool,
     /// One merge lock per workspace: every run of this session applies its
@@ -403,6 +406,7 @@ impl Runtime {
             goal_recovery: false,
             goal_timer: None,
             goal_grant: None,
+            delivery_refused: false,
             last_turn_overflowed: false,
             merge_lock: self.merge_lock(start.workspace.as_path()),
             reports: Arc::clone(&self.reports),
@@ -594,12 +598,19 @@ impl SessionState {
         if self.arbiter.mode() != super::ControllerMode::Run {
             return Ok(());
         }
-        if !self.open_asks.is_empty() {
+        if self.delivery_refused || !self.open_asks.is_empty() {
             return Ok(());
         }
-        let idle = match self.services.turn(&self.caller, TurnOp::IsIdle).await? {
-            dal_core::TurnOpReply::Idle(idle) => idle,
-            _ => false,
+        let idle = match self.services.turn(&self.caller, TurnOp::IsIdle).await {
+            Ok(dal_core::TurnOpReply::Idle(idle)) => idle,
+            Ok(_) => false,
+            Err(error) => {
+                // A refused grant stays refused until the user acts again:
+                // polling every tick would raise the same question forever.
+                self.delivery_refused =
+                    matches!(error, ServiceError::Denied(_) | ServiceError::Declined);
+                return Err(error);
+            }
         };
         if !idle {
             return Ok(());
@@ -946,12 +957,32 @@ impl SessionState {
     async fn load_goal(&mut self) {
         let session = self.session.to_string();
         self.goal = Some(adapter::load(self.services.as_ref(), &self.caller, &session).await);
+        // A refused grant must not be asked again by the delivery poll: the
+        // next ask belongs to the user's next goal command.
+        if self.goal.as_ref().is_some_and(GoalStore::grant_refused) {
+            self.delivery_refused = true;
+        }
         if self
             .goal
             .as_ref()
             .is_some_and(|store| adapter::persisted_mode(store) == Some("stopped"))
         {
             self.arbiter.stop();
+        }
+    }
+
+    /// Repeats a goal load that failed because the sidecar was unreachable.
+    /// The session-start load runs before any front end can answer a grant
+    /// question, so a fresh install fails it; the first goal use retries once
+    /// the user may have answered.
+    async fn reload_unreachable_goal(&mut self) {
+        if self.parent.is_none()
+            && self
+                .goal
+                .as_ref()
+                .is_some_and(GoalStore::sidecar_unreachable)
+        {
+            self.load_goal().await;
         }
     }
 
@@ -968,6 +999,7 @@ impl SessionState {
     }
 
     async fn input(&mut self) -> Result<(), ServiceError> {
+        self.delivery_refused = false;
         self.guard_cancel = false;
         if self.config.loop_guard.enabled {
             reset(&mut self.guard);
@@ -1038,6 +1070,7 @@ impl SessionState {
     }
 
     async fn command(&mut self, name: &str, args: &str) -> Result<String, ServiceError> {
+        self.delivery_refused = false;
         if self.parent.is_some() {
             return Ok(super::monitor::status::subagent_reply(name));
         }
@@ -1050,6 +1083,7 @@ impl SessionState {
     }
 
     async fn goal_command(&mut self, args: &str) -> Result<String, ServiceError> {
+        self.reload_unreachable_goal().await;
         let store = self.goal.as_mut().ok_or_else(|| {
             ServiceError::failed(None, "goal: the session store is not available.")
         })?;
@@ -1195,6 +1229,7 @@ impl SessionState {
         name: &str,
         args: &RawJson,
     ) -> ToolReply {
+        self.delivery_refused = false;
         if name == "agents" {
             return self.agents_tool(caller, call, args).await;
         }
@@ -1213,6 +1248,7 @@ impl SessionState {
                 "goal: a subagent cannot hold a goal. Report to the agent that started you.",
             ));
         }
+        self.reload_unreachable_goal().await;
         let todos = self.todo_summary().await?;
         let inflight = self.inflight_counts().await?;
         let store = self.goal.as_mut().ok_or_else(|| {

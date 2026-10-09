@@ -265,7 +265,12 @@ pub(crate) enum GoalError {
     SaveFailed { message: Box<str> },
     /// The sidecar service is unavailable.
     #[error("goal: the session store is not available: {message}.")]
-    StoreUnavailable { message: Box<str> },
+    StoreUnavailable {
+        message: Box<str>,
+        /// The user or the host refused the service grant (a decline, or a
+        /// denial with no front end to ask).
+        refused: bool,
+    },
     /// An unfinished goal blocks creation.
     #[error(
         "create_goal: this session already has an unfinished goal ({id}, {status}). Use update_goal when it is complete."

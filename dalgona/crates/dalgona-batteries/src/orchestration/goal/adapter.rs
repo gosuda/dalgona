@@ -33,6 +33,22 @@ pub(crate) struct GoalStore {
 }
 
 impl GoalStore {
+    /// Whether the last load failed because the sidecar could not be
+    /// reached (a denied or unanswered grant, for one). Such a load is worth
+    /// repeating once the cause may be gone; a damaged file is not.
+    pub(crate) fn sidecar_unreachable(&self) -> bool {
+        matches!(self.error, Some(GoalError::StoreUnavailable { .. }))
+    }
+
+    /// Whether the last load failed because the service grant was refused.
+    /// Nothing else may ask for it again until the user acts.
+    pub(crate) fn grant_refused(&self) -> bool {
+        matches!(
+            self.error,
+            Some(GoalError::StoreUnavailable { refused: true, .. })
+        )
+    }
+
     pub(crate) fn empty(session: &str, mode: ControllerMode) -> Self {
         Self {
             sidecar: Some(GoalSidecar {
@@ -70,6 +86,7 @@ pub(crate) async fn load(services: &dyn Services, caller: &Caller, session: &str
     let Ok(name) = SidecarName::parse("goal.json") else {
         return failed_store(GoalError::StoreUnavailable {
             message: "the goal sidecar name is invalid".into(),
+            refused: false,
         });
     };
     match services.sidecar(caller, SidecarOp::Read { name }).await {
@@ -98,6 +115,7 @@ pub(crate) async fn load(services: &dyn Services, caller: &Caller, session: &str
         },
         Err(error) => failed_store(GoalError::StoreUnavailable {
             message: error.to_string().into_boxed_str(),
+            refused: matches!(error, ServiceError::Denied(_) | ServiceError::Declined),
         }),
     }
 }
