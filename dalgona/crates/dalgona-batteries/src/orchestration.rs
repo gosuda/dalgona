@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
 //! Orchestration battery: one owner task per session, strict session-start config.
 
-pub(crate) mod admission;
 pub(crate) mod agents_tool;
 pub(crate) mod arbiter;
 mod commands;
@@ -101,7 +100,7 @@ impl Default for OrchestrationAgentsConfig {
 }
 
 /// Strict configuration for `[plugin.orchestration]`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct OrchestrationConfig {
     /// Loop guard sub-battery.
     pub loop_guard: BatteryConfig,
@@ -121,22 +120,6 @@ pub struct OrchestrationConfig {
     pub isolation: BatteryConfig,
     /// Optional named saved workflows.
     pub workflows: Option<toml::Value>,
-}
-
-impl Default for OrchestrationConfig {
-    fn default() -> Self {
-        Self {
-            loop_guard: BatteryConfig::default(),
-            sleep: BatteryConfig::default(),
-            monitor: OrchestrationMonitorConfig::default(),
-            inflight: BatteryConfig::default(),
-            goal: BatteryConfig::default(),
-            arbiter: BatteryConfig::default(),
-            agents: OrchestrationAgentsConfig::default(),
-            isolation: BatteryConfig::default(),
-            workflows: None,
-        }
-    }
 }
 
 /// Configuration decode error for the orchestration battery.

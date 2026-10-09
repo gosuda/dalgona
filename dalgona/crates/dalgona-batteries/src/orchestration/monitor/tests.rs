@@ -7,12 +7,11 @@ use std::error::Error;
 use dal_core::{JobId, RawJson, Timestamp};
 
 use super::super::{ControllerMode, JobsView};
-use super::delivery::{flush, on_output, update_monitor_only_wake};
 use super::state::{
-    MonitorConfig, MonitorEffect, MonitorId, MonitorRequest, MonitorState, PAUSE_NOTICE,
-    on_job_end, parse_config, parse_request, stop_all, watch,
+    MonitorConfig, MonitorId, MonitorRequest, MonitorState, parse_config, parse_request, stop_all,
+    watch,
 };
-use super::status::{abort_reply, quiet, status_json, status_line, status_payload, subagent_reply};
+use super::status::{abort_reply, status_json, status_payload, subagent_reply};
 use super::*;
 
 fn raw(value: &str) -> Result<RawJson, Box<dyn Error>> {
@@ -49,10 +48,6 @@ impl JobsView for FakeJobs {
         self.jobs
             .values()
             .any(|(known, live)| *known == job && *live)
-    }
-
-    fn top_level_live_count(&self) -> usize {
-        self.jobs.values().filter(|(_, live)| *live).count()
     }
 }
 
@@ -196,159 +191,6 @@ fn seventeenth_live_watch_rejects_including_paused_and_muted() -> Result<(), Box
 }
 
 #[test]
-fn first_batch_coalesces_and_second_obeys_rate_limit() -> Result<(), Box<dyn Error>> {
-    let (live, job) = FakeJobs::live("j1");
-    let mut state = MonitorState::default();
-    let config = MonitorConfig::default();
-    let epoch = Timestamp::UNIX_EPOCH;
-    let request = watch_request("j1", "ok")?;
-    watch(&mut state, &request, &live, epoch, &config)?;
-    on_output(&mut state, job, "ok 1", epoch, &config);
-    on_output(&mut state, job, "ok 2", at_secs(epoch, 1), &config);
-    on_output(&mut state, job, "nope", at_secs(epoch, 1), &config);
-    assert!(flush(&mut state, at_secs(epoch, 1), &config).is_empty());
-    let effects = flush(&mut state, at_secs(epoch, 2), &config);
-    assert_eq!(effects.len(), 1);
-    let MonitorEffect::Batch(batch) = &effects[0] else {
-        return Err("expected one P3 batch".into());
-    };
-    assert_eq!(batch.lines.len(), 2);
-    assert!(batch.text().contains("Monitor event(job j1): ok 1"));
-    // One second later the rate limit still holds; at seven seconds it lifts.
-    on_output(&mut state, job, "ok 3", at_secs(epoch, 3), &config);
-    assert!(flush(&mut state, at_secs(epoch, 3), &config).is_empty());
-    let later = flush(&mut state, at_secs(epoch, 7), &config);
-    assert_eq!(later.len(), 1);
-    Ok(())
-}
-
-#[test]
-fn overflow_appends_exact_dropped_trailer() -> Result<(), Box<dyn Error>> {
-    let (live, job) = FakeJobs::live("j1");
-    let mut state = MonitorState::default();
-    let config = MonitorConfig::default();
-    let epoch = Timestamp::UNIX_EPOCH;
-    let request = watch_request("j1", "ok")?;
-    watch(&mut state, &request, &live, epoch, &config)?;
-    for index in 0..60 {
-        on_output(&mut state, job, &format!("ok {index}"), epoch, &config);
-    }
-    let effects = flush(&mut state, at_secs(epoch, 2), &config);
-    assert_eq!(effects.len(), 1);
-    let MonitorEffect::Batch(batch) = &effects[0] else {
-        return Err("expected one P3 batch".into());
-    };
-    assert_eq!(batch.lines.len(), 50);
-    assert!(
-        batch
-            .text()
-            .contains("(10 more lines from job j1 were dropped.)")
-    );
-    Ok(())
-}
-
-#[test]
-fn fire_budget_delivers_two_hundred_then_mutes_once() -> Result<(), Box<dyn Error>> {
-    let (live, job) = FakeJobs::live("j1");
-    let mut state = MonitorState::default();
-    let config = MonitorConfig::default();
-    let epoch = Timestamp::UNIX_EPOCH;
-    let request = watch_request("j1", "ok")?;
-    watch(&mut state, &request, &live, epoch, &config)?;
-    let mut notices = 0;
-    for index in 0..201 {
-        let at = at_secs(epoch, u64::try_from(index).unwrap_or(u64::MAX));
-        for effect in on_output(&mut state, job, "ok", at, &config) {
-            if matches!(effect, MonitorEffect::Notice(_)) {
-                notices += 1;
-            }
-        }
-    }
-    assert_eq!(notices, 1);
-    let monitor = state.monitors.values().next().ok_or("watch missing")?;
-    assert!(monitor.muted);
-    assert_eq!(monitor.matched_lines, 201);
-    Ok(())
-}
-
-#[test]
-fn duplicate_batch_suppresses_second_delivery() -> Result<(), Box<dyn Error>> {
-    let (live, job) = FakeJobs::live("j1");
-    let mut state = MonitorState::default();
-    let config = MonitorConfig::default();
-    let epoch = Timestamp::UNIX_EPOCH;
-    let request = watch_request("j1", "ok")?;
-    watch(&mut state, &request, &live, epoch, &config)?;
-    on_output(&mut state, job, "ok", epoch, &config);
-    assert_eq!(flush(&mut state, at_secs(epoch, 2), &config).len(), 1);
-    assert!(flush(&mut state, at_secs(epoch, 8), &config).is_empty());
-    Ok(())
-}
-
-#[test]
-fn wake_budget_pauses_on_fifth_monitor_only_wake() -> Result<(), Box<dyn Error>> {
-    let (live, job) = FakeJobs::live("j1");
-    let mut state = MonitorState::default();
-    let config = MonitorConfig::default();
-    let epoch = Timestamp::UNIX_EPOCH;
-    let request = watch_request("j1", "ok")?;
-    watch(&mut state, &request, &live, epoch, &config)?;
-    let monitor = MonitorId(1);
-    for wake in 1..=5u64 {
-        on_output(&mut state, job, "ok", at_secs(epoch, wake), &config);
-        let effects = flush(&mut state, at_secs(epoch, 7 * wake - 3), &config);
-        assert!(!effects.is_empty());
-        let pause = update_monitor_only_wake(&mut state, &[monitor], true, &config);
-        if wake < 5 {
-            assert!(pause.is_empty());
-        } else {
-            assert_eq!(pause.len(), 1);
-            assert_eq!(pause[0], MonitorEffect::Notice(PAUSE_NOTICE.into()));
-        }
-    }
-    assert!(
-        state
-            .monitors
-            .get(&monitor)
-            .is_some_and(|watch| watch.paused)
-    );
-    // A mixed wake resets the streak.
-    update_monitor_only_wake(&mut state, &[], false, &config);
-    assert_eq!(state.monitor_only_wakes, 0);
-    Ok(())
-}
-
-#[test]
-fn status_renders_waiting_parts_and_exact_json() -> Result<(), Box<dyn Error>> {
-    let counts = inflight_counts(2, 1, 0, false, false);
-    let payload = status_payload(ControllerMode::Run, false, counts, 0, None);
-    assert_eq!(status_line(&payload, true), "waiting on 2 jobs · 1 monitor");
-    assert_eq!(
-        status_json(&payload),
-        "{\"mode\":\"run\",\"paused_reason\":null,\"quiet\":false,\"inflight\":{\"jobs\":2,\"monitors\":1,\"asks\":0,\"goal_timer\":0,\"loop_guard\":0},\"silent_jobs\":0,\"goal\":null}"
-    );
-    let asking = inflight_counts(0, 0, 1, false, false);
-    let waiting = status_payload(ControllerMode::Run, false, asking, 0, None);
-    assert_eq!(status_line(&waiting, true), "waiting for you");
-    // Asks never enter the count predicate, but an outstanding ask keeps the
-    // session non-idle through its caller.
-    assert!(quiet(true, &asking, 0, 5_000));
-    let paused = status_payload(
-        ControllerMode::Paused { reason: "test" },
-        true,
-        inflight_counts(0, 0, 0, false, false),
-        0,
-        None,
-    );
-    assert_eq!(status_line(&paused, true), "idle · paused");
-    assert!(quiet(true, &paused.inflight, 0, 2_000));
-    assert!(!quiet(true, &paused.inflight, 0, 1_999));
-    assert!(!quiet(false, &paused.inflight, 0, 5_000));
-    assert!(!quiet(true, &counts, 1, 5_000));
-    Ok(())
-}
-
-#[test]
 fn abort_and_subagent_replies_are_exact() {
     assert_eq!(
         abort_reply(true, 5, 2),
@@ -372,24 +214,6 @@ fn monitor_ids_round_trip_and_reject_other_shapes() {
     assert_eq!(MonitorId::parse("m"), None);
     assert_eq!(MonitorId::parse("m1x"), None);
     assert_eq!(MonitorId::parse(""), None);
-}
-
-#[test]
-fn job_end_drops_watches_and_stop_all_counts_newly_stopped() -> Result<(), Box<dyn Error>> {
-    let (live, job) = FakeJobs::live("j1");
-    let mut state = MonitorState::default();
-    let config = MonitorConfig::default();
-    let now = Timestamp::UNIX_EPOCH;
-    for _ in 0..2 {
-        watch(&mut state, &watch_request("j1", "ok")?, &live, now, &config)?;
-    }
-    assert_eq!(stop_all(&mut state), 2);
-    assert_eq!(stop_all(&mut state), 0);
-    on_output(&mut state, job, "ok", now, &config);
-    on_job_end(&mut state, job);
-    assert!(state.monitors.is_empty());
-    assert!(state.output.is_empty());
-    Ok(())
 }
 
 #[test]

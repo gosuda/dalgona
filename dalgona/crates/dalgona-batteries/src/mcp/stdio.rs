@@ -257,12 +257,6 @@ impl StdioTransport {
         self.pending.lock().await.remove(&id);
     }
 
-    /// Returns the bounded stderr excerpt for an internal crash or start error.
-    pub(crate) async fn stderr_excerpt(&self) -> String {
-        let mut tail = self.stderr_tail.lock().await;
-        String::from_utf8_lossy(tail.make_contiguous()).into_owned()
-    }
-
     /// Closes stdin, waits for the grace period, then kills and reaps the process tree.
     pub(crate) async fn shutdown(&self, grace: Duration) -> Result<(), McpError> {
         clear_pending(&self.pending).await;

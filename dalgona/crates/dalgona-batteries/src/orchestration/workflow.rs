@@ -135,22 +135,8 @@ pub(crate) mod decode;
 pub(crate) mod render;
 pub(crate) mod saved;
 
-#[cfg(test)]
-mod tests;
-
 pub(crate) use decode::decode_steps;
 pub(crate) use saved::find_saved;
-impl Workflow {
-    /// Counts the statically known child sessions planned by the workflow.
-    #[must_use]
-    pub(crate) fn planned(&self) -> usize {
-        self.steps
-            .iter()
-            .map(|step| match &step.items {
-                Items::Task => 1,
-                Items::Literal(items) => items.len(),
-                Items::From(_) => 0,
-            })
-            .sum()
-    }
-}
+
+#[cfg(test)]
+mod tests;

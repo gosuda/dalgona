@@ -1271,10 +1271,9 @@ impl SessionState {
                     .and_then(|object| object.get(&"command"))
                     .and_then(sonic_rs::JsonValueTrait::as_str)
                 && let Some(wait) = classifier.classify(command)
+                && let Ok(Some(args)) = rewrite_exec_args(&event.args, wait)
             {
-                if let Ok(Some(args)) = rewrite_exec_args(&event.args, wait) {
-                    verdict = ToolCallVerdict::Rewrite { args };
-                }
+                verdict = ToolCallVerdict::Rewrite { args };
             }
         }
         verdict
@@ -1313,13 +1312,6 @@ impl JobsView for SessionJobsView<'_> {
         self.jobs.iter().any(|job| {
             job.id == id && matches!(job.state, JobStateView::Running | JobStateView::Detached)
         })
-    }
-
-    fn top_level_live_count(&self) -> usize {
-        self.jobs
-            .iter()
-            .filter(|job| matches!(job.state, JobStateView::Running | JobStateView::Detached))
-            .count()
     }
 }
 

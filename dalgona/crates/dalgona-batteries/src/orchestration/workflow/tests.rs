@@ -210,7 +210,7 @@ fn workflow_pool_dependency_cut_is_utf8_safe_and_bounded() {
     }];
     let rendered = render(&step, None, &reports, None, JobId::new_v7());
     assert!(rendered.len() <= POOL_REPORT_LIMIT);
-    assert!(rendered.ends_with("(cut; read job://") == false);
+    assert!(!rendered.ends_with("(cut; read job://"));
     assert!(rendered.contains("(cut; read job://"));
     assert!(rendered.is_char_boundary(rendered.len()));
 }

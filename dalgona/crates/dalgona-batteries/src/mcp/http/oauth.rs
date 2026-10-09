@@ -53,7 +53,7 @@ pub(crate) fn challenge(headers: &HeaderMap) -> Challenge {
         if parsed.scope.is_none() {
             parsed.scope = auth::challenge_param(value, "scope");
         }
-        if parsed.insufficient_scope == false {
+        if !parsed.insufficient_scope {
             parsed.insufficient_scope = auth::challenge_param(value, "error")
                 .is_some_and(|error| error.eq_ignore_ascii_case("insufficient_scope"));
         }
@@ -251,7 +251,7 @@ pub(crate) async fn authorize(
             match answer {
                 Ok(Some(Answer::Value(value))) if value.decode_as::<bool>().unwrap_or(false) => {},
                 Ok(Some(Answer::Approve | Answer::ApproveForSession)) => {},
-                Ok(None) | Ok(Some(_)) => return Err(auth_error("OAuth authorization was declined")),
+                Ok(None | Some(_)) => return Err(auth_error("OAuth authorization was declined")),
                 Err(dal_agent::error::ServiceError::Denied(_)) => return Err(McpError::NoAskFrontEnd),
                 Err(dal_agent::error::ServiceError::Cancelled) if cancel.is_cancelled() => return Err(McpError::NoAskFrontEnd),
                 Err(_) => return Err(auth_error("OAuth authorization prompt failed")),
@@ -489,7 +489,7 @@ async fn ask_client_id(
             }
             Ok(client_id.trim().to_owned())
         }
-        Ok(None) | Ok(Some(_)) => Err(McpError::NoAskFrontEnd),
+        Ok(None | Some(_)) => Err(McpError::NoAskFrontEnd),
         Err(dal_agent::error::ServiceError::Denied(_)) => Err(McpError::NoAskFrontEnd),
         Err(dal_agent::error::ServiceError::Cancelled) if cancel.is_cancelled() => {
             Err(McpError::NoAskFrontEnd)
@@ -697,8 +697,10 @@ fn token_from_response(
     let scopes = value
         .get("scope")
         .and_then(JsonValueTrait::as_str)
-        .map(|scope| scope.split_ascii_whitespace().map(str::to_owned).collect())
-        .unwrap_or_else(|| scopes.to_vec());
+        .map_or_else(
+            || scopes.to_vec(),
+            |scope| scope.split_ascii_whitespace().map(str::to_owned).collect(),
+        );
     Ok(TokenRecord {
         client_id: client_id.to_owned(),
         access_token,
@@ -744,7 +746,7 @@ fn form_encode(value: &str, encoded: &mut String) {
     for byte in value.bytes() {
         match byte {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'*' => {
-                encoded.push(byte as char)
+                encoded.push(byte as char);
             }
             b' ' => encoded.push('+'),
             other => {

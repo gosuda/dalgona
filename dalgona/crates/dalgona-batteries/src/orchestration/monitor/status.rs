@@ -33,25 +33,6 @@ pub(crate) struct GoalPreview {
     pub objective: Box<str>,
 }
 
-/// Builds inflight counts from the five sources only: queued or running
-/// top-level jobs, live monitors that are not paused, open asks, a
-/// zero-or-one goal timer, and a zero-or-one loop-guard recovery.
-pub(crate) fn inflight_counts(
-    jobs: usize,
-    monitors: usize,
-    asks: usize,
-    goal_timer: bool,
-    loop_guard: bool,
-) -> InflightCounts {
-    InflightCounts {
-        jobs,
-        monitors,
-        asks,
-        goal_timer: u8::from(goal_timer),
-        loop_guard: u8::from(loop_guard),
-    }
-}
-
 /// Builds one status payload; the core emits it only when it changes and no
 /// more than twice per second.
 pub(crate) fn status_payload(
@@ -118,64 +99,6 @@ pub(crate) fn status_json(payload: &StatusPayload) -> String {
         inflight.loop_guard,
         payload.silent_jobs,
     )
-}
-
-/// Renders the exact status line: `working` while a turn runs, `waiting for
-/// you` when idle with at least one open ask, `waiting on <parts>` when idle
-/// with another nonzero count, otherwise `idle`. Appends ` · paused` or
-/// ` · stopped` for those controller modes.
-pub(crate) fn status_line(payload: &StatusPayload, session_idle: bool) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    if payload.inflight.jobs == 1 {
-        parts.push("1 job".to_owned());
-    } else if payload.inflight.jobs > 1 {
-        parts.push(format!("{} jobs", payload.inflight.jobs));
-    }
-    if payload.inflight.monitors == 1 {
-        parts.push("1 monitor".to_owned());
-    } else if payload.inflight.monitors > 1 {
-        parts.push(format!("{} monitors", payload.inflight.monitors));
-    }
-    if payload.goal.is_some() {
-        parts.push("goal".to_owned());
-    }
-    if payload.inflight.loop_guard > 0 {
-        parts.push("loop guard".to_owned());
-    }
-    let mut line = if !session_idle {
-        "working".to_owned()
-    } else if payload.inflight.asks > 0 {
-        "waiting for you".to_owned()
-    } else if parts.is_empty() {
-        "idle".to_owned()
-    } else {
-        format!("waiting on {}", parts.join(" · "))
-    };
-    match payload.mode {
-        ControllerMode::Run => {}
-        ControllerMode::Paused { .. } => line.push_str(" · paused"),
-        ControllerMode::Stopped => line.push_str(" · stopped"),
-    }
-    line
-}
-
-/// Quiet holds only when the session is idle, every inflight source except
-/// `asks` is zero, no arbiter item is ready, and nothing relevant changed
-/// for 2000 ms. An open ask alone never enters the count predicate, but it
-/// keeps the session non-idle through its caller.
-pub(crate) fn quiet(
-    session_idle: bool,
-    counts: &InflightCounts,
-    ready_items: usize,
-    unchanged_for_ms: u64,
-) -> bool {
-    session_idle
-        && counts.jobs == 0
-        && counts.monitors == 0
-        && counts.goal_timer == 0
-        && counts.loop_guard == 0
-        && ready_items == 0
-        && unchanged_for_ms >= 2000
 }
 
 /// Builds the exact `/abort` reply after the core cancels the turn, cancels

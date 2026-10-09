@@ -14,14 +14,10 @@ mod guard;
 mod rewrite;
 mod sleep;
 
-#[cfg(test)]
-mod tests;
-
 /// Maximum tool-call records retained by the guard window.
 const RECORD_CAPACITY: usize = 64;
 pub(crate) use guard::{
-    GuardEffects, GuardState, GuardVerdict, canonical_args, clear_pending_attempts, on_tool_call,
-    reset,
+    GuardEffects, GuardState, GuardVerdict, clear_pending_attempts, on_tool_call, reset,
 };
 pub(crate) use rewrite::rewrite_exec_args;
 pub(crate) use sleep::{SleepClassifier, SleepWait};
@@ -61,25 +57,5 @@ fn render_template(template: &str, values: &[(&str, &str)]) -> Box<str> {
     rendered.into_boxed_str()
 }
 
-/// Renders ` · silent <minutes>m` once a job has been quiet for over ten
-/// minutes. Returns `None` through exactly 600 seconds. Silence never
-/// changes job or controller state.
-///
-/// The plan lists this helper in both the guard and monitor modules; this is
-/// the single implementation, re-exported by the monitor module.
-pub(crate) fn silence_suffix(last_activity: Timestamp, now: Timestamp) -> Option<String> {
-    if now < last_activity {
-        return None;
-    }
-    let seconds = now.as_second().checked_sub(last_activity.as_second())?;
-    let elapsed = if now.subsec_nanosecond() < last_activity.subsec_nanosecond() {
-        seconds.checked_sub(1)?
-    } else {
-        seconds
-    };
-    if elapsed <= 600 {
-        return None;
-    }
-    let minutes = elapsed / 60;
-    Some(format!(" · silent {minutes}m"))
-}
+#[cfg(test)]
+mod tests;

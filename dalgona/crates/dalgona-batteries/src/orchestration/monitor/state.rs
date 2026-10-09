@@ -17,23 +17,8 @@ pub(crate) const MONITOR_DESCRIPTION: &str = "Watch the output of one of your ba
 /// Input schema for the model-visible `monitor` tool.
 pub(crate) const MONITOR_SCHEMA: &str = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"enum\":[\"watch\",\"stop\",\"rearm\"]},\"job\":{\"type\":\"string\",\"description\":\"The UUIDv7 job id. watch only.\"},\"filter\":{\"type\":\"string\",\"description\":\"A regex; each matching output line is an event. watch only.\"},\"description\":{\"type\":\"string\",\"maxLength\":80},\"id\":{\"type\":\"string\",\"description\":\"The monitor id, m<n>. stop and rearm only.\"}},\"required\":[\"action\"],\"additionalProperties\":false}";
 
-/// Pause notice delivered with the wake that reaches the wake budget.
-pub(crate) const PAUSE_NOTICE: &str = "Monitor paused after repeated updates. The job's report still arrives when it ends; use monitor rearm only for intermediate events.";
-
-/// Mute notice delivered once when a monitor reaches its fire budget.
-pub(crate) const MUTED_NOTICE: &str = "auto-muted: fire budget (200/24h) reached; rearm to resume";
-
 /// Maximum live monitors per session, including paused and muted ones.
 pub(crate) const MAX_LIVE_MONITORS: usize = 16;
-
-/// Matched lines delivered per monitor in a rolling 24 hours.
-pub(crate) const FIRE_BUDGET: usize = 200;
-
-/// Output characters retained per line (Unicode scalar values).
-pub(crate) const MAX_RETAINED_LINE: usize = 65_536;
-
-/// Shared-queue character overhead reserved outside `max_chars`.
-pub(crate) const QUEUE_OVERHEAD: u64 = 512;
 
 /// Monitor delivery state owned by the orchestration core's one task.
 #[derive(Debug)]
@@ -67,10 +52,6 @@ impl MonitorState {
             .values()
             .filter(|monitor| !monitor.stopped && !monitor.paused && !monitor.muted)
             .count()
-    }
-
-    pub(crate) fn job_ids(&self) -> Vec<JobId> {
-        self.monitors.values().map(|monitor| monitor.job).collect()
     }
 }
 
@@ -229,14 +210,6 @@ fn checked_integer(
     Ok(raw)
 }
 
-/// Renders the cross-table coherence error for session-start validation,
-/// which the orchestration core owns across all its tables.
-pub(crate) fn coherence_error(off_table: &str, on_table: &str) -> String {
-    format!(
-        "orchestration: [plugin.orchestration.{off_table}] cannot be off while {on_table} is on."
-    )
-}
-
 /// A validated `monitor` tool call.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct MonitorRequest {
@@ -322,37 +295,7 @@ pub(crate) struct MonitorBatch {
     pub dropped: u32,
 }
 
-impl MonitorBatch {
-    /// Renders the header, the event lines, and the overflow trailer.
-    pub(crate) fn text(&self) -> String {
-        let mut text = format!(
-            "Monitor {} ({}) from job {}:",
-            self.monitor.render(),
-            self.description,
-            self.job_display
-        );
-        for line in &self.lines {
-            text.push('\n');
-            text.push_str(line);
-        }
-        if self.dropped > 0 {
-            let _ = write!(
-                text,
-                "\n({} more lines from {} were dropped.)",
-                self.dropped, self.description
-            );
-        }
-        text
-    }
-}
-
-/// Reducer effects returned to the orchestration core for P3 routing.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum MonitorEffect {
-    Batch(MonitorBatch),
-    Notice(Box<str>),
-    Stopped(MonitorId),
-}
+impl MonitorBatch {}
 
 /// Reads one optional string member; a wrong-typed member counts as absent
 /// and surfaces as the missing-field error for its key.
@@ -542,15 +485,6 @@ pub(crate) fn watch(
             })
         }
     }
-}
-
-/// Ends every watch on an ended job and drops its queued lines; a later
-/// rearm reports `no monitor`.
-pub(crate) fn on_job_end(state: &mut MonitorState, job: JobId) {
-    state.monitors.retain(|_, monitor| monitor.job != job);
-    state
-        .output
-        .retain(|line| state.monitors.contains_key(&line.monitor));
 }
 
 /// Stops every live watch without ending it; rearms stay possible while

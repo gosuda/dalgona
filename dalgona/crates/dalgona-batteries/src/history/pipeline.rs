@@ -24,7 +24,7 @@ use super::records::{LetterRecord, RecordError};
 use super::selection::{
     LetterVisibility, entry_id, history_index_line, index_text, select_oldest_plus_newest,
 };
-use super::spans::{CompactPiece, HistoryError, Item, Role, SourceError, Span, items};
+use super::spans::{CompactPiece, HistoryError, Item, SourceError, Span, items};
 use super::{CARRIED_PREFIX, HISTORY_HEADER, PNG_BYTE_BUDGET, RENDER_TIMEOUT_MS, SAVINGS_FACTOR};
 
 /// Minimum completed user turns in the covered span for a drawable history.
@@ -409,7 +409,7 @@ impl Engine {
         let font = Arc::clone(&self.font);
         let source = Arc::clone(&request.source);
         let pieces = Arc::clone(&request.pieces);
-        let grid = profile_grid(&profile);
+        let grid = profile_grid(profile);
         let worker = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             render_pages(&font, grid, &pieces, source.as_ref())
@@ -674,7 +674,7 @@ fn letter(
     };
     LetterRecord::check(&record, next)?;
     let (first, last) = entry_range(&candidate.spans);
-    let index_line = history_index_line(&record.id(), first, last, LetterVisibility::Drawn);
+    let index_line = history_index_line(record.id(), first, last, LetterVisibility::Drawn);
     Ok(DrawnLetter {
         png,
         record,

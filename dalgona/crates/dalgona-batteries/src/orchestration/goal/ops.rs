@@ -427,35 +427,3 @@ pub(crate) fn continuation_unknown() -> String {
 pub(crate) fn continuation_unsaved(reply: &str, message: &str) -> String {
     format!("{reply} (not saved: {message})")
 }
-
-/// Builds the `/goal clear` recovery document: a valid empty goal document
-/// with the current in-memory controller mode and next id. Arms no P4.
-#[must_use]
-pub(crate) fn clear_recovery_doc(
-    session: &str,
-    controller: ControllerMode,
-    next_goal: u64,
-) -> Vec<u8> {
-    let sidecar = GoalSidecar {
-        v: 1,
-        session: session.into(),
-        controller,
-        next_goal,
-        goal: None,
-    };
-    super::sidecar::encode_sidecar(&sidecar).unwrap_or_else(|_| {
-        format!(
-            "{{\"v\":1,\"session\":\"{session}\",\"controller\":\"{}\",\"next_goal\":{next_goal},\"goal\":null}}\n",
-            controller_wire(controller)
-        )
-        .into_bytes()
-    })
-}
-
-/// Recovers the prior next id from a damaged document, if one decodes.
-#[must_use]
-pub(crate) fn salvage_next_goal(bytes: &[u8]) -> Option<u64> {
-    let text = core::str::from_utf8(bytes).ok()?;
-    let value: Value = sonic_rs::from_str(text.strip_suffix('\n').unwrap_or(text)).ok()?;
-    value.as_object()?.get(&"next_goal")?.as_u64()
-}

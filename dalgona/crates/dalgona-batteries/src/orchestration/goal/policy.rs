@@ -17,8 +17,6 @@ pub(crate) const REPETITION_REASON: &str = "repeated assistant output";
 pub(crate) const LENGTH_REASON: &str = "output truncation repeated";
 /// Mechanical block reason for the unattended limit.
 pub(crate) const UNATTENDED_REASON: &str = "unattended continuation limit reached";
-/// Mechanical block reason for an exhausted provider.
-pub(crate) const PROVIDER_REASON: &str = "provider error ended the turn (retries exhausted)";
 /// Mechanical block reason for an unrecovered context overflow.
 pub(crate) const OVERFLOW_REASON: &str =
     "context overflow ended the turn (compaction did not recover)";
