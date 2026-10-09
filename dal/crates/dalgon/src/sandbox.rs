@@ -509,6 +509,21 @@ mod win {
     /// `ACCESS_ALLOWED_ACE_TYPE` for the DACL walk — same absence as the
     /// label-ACE constant.
     const ALLOWED_ACE_TYPE: u8 = 0x0;
+    /// `OBJECT_INHERIT_ACE` / `CONTAINER_INHERIT_ACE` — the label ACE
+    /// carries both so the write root's Low label propagates to its whole
+    /// subtree, matching the DACL grant's `(OI)(CI)` reach.
+    const OBJECT_INHERIT_ACE: u8 = 0x1;
+    const CONTAINER_INHERIT_ACE: u8 = 0x2;
+    /// `ACCESS_DENIED_ACE_TYPE` — a deny ACE touching the needed access
+    /// always wins over the sandbox's planted allow, so it ends the
+    /// packages-readability search.
+    const DENIED_ACE_TYPE: u8 = 0x1;
+    /// `INHERIT_ONLY_ACE` — an ACE marked so only covers descendants, not
+    /// the object carrying it.
+    const INHERIT_ONLY_ACE: u8 = 0x8;
+    /// `FILE_GENERIC_READ | FILE_GENERIC_EXECUTE` — the file-specific
+    /// expansion of the generic pair the plant would add.
+    const FILE_READ_EXECUTE: u32 = 0x0012_0089 | 0x0012_00A0;
     /// `S-1-15-2-1` (`ALL APPLICATION PACKAGES`): the well-known SID whose
     /// default RX grant on system directories the container can already
     /// read and execute through.
@@ -1018,7 +1033,7 @@ mod win {
                     // leaves no ACE its retired holder record cannot reap.
                     let _ = edit_dacl(path, sid, access, REVOKE_ACCESS, false);
                     if let Some(orig) = state.orig_label.get(&key).cloned() {
-                        let _ = restore_label(&path, orig);
+                        let _ = restore_label(path, orig);
                     }
                     return Err(error);
                 }
@@ -1240,7 +1255,15 @@ mod win {
             if unsafe { ConvertStringSidToSidW(name.as_ptr(), &raw mut sid) } == FALSE {
                 return Err(last_error(&format!("build label for {}", path.display())));
             }
-            let added = unsafe { AddMandatoryAce(acl, ACL_REVISION, 0, LABEL_NO_WRITE_UP, sid) };
+            let added = unsafe {
+                AddMandatoryAce(
+                    acl,
+                    ACL_REVISION,
+                    u32::from(OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE),
+                    LABEL_NO_WRITE_UP,
+                    sid,
+                )
+            };
             unsafe { LocalFree(sid.cast()) };
             if added == FALSE {
                 return Err(last_error(&format!("build label for {}", path.display())));
@@ -1451,12 +1474,8 @@ mod win {
             unsafe { LocalFree(sd) };
             return false;
         }
-        // The file-specific equivalents of the GENERIC_READ|GENERIC_EXECUTE
-        // pair the plant would add, plus the generic forms — a stored mask
-        // can carry either representation, and GENERIC_ALL subsumes both.
-        const DENIED_ACE_TYPE: u8 = 0x01;
-        const INHERIT_ONLY_ACE: u8 = 0x08;
-        const FILE_READ_EXECUTE: u32 = 0x0012_0089 | 0x0012_00A0; // FILE_GENERIC_READ | FILE_GENERIC_EXECUTE
+        // A stored mask can carry the generic pair or its file-specific
+        // expansion; GENERIC_ALL subsumes either.
         let covers = |mask: u32| {
             mask & GENERIC_ALL_ACCESS == GENERIC_ALL_ACCESS
                 || mask & GENERIC_READ_EXECUTE == GENERIC_READ_EXECUTE
