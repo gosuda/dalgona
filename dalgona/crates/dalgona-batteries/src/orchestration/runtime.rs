@@ -14,8 +14,8 @@ use dal_agent::ext::{
     StatusSnapshot,
 };
 use dal_core::ext::{
-    InputEvent, InputVerdict, SessionEnd, SessionStart, Settled, ToolCallEvent, ToolCallVerdict,
-    ToolResultEvent, TurnEnd,
+    BeforeTurn, InputEvent, InputVerdict, SessionEnd, SessionStart, Settled, ToolCallEvent,
+    ToolCallVerdict, ToolResultEvent, TurnEnd,
 };
 use dal_core::{
     AgentState, AgentsOp, AgentsReply, ArtifactFile, Budget, CallId, ExitStatusKind, JobId,
@@ -32,7 +32,7 @@ use super::arbiter::Arbiter;
 use super::goal::adapter::{self, GoalStore};
 use super::goal::ops::{GoalScope, TodoSummary, format_duration};
 use super::monitor::state::{MonitorConfig, MonitorState};
-use super::monitor::status::{InflightCounts, status_json, status_payload};
+use super::monitor::status::{InflightCounts, status_line};
 use super::pool::{IndexCollector, TaskResult, TaskState};
 use super::stuck::{
     GuardState, GuardVerdict, SleepClassifier, clear_pending_attempts, on_tool_call, reset,
@@ -76,6 +76,7 @@ struct Owner {
 
 enum Message {
     Input(oneshot::Sender<Result<(), ServiceError>>),
+    BeforeTurn(oneshot::Sender<()>),
     ToolCall(ToolCallEvent, oneshot::Sender<ToolCallVerdict>),
     Tool {
         caller: Caller,
@@ -138,6 +139,7 @@ struct SessionState {
     line_cursors: HashMap<JobId, u64>,
     last_stop: StopKind,
     turn_tool_called: bool,
+    turn_active: bool,
     goal_timer: Option<(TokioInstant, String)>,
     /// One merge lock per workspace: every run of this session applies its
     /// patches to the same checkout one at a time.
@@ -366,6 +368,7 @@ impl Runtime {
             line_cursors: HashMap::new(),
             last_stop: StopKind::Completed,
             turn_tool_called: false,
+            turn_active: false,
             goal_timer: None,
             merge_lock: self.merge_lock(start.workspace.as_path()),
             reports: Arc::clone(&self.reports),
@@ -447,6 +450,7 @@ impl SessionState {
                 self.publish_status();
                 let _ = reply.send(result);
             }
+            Message::BeforeTurn(reply) => self.before_turn(reply),
             Message::ToolCall(event, reply) => {
                 if event.tool.as_str() == "ask" {
                     self.open_asks.insert(event.call.clone());
@@ -493,6 +497,7 @@ impl SessionState {
                 self.last_stop = stop_kind(event.stop);
                 self.guard_cancel = false;
                 self.turn_tool_called = false;
+                self.turn_active = false;
                 self.publish_status();
                 let _ = reply.send(());
             }
@@ -829,6 +834,12 @@ impl SessionState {
         {
             self.arbiter.stop();
         }
+    }
+
+    fn before_turn(&mut self, reply: oneshot::Sender<()>) {
+        self.turn_active = true;
+        self.publish_status();
+        let _ = reply.send(());
     }
 
     async fn input(&mut self) -> Result<(), ServiceError> {
@@ -1905,13 +1916,13 @@ impl SessionState {
             self.goal_timer.is_some(),
             self.guard.episode.is_some(),
         );
+        let session_idle = !self.turn_active;
         let others = inflight.jobs + inflight.monitors + usize::from(inflight.goal_timer > 0);
-        let quiet = self.arbiter.quiet(true, others, 0, Instant::now());
-        let goal = self.goal.as_ref().and_then(adapter::preview);
-        let payload = status_payload(self.arbiter.mode(), quiet, inflight, 0, goal);
+        let quiet = self.arbiter.quiet(session_idle, others, 0, Instant::now());
+        let line = status_line(self.arbiter.mode(), session_idle, inflight);
         if let Ok(mut snapshot) = self.snapshot.lock() {
             snapshot.quiet = quiet;
-            snapshot.text = Some(status_json(&payload).into_boxed_str());
+            snapshot.text = Some(line.into_boxed_str());
         }
     }
 }
@@ -3369,6 +3380,29 @@ impl ObserveHook<SessionEnd> for SessionEndHook {
         Box::pin(async move {
             runtime.close(cx.session, end).await;
             Ok(())
+        })
+    }
+}
+
+pub(crate) struct BeforeTurnHook(pub(crate) Runtime);
+
+impl Hook<BeforeTurn, Option<String>> for BeforeTurnHook {
+    fn call(
+        &self,
+        _event: BeforeTurn,
+        cx: HookCx,
+    ) -> BoxFuture<'static, Result<Option<String>, HookError>> {
+        let runtime = self.0.clone();
+        let session = cx.session;
+        let deadline = cx.deadline;
+        let cancel = cx.cancel;
+        Box::pin(async move {
+            runtime
+                .hook_request(session, deadline, cancel, |reply| {
+                    Message::BeforeTurn(reply)
+                })
+                .await?;
+            Ok(None)
         })
     }
 }

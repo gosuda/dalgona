@@ -1232,11 +1232,8 @@ async fn user_cancel_pauses_automatic_work_but_guard_pause_reason_wins() -> Test
         .ok_or("status absent")?
         .text
         .ok_or("status text absent")?;
-    assert!(
-        status.contains(crate::orchestration::stuck::LOOP_HARD_STOP_REASON),
-        "{status}"
-    );
-    assert!(!status.contains("cancelled by the user"), "{status}");
+    assert!(status.ends_with(" · paused"), "{status}");
+    assert!(!status.contains(['{', '}', '"']), "{status}");
     // The next cancellation has no guard cause.
     super::TurnEndHook(fixture.runtime.clone())
         .call(
@@ -1253,7 +1250,31 @@ async fn user_cancel_pauses_automatic_work_but_guard_pause_reason_wins() -> Test
         .ok_or("status absent")?
         .text
         .ok_or("status text absent")?;
-    assert!(status.contains("cancelled by the user"), "{status}");
+    assert!(status.ends_with(" · paused"), "{status}");
+    Ok(())
+}
+#[tokio::test]
+async fn status_reports_working_after_before_turn() -> TestResult {
+    use dal_agent::ext::Hook as _;
+    use dal_core::ext::BeforeTurn;
+    let fixture = Fixture::open().await?;
+    let turn = dal_core::TurnId::new(std::num::NonZeroU64::MIN);
+    super::BeforeTurnHook(fixture.runtime.clone())
+        .call(
+            BeforeTurn {
+                turn,
+                text: "work".into(),
+            },
+            HookCx::for_test(fixture.host.clone(), fixture.session, Some(turn)),
+        )
+        .await?;
+    let status = fixture
+        .runtime
+        .snapshot(fixture.session)
+        .ok_or("status absent")?
+        .text
+        .ok_or("status text absent")?;
+    assert_eq!(status.as_ref(), "working");
     Ok(())
 }
 
@@ -1595,7 +1616,7 @@ async fn paused_and_stopped_controllers_keep_reports_queued_until_resumed() -> T
                 .ok_or("status absent")?
                 .text
                 .ok_or("status text absent")?;
-            assert!(status.contains("\"mode\":\"stopped\""), "{status}");
+            assert!(status.ends_with(" · stopped"), "{status}");
             fixture
                 .runtime
                 .command(fixture.session, "continuation", "run")

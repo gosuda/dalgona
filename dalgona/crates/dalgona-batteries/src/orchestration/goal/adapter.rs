@@ -206,10 +206,6 @@ pub(crate) fn update_mode(store: &mut GoalStore, mode: ControllerMode) {
     sidecar.controller = mode;
 }
 
-pub(crate) fn preview(store: &GoalStore) -> Option<super::super::monitor::status::GoalPreview> {
-    super::sidecar::goal_projection(store.sidecar.as_ref()?.goal.as_ref())
-}
-
 pub(crate) fn persisted_mode(store: &GoalStore) -> Option<&'static str> {
     store
         .sidecar

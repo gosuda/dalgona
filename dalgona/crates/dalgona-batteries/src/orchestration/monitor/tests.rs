@@ -12,7 +12,7 @@ use super::state::{
     MonitorConfig, MonitorEffect, MonitorId, MonitorRequest, MonitorState, PAUSE_NOTICE,
     on_job_end, parse_config, parse_request, stop_all, watch,
 };
-use super::status::{abort_reply, status_json, status_payload, subagent_reply};
+use super::status::{abort_reply, status_line, subagent_reply};
 use super::*;
 
 fn raw(value: &str) -> Result<RawJson, Box<dyn Error>> {
@@ -315,12 +315,48 @@ fn wake_budget_pauses_on_fifth_monitor_only_wake() -> Result<(), Box<dyn Error>>
 }
 
 #[test]
-fn status_renders_waiting_parts_and_exact_json() {
-    let counts = inflight_counts(2, 1, 0, false, false);
-    let payload = status_payload(ControllerMode::Run, false, counts, 0, None);
+fn status_renders_human_lines_for_idle_work_and_paused_sources() {
     assert_eq!(
-        status_json(&payload),
-        "{\"mode\":\"run\",\"paused_reason\":null,\"quiet\":false,\"inflight\":{\"jobs\":2,\"monitors\":1,\"asks\":0,\"goal_timer\":0,\"loop_guard\":0},\"silent_jobs\":0,\"goal\":null}"
+        status_line(
+            ControllerMode::Run,
+            true,
+            inflight_counts(0, 0, 0, false, false)
+        ),
+        "idle"
+    );
+    assert_eq!(
+        status_line(
+            ControllerMode::Run,
+            false,
+            inflight_counts(2, 1, 0, false, false)
+        ),
+        "working"
+    );
+    let waiting = status_line(
+        ControllerMode::Run,
+        true,
+        inflight_counts(2, 1, 0, true, false),
+    );
+    assert_eq!(waiting, "waiting on 2 jobs · 1 monitor · goal");
+    assert!(waiting.len() <= super::status::STATUS_LINE_LIMIT);
+    assert!(!waiting.contains(['{', '}', '"', '\n']));
+    assert_eq!(
+        status_line(
+            ControllerMode::Paused {
+                reason: "paused by the user",
+            },
+            true,
+            inflight_counts(0, 0, 0, true, false),
+        ),
+        "waiting on goal · paused"
+    );
+    assert_eq!(
+        status_line(
+            ControllerMode::Stopped,
+            true,
+            inflight_counts(0, 0, 1, false, false)
+        ),
+        "waiting for you · stopped"
     );
 }
 

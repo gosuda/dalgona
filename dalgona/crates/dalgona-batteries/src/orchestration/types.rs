@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
-//! Shared orchestration vocabulary: controller modes, stop kinds, job views,
-//! and read-only status projections. One definition lives here; the owner
-//! task, the arbiter, and the companion reducers all use these items.
+//! Shared orchestration vocabulary: controller modes, stop kinds, and job views.
+//! One definition lives here; the owner task, the arbiter, and the companion
+//! reducers all use these items.
 
 /// Controller mode shared with the companion monitor and goal reducers.
-/// The paused reason is observable as status text.
+/// The paused state is shown by the status suffix.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ControllerMode {
     Run,
@@ -40,38 +40,4 @@ pub(crate) trait JobsView {
     fn resolve_job(&self, display: &str) -> Option<dal_core::JobId>;
     /// Reports whether the job is a live top-level exec job in this session.
     fn is_live_top_level_exec(&self, job: dal_core::JobId) -> bool;
-}
-
-/// Live per-session counts rendered into `orchestration.status`.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-#[expect(
-    dead_code,
-    reason = "the orchestration status contract fixes the inflight projection surface"
-)]
-pub(crate) struct Inflight {
-    /// Queued or running top-level jobs.
-    pub jobs: usize,
-    /// Live monitors that are not paused.
-    pub monitors: usize,
-    /// Open ask requests.
-    pub asks: usize,
-    /// Whether a goal continuation timer is scheduled.
-    pub goal_timer: bool,
-    /// Whether loop-guard recovery is pending.
-    pub loop_guard: bool,
-}
-
-/// Read-only goal projection for status rendering.
-#[derive(Clone, Debug, Eq, PartialEq)]
-#[expect(
-    dead_code,
-    reason = "the orchestration status contract fixes the goal projection surface"
-)]
-pub(crate) struct GoalView {
-    /// Session-local goal id (`g<n>`).
-    pub id: String,
-    /// Current lifecycle state.
-    pub status: GoalStatus,
-    /// Full objective text.
-    pub objective: String,
 }

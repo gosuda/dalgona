@@ -6,7 +6,6 @@ use dal_core::Timestamp;
 use serde::{Deserialize, Serialize};
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
 
-use super::super::monitor::GoalPreview;
 use super::super::{ControllerMode, GoalStatus};
 
 /// Wire name for one goal lifecycle state.
@@ -408,20 +407,4 @@ pub(crate) fn encode_sidecar(sidecar: &GoalSidecar) -> Result<Vec<u8>, GoalError
     let mut text = sonic_rs::to_string(sidecar).map_err(|error: sonic_rs::Error| damaged(error))?;
     text.push('\n');
     Ok(text.into_bytes())
-}
-
-/// Projects one goal to its read-only status preview, truncating the
-/// objective to its first 32 Unicode scalar values.
-#[must_use]
-pub(crate) fn goal_projection(goal: Option<&Goal>) -> Option<GoalPreview> {
-    goal.map(|goal| GoalPreview {
-        id: goal.id.clone(),
-        status: goal.status,
-        objective: goal
-            .objective
-            .chars()
-            .take(32)
-            .collect::<String>()
-            .into_boxed_str(),
-    })
 }

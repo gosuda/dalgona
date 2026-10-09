@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Show orchestration status as a short human-readable line in the activity row instead of a raw JSON object.
 - Show the plan battery status as one short line in the activity row, such as `planning · 3/5 done · writing tests`, instead of a raw JSON object.
 - Draw compacted history as images: for a model that reads images, compaction now emits the older journal as labeled PNG images with exact-text `letter://` records, reuses stored letters across compactions, and keeps stored text as text. The text summary still runs whenever the image path declines.
 - Run the history compactor before the text summary: the compaction chain is now `remote`, `history`, `summary`, so an image-reading model gets images instead of a summary whenever the image caps allow it.

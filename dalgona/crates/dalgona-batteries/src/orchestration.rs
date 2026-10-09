@@ -314,15 +314,16 @@ pub fn orchestration(config: OrchestrationConfig) -> Result<Extension, Registrat
         || config.monitor.enabled
         || config.arbiter.enabled
         || config.agents.enabled;
+    let status_enabled = config.inflight.enabled;
     let turn_end_enabled = config.loop_guard.enabled
         || config.goal.enabled
         || config.monitor.enabled
-        || config.arbiter.enabled;
+        || config.arbiter.enabled
+        || status_enabled;
     let settled_enabled = config.goal.enabled
         || config.monitor.enabled
         || config.arbiter.enabled
         || config.agents.enabled;
-    let status_enabled = config.inflight.enabled;
     let tool_result_enabled = config.goal.enabled || config.monitor.enabled;
     let runtime = runtime::Runtime::new(config)?;
     let inject = ServiceSet::from_names(["agents", "jobs", "turn", "sidecar", "run", "ask"])?;
@@ -337,6 +338,9 @@ pub fn orchestration(config: OrchestrationConfig) -> Result<Extension, Registrat
     }
     if input_enabled {
         builder = builder.on_input(runtime::InputHook(runtime.clone()));
+    }
+    if status_enabled {
+        builder = builder.on_before_turn(runtime::BeforeTurnHook(runtime.clone()));
     }
     if tool_hook_enabled {
         builder = builder.on_tool_call(runtime::ToolCallHook(runtime.clone()));
