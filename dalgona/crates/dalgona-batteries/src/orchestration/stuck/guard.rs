@@ -148,11 +148,6 @@ fn canonical_value(value: &Value) -> Result<Box<str>, GuardError> {
     Ok(canonical.into_boxed_str())
 }
 
-/// Parses raw tool arguments once and emits their canonical form.
-pub(crate) fn canonical_args(args: &RawJson) -> Result<Box<str>, GuardError> {
-    canonical_value(&parse_args(args)?)
-}
-
 /// Records one tool call and returns its guard effects. Blocked calls stay
 /// counted; a fresh signature ends the escalation episode.
 pub(crate) fn on_tool_call(

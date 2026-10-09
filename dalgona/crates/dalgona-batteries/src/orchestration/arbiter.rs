@@ -96,12 +96,6 @@ impl Arbiter {
         }
     }
 
-    /// User cancellation pauses automatic turns.
-    pub(crate) fn on_user_cancel(&mut self) {
-        self.mode = ControllerMode::Paused {
-            reason: "cancelled by the user",
-        };
-    }
     /// Pauses automatic turns with a fixed owner-selected reason.
     pub(crate) fn pause(&mut self, reason: &'static str) {
         self.mode = ControllerMode::Paused { reason };

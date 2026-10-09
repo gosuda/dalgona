@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     ffi::{OsStr, OsString},
     io,
     process::Stdio,
@@ -20,7 +20,7 @@ use tokio::{
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 
 use crate::mcp::{
-    Budgets, McpError, STDERR_RING, TransportError,
+    Budgets, McpError, TransportError,
     tools::{Key, ServerDecl, resolve_executable},
 };
 
@@ -43,9 +43,7 @@ pub(crate) struct StdioTransport {
     child: Arc<Mutex<Box<dyn ChildWrapper>>>,
     stdin: Arc<Mutex<Option<ChildStdin>>>,
     pending: Arc<Mutex<HashMap<u64, mpsc::Sender<Result<RawJson, McpError>>>>>,
-    stderr_tail: Arc<Mutex<VecDeque<u8>>>,
     reader_task: AbortOnDropHandle<()>,
-    stderr_task: AbortOnDropHandle<()>,
     cancel: CancellationToken,
 }
 
@@ -113,18 +111,17 @@ impl StdioTransport {
         wrapped.wrap(process_wrap::tokio::JobObject);
 
         let mut spawn_task = tokio::task::spawn_blocking(move || wrapped.spawn());
-        let spawn_result = match timeout(budgets.start, &mut spawn_task).await {
-            Ok(result) => result,
-            Err(_) => {
-                if let Ok(Ok(mut child)) = spawn_task.await {
-                    let _ = child.start_kill();
-                    let _ = child.wait().await;
-                }
-                return Err(McpError::Start {
-                    key: key.display(),
-                    cause: format!("timed out after {} s", budgets.start.as_secs()),
-                });
+        let spawn_result = if let Ok(result) = timeout(budgets.start, &mut spawn_task).await {
+            result
+        } else {
+            if let Ok(Ok(mut child)) = spawn_task.await {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
             }
+            return Err(McpError::Start {
+                key: key.display(),
+                cause: format!("timed out after {} s", budgets.start.as_secs()),
+            });
         };
         let mut child = spawn_result
             .map_err(|error| McpError::Start {
@@ -139,7 +136,7 @@ impl StdioTransport {
         let stdin = child.stdin().take();
         let stdout = child.stdout().take();
         let stderr = child.stderr().take();
-        let (Some(stdin), Some(stdout), Some(stderr)) = (stdin, stdout, stderr) else {
+        let (Some(stdin), Some(stdout), Some(_stderr)) = (stdin, stdout, stderr) else {
             let _ = child.start_kill();
             let _ = child.wait().await;
             return Err(McpError::Start {
@@ -151,12 +148,7 @@ impl StdioTransport {
         let child = Arc::new(Mutex::new(child));
         let stdin = Arc::new(Mutex::new(Some(stdin)));
         let pending = Arc::new(Mutex::new(HashMap::new()));
-        let stderr_tail = Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_RING)));
         let cancel = CancellationToken::new();
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "stdio server owns the abort-on-drop reader task"
-        )]
         let reader_task = AbortOnDropHandle::new(tokio::spawn(read_stdout(
             stdout,
             Arc::clone(&child),
@@ -165,21 +157,12 @@ impl StdioTransport {
             key.clone(),
             cancel.clone(),
         )));
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "stdio server owns the abort-on-drop stderr drain"
-        )]
-        let stderr_task =
-            AbortOnDropHandle::new(tokio::spawn(read_stderr(stderr, Arc::clone(&stderr_tail))));
-
         Ok(Self {
             key,
             child,
             stdin,
             pending,
-            stderr_tail,
             reader_task,
-            stderr_task,
             cancel,
         })
     }
@@ -257,12 +240,6 @@ impl StdioTransport {
         self.pending.lock().await.remove(&id);
     }
 
-    /// Returns the bounded stderr excerpt for an internal crash or start error.
-    pub(crate) async fn stderr_excerpt(&self) -> String {
-        let mut tail = self.stderr_tail.lock().await;
-        String::from_utf8_lossy(tail.make_contiguous()).into_owned()
-    }
-
     /// Closes stdin, waits for the grace period, then kills and reaps the process tree.
     pub(crate) async fn shutdown(&self, grace: Duration) -> Result<(), McpError> {
         clear_pending(&self.pending).await;
@@ -292,7 +269,6 @@ impl StdioTransport {
         };
         drop(child);
         self.reader_task.abort();
-        self.stderr_task.abort();
         result
     }
 
@@ -357,7 +333,7 @@ fn exit_code(status: std::process::ExitStatus) -> i32 {
     #[cfg(unix)]
     {
         use std::os::unix::process::ExitStatusExt;
-        return status.signal().map_or(-1, |signal| 128 + signal);
+        status.signal().map_or(-1, |signal| 128 + signal)
     }
     #[cfg(not(unix))]
     {
@@ -367,7 +343,7 @@ fn exit_code(status: std::process::ExitStatus) -> i32 {
 
 async fn process_status(child: &Arc<Mutex<Box<dyn ChildWrapper>>>) -> i32 {
     let mut child = child.lock().await;
-    child.try_wait().ok().flatten().map(exit_code).unwrap_or(-1)
+    child.try_wait().ok().flatten().map_or(-1, exit_code)
 }
 
 async fn read_stdout(
@@ -575,23 +551,4 @@ async fn clear_pending(
     pending: &Arc<Mutex<HashMap<u64, mpsc::Sender<Result<RawJson, McpError>>>>>,
 ) {
     pending.lock().await.clear();
-}
-
-async fn read_stderr(mut stderr: ChildStderr, tail: Arc<Mutex<VecDeque<u8>>>) {
-    let mut buffer = [0_u8; 4096];
-    loop {
-        let count = match stderr.read(&mut buffer).await {
-            Ok(0) | Err(_) => return,
-            Ok(count) => count,
-        };
-        let mut tail = tail.lock().await;
-        if count >= STDERR_RING {
-            tail.clear();
-            tail.extend(&buffer[count - STDERR_RING..count]);
-            continue;
-        }
-        let excess = tail.len().saturating_add(count).saturating_sub(STDERR_RING);
-        tail.drain(..excess);
-        tail.extend(&buffer[..count]);
-    }
 }

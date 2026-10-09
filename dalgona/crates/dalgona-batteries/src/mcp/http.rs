@@ -196,7 +196,7 @@ impl HttpTransport {
                     }));
                 }
                 auth_attempts += 1;
-                let challenge = oauth::challenge(&response.headers());
+                let challenge = oauth::challenge(response.headers());
                 let _authorization = self.authorization.lock().await;
                 if self.bearer().await != used_token {
                     request_id = ids.fetch_add(1, Ordering::Relaxed);
@@ -250,7 +250,7 @@ impl HttpTransport {
                 continue;
             }
             if status == StatusCode::FORBIDDEN {
-                let challenge = oauth::challenge(&response.headers());
+                let challenge = oauth::challenge(response.headers());
                 if !challenge.insufficient_scope {
                     return Err(TransportError::Mcp(McpError::HttpAuth {
                         code: status.as_u16(),
@@ -387,7 +387,7 @@ impl HttpTransport {
                     }));
                 }
                 auth_attempts += 1;
-                let challenge = oauth::challenge(&response.headers());
+                let challenge = oauth::challenge(response.headers());
                 let _authorization = self.authorization.lock().await;
                 if self.bearer().await != token {
                     continue;
@@ -429,7 +429,7 @@ impl HttpTransport {
                 continue;
             }
             if response.status() == StatusCode::FORBIDDEN {
-                let challenge = oauth::challenge(&response.headers());
+                let challenge = oauth::challenge(response.headers());
                 if !challenge.insufficient_scope {
                     return Err(TransportError::Mcp(McpError::HttpAuth {
                         code: 403,

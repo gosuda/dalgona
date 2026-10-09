@@ -4,14 +4,11 @@
 //! recovery document.
 
 use dal_core::Timestamp;
-use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
 use std::fmt::Write as _;
 
 use super::super::monitor::InflightCounts;
 use super::super::{ControllerMode, GoalStatus};
-use super::sidecar::{
-    BlockedReason, Goal, GoalError, GoalSidecar, controller_wire, goal_status_wire,
-};
+use super::sidecar::{BlockedReason, Goal, GoalError, GoalSidecar, goal_status_wire};
 
 /// Description for the model-visible `create_goal` tool.
 pub(crate) const CREATE_GOAL_DESCRIPTION: &str = "Register a goal for work that outlives this turn: it waits on external state, or the requested outcome needs more than one verify-and-fix round. A single answer, lookup, or one-shot edit needs no goal. Objectives are limited to 4000 characters; put longer instructions in a file and name the file. Fails while an unfinished goal exists.";
@@ -426,36 +423,4 @@ pub(crate) fn continuation_unknown() -> String {
 #[must_use]
 pub(crate) fn continuation_unsaved(reply: &str, message: &str) -> String {
     format!("{reply} (not saved: {message})")
-}
-
-/// Builds the `/goal clear` recovery document: a valid empty goal document
-/// with the current in-memory controller mode and next id. Arms no P4.
-#[must_use]
-pub(crate) fn clear_recovery_doc(
-    session: &str,
-    controller: ControllerMode,
-    next_goal: u64,
-) -> Vec<u8> {
-    let sidecar = GoalSidecar {
-        v: 1,
-        session: session.into(),
-        controller,
-        next_goal,
-        goal: None,
-    };
-    super::sidecar::encode_sidecar(&sidecar).unwrap_or_else(|_| {
-        format!(
-            "{{\"v\":1,\"session\":\"{session}\",\"controller\":\"{}\",\"next_goal\":{next_goal},\"goal\":null}}\n",
-            controller_wire(controller)
-        )
-        .into_bytes()
-    })
-}
-
-/// Recovers the prior next id from a damaged document, if one decodes.
-#[must_use]
-pub(crate) fn salvage_next_goal(bytes: &[u8]) -> Option<u64> {
-    let text = core::str::from_utf8(bytes).ok()?;
-    let value: Value = sonic_rs::from_str(text.strip_suffix('\n').unwrap_or(text)).ok()?;
-    value.as_object()?.get(&"next_goal")?.as_u64()
 }

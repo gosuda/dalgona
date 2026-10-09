@@ -3,7 +3,6 @@
 //! goal-turn accounting, and mechanical blocks.
 
 use super::super::StopKind;
-use super::super::monitor::InflightCounts;
 use super::sidecar::Goal;
 
 /// Milliseconds after a user-started turn before a continuation may run.
@@ -17,8 +16,6 @@ pub(crate) const REPETITION_REASON: &str = "repeated assistant output";
 pub(crate) const LENGTH_REASON: &str = "output truncation repeated";
 /// Mechanical block reason for the unattended limit.
 pub(crate) const UNATTENDED_REASON: &str = "unattended continuation limit reached";
-/// Mechanical block reason for an exhausted provider.
-pub(crate) const PROVIDER_REASON: &str = "provider error ended the turn (retries exhausted)";
 /// Mechanical block reason for an unrecovered context overflow.
 pub(crate) const OVERFLOW_REASON: &str =
     "context overflow ended the turn (compaction did not recover)";
@@ -33,14 +30,8 @@ pub(crate) const STALL_TURNS: u32 = 3;
 /// Where a continuation decision runs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum GoalPath {
-    /// A recovery turn after an interruption.
-    Recovery,
     /// The wake after a turn ended.
     AfterTurn,
-    /// The grace window after a user-started turn.
-    UserGrace,
-    /// An idle wake with no turn behind it.
-    Idle,
 }
 
 /// Which prompt a granted continuation carries.
@@ -118,12 +109,6 @@ pub(crate) struct VerdictInput<'a> {
     pub(crate) last_stop: StopKind,
     /// Progress signature of the last assistant output.
     pub(crate) signature: &'a str,
-    /// Open todo tasks.
-    pub(crate) open_todos: usize,
-    /// Total todo tasks.
-    pub(crate) total_todos: usize,
-    /// Live inflight counts.
-    pub(crate) inflight: &'a InflightCounts,
 }
 
 /// Decides eligibility without consulting the deny table: active status and
@@ -137,13 +122,7 @@ pub(crate) fn eligible(input: &VerdictInput<'_>) -> bool {
     if input.goal.status != GoalStatus::Active || input.pending_user_messages {
         return false;
     }
-    match input.path {
-        GoalPath::Recovery => true,
-        GoalPath::AfterTurn | GoalPath::UserGrace => {
-            matches!(input.last_stop, Completed | Length)
-        }
-        GoalPath::Idle => input.idle,
-    }
+    matches!(input.path, GoalPath::AfterTurn) && matches!(input.last_stop, Completed | Length)
 }
 
 /// Counts the trailing run of equal output hashes.
@@ -177,7 +156,7 @@ pub(crate) fn verdict(input: &VerdictInput<'_>) -> Verdict {
     if input.goal.consecutive >= CAP_TURNS {
         return Verdict::Deny(DenyReason::Cap);
     }
-    if matches!(input.path, GoalPath::AfterTurn | GoalPath::UserGrace)
+    if matches!(input.path, GoalPath::AfterTurn)
         && input.goal.last_signature.as_deref() == Some(input.signature)
     {
         return Verdict::Deny(DenyReason::Stale);

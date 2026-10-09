@@ -91,17 +91,12 @@ enum TodoStateSchema {
 
 /// Presence of the `todos` member: absent, explicit null, or a complete array.
 /// Explicit null is malformed for both actions; only absence means "no member".
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub(crate) enum TodosField {
+    #[default]
     Absent,
     Null,
     List(Vec<TodoItemInput>),
-}
-
-impl Default for TodosField {
-    fn default() -> Self {
-        Self::Absent
-    }
 }
 
 type TodosFieldSchema = Option<Vec<TodoItemInput>>;
@@ -963,7 +958,7 @@ mod host_tests {
                     leaf = Some(entries.len() - 1);
                 }
                 2 => {
-                    let body = if next(&mut seed) % 2 == 0 {
+                    let body = if next(&mut seed).is_multiple_of(2) {
                         r#"{"list":{}}"#
                     } else {
                         r#"{"list":[{"subject":"bad","description":"","state":"waiting"}]}"#

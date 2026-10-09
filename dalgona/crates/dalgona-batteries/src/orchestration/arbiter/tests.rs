@@ -93,20 +93,6 @@ fn arbiter_limit_pauses() {
 }
 
 #[test]
-fn arbiter_cancel_keeps_reports() {
-    let mut arbiter = Arbiter::new();
-    arbiter.on_continuation_run();
-    let at = now();
-    arbiter.push_monitor("batch".to_owned(), at);
-    arbiter.on_user_cancel();
-    assert!(matches!(arbiter.mode(), ControllerMode::Paused { .. }));
-    let items = arbiter.collect(Vec::new());
-    assert_eq!(items.len(), 1);
-    arbiter.on_user_prompt();
-    assert_eq!(arbiter.mode(), ControllerMode::Run);
-}
-
-#[test]
 fn arbiter_quiet_needs_idle_and_grace() {
     let arbiter = Arbiter::new();
     let at = now();
@@ -151,9 +137,6 @@ fn arbiter_exactly_once_model() {
                         delivered.extend(included);
                     }
                 }
-            } else if roll == 1 {
-                arbiter.on_user_cancel();
-                arbiter.on_user_prompt();
             }
             let _ = (step, at);
         }

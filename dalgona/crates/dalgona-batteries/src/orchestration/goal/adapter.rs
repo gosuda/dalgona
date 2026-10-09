@@ -11,15 +11,12 @@ use super::ops::{
     GoalCommand, GoalScope, TodoSummary, UpdateTarget, apply_goal_command, create_goal, get_goal,
     parse_goal_command, update_goal,
 };
-use super::sidecar::{
-    Goal, GoalError, GoalSidecar, controller_wire, decode_sidecar, encode_sidecar,
-};
+use super::sidecar::{GoalError, GoalSidecar, controller_wire, decode_sidecar, encode_sidecar};
 
 #[derive(Clone, Debug)]
 pub(crate) struct GoalStore {
     pub sidecar: Option<GoalSidecar>,
     pub saved: bool,
-    pub raw: Option<Vec<u8>>,
     pub error: Option<GoalError>,
 }
 
@@ -34,7 +31,6 @@ impl GoalStore {
                 goal: None,
             }),
             saved: false,
-            raw: None,
             error: None,
         }
     }
@@ -77,13 +73,11 @@ pub(crate) async fn load(services: &dyn Services, caller: &Caller, session: &str
             Ok(sidecar) => GoalStore {
                 sidecar: Some(sidecar),
                 saved: true,
-                raw: Some(bytes),
                 error: None,
             },
             Err(error) => GoalStore {
                 sidecar: None,
                 saved: true,
-                raw: Some(bytes),
                 error: Some(error),
             },
         },
@@ -97,7 +91,6 @@ fn failed_store(error: GoalError) -> GoalStore {
     GoalStore {
         sidecar: None,
         saved: false,
-        raw: None,
         error: Some(error),
     }
 }
@@ -201,13 +194,6 @@ pub(crate) fn update_mode(store: &mut GoalStore, mode: ControllerMode) {
         return;
     };
     sidecar.controller = mode;
-}
-
-pub(crate) fn projection(store: &GoalStore) -> Option<Goal> {
-    store
-        .sidecar
-        .as_ref()
-        .and_then(|sidecar| sidecar.goal.clone())
 }
 
 pub(crate) fn preview(store: &GoalStore) -> Option<super::super::monitor::status::GoalPreview> {

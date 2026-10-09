@@ -255,9 +255,6 @@ pub(crate) enum GoalError {
         "goal: the goal file is damaged: {error}. dalgona continues no goal until you run /goal clear."
     )]
     Damaged { error: Box<str> },
-    /// A sidecar write failed.
-    #[error("goal: saving the goal failed: {message}.")]
-    SaveFailed { message: Box<str> },
     /// The sidecar service is unavailable.
     #[error("goal: the session store is not available: {message}.")]
     StoreUnavailable { message: Box<str> },
@@ -334,7 +331,7 @@ pub(crate) fn decode_sidecar(
             return Err(damaged(format_args!("missing member `{key}`")));
         }
     }
-    for (key, _) in object.iter() {
+    for (key, _) in object {
         if !SIDECAR_KEYS.contains(&key) {
             return Err(damaged(format_args!("unknown member `{key}`")));
         }

@@ -35,13 +35,11 @@ pub(crate) enum StopKind {
 /// The body adapts to the dispatch part's job API once it lands; this trait
 /// stays the single seam so no second view is introduced here.
 pub(crate) trait JobsView {
-    /// Parses a host-issued UUIDv7 job id.
+    /// Parses a host-issued `UUIDv7` job id.
     /// Returns `None` when no job with that id exists in this session.
     fn resolve_job(&self, display: &str) -> Option<dal_core::JobId>;
     /// Reports whether the job is a live top-level exec job in this session.
     fn is_live_top_level_exec(&self, job: dal_core::JobId) -> bool;
-    /// Counts queued or running top-level jobs.
-    fn top_level_live_count(&self) -> usize;
 }
 
 /// Live per-session counts rendered into `orchestration.status`.

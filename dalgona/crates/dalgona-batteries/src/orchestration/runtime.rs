@@ -910,9 +910,6 @@ impl SessionState {
                 last_turn_context_overflow: false,
                 last_stop: self.last_stop,
                 signature: &signature,
-                open_todos: todos.open,
-                total_todos: todos.total,
-                inflight: &inflight,
             };
             super::goal::policy::verdict(&input)
         };
@@ -1072,7 +1069,7 @@ impl SessionState {
     ) -> Result<String, ServiceError> {
         let mut reports = Vec::new();
         for (step_index, step) in workflow.steps.iter().enumerate() {
-            let mut from_items = Vec::new();
+            let from_items;
             let items = match &step.items {
                 super::workflow::Items::Task => vec![None],
                 super::workflow::Items::Literal(items) => items.iter().map(Some).collect(),
@@ -1195,7 +1192,6 @@ impl SessionState {
                         text: report.text.to_string(),
                     }),
                     changed: Vec::new(),
-                    isolation: None,
                 };
                 let _ = result;
             }
@@ -1271,10 +1267,9 @@ impl SessionState {
                     .and_then(|object| object.get(&"command"))
                     .and_then(sonic_rs::JsonValueTrait::as_str)
                 && let Some(wait) = classifier.classify(command)
+                && let Ok(Some(args)) = rewrite_exec_args(&event.args, wait)
             {
-                if let Ok(Some(args)) = rewrite_exec_args(&event.args, wait) {
-                    verdict = ToolCallVerdict::Rewrite { args };
-                }
+                verdict = ToolCallVerdict::Rewrite { args };
             }
         }
         verdict
@@ -1313,13 +1308,6 @@ impl JobsView for SessionJobsView<'_> {
         self.jobs.iter().any(|job| {
             job.id == id && matches!(job.state, JobStateView::Running | JobStateView::Detached)
         })
-    }
-
-    fn top_level_live_count(&self) -> usize {
-        self.jobs
-            .iter()
-            .filter(|job| matches!(job.state, JobStateView::Running | JobStateView::Detached))
-            .count()
     }
 }
 

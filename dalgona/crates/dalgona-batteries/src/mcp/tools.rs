@@ -42,9 +42,7 @@ fn executable_file(path: &Path) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::metadata(path)
-            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
-            .unwrap_or(false)
+        std::fs::metadata(path).is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0)
     }
     #[cfg(not(unix))]
     {
@@ -54,7 +52,7 @@ fn executable_file(path: &Path) -> bool {
 
 /// A stable per-session server identity.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct Key {
+pub(crate) struct Key {
     pub session: SessionId,
     pub skill: String,
     pub server: String,
@@ -63,14 +61,14 @@ pub struct Key {
 impl Key {
     /// Returns the diagnostic and command identity `<session>:<skill>:<server>`.
     #[must_use]
-    pub fn display(&self) -> String {
+    pub(crate) fn display(&self) -> String {
         format!("{}:{}:{}", self.session, self.skill, self.server)
     }
 }
 
 /// Folds an MCP tool name to the stable mapped-tool grammar.
 #[must_use]
-pub fn fold_tool_name(skill: &str, server: &str, tool: &str) -> String {
+pub(crate) fn fold_tool_name(skill: &str, server: &str, tool: &str) -> String {
     let mut output = String::with_capacity(
         skill
             .len()
@@ -134,8 +132,8 @@ fn collect_header_annotations(
     let Some(properties) = schema.get("properties").and_then(|value| value.as_object()) else {
         return Ok(());
     };
-    for (property, definition) in properties.iter() {
-        let property: &str = property.as_ref();
+    for (property, definition) in properties {
+        let property: &str = property;
         path.push(property.to_owned());
         if let Some(annotation) = definition.get("x-mcp-header") {
             let Some(header) = annotation.as_str() else {
@@ -273,7 +271,6 @@ struct RemoteToolPageWire {
 /// A decoded tool was excluded because its optional header metadata was invalid.
 #[derive(Clone, Debug)]
 pub(crate) struct ExcludedTool {
-    pub(crate) name: String,
     pub(crate) warning: String,
 }
 
@@ -339,7 +336,6 @@ fn decode_tool(wire: RemoteToolWire) -> Result<Result<RemoteTool, ExcludedTool>,
                     "mcp: mapped tool {} excluded; invalid x-mcp-header annotation",
                     wire.name
                 ),
-                name: wire.name,
             }));
         }
     };
@@ -556,7 +552,7 @@ impl Tool for ServerEntryTool {
         let empty = args
             .decode_as::<Value>()
             .ok()
-            .and_then(|value| value.as_object().map(|obj| obj.is_empty()));
+            .and_then(|value| value.as_object().map(sonic_rs::Object::is_empty));
         if empty != Some(true) {
             return Err(ArgError::message("mcp server entry takes no arguments"));
         }

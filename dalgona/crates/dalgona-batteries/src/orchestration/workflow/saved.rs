@@ -73,23 +73,6 @@ fn table_member<'a>(table: &'a Value, name: &str) -> Option<&'a Value> {
     table.as_object()?.get(&name)
 }
 
-/// Lists the saved workflows sorted by name with the invalidation reason.
-/// A workflow that only needs `input` lists as valid here; the input check
-/// runs when the workflow is actually used.
-pub(crate) fn saved_names(table: &RawJson) -> Vec<(String, Option<String>)> {
-    let Ok(value) = sonic_rs::from_str::<Value>(table.as_str()) else {
-        return Vec::new();
-    };
-    table_names(table)
-        .into_iter()
-        .map(|name| {
-            let reason = table_member(&value, &name)
-                .and_then(|member| load_member(&name, member, Some("")).err());
-            (name, reason)
-        })
-        .collect()
-}
-
 /// Finds one saved workflow by name. The label of the decoded workflow is
 /// the saved name.
 pub(crate) fn find_saved(

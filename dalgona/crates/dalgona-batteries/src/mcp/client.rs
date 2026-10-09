@@ -865,7 +865,7 @@ impl Client {
                 responses = Some(answer_inputs(&result, session, who).await?);
                 request_state = result
                     .get("requestState")
-                    .map(|value| sonic_rs::to_string(value))
+                    .map(sonic_rs::to_string)
                     .transpose()
                     .map_err(|error| protocol_error(error.to_string()))?;
                 continue;
@@ -1119,8 +1119,8 @@ async fn answer_inputs(
         return Ok("{}".into());
     };
     let mut answers = Vec::new();
-    for (name, request) in requests.iter() {
-        let name: &str = name.as_ref();
+    for (name, request) in requests {
+        let name: &str = name;
         let answer = if request.get("method").and_then(JsonValueTrait::as_str)
             == Some("elicitation/create")
         {
@@ -1152,8 +1152,8 @@ async fn answer_elicitation(
         return Ok("{\"action\":\"decline\"}".into());
     };
     let mut content = Vec::new();
-    for (name, schema) in properties.iter() {
-        let name: &str = name.as_ref();
+    for (name, schema) in properties {
+        let name: &str = name;
         let prompt = format!("{message}: {name}");
         let question = if let Some(variants) = schema.get("enum").and_then(|value| value.as_array())
         {
