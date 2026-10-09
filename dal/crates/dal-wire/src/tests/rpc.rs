@@ -266,7 +266,7 @@ async fn malformed_optional_members_are_invalid_params() {
             assert_invalid_params(&reply, method, member);
         }
         let reply = rpc.call(50, "session/list", sonic_rs::json!([])).await;
-        assert_invalid_params(&reply, "session/list", "params");
+        assert_invalid_params(&reply, "session/list", "object");
     })
     .await;
 }

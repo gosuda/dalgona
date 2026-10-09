@@ -325,7 +325,7 @@ async fn logout_with_a_malformed_provider_removes_nothing() {
         }
         for (id, params) in (10..).zip([sonic_rs::json!([1]), sonic_rs::json!("openai")]) {
             let reply = rpc.call(id, "auth/logout", params).await;
-            assert_invalid_params(&reply, "auth/logout", "params");
+            assert_invalid_params(&reply, "auth/logout", "object");
         }
         assert_eq!(std::fs::read(&auth).expect("auth.json"), before);
         let stored = AuthStore::load(&auth).expect("auth.json");
