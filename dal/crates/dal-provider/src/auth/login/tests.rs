@@ -4,6 +4,9 @@ use std::{
     sync::atomic::{AtomicU32, Ordering},
 };
 
+mod oauth_login;
+mod server;
+
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
