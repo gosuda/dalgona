@@ -659,7 +659,7 @@ mod tests {
             String::from_utf8(stdout).expect("utf8"),
             "{\"jsonrpc\":\"2.0\",\"id\":null,\"result\":{\"stopReason\":\"end_turn\"}}\n"
         );
-        assert!(stderr.is_empty());
+        assert_eq!(stderr, [] as [u8; 0]);
         host.shutdown(Duration::from_secs(1)).await;
     }
 
@@ -684,8 +684,8 @@ mod tests {
             .expect("run");
         assert_eq!(outcome, PrintOutcome::Interrupted);
         assert!(started.elapsed() >= Duration::from_millis(450));
-        assert!(stdout.is_empty());
-        assert!(stderr.is_empty());
+        assert_eq!(stdout, [] as [u8; 0]);
+        assert_eq!(stderr, [] as [u8; 0]);
         let report = host.shutdown(Duration::from_millis(100)).await;
         assert!(!report.status_quiet);
     }
@@ -731,7 +731,7 @@ mod tests {
         .expect("run");
         assert_eq!(outcome, PrintOutcome::Completed);
         assert_eq!(String::from_utf8(stdout).expect("utf8"), "Hello\n");
-        assert!(stderr.is_empty());
+        assert_eq!(stderr, [] as [u8; 0]);
         host.shutdown(Duration::from_secs(1)).await;
     }
 }

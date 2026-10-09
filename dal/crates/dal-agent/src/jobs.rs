@@ -1035,7 +1035,7 @@ mod tests {
         let mut jobs = JobTable::open(root.path().to_path_buf(), &delivered)
             .await
             .expect("reopen after journaled wake");
-        assert!(jobs.take(1).is_empty());
+        assert_eq!(jobs.take(1), []);
     }
 
     #[tokio::test]

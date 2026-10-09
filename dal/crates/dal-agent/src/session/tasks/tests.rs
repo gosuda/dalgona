@@ -406,7 +406,7 @@ fn scope_cancel_stops_unfinished_members_once() {
     let mut stopped = table.cancel(CancelTarget::Scope(scope));
     stopped.sort();
     assert_eq!(stopped, vec![a, b]);
-    assert!(table.cancel(CancelTarget::Scope(scope)).is_empty());
+    assert_eq!(table.cancel(CancelTarget::Scope(scope)), []);
     assert!(
         matches!(
             table.submit(scope, tool_req(), None),

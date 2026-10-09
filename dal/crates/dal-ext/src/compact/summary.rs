@@ -259,9 +259,9 @@ mod tests {
                 model: "test-model".into(),
             }
         );
-        assert!(!request.system.is_empty());
+        assert_ne!(request.system.as_ref(), "");
         assert!(request.system.contains("session://s1/e1"));
-        assert!(request.tools.is_empty());
+        assert_eq!(request.tools.len(), 0);
         assert_eq!(request.params.max_output_tokens, Some(4096));
         assert_eq!(request.cache_key, None);
     }

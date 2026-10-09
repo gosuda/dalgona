@@ -194,11 +194,9 @@ async fn t_e08_late_or_foreign_references_are_denied_without_binding() {
             "{reference} at {cutoff}"
         );
     }
-    assert!(
-        session
-            .snapshots
-            .delivered(session.session, child, token)
-            .is_empty()
+    assert_eq!(
+        session.snapshots.delivered(session.session, child, token),
+        [] as [(u64, u64); 0]
     );
     assert!(
         session
@@ -276,11 +274,11 @@ async fn t_e09_only_an_intact_view_rebinds_provenance() {
             !evidence.deliver(forged, recipient, 1),
             "forged view for {recipient:?}"
         );
-        assert!(
+        assert_eq!(
             session
                 .snapshots
-                .delivered(session.session, recipient, token)
-                .is_empty()
+                .delivered(session.session, recipient, token),
+            [] as [(u64, u64); 0]
         );
     }
     assert!(evidence.deliver(&intact, Consumer::Model, 1));

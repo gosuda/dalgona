@@ -681,7 +681,7 @@ async fn rust_infer_is_trusted_and_script_infer_is_gated() {
         .infer(&bare, model_request())
         .await
         .expect("rust infer is trusted");
-    assert!(inference.events.is_empty());
+    assert_eq!(inference.events, []);
     assert_eq!(open_count(&fx.broker), 0, "trusted infer asks nothing");
 
     let denied = fx
@@ -713,7 +713,7 @@ async fn rust_infer_is_trusted_and_script_infer_is_gated() {
     await_open(&fx.broker).await;
     answer_next(&fx.broker, Answer::Approve);
     let inference = approved.join().await.expect("approved script infer runs");
-    assert!(inference.events.is_empty());
+    assert_eq!(inference.events, []);
 }
 
 fn run_request(argv: &[&str], cwd: PathBuf) -> dal_core::RunRequest {
@@ -1101,13 +1101,7 @@ async fn records_keep_only_the_caller_kind() {
     let letters = fx.services.records(&who, "letter").await.unwrap();
     assert_eq!(letters.len(), 2, "only the caller's own kind returns");
     assert!(letters.iter().all(|record| record.as_str() == "{\"n\":1}"));
-    assert!(
-        fx.services
-            .records(&who, "missing")
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert_eq!(fx.services.records(&who, "missing").await.unwrap(), []);
 }
 
 #[tokio::test]

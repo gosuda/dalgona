@@ -555,7 +555,7 @@ mod tests {
     #[test]
     fn planner_handles_empty_and_singleton_inputs() {
         let policy = policy(ApprovalMode::Ask, true);
-        assert!(plan(&[], &policy).is_empty());
+        assert_eq!(plan(&[], &policy), []);
         assert_eq!(
             plan(&[call("1", "read", ToolClass::Read)], &policy),
             vec![Unit::Reads {

@@ -231,7 +231,7 @@ fn known_adaptive_off_never_sends_unsupported_low() {
         let got = bare(Off, &caps, WIDE);
         assert_eq!(got.level, Off);
         assert_eq!(got.wire, an(Omit, None));
-        assert!(got.notices.is_empty());
+        assert_eq!(got.notices, []);
     }
     let patch = BeforeRequestPatch {
         effort: Some(Effort::Medium),
@@ -261,7 +261,7 @@ fn known_adaptive_off_never_sends_unsupported_low() {
     );
     let unknown = bare(Off, &ThinkingSupport::UnknownAdaptive, WIDE);
     assert_eq!(unknown.wire, an(Omit, Some(Effort::Low)));
-    assert!(unknown.notices.is_empty());
+    assert_eq!(unknown.notices, []);
 }
 
 #[test]

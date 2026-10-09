@@ -286,7 +286,7 @@ async fn ephemeral_blobs_and_records_leave_no_files_before_or_after_close() {
         expected
     );
     assert!(!data_root.exists());
-    assert!(
+    assert_eq!(
         store
             .list(ListQuery {
                 limit: None,
@@ -294,8 +294,8 @@ async fn ephemeral_blobs_and_records_leave_no_files_before_or_after_close() {
                 search: None,
             })
             .expect("list empty workspace")
-            .items
-            .is_empty()
+            .items,
+        [] as [dal_core::SessionInfo; 0]
     );
 
     journal.close().await.expect("close memory session");

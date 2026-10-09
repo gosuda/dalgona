@@ -268,14 +268,23 @@ impl Invocation {
     /// Returns [`HostTerminal::LimitExceeded`] once the tree has issued
     /// [`MAX_ISSUED`] operations.
     pub fn issue(&self) -> Result<u32, HostTerminal> {
-        self.issued
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |issued| {
-                (issued < MAX_ISSUED).then_some(issued + 1)
-            })
-            .map(|previous| previous + 1)
-            .map_err(|_| HostTerminal::LimitExceeded {
-                what: "issued operations",
-            })
+        let mut issued = self.issued.load(Ordering::Acquire);
+        loop {
+            let Some(next) = (issued < MAX_ISSUED).then_some(issued + 1) else {
+                return Err(HostTerminal::LimitExceeded {
+                    what: "issued operations",
+                });
+            };
+            match self.issued.compare_exchange_weak(
+                issued,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(previous) => return Ok(previous + 1),
+                Err(actual) => issued = actual,
+            }
+        }
     }
 
     /// Returns the invocation identity.

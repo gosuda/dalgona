@@ -360,7 +360,7 @@ async fn refuses_retry_after_above_budget_without_sleeping() {
         error,
         ProviderError::RetryAfterTooLong { seconds: 120, .. }
     ));
-    assert!(clock.sleeps().is_empty());
+    assert_eq!(clock.sleeps(), []);
     assert_eq!(
         server
             .join_next()

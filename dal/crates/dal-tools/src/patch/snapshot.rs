@@ -757,10 +757,9 @@ mod tests {
         store.show(reference, Consumer::Model, 1, 5);
         store.deliver(session, Consumer::Model, reference, 0, 3, 5);
         store.deliver(session, Consumer::Model, reference, 4, 2, 5);
-        assert!(
-            store
-                .delivered(session, Consumer::Model, reference)
-                .is_empty()
+        assert_eq!(
+            store.delivered(session, Consumer::Model, reference),
+            [] as [(u64, u64); 0]
         );
         assert!(!store.covers(session, Consumer::Model, reference, 0, 3, 5));
         assert!(!store.covers(session, Consumer::Model, reference, 4, 2, 5));
@@ -945,7 +944,10 @@ mod tests {
         // The second capture forced the first out.
         assert!(store.snapshot(first).is_none());
         assert!(store.snapshot(second).is_some());
-        assert!(store.delivered(session, Consumer::Model, first).is_empty());
+        assert_eq!(
+            store.delivered(session, Consumer::Model, first),
+            [] as [(u64, u64); 0]
+        );
         assert!(!store.covers(session, Consumer::Model, first, 1, 3, 5));
         // The sequence never reuses a minted token.
         assert!(second.seq > first.seq);
@@ -989,10 +991,9 @@ mod tests {
     fn delivered_reports_recorded_intervals() {
         let (store, session, generation) = store();
         let reference = capture(&store, session, generation);
-        assert!(
-            store
-                .delivered(session, Consumer::Model, reference)
-                .is_empty()
+        assert_eq!(
+            store.delivered(session, Consumer::Model, reference),
+            [] as [(u64, u64); 0]
         );
         store.show(reference, Consumer::Model, 1, 6);
         store.deliver(session, Consumer::Model, reference, 1, 3, 4);
@@ -1002,10 +1003,9 @@ mod tests {
             vec![(1, 6)]
         );
         // Another consumer sees nothing.
-        assert!(
-            store
-                .delivered(session, invocation(1), reference)
-                .is_empty()
+        assert_eq!(
+            store.delivered(session, invocation(1), reference),
+            [] as [(u64, u64); 0]
         );
     }
 }

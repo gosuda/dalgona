@@ -329,7 +329,6 @@ impl ModelCx<'_> {
     }
 
     /// Forwards `request` once, with `private` tools visible only to it.
-    #[must_use]
     pub fn forward<'a>(
         &'a self,
         request: ModelRequest,
