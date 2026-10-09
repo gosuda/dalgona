@@ -33,4 +33,3 @@ writes a file directly.
 
 Config: the `[plugin.quality]` table accepts no keys; the guard is turned
 on through the product's `[guard]` table.
-fs.readquality0.1.0codemod_offers

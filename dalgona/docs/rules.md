@@ -14,5 +14,3 @@ startup, and duplicate entries are idempotent.
 | project-workflow | project-workflow-agents-md-binding, project-workflow-slice-first, project-workflow-write-it-down |
 | git-commit | git-commit-no-force-push, git-commit-no-placeholder-message, git-commit-no-secrets |
 | detectors | collapse-repetition, control-token-leak, repetitive-turns, fabricated-unavailable-tool-call |
-the shipped set registers{set}---
-{set}stopstopnope
