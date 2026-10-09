@@ -1286,7 +1286,8 @@ impl Driver {
             } => Some(summary.clone()),
             _ => None,
         });
-        let outcome = match covered.first().zip(covered.last()) {
+        let has_context = covered.iter().any(|entry| entry.note.is_none());
+        let outcome = match covered.first().zip(covered.last()).filter(|_| has_context) {
             Some((first, last)) => {
                 let context = self.compact_model_context(turn).await;
                 self.compact_span(match context {
@@ -1494,6 +1495,18 @@ fn covered_entries(items: &[EntryView]) -> Vec<crate::ext::compact::CoveredEntry
     for item in items {
         if matches!(item.kind, dal_core::EntryKind::Compaction { .. }) {
             user_open = false;
+            continue;
+        }
+        if let dal_core::EntryKind::Reminder { text, .. } = &item.kind {
+            let mut entry = crate::ext::compact::CoveredEntry::new(
+                item.id,
+                false,
+                ContextItem::User { parts: Vec::new() },
+            );
+            entry.note = Some(text.clone());
+            entry.estimated_tokens = 0;
+            user_open = false;
+            out.push(entry);
             continue;
         }
         let Some(content) = crate::session::context::context_items(std::slice::from_ref(item))

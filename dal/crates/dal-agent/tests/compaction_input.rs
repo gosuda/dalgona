@@ -31,6 +31,8 @@ struct Captured {
     carried: Option<Box<str>>,
     first_kept: Option<EntryId>,
     covered_span: (EntryId, EntryId),
+    covered: Vec<(EntryId, Option<Box<str>>)>,
+    context_items: usize,
 }
 
 struct CaptureCompactor(Arc<Mutex<Option<Captured>>>);
@@ -51,6 +53,12 @@ impl Compactor for CaptureCompactor {
             carried: input.carried.clone(),
             first_kept: input.first_kept,
             covered_span: input.span,
+            covered: input
+                .covered
+                .iter()
+                .map(|covered| (covered.entry, covered.note.clone()))
+                .collect(),
+            context_items: input.covered_context().len(),
         });
         Box::pin(async { Ok(None) })
     }
@@ -149,6 +157,22 @@ async fn compact_fixture() -> (
     Arc<Mutex<Option<Captured>>>,
     SessionId,
 ) {
+    let image = b"retained image".to_vec();
+    let image_id = dal_core::BlobId::from_bytes(&image);
+    compact_fixture_with(seed_records(&image, image_id), Some(image)).await
+}
+
+/// Builds a session seeded with `records`, and stores `blob` after the first record.
+async fn compact_fixture_with(
+    records: Vec<Record>,
+    blob: Option<Vec<u8>>,
+) -> (
+    tempfile::TempDir,
+    dal_agent::Agent,
+    Host,
+    Arc<Mutex<Option<Captured>>>,
+    SessionId,
+) {
     let temp = tempfile::tempdir().expect("temp directory");
     let data = temp.path().join("data");
     let workspace_dir = temp.path().join("workspace");
@@ -158,12 +182,12 @@ async fn compact_fixture() -> (
     let session = SessionId::new_v7();
     let store = Store::new(data.clone(), workspace.clone(), JournalProduct::Dal);
     let mut journal = store.create_session(session);
-    let image = b"retained image".to_vec();
-    let image_id = dal_core::BlobId::from_bytes(&image);
-    let mut records = seed_records(&image, image_id);
+    let mut records = records;
     let rest = records.split_off(1);
     journal.append(records).await.expect("seed first user");
-    journal.put_blob(image).expect("write retained image");
+    if let Some(blob) = blob {
+        journal.put_blob(blob).expect("write retained image");
+    }
     journal.append(rest).await.expect("seed session");
     journal.close().await.expect("close seeded session");
 
@@ -210,17 +234,11 @@ async fn compact_fixture() -> (
     (temp, agent, host, seen, session)
 }
 
-#[tokio::test]
-async fn driver_passes_catalog_profile_retained_images_and_carried_summary() {
-    let (_temp, agent, host, seen, session) = compact_fixture().await;
-    assert_eq!(
-        agent
-            .view(dal_core::PageReq::default())
-            .expect("initial view")
-            .session
-            .id,
-        session
-    );
+/// Runs one warm turn and a manual compaction, then returns what the compactor saw.
+async fn warm_then_compact(
+    agent: &dal_agent::Agent,
+    seen: &Arc<Mutex<Option<Captured>>>,
+) -> Captured {
     let mut subscription = agent.subscribe(None).expect("subscribe");
     agent
         .submit(Command::Prompt {
@@ -241,7 +259,7 @@ async fn driver_passes_catalog_profile_retained_images_and_carried_summary() {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     );
 
-    let captured = tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if let Some(captured) = seen
                 .lock()
@@ -254,7 +272,21 @@ async fn driver_passes_catalog_profile_retained_images_and_carried_summary() {
         }
     })
     .await
-    .expect("compactor receives selected context");
+    .expect("compactor receives selected context")
+}
+
+#[tokio::test]
+async fn driver_passes_catalog_profile_retained_images_and_carried_summary() {
+    let (_temp, agent, host, seen, session) = compact_fixture().await;
+    assert_eq!(
+        agent
+            .view(dal_core::PageReq::default())
+            .expect("initial view")
+            .session
+            .id,
+        session
+    );
+    let captured = warm_then_compact(&agent, &seen).await;
     assert_eq!(captured.image_profile, Some(ImageProfile::openai()));
     assert_eq!(captured.images_elsewhere, 2);
     assert_eq!(
@@ -264,5 +296,52 @@ async fn driver_passes_catalog_profile_retained_images_and_carried_summary() {
     assert_eq!(captured.carried.as_deref(), Some("carried history summary"));
     assert_eq!(captured.first_kept, Some(entry(2)));
     assert_eq!(captured.covered_span, (entry(1), entry(1)));
+    assert_eq!(captured.covered, vec![(entry(1), None)]);
+    assert_eq!(captured.context_items, 1);
+    host.close(session).await.expect("close session");
+}
+
+#[tokio::test]
+async fn driver_hands_reminders_to_compactors_as_notes_outside_the_context() {
+    let records = vec![
+        user(
+            1,
+            None,
+            vec![JournalPart::Text {
+                text: "old prefix".into(),
+            }],
+        ),
+        Record::Reminder(Entry {
+            id: entry(2),
+            parent: Some(entry(1)),
+            at: jiff::Timestamp::UNIX_EPOCH,
+            kind: EntryKind::Reminder {
+                source: "rule:gate".into(),
+                text: "Respect the gate rule.".into(),
+            },
+        }),
+        user(
+            3,
+            Some(entry(2)),
+            vec![JournalPart::Text {
+                text: "retained".repeat(20_000).into(),
+            }],
+        ),
+    ];
+    let (_temp, agent, host, seen, session) = compact_fixture_with(records, None).await;
+    let captured = warm_then_compact(&agent, &seen).await;
+    assert_eq!(captured.first_kept, Some(entry(3)));
+    assert_eq!(captured.covered_span, (entry(1), entry(2)));
+    assert_eq!(
+        captured.covered,
+        vec![
+            (entry(1), None),
+            (entry(2), Some("Respect the gate rule.".into())),
+        ]
+    );
+    assert_eq!(
+        captured.context_items, 1,
+        "the reminder is not model context"
+    );
     host.close(session).await.expect("close session");
 }
