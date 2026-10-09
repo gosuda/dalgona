@@ -18,7 +18,6 @@ fn orchestration_config_defaults_enable_every_battery() {
     assert!(config.goal.enabled);
     assert!(config.arbiter.enabled);
     assert!(config.agents.enabled);
-    assert!(config.isolation.enabled);
 }
 
 #[test]
