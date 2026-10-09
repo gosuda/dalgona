@@ -16,10 +16,11 @@ use dal_ext::Font;
 use tokio::sync::Semaphore;
 
 use super::CARRIED_PREFIX;
+use super::compact::{BlobStore, PartsSink};
 use super::pipeline::{
-    Budget, Commit, Drawn, Engine, ImageProfile, Limits, Request, Slot, SourceReader,
+    Budget, Commit, Drawn, Engine, ImageProfile, KnownLetter, Limits, Request, Slot, SourceReader,
 };
-use super::records::{LetterRecord, journal_input};
+use super::records::{LetterRecord, journal_input, text_blobs};
 use super::selection::LetterVisibility;
 use super::spans::{CompactPiece, Item, Role, SourceError, Span, items};
 
@@ -37,6 +38,7 @@ fn user(entry_no: u64, turn: bool, text: &str) -> CoveredEntry {
         content: ContextItem::User {
             parts: vec![Part::Text { text: text.into() }],
         },
+        note: None,
     }
 }
 
@@ -673,6 +675,7 @@ fn covered_entry(entry_no: u64, turn: bool, content: ContextItem) -> CoveredEntr
         starts_user_turn: turn,
         estimated_tokens: 1_000_000,
         content,
+        note: None,
     }
 }
 
@@ -751,9 +754,9 @@ fn every_role() -> Vec<CoveredEntry> {
                 vec![
                     text("boom"),
                     Part::Blob {
-                        blob_id: BlobId::from_bytes(b"long output"),
+                        blob_id: BlobId::from_bytes(b"stored tail"),
                         mime: "text/plain".into(),
-                        bytes: 20_000,
+                        bytes: 11,
                     },
                 ],
             ),
@@ -761,9 +764,19 @@ fn every_role() -> Vec<CoveredEntry> {
     ]
 }
 
+/// Serves `stored tail` for every stored text part of `covered`.
+fn prefetch_blobs(covered: &[CoveredEntry]) -> HashMap<(u64, u32), Arc<[u8]>> {
+    text_blobs(covered)
+        .into_iter()
+        .map(|(key, _)| (key, Arc::from(b"stored tail".to_vec())))
+        .collect()
+}
+
 #[test]
 fn journal_input_marks_every_role_and_keeps_journal_part_indexes() {
-    let (pieces, source) = journal_input(&every_role()).expect("journal input");
+    let entries = every_role();
+    let (pieces, source) =
+        journal_input(&entries, &prefetch_blobs(&entries)).expect("journal input");
     let built = items(&pieces, |span| source.read(span)).expect("items build");
     let seen: Vec<String> = built
         .iter()
@@ -796,14 +809,16 @@ fn journal_input_marks_every_role_and_keeps_journal_part_indexes() {
             "text 3:0 output read file text",
             "mark ¶failed:bash ",
             "text 4:0 failed output bash boom",
-            "picture 4:1 text/plain 20000",
+            "mark ¶failed:bash ",
+            "text 4:1 failed output bash stored tail",
         ]
     );
 }
 
 #[test]
 fn journal_source_returns_exact_bytes_and_names_what_is_missing() {
-    let (_, source) = journal_input(&every_role()).expect("journal input");
+    let entries = every_role();
+    let (_, source) = journal_input(&entries, &prefetch_blobs(&entries)).expect("journal input");
     let span = |entry_no: u64, part: u32, off: u32, len: u32| Span {
         entry: entry(entry_no),
         part,
@@ -814,6 +829,10 @@ fn journal_source_returns_exact_bytes_and_names_what_is_missing() {
     assert_eq!(
         source.read(span(2, 2, 0, 15)).expect("call arguments"),
         br#"{"path":"a.rs"}"#
+    );
+    assert_eq!(
+        source.read(span(4, 1, 0, 11)).expect("stored text"),
+        b"stored tail"
     );
     for missing in [
         span(9, 0, 0, 1),
@@ -863,7 +882,8 @@ async fn journal_input_drives_the_pipeline_and_names_roles_in_letter_text() {
             },
         ),
     ];
-    let (pieces, source) = journal_input(&entries).expect("journal input");
+    let (pieces, source) =
+        journal_input(&entries, &prefetch_blobs(&entries)).expect("journal input");
     let source: Arc<dyn SourceReader> = Arc::new(source);
     let request = Request::new(
         SessionId::new_v7(),
@@ -907,4 +927,235 @@ async fn journal_input_drives_the_pipeline_and_names_roles_in_letter_text() {
             .iter()
             .any(|line| line.visibility == LetterVisibility::ShownAsText)
     );
+}
+
+#[test]
+fn reminder_entries_become_note_pieces() {
+    let mut reminder = covered_entry(5, false, ContextItem::User { parts: Vec::new() });
+    reminder.note = Some("mind the gap".into());
+    let (pieces, source) =
+        journal_input(std::slice::from_ref(&reminder), &HashMap::new()).expect("journal input");
+    let built = items(&pieces, |span| source.read(span)).expect("items build");
+    assert_eq!(built[0], Item::Mark("¶note: ".into()));
+    let Item::Text {
+        span, role, text, ..
+    } = &built[1]
+    else {
+        panic!("the reminder text becomes one text piece");
+    };
+    assert_eq!(
+        (span.entry.get(), span.part, span.off, span.len),
+        (5, 0, 0, 12)
+    );
+    assert_eq!(role.words(), "note");
+    assert_eq!(text.as_ref(), "mind the gap");
+    assert_eq!(
+        source
+            .read(Span {
+                entry: entry(5),
+                part: 0,
+                off: 5,
+                len: 3,
+            })
+            .expect("the note bytes are readable"),
+        b"the"
+    );
+}
+
+#[test]
+fn stored_text_stays_text_and_a_missing_blob_declines_the_span() {
+    let entries = vec![covered_entry(
+        1,
+        true,
+        ContextItem::User {
+            parts: vec![
+                text("inline"),
+                Part::Blob {
+                    blob_id: BlobId::from_bytes(b"stored tail"),
+                    mime: "text/plain".into(),
+                    bytes: 11,
+                },
+            ],
+        },
+    )];
+    assert_eq!(
+        text_blobs(&entries),
+        vec![((1, 1), BlobId::from_bytes(b"stored tail"))]
+    );
+    let (pieces, source) =
+        journal_input(&entries, &prefetch_blobs(&entries)).expect("journal input");
+    let built = items(&pieces, |span| source.read(span)).expect("items build");
+    assert_eq!(
+        built[1],
+        Item::Text {
+            span: Span {
+                entry: entry(1),
+                part: 0,
+                off: 0,
+                len: 6,
+            },
+            role: Role::User,
+            total: 6,
+            text: "inline".into(),
+        }
+    );
+    assert_eq!(
+        built[3],
+        Item::Text {
+            span: Span {
+                entry: entry(1),
+                part: 1,
+                off: 0,
+                len: 11,
+            },
+            role: Role::User,
+            total: 11,
+            text: "stored tail".into(),
+        }
+    );
+    assert!(
+        journal_input(&entries, &HashMap::new()).is_none(),
+        "a stored text part that was not read declines the whole span"
+    );
+}
+
+async fn drawn_unbounded(entries: &[CoveredEntry]) -> Drawn {
+    let (result, drawn) = run(
+        limits(),
+        profile(1000),
+        request(entries, budget(u64::MAX / 4, 0.7)),
+    )
+    .await;
+    assert!(result.expect("unbounded run succeeds").is_some());
+    drawn.expect("drawn")
+}
+
+fn stored_letters(drawn: &Drawn) -> Vec<KnownLetter> {
+    drawn
+        .letters
+        .iter()
+        .map(|letter| KnownLetter {
+            record: letter.record.clone(),
+            png: Some(letter.png.clone()),
+        })
+        .collect()
+}
+
+fn second_request(entries: &[CoveredEntry], known: Vec<KnownLetter>) -> Request {
+    let (pieces, source) = pieces(entries);
+    Request::new(
+        SessionId::new_v7(),
+        entries,
+        (entry(1), entry(2)),
+        2,
+        budget(u64::MAX / 4, 0.7),
+        pieces,
+        Arc::new(source),
+    )
+    .with_known(known)
+}
+
+#[tokio::test]
+async fn known_letters_are_reused_with_their_ids_and_pngs() {
+    let entries = covered();
+    let first = drawn_unbounded(&entries).await;
+    let known = stored_letters(&first);
+    assert!(known.len() > 2, "the fixture draws several letters");
+
+    let (result, drawn) = run(limits(), profile(1000), second_request(&entries, known)).await;
+    assert!(result.expect("second run succeeds").is_some());
+    let drawn = drawn.expect("drawn");
+    assert_eq!(drawn.letters.len(), first.letters.len());
+    for (left, right) in first.letters.iter().zip(&drawn.letters) {
+        assert!(right.reused, "{} stays a stored letter", right.record.id());
+        assert_eq!(left.record, right.record);
+        assert_eq!(left.png, right.png);
+        assert!(right.record.id().starts_with("history/1."));
+    }
+}
+
+#[tokio::test]
+async fn stale_known_letters_are_listed_and_redrawn_fresh() {
+    let entries = covered();
+    let first = drawn_unbounded(&entries).await;
+    let mut known = stored_letters(&first);
+    let LetterRecord::Compaction { id, cell, .. } = &mut known[1].record else {
+        panic!("a compaction record");
+    };
+    let stale_id = id.clone();
+    *cell = [1, 1];
+
+    let (result, drawn) = run(limits(), profile(1000), second_request(&entries, known)).await;
+    assert!(result.expect("second run succeeds").is_some());
+    let drawn = drawn.expect("drawn");
+    assert!(
+        drawn
+            .letters
+            .iter()
+            .all(|letter| letter.record.id() != stale_id),
+        "the stale letter is never shown as itself"
+    );
+    let stale_line = drawn
+        .index
+        .iter()
+        .find(|line| line.id.as_ref() == stale_id)
+        .expect("the stale letter stays listed");
+    assert_eq!(stale_line.visibility, LetterVisibility::NotDrawn);
+    assert!(stale_line.text.ends_with(", not drawn"));
+    assert!(
+        drawn
+            .letters
+            .iter()
+            .any(|letter| letter.record.id().starts_with("history/2.")),
+        "the stale content is drawn again under a fresh id"
+    );
+}
+
+#[derive(Default)]
+struct MapStore {
+    blobs: Mutex<HashMap<[u8; 32], Vec<u8>>>,
+}
+
+impl BlobStore for MapStore {
+    fn put(&self, png: Vec<u8>) -> BoxFuture<'static, Result<[u8; 32], CompactError>> {
+        let digest = *blake3::hash(&png).as_bytes();
+        self.blobs.lock().expect("store lock").insert(digest, png);
+        Box::pin(std::future::ready(Ok(digest)))
+    }
+}
+
+#[tokio::test]
+async fn the_sink_stores_each_png_and_returns_image_parts() {
+    let entries = covered();
+    let request = request(&entries, budget(u64::MAX / 4, 0.7));
+    let sink = Arc::new(PartsSink::new(
+        Arc::new(MapStore::default()),
+        "history".parse().expect("battery name"),
+    ));
+    let result = engine(limits())
+        .run(request, profile(1000), sink as Arc<dyn Commit>)
+        .await;
+    let compaction = result.expect("the sink commits").expect("the compaction");
+    let dal_agent::ext::Replacement::Parts {
+        parts,
+        letters,
+        parts_tokens,
+    } = compaction.replacement
+    else {
+        panic!("the replacement carries image parts");
+    };
+    let images = parts
+        .iter()
+        .filter(|part| matches!(part, Part::Image { .. }))
+        .count();
+    assert!(!letters.is_empty());
+    assert_eq!(images, letters.len());
+    assert!(parts_tokens > 0);
+    for record in &letters {
+        assert_eq!(record.ext.as_str(), "history");
+        assert_eq!(record.kind.as_ref(), "letter");
+        let body = LetterRecord::decode(&record.body, entry(u64::MAX)).expect("the record decodes");
+        assert!(matches!(body, LetterRecord::Compaction { .. }));
+        assert!(body.id().starts_with("history/1."));
+    }
 }

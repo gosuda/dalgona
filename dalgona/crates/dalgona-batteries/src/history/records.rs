@@ -3,14 +3,16 @@
 //! Strict history letter records and the journal input that feeds them.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use dal_agent::ext::CoveredEntry;
-use dal_core::{AssistantPart, ContextItem, EntryId, Part};
+use dal_core::{AssistantPart, BlobId, ContextItem, EntryId, Part};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::pipeline::SourceReader;
 use super::spans::{CompactPiece, Role, SourceError, Span};
+
 /// A strict history letter record body.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields, rename_all = "snake_case")]
@@ -358,7 +360,16 @@ impl PieceBuilder {
     }
 
     /// Adds the parts of a user message or tool result under one role.
-    fn content(&mut self, entry: EntryId, role: &Role, parts: &[Part]) -> Option<()> {
+    ///
+    /// Stored text is read from `blobs`; a stored text part that was not
+    /// prefetched stops the whole build.
+    fn content(
+        &mut self,
+        entry: EntryId,
+        role: &Role,
+        parts: &[Part],
+        blobs: &HashMap<(u64, u32), Arc<[u8]>>,
+    ) -> Option<()> {
         for (index, part) in parts.iter().enumerate() {
             let index = u32::try_from(index).ok()?;
             match part {
@@ -369,7 +380,13 @@ impl PieceBuilder {
                 }
                 Part::Blob { mime, bytes, .. } => {
                     let length = u32::try_from(*bytes).ok()?;
-                    self.picture(entry, index, role.clone(), mime, length);
+                    if mime.starts_with("text/") {
+                        let text = blobs.get(&(entry.get(), index))?;
+                        let text = std::str::from_utf8(text).ok()?;
+                        self.text(entry, index, role.clone(), text)?;
+                    } else {
+                        self.picture(entry, index, role.clone(), mime, length);
+                    }
                 }
             }
         }
@@ -397,22 +414,30 @@ impl PieceBuilder {
 /// Decodes the covered entries of one compaction span into source pieces.
 ///
 /// Each piece carries its journal role: user text, assistant text, tool
-/// calls, tool output, failed tool output, or reasoning. The part index of a
-/// piece is its position in the covered message, so spans name the same
-/// parts that `letter://` reads back from the journal. Images and stored
-/// blobs become picture pieces and are never read. The returned
-/// [`JournalSource`] serves the exact bytes of every text piece.
+/// calls, tool output, failed tool output, notes, or reasoning. The part
+/// index of a piece is its position in the covered message, so spans name
+/// the same parts that `letter://` reads back from the journal. A reminder
+/// entry becomes one note piece over its text. Images and stored non-text
+/// blobs become picture pieces and are never read; stored text is read from
+/// `blobs`, which [`text_blobs`] names. The returned [`JournalSource`]
+/// serves the exact bytes of every text piece.
 ///
-/// Returns `None` when a part is larger than a span can name (4 GiB).
+/// Returns `None` when a stored text part was not prefetched or a part is
+/// larger than a span can name (4 GiB).
 #[must_use]
 pub(crate) fn journal_input(
     covered: &[CoveredEntry],
+    blobs: &HashMap<(u64, u32), Arc<[u8]>>,
 ) -> Option<(Vec<CompactPiece>, JournalSource)> {
     let mut builder = PieceBuilder::default();
     for covered_entry in covered {
         let entry = covered_entry.entry;
+        if let Some(note) = &covered_entry.note {
+            builder.text(entry, 0, Role::Note, note)?;
+            continue;
+        }
         match &covered_entry.content {
-            ContextItem::User { parts } => builder.content(entry, &Role::User, parts)?,
+            ContextItem::User { parts } => builder.content(entry, &Role::User, parts, blobs)?,
             ContextItem::Assistant { parts, .. } => builder.assistant(entry, parts)?,
             ContextItem::ToolResult {
                 name,
@@ -425,9 +450,38 @@ pub(crate) fn journal_input(
                 } else {
                     Role::Output(name.clone())
                 };
-                builder.content(entry, &role, parts)?;
+                builder.content(entry, &role, parts, blobs)?;
             }
         }
     }
     Some((builder.pieces, builder.source))
+}
+
+/// Names every stored text part of the covered span.
+///
+/// Each entry is the `(entry, part)` key of [`JournalSource`] and the blob
+/// id the host reads before it builds the journal input.
+#[must_use]
+pub(crate) fn text_blobs(covered: &[CoveredEntry]) -> Vec<((u64, u32), BlobId)> {
+    let mut out = Vec::new();
+    for covered_entry in covered {
+        if covered_entry.note.is_some() {
+            continue;
+        }
+        let parts = match &covered_entry.content {
+            ContextItem::User { parts } | ContextItem::ToolResult { parts, .. } => parts,
+            ContextItem::Assistant { .. } => continue,
+        };
+        for (index, part) in parts.iter().enumerate() {
+            let Part::Blob { blob_id, mime, .. } = part else {
+                continue;
+            };
+            if mime.starts_with("text/")
+                && let Ok(index) = u32::try_from(index)
+            {
+                out.push(((covered_entry.entry.get(), index), *blob_id));
+            }
+        }
+    }
+    out
 }

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Run the history compactor before the text summary: the compaction chain is now `remote`, `history`, `summary`, so an image-reading model gets images instead of a summary whenever the image caps allow it.
 - Fix `read dalgona://<page>`: the model can now read the Dalgona manual, not only the `dalgona docs` command.
 - Include an MCP stdio server's exit status and bounded stderr excerpt when it crashes during a call.
 - Fix the review battery: `/review` can now read the git status and diff of a session, so it reports findings instead of failing with a workspace-size error.

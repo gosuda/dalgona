@@ -153,6 +153,15 @@ pub(crate) trait SourceReader: Send + Sync + 'static {
     fn read(&self, span: Span) -> Result<Vec<u8>, SourceError>;
 }
 
+/// One stored letter of an earlier compaction on the current path.
+#[derive(Clone, Debug)]
+pub(crate) struct KnownLetter {
+    /// The stored `letter` record.
+    pub(crate) record: LetterRecord,
+    /// The stored PNG bytes; `None` when the blob is gone or damaged.
+    pub(crate) png: Option<Vec<u8>>,
+}
+
 /// One frozen compaction request.
 pub(crate) struct Request {
     session: SessionId,
@@ -164,6 +173,7 @@ pub(crate) struct Request {
     text_tokens: u64,
     pieces: Arc<[CompactPiece]>,
     source: Arc<dyn SourceReader>,
+    known: Arc<[KnownLetter]>,
 }
 
 impl Request {
@@ -193,7 +203,15 @@ impl Request {
             }),
             pieces: pieces.into(),
             source,
+            known: Arc::from(Vec::new()),
         }
+    }
+
+    /// Returns the request with the stored letters of earlier compactions.
+    #[must_use]
+    pub(crate) fn with_known(mut self, known: Vec<KnownLetter>) -> Self {
+        self.known = known.into();
+        self
     }
 
     /// Returns the request with an earlier summary carried in front of the images.
@@ -227,6 +245,9 @@ pub(crate) struct DrawnLetter {
     pub(crate) png: Vec<u8>,
     /// The `letter` record to commit with the compaction.
     pub(crate) record: LetterRecord,
+    /// True when this letter reuses a stored record instead of appending a
+    /// new one.
+    pub(crate) reused: bool,
 }
 
 /// The `letter://` index line of one candidate letter.
@@ -281,10 +302,13 @@ impl Drawn {
         if drawn.len() != self.letters.len() {
             return Err(Decline::Inconsistent);
         }
-        self.letters
-            .iter()
-            .zip(drawn)
-            .try_for_each(|(letter, line)| letter.verify(line))
+        self.letters.iter().try_for_each(|letter| {
+            let line = drawn
+                .iter()
+                .find(|line| line.id.as_ref() == letter.record.id())
+                .ok_or(Decline::Inconsistent)?;
+            letter.verify(line)
+        })
     }
 }
 
@@ -356,6 +380,7 @@ struct Candidate {
     items: Vec<Item>,
     spans: Vec<Span>,
     png: Option<Vec<u8>>,
+    reused: Option<LetterRecord>,
 }
 
 /// Runs the image pipeline under the process-wide render gate.
@@ -416,12 +441,13 @@ impl Engine {
         }
         let window = request.budget.window_tokens.ok_or(Decline::UnknownWindow)?;
         let mut candidates = self.render(&request, &profile, Arc::clone(&permit)).await?;
+        let unmatched = unmatched_known(&request, &candidates);
         let pool = drawable(&candidates);
         if pool.is_empty() {
             return Err(Decline::NothingToDraw.into());
         }
         let selected = self.select(&request, &profile, window, &candidates, &pool)?;
-        let drawn = assemble(&request, &profile, &mut candidates, &selected)?;
+        let drawn = assemble(&request, &profile, &mut candidates, &selected, &unmatched)?;
         drawn.verify()?;
         sink.commit(request.span, drawn).await
     }
@@ -435,10 +461,11 @@ impl Engine {
         let font = Arc::clone(&self.font);
         let source = Arc::clone(&request.source);
         let pieces = Arc::clone(&request.pieces);
-        let grid = profile_grid(profile);
+        let known = Arc::clone(&request.known);
+        let profile = *profile;
         let worker = tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            render_pages(&font, grid, &pieces, source.as_ref())
+            render_pages(&font, &profile, &pieces, source.as_ref(), &known)
         });
         match timeout(self.limits.render, worker).await {
             Err(_) => Err(Decline::RenderTimeout {
@@ -576,12 +603,49 @@ fn drawable(candidates: &[Candidate]) -> Vec<usize> {
         .collect()
 }
 
+/// Stored letters that no candidate reused stay listed as not drawn.
+/// Their records remain on the branch; none is deleted.
+fn unmatched_known(request: &Request, candidates: &[Candidate]) -> Vec<LetterRecord> {
+    request
+        .known
+        .iter()
+        .filter(|known| {
+            !candidates.iter().any(|candidate| {
+                candidate
+                    .reused
+                    .as_ref()
+                    .is_some_and(|record| record.id() == known.record.id())
+            })
+        })
+        .map(|known| known.record.clone())
+        .collect()
+}
+
+/// Returns true when a stored letter cannot be shown on the current grid:
+/// its cell pitch differs, or its image exceeds the grid.
+pub(crate) fn stale(record: &LetterRecord, profile: &ImageProfile) -> bool {
+    let LetterRecord::Compaction {
+        cell,
+        width,
+        height,
+        ..
+    } = record
+    else {
+        return true;
+    };
+    *cell != [profile.cell_w, profile.cell_h]
+        || *width > profile_width(profile)
+        || *height > profile_height(profile)
+}
+
 fn render_pages(
     font: &Font,
-    grid: Grid,
+    profile: &ImageProfile,
     pieces: &[CompactPiece],
     source: &dyn SourceReader,
+    known: &[KnownLetter],
 ) -> Result<Vec<Candidate>, Decline> {
+    let grid = profile_grid(profile);
     let glyphs = font.glyphs().map_err(|_| Decline::Font)?;
     let built = items(pieces, |span| source.read(span))?;
     let mut out = Vec::new();
@@ -590,7 +654,13 @@ fn render_pages(
         if spans.is_empty() {
             continue;
         }
-        let png = if page.drawable {
+        let reused = known
+            .iter()
+            .find(|known| known.record.spans() == spans.as_slice())
+            .filter(|known| !stale(&known.record, profile) && known.png.is_some());
+        let png = if let Some(known) = reused {
+            known.png.clone()
+        } else if page.drawable {
             Some(draw(glyphs, grid, &page)?)
         } else {
             None
@@ -599,6 +669,7 @@ fn render_pages(
             items: page.items,
             spans,
             png,
+            reused: reused.map(|known| known.record.clone()),
         });
     }
     Ok(out)
@@ -625,6 +696,7 @@ fn assemble(
     profile: &ImageProfile,
     candidates: &mut [Candidate],
     selected: &[usize],
+    unmatched: &[LetterRecord],
 ) -> Result<Drawn, Decline> {
     let next_value = request
         .span
@@ -638,12 +710,18 @@ fn assemble(
         slots.push(Slot::Text(format!("{CARRIED_PREFIX}{carried}").into()));
     }
     let mut letters = Vec::new();
-    let mut index = Vec::with_capacity(candidates.len());
+    let mut index: Vec<IndexLine> = Vec::with_capacity(candidates.len());
     let mut hidden = Vec::new();
     let mut shown_as_text = 0_usize;
-    let total = candidates.len();
+    let mut fresh = 0_usize;
+    let total = candidates.len() + unmatched.len();
     for (position, candidate) in candidates.iter_mut().enumerate() {
-        let id = format!("history/{}.{}", request.ordinal, position + 1);
+        let id = if let Some(record) = &candidate.reused {
+            record.id().to_string()
+        } else {
+            fresh += 1;
+            format!("history/{}.{}", request.ordinal, fresh)
+        };
         let visibility = if candidate.png.is_none() {
             LetterVisibility::ShownAsText
         } else if selected.contains(&position) {
@@ -671,12 +749,24 @@ fn assemble(
                 );
                 slots.push(Slot::Text(lead.into()));
             }
-            LetterVisibility::NotDrawn => hidden.push((position, (first, last))),
+            LetterVisibility::NotDrawn => hidden.push((Box::from(id.as_str()), (first, last))),
         }
     }
+    for record in unmatched {
+        let (first, last) = entry_range(record.spans());
+        let id = record.id();
+        index.push(IndexLine {
+            id: Box::from(id),
+            visibility: LetterVisibility::NotDrawn,
+            text: history_index_line(id, first, last, LetterVisibility::NotDrawn).into(),
+        });
+        hidden.push((Box::from(id), (first, last)));
+    }
+    index.sort_by_key(|line| letter_id_parts(&line.id));
+    hidden.sort_by_key(|(id, _)| letter_id_parts(id));
     let shown = letters.len() + shown_as_text;
     slots.push(Slot::Text(
-        index_text(shown, total, &hidden_ranges(request.ordinal, &hidden)).into(),
+        index_text(shown, total, &hidden_ranges(&hidden)).into(),
     ));
     let text_bytes: usize = slots
         .iter()
@@ -704,6 +794,14 @@ fn letter(
     next: EntryId,
 ) -> Result<DrawnLetter, Decline> {
     let png = candidate.png.take().ok_or(Decline::Inconsistent)?;
+    if let Some(record) = candidate.reused.clone() {
+        LetterRecord::check(&record, next)?;
+        return Ok(DrawnLetter {
+            png,
+            record,
+            reused: true,
+        });
+    }
     let record = LetterRecord::Compaction {
         v: 1,
         id: id.to_string(),
@@ -716,33 +814,37 @@ fn letter(
         letters: Vec::new(),
     };
     LetterRecord::check(&record, next)?;
-    Ok(DrawnLetter { png, record })
+    Ok(DrawnLetter {
+        png,
+        record,
+        reused: false,
+    })
 }
 
-fn hidden_ranges(ordinal: u32, hidden: &[(usize, (u64, u64))]) -> String {
-    let mut groups: Vec<(usize, usize, u64, u64)> = Vec::new();
-    for (position, (first, last)) in hidden {
+fn hidden_ranges(hidden: &[(Box<str>, (u64, u64))]) -> String {
+    let mut groups: Vec<(u32, u32, u32, u64, u64)> = Vec::new();
+    for (id, (first, last)) in hidden {
+        let Some((ordinal, index)) = letter_id_parts(id) else {
+            continue;
+        };
         match groups.last_mut() {
-            Some(group) if group.1 + 1 == *position => {
-                group.1 = *position;
-                group.2 = group.2.min(*first);
-                group.3 = group.3.max(*last);
+            Some(group) if group.0 == ordinal && group.2 + 1 == index => {
+                group.2 = index;
+                group.3 = group.3.min(*first);
+                group.4 = group.4.max(*last);
             }
-            _ => groups.push((*position, *position, *first, *last)),
+            _ => groups.push((ordinal, index, index, *first, *last)),
         }
     }
     let named: Vec<String> = groups
         .iter()
         .take(MAX_HIDDEN_GROUPS)
-        .map(|(from, to, first, last)| {
+        .map(|&(ordinal, from, to, first, last)| {
             if from == to {
-                let id = format!("history/{ordinal}.{}", from + 1);
-                format!("letter://{id} (entries {first}-{last})")
+                format!("letter://history/{ordinal}.{from} (entries {first}-{last})")
             } else {
                 format!(
-                    "letter://history/{ordinal}.{} to letter://history/{ordinal}.{} (entries {first}-{last})",
-                    from + 1,
-                    to + 1
+                    "letter://history/{ordinal}.{from} to letter://history/{ordinal}.{to} (entries {first}-{last})"
                 )
             }
         })
@@ -757,6 +859,12 @@ fn hidden_ranges(ordinal: u32, hidden: &[(usize, (u64, u64))]) -> String {
         );
     }
     text
+}
+
+/// Splits a `history/<ordinal>.<index>` id into its numbers.
+fn letter_id_parts(id: &str) -> Option<(u32, u32)> {
+    let (ordinal, index) = id.strip_prefix("history/")?.split_once('.')?;
+    Some((ordinal.parse().ok()?, index.parse().ok()?))
 }
 
 /// Renders the exact per-letter source text of one letter from its items.

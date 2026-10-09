@@ -91,13 +91,6 @@ pub(crate) enum Role {
     Call(Box<str>),
     Output(Box<str>),
     FailedOutput(Box<str>),
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the covered compaction context carries no reminder entries, so no host builds note pieces"
-        )
-    )]
     Note,
     Reasoning,
 }
