@@ -7,6 +7,7 @@
 mod admission;
 mod agent;
 mod broker;
+pub mod confine;
 pub mod error;
 pub mod ext;
 mod host;

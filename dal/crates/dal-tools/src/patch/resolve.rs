@@ -3,6 +3,7 @@
 use std::path::{Component, Path, PathBuf};
 
 use super::ir::{Edit, EngineError, ErrorClass};
+use dal_agent::confine::canonicalize_existing_prefix;
 
 /// Decoded text with BOM, EOL, and final-newline metadata.
 #[derive(Clone, Debug)]
@@ -246,29 +247,6 @@ fn edit_spans(edits: &[Edit], path: &Path) -> Vec<(usize, usize, usize)> {
         spans.push((start, end, target));
     }
     spans
-}
-
-/// Canonicalizes the deepest existing ancestor and re-appends the missing
-/// tail, so a link in an existing prefix cannot hide an escape behind
-/// directories that do not exist yet. Returns `None` when a component exists
-/// but cannot be resolved, such as a dangling link.
-fn canonicalize_existing_prefix(path: &Path) -> Option<PathBuf> {
-    let mut tail: Vec<&std::ffi::OsStr> = Vec::new();
-    let mut current = path;
-    loop {
-        match std::fs::canonicalize(current) {
-            Ok(mut resolved) => {
-                resolved.extend(tail.iter().rev());
-                return Some(resolved);
-            }
-            Err(_) if std::fs::symlink_metadata(current).is_ok() => return None,
-            Err(_) => {
-                let name = current.file_name()?;
-                tail.push(name);
-                current = current.parent()?;
-            }
-        }
-    }
 }
 
 fn outside_workspace(raw: &Path, workspace: &Path) -> EngineError {

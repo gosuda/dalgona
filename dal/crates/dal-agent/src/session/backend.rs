@@ -20,7 +20,8 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use crate::broker::Broker;
-use crate::error::{AgentError, HostError, ServiceError};
+use crate::confine::{ConfineError, Confined, confine};
+use crate::error::{AgentError, DenyReason, HostError, ServiceError};
 use crate::ext::ExtRecord;
 use crate::ext::services::{ServiceFuture, SessionBackend, SessionServices};
 use crate::ext::tool::RawValue;
@@ -189,6 +190,55 @@ fn blob_id_from_digest(digest: [u8; 32]) -> Result<BlobId, ServiceError> {
     let encoded = std::str::from_utf8(&encoded)
         .map_err(|error| ServiceError::failed(None, error.to_string()))?;
     BlobId::parse(encoded).map_err(|_| ServiceError::failed(None, "the blob digest is invalid"))
+}
+
+/// Resolves a script-supplied path inside the session root on a blocking
+/// thread.
+async fn confine_path(
+    root: PathBuf,
+    path: &str,
+    service: Service,
+) -> Result<Confined, ServiceError> {
+    let raw = PathBuf::from(path);
+    let outcome = tokio::task::spawn_blocking(move || confine(&root, &raw))
+        .await
+        .map_err(|error| ServiceError::failed(Some(service), error.to_string()))?;
+    outcome.map_err(|error| refusal(service, path, error))
+}
+
+/// Proves on a blocking thread that a staged path still resolves to the same
+/// location inside the session root.
+async fn recheck_path(
+    root: PathBuf,
+    confined: Confined,
+    path: &str,
+    service: Service,
+) -> Result<Confined, ServiceError> {
+    let (confined, outcome) = tokio::task::spawn_blocking(move || {
+        let outcome = confined.recheck(&root);
+        (confined, outcome)
+    })
+    .await
+    .map_err(|error| ServiceError::failed(Some(service), error.to_string()))?;
+    outcome
+        .map(|()| confined)
+        .map_err(|error| refusal(service, path, error))
+}
+
+fn refusal(service: Service, path: &str, error: ConfineError) -> ServiceError {
+    match error {
+        ConfineError::Unresolvable => {
+            ServiceError::failed(Some(service), format!("{service} \"{path}\": {error}"))
+        }
+        _ => ServiceError::Denied(DenyReason::out_of_scope(format!("path \"{path}\""))),
+    }
+}
+
+fn fs_failure(service: Service, path: &str, error: &std::io::Error) -> ServiceError {
+    ServiceError::failed(
+        Some(service),
+        format!("{service} \"{path}\" failed: {error}"),
+    )
 }
 
 /// Host data-plane for one live session.
@@ -390,23 +440,6 @@ impl Backend {
         &self.cancel
     }
 
-    /// Joins a workspace-relative path, refusing escapes from the root.
-    fn contained(&self, path: &str) -> Option<PathBuf> {
-        let joined = self.canonical_root.join(path);
-        let resolved = if joined.exists() {
-            std::fs::canonicalize(&joined).unwrap_or(joined)
-        } else if let Some(parent) = joined.parent() {
-            let canonical_parent =
-                std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
-            canonical_parent.join(joined.file_name()?)
-        } else {
-            joined
-        };
-        resolved
-            .starts_with(&self.canonical_root)
-            .then_some(resolved)
-    }
-
     fn host(&self) -> crate::host::Host {
         crate::host::Host {
             state: Arc::clone(&self.host),
@@ -416,25 +449,34 @@ impl Backend {
 
 impl SessionBackend for Backend {
     fn fs_read(&self, path: &str) -> ServiceFuture<'_, Option<Vec<u8>>> {
-        let resolved = self.contained(path);
+        let root = self.canonical_root.clone();
+        let path = path.to_owned();
         Box::pin(async move {
-            let Some(resolved) = resolved else {
-                return Ok(None);
-            };
-            Ok(tokio::fs::read(resolved).await.ok())
+            let confined = confine_path(root, &path, Service::FsRead).await?;
+            match tokio::fs::read(confined.resolved()).await {
+                Ok(bytes) => Ok(Some(bytes)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(fs_failure(Service::FsRead, &path, &error)),
+            }
         })
     }
 
     fn fs_write(&self, path: &str, bytes: Vec<u8>) -> ServiceFuture<'_, ()> {
-        let resolved = self.contained(path);
+        let root = self.canonical_root.clone();
+        let path = path.to_owned();
         Box::pin(async move {
-            if let Some(resolved) = resolved {
-                if let Some(parent) = resolved.parent() {
-                    let _ = tokio::fs::create_dir_all(parent).await;
-                }
-                let _ = tokio::fs::write(resolved, bytes).await;
+            let service = Service::FsWrite;
+            let confined = confine_path(root.clone(), &path, service).await?;
+            let confined = recheck_path(root.clone(), confined, &path, service).await?;
+            if let Some(parent) = confined.resolved().parent() {
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .map_err(|error| fs_failure(service, &path, &error))?;
             }
-            Ok(())
+            let confined = recheck_path(root, confined, &path, service).await?;
+            tokio::fs::write(confined.resolved(), bytes)
+                .await
+                .map_err(|error| fs_failure(service, &path, &error))
         })
     }
 
@@ -1476,6 +1518,72 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         Arc::clone(&sessions.get(&id).expect("live session").backend)
+    }
+
+    #[tokio::test]
+    async fn fs_services_confine_paths_and_report_failures() {
+        let (host, root, child, temp) = host_with_child().await;
+        let backend = backend_of(&host, root);
+        let workspace = temp.path().join("workspace");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir(&outside).expect("outside directory");
+
+        for path in ["new/../../outside/file", "../outside/file"] {
+            let result = backend.fs_write(path, b"escape".to_vec()).await;
+            assert!(result.is_err(), "{path} must be refused");
+        }
+        let absolute = outside.join("absolute.txt");
+        let result = backend
+            .fs_write(absolute.to_string_lossy().as_ref(), b"escape".to_vec())
+            .await;
+        assert!(result.is_err(), "absolute path must be refused");
+        assert!(!outside.join("file").exists());
+        assert!(!outside.join("absolute.txt").exists());
+
+        backend
+            .fs_write("nested/path/file.txt", b"inside".to_vec())
+            .await
+            .expect("nested write");
+        assert_eq!(
+            backend.fs_read("nested/path/file.txt").await.expect("read"),
+            Some(b"inside".to_vec())
+        );
+
+        std::fs::create_dir(workspace.join("directory")).expect("directory");
+        assert!(backend.fs_read("directory").await.is_err());
+        assert_eq!(
+            backend.fs_read("missing").await.expect("missing read"),
+            None
+        );
+
+        host.close(child).await.expect("close child");
+        host.close(root).await.expect("close session");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fs_write_refuses_a_symlink_swap_before_directory_creation() {
+        let (host, root, child, temp) = host_with_child().await;
+        let backend = backend_of(&host, root);
+        let workspace = temp.path().join("workspace");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir(&outside).expect("outside directory");
+        std::os::unix::fs::symlink(&outside, workspace.join("link")).expect("outside link");
+        assert!(
+            backend
+                .fs_write("link/file.txt", b"escape".to_vec())
+                .await
+                .is_err()
+        );
+        assert!(!outside.join("file.txt").exists());
+
+        let future = backend.fs_write("staged/file.txt", b"escape".to_vec());
+        std::os::unix::fs::symlink(&outside, workspace.join("staged")).expect("swap symlink");
+        assert!(future.await.is_err());
+        assert!(!outside.join("staged").exists());
+
+        host.close(child).await.expect("close child");
+        host.close(root).await.expect("close session");
     }
 
     fn start_in(workspace: Option<Workspace>, model: Option<&str>) -> dal_core::AgentStart {
