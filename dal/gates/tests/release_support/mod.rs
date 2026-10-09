@@ -23,7 +23,7 @@ pub(crate) fn repo_root() -> PathBuf {
 /// WSL launcher — before PATH, and with no distro registered it exits 1
 /// without starting the script. Prefer the Git for Windows bash under
 /// Program Files, the same ladder the exec tool follows.
-fn shell() -> Command {
+pub(crate) fn shell() -> Command {
     #[cfg(windows)]
     {
         for key in ["ProgramFiles", "ProgramFiles(x86)"] {
