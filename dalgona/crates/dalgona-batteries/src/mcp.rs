@@ -75,16 +75,32 @@ pub enum McpError {
     Latched { key: String },
     /// An MCP call exceeded its effective deadline.
     #[error("mcp call timed out after {n} s")]
-    Timeout { n: u64 },
+    Timeout {
+        /// The effective deadline in seconds.
+        n: u64,
+    },
     /// The requested remote tool is not in the server's current list.
     #[error("mcp tool {tool} not found on server {key}")]
-    NotFound { tool: String, key: String },
+    NotFound {
+        /// The missing tool name.
+        tool: String,
+        /// The declaring server.
+        key: String,
+    },
     /// The server returned a JSON-RPC error response.
     #[error("mcp protocol error {code}: {message}")]
-    Protocol { code: i64, message: String },
+    Protocol {
+        /// The JSON-RPC error code.
+        code: i64,
+        /// The server's error message.
+        message: String,
+    },
     /// The server returned an unsupported MCP result type.
     #[error("unsupported mcp resultType {value}")]
-    ResultType { value: String },
+    ResultType {
+        /// The unsupported resultType value.
+        value: String,
+    },
     /// The server exceeded the tools/list page limit.
     #[error("mcp list exceeded 50 pages")]
     ListPages,
@@ -99,10 +115,18 @@ pub enum McpError {
     StepUpLimit,
     /// OAuth authorization failed for another reason.
     #[error("mcp authorization failed: {cause}")]
-    Auth { cause: String },
+    Auth {
+        /// The authorization failure detail.
+        cause: String,
+    },
     /// The HTTP endpoint continued rejecting requests after authorization.
     #[error("mcp http status {code} after {n} authorization attempts")]
-    HttpAuth { code: u16, n: u32 },
+    HttpAuth {
+        /// The HTTP status code.
+        code: u16,
+        /// How many authorization attempts ran.
+        n: u32,
+    },
     /// The server repeatedly requested interactive input.
     #[error("mcp input-required limit reached")]
     InputRequiredLimit,
@@ -131,7 +155,10 @@ pub enum McpConfigError {
     InvalidSection,
     /// The section names a key MCP does not read.
     #[error("unknown key \"plugin.mcp.{key}\"; MCP has no user settings")]
-    UnknownKey { key: Box<str> },
+    UnknownKey {
+        /// The rejected key.
+        key: Box<str>,
+    },
     /// The shared `enabled` switch is not a boolean.
     #[error("plugin.mcp.enabled must be a boolean")]
     InvalidEnabled,

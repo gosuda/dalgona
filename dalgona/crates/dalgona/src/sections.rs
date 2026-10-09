@@ -144,7 +144,6 @@ fn validate_plugin_sections(config: &dalgon::Config) -> Result<(), dalgon::Build
             "ask" | "skills" | "ttsr-rules" if !has_configured_plugin(config, name) => {
                 empty_plugin_section(config, name)?;
             }
-            "ask" | "skills" | "ttsr-rules" => {}
             _ => {}
         }
     }

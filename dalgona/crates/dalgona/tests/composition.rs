@@ -1,3 +1,4 @@
+//! Composition gates for the dalgona product.
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
 use std::collections::BTreeSet;
 use std::error::Error;
@@ -53,7 +54,7 @@ fn names(product: &Product) -> BTreeSet<&str> {
     product
         .extensions
         .iter()
-        .map(|extension| extension.name())
+        .map(dal_agent::ext::Extension::name)
         .collect()
 }
 
@@ -91,7 +92,7 @@ fn diagram_prompt_tracks_the_strict_tui_setting() -> Result<(), Box<dyn Error>> 
                     if text.as_ref() == dal_core::PROMPT_DIAGRAMS
             ))
             .count();
-        assert_eq!(occurrences, if enabled { 1 } else { 0 });
+        assert_eq!(occurrences, usize::from(enabled));
     }
     Ok(())
 }
@@ -256,7 +257,7 @@ fn batteries_register_in_name_byte_order_after_the_builtins() -> Result<(), Box<
         .extensions
         .iter()
         .filter(|extension| extension.origin() == dal_core::Origin::Bundled)
-        .map(|extension| extension.name())
+        .map(dal_agent::ext::Extension::name)
         .collect();
     let mut sorted = batteries.clone();
     sorted.sort_unstable();

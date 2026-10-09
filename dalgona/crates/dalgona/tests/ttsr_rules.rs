@@ -1,3 +1,4 @@
+//! TTSR rule-pack gates.
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
 use std::collections::BTreeSet;
 use std::error::Error;
