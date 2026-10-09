@@ -49,10 +49,6 @@ impl JobsView for FakeJobs {
     }
 }
 
-fn at_secs(base: Timestamp, secs: u64) -> Timestamp {
-    base + jiff::SignedDuration::from_secs(i64::try_from(secs).unwrap_or(i64::MAX))
-}
-
 fn watch_request(job: &str, filter: &str) -> Result<MonitorRequest, Box<dyn Error>> {
     Ok(parse_request(&raw(&format!(
         "{{\"action\":\"watch\",\"job\":\"{job}\",\"filter\":\"{filter}\"}}"

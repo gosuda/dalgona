@@ -42,28 +42,3 @@ pub(crate) trait JobsView {
     fn is_live_top_level_exec(&self, job: dal_core::JobId) -> bool;
 }
 
-/// Live per-session counts rendered into `orchestration.status`.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct Inflight {
-    /// Queued or running top-level jobs.
-    pub jobs: usize,
-    /// Live monitors that are not paused.
-    pub monitors: usize,
-    /// Open ask requests.
-    pub asks: usize,
-    /// Whether a goal continuation timer is scheduled.
-    pub goal_timer: bool,
-    /// Whether loop-guard recovery is pending.
-    pub loop_guard: bool,
-}
-
-/// Read-only goal projection for status rendering.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct GoalView {
-    /// Session-local goal id (`g<n>`).
-    pub id: String,
-    /// Current lifecycle state.
-    pub status: GoalStatus,
-    /// Full objective text.
-    pub objective: String,
-}

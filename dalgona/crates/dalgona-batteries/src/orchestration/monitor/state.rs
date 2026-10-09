@@ -3,7 +3,6 @@
 //! exact error texts, config parsing, and stop/rearm.
 
 use std::collections::HashMap;
-use std::fmt::Write as _;
 
 use dal_core::{JobId, RawJson, Timestamp};
 use regex_automata::meta::Regex;
@@ -70,11 +69,8 @@ impl MonitorId {
 /// next flush reaps it and reports the end to the core.
 #[derive(Debug)]
 pub(crate) struct Monitor {
-    pub(super) id: MonitorId,
     pub(super) job: JobId,
     pub(super) job_display: Box<str>,
-    pub(super) filter: Regex,
-    pub(super) description: Box<str>,
     pub(super) paused: bool,
     pub(super) stopped: bool,
 }
@@ -381,7 +377,7 @@ pub(crate) fn watch(
             if !jobs.is_live_top_level_exec(job_id) {
                 return Err(MonitorError::NotRunning { job: job.clone() });
             }
-            let compiled = Regex::new(filter).map_err(|error| MonitorError::BadFilter {
+            Regex::new(filter).map_err(|error| MonitorError::BadFilter {
                 error: error.to_string().into(),
             })?;
             let live = state
@@ -400,11 +396,8 @@ pub(crate) fn watch(
             state.monitors.insert(
                 id,
                 Monitor {
-                    id,
                     job: job_id,
                     job_display: job.clone(),
-                    filter: compiled,
-                    description: reply_description.clone(),
                     paused: false,
                     stopped: false,
                 },

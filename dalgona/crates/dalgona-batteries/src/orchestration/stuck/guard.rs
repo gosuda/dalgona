@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use dal_core::{RawJson, Timestamp};
+use dal_core::RawJson;
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
 
 use super::detect::{Detection, detect, read_path};
@@ -34,7 +34,6 @@ pub(crate) struct ToolCallRecord {
     pub(crate) tool: Box<str>,
     pub(crate) canonical: Box<str>,
     pub(crate) signature: Box<str>,
-    pub(crate) at: Timestamp,
 }
 
 /// Escalation state for one repeated signature.
@@ -165,7 +164,6 @@ pub(crate) fn on_tool_call(
         tool: tool.into(),
         canonical,
         signature: signature.clone().into_boxed_str(),
-        at: Timestamp::UNIX_EPOCH,
     };
     push_record(&mut state.records, record.clone());
     push_record(&mut state.pending_attempts, record);
