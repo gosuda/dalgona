@@ -544,8 +544,10 @@ where
             apply_event(
                 &mut surfaces.session,
                 &mut surfaces.dialog,
+                &surfaces.transcript,
                 event,
                 probe.kitty_keyboard,
+                opts.screen,
             );
         }
         surfaces.flush_answers(opts, agent);
@@ -1225,7 +1227,9 @@ fn probe_terminal(
                 decoder,
                 &mut surfaces.session,
                 &mut surfaces.dialog,
+                &surfaces.transcript,
                 &parser.finish(),
+                opts.screen,
             );
             break;
         }
@@ -1246,13 +1250,27 @@ fn probe_terminal(
             probe.background_luminance = next.background_luminance;
         }
         if !keys.is_empty() {
-            apply_type_ahead(decoder, &mut surfaces.session, &mut surfaces.dialog, &keys);
+            apply_type_ahead(
+                decoder,
+                &mut surfaces.session,
+                &mut surfaces.dialog,
+                &surfaces.transcript,
+                &keys,
+                opts.screen,
+            );
             // A key event requests an immediate frame that bypasses the batch.
             surfaces.paint(io, state, painter, opts, palette)?;
         }
         if probe.da1 {
             let held = parser.finish();
-            apply_type_ahead(decoder, &mut surfaces.session, &mut surfaces.dialog, &held);
+            apply_type_ahead(
+                decoder,
+                &mut surfaces.session,
+                &mut surfaces.dialog,
+                &surfaces.transcript,
+                &held,
+                opts.screen,
+            );
             break;
         }
     }
@@ -1265,24 +1283,158 @@ fn apply_type_ahead(
     decoder: &mut KeyDecoder,
     session: &mut Session,
     dialog: &mut DialogUi,
+    transcript: &Transcript,
     bytes: &[u8],
+    screen: crate::Screen,
 ) {
     if bytes.is_empty() {
         return;
     }
     for event in decoder.feed(bytes, Instant::now()) {
-        apply_event(session, dialog, event, false);
+        apply_event(session, dialog, transcript, event, false, screen);
     }
 }
 
-fn apply_event(session: &mut Session, dialog: &mut DialogUi, event: InputEvent, kitty: bool) {
+/// Overlay keys: the read-only overlay owns the input. Esc or q leaves and
+/// the live block repaints in place; Ctrl+T toggles back; the transcript
+/// keys scroll the shared viewport; everything else changes nothing, so no
+/// typed text reaches the composer behind the overlay.
+fn apply_overlay_key(
+    session: &mut Session,
+    transcript: &Transcript,
+    key: crate::keys::Key,
+    kitty: bool,
+) {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    let rows = transcript.rows().len();
+    match (key.code, key.modifiers) {
+        (KeyCode::Esc, _)
+        | (KeyCode::Char('q'), KeyModifiers::NONE)
+        | (KeyCode::Char('t'), KeyModifiers::CONTROL) => session.overlay = false,
+        _ => match resolve_in(key, kitty, &[Owner::Transcript]) {
+            Some(Action::TranscriptPageUp) => session.viewport.scroll_up(rows),
+            Some(Action::TranscriptPageDown) => session.viewport.scroll_down(rows),
+            Some(Action::TranscriptJumpLatest) => session.viewport.jump_latest(),
+            _ => {}
+        },
+    }
+}
+
+/// Filter-row keys: Enter jumps to the latest match, Esc closes and returns
+/// focus to the composer, and characters edit the query.
+fn apply_search_key(session: &mut Session, transcript: &Transcript, key: crate::keys::Key) {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    match key.code {
+        KeyCode::Esc => session.viewport.close_search(),
+        KeyCode::Enter => {
+            let query = session
+                .viewport
+                .search_text()
+                .unwrap_or_default()
+                .to_owned();
+            jump_to_search_match(session, transcript, &query);
+        }
+        KeyCode::Backspace => session.viewport.backspace_search(),
+        KeyCode::Char(character)
+            if key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT =>
+        {
+            session.viewport.type_search(character);
+        }
+        _ => {}
+    }
+}
+
+/// Jumps the viewport to the latest transcript row containing the query.
+fn jump_to_search_match(session: &mut Session, transcript: &Transcript, query: &str) {
+    if query.is_empty() {
+        return;
+    }
+    let needle = query.to_lowercase();
+    if let Some(row) = transcript
+        .rows()
+        .iter()
+        .rposition(|row| row.to_lowercase().contains(&needle))
+    {
+        session.viewport.jump_to(row);
+    }
+}
+
+/// Input contexts that resolve a key, in owner order; a viewport adds the
+/// transcript keys.
+fn key_owners(viewport: bool) -> &'static [Owner] {
+    if viewport {
+        &[
+            Owner::App,
+            Owner::Transcript,
+            Owner::Composer,
+            Owner::Editor,
+        ]
+    } else {
+        &[Owner::App, Owner::Composer, Owner::Editor]
+    }
+}
+
+/// Applies the caret and kill-ring edits; returns whether the action was one.
+fn apply_edit_action(composer: &mut Composer, action: Action) -> bool {
+    match action {
+        Action::CharLeft => composer.move_left(),
+        Action::CharRight => composer.move_right(),
+        Action::WordLeft => composer.word_left(),
+        Action::WordRight => composer.word_right(),
+        Action::LineStart => composer.line_start(),
+        Action::LineEnd => composer.line_end(),
+        Action::DeleteWordBack => composer.delete_word_back(),
+        Action::DeleteWordForward => composer.delete_word_forward(),
+        Action::KillLineStart => composer.kill_line_start(),
+        Action::KillLineEnd => composer.kill_line_end(),
+        Action::Yank => composer.yank(),
+        Action::Undo => composer.undo(),
+        _ => return false,
+    }
+    true
+}
+
+/// Applies the actions a transcript viewport owns; returns whether it did.
+fn apply_viewport_action(
+    session: &mut Session,
+    transcript: &Transcript,
+    action: Action,
+    screen: crate::Screen,
+) -> bool {
+    let rows = transcript.rows().len();
+    match action {
+        // The overlay is an inline-mode surface; fullscreen is already one.
+        Action::TranscriptOverlay if screen == crate::Screen::Inline => {
+            session.overlay = !session.overlay;
+        }
+        Action::SearchTranscript if screen == crate::Screen::Fullscreen => {
+            session.viewport.open_search();
+        }
+        Action::TranscriptPageUp => session.viewport.scroll_up(rows),
+        Action::TranscriptPageDown => session.viewport.scroll_down(rows),
+        Action::TranscriptJumpLatest => session.viewport.jump_latest(),
+        _ => return false,
+    }
+    true
+}
+
+fn apply_event(
+    session: &mut Session,
+    dialog: &mut DialogUi,
+    transcript: &Transcript,
+    event: InputEvent,
+    kitty: bool,
+    screen: crate::Screen,
+) {
     use crossterm::event::{KeyCode, KeyModifiers};
 
     let InputEvent::Key(key) = event else {
         if let InputEvent::Paste(bytes) = event {
             if dialog.is_open() {
                 dialog.paste(&bytes);
-            } else if session.dialog.is_none() && session.picker.is_none() {
+            } else if !session.overlay && session.dialog.is_none() && session.picker.is_none() {
                 session.composer.insert_paste(&bytes);
                 session.update_popup();
             }
@@ -1315,11 +1467,21 @@ fn apply_event(session: &mut Session, dialog: &mut DialogUi, event: InputEvent, 
         apply_picker_key(session, key);
         return;
     }
-    if session.overlay && key.code == KeyCode::Esc {
-        session.overlay = false;
+    if session.overlay {
+        apply_overlay_key(session, transcript, key, kitty);
         return;
     }
-    let action = resolve_in(key, kitty, &[Owner::App, Owner::Composer, Owner::Editor]);
+    let viewport = screen == crate::Screen::Fullscreen;
+    if viewport && session.viewport.search_text().is_some() {
+        apply_search_key(session, transcript, key);
+        return;
+    }
+    let action = resolve_in(key, kitty, key_owners(viewport));
+    if let Some(action) = action
+        && apply_viewport_action(session, transcript, action, screen)
+    {
+        return;
+    }
     match action {
         Some(Action::QuitEmptyComposer) if session.composer.is_empty() => session.quit = true,
         // Ctrl+D with a draft deletes the character under the caret.
@@ -1330,7 +1492,6 @@ fn apply_event(session: &mut Session, dialog: &mut DialogUi, event: InputEvent, 
         }
         Some(Action::CloseOverlayOrInterrupt | Action::Interrupt) => session.interrupt(),
         Some(Action::Newline) => session.composer.insert("\n"),
-        Some(Action::TranscriptOverlay) => session.overlay = !session.overlay,
         Some(Action::AcceptCycleCompletion) => {
             if let Some(candidate) = session.candidates.first() {
                 let completed = format!("/{} ", candidate.name);
@@ -1344,18 +1505,7 @@ fn apply_event(session: &mut Session, dialog: &mut DialogUi, event: InputEvent, 
             args: "".into(),
             expected: None,
         }),
-        Some(Action::CharLeft) => session.composer.move_left(),
-        Some(Action::CharRight) => session.composer.move_right(),
-        Some(Action::WordLeft) => session.composer.word_left(),
-        Some(Action::WordRight) => session.composer.word_right(),
-        Some(Action::LineStart) => session.composer.line_start(),
-        Some(Action::LineEnd) => session.composer.line_end(),
-        Some(Action::DeleteWordBack) => session.composer.delete_word_back(),
-        Some(Action::DeleteWordForward) => session.composer.delete_word_forward(),
-        Some(Action::KillLineStart) => session.composer.kill_line_start(),
-        Some(Action::KillLineEnd) => session.composer.kill_line_end(),
-        Some(Action::Yank) => session.composer.yank(),
-        Some(Action::Undo) => session.composer.undo(),
+        Some(action) if apply_edit_action(&mut session.composer, action) => {}
         Some(Action::HistoryPrev) if session.composer.on_first_line() => {
             session.composer.history_prev();
         }
@@ -1431,6 +1581,20 @@ mod tests {
 
     use super::{ExitDialog, Session, apply_event};
 
+    /// Applies one key to a fresh dialog and transcript on the inline screen.
+    fn apply_key(session: &mut Session, key: crate::keys::Key) {
+        use crate::keys::InputEvent;
+
+        apply_event(
+            session,
+            &mut crate::dialog::DialogUi::default(),
+            &crate::transcript::Transcript::default(),
+            InputEvent::Key(key),
+            false,
+            crate::Screen::Inline,
+        );
+    }
+
     #[test]
     fn chooser_reply_is_not_rendered_as_debug_text() {
         let mut session = Session::default();
@@ -1446,8 +1610,7 @@ mod tests {
 
     #[test]
     fn picker_arrow_enter_selects_and_escape_or_control_c_cancels() {
-        use crate::dialog::DialogUi;
-        use crate::keys::{InputEvent, Key};
+        use crate::keys::Key;
         use crate::picker::{PickerAction, PickerOption, PickerUi};
         use crossterm::event::{KeyCode, KeyModifiers};
 
@@ -1476,40 +1639,23 @@ mod tests {
             )),
             ..Session::default()
         };
-        apply_event(
-            &mut session,
-            &mut DialogUi::default(),
-            InputEvent::Key(Key::new(KeyCode::Down, KeyModifiers::NONE)),
-            false,
-        );
-        apply_event(
-            &mut session,
-            &mut DialogUi::default(),
-            InputEvent::Key(Key::new(KeyCode::Enter, KeyModifiers::NONE)),
-            false,
-        );
+        apply_key(&mut session, Key::new(KeyCode::Down, KeyModifiers::NONE));
+        apply_key(&mut session, Key::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(
             matches!(&session.pending_commands[..], [dal_core::Command::Run { args, .. }] if args.as_ref() == "openai/second")
         );
         assert!(session.picker.is_none());
 
         session.picker = Some(PickerUi::new("Pick", "", Vec::new()));
-        apply_event(
-            &mut session,
-            &mut DialogUi::default(),
-            InputEvent::Key(Key::new(KeyCode::Esc, KeyModifiers::NONE)),
-            false,
-        );
+        apply_key(&mut session, Key::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(session.picker.is_none());
         assert_eq!(session.pending_commands.len(), 1);
 
         session.picker = Some(PickerUi::new("Pick", "", Vec::new()));
         session.active_turn = Some(dal_core::TurnId::new(NonZeroU64::MIN));
-        apply_event(
+        apply_key(
             &mut session,
-            &mut DialogUi::default(),
-            InputEvent::Key(Key::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
-            false,
+            Key::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
         );
         assert!(session.picker.is_none());
         assert_eq!(session.pending_commands.len(), 1);
@@ -1517,20 +1663,14 @@ mod tests {
 
     #[test]
     fn settings_picker_updates_local_state_and_queues_config_saves() {
-        use crate::dialog::DialogUi;
-        use crate::keys::{InputEvent, Key};
+        use crate::keys::Key;
         use crossterm::event::{KeyCode, KeyModifiers};
 
         let mut session = Session {
             picker: Some(crate::picker::settings_picker(false, "")),
             ..Session::default()
         };
-        apply_event(
-            &mut session,
-            &mut DialogUi::default(),
-            InputEvent::Key(Key::new(KeyCode::Enter, KeyModifiers::NONE)),
-            false,
-        );
+        apply_key(&mut session, Key::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(
             session.pending_diagram_settings,
             [(true, dal_core::command::Save::SessionOnly)]
@@ -1543,12 +1683,7 @@ mod tests {
             .as_mut()
             .expect("settings picker")
             .move_selection(true);
-        apply_event(
-            &mut session,
-            &mut DialogUi::default(),
-            InputEvent::Key(Key::new(KeyCode::Enter, KeyModifiers::NONE)),
-            false,
-        );
+        apply_key(&mut session, Key::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(
             session.pending_diagram_settings,
             [
@@ -1639,18 +1774,11 @@ mod tests {
 
     #[test]
     fn help_key_runs_the_hotkeys_command() {
-        use crate::dialog::DialogUi;
-        use crate::keys::{InputEvent, Key};
+        use crate::keys::Key;
         use crossterm::event::{KeyCode, KeyModifiers};
 
         let mut session = Session::default();
-        let mut dialog = DialogUi::default();
-        apply_event(
-            &mut session,
-            &mut dialog,
-            InputEvent::Key(Key::new(KeyCode::F(1), KeyModifiers::NONE)),
-            false,
-        );
+        apply_key(&mut session, Key::new(KeyCode::F(1), KeyModifiers::NONE));
         assert!(matches!(
             &session.pending_commands[..],
             [dal_core::Command::Run { name, .. }] if name.as_ref() == "hotkeys"

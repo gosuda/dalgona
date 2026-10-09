@@ -9,7 +9,7 @@ use std::cell::Cell;
 /// window at an absolute row, so new content never moves the view; End
 /// re-attaches; a page never passes the oldest row.
 #[derive(Debug, Clone)]
-pub struct Viewport {
+pub(crate) struct Viewport {
     follow: bool,
     /// Absolute top row of the frozen window while detached.
     anchor: usize,
@@ -28,7 +28,7 @@ impl Default for Viewport {
 impl Viewport {
     /// Creates a following viewport.
     #[must_use]
-    pub fn following() -> Self {
+    pub(crate) fn following() -> Self {
         Self {
             follow: true,
             anchor: 0,
@@ -38,13 +38,14 @@ impl Viewport {
     }
 
     /// Whether the window sticks to the live edge.
+    #[cfg(test)]
     #[must_use]
-    pub fn follows(&self) -> bool {
+    pub(crate) fn follows(&self) -> bool {
         self.follow
     }
 
     /// Remembers the visible window height: one page of scrolling.
-    pub fn observe(&self, height: usize) {
+    pub(crate) fn observe(&self, height: usize) {
         self.page.set(height);
     }
 
@@ -53,7 +54,7 @@ impl Viewport {
     /// rows arrive; a resize that grows the window pulls the top down so the
     /// window never passes the live edge.
     #[must_use]
-    pub fn window_top(&self, rows: usize, height: usize) -> usize {
+    pub(crate) fn window_top(&self, rows: usize, height: usize) -> usize {
         if self.follow {
             return rows.saturating_sub(height);
         }
@@ -62,7 +63,7 @@ impl Viewport {
 
     /// Page up: detaches and moves the frozen window one page toward the
     /// oldest row. A page is the visible window height, never one row.
-    pub fn scroll_up(&mut self, rows: usize) {
+    pub(crate) fn scroll_up(&mut self, rows: usize) {
         let page = self.page.get().max(1);
         if self.follow {
             self.anchor = rows.saturating_sub(page);
@@ -74,7 +75,7 @@ impl Viewport {
     /// Page down: moves the frozen window one page toward the live edge,
     /// never past a full window of newest rows. A following view is already
     /// at the edge.
-    pub fn scroll_down(&mut self, rows: usize) {
+    pub(crate) fn scroll_down(&mut self, rows: usize) {
         if self.follow {
             return;
         }
@@ -86,42 +87,42 @@ impl Viewport {
     }
 
     /// Jumps the frozen window to `row`, as a search match does.
-    pub fn jump_to(&mut self, row: usize) {
+    pub(crate) fn jump_to(&mut self, row: usize) {
         self.follow = false;
         self.anchor = row;
     }
 
     /// Re-attaches follow at the live edge.
-    pub fn jump_latest(&mut self) {
+    pub(crate) fn jump_latest(&mut self) {
         self.follow = true;
         self.anchor = 0;
     }
 
     /// Opens the filter row over the viewport top.
-    pub fn open_search(&mut self) {
+    pub(crate) fn open_search(&mut self) {
         self.search = Some(String::new());
     }
 
     /// Closes search and returns focus to the composer.
-    pub fn close_search(&mut self) {
+    pub(crate) fn close_search(&mut self) {
         self.search = None;
     }
 
     /// The open filter text, while the row shows.
     #[must_use]
-    pub fn search_text(&self) -> Option<&str> {
+    pub(crate) fn search_text(&self) -> Option<&str> {
         self.search.as_deref()
     }
 
     /// Types one character into the open filter row; closed stays closed.
-    pub fn type_search(&mut self, character: char) {
+    pub(crate) fn type_search(&mut self, character: char) {
         if let Some(query) = &mut self.search {
             query.push(character);
         }
     }
 
     /// Removes the last character from the open filter row.
-    pub fn backspace_search(&mut self) {
+    pub(crate) fn backspace_search(&mut self) {
         if let Some(query) = &mut self.search {
             query.pop();
         }
@@ -129,14 +130,14 @@ impl Viewport {
 
     /// The follow-stopped cue while the view is detached.
     #[must_use]
-    pub fn cue(&self) -> Option<&'static str> {
+    pub(crate) fn cue(&self) -> Option<&'static str> {
         (!self.follow).then_some(crate::copy::ids::FOLLOW_STOPPED)
     }
 }
 
 /// Returns the header row count: one row when wide and tall enough.
 #[must_use]
-pub const fn header_rows(width: u16, height: u16) -> usize {
+pub(crate) const fn header_rows(width: u16, height: u16) -> usize {
     if width >= 60 && height >= 14 { 1 } else { 0 }
 }
 
