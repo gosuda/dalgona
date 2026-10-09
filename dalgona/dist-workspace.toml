@@ -16,8 +16,12 @@ targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "aarch64-pc-wind
 packages = ["dalgona"]
 # Whether to embed dependency information using cargo-auditable
 cargo-auditable = true
+# The single license file and product docs live at the repository root,
+# outside the package manifest dirs; dist resolves auto-included files
+# from the wrong base for them, so every static file is named here.
+auto-includes = false
 # Extra static files to include in each App (path relative to this Cargo.toml's dir)
-include = ["man"]
+include = ["crates/dalgona/man", "../LICENSE.md", "README.md", "CHANGELOG.md"]
 # Publish jobs to run in CI
 publish-jobs = ["./dalgona-publish-crates"]
 # Post-announce jobs to run in CI
