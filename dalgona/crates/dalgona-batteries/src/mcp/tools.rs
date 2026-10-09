@@ -231,11 +231,11 @@ pub(crate) enum ParameterHeaderError {
 }
 
 fn encode_header_value(value: &str) -> String {
+    use base64::{Engine, engine::general_purpose::STANDARD};
     let already_encoded = value.starts_with("=?base64?") && value.ends_with("?=");
     if value.is_ascii() && !already_encoded {
         return value.to_owned();
     }
-    use base64::{Engine, engine::general_purpose::STANDARD};
     format!("=?base64?{}?=", STANDARD.encode(value.as_bytes()))
 }
 
@@ -328,16 +328,13 @@ fn decode_tool(wire: RemoteToolWire) -> Result<Result<RemoteTool, ExcludedTool>,
             code: -32600,
             message: format!("server returned an invalid tool schema: {error}"),
         })?;
-    let headers = match header_annotations(&schema_value) {
-        Ok(headers) => headers,
-        Err(_) => {
-            return Ok(Err(ExcludedTool {
-                warning: format!(
-                    "mcp: mapped tool {} excluded; invalid x-mcp-header annotation",
-                    wire.name
-                ),
-            }));
-        }
+    let Ok(headers) = header_annotations(&schema_value) else {
+        return Ok(Err(ExcludedTool {
+            warning: format!(
+                "mcp: mapped tool {} excluded; invalid x-mcp-header annotation",
+                wire.name
+            ),
+        }));
     };
     let valid_schema = dal_core::ext::valid_tool_parameters(&schema);
     if !valid_schema {
