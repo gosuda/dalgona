@@ -1,10 +1,11 @@
 use super::{
-    AgentInfo, AgentReport, AgentStart, AgentState, AgentsOp, AgentsReply, CallId, Channel,
-    CommandName, EntryId, FetchMethod, FetchRequest, FetchResponse, HookEvent, HookMismatch,
-    HookOutcome, HookVerdict, InputVerdict, JobId, Mail, MailMode, McpRequest, McpResponse, Name,
-    Part, RUST_STREAM_EVENT, RawJson, RegistrationError, RepeatMode, RuleRecord, RunRequest,
-    RunRequestError, STAR_EVENTS, Service, ServiceSet, SessionId, SidecarName, Stop, StreamVerdict,
-    ToolCallEvent, ToolCallVerdict, ToolClass, TurnId, valid_tool_parameters, valid_version,
+    AgentInfo, AgentRefusal, AgentReport, AgentStart, AgentState, AgentsOp, AgentsReply, CallId,
+    Channel, CommandName, EntryId, FetchMethod, FetchRequest, FetchResponse, HookEvent,
+    HookMismatch, HookOutcome, HookVerdict, InputVerdict, JobId, Mail, MailMode, McpRequest,
+    McpResponse, Name, Part, RUST_STREAM_EVENT, RawJson, RegistrationError, RepeatMode, RuleRecord,
+    RunRequest, RunRequestError, STAR_EVENTS, Service, ServiceSet, SessionId, SidecarName, Stop,
+    StreamVerdict, ToolCallEvent, ToolCallVerdict, ToolClass, TurnId, valid_tool_parameters,
+    valid_version,
 };
 
 use std::num::NonZeroU64;
@@ -575,6 +576,44 @@ fn mailbox_values_keep_mode_and_cursor() -> TestResult {
     let encoded = sonic_rs::to_string(&reply)?;
     assert_eq!(sonic_rs::from_str::<AgentsReply>(&encoded)?, reply);
 
+    Ok(())
+}
+
+#[test]
+fn a_refused_start_round_trips_with_its_typed_reason_and_text() -> TestResult {
+    let cases = [
+        (
+            AgentRefusal::MaxDepth { max_depth: 2 },
+            "child sessions cannot start children here: agents.max_depth = 2.",
+        ),
+        (
+            AgentRefusal::WorkspaceUnresolved,
+            "the child workspace cannot be resolved.",
+        ),
+        (
+            AgentRefusal::WorkspaceOutsideRoot,
+            "the child workspace must stay inside the caller's workspace.",
+        ),
+        (
+            AgentRefusal::ModelUnroutable {
+                model: "acme/none".into(),
+            },
+            "the child model acme/none cannot be routed.",
+        ),
+    ];
+    for (reason, text) in cases {
+        assert_eq!(reason.to_string(), text);
+        let reply = AgentsReply::Refused { reason };
+        let encoded = sonic_rs::to_string(&reply)?;
+        assert_eq!(sonic_rs::from_str::<AgentsReply>(&encoded)?, reply);
+    }
+    let encoded = sonic_rs::to_string(&AgentsReply::Refused {
+        reason: AgentRefusal::MaxDepth { max_depth: 1 },
+    })?;
+    assert_eq!(
+        encoded,
+        r#"{"type":"refused","value":{"reason":{"type":"max_depth","maxDepth":1}}}"#
+    );
     Ok(())
 }
 

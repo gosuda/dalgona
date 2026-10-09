@@ -186,6 +186,37 @@ pub enum ExitStatusKind {
     Aborted,
 }
 
+/// Why the host refused to start a child session. The display text is
+/// the sentence a user or a model reads.
+#[non_exhaustive]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, thiserror::Error)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(
+    tag = "type",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum AgentRefusal {
+    /// The caller is already as deep as `agents.max_depth` allows.
+    #[error("child sessions cannot start children here: agents.max_depth = {max_depth}.")]
+    MaxDepth {
+        /// The configured depth limit.
+        max_depth: u32,
+    },
+    /// The child workspace does not exist or cannot be resolved.
+    #[error("the child workspace cannot be resolved.")]
+    WorkspaceUnresolved,
+    /// The child workspace lies outside the caller's workspace.
+    #[error("the child workspace must stay inside the caller's workspace.")]
+    WorkspaceOutsideRoot,
+    /// The requested child model has no route.
+    #[error("the child model {model} cannot be routed.")]
+    ModelUnroutable {
+        /// The model reference the start asked for.
+        model: Box<str>,
+    },
+}
+
 /// The result of an agent-session operation.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -201,6 +232,11 @@ pub enum AgentsReply {
     Started {
         /// The new child session.
         id: SessionId,
+    },
+    /// The host refused to start the child session; the reason says why.
+    Refused {
+        /// Why the start was refused.
+        reason: AgentRefusal,
     },
     /// A prompt turn was started on an idle child.
     Prompted {

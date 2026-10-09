@@ -52,6 +52,8 @@ struct Script {
     delivered: HashSet<JobId>,
     lines: VecDeque<dal_core::JobLines>,
     line_reads: Vec<Option<u64>>,
+    /// A refusal the host answers every start with.
+    refuse_start: Option<dal_core::AgentRefusal>,
     /// Whether awaited children end without storing a report.
     silent: bool,
     /// Grace prompts the host accepted, in order.
@@ -245,6 +247,15 @@ impl Services for Host {
                 } else {
                     Ok(AgentsReply::Cancelled { id })
                 }
+            }
+            AgentsOp::Start(_) if script.refuse_start.is_some() => {
+                let reason = script.refuse_start.clone();
+                drop(script);
+                return Box::pin(async move {
+                    reason
+                        .map(|reason| AgentsReply::Refused { reason })
+                        .ok_or_else(|| ServiceError::failed(None, "no refusal was scripted"))
+                });
             }
             AgentsOp::Start(start) => {
                 let id = script.started.unwrap_or_else(SessionId::new_v7);
@@ -743,6 +754,19 @@ async fn failed_wait_with_clean_teardown_keeps_only_the_result_failure() -> Test
     assert_eq!(fixture.host.cancels(), vec![child]);
     assert!(error.contains("the provider stopped answering"), "{error}");
     assert!(!error.contains(CLOSE_REFUSED), "{error}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_refused_child_start_shows_the_exact_reason_in_the_run() -> TestResult {
+    let fixture = Fixture::open().await?;
+    fixture.script().refuse_start = Some(dal_core::AgentRefusal::MaxDepth { max_depth: 1 });
+    let reply = run_one_step(&fixture).await?;
+    assert!(
+        reply.contains("child sessions cannot start children here: agents.max_depth = 1."),
+        "the refusal text reaches the run report: {reply}"
+    );
+    assert!(fixture.host.prompts().is_empty());
     Ok(())
 }
 

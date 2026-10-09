@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Show the exact reason when an orchestration child cannot start, such as the child depth limit, instead of a bare failure.
 - Give each orchestration child one final grace prompt when it ends without a report, then fail it clearly if it stays silent.
 - Keep goals across session reopen and report failed goal saves.
 - Show orchestration status as a short human-readable line in the activity row instead of a raw JSON object.

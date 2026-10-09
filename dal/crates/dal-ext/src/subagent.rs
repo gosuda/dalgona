@@ -193,6 +193,9 @@ impl AgentTool {
                             .into_boxed_str(),
                         ))
                     }
+                    Ok(AgentsReply::Refused { reason }) => {
+                        ToolOutcome::Err(ToolError::message(reason.to_string()))
+                    }
                     Ok(_) => ToolOutcome::Err(ToolError::message(
                         "agents service returned an unexpected reply",
                     )),

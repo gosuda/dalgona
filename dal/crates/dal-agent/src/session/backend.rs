@@ -10,10 +10,10 @@ use std::sync::Arc;
 
 use dal_core::ext::{Mail as ExtMail, Service, SidecarName};
 use dal_core::{
-    AgentInfo, AgentReport, AgentState, AgentsOp, AgentsReply, ApprovalMode, BlobId, Command,
-    EntryId, Expect, FetchMethod, FetchRequest, FetchResponse, Inference, JobsOp, JobsReply,
-    MailMode, ModelRequest, Name, Notice, Part, RawJson, Reply, Request, SessionId, StateError,
-    StateOp, StateRecord, TurnOp, TurnOpReply, Workspace,
+    AgentInfo, AgentRefusal, AgentReport, AgentState, AgentsOp, AgentsReply, ApprovalMode, BlobId,
+    Command, EntryId, Expect, FetchMethod, FetchRequest, FetchResponse, Inference, JobsOp,
+    JobsReply, MailMode, ModelRequest, Name, Notice, Part, RawJson, Reply, Request, SessionId,
+    StateError, StateOp, StateRecord, TurnOp, TurnOpReply, Workspace,
 };
 use dal_provider::EventStream;
 use tokio::sync::oneshot;
@@ -776,6 +776,10 @@ fn cancel_child(id: SessionId, result: Result<(), HostError>) -> Result<AgentsRe
         })
 }
 
+fn refused(reason: AgentRefusal) -> AgentsReply {
+    AgentsReply::Refused { reason }
+}
+
 fn child_start_error(error: impl std::fmt::Display) -> ServiceError {
     ServiceError::failed(
         Some(Service::Agents),
@@ -831,38 +835,56 @@ impl Backend {
             .is_some_and(|entry| entry.parent == Some(self.session))
     }
 
-    async fn agent_start(&self, start: dal_core::AgentStart) -> Result<AgentsReply, ServiceError> {
-        let workspace = start
-            .workspace
-            .clone()
-            .unwrap_or_else(|| self.workspace.clone());
-        // A child workspace must stay inside the caller's root: an
-        // absolute path outside it would widen the `agents` grant into
-        // tool access across the whole filesystem. The lexical spelling
-        // lies — `/root/../etc` starts with `/root` — so containment is
-        // checked on canonical paths; a workspace that cannot be resolved
-        // fails closed. The checked canonical path is the one the child
-        // receives: re-resolving the lexical spelling later would race a
-        // swapped symlink into an outside root.
-        let Some(child_root) = std::fs::canonicalize(workspace.as_path()).ok() else {
-            return Ok(AgentsReply::Cancelled { id: self.session });
-        };
-        // The containment root is the one `Backend::new` captured: a
-        // replaceable symlink at the session workspace must not shift the
-        // boundary a child is compared against mid-session.
-        let parent_root = self.canonical_root.clone();
-        if !child_root.starts_with(&parent_root) {
-            return Ok(AgentsReply::Cancelled { id: self.session });
+    /// The depth limit when this session may not start a child: a child
+    /// of this session would sit one level deeper than `agents.max_depth`.
+    fn depth_refusal(&self) -> Option<u32> {
+        let max = self.host.shared.config.agents().max_depth.get();
+        let depth = self
+            .host
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&self.session)
+            .map_or(0, |entry| entry.depth);
+        (depth + 1 > max).then_some(max)
+    }
+
+    /// Resolves the child workspace and keeps it inside the caller's root:
+    /// an absolute path outside it would widen the `agents` grant into
+    /// tool access across the whole filesystem. The lexical spelling
+    /// lies — `/root/../etc` starts with `/root` — so containment is
+    /// checked on canonical paths; a workspace that cannot be resolved
+    /// fails closed. The checked canonical path is the one the child
+    /// receives: re-resolving the lexical spelling later would race a
+    /// swapped symlink into an outside root. The containment root is the
+    /// one `Backend::new` captured, so a replaceable symlink at the
+    /// session workspace cannot shift the boundary mid-session.
+    fn child_workspace(&self, requested: Option<&Workspace>) -> Result<Workspace, AgentRefusal> {
+        let workspace = requested.unwrap_or(&self.workspace);
+        let child_root = std::fs::canonicalize(workspace.as_path())
+            .map_err(|_| AgentRefusal::WorkspaceUnresolved)?;
+        if !child_root.starts_with(&self.canonical_root) {
+            return Err(AgentRefusal::WorkspaceOutsideRoot);
         }
-        let Ok(workspace) = Workspace::new(child_root) else {
-            return Ok(AgentsReply::Cancelled { id: self.session });
+        Workspace::new(child_root).map_err(|_| AgentRefusal::WorkspaceUnresolved)
+    }
+
+    async fn agent_start(&self, start: dal_core::AgentStart) -> Result<AgentsReply, ServiceError> {
+        if let Some(max_depth) = self.depth_refusal() {
+            return Ok(refused(AgentRefusal::MaxDepth { max_depth }));
+        }
+        let workspace = match self.child_workspace(start.workspace.as_ref()) {
+            Ok(workspace) => workspace,
+            Err(reason) => return Ok(refused(reason)),
         };
         // An explicit child model the catalog cannot route refuses the
         // start; silently inheriting the caller's model would run a
         // different program than the one requested.
         let model = self.resolve_child_model(start.model.as_deref()).await;
-        if start.model.is_some() && model.is_none() {
-            return Ok(AgentsReply::Cancelled { id: self.session });
+        if let (Some(requested), None) = (start.model.as_deref(), &model) {
+            return Ok(refused(AgentRefusal::ModelUnroutable {
+                model: requested.into(),
+            }));
         }
         let host = self.host();
         let child = host
@@ -1397,5 +1419,138 @@ mod tests {
             "a closed child must refuse the approval copy"
         );
         host.close(root.inner.session).await.expect("close root");
+    }
+
+    /// A real host with one root session and one child of it.
+    async fn host_with_child() -> (Host, SessionId, SessionId, tempfile::TempDir) {
+        let temp = tempfile::tempdir().expect("temporary data root");
+        let data = temp.path().join("data");
+        let workspace_path = temp.path().join("workspace");
+        std::fs::create_dir_all(&data).expect("data root");
+        std::fs::create_dir_all(&workspace_path).expect("workspace");
+        let config = Config::load(ConfigProduct::Dalgon, &data, "", None).expect("config");
+        let workspace = Workspace::new(workspace_path.clone()).expect("workspace value");
+        let host = Host::start(
+            Product {
+                name: "dal",
+                data_root: data,
+                defaults: "",
+                extensions: Vec::new(),
+                bundled: Vec::new(),
+            },
+            config,
+            Env::data_root(workspace_path),
+        )
+        .await
+        .expect("host");
+        let root = host
+            .open(
+                SessionRef::New {
+                    workspace: workspace.clone(),
+                    name: None,
+                },
+                ClientId::new("backend-test"),
+            )
+            .await
+            .expect("root");
+        let root_id = root.inner.session;
+        let child = host
+            .open(
+                SessionRef::Child {
+                    parent: root_id,
+                    call: CallId::new("refusal"),
+                    workspace,
+                    name: None,
+                },
+                ClientId::new("backend-test"),
+            )
+            .await
+            .expect("child");
+        (host, root_id, child.inner.session, temp)
+    }
+
+    fn backend_of(host: &Host, id: SessionId) -> Arc<Backend> {
+        let sessions = host
+            .state
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Arc::clone(&sessions.get(&id).expect("live session").backend)
+    }
+
+    fn start_in(workspace: Option<Workspace>, model: Option<&str>) -> dal_core::AgentStart {
+        dal_core::AgentStart {
+            call: CallId::new("refused-start"),
+            name: "member".into(),
+            prompt: "work".into(),
+            model: model.map(Into::into),
+            role: None,
+            system: None,
+            tools: None,
+            workspace,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_start_past_max_depth_reaches_the_parent_with_its_reason() {
+        let (host, _root, child, _temp) = host_with_child().await;
+        let reply = backend_of(&host, child)
+            .agents_op(AgentsOp::Start(start_in(None, None)))
+            .await
+            .expect("a refusal is a reply");
+        let AgentsReply::Refused { reason } = reply else {
+            panic!("expected a refusal, got {reply:?}");
+        };
+        assert_eq!(reason, AgentRefusal::MaxDepth { max_depth: 1 });
+        assert_eq!(
+            reason.to_string(),
+            "child sessions cannot start children here: agents.max_depth = 1."
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_refusals_name_the_reason() {
+        let (host, root, _child, temp) = host_with_child().await;
+        let backend = backend_of(&host, root);
+        let outside = Workspace::new(temp.path().to_path_buf()).expect("outside workspace");
+        let missing =
+            Workspace::new(temp.path().join("workspace").join("absent")).expect("absent workspace");
+        for (workspace, expected) in [
+            (outside, AgentRefusal::WorkspaceOutsideRoot),
+            (missing, AgentRefusal::WorkspaceUnresolved),
+        ] {
+            let reply = backend
+                .agents_op(AgentsOp::Start(start_in(Some(workspace), None)))
+                .await
+                .expect("a refusal is a reply");
+            assert_eq!(reply, AgentsReply::Refused { reason: expected });
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unroutable_model_refuses_the_start_with_its_name() {
+        let (host, root, _child, _temp) = host_with_child().await;
+        let reply = backend_of(&host, root)
+            .agents_op(AgentsOp::Start(start_in(None, Some("acme/none"))))
+            .await
+            .expect("a refusal is a reply");
+        assert_eq!(
+            reply,
+            AgentsReply::Refused {
+                reason: AgentRefusal::ModelUnroutable {
+                    model: "acme/none".into()
+                }
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_child_still_reports_cancelled() {
+        let (host, root, child, _temp) = host_with_child().await;
+        let reply = backend_of(&host, root)
+            .agents_op(AgentsOp::Cancel { id: child })
+            .await
+            .expect("cancel is a reply");
+        assert_eq!(reply, AgentsReply::Cancelled { id: child });
     }
 }

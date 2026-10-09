@@ -40,9 +40,10 @@ pub use ops::{
     Mail, MailMode, Receipt, SidecarOp, TurnOp,
 };
 pub use protocol::{
-    AgentsReply, ExitStatusKind, FetchMethod, FetchRequest, FetchResponse, JobCounts, JobEndEvent,
-    JobEnds, JobLine, JobLines, JobReport, JobStateView, JobStatus, JobsError, JobsReply,
-    McpRequest, McpResponse, RunOutput, RunRequest, RunRequestError, TurnOpReply, WakeError,
+    AgentRefusal, AgentsReply, ExitStatusKind, FetchMethod, FetchRequest, FetchResponse, JobCounts,
+    JobEndEvent, JobEnds, JobLine, JobLines, JobReport, JobStateView, JobStatus, JobsError,
+    JobsReply, McpRequest, McpResponse, RunOutput, RunRequest, RunRequestError, TurnOpReply,
+    WakeError,
 };
 pub use scope::{Budget, OnError, ScopeSpec, ScopeSpecError, ScopeUsage};
 pub use scopes::{

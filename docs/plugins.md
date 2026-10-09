@@ -200,6 +200,8 @@ These are the operations. A handler may call only those in its `uses`.
 
 Write the id as `group.operation`, for example `"state.write"`. Ids are exact: no wildcards, no duplicates, at most 64 per declaration. `tools.read` takes `path` as its positional argument, `tools.search` takes `pattern`, and `tools.exec` takes `command`. Every other argument is named. Call `ctx.describe("tools.exec")` to see the keywords of one operation.
 
+`agents.start` answers `refused` with a typed `reason` when policy or input stops a child: `max_depth` (`child sessions cannot start children here: agents.max_depth = <n>.`), `workspace_unresolved`, `workspace_outside_root`, or `model_unroutable`. Show the reason text to the user; a `cancelled` reply still means the child was cancelled.
+
 `uses` asks; it does not grant. Each effect still needs a live grant and passes the approval ladder, so `tools.patch` and `tools.exec` ask before they run. `ask` operations need to be in `uses` but need no grant. `turn.wake` refuses after 20 turns in a row that wake started with no user prompt. `models.forward` exists only for model handlers, so plugins cannot use it.
 
 State is explicit and session-scoped. A read returns a record with `present`, `value` (when present), and `revision`. A write or delete must pass the `revision` from a read as `expected`. A stale revision fails with `conflict`, and `ctx.try_call` can catch that. Keys match `[a-z][a-z0-9_.-]{0,63}`. An ephemeral session returns `unavailable` for state. The `todo` example keeps a list this way; read it at `dal://examples/todo`.

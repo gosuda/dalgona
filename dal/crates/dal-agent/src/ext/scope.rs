@@ -168,10 +168,16 @@ impl Runtime {
                 }
                 () = cancel.cancelled() => return Err(ScopeError::Cancelled),
             };
-            let AgentsReply::Started { id } = started else {
-                return Err(ScopeError::Failed(
-                    "the member session did not start".into(),
-                ));
+            let id = match started {
+                AgentsReply::Started { id } => id,
+                AgentsReply::Refused { reason } => {
+                    return Err(ScopeError::Failed(reason.to_string().into()));
+                }
+                _ => {
+                    return Err(ScopeError::Failed(
+                        "the member session did not start".into(),
+                    ));
+                }
             };
             *locked(&child) = Some(id);
             let awaited = tokio::select! {

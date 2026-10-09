@@ -1067,8 +1067,9 @@ async fn agents_start_cannot_escape_the_workspace_through_a_link() {
     };
     let reply = raw.as_str();
     assert!(
-        reply.contains(r#""type":"cancelled""#),
-        "a link resolving outside the workspace is refused: {reply}"
+        reply.contains(r#""type":"refused""#)
+            && reply.contains(r#""type":"workspace_outside_root""#),
+        "a link resolving outside the workspace is refused with its reason: {reply}"
     );
 }
 
