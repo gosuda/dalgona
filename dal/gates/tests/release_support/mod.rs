@@ -2,6 +2,8 @@
     clippy::disallowed_methods,
     reason = "release support runs the publish and semver shell scripts"
 )]
+#[cfg(windows)]
+use std::env;
 use std::{
     error::Error,
     io::{self, Write},
@@ -80,10 +82,12 @@ fn captured(command: &mut Command, input: Option<&str>) -> Run {
         .status
         .code()
         .ok_or_else(|| io::Error::other("child process terminated without an exit code"))?;
+    // Windows interpreters emit CRLF on their standard streams; normalize so
+    // the guards' assertions compare the same logical lines on every OS.
     Ok((
         code,
-        String::from_utf8(output.stdout)?,
-        String::from_utf8(output.stderr)?,
+        String::from_utf8(output.stdout)?.replace("\r\n", "\n"),
+        String::from_utf8(output.stderr)?.replace("\r\n", "\n"),
     ))
 }
 
