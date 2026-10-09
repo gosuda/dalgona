@@ -15,7 +15,7 @@ use super::ops::{
 };
 use super::policy::{
     DenyReason, GoalPath, PromptKind, Verdict, VerdictInput, on_user_prompt, progress_signature,
-    record_goal_turn, verdict,
+    provider_block_active, record_goal_turn, verdict,
 };
 use super::prompt::{build_prompt, escape_objective};
 use super::sidecar::{BlockedReason, Goal, GoalSidecar, decode_sidecar, encode_sidecar};
@@ -756,4 +756,80 @@ fn durations_continuations_and_recovery_shape() {
     let doc = clear_recovery_doc("s9", ControllerMode::Stopped, 3);
     assert!(doc.ends_with(b"\n"));
     assert!(String::from_utf8_lossy(&doc).contains("\"controller\":\"stopped\""));
+}
+
+#[test]
+fn verdict_paths_gate_eligibility_stale_and_recovery() -> Result<(), Box<dyn Error>> {
+    let (mut sidecar, _) = active_sidecar()?;
+    let quiet = InflightCounts::default();
+    {
+        let goal = sidecar.goal.as_mut().ok_or("goal missing")?;
+        goal.last_signature = Some("g1:0/0:abcd1234".into());
+    }
+    let goal = sidecar.goal.as_ref().ok_or("goal missing")?;
+    // The user grace behaves like the after-turn path: stale on the same
+    // signature, and it needs a completed or length stop.
+    let mut grace = base_input(goal, &quiet);
+    grace.path = GoalPath::UserGrace;
+    assert_eq!(
+        verdict(&grace),
+        Verdict::Deny(DenyReason::Stale),
+        "the grace is stale on the delivered signature"
+    );
+    grace.last_stop = StopKind::Filter;
+    assert_eq!(
+        verdict(&grace),
+        Verdict::Deny(DenyReason::NotEligible),
+        "the grace continues only a completed or length stop"
+    );
+    grace.last_stop = StopKind::Completed;
+    grace.signature = "g1:0/0:11111111";
+    assert!(
+        matches!(verdict(&grace), Verdict::Continue { .. }),
+        "the grace continues a moved signature"
+    );
+    // Recovery is eligible whatever the last stop, and never stale.
+    let mut recovery = base_input(goal, &quiet);
+    recovery.path = GoalPath::Recovery;
+    recovery.last_stop = StopKind::Error;
+    assert!(
+        matches!(verdict(&recovery), Verdict::Continue { .. }),
+        "recovery continues after the provider error"
+    );
+    // Idle needs an idle session and is never stale.
+    let mut idle = base_input(goal, &quiet);
+    idle.path = GoalPath::Idle;
+    idle.idle = false;
+    assert_eq!(
+        verdict(&idle),
+        Verdict::Deny(DenyReason::NotEligible),
+        "the idle path needs an idle session"
+    );
+    idle.idle = true;
+    assert!(
+        matches!(verdict(&idle), Verdict::Continue { .. }),
+        "the idle path is never stale"
+    );
+    Ok(())
+}
+
+#[test]
+fn provider_block_detects_only_the_mechanical_provider_reason() -> Result<(), Box<dyn Error>> {
+    let (mut sidecar, _) = active_sidecar()?;
+    let goal = sidecar.goal.as_mut().ok_or("goal missing")?;
+    goal.status = GoalStatus::Blocked;
+    goal.blocked = Some(BlockedReason {
+        reason: "provider error ended the turn (retries exhausted)".into(),
+        at: ts("2026-09-25T10:15:30.123Z")?,
+        mechanical: true,
+    });
+    assert!(provider_block_active(goal));
+    goal.blocked.as_mut().ok_or("block missing")?.mechanical = false;
+    assert!(!provider_block_active(goal));
+    goal.blocked.as_mut().ok_or("block missing")?.mechanical = true;
+    goal.blocked.as_mut().ok_or("block missing")?.reason = "waiting on the user".into();
+    assert!(!provider_block_active(goal));
+    goal.status = GoalStatus::Active;
+    assert!(!provider_block_active(goal));
+    Ok(())
 }

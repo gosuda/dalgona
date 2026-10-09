@@ -119,6 +119,10 @@ struct ReportArgs {
     report: String,
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the owner task's latches are flat flags: guard cancellation, turn tool use, turn activity, prompt provenance, and the recovery arm"
+)]
 struct SessionState {
     session: SessionId,
     parent: Option<SessionId>,
@@ -146,6 +150,13 @@ struct SessionState {
     last_stop: StopKind,
     turn_tool_called: bool,
     turn_active: bool,
+    /// A user prompt opened the current turn; consumed by `before_turn`.
+    prompt_seen: bool,
+    /// The active or last-settled turn was started by a user prompt.
+    turn_user_started: bool,
+    /// The prompt that reactivated a provider-error block runs the next
+    /// verdict on the Recovery path.
+    goal_recovery: bool,
     goal_timer: Option<(TokioInstant, String)>,
     /// One merge lock per workspace: every run of this session applies its
     /// patches to the same checkout one at a time.
@@ -375,6 +386,9 @@ impl Runtime {
             last_stop: StopKind::Completed,
             turn_tool_called: false,
             turn_active: false,
+            prompt_seen: false,
+            turn_user_started: false,
+            goal_recovery: false,
             goal_timer: None,
             merge_lock: self.merge_lock(start.workspace.as_path()),
             reports: Arc::clone(&self.reports),
@@ -576,6 +590,15 @@ impl SessionState {
         }
         let jobs = self.completed_jobs().await?;
         let taken: Vec<_> = jobs.iter().map(|job| job.id).collect();
+        // A wake for another source evaluates the goal verdict on the Idle
+        // path; a granted continuation joins this wake's injection, and a
+        // recovery text keeps it waiting for the next wake.
+        if self.arbiter.wake_has_other_sources(&jobs)
+            && let Err(error) = self.evaluate_idle_goal().await
+        {
+            self.release_reports(taken).await?;
+            return Err(error);
+        }
         let ready = self.arbiter.collect(jobs);
         if ready.is_empty() {
             self.release_reports(taken).await?;
@@ -651,6 +674,63 @@ impl SessionState {
             }
         }
         Ok(())
+    }
+
+    /// A wake for another source evaluates the goal verdict on the Idle
+    /// path. A granted continuation joins that wake's injection, behind a
+    /// recovery text when one waits. The wake turn itself records its goal
+    /// accounting at its own end, so this admission records nothing.
+    async fn evaluate_idle_goal(&mut self) -> Result<(), ServiceError> {
+        let active = self
+            .goal
+            .as_ref()
+            .filter(|store| store.error.is_none())
+            .and_then(|store| store.sidecar.as_ref())
+            .and_then(|sidecar| sidecar.goal.as_ref())
+            .is_some_and(|goal| goal.status == super::GoalStatus::Active);
+        if !active {
+            return Ok(());
+        }
+        let todos = self.todo_summary().await?;
+        let inflight = self.inflight_counts().await?;
+        let signature = self.idle_signature(&todos);
+        let decision = self.goal_verdict(
+            super::goal::policy::GoalPath::Idle,
+            &signature,
+            true,
+            &todos,
+            &inflight,
+        );
+        let (prompt, stall) = match decision {
+            super::goal::policy::Verdict::Continue { prompt, stall } => (prompt, stall),
+            super::goal::policy::Verdict::Deny(reason) => {
+                self.deny_goal(reason, dal_core::Timestamp::now());
+                return Ok(());
+            }
+        };
+        let live_parts = Self::live_parts(&inflight);
+        let Some((_, prompt_text)) =
+            self.build_goal_prompt(prompt, &if stall { live_parts } else { Vec::new() })
+        else {
+            return Ok(());
+        };
+        self.arbiter.admit_goal(prompt_text, Instant::now());
+        Ok(())
+    }
+
+    /// The signature an Idle admission records in the prompt: the last
+    /// delivered signature, or a fresh one when no continuation has run.
+    fn idle_signature(&self, todos: &TodoSummary) -> String {
+        let goal = self
+            .goal
+            .as_ref()
+            .and_then(|store| store.sidecar.as_ref())
+            .and_then(|sidecar| sidecar.goal.as_ref());
+        if let Some(stored) = goal.and_then(|goal| goal.last_signature.as_deref()) {
+            return stored.to_owned();
+        }
+        let id = goal.map(|goal| goal.id.as_ref()).unwrap_or_default();
+        super::goal::policy::progress_signature(id, todos.open, todos.total, "")
     }
 
     /// Applies the monitor-only wake budget after a committed wake.
@@ -844,6 +924,9 @@ impl SessionState {
 
     fn before_turn(&mut self, reply: oneshot::Sender<()>) {
         self.turn_active = true;
+        // Wake openings skip the input hook, so the latch is set only when a
+        // user prompt opened this turn.
+        self.turn_user_started = std::mem::take(&mut self.prompt_seen);
         self.publish_status();
         let _ = reply.send(());
     }
@@ -853,12 +936,18 @@ impl SessionState {
         if self.config.loop_guard.enabled {
             reset(&mut self.guard);
         }
+        self.prompt_seen = true;
         self.arbiter.on_user_prompt();
+        // A prompt in the grace window drops the scheduled continuation.
+        self.goal_timer = None;
         if let Some(store) = self.goal.as_mut() {
             let mode = self.arbiter.mode();
             let should_save = store.saved && store.sidecar.is_some();
             if let Some(sidecar) = store.sidecar.as_mut() {
                 if let Some(goal) = sidecar.goal.as_mut() {
+                    if super::goal::policy::provider_block_active(goal) {
+                        self.goal_recovery = true;
+                    }
                     super::goal::policy::on_user_prompt(goal);
                 }
                 sidecar.controller = mode;
@@ -936,7 +1025,15 @@ impl SessionState {
         let mode = self.arbiter.mode();
         let cleared =
             super::goal::ops::parse_goal_command(args) == super::goal::ops::GoalCommand::Clear;
-        let reply = adapter::command(args, store, &ctx, self.services.as_ref(), &self.caller, mode).await;
+        let reply = adapter::command(
+            args,
+            store,
+            &ctx,
+            self.services.as_ref(),
+            &self.caller,
+            mode,
+        )
+        .await;
         // A clear leaves no goal for a scheduled continuation.
         if cleared {
             self.goal_timer = None;
@@ -1254,6 +1351,14 @@ impl SessionState {
         if self.last_stop == StopKind::Error {
             return Ok(());
         }
+        let recovery = std::mem::take(&mut self.goal_recovery);
+        let path = if recovery {
+            super::goal::policy::GoalPath::Recovery
+        } else if self.turn_user_started {
+            super::goal::policy::GoalPath::UserGrace
+        } else {
+            super::goal::policy::GoalPath::AfterTurn
+        };
         let todos = self.todo_summary().await?;
         let inflight = self.inflight_counts().await?;
         let idle = matches!(
@@ -1263,7 +1368,7 @@ impl SessionState {
         let Some(signature) = self.goal_signature(&event.reply_text, &todos) else {
             return Ok(());
         };
-        let decision = self.goal_verdict(&signature, idle, &todos, &inflight);
+        let decision = self.goal_verdict(path, &signature, idle, &todos, &inflight);
         self.apply_goal_verdict(
             decision,
             &event.reply_text,
@@ -1326,6 +1431,7 @@ impl SessionState {
 
     fn goal_verdict(
         &self,
+        path: super::goal::policy::GoalPath,
         signature: &str,
         idle: bool,
         todos: &TodoSummary,
@@ -1343,10 +1449,10 @@ impl SessionState {
         };
         let input = super::goal::policy::VerdictInput {
             goal,
-            path: super::goal::policy::GoalPath::AfterTurn,
+            path,
             idle,
-            pending_user_messages: false,
-            continuation_pending: self.goal_timer.is_some(),
+            pending_user_messages: !self.open_asks.is_empty(),
+            continuation_pending: self.goal_timer.is_some() || self.arbiter.goal_pending(),
             last_turn_context_overflow: false,
             last_stop: self.last_stop,
             signature,
@@ -1365,51 +1471,79 @@ impl SessionState {
         inflight: &InflightCounts,
         now: dal_core::Timestamp,
     ) {
-        if let Some(store) = self.goal.as_mut()
-            && let Some(sidecar) = store.sidecar.as_mut()
-            && let Some(goal) = sidecar.goal.as_mut()
-        {
-            match decision {
-                super::goal::policy::Verdict::Continue { prompt, stall } => {
-                    let live_parts = Self::live_parts(inflight);
-                    let number = goal.unattended.saturating_add(1);
-                    let prompt_text = super::goal::prompt::build_prompt(
-                        goal,
-                        prompt,
-                        number,
-                        if stall { &live_parts } else { &[] },
-                    );
-                    super::goal::policy::record_goal_turn(
-                        goal,
-                        reply_text,
-                        self.turn_tool_called,
-                        0,
-                        0,
-                        signature,
-                        prompt,
-                    );
-                    goal.updated_at = now;
-                    self.goal_timer = Some((
-                        TokioInstant::now()
-                            + std::time::Duration::from_millis(
-                                super::goal::policy::CONTINUATION_DELAY_MS,
-                            ),
-                        prompt_text,
-                    ));
-                }
-                super::goal::policy::Verdict::Deny(reason) => {
-                    if let Some(blocked) = reason.mechanical_reason() {
-                        goal.status = super::GoalStatus::Blocked;
-                        goal.blocked = Some(super::goal::sidecar::BlockedReason {
-                            reason: blocked.into(),
-                            at: now,
-                            mechanical: true,
-                        });
-                        goal.updated_at = now;
-                    }
-                }
+        match decision {
+            super::goal::policy::Verdict::Continue { prompt, stall } => {
+                let tool_called = self.turn_tool_called;
+                let live_parts = Self::live_parts(inflight);
+                let Some((goal, prompt_text)) =
+                    self.build_goal_prompt(prompt, &if stall { live_parts } else { Vec::new() })
+                else {
+                    return;
+                };
+                super::goal::policy::record_goal_turn(
+                    goal,
+                    reply_text,
+                    tool_called,
+                    0,
+                    0,
+                    signature,
+                    prompt,
+                );
+                goal.updated_at = now;
+                self.schedule_goal(prompt_text);
             }
+            super::goal::policy::Verdict::Deny(reason) => self.deny_goal(reason, now),
         }
+    }
+
+    /// Builds one continuation prompt against the current goal.
+    fn build_goal_prompt(
+        &mut self,
+        prompt: super::goal::policy::PromptKind,
+        live_parts: &[Box<str>],
+    ) -> Option<(&mut super::goal::sidecar::Goal, String)> {
+        let goal = self.goal.as_mut()?.sidecar.as_mut()?.goal.as_mut()?;
+        let number = goal.unattended.saturating_add(1);
+        let prompt_text = super::goal::prompt::build_prompt(goal, prompt, number, live_parts);
+        Some((goal, prompt_text))
+    }
+
+    /// Arms the arbiter timer for one continuation prompt. P4 is ready at
+    /// once after an automatic turn and ten seconds after a turn that a
+    /// user prompt started.
+    fn schedule_goal(&mut self, prompt_text: String) {
+        let delay = if self.turn_user_started {
+            super::goal::policy::CONTINUATION_DELAY_MS
+        } else {
+            0
+        };
+        self.goal_timer = Some((
+            TokioInstant::now() + std::time::Duration::from_millis(delay),
+            prompt_text,
+        ));
+    }
+
+    /// Applies a mechanical deny: blocks the goal with the deny's exact
+    /// reason. `NotEligible`, `SingleFlight`, and `Stale` change nothing.
+    fn deny_goal(&mut self, reason: super::goal::policy::DenyReason, now: dal_core::Timestamp) {
+        let Some(blocked) = reason.mechanical_reason() else {
+            return;
+        };
+        let Some(goal) = self
+            .goal
+            .as_mut()
+            .and_then(|store| store.sidecar.as_mut())
+            .and_then(|sidecar| sidecar.goal.as_mut())
+        else {
+            return;
+        };
+        goal.status = super::GoalStatus::Blocked;
+        goal.blocked = Some(super::goal::sidecar::BlockedReason {
+            reason: blocked.into(),
+            at: now,
+            mechanical: true,
+        });
+        goal.updated_at = now;
     }
 
     async fn agents_tool(&mut self, caller: Caller, call: CallId, args: &RawJson) -> ToolReply {

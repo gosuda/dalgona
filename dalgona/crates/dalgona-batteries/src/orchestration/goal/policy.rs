@@ -34,30 +34,12 @@ pub(crate) const STALL_TURNS: u32 = 3;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum GoalPath {
     /// A recovery turn after an interruption.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "goal recovery entry waits on durable goal sidecar persistence"
-        )
-    )]
     Recovery,
     /// The wake after a turn ended.
     AfterTurn,
     /// The grace window after a user-started turn.
-    #[expect(
-        dead_code,
-        reason = "goal recovery entry waits on durable goal sidecar persistence"
-    )]
     UserGrace,
     /// An idle wake with no turn behind it.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "goal recovery entry waits on durable goal sidecar persistence"
-        )
-    )]
     Idle,
 }
 
@@ -211,7 +193,7 @@ pub(crate) fn verdict(input: &VerdictInput<'_>) -> Verdict {
     if input.goal.consecutive >= CAP_TURNS {
         return Verdict::Deny(DenyReason::Cap);
     }
-    if input.path == GoalPath::AfterTurn
+    if matches!(input.path, GoalPath::AfterTurn | GoalPath::UserGrace)
         && input.goal.last_signature.as_deref() == Some(input.signature)
     {
         return Verdict::Deny(DenyReason::Stale);
@@ -316,4 +298,16 @@ pub(crate) fn on_user_prompt(goal: &mut Goal) {
         goal.unattended = 0;
         goal.goal_turns = 0;
     }
+}
+
+/// Whether the goal sits in the provider-error mechanical block whose
+/// reactivating prompt runs the next verdict on the [`GoalPath::Recovery`]
+/// path.
+#[must_use]
+pub(crate) fn provider_block_active(goal: &Goal) -> bool {
+    goal.status == super::super::GoalStatus::Blocked
+        && goal
+            .blocked
+            .as_ref()
+            .is_some_and(|blocked| blocked.mechanical && blocked.reason.as_ref() == PROVIDER_REASON)
 }

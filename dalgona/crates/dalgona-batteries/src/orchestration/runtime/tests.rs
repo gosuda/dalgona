@@ -504,14 +504,29 @@ struct Fixture {
 }
 
 impl Fixture {
+    /// Opens with every battery except the goal owner, for the tests that
+    /// drive cancellation and runs directly.
     async fn open() -> Result<Self, Box<dyn std::error::Error>> {
-        Self::open_config(parse_config(None)?).await
+        let mut config = parse_config(None)?;
+        config.goal.enabled = false;
+        Self::open_owner(config).await
+    }
+
+    /// Opens with the goal owner enabled, for the continuation tests.
+    async fn open_goal() -> Result<Self, Box<dyn std::error::Error>> {
+        Self::open_owner(parse_config(None)?).await
     }
 
     async fn open_config(
         mut config: crate::orchestration::OrchestrationConfig,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         config.goal.enabled = false;
+        Self::open_owner(config).await
+    }
+
+    async fn open_owner(
+        config: crate::orchestration::OrchestrationConfig,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let runtime = Runtime::new(config)?;
         let host = Arc::new_cyclic(|this| Host {
             this: this.clone(),
@@ -599,6 +614,82 @@ impl Fixture {
             )
             .await?;
         Ok(())
+    }
+
+    /// Creates the session goal through the `/goal` command.
+    async fn create_goal(&self, objective: &str) -> TestResult {
+        self.runtime
+            .command(self.session, "goal", objective)
+            .await?;
+        Ok(())
+    }
+
+    /// Opens one user prompt turn: the input hook, then the before-turn hook.
+    async fn begin_turn(&self, turn: dal_core::TurnId) -> TestResult {
+        use dal_agent::ext::Hook as _;
+        super::BeforeTurnHook(self.runtime.clone())
+            .call(
+                dal_core::ext::BeforeTurn {
+                    turn,
+                    text: "work".into(),
+                },
+                HookCx::for_test(self.host.clone(), self.session, Some(turn)),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Ends the active turn: the turn-end hook, then the settled hook.
+    async fn end_turn(&self, turn: dal_core::TurnId, stop: Stop, reply_text: &str) -> TestResult {
+        use dal_agent::ext::ObserveHook as _;
+        super::TurnEndHook(self.runtime.clone())
+            .call(
+                dal_core::ext::TurnEnd { turn, stop },
+                HookCx::for_test(self.host.clone(), self.session, Some(turn)),
+            )
+            .await?;
+        super::SettledHook(self.runtime.clone())
+            .call(
+                dal_core::ext::Settled {
+                    turn,
+                    reply_text: reply_text.into(),
+                },
+                HookCx::for_test(self.host.clone(), self.session, Some(turn)),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Runs one full user prompt turn to its settled end.
+    async fn user_turn(&self, turn: dal_core::TurnId, stop: Stop, reply_text: &str) -> TestResult {
+        self.user_input().await?;
+        self.begin_turn(turn).await?;
+        self.end_turn(turn, stop, reply_text).await
+    }
+
+    /// Ends one top-level job so its report waits for the next wake.
+    fn done_job(&self, text: &str) -> JobId {
+        let job = JobId::new_v7();
+        self.script().jobs.push((
+            JobStatus {
+                id: job,
+                label: "report".into(),
+                state: JobStateView::Done(dal_core::JobOutcome::Exited { code: 0 }),
+                log: None,
+                last_activity_at: dal_core::Timestamp::now(),
+            },
+            None,
+            text.to_owned(),
+        ));
+        job
+    }
+
+    /// Lets the session owner run the timer and tick work that virtual time
+    /// made ready.
+    async fn pump(&self) {
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
     }
 }
 
@@ -1758,5 +1849,153 @@ async fn paused_and_stopped_controllers_keep_reports_queued_until_resumed() -> T
         premature.is_empty(),
         "controllers woke before resume: {premature:?}"
     );
+    Ok(())
+}
+
+fn goal_turn() -> dal_core::TurnId {
+    dal_core::TurnId::new(std::num::NonZeroU64::MIN)
+}
+
+const GOAL_PROMPT_HEAD: &str = "Continue working toward the active goal.";
+
+#[tokio::test(start_paused = true)]
+async fn user_grace_fires_at_ten_seconds_and_a_prompt_drops_it() -> TestResult {
+    let fixture = Fixture::open_goal().await?;
+    fixture.create_goal("write the parser").await?;
+    let turn = goal_turn();
+    fixture
+        .user_turn(turn, Stop::EndTurn, "made progress")
+        .await?;
+    fixture.pump().await;
+    assert!(
+        fixture.script().wakes.is_empty(),
+        "the grace scheduled no wake yet"
+    );
+    tokio::time::advance(std::time::Duration::from_millis(9_900)).await;
+    fixture.pump().await;
+    {
+        let script = fixture.script();
+        assert!(
+            script.wakes.is_empty(),
+            "no continuation before ten seconds: {:?}",
+            script.wakes
+        );
+    }
+    // A prompt inside the window drops the scheduled continuation.
+    fixture.user_input().await?;
+    tokio::time::advance(std::time::Duration::from_millis(1_000)).await;
+    fixture.pump().await;
+    {
+        let script = fixture.script();
+        assert!(
+            script.wakes.is_empty(),
+            "the prompt dropped the scheduled continuation: {:?}",
+            script.wakes
+        );
+    }
+    // The dropped prompt's own turn schedules a fresh grace, which fires.
+    fixture.begin_turn(turn).await?;
+    fixture
+        .end_turn(turn, Stop::EndTurn, "changed direction")
+        .await?;
+    tokio::time::advance(std::time::Duration::from_millis(10_100)).await;
+    fixture.pump().await;
+    {
+        let script = fixture.script();
+        assert_eq!(script.wakes.len(), 1, "{:?}", script.wakes);
+        assert!(
+            script.wakes[0].starts_with(GOAL_PROMPT_HEAD),
+            "{}",
+            script.wakes[0]
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn idle_wake_joins_the_goal_continuation_to_job_reports() -> TestResult {
+    let fixture = Fixture::open_goal().await?;
+    fixture.create_goal("write the parser").await?;
+    // No continuation is scheduled, so the wake for the job report
+    // evaluates the goal verdict on the Idle path.
+    fixture.done_job("server exited: 2 problems left");
+    tokio::time::advance(std::time::Duration::from_millis(300)).await;
+    fixture.pump().await;
+    {
+        let script = fixture.script();
+        assert_eq!(script.wakes.len(), 1, "{:?}", script.wakes);
+        let report = &script.wakes[0];
+        let Some(goal_at) = report.find(GOAL_PROMPT_HEAD) else {
+            return Err(format!("the wake carries no goal prompt: {report}").into());
+        };
+        let Some(jobs_at) = report.find("server exited: 2 problems left") else {
+            return Err(format!("the wake carries no job report: {report}").into());
+        };
+        assert!(jobs_at < goal_at, "P2 precedes P4: {report}");
+    }
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn provider_error_blocks_and_the_next_prompt_recovers() -> TestResult {
+    let fixture = Fixture::open_goal().await?;
+    fixture.create_goal("write the parser").await?;
+    let turn = goal_turn();
+    fixture.user_turn(turn, Stop::Failed, "").await?;
+    tokio::time::advance(std::time::Duration::from_secs(12)).await;
+    fixture.pump().await;
+    {
+        let script = fixture.script();
+        assert!(
+            script.wakes.is_empty(),
+            "a failed turn schedules no continuation: {:?}",
+            script.wakes
+        );
+    }
+    let shown = fixture.runtime.command(fixture.session, "goal", "").await?;
+    assert!(
+        shown.contains("blocked: provider error ended the turn (retries exhausted)"),
+        "{shown}"
+    );
+    // The next prompt reactivates the goal; the Recovery verdict runs at
+    // that prompt's turn end.
+    fixture.user_turn(turn, Stop::EndTurn, "back on it").await?;
+    let shown = fixture.runtime.command(fixture.session, "goal", "").await?;
+    assert!(shown.contains("g1: active"), "{shown}");
+    tokio::time::advance(std::time::Duration::from_millis(10_100)).await;
+    fixture.pump().await;
+    let script = fixture.script();
+    assert_eq!(script.wakes.len(), 1, "{:?}", script.wakes);
+    assert!(
+        script.wakes[0].starts_with(GOAL_PROMPT_HEAD),
+        "{}",
+        script.wakes[0]
+    );
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn automatic_turn_continuation_is_ready_at_once() -> TestResult {
+    let fixture = Fixture::open_goal().await?;
+    fixture.create_goal("write the parser").await?;
+    let turn = goal_turn();
+    fixture
+        .user_turn(turn, Stop::EndTurn, "made progress")
+        .await?;
+    tokio::time::advance(std::time::Duration::from_millis(10_100)).await;
+    fixture.pump().await;
+    assert_eq!(fixture.script().wakes.len(), 1);
+    // The wake turn was automatic: its opening runs before_turn, which
+    // clears the prompt latch, and its continuation waits no grace.
+    fixture.begin_turn(turn).await?;
+    fixture
+        .end_turn(turn, Stop::EndTurn, "more progress")
+        .await?;
+    tokio::time::advance(std::time::Duration::from_millis(300)).await;
+    fixture.pump().await;
+    {
+        let script = fixture.script();
+        assert_eq!(script.wakes.len(), 2, "{:?}", script.wakes);
+    }
     Ok(())
 }

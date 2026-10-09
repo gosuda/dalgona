@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Continue an active goal on its own: the continuation now fires right after an automatic turn, ten seconds after a user turn, at idle wakes for other sources, and after a provider error once the user speaks again, while `/goal clear` on a damaged goal file repairs it in place.
 - Show the exact reason when an orchestration child cannot start, such as the child depth limit, instead of a bare failure.
 - Give each orchestration child one final grace prompt when it ends without a report, then fail it clearly if it stays silent.
 - Keep goals across session reopen and report failed goal saves.

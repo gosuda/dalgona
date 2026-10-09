@@ -89,6 +89,18 @@ impl Arbiter {
         self.last_activity = Some(now);
     }
 
+    /// Whether a goal continuation text waits for a wake.
+    pub(crate) fn goal_pending(&self) -> bool {
+        self.goal.is_some()
+    }
+
+    /// Whether the next wake carries a source other than the goal: the
+    /// recovery text, taken job reports, or a monitor batch. The goal
+    /// verdict runs on the Idle path only at such a wake.
+    pub(crate) fn wake_has_other_sources(&self, jobs: &[JobReport]) -> bool {
+        self.recovery.is_some() || !jobs.is_empty() || !self.monitor.is_empty()
+    }
+
     /// A user prompt resumes paused mode but never stopped.
     pub(crate) fn on_user_prompt(&mut self) {
         if matches!(self.mode, ControllerMode::Paused { .. }) {
