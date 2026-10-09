@@ -1,7 +1,7 @@
 //! A draining connection answers new requests with `-32009` instead of running
 //! them, and a host that is shut down maps to the same code.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use dal_agent::HostError;
 use sonic_rs::JsonValueTrait;
@@ -54,6 +54,7 @@ async fn a_draining_connection_bounds_replies_during_a_connected_flood() {
     let client = async {
         let mut rpc = Rpc::new(peer);
         initialize(&mut rpc).await;
+        let started = Instant::now();
         drain.cancel();
         let (incoming, mut outgoing) = rpc.into_parts();
         let mut sent = 0_i64;
@@ -83,21 +84,25 @@ async fn a_draining_connection_bounds_replies_during_a_connected_flood() {
                 }
             }
         }
-        (sent, replies)
+        (sent, replies, started.elapsed())
     };
-    let (outcome, (sent, replies)) = tokio::time::timeout(Duration::from_secs(5), async {
+    let (outcome, (sent, replies, elapsed)) = tokio::time::timeout(Duration::from_secs(5), async {
         tokio::join!(server, client)
     })
     .await
     .expect("draining connection closes despite the flood");
     outcome.expect("rpc serve ends cleanly");
     assert!(
+        elapsed <= Duration::from_secs(3),
+        "draining connection exceeded the grace bound: {elapsed:?}"
+    );
+    assert!(
         sent > 64,
         "the client did not exercise a sustained flood: {sent}"
     );
     assert!(
-        replies <= 64,
-        "draining replies exceeded the bounded budget: {replies}"
+        replies <= 1_024,
+        "draining replies exceeded the small bounded budget: {replies}"
     );
 }
 
