@@ -1043,10 +1043,22 @@ mod win {
             Ok(()) => Ok(true),
             Err(error) => {
                 let _ = transact(edge, |state| {
-                    if state.holders.get(&key).is_some_and(|h| h.len() == 1) {
-                        state.orig.remove(&key);
+                    // The failed transact may have applied the ACE and label
+                    // but died in `state.save`; undo the filesystem side
+                    // before retiring the holder so nothing outlives its
+                    // record. A revoke miss keeps the holder so the reaper
+                    // can retry the lift later.
+                    if edit_dacl(path, sid, access, REVOKE_ACCESS, false).is_ok() {
+                        if access == GENERIC_ALL_ACCESS
+                            && let Some(orig) = state.orig_label.remove(&key)
+                        {
+                            let _ = restore_label(path, orig);
+                        }
+                        if state.holders.get(&key).is_some_and(|h| h.len() == 1) {
+                            state.orig.remove(&key);
+                        }
+                        state.remove_holder(&key, guid, access);
                     }
-                    state.remove_holder(&key, guid, access);
                     Ok(())
                 });
                 Err(error)
@@ -1575,6 +1587,19 @@ mod win {
         })?;
         if let Some(error) = first_error {
             let _ = transact(edge, |state| {
+                // `Err` drops `planted`, so the caller can never lift those
+                // ACEs — revoke the successful prefix here, retiring each
+                // holder only once its edit is undone. The never-attempted
+                // suffix needs no undo; retire its holders outright.
+                for path in &planted {
+                    let key = path_key(path);
+                    if edit_dacl(path, sid, access, REVOKE_ACCESS, false).is_ok() {
+                        if state.holders.get(&key).is_some_and(|h| h.len() == 1) {
+                            state.orig.remove(&key);
+                        }
+                        state.remove_holder(&key, guid, access);
+                    }
+                }
                 for path in recorded.iter().skip(planted.len()) {
                     let key = path_key(path);
                     if state.holders.get(&key).is_some_and(|h| h.len() == 1) {
