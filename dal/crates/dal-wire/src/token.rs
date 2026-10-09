@@ -527,11 +527,14 @@ mod win {
                 ptr::null_mut(),
             )
         };
-        // The descriptor only had to outlive `CreateFileW` — free it on
-        // both exit paths or every token creation leaks the LocalAlloc.
+        // Capture the `CreateFileW` cause before `LocalFree` runs another
+        // Win32 call and clobbers the thread-local last-error. The
+        // descriptor only had to outlive `CreateFileW` — free it on both
+        // exit paths or every token creation leaks the LocalAlloc.
+        let error = (raw == INVALID_HANDLE_VALUE).then(io::Error::last_os_error);
         unsafe { LocalFree(descriptor) };
-        if raw == INVALID_HANDLE_VALUE {
-            return Err(io::Error::last_os_error());
+        if let Some(error) = error {
+            return Err(error);
         }
         Ok(unsafe { File::from_raw_handle(raw) })
     }

@@ -1057,21 +1057,30 @@ mod win {
                         // restoring it now would switch the root off Low under
                         // another live run's AppContainer.
                         let last = state.holders.get(&key).is_some_and(|h| h.len() == 1);
-                        if access == GENERIC_ALL_ACCESS
+                        // A failed label restore keeps the whole cleanup
+                        // (holder + both snapshots) so the next transact's
+                        // reap retries it — removing the holder now would
+                        // orphan the snapshot and strand the root on the
+                        // injected Low label forever.
+                        let label_kept = if access == GENERIC_ALL_ACCESS
                             && last
                             && let Some(orig) = state.orig_label.get(&key).cloned()
-                            // The snapshot only leaves the state once the
-                            // label is back — a failed restore keeps it so
-                            // the next transact can retry instead of
-                            // stranding the root on the injected Low label.
-                            && restore_label(path, orig).is_ok()
                         {
-                            state.orig_label.remove(&key);
+                            if restore_label(path, orig).is_ok() {
+                                state.orig_label.remove(&key);
+                                false
+                            } else {
+                                true
+                            }
+                        } else {
+                            false
+                        };
+                        if !label_kept {
+                            if last {
+                                state.orig.remove(&key);
+                            }
+                            state.remove_holder(&key, guid, access);
                         }
-                        if last {
-                            state.orig.remove(&key);
-                        }
-                        state.remove_holder(&key, guid, access);
                     }
                     Ok(())
                 });
@@ -2168,7 +2177,10 @@ mod win {
                 command.as_mut_ptr(),
                 ptr::null(),
                 ptr::null(),
-                1, // bInheritHandles, bounded by PROC_THREAD_ATTRIBUTE_HANDLE_LIST
+                // With no handle list, TRUE would hand the sandbox child
+                // every inheritable parent handle — bypassing the ACL
+                // boundary this attribute is meant to bound.
+                i32::from(!inheritable.is_empty()),
                 CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
                 ptr::null(),
                 ptr::null(),
@@ -2235,6 +2247,12 @@ mod win {
     mod spawn_tests {
         use super::*;
 
+        /// Serializes tests that edit process-global environment — the
+        /// parallel harness runs tests on separate threads but shares the
+        /// process env block, so a scoped PATH edit must hold the lock to
+        /// avoid leaking into a concurrent `spawn`'s ambient capture.
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
         /// The full plant→spawn→lift pipeline must actually run a
         /// permitted program — every existing gate only asserts denial, so
         /// a sandbox that cannot launch anything would still pass. PATH is
@@ -2242,8 +2260,10 @@ mod win {
         /// ACEs; the assertion is on the child really running.
         #[test]
         fn sandboxed_program_runs_to_success() {
-            // SAFETY: the test harness runs this single-threaded enough for
-            // a scoped env edit; PATH is restored before the assert.
+            let _env = ENV_LOCK.lock().expect("env lock poisoned");
+            // SAFETY: serialized by ENV_LOCK; PATH is restored before the
+            // assert — `remove_var` when it was originally absent so no
+            // empty PATH leaks out either.
             let old_path = std::env::var_os("PATH");
             let system32 =
                 Path::new(&std::env::var_os("SystemRoot").expect("SystemRoot")).join("System32");
@@ -2255,7 +2275,10 @@ mod win {
                 whoami.as_os_str(),
                 &[OsString::from("/all")],
             );
-            unsafe { std::env::set_var("PATH", old_path.unwrap_or_default()) };
+            match old_path {
+                Some(path) => unsafe { std::env::set_var("PATH", path) },
+                None => unsafe { std::env::remove_var("PATH") },
+            }
             match result {
                 // Client editions launch the container child.
                 Ok(code) => {
