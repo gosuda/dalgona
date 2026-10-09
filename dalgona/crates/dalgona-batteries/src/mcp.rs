@@ -43,6 +43,14 @@ pub const TOOL_CACHE_CAP: Duration = Duration::from_secs(3600);
 pub const RESULT_TEXT_CAP: usize = 524_288;
 /// Marker appended when an MCP result exceeds [`RESULT_TEXT_CAP`].
 pub const RESULT_TRUNCATED_MARKER: &str = "<mcp result truncated at 524288 bytes>";
+/// Formats one bounded stderr excerpt for an exit error.
+pub(crate) fn stderr_diagnostic(excerpt: &str) -> String {
+    if excerpt.is_empty() {
+        String::new()
+    } else {
+        format!("; stderr: {excerpt}")
+    }
+}
 
 /// Client identity and token location supplied by the Dalgona product builder.
 #[derive(Clone, Debug)]
@@ -78,12 +86,14 @@ pub enum McpError {
         cause: String,
     },
     /// A stdio server exited while a request was in flight.
-    #[error("mcp server {key} exited during the call with status {code}")]
+    #[error("mcp server {key} exited during the call with status {code}{diagnostic}")]
     Exited {
         /// The server key that exited mid-call.
         key: String,
         /// The process exit status code.
         code: i32,
+        /// The optional formatted stderr diagnostic suffix.
+        diagnostic: String,
     },
     /// A stdout protocol line was malformed and the server was treated as crashed.
     #[error("mcp server {key} wrote an invalid protocol line; treated as a crash")]

@@ -7,7 +7,7 @@ use std::{collections::BTreeMap, fs, path::PathBuf, time::Duration};
 use std::path::Path;
 
 use crate::mcp::{
-    McpConfig,
+    McpConfig, STDERR_RING,
     http::auth::{self as token_auth, TokenRecord},
     tools::fold_tool_name,
 };
@@ -474,6 +474,76 @@ fn crash_stdio_decl(marker: &Path) -> McpServerDecl {
             "printf x >> \"$MCP_CRASH_MARKER\"; exit 1".into(),
         ],
         env,
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn stdio_call_crash_reports_bounded_stderr() {
+    let entry = fold_tool_name(SKILL, SERVER, "");
+    let echo = fold_tool_name(SKILL, SERVER, "echo");
+    let mut fixture = HostedFixture::new(
+        stderr_crash_stdio_decl(),
+        vec![
+            scripted_tool_step("entry-1", &entry, "{}"),
+            scripted_final_step(),
+            scripted_tool_step("echo-1", &echo, "{}"),
+            scripted_final_step(),
+        ],
+        Answer::ApproveForSession,
+    )
+    .await;
+    fixture.prompt().await;
+    fixture.turn_ended().await;
+    assert!(fixture.status().await.contains("ready"));
+
+    fixture.prompt().await;
+    fixture.turn_ended().await;
+    let results = fixture.tool_results(&echo);
+    assert_eq!(results.len(), 1);
+    assert!(results[0].0);
+    assert!(results[0].1.contains("status 1"), "{results:?}");
+    assert!(
+        results[0].1.contains("crash stderr line one")
+            && results[0].1.contains("crash stderr line two"),
+        "{results:?}"
+    );
+    assert!(
+        results[0].1.len() <= STDERR_RING + 1024,
+        "stderr excerpt exceeded the ring bound: {}",
+        results[0].1.len()
+    );
+    fixture.shutdown().await;
+}
+
+#[cfg(unix)]
+fn stderr_crash_stdio_decl() -> McpServerDecl {
+    McpServerDecl::Stdio {
+        command: vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            r#"
+while IFS= read -r line; do
+  id=${line#*\"id\":}
+  id=${id%%,*}
+  case "$line" in
+    *'"method":"server/discover"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
+      ;;
+    *'"method":"tools/list"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"echo","inputSchema":{"type":"object","properties":{}}}],"ttlMs":10000}}\n' "$id"
+      ;;
+    *'"method":"tools/call"'*)
+      head -c 70000 /dev/zero | tr '\0' x >&2
+      printf '\ncrash stderr line one\ncrash stderr line two\n' >&2
+      exit 1
+      ;;
+  esac
+done
+"#
+            .into(),
+        ],
+        env: BTreeMap::new(),
     }
 }
 

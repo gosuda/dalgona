@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Fix `read dalgona://<page>`: the model can now read the Dalgona manual, not only the `dalgona docs` command.
+- Include an MCP stdio server's exit status and bounded stderr excerpt when it crashes during a call.
 - Fix the review battery: `/review` can now read the git status and diff of a session, so it reports findings instead of failing with a workspace-size error.
 - Fix the history compaction notice for a model that reads images when this host cannot store them: it now says `history: this host cannot commit image parts.` instead of `history: the journal source is unavailable.`, and the text summary still runs.
 - Fix goal saving errors: a failed write of the goal file now reports `goal: saving the goal failed: <message>` instead of a raw file error.

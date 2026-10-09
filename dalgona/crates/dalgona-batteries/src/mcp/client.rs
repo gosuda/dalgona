@@ -1222,6 +1222,7 @@ async fn await_reply(
                 return Err(TransportError::Mcp(McpError::Exited {
                     key: ctx.instance.key.display(),
                     code: -1,
+                    diagnostic: String::new(),
                 }));
             }
             Err(_) => {

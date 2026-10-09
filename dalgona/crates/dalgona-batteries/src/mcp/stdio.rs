@@ -14,13 +14,13 @@ use sonic_rs::JsonValueTrait;
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     process::{ChildStderr, ChildStdin, ChildStdout, Command},
-    sync::{Mutex, mpsc},
+    sync::{Mutex, mpsc, oneshot},
     time::timeout,
 };
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 
 use crate::mcp::{
-    Budgets, McpError, STDERR_RING, TransportError,
+    Budgets, McpError, STDERR_RING, TransportError, stderr_diagnostic,
     tools::{Key, ServerDecl, resolve_executable},
 };
 
@@ -45,10 +45,6 @@ pub(crate) struct StdioTransport {
     child: Arc<Mutex<Box<dyn ChildWrapper>>>,
     stdin: Arc<Mutex<Option<ChildStdin>>>,
     pending: Pending,
-    #[expect(
-        dead_code,
-        reason = "crash-diagnostics ring read by stderr_excerpt on server failure paths"
-    )]
     stderr_tail: Arc<Mutex<VecDeque<u8>>>,
     reader_task: AbortOnDropHandle<()>,
     stderr_task: AbortOnDropHandle<()>,
@@ -106,6 +102,7 @@ impl StdioTransport {
         let stdin = Arc::new(Mutex::new(Some(stdin)));
         let pending = Arc::new(Mutex::new(HashMap::new()));
         let stderr_tail = Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_RING)));
+        let (stderr_done_tx, stderr_done_rx) = oneshot::channel();
         let cancel = CancellationToken::new();
         #[expect(
             clippy::disallowed_methods,
@@ -116,6 +113,8 @@ impl StdioTransport {
             Arc::clone(&child),
             Arc::clone(&stdin),
             Arc::clone(&pending),
+            Arc::clone(&stderr_tail),
+            stderr_done_rx,
             key.clone(),
             cancel.clone(),
         )));
@@ -123,8 +122,11 @@ impl StdioTransport {
             clippy::disallowed_methods,
             reason = "stdio server owns the abort-on-drop stderr drain"
         )]
-        let stderr_task =
-            AbortOnDropHandle::new(tokio::spawn(read_stderr(stderr, Arc::clone(&stderr_tail))));
+        let stderr_task = AbortOnDropHandle::new(tokio::spawn(read_stderr(
+            stderr,
+            Arc::clone(&stderr_tail),
+            stderr_done_tx,
+        )));
 
         Ok(Self {
             key,
@@ -239,18 +241,14 @@ impl StdioTransport {
         let write = async {
             let mut stdin = self.stdin.lock().await;
             let Some(stdin) = stdin.as_mut() else {
-                return Err(McpError::Exited {
-                    key: self.key.display(),
-                    code: process_status(&self.child).await,
-                });
+                let code = process_status(&self.child).await;
+                return Err(self.exited_error(code).await);
             };
             if stdin.write_all(body.as_str().as_bytes()).await.is_err()
                 || stdin.write_all(b"\n").await.is_err()
             {
-                return Err(McpError::Exited {
-                    key: self.key.display(),
-                    code: process_status(&self.child).await,
-                });
+                let code = process_status(&self.child).await;
+                return Err(self.exited_error(code).await);
             }
             Ok(())
         };
@@ -272,13 +270,16 @@ impl StdioTransport {
     }
 
     /// Returns the bounded stderr excerpt retained for crash diagnostics.
-    #[expect(
-        dead_code,
-        reason = "crash-diagnostics reader for MCP server failure paths, wired with error reporting"
-    )]
     pub(crate) async fn stderr_excerpt(&self) -> String {
-        let mut tail = self.stderr_tail.lock().await;
-        String::from_utf8_lossy(tail.make_contiguous()).into_owned()
+        read_stderr_excerpt(&self.stderr_tail).await
+    }
+    async fn exited_error(&self, code: i32) -> McpError {
+        let excerpt = self.stderr_excerpt().await;
+        McpError::Exited {
+            key: self.key.display(),
+            code,
+            diagnostic: stderr_diagnostic(&excerpt),
+        }
     }
 
     /// Closes stdin, waits for the grace period, then kills and reaps the process tree.
@@ -288,30 +289,24 @@ impl StdioTransport {
         self.stdin.lock().await.take();
 
         let mut child = self.child.lock().await;
-        let result = match timeout(grace, child.wait()).await {
+        let outcome = match timeout(grace, child.wait()).await {
             Ok(Ok(_)) => Ok(()),
-            Ok(Err(_)) => Err(McpError::Exited {
-                key: self.key.display(),
-                code: -1,
-            }),
+            Ok(Err(_)) => Err(-1),
             Err(_) => match child.start_kill() {
                 Ok(()) => match timeout(POST_KILL_WAIT, child.wait()).await {
                     Ok(Ok(_)) => Ok(()),
-                    Ok(Err(_)) | Err(_) => Err(McpError::Exited {
-                        key: self.key.display(),
-                        code: -1,
-                    }),
+                    Ok(Err(_)) | Err(_) => Err(-1),
                 },
-                Err(_) => Err(McpError::Exited {
-                    key: self.key.display(),
-                    code: -1,
-                }),
+                Err(_) => Err(-1),
             },
         };
         drop(child);
         self.reader_task.abort();
         self.stderr_task.abort();
-        result
+        match outcome {
+            Ok(()) => Ok(()),
+            Err(code) => Err(self.exited_error(code).await),
+        }
     }
 
     /// Sends an MCP notification without allocating a response slot.
@@ -323,10 +318,8 @@ impl StdioTransport {
         let write = async {
             let mut stdin = self.stdin.lock().await;
             let Some(stdin) = stdin.as_mut() else {
-                return Err(TransportError::Mcp(McpError::Exited {
-                    key: self.key.display(),
-                    code: process_status(&self.child).await,
-                }));
+                let code = process_status(&self.child).await;
+                return Err(TransportError::Mcp(self.exited_error(code).await));
             };
             stdin
                 .write_all(body.as_str().as_bytes())
@@ -387,12 +380,22 @@ async fn process_status(child: &Arc<Mutex<Box<dyn ChildWrapper>>>) -> i32 {
     let mut child = child.lock().await;
     child.try_wait().ok().flatten().map_or(-1, exit_code)
 }
+async fn read_stderr_excerpt(tail: &Arc<Mutex<VecDeque<u8>>>) -> String {
+    let mut tail = tail.lock().await;
+    String::from_utf8_lossy(tail.make_contiguous()).into_owned()
+}
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "stdio reader receives the process-owned channels and cancellation token"
+)]
 async fn read_stdout(
     stdout: ChildStdout,
     child: Arc<Mutex<Box<dyn ChildWrapper>>>,
     stdin: Arc<Mutex<Option<ChildStdin>>>,
     pending: Pending,
+    stderr_tail: Arc<Mutex<VecDeque<u8>>>,
+    stderr_done_rx: oneshot::Receiver<()>,
     key: Key,
     cancel: CancellationToken,
 ) {
@@ -405,11 +408,14 @@ async fn read_stdout(
         let line = match line {
             Ok(Some(line)) => line,
             Ok(None) => {
+                let _ = timeout(POST_KILL_WAIT, stderr_done_rx).await;
+                let excerpt = read_stderr_excerpt(&stderr_tail).await;
                 fail_pending(
                     &pending,
                     McpError::Exited {
                         key: key.display(),
                         code: process_status(&child).await,
+                        diagnostic: stderr_diagnostic(&excerpt),
                     },
                 )
                 .await;
@@ -460,11 +466,13 @@ async fn read_stdout(
                 && (stdin.write_all(response.as_bytes()).await.is_err()
                     || stdin.write_all(b"\n").await.is_err())
             {
+                let excerpt = read_stderr_excerpt(&stderr_tail).await;
                 fail_pending(
                     &pending,
                     McpError::Exited {
                         key: key.display(),
                         code: -1,
+                        diagnostic: stderr_diagnostic(&excerpt),
                     },
                 )
                 .await;
@@ -586,11 +594,15 @@ async fn clear_pending(pending: &Pending) {
     pending.lock().await.clear();
 }
 
-async fn read_stderr(mut stderr: ChildStderr, tail: Arc<Mutex<VecDeque<u8>>>) {
+async fn read_stderr(
+    mut stderr: ChildStderr,
+    tail: Arc<Mutex<VecDeque<u8>>>,
+    done: oneshot::Sender<()>,
+) {
     let mut buffer = [0_u8; 4096];
     loop {
         let count = match stderr.read(&mut buffer).await {
-            Ok(0) | Err(_) => return,
+            Ok(0) | Err(_) => break,
             Ok(count) => count,
         };
         let mut tail = tail.lock().await;
@@ -603,4 +615,5 @@ async fn read_stderr(mut stderr: ChildStderr, tail: Arc<Mutex<VecDeque<u8>>>) {
         tail.drain(..excess);
         tail.extend(&buffer[..count]);
     }
+    let _ = done.send(());
 }
