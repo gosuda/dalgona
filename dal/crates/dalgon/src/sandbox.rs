@@ -2266,9 +2266,17 @@ mod win {
             // empty PATH leaks out either.
             let env: std::collections::HashMap<OsString, OsString> =
                 std::env::vars_os().collect();
-            let old_path = env.get(OsStr::new("PATH")).cloned();
-            let system32 = Path::new(env.get(OsStr::new("SystemRoot")).expect("SystemRoot"))
-                .join("System32");
+            // Windows env names are case-insensitive but `vars_os` keeps
+            // the stored case (`SYSTEMROOT` here), so compare folded.
+            let get = |name: &str| {
+                env.iter()
+                    .find(|(key, _)| {
+                        key.as_os_str().eq_ignore_ascii_case(OsStr::new(name))
+                    })
+                    .map(|(_, value)| value.clone())
+            };
+            let old_path = get("PATH");
+            let system32 = Path::new(&get("SystemRoot").expect("SystemRoot")).join("System32");
             unsafe { std::env::set_var("PATH", &system32) };
             let root = tempfile::tempdir().expect("temp root");
             let whoami = system32.join("whoami.exe");
