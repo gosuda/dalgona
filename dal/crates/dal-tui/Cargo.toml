@@ -34,7 +34,7 @@ tempfile.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-insta = "=1.48.0"
+insta = "=1.49.0"
 proptest.workspace = true
 
 [lints]

@@ -28,7 +28,7 @@ dal-tui = { path = "../crates/dal-tui" }
 dal-wire = { path = "../crates/dal-wire" }
 dalgon = { path = "../crates/dalgon", default-features = false }
 futures = { workspace = true }
-insta = "=1.48.0"
+insta = "=1.49.0"
 proptest = { workspace = true }
 ratatui = "=0.30.2"
 serde = { workspace = true }
