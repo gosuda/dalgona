@@ -137,8 +137,9 @@ pub async fn create_token(
 
 /// Windows parity for the POSIX 0600 edge: the token file carries a
 /// protected DACL that grants the current user, SYSTEM, and
-/// Administrators only. `icacls /inheritance:d` drops inherited ACEs
-/// and sets the protected flag; `/grant:r` writes the explicit ACEs.
+/// Administrators only. `icacls /inheritance:r` removes inherited ACEs
+/// and sets the protected flag — `d` would copy them into explicit
+/// grants that survive the fix; `/grant:r` writes the three ACEs.
 /// SID spellings keep the grants locale-independent.
 #[cfg(windows)]
 #[expect(
@@ -153,7 +154,7 @@ fn owner_only_acl(path: &Path) -> io::Result<()> {
     let output = std::process::Command::new("icacls")
         .arg(path)
         .args([
-            "/inheritance:d",
+            "/inheritance:r",
             "/grant:r",
             &format!("*{}:F", sid.as_str()),
             "*S-1-5-18:F",
