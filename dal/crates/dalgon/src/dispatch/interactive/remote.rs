@@ -58,7 +58,9 @@ impl TuiHost for RemoteBackend {
     /// Signs in through `auth/login`. A browser or device login answers
     /// with its URL, then ends with the server's `login_finished` update.
     /// Cancelling fires `auth/cancel` so the server attempt ends instead of
-    /// running until its own deadline. Browser sign-in completes through the
+    /// running until its own deadline. An API-key login has no login id, so
+    /// Esc abandons its `auth/login` round trip and a dropped connection
+    /// fails the call. Browser sign-in completes through the
     /// server's loopback listener, so a remote host must share loopback with
     /// the terminal; relaying completion across machines needs a wire
     /// addition and is out of scope here.
@@ -93,11 +95,19 @@ impl TuiHost for RemoteBackend {
                 },
                 None => return Err(cancelled()),
             };
-            self.0
-                .login(provider, RemoteLoginMethod::ApiKey(key))
-                .await
-                .map_err(wire)?;
-            return Ok(outcome);
+            // The store is one `auth/login` round trip with no login id for
+            // `auth/cancel`: Esc abandons the wait, and a dropped connection
+            // fails the call, so the submitted key stays cancellable until
+            // the reply resolves.
+            let store = self.0.login(provider, RemoteLoginMethod::ApiKey(key));
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Err(cancelled()),
+                result = store => {
+                    result.map_err(wire)?;
+                    return Ok(outcome);
+                }
+            }
         }
         let mut updates = self.0.subscribe().await.map_err(wire)?;
         let wire_method = if method == Method::Device {
@@ -466,6 +476,31 @@ mod tests {
                 .expect_err("cancelled before the key");
             assert!(is_cancelled(&error), "{error}");
             assert!(!rig.auth_json().exists());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cancelling_after_the_key_is_sent_ends_in_a_cancelled_error() {
+        with_backend(TokenReply::Issue, async |rig| {
+            let (key, pasted) = oneshot::channel();
+            let cancel = CancellationToken::new();
+            let (io, _events) = LoginIo::channel(Some(pasted), cancel.clone());
+            let user = async {
+                key.send(String::from("sk-remote")).expect("send key");
+                // Let the backend consume the paste and reach the
+                // post-submission wait, so Esc lands mid-flight instead of
+                // in the pre-submission select.
+                tokio::task::yield_now().await;
+                cancel.cancel();
+            };
+            let (outcome, ()) = tokio::join!(
+                biased;
+                rig.backend.login("openai", Method::ApiKey, io),
+                user
+            );
+            let error = outcome.expect_err("cancelled after the key");
+            assert!(is_cancelled(&error), "{error}");
         })
         .await;
     }
