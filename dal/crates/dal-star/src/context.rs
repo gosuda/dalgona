@@ -395,10 +395,6 @@ fn parse_export_key(group: FacadeGroup, key: &str) -> starlark::Result<OpId> {
 }
 
 /// Allocates one facade value bound to `inv`; `scope` makes it scheduled.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the facade binds the full script context; grouping would split one invariant"
-)]
 pub(crate) fn facade<'v>(
     heap: Heap<'v>,
     group: FacadeGroup,

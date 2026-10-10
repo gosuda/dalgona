@@ -478,10 +478,6 @@ pub(super) struct Crossing {
     pub delta_mass: f64,
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one crossing check carries both metric sets and both bands"
-)]
 pub(super) fn crossings(
     path: &str,
     pre: Option<&FileMetrics>,

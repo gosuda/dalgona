@@ -1,9 +1,5 @@
 #![expect(unsafe_code, reason = "starlark value derives")]
 #![expect(
-    clippy::too_many_arguments,
-    reason = "starlark_module generates one dispatcher argument per exported method"
-)]
-#![expect(
     clippy::unnecessary_wraps,
     reason = "the starlark_module macro requires registered functions to return Result"
 )]
