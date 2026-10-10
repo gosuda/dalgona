@@ -337,6 +337,130 @@ fn tui_transcript_overlay_repaints_the_main_screen_in_place()
     Ok(())
 }
 
+#[test]
+fn tui_transcript_overlay_closes_on_ctrl_t_and_keeps_typing_out_of_the_composer()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let dir = TestDir::new()?;
+    let mut command = dalgon_command(dir.path(), &["overlay response"])?;
+    command.args(["--screen", "inline"]);
+    let mut terminal = PtyProcess::spawn(&mut command, 80, 24)?;
+    terminal.wait_for(
+        dal_tui::copy::ids::COMPOSER_PLACEHOLDER.as_bytes(),
+        Duration::from_secs(10),
+    )?;
+    terminal.write(probe_answers())?;
+    terminal.collect_for(Duration::from_millis(150))?;
+    terminal.write(b"overlay prompt\r")?;
+    terminal.wait_for(b"overlay response", Duration::from_secs(10))?;
+    terminal.wait_for_count(b"enter send", 2, Duration::from_secs(10))?;
+    terminal.write(b"kept draft")?;
+    terminal.wait_for(b"kept draft", Duration::from_secs(5))?;
+    terminal.collect_for(Duration::from_millis(150))?;
+    let mut before = VtRecorder::new(80, 24);
+    before.feed(terminal.output());
+    let main_grid = before.screen_rows();
+    assert!(before.row_containing("> kept draft").is_some());
+
+    terminal.write(b"\x14")?;
+    terminal.wait_for(b"\x1b[?1049h", Duration::from_secs(5))?;
+    // Ordinary keys, Enter, and Backspace belong to the overlay, not the draft.
+    terminal.write(b"zzz\x7f\r")?;
+    terminal.collect_for(Duration::from_millis(200))?;
+    let overlay_end = terminal.output().len();
+    terminal.write(b"\x14")?;
+    terminal.wait_for(b"\x1b[r\x1b[?1049l", Duration::from_secs(5))?;
+    terminal.collect_for(Duration::from_millis(300))?;
+
+    let stream = terminal.output();
+    assert_eq!(
+        occurrences_of(stream, b"\x1b[?1049h"),
+        1,
+        "one alternate-screen enter"
+    );
+    assert_eq!(
+        occurrences_of(stream, b"\x1b[r\x1b[?1049l"),
+        1,
+        "one alternate-screen exit"
+    );
+    assert!(
+        find_sequence(&stream[overlay_end..], b"zzz").is_none(),
+        "typed keys never repaint into the composer"
+    );
+    let mut after = VtRecorder::new(80, 24);
+    after.feed(stream);
+    assert_eq!(after.screen_rows(), main_grid, "the main grid is untouched");
+    assert!(
+        after.row_containing("> kept draft").is_some(),
+        "the draft is exactly as it was: {:?}",
+        after.screen_rows()
+    );
+    assert!(after.row_containing("zzz").is_none());
+
+    terminal.write(b"\x1b[F")?;
+    terminal.write(&[0x7f; 64])?;
+    terminal.collect_for(Duration::from_millis(200))?;
+    terminal.write(b"\x04")?;
+    let status = terminal.wait_for_exit(Duration::from_secs(5))?;
+    assert!(status.success(), "dalgon exited with {status}");
+    Ok(())
+}
+
+#[test]
+fn tui_pty_replays_a_prompt_typed_while_the_startup_probe_is_open()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let dir = TestDir::new()?;
+    let mut command = dalgon_command(dir.path(), &["probe replay response"])?;
+    command.args(["--screen", "inline"]);
+    let mut terminal = PtyProcess::spawn(&mut command, 80, 24)?;
+    terminal.wait_for(
+        dal_tui::copy::ids::COMPOSER_PLACEHOLDER.as_bytes(),
+        Duration::from_secs(10),
+    )?;
+    // The prompt, with its Enter, shares a read with the first probe reply
+    // bytes; the replies then arrive split mid-sequence.
+    terminal.write(b"early prompt\r\x1b[?2026;2")?;
+    terminal.write(b"$y\x1b[?2027;2$y\x1b]11;rgb:0000/00")?;
+    terminal.write(b"00/0000\x07\x1b[?1;2c")?;
+    terminal.wait_for(b"probe replay response", Duration::from_secs(10))?;
+    terminal.wait_for_count(b"enter send", 2, Duration::from_secs(10))?;
+    terminal.collect_for(Duration::from_millis(200))?;
+
+    let mut settled = VtRecorder::new(80, 24);
+    settled.feed(terminal.output());
+    assert!(
+        settled.row_containing("early prompt").is_some(),
+        "the prompt typed during the probe was submitted: {:?}",
+        settled.screen_rows()
+    );
+    for leaked in ["2026", "2027", "rgb:", "$y", "?1;2c"] {
+        assert!(
+            settled.row_containing(leaked).is_none(),
+            "probe reply bytes {leaked:?} reached the screen: {:?}",
+            settled.screen_rows()
+        );
+    }
+    terminal.write(b"x")?;
+    terminal.wait_for(b"> x", Duration::from_secs(5))?;
+    terminal.collect_for(Duration::from_millis(150))?;
+    let mut typed = VtRecorder::new(80, 24);
+    typed.feed(terminal.output());
+    assert!(
+        typed
+            .screen_rows()
+            .iter()
+            .any(|row| row.trim_end() == "> x"),
+        "the composer holds exactly what was typed after the probe: {:?}",
+        typed.screen_rows()
+    );
+
+    terminal.write(&[0x7f; 8])?;
+    terminal.collect_for(Duration::from_millis(200))?;
+    terminal.write(b"\x04")?;
+    let status = terminal.wait_for_exit(Duration::from_secs(5))?;
+    assert!(status.success(), "dalgon exited with {status}");
+    Ok(())
+}
+
 fn occurrences_of(haystack: &[u8], needle: &[u8]) -> usize {
     if needle.is_empty() {
         return 0;

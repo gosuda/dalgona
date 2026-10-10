@@ -345,6 +345,7 @@ impl Live {
         self.tool_cards.clear();
         self.tool_order.clear();
         self.emitted_tools.clear();
+        self.jobs.clear();
     }
 
     /// Commits settled rows exactly once per entry id.
@@ -741,5 +742,21 @@ mod tests {
         live.take_assistant_text();
         live.apply_update(&delta(3, "fresh"));
         assert_eq!(rows(&live), ["fresh"]);
+    }
+
+    #[test]
+    fn a_resync_forgets_jobs_the_lost_replay_may_have_settled() {
+        let mut live = super::Live::default();
+        let started = Update {
+            r#gen: Gen::new(std::num::NonZeroU64::MIN),
+            seq: Seq::new(std::num::NonZeroU64::MIN),
+            kind: UpdateKind::JobStarted {
+                job: dal_core::JobId::new_v7(),
+            },
+        };
+        live.apply_update(&started);
+        assert_eq!(live.running_jobs(), 1);
+        live.reset_after_resync();
+        assert_eq!(live.running_jobs(), 0);
     }
 }

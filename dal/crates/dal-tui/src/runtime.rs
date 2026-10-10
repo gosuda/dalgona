@@ -57,8 +57,8 @@ struct Session {
     cancelling: Option<TurnId>,
     cancel_settled: bool,
     cancel_deadline: Option<std::time::Instant>,
-    /// The reply of the one `Run` command still executing off this thread.
-    inflight: Option<std::sync::mpsc::Receiver<Result<Reply, TuiError>>>,
+    /// The one `Run` command still executing off this thread.
+    inflight: Option<InflightRun>,
 }
 
 /// A terminal-only request that needs the host; the loop runs it after the
@@ -247,7 +247,7 @@ impl Session {
     /// Takes the reply of the in-flight `Run` command once it has settled.
     fn settled_run(&mut self) -> Option<Result<Reply, TuiError>> {
         use std::sync::mpsc::TryRecvError;
-        let settled = match self.inflight.as_ref()?.try_recv() {
+        let settled = match self.inflight.as_ref()?.settled.try_recv() {
             Ok(reply) => reply,
             Err(TryRecvError::Empty) => return None,
             Err(TryRecvError::Disconnected) => Err(TuiError::Terminal(
@@ -259,23 +259,58 @@ impl Session {
     }
 }
 
-/// Runs one `Run` command on its own thread and returns the channel that
-/// carries its single reply. The thread blocks on the same runtime handle
-/// the loop uses for every other host call.
+/// A `Run` command executing on its own thread. Dropping it abandons the
+/// wait and joins the worker, so no command thread outlives the loop that
+/// owns the terminal and the host.
+#[derive(Debug)]
+struct InflightRun {
+    settled: std::sync::mpsc::Receiver<Result<Reply, TuiError>>,
+    abandon: Arc<tokio::sync::Notify>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for InflightRun {
+    fn drop(&mut self) {
+        self.abandon.notify_one();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+/// Runs one `Run` command on its own thread. The thread blocks on the same
+/// runtime handle the loop uses for every other host call, and gives up the
+/// wait when the returned guard is dropped.
 fn start_run<A: TuiAgent>(
     runtime: &tokio::runtime::Handle,
     agent: &A,
     command: Command,
-) -> std::io::Result<std::sync::mpsc::Receiver<Result<Reply, TuiError>>> {
+) -> std::io::Result<InflightRun> {
     let (reply, settled) = std::sync::mpsc::channel();
+    let abandon = Arc::new(tokio::sync::Notify::new());
     let runtime = runtime.clone();
     let agent = agent.clone();
-    std::thread::Builder::new()
+    let abandoned = Arc::clone(&abandon);
+    let worker = std::thread::Builder::new()
         .name("dal-tui-command".to_owned())
         .spawn(move || {
-            let _ = reply.send(runtime.block_on(agent.submit(command)));
+            let outcome = runtime.block_on(async {
+                let submit = std::pin::pin!(agent.submit(command));
+                let given_up = std::pin::pin!(abandoned.notified());
+                match futures::future::select(submit, given_up).await {
+                    futures::future::Either::Left((reply, _)) => reply,
+                    futures::future::Either::Right(((), _)) => Err(TuiError::Terminal(
+                        "the command was abandoned when the terminal closed".to_owned(),
+                    )),
+                }
+            });
+            let _ = reply.send(outcome);
         })?;
-    Ok(settled)
+    Ok(InflightRun {
+        settled,
+        abandon,
+        worker: Some(worker),
+    })
 }
 
 pub(super) fn run<H, M, S>(
@@ -308,7 +343,7 @@ where
             .rt
             .block_on(agent.subscribe(Some((view.r#gen, view.seq))))?;
         let commands = opts.rt.block_on(host.commands())?;
-        let pump = Pump::spawn(opts, subscription);
+        let pump = Pump::spawn(&opts.rt, subscription);
         let state = Arc::new(Mutex::new(TermState::new()));
         let hook = PanicHookGuard::install(Arc::clone(&state));
         io.enable_raw()
@@ -720,30 +755,67 @@ fn wait_for_cancelled<S: TuiSubscription>(
     false
 }
 
+/// Deliveries the pump holds ahead of the 50 ms drain before it stops
+/// reading the subscription.
+const PUMP_DEPTH: usize = 1024;
+
+/// How long the pump waits before retrying a send into a full queue.
+const PUMP_BACKPRESSURE_WAIT: Duration = Duration::from_millis(5);
+
+type PumpItem = Result<TuiDelivery, TuiError>;
+
 /// Owned delivery pump: one parked thread turns the async subscription into
 /// a sync channel the 50 ms input loop drains without blocking.
 ///
 /// `run` is called outside async context; the pump thread inherits that same
 /// freedom and drives the subscription with the process-edge runtime handle.
-/// The channel is intentionally unbounded: session deliveries are lossless
-/// and must never shed. `Drop` stops the worker within one poll tick and
+/// The channel holds at most [`PUMP_DEPTH`] deliveries. While the loop is busy
+/// in a host call the pump waits with one delivery in hand and stops reading
+/// the subscription, which keeps its own bounded queue and answers a lagging
+/// reader with a resync, so no delivery is dropped here and none piles up
+/// without limit. An error is queued like any delivery, so a full queue
+/// never hides a failure. `Drop` stops the worker within one poll tick and
 /// joins it, so neither shutdown nor resync leaks a thread.
 struct Pump<S: TuiSubscription> {
-    deliveries: std::sync::mpsc::Receiver<Result<TuiDelivery, TuiError>>,
+    deliveries: std::sync::mpsc::Receiver<PumpItem>,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     worker: Option<std::thread::JoinHandle<()>>,
     marker: std::marker::PhantomData<S>,
 }
 
+/// Queues `item`, waiting while the queue is full. Returns false once the
+/// consumer is gone or the pump was asked to stop.
+fn deliver(
+    sender: &std::sync::mpsc::SyncSender<PumpItem>,
+    stop: &std::sync::atomic::AtomicBool,
+    mut item: PumpItem,
+) -> bool {
+    use std::sync::atomic::Ordering;
+    use std::sync::mpsc::TrySendError;
+    loop {
+        match sender.try_send(item) {
+            Ok(()) => return true,
+            Err(TrySendError::Disconnected(_)) => return false,
+            Err(TrySendError::Full(unsent)) => {
+                if stop.load(Ordering::SeqCst) {
+                    return false;
+                }
+                item = unsent;
+                std::thread::sleep(PUMP_BACKPRESSURE_WAIT);
+            }
+        }
+    }
+}
+
 impl<S: TuiSubscription> Pump<S> {
-    fn spawn(opts: &TuiOptions, mut subscription: S) -> Self {
+    fn spawn(runtime: &tokio::runtime::Handle, mut subscription: S) -> Self {
         use std::sync::atomic::Ordering;
-        let (sender, deliveries) = std::sync::mpsc::channel();
+        let (sender, deliveries) = std::sync::mpsc::sync_channel(PUMP_DEPTH);
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let worker = std::thread::Builder::new()
             .name("dal-tui-delivery-pump".to_owned())
             .spawn({
-                let runtime = opts.rt.clone();
+                let runtime = runtime.clone();
                 let stop_flag = std::sync::Arc::clone(&stop);
                 move || {
                     while !stop_flag.load(Ordering::SeqCst) {
@@ -758,12 +830,12 @@ impl<S: TuiSubscription> Pump<S> {
                             // return at once, so exit instead of spinning.
                             Ok(Ok(None)) => break,
                             Ok(Ok(Some(delivery))) => {
-                                if sender.send(Ok(delivery)).is_err() {
+                                if !deliver(&sender, &stop_flag, Ok(delivery)) {
                                     break;
                                 }
                             }
                             Ok(Err(error)) => {
-                                let _ = sender.send(Err(error));
+                                deliver(&sender, &stop_flag, Err(error));
                                 break;
                             }
                         }
@@ -781,8 +853,8 @@ impl<S: TuiSubscription> Pump<S> {
     }
 
     /// Stops the current worker and pumps a fresh cursor instead.
-    fn restart(&mut self, opts: &TuiOptions, subscription: S) {
-        *self = Self::spawn(opts, subscription);
+    fn restart(&mut self, runtime: &tokio::runtime::Handle, subscription: S) {
+        *self = Self::spawn(runtime, subscription);
     }
 }
 
@@ -1006,7 +1078,7 @@ impl Surfaces {
                         let subscription = opts
                             .rt
                             .block_on(agent.subscribe(Some((fresh.r#gen, fresh.seq))))?;
-                        pump.restart(opts, subscription);
+                        pump.restart(&opts.rt, subscription);
                     }
                     self.live.reset_after_resync();
                     self.live.seed_ext_status(&agent.ext_status());
@@ -2097,7 +2169,7 @@ mod run_command_tests {
     };
     use tokio::sync::Notify;
 
-    use super::{Session, run, start_run};
+    use super::{InflightRun, Session, run, start_run};
     use crate::backend::{TuiAgent, TuiDelivery, TuiHost, TuiSubscription};
     use crate::{ColorMode, EnvFacts, Screen, ThemeRequest, TuiError, TuiOptions};
 
@@ -2135,7 +2207,7 @@ mod run_command_tests {
         fn subscribe(
             &self,
             _after: Option<(Gen, Seq)>,
-        ) -> impl std::future::Future<Output = Result<Silent, TuiError>> {
+        ) -> impl Future<Output = Result<Silent, TuiError>> {
             std::future::ready(Ok(Silent))
         }
 
@@ -2148,7 +2220,7 @@ mod run_command_tests {
             &self,
             _id: RequestId,
             _answer: Answer,
-        ) -> impl std::future::Future<Output = Result<(), TuiError>> {
+        ) -> impl Future<Output = Result<(), TuiError>> {
             std::future::ready(Ok(()))
         }
 
@@ -2301,7 +2373,11 @@ mod run_command_tests {
         let (reply, settled) = std::sync::mpsc::channel();
         drop(reply);
         let mut session = Session {
-            inflight: Some(settled),
+            inflight: Some(InflightRun {
+                settled,
+                abandon: Arc::new(Notify::new()),
+                worker: None,
+            }),
             ..Session::default()
         };
         assert!(matches!(
@@ -2309,5 +2385,507 @@ mod run_command_tests {
             Some(Err(TuiError::Terminal(_)))
         ));
         assert!(session.inflight.is_none());
+    }
+
+    #[test]
+    fn dropping_a_waiting_run_gives_up_the_wait_and_joins_its_worker() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        let held = Held(Arc::new(Notify::new()));
+        let inflight =
+            start_run(runtime.handle(), &held, run_command()).expect("the worker thread starts");
+        let (done, joined) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            drop(inflight);
+            let _ = done.send(());
+        });
+        assert!(
+            joined.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "the worker must stop without the host ever replying"
+        );
+    }
+}
+
+#[cfg(test)]
+mod pump_tests {
+    use std::num::NonZeroU64;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use dal_core::{Gen, JobId, Seq, Update, UpdateKind};
+
+    use super::{PUMP_DEPTH, Pump};
+    use crate::TuiError;
+    use crate::backend::{TuiDelivery, TuiSubscription};
+
+    /// Hands out `total` updates at once, then fails, and counts every update
+    /// the pump asked for.
+    struct Burst {
+        produced: Arc<AtomicUsize>,
+        total: usize,
+    }
+
+    impl TuiSubscription for Burst {
+        fn next(
+            &mut self,
+        ) -> impl std::future::Future<Output = Result<Option<TuiDelivery>, TuiError>> {
+            let index = self.produced.load(Ordering::SeqCst);
+            if index == self.total {
+                return std::future::ready(Err(TuiError::Terminal("the burst ended".to_owned())));
+            }
+            self.produced.store(index + 1, Ordering::SeqCst);
+            let seq = u64::try_from(index).expect("small index") + 1;
+            std::future::ready(Ok(Some(TuiDelivery::Update(Arc::new(Update {
+                r#gen: Gen::new(NonZeroU64::MIN),
+                seq: Seq::new(NonZeroU64::new(seq).expect("nonzero")),
+                kind: UpdateKind::JobSettled {
+                    job: JobId::new_v7(),
+                },
+            })))))
+        }
+    }
+
+    #[test]
+    fn a_stalled_loop_bounds_the_queue_and_loses_nothing() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let produced = Arc::new(AtomicUsize::new(0));
+        let total = PUMP_DEPTH * 4;
+        let pump = Pump::spawn(
+            runtime.handle(),
+            Burst {
+                produced: Arc::clone(&produced),
+                total,
+            },
+        );
+
+        while produced.load(Ordering::SeqCst) <= PUMP_DEPTH {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(
+            produced.load(Ordering::SeqCst),
+            PUMP_DEPTH + 1,
+            "a full queue plus the one delivery in hand, and no more"
+        );
+
+        for expected in 1..=total {
+            let delivery = pump
+                .deliveries
+                .recv_timeout(Duration::from_secs(5))
+                .expect("every delivery arrives")
+                .expect("an update, not an error");
+            let TuiDelivery::Update(update) = delivery else {
+                panic!("the burst only carries updates");
+            };
+            assert_eq!(
+                update.seq,
+                Seq::new(
+                    NonZeroU64::new(u64::try_from(expected).expect("small")).expect("nonzero")
+                ),
+                "deliveries stay in order"
+            );
+        }
+        let failure = pump
+            .deliveries
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the failure is queued behind the updates");
+        assert!(matches!(failure, Err(TuiError::Terminal(_))), "{failure:?}");
+        assert!(
+            pump.deliveries
+                .recv_timeout(Duration::from_secs(5))
+                .is_err_and(|error| error == std::sync::mpsc::RecvTimeoutError::Disconnected),
+            "the pump ends after delivering the failure"
+        );
+    }
+
+    #[test]
+    fn dropping_a_blocked_pump_stops_its_worker() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let produced = Arc::new(AtomicUsize::new(0));
+        let pump = Pump::spawn(
+            runtime.handle(),
+            Burst {
+                produced: Arc::clone(&produced),
+                total: PUMP_DEPTH * 4,
+            },
+        );
+        while produced.load(Ordering::SeqCst) <= PUMP_DEPTH {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let (done, joined) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            drop(pump);
+            let _ = done.send(());
+        });
+        assert!(
+            joined.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "a worker waiting on a full queue still honours the stop flag"
+        );
+    }
+}
+
+#[cfg(test)]
+mod loop_tests {
+    use std::collections::VecDeque;
+    use std::num::NonZeroU64;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use dal_agent::SessionRef;
+    use dal_agent::login::{LoginIo, LoginOutcome, Method, StoredCredential};
+    use dal_core::{
+        Answer, ApprovalMode, AutoCompaction, ClientId, Command, CommandSpec, Gen, Mode, Output,
+        Page, PageReq, Part, Reply, RequestId, Seq, SessionId, SessionInfo, SettingsView, Stats,
+        ThinkingLevel, TreeOutline, TurnState, Usage, UsageView, View, Workspace,
+    };
+
+    use crate::backend::{TuiAgent, TuiDelivery, TuiHost, TuiSubscription};
+    use crate::term::TermIo;
+    use crate::{ColorMode, EnvFacts, Screen, ThemeRequest, TuiError, TuiOptions, WidthMode};
+
+    /// Probe replies from a plain terminal: no kitty keyboard, DA1 last.
+    const PROBE_REPLIES: &[&[u8]] = &[
+        b"\x1b[?2026;2$y",
+        b"\x1b[?2027;2$y",
+        b"\x1b]11;rgb:0000/0000/0000\x07",
+        b"\x1b[?1;2c",
+    ];
+
+    /// What the fake host saw, in order.
+    #[derive(Clone, Default)]
+    struct Log(Arc<Mutex<Vec<String>>>);
+
+    impl Log {
+        fn push(&self, event: impl Into<String>) {
+            self.0.lock().expect("log").push(event.into());
+        }
+
+        fn events(&self) -> Vec<String> {
+            self.0.lock().expect("log").clone()
+        }
+    }
+
+    /// Logs when the future holding it is dropped.
+    struct LogOnDrop(Log, &'static str);
+
+    impl Drop for LogOnDrop {
+        fn drop(&mut self) {
+            self.0.push(self.1);
+        }
+    }
+
+    struct Silent;
+
+    impl TuiSubscription for Silent {
+        fn next(
+            &mut self,
+        ) -> impl std::future::Future<Output = Result<Option<TuiDelivery>, TuiError>> {
+            std::future::ready(Ok(None))
+        }
+    }
+
+    /// A session whose `Run` commands never reply and whose prompts are
+    /// recorded, so the terminal loop runs against a host it does not own.
+    #[derive(Clone)]
+    struct FakeAgent {
+        log: Log,
+        run_entered: Arc<AtomicBool>,
+    }
+
+    fn text_of(content: &[Part]) -> String {
+        content
+            .iter()
+            .filter_map(|part| match part {
+                Part::Text { text } => Some(text.as_ref()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    impl TuiAgent for FakeAgent {
+        type Subscription = Silent;
+
+        fn view(&self, _page: PageReq) -> impl Future<Output = Result<View, TuiError>> {
+            std::future::ready(Ok(idle_view()))
+        }
+
+        fn subscribe(
+            &self,
+            _after: Option<(Gen, Seq)>,
+        ) -> impl Future<Output = Result<Silent, TuiError>> {
+            std::future::ready(Ok(Silent))
+        }
+
+        async fn submit(&self, command: Command) -> Result<Reply, TuiError> {
+            match command {
+                Command::Run { .. } => {
+                    let _abandoned = LogOnDrop(self.log.clone(), "run:abandoned");
+                    self.log.push("run:entered");
+                    self.run_entered.store(true, Ordering::SeqCst);
+                    std::future::pending().await
+                }
+                Command::Prompt { content, .. } => {
+                    self.log.push(format!("prompt:{}", text_of(&content)));
+                    Ok(Reply::Done(Output::Nothing))
+                }
+                _ => Ok(Reply::Done(Output::Nothing)),
+            }
+        }
+
+        fn answer(
+            &self,
+            _id: RequestId,
+            _answer: Answer,
+        ) -> impl Future<Output = Result<(), TuiError>> {
+            std::future::ready(Ok(()))
+        }
+
+        fn ext_status(&self) -> Vec<dal_core::ExtStatus> {
+            Vec::new()
+        }
+    }
+
+    #[derive(Clone)]
+    struct FakeHost {
+        agent: FakeAgent,
+    }
+
+    impl TuiHost for FakeHost {
+        type Agent = FakeAgent;
+
+        fn open(
+            &self,
+            _session: SessionRef,
+            _client: ClientId,
+        ) -> impl Future<Output = Result<FakeAgent, TuiError>> {
+            std::future::ready(Ok(self.agent.clone()))
+        }
+
+        fn commands(&self) -> impl Future<Output = Result<Arc<[CommandSpec]>, TuiError>> {
+            std::future::ready(Ok(Arc::from(Vec::new())))
+        }
+
+        fn close(&self, _id: SessionId) -> impl Future<Output = Result<(), TuiError>> {
+            self.agent.log.push("host:close");
+            std::future::ready(Ok(()))
+        }
+
+        fn login(
+            &self,
+            _provider: &str,
+            _method: Method,
+            _io: LoginIo,
+        ) -> impl Future<Output = Result<LoginOutcome, TuiError>> {
+            std::future::ready(Err(TuiError::Terminal(
+                "the fake host has no providers".into(),
+            )))
+        }
+
+        fn logout(
+            &self,
+            _provider: Option<&str>,
+        ) -> impl Future<Output = Result<Vec<Box<str>>, TuiError>> {
+            std::future::ready(Ok(Vec::new()))
+        }
+
+        fn stored_credentials(
+            &self,
+        ) -> impl Future<Output = Result<Vec<StoredCredential>, TuiError>> {
+            std::future::ready(Ok(Vec::new()))
+        }
+    }
+
+    fn idle_view() -> View {
+        View {
+            r#gen: Gen::new(NonZeroU64::MIN),
+            seq: Seq::new(NonZeroU64::MIN),
+            session: SessionInfo {
+                id: SessionId::parse("018f0f62-3b00-7000-8000-000000000001")
+                    .expect("fixture session id is valid"),
+                name: None,
+                preview: "".into(),
+                workspace: Workspace::new(std::env::temp_dir()).expect("absolute workspace"),
+                updated_at: dal_core::Timestamp::UNIX_EPOCH,
+                created_at: Some(dal_core::Timestamp::UNIX_EPOCH),
+                archived: Some(false),
+                last_seq: Some(Seq::new(NonZeroU64::MIN)),
+            },
+            turn: TurnState::Idle,
+            entries: Page {
+                items: Vec::new(),
+                next_before: None,
+            },
+            tree: TreeOutline {
+                branches: Vec::new(),
+            },
+            settings: SettingsView {
+                model: None,
+                thinking: ThinkingLevel::Medium,
+                approval: ApprovalMode::Ask,
+                mode: Mode::Normal,
+                name: None,
+            },
+            open: Vec::new(),
+            changes: Vec::new(),
+            usage: UsageView {
+                usage: Usage {
+                    input_tokens: 0,
+                    cached_input_tokens: 0,
+                    output_tokens: 0,
+                    reasoning_tokens: None,
+                    cache_write_tokens: 0,
+                    cost_usd: None,
+                },
+                context_tokens: 0,
+                context_window: 128_000,
+            },
+            stats: Stats {
+                steers_queued: 0,
+                follow_ups_queued: 0,
+                retries: 0,
+                dropped_observations: 0,
+                auto_compaction: AutoCompaction::Off,
+            },
+        }
+    }
+
+    /// One read's worth of input, optionally held back until a flag is set.
+    struct Chunk {
+        after: Option<Arc<AtomicBool>>,
+        bytes: Vec<u8>,
+    }
+
+    /// A terminal whose reads hand out one scripted chunk each, in order,
+    /// with no clock: a chunk is available as soon as its gate opens.
+    struct ScriptedTerminal {
+        chunks: Mutex<VecDeque<Chunk>>,
+    }
+
+    impl TermIo for ScriptedTerminal {
+        fn enable_raw(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn disable_raw(&self) {}
+
+        fn size(&self) -> std::io::Result<(u16, u16)> {
+            Ok((80, 24))
+        }
+
+        fn write(&self, _bytes: &[u8]) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn read(&self, timeout: Duration) -> std::io::Result<Vec<u8>> {
+            let mut chunks = self.chunks.lock().expect("script");
+            let open = chunks.front().is_some_and(|chunk| {
+                chunk
+                    .after
+                    .as_ref()
+                    .is_none_or(|gate| gate.load(Ordering::SeqCst))
+            });
+            if open && let Some(chunk) = chunks.pop_front() {
+                return Ok(chunk.bytes);
+            }
+            drop(chunks);
+            std::thread::sleep(timeout.min(Duration::from_millis(5)));
+            Ok(Vec::new())
+        }
+
+        fn raise_tstp(&self) {}
+    }
+
+    fn chunk(bytes: &[u8]) -> Chunk {
+        Chunk {
+            after: None,
+            bytes: bytes.to_vec(),
+        }
+    }
+
+    /// Runs the terminal loop against the fake host and returns what the host saw.
+    fn drive(script: Vec<Chunk>, run_entered: Arc<AtomicBool>) -> Vec<String> {
+        static ONE_LOOP_AT_A_TIME: Mutex<()> = Mutex::new(());
+        let _serial = ONE_LOOP_AT_A_TIME
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let log = Log::default();
+        let host = FakeHost {
+            agent: FakeAgent {
+                log: log.clone(),
+                run_entered,
+            },
+        };
+        let workspace = Workspace::new(std::env::temp_dir()).expect("absolute workspace");
+        let opts = TuiOptions {
+            session: SessionRef::Ephemeral { workspace },
+            screen: Screen::Inline,
+            theme_request: ThemeRequest::Palette,
+            default_model: None,
+            images: false,
+            diagrams: false,
+            motion: false,
+            editor: "vi".into(),
+            color: ColorMode::Never,
+            binary: "dalgon",
+            env: EnvFacts {
+                stdin_tty: true,
+                term: Some("xterm-256color".to_owned()),
+                width_mode: WidthMode::Narrow,
+                ..EnvFacts::default()
+            },
+            rt: runtime.handle().clone(),
+        };
+        let terminal = ScriptedTerminal {
+            chunks: Mutex::new(script.into()),
+        };
+        super::run(&host, &opts, &terminal, || Ok(Vec::new()), |_| Ok(()))
+            .expect("the loop exits cleanly");
+        log.events()
+    }
+
+    #[test]
+    fn quitting_with_a_run_in_flight_abandons_it_before_the_host_closes() {
+        let run_entered = Arc::new(AtomicBool::new(false));
+        let mut script: Vec<Chunk> = PROBE_REPLIES.iter().map(|reply| chunk(reply)).collect();
+        script.push(chunk(b"/goal\r"));
+        script.push(Chunk {
+            after: Some(Arc::clone(&run_entered)),
+            bytes: b"\x04".to_vec(),
+        });
+        assert_eq!(
+            drive(script, run_entered),
+            ["run:entered", "run:abandoned", "host:close"],
+            "the slow command is cancelled and its worker joined while the host is still open"
+        );
+    }
+
+    #[test]
+    fn input_typed_during_the_probe_is_replayed_and_no_reply_reaches_the_composer() {
+        let script = vec![
+            chunk(b"hel\x1b[?2026;2"),
+            chunk(b"$y\x1b[?2027;2$ylo\r"),
+            chunk(b"\x1b]11;rgb:0000/00"),
+            chunk(b"00/0000\x07\x1b[?1;2c"),
+            chunk(b"world\r"),
+            chunk(b"\x04"),
+        ];
+        assert_eq!(
+            drive(script, Arc::new(AtomicBool::new(false))),
+            ["prompt:hello", "prompt:world", "host:close"],
+            "the first prompt survives the probe and the second carries no reply bytes"
+        );
     }
 }
