@@ -933,3 +933,13 @@ fn text_part_with_escapes_round_trips() -> Result<(), Box<dyn std::error::Error>
     assert_eq!(&**text, "first line\nquoted \"word\" and a \\backslash");
     Ok(())
 }
+
+/// An empty object has a tail too: `{}` is a complete record missing `v`,
+/// not trailing garbage. Reverting the derived tail reports
+/// `Invalid { trailing bytes }` instead of `MissingVersion`.
+#[test]
+fn decode_an_empty_object_is_missing_version_not_trailing_bytes() {
+    assert!(matches!(decode(b"{}"), Err(DecodeError::MissingVersion)));
+    // A truncated line still fails as malformed.
+    assert!(matches!(decode(b"{"), Err(DecodeError::Invalid { .. })));
+}
