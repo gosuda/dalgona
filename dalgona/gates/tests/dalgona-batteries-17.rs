@@ -141,7 +141,7 @@ fn bundled_rule_sets_gate() -> support::TestResult<()> {
     let scratch = support::Scratch::new("bundled-rule-sets")?;
     let data_root = scratch.path().to_path_buf();
     let product = support::build_product(data_root.clone(), None)?;
-    assert!(product.bundled.is_empty());
+    assert_eq!(product.bundled, Vec::new());
     let all = rules(&product)?;
     let names: BTreeSet<&str> = all.iter().map(|rule| rule.name.as_str()).collect();
     assert_eq!(names, BTreeSet::from(RULES));
