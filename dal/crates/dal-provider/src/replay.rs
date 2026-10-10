@@ -16,21 +16,24 @@ use dal_core::RawJson;
 
 use crate::{
     error::ProviderError,
-    scripted::Script,
+    scripted::{Script, ScriptError},
     stream::{EventStream, StopReason, StreamEvent, ToolArgs},
 };
 
-/// Events captured from provider streams, grouped per stream step.
+/// Streams captured from provider streams, grouped per stream step.
 ///
-/// One step closes on its `Stop` terminal; a step may also stay open when the
-/// stream errored or was cut — an open tail is replayable but incomplete.
+/// One events step closes on its `Stop` terminal, or when the stream errors
+/// or ends: each `record` wrapper holds its own in-progress buffer and
+/// publishes one sealed step atomically, so two live streams wrapped with
+/// clones of one capture can never interleave. A stream that ends without
+/// `Stop` seals its events step and appends a `fail` line, keeping the
+/// fixture a valid replay of the observed failure.
 #[derive(Clone, Default)]
-pub struct Capture(std::sync::Arc<Mutex<CaptureInner>>);
+pub struct Capture(std::sync::Arc<Mutex<Vec<Line>>>);
 
-#[derive(Default)]
-struct CaptureInner {
-    steps: Vec<Vec<StreamEvent>>,
-    open: Vec<StreamEvent>,
+enum Line {
+    Events(Vec<StreamEvent>),
+    Fail(String),
 }
 
 impl Capture {
@@ -40,50 +43,116 @@ impl Capture {
         Self::default()
     }
 
-    /// Every completed step plus the still-open tail, in arrival order.
+    /// Every sealed events step, in arrival order.
     pub async fn steps(&self) -> Vec<Vec<StreamEvent>> {
-        let inner = self.0.lock().await;
-        let mut steps = inner.steps.clone();
-        if !inner.open.is_empty() {
-            steps.push(inner.open.clone());
-        }
-        steps
+        self.0
+            .lock()
+            .await
+            .iter()
+            .filter_map(|line| match line {
+                Line::Events(events) => Some(events.clone()),
+                Line::Fail(_) => None,
+            })
+            .collect()
+    }
+
+    /// Every recorded stream-failure message, in arrival order.
+    pub async fn failures(&self) -> Vec<String> {
+        self.0
+            .lock()
+            .await
+            .iter()
+            .filter_map(|line| match line {
+                Line::Fail(message) => Some(message.clone()),
+                Line::Events(_) => None,
+            })
+            .collect()
     }
 
     /// The recorded steps re-encoded as replay fixture lines.
     ///
+    /// Stream failures encode as `fail` steps carrying the error's display
+    /// text; replaying the fixture yields [`ProviderError::InvalidRequest`]
+    /// in their place.
+    ///
     /// # Errors
-    /// Returns `Err` when an event cannot encode into the replay grammar.
+    /// Returns `Err` when an event cannot encode into the replay grammar or
+    /// the joined fixture fails the grammar.
     pub async fn replay(&self) -> Result<Vec<String>, ReplayError> {
-        self.steps()
+        let lines = self
+            .0
+            .lock()
             .await
             .iter()
-            .map(|step| encode_step(step))
-            .collect()
+            .map(|line| match line {
+                Line::Events(events) => encode_step(events),
+                Line::Fail(message) => Ok(format!(
+                    "{{\"kind\":\"fail\",\"message\":{}}}",
+                    json_str(message)
+                )),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Script::from_replay(lines.join("\n").as_bytes()).map_err(ReplayError::Grammar)?;
+        Ok(lines)
     }
 
-    async fn note(&self, event: &StreamEvent) {
-        let mut inner = self.0.lock().await;
-        inner.open.push(event.clone());
-        if matches!(event, StreamEvent::Stop { .. }) {
-            let step = std::mem::take(&mut inner.open);
-            inner.steps.push(step);
-        }
+    async fn push_events(&self, events: Vec<StreamEvent>) {
+        self.0.lock().await.push(Line::Events(events));
+    }
+
+    async fn push_fail(&self, message: String) {
+        self.0.lock().await.push(Line::Fail(message));
     }
 }
 
 /// Wraps `stream` so every delivered event is appended to `capture`.
 ///
-/// Stream errors and cuts are not captured: the replay grammar encodes
-/// events, not failures.
+/// The wrapper owns its in-progress buffer: a `Stop` seals one events step
+/// into the shared capture atomically. An error seals the open step and
+/// appends a `fail` line; the stream ending mid-step seals the tail and
+/// appends a `fail` line, so a cut stays replayable.
 pub fn record(stream: EventStream, capture: Capture) -> EventStream {
-    let source = stream::unfold((stream, capture), |(mut inner, capture)| async move {
-        let item = inner.next().await;
-        if let Some(Ok(event)) = &item {
-            capture.note(event).await;
-        }
-        item.map(|item| (item, (inner, capture)))
-    });
+    let source = stream::unfold(
+        (stream, capture, Vec::new(), false),
+        |(mut inner, capture, mut open, mut failed)| async move {
+            let item = inner.next().await;
+            match &item {
+                Some(Ok(event)) => {
+                    open.push(event.clone());
+                    // A new events block follows any recorded failure, so the
+                    // dedupe flag re-arms for this step.
+                    failed = false;
+                    if matches!(event, StreamEvent::Stop { .. }) {
+                        capture.push_events(std::mem::take(&mut open)).await;
+                    }
+                }
+                Some(Err(error)) => {
+                    if !open.is_empty() {
+                        capture.push_events(std::mem::take(&mut open)).await;
+                    }
+                    if !failed {
+                        capture.push_fail(error.to_string()).await;
+                        failed = true;
+                    }
+                }
+                None => {
+                    // A Stop already sealed the step: only an unterminated
+                    // tail earns a `fail` line, so a clean stream records
+                    // exactly its `events` step.
+                    if !open.is_empty() {
+                        capture.push_events(std::mem::take(&mut open)).await;
+                        if !failed {
+                            capture
+                                .push_fail("stream ended without a terminal event".to_owned())
+                                .await;
+                            failed = true;
+                        }
+                    }
+                }
+            }
+            item.map(|item| (item, (inner, capture, open, failed)))
+        },
+    );
     EventStream::new(source, || {})
 }
 
@@ -178,13 +247,14 @@ pub enum ReplayError {
     },
     /// The encoded step fails the replay grammar.
     #[error("encoded step fails the replay grammar: {0}")]
-    Grammar(String),
+    Grammar(#[source] ScriptError),
 }
 
 /// Encodes one event into its replay wire shape.
 ///
-/// `ToolArgsDelta` fragments re-encode with UTF-8 lossy replacement — the
-/// replay grammar stores argument fragments as strings.
+/// `ToolArgsDelta` fragments may split a UTF-8 sequence, so they re-encode
+/// as the `fragment` string only when the bytes are valid UTF-8; otherwise
+/// they carry the lossless `fragment_bytes` array.
 ///
 /// # Errors
 /// Returns `Err` when the event cannot encode into the replay grammar or the
@@ -205,11 +275,25 @@ pub fn encode_event(event: &StreamEvent) -> Result<RawJson, ReplayError> {
             json_str(id),
             json_str(name)
         ),
-        StreamEvent::ToolArgsDelta { id, fragment } => format!(
-            "{{\"type\":\"tool_args_delta\",\"id\":{},\"fragment\":{}}}",
-            json_str(id),
-            json_str(&String::from_utf8_lossy(fragment))
-        ),
+        StreamEvent::ToolArgsDelta { id, fragment } => {
+            if let Ok(text) = str::from_utf8(fragment) {
+                format!(
+                    "{{\"type\":\"tool_args_delta\",\"id\":{},\"fragment\":{}}}",
+                    json_str(id),
+                    json_str(text)
+                )
+            } else {
+                let bytes = fragment
+                    .iter()
+                    .map(u8::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!(
+                    "{{\"type\":\"tool_args_delta\",\"id\":{},\"fragment_bytes\":[{bytes}]}}",
+                    json_str(id)
+                )
+            }
+        }
         StreamEvent::Replay { payload } => {
             let family = sonic_rs::to_string(&payload.family)
                 .map_err(|_| encode_err("family not serializable"))?;
@@ -288,8 +372,7 @@ pub fn encode_step(events: &[StreamEvent]) -> Result<String, ReplayError> {
         .collect::<Vec<_>>()
         .join(",");
     let line = format!("{{\"kind\":\"events\",\"events\":[{joined}]}}");
-    Script::from_replay(line.as_bytes())
-        .map_err(|error| ReplayError::Grammar(error.to_string()))?;
+    Script::from_replay(line.as_bytes()).map_err(ReplayError::Grammar)?;
     Ok(line)
 }
 

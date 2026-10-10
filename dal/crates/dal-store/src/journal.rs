@@ -2084,9 +2084,11 @@ mod tests {
         }
 
         /// Near-miss lines — a real record with trailing garbage — must not
-        /// decode silently: either the whole line parses or it fails typed.
+        /// decode silently: the decoder consumes the whole line or fails
+        /// typed. The suffix excludes JSON whitespace, which a strict codec
+        /// may legitimately tolerate.
         #[test]
-        fn decode_line_rejects_trailing_garbage(garbage in "\\PC{1,32}") {
+        fn decode_line_rejects_trailing_garbage(garbage in "[^\n\t\r ]{1,32}") {
             let record = Record::Boot {
                 r#gen: Gen::new(core::num::NonZeroU64::MIN),
                 at: timestamp(),
@@ -2094,9 +2096,10 @@ mod tests {
             };
             let mut line = encode_records(std::slice::from_ref(&record));
             line.extend_from_slice(garbage.as_bytes());
-            // Tolerated or rejected, but never a partial-record accept and
-            // never a panic.
-            let _ = decode_line(&line, 0);
+            assert!(
+                decode_line(&line, 0).is_err(),
+                "valid record followed by `{garbage}` must not decode"
+            );
         }
     }
 }
