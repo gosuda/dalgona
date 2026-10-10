@@ -11,6 +11,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
+use dal_agent::login::LoginId;
 use dal_agent::{Agent, Host};
 use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
@@ -68,9 +69,9 @@ pub(crate) struct Conn {
     pub host_sub: Option<CancellationToken>,
     /// Cancel token per in-flight request id for `$/cancel_request`.
     pub inflight: HashMap<String, CancellationToken>,
-    /// Running OAuth logins by request key; closing the connection cancels
-    /// them.
-    pub logins: HashMap<String, CancellationToken>,
+    /// Running OAuth logins by their minted `LoginId`; closing the connection
+    /// cancels them.
+    pub logins: HashMap<LoginId, CancellationToken>,
     /// Next subscription fence value.
     pub fence: u64,
 }

@@ -500,6 +500,156 @@ async fn closing_the_connection_cancels_a_pending_login() {
     assert!(!auth.exists());
 }
 
+async fn cancel_reused_request_ids(rig: &Rig) {
+    with_rpc(rig, |mut rpc| async move {
+        initialize(&mut rpc).await;
+        let first = rpc
+            .call(
+                2,
+                "auth/login",
+                sonic_rs::json!({"provider": "openai-codex", "method": "browser"}),
+            )
+            .await;
+        let first_id = result(&first)["loginId"].as_u64().expect("first login id");
+        let second = rpc
+            .call(
+                2,
+                "auth/login",
+                sonic_rs::json!({"provider": "openai-codex", "method": "browser"}),
+            )
+            .await;
+        let second_id = result(&second)["loginId"]
+            .as_u64()
+            .expect("second login id");
+        assert_ne!(
+            first_id, second_id,
+            "reused request ids must not alias logins"
+        );
+
+        for (request_id, login_id) in [(3, first_id), (4, second_id)] {
+            let reply = rpc
+                .call(
+                    request_id,
+                    "auth/cancel",
+                    sonic_rs::json!({"loginId": login_id}),
+                )
+                .await;
+            assert_eq!(result(&reply), &sonic_rs::json!({"cancelled": true}));
+        }
+    })
+    .await;
+}
+
+async fn disconnect_reused_request_id(rig: &Rig) {
+    let mut updates = rig.host.subscribe();
+    with_rpc(rig, |mut rpc| async move {
+        initialize(&mut rpc).await;
+        rpc.call(1, "host/subscribe", sonic_rs::json!({})).await;
+        let first = rpc
+            .call(
+                2,
+                "auth/login",
+                sonic_rs::json!({"provider": "openai-codex", "method": "browser"}),
+            )
+            .await;
+        let first_id = result(&first)["loginId"].as_u64().expect("first login id");
+        let first_url = result(&first)["url"]
+            .as_str()
+            .expect("first authorize url")
+            .to_owned();
+        let second = rpc
+            .call(
+                2,
+                "auth/login",
+                sonic_rs::json!({"provider": "openai-codex", "method": "browser"}),
+            )
+            .await;
+        let second_id = result(&second)["loginId"]
+            .as_u64()
+            .expect("second login id");
+        assert_eq!(second_id, 4);
+        assert_ne!(
+            first_id, second_id,
+            "reused request ids must not alias logins"
+        );
+
+        follow_authorize_url(&first_url, "auth-code")
+            .await
+            .expect("first callback");
+        let finished = login_finished(&mut rpc).await;
+        assert_eq!(finished["loginId"].as_u64(), Some(first_id), "{finished}");
+        assert_eq!(finished["state"].as_str(), Some("ready"), "{finished}");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let mut request_id = 3;
+        loop {
+            let reply = rpc
+                .call(
+                    request_id,
+                    "auth/cancel",
+                    sonic_rs::json!({"loginId": first_id}),
+                )
+                .await;
+            if result(&reply) == &sonic_rs::json!({"cancelled": false}) {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "completed login forgets its id"
+            );
+            request_id += 1;
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+
+    let finished = loop {
+        let update = tokio::time::timeout(Duration::from_secs(10), updates.next())
+            .await
+            .expect("update in time")
+            .expect("host open");
+        if let dal_agent::HostUpdate::LoginFinished { login, .. } = &update
+            && login.get() == 4
+        {
+            break update;
+        }
+    };
+    assert_eq!(
+        finished,
+        dal_agent::HostUpdate::LoginFinished {
+            login: dal_agent::login::LoginId::new(4),
+            provider: "openai-codex".into(),
+            ready: false,
+            detail: Some("sign-in cancelled.".into()),
+        }
+    );
+
+    with_rpc(rig, |mut rpc| async move {
+        initialize(&mut rpc).await;
+        for (request_id, login_id) in [(1, 3), (2, 4)] {
+            let reply = rpc
+                .call(
+                    request_id,
+                    "auth/cancel",
+                    sonic_rs::json!({"loginId": login_id}),
+                )
+                .await;
+            assert_eq!(
+                result(&reply),
+                &sonic_rs::json!({"cancelled": false}),
+                "login {login_id} must be gone after completion or connection close"
+            );
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn reused_request_id_keeps_logins_independent_through_cancellation_and_disconnect() {
+    let (rig, _fake) = fake_rig(TokenReply::Issue).await;
+    cancel_reused_request_ids(&rig).await;
+    disconnect_reused_request_id(&rig).await;
+}
+
 #[tokio::test]
 async fn cancel_before_completion_cancels_the_waiter_and_reports_true() {
     let (rig, _fake) = fake_rig(TokenReply::Issue).await;

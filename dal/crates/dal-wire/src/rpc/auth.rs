@@ -203,23 +203,17 @@ impl Reply<'_> {
 /// cancels the login too and forgets both registrations.
 struct LoginSlot {
     state: Arc<Mutex<Conn>>,
-    key: String,
     cancel: CancellationToken,
     host: Host,
     login: LoginId,
 }
 
 impl LoginSlot {
-    async fn register(state: &Arc<Mutex<Conn>>, host: &Host, key: String) -> Self {
+    async fn register(state: &Arc<Mutex<Conn>>, host: &Host) -> Self {
         let (login, cancel) = host.register_login();
-        state
-            .lock()
-            .await
-            .logins
-            .insert(key.clone(), cancel.clone());
+        state.lock().await.logins.insert(login, cancel.clone());
         Self {
             state: Arc::clone(state),
-            key,
             cancel,
             host: host.clone(),
             login,
@@ -227,7 +221,7 @@ impl LoginSlot {
     }
 
     async fn release(self) {
-        self.state.lock().await.logins.remove(&self.key);
+        self.state.lock().await.logins.remove(&self.login);
         self.host.finish_login(self.login);
     }
 }
@@ -237,7 +231,7 @@ impl Drop for LoginSlot {
         self.cancel.cancel();
         self.host.finish_login(self.login);
         if let Ok(mut locked) = self.state.try_lock() {
-            locked.logins.remove(&self.key);
+            locked.logins.remove(&self.login);
         }
     }
 }
@@ -250,7 +244,7 @@ async fn run_oauth(
     provider: &str,
     method: Method,
 ) -> Result<Option<Value>, ErrorObject> {
-    let slot = LoginSlot::register(reply.state, host, id_key(reply.id)).await;
+    let slot = LoginSlot::register(reply.state, host).await;
     let login_id = slot.login.get();
     let (io, mut events) = LoginIo::channel(None, slot.cancel.clone());
     let login = host.login_as(slot.login, provider, method, io);
