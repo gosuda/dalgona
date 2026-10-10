@@ -1839,10 +1839,9 @@ async fn an_oversized_dynamic_pool_fails_the_run_without_starting_pool_children(
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn paused_and_stopped_controllers_keep_reports_queued_until_resumed() -> TestResult {
     use dal_agent::ext::ObserveHook as _;
-    let mut premature = Vec::new();
     for mode in ["user cancel", "stop"] {
         let fixture = Fixture::open().await?;
         fixture.user_input().await?;
@@ -1875,9 +1874,13 @@ async fn paused_and_stopped_controllers_keep_reports_queued_until_resumed() -> T
             None,
             "waiting report".into(),
         ));
-        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
-        if !fixture.script().wakes.is_empty() {
-            premature.push(mode);
+        for _ in 0..3 {
+            tokio::time::advance(std::time::Duration::from_millis(250)).await;
+            fixture.pump().await;
+            assert!(
+                fixture.script().wakes.is_empty(),
+                "the {mode} controller woke before resume"
+            );
         }
         if mode == "stop" {
             fixture.user_input().await?;
@@ -1895,16 +1898,16 @@ async fn paused_and_stopped_controllers_keep_reports_queued_until_resumed() -> T
         } else {
             fixture.user_input().await?;
         }
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                let changed = fixture.host.changed.notified();
-                if fixture.script().delivered.contains(&job) {
-                    break;
-                }
-                changed.await;
-            }
-        })
-        .await?;
+        let mut ticks = 0;
+        while !fixture.script().delivered.contains(&job) {
+            assert!(
+                ticks < 8,
+                "the {mode} report was not delivered after resume"
+            );
+            ticks += 1;
+            tokio::time::advance(std::time::Duration::from_millis(250)).await;
+            fixture.pump().await;
+        }
         assert!(
             fixture
                 .script()
@@ -1913,10 +1916,6 @@ async fn paused_and_stopped_controllers_keep_reports_queued_until_resumed() -> T
                 .any(|text| text.contains("waiting report"))
         );
     }
-    assert!(
-        premature.is_empty(),
-        "controllers woke before resume: {premature:?}"
-    );
     Ok(())
 }
 

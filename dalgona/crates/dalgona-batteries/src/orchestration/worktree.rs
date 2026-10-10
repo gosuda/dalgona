@@ -264,9 +264,32 @@ pub(crate) fn retained_notice(
     )
 }
 
+#[derive(serde::Serialize)]
+struct Retained<'a> {
+    v: u8,
+    reason: &'a str,
+    base: &'a str,
+    worktree: &'a str,
+    at: &'a str,
+}
+
 /// Builds the exact `retained.json` body, terminated by one LF.
-pub(crate) fn retained_body(reason: &str, base: &str, worktree: &str, at: &str) -> String {
-    format!(
-        "{{\"v\":1,\"reason\":\"{reason}\",\"base\":\"{base}\",\"worktree\":\"{worktree}\",\"at\":\"{at}\"}}\n"
-    )
+///
+/// # Errors
+/// Returns the encoder error when the record cannot be serialized.
+pub(crate) fn retained_body(
+    reason: &str,
+    base: &str,
+    worktree: &str,
+    at: &str,
+) -> Result<String, sonic_rs::Error> {
+    let mut body = sonic_rs::to_string(&Retained {
+        v: 1,
+        reason,
+        base,
+        worktree,
+        at,
+    })?;
+    body.push('\n');
+    Ok(body)
 }

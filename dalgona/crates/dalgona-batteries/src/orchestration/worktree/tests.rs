@@ -85,9 +85,15 @@ fn isolation_retained_artifacts_match_plan_shapes() {
         &"a".repeat(40),
         "/wt/1.retained-123",
         "2026-09-25T10:20:00.000Z",
+    )
+    .unwrap();
+    assert_eq!(
+        body,
+        format!(
+            "{{\"v\":1,\"reason\":\"conflict\",\"base\":\"{}\",\"worktree\":\"/wt/1.retained-123\",\"at\":\"2026-09-25T10:20:00.000Z\"}}\n",
+            "a".repeat(40)
+        )
     );
-    assert!(body.ends_with('\n'));
-    assert!(body.contains("\"v\":1"));
     let notice = retained_notice(
         "/wt/1.retained-123",
         "patch does not apply",
@@ -98,6 +104,30 @@ fn isolation_retained_artifacts_match_plan_shapes() {
         notice,
         "isolation: retained at /wt/1.retained-123; the changes did not apply cleanly (patch does not apply). Apply them by hand: git -C /repo apply --3way /iso/delta.patch"
     );
+}
+
+#[test]
+fn isolation_retained_body_round_trips_quotes_backslashes_and_controls() {
+    #[derive(serde::Deserialize)]
+    struct Parsed {
+        v: u8,
+        reason: String,
+        base: String,
+        worktree: String,
+        at: String,
+    }
+    let reason = "the changes did not apply cleanly (error: \"x\" \\ y\nz\ttab)";
+    let worktree = "/wt/\"q\"\\back\nslash.retained-1";
+    let base = "ba\"se";
+    let body = retained_body(reason, base, worktree, "2026-09-25T10:20:00.000Z").unwrap();
+    assert!(body.ends_with("}\n"));
+    assert_eq!(body.matches('\n').count(), 1);
+    let parsed: Parsed = sonic_rs::from_str(&body).unwrap();
+    assert_eq!(parsed.v, 1);
+    assert_eq!(parsed.reason, reason);
+    assert_eq!(parsed.base, base);
+    assert_eq!(parsed.worktree, worktree);
+    assert_eq!(parsed.at, "2026-09-25T10:20:00.000Z");
 }
 
 #[test]

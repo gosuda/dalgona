@@ -301,15 +301,7 @@ async fn an_overflowed_turn_blocks_the_goal_through_the_real_host() -> Result<()
     }
     assert!(ended, "the rejected request did not end the turn");
     drop(subscription);
-    // The turn-end hook may run just after the turn-ended update.
-    let mut shown = String::new();
-    for _ in 0..50 {
-        shown = output_text(run_goal(&agent, "").await?)?;
-        if shown.contains("blocked:") {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    let shown = output_text(run_goal(&agent, "").await?)?;
     assert!(
         shown.contains("blocked: context overflow ended the turn (compaction did not recover)"),
         "{shown}"

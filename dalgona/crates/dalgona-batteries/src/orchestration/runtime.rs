@@ -3436,12 +3436,19 @@ impl Coordinator {
             .as_ref()
             .map(|base| base.commit.clone())
             .unwrap_or_default();
-        let record =
-            super::worktree::retained_body(&reason, &base, &worktree.display().to_string(), &at);
-        if let Err(error) = self
-            .write_artifact(task, ArtifactFile::RetainedJson, record.into_bytes())
-            .await
-        {
+        let saved = match super::worktree::retained_body(
+            &reason,
+            &base,
+            &worktree.display().to_string(),
+            &at,
+        ) {
+            Ok(record) => self
+                .write_artifact(task, ArtifactFile::RetainedJson, record.into_bytes())
+                .await
+                .map_err(|error| error.to_string()),
+            Err(error) => Err(error.to_string()),
+        };
+        if let Err(error) = saved {
             let _ = write!(notes, " (retained.json could not be saved: {error})");
         }
         let mut notice = super::worktree::retained_notice(
