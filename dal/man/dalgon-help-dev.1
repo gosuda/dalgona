@@ -1,0 +1,19 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH dalgon-help-dev 1  "dalgon-help-dev " 
+.SH NAME
+dalgon\-help\-dev \- Inspect and drive sessions for debugging.
+.SH SYNOPSIS
+\fBdalgon help dev\fR [\fIsubcommands\fR]
+.SH DESCRIPTION
+Inspect and drive sessions for debugging.
+.SH SUBCOMMANDS
+.TP
+dalgon\-help\-dev\-run(1)
+Drive a scripted headless session from a scenario file (one step JSON per line).
+.TP
+dalgon\-help\-dev\-journal(1)
+Replay, diff, and edit session journals.
+.TP
+dalgon\-help\-dev\-fold(1)
+Print which folded fields each journal record changes.
