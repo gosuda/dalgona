@@ -420,8 +420,8 @@ impl Services for Host {
                             .tool(
                                 id,
                                 caller,
-                                CallId::new("report"),
-                                "report",
+                                CallId::new(crate::orchestration::agents_tool::REPORT_TOOL_NAME),
+                                crate::orchestration::agents_tool::REPORT_TOOL_NAME,
                                 RawJson::parse(&args).map_err(|error| {
                                     ServiceError::failed(None, error.to_string())
                                 })?,

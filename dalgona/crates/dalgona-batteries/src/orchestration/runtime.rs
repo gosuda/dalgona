@@ -27,7 +27,9 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant as TokioInstant, timeout_at};
 use tokio_util::sync::CancellationToken;
 
-use super::agents_tool::{Report, ReportCell, ReportOutcome, ReportStatus, submit};
+use super::agents_tool::{
+    REPORT_TOOL_NAME, Report, ReportCell, ReportOutcome, ReportStatus, submit,
+};
 use super::arbiter::Arbiter;
 use super::goal::adapter::{self, GoalStore};
 use super::goal::ops::{GoalScope, TodoSummary, format_duration};
@@ -1374,7 +1376,7 @@ impl SessionState {
         ToolReply::Done(match name {
             "create_goal" | "update_goal" | "get_goal" => self.goal_tool(name, args.as_str()).await,
             "monitor" => self.monitor_tool(args).await,
-            "report" => self.report_tool(args.as_str()),
+            _ if name == REPORT_TOOL_NAME => self.report_tool(args.as_str()),
             _ => Err(ServiceError::failed(None, "unknown orchestration tool")),
         })
     }
@@ -3199,7 +3201,7 @@ impl Coordinator {
             let name = Name::parse(tool).map_err(|error| error.to_string())?;
             tool_names.push(name);
         }
-        tool_names.push(Name::parse("report").map_err(|error| error.to_string())?);
+        tool_names.push(Name::parse(REPORT_TOOL_NAME).map_err(|error| error.to_string())?);
         let workspace = dir.map(|dir| {
             self.base.as_ref().map_or_else(
                 || dir.to_path_buf(),

@@ -113,7 +113,8 @@ impl IndexCollector {
 /// Builds the exact subagent preamble for one task label.
 pub(crate) fn preamble(label: &str, rendered: &str) -> String {
     format!(
-        "You are a subagent. Another agent started you for one task. The user does not see your messages; only your report reaches the agent that started you.\nWork only on this task. When you finish, or when you cannot go on, call report exactly once. The report must name every file you changed, the commands you ran, what you found with file paths and line numbers, and anything the other agent must still do.\n\nTask \"{label}\":\n{rendered}"
+        "You are a subagent. Another agent started you for one task. The user does not see your messages; only your report reaches the agent that started you.\nWork only on this task. When you finish, or when you cannot go on, call {} exactly once. The report must name every file you changed, the commands you ran, what you found with file paths and line numbers, and anything the other agent must still do.\n\nTask \"{label}\":\n{rendered}",
+        super::agents_tool::REPORT_TOOL_NAME
     )
 }
 
@@ -153,7 +154,10 @@ impl GraceCause {
     /// The exact reason sentence opening the grace text.
     pub(crate) fn reason(self) -> String {
         match self {
-            GraceCause::NoReport => "You ended your turn without calling report.".to_owned(),
+            GraceCause::NoReport => format!(
+                "You ended your turn without calling {}.",
+                super::agents_tool::REPORT_TOOL_NAME
+            ),
             GraceCause::ToolRounds(rounds) => {
                 format!("You used all {rounds} tool rounds of this turn.")
             }
@@ -168,8 +172,9 @@ impl GraceCause {
 /// Builds the exact grace prompt for one cause.
 pub(crate) fn grace_text(cause: GraceCause) -> String {
     format!(
-        "{} You have one last turn. Call report now with your best answer. Use status done only if the task is complete; otherwise use blocked or failed, and say in the report that your work was cut short. Do not call any other tool.",
-        cause.reason()
+        "{} You have one last turn. Call {} now with your best answer. Use status done only if the task is complete; otherwise use blocked or failed, and say in the report that your work was cut short. Do not call any other tool.",
+        cause.reason(),
+        super::agents_tool::REPORT_TOOL_NAME
     )
 }
 

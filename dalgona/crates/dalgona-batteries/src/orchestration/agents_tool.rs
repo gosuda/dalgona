@@ -14,7 +14,10 @@ use super::workflow::{Isolation, Workflow, find_saved};
 #[cfg(test)]
 mod tests;
 
-pub(crate) const REPORT_DESCRIPTION: &str = "Send your final report to the agent that started you. Call it exactly once, when the task is done, blocked, or failed. Your turn ends after this call.";
+/// Provider-wire name for the child-only report tool.
+pub(crate) const REPORT_TOOL_NAME: &str = "orchestration__report";
+
+pub(crate) const REPORT_DESCRIPTION: &str = "Send your final report to the agent that started you. Call this tool exactly once, when the task is done, blocked, or failed. Your turn ends after this call.";
 
 pub(crate) const REPORT_SCHEMA: &str = "{\"type\":\"object\",\"properties\":{\"status\":{\"type\":\"string\",\"enum\":[\"done\",\"blocked\",\"failed\"],\"description\":\"done: the task is complete. blocked: you cannot go on without something you do not have. failed: you tried, and the task cannot be done.\"},\"report\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":16000,\"description\":\"What you found or changed, with file paths and line numbers. The agent that started you reads only this text.\"}},\"required\":[\"status\",\"report\"],\"additionalProperties\":false}";
 

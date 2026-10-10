@@ -569,7 +569,8 @@ impl SessionBackend for Backend {
         let root = self.canonical_root.clone();
         let path = path.to_owned();
         Box::pin(async move {
-            let confined = confine_path(root, &path, Service::FsRead).await?;
+            let confined = confine_path(root.clone(), &path, Service::FsRead).await?;
+            let confined = recheck_path(root, confined, &path, Service::FsRead).await?;
             match tokio::fs::read(confined.resolved()).await {
                 Ok(bytes) => Ok(Some(bytes)),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -946,6 +947,13 @@ fn child_start_error(error: impl std::fmt::Display) -> ServiceError {
 }
 
 impl Backend {
+    /// Provider-wire name of the trusted child completion tool. It follows
+    /// the `<plugin>__<local>` wire convention, and the `orchestration`
+    /// extension name is already claimed by the Bundled battery, so a User
+    /// plugin cannot mint the same wire name without an extension-name
+    /// conflict; plain `report` no longer matches.
+    const CHILD_REPORT_TOOL_NAME: &str = "orchestration__report";
+
     async fn agents_op(&self, op: AgentsOp) -> Result<AgentsReply, ServiceError> {
         match op {
             AgentsOp::Start(start) => self.agent_start(start).await,
@@ -1310,7 +1318,8 @@ impl Backend {
     /// Builds the completion report from the child's last assistant entry.
     /// `stop` is the child's durable terminal stop, read off its projection;
     /// `view.turn` alone only knows the turn ended, not why. An explicit
-    /// `report` tool call on any assistant entry wins over the last text.
+    /// `orchestration__report` tool call on any assistant entry wins over the
+    /// last text.
     fn child_report(id: SessionId, view: &dal_core::View, stop: dal_core::Stop) -> AgentsReply {
         #[derive(serde::Deserialize)]
         struct ReportInput {
@@ -1338,7 +1347,7 @@ impl Backend {
                 let dal_core::Block::ToolCall { name, input, .. } = block else {
                     return None;
                 };
-                (name.as_ref() == "report")
+                (name.as_ref() == Self::CHILD_REPORT_TOOL_NAME)
                     .then_some(input)
                     .and_then(|input| sonic_rs::from_str::<ReportInput>(input.as_str()).ok())
                     .map(|fields| fields.report)

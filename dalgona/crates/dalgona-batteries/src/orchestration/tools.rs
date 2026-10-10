@@ -12,7 +12,9 @@ use dal_core::{
     Workspace,
 };
 
-use super::agents_tool::{AGENTS_DESCRIPTION, AGENTS_SCHEMA, REPORT_DESCRIPTION, REPORT_SCHEMA};
+use super::agents_tool::{
+    AGENTS_DESCRIPTION, AGENTS_SCHEMA, REPORT_DESCRIPTION, REPORT_SCHEMA, REPORT_TOOL_NAME,
+};
 use super::goal::ops::{
     CREATE_GOAL_DESCRIPTION, CREATE_GOAL_SCHEMA, GET_GOAL_DESCRIPTION, GET_GOAL_SCHEMA,
     UPDATE_GOAL_DESCRIPTION, UPDATE_GOAL_SCHEMA,
@@ -166,7 +168,7 @@ pub(crate) fn report_tool(
     runtime: &Runtime,
 ) -> Result<(Arc<dyn Tool>, Visibility), RegistrationError> {
     Ok((
-        build_tool(runtime, "report", REPORT_DESCRIPTION, REPORT_SCHEMA)?,
+        build_tool(runtime, REPORT_TOOL_NAME, REPORT_DESCRIPTION, REPORT_SCHEMA)?,
         Visibility::Model,
     ))
 }

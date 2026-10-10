@@ -16,9 +16,10 @@ const STEP_FIELDS: [&str; 11] = [
     "system",
     "isolation",
 ];
-pub(crate) const FORBIDDEN_TOOLS: [&str; 6] = [
+pub(crate) const FORBIDDEN_TOOLS: [&str; 7] = [
     "agents",
     "report",
+    super::agents_tool::REPORT_TOOL_NAME,
     "create_goal",
     "update_goal",
     "get_goal",

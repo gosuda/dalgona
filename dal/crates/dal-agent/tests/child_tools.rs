@@ -82,7 +82,7 @@ fn text_stream() -> EventStream {
 }
 
 fn call_stream(name: &str) -> EventStream {
-    let args = if name == "report" {
+    let args = if name.contains("report") {
         RawJson::parse(r#"{"status":"done","report":"reported"}"#).expect("report args")
     } else {
         RawJson::parse("{}").expect("args json")
@@ -414,6 +414,10 @@ fn kit_extension(
     let mut builder = ExtensionBuilder::new("kit", "0.1.0", inject)
         .expect("builder")
         .tool(
+            Counter::new("orchestration__report", Arc::new(AtomicUsize::new(0))),
+            Visibility::Model,
+        )
+        .tool(
             Counter::new("report", Arc::new(AtomicUsize::new(0))),
             Visibility::Model,
         )
@@ -715,7 +719,10 @@ async fn a_childs_tool_list_survives_an_extension_reload() {
     // below really adds `gamma` to what a session may see.
     rig.run("spawn", "*").await;
     rig.settled(rig.child(0), 1).await;
-    assert_eq!(rig.probe.requests()[0], ["alpha", "beta", "report"]);
+    assert_eq!(
+        rig.probe.requests()[0],
+        ["alpha", "beta", "orchestration__report", "report"]
+    );
 
     rig.run("spawn", "alpha").await;
     rig.settled(rig.child(1), 2).await;
@@ -740,7 +747,7 @@ async fn a_childs_tool_list_survives_an_extension_reload() {
     rig.settled(rig.child(2), 4).await;
     assert_eq!(
         rig.probe.requests()[3],
-        ["alpha", "beta", "gamma", "report"],
+        ["alpha", "beta", "gamma", "orchestration__report", "report"],
         "an unrestricted child sees the recomposed tools"
     );
 }
@@ -877,8 +884,8 @@ async fn an_unbounded_prompt_runs_every_step_and_the_bound_does_not_carry_over()
 #[tokio::test]
 async fn parent_await_reads_report_tool_without_grace() {
     let rig = rig().await;
-    rig.probe.queue("report");
-    rig.run("spawn", "report").await;
+    rig.probe.queue("orchestration__report");
+    rig.run("spawn", "orchestration__report").await;
     let child = rig.child(0);
     rig.settled(child, 1).await;
     rig.run("collect-report", &child.to_string()).await;
@@ -892,6 +899,21 @@ async fn parent_await_reads_report_tool_without_grace() {
         rig.probe.requests().len(),
         2,
         "the report call and its tool result complete one child turn"
+    );
+}
+
+#[tokio::test]
+async fn plain_report_tool_does_not_hijack_child_report() {
+    let rig = rig().await;
+    rig.probe.queue("report");
+    rig.run("spawn", "report").await;
+    let child = rig.child(0);
+    rig.settled(child, 1).await;
+    rig.run("collect-report", &child.to_string()).await;
+    assert_eq!(
+        rig.reports.lock().expect("reports lock").as_slice(),
+        ["done"],
+        "a plain `report` call must not settle as the trusted report"
     );
 }
 

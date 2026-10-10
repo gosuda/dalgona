@@ -122,7 +122,10 @@ fn child_grace_endings() {
     };
     assert_eq!(
         grace_text(cause),
-        "You used all 50 tool rounds of this turn. You have one last turn. Call report now with your best answer. Use status done only if the task is complete; otherwise use blocked or failed, and say in the report that your work was cut short. Do not call any other tool."
+        format!(
+            "You used all 50 tool rounds of this turn. You have one last turn. Call {} now with your best answer. Use status done only if the task is complete; otherwise use blocked or failed, and say in the report that your work was cut short. Do not call any other tool.",
+            crate::orchestration::agents_tool::REPORT_TOOL_NAME
+        )
     );
     // (e) A fired deadline earns grace with the time reason.
     let mut timed_out = ended(None, StopReason::Cancelled);
@@ -155,9 +158,10 @@ fn child_grace_endings() {
 #[test]
 fn pool_text_builders_match_contract() {
     assert!(preamble("audit", "Check.").contains("Task \"audit\":\nCheck."));
+    assert!(
+        preamble("audit", "Check.").contains(crate::orchestration::agents_tool::REPORT_TOOL_NAME)
+    );
     assert_eq!(item_label("audit", 0, "routes"), "audit 1: routes");
-    assert_eq!(split_items("  a  \n\nb\n"), ["a", "b"]);
-    assert_eq!(split_items("").len(), 0);
     assert_eq!(
         unresolved_skip("b"),
         TaskState::Skipped("step b produced no result".to_owned())
