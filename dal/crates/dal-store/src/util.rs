@@ -19,10 +19,12 @@ use crate::{error::StoreError, private};
 /// Mode of journal, lock, info, and sidecar files.
 pub(crate) const MODE_FILE: u32 = 0o600;
 /// Permission mode used by private journal, lock, cache, and sidecar files.
+///
+/// `Mode0600` provides owner read and write access on Unix. Other platforms use
+/// their platform defaults.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FileMode {
-    /// Owner read and write only on Unix; a protected owner, SYSTEM, and Administrators DACL
-    /// on Windows.
+    /// Owner read and write only on Unix; platform defaults elsewhere.
     Mode0600,
 }
 

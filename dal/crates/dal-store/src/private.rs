@@ -1,9 +1,9 @@
 //! Owner-only file creation and verification.
 //!
-//! POSIX carries the policy in mode bits. Other platforms create the file
-//! and report it private, matching the behavior before owner-only checks
-//! existed; adding another platform means writing that platform's owner
-//! check here behind its `cfg`.
+//! Unix carries the policy in mode bits. Other platforms create files with
+//! platform defaults, and `file_is_private` is informational there without
+//! inspecting platform-specific permissions. Add another platform's owner
+//! check here behind its `cfg` before relying on it.
 
 use std::{fs::File, io, path::Path};
 
@@ -28,11 +28,11 @@ pub(crate) fn create_new(path: &Path, mode: FileMode) -> io::Result<File> {
         .open(path)
 }
 
-/// Whether `file` is closed to every principal but its owner.
+/// Checks whether `file` has owner-only Unix permission bits.
 ///
-/// On Unix this is the absence of group and other permission bits.
-/// Platforms without owner bits accept every file, which keeps `auth.json`
-/// reads no stricter than they were before this check existed.
+/// On Unix this is the absence of group and other permission bits. On other
+/// platforms this is informational only: it returns `Ok(true)` without
+/// inspecting platform-specific permissions.
 ///
 /// # Errors
 /// Returns the I/O error when the file's metadata cannot be read.
@@ -53,7 +53,7 @@ fn file_is_private_impl(file: &File) -> io::Result<bool> {
 #[cfg(not(unix))]
 #[expect(
     clippy::unnecessary_wraps,
-    reason = "the unix variant fails on metadata reads; this stub shares the signature"
+    reason = "the non-Unix variant is informational; this stub shares the fallible signature"
 )]
 fn file_is_private_impl(file: &File) -> io::Result<bool> {
     let _ = file;
@@ -62,6 +62,7 @@ fn file_is_private_impl(file: &File) -> io::Result<bool> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use super::*;
 
     #[cfg(unix)]
