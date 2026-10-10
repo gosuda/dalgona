@@ -318,6 +318,16 @@ fn session_grant_accepts_a_mapped_tool_name() {
             .allow_always()
             .contains(&Name::parse_mapped_tool(tool).unwrap())
     );
+    assert!(matches!(
+        emit.records.as_slice(),
+        [
+            Record::Resolved {
+                answer: Answer::ApproveForSession,
+                ..
+            },
+            Record::AllowAlways { tool: recorded, .. }
+        ] if **recorded == *tool
+    ));
 }
 
 #[test]

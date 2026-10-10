@@ -197,9 +197,6 @@ impl Session {
             None
         };
         self.open_questions.remove(index);
-        if let Some(name) = grant {
-            self.allow_always.insert(name);
-        }
         let by = by.unwrap_or_else(|| ClientId::new("core"));
         emit.records.push(Record::Resolved {
             at: now,
@@ -208,12 +205,42 @@ impl Session {
             by: by.clone(),
             was_default,
         });
+        if let Some(name) = grant {
+            emit.records.push(Record::AllowAlways {
+                at: now,
+                tool: name.as_str().into(),
+                by: by.clone(),
+            });
+            self.allow_always.insert(name);
+        }
         emit.updates.push(UpdateKind::RequestResolved {
             id: request,
             answer: answer.clone(),
             by,
         });
         Ok(())
+    }
+
+    /// Resolves every still-open question as a core cancellation: a
+    /// cancelled turn ends with its approvals answered, so a withdrawal or
+    /// expiry that lands after the close still finds its terminal record
+    /// already journaled instead of dropping it as unknown.
+    pub(super) fn cancel_open_questions(&mut self, now: jiff::Timestamp, emit: &mut Emit) {
+        for (request, _) in self.open_questions.drain(..) {
+            let by = ClientId::new("core");
+            emit.records.push(Record::Resolved {
+                at: now,
+                request,
+                answer: Answer::Cancel,
+                by: by.clone(),
+                was_default: false,
+            });
+            emit.updates.push(UpdateKind::RequestResolved {
+                id: request,
+                answer: Answer::Cancel,
+                by,
+            });
+        }
     }
 
     /// Records a started job and tells clients once.

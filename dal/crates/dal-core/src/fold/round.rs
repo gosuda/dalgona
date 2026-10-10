@@ -342,6 +342,9 @@ impl Session {
                 text: message.clone(),
             }));
         }
+        if matches!(stop, TurnEndStop::Cancelled) {
+            self.cancel_open_questions(now, emit);
+        }
         emit.records.push(Record::TurnEnd {
             at: now,
             turn,
