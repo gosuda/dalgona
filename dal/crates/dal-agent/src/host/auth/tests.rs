@@ -243,7 +243,12 @@ async fn a_login_nobody_completes_times_out_after_fifteen_minutes() {
         outcome,
         Err(HostError::Provider(ProviderError::LoginTimeout))
     ));
-    assert_eq!(started.elapsed(), Duration::from_mins(15));
+    #[expect(
+        clippy::duration_suboptimal_units,
+        reason = "MSRV 1.90 lacks const Duration::from_mins"
+    )]
+    let expected_wait = Duration::from_secs(15 * 60);
+    assert_eq!(started.elapsed(), expected_wait);
     assert!(!auth_json(dir.path()).exists());
     assert_eq!(
         finished(&mut subscription).await,
