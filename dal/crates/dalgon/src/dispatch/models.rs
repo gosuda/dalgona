@@ -155,23 +155,54 @@ fn print_table(rows: &[&CatalogEntry]) -> std::io::Result<()> {
     writeln!(stdout, "Prices: {source}, fetched {date}.")
 }
 
-/// Renders a catalog field for the terminal table with control characters
-/// replaced, so a provider-supplied value that reaches this layer still
-/// cannot move the cursor or start an escape sequence.
+/// Renders a catalog field for the terminal table with control and format
+/// characters replaced, so a provider-supplied value that reaches this layer
+/// still cannot move the cursor, reorder text, or start an escape sequence.
 fn visible(value: &str) -> String {
-    if value.chars().all(|character| !character.is_control()) {
+    if value
+        .chars()
+        .all(|character| !is_control_or_format(character))
+    {
         return value.to_owned();
     }
     value
         .chars()
         .map(|character| {
-            if character.is_control() {
+            if is_control_or_format(character) {
                 char::REPLACEMENT_CHARACTER
             } else {
                 character
             }
         })
         .collect()
+}
+
+fn is_control_or_format(character: char) -> bool {
+    character.is_control()
+        || matches!(
+            u32::from(character),
+            0x00AD
+                | 0x0600..=0x0605
+                | 0x061C
+                | 0x06DD
+                | 0x070F
+                | 0x0890..=0x0891
+                | 0x08E2
+                | 0x180E
+                | 0x200B..=0x200F
+                | 0x202A..=0x202E
+                | 0x2060..=0x2064
+                | 0x2066..=0x206F
+                | 0xFEFF
+                | 0xFFF9..=0xFFFB
+                | 0x110BD
+                | 0x110CD
+                | 0x13430..=0x1343F
+                | 0x1BCA0..=0x1BCA3
+                | 0x1D173..=0x1D17A
+                | 0xE0001
+                | 0xE0020..=0xE007F
+        )
 }
 
 fn context_text(entry: &CatalogEntry) -> String {
@@ -228,4 +259,16 @@ fn internal_models_error(error: &str, data_root: &std::path::Path) -> ExitCode {
         crate::cli::texts::internal_error_at("models", error, &log_path),
         exit::ExitKind::Internal,
     )
+}
+#[cfg(test)]
+mod tests {
+    use super::visible;
+
+    #[test]
+    fn visible_replaces_format_controls_without_losing_unicode_text() {
+        assert_eq!(
+            visible("模型\u{202E}name\u{2066}é\u{FEFF}\u{1B}"),
+            "模型�name�é��"
+        );
+    }
 }

@@ -18,19 +18,22 @@ use crate::{
     thinking::{Effort, ThinkingSupport},
 };
 
-/// Replaces terminal control characters (C0, DEL, and C1) in a
-/// provider-supplied catalog identifier with the replacement character, so a
-/// configured or compromised provider cannot smuggle newlines or escape
-/// sequences through model ids or display names into CLI output or the
-/// models cache.
+/// Replaces terminal control and format characters in a provider-supplied
+/// catalog identifier with the replacement character, so a configured or
+/// compromised provider cannot smuggle newlines, bidi reordering, or escape
+/// sequences through model ids or display names into CLI output or the models
+/// cache.
 pub(crate) fn sanitize_identifier(value: &str) -> Box<str> {
-    if value.chars().all(|character| !character.is_control()) {
+    if value
+        .chars()
+        .all(|character| !is_control_or_format(character))
+    {
         return value.into();
     }
     value
         .chars()
         .map(|character| {
-            if character.is_control() {
+            if is_control_or_format(character) {
                 char::REPLACEMENT_CHARACTER
             } else {
                 character
@@ -38,6 +41,34 @@ pub(crate) fn sanitize_identifier(value: &str) -> Box<str> {
         })
         .collect::<String>()
         .into_boxed_str()
+}
+
+fn is_control_or_format(character: char) -> bool {
+    character.is_control()
+        || matches!(
+            u32::from(character),
+            0x00AD
+                | 0x0600..=0x0605
+                | 0x061C
+                | 0x06DD
+                | 0x070F
+                | 0x0890..=0x0891
+                | 0x08E2
+                | 0x180E
+                | 0x200B..=0x200F
+                | 0x202A..=0x202E
+                | 0x2060..=0x2064
+                | 0x2066..=0x206F
+                | 0xFEFF
+                | 0xFFF9..=0xFFFB
+                | 0x110BD
+                | 0x110CD
+                | 0x13430..=0x1343F
+                | 0x1BCA0..=0x1BCA3
+                | 0x1D173..=0x1D17A
+                | 0xE0001
+                | 0xE0020..=0xE007F
+        )
 }
 
 pub(crate) fn decode_openai_models(
@@ -391,5 +422,16 @@ impl CodexReasoningLevel {
             Self::String(effort) => Some(effort),
             Self::Object { effort } => effort.as_deref(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_identifier;
+
+    #[test]
+    fn sanitize_identifier_replaces_format_controls_without_losing_unicode_text() {
+        let sanitized = sanitize_identifier("café\u{202E}模型\u{2069}\u{FEFF}");
+        assert_eq!(sanitized.as_ref(), "café�模型��");
     }
 }
