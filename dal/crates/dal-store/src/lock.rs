@@ -588,7 +588,7 @@ mod tests {
 
 #[cfg(all(test, unix))]
 mod replaced_file_tests {
-    use std::{cell::Cell, fs, path::Path, time::Duration};
+    use std::{cell::Cell, fs, path::Path};
 
     use dal_core::SessionId;
 
@@ -623,19 +623,21 @@ mod replaced_file_tests {
     }
 
     #[test]
-    fn lock_file_replaced_on_every_attempt_fails_within_the_wait_bound() {
+    fn lock_file_replaced_after_deadline_is_not_retried() {
         let dir = TestDir::new();
         let path = dir.0.join("lock");
-        let started = std::time::Instant::now();
+        let attempts = Cell::new(0);
 
         let result = LockGuard::acquire_with(&path, SessionId::new_v7(), |at| {
+            attempts.set(attempts.get() + 1);
+            assert_eq!(attempts.get(), 1, "an expired acquisition must not reopen");
+            std::thread::sleep(PID_WAIT);
             replace(at).expect("replace the lock file");
         });
 
         assert!(
             matches!(result, Err(StoreError::Io { .. })),
-            "endless replacement must surface as an I/O error, got {result:?}"
+            "replacement after the deadline must return an I/O error, got {result:?}"
         );
-        assert!(started.elapsed() < PID_WAIT + Duration::from_millis(100));
     }
 }
