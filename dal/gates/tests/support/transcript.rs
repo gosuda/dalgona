@@ -231,7 +231,7 @@ pub fn assert_snapshot(gate: &str, name: &str, rows: &[String]) -> io::Result<()
                     )
                 } else {
                     format!(
-                        "length: {} missing row(s) after row {}: expected {:?}",
+                        "length: {} missing row(s) starting at row {}: expected {:?}",
                         shared - normalized.len(),
                         normalized.len() + 1,
                         &blessed_rows[normalized.len()..]
