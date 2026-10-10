@@ -107,7 +107,7 @@ fn prompt_and_remember(
             } else if stable == 0 {
                 "output still arriving".to_string()
             } else {
-                format!("output quiet for only {stable} consecutive poll(s)")
+                format!("quiet-and-idle for only {stable} of 3 required polls")
             };
             return Err(
                 format!("turn frame never settled after the reply arrived: {cause}").into(),
