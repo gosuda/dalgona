@@ -303,54 +303,64 @@ fn mcp_grant_request(
     detail.sort();
     Ok((digest.into(), detail.join("\n").into()))
 }
+
+/// Renders a stdio command for the grant prompt without any operand value:
+/// the executable and option names stay, every other token is replaced, so a
+/// credential cannot ride in through an argument the denylist never named.
 fn redact_mcp_argv(command: Vec<Box<str>>) -> Vec<Box<str>> {
-    let mut redacted = Vec::with_capacity(command.len());
-    let mut redact_next = false;
-    for argument in command {
-        if is_secret_mcp_flag(&argument) {
-            redacted.push(argument);
-            redact_next = true;
-            continue;
-        }
-        if let Some((flag, _)) = argument.split_once('=')
-            && is_secret_mcp_flag(flag)
-        {
-            redacted.push(format!("{flag}=<redacted>").into());
-            redact_next = false;
-            continue;
-        }
-        if redact_next {
-            redacted.push("<redacted>".into());
-            redact_next = false;
-        } else {
-            redacted.push(argument);
-        }
+    command
+        .into_iter()
+        .enumerate()
+        .map(|(position, argument)| {
+            if position == 0 {
+                argument
+            } else {
+                redact_mcp_argument(&argument).into()
+            }
+        })
+        .collect()
+}
+
+fn redact_mcp_argument(argument: &str) -> String {
+    let (name, has_value) = argument
+        .split_once('=')
+        .map_or((argument, false), |(name, _)| (name, true));
+    match (is_option_name(name), has_value) {
+        (true, false) => name.to_owned(),
+        (true, true) => format!("{name}=<redacted>"),
+        (false, _) => "<redacted>".to_owned(),
     }
-    redacted
 }
 
-fn is_secret_mcp_flag(argument: &str) -> bool {
-    matches!(
-        argument,
-        "-t" | "--token" | "--api-key" | "--authorization" | "-H" | "--header"
-    )
+/// A long option in lowercase kebab case or a single-letter short option.
+/// Anything else, including a dashed value such as `-secret`, is an operand.
+fn is_option_name(token: &str) -> bool {
+    if let Some(long) = token.strip_prefix("--") {
+        let mut chars = long.chars();
+        return chars.next().is_some_and(|c| c.is_ascii_lowercase())
+            && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    }
+    token
+        .strip_prefix('-')
+        .is_some_and(|short| short.len() == 1 && short.chars().all(|c| c.is_ascii_alphabetic()))
 }
 
+/// Keeps only the scheme and host authority of a URL: userinfo, path, query,
+/// and fragment can all carry credentials.
 fn redact_mcp_url(url: &str) -> String {
     let Some((scheme, remainder)) = url.split_once("://") else {
         return "invalid MCP URL".to_owned();
     };
-    let without_query = remainder.split(['?', '#']).next().unwrap_or_default();
-    let (authority, path) = without_query
-        .split_once('/')
-        .map_or((without_query, None), |(authority, path)| {
-            (authority, Some(path))
-        });
-    let authority = authority.rsplit('@').next().unwrap_or_default();
-    match path {
-        Some(path) => format!("{scheme}://{authority}/{path}"),
-        None => format!("{scheme}://{authority}"),
+    if scheme.is_empty()
+        || !scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+    {
+        return "invalid MCP URL".to_owned();
     }
+    let authority = remainder.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = authority.rsplit('@').next().unwrap_or_default();
+    format!("{scheme}://{host}")
 }
 
 fn generation_owner(generation: &Generation, ext: usize) -> Box<str> {

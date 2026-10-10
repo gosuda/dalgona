@@ -401,7 +401,7 @@ fn overlay_accepts_entry_and_folded_mcp_tool_names() {
     let (set, detail) = super::mcp_grant_request(&base_generation, &docs).unwrap();
     assert_eq!(
         detail.as_ref(),
-        "docs.api: URL https://api.example/mcp\ndocs.cli: command [\"mcp\", \"--config\", \"/etc/mcp.json\"]\ndocs.web: URL https://docs.example/mcp"
+        "docs.api: URL https://api.example\ndocs.cli: command [\"mcp\", \"--config\", \"<redacted>\"]\ndocs.web: URL https://docs.example"
     );
     let changed_declaring = docs_extension("https://changed.example/mcp", mcp);
     let changed_generation = generation(vec![extension("battery", &[]), changed_declaring]);
@@ -422,7 +422,7 @@ fn mcp_grant_detail_redacts_url_and_argv_credentials() {
                 (
                     "api".into(),
                     McpServerDecl::Http {
-                        url: "https://user:password@api.example:8443/mcp/v1?token=url-secret#fragment"
+                        url: "https://user:password@api.example:8443/mcp/path-secret/v1?token=url-secret#fragment"
                             .into(),
                     },
                 ),
@@ -431,21 +431,24 @@ fn mcp_grant_detail_redacts_url_and_argv_credentials() {
                     McpServerDecl::Stdio {
                         command: vec![
                             "mcp".into(),
+                            "positional-secret".into(),
                             "--token".into(),
                             "token-secret".into(),
                             "--token".into(),
                             "-leading-secret".into(),
-                            "--token".into(),
-                            "--api-key".into(),
-                            "adjacent-key-secret".into(),
+                            "--client-secret".into(),
+                            "client-secret-value".into(),
+                            "--password".into(),
+                            "password-value".into(),
+                            "--access-token".into(),
+                            "access-token-value".into(),
+                            "--vendor-credential".into(),
+                            "custom-flag-secret".into(),
                             "-t".into(),
                             "short-secret".into(),
                             "--api-key=key-secret".into(),
-                            "--authorization".into(),
-                            "Bearer auth-secret".into(),
-                            "-H".into(),
-                            "Authorization: Bearer header-secret".into(),
                             "--header=Cookie: cookie-secret".into(),
+                            "Authorization: Bearer header-secret".into(),
                             "--verbose".into(),
                         ],
                         env: [
@@ -469,17 +472,30 @@ fn mcp_grant_detail_redacts_url_and_argv_credentials() {
     let (_, detail) = super::mcp_grant_request(&generation, &name("docs")).unwrap();
     assert_eq!(
         detail.as_ref(),
-        "docs.api: URL https://api.example:8443/mcp/v1\ndocs.cli: command [\"mcp\", \"--token\", \"<redacted>\", \"--token\", \"<redacted>\", \"--token\", \"--api-key\", \"<redacted>\", \"-t\", \"<redacted>\", \"--api-key=<redacted>\", \"--authorization\", \"<redacted>\", \"-H\", \"<redacted>\", \"--header=<redacted>\", \"--verbose\"] env keys [AUTH_TOKEN, LD_PRELOAD]"
+        "docs.api: URL https://api.example:8443\ndocs.cli: command [\"mcp\", \"<redacted>\", \"--token\", \"<redacted>\", \"--token\", \"<redacted>\", \"--client-secret\", \"<redacted>\", \"--password\", \"<redacted>\", \"--access-token\", \"<redacted>\", \"--vendor-credential\", \"<redacted>\", \"-t\", \"<redacted>\", \"--api-key=<redacted>\", \"--header=<redacted>\", \"<redacted>\", \"--verbose\"] env keys [AUTH_TOKEN, LD_PRELOAD]"
     );
-    assert!(!detail.contains("password"));
-    assert!(!detail.contains("url-secret"));
-    assert!(!detail.contains("token-secret"));
-    assert!(!detail.contains("-leading-secret"));
-    assert!(!detail.contains("auth-secret"));
-    assert!(!detail.contains("header-secret"));
-    assert!(!detail.contains("cookie-secret"));
-    assert!(!detail.contains("env-secret"));
-    assert!(!detail.contains("/tmp/lib.so"));
+    for leaked in [
+        "user:password",
+        "url-secret",
+        "path-secret",
+        "positional-secret",
+        "token-secret",
+        "-leading-secret",
+        "client-secret-value",
+        "access-token-value",
+        "custom-flag-secret",
+        "short-secret",
+        "key-secret",
+        "cookie-secret",
+        "header-secret",
+        "env-secret",
+        "/tmp/lib.so",
+    ] {
+        assert!(
+            !detail.contains(leaked),
+            "the grant detail leaks {leaked}: {detail}"
+        );
+    }
 }
 
 #[test]

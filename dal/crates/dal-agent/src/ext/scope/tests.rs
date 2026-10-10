@@ -21,6 +21,7 @@ use futures::channel::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use super::{Scope, ScopeError, ScopeValue, Shared, locked};
+use crate::error::ServiceError;
 use crate::ext::services::ServiceFuture;
 use crate::ext::{Caller, CallerKind, RawValue, Services, ToolOutcome};
 
@@ -32,9 +33,15 @@ macro_rules! never {
 
 type Upstream = mpsc::UnboundedSender<Result<StreamEvent, ProviderError>>;
 
+type AgentsResult = Result<AgentsReply, ServiceError>;
+
 struct Held {
     stream: Mutex<Option<EventStream>>,
     report: Mutex<VecDeque<oneshot::Receiver<AgentReport>>>,
+    awaits: Mutex<VecDeque<AgentsResult>>,
+    close_replies: Mutex<VecDeque<AgentsResult>>,
+    started: Mutex<Vec<SessionId>>,
+    closed: Mutex<Vec<SessionId>>,
     awaiting: AtomicUsize,
     inferred: AtomicUsize,
 }
@@ -76,10 +83,17 @@ impl Services for Held {
     }
     fn agents(&self, _who: &Caller, op: AgentsOp) -> ServiceFuture<'_, AgentsReply> {
         let reply = match op {
-            AgentsOp::Start(_) => Ok(AgentsReply::Started { id: member() }),
+            AgentsOp::Start(_) => {
+                let id = member();
+                locked(&self.started).push(id);
+                Ok(AgentsReply::Started { id })
+            }
             AgentsOp::Await { .. } => {
-                let report = locked(&self.report).pop_front();
                 self.awaiting.fetch_add(1, Ordering::SeqCst);
+                if let Some(scripted) = locked(&self.awaits).pop_front() {
+                    return Box::pin(async move { scripted });
+                }
+                let report = locked(&self.report).pop_front();
                 return Box::pin(async move {
                     match report {
                         Some(report) => match report.await {
@@ -90,7 +104,12 @@ impl Services for Held {
                     }
                 });
             }
-            AgentsOp::Cancel { id } => Ok(AgentsReply::Cancelled { id }),
+            AgentsOp::Cancel { id } => {
+                locked(&self.closed).push(id);
+                locked(&self.close_replies)
+                    .pop_front()
+                    .unwrap_or(Ok(AgentsReply::Cancelled { id }))
+            }
             _ => never!(),
         };
         Box::pin(async move { reply })
@@ -176,6 +195,10 @@ fn rig() -> Rig {
             flag.store(true, Ordering::SeqCst);
         }))),
         report: Mutex::new(VecDeque::new()),
+        awaits: Mutex::new(VecDeque::new()),
+        close_replies: Mutex::new(VecDeque::new()),
+        started: Mutex::new(Vec::new()),
+        closed: Mutex::new(Vec::new()),
         awaiting: AtomicUsize::new(0),
         inferred: AtomicUsize::new(0),
     });
@@ -470,5 +493,75 @@ async fn a_handle_dropped_before_its_first_poll_stays_cancelled() {
         held.inferred.load(Ordering::SeqCst),
         0,
         "the drive never starts upstream work for a cancelled handle"
+    );
+}
+
+async fn failed_member(rig: &Rig) -> (SessionId, String) {
+    let handle = rig.scope.agent(start()).expect("admitted");
+    let error = timed(handle.result()).await.expect_err("the member failed");
+    let started = locked(&rig.held.started).clone();
+    assert_eq!(started.len(), 1, "one member session started");
+    (started[0], error.to_string())
+}
+
+fn wait_failure() -> ServiceError {
+    ServiceError::failed(None, "the await broke")
+}
+
+#[tokio::test]
+async fn a_failed_await_cancels_the_member_session_and_keeps_the_wait_error() {
+    let rig = rig();
+    locked(&rig.held.awaits).push_back(Err(wait_failure()));
+    let (member, error) = failed_member(&rig).await;
+    assert_eq!(
+        *locked(&rig.held.closed),
+        vec![member],
+        "the child is closed"
+    );
+    assert_eq!(error, "the await broke");
+}
+
+#[tokio::test]
+async fn a_failed_second_await_cancels_the_member_session_and_keeps_the_wait_error() {
+    let rig = rig();
+    let pending = SessionId::new_v7();
+    locked(&rig.held.awaits).push_back(Ok(AgentsReply::Pending { id: pending }));
+    locked(&rig.held.awaits).push_back(Err(wait_failure()));
+    let (_, error) = failed_member(&rig).await;
+    assert_eq!(
+        *locked(&rig.held.closed),
+        vec![pending],
+        "the pending child is closed"
+    );
+    assert_eq!(error, "the await broke");
+}
+
+#[tokio::test]
+async fn an_unexpected_close_reply_is_reported_with_the_wait_error() {
+    let rig = rig();
+    locked(&rig.held.awaits).push_back(Err(wait_failure()));
+    locked(&rig.held.close_replies).push_back(Ok(AgentsReply::Pending { id: member() }));
+    let (member, error) = failed_member(&rig).await;
+    assert_eq!(*locked(&rig.held.closed), vec![member]);
+    assert_eq!(
+        error,
+        format!(
+            "the await broke; closing child session {member} returned an unexpected reply. Retry cancelling that session."
+        )
+    );
+}
+
+#[tokio::test]
+async fn a_failed_close_is_reported_with_the_wait_error() {
+    let rig = rig();
+    locked(&rig.held.awaits).push_back(Err(wait_failure()));
+    locked(&rig.held.close_replies).push_back(Err(ServiceError::failed(None, "the close broke")));
+    let (member, error) = failed_member(&rig).await;
+    assert_eq!(*locked(&rig.held.closed), vec![member]);
+    assert_eq!(
+        error,
+        format!(
+            "the await broke; closing child session {member} also failed: the close broke. Retry cancelling that session."
+        )
     );
 }

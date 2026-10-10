@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Show less of an MCP server's launch in plugin grant questions: a stdio command keeps its executable and option names, every other argument shows as `<redacted>`, and an HTTP server shows only its scheme and host. Before, a credential in a positional argument, an unlisted flag such as `--client-secret`, or a URL path reached the question, the session journal, and every subscriber. Environment variable names still show; their values never did.
 - Keep cancelled scope handles terminal when upstream work finishes late. Scope cancellation also closes inference streams that have already opened.
 - Show bidirectional controls as visible escape sequences in approval text. Reject control-bearing sign-in URLs before opening a browser or writing a terminal hyperlink.
 - Fix extension file services rejecting paths outside the workspace and reporting path and I/O failures. Missing files still return no content. Path checks do not provide isolation from concurrent filesystem changes.
