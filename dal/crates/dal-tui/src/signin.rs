@@ -431,16 +431,13 @@ fn flow_rows(
     }
     if let Some(hint) = &flow.paste_hint {
         tail.push(RenderRow::plain(escape(hint), Role::Text));
-        let room = width.saturating_sub(3).max(1);
-        let count = flow.pasted.chars().count();
-        let visible: String = flow
+        let shown = flow
             .pasted
             .chars()
-            .skip(count.saturating_sub(room))
-            .collect();
-        let visible = escape(&visible);
-        let mut input = RenderRow::plain(format!("> {visible}"), Role::Text);
-        input.cursor = Some(2 + crate::width::width(&visible, mode));
+            .count()
+            .min(width.saturating_sub(3).max(1));
+        let mut input = RenderRow::plain(format!("> {}", "*".repeat(shown)), Role::Text);
+        input.cursor = Some(2 + shown);
         tail.push(input);
     }
     tail.push(RenderRow::plain(
@@ -673,6 +670,31 @@ mod tests {
             );
         }
         String::from_utf8(out).expect("terminal output is UTF-8")
+    }
+
+    #[test]
+    fn pasted_authorization_is_masked_but_retained_for_exchange() {
+        let pasted = "https://example.test/callback?code=secret-code&state=secret-state";
+        let mut sign_in = SignIn {
+            provider: "test".into(),
+            stage: Stage::Flow(Box::new(FlowView {
+                paste_hint: Some("Paste the redirect URL.".into()),
+                ..FlowView::default()
+            })),
+            run: None,
+        };
+        sign_in.paste(pasted);
+
+        let rows = sign_in.rows(80, WidthMode::Narrow, 24);
+        let shown: String = rows.iter().map(|row| row.text.as_str()).collect();
+        let mask = "*".repeat(pasted.chars().count());
+        assert!(shown.contains(&format!("> {mask}")));
+        assert!(!shown.contains("secret-code"));
+        assert!(!shown.contains("secret-state"));
+        let Stage::Flow(flow) = &sign_in.stage else {
+            panic!("test flow must remain a flow");
+        };
+        assert_eq!(flow.pasted, pasted);
     }
 
     #[test]
