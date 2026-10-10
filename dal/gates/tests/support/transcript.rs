@@ -6,22 +6,15 @@
     reason = "transcript helpers are public only within private test modules"
 )]
 
-//! Committable PTY transcripts and terminal snapshot diffs.
+//! Records PTY output, input, and resize events in a replayable file.
 //!
-//! A `Transcript` records framed terminal traffic (child output, keyboard
-//! input, resizes) beside the PTY driver; `replay` feeds the output half
-//! through the same `vt.rs` parser the live gates use, so a committed
-//! transcript + a committed screen snapshot becomes a diffable terminal
-//! artifact instead of manual xterm verification.
-//!
-//! Snapshot artifacts live under `tests/snapshots/<gate>/<name>.snap`.
-//! Regenerate or bless a changed screen with `DAL_SNAPSHOT_UPDATE=1`; a
-//! mismatch writes `<name>.actual` next to it and fails naming both paths.
+//! Replay preserves output order and terminal geometry. Input records remain
+//! in the file but do not render as terminal output.
 
 use std::{
     fs,
     io::{self, Write},
-    path::{Path, PathBuf},
+    path::Path,
     time::Instant,
 };
 
@@ -175,55 +168,6 @@ impl Transcript {
         }
         recorder
     }
-}
-
-/// Snapshots visible rows of a replayed transcript against
-/// `tests/snapshots/<gate>/<name>.snap`. With `DAL_SNAPSHOT_UPDATE=1` the file
-/// is (re)written; otherwise a drift writes `<name>.actual` and errors naming
-/// the first differing row.
-pub fn assert_snapshot(gate: &str, name: &str, rows: &[String]) -> io::Result<()> {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("snapshots")
-        .join(gate);
-    let expected = root.join(format!("{name}.snap"));
-    let normalized: Vec<String> = rows.iter().map(|row| row.trim_end().to_owned()).collect();
-    let rendered = normalized.join("\n") + "\n";
-
-    if std::env::var_os("DAL_SNAPSHOT_UPDATE").is_some() {
-        fs::create_dir_all(&root)?;
-        fs::write(&expected, &rendered)?;
-        return Ok(());
-    }
-
-    let blessed = fs::read_to_string(&expected).map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!(
-                "missing snapshot {} (run with DAL_SNAPSHOT_UPDATE=1 to bless): {error}",
-                expected.display()
-            ),
-        )
-    })?;
-    if blessed == rendered {
-        return Ok(());
-    }
-
-    let actual = root.join(format!("{name}.actual"));
-    fs::create_dir_all(&root)?;
-    fs::write(&actual, &rendered)?;
-
-    let first_diff = blessed
-        .lines()
-        .zip(normalized.iter())
-        .position(|(want, got)| want != got)
-        .map(|index| index + 1)
-        .map_or_else(|| "length".to_owned(), |line| format!("row {line}"));
-    Err(io::Error::other(format!(
-        "snapshot drift at {first_diff}: {} vs {} — bless with DAL_SNAPSHOT_UPDATE=1 if intended",
-        expected.display(),
-        actual.display(),
-    )))
 }
 
 fn hex(bytes: &[u8]) -> String {

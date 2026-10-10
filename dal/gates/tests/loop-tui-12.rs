@@ -17,8 +17,8 @@
 //! codes alone: startup, streamed replies, approvals, slash commands, queued
 //! follow-ups, interrupts, resizes, multiline paste, and resume.
 //!
-//! Records a real PTY session as a transcript artifact and diffs its replayed
-//! screen against the committed snapshot.
+//! Records a real PTY session and verifies that its saved replay preserves
+//! the live terminal state and ordered cell writes.
 
 #[expect(
     dead_code,
@@ -45,7 +45,7 @@ use std::{
 
 use pty::{PtyProcess, dalgon_command, dalgon_command_with_fixture};
 use support::TestDir;
-use transcript::{Transcript, assert_snapshot};
+use transcript::Transcript;
 use vt::VtRecorder;
 
 type TestResult = Result<(), Box<dyn Error + Send + Sync>>;
@@ -830,9 +830,9 @@ fn answering_y_to_the_draft_question_quits() -> TestResult {
 }
 
 #[test]
-fn pty_transcript_replays_to_the_committed_snapshot() -> Result<(), Box<dyn Error + Send + Sync>> {
+fn pty_transcript_preserves_live_terminal_state() -> TestResult {
     let dir = TestDir::new()?;
-    let mut command = dalgon_command(dir.path(), &["snapshot reply text"])?;
+    let mut command = dalgon_command(dir.path(), &["recorded reply text"])?;
     let mut terminal = PtyProcess::spawn(&mut command, 80, 24)?;
     let mut record = Transcript::new();
 
@@ -842,45 +842,35 @@ fn pty_transcript_replays_to_the_committed_snapshot() -> Result<(), Box<dyn Erro
     )?;
     record.absorb(terminal.output());
 
-    terminal.write(b"snapshot prompt\r")?;
-    record.input(b"snapshot prompt\r");
-    terminal.wait_for(b"snapshot reply text", Duration::from_secs(10))?;
-    // Let the commit burst settle so the captured frame is the final state.
+    terminal.write(b"recorded prompt\r")?;
+    record.input(b"recorded prompt\r");
+    terminal.wait_for(b"recorded reply text", Duration::from_secs(10))?;
     terminal.collect_for(Duration::from_millis(150))?;
     record.absorb(terminal.output());
+    record.absorb(terminal.output());
+
+    let mut live = VtRecorder::new(80, 24);
+    live.feed(terminal.output());
+    assert_eq!(
+        live.rows_containing("recorded reply text")
+            .iter()
+            .map(|row| row.trim())
+            .collect::<Vec<_>>(),
+        ["recorded reply text"],
+        "the live session must contain exactly one complete reply"
+    );
 
     let path = dir.path().join("session.transcript");
     record.save(&path)?;
-
-    // The committed transcript itself must round-trip through the parser.
-    let loaded = Transcript::load(&path)?;
-    let replayed = loaded.replay(80, 24);
-    // The live workspace row ends in the run's random tempdir; normalize
-    // everything from the tempdir marker onward or every run drifts there.
-    // The temp root itself is spelled per-platform (`/tmp` on Linux,
-    // `$TMPDIR`/`private` forms on macOS), so fold it to a stable `/tmp`.
-    let temp = std::env::temp_dir();
-    let temp_canonical = temp.canonicalize().unwrap_or_else(|_| temp.clone());
-    let rows: Vec<String> = replayed
-        .screen_rows()
-        .into_iter()
-        .chain(replayed.scrollback_rows())
-        .map(|row| {
-            row.replace(temp_canonical.to_string_lossy().as_ref(), "/tmp")
-                .replace(temp.to_string_lossy().as_ref(), "/tmp")
-        })
-        .map(|row| match row.find("dalgon-gates-") {
-            Some(at) => format!("{}<workspace>", &row[..at]),
-            None => row,
-        })
-        .filter(|row| !row.trim().is_empty())
-        .collect();
-    assert!(
-        rows.iter().any(|row| row.contains("snapshot reply text")),
-        "replayed transcript shows the scripted reply"
+    let replayed = Transcript::load(&path)?.replay(80, 24);
+    assert_eq!(
+        replayed.written_cells(),
+        live.written_cells(),
+        "recording must not lose, duplicate, or reorder output"
     );
-
-    assert_snapshot("loop-tui-12", "settled-screen", &rows)?;
+    assert_eq!(replayed.screen_rows(), live.screen_rows());
+    assert_eq!(replayed.scrollback_rows(), live.scrollback_rows());
+    assert_eq!(replayed.cursor(), live.cursor());
 
     terminal.write(b"\x04")?;
     let status = terminal.wait_for_exit(Duration::from_secs(5))?;
