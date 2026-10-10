@@ -49,15 +49,14 @@ fn remote_tui_reattaches_after_dropped_websocket() -> Result<(), Box<dyn Error +
     let fixture = exec_then_reply_fixture(&exec, "remote session continued after socket drop")?;
 
     let mut server_command = dalgon_command_with_fixture(server_home.path(), &fixture)?;
-    let port = free_port()?;
-    let port_text = port.to_string();
     let serve_log = server_home.path().join("serve.stderr");
+    let serve_stdout = server_home.path().join("serve.stdout");
     server_command
-        .args(["serve", "--bind", "127.0.0.1", "--port", &port_text])
-        .stdout(Stdio::null())
+        .args(["serve", "--bind", "127.0.0.1", "--port", "0"])
+        .stdout(Stdio::from(std::fs::File::create(&serve_stdout)?))
         .stderr(Stdio::from(std::fs::File::create(&serve_log)?));
     let mut server = ServeChild::spawn(server_command.spawn()?);
-    wait_for_listener(port, Duration::from_secs(10))?;
+    let port = wait_for_listen_port(&mut server, &serve_stdout, Duration::from_secs(10))?;
 
     let proxy = TcpProxy::start(SocketAddr::from(([127, 0, 0, 1], port)))?;
     let mut client_command = dalgon_command(client_home.path(), &["client provider is bypassed"])?;
@@ -80,10 +79,21 @@ fn remote_tui_reattaches_after_dropped_websocket() -> Result<(), Box<dyn Error +
     }
     terminal.collect_for(Duration::from_millis(5))?;
     terminal.write(b"start the remote turn\r")?;
-    terminal.wait_for(
+    if let Err(error) = terminal.wait_for(
         dal_tui::copy::ids::DIALOG_ACTIONS_SHORT.as_bytes(),
         Duration::from_secs(15),
-    )?;
+    ) {
+        let log = std::fs::read_to_string(&serve_log).unwrap_or_default();
+        let out = std::fs::read_to_string(&serve_stdout).unwrap_or_default();
+        let tail = String::from_utf8_lossy(terminal.output()).into_owned();
+        let tail = tail.get(tail.len().saturating_sub(2048)..).unwrap_or(&tail);
+        let subscriptions = proxy.subscription_cursors().len();
+        let last_server = proxy.server_update_cursor(0);
+        return Err(format!(
+            "{error}\nserve stdout:\n{out}\nserve stderr:\n{log}\nsubscriptions: {subscriptions}\nlast server update: {last_server:?}\npty tail:\n{tail}"
+        )
+        .into());
+    }
     terminal.write(b"y")?;
     wait_for_path(&marker, Duration::from_secs(10))?;
     terminal.wait_for(
@@ -138,25 +148,75 @@ fn shell_quote(path: &std::path::Path) -> String {
     format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
 }
 
-fn free_port() -> io::Result<u16> {
-    let listener = TcpListener::bind(("127.0.0.1", 0))?;
-    Ok(listener.local_addr()?.port())
-}
-
-fn wait_for_listener(port: u16, timeout: Duration) -> io::Result<()> {
+/// Reads the port the server bound from its `listening on http://host:port`
+/// line; the server binds port 0, so the kernel hands it a port nobody else
+/// can hold.
+fn wait_for_listen_port(
+    server: &mut ServeChild,
+    stdout_log: &std::path::Path,
+    timeout: Duration,
+) -> io::Result<u16> {
+    const MARKER: &str = "listening on http://127.0.0.1:";
     let deadline = Instant::now() + timeout;
     loop {
-        match TcpStream::connect(("127.0.0.1", port)) {
-            Ok(stream) => {
-                let _ = stream.shutdown(Shutdown::Both);
-                return Ok(());
-            }
-            Err(_) if Instant::now() < deadline => {
-                thread::sleep(Duration::from_millis(10));
-            }
-            Err(error) => return Err(error),
+        let text = std::fs::read_to_string(stdout_log)?;
+        let port = complete_lines(&text)
+            .filter_map(|line| parse_listen_port(line, MARKER))
+            .next();
+        if let Some(port) = port {
+            return Ok(port);
         }
+        if !server.is_running()? {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "serve exited before reporting its listen address",
+            ));
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "serve did not report its listen address",
+            ));
+        }
+        thread::sleep(Duration::from_millis(10));
     }
+}
+
+/// Lines the writer finished: a trailing fragment without `\n` may be a
+/// torn write, so only lines closed by a newline count.
+fn complete_lines(text: &str) -> impl Iterator<Item = &str> {
+    let mut lines: Vec<&str> = text.split('\n').collect();
+    if !text.ends_with('\n') {
+        lines.pop();
+    }
+    lines.into_iter()
+}
+
+/// Parses the port from one complete `listening on http://host:port
+/// (details)` line: the port is the word after the marker, and a torn write
+/// never yields a trailing space, so only a fully written port parses.
+fn parse_listen_port(line: &str, marker: &str) -> Option<u16> {
+    let (_, rest) = line.split_once(marker)?;
+    let (port, _) = rest.split_once(' ')?;
+    port.parse().ok()
+}
+
+#[test]
+fn listen_port_parses_only_complete_lines() {
+    const MARKER: &str = "listening on http://127.0.0.1:";
+    assert_eq!(
+        parse_listen_port(
+            "dalgon serve listening on http://127.0.0.1:36311 (loopback, no token)",
+            MARKER,
+        ),
+        Some(36311)
+    );
+    assert_eq!(
+        parse_listen_port("dalgon serve listening on http://127.0.0.1:3631", MARKER),
+        None
+    );
+    assert_eq!(parse_listen_port("starting up", MARKER), None);
+    assert!(complete_lines("a\npartial").eq(["a"]));
 }
 
 fn wait_for_path(path: &std::path::Path, timeout: Duration) -> io::Result<()> {
@@ -260,6 +320,7 @@ impl TcpProxy {
         }
         Ok(())
     }
+
     fn subscription_cursors(&self) -> Vec<(u64, u64)> {
         let captures = self
             .client_frames

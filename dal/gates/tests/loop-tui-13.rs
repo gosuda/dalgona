@@ -27,7 +27,11 @@ mod support;
 #[path = "support/vt.rs"]
 mod vt;
 
-use std::{error::Error, process::Command, time::Duration};
+use std::{
+    error::Error,
+    process::Command,
+    time::{Duration, Instant},
+};
 
 use pty::{PtyProcess, dalgon_command, dalgon_command_with_fixture};
 use support::TestDir;
@@ -42,6 +46,61 @@ const ROWS: u16 = 30;
 /// so the legacy key column is the working one.
 fn probe_answers() -> &'static [u8] {
     b"\x1b[?2026;2$y\x1b[?2027;2$y\x1b]11;rgb:0000/0000/0000\x07\x1b[?1;2c"
+}
+
+/// Replays everything the child printed and returns the visible rows once the
+/// recorder sits outside a synchronized update, trimmed of trailing blanks.
+fn replayed_rows(terminal: &PtyProcess) -> (VtRecorder, Vec<String>) {
+    let mut screen = VtRecorder::new(COLUMNS, ROWS);
+    screen.feed(terminal.output());
+    let rows = screen
+        .screen_rows()
+        .into_iter()
+        .map(|row| row.trim_end().to_owned())
+        .collect();
+    (screen, rows)
+}
+
+/// Whether the last non-empty row, the status row, carries no spinner glyph
+/// and no turn state word, which holds only after the turn left its running
+/// state and the frame behind it was drawn.
+fn status_row_is_idle(rows: &[String]) -> bool {
+    use dal_tui::copy::ids;
+    let Some(status) = rows.iter().rev().find(|row| !row.is_empty()) else {
+        return false;
+    };
+    let spinner = status
+        .chars()
+        .any(|cell| ('\u{2800}'..='\u{28ff}').contains(&cell));
+    let state_words = [
+        ids::STATE_THINKING,
+        ids::STATE_WORKING,
+        ids::STATE_FETCHING,
+        ids::STATE_COMPACTING,
+        ids::STATE_RETRYING,
+        ids::STATE_WAITING,
+    ];
+    !spinner && !state_words.iter().any(|word| status.contains(word))
+}
+
+/// Drains output until the replayed screen, outside any synchronized update,
+/// satisfies `ready`; reports the last screen when the deadline passes.
+fn wait_for_screen(
+    terminal: &mut PtyProcess,
+    what: &str,
+    ready: impl Fn(&[String]) -> bool,
+) -> TestResult {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        terminal.collect_for(Duration::from_millis(20))?;
+        let (screen, rows) = replayed_rows(terminal);
+        if !screen.sync_is_open() && ready(&rows) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("screen never showed {what}: {rows:#?}").into());
+        }
+    }
 }
 
 /// Starts `command` inline, types each prompt, waits for the text that ends
@@ -60,20 +119,14 @@ fn run_turns(
     terminal.collect_for(Duration::from_millis(20))?;
     for (prompt, reply) in turns {
         terminal.write(format!("{prompt}\r").as_bytes())?;
-        terminal.wait_for(reply.as_bytes(), Duration::from_secs(20))?;
-        // Let the commit burst and the repaint behind it land before the
-        // next prompt, so the capture holds a settled screen.
-        terminal.collect_for(Duration::from_millis(300))?;
+        let reply_row = format!("  {reply}");
+        wait_for_screen(&mut terminal, "the reply settled", |rows| {
+            rows.iter().any(|row| *row == reply_row) && status_row_is_idle(rows)
+        })?;
     }
-    let mut screen = VtRecorder::new(COLUMNS, ROWS);
-    screen.feed(terminal.output());
+    let (screen, rows) = replayed_rows(&terminal);
     assert_eq!(screen.erase_display_sequences(), 0);
     assert!(!screen.sync_is_open());
-    let rows = screen
-        .screen_rows()
-        .into_iter()
-        .map(|row| row.trim_end().to_owned())
-        .collect();
     Ok((terminal, rows))
 }
 
@@ -218,15 +271,12 @@ fn tui_inline_popup_close_leaves_no_blank_rows_above_the_composer() -> TestResul
     terminal.write(b"\x1b")?;
     terminal.collect_for(Duration::from_millis(300))?;
     terminal.write(b"\x7f")?;
-    terminal.collect_for(Duration::from_millis(300))?;
+    let placeholder = format!("> {}", dal_tui::copy::ids::COMPOSER_PLACEHOLDER);
+    wait_for_screen(&mut terminal, "the emptied composer", |rows| {
+        rows.iter().any(|row| *row == placeholder)
+    })?;
 
-    let mut screen = VtRecorder::new(COLUMNS, ROWS);
-    screen.feed(terminal.output());
-    let rows: Vec<String> = screen
-        .screen_rows()
-        .into_iter()
-        .map(|row| row.trim_end().to_owned())
-        .collect();
+    let (_, rows) = replayed_rows(&terminal);
     let first = rows
         .iter()
         .position(|row| row == "> first inline prompt")
