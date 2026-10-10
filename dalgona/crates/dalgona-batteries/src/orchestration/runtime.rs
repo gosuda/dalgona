@@ -2882,8 +2882,11 @@ impl Coordinator {
                 task,
             })
             .await;
+        // The store rejects names composed only of session-id characters
+        // (`a`, `deed`, `0123`) as ambiguous with an id; numbering every
+        // task name keeps a hex-only step name usable.
         let label = item.map_or_else(
-            || step.name.clone(),
+            || format!("{} {}", step.name, index + 1),
             |item| super::pool::item_label(&step.name, index, item),
         );
         if step.isolation == super::workflow::Isolation::Worktree {

@@ -49,8 +49,8 @@ use crate::{
 /// The exact fallback notice prefix. The final error text follows one space.
 const FALLBACK_NOTICE: &str = "Falling back from WebSockets to HTTPS transport.";
 /// Idle sockets live for less than five minutes and no more than 55 minutes.
-const WS_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-const WS_MAX_AGE: Duration = Duration::from_secs(55 * 60);
+const WS_IDLE_TIMEOUT: Duration = Duration::from_mins(5);
+const WS_MAX_AGE: Duration = Duration::from_mins(55);
 const BETA_HEADER: &str = "responses_websockets=2026-02-06";
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;

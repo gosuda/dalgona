@@ -9,20 +9,35 @@ use std::num::NonZeroU32;
 use crate::Env;
 
 mod builder;
+
 pub mod command;
+
 pub mod compact;
+
 pub mod docs;
+
 pub mod generation;
+
 pub mod grants;
+
 pub mod hooks;
+
 pub mod mcp;
+
 pub(crate) mod overlay;
+
 pub mod prompt;
+
 pub mod scheme;
+
 pub mod scope;
+
 pub mod script;
+
 pub mod services;
+
 pub(crate) mod synthetic;
+
 pub mod tool;
 
 pub use builder::{Extension, ExtensionBuilder};
@@ -346,6 +361,7 @@ impl ModelCx<'_> {
     }
 
     /// Forwards `request` once, with `private` tools visible only to it.
+    #[must_use = "await it to run the request"]
     pub fn forward<'a>(
         &'a self,
         request: ModelRequest,

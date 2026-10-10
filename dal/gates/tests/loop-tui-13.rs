@@ -121,7 +121,7 @@ fn run_turns(
         terminal.write(format!("{prompt}\r").as_bytes())?;
         let reply_row = format!("  {reply}");
         wait_for_screen(&mut terminal, "the reply settled", |rows| {
-            rows.iter().any(|row| *row == reply_row) && status_row_is_idle(rows)
+            rows.contains(&reply_row) && status_row_is_idle(rows)
         })?;
     }
     let (screen, rows) = replayed_rows(&terminal);
@@ -273,7 +273,7 @@ fn tui_inline_popup_close_leaves_no_blank_rows_above_the_composer() -> TestResul
     terminal.write(b"\x7f")?;
     let placeholder = format!("> {}", dal_tui::copy::ids::COMPOSER_PLACEHOLDER);
     wait_for_screen(&mut terminal, "the emptied composer", |rows| {
-        rows.iter().any(|row| *row == placeholder)
+        rows.contains(&placeholder)
     })?;
 
     let (_, rows) = replayed_rows(&terminal);

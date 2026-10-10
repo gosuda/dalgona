@@ -72,8 +72,7 @@ fn authorize_url(output: &[u8]) -> io::Result<String> {
         .ok_or_else(|| io::Error::other("no authorize URL in the terminal output"))?;
     let end = text[start..]
         .find(['\r', '\n', ' '])
-        .map(|index| start + index)
-        .unwrap_or(text.len());
+        .map_or(text.len(), |index| start + index);
     Ok(text[start..end].into())
 }
 

@@ -2787,4 +2787,142 @@ async fn queued_worktree_items_create_no_checkout_until_a_worker_is_free() -> Te
     assert!(report.contains("done"), "{report}");
     Ok(())
 }
-// weave: run 'weave explain dalgona/crates/dalgona-batteries/src/orchestration/runtime/tests.rs' for per-hunk detail, 'weave check' to verify your resolution
+
+mod step_tests {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    use dal_agent::ext::{Scope, ToolCx};
+    use dal_core::ScopeSpec;
+    use dal_core::{Budget, CallId, OnError, SessionId};
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
+
+    use super::super::super::pool::IndexCollector;
+    use super::super::super::workflow::{Isolation, Items, Step};
+    use super::super::Coordinator;
+    use super::super::merge_locks::MergeLocks;
+    use crate::work::support::FakeServices;
+
+    fn task_step(name: &str) -> Step {
+        Step {
+            name: name.to_owned(),
+            prompt: "work".to_owned(),
+            items: Items::Task,
+            workers: 1,
+            after: Vec::new(),
+            tools: Vec::new(),
+            model: None,
+            role: None,
+            system: None,
+            isolation: Isolation::Shared,
+        }
+    }
+
+    fn coordinator(services: Arc<FakeServices>) -> Coordinator {
+        let caller = ToolCx::for_test(services.clone()).caller().clone();
+        let (sender, _receiver) = mpsc::channel(8);
+        Coordinator {
+            services,
+            caller,
+            sender,
+            session: SessionId::new_v7(),
+            workspace: std::path::PathBuf::from("/tmp"),
+            data_root: None,
+            base: None,
+            run: dal_core::JobId::new_v7(),
+            call: CallId::new("c"),
+            label: "run".into(),
+            input: None,
+            cancel: CancellationToken::new(),
+            live_tasks: Mutex::new(HashMap::new()),
+            merge_locks: MergeLocks::default(),
+            reports: Arc::default(),
+            child_max_steps: 0,
+            child_max_minutes: 0,
+        }
+    }
+
+    /// Waits for the scope task to forward the queued `agents.start` to the
+    /// scripted host. `start_item` returns once the child handle exists; the
+    /// host call itself is delivered on the scope's worker.
+    async fn started_names(services: &Arc<FakeServices>) -> Vec<String> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while services.agent_start_names().is_empty() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no agents.start reached the scripted host"
+            );
+            tokio::task::yield_now().await;
+        }
+        services.agent_start_names()
+    }
+
+    /// The session store refuses names made only of session-id characters;
+    /// a Task step keeps its counter in the child name so a hex-only step
+    /// name still admits. A regression here returns `Cancelled` from the
+    /// real backend and the step never runs.
+    #[tokio::test]
+    async fn a_task_step_mints_a_numbered_child_name() {
+        let services = Arc::new(FakeServices::default());
+        let coordinator = coordinator(Arc::clone(&services));
+        let scope = Scope::over(
+            Arc::clone(&coordinator.services),
+            &coordinator.caller,
+            coordinator.cancel.child_token(),
+            ScopeSpec {
+                limit: 1,
+                on_error: OnError::Settle,
+                budget: Budget::default(),
+            },
+        )
+        .expect("scope");
+        let mut collector = IndexCollector::new(1);
+        let mut pending = HashMap::new();
+        coordinator
+            .start_item(
+                &task_step("a"),
+                &[],
+                (0, None),
+                &scope,
+                &mut collector,
+                &mut pending,
+            )
+            .await
+            .expect("the child start was built");
+        assert_eq!(started_names(&services).await, ["a 1"]);
+    }
+
+    #[tokio::test]
+    async fn pool_items_keep_the_item_label_shape() {
+        let services = Arc::new(FakeServices::default());
+        let coordinator = coordinator(Arc::clone(&services));
+        let scope = Scope::over(
+            Arc::clone(&coordinator.services),
+            &coordinator.caller,
+            coordinator.cancel.child_token(),
+            ScopeSpec {
+                limit: 1,
+                on_error: OnError::Settle,
+                budget: Budget::default(),
+            },
+        )
+        .expect("scope");
+        let mut step = task_step("a");
+        step.items = Items::Literal(vec!["one".to_owned(), "two".to_owned()]);
+        let mut collector = IndexCollector::new(1);
+        let mut pending = HashMap::new();
+        coordinator
+            .start_item(
+                &step,
+                &[],
+                (0, Some("one")),
+                &scope,
+                &mut collector,
+                &mut pending,
+            )
+            .await
+            .expect("the child start was built");
+        assert_eq!(started_names(&services).await, ["a 1: one"]);
+    }
+}

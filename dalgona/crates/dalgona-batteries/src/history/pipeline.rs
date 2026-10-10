@@ -871,15 +871,14 @@ fn assemble(
             fresh += 1;
             format!("history/{}.{}", request.ordinal, fresh)
         };
-        let visibility = if candidate.png.is_none()
-            && (!candidate.drawable || candidate.reused.is_none())
-        {
-            LetterVisibility::ShownAsText
-        } else if selected.contains(&position) {
-            LetterVisibility::Drawn
-        } else {
-            LetterVisibility::NotDrawn
-        };
+        let visibility =
+            if candidate.png.is_none() && (!candidate.drawable || candidate.reused.is_none()) {
+                LetterVisibility::ShownAsText
+            } else if selected.contains(&position) {
+                LetterVisibility::Drawn
+            } else {
+                LetterVisibility::NotDrawn
+            };
         let (first, last) = entry_range(&candidate.spans);
         index.push(IndexLine {
             id: Box::from(id.as_str()),

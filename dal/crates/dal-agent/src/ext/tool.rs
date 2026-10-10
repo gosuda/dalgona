@@ -108,6 +108,7 @@ impl ToolOutput {
         }
     }
 }
+
 impl fmt::Display for ToolOutput {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let texts = self.parts.iter().filter_map(|part| match part {
@@ -138,6 +139,7 @@ pub enum ToolOutcome {
     /// The foreground budget expired; the child continues as this job.
     Detached(JobId),
 }
+
 /// Private proof seal: only [`ToolCx::authorize`] mints [`Approved`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct Seal;
@@ -272,6 +274,7 @@ pub trait Tool: Send + Sync + 'static {
 
 /// Maximum lines retained in one tool output sink; older lines shed first.
 pub const OUTPUT_SINK_CAPACITY: usize = 256;
+
 /// Maximum bytes kept per sunk line; longer lines cut at a char boundary.
 pub const OUTPUT_SINK_LINE_BYTES: usize = 4_096;
 
@@ -656,6 +659,7 @@ impl ToolCx<'_> {
     }
 
     /// Resolves one `scheme://` URI to its page text.
+    #[must_use = "await it to receive the document"]
     pub fn resolve(&self, uri: &str) -> BoxFuture<'_, Result<Doc, ToolError>> {
         self.rt.resolve(
             uri,

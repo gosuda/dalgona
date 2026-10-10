@@ -243,7 +243,7 @@ async fn a_login_nobody_completes_times_out_after_fifteen_minutes() {
         outcome,
         Err(HostError::Provider(ProviderError::LoginTimeout))
     ));
-    assert_eq!(started.elapsed(), Duration::from_secs(15 * 60));
+    assert_eq!(started.elapsed(), Duration::from_mins(15));
     assert!(!auth_json(dir.path()).exists());
     assert_eq!(
         finished(&mut subscription).await,

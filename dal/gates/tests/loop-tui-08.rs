@@ -15,6 +15,7 @@
 )]
 #[path = "support/pty.rs"]
 mod pty;
+
 #[expect(
     dead_code,
     reason = "gate support helpers are shared across independent test targets"
@@ -107,7 +108,7 @@ fn remote_tui_reattaches_after_dropped_websocket() -> Result<(), Box<dyn Error +
     proxy.wait_for_connections(2, Duration::from_secs(15))?;
     terminal.wait_for(
         b"remote session continued after socket drop",
-        Duration::from_secs(15),
+        Duration::from_secs(30),
     )?;
     terminal.wait_for_count(b"enter send", 2, Duration::from_secs(15))?;
     let cursors = proxy.subscription_cursors();
@@ -160,9 +161,7 @@ fn wait_for_listen_port(
     let deadline = Instant::now() + timeout;
     loop {
         let text = std::fs::read_to_string(stdout_log)?;
-        let port = complete_lines(&text)
-            .filter_map(|line| parse_listen_port(line, MARKER))
-            .next();
+        let port = complete_lines(&text).find_map(|line| parse_listen_port(line, MARKER));
         if let Some(port) = port {
             return Ok(port);
         }

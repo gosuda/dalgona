@@ -405,6 +405,7 @@ impl ScopeHandle {
     }
 
     /// Waits for the terminal state and returns the value or the error.
+    #[must_use = "await it to receive the value or error"]
     pub fn result(&self) -> BoxFuture<'_, Result<ScopeValue, ScopeError>> {
         Box::pin(async move {
             let mut status = self.state.status.subscribe();
@@ -437,6 +438,7 @@ impl ScopeHandle {
     }
 
     /// Sends one mailbox message to a member handle.
+    #[must_use = "await it to deliver the message"]
     pub fn send(&self, text: &str, mode: MailMode) -> BoxFuture<'_, Result<Receipt, ServiceError>> {
         let target = self.state.member.as_ref().and_then(|child| *locked(child));
         let text: Box<str> = text.into();
