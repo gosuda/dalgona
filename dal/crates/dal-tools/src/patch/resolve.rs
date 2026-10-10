@@ -3,7 +3,7 @@
 use std::path::{Component, Path, PathBuf};
 
 use super::ir::{Edit, EngineError, ErrorClass};
-use dal_agent::confine::canonicalize_existing_prefix;
+use dal_agent::canonicalize_existing_prefix;
 
 /// Decoded text with BOM, EOL, and final-newline metadata.
 #[derive(Clone, Debug)]

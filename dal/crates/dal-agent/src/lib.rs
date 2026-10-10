@@ -7,7 +7,6 @@
 mod admission;
 mod agent;
 mod broker;
-pub mod confine;
 pub mod error;
 pub mod ext;
 mod host;
@@ -30,6 +29,7 @@ pub use proc::{
     FULL_OUTPUT_PREFIX, OUTPUT_FILE_CAP_BYTES, PREVIEW_BYTES, PROGRESS_LINES, PROGRESS_PERIOD,
     Proc, ProcResult, ProcStatus, SpawnOpts, StopReason, TRUNCATION_MARKER,
 };
+pub use session::backend::canonicalize_existing_prefix;
 
 /// The sign-in vocabulary of [`Host::login`], [`Host::logout`], and
 /// [`Host::stored_credentials`], so front ends need no provider crate.
