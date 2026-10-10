@@ -2413,6 +2413,13 @@ impl Fixture {
         self.git_calls(is_plain_apply).len()
     }
 
+    fn worktree_adds(&self) -> usize {
+        self.git_calls(|argv| {
+            argv.iter().any(|word| word == "worktree") && argv.iter().any(|word| word == "add")
+        })
+        .len()
+    }
+
     fn task_artifact(&self, file: ArtifactFile) -> Result<Vec<u8>, &'static str> {
         let script = self.script();
         let task = script
@@ -2614,6 +2621,33 @@ async fn a_run_aborted_between_steps_settles_cancelled_not_done() -> TestResult 
         JobStateView::Done(dal_core::JobOutcome::Cancelled),
         "an aborted run settles cancelled, not done"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn queued_worktree_items_create_no_checkout_until_a_worker_is_free() -> TestResult {
+    let fixture = Fixture::open_config(isolation_config()?).await?;
+    let hold = CancellationToken::new();
+    {
+        let mut script = fixture.script();
+        script.hold = Some(hold.clone());
+        script
+            .run_outputs
+            .extend(isolated_prefix().into_iter().take(4));
+        script.run_outputs.extend((0..40).map(|_| Ok(output(""))));
+    }
+    fixture.tool(r#"{"action":"run","steps":[{"name":"pool","prompt":"edit {{item}}","items":["one","two","three","four"],"workers":2,"tools":["patch"],"isolation":"worktree"}]}"#).await?;
+    wait_for_starts(&fixture, 2).await?;
+    assert_eq!(
+        fixture.worktree_adds(),
+        2,
+        "only the active workers hold a checkout"
+    );
+    hold.cancel();
+    let report = fixture.ended_run().await?;
+    assert_eq!(fixture.script().starts.len(), 4);
+    assert_eq!(fixture.worktree_adds(), 4);
+    assert!(report.contains("done"), "{report}");
     Ok(())
 }
 // weave: run 'weave explain dalgona/crates/dalgona-batteries/src/orchestration/runtime/tests.rs' for per-hunk detail, 'weave check' to verify your resolution

@@ -2866,7 +2866,9 @@ impl Coordinator {
     }
 
     /// Starts one item: its task job, its worktree when the step isolates,
-    /// and its child session inside the scope.
+    /// and its child session inside the scope. An isolating step waits for
+    /// a free worker before it creates the worktree, so queued items hold no
+    /// checkout.
     async fn start_item(
         &self,
         step: &super::workflow::Step,
@@ -2892,6 +2894,10 @@ impl Coordinator {
             || step.name.clone(),
             |item| super::pool::item_label(&step.name, index, item),
         );
+        if step.isolation == super::workflow::Isolation::Worktree {
+            self.await_worker_slot(step, scope, pending, collector)
+                .await;
+        }
         if self.cancel.is_cancelled() {
             self.finish_unstarted_task(task, index, item, label, TaskState::Cancelled, collector)
                 .await;
@@ -2922,35 +2928,8 @@ impl Coordinator {
         let handle = match handle {
             Ok(handle) => handle,
             Err(reason) => {
-                let state = if self.cancel.is_cancelled() {
-                    TaskState::Cancelled
-                } else {
-                    TaskState::Failed(reason.clone())
-                };
-                let end = self
-                    .end_worktree(task, dir.as_deref(), &state, &reason, "0.0s", &label)
+                self.settle_unspawned(task, member, &label, dir.as_deref(), reason, collector)
                     .await;
-                let text = super::delivery::task_text(
-                    task,
-                    &label,
-                    self.run,
-                    state.word(),
-                    "0.0s",
-                    &end.changed,
-                    &reason,
-                );
-                self.settle_job(task, job_outcome(&state), &text).await;
-                collector.insert(
-                    index,
-                    TaskResult {
-                        id: task,
-                        state,
-                        changed: end.changed,
-                        isolation: end.isolation,
-                        body: reason.into_boxed_str(),
-                        item: item.unwrap_or_default().into(),
-                    },
-                );
                 return Ok(());
             }
         };
@@ -2973,6 +2952,62 @@ impl Coordinator {
         Ok(())
     }
 
+    /// Settles an item whose child never started: its worktree is kept or
+    /// removed, and its task job ends with the reason.
+    async fn settle_unspawned(
+        &self,
+        task: JobId,
+        member: (usize, Option<&str>),
+        label: &str,
+        dir: Option<&Path>,
+        reason: String,
+        collector: &mut IndexCollector,
+    ) {
+        let (index, item) = member;
+        let state = if self.cancel.is_cancelled() {
+            TaskState::Cancelled
+        } else {
+            TaskState::Failed(reason.clone())
+        };
+        let end = self
+            .end_worktree(task, dir, &state, &reason, "0.0s", label)
+            .await;
+        let text = super::delivery::task_text(
+            task,
+            label,
+            self.run,
+            state.word(),
+            "0.0s",
+            &end.changed,
+            &reason,
+        );
+        self.settle_job(task, job_outcome(&state), &text).await;
+        collector.insert(
+            index,
+            TaskResult {
+                id: task,
+                state,
+                changed: end.changed,
+                isolation: end.isolation,
+                body: reason.into_boxed_str(),
+                item: item.unwrap_or_default().into(),
+            },
+        );
+    }
+
+    /// Waits until an isolating step has a free worker. A queued item then
+    /// creates its worktree only once a child can start in it.
+    async fn await_worker_slot(
+        &self,
+        step: &super::workflow::Step,
+        scope: &Scope,
+        pending: &mut HashMap<dal_agent::ext::ScopeHandleId, PendingTask>,
+        collector: &mut IndexCollector,
+    ) {
+        let workers = usize::from(step.workers);
+        while pending.len() >= workers && self.await_one(scope, pending, collector).await {}
+    }
+
     /// Awaits every started child, honouring per-task cancels and the run
     /// cancellation.
     async fn await_items(
@@ -2981,21 +3016,31 @@ impl Coordinator {
         pending: &mut HashMap<dal_agent::ext::ScopeHandleId, PendingTask>,
         collector: &mut IndexCollector,
     ) {
-        while !pending.is_empty() {
-            let Some(handle) = scope.next().await else {
-                break;
-            };
-            let Some(task) = pending.remove(&handle.id()) else {
-                continue;
-            };
-            self.live_tasks
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .remove(&task.task);
-            let index = task.index;
-            let result = self.finish_child(task, handle).await;
-            collector.insert(index, result);
-        }
+        while !pending.is_empty() && self.await_one(scope, pending, collector).await {}
+    }
+
+    /// Awaits one started child and settles it, worktree included. `false`
+    /// means the scope holds no more children.
+    async fn await_one(
+        &self,
+        scope: &Scope,
+        pending: &mut HashMap<dal_agent::ext::ScopeHandleId, PendingTask>,
+        collector: &mut IndexCollector,
+    ) -> bool {
+        let Some(handle) = scope.next().await else {
+            return false;
+        };
+        let Some(task) = pending.remove(&handle.id()) else {
+            return true;
+        };
+        self.live_tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&task.task);
+        let index = task.index;
+        let result = self.finish_child(task, handle).await;
+        collector.insert(index, result);
+        true
     }
 
     fn on_control(&self, control: RunControl) {
