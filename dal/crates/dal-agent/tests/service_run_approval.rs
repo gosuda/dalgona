@@ -32,6 +32,11 @@ use dal_store::Store;
 /// request that never opens.
 const WAIT: Duration = Duration::from_secs(15);
 
+/// Stdout prefix the probe asks for unless a test varies it.
+const DEFAULT_PREFIX_LIMIT: u32 = 4096;
+/// The largest stdout prefix the spawn door accepts.
+const MAX_PREFIX_LIMIT: u32 = 262_145;
+
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 const STEP_CALL: &str = "{\"kind\":\"events\",\"events\":[{\"type\":\"tool_call_started\",\"id\":\"run-call\",\"name\":\"fixture__do_run\"},{\"type\":\"tool_calls_done\",\"calls\":[{\"id\":\"run-call\",\"name\":\"fixture__do_run\",\"args\":{\"kind\":\"parsed\",\"value\":{}}}]},{\"type\":\"usage\",\"usage\":{\"input_tokens\":10,\"cached_input_tokens\":0,\"output_tokens\":5,\"reasoning_tokens\":null,\"cache_write_tokens\":0,\"cost_usd\":null}},{\"type\":\"stop\",\"reason\":\"tool_use\"}]}\n";
@@ -42,6 +47,7 @@ const STEP_END: &str = "{\"kind\":\"events\",\"events\":[{\"type\":\"text_delta\
 struct RunProbe {
     name: Name,
     spec: Arc<ToolSpec>,
+    stdout_prefix_limit: u32,
 }
 
 impl Tool for RunProbe {
@@ -69,7 +75,7 @@ impl Tool for RunProbe {
                 stdin: None,
                 timeout: None,
                 env: Vec::new(),
-                stdout_prefix_limit: 4096,
+                stdout_prefix_limit: self.stdout_prefix_limit,
             };
             match cx.services().run(cx.caller(), request).await {
                 Ok(output) => ToolOutcome::Ok(Box::new(ToolOutput::from_text(
@@ -149,6 +155,7 @@ fn write_toml_line(into: &mut String, line: &str) {
 /// Builds the host, opens a session, and submits the probe prompt.
 async fn host_with_probe(
     approval: Option<&str>,
+    stdout_prefix_limit: u32,
 ) -> Result<(Host, Agent, tempfile::TempDir), Box<dyn std::error::Error>> {
     let probe = Arc::new(RunProbe {
         name: Name::parse("fixture__do_run")?,
@@ -158,6 +165,7 @@ async fn host_with_probe(
             parameters: RawJson::parse(r#"{"type":"object"}"#)?,
             grammar: None,
         }),
+        stdout_prefix_limit,
     });
     host_with_tool(approval, "fixture__do_run", "do_run", probe).await
 }
@@ -266,7 +274,7 @@ async fn submit_probe(agent: &Agent) -> TestResult {
 
 /// Default `ask` mode with an answering client attached.
 async fn start_ask_answered() -> Result<Session, Box<dyn std::error::Error>> {
-    let (host, agent, tmp) = host_with_probe(None).await?;
+    let (host, agent, tmp) = host_with_probe(None, DEFAULT_PREFIX_LIMIT).await?;
     let subscription = agent.subscribe(None)?;
     submit_probe(&agent).await?;
     let listener = agent.subscribe_listen(None)?;
@@ -281,7 +289,7 @@ async fn start_ask_answered() -> Result<Session, Box<dyn std::error::Error>> {
 
 /// Default `ask` mode with only a listener: nobody can answer.
 async fn start_ask_headless() -> Result<Session, Box<dyn std::error::Error>> {
-    let (host, agent, tmp) = host_with_probe(None).await?;
+    let (host, agent, tmp) = host_with_probe(None, DEFAULT_PREFIX_LIMIT).await?;
     submit_probe(&agent).await?;
     let listener = agent.subscribe_listen(None)?;
     Ok(Session {
@@ -295,7 +303,14 @@ async fn start_ask_headless() -> Result<Session, Box<dyn std::error::Error>> {
 
 /// `all` mode with only a listener.
 async fn start_all_headless() -> Result<Session, Box<dyn std::error::Error>> {
-    let (host, agent, tmp) = host_with_probe(Some("all")).await?;
+    start_all_headless_with_limit(DEFAULT_PREFIX_LIMIT).await
+}
+
+/// `all` mode with only a listener, running with the given stdout prefix limit.
+async fn start_all_headless_with_limit(
+    stdout_prefix_limit: u32,
+) -> Result<Session, Box<dyn std::error::Error>> {
+    let (host, agent, tmp) = host_with_probe(Some("all"), stdout_prefix_limit).await?;
     submit_probe(&agent).await?;
     let listener = agent.subscribe_listen(None)?;
     Ok(Session {
@@ -393,6 +408,59 @@ async fn a_granted_run_under_all_runs_without_asking() -> TestResult {
     assert!(dump.contains("hello"), "the run needed no approval: {dump}");
     assert!(!dump.contains("denied"), "{dump}");
     Ok(())
+}
+
+#[tokio::test]
+async fn a_run_at_the_maximum_stdout_prefix_limit_is_accepted() -> TestResult {
+    let mut session = start_all_headless_with_limit(MAX_PREFIX_LIMIT).await?;
+    let dump = finish_turn(&mut session).await?;
+    assert!(
+        dump.contains("hello"),
+        "the maximum limit still runs: {dump}"
+    );
+    assert!(
+        has_log_file(&session.tmp.path().join("data")),
+        "an accepted run leaves its durable log, so the refusal check can see one"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_run_above_the_maximum_stdout_prefix_limit_is_refused_before_launch() -> TestResult {
+    for limit in [MAX_PREFIX_LIMIT + 1, u32::MAX] {
+        let mut session = start_all_headless_with_limit(limit).await?;
+        let dump = finish_turn(&mut session).await?;
+        assert!(
+            dump.contains("stdout prefix limit exceeds 262145 bytes"),
+            "limit {limit} reaches the spawn door and is refused: {dump}"
+        );
+        assert!(
+            !dump.contains("hello"),
+            "limit {limit} must not launch the child: {dump}"
+        );
+        let jobs = session.tmp.path().join("data");
+        assert!(
+            !has_log_file(&jobs),
+            "limit {limit} must leave no durable log under {}",
+            jobs.display()
+        );
+    }
+    Ok(())
+}
+
+/// Whether any `.log` file exists under `root`.
+fn has_log_file(root: &std::path::Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let path = entry.path();
+        if path.is_dir() {
+            has_log_file(&path)
+        } else {
+            path.extension().is_some_and(|ext| ext == "log")
+        }
+    })
 }
 
 /// Reads one closed session's journal records from disk.
