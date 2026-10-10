@@ -161,6 +161,44 @@ fn group_readable_file_is_refused_with_the_chmod_fix() {
     );
 }
 
+#[cfg(windows)]
+#[test]
+fn stored_file_is_owner_only_and_a_broadly_readable_file_is_refused() {
+    let dir = TestDir::new("windows-acl");
+    let mut store = AuthStore::empty(dir.auth());
+    store
+        .set(
+            OPENAI,
+            Credential::ApiKey {
+                key: SecretString::from("sk-1"),
+            },
+        )
+        .expect("openai takes a key");
+    store.store().expect("store writes");
+    AuthStore::load(dir.auth()).expect("a freshly stored file is private");
+
+    grant_everyone_read(&dir.auth());
+    let error = AuthStore::load(dir.auth()).expect_err("a world-readable file is refused");
+    assert!(
+        matches!(error, ProviderError::AuthFilePerms { .. }),
+        "{error:?}"
+    );
+}
+
+#[cfg(windows)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test edge: widening the file DACL runs the OS utility"
+)]
+fn grant_everyone_read(path: &Path) {
+    let output = std::process::Command::new("icacls")
+        .arg(path)
+        .args(["/grant", "*S-1-1-0:R"])
+        .output()
+        .expect("run icacls");
+    assert!(output.status.success(), "{output:?}");
+}
+
 #[cfg(unix)]
 #[test]
 fn symlink_is_refused_even_to_a_private_file() {

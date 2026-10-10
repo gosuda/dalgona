@@ -6,6 +6,7 @@ mod journal;
 mod layout;
 mod list;
 mod lock;
+mod private;
 mod shard;
 mod sidecar;
 mod store;
@@ -17,6 +18,7 @@ pub use error::{
 };
 pub use journal::Receipt;
 pub use layout::Locator;
+pub use private::file_is_private;
 pub use sidecar::{ExtensionSidecar, Sidecar};
 pub use store::{AppendOutcome, Journal, Store};
 pub use util::{FileMode, canonical_path, create_private_dir_all, write_atomic, write_atomic_new};

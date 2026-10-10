@@ -14,19 +14,21 @@ use tempfile::TempPath;
 use unicode_segmentation::UnicodeSegmentation;
 use uuid::Uuid;
 
-use crate::error::StoreError;
+use crate::{error::StoreError, private};
 
 /// Mode of journal, lock, info, and sidecar files.
 pub(crate) const MODE_FILE: u32 = 0o600;
 /// Permission mode used by private journal, lock, cache, and sidecar files.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FileMode {
-    /// Owner read and write only on Unix.
+    /// Owner read and write only on Unix; a protected owner, SYSTEM, and Administrators DACL
+    /// on Windows.
     Mode0600,
 }
 
 impl FileMode {
-    const fn bits(self) -> u32 {
+    #[cfg(unix)]
+    pub(crate) const fn bits(self) -> u32 {
         match self {
             Self::Mode0600 => MODE_FILE,
         }
@@ -186,10 +188,7 @@ fn publish_temp(
     publication: Publication,
 ) -> Result<(), StoreError> {
     let dir = containing_dir(target);
-    let mut options = open_options();
-    options.write(true).create_new(true);
-    with_mode(&mut options, mode.bits());
-    let mut file = options.open(temp).map_err(|source| io_err(temp, source))?;
+    let mut file = private::create_new(temp, mode).map_err(|source| io_err(temp, source))?;
 
     let result = (|| {
         file.write_all(bytes)

@@ -6,7 +6,7 @@
 //! [`SecretString`], whose `Debug` output is redacted and which has no
 //! `Display`. `auth.json` holds one member per table provider, keyed by its
 //! id; unknown members anywhere are rejected. Reads refuse a
-//! symbolic link and, on POSIX, any group or other permission bit. Writes go
+//! symbolic link and, on POSIX, a group or other permission bit. Writes go
 //! through the store part's atomic writer at mode 0600.
 //!
 //! JWT claims are read without checking the signature. The values they yield
@@ -202,6 +202,20 @@ impl OAuthCredential {
         self.expires_at
             .is_some_and(|at| at.saturating_sub(now) <= crate::auth::refresh::PROACTIVE_WINDOW_SECS)
     }
+
+    /// The `ChatGPT` account id a Codex request sends: the stored id when it
+    /// is not blank, else the ID token's `chatgpt_account_id` claim.
+    #[must_use]
+    pub(crate) fn chatgpt_account_id(&self) -> Option<std::borrow::Cow<'_, str>> {
+        self.account_id
+            .as_deref()
+            .filter(|id| !id.trim().is_empty())
+            .map(std::borrow::Cow::Borrowed)
+            .or_else(|| {
+                let identity = codex_identity(self.id_token.as_deref()?)?;
+                Some(std::borrow::Cow::Owned(identity.account_id))
+            })
+    }
 }
 
 impl fmt::Debug for OAuthCredential {
@@ -314,7 +328,6 @@ impl AuthStore {
     /// Reads and strictly decodes `auth.json` at `path`.
     ///
     /// # Errors
-    /// [`ProviderError::AuthFileSymlink`] when `path` is a symbolic link (or
     /// is swapped while opening), [`ProviderError::AuthFilePerms`] when a
     /// group or other permission bit is set on POSIX, and
     /// [`ProviderError::AuthFileInvalid`] when the file cannot be read or is
@@ -343,7 +356,9 @@ impl AuthStore {
         if !opened.is_file() {
             return Err(invalid(&path, String::from("not a regular file")));
         }
-        if has_shared_bits(&opened) {
+        let private =
+            dal_store::file_is_private(&file).map_err(|error| invalid(&path, error.to_string()))?;
+        if !private {
             return Err(ProviderError::AuthFilePerms { path });
         }
         let mut bytes = Vec::new();
@@ -692,18 +707,6 @@ fn same_file(link: &Metadata, opened: &Metadata) -> bool {
 fn same_file(link: &Metadata, opened: &Metadata) -> bool {
     let _ = (link, opened);
     true
-}
-
-#[cfg(unix)]
-fn has_shared_bits(metadata: &Metadata) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    metadata.permissions().mode() & 0o077 != 0
-}
-
-#[cfg(not(unix))]
-fn has_shared_bits(metadata: &Metadata) -> bool {
-    let _ = metadata;
-    false
 }
 
 #[cfg(test)]
