@@ -16,6 +16,18 @@ pub(crate) fn invalid_params(method: &str, detail: impl Into<String>) -> ErrorOb
     }
 }
 
+/// Prefixes a bare `-32602` error with `invalid params for <method>`.
+///
+/// Every `-32602` reply leaves the server in that one shape, whichever
+/// handler built it.
+pub(crate) fn normalize_invalid_params(method: &str, error: ErrorObject) -> ErrorObject {
+    if error.code == -32602 && !error.message.starts_with("invalid params for") {
+        invalid_params(method, error.message)
+    } else {
+        error
+    }
+}
+
 /// Builds the `-32009` error object for a server that no longer takes requests.
 pub(crate) fn server_draining() -> ErrorObject {
     ErrorObject {

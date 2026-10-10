@@ -72,6 +72,7 @@ async fn a_browser_login_returns_pending_then_the_ready_host_update() {
         assert_eq!(pending["state"].as_str(), Some("pending"));
         assert!(pending.get("userCode").is_none(), "{pending}");
         let url = pending["url"].as_str().expect("authorize url").to_owned();
+        let login_id = pending["loginId"].as_u64().expect("login id");
         assert!(url.contains("/oauth/authorize"), "{url}");
         assert!(!auth.exists(), "nothing is stored before the callback");
 
@@ -81,7 +82,7 @@ async fn a_browser_login_returns_pending_then_the_ready_host_update() {
         assert!(page.contains("Sign-in complete"), "{page}");
         assert_eq!(
             login_finished(&mut rpc).await,
-            sonic_rs::json!({"type": "login_finished", "provider": "openai-codex", "state": "ready"})
+            sonic_rs::json!({"type": "login_finished", "loginId": login_id, "provider": "openai-codex", "state": "ready"})
         );
         rpc.assert_quiet(Duration::from_millis(300)).await;
         assert!(auth.is_file());
@@ -440,6 +441,7 @@ async fn the_remote_client_decodes_login_logout_and_status_from_the_real_server(
                 provider,
                 ready,
                 detail,
+                ..
             } = update
             {
                 assert_eq!(provider, "openai-codex");
@@ -489,6 +491,7 @@ async fn closing_the_connection_cancels_a_pending_login() {
     assert_eq!(
         finished,
         dal_agent::HostUpdate::LoginFinished {
+            login: dal_agent::login::LoginId::new(1),
             provider: "openai-codex".into(),
             ready: false,
             detail: Some("sign-in cancelled.".into()),
@@ -664,11 +667,13 @@ async fn the_remote_client_cancels_a_pending_login() {
                 provider,
                 ready,
                 detail,
+                login_id: finished_id,
             } = update
             {
                 assert_eq!(provider, "openai-codex");
                 assert!(!ready);
                 assert_eq!(detail.as_deref(), Some("sign-in cancelled."));
+                assert_eq!(finished_id, login_id);
                 break;
             }
         }
@@ -678,4 +683,32 @@ async fn the_remote_client_cancels_a_pending_login() {
         outcome = server => panic!("the local server ended: {outcome:?}"),
         () = client => {}
     }
+}
+
+#[test]
+fn bespoke_arms_prefix_a_bare_invalid_params_error_like_guarded_ones() {
+    use crate::rpc::{host_error, normalize_invalid_params};
+
+    let bare = host_error(dal_agent::HostError::Store(
+        dal_store::StoreError::Invalid {
+            reason: "the record is not writable".into(),
+        },
+    ));
+    assert_eq!(bare.code, -32602);
+    assert_eq!(bare.message, "the record is not writable");
+    for method in ["auth/login", "session/subscribe"] {
+        let shaped = normalize_invalid_params(method, bare.clone());
+        assert_eq!(shaped.code, -32602);
+        assert_eq!(
+            shaped.message,
+            format!("invalid params for {method}: the record is not writable")
+        );
+        let again = normalize_invalid_params(method, shaped.clone());
+        assert_eq!(again.message, shaped.message, "a prefixed error is kept");
+    }
+    let internal = host_error(dal_agent::HostError::Closed);
+    assert_eq!(
+        normalize_invalid_params("auth/login", internal.clone()).message,
+        internal.message
+    );
 }

@@ -71,6 +71,8 @@ pub enum RemoteHostUpdate {
     },
     /// A provider login finished.
     LoginFinished {
+        /// The `loginId` of the attempt that finished.
+        login_id: u64,
         /// The provider id.
         provider: String,
         /// True when the credential is ready.

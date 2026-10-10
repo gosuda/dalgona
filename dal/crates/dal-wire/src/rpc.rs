@@ -29,8 +29,8 @@ pub(crate) mod session;
 pub(crate) mod subs;
 
 pub(crate) use fail::{
-    agent_error, decode_params, hint_value, host_error, id_key, invalid_params, scheme_error,
-    server_draining, to_value,
+    agent_error, decode_params, hint_value, host_error, id_key, invalid_params,
+    normalize_invalid_params, scheme_error, server_draining, to_value,
 };
 pub(crate) use subs::{host_notifier, send_resync, session_pump};
 
@@ -38,7 +38,7 @@ pub(crate) use subs::{host_notifier, send_resync, session_pump};
 pub(crate) const MAX_IN_FLIGHT: usize = 256;
 
 /// Maximum rejection frames queued after a connection starts draining.
-const MAX_DRAIN_REPLIES: usize = 64;
+pub(crate) const MAX_DRAIN_REPLIES: usize = 64;
 
 /// Grace period for draining handlers after transport end.
 pub(crate) const DRAIN_GRACE: Duration = Duration::from_secs(1);
@@ -488,13 +488,9 @@ where
     Fut: Future<Output = Result<Value, ErrorObject>>,
 {
     require_cap(state, capability).await?;
-    run().await.map_err(|error| {
-        if error.code == -32602 && !error.message.starts_with("invalid params for") {
-            invalid_params(method, error.message)
-        } else {
-            error
-        }
-    })
+    run()
+        .await
+        .map_err(|error| normalize_invalid_params(method, error))
 }
 
 /// Handles `initialize`: negotiates version 1 and the capability intersection.

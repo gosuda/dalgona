@@ -16,8 +16,8 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    Conn, agent_error, decode_params, host_error, invalid_params, opt_i64, opt_string, req_string,
-    send, to_value,
+    Conn, agent_error, decode_params, host_error, invalid_params, normalize_invalid_params,
+    opt_i64, opt_string, req_string, send, to_value,
 };
 use crate::jsonrpc::{ErrorObject, Id, Message};
 use crate::transport::FrameWriter;
@@ -208,7 +208,7 @@ pub(crate) async fn subscribe(
     };
     let fail = |error: ErrorObject| Message::Error {
         id: id.clone(),
-        error,
+        error: normalize_invalid_params("session/subscribe", error),
     };
     let session = match session_param("session/subscribe", params) {
         Ok(session) => session,

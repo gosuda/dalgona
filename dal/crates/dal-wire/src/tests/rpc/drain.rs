@@ -8,7 +8,7 @@ use sonic_rs::JsonValueTrait;
 use tokio_util::sync::CancellationToken;
 
 use super::{Rpc, assert_error, initialize, rig};
-use crate::rpc::host_error;
+use crate::rpc::{MAX_DRAIN_REPLIES, host_error};
 use crate::serve_rpc_draining;
 use crate::transport::MemoryTransport;
 
@@ -97,12 +97,12 @@ async fn a_draining_connection_bounds_replies_during_a_connected_flood() {
         "draining connection exceeded the grace bound: {elapsed:?}"
     );
     assert!(
-        sent > 64,
-        "the client did not exercise a sustained flood: {sent}"
+        sent > i64::try_from(MAX_DRAIN_REPLIES).expect("cap fits i64") * 4,
+        "the client did not cross the cap with a sustained flood: {sent}"
     );
-    assert!(
-        replies <= 1_024,
-        "draining replies exceeded the small bounded budget: {replies}"
+    assert_eq!(
+        replies, MAX_DRAIN_REPLIES,
+        "requests past the cap must earn no further draining replies"
     );
 }
 

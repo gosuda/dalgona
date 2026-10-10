@@ -288,12 +288,14 @@ fn host_update_body(host: &Host, update: &HostUpdate) -> Option<Value> {
             "parentId": parent.to_string(),
         })),
         HostUpdate::LoginFinished {
+            login,
             provider,
             ready,
             detail,
         } => {
             let mut body = sonic_rs::json!({
                 "type": "login_finished",
+                "loginId": login.get(),
                 "provider": provider.as_ref(),
                 "state": if *ready { "ready" } else { "failed" },
             });

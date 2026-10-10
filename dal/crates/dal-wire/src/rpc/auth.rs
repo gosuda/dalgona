@@ -20,7 +20,10 @@ use tokio::sync::{Mutex, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use super::misc::route_identity;
-use super::{Conn, host_error, id_key, invalid_params, opt_string, req_string, to_value};
+use super::{
+    Conn, host_error, id_key, invalid_params, normalize_invalid_params, opt_string, req_string,
+    to_value,
+};
 use crate::jsonrpc::{ErrorObject, Id, Message};
 use crate::transport::FrameWriter;
 
@@ -126,7 +129,7 @@ pub(crate) async fn auth_login(
         Ok(None) => return None,
         Err(error) => Message::Error {
             id: id.clone(),
-            error,
+            error: normalize_invalid_params("auth/login", error),
         },
     };
     Some(reply)
@@ -250,7 +253,7 @@ async fn run_oauth(
     let slot = LoginSlot::register(reply.state, host, id_key(reply.id)).await;
     let login_id = slot.login.get();
     let (io, mut events) = LoginIo::channel(None, slot.cancel.clone());
-    let login = host.login(provider, method, io);
+    let login = host.login_as(slot.login, provider, method, io);
     tokio::pin!(login);
     let mut replied = false;
     let outcome = loop {
