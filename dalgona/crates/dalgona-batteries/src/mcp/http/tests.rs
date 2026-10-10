@@ -752,6 +752,32 @@ mod unauthorized_recovery {
     }
 
     #[tokio::test]
+    async fn a_rate_limited_refresh_neither_prompts_nor_blocks_a_later_refresh() {
+        let replies = vec![
+            (429, "{}".to_owned()),
+            tokens_reply("fresh-access", "fresh-refresh"),
+        ];
+        let (fixture, listener) = Fixture::start("fresh-access", replies).await;
+        let transport = fixture.transport();
+        let scenario = async {
+            let first = fixture.call(&transport).await;
+            assert!(
+                matches!(first, Err(TransportError::Mcp(McpError::Auth { .. }))),
+                "a 429 from the token endpoint is transient, not a refusal: {first:?}"
+            );
+            assert_eq!(fixture.asked(), 0, "a rate limit must not prompt");
+            let second = fixture
+                .call(&transport)
+                .await
+                .expect("a later 401 refreshes again");
+            assert!(second.as_str().contains("fresh-access"));
+        };
+        with_server(listener, &fixture.server, scenario).await;
+        assert_eq!(fixture.server.token_requests(), 2);
+        assert_eq!(fixture.asked(), 0);
+    }
+
+    #[tokio::test]
     async fn a_refused_refresh_latches_until_the_user_authorizes_again() {
         let replies = vec![(400, "{\"error\":\"invalid_grant\"}".to_owned())];
         let (fixture, listener) = Fixture::start("fresh-access", replies).await;
@@ -837,6 +863,75 @@ mod unauthorized_recovery {
         with_server(listener, &fixture.server, scenario).await;
         assert_eq!(fixture.server.token_requests(), 1);
         assert_eq!(fixture.asked(), 1);
+    }
+
+    fn interactive_record() -> TokenRecord {
+        TokenRecord {
+            client_id: "client".to_owned(),
+            access_token: "interactive-access".to_owned(),
+            refresh_token: Some("interactive-refresh".to_owned()),
+            scopes: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_declined_transport_adopts_a_token_another_transport_published() {
+        let replies = vec![(400, "{\"error\":\"invalid_grant\"}".to_owned())];
+        let (fixture, listener) = Fixture::start("interactive-access", replies).await;
+        fixture.answer(Answer::Cancel);
+        let declined = fixture.transport();
+        let scenario = async {
+            let first = fixture.call(&declined).await;
+            assert!(matches!(
+                first,
+                Err(TransportError::Mcp(McpError::NoAskFrontEnd))
+            ));
+            let discovery = fixture.discovery().await;
+            fixture
+                .transport()
+                .persist(&discovery, interactive_record())
+                .await
+                .expect("another transport authorizes");
+            fixture
+                .call(&declined)
+                .await
+                .expect("the declined transport adopts the published token")
+        };
+        let response = with_server(listener, &fixture.server, scenario).await;
+        assert!(response.as_str().contains("interactive-access"));
+        assert_eq!(fixture.asked(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_decline_latch_does_not_outlive_the_credential_it_refused() {
+        let replies = vec![(400, "{\"error\":\"invalid_grant\"}".to_owned())];
+        let (fixture, listener) = Fixture::start("never-accepted", replies).await;
+        fixture.answer(Answer::Cancel);
+        let declined = fixture.transport();
+        let scenario = async {
+            let first = fixture.call(&declined).await;
+            assert!(matches!(
+                first,
+                Err(TransportError::Mcp(McpError::NoAskFrontEnd))
+            ));
+            let discovery = fixture.discovery().await;
+            fixture
+                .transport()
+                .persist(&discovery, interactive_record())
+                .await
+                .expect("another transport authorizes");
+            let second = fixture.call(&declined).await;
+            assert!(matches!(
+                second,
+                Err(TransportError::Mcp(McpError::NoAskFrontEnd))
+            ));
+        };
+        with_server(listener, &fixture.server, scenario).await;
+        assert_eq!(
+            fixture.asked(),
+            2,
+            "a rejected new credential prompts again instead of inheriting the old decline"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

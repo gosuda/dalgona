@@ -59,6 +59,9 @@ pub(crate) struct TokenFile {
 pub(crate) struct AuthorizationState {
     pub(crate) cancelled: bool,
     pub(crate) refresh_failed: bool,
+    /// The access token the flags above describe; a different bearer
+    /// means the credential changed and the flags no longer apply.
+    pub(crate) token: Option<String>,
 }
 
 /// Coalesces one token refresh per credential key.
@@ -74,6 +77,7 @@ struct RefreshSlot {
     state: Mutex<RefreshSlotState>,
     prompts: AtomicU32,
     cancelled: AtomicBool,
+    commit: Mutex<()>,
 }
 impl RefreshSlot {
     /// interactive record superseded it while it ran.
@@ -164,20 +168,68 @@ impl RefreshCoordinator {
                     state: Mutex::new(RefreshSlotState::default()),
                     prompts: AtomicU32::new(0),
                     cancelled: AtomicBool::new(false),
+                    commit: Mutex::new(()),
                 })
             })
             .clone()
     }
 
-    /// Records a record obtained outside a refresh, such as an interactive
-    /// authorization, so a caller still holding an older access token adopts
-    /// it instead of a stale cached refresh result.
-    pub(crate) async fn publish(&self, key: &str, record: TokenRecord) {
+    /// Persists and records a record obtained outside a refresh, such as an
+    /// interactive authorization, so every transport of the client adopts it
+    /// instead of a stale cached refresh result.
+    ///
+    /// The commit lock serializes this with `commit`, so a refresh result that
+    /// settled earlier can never land on disk after this record.
+    ///
+    /// # Errors
+    ///
+    /// Returns the persistence error unchanged; the slot keeps its previous
+    /// record then.
+    pub(crate) async fn publish<F, Fut>(
+        &self,
+        key: &str,
+        record: TokenRecord,
+        persist: F,
+    ) -> Result<(), McpError>
+    where
+        F: FnOnce(TokenRecord) -> Fut,
+        Fut: Future<Output = Result<(), McpError>>,
+    {
         let slot = self.slot(key).await;
+        let _commit = slot.commit.lock().await;
+        persist(record.clone()).await?;
         let mut state = slot.state.lock().await;
         state.superseded = state.flight.is_some();
         state.last = Some(record);
         slot.cancelled.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// Persists the settled refresh result, or the newer record that
+    /// superseded it, and returns the record that persisted.
+    ///
+    /// Holding the commit lock across the check and the write keeps disk
+    /// order equal to slot order: a record published afterwards persists
+    /// after this write, and one published before replaces `settled`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the persistence error unchanged.
+    pub(crate) async fn commit<F, Fut>(
+        &self,
+        key: &str,
+        settled: TokenRecord,
+        persist: F,
+    ) -> Result<TokenRecord, McpError>
+    where
+        F: FnOnce(TokenRecord) -> Fut,
+        Fut: Future<Output = Result<(), McpError>>,
+    {
+        let slot = self.slot(key).await;
+        let _commit = slot.commit.lock().await;
+        let winner = slot.state.lock().await.last.clone().unwrap_or(settled);
+        persist(winner.clone()).await?;
+        Ok(winner)
     }
 
     /// The record the slot last settled or published.
@@ -330,12 +382,22 @@ pub(crate) fn record_for<'a>(
 
 /// Persists one token record under its issuer and canonical resource with
 /// mode-0600 atomic replacement.
+///
+/// One process-wide lock spans the read and the write: the file holds every
+/// credential key, so two keys persisting at once would otherwise drop each
+/// other's record. This runs under `spawn_blocking`, so a std lock is
+/// correct here.
 pub(crate) fn persist_token(
     path: &Path,
     issuer: &str,
     resource: &str,
     record: TokenRecord,
 ) -> Result<(), McpError> {
+    static TOKEN_FILE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = match TOKEN_FILE.lock() {
+        Ok(guard) => guard,
+        Err(poison) => poison.into_inner(),
+    };
     let mut file = read_tokens(path);
     file.tokens
         .entry(issuer.to_owned())
@@ -746,7 +808,10 @@ mod tests {
             refresh_token: None,
             scopes: Vec::new(),
         };
-        coordinator.publish("key", published).await;
+        coordinator
+            .publish("key", published, |_| async { Ok(()) })
+            .await
+            .expect("publish persists");
         // A caller holding the published token itself must adopt it without
         // waiting on the superseded flight started for the older token.
         let adopted = tokio::time::timeout(
@@ -760,5 +825,136 @@ mod tests {
             adopted.map(|record| record.access_token),
             Some("new-access".to_owned())
         );
+    }
+
+    fn record(access: &str) -> TokenRecord {
+        TokenRecord {
+            client_id: "client".to_owned(),
+            access_token: access.to_owned(),
+            refresh_token: None,
+            scopes: Vec::new(),
+        }
+    }
+
+    fn logging(
+        log: &Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> impl FnOnce(TokenRecord) -> std::future::Ready<Result<(), McpError>> {
+        let log = Arc::clone(log);
+        move |record| {
+            log.lock().expect("persist log").push(record.access_token);
+            std::future::ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn commit_persists_the_published_record_instead_of_a_superseded_result() {
+        let coordinator = RefreshCoordinator::new();
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        coordinator
+            .publish("key", record("interactive"), logging(&log))
+            .await
+            .expect("publish persists");
+        let winner = coordinator
+            .commit("key", record("stale-refresh-result"), logging(&log))
+            .await
+            .expect("commit persists");
+        assert_eq!(winner.access_token, "interactive");
+        assert_eq!(
+            log.lock().expect("persist log").as_slice(),
+            ["interactive", "interactive"]
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_waits_for_an_in_progress_commit_so_the_newer_record_lands_last() {
+        let coordinator = RefreshCoordinator::new();
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel::<()>();
+        let (gate_tx, gate_rx) = tokio::sync::oneshot::channel::<()>();
+        let committing = coordinator.commit("key", record("refreshed"), {
+            let log = Arc::clone(&log);
+            async move |record: TokenRecord| {
+                entered_tx.send(()).expect("announce the write");
+                gate_rx.await.expect("release the write");
+                log.lock().expect("persist log").push(record.access_token);
+                Ok(())
+            }
+        });
+        let publishing = async {
+            entered_rx.await.expect("the commit began writing");
+            let publish = coordinator.publish("key", record("interactive"), logging(&log));
+            tokio::pin!(publish);
+            assert!(
+                tokio::time::timeout(std::time::Duration::ZERO, publish.as_mut())
+                    .await
+                    .is_err(),
+                "the newer record waits for the in-progress write"
+            );
+            gate_tx.send(()).expect("release the commit");
+            publish.await
+        };
+        let (committed, published) = tokio::join!(committing, publishing);
+        assert_eq!(committed.expect("commit").access_token, "refreshed");
+        published.expect("publish");
+        assert_eq!(
+            log.lock().expect("persist log").as_slice(),
+            ["refreshed", "interactive"]
+        );
+        assert_eq!(
+            coordinator
+                .current("key")
+                .await
+                .map(|record| record.access_token),
+            Some("interactive".to_owned())
+        );
+    }
+
+    #[test]
+    fn concurrent_persists_for_distinct_keys_keep_both_records() {
+        let dir =
+            std::env::temp_dir().join(format!("dalgona-tokens-race-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("tokens.json");
+        let barrier = std::sync::Barrier::new(8);
+        std::thread::scope(|scope| {
+            for worker in 0..8 {
+                let (path, barrier) = (&path, &barrier);
+                scope.spawn(move || {
+                    barrier.wait();
+                    for round in 0..50 {
+                        let (issuer, resource) = if (worker + round) % 2 == 0 {
+                            ("issuer-a", "resource-a")
+                        } else {
+                            ("issuer-b", "resource-b")
+                        };
+                        persist_token(
+                            path,
+                            issuer,
+                            resource,
+                            TokenRecord {
+                                client_id: "client".to_owned(),
+                                access_token: format!("{issuer}-{worker}-{round}"),
+                                refresh_token: None,
+                                scopes: Vec::new(),
+                            },
+                        )
+                        .expect("persist keeps both keys");
+                        // Writes only add keys, so a key present after one
+                        // locked write stays present through later writes; a
+                        // torn read-modify-write drops it here.
+                        let file = read_tokens(path);
+                        assert!(
+                            file.tokens
+                                .get(issuer)
+                                .and_then(|resources| resources.get(resource))
+                                .is_some(),
+                            "the written key survives concurrent persists"
+                        );
+                    }
+                });
+            }
+        });
+        let file = read_tokens(&path);
+        assert_eq!(file.tokens.len(), 2, "both issuers survive");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -374,28 +374,28 @@ where
         () = cancel.cancelled() => Err(McpError::NoAskFrontEnd),
         result = coordinator.run(&key, record.access_token.as_str(), operation) => result,
     }?;
-    // Persist only the settled winner: an interactive login published during
-    // the flight supersedes the flight's token and must not be overwritten.
-    // Waiters wake after settle, so `current` already holds the winner.
-    if result.is_some() {
-        let winner = coordinator.current(&key).await.or(result);
-        if let Some(token) = winner.clone() {
-            persist(token).await?;
-        }
-        return Ok(winner);
+    // Persist only the slot's winner, under the coordinator's commit lock:
+    // an interactive login published during or after the flight supersedes
+    // the flight's token and must not be overwritten.
+    match result {
+        Some(settled) => coordinator.commit(&key, settled, persist).await.map(Some),
+        None => Ok(None),
     }
-    Ok(result)
 }
-
 
 /// Maps a failed token-endpoint status for a refresh.
 ///
-/// A client error is a refusal: the refresh token is invalid or revoked, so
-/// it reports `None` and the caller falls back to interactive authorization.
-/// A server error, timeout, or rate limit is transient: it reports an error
-/// so a later request may refresh again.
+/// A refusal that invalidates the credential (400, 401, 403, 404, and other
+/// client errors) reports `None` and the caller falls back to interactive
+/// authorization. A server error, a request timeout (408), or a rate limit
+/// (429) is transient: it reports an error so a later request may refresh
+/// again with the same credential.
 fn refresh_refusal(status: StatusCode) -> Result<Option<TokenRecord>, McpError> {
-    if status.is_client_error() {
+    let transient = matches!(
+        status,
+        StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_MANY_REQUESTS
+    );
+    if status.is_client_error() && !transient {
         return Ok(None);
     }
     Err(auth_error(&format!(
@@ -1121,36 +1121,29 @@ mod tests {
         net::TcpListener,
     };
 
-    async fn token_server(listener: TcpListener, count: Arc<AtomicUsize>) {
-        let quiet = tokio::time::sleep(Duration::from_millis(100));
-        tokio::pin!(quiet);
-        loop {
-            tokio::select! {
-                accepted = listener.accept() => {
-                    let (stream, _) = accepted.expect("token request");
-                    count.fetch_add(1, Ordering::Relaxed);
-                    let mut reader = BufReader::new(stream);
-                    loop {
-                        let mut line = String::new();
-                        reader.read_line(&mut line).await.expect("token headers");
-                        if line == "\r\n" {
-                            break;
-                        }
-                    }
-                    let body =
-                        r#"{"access_token":"new-access","refresh_token":"new-refresh","token_type":"Bearer"}"#;
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                        body.len()
-                    );
-                    reader
-                        .get_mut()
-                        .write_all(response.as_bytes())
-                        .await
-                        .expect("token response");
+    /// Serves exactly `expected` token requests, then returns.
+    async fn token_server(listener: TcpListener, expected: usize, count: Arc<AtomicUsize>) {
+        for _ in 0..expected {
+            let (stream, _) = listener.accept().await.expect("token request");
+            count.fetch_add(1, Ordering::Relaxed);
+            let mut reader = BufReader::new(stream);
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).await.expect("token headers");
+                if line == "\r\n" {
+                    break;
                 }
-                () = &mut quiet => break,
             }
+            let body = r#"{"access_token":"new-access","refresh_token":"new-refresh","token_type":"Bearer"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            reader
+                .get_mut()
+                .write_all(response.as_bytes())
+                .await
+                .expect("token response");
         }
     }
 
@@ -1290,7 +1283,7 @@ mod tests {
         let token_endpoint =
             Url::parse(&format!("http://{address}/token")).expect("token endpoint");
         let count = Arc::new(AtomicUsize::new(0));
-        let server = token_server(listener, Arc::clone(&count));
+        let server = token_server(listener, 1, Arc::clone(&count));
         let client = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()
@@ -1433,7 +1426,7 @@ mod tests {
             .expect("counter listener");
         let address = listener.local_addr().expect("counter address");
         let count = Arc::new(AtomicUsize::new(0));
-        let server = token_server(listener, Arc::clone(&count));
+        let server = token_server(listener, 1, Arc::clone(&count));
         let client = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .no_proxy()
@@ -1541,8 +1534,7 @@ mod tests {
             }
         }
         gate.await.expect("release gate");
-        let body =
-            r#"{"access_token":"stale-access","refresh_token":"stale-refresh","token_type":"Bearer"}"#;
+        let body = r#"{"access_token":"stale-access","refresh_token":"stale-refresh","token_type":"Bearer"}"#;
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
@@ -1623,8 +1615,10 @@ mod tests {
                         refresh_token: None,
                         scopes: Vec::new(),
                     },
+                    |_| async { Ok::<(), McpError>(()) },
                 )
-                .await;
+                .await
+                .expect("interactive record persists");
             gate_tx.send(()).expect("release the flight");
         };
         let (updated, (), ()) = tokio::join!(refreshing, publisher, server);
@@ -1639,6 +1633,32 @@ mod tests {
             &["interactive-access".to_owned()],
             "only the settled winner persists"
         );
+    }
+
+    #[test]
+    fn refresh_refusal_keeps_transient_statuses_retryable() {
+        for status in [
+            StatusCode::BAD_REQUEST,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
+            StatusCode::NOT_FOUND,
+        ] {
+            assert!(
+                matches!(refresh_refusal(status), Ok(None)),
+                "{status} invalidates the credential"
+            );
+        }
+        for status in [
+            StatusCode::REQUEST_TIMEOUT,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ] {
+            assert!(
+                matches!(refresh_refusal(status), Err(McpError::Auth { .. })),
+                "{status} is transient"
+            );
+        }
     }
 
     #[test]

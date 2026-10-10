@@ -42,6 +42,43 @@ const RESPONSE_MAX: usize = 8 * 1024 * 1024;
 const ERROR_BODY_MAX: usize = 64 * 1024;
 const SESSION_ID_MAX: usize = 4096;
 
+struct TokenStore {
+    path: PathBuf,
+    issuer: String,
+    resource: String,
+    cache: Arc<Mutex<Option<token_auth::TokenFile>>>,
+}
+
+impl TokenStore {
+    /// Writes `record` to the token file, then mirrors it into the cache when
+    /// the cache is loaded; an unloaded cache reads the new file on demand.
+    async fn save(self, record: token_auth::TokenRecord) -> Result<(), McpError> {
+        let Self {
+            path,
+            issuer,
+            resource,
+            cache,
+        } = self;
+        let stored = record.clone();
+        let (file_issuer, file_resource) = (issuer.clone(), resource.clone());
+        tokio::task::spawn_blocking(move || {
+            token_auth::persist_token(&path, &file_issuer, &file_resource, stored)
+        })
+        .await
+        .map_err(|_| McpError::Auth {
+            cause: "token persistence failed".to_owned(),
+        })??;
+        if let Some(tokens) = cache.lock().await.as_mut() {
+            tokens
+                .tokens
+                .entry(issuer)
+                .or_default()
+                .insert(resource, record);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug)]
 struct CallDeadline {
     started: Instant,
@@ -365,6 +402,12 @@ impl HttpTransport {
                 reset_deadline: false,
             });
         }
+        if authorization.token != current {
+            *authorization = token_auth::AuthorizationState {
+                token: current,
+                ..token_auth::AuthorizationState::default()
+            };
+        }
         if ledger.attempts > 3 {
             return Ok(AuthStep::Fail(TransportError::Mcp(McpError::HttpAuth {
                 code: StatusCode::UNAUTHORIZED.as_u16(),
@@ -383,6 +426,18 @@ impl HttpTransport {
             && !record.access_token.is_empty()
         {
             ledger.stored_token_attempted = true;
+            ledger.request_id = ids.fetch_add(1, Ordering::Relaxed);
+            return Ok(AuthStep::Retry {
+                reset_deadline: false,
+            });
+        }
+        if let Some(used) = ledger.used_token.as_deref()
+            && let Some(record) = existing.as_ref()
+            && !record.access_token.is_empty()
+            && record.access_token != used
+        {
+            ledger.forget_attempts();
+            *authorization = token_auth::AuthorizationState::default();
             ledger.request_id = ids.fetch_add(1, Ordering::Relaxed);
             return Ok(AuthStep::Retry {
                 reset_deadline: false,
@@ -797,9 +852,9 @@ impl HttpTransport {
     async fn bearer(&self) -> Option<String> {
         let issuer = self.verified_issuer.lock().await.clone()?;
         let resource = token_auth::canonical_resource(&self.url);
-        let tokens = self.load_tokens().await;
-        token_auth::record_for(&tokens, &issuer, &resource)
-            .map(|record| record.access_token.clone())
+        self.lookup(&issuer, &resource)
+            .await
+            .map(|record| record.access_token)
             .filter(|token| !token.is_empty())
     }
 
@@ -820,8 +875,18 @@ impl HttpTransport {
         issuer: &str,
         resource: &str,
     ) -> Result<Option<token_auth::TokenRecord>, TransportError> {
+        Ok(self.lookup(issuer, resource).await)
+    }
+
+    /// The newest record for the credential: the coordinator's settled or
+    /// published record, which every transport shares, else the token file.
+    async fn lookup(&self, issuer: &str, resource: &str) -> Option<token_auth::TokenRecord> {
+        let key = token_auth::refresh_key(issuer, resource);
+        if let Some(record) = self.refreshes.current(&key).await {
+            return Some(record);
+        }
         let tokens = self.load_tokens().await;
-        Ok(token_auth::record_for(&tokens, issuer, resource).cloned())
+        token_auth::record_for(&tokens, issuer, resource).cloned()
     }
 
     async fn set_issuer(&self, issuer: &str) {
@@ -834,83 +899,47 @@ impl HttpTransport {
         record: &token_auth::TokenRecord,
         cancel: &CancellationToken,
     ) -> Result<Option<token_auth::TokenRecord>, TransportError> {
-        let path = self.tokens_path.clone();
-        let issuer = discovery.issuer.clone();
-        let resource = discovery.resource.clone();
-        let cache = Arc::clone(&self.tokens);
-        let cache_issuer = issuer.clone();
-        let cache_resource = resource.clone();
-        let persist = move |record: token_auth::TokenRecord| async move {
-            let cache_record = record.clone();
-            let result = tokio::task::spawn_blocking(move || {
-                token_auth::persist_token(&path, &issuer, &resource, record)
-            })
-            .await
-            .map_err(|_| McpError::Auth {
-                cause: "token persistence failed".to_owned(),
-            })?;
-            result?;
-            let mut tokens = cache.lock().await;
-            tokens
-                .get_or_insert_with(token_auth::TokenFile::default)
-                .tokens
-                .entry(cache_issuer)
-                .or_default()
-                .insert(cache_resource, cache_record);
-            Ok(())
-        };
-        let updated = oauth::refresh(
+        let store = self.store(discovery);
+        oauth::refresh(
             &self.refreshes,
             &self.oauth,
             discovery,
             record,
             self.connect_timeout,
             cancel,
-            persist,
+            move |record| store.save(record),
         )
         .await
-        .map_err(TransportError::Mcp)?;
-        if let Some(record) = updated.as_ref() {
-            self.remember(discovery, record.clone()).await;
-        }
-        Ok(updated)
+        .map_err(TransportError::Mcp)
     }
+
+    /// The write that saves a record to the token file and this transport's
+    /// loaded cache, for the coordinator to run under its commit lock.
+    fn store(&self, discovery: &Discovery) -> TokenStore {
+        TokenStore {
+            path: self.tokens_path.clone(),
+            issuer: discovery.issuer.clone(),
+            resource: discovery.resource.clone(),
+            cache: Arc::clone(&self.tokens),
+        }
+    }
+
     /// Persists an interactively authorized record and publishes it to the
-    /// refresh coordinator, so a transport still holding an older access
+    /// refresh coordinator, so every transport still holding an older access
     /// token adopts it instead of a stale cached refresh result.
     async fn persist(
         &self,
         discovery: &Discovery,
         record: token_auth::TokenRecord,
     ) -> Result<(), TransportError> {
-        let path = self.tokens_path.clone();
-        let issuer = discovery.issuer.clone();
-        let resource = discovery.resource.clone();
-        let stored = record.clone();
-        tokio::task::spawn_blocking(move || {
-            token_auth::persist_token(&path, &issuer, &resource, stored)
-        })
-        .await
-        .map_err(|_| {
-            TransportError::Mcp(McpError::Auth {
-                cause: "token persistence failed".to_owned(),
-            })
-        })?
-        .map_err(TransportError::Mcp)?;
         let key = token_auth::refresh_key(&discovery.issuer, &discovery.resource);
-        self.refreshes.publish(&key, record.clone()).await;
-        self.remember(discovery, record).await;
-        Ok(())
-    }
-    async fn remember(&self, discovery: &Discovery, record: token_auth::TokenRecord) {
-        let mut tokens = self.load_tokens().await;
-        tokens
-            .tokens
-            .entry(discovery.issuer.clone())
-            .or_default()
-            .insert(discovery.resource.clone(), record);
-        *self.tokens.lock().await = Some(tokens);
+        let store = self.store(discovery);
+        self.refreshes
+            .publish(&key, record, move |record| store.save(record))
+            .await
+            .map_err(TransportError::Mcp)?;
         self.set_issuer(&discovery.issuer).await;
+        Ok(())
     }
 
     async fn discover(
