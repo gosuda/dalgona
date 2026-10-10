@@ -192,6 +192,58 @@ fn seventeenth_live_watch_rejects_including_paused_and_muted() -> Result<(), Box
 }
 
 #[test]
+fn filter_is_capped_before_compilation() -> Result<(), Box<dyn Error>> {
+    let at_cap = "a".repeat(1024);
+    parse_request(&raw(&format!(
+        "{{\"action\":\"watch\",\"job\":\"j1\",\"filter\":\"{at_cap}\"}}"
+    ))?)?;
+    let over = "a".repeat(1025);
+    let error = parse_request(&raw(&format!(
+        "{{\"action\":\"watch\",\"job\":\"j1\",\"filter\":\"{over}\"}}"
+    ))?)
+    .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "monitor: filter is longer than 1024 characters."
+    );
+    Ok(())
+}
+
+#[test]
+fn full_table_rejects_before_compiling_filter() -> Result<(), Box<dyn Error>> {
+    let (live, _) = FakeJobs::live("j1");
+    let mut state = MonitorState::default();
+    let config = MonitorConfig::default();
+    let now = Timestamp::UNIX_EPOCH;
+    for _ in 0..16 {
+        watch(&mut state, &watch_request("j1", "ok")?, &live, now, &config)?;
+    }
+    let uncompilable = watch_request("j1", "(")?;
+    assert_eq!(
+        watch(&mut state, &uncompilable, &live, now, &config)
+            .unwrap_err()
+            .to_string(),
+        "monitor: 16 monitors are live; stop one first."
+    );
+    Ok(())
+}
+
+#[test]
+fn filter_exceeding_automaton_size_limit_is_rejected() -> Result<(), Box<dyn Error>> {
+    let (live, _) = FakeJobs::live("j1");
+    let mut state = MonitorState::default();
+    let config = MonitorConfig::default();
+    let heavy = watch_request("j1", "((a{100}){100}){100}")?;
+    assert!(
+        watch(&mut state, &heavy, &live, Timestamp::UNIX_EPOCH, &config)
+            .unwrap_err()
+            .to_string()
+            .starts_with("monitor: filter is not a valid regex: ")
+    );
+    Ok(())
+}
+
+#[test]
 fn first_batch_coalesces_and_second_obeys_rate_limit() -> Result<(), Box<dyn Error>> {
     let (live, job) = FakeJobs::live("j1");
     let mut state = MonitorState::default();
@@ -240,6 +292,52 @@ fn overflow_appends_exact_dropped_trailer() -> Result<(), Box<dyn Error>> {
             .text()
             .contains("(10 more lines from job j1 were dropped.)")
     );
+    Ok(())
+}
+
+#[test]
+fn line_wider_than_queue_drops_alone_without_evicting_others() -> Result<(), Box<dyn Error>> {
+    let (live, job) = FakeJobs::live("j1");
+    let mut state = MonitorState::default();
+    let config = MonitorConfig::default();
+    let epoch = Timestamp::UNIX_EPOCH;
+    watch(
+        &mut state,
+        &watch_request("j1", "^ok")?,
+        &live,
+        epoch,
+        &config,
+    )?;
+    watch(
+        &mut state,
+        &watch_request("j1", "^big")?,
+        &live,
+        epoch,
+        &config,
+    )?;
+    on_output(&mut state, job, "ok 1", epoch, &config);
+    let oversized = format!("big {}", "x".repeat(4096));
+    on_output(&mut state, job, &oversized, epoch, &config);
+    assert_eq!(state.output.len(), 1);
+    assert_eq!(state.monitors[&MonitorId(1)].overflow_lines, 0);
+    assert_eq!(state.monitors[&MonitorId(2)].overflow_lines, 1);
+    Ok(())
+}
+
+#[test]
+fn job_ids_lists_each_job_once() -> Result<(), Box<dyn Error>> {
+    let (mut live, first) = FakeJobs::live("j1");
+    let second = JobId::new_v7();
+    live.jobs.insert("j2".into(), (second, true));
+    let mut state = MonitorState::default();
+    let config = MonitorConfig::default();
+    let now = Timestamp::UNIX_EPOCH;
+    for job in ["j1", "j1", "j1", "j2"] {
+        watch(&mut state, &watch_request(job, "ok")?, &live, now, &config)?;
+    }
+    let ids = state.job_ids();
+    assert_eq!(ids.len(), 2);
+    assert!(ids.contains(&first) && ids.contains(&second));
     Ok(())
 }
 

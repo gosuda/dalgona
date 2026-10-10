@@ -2,7 +2,7 @@
 //! Monitor lifecycle: the `monitor` tool contract, watch validation with the
 //! exact error texts, config parsing, and stop/rearm.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
 
 use dal_core::{JobId, RawJson, Timestamp};
@@ -15,7 +15,7 @@ use super::super::JobsView;
 pub(crate) const MONITOR_DESCRIPTION: &str = "Watch the output of one of your background exec jobs and get the lines that match filter as messages, without polling. The watch ends when the job ends; the job's own report still arrives. At most 16 watches at once.";
 
 /// Input schema for the model-visible `monitor` tool.
-pub(crate) const MONITOR_SCHEMA: &str = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"enum\":[\"watch\",\"stop\",\"rearm\"]},\"job\":{\"type\":\"string\",\"description\":\"The UUIDv7 job id. watch only.\"},\"filter\":{\"type\":\"string\",\"description\":\"A regex; each matching output line is an event. watch only.\"},\"description\":{\"type\":\"string\",\"maxLength\":80},\"id\":{\"type\":\"string\",\"description\":\"The monitor id, m<n>. stop and rearm only.\"}},\"required\":[\"action\"],\"additionalProperties\":false}";
+pub(crate) const MONITOR_SCHEMA: &str = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"enum\":[\"watch\",\"stop\",\"rearm\"]},\"job\":{\"type\":\"string\",\"description\":\"The UUIDv7 job id. watch only.\"},\"filter\":{\"type\":\"string\",\"maxLength\":1024,\"description\":\"A regex; each matching output line is an event. watch only.\"},\"description\":{\"type\":\"string\",\"maxLength\":80},\"id\":{\"type\":\"string\",\"description\":\"The monitor id, m<n>. stop and rearm only.\"}},\"required\":[\"action\"],\"additionalProperties\":false}";
 
 /// Pause notice delivered with the wake that reaches the wake budget.
 pub(crate) const PAUSE_NOTICE: &str = "Monitor paused after repeated updates. The job's report still arrives when it ends; use monitor rearm only for intermediate events.";
@@ -25,6 +25,12 @@ pub(crate) const MUTED_NOTICE: &str = "auto-muted: fire budget (200/24h) reached
 
 /// Maximum live monitors per session, including paused and muted ones.
 pub(crate) const MAX_LIVE_MONITORS: usize = 16;
+
+/// Longest accepted `filter` regex source, in Unicode scalar values.
+pub(crate) const MAX_FILTER_CHARS: usize = 1024;
+
+/// Compiled-NFA heap ceiling for one `filter`, in bytes.
+const FILTER_SIZE_LIMIT: usize = 1 << 20;
 
 /// Matched lines delivered per monitor in a rolling 24 hours.
 pub(crate) const FIRE_BUDGET: usize = 200;
@@ -69,8 +75,11 @@ impl MonitorState {
             .count()
     }
 
+    /// The distinct jobs with at least one retained watch, so one line read
+    /// serves every watch on the same job.
     pub(crate) fn job_ids(&self) -> Vec<JobId> {
-        self.monitors.values().map(|monitor| monitor.job).collect()
+        let jobs: HashSet<JobId> = self.monitors.values().map(|monitor| monitor.job).collect();
+        jobs.into_iter().collect()
     }
 }
 
@@ -267,6 +276,8 @@ pub(crate) enum MonitorError {
     NotRunning { job: Box<str> },
     #[error("monitor: filter is not a valid regex: {error}.")]
     BadFilter { error: Box<str> },
+    #[error("monitor: filter is longer than {max} characters.")]
+    FilterTooLong { max: usize },
     #[error("monitor: 16 monitors are live; stop one first.")]
     Full,
     #[error("monitor: no monitor {id}.")]
@@ -403,6 +414,11 @@ pub(crate) fn parse_request(args: &RawJson) -> Result<MonitorRequest, MonitorErr
                     field: "filter".into(),
                 });
             };
+            if filter.chars().count() > MAX_FILTER_CHARS {
+                return Err(MonitorError::FilterTooLong {
+                    max: MAX_FILTER_CHARS,
+                });
+            }
             Ok(MonitorRequest {
                 action: MonitorAction::Watch {
                     job,
@@ -469,9 +485,6 @@ pub(crate) fn watch(
             if !jobs.is_live_top_level_exec(job_id) {
                 return Err(MonitorError::NotRunning { job: job.clone() });
             }
-            let compiled = Regex::new(filter).map_err(|error| MonitorError::BadFilter {
-                error: error.to_string().into(),
-            })?;
             let live = state
                 .monitors
                 .values()
@@ -480,6 +493,12 @@ pub(crate) fn watch(
             if live >= MAX_LIVE_MONITORS {
                 return Err(MonitorError::Full);
             }
+            let compiled = Regex::builder()
+                .configure(Regex::config().nfa_size_limit(Some(FILTER_SIZE_LIMIT)))
+                .build(filter)
+                .map_err(|error| MonitorError::BadFilter {
+                    error: error.to_string().into(),
+                })?;
             let id = MonitorId(state.next_id);
             state.next_id = state.next_id.saturating_add(1);
             let reply_description: Box<str> = description

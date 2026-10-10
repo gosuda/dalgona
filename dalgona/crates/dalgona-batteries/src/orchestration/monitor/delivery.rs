@@ -68,8 +68,8 @@ fn queue_chars(state: &MonitorState) -> usize {
 
 /// Enqueues one matching line, evicting the oldest lines first while the
 /// shared queue exceeds `max_lines` or `max_chars - 512`. Each eviction
-/// counts toward its owner's dropped-line total. A line that fits nowhere
-/// is dropped against its own monitor.
+/// counts toward its owner's dropped-line total. A line wider than the whole
+/// queue is dropped against its own monitor without evicting anything.
 fn push_line(
     state: &mut MonitorState,
     id: MonitorId,
@@ -83,6 +83,12 @@ fn push_line(
     )
     .unwrap_or(usize::MAX);
     let width = text.chars().count();
+    if width > capacity {
+        if let Some(owner) = state.monitors.get_mut(&id) {
+            owner.overflow_lines = owner.overflow_lines.saturating_add(1);
+        }
+        return;
+    }
     while state.output.len() >= config.max_lines
         || queue_chars(state).saturating_add(width) > capacity
     {
@@ -92,12 +98,6 @@ fn push_line(
         if let Some(owner) = state.monitors.get_mut(&oldest.monitor) {
             owner.overflow_lines = owner.overflow_lines.saturating_add(1);
         }
-    }
-    if state.output.is_empty() && width > capacity {
-        if let Some(owner) = state.monitors.get_mut(&id) {
-            owner.overflow_lines = owner.overflow_lines.saturating_add(1);
-        }
-        return;
     }
     state.output.push_back(OutputLine {
         monitor: id,
