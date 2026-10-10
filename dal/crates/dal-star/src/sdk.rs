@@ -473,10 +473,6 @@ fn dal_methods(builder: &mut MethodsBuilder) {
     /// `dal.rule(text, pattern=None, judge=None, always_apply=False,
     /// scope=None, interrupt_mode=None, repeat_mode=None, repeat_gap=None)`;
     /// a rule needs a pattern unless it always applies.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "spec P02 names eight rule keywords"
-    )]
     fn rule<'v>(
         #[starlark(this)] _this: &DalNamespace,
         #[starlark(require = named)] pattern: Option<String>,
