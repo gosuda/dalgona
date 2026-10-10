@@ -93,21 +93,23 @@ async fn copy_child_approval(
 }
 
 /// Runs the prompted turn's interrupt inside the child's task group: after
-/// `delay` the turn is cancelled, and the timer dies with the session.
-fn spawn_prompt_interrupt(tasks: &SessionTasks, handle: SessionHandle, delay: std::time::Duration) {
+/// `delay` the named turn is cancelled, and the timer dies with the session.
+fn spawn_prompt_interrupt(
+    tasks: &SessionTasks,
+    handle: SessionHandle,
+    turn: dal_core::TurnId,
+    delay: std::time::Duration,
+) {
     tasks.spawn(async move {
         tokio::time::sleep(delay).await;
-        let (reply, receipt) = oneshot::channel();
-        if handle
-            .turn(crate::session::TurnRequest {
-                op: TurnOp::Cancel,
-                reply,
-            })
-            .await
-            .is_ok()
-        {
-            let _ = receipt.await;
-        }
+        let _ = handle
+            .submit(
+                Command::Cancel {
+                    scope: dal_core::CancelScope::Turn(turn),
+                },
+                dal_core::ClientId::new("core"),
+            )
+            .await;
     });
 }
 
@@ -1160,13 +1162,13 @@ impl Backend {
                 dal_core::ClientId::new("core"),
             )
             .await;
-        if !matches!(reply, Ok(Reply::Accepted { .. })) {
+        let Ok(Reply::Accepted { turn, .. }) = reply else {
             child_shared.set_next_turn_step_cap(None);
             self.release_prompt_slot(id);
             return AgentsReply::Cancelled { id };
-        }
+        };
         if let Some(delay) = interrupt {
-            spawn_prompt_interrupt(&child_tasks, handle, delay);
+            spawn_prompt_interrupt(&child_tasks, handle, turn, delay);
         }
         AgentsReply::Prompted { id }
     }
@@ -1505,9 +1507,53 @@ impl Backend {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU64;
+
     use super::*;
     use crate::host::{Env, Host, Product, SessionRef};
+    use crate::session::control::ControlCell;
+    use crate::session::{ActorRequest, ResolutionInbox};
     use dal_core::{ApprovalMode, CallId, ClientId, Config, ConfigProduct, Workspace};
+
+    #[tokio::test]
+    async fn prompt_interrupt_targets_ended_turn_without_cancelling_successor() {
+        let prompted = dal_core::TurnId::new(NonZeroU64::MIN);
+        let successor = dal_core::TurnId::new(NonZeroU64::new(2).expect("nonzero turn"));
+        let control = Arc::new(std::sync::Mutex::new(ControlCell::new()));
+        let successor_token = {
+            let mut control = control
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            control.begin_turn(prompted);
+            control.end_turn(prompted);
+            control.begin_turn(successor)
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let handle = SessionHandle::new(
+            SessionId::new_v7(),
+            tx,
+            Arc::clone(&control),
+            Arc::new(ResolutionInbox::new()),
+        );
+        let tasks = SessionTasks::new();
+        spawn_prompt_interrupt(&tasks, handle, prompted, std::time::Duration::ZERO);
+
+        let request = rx.recv().await.expect("timer submits a cancellation");
+        let ActorRequest::Submit { command, reply, .. } = request else {
+            panic!("timer submitted an unrelated actor request");
+        };
+        assert_eq!(
+            command,
+            Command::Cancel {
+                scope: dal_core::CancelScope::Turn(prompted),
+            }
+        );
+        reply
+            .send(Ok(Reply::Done(dal_core::Output::Nothing)))
+            .expect("timer is waiting for the command reply");
+        assert!(!successor_token.is_cancelled());
+        tasks.stop().await;
+    }
 
     #[test]
     fn cancel_child_reports_non_lifecycle_close_failures() {
