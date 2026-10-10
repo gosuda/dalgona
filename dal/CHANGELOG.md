@@ -1,7 +1,6 @@
 # Changelog
 
 ## Unreleased
-// refused_by: statement_fold · collision: none (no common ancestor text)
 - Keep cancelled scope handles terminal when upstream work finishes late. Scope cancellation also closes inference streams that have already opened.
 - Show bidirectional controls as visible escape sequences in approval text. Reject control-bearing sign-in URLs before opening a browser or writing a terminal hyperlink.
 - Fix extension file services rejecting paths outside the workspace and reporting path and I/O failures. Missing files still return no content. Path checks do not provide isolation from concurrent filesystem changes.
@@ -95,4 +94,3 @@
 - Change `eval` to take `{code, uses?, data?}`. A cell inherits its operations from `eval.uses`, and `uses = []` makes it pure.
 - Remove the `notify` example plugin; its behavior cannot run under the v1 hook limits.
 - Fix extension records: `append_record` now writes a journal record before it returns, `records` reads only the calling extension's rows on the current leaf path, and a tool call runs as the extension that registered it, with that extension's `inject` set. Records survive resume and follow `/tree` leaf moves.
-// weave: run 'weave explain dal/CHANGELOG.md' for per-hunk detail, 'weave check' to verify your resolution
