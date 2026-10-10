@@ -86,21 +86,26 @@ fn parse_child_policy_tool(name: &str) -> Result<Name, HostError> {
     })
 }
 
-/// Reads the newest host-owned child-policy record a journal carries; a
-/// journal without one leaves the session unrestricted and on the configured
-/// mode. Provenance is enforced when records are constructed; the journal
-/// format does not carry a second authentication field.
+/// Reads the one host-owned child-policy record a journal carries; a journal
+/// without one leaves the session unrestricted and on the configured mode.
+/// The child-start path writes exactly one, so a second occurrence is a
+/// forgery and fails the replay instead of letting the newest record win.
 fn replay_child_policy(records: &[Record]) -> Result<Option<ChildPolicy>, HostError> {
-    let found = records.iter().rev().find(|record| {
+    let mut found = records.iter().filter(|record| {
         matches!(
             record,
             Record::Ext { ext, kind, .. }
                 if super::is_child_policy_record(ext.as_ref(), kind.as_ref())
         )
     });
-    let Some(Record::Ext { body, .. }) = found else {
+    let Some(Record::Ext { body, .. }) = found.next() else {
         return Ok(None);
     };
+    if found.next().is_some() {
+        return Err(HostError::Config {
+            message: "journal carries more than one child policy record".into(),
+        });
+    }
     let body: ChildPolicyBody =
         sonic_rs::from_str(body.as_str()).map_err(|error| HostError::Config {
             message: format!("invalid child policy record: {error}").into(),
@@ -1226,5 +1231,57 @@ fn snapshot_args(entry: &SessionPorts) -> crate::session::projection::SnapshotAr
         created_at: None,
         archived: None,
         page: PageReq::default(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use dal_core::{RawJson, Record, Timestamp};
+
+    use super::replay_child_policy;
+
+    fn policy_record(ext: &str, kind: &str, body: &str) -> Record {
+        Record::Ext {
+            at: Timestamp::UNIX_EPOCH,
+            ext: ext.into(),
+            kind: kind.into(),
+            body: RawJson::parse(body).expect("record body parses"),
+        }
+    }
+
+    #[test]
+    fn a_single_policy_record_replays() {
+        let records = [policy_record(
+            "dal-agent",
+            "child_policy",
+            r#"{"tools":["read_file"],"approval":"ask"}"#,
+        )];
+        let policy = replay_child_policy(&records)
+            .expect("policy replays")
+            .expect("policy present");
+        assert_eq!(policy.tools.map(|tools| tools.len()), Some(1));
+    }
+
+    #[test]
+    fn a_second_policy_record_fails_the_replay() {
+        let records = [
+            policy_record(
+                "dal-agent",
+                "child_policy",
+                r#"{"tools":["read_file"],"approval":"ask"}"#,
+            ),
+            policy_record(
+                "dal-agent",
+                "child_policy",
+                r#"{"tools":null,"approval":"all"}"#,
+            ),
+        ];
+        assert!(replay_child_policy(&records).is_err());
+    }
+
+    #[test]
+    fn other_records_leave_the_session_unrestricted() {
+        let records = [policy_record("focus", "child_policy", "{}")];
+        assert!(replay_child_policy(&records).expect("replays").is_none());
     }
 }

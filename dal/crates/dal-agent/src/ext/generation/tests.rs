@@ -218,6 +218,26 @@ fn skill_mcp_requires_declaring_extension_to_inject_mcp() {
 }
 
 #[test]
+fn the_child_policy_extension_name_is_builtin_only() {
+    for origin in [Origin::Bundled, Origin::User] {
+        let plugin = ext("dal-agent", origin).build().expect("valid identity");
+        let err = ValidatedExtensions::validate(vec![plugin], None)
+            .expect_err("a non-builtin dal-agent extension is rejected");
+        assert!(matches!(
+            err,
+            RegistrationError::Conflict {
+                kind: "extension",
+                ..
+            }
+        ));
+    }
+    let builtin = ext("dal-agent", Origin::Builtin)
+        .build()
+        .expect("valid identity");
+    assert!(ValidatedExtensions::validate(vec![builtin], None).is_ok());
+}
+
+#[test]
 fn generation_rejects_conflicts_before_publish() {
     let product = ext("core", Origin::Builtin)
         .tool(stub_tool("dup"), Visibility::Model)
