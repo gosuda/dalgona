@@ -41,7 +41,7 @@ use super::dream::{
 use super::{DREAM_SIDECAR_NAME, PROBE_INTERVAL_HOURS};
 
 /// dream-job idle interval: 20 minutes without input.
-const IDLE_INTERVAL: Duration = Duration::from_secs(20 * 60);
+const IDLE_INTERVAL: Duration = Duration::from_mins(20);
 
 /// Inbox messages for one session task.
 pub(crate) enum TaskMsg {

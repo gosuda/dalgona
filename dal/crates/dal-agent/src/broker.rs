@@ -266,7 +266,7 @@ pub(crate) fn default_timeout(question: &Question) -> Duration {
     match question {
         Question::Approval { .. } => Duration::from_secs(300),
         Question::Grant { .. } => Duration::from_secs(120),
-        _ => Duration::from_secs(1800),
+        _ => Duration::from_mins(30),
     }
 }
 
