@@ -20,7 +20,8 @@ use dal_core::ext::{
 use dal_core::{
     AgentReport, AgentStart, AgentsOp, AgentsReply, Answer, CallId, EntryId, FetchRequest,
     FetchResponse, Inference, JobsOp, JobsReply, ModelRequest, Name, Notice, Question, RawJson,
-    RunOutput, RunRequest, SessionId, SidecarOp, Stop, ToolClass, TurnId, TurnOp, TurnOpReply,
+    RunOutput, RunRequest, Service, SessionId, SidecarOp, Stop, ToolClass, TurnId, TurnOp,
+    TurnOpReply,
 };
 
 use super::plan::{self, BatteryState, Host};
@@ -64,6 +65,17 @@ pub(crate) struct FakeServices {
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Mirrors the store's session-name admission rule (`dal-store`'s
+/// `normalize_name`): 1-64 characters, no control characters, and at
+/// least one character other than `0-9`, `a-f`, and `-`.
+fn name_admitted(name: &str) -> bool {
+    let id_only = !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f' | b'-'));
+    (1..=64).contains(&name.chars().count()) && !name.chars().any(char::is_control) && !id_only
 }
 
 fn unavailable<T: Send + 'static>(calls: &AtomicUsize) -> ServiceFuture<'static, T> {
@@ -224,7 +236,18 @@ impl Services for FakeServices {
     fn agents(&self, _who: &Caller, op: AgentsOp) -> ServiceFuture<'_, AgentsReply> {
         match op {
             AgentsOp::Start(start) => {
+                let name = start.name.clone();
                 locked(&self.agent_starts).push(start);
+                // Mirror the store's session-name admission rule so a child
+                // name that the real host would refuse fails here too.
+                if !name_admitted(&name) {
+                    return Box::pin(async {
+                        Err(ServiceError::failed(
+                            Some(Service::Agents),
+                            "a session name must have 1 to 64 characters, no control characters, and at least one character other than 0-9, a-f, and -",
+                        ))
+                    });
+                }
                 Box::pin(async {
                     Ok(AgentsReply::Started {
                         id: SessionId::new_v7(),

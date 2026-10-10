@@ -267,7 +267,11 @@ async fn a_refused_child_start_is_a_typed_error_not_a_cancellation() {
         "a valid child reports Started: {started}"
     );
     assert!(
-        !started.contains("Cancelled"),
-        "the child reached a terminal state: {started}"
+        started.contains("Await {"),
+        "the await resolves to a completed report, not Pending or Cancelled: {started}"
+    );
+    assert!(
+        started.contains("stop: EndTurn"),
+        "the report carries a terminal stop kind: {started}"
     );
 }

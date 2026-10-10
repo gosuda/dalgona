@@ -800,18 +800,17 @@ impl Backend {
             prompt = format!("System: {system}\n\n{prompt}");
         }
         if let Some(model) = model
-            && child
+            && let Err(error) = child
                 .submit(dal_core::Command::SetModel {
                     model,
                     save: dal_core::Save::SessionOnly,
                 })
                 .await
-                .is_err()
         {
             let _ = host.close(child_id).await;
             return Err(ServiceError::failed(
                 Some(Service::Agents),
-                "the child session could not take its model; it was closed again",
+                format!("the child session could not take its model; it was closed again: {error}"),
             ));
         }
         // A refused start must not collapse into `Cancelled`: the typed
