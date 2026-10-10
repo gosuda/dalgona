@@ -55,6 +55,9 @@ const TASK_JOB_NAME: &str = "agents-task";
 /// Deadline for one git call of the isolation backend.
 const GIT_CALL_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Skip reason of a step the run never started because it was cancelled.
+const CANCELLED_SKIP: &str = "the run was cancelled";
+
 #[cfg(test)]
 mod tests;
 
@@ -2517,6 +2520,28 @@ enum StepOutcome {
     },
 }
 
+/// The ledger of one run's steps: which started, which ended, and what each
+/// contributed.
+struct StepBook {
+    reports: Vec<super::workflow::StepResult>,
+    outcomes: Vec<Option<StepOutcome>>,
+    started: Vec<bool>,
+    ended: Vec<bool>,
+    active: tokio::task::JoinSet<(usize, super::workflow::Step, Result<StepOutcome, String>)>,
+}
+
+impl StepBook {
+    fn new(steps: usize) -> Self {
+        Self {
+            reports: Vec::new(),
+            outcomes: (0..steps).map(|_| None).collect(),
+            started: vec![false; steps],
+            ended: vec![false; steps],
+            active: tokio::task::JoinSet::new(),
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 enum ItemError {
     #[error("{0}")]
@@ -2592,54 +2617,30 @@ impl Coordinator {
         workflow: &super::workflow::Workflow,
         mut control: mpsc::Receiver<RunControl>,
     ) -> Result<Vec<StepOutcome>, String> {
-        let mut reports: Vec<super::workflow::StepResult> = Vec::new();
-        let mut outcomes: Vec<Option<StepOutcome>> =
-            (0..workflow.steps.len()).map(|_| None).collect();
-        let mut started = vec![false; workflow.steps.len()];
-        let mut ended = vec![false; workflow.steps.len()];
-        let mut active = tokio::task::JoinSet::new();
+        let mut book = StepBook::new(workflow.steps.len());
         let mut failure = None;
-        while ended.iter().any(|done| !done) {
-            for (index, step) in workflow.steps.iter().enumerate() {
-                if started[index] || !step.after.iter().all(|&dep| ended[dep]) {
-                    continue;
-                }
-                started[index] = true;
-                let coordinator = Arc::clone(self);
-                let step = step.clone();
-                let reports = reports.clone();
-                active.spawn(async move {
-                    let result = coordinator.run_step(&step, &reports).await;
-                    (index, step, result)
-                });
+        loop {
+            self.admit_steps(workflow, &mut book);
+            if book.ended.iter().all(|done| *done) {
+                break;
             }
             tokio::select! {
                 Some(control) = control.recv() => {
                     self.on_control(control);
                 }
-                joined = active.join_next() => {
+                joined = book.active.join_next() => {
                     match joined {
                         Some(Ok((index, step, Ok(outcome)))) => {
-                            let report = match &outcome {
-                                StepOutcome::Tasks { results, .. } => Self::step_report(&step, results),
-                                StepOutcome::Skipped { .. } => super::workflow::StepResult {
-                                    name: step.name,
-                                    task_report: None,
-                                    pool_items: None,
-                                },
-                            };
-                            reports.push(report);
-                            ended[index] = true;
-                            outcomes[index] = Some(outcome);
+                            Self::end_step(&mut book, index, &step, outcome);
                         }
                         Some(Ok((index, _, Err(message)))) => {
-                            ended[index] = true;
+                            book.ended[index] = true;
                             self.cancel.cancel();
                             failure.get_or_insert(message);
                         }
                         Some(Err(error)) => {
                             self.cancel.cancel();
-                            while active.join_next().await.is_some() {}
+                            while book.active.join_next().await.is_some() {}
                             return Err(format!("a workflow step stopped unexpectedly: {error}"));
                         }
                         None => return Err("the workflow has unresolved dependencies".into()),
@@ -2649,8 +2650,62 @@ impl Coordinator {
         }
         match failure {
             Some(message) => Err(message),
-            None => Ok(outcomes.into_iter().flatten().collect()),
+            None => Ok(book.outcomes.into_iter().flatten().collect()),
         }
+    }
+
+    /// Starts every step whose dependencies ended. A cancelled run starts
+    /// nothing: its ready steps end skipped, which can ready their
+    /// dependents in turn.
+    fn admit_steps(self: &Arc<Self>, workflow: &super::workflow::Workflow, book: &mut StepBook) {
+        loop {
+            let mut skipped = false;
+            for (index, step) in workflow.steps.iter().enumerate() {
+                if book.started[index] || !step.after.iter().all(|&dep| book.ended[dep]) {
+                    continue;
+                }
+                book.started[index] = true;
+                if self.cancel.is_cancelled() {
+                    let outcome = StepOutcome::Skipped {
+                        name: step.name.clone(),
+                        reason: CANCELLED_SKIP.to_owned(),
+                    };
+                    Self::end_step(book, index, step, outcome);
+                    skipped = true;
+                    continue;
+                }
+                let coordinator = Arc::clone(self);
+                let step = step.clone();
+                let reports = book.reports.clone();
+                book.active.spawn(async move {
+                    let result = coordinator.run_step(&step, &reports).await;
+                    (index, step, result)
+                });
+            }
+            if !skipped {
+                return;
+            }
+        }
+    }
+
+    /// Records one ended step's outcome and the report its dependents read.
+    fn end_step(
+        book: &mut StepBook,
+        index: usize,
+        step: &super::workflow::Step,
+        outcome: StepOutcome,
+    ) {
+        let report = match &outcome {
+            StepOutcome::Tasks { results, .. } => Self::step_report(step, results),
+            StepOutcome::Skipped { .. } => super::workflow::StepResult {
+                name: step.name.clone(),
+                task_report: None,
+                pool_items: None,
+            },
+        };
+        book.reports.push(report);
+        book.ended[index] = true;
+        book.outcomes[index] = Some(outcome);
     }
 
     async fn run_step(
@@ -3585,7 +3640,8 @@ impl Coordinator {
         let unfinished = result.unfinished();
         let sections = sections_of(&steps);
         let cancelled = self.cancel.is_cancelled();
-        let (text, outcome) = if result.is_done() {
+        let skipped_by_cancel = steps.iter().any(StepOutcome::skipped_by_cancel);
+        let (text, outcome) = if result.is_done() && !skipped_by_cancel {
             (
                 super::delivery::run_notice(
                     self.run,
@@ -3730,6 +3786,11 @@ fn sections_of(steps: &[StepOutcome]) -> Vec<super::delivery::StepNotice<'_>> {
 }
 
 impl StepOutcome {
+    /// Whether this step never started because the run was cancelled.
+    fn skipped_by_cancel(&self) -> bool {
+        matches!(self, Self::Skipped { reason, .. } if reason == CANCELLED_SKIP)
+    }
+
     fn results(&self) -> &[TaskResult] {
         match self {
             StepOutcome::Tasks { results, .. } => results,

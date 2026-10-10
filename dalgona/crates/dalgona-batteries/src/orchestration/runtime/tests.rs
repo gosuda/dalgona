@@ -59,6 +59,9 @@ struct Script {
     refuse_start: Option<dal_core::AgentRefusal>,
     /// Whether awaited children end without storing a report.
     silent: bool,
+    /// Whether the next settled job makes the session abort its runs, the way
+    /// a user abort lands between two steps.
+    abort_on_settle: bool,
     /// Grace prompts the host accepted, in order.
     prompts: Vec<(SessionId, String)>,
     /// Await calls served so far; each later one reports a new entry.
@@ -380,6 +383,13 @@ impl Services for Host {
             return self.wait_job(id);
         }
         let mut script = locked(&self.script);
+        let settled_task = match &op {
+            JobsOp::Settle { id, .. } => script
+                .jobs
+                .iter()
+                .any(|(job, parent, _)| job.id == *id && parent.is_some()),
+            _ => false,
+        };
         let reply = match op {
             JobsOp::Spawn { parent, name, .. } => {
                 let id = JobId::new_v7();
@@ -451,9 +461,16 @@ impl Services for Host {
             JobsOp::Hold { .. } | JobsOp::Unhold { .. } => Ok(JobsReply::Held(Vec::new())),
             _ => Err(ServiceError::failed(None, "unscripted job operation")),
         };
+        let aborts = settled_task && reply.is_ok() && std::mem::take(&mut script.abort_on_settle);
         drop(script);
         self.changed.notify_waiters();
-        Box::pin(async move { reply })
+        match locked(&self.runtime).clone() {
+            Some((runtime, session)) if aborts => Box::pin(async move {
+                let _ = runtime.command(session, "abort", "").await;
+                reply
+            }),
+            _ => Box::pin(async move { reply }),
+        }
     }
     fn open_asks(&self, _who: &Caller) -> ServiceFuture<'_, usize> {
         unavailable()
@@ -2551,6 +2568,51 @@ async fn a_failed_prune_still_retains_the_moved_worktree_and_says_so() -> TestRe
     assert!(
         text.contains("stale worktree records remain: fatal: prune denied"),
         "{text}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_failed_step_starts_no_dependent_step_and_no_task_job_for_it() -> TestResult {
+    let fixture = Fixture::open().await?;
+    fixture.script().report =
+        Some("item\n".repeat(crate::orchestration::pool::ITEM_LINES_LIMIT + 1));
+    fixture.tool(r#"{"action":"run","steps":[{"name":"source","prompt":"list items","tools":["read"],"isolation":"shared"},{"name":"pool","prompt":"{{item}}","items_from":"source","after":["source"],"tools":["read"],"isolation":"shared"},{"name":"tail","prompt":"wrap up","after":["pool"],"tools":["read"],"isolation":"shared"}]}"#).await?;
+    fixture.ended_run().await?;
+    let script = fixture.script();
+    assert_eq!(script.starts.len(), 1, "only the source step ran a child");
+    assert_eq!(
+        script
+            .jobs
+            .iter()
+            .filter(|(_, parent, _)| parent.is_some())
+            .count(),
+        1,
+        "a step behind the failure creates no task job"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_run_aborted_between_steps_settles_cancelled_not_done() -> TestResult {
+    let fixture = Fixture::open().await?;
+    fixture.script().abort_on_settle = true;
+    fixture.tool(r#"{"action":"run","steps":[{"name":"first","prompt":"one","tools":["read"],"isolation":"shared"},{"name":"second","prompt":"two","after":["first"],"tools":["read"],"isolation":"shared"}]}"#).await?;
+    fixture.ended_run().await?;
+    let script = fixture.script();
+    assert_eq!(script.starts.len(), 1, "the second step never starts");
+    let run = script
+        .jobs
+        .iter()
+        .find(|(_, parent, _)| parent.is_none())
+        .ok_or("run absent")?
+        .0
+        .state
+        .clone();
+    assert_eq!(
+        run,
+        JobStateView::Done(dal_core::JobOutcome::Cancelled),
+        "an aborted run settles cancelled, not done"
     );
     Ok(())
 }
