@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     AuthStore, Credential, CredentialKind, LoginEndpoints, LoginFlow, LoginProgress, PROVIDERS,
     ProviderDef, ProviderError, SecretString,
-    auth::oauth::{logout_with, store_api_key, unix_now},
+    auth::oauth::{logout_with, store_api_key_unless_cancelled, unix_now},
     find,
     http::{LOGIN_WAIT, build_client},
 };
@@ -158,7 +158,9 @@ impl LoginSite {
 /// The OAuth methods drive [`LoginFlow`] under its 15-minute deadline.
 /// [`Method::ApiKey`] waits for one value on [`LoginIo::paste`] under the same
 /// deadline, then stores it. Every path ends with the locked, atomic
-/// `auth.json` write.
+/// `auth.json` write. Cancellation that arrives before that write commits
+/// reports [`ProviderError::LoginCancelled`] and leaves the file unchanged;
+/// once the write has committed, the stored credential is returned.
 ///
 /// # Errors
 /// Returns [`ProviderError::LoginInput`] when the provider does not offer the
@@ -212,7 +214,7 @@ async fn store_key(
     if cancel.is_cancelled() {
         return Err(ProviderError::LoginCancelled);
     }
-    store_api_key(&site.auth_path, provider, key.clone()).await?;
+    store_api_key_unless_cancelled(site.auth_path.clone(), provider, key.clone(), &cancel).await?;
     Ok(Credential::ApiKey {
         key: SecretString::from(key),
     })
@@ -272,6 +274,9 @@ pub struct StoredCredential {
     /// Whether an OAuth access token is inside the proactive refresh window
     /// or past its expiry, so the next request refreshes it.
     pub expired: bool,
+    /// The stored OAuth `expires_at`, in seconds since the Unix epoch, when
+    /// the credential is an OAuth one that names an expiry.
+    pub expires_at: Option<i64>,
 }
 
 /// Lists the credentials stored in `auth.json`, in stable provider order.
@@ -285,14 +290,19 @@ pub fn stored_credentials(site: &LoginSite) -> Result<Vec<StoredCredential>, Pro
         .status()
         .into_iter()
         .map(|status| {
+            let credential = store.credential(&status.provider);
             let expired = matches!(
-                store.credential(&status.provider),
+                &credential,
                 Some(Credential::OAuth(oauth)) if oauth.expiring(now)
             );
             StoredCredential {
                 provider: status.provider,
                 kind: status.kind,
                 expired,
+                expires_at: match credential {
+                    Some(Credential::OAuth(oauth)) => oauth.expires_at,
+                    _ => None,
+                },
             }
         })
         .collect())

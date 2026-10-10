@@ -755,7 +755,26 @@ pub async fn store_api_key(
     provider: &str,
     key: String,
 ) -> Result<(), ProviderError> {
-    let path = path.into();
+    store_api_key_unless_cancelled(path.into(), provider, key, &CancellationToken::new()).await
+}
+
+/// Stores one API key unless `cancel` fires first.
+///
+/// The commit point is the cancellation check made while the auth-file lock is
+/// held, immediately before the atomic write. Cancellation seen before it
+/// returns [`ProviderError::LoginCancelled`] and leaves `auth.json` unchanged,
+/// including while the lock is still contended; cancellation after it finds the
+/// key durably stored and returns `Ok`.
+///
+/// # Errors
+/// Returns [`ProviderError::LoginCancelled`] when cancellation wins, and an
+/// auth-store or lock error when the key cannot be written.
+pub(crate) async fn store_api_key_unless_cancelled(
+    path: PathBuf,
+    provider: &str,
+    key: String,
+    cancel: &CancellationToken,
+) -> Result<(), ProviderError> {
     let parent = path
         .parent()
         .map(Path::to_path_buf)
@@ -779,9 +798,17 @@ pub async fn store_api_key(
     })
     .await?;
     let provider = provider.to_owned();
-    let lock = crate::auth::refresh::lock_auth_file(&path).await?;
+    let lock = tokio::select! {
+        biased;
+        () = cancel.cancelled() => return Err(ProviderError::LoginCancelled),
+        lock = crate::auth::refresh::lock_auth_file(&path) => lock?,
+    };
+    let cancel = cancel.clone();
     crate::auth::refresh::blocking(move || {
         let _lock = lock;
+        if cancel.is_cancelled() {
+            return Err(ProviderError::LoginCancelled);
+        }
         let mut store = AuthStore::load(&path)?;
         store.set(
             &provider,

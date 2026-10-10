@@ -7,7 +7,7 @@ use std::{
 mod oauth_login;
 mod server;
 
-use tokio::sync::oneshot;
+use tokio::{sync::oneshot, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 
 use super::{LoginIo, LoginSite, Method, login, login_providers, sign_out, stored_credentials};
@@ -126,6 +126,38 @@ async fn cancelling_while_the_key_is_awaited_reports_cancellation_and_writes_not
     let result = login("anthropic", Method::ApiKey, io, &dir.site()).await;
     assert!(matches!(result, Err(ProviderError::LoginCancelled)));
     assert!(!dir.0.join("auth.json").exists());
+}
+
+#[tokio::test]
+async fn cancelling_while_the_auth_file_lock_is_held_reports_cancellation_and_writes_nothing() {
+    let dir = TestDir::new();
+    let guard = crate::auth::refresh::lock_auth_file(&dir.0.join("auth.json"))
+        .await
+        .expect("hold the auth-file lock");
+    let (sender, receiver) = oneshot::channel::<String>();
+    sender
+        .send(String::from("sk-held"))
+        .expect("receiver is alive");
+    let cancel = CancellationToken::new();
+    let io = LoginIo::channel(Some(receiver), cancel.clone()).0;
+    let site = dir.site();
+    let mut attempt = JoinSet::new();
+    attempt.spawn(async move { login("openai", Method::ApiKey, io, &site).await });
+    tokio::select! {
+        biased;
+        () = cancel.cancelled() => panic!("cancel nobody fired"),
+        () = tokio::time::sleep(std::time::Duration::from_millis(250)) => {}
+        joined = attempt.join_next() => panic!("login finished before cancellation: {joined:?}"),
+    }
+    cancel.cancel();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), attempt.join_next())
+        .await
+        .expect("the cancelled login returns promptly")
+        .expect("the login task is still tracked")
+        .expect("the login task runs");
+    assert!(matches!(result, Err(ProviderError::LoginCancelled)));
+    assert!(!dir.0.join("auth.json").exists());
+    drop(guard);
 }
 
 #[tokio::test]
