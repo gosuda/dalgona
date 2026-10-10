@@ -22,8 +22,8 @@ fn detector_lanes_fire_once_on_fixtures_and_stay_quiet_on_clean_input() -> suppo
             positive, clean,
             "detector fixture pair for {lane} is not distinct"
         );
-        assert!(!positive.trim().is_empty());
-        assert!(!clean.trim().is_empty());
+        assert_ne!(positive.trim(), "");
+        assert_ne!(clean.trim(), "");
     }
     let scratch = support::Scratch::new("detector-fixtures")?;
     let runtime = tokio::runtime::Builder::new_multi_thread()

@@ -1059,17 +1059,12 @@ async fn agents_start_cannot_escape_the_workspace_through_a_link() {
         &format!(r#"{{"prompt":"work","workspace":"{}"}}"#, link.display()),
     )
     .await;
-    let OpOutcome::Ok { value, .. } = outcome else {
-        panic!("agents.start answers a typed reply: {outcome:?}");
+    let OpOutcome::Terminal(HostTerminal::Denied {
+        reason: DenyReason::OutOfScope { .. },
+    }) = outcome
+    else {
+        panic!("a link resolving outside the workspace is denied: {outcome:?}");
     };
-    let OpValue::Json(raw) = value else {
-        panic!("agents.start answers raw JSON: {value:?}");
-    };
-    let reply = raw.as_str();
-    assert!(
-        reply.contains(r#""type":"cancelled""#),
-        "a link resolving outside the workspace is refused: {reply}"
-    );
 }
 
 #[derive(serde::Deserialize)]

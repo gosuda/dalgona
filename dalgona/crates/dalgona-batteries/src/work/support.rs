@@ -18,10 +18,13 @@ use dal_core::ext::{
     ToolCallVerdict, Visibility,
 };
 use dal_core::{
-    AgentsOp, AgentsReply, Answer, CallId, EntryId, FetchRequest, FetchResponse, Inference, JobsOp,
-    JobsReply, ModelRequest, Name, Notice, Question, RawJson, RunOutput, RunRequest, SessionId,
-    SidecarOp, ToolClass, TurnId, TurnOp, TurnOpReply,
+    AgentReport, AgentStart, AgentsOp, AgentsReply, Answer, CallId, EntryId, FetchRequest,
+    FetchResponse, Inference, JobsOp, JobsReply, ModelRequest, Name, Notice, Question, RawJson,
+    RunOutput, RunRequest, Service, SessionId, SidecarOp, Stop, ToolClass, TurnId, TurnOp,
+    TurnOpReply,
 };
+
+use unicode_segmentation::UnicodeSegmentation;
 
 use super::plan::{self, BatteryState, Host};
 use super::{PlanConfig, todo};
@@ -56,6 +59,7 @@ pub(crate) struct FakeServices {
     script: Mutex<VecDeque<Scripted>>,
     questions: Mutex<Vec<Question>>,
     append_failures: Mutex<VecDeque<bool>>,
+    agent_starts: Mutex<Vec<AgentStart>>,
     asked: tokio::sync::Notify,
     cancel: tokio::sync::Notify,
     side_calls: AtomicUsize,
@@ -63,6 +67,33 @@ pub(crate) struct FakeServices {
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Mirrors the store's session-name admission rule (`dal-store`'s
+/// `normalize_name`): trims, collapses line-break runs to one space,
+/// then 1-64 grapheme clusters, no control characters, and at least
+/// one character other than `0-9`, `a-f`, and `-`.
+fn name_admitted(name: &str) -> bool {
+    let mut out = String::new();
+    let mut breaking = false;
+    for ch in name.trim().chars() {
+        if ch == '\r' || ch == '\n' {
+            if !breaking {
+                out.push(' ');
+                breaking = true;
+            }
+        } else {
+            breaking = false;
+            out.push(ch);
+        }
+    }
+    let id_only = !out.is_empty()
+        && out
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f' | b'-'));
+    (1..=64).contains(&out.graphemes(true).count())
+        && !out.chars().any(char::is_control)
+        && !id_only
 }
 
 fn unavailable<T: Send + 'static>(calls: &AtomicUsize) -> ServiceFuture<'static, T> {
@@ -94,6 +125,14 @@ impl FakeServices {
 
     pub(crate) fn side_calls(&self) -> usize {
         self.side_calls.load(Ordering::SeqCst)
+    }
+
+    /// The child names every scripted `agents.start` received, in order.
+    pub(crate) fn agent_start_names(&self) -> Vec<String> {
+        locked(&self.agent_starts)
+            .iter()
+            .map(|start| start.name.to_string())
+            .collect()
     }
 
     pub(crate) async fn wait_asked(&self) -> bool {
@@ -212,8 +251,39 @@ impl Services for FakeServices {
         unavailable(&self.side_calls)
     }
 
-    fn agents(&self, _who: &Caller, _op: AgentsOp) -> ServiceFuture<'_, AgentsReply> {
-        unavailable(&self.side_calls)
+    fn agents(&self, _who: &Caller, op: AgentsOp) -> ServiceFuture<'_, AgentsReply> {
+        match op {
+            AgentsOp::Start(start) => {
+                let name = start.name.clone();
+                locked(&self.agent_starts).push(start);
+                // Mirror the store's session-name admission rule so a child
+                // name that the real host would refuse fails here too.
+                if !name_admitted(&name) {
+                    return Box::pin(async {
+                        Err(ServiceError::failed(
+                            Some(Service::Agents),
+                            "a session name must have 1 to 64 characters, no control characters, and at least one character other than 0-9, a-f, and -",
+                        ))
+                    });
+                }
+                Box::pin(async {
+                    Ok(AgentsReply::Started {
+                        id: SessionId::new_v7(),
+                    })
+                })
+            }
+            AgentsOp::Await { id, .. } => Box::pin(async move {
+                Ok(AgentsReply::Await {
+                    report: AgentReport {
+                        stop: Stop::EndTurn,
+                        text: "done".into(),
+                        session: id,
+                        entry: EntryId::new(NonZeroU64::MIN),
+                    },
+                })
+            }),
+            _ => unavailable(&self.side_calls),
+        }
     }
 
     fn jobs(&self, _who: &Caller, _op: JobsOp) -> ServiceFuture<'_, JobsReply> {
