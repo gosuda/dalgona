@@ -294,6 +294,7 @@ impl Host {
                 sessions_closed += 1;
             }
         }
+        let _providers_stopped = timeout(close_grace, self.state.shared.providers.shutdown()).await;
         let tasks_remaining = task_owners.iter().fold(0_usize, |total, tasks| {
             total.saturating_add(tasks.tracked())
         });

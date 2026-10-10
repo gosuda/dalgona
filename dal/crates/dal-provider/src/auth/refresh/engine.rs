@@ -4,10 +4,15 @@
 //! persistence. The task holds the auth file lock; the slot serializes
 //! callers. A caller can drop its wait before the task starts, but cannot
 //! interrupt a request that may have rotated the stored refresh token.
+//! [`Refresher::shutdown`] is the host's way to end the engine: it refuses new
+//! refreshes and waits for every task still in a slot.
 
 use std::{
     path::{Path, PathBuf},
-    sync::LazyLock,
+    sync::{
+        LazyLock,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use serde::{Deserialize, Serialize};
@@ -35,8 +40,10 @@ use crate::{
 /// Refreshes OAuth credentials stored in one `auth.json`, at most one refresh
 /// per credential key at a time across every refresher of that file.
 ///
-/// A host keeps one `Refresher` per `auth.json`; dropping it drops its
-/// mutexes. It holds no secret itself.
+/// A host keeps one `Refresher` per `auth.json` and calls
+/// [`Refresher::shutdown`] before dropping it, because a refresh task that
+/// outlives its owner would keep the auth-file lock and still commit. It holds
+/// no secret itself.
 #[derive(Debug)]
 pub struct Refresher {
     client: LazyLock<reqwest::Client, fn() -> reqwest::Client>,
@@ -44,6 +51,7 @@ pub struct Refresher {
     auth_path: PathBuf,
     endpoints: TokenEndpoints,
     slots: Vec<(&'static str, RefreshSlot)>,
+    closed: AtomicBool,
 }
 
 #[derive(Debug)]
@@ -101,6 +109,7 @@ impl Refresher {
             user_agent: user_agent.into(),
             auth_path: auth_path.into(),
             endpoints,
+            closed: AtomicBool::new(false),
             slots: PROVIDERS
                 .iter()
                 .filter(|def| def.oauth.is_some())
@@ -199,6 +208,12 @@ impl Refresher {
             drop(key);
             return await_refresh(&mut in_flight).await;
         }
+        if self.closed.load(Ordering::Acquire) {
+            return Err(ProviderError::Transport {
+                family: provider.family,
+                reason: String::from("credential refresh refused: the refresher is shut down"),
+            });
+        }
         let file = lock_auth_file(&self.auth_path).await?;
         let path = self.auth_path.clone();
         let mut store = blocking(move || AuthStore::load(path)).await?;
@@ -240,6 +255,25 @@ impl Refresher {
         *in_flight = Some(task);
         drop(key);
         await_refresh(&mut in_flight).await
+    }
+
+    /// Stops new refreshes and waits until every refresh task that is still
+    /// in a slot has persisted or failed, so none outlives the host.
+    ///
+    /// A [`Refresher::refresh`] that needs a new request after this call
+    /// starts fails with [`ProviderError::Transport`]; one that joins a task
+    /// already in flight still receives its result. The wait covers a task
+    /// whose callers all dropped their waits, and is safe to drop and call
+    /// again: the slot keeps the task until it is observed finished.
+    pub async fn shutdown(&self) {
+        self.closed.store(true, Ordering::Release);
+        for (_, slot) in &self.slots {
+            let mut in_flight = slot.in_flight.lock().await;
+            if let Some(task) = in_flight.as_mut() {
+                let _outcome = task.await;
+            }
+            *in_flight = None;
+        }
     }
 
     fn slot(&self, provider: &ProviderDef) -> Option<&RefreshSlot> {

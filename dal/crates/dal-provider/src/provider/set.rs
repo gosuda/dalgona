@@ -349,6 +349,14 @@ impl ProviderSet {
         crate::catalog::resolve(catalog, &self.inner.config.aliases, reference)
     }
 
+    /// Stops OAuth credential refreshes and waits for every refresh task still
+    /// running, so none keeps the auth-file lock or commits tokens after the
+    /// host that owns this set is gone. Later refreshes fail with
+    /// [`ProviderError::Transport`].
+    pub async fn shutdown(&self) {
+        self.inner.refresher.shutdown().await;
+    }
+
     /// Clears all WebSocket and once-per-session notice state for `session`.
     pub fn end_session(&self, session: &SessionId) {
         self.inner.ws.end_session(session);

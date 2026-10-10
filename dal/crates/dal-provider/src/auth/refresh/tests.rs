@@ -6,7 +6,7 @@ use std::{
     pin::pin,
     rc::Rc,
     sync::atomic::{AtomicU32, Ordering},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use dal_core::Family;
@@ -467,6 +467,60 @@ async fn cancelled_refresh_persists_rotated_credential() {
     assert_eq!(on_disk.refresh_token.expose(), NEW_REFRESH);
     let probe = open_lock_file(&lock_path(&dir.auth()).expect("lock path")).expect("open lock");
     probe.try_lock().expect("the file lock was released");
+}
+
+#[tokio::test]
+async fn shutdown_drains_an_abandoned_in_flight_refresh_and_refuses_new_ones() {
+    let dir = TestDir::new("shutdown");
+    let held = codex(OLD_ACCESS, OLD_REFRESH, Some(unix_now() + 10));
+    seed(&dir.auth(), held.clone());
+    let (listener, base) = listen().await;
+    let refresher = refresher(&dir.auth(), &base);
+    let started = Rc::new(Notify::new());
+    let release = Rc::new(Notify::new());
+    let client = async {
+        tokio::select! {
+            biased;
+            () = started.notified() => {}
+            _ = refresher.refresh(codex_def(), &held, RefreshReason::Expiring) => {
+                panic!("the refresh completed before the request reached the server")
+            }
+        }
+        let mut drain = Box::pin(refresher.shutdown());
+        futures::future::poll_fn(|cx| {
+            assert!(drain.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), drain)
+            .await
+            .expect("shutdown drains the abandoned refresh");
+    };
+    let replies = vec![
+        Reply::JsonAfterNotify(
+            Rc::clone(&started),
+            Rc::clone(&release),
+            200,
+            String::from(NEW_TOKENS),
+        ),
+        Reply::Json(500, String::from(r#"{"error":"duplicate refresh"}"#)),
+    ];
+    let ((), seen) = with_server(listener, replies, client).await;
+
+    assert_eq!(seen.len(), 1);
+    let on_disk = stored(&dir.auth());
+    assert_eq!(on_disk.access_token.expose(), NEW_ACCESS);
+    assert_eq!(on_disk.refresh_token.expose(), NEW_REFRESH);
+    let error = refresher
+        .refresh(codex_def(), &held, RefreshReason::Rejected)
+        .await
+        .expect_err("shutdown refuses new refreshes");
+    assert!(
+        matches!(error, ProviderError::Transport { .. }),
+        "{error:?}"
+    );
+    assert_no_secret(&error, &[NEW_ACCESS, NEW_REFRESH]);
 }
 
 #[tokio::test]
