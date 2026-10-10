@@ -15,17 +15,20 @@ use crate::exit;
 /// line count; journals hold hundreds of records, not millions.
 pub(super) fn run(path: &Path) -> Result<ExitCode, DevError> {
     let lines = util::read_lines(path)?;
-    if lines.is_empty() {
+    if lines.records.is_empty() {
         return Err(DevError::Empty {
             path: path.display().to_string(),
         });
     }
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
+    if lines.torn > 0 {
+        let _ = writeln!(out, "torn tail: {} bytes ignored", lines.torn);
+    }
     let mut prior: BTreeMap<String, String> = BTreeMap::new();
-    for (index, line) in lines.iter().enumerate() {
+    for (index, line) in lines.records.iter().enumerate() {
         let record = util::decode_line(path, line, index)?;
-        let session = util::fold(path, &lines[..=index])?;
+        let session = util::fold(path, &lines.records[..=index])?;
         let fields = util::fields(&session);
         let mut delta = String::new();
         for (name, value) in &fields {

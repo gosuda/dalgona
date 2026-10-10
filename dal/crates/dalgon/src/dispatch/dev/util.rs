@@ -8,17 +8,51 @@ use dal_core::{Record, Session, Timestamp, decode};
 
 use super::DevError;
 
-/// Reads one journal file into its non-empty record lines.
-pub(super) fn read_lines(path: &Path) -> Result<Vec<Vec<u8>>, DevError> {
+/// One journal's complete records and its torn tail, in store terms.
+pub(super) struct JournalLines {
+    /// Newline-terminated record lines, in file order.
+    pub(super) records: Vec<Vec<u8>>,
+    /// Bytes after the last newline: the tail the store quarantines as torn.
+    pub(super) torn: usize,
+}
+
+/// Reads one journal file into its complete record lines.
+///
+/// Matches the store's durability grammar: a record exists only where a
+/// newline terminates it, a blank record is `empty record` damage, and an
+/// unterminated tail is torn — reported, never replayed.
+///
+/// # Errors
+/// `Read` when the file cannot be read; `Decode` on a blank record.
+pub(super) fn read_lines(path: &Path) -> Result<JournalLines, DevError> {
     let bytes = fs::read(path).map_err(|source| DevError::Read {
         path: path.display().to_string(),
         source,
     })?;
-    Ok(bytes
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-        .map(<[u8]>::to_vec)
-        .collect())
+    let mut records = Vec::new();
+    let mut start = 0;
+    for end in bytes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, byte)| (*byte == b'\n').then_some(index))
+    {
+        if end == start {
+            return Err(DevError::Decode {
+                path: path.display().to_string(),
+                line: records.len() + 1,
+                source: dal_core::DecodeError::Invalid {
+                    offset: 0,
+                    message: "empty record".into(),
+                },
+            });
+        }
+        records.push(bytes[start..end].to_vec());
+        start = end + 1;
+    }
+    Ok(JournalLines {
+        records,
+        torn: bytes.len() - start,
+    })
 }
 
 /// Decodes one journal line, reporting its 1-based position on failure.
@@ -43,15 +77,15 @@ pub(super) fn fold(path: &Path, lines: &[Vec<u8>]) -> Result<Session, DevError> 
 }
 
 /// Folds a journal file end to end.
-pub(super) fn load(path: &Path) -> Result<(Vec<Vec<u8>>, Session), DevError> {
+pub(super) fn load(path: &Path) -> Result<(Vec<Vec<u8>>, usize, Session), DevError> {
     let lines = read_lines(path)?;
-    if lines.is_empty() {
+    if lines.records.is_empty() {
         return Err(DevError::Empty {
             path: path.display().to_string(),
         });
     }
-    let session = fold(path, &lines)?;
-    Ok((lines, session))
+    let session = fold(path, &lines.records)?;
+    Ok((lines.records, lines.torn, session))
 }
 
 /// The wire kind of one journal record.

@@ -50,21 +50,34 @@ pub(super) async fn run(
         .parent()
         .filter(|dir| !dir.as_os_str().is_empty())
         .map_or_else(|| cwd.clone(), Path::to_path_buf);
-    let mut run = RunCx::new(scenario_dir, vars, helper, args.keep)?;
+    let mut run = RunCx::new(scenario_dir, vars, helper, args.keep, args.root.clone())?;
 
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     let mut done = 0usize;
+    let mut result = Ok(());
     for (index, line) in text.lines().enumerate() {
         let line_no = index + 1;
         if line.trim().is_empty() {
             continue;
         }
-        let step = Step::decode(line, &args.file, line_no)?;
-        run.step(step, line_no, &mut out).await?;
+        let step = match Step::decode(line, &args.file, line_no) {
+            Ok(step) => step,
+            Err(error) => {
+                result = Err(error);
+                break;
+            }
+        };
+        if let Err(error) = run.step(step, line_no, &mut out).await {
+            result = Err(error);
+            break;
+        }
         done += 1;
     }
-    run.finish(&mut out);
+    // The host must close before the run root is removed: live actors keep
+    // journals open and would race the deletion (or leak past the report).
+    run.finish(&mut out).await;
+    result?;
     let _ = writeln!(out, "scenario passed ({done} steps)");
     Ok(exit::code(exit::ExitKind::Success))
 }
@@ -171,7 +184,8 @@ impl Step {
 
 /// The process state one scenario run owns.
 struct RunCx {
-    root: PathBuf,
+    root_path: PathBuf,
+    root: Option<PathBuf>,
     keep: bool,
     data_root: PathBuf,
     workspace: PathBuf,
@@ -190,27 +204,35 @@ struct RunCx {
 }
 
 impl RunCx {
-    /// Builds the run root under the system temp dir.
+    /// Builds the run root under the system temp dir, or adopts `root`.
+    ///
+    /// An adopted root is never deleted: it is how `resume` and `continue`
+    /// scenarios find a populated store — pass the `kept run root` line of
+    /// an earlier `--keep` run.
     fn new(
         scenario_dir: PathBuf,
         vars: VarsMap,
         helper: Option<PathBuf>,
         keep: bool,
+        root: Option<PathBuf>,
     ) -> Result<Self, DevError> {
-        let root = std::env::temp_dir().join(format!(
-            "dal-dev-{}-{}",
-            std::process::id(),
-            SessionId::new_v7()
-        ));
-        let data_root = root.join("data");
-        let workspace = root.join("work");
-        for dir in [&root, &data_root, &workspace] {
+        let root_path = root.clone().unwrap_or_else(|| {
+            std::env::temp_dir().join(format!(
+                "dal-dev-{}-{}",
+                std::process::id(),
+                SessionId::new_v7()
+            ))
+        });
+        let data_root = root_path.join("data");
+        let workspace = root_path.join("work");
+        for dir in [&root_path, &data_root, &workspace] {
             std::fs::create_dir_all(dir).map_err(|source| DevError::Write {
                 path: dir.display().to_string(),
                 source,
             })?;
         }
         Ok(Self {
+            root_path,
             root,
             keep,
             data_root,
@@ -501,13 +523,15 @@ impl RunCx {
         })
     }
 
-    /// Drops the session handles so the run root can be removed cleanly.
-    fn finish(&mut self, out: &mut impl Write) {
+    /// Closes the session and host so the run root can be removed cleanly.
+    async fn finish(&mut self, out: &mut impl Write) {
         self.agent = None;
         self.subscription = None;
-        self.host = None;
-        if self.keep {
-            let _ = writeln!(out, "kept run root: {}", self.root.display());
+        if let Some(host) = self.host.take() {
+            let _ = host.shutdown(std::time::Duration::from_secs(3)).await;
+        }
+        if self.keep || self.root.is_some() {
+            let _ = writeln!(out, "kept run root: {}", self.root_path.display());
         }
     }
 
@@ -569,8 +593,11 @@ impl RunCx {
 
     /// Builds the user config text from scenario config lines and the provider.
     fn user_config(&self) -> String {
+        // `ask` is the default: a scenario that wants patch or exec calls
+        // declares `approval = "all"` in a config step, like the product
+        // itself requires.
         let mut text = if self.config_text.is_empty() {
-            "model = \"openai-responses/gpt-6\"\napproval = \"all\"\n".to_owned()
+            "model = \"openai-responses/gpt-6\"\napproval = \"ask\"\n".to_owned()
         } else {
             self.config_text.join("\n")
         };
@@ -581,7 +608,9 @@ impl RunCx {
                 .map(|name| format!("\"{name}\""))
                 .collect::<Vec<_>>()
                 .join(", ");
-            let _ = writeln!(text, "plugins = [{list}]");
+            // Root keys must precede every table declaration; prepend so an
+            // arbitrary config step cannot hide `plugins` inside a table.
+            text.insert_str(0, &format!("plugins = [{list}]\n"));
         }
         if let Some(fixture) = &self.provider_fixture {
             let escaped = fixture.to_string_lossy().replace('\\', "\\\\");
@@ -614,6 +643,19 @@ impl RunCx {
                 (name, source)
             }
         };
+        // The name becomes one path component under the data root: reject
+        // separators, anchors, and `..` before any filesystem I/O so a
+        // scenario cannot write `plugin.star` outside its own run.
+        let mut components = std::path::Path::new(&name).components();
+        if !(components
+            .next()
+            .is_some_and(|part| matches!(part, std::path::Component::Normal(_)))
+            && components.next().is_none())
+        {
+            return Err(invalid(format!(
+                "plugin name `{name}` must be a single path component"
+            )));
+        }
         let dir = self.data_root.join("plugins").join(&name);
         std::fs::create_dir_all(&dir).map_err(|source| DevError::Write {
             path: dir.display().to_string(),
@@ -653,7 +695,7 @@ impl RunCx {
                 }
                 Script::from_replay(text.as_bytes())
                     .map_err(|error| invalid(format!("provider script invalid: {error}")))?;
-                let file = self.root.join("provider-script.jsonl");
+                let file = self.root_path.join("provider-script.jsonl");
                 std::fs::write(&file, text).map_err(|source| DevError::Write {
                     path: file.display().to_string(),
                     source,
@@ -899,7 +941,7 @@ impl RunCx {
         }
         let mut count = 0usize;
         for journal in &journals {
-            for (index, line_text) in util::read_lines(journal)?.iter().enumerate() {
+            for (index, line_text) in util::read_lines(journal)?.records.iter().enumerate() {
                 let record = util::decode_line(journal, line_text, index + 1)?;
                 if util::record_kind(&record) == spec.kind {
                     count += 1;
@@ -956,8 +998,8 @@ impl RunCx {
 
 impl Drop for RunCx {
     fn drop(&mut self) {
-        if !self.keep {
-            let _ = std::fs::remove_dir_all(&self.root);
+        if !self.keep && self.root.is_none() {
+            let _ = std::fs::remove_dir_all(&self.root_path);
         }
     }
 }

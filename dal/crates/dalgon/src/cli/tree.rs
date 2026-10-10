@@ -288,6 +288,10 @@ pub(crate) struct DevRunArgs {
     /// Keep the run's data root and workspace for inspection.
     #[arg(long)]
     pub(crate) keep: bool,
+    /// Reuse an earlier kept run root instead of building a fresh one, so
+    /// `resume` and `continue` session steps find a populated store.
+    #[arg(long, value_name = "DIR")]
+    pub(crate) root: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Args)]

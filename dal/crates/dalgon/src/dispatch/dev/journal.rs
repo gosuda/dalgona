@@ -22,10 +22,13 @@ pub(super) fn run(args: &cli::DevJournalArgs) -> Result<ExitCode, DevError> {
 
 /// Folds one journal and prints the recovered state summary.
 fn replay(path: &Path) -> Result<ExitCode, DevError> {
-    let (lines, session) = util::load(path)?;
+    let (lines, torn, session) = util::load(path)?;
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     let _ = writeln!(out, "records: {}", lines.len());
+    if torn > 0 {
+        let _ = writeln!(out, "torn tail: {torn} bytes ignored");
+    }
     let _ = writeln!(out, "phase: {:?}", session.phase());
     let _ = writeln!(out, "approval: {:?}", session.approval_mode());
     let model = session
@@ -77,8 +80,8 @@ fn names(iter: impl Iterator<Item = String>) -> String {
 
 /// Prints the folded fields that differ between two journals.
 fn diff(before: &Path, after: &Path) -> Result<ExitCode, DevError> {
-    let (_, left) = util::load(before)?;
-    let (_, right) = util::load(after)?;
+    let (_, left_torn, left) = util::load(before)?;
+    let (_, right_torn, right) = util::load(after)?;
     let left_fields = util::fields(&left);
     let right_fields = util::fields(&right);
     let stdout = std::io::stdout();
@@ -107,7 +110,45 @@ fn diff(before: &Path, after: &Path) -> Result<ExitCode, DevError> {
     if differences == 0 {
         let _ = writeln!(out, "states identical");
     }
+    for (side, torn) in [("before", left_torn), ("after", right_torn)] {
+        if torn > 0 {
+            let _ = writeln!(out, "{side}: torn tail of {torn} bytes ignored");
+        }
+    }
     Ok(exit::code(exit::ExitKind::Success))
+}
+
+/// Whether two paths name the same file: canonicalized equality catches
+/// relative spellings and symlinks, and the device/inode pair catches hard
+/// links where both paths resolve canonically.
+fn same_file(input: &Path, output: &Path) -> bool {
+    let source = input.canonicalize().ok();
+    if let Ok(target) = output.canonicalize() {
+        return Some(target) == source || same_inode(input, output);
+    }
+    // The output does not exist yet: compare the canonical parent + name
+    // against the source so `./journal.jsonl` still names the input.
+    let Some(source) = source else {
+        return false;
+    };
+    let Some(dir) = output.parent().and_then(|dir| dir.canonicalize().ok()) else {
+        return false;
+    };
+    output.file_name().map(|name| dir.join(name)).as_deref() == Some(source.as_path())
+}
+
+#[cfg(unix)]
+fn same_inode(left: &Path, right: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (fs::metadata(left), fs::metadata(right)) {
+        (Ok(a), Ok(b)) => (a.dev(), a.ino()) == (b.dev(), b.ino()),
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn same_inode(_left: &Path, _right: &Path) -> bool {
+    false
 }
 
 /// Writes `output` as `input` with its final record cut mid-line.
@@ -115,7 +156,7 @@ fn diff(before: &Path, after: &Path) -> Result<ExitCode, DevError> {
 /// The last record keeps its leading bytes so the tail still scans as a torn
 /// write: a partial record with no terminating newline.
 fn torn(input: &Path, output: &Path) -> Result<ExitCode, DevError> {
-    if input == output {
+    if same_file(input, output) {
         return Err(DevError::SamePath {
             path: input.display().to_string(),
         });

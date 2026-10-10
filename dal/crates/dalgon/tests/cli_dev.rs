@@ -21,8 +21,9 @@ fn nz(value: u64) -> NonZeroU64 {
 fn write_journal(dir: &Path, records: &[Record]) -> Result<PathBuf, Box<dyn Error>> {
     let mut bytes = Vec::new();
     for record in records {
+        // encode() already terminates the record line; a second LF would be
+        // a blank line, which the store grammar reads as damage.
         bytes.extend_from_slice(&encode(record)?);
-        bytes.push(b'\n');
     }
     let path = dir.join("journal.jsonl");
     fs::write(&path, bytes)?;
@@ -153,8 +154,14 @@ fn dev_journal_torn_leaves_a_tail_replay_rejects() -> Result<(), Box<dyn Error>>
         "replay",
         torn.to_str().expect("utf8 path"),
     ])?;
-    assert!(!replay.status.success(), "torn replay should fail");
-    assert!(stderr(&replay).contains("line"), "{}", stderr(&replay));
+    // Store semantics: the unterminated tail is not a durable record, so
+    // replay succeeds on the complete prefix and reports what it ignored.
+    assert!(replay.status.success(), "{}", stderr(&replay));
+    let replay_out = String::from_utf8_lossy(&replay.stdout);
+    assert!(
+        replay_out.contains("torn tail:"),
+        "expected a torn-tail note, got {replay_out}"
+    );
     Ok(())
 }
 
@@ -299,5 +306,66 @@ fn dev_run_fails_closed_when_no_provider_is_given() -> Result<(), Box<dyn Error>
     assert!(!output.status.success());
     let text = stderr(&output);
     assert!(text.contains("provider"), "{text}");
+    Ok(())
+}
+
+#[test]
+fn dev_run_rejects_a_plugin_name_that_is_not_one_component() -> Result<(), Box<dyn Error>> {
+    let fixture = CliFixture::new()?;
+    fs::write(fixture.data.join("evil.star"), "def on_boot():\n    pass\n")?;
+    let scenario = write_scenario(
+        &fixture,
+        &[r#"{"plugin":{"name":"../escape","file":"evil.star"}}"#],
+    )?;
+    let output = fixture.output(&["dev", "run", scenario.to_str().expect("utf8 path")])?;
+    assert!(!output.status.success());
+    let text = stderr(&output);
+    assert!(text.contains("single path component"), "{text}");
+    Ok(())
+}
+
+#[test]
+fn dev_run_continue_adopts_a_kept_root() -> Result<(), Box<dyn Error>> {
+    let fixture = CliFixture::new()?;
+    let first = write_scenario(
+        &fixture,
+        &[
+            r#"{"provider":{"script":[{"kind":"events","events":[{"type":"text_delta","text":"first"},{"type":"tool_calls_done","calls":[]},{"type":"usage","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":5,"reasoning_tokens":null,"cache_write_tokens":0,"cost_usd":null}},{"type":"stop","reason":"end_turn"}]}]}}"#,
+            r#"{"session":{"new":{"name":"carried"}}}"#,
+            r#"{"prompt":"one"}"#,
+            r#"{"expect":{"update":"turn_ended"}}"#,
+        ],
+    )?;
+    let kept = fixture.output(&["dev", "run", "--keep", first.to_str().expect("utf8 path")])?;
+    assert!(kept.status.success(), "{}", stderr(&kept));
+    let root = stdout(&kept)
+        .lines()
+        .find_map(|line| line.strip_prefix("kept run root:"))
+        .map(str::trim)
+        .expect("kept run prints its root")
+        .to_owned();
+
+    let second = write_scenario(
+        &fixture,
+        &[
+            r#"{"provider":{"script":[{"kind":"events","events":[{"type":"text_delta","text":"second"},{"type":"tool_calls_done","calls":[]},{"type":"usage","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":5,"reasoning_tokens":null,"cache_write_tokens":0,"cost_usd":null}},{"type":"stop","reason":"end_turn"}]}]}}"#,
+            r#"{"session":"continue"}"#,
+            r#"{"prompt":"two"}"#,
+            r#"{"expect":{"update":"turn_ended"}}"#,
+            r#"{"expect":{"journal":"TurnEnd"}}"#,
+        ],
+    )?;
+    let resumed = fixture.output(&[
+        "dev",
+        "run",
+        "--root",
+        &root,
+        second.to_str().expect("utf8 path"),
+    ])?;
+    assert!(resumed.status.success(), "{}", stderr(&resumed));
+    let text = stdout(&resumed);
+    assert!(text.contains("scenario passed"), "{text}");
+    // An adopted root is never deleted.
+    assert!(Path::new(&root).exists(), "adopted root {root} was removed");
     Ok(())
 }
