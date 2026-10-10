@@ -40,6 +40,10 @@ use super::dream::{
 use super::{DREAM_SIDECAR_NAME, PROBE_INTERVAL_HOURS};
 
 /// dream-job idle interval: 20 minutes without input.
+#[expect(
+    clippy::duration_suboptimal_units,
+    reason = "Duration::from_mins is a runtime fn until Rust 1.91; MSRV is 1.90"
+)]
 const IDLE_INTERVAL: Duration = Duration::from_secs(20 * 60);
 
 /// Inbox messages for one session task.
