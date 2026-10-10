@@ -134,6 +134,10 @@ pub(crate) async fn apply_files(
         }
         let trash = trash_path(session, &file.absolute_path);
         if let Err(error) = tokio::fs::rename(&file.absolute_path, &trash).await {
+            // Best-effort restore of deletes already moved to trash.
+            for (src, trash) in trash_paths.iter().rev() {
+                let _ = tokio::fs::rename(trash, src).await;
+            }
             cleanup_temps(&temps).await;
             return Err(EngineError::new(
                 ErrorClass::Io,

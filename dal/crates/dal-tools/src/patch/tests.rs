@@ -1568,6 +1568,65 @@ async fn commit_rejects_fifo_after_staging() {
     assert!(output.text.contains("pipe"), "{}", output.text);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn commit_restores_earlier_deletes_when_a_later_delete_fails() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("temp workspace");
+    let locked = dir.path().join("locked");
+    std::fs::create_dir(&locked).expect("locked dir");
+    std::fs::write(dir.path().join("first.txt"), b"first\n").expect("seed first");
+    std::fs::write(locked.join("second.txt"), b"second\n").expect("seed second");
+    let session = test_session(dir.path(), false);
+    let mut staged = plan(
+        &session,
+        DialectId::ApplyPatch,
+        "*** Begin Patch\n*** Delete File: first.txt\n*** Delete File: locked/second.txt\n*** End Patch\n",
+    )
+    .await
+    .expect("stage two deletes");
+    // The read-only directory must be the delete that fails: commit visits
+    // files in plan order, and lexical order already puts first.txt first.
+    staged
+        .files
+        .sort_by(|left, right| left.path.cmp(&right.path));
+    let mut permissions = std::fs::metadata(&locked)
+        .expect("locked metadata")
+        .permissions();
+    permissions.set_mode(0o555);
+    std::fs::set_permissions(&locked, permissions).expect("lock the directory");
+
+    let output = commit(&session, staged, &[]).await;
+
+    let mut permissions = std::fs::metadata(&locked)
+        .expect("locked metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&locked, permissions).expect("unlock the directory");
+    assert_eq!(output.error_class, Some(super::ir::ErrorClass::Io));
+    assert!(
+        output.text.contains("Nothing was written"),
+        "{}",
+        output.text
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("first.txt")).expect("first delete restored"),
+        b"first\n"
+    );
+    assert_eq!(
+        std::fs::read(locked.join("second.txt")).expect("second file intact"),
+        b"second\n"
+    );
+    let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+        .expect("read workspace")
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.file_name())
+        .filter(|name| name.to_string_lossy().contains(".dalgon-trash"))
+        .collect();
+    assert!(leftovers.is_empty(), "trash files left behind: {leftovers:?}");
+}
+
 #[tokio::test]
 async fn stage_replacement_contract() {
     let dir = tempfile::tempdir().expect("temp workspace");
