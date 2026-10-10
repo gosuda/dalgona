@@ -57,9 +57,11 @@ impl TuiHost for RemoteBackend {
 
     /// Signs in through `auth/login`. A browser or device login answers
     /// with its URL, then ends with the server's `login_finished` update.
-    /// The wire has no cancel or paste method: cancelling stops the wait,
-    /// and the server flow runs until its own deadline or the connection
-    /// closes.
+    /// Cancelling fires `auth/cancel` so the server attempt ends instead of
+    /// running until its own deadline. Browser sign-in completes through the
+    /// server's loopback listener, so a remote host must share loopback with
+    /// the terminal; relaying completion across machines needs a wire
+    /// addition and is out of scope here.
     async fn login(
         &self,
         provider: &str,
@@ -120,6 +122,7 @@ impl TuiHost for RemoteBackend {
                     None => LoginProgress::OpenUrl { url },
                 };
                 if progress.try_send(shown).is_err() {
+                    let _ = self.0.cancel_login(login_id).await;
                     return Err(cancelled());
                 }
                 login_id
@@ -128,7 +131,10 @@ impl TuiHost for RemoteBackend {
         loop {
             let update = tokio::select! {
                 biased;
-                () = cancel.cancelled() => return Err(cancelled()),
+                () = cancel.cancelled() => {
+                    let _ = self.0.cancel_login(pending).await;
+                    return Err(cancelled());
+                }
                 update = updates.next() => update.map_err(wire)?,
             };
             if matches!(update, RemoteHostUpdate::Reconnected) {
@@ -540,6 +546,7 @@ mod tests {
     #[tokio::test]
     async fn cancelling_a_pending_login_ends_in_a_cancelled_error() {
         with_backend(TokenReply::Issue, async |rig| {
+            let mut host_updates = rig.host.subscribe();
             let cancel = CancellationToken::new();
             let (io, mut events) = LoginIo::channel(None, cancel.clone());
             let user = async {
@@ -553,6 +560,18 @@ mod tests {
             let error = outcome.expect_err("cancelled");
             assert!(is_cancelled(&error), "{error}");
             assert!(!rig.auth_json().exists());
+            let finished = tokio::time::timeout(WAIT, async {
+                loop {
+                    let update = host_updates.next().await.expect("host stays up");
+                    if let dal_agent::HostUpdate::LoginFinished { ready, detail, .. } = update {
+                        break (ready, detail);
+                    }
+                }
+            })
+            .await
+            .expect("the server ends the cancelled attempt");
+            assert!(!finished.0, "a cancelled sign-in never reports ready");
+            assert_eq!(finished.1.as_deref(), Some("sign-in cancelled."));
         })
         .await;
     }
