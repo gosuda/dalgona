@@ -271,6 +271,27 @@ fn dev_run_surfaces_and_answers_an_approval_request() -> Result<(), Box<dyn Erro
 }
 
 #[test]
+fn dev_run_loads_the_bundled_devprobe_plugin() -> Result<(), Box<dyn Error>> {
+    let fixture = CliFixture::new()?;
+    let scenario = write_scenario(
+        &fixture,
+        &[
+            r#"{"plugin":"devprobe"}"#,
+            r#"{"provider":{"script":[{"kind":"events","events":[{"type":"tool_calls_done","calls":[{"id":"call-1","name":"devprobe__echo","args":{"kind":"parsed","value":{"value":"probe-echoed"}}}]},{"type":"usage","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":5,"reasoning_tokens":null,"cache_write_tokens":0,"cost_usd":null}},{"type":"stop","reason":"tool_use"}]},{"kind":"events","events":[{"type":"text_delta","text":"done"},{"type":"tool_calls_done","calls":[]},{"type":"usage","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":5,"reasoning_tokens":null,"cache_write_tokens":0,"cost_usd":null}},{"type":"stop","reason":"end_turn"}]}]}}"#,
+            r#"{"prompt":"call the echo tool"}"#,
+            r#"{"expect":{"update":{"kind":"tool_settled","contains":"probe-echoed"}}}"#,
+            r#"{"expect":{"update":{"kind":"turn_ended","contains":"end_turn"}}}"#,
+        ],
+    )?;
+    let output = fixture.output(&["dev", "run", scenario.to_str().expect("utf8 path")])?;
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("plugin devprobe"), "{text}");
+    assert!(text.contains("scenario passed"), "{text}");
+    Ok(())
+}
+
+#[test]
 fn dev_run_fails_closed_when_no_provider_is_given() -> Result<(), Box<dyn Error>> {
     let fixture = CliFixture::new()?;
     let scenario = write_scenario(&fixture, &[r#"{"prompt":"hi"}"#])?;

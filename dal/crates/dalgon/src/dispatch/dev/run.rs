@@ -29,6 +29,11 @@ use crate::{BuildCx, VarsMap, cli, exit};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// The bundled `devprobe` extension: echo, env/state/ask probes, a command,
+/// and `before_turn`/`tool_call` hooks — enough surface to exercise dispatch,
+/// service grants, and requests without hand-writing fixture plugins.
+const DEVPROBE_STAR: &str = include_str!("devprobe.star");
+
 /// Runs the scenario file to completion or its first failing step.
 pub(super) async fn run(
     args: &cli::DevRunArgs,
@@ -110,6 +115,7 @@ enum SessionKind {
 enum Step {
     Provider(ProviderWire),
     Config(ConfigWire),
+    Plugin(PluginWire),
     Session(SessionKind),
     Write {
         path: PathBuf,
@@ -174,6 +180,7 @@ struct RunCx {
     helper: Option<PathBuf>,
     provider_fixture: Option<PathBuf>,
     config_text: Vec<String>,
+    plugins: Vec<String>,
     session_kind: SessionKind,
     host: Option<Host>,
     agent: Option<Agent>,
@@ -213,6 +220,7 @@ impl RunCx {
             helper,
             provider_fixture: None,
             config_text: Vec::new(),
+            plugins: Vec::new(),
             session_kind: SessionKind::New(None),
             host: None,
             agent: None,
@@ -251,6 +259,11 @@ impl RunCx {
                 };
                 self.config_text.push(text);
                 let _ = writeln!(out, "{line:>4}  config");
+            }
+            Step::Plugin(wire) => {
+                self.require_pre_session(line)?;
+                let name = self.plugin_step(wire, &fail)?;
+                let _ = writeln!(out, "{line:>4}  plugin {name}");
             }
             Step::Session(kind) => {
                 self.require_pre_session(line)?;
@@ -561,11 +574,58 @@ impl RunCx {
         } else {
             self.config_text.join("\n")
         };
+        if !self.plugins.is_empty() {
+            let list = self
+                .plugins
+                .iter()
+                .map(|name| format!("\"{name}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = writeln!(text, "plugins = [{list}]");
+        }
         if let Some(fixture) = &self.provider_fixture {
             let escaped = fixture.to_string_lossy().replace('\\', "\\\\");
-            let _ = write!(text, "\n[providers.scripted]\nfixture = \"{escaped}\"\n");
+            let _ = writeln!(text, "\n[providers.scripted]\nfixture = \"{escaped}\"");
         }
         text
+    }
+
+    /// Installs one plugin source under the run data root and enables it.
+    fn plugin_step(
+        &mut self,
+        wire: PluginWire,
+        invalid: &impl Fn(String) -> DevError,
+    ) -> Result<String, DevError> {
+        let (name, source) = match wire {
+            PluginWire::Bundled(name) => {
+                if name != "devprobe" {
+                    return Err(invalid(format!(
+                        "unknown bundled plugin `{name}`: only `devprobe` is bundled"
+                    )));
+                }
+                (name, DEVPROBE_STAR.to_owned())
+            }
+            PluginWire::File { name, file } => {
+                let path = resolve(&self.scenario_dir, &file);
+                let source = std::fs::read_to_string(&path).map_err(|source| DevError::Read {
+                    path: path.display().to_string(),
+                    source,
+                })?;
+                (name, source)
+            }
+        };
+        let dir = self.data_root.join("plugins").join(&name);
+        std::fs::create_dir_all(&dir).map_err(|source| DevError::Write {
+            path: dir.display().to_string(),
+            source,
+        })?;
+        let target = dir.join("plugin.star");
+        std::fs::write(&target, source).map_err(|source| DevError::Write {
+            path: target.display().to_string(),
+            source,
+        })?;
+        self.plugins.push(name.clone());
+        Ok(name)
     }
 
     /// Validates a provider step and returns the fixture file path.
@@ -988,6 +1048,7 @@ fn thinking_level(text: &str) -> Result<ThinkingLevel, String> {
 struct StepWire {
     provider: Option<ProviderWire>,
     config: Option<ConfigWire>,
+    plugin: Option<PluginWire>,
     session: Option<SessionWire>,
     write: Option<WriteWire>,
     prompt: Option<PromptWire>,
@@ -1022,6 +1083,15 @@ struct ProviderWire {
 enum ConfigWire {
     Text(String),
     File { file: PathBuf },
+}
+
+/// `{"plugin": "devprobe"}` bundles the probe, or `{"plugin": {"name": n,
+/// "file": f}}` copies a scenario-relative `.star` file into the data root.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum PluginWire {
+    Bundled(String),
+    File { name: String, file: PathBuf },
 }
 
 /// `{"session": ...}` — a session shape or a named string.
@@ -1224,6 +1294,7 @@ impl StepWire {
         for (name, set) in [
             ("provider", self.provider.is_some()),
             ("config", self.config.is_some()),
+            ("plugin", self.plugin.is_some()),
             ("session", self.session.is_some()),
             ("write", self.write.is_some()),
             ("prompt", self.prompt.is_some()),
@@ -1264,6 +1335,9 @@ impl StepWire {
         }
         if let Some(wire) = self.config {
             return Ok(Step::Config(wire));
+        }
+        if let Some(wire) = self.plugin {
+            return Ok(Step::Plugin(wire));
         }
         if let Some(wire) = self.session {
             let kind = match wire {
