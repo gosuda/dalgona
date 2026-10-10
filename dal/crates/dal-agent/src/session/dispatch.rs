@@ -1188,7 +1188,7 @@ impl ToolCxRuntime for CallRuntime {
 
 /// Checks one grant-bound spawn: the grant's whitespace-split prefix tokens
 /// start the actual argv with exact tokens and the cwd sits below a grant
-/// root. Git directory selectors (`-C` and `--git-dir`) are checked against
+/// root. Git path selectors (`-C`, `--git-dir`, and `--work-tree`) are checked against
 /// the same roots, resolving relative operands from the effective directory.
 /// An empty prefix never matches here; one-shot approvals carry none.
 pub(crate) fn grant_covers(approved: &Approved, argv: &[std::ffi::OsString], cwd: &Path) -> bool {
@@ -1206,11 +1206,11 @@ pub(crate) fn grant_covers(approved: &Approved, argv: &[std::ffi::OsString], cwd
         && git_paths_in_roots(argv, cwd, approved.roots())
 }
 
-/// Checks every git directory selector in the global argument portion.
+/// Checks every git path selector in the global argument portion.
 ///
 /// Git applies relative `-C` paths successively, so each one becomes the
-/// effective directory for later relative paths. Git resolves `--git-dir`
-/// operands against the final `-C` directory. Unknown options are skipped;
+/// effective directory for later path operands. `--git-dir` and `--work-tree`
+/// are checked against that final directory. Unknown options are skipped;
 /// `--` ends option parsing. Invalid or missing operands fail closed.
 fn git_paths_in_roots(argv: &[std::ffi::OsString], cwd: &Path, roots: &[PathBuf]) -> bool {
     let Some(program) = argv.first() else {
@@ -1233,7 +1233,7 @@ fn git_c_base(argv: &[std::ffi::OsString], cwd: &Path, roots: &[PathBuf]) -> Opt
         if arg == std::ffi::OsStr::new("--") {
             break;
         }
-        if arg == std::ffi::OsStr::new("--git-dir") {
+        if arg == std::ffi::OsStr::new("--git-dir") || arg == std::ffi::OsStr::new("--work-tree") {
             argv.get(index + 1)?;
             index += 2;
             continue;
@@ -1262,7 +1262,7 @@ fn git_dirs_in_roots(argv: &[std::ffi::OsString], base: &Path, roots: &[PathBuf]
         if arg == std::ffi::OsStr::new("--") {
             break;
         }
-        if arg == std::ffi::OsStr::new("--git-dir") {
+        if arg == std::ffi::OsStr::new("--git-dir") || arg == std::ffi::OsStr::new("--work-tree") {
             let Some(path) = argv.get(index + 1) else {
                 return false;
             };
@@ -1275,7 +1275,9 @@ fn git_dirs_in_roots(argv: &[std::ffi::OsString], base: &Path, roots: &[PathBuf]
         let Some(text) = arg.to_str() else {
             return false;
         };
-        if let Some(path) = text.strip_prefix("--git-dir=")
+        if let Some(path) = text
+            .strip_prefix("--git-dir=")
+            .or_else(|| text.strip_prefix("--work-tree="))
             && checked_git_path(base, std::ffi::OsStr::new(path), roots).is_none()
         {
             return false;
@@ -1654,5 +1656,87 @@ mod tests {
         outside_git_arg.push(outside_git.as_os_str());
         let outside_git_dir = vec!["git".into(), outside_git_arg, "status".into()];
         assert!(!grant_covers(&approved, &outside_git_dir, &workspace));
+    }
+    #[test]
+    fn git_work_tree_stays_inside_a_nested_workspace() {
+        let temp = tempfile::tempdir().expect("temporary grant roots");
+        let outer = temp.path().join("outer-repo");
+        let workspace = outer.join("agent-workspace");
+        let nested = workspace.join("nested-repo");
+        let workspace_git = workspace.join(".git");
+        let outside_git = outer.join("outside.git");
+        let inside_git = workspace.join("outside.git");
+        let work_tree_dash_c = workspace.join("-Cnested");
+        std::fs::create_dir_all(&nested).expect("nested repository");
+        std::fs::create_dir_all(&workspace_git).expect("workspace git directory");
+        std::fs::create_dir_all(&inside_git).expect("nested relative git directory");
+        std::fs::create_dir_all(&outside_git).expect("outside git directory");
+        std::fs::create_dir_all(&work_tree_dash_c).expect("dash-prefixed work tree");
+        let approved = Approved::new(
+            CallId::new("work-tree-grant"),
+            None,
+            Box::new([std::ffi::OsString::from("git")]),
+            Box::new([workspace.clone()]),
+            None,
+        );
+
+        let work_tree_relative = vec![
+            "git".into(),
+            "--git-dir".into(),
+            ".git".into(),
+            "--work-tree".into(),
+            "nested-repo".into(),
+            "status".into(),
+        ];
+        assert!(grant_covers(&approved, &work_tree_relative, &workspace));
+
+        let work_tree_absolute = vec![
+            "git".into(),
+            "--git-dir".into(),
+            ".git".into(),
+            "--work-tree".into(),
+            outer.as_os_str().to_os_string(),
+            "status".into(),
+        ];
+        assert!(!grant_covers(&approved, &work_tree_absolute, &workspace));
+
+        let mut outside_work_tree_arg = std::ffi::OsString::from("--work-tree=");
+        outside_work_tree_arg.push(outer.as_os_str());
+        let outside_work_tree_equals = vec![
+            "git".into(),
+            "--git-dir".into(),
+            ".git".into(),
+            outside_work_tree_arg,
+            "status".into(),
+        ];
+        assert!(!grant_covers(
+            &approved,
+            &outside_work_tree_equals,
+            &workspace
+        ));
+        let work_tree_operand_that_looks_like_c = vec![
+            "git".into(),
+            "--work-tree".into(),
+            "-Cnested".into(),
+            "--git-dir".into(),
+            "../outside.git".into(),
+            "status".into(),
+        ];
+        assert!(!grant_covers(
+            &approved,
+            &work_tree_operand_that_looks_like_c,
+            &workspace,
+        ));
+
+        let mut nested_work_tree_arg = std::ffi::OsString::from("--work-tree=");
+        nested_work_tree_arg.push(nested.as_os_str());
+        let work_tree_equals = vec![
+            "git".into(),
+            "--git-dir".into(),
+            ".git".into(),
+            nested_work_tree_arg,
+            "status".into(),
+        ];
+        assert!(grant_covers(&approved, &work_tree_equals, &workspace));
     }
 }
