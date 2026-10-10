@@ -257,5 +257,13 @@ name = "loop-tui-11"
 path = "tests/loop-tui-11.rs"
 
 [[test]]
+name = "loop-tui-12"
+path = "tests/loop-tui-12.rs"
+
+[[test]]
+name = "soak-01"
+path = "tests/soak-01.rs"
+
+[[test]]
 name = "dal-full-01"
 path = "tests/dal-full-01.rs"

@@ -191,7 +191,8 @@ struct ReplayArgsDeltaWire {
     #[serde(rename = "type")]
     kind: String,
     id: String,
-    fragment: String,
+    fragment: Option<String>,
+    fragment_bytes: Option<Vec<u8>>,
 }
 
 #[derive(Deserialize)]
@@ -377,9 +378,16 @@ fn decode_args_delta(raw: &RawJson, line: usize) -> Result<StreamEvent, ScriptEr
     if wire.kind.as_str() != "tool_args_delta" {
         return Err(replay_error(line, "invalid tool argument delta"));
     }
+    let fragment = match (wire.fragment, wire.fragment_bytes) {
+        (Some(_), Some(_)) | (None, None) => {
+            return Err(replay_error(line, "invalid tool argument delta"));
+        }
+        (Some(text), None) => text.into_bytes(),
+        (None, Some(bytes)) => bytes,
+    };
     Ok(StreamEvent::ToolArgsDelta {
         id: wire.id,
-        fragment: wire.fragment.into_bytes(),
+        fragment,
     })
 }
 

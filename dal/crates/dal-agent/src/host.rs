@@ -168,6 +168,16 @@ pub(crate) struct HostState {
     pub(crate) attached: Mutex<tokio::task::JoinSet<()>>,
 }
 
+impl HostState {
+    /// Publishes one host-level update to every live subscriber.
+    pub(crate) fn publish(&self, update: &HostUpdate) {
+        self.subscribers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|sender| sender.send((*update).clone()).is_ok());
+    }
+}
+
 /// Product, configuration, and runtime handles shared by every session.
 pub(crate) struct HostShared {
     /// The validated product configuration.

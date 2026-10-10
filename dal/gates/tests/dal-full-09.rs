@@ -11,7 +11,7 @@ use std::{
     process::Command,
 };
 
-const INVENTORIES: [(&str, &[&str]); 5] = [
+const INVENTORIES: [(&str, &[&str]); 6] = [
     (
         "loop-headless",
         &[
@@ -40,6 +40,7 @@ const INVENTORIES: [(&str, &[&str]); 5] = [
             "loop-tui-09",
             "loop-tui-10",
             "loop-tui-11",
+            "loop-tui-12",
         ],
     ),
     (
@@ -60,6 +61,7 @@ const INVENTORIES: [(&str, &[&str]); 5] = [
             "loop-plugin-13",
         ],
     ),
+    ("soak", &["soak-01"]),
     (
         "wires",
         &[

@@ -99,3 +99,35 @@ fn error_encoding_omits_absent_data() {
             .is_some_and(|error| error.get("data").is_none())
     );
 }
+
+proptest! {
+    /// The frame decoder must never panic on arbitrary input: malformed frames
+    /// surface a typed `JsonRpcError`, never a crash.
+    #[test]
+    fn decode_never_panics_on_arbitrary_frames(frame in ".*{0,512}") {
+        let _ = decode_jsonrpc(&frame);
+    }
+
+    /// Structurally valid JSON that is not a well-formed request or response
+    /// must decode or fail typed — never panic.
+    #[test]
+    fn decode_near_miss_json_values(
+        tag in "[ -~]{0,24}",
+        n in any::<i64>(),
+        tail in prop_oneof![
+            Just(sonic_rs::json!({})),
+            Just(sonic_rs::json!([])),
+            any::<i64>().prop_map(Into::into),
+        ],
+    ) {
+        let frames = [
+            sonic_rs::to_string(&sonic_rs::json!({"jsonrpc": "2.0", "method": tag})).expect("escapes"),
+            sonic_rs::to_string(&sonic_rs::json!({"jsonrpc": "9.9", "id": n, "result": tail})).expect("escapes"),
+            sonic_rs::to_string(&sonic_rs::json!([n, {"id": tag}, true])).expect("escapes"),
+            sonic_rs::to_string(&sonic_rs::json!({"id": n, "error": {"code": n, "message": tag}})).expect("escapes"),
+        ];
+        for frame in frames {
+            let _ = decode_jsonrpc(&frame);
+        }
+    }
+}
