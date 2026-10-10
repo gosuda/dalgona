@@ -312,6 +312,7 @@ async fn fixture_kind(delay: Duration, durable: bool) -> Fixture {
             entry.workspace.clone(),
         )
     };
+    let resolutions = handle.resolutions();
     // The fixture's job table is the data-plane's own; the actor keeps the
     // session table internally.
     let jobs = Arc::new(tokio::sync::Mutex::new(crate::jobs::JobTable::new()));
@@ -368,7 +369,11 @@ async fn fixture_kind(delay: Duration, durable: bool) -> Fixture {
             overlay: Arc::new(crate::ext::overlay::Overlay::default()),
             history: Arc::from([]),
             sites: std::collections::HashMap::new(),
+            turn_cancel: Arc::new(|_: dal_core::TurnId| {
+                Some(tokio_util::sync::CancellationToken::new())
+            }),
             cancel: cancel.clone(),
+            resolutions,
             ask_timeout: Duration::from_secs(30),
             ephemeral,
             workspace: workspace.clone(),

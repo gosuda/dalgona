@@ -904,7 +904,17 @@ impl CallRuntime {
         let deadline = tokio::time::Instant::now() + default_timeout(&question);
         let owner = tool_owner(&self.generation, &self.tools, &self.tool);
         let (request, waiter) = self.broker.open(owner, question, turn, deadline);
-        self.report_asked(&request).await;
+        if self.report_asked(&request).await.is_err() {
+            if let Ok(resolved) =
+                self.broker
+                    .answer(request.id, Answer::Cancel, ClientId::new("core"))
+            {
+                self.broker.cancel(&resolved);
+            }
+            return Err(dal_core::DenyReason::Unavailable {
+                what: "session closed while opening approval".into(),
+            });
+        }
         let asked_at = Instant::now();
         let answered = tokio::select! {
             biased;
@@ -973,15 +983,15 @@ impl CallRuntime {
     /// `Asked` goes straight to the actor: the ask blocks this call until
     /// an answer arrives, so a deferred buffer would publish the request
     /// only after the answer it is supposed to enable.
-    async fn report_asked(&self, request: &Request) {
-        self.shared
-            .publish(dal_core::UpdateKind::RequestOpened(request.clone()));
-        let _ = self
-            .handle
+    async fn report_asked(&self, request: &Request) -> Result<(), crate::error::AgentError> {
+        self.handle
             .work(TurnWork::Asked {
                 request: request.clone(),
             })
-            .await;
+            .await?;
+        self.shared
+            .publish(dal_core::UpdateKind::RequestOpened(request.clone()));
+        Ok(())
     }
 
     /// Buffers one broker resolution for journaling.

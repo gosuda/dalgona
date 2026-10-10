@@ -1,3 +1,8 @@
+#![cfg_attr(
+    unix,
+    expect(clippy::disallowed_methods, reason = "integration tests fail loudly")
+)]
+
 //!
 //!
 //! The extension service ladder must ask like the exec tool: under `ask` an
@@ -17,8 +22,9 @@ use dal_agent::ext::{
 use dal_agent::{Agent, Delivery, Env, Host, Product, SessionRef, Subscription, ToolError};
 use dal_core::ext::{ExportId, ExportKind, OpSet};
 use dal_core::{
-    Answer, ClientId, Command, EntryKind, Expect, ModelInfo, Name, Part, RawJson, Record,
-    RunRequest, SessionId, ToolClass, ToolSpec, UpdateKind, Visibility, Workspace,
+    Answer, CancelScope, ClientId, Command, EntryKind, Expect, ModelInfo, Name, Part, RawJson,
+    Record, Reply, RunRequest, SessionId, Stop, ToolClass, ToolSpec, TurnId, UpdateKind,
+    Visibility, Workspace,
 };
 use dal_store::Store;
 
@@ -76,6 +82,56 @@ impl Tool for RunProbe {
         })
     }
 }
+/// A model-visible tool that holds a `sleep 30` child through the extension
+/// `run` service: long enough that only cancellation can end the turn.
+struct SleepProbe {
+    name: Name,
+    spec: Arc<ToolSpec>,
+}
+
+impl Tool for SleepProbe {
+    fn name(&self) -> &Name {
+        &self.name
+    }
+
+    fn spec(&self, _model: &ModelInfo) -> Arc<ToolSpec> {
+        Arc::clone(&self.spec)
+    }
+
+    fn classify(
+        &self,
+        _args: &RawValue,
+        _ws: &Workspace,
+    ) -> Result<ToolClass, dal_agent::ext::ArgError> {
+        Ok(ToolClass::Other)
+    }
+
+    fn run<'a>(&'a self, _call: ToolCall, cx: ToolCx<'a>) -> BoxFuture<'a, ToolOutcome> {
+        Box::pin(async move {
+            let request = RunRequest {
+                argv: vec![
+                    OsString::from("sh"),
+                    OsString::from("-c"),
+                    OsString::from("echo $$ > sleep.pid; exec sleep 3600"),
+                ],
+                cwd: None,
+                stdin: None,
+                timeout: None,
+                env: Vec::new(),
+                stdout_prefix_limit: 4096,
+            };
+            match cx.services().run(cx.caller(), request).await {
+                Ok(output) => ToolOutcome::Ok(Box::new(ToolOutput::from_text(
+                    String::from_utf8_lossy(&output.stdout_tail)
+                        .into_owned()
+                        .into_boxed_str(),
+                ))),
+                Err(error) => ToolOutcome::Err(ToolError::message(error.to_string())),
+            }
+        })
+    }
+}
+
 struct Session {
     host: Host,
     agent: Agent,
@@ -94,13 +150,34 @@ fn write_toml_line(into: &mut String, line: &str) {
 async fn host_with_probe(
     approval: Option<&str>,
 ) -> Result<(Host, Agent, tempfile::TempDir), Box<dyn std::error::Error>> {
+    let probe = Arc::new(RunProbe {
+        name: Name::parse("fixture__do_run")?,
+        spec: Arc::new(ToolSpec {
+            name: Name::parse("fixture__do_run")?,
+            description: "run probe tool".into(),
+            parameters: RawJson::parse(r#"{"type":"object"}"#)?,
+            grammar: None,
+        }),
+    });
+    host_with_tool(approval, "fixture__do_run", "do_run", probe).await
+}
+
+/// Builds the host with one named run tool and opens a session. The
+/// scripted step calls the tool by name, so the fixture is rewritten for it.
+async fn host_with_tool(
+    approval: Option<&str>,
+    tool_name: &str,
+    local: &str,
+    tool: Arc<dyn Tool>,
+) -> Result<(Host, Agent, tempfile::TempDir), Box<dyn std::error::Error>> {
     let tmp = tempfile::tempdir()?;
     let data = tmp.path().join("data");
     let workspace_dir = tmp.path().join("w");
     std::fs::create_dir_all(&data)?;
     std::fs::create_dir_all(&workspace_dir)?;
     let fixture = data.join("script.jsonl");
-    std::fs::write(&fixture, format!("{STEP_CALL}{STEP_END}"))?;
+    let step = STEP_CALL.replace("fixture__do_run", tool_name);
+    std::fs::write(&fixture, format!("{step}{STEP_END}"))?;
     let mut user = String::from("model = \"openai/gpt-6-luna\"\n");
     if let Some(mode) = approval {
         write_toml_line(&mut user, &format!("approval = \"{mode}\""));
@@ -118,26 +195,17 @@ async fn host_with_probe(
         "",
         Some(user.as_str()),
     )?;
-    let probe = Arc::new(RunProbe {
-        name: Name::parse("fixture__do_run")?,
-        spec: Arc::new(ToolSpec {
-            name: Name::parse("fixture__do_run")?,
-            description: "run probe tool".into(),
-            parameters: RawJson::parse(r#"{"type":"object"}"#)?,
-            grammar: None,
-        }),
-    });
     let inject = dal_core::ServiceSet::from_names(["run"])?;
     let extension = ExtensionBuilder::new("fixture", "0.1.0", inject)?
         .with_origin(dal_core::Origin::Builtin, None)
         .script_tool(
-            probe,
+            tool,
             Visibility::Model,
             ExportSpec {
                 id: ExportId {
                     plugin: Name::parse("fixture")?,
                     kind: ExportKind::Tool,
-                    local: Name::parse("do_run")?,
+                    local: Name::parse(local)?,
                 },
                 uses: OpSet::EMPTY,
                 input: RawJson::parse(r#"{"type":"object"}"#)?,
@@ -514,5 +582,228 @@ async fn a_run_nobody_answers_journals_the_default_it_broadcasts() -> TestResult
     assert!(matches!(answer, Answer::Decline), "{answer:?}");
     assert_eq!(by.as_str(), "core");
     assert!(was_default);
+    Ok(())
+}
+/// Opens a session running the sleep probe and submits its prompt,
+/// returning the turn the approval will belong to.
+async fn start_sleep_turn() -> Result<(Session, TurnId), Box<dyn std::error::Error>> {
+    let probe = Arc::new(SleepProbe {
+        name: Name::parse("fixture__sleep")?,
+        spec: Arc::new(ToolSpec {
+            name: Name::parse("fixture__sleep")?,
+            description: "sleep probe tool".into(),
+            parameters: RawJson::parse(r#"{"type":"object"}"#)?,
+            grammar: None,
+        }),
+    });
+    let (host, agent, tmp) = host_with_tool(None, "fixture__sleep", "sleep", probe).await?;
+    let subscription = agent.subscribe(None)?;
+    let turn = match agent
+        .submit(Command::Prompt {
+            expect: Expect::Idle,
+            content: vec![Part::Text {
+                text: "run sleep".into(),
+            }],
+        })
+        .await?
+    {
+        Reply::Accepted { turn, .. } => turn,
+        reply => return Err(format!("prompt not accepted: {reply:?}").into()),
+    };
+    let listener = agent.subscribe_listen(None)?;
+    Ok((
+        Session {
+            host,
+            agent,
+            subscription: Some(subscription),
+            listener,
+            tmp,
+        },
+        turn,
+    ))
+}
+
+/// Best-effort reaper for the probe child: a failed run must not leave an
+/// hour-long sleeper behind, especially on red runs where the kill is absent.
+struct KillGuard {
+    pid: Option<u32>,
+}
+
+impl Drop for KillGuard {
+    fn drop(&mut self) {
+        if let Some(pid) = self.pid {
+            let _ = std::process::Command::new("kill")
+                .args(["-9", &pid.to_string()])
+                .status();
+        }
+    }
+}
+
+/// Waits for the probe child to record its pid.
+async fn wait_sleep_pid(workspace: &std::path::Path) -> Result<u32, Box<dyn std::error::Error>> {
+    let pidfile = workspace.join("sleep.pid");
+    for _ in 0..100 {
+        if let Ok(text) = std::fs::read_to_string(&pidfile)
+            && let Ok(pid) = text.trim().parse::<u32>()
+        {
+            return Ok(pid);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    Err("the probe child never started".into())
+}
+
+#[cfg(unix)]
+fn pid_is_dead(pid: u32) -> bool {
+    !std::path::Path::new(&format!("/proc/{pid}")).exists()
+}
+
+/// Cancelling a turn kills its held run: `sleep 3600` can only end by a
+/// kill, so the dead pid proves the cancellation ladder fired, and the
+/// approval waiter settles exactly once.
+#[tokio::test]
+async fn cancelling_a_turn_kills_its_held_run() -> TestResult {
+    let (mut session, turn) = start_sleep_turn().await?;
+    let workspace = session.tmp.path().join("w");
+    let request = next_run_request(&mut session).await?;
+    session.agent.answer(request, Answer::Approve).await?;
+    let pid = wait_sleep_pid(&workspace).await?;
+    let _guard = KillGuard { pid: Some(pid) };
+    let started = std::time::Instant::now();
+    session
+        .agent
+        .submit(Command::Cancel {
+            scope: CancelScope::Turn(turn),
+        })
+        .await?;
+    let outcome = tokio::time::timeout(Duration::from_secs(30), async {
+        let mut resolved_count = 0;
+        let stop = loop {
+            let delivery = session
+                .listener
+                .next()
+                .await
+                .ok_or("the session closed before the turn ended")?;
+            let Delivery::Update(update) = &delivery else {
+                continue;
+            };
+            match &update.kind {
+                UpdateKind::RequestResolved { id, .. } if *id == request => {
+                    resolved_count += 1;
+                }
+                UpdateKind::TurnEnded { stop: ended, .. } => break Some(*ended),
+                _ => {}
+            }
+        };
+        Ok::<_, Box<dyn std::error::Error>>((resolved_count, stop))
+    })
+    .await
+    .map_err(|_| "the turn did not end within 30 s of its cancel")??;
+    let (resolved_count, stop) = outcome;
+    assert_eq!(
+        resolved_count, 1,
+        "the approval waiter must settle exactly once"
+    );
+    assert_eq!(stop, Some(Stop::Cancelled), "the turn must end cancelled");
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "the 3600 s sleep outlived its turn cancel"
+    );
+    #[cfg(unix)]
+    assert!(pid_is_dead(pid), "the cancelled child is still alive");
+    let id = session.agent.view(dal_core::PageReq::default())?.session.id;
+    session.host.close(id).await?;
+    let records = journal_records(&session.tmp, id).await?;
+    let resolved = records
+        .iter()
+        .filter(|record| {
+            matches!(record, Record::Resolved { request: answered, .. } if *answered == request)
+        })
+        .count();
+    assert_eq!(resolved, 1, "the journal must hold one resolution");
+    Ok(())
+}
+
+/// Cancelling while the approval is still open resolves that waiter exactly
+/// once as a core cancellation, and nothing ever spawns.
+#[tokio::test]
+async fn cancelling_an_open_approval_resolves_it_once() -> TestResult {
+    let (mut session, turn) = start_sleep_turn().await?;
+    let workspace = session.tmp.path().join("w");
+    let request = next_run_request(&mut session).await?;
+    session
+        .agent
+        .submit(Command::Cancel {
+            scope: CancelScope::Turn(turn),
+        })
+        .await?;
+    let mut resolutions = Vec::new();
+    let mut stop = None;
+    let mut kinds = Vec::new();
+    for _ in 0..15 {
+        let delivery = tokio::time::timeout(Duration::from_secs(2), session.listener.next())
+            .await
+            .map_err(|_| "the open approval was not resolved within 30 s")?
+            .ok_or("the session closed before the turn ended")?;
+        let Delivery::Update(update) = &delivery else {
+            continue;
+        };
+        kinds.push(format!("{:?}", update.kind));
+        match &update.kind {
+            UpdateKind::RequestResolved { id, answer, by } if *id == request => {
+                resolutions.push((answer.clone(), by.clone()));
+            }
+            UpdateKind::TurnEnded { stop: ended, .. } => {
+                stop = Some(*ended);
+            }
+            _ => {}
+        }
+        if stop.is_some() && !resolutions.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(resolutions.len(), 1, "kinds: {kinds:?}");
+    let resolved_pos = kinds
+        .iter()
+        .position(|kind| kind.starts_with("RequestResolved"))
+        .expect("a resolution was recorded");
+    let ended_pos = kinds
+        .iter()
+        .position(|kind| kind.starts_with("TurnEnded"))
+        .expect("the turn ended");
+    assert!(
+        resolved_pos < ended_pos,
+        "the resolution must publish before the end: {kinds:?}"
+    );
+    assert!(
+        matches!(resolutions[0].0, Answer::Cancel),
+        "the open approval must cancel: {:?}",
+        resolutions[0].0
+    );
+    assert_eq!(resolutions[0].1.as_str(), "core");
+    assert_eq!(stop, Some(Stop::Cancelled), "the turn must end cancelled");
+    assert!(
+        !workspace.join("sleep.pid").exists(),
+        "nothing may spawn after the approval died"
+    );
+    let id = session.agent.view(dal_core::PageReq::default())?.session.id;
+    session.host.close(id).await?;
+    let records = journal_records(&session.tmp, id).await?;
+    let journaled: Vec<_> = records
+        .iter()
+        .filter_map(|record| match record {
+            Record::Resolved {
+                request: answered,
+                answer,
+                ..
+            } if *answered == request => Some(answer.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        journaled,
+        vec![Answer::Cancel],
+        "the journal must hold exactly the cancellation"
+    );
     Ok(())
 }

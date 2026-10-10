@@ -267,16 +267,19 @@ impl Driver {
     /// Returns the turn state, creating it on first touch of the turn.
     ///
     /// The turn binds the bypass-cell token when the actor already opened
-    /// it (`TurnStarted` is journaled before any driver effect), so an
-    /// out-of-band `cancel` stops the stream; a late/stale turn falls back
-    /// to a standalone token exactly as before.
+    /// it (`TurnStarted` is journaled before any driver effect), in either
+    /// phase: opening hooks run before the journal sees `TurnStart`, so an
+    /// opening touch binds the opening token `cancel` fires. A turn with no
+    /// live token is stale or still replaying; it binds an inert token no
+    /// cancel fires, never the session token, so a stop cannot leak across
+    /// turns.
     fn turn(&mut self, turn: TurnId) -> &mut TurnState {
         let deps = &self.deps;
         let cancel = self
             .control
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .token(turn)
+            .token_for(turn)
             .unwrap_or_default();
         self.turns.entry(turn).or_insert_with(|| {
             let generation = deps.host.shared.generation.borrow().clone();

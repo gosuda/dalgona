@@ -52,6 +52,7 @@ struct FakeBackend {
     updates: Mutex<Vec<dal_core::UpdateKind>>,
     /// Resolutions the ask guard asked the actor to journal.
     resolved: Mutex<Vec<crate::broker::Resolved>>,
+    resolutions: Arc<crate::session::ResolutionInbox>,
     headless: std::sync::atomic::AtomicBool,
 }
 
@@ -189,6 +190,7 @@ impl SessionBackend for FakeBackend {
         Box::pin(async { Ok(()) })
     }
     fn request_resolved(&self, resolved: crate::broker::Resolved) {
+        self.resolutions.mark_settled(resolved.request.id);
         self.resolved
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -375,6 +377,7 @@ struct Fixture {
     rt: Arc<FakeRt>,
     temp: tempfile::TempDir,
     cancel: CancellationToken,
+    turn_token: CancellationToken,
     generation: watch::Sender<Arc<Generation>>,
 }
 
@@ -417,6 +420,7 @@ fn assemble(ask_timeout: Duration, ephemeral: bool) -> Fixture {
     );
     let (generation, generation_rx) = watch::channel(generation_of(Vec::new()));
     let overlay = Arc::new(crate::ext::overlay::Overlay::default());
+    let turn_token = CancellationToken::new();
     let services = Arc::new(SessionServices::new(SessionServicesDeps {
         grants,
         broker: Arc::clone(&broker),
@@ -427,7 +431,12 @@ fn assemble(ask_timeout: Duration, ephemeral: bool) -> Fixture {
         overlay: Arc::clone(&overlay),
         history: Arc::from(["first".to_owned(), "second".to_owned()]),
         sites,
+        turn_cancel: {
+            let live = turn_token.clone();
+            Arc::new(move |_| Some(live.clone()))
+        },
         cancel: cancel.clone(),
+        resolutions: Arc::clone(&backend.resolutions),
         ask_timeout,
         ephemeral,
         workspace,
@@ -439,6 +448,7 @@ fn assemble(ask_timeout: Duration, ephemeral: bool) -> Fixture {
         rt,
         temp,
         cancel,
+        turn_token,
         generation,
     }
 }
@@ -1430,5 +1440,121 @@ async fn an_open_ask_times_out_at_its_absolute_deadline() {
     assert!(
         matches!(outcome, Ok(None)),
         "the absolute timeout resolves to no answer: {outcome:?}"
+    );
+}
+/// A fired turn token cancels turn-scoped service calls without touching
+/// the session token.
+#[tokio::test]
+async fn a_fired_turn_token_cancels_turn_scoped_calls() {
+    let fx = fixture(Duration::from_secs(30));
+    fx.turn_token.cancel();
+    let run = fx
+        .services
+        .run(
+            &caller("focus", &["run"], Some(turn())),
+            run_request(&["echo"], fx.temp.path().to_path_buf()),
+        )
+        .await;
+    assert!(
+        matches!(run, Err(ServiceError::Cancelled)),
+        "a dead turn must not run: {run:?}"
+    );
+    let ask = fx
+        .services
+        .ask(
+            &caller("focus", &["ask"], Some(turn())),
+            Question::Text {
+                prompt: "proceed?".into(),
+                placeholder: None,
+            },
+        )
+        .await;
+    assert!(
+        matches!(ask, Err(ServiceError::Cancelled)),
+        "a dead turn must not ask: {ask:?}"
+    );
+}
+
+/// The reserved child-policy identity is denied at the extension door, on
+/// any session, while ordinary records still pass.
+#[tokio::test]
+async fn the_child_policy_identity_is_denied_to_extensions() {
+    let fx = fixture(Duration::from_secs(30));
+    let body = || Box::new(RawJson::parse("{}").unwrap());
+    let forged = fx
+        .services
+        .append_record(
+            &caller("dal-agent", &["sidecar"], None),
+            "child_policy",
+            body(),
+        )
+        .await;
+    assert!(
+        matches!(forged, Err(ServiceError::Denied(_))),
+        "a forged child policy must be denied: {forged:?}"
+    );
+    assert!(
+        fx.services
+            .append_record(&caller("dal-agent", &["sidecar"], None), "notes", body())
+            .await
+            .is_ok(),
+        "an ordinary dal-agent record must pass"
+    );
+    assert!(
+        fx.services
+            .append_record(&caller("focus", &["sidecar"], None), "child_policy", body())
+            .await
+            .is_ok(),
+        "another extension's own kind must pass"
+    );
+}
+
+/// A dropped ask reopens only after its withdrawal reaches the durable
+/// owner: the next ask is never answered from a stale slot.
+#[tokio::test]
+async fn a_dropped_ask_reopens_after_its_withdrawal_settles() {
+    let fx = fixture(Duration::from_secs(30));
+    let ask = |services: Arc<SessionServices>| async move {
+        let who = caller("focus", &["ask"], Some(turn()));
+        services
+            .ask(
+                &who,
+                Question::Text {
+                    prompt: "proceed?".into(),
+                    placeholder: None,
+                },
+            )
+            .await
+    };
+    let first = spawn(ask(Arc::clone(&fx.services)));
+    await_open(&fx.broker).await;
+    drop(first);
+    for _ in 0..100 {
+        if !fx.backend.resolved.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        fx.backend.resolved.lock().unwrap().len(),
+        1,
+        "the dropped ask must withdraw exactly once"
+    );
+    let second = spawn(ask(Arc::clone(&fx.services)));
+    // `await_open` counts settled slots too: wait for a new unresolved one.
+    for _ in 0..100 {
+        if !fx.broker.open_requests().is_empty() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    answer_next(&fx.broker, Answer::Decline);
+    assert!(
+        second
+            .join()
+            .await
+            .expect("the reopened ask resolves")
+            .is_none(),
+        "the slot must reopen after the settle"
     );
 }

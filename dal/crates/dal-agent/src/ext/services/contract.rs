@@ -350,6 +350,12 @@ pub(crate) struct SessionServicesDeps {
     pub(crate) sites: HashMap<Name, Option<Site>>,
     /// The session cancellation token.
     pub(crate) cancel: CancellationToken,
+    /// Resolves a live turn's cancellation token inside this session.
+    pub(crate) turn_cancel:
+        Arc<dyn Fn(dal_core::TurnId) -> Option<CancellationToken> + Send + Sync>,
+    /// The actor-owned durable resolution inbox shared with the session
+    /// handle, for settle-gated ask-slot reuse.
+    pub(crate) resolutions: Arc<crate::session::ResolutionInbox>,
     /// How long one `ask` question may stay open.
     pub(crate) ask_timeout: Duration,
     /// Whether this session is ephemeral and holds no sidecar directory.

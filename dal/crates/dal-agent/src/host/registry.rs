@@ -164,6 +164,16 @@ struct WiredSession {
     jobs: Arc<tokio::sync::Mutex<crate::jobs::JobTable>>,
 }
 
+/// The extension surface minted when a session is wired.
+struct WiredExtensions {
+    /// The grant store backing ask and run approvals.
+    grants: Arc<GrantStore>,
+    /// The extension overlay published for the session.
+    overlay: Arc<crate::ext::overlay::Overlay>,
+    /// The extension generation live at wire time.
+    generation: Arc<Generation>,
+}
+
 impl Host {
     /// Resolves a session reference, replays its journal, and spawns its actor.
     ///
@@ -749,32 +759,29 @@ impl Host {
             jobs_dir: backend.jobs_dir().to_path_buf(),
             tasks: tasks.clone(),
         }));
-        let grants = Arc::new(
-            GrantStore::with_runtime(
-                self.state.shared.data_root.clone(),
-                ASK_TIMEOUT,
-                Arc::clone(&broker),
-            )
-            .map_err(|error| HostError::Config {
-                message: error.to_string().into(),
-            })?,
-        );
-        let ext_generation = self.state.shared.generation.borrow().clone();
-        let overlay = Arc::new(crate::ext::overlay::Overlay::with_grants(
-            Arc::clone(&grants),
-            cancel.clone(),
-        ));
+        let extensions = self.grants_and_overlay(&broker, cancel)?;
+        let turn_control = Arc::clone(&ports.control);
         let services = Arc::new(SessionServices::new(SessionServicesDeps {
-            grants,
+            grants: extensions.grants,
             broker: Arc::clone(&broker),
             backend: backend.clone(),
             rt,
-            mcp_client: ext_generation.mcp().map(|(_, client)| Arc::clone(client)),
+            mcp_client: extensions
+                .generation
+                .mcp()
+                .map(|(_, client)| Arc::clone(client)),
             generation: self.state.shared.generation.subscribe(),
-            overlay: Arc::clone(&overlay),
+            overlay: Arc::clone(&extensions.overlay),
             history: opening_texts,
             sites: HashMap::new(),
+            turn_cancel: Arc::new(move |turn| {
+                turn_control
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .token_for(turn)
+            }),
             cancel: cancel.clone(),
+            resolutions: handle.resolutions(),
             ask_timeout: ASK_TIMEOUT,
             ephemeral: resolved.ephemeral,
             workspace: resolved.workspace.clone(),
@@ -790,12 +797,41 @@ impl Host {
             task,
             backend,
             services,
-            overlay,
-            ext_generation,
+            overlay: extensions.overlay,
+            ext_generation: extensions.generation,
             generation,
             broker,
             shared,
             jobs,
+        })
+    }
+
+    /// Loads the grant store, extension overlay, and live generation for a
+    /// session being wired.
+    fn grants_and_overlay(
+        &self,
+        broker: &Arc<Broker>,
+        cancel: &CancellationToken,
+    ) -> Result<WiredExtensions, HostError> {
+        let grants = Arc::new(
+            GrantStore::with_runtime(
+                self.state.shared.data_root.clone(),
+                ASK_TIMEOUT,
+                Arc::clone(broker),
+            )
+            .map_err(|error| HostError::Config {
+                message: error.to_string().into(),
+            })?,
+        );
+        let overlay = Arc::new(crate::ext::overlay::Overlay::with_grants(
+            Arc::clone(&grants),
+            cancel.clone(),
+        ));
+        let ext_generation = self.state.shared.generation.borrow().clone();
+        Ok(WiredExtensions {
+            grants,
+            overlay,
+            generation: ext_generation,
         })
     }
 

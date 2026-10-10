@@ -243,6 +243,7 @@ pub(crate) struct Actor {
     depth: u32,
     parent: Option<SessionId>,
     rx: mpsc::Receiver<ActorRequest>,
+    resolutions: Arc<crate::session::ResolutionInbox>,
     driver_tx: mpsc::Sender<TurnBatch>,
     host: Arc<crate::host::HostState>,
     pending_commands: VecDeque<ReplyTx>,
@@ -481,6 +482,7 @@ pub(crate) fn spawn(deps: ActorDeps) -> (SessionHandle, DriverPorts, tokio::task
     let (tx, rx) = mpsc::channel(COMMAND_CHANNEL);
     let (driver_tx, ops_rx) = mpsc::channel(DRIVER_CHANNEL);
     let control = Arc::new(Mutex::new(ControlCell::new()));
+    let resolutions = Arc::new(crate::session::ResolutionInbox::new());
     let actor = Actor {
         session: deps.session,
         journal: deps.journal,
@@ -494,6 +496,7 @@ pub(crate) fn spawn(deps: ActorDeps) -> (SessionHandle, DriverPorts, tokio::task
         depth: deps.depth,
         parent: deps.parent,
         rx,
+        resolutions: Arc::clone(&resolutions),
         driver_tx,
         host: deps.host,
         pending_commands: VecDeque::new(),
@@ -505,7 +508,7 @@ pub(crate) fn spawn(deps: ActorDeps) -> (SessionHandle, DriverPorts, tokio::task
         backend: deps.backend,
         tasks: deps.tasks,
     };
-    let handle = SessionHandle::new(deps.session, tx, std::sync::Arc::clone(&actor.control));
+    let handle = SessionHandle::new(deps.session, tx, Arc::clone(&actor.control), resolutions);
     #[expect(
         clippy::disallowed_methods,
         reason = "session-owned actor task: the host stores the handle and awaits it on close"
@@ -546,6 +549,8 @@ struct FoldOutcome {
         oneshot::Sender<Option<dal_core::EntryId>>,
         Option<dal_core::EntryId>,
     )>,
+    /// A cancelled turn whose end update waits for its journal receipts.
+    cancelled_end: Option<TurnId>,
 }
 
 impl Actor {
@@ -616,6 +621,28 @@ impl Actor {
                     if self.closing {
                         break;
                     }
+                    self.drain_queued().await;
+                    if self.closing {
+                        break;
+                    }
+                    self.drain_resolutions().await;
+                    if self.closing {
+                        break;
+                    }
+                }
+                () = self.resolutions.wait() => {
+                    // Causal barrier: a resolution can only exist after its
+                    // `Asked` was enqueued, so fold everything already queued
+                    // before touching the inbox. An `Answered` then never
+                    // meets a question that is still waiting in the mailbox.
+                    self.drain_queued().await;
+                    if self.closing {
+                        break;
+                    }
+                    self.drain_resolutions().await;
+                    if self.closing {
+                        break;
+                    }
                 }
                 _ = status_tick.tick() => {
                     self.poll_status();
@@ -624,6 +651,30 @@ impl Actor {
                     self.sweep_expiry().await;
                 }
             }
+        }
+        self.drain_resolutions().await;
+    }
+
+    /// Folds mailbox requests that arrived before a woken inbox resolution.
+    /// Bounded: one full mailbox plus arrivals during the drain.
+    async fn drain_queued(&mut self) {
+        for _ in 0..super::COMMAND_CHANNEL * 4 {
+            let Ok(request) = self.rx.try_recv() else {
+                break;
+            };
+            self.on_request(request).await;
+            if self.closing {
+                break;
+            }
+        }
+    }
+
+    /// Journals every inbox resolution in order and marks each id settled,
+    /// so the services slot reopens only after the terminal record landed.
+    async fn drain_resolutions(&mut self) {
+        while let Some((id, work)) = self.resolutions.take() {
+            self.on_work(work).await;
+            self.resolutions.mark_settled(id);
         }
     }
 
@@ -769,9 +820,24 @@ impl Actor {
             self.step(event, &mut effects);
         }
         queue.extend(effects);
-        self.execute(queue.into(), None).await;
+        let durable = self.execute(queue.into(), None).await;
+        if durable {
+            if outcome.cancelled_end.is_some() {
+                Box::pin(self.drain_resolutions()).await;
+            }
+            if let Some(turn) = outcome.cancelled_end {
+                self.publish(UpdateKind::TurnEnded {
+                    turn,
+                    stop: dal_core::Stop::Cancelled,
+                });
+            }
+        }
         if let Some((reply, entry)) = outcome.receipt {
-            let _ = reply.send(if self.broken.is_none() { entry } else { None });
+            let _ = reply.send(if durable && self.broken.is_none() {
+                entry
+            } else {
+                None
+            });
         }
         self.mark_delivered(&outcome.delivered);
     }
@@ -884,7 +950,13 @@ impl Actor {
                 // confirmation — the kill ladder of an in-flight call has
                 // completed by now; other stops already published at `Emit`.
                 if stop == dal_core::Stop::Cancelled {
-                    self.publish(UpdateKind::TurnEnded { turn, stop });
+                    let resolved = self
+                        .broker
+                        .resolve_turn(turn, Answer::Cancel, core_client());
+                    for item in resolved {
+                        self.queue_resolved(&item, queue);
+                    }
+                    outcome.cancelled_end = Some(turn);
                 }
             }
             TurnWork::TaskFailed { turn, message } => {
@@ -1018,22 +1090,25 @@ impl Actor {
     async fn execute(&mut self, effects: Vec<Effect>, reply: Option<ReplyTx>) -> bool {
         let mut queue: VecDeque<Effect> = effects.into();
         let mut reply = reply;
-        let mut durable = true;
         loop {
             let mut driver_effects = Vec::new();
             let mut asks = Vec::new();
+            let parked_commands = self.pending_commands.len();
             while let Some(effect) = queue.pop_front() {
                 match effect {
                     Effect::Emit(emit) => {
                         if let Err(error) = self.append_observe(emit, &mut queue).await {
+                            let message: Box<str> = error.to_string().into();
                             if let Some(tx) = reply.take() {
                                 let _ = tx.send(Err(error));
                             }
-                            durable = false;
-                            if self.broken.is_some() {
-                                self.release_pending(false);
-                                return false;
+                            if self.broken.is_none() {
+                                self.broken = Some(message);
                             }
+                            self.fail_parked(parked_commands);
+                            self.cancel_asks(asks);
+                            self.release_pending(false);
+                            return false;
                         }
                     }
                     Effect::Reply(result) => {
@@ -1108,10 +1183,37 @@ impl Actor {
             let Some(more) = more else { break };
             queue.extend(more);
         }
-        self.release_pending(durable);
-        durable
+        self.release_pending(true);
+        true
     }
 
+    /// Fails command replies parked after `len`: their driver batch never
+    /// sent, so no `CommandDone` can ever settle them.
+    fn fail_parked(&mut self, len: usize) {
+        while self.pending_commands.len() > len {
+            let Some(tx) = self.pending_commands.pop_back() else {
+                break;
+            };
+            let message = self
+                .broken
+                .clone()
+                .unwrap_or_else(|| "journal append failed.".into());
+            let _ = tx.send(Err(AgentError::Invalid(ValidationError::new(message))));
+        }
+    }
+
+    /// Cancels ask waiters collected but never handed to the driver: the
+    /// session is broken, so their questions can never be answered.
+    fn cancel_asks(&self, asks: Vec<(Request, AnswerWait)>) {
+        for (request, _) in asks {
+            if let Ok(resolved) = self
+                .broker
+                .answer(request.id, Answer::Cancel, core_client())
+            {
+                self.broker.cancel(&resolved);
+            }
+        }
+    }
     /// Delivers answers only after every queued resolution has been appended.
     fn release_pending(&mut self, durable: bool) {
         for resolved in self.pending_releases.drain(..) {
@@ -1295,9 +1397,11 @@ impl Actor {
 
     /// Steps one broker resolution into queued effects without recursing.
     ///
-    /// Returns whether the fold accepted the resolution; a rejected
-    /// resolution must fail closed through [`Broker::cancel`] instead of
-    /// waiting for a release that would carry an unjournaled answer.
+    /// Returns whether the fold accepted the resolution *and* emitted its
+    /// journal record: an unknown question steps to `Ok` with no `Emit`,
+    /// and such a resolution must fail closed through [`Broker::cancel`]
+    /// instead of waiting for a release that would carry an unjournaled
+    /// answer.
     fn queue_resolved(&mut self, item: &Resolved, queue: &mut VecDeque<Effect>) -> bool {
         let by = if item.was_default {
             None
@@ -1317,7 +1421,10 @@ impl Actor {
                 Timestamp::now(),
                 &mut effects,
             )
-            .is_ok();
+            .is_ok()
+            && effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::Emit(_)));
         if stepped {
             queue.extend(effects);
             self.pending_releases.push(item.clone());
@@ -1348,6 +1455,11 @@ impl Actor {
         kind: Box<str>,
         body: dal_core::RawJson,
     ) -> Result<dal_core::EntryId, ServiceError> {
+        // Reserved-identity enforcement lives at the extension door
+        // (`SessionServices::append_record`): the host child-start adapter
+        // reaches this journal through `handle.ext_record` directly, so an
+        // actor-side check cannot tell the trusted writer apart and must
+        // not second-guess it.
         if let Some(broken) = &self.broken {
             return Err(ServiceError::failed(None, broken.clone()));
         }
@@ -1393,9 +1505,17 @@ impl Actor {
         let mut queue = VecDeque::new();
         if !self.queue_resolved(&resolved, &mut queue) {
             self.broker.cancel(&resolved);
-            return Ok(());
+            return Err(AgentError::Invalid(ValidationError::new(format!(
+                "request {id} has no open question."
+            ))));
         }
-        self.execute(queue.into_iter().collect(), None).await;
+        if !self.execute(queue.into_iter().collect(), None).await {
+            let message = self
+                .broken
+                .clone()
+                .unwrap_or_else(|| "journal append failed.".into());
+            return Err(AgentError::Invalid(ValidationError::new(message)));
+        }
         Ok(())
     }
 

@@ -203,8 +203,11 @@ pub type UpdatePublisher = Arc<dyn Fn(dal_core::UpdateKind) + Send + Sync>;
 /// The actor route a session installs on its grant store: it folds
 /// `Event::RequestOpened` for grant questions before they are published,
 /// so every settlement journals a record.
-pub(crate) type RequestOpenPublisher =
-    Arc<dyn Fn(dal_core::Request) -> crate::ext::BoxFuture<'static, ()> + Send + Sync>;
+pub(crate) type RequestOpenPublisher = Arc<
+    dyn Fn(dal_core::Request) -> crate::ext::BoxFuture<'static, Result<(), ServiceError>>
+        + Send
+        + Sync,
+>;
 
 /// The probe a session installs on its grant store to learn whether a
 /// front end that can answer extension questions is attached.
@@ -283,7 +286,7 @@ impl GrantStore {
     /// Routes one opened grant question through the session actor before
     /// it is published. A dead session skips the route: the question then
     /// expires fail-closed with no answerer.
-    async fn open_request(&self, request: &dal_core::Request) {
+    async fn open_request(&self, request: &dal_core::Request) -> Result<(), ServiceError> {
         let publisher = self
             .request_open
             .lock()
@@ -291,8 +294,9 @@ impl GrantStore {
             .as_ref()
             .map(Arc::clone);
         if let Some(publisher) = publisher {
-            publisher(request.clone()).await;
+            publisher(request.clone()).await?;
         }
+        Ok(())
     }
 
     fn publish_request_update(&self, update: dal_core::UpdateKind) {
@@ -436,7 +440,12 @@ impl GrantStore {
             return Err(ServiceError::failed(None, "grant store has no broker"));
         };
         let (request, answer) = broker.open(owner, question, turn, deadline);
-        self.open_request(&request).await;
+        if let Err(error) = self.open_request(&request).await {
+            if let Ok(resolved) = broker.answer(request.id, Answer::Cancel, ClientId::new("core")) {
+                broker.cancel(&resolved);
+            }
+            return self.finalize_mcp(&key, Err(error), None, &notify).await;
+        }
         self.publish_request_update(dal_core::UpdateKind::RequestOpened(request.clone()));
         tokio::select! {
             biased;
@@ -558,7 +567,13 @@ impl GrantStore {
             return Err(ServiceError::failed(None, "grant store has no broker"));
         };
         let (request, answer) = broker.open(owner, question, who.turn, deadline);
-        self.open_request(&request).await;
+        if let Err(error) = self.open_request(&request).await {
+            let outcome = Err(error);
+            if let Ok(resolved) = broker.answer(request.id, Answer::Cancel, ClientId::new("core")) {
+                broker.cancel(&resolved);
+            }
+            return self.finalize(&key, service, outcome, None, &notify).await;
+        }
         self.publish_request_update(dal_core::UpdateKind::RequestOpened(request.clone()));
         tokio::select! {
             biased;
