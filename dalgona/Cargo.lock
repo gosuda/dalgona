@@ -1134,6 +1134,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml 1.1.8+spec-1.1.0",
+ "unicode-segmentation",
  "unicode-width 0.2.2",
  "uuid",
 ]

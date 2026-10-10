@@ -24,6 +24,8 @@ use dal_core::{
     TurnOpReply,
 };
 
+use unicode_segmentation::UnicodeSegmentation;
+
 use super::plan::{self, BatteryState, Host};
 use super::{PlanConfig, todo};
 
@@ -68,14 +70,30 @@ fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 /// Mirrors the store's session-name admission rule (`dal-store`'s
-/// `normalize_name`): 1-64 characters, no control characters, and at
-/// least one character other than `0-9`, `a-f`, and `-`.
+/// `normalize_name`): trims, collapses line-break runs to one space,
+/// then 1-64 grapheme clusters, no control characters, and at least
+/// one character other than `0-9`, `a-f`, and `-`.
 fn name_admitted(name: &str) -> bool {
-    let id_only = !name.is_empty()
-        && name
+    let mut out = String::new();
+    let mut breaking = false;
+    for ch in name.trim().chars() {
+        if ch == '\r' || ch == '\n' {
+            if !breaking {
+                out.push(' ');
+                breaking = true;
+            }
+        } else {
+            breaking = false;
+            out.push(ch);
+        }
+    }
+    let id_only = !out.is_empty()
+        && out
             .bytes()
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f' | b'-'));
-    (1..=64).contains(&name.chars().count()) && !name.chars().any(char::is_control) && !id_only
+    (1..=64).contains(&out.graphemes(true).count())
+        && !out.chars().any(char::is_control)
+        && !id_only
 }
 
 fn unavailable<T: Send + 'static>(calls: &AtomicUsize) -> ServiceFuture<'static, T> {
