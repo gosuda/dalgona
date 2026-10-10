@@ -72,21 +72,31 @@ fn next_id() -> GenerationId {
 /// prefix is every non-`User` extension in current canonical order
 /// (builtins in input order, then bundled by name) and only the
 /// trailing `User` run is replaced. `replace` swaps same-named
-/// non-`User` records, so a reload can rebind per-generation state
-/// inside a builtin extension. Canonical validation re-sorts
-/// afterward, so the result order never depends on this filter.
+/// non-`User` records *in place*, so a reload can rebind per-generation
+/// state inside a builtin extension without moving it in the canonical
+/// order hook and record tables follow. A `replace` name with no live
+/// same-named record appends after the kept run. Canonical validation
+/// re-sorts `Bundled` and `User` runs afterward.
 pub(crate) fn splice_plugins(
     current: &[Extension],
     plugins: Vec<Extension>,
     replace: Vec<Extension>,
 ) -> Vec<Extension> {
-    let replaced: std::collections::BTreeSet<&str> = replace.iter().map(Extension::name).collect();
-    let mut next: Vec<Extension> = current
-        .iter()
-        .filter(|ext| ext.origin() != Origin::User && !replaced.contains(ext.name()))
-        .cloned()
-        .collect();
-    next.extend(replace);
+    let mut pending = replace;
+    let mut next: Vec<Extension> = Vec::with_capacity(current.len() + plugins.len());
+    for ext in current {
+        if ext.origin() == Origin::User {
+            continue;
+        }
+        match pending
+            .iter()
+            .position(|record| record.name() == ext.name())
+        {
+            Some(at) => next.push(pending.remove(at)),
+            None => next.push(ext.clone()),
+        }
+    }
+    next.extend(pending);
     next.extend(plugins);
     next
 }
