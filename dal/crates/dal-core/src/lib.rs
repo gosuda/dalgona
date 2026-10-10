@@ -48,9 +48,10 @@ pub use ext::{
     TurnOpReply, UsesError, ViewNode, Visibility, WakeError, valid_tool_parameters, valid_version,
 };
 pub use fold::{
-    CompactLimits, CompactionExtRecord, CompactionReason, CompactionSummary, Effect, Emit, Event,
-    LeafExt, Limits, ModelRequestPlan, PartialResponse, PendingCall, Phase, ReplayError,
-    ResolveError, ResolvedCall, Session, Settings, SettledOutcome, Step, TurnSource, TurnStage,
+    CompactLimits, CompactionExtRecord, CompactionReason, CompactionSummary, DeclaredFold, Effect,
+    Emit, Event, LeafExt, Limits, ModelRequestPlan, PartialResponse, PendingCall, Phase,
+    ReplayError, ResolveError, ResolvedCall, Session, Settings, SettledOutcome, Step, TurnSource,
+    TurnStage,
 };
 pub use id::{
     BlobId, CallId, ClientId, EntryId, Gen, GenerationId, IdError, JobId, RequestId, Seq,

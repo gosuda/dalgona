@@ -23,17 +23,24 @@ use crate::{Startup, host_exit, map_approval, two_lines};
 
 #[cfg(feature = "tui")]
 mod interactive;
+
 mod wires;
 
 #[cfg(feature = "tui")]
 pub(crate) use interactive::interactive;
 
 pub(crate) use wires::{acp, app_server, rpc};
+mod dev;
+
 mod docs;
+
 mod login;
+
 mod logout;
+
 mod models;
 
+pub(crate) use dev::run as dev;
 pub(crate) use docs::run as docs;
 pub(crate) use login::run as login;
 pub(crate) use logout::run as logout;

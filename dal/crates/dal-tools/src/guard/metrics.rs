@@ -491,6 +491,7 @@ pub(super) struct Bands {
     /// File physical-lines band.
     pub file_ploc: u32,
 }
+
 pub(super) fn crossings(
     path: &str,
     pre: Option<&FileMetrics>,

@@ -248,6 +248,7 @@ path = "tests/release_semver.rs"
 [[test]]
 name = "release_dist"
 path = "tests/release_dist.rs"
+
 [[test]]
 name = "loop-tui-08"
 path = "tests/loop-tui-08.rs"
@@ -269,9 +270,14 @@ name = "loop-tui-12"
 path = "tests/loop-tui-12.rs"
 
 [[test]]
+name = "soak-01"
+path = "tests/soak-01.rs"
+
+[[test]]
 name = "loop-tui-13"
 path = "tests/loop-tui-13.rs"
 
 [[test]]
 name = "dal-full-01"
 path = "tests/dal-full-01.rs"
+# weave: run 'weave explain dal/gates/Cargo.toml' for per-hunk detail, 'weave check' to verify your resolution

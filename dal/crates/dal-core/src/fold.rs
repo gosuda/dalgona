@@ -39,7 +39,7 @@ mod types;
 mod views;
 
 pub use ext::LeafExt;
-pub use session::Session;
+pub use session::{DeclaredFold, Session};
 pub use types::{
     CompactLimits, CompactionExtRecord, CompactionReason, CompactionSummary, Effect, Emit, Event,
     Limits, ModelRequestPlan, PartialResponse, PendingCall, Phase, ReplayError, ResolveError,

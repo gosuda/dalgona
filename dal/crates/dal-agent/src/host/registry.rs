@@ -1123,11 +1123,7 @@ impl Host {
     }
 
     pub(crate) fn publish(&self, update: &HostUpdate) {
-        self.state
-            .subscribers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .retain(|sender| sender.send((*update).clone()).is_ok());
+        self.state.publish(update);
     }
 }
 

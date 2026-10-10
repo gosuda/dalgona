@@ -19,7 +19,9 @@ use crate::error::{AbortedTurn, JournalError, OpenReport, TornTail};
 
 /// The largest one record may be, in bytes (D-08).
 pub(crate) const MAX_RECORD: u64 = 67_108_864;
+
 const SCAN_BUFFER: usize = 1_048_576;
+
 /// The backward read window for torn-tail repair (D-14).
 const READ_WINDOW: u64 = 65_536;
 
@@ -2075,5 +2077,49 @@ mod tests {
             &reopened.repair[0],
             Record::Boot { r#gen, .. } if r#gen.get() == 3
         ));
+    }
+
+    proptest::proptest! {
+        /// Arbitrary bytes at the journal decode boundary must never panic and
+        /// must surface a typed `OpenFailure`, never a silent misdecode.
+        #[test]
+        fn decode_line_never_panics_on_arbitrary_bytes(bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..=256)) {
+            let _ = decode_line(&bytes, 0);
+        }
+
+        /// A line that decodes must be exactly what was encoded: round-trip
+        /// through the real codec proves no partial accept.
+        #[test]
+        fn decode_line_accepts_exactly_the_encoded_record(
+            r#gen in 1..=u64::MAX,
+        ) {
+            let record = Record::Boot {
+                r#gen: Gen::new(core::num::NonZeroU64::new(r#gen).expect("nonzero")),
+                at: timestamp(),
+                version: "test".into(),
+            };
+            let encoded = encode_records(std::slice::from_ref(&record));
+            let decoded = decode_line(&encoded, 0).expect("encoded record decodes");
+            assert!(matches!(decoded, Record::Boot { .. }));
+        }
+
+        /// Near-miss lines — a real record with trailing garbage — must not
+        /// decode silently: the decoder consumes the whole line or fails
+        /// typed. The suffix excludes JSON whitespace, which a strict codec
+        /// may legitimately tolerate.
+        #[test]
+        fn decode_line_rejects_trailing_garbage(garbage in "[^\n\t\r ]{1,32}") {
+            let record = Record::Boot {
+                r#gen: Gen::new(core::num::NonZeroU64::MIN),
+                at: timestamp(),
+                version: "test".into(),
+            };
+            let mut line = encode_records(std::slice::from_ref(&record));
+            line.extend_from_slice(garbage.as_bytes());
+            assert!(
+                decode_line(&line, 0).is_err(),
+                "valid record followed by `{garbage}` must not decode"
+            );
+        }
     }
 }

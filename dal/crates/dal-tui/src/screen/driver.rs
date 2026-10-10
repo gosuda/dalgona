@@ -230,10 +230,6 @@ impl Painter {
         self.cursor = place;
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "one paint pass carries every inline render input"
-    )]
     fn inline_bytes(
         &mut self,
         out: &mut Vec<u8>,
@@ -548,6 +544,7 @@ fn open_link(out: &mut Vec<u8>, url: &str) {
 fn close_link(out: &mut Vec<u8>) {
     out.extend_from_slice(b"\x1b[24m\x1b]8;;\x1b\\");
 }
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;

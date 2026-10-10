@@ -7,12 +7,15 @@ use std::{num::NonZeroU64, path::PathBuf};
 fn id(value: u64) -> TurnId {
     TurnId::new(NonZeroU64::new(value).unwrap())
 }
+
 fn entry(value: u64) -> EntryId {
     EntryId::new(NonZeroU64::new(value).unwrap())
 }
+
 fn stamp() -> jiff::Timestamp {
     jiff::Timestamp::UNIX_EPOCH
 }
+
 fn workspace_root() -> crate::workspace::Workspace {
     #[cfg(unix)]
     let root = PathBuf::from("/");
@@ -20,21 +23,26 @@ fn workspace_root() -> crate::workspace::Workspace {
     let root = PathBuf::from("C:\\");
     crate::workspace::Workspace::new(root).unwrap()
 }
+
 fn session() -> Session {
     Session::replay([], stamp()).unwrap().0
 }
+
 fn client() -> ClientId {
     ClientId::new("test")
 }
+
 fn name(value: &str) -> Name {
     Name::parse(value).unwrap()
 }
+
 fn route() -> ModelRoute {
     ModelRoute::Api {
         family: Family::Chat,
         model: "test-model".into(),
     }
 }
+
 fn usage(tokens: u64) -> Usage {
     Usage {
         input_tokens: tokens,
@@ -45,6 +53,7 @@ fn usage(tokens: u64) -> Usage {
         cost_usd: None,
     }
 }
+
 fn prompt(text: &str) -> Event {
     Event::Command {
         cmd: Command::Prompt {
@@ -54,6 +63,7 @@ fn prompt(text: &str) -> Event {
         by: client(),
     }
 }
+
 fn guard(turn: TurnId) -> Event {
     Event::Guard {
         turn,
@@ -62,11 +72,13 @@ fn guard(turn: TurnId) -> Event {
         outcome: HookOutcome::new(HookEvent::BeforeTurn, HookVerdict::BeforeTurn(None)).unwrap(),
     }
 }
+
 fn send(session: &mut Session, event: Event) -> Result<Vec<Effect>, Rejection> {
     let mut out = Vec::new();
     session.step(event, stamp(), &mut out)?;
     Ok(out)
 }
+
 fn begin(session: &mut Session) -> TurnId {
     send(session, prompt("question")).unwrap();
     let turn = match session.phase() {
@@ -76,6 +88,7 @@ fn begin(session: &mut Session) -> TurnId {
     send(session, guard(turn)).unwrap();
     turn
 }
+
 fn limits(min_tokens: u64) -> Event {
     Event::Limits {
         window: 100_000,
@@ -89,6 +102,7 @@ fn limits(min_tokens: u64) -> Event {
         },
     }
 }
+
 fn inference(stop: Stop, calls: &[(&str, &str)], tokens: u64) -> Inference {
     let mut events = vec![StreamEvent::Usage(usage(tokens))];
     for (call, tool) in calls {
@@ -101,6 +115,7 @@ fn inference(stop: Stop, calls: &[(&str, &str)], tokens: u64) -> Inference {
     events.push(StreamEvent::Stop(stop));
     Inference { events }
 }
+
 fn stream_result(session: &mut Session, turn: TurnId, response: Inference) -> Vec<Effect> {
     send(
         session,
@@ -114,6 +129,7 @@ fn stream_result(session: &mut Session, turn: TurnId, response: Inference) -> Ve
     )
     .unwrap()
 }
+
 fn only_tool_result(records: &[Record]) -> &Entry {
     records
         .iter()
@@ -123,6 +139,7 @@ fn only_tool_result(records: &[Record]) -> &Entry {
         })
         .unwrap()
 }
+
 fn append_emitted(out: &[Effect], records: &mut Vec<Record>) {
     for effect in out {
         if let Effect::Emit(emit) = effect {
@@ -130,6 +147,7 @@ fn append_emitted(out: &[Effect], records: &mut Vec<Record>) {
         }
     }
 }
+
 fn same_replayed_state(live: &Session, records: &[Record]) {
     let replayed = Session::replay(records.iter().cloned(), stamp()).unwrap().0;
     assert_eq!(replayed.phase, live.phase);
@@ -144,6 +162,7 @@ fn same_replayed_state(live: &Session, records: &[Record]) {
     assert_eq!(replayed.projected_bytes, live.projected_bytes);
     assert_eq!(replayed.turn_totals, live.turn_totals);
 }
+
 fn one_read_round(session: &mut Session, turn: TurnId, call: &str, tokens: u64) -> Vec<Effect> {
     stream_result(
         session,
@@ -187,6 +206,7 @@ fn one_read_round(session: &mut Session, turn: TurnId, call: &str, tokens: u64) 
     )
     .unwrap()
 }
+
 fn compact_summary(before: u64, after: u64) -> CompactionSummary {
     CompactionSummary {
         compactor: name("summary"),
@@ -1276,6 +1296,69 @@ fn replay_repairs_aborted_turn() {
     ));
 }
 
+/// `replay_declared` must NOT run crash-recovery synthesis: the same open
+/// turn stays open so journal inspection attributes state to the written
+/// records only.
+#[test]
+fn replay_declared_keeps_the_open_turn_unrepaired() {
+    let session_id = crate::id::SessionId::parse("01890f47-36b0-7cc4-8000-000000000001").unwrap();
+    let header = crate::journal::Header {
+        id: session_id,
+        at: stamp(),
+        workspace: workspace_root(),
+        product: crate::journal::Product::Dal,
+        from: None,
+    };
+    let call = CallId::new("call");
+    let assistant = Entry {
+        id: entry(1),
+        parent: None,
+        at: stamp(),
+        kind: EntryKind::Assistant {
+            api: Family::Chat,
+            model: "test".into(),
+            content: vec![Block::ToolCall {
+                id: call.clone(),
+                name: "read_file".into(),
+                input: RawJson::parse("{}").unwrap(),
+            }],
+            usage: usage(1),
+            stop: AssistantStop::ToolUse,
+        },
+    };
+    let records = [
+        Record::Session(header),
+        Record::TurnStart {
+            at: stamp(),
+            turn: id(3),
+        },
+        Record::Assistant(assistant),
+        Record::ToolStart {
+            at: stamp(),
+            turn: id(3),
+            call,
+        },
+    ];
+    let declared = Session::replay_declared(records).unwrap();
+    // Replay mints a fresh boot generation and repair ToolResult entries;
+    // the declared fold must mint neither.
+    assert_eq!(declared.generation, None);
+    let repairs = declared
+        .tree
+        .entries
+        .values()
+        .filter(|entry| matches!(entry.kind, EntryKind::ToolResult { .. }))
+        .count();
+    assert_eq!(repairs, 0, "no repair entries in the declared fold");
+    // A journal ending inside a turn declares the live fold's shape —
+    // `Running` at the boundary step — not `Idle`.
+    assert!(
+        matches!(declared.phase(), Phase::Running { turn, .. } if *turn == id(3)),
+        "an unterminated turn must surface as Running: {:?}",
+        declared.phase()
+    );
+}
+
 const LOST: &str = "Tool call was not completed: dalgon stopped before it finished.";
 
 fn open_turn(session: &mut Session, journal: &mut Vec<Record>) -> TurnId {
@@ -1287,6 +1370,7 @@ fn open_turn(session: &mut Session, journal: &mut Vec<Record>) -> TurnId {
     append_emitted(&send(session, guard(turn)).unwrap(), journal);
     turn
 }
+
 fn resolved_call(
     call: &str,
     tool: &str,
@@ -1300,6 +1384,7 @@ fn resolved_call(
         result,
     }
 }
+
 fn results_of(records: &[Record], call: &str) -> Vec<(bool, Vec<JournalPart>)> {
     let call = CallId::new(call);
     records
@@ -1318,9 +1403,11 @@ fn results_of(records: &[Record], call: &str) -> Vec<(bool, Vec<JournalPart>)> {
         })
         .collect()
 }
+
 fn text_part(text: &str) -> Vec<JournalPart> {
     vec![JournalPart::Text { text: text.into() }]
 }
+
 fn assistant_record(entry_id: u64, calls: &[&str]) -> Record {
     Record::Assistant(Entry {
         id: entry(entry_id),
@@ -1342,6 +1429,7 @@ fn assistant_record(entry_id: u64, calls: &[&str]) -> Record {
         },
     })
 }
+
 fn result_record(entry_id: u64, call: &str) -> Record {
     Record::ToolResult(Entry {
         id: entry(entry_id),
@@ -1357,6 +1445,7 @@ fn result_record(entry_id: u64, call: &str) -> Record {
         },
     })
 }
+
 fn start_record(turn: u64, call: &str) -> Record {
     Record::ToolStart {
         at: stamp(),
@@ -1364,12 +1453,14 @@ fn start_record(turn: u64, call: &str) -> Record {
         call: CallId::new(call),
     }
 }
+
 fn turn_start_record(turn: u64) -> Record {
     Record::TurnStart {
         at: stamp(),
         turn: id(turn),
     }
 }
+
 fn turn_end_record(turn: u64) -> Record {
     Record::TurnEnd {
         at: stamp(),
@@ -1379,6 +1470,7 @@ fn turn_end_record(turn: u64) -> Record {
         changes: Vec::new(),
     }
 }
+
 fn contradicts(records: Vec<Record>) -> bool {
     matches!(
         Session::replay(records, stamp()),
@@ -2384,6 +2476,7 @@ fn receipt_effect_precedes_reply_and_publish() {
         Some(Effect::Reply(Ok(Reply::Done(Output::Nothing))))
     ));
 }
+
 #[test]
 fn set_mode_persists_and_replays() {
     let mut session = session();

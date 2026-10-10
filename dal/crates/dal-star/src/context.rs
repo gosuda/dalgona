@@ -738,3 +738,4 @@ fn phase_name(phase: Phase) -> &'static str {
         Phase::Hook(_) => "hook",
     }
 }
+// weave: run 'weave explain dal/crates/dal-star/src/context.rs' for per-hunk detail, 'weave check' to verify your resolution

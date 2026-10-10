@@ -1351,6 +1351,12 @@ impl Actor {
         queue: &mut VecDeque<Effect>,
     ) -> Result<(), AgentError> {
         let updates = emit.updates;
+        // A `Record::Name` changes the session's visible listing metadata; host
+        // subscribers must hear about it once the record is durable.
+        let renamed = emit
+            .records
+            .iter()
+            .any(|record| matches!(record, Record::Name { .. }));
         if let Err(error) = self.journal.append(emit.records).await {
             eprintln!(
                 "[dal-agent] session {:?} journal append failed: {error}",
@@ -1364,6 +1370,11 @@ impl Actor {
         }
         for kind in updates {
             self.observe(kind, queue);
+        }
+        if renamed {
+            self.host.publish(&crate::host::HostUpdate::SessionChanged {
+                session: self.session,
+            });
         }
         Ok(())
     }

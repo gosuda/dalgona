@@ -120,6 +120,7 @@ enum StagePlan {
         rename_to: Option<RenameTarget>,
     },
 }
+
 pub(crate) async fn stage_file(
     session: &PatchSession,
     style: super::super::ir::DialectId,
@@ -820,7 +821,6 @@ fn diff_hunks(before: &[u8], after: &[u8]) -> Vec<DiffHunk> {
 }
 
 #[expect(
-    clippy::too_many_arguments,
     clippy::too_many_lines,
     reason = "one proof carries the session, path pair, and locator inputs"
 )]
@@ -1340,6 +1340,7 @@ fn strip_numbered_prefixes(value: &str) -> Option<(usize, String)> {
 fn find_text_matches(haystack: &str, needle: &str) -> Vec<(usize, usize)> {
     find_text_match_set(haystack, needle).spans
 }
+
 #[cfg(test)]
 pub(crate) fn find_text_matches_linear_probe(haystack: &str, needle: &str) -> usize {
     MATCH_COMPARISONS.store(0, std::sync::atomic::Ordering::Relaxed);

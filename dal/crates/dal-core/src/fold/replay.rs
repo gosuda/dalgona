@@ -1,5 +1,5 @@
 use super::helpers::{entry_weight, parse_job_kind};
-use super::types::{MAX_WAKE_RUN, PRODUCT_VERSION, Tree};
+use super::types::{MAX_WAKE_RUN, PRODUCT_VERSION, Step, Tree, TurnStage};
 use super::{
     BTreeMap, Block, CallId, Effect, Emit, Entry, EntryId, EntryKind, EntryView, JobEvent, JobId,
     JobKind, JournalPart, Name, NonZeroU64, Phase, Record, ReplayError, Session, TurnEndStop,
@@ -345,6 +345,34 @@ impl Replay {
             _ => {}
         }
         Ok(())
+    }
+
+    /// Applies the declared-fold tail to the running session: reserves
+    /// entry and turn counters, surfaces an unterminated turn as the
+    /// running phase the journal declares, and restores branch state.
+    /// Idempotent, so an incremental fold can re-apply it after every
+    /// pushed record.
+    pub(super) fn declared_tail(&mut self) -> Result<(), ReplayError> {
+        self.calls.retain(|known| !known.settled);
+        self.reserve_counters()?;
+        self.session.phase = match self.active_turn {
+            Some(turn) => Phase::Running {
+                turn,
+                round: Step(0),
+                stage: TurnStage::Boundary,
+            },
+            None => Phase::Idle,
+        };
+        self.session.restore_branch_state()
+    }
+
+    /// Folds the declared records into a session without crash-recovery
+    /// synthesis: open turns stay open and no repair, orphan, or boot
+    /// records are minted, so journal inspection attributes state to the
+    /// written records only.
+    pub(super) fn finish_declared(mut self) -> Result<Session, ReplayError> {
+        self.declared_tail()?;
+        Ok(self.session)
     }
 
     pub(super) fn finish(

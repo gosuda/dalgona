@@ -252,10 +252,6 @@ pub fn effective_deadline(turn_deadline: Instant, wait_ms: u64) -> Instant {
 
 /// Mints one [`HookCx`] for a single hook invocation of `caller`.
 #[must_use]
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the mint carries the fixed session family a hook needs; parent joined it"
-)]
 pub fn mint_cx(
     caller: Caller,
     services: Arc<dyn Services>,

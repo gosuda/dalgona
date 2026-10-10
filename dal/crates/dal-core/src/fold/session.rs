@@ -138,6 +138,22 @@ impl Session {
             .ok_or_else(|| contradiction("generation id space exhausted"))
     }
 
+    /// Reconstructs the session exactly as the journal declares it, without
+    /// the crash-recovery records [`Session::replay`] synthesizes: an open
+    /// turn stays open, started jobs stay started, and the generation stays
+    /// the last boot's. Journal inspection uses this so attribution maps to
+    /// written records, not synthetic repairs.
+    ///
+    /// # Errors
+    /// Same contract as [`Session::replay`].
+    pub fn replay_declared(records: impl IntoIterator<Item = Record>) -> Result<Self, ReplayError> {
+        let mut replay = Replay::new();
+        for record in records {
+            replay.record(&record)?;
+        }
+        replay.finish_declared()
+    }
+
     /// Decodes lines and replays them, preserving unsupported-version errors.
     ///
     /// # Errors
@@ -201,5 +217,48 @@ impl Session {
     #[must_use]
     pub const fn promoted(&self) -> &BTreeSet<Name> {
         &self.promoted
+    }
+}
+
+/// An incremental fold over declared journal records.
+///
+/// Pushes records one at a time so a tool that attributes each record's
+/// change keeps one running fold instead of replaying every prefix;
+/// `session()` returns the session the pushed records declare, the same
+/// answer [`Session::replay_declared`] gives for the same records.
+pub struct DeclaredFold {
+    replay: Replay,
+}
+
+impl Default for DeclaredFold {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DeclaredFold {
+    /// An empty fold.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            replay: Replay::new(),
+        }
+    }
+
+    /// Folds one more declared record.
+    ///
+    /// # Errors
+    /// Same contract as [`Session::replay_declared`].
+    pub fn push(&mut self, record: &Record) -> Result<(), ReplayError> {
+        self.replay.record(record)
+    }
+
+    /// The session the pushed records declare so far.
+    ///
+    /// # Errors
+    /// Same contract as [`Session::replay_declared`].
+    pub fn session(&mut self) -> Result<Session, ReplayError> {
+        self.replay.declared_tail()?;
+        Ok(self.replay.session.clone())
     }
 }

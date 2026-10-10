@@ -11,7 +11,7 @@ use std::{
     process::Command,
 };
 
-const INVENTORIES: [(&str, &[&str]); 6] = [
+const INVENTORIES: [(&str, &[&str]); 7] = [
     (
         "loop-headless",
         &[
@@ -62,6 +62,7 @@ const INVENTORIES: [(&str, &[&str]); 6] = [
             "loop-plugin-13",
         ],
     ),
+    ("soak", &["soak-01"]),
     (
         "wires",
         &[
@@ -214,3 +215,4 @@ fn has_row_number(bytes: &[u8]) -> bool {
     }
     false
 }
+// weave: run 'weave explain dal/gates/tests/dal-full-09.rs' for per-hunk detail, 'weave check' to verify your resolution

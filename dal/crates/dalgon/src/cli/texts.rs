@@ -38,6 +38,9 @@ pub(crate) const APP_SERVER_HELP: &str =
 pub(crate) const COMPLETION_HELP: &str = "Generate shell completion scripts.";
 pub(crate) const PLUGIN_HELP: &str = "Manage configured plugin grants.";
 pub(crate) const RULES_HELP: &str = "Inspect or test stream rules.";
+pub(crate) const DEV_HELP: &str = "Inspect and drive sessions for debugging.";
+pub(crate) const DEV_RUN_HELP: &str =
+    "Drive a scripted headless session from a scenario file (one step JSON per line).";
 pub(crate) const LOGIN_API_KEY_HELP: &str = "Read an API key from standard input.";
 pub(crate) const LOGIN_DEVICE_AUTH_HELP: &str = "Use the provider device-auth flow.";
 pub(crate) const LOGIN_STATUS_HELP: &str = "Show provider sign-in state.";
@@ -111,6 +114,14 @@ pub(crate) const RULE_TEST_SOURCE_HELP: &str = "Select the input stream to test.
 pub(crate) const RULE_TEST_TOOL_HELP: &str =
     "Name the tool for a tool-source test (default: patch).";
 pub(crate) const RULE_TEST_PATH_HELP: &str = "Set the path context for a tool-source test.";
+pub(crate) const DEV_JOURNAL_HELP: &str = "Replay, diff, and edit session journals.";
+pub(crate) const DEV_JOURNAL_REPLAY_HELP: &str = "Fold a journal and print the recovered state.";
+pub(crate) const DEV_JOURNAL_DIFF_HELP: &str =
+    "Print the folded fields that differ between two journals.";
+pub(crate) const DEV_JOURNAL_TORN_HELP: &str = "Copy a journal with its tail cut mid-record.";
+pub(crate) const DEV_JOURNAL_SIDECAR_HELP: &str =
+    "List or dump the sidecar files in a session directory.";
+pub(crate) const DEV_FOLD_HELP: &str = "Print which folded fields each journal record changes.";
 pub(crate) fn serve_public_warning(addr: SocketAddr) -> String {
     format!(
         "dalgon: warning: --public serves {addr} over plain HTTP; the serve token crosses the network in plain text."

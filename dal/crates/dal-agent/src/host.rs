@@ -1,13 +1,18 @@
 //! Host-owned live sessions and their process-independent inputs.
 
 mod auth;
+
 mod history;
+
 pub(crate) mod ops;
+
 mod registry;
+
 mod start;
 
 /// Extension record identity for a child session's durable start policy.
 pub(crate) const CHILD_POLICY_EXT: &str = "dal-agent";
+
 /// Extension record kind for a child session's durable start policy.
 pub(crate) const CHILD_POLICY_KIND: &str = "child_policy";
 
@@ -210,6 +215,16 @@ pub(crate) struct HostState {
     pub(crate) shared: Arc<HostShared>,
     /// The futures of the extensions' `Attach` controllers; shutdown aborts them.
     pub(crate) attached: Mutex<tokio::task::JoinSet<()>>,
+}
+
+impl HostState {
+    /// Publishes one host-level update to every live subscriber.
+    pub(crate) fn publish(&self, update: &HostUpdate) {
+        self.subscribers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|sender| sender.send((*update).clone()).is_ok());
+    }
 }
 
 pub(crate) struct NameClaim {
