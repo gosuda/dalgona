@@ -140,6 +140,8 @@ pub(crate) enum Commands {
     Plugin(PluginArgs),
     #[command(about = texts::RULES_HELP)]
     Rules(RulesArgs),
+    #[command(about = texts::DEV_HELP)]
+    Dev(DevArgs),
     #[command(name = "__sandbox", hide = true, about = texts::SANDBOX_HELP)]
     Sandbox,
 }
@@ -260,6 +262,82 @@ pub(crate) enum RuleTestSourceArg {
     Text,
     Thinking,
     Tool,
+}
+
+#[derive(Clone, Debug, Args)]
+pub(crate) struct DevArgs {
+    #[command(subcommand)]
+    pub(crate) command: DevSubcommand,
+}
+
+#[derive(Clone, Debug, Subcommand)]
+pub(crate) enum DevSubcommand {
+    #[command(about = texts::DEV_JOURNAL_HELP)]
+    Journal(DevJournalArgs),
+    #[command(about = texts::DEV_FOLD_HELP)]
+    Fold(DevFoldArgs),
+}
+
+#[derive(Clone, Debug, Args)]
+pub(crate) struct DevFoldArgs {
+    /// The journal file to explain.
+    #[arg(value_name = "FILE")]
+    pub(crate) file: PathBuf,
+}
+
+#[derive(Clone, Debug, Args)]
+pub(crate) struct DevJournalArgs {
+    #[command(subcommand)]
+    pub(crate) command: DevJournalSubcommand,
+}
+
+#[derive(Clone, Debug, Subcommand)]
+pub(crate) enum DevJournalSubcommand {
+    #[command(about = texts::DEV_JOURNAL_REPLAY_HELP)]
+    Replay(DevReplayArgs),
+    #[command(about = texts::DEV_JOURNAL_DIFF_HELP)]
+    Diff(DevDiffArgs),
+    #[command(about = texts::DEV_JOURNAL_TORN_HELP)]
+    Torn(DevTornArgs),
+    #[command(about = texts::DEV_JOURNAL_SIDECAR_HELP)]
+    Sidecar(DevSidecarArgs),
+}
+
+#[derive(Clone, Debug, Args)]
+pub(crate) struct DevReplayArgs {
+    /// The journal file to fold.
+    #[arg(value_name = "FILE")]
+    pub(crate) file: PathBuf,
+}
+
+#[derive(Clone, Debug, Args)]
+pub(crate) struct DevDiffArgs {
+    /// The journal whose folded fields print as removed.
+    #[arg(value_name = "BEFORE")]
+    pub(crate) before: PathBuf,
+    /// The journal whose folded fields print as added.
+    #[arg(value_name = "AFTER")]
+    pub(crate) after: PathBuf,
+}
+
+#[derive(Clone, Debug, Args)]
+pub(crate) struct DevTornArgs {
+    /// The journal to copy.
+    #[arg(value_name = "IN")]
+    pub(crate) input: PathBuf,
+    /// The torn copy to write.
+    #[arg(value_name = "OUT")]
+    pub(crate) output: PathBuf,
+}
+
+#[derive(Clone, Debug, Args)]
+pub(crate) struct DevSidecarArgs {
+    /// The session directory holding journal.jsonl and its sidecars.
+    #[arg(value_name = "DIR")]
+    pub(crate) dir: PathBuf,
+    /// Dump one sidecar instead of listing them.
+    #[arg(value_name = "NAME")]
+    pub(crate) name: Option<String>,
 }
 
 #[derive(Clone, Debug, Args)]
