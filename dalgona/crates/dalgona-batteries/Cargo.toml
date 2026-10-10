@@ -39,6 +39,7 @@ hyper = { version = "=1.12.0", features = ["full"] }
 hyper-util = { version = "=0.1.21", features = ["full"] }
 proptest = "=1.11.0"
 shuttle = "=0.9.5"
+unicode-segmentation = "=1.13.3"
 
 [lints]
 workspace = true
