@@ -294,11 +294,14 @@ async fn run_oauth(
 
 /// Handles `auth/cancel`: fires a pending login's cancel token by `loginId`.
 ///
-/// Answers whether a pending attempt was cancelled: false when the id is
-/// unknown or its login already finished. Cancelling resolves the login's
-/// waiter with the typed cancellation, which the host reports as a failed
-/// `login_finished` update; the `auth/login` request already answered
-/// `pending`, so no second reply follows it.
+/// The RPC trust model is capability-scoped for a single-user daemon, not
+/// connection-scoped: any caller granted `auth` may cancel any pending login
+/// on this host, including one started on another connection. `LoginId` is
+/// therefore a host-wide capability, and `cancelled` reports whether that
+/// host-wide id was still pending. Cancelling resolves the login's waiter with
+/// the typed cancellation, which the host reports as a failed `login_finished`
+/// update; the `auth/login` request already answered `pending`, so no second
+/// reply follows it.
 pub(crate) fn auth_cancel(host: &Host, params: &Value) -> Result<Value, ErrorObject> {
     let raw = super::opt_i64("auth/cancel", params, "loginId")?
         .ok_or_else(|| invalid_params("auth/cancel", "missing member `loginId`"))?;
