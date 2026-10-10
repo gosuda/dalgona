@@ -39,17 +39,6 @@ disallowed_methods = "deny"
 [profile.dev]
 debug = "line-tables-only"
 
-[profile.dev.package.sonic-rs]
-opt-level = 3
-[profile.dev.package.blake3]
-opt-level = 3
-[profile.dev.package.regex]
-opt-level = 2
-[profile.dev.package.ratatui]
-opt-level = 2
-[profile.dev.package.proptest]
-opt-level = 2
-
 # Fast feedback: Faster Tests
 [profile.test]
 opt-level = 3
