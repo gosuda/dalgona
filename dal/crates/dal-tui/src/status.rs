@@ -314,7 +314,7 @@ fn fit(
     placed: &[String],
     mode: WidthMode,
 ) -> Option<String> {
-    let separators = placed.len().saturating_mul(SEPARATOR.len());
+    let separators = placed.len().saturating_mul(width(SEPARATOR, mode));
     let used = separators
         + placed
             .iter()
@@ -629,5 +629,24 @@ mod tests {
 
         std::fs::write(repo.join(".git/HEAD"), "garbage").expect("broken HEAD");
         assert_eq!(git_branch(&repo), None);
+    }
+
+    #[test]
+    fn narrow_mode_budget_counts_separator_cells() {
+        let line = render(
+            StatusData {
+                state: Some("s"),
+                model: Some("m"),
+                path: Some("p"),
+                tokens: Some("in 14k out 4k"),
+                ..StatusData::default()
+            },
+            70,
+            WidthMode::Narrow,
+        );
+        assert!(
+            line.ends_with('1'),
+            "the fourth slot receives its one remaining cell: {line:?}"
+        );
     }
 }
