@@ -1,5 +1,6 @@
 //! Write-once settled transcript; committed rows are never repainted.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
@@ -22,6 +23,16 @@ pub struct Transcript {
     committed: HashSet<String>,
     pending: Vec<(String, Vec<RenderRow>)>,
     tool_durations: HashMap<String, Duration>,
+    search: RefCell<SearchCount>,
+}
+
+/// Matches of one query over the first `scanned` rows; `needle` is its lowercase form.
+#[derive(Debug, Default)]
+struct SearchCount {
+    query: String,
+    needle: String,
+    scanned: usize,
+    count: usize,
 }
 
 impl Transcript {
@@ -134,6 +145,28 @@ impl Transcript {
     pub fn rows(&self) -> &[String] {
         &self.rows
     }
+
+    /// Counts committed rows containing `query`, ignoring case.
+    ///
+    /// Rows only append, so the count is carried across calls: a repeat query
+    /// scans just the rows committed since the last call, and a changed query
+    /// rescans once.
+    pub(crate) fn search_matches(&self, query: &str) -> usize {
+        let mut state = self.search.borrow_mut();
+        if state.query != query {
+            query.clone_into(&mut state.query);
+            state.needle = query.to_lowercase();
+            state.scanned = 0;
+            state.count = 0;
+        }
+        let fresh = self.rows[state.scanned..]
+            .iter()
+            .filter(|row| row.to_lowercase().contains(&state.needle))
+            .count();
+        state.count += fresh;
+        state.scanned = self.rows.len();
+        state.count
+    }
 }
 
 #[cfg(test)]
@@ -165,6 +198,19 @@ mod tests {
         assert_eq!(transcript.commit("e1", &rows), rows);
         assert_eq!(transcript.commit("e1", &rows), [] as [String; 0]);
         assert_eq!(transcript.rows(), &rows);
+    }
+
+    #[test]
+    fn search_matches_carry_across_commits_and_reset_on_a_new_query() {
+        let mut transcript = Transcript::default();
+        transcript.commit("e1", &["Alpha one".to_owned(), "beta".to_owned()]);
+        assert_eq!(transcript.search_matches("alpha"), 1);
+        assert_eq!(transcript.search_matches("alpha"), 1);
+        transcript.commit("e2", &["ALPHA two".to_owned(), "gamma".to_owned()]);
+        assert_eq!(transcript.search_matches("alpha"), 2);
+        assert_eq!(transcript.search_matches("BETA"), 1);
+        assert_eq!(transcript.search_matches("alpha"), 2);
+        assert_eq!(transcript.search_matches("absent"), 0);
     }
     #[test]
     fn pending_diagram_rows_do_not_enter_committed_transcript() {

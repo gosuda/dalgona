@@ -1,5 +1,6 @@
 //! Live blocks fed by sequenced updates; settled rows commit exactly once.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{Duration, Instant};
 
@@ -42,6 +43,7 @@ pub struct ChildRow {
 #[derive(Debug, Default)]
 pub struct Live {
     assistant_text: String,
+    stream: RefCell<crate::markdown::MarkdownStream>,
     assistant_open: bool,
     tool_cards: HashMap<String, ToolCard>,
     tool_order: Vec<String>,
@@ -236,7 +238,22 @@ impl Live {
     /// Drains completed assistant prose after its entry has committed.
     pub fn take_assistant_text(&mut self) -> String {
         self.assistant_open = false;
+        self.stream.get_mut().reset();
         std::mem::take(&mut self.assistant_text)
+    }
+
+    /// The last `limit` rows of the assistant text as markdown, rendering only the
+    /// lines completed since the previous call.
+    pub(crate) fn assistant_rows(
+        &self,
+        cap: usize,
+        full: usize,
+        mode: crate::width::WidthMode,
+        limit: usize,
+    ) -> Vec<crate::render::RenderRow> {
+        self.stream
+            .borrow_mut()
+            .rows(&self.assistant_text, cap, full, mode, limit)
     }
 
     /// Returns how long the tool call `call` has run: the settled duration, or
@@ -323,6 +340,7 @@ impl Live {
     /// Rebuilds transient state from a fresh view after replay was lost.
     pub fn reset_after_resync(&mut self) {
         self.assistant_text.clear();
+        self.stream.get_mut().reset();
         self.assistant_open = false;
         self.tool_cards.clear();
         self.tool_order.clear();
@@ -695,5 +713,33 @@ mod tests {
         assert_eq!(live.running_jobs(), 2);
         live.apply_update(&update(4, UpdateKind::JobSettled { job: first }));
         assert_eq!(live.running_jobs(), 1);
+    }
+
+    #[test]
+    fn streamed_rows_follow_deltas_and_start_over_after_the_text_is_taken() {
+        use crate::width::WidthMode;
+        let mut live = super::Live::default();
+        let delta = |seq: u64, text: &str| Update {
+            r#gen: Gen::new(std::num::NonZeroU64::MIN),
+            seq: Seq::new(std::num::NonZeroU64::new(seq).unwrap_or(std::num::NonZeroU64::MIN)),
+            kind: UpdateKind::Delta {
+                turn: dal_core::TurnId::new(std::num::NonZeroU64::MIN),
+                channel: dal_core::StreamChannel::Text,
+                text: text.into(),
+            },
+        };
+        let rows = |live: &Live| -> Vec<String> {
+            live.assistant_rows(40, 40, WidthMode::Narrow, usize::MAX)
+                .into_iter()
+                .map(|row| row.text)
+                .collect()
+        };
+        live.apply_update(&delta(1, "first li"));
+        assert_eq!(rows(&live), ["first li"]);
+        live.apply_update(&delta(2, "ne\nsecond"));
+        assert_eq!(rows(&live), ["first line", "second"]);
+        live.take_assistant_text();
+        live.apply_update(&delta(3, "fresh"));
+        assert_eq!(rows(&live), ["fresh"]);
     }
 }

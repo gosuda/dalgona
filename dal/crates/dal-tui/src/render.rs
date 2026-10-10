@@ -158,7 +158,7 @@ pub(crate) fn frame_rows(input: FrameInput<'_>, width: u16, height: u16) -> Vec<
         );
     }
 
-    let mut activity = activity_rows(&input, w, mode);
+    let mut activity = activity_rows(&input, w, mode, h);
     let notices = input.live.notices();
     let overlay = overlay_height(&input, w, mode);
     let laid = composer_layout(&input, w, mode);
@@ -453,13 +453,7 @@ fn search_row(input: &FrameInput<'_>, query: &str) -> RenderRow {
     use crate::copy::ids;
     let mut suffix = String::new();
     if !query.is_empty() {
-        let needle = query.to_lowercase();
-        let matches = input
-            .transcript
-            .rows()
-            .iter()
-            .filter(|row| row.to_lowercase().contains(&needle))
-            .count();
+        let matches = input.transcript.search_matches(query);
         suffix = match matches {
             0 => format!(" · {}", ids::SEARCH_NO_MATCHES),
             count => {
@@ -593,8 +587,14 @@ fn queued_steer_row(turn: TurnState, count: u32) -> Option<RenderRow> {
 }
 
 /// The scrollable middle region: first-run hint, queued steering, tool rows,
-/// pending transcript rows, and streamed assistant text.
-fn activity_rows(input: &FrameInput<'_>, w: usize, mode: WidthMode) -> Vec<RenderRow> {
+/// pending transcript rows, and streamed assistant text. Streamed text keeps only
+/// its last `limit` rows, the most any frame can show.
+fn activity_rows(
+    input: &FrameInput<'_>,
+    w: usize,
+    mode: WidthMode,
+    limit: usize,
+) -> Vec<RenderRow> {
     let mut activity = Vec::new();
     if input.view.settings.model.is_none() && input.opts.default_model.is_none() {
         activity.push(RenderRow::new(
@@ -617,21 +617,16 @@ fn activity_rows(input: &FrameInput<'_>, w: usize, mode: WidthMode) -> Vec<Rende
             .map(|row| RenderRow::new(row, Role::Dim)),
     );
     activity.extend(input.transcript.pending_rows().cloned());
-    if !input.live.assistant_text().is_empty() {
-        activity.extend(
-            text_rows(
-                input.live.assistant_text(),
-                prose_cap(w),
-                mode,
-                Prose::Markdown {
-                    full: w.saturating_sub(2),
-                },
-                input.diagram_settings,
-                input.diagram_cache,
-            )
-            .into_iter()
-            .map(gutter_row),
-        );
+    let text = input.live.assistant_text();
+    if !text.is_empty() {
+        let cap = prose_cap(w);
+        let rows = match wire_block(&input.diagram_settings, input.diagram_cache, text, cap) {
+            Some(wired) => wired_rows(wired, cap, mode),
+            None => input
+                .live
+                .assistant_rows(cap, w.saturating_sub(2), mode, limit),
+        };
+        activity.extend(rows.into_iter().map(gutter_row));
     }
     activity
 }
@@ -781,11 +776,25 @@ pub(crate) fn linked_text(text: &str) -> (String, Vec<RenderLink>) {
     escape_linked(&visible, links)
 }
 
+/// The longest byte span a link candidate may cover. A candidate that needs more
+/// stays literal text, so a malformed line costs a bounded scan per delimiter
+/// instead of a rescan of the whole remaining line.
+const LINK_SPAN_MAX: usize = 4096;
+
+/// The prefix of `text` a link candidate may examine, cut on a character boundary.
+fn link_window(text: &str) -> &str {
+    let mut end = text.len().min(LINK_SPAN_MAX);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
 fn osc8_link(text: &str) -> Option<(usize, &str, &str)> {
     let prefix = "\u{1b}]8;;";
     let terminator = "\u{1b}\\";
     let close = "\u{1b}]8;;\u{1b}\\";
-    let rest = text.strip_prefix(prefix)?;
+    let rest = link_window(text).strip_prefix(prefix)?;
     let url_end = rest.find(terminator)?;
     let url = &rest[..url_end];
     if !valid_link_url(url) {
@@ -802,7 +811,7 @@ fn osc8_link(text: &str) -> Option<(usize, &str, &str)> {
 }
 
 fn markdown_link(text: &str) -> Option<(usize, &str, &str)> {
-    let text = text.strip_prefix('[')?;
+    let text = link_window(text).strip_prefix('[')?;
     let close_label = text.find(']')?;
     if text.as_bytes().get(close_label + 1) != Some(&b'(') {
         return None;
@@ -814,15 +823,19 @@ fn markdown_link(text: &str) -> Option<(usize, &str, &str)> {
 }
 
 fn plain_url(text: &str) -> Option<(usize, String)> {
-    let valid_start = text.starts_with("file://");
-    if !valid_start {
+    let window = link_window(text);
+    if !window.starts_with("file://") {
         return None;
     }
-    let end = text
+    let end = match window
         .char_indices()
         .find(|(_, character)| character.is_whitespace() || character.is_control())
-        .map_or(text.len(), |(index, _)| index);
-    let candidate = text[..end].trim_end_matches(['.', ',', ';', ':', '!', '?']);
+    {
+        Some((index, _)) => index,
+        None if window.len() == text.len() => text.len(),
+        None => return None,
+    };
+    let candidate = window[..end].trim_end_matches(['.', ',', ';', ':', '!', '?']);
     if candidate.is_empty() || !valid_link_url(candidate) {
         return None;
     }
@@ -984,6 +997,12 @@ pub(crate) fn text_rows(
             Prose::Markdown { full } => crate::markdown::markdown_rows(text, cap, full, mode),
         };
     };
+    wired_rows(wired, cap, mode)
+}
+
+/// The rows of a rendered diagram block: art, a failure card over its source, an
+/// image card, or the pending placeholder.
+fn wired_rows(wired: WiredBlock, cap: usize, mode: WidthMode) -> Vec<RenderRow> {
     match wired {
         WiredBlock::Art(art) => art.rows.iter().map(|cells| art_row(cells)).collect(),
         WiredBlock::Fallback {
@@ -1379,6 +1398,35 @@ mod tests {
             .and_then(|row| row.links.first())
             .expect("clipped tool result keeps its file link");
         assert_eq!(link.url, path);
+    }
+
+    #[test]
+    fn a_million_unmatched_brackets_stay_literal() {
+        let text = "[".repeat(1_000_000);
+        let (visible, links) = super::linked_text(&text);
+        assert_eq!(visible, text);
+        assert_eq!(links.len(), 0);
+    }
+
+    #[test]
+    fn a_link_stays_whole_below_the_candidate_cap_and_literal_above_it() {
+        let fits = format!("[x](file:///{})", "a".repeat(super::LINK_SPAN_MAX - 20));
+        let (visible, links) = super::linked_text(&fits);
+        assert_eq!(visible, "x");
+        assert_eq!(links.len(), 1);
+
+        let over = format!("[x](file:///{})", "a".repeat(super::LINK_SPAN_MAX));
+        let (visible, links) = super::linked_text(&over);
+        assert_eq!(visible, over);
+        assert_eq!(links.len(), 0);
+    }
+
+    #[test]
+    fn a_plain_url_cut_by_the_cap_is_not_linked_as_a_prefix() {
+        let over = format!("file:///{}", "a".repeat(super::LINK_SPAN_MAX));
+        let (visible, links) = super::linked_text(&over);
+        assert_eq!(visible, over);
+        assert_eq!(links.len(), 0);
     }
 
     #[test]
