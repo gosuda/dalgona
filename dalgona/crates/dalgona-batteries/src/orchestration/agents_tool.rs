@@ -126,8 +126,9 @@ pub(crate) enum AgentAction {
 /// when every step is shared and lists read-only tools; otherwise it is an
 /// execution whose one approval carries the scoped `git` grant of the run:
 /// the workspace root, and under the host data root the shared worktree and
-/// isolation trees (the core narrows those to this session). Waiting,
-/// cancelling, and listing never mutate.
+/// isolation trees (the core narrows those to this session). The runtime
+/// resolves `git` `-C` and `--git-dir` operands against these roots too.
+/// Waiting, cancelling, and listing never mutate.
 pub(crate) fn approval_class(
     action: &AgentAction,
     workspace: &Path,

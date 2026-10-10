@@ -7,7 +7,7 @@
 //! resolutions report back to the actor for journaling.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -1188,12 +1188,10 @@ impl ToolCxRuntime for CallRuntime {
 
 /// Checks one grant-bound spawn: the grant's whitespace-split prefix tokens
 /// start the actual argv with exact tokens and the cwd sits below a grant
-/// root. An empty prefix never matches here; one-shot approvals carry none.
-pub(crate) fn grant_covers(
-    approved: &Approved,
-    argv: &[std::ffi::OsString],
-    cwd: &std::path::Path,
-) -> bool {
+/// root. Git directory selectors (`-C` and `--git-dir`) are checked against
+/// the same roots, resolving relative operands from the effective directory.
+/// An empty prefix never matches here; one-shot approvals carry none.
+pub(crate) fn grant_covers(approved: &Approved, argv: &[std::ffi::OsString], cwd: &Path) -> bool {
     if approved.prefix().is_empty() || argv.is_empty() {
         return false;
     }
@@ -1205,6 +1203,103 @@ pub(crate) fn grant_covers(
         }
     }
     crate::proc::cwd_in_roots(cwd, approved.roots())
+        && git_paths_in_roots(argv, cwd, approved.roots())
+}
+
+/// Checks every git directory selector in the global argument portion.
+///
+/// Git applies relative `-C` paths successively, so each one becomes the
+/// effective directory for later relative paths. Git resolves `--git-dir`
+/// operands against the final `-C` directory. Unknown options are skipped;
+/// `--` ends option parsing. Invalid or missing operands fail closed.
+fn git_paths_in_roots(argv: &[std::ffi::OsString], cwd: &Path, roots: &[PathBuf]) -> bool {
+    let Some(program) = argv.first() else {
+        return false;
+    };
+    if Path::new(program).file_stem() != Some(std::ffi::OsStr::new("git")) {
+        return true;
+    }
+    let Some(base) = git_c_base(argv, cwd, roots) else {
+        return false;
+    };
+    git_dirs_in_roots(argv, &base, roots)
+}
+
+fn git_c_base(argv: &[std::ffi::OsString], cwd: &Path, roots: &[PathBuf]) -> Option<PathBuf> {
+    let mut base = cwd.to_path_buf();
+    let mut index = 1;
+    while index < argv.len() {
+        let arg = &argv[index];
+        if arg == std::ffi::OsStr::new("--") {
+            break;
+        }
+        if arg == std::ffi::OsStr::new("--git-dir") {
+            argv.get(index + 1)?;
+            index += 2;
+            continue;
+        }
+        if arg == std::ffi::OsStr::new("-C") {
+            let path = argv.get(index + 1)?;
+            base = checked_git_path(&base, path, roots)?;
+            index += 2;
+            continue;
+        }
+        let text = arg.to_str()?;
+        let Some(path) = text.strip_prefix("-C") else {
+            index += 1;
+            continue;
+        };
+        base = checked_git_path(&base, std::ffi::OsStr::new(path), roots)?;
+        index += 1;
+    }
+    Some(base)
+}
+
+fn git_dirs_in_roots(argv: &[std::ffi::OsString], base: &Path, roots: &[PathBuf]) -> bool {
+    let mut index = 1;
+    while index < argv.len() {
+        let arg = &argv[index];
+        if arg == std::ffi::OsStr::new("--") {
+            break;
+        }
+        if arg == std::ffi::OsStr::new("--git-dir") {
+            let Some(path) = argv.get(index + 1) else {
+                return false;
+            };
+            if checked_git_path(base, path, roots).is_none() {
+                return false;
+            }
+            index += 2;
+            continue;
+        }
+        let Some(text) = arg.to_str() else {
+            return false;
+        };
+        if let Some(path) = text.strip_prefix("--git-dir=")
+            && checked_git_path(base, std::ffi::OsStr::new(path), roots).is_none()
+        {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+fn checked_git_path(base: &Path, path: &std::ffi::OsStr, roots: &[PathBuf]) -> Option<PathBuf> {
+    let resolved = resolve_git_path(base, path)?;
+    crate::proc::cwd_in_roots(&resolved, roots).then_some(resolved)
+}
+
+fn resolve_git_path(base: &Path, path: &std::ffi::OsStr) -> Option<PathBuf> {
+    if path.is_empty() {
+        return None;
+    }
+    let path = Path::new(path);
+    Some(if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
+    })
 }
 
 /// Parks one detached child: binds pending grant intents, reserves the job
@@ -1501,5 +1596,63 @@ mod tests {
         assert!(!job_is_live(&jobs, Some(id)));
         assert!(job_is_live(&jobs, None));
         Ok(())
+    }
+    #[test]
+    fn git_c_and_git_dir_stay_inside_a_nested_workspace() {
+        let temp = tempfile::tempdir().expect("temporary grant roots");
+        let outer = temp.path().join("outer-repo");
+        let workspace = outer.join("agent-workspace");
+        let nested = workspace.join("nested-repo");
+        let workspace_git = workspace.join(".git");
+        let outside_git = outer.join("outside.git");
+        let inside_git = workspace.join("outside.git");
+        std::fs::create_dir_all(&nested).expect("nested repository");
+        std::fs::create_dir_all(&workspace_git).expect("workspace git directory");
+        std::fs::create_dir_all(&inside_git).expect("nested relative git directory");
+        std::fs::create_dir_all(&outside_git).expect("outside git directory");
+        let approved = Approved::new(
+            CallId::new("git-grant"),
+            None,
+            Box::new([std::ffi::OsString::from("git")]),
+            Box::new([workspace.clone()]),
+            None,
+        );
+
+        let nested_relative = vec![
+            "git".into(),
+            "-C".into(),
+            "nested-repo".into(),
+            "status".into(),
+        ];
+        assert!(grant_covers(&approved, &nested_relative, &workspace));
+        let enclosing_absolute = vec![
+            "git".into(),
+            "-C".into(),
+            outer.as_os_str().to_os_string(),
+            "status".into(),
+        ];
+        assert!(!grant_covers(&approved, &enclosing_absolute, &workspace));
+
+        let reordered_git_dir = vec![
+            "git".into(),
+            "--git-dir".into(),
+            "../outside.git".into(),
+            "-C".into(),
+            "..".into(),
+            "status".into(),
+        ];
+        assert!(!grant_covers(&approved, &reordered_git_dir, &nested));
+
+        let git_dir_relative = vec![
+            "git".into(),
+            "--git-dir".into(),
+            ".git".into(),
+            "status".into(),
+        ];
+        assert!(grant_covers(&approved, &git_dir_relative, &workspace));
+        let mut outside_git_arg = std::ffi::OsString::from("--git-dir=");
+        outside_git_arg.push(outside_git.as_os_str());
+        let outside_git_dir = vec!["git".into(), outside_git_arg, "status".into()];
+        assert!(!grant_covers(&approved, &outside_git_dir, &workspace));
     }
 }
