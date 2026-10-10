@@ -82,6 +82,10 @@ name = "loop-headless-09"
 path = "tests/loop-headless-09.rs"
 
 [[test]]
+name = "login-cli-pty-01"
+path = "tests/login-cli-pty-01.rs"
+
+[[test]]
 name = "login-tui-01"
 path = "tests/login-tui-01.rs"
 

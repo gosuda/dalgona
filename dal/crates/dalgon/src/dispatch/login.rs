@@ -1,17 +1,26 @@
 use std::{
     io::{self, Write},
-    path::Path,
+    path::{Path, PathBuf},
     process::ExitCode,
     time::Duration,
 };
 
+use dal_agent::login::LoginOutcome;
+use dal_agent::{Host, HostError, Product};
 use dal_provider::{
-    AuthStore, Credential, LoginIo, LoginProgress, LoginSite, Method, OAuthCredential, ProviderDef,
-    ProviderError, find,
+    CredentialKind, LoginIo, LoginProgress, Method, ProviderDef, ProviderError, StoredCredential,
+    find,
 };
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
-use crate::{Startup, cli, edge, exit, two_lines};
+use crate::{Startup, VarsMap, cli, edge, exit, two_lines};
+
+#[cfg(feature = "test-support")]
+/// Overrides the pinned sign-in endpoints with a literal-loopback base for a
+/// test that runs the CLI sign-in against a local server. Release builds
+/// never read it; the base must stay a literal loopback origin.
+const TEST_ENDPOINTS_ENV: &str = "DAL_LOGIN_TEST_ENDPOINTS";
 
 /// The provider ids dal signs in to, in display order.
 pub(super) fn provider_ids() -> impl Iterator<Item = &'static str> {
@@ -40,9 +49,14 @@ impl Drop for RawModeGuard {
 }
 
 /// Runs login, its status subcommand, or the provider picker.
-pub(crate) async fn run(args: cli::LoginArgs, startup: Startup) -> ExitCode {
+///
+/// Every sign-in, sign-out, and status read runs through the shared [`Host`]
+/// operations, so the CLI publishes the same `LoginFinished` lifecycle and
+/// policy path as the terminal and RPC front ends. Only the terminal
+/// input/progress loop below is CLI-owned.
+pub(crate) async fn run(args: cli::LoginArgs, startup: Startup, product: Product) -> ExitCode {
     if args.command.is_some() {
-        return status(&startup.data_root, &startup.vars);
+        return status_command(startup, product).await;
     }
     if args.device_auth
         && !args
@@ -63,15 +77,80 @@ pub(crate) async fn run(args: cli::LoginArgs, startup: Startup) -> ExitCode {
         );
     }
     let Some(provider) = args.provider.as_deref() else {
-        return choose_provider(startup, args.api_key).await;
+        return choose_provider(startup, product, args.api_key).await;
     };
     let Some(def) = find(provider).filter(|def| is_login_provider(def.id)) else {
         return unknown_provider(provider);
     };
     if args.api_key {
-        return login_api_key_flag(startup, def).await;
+        return login_api_key_flag(startup, product, def).await;
     }
-    login_default(startup, def, args.device_auth).await
+    login_default(startup, product, def, args.device_auth).await
+}
+
+/// The shared host with the paths one auth command reports against.
+pub(super) struct AuthHost {
+    pub(super) host: Host,
+    pub(super) data_root: PathBuf,
+    pub(super) vars: VarsMap,
+    pub(super) auth_path: PathBuf,
+}
+
+/// Starts the shared host for one auth command. Test-support builds also
+/// apply the loopback endpoint override when the test seam names one;
+/// release builds never read it.
+pub(super) async fn start_auth_host(
+    startup: Startup,
+    product: Product,
+) -> Result<AuthHost, ExitCode> {
+    let data_root = startup.data_root.clone();
+    let vars = startup.vars.clone();
+    let auth_path = data_root.join("auth.json");
+    #[cfg(feature = "test-support")]
+    let test_base = startup
+        .vars
+        .get(std::ffi::OsStr::new(TEST_ENDPOINTS_ENV))
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string_lossy().into_owned());
+    let host = super::start_host(
+        product,
+        &startup.config,
+        startup.vars,
+        startup.cwd,
+        startup.helper,
+        &startup.data_root,
+    )
+    .await?;
+    #[cfg(feature = "test-support")]
+    if let Some(base) = test_base {
+        let endpoints = dal_provider::LoginEndpoints::loopback(&base)
+            .map_err(|error| provider_error("login", &error, &auth_path))?;
+        host.set_login_endpoints(endpoints)
+            .map_err(|error| host_auth_error("login", &error, &auth_path))?;
+    }
+    Ok(AuthHost {
+        host,
+        data_root,
+        vars,
+        auth_path,
+    })
+}
+
+/// Shuts the auth host down after its command finishes.
+pub(super) async fn shutdown_auth_host(host: Host) {
+    let _ = host.shutdown(Duration::from_secs(3)).await;
+}
+
+/// Maps a host auth failure to its exit code, keeping the provider error
+/// text the command dispatch already reports.
+pub(super) fn host_auth_error(module: &str, error: &HostError, path: &Path) -> ExitCode {
+    match error {
+        HostError::Provider(error) => provider_error(module, error, path),
+        error => two_lines(
+            crate::cli::texts::internal_error_at(module, &error.to_string(), &path.join("cache").join("dal.log")),
+            exit::ExitKind::Internal,
+        ),
+    }
 }
 
 pub(super) fn unknown_provider(provider: &str) -> ExitCode {
@@ -93,7 +172,11 @@ fn device_providers() -> impl Iterator<Item = &'static ProviderDef> {
 }
 
 /// `--api-key`: read a piped key, for a provider that takes one.
-async fn login_api_key_flag(startup: Startup, def: &'static ProviderDef) -> ExitCode {
+async fn login_api_key_flag(
+    startup: Startup,
+    product: Product,
+    def: &'static ProviderDef,
+) -> ExitCode {
     if !def.offers(Method::ApiKey) {
         return two_lines(
             [
@@ -103,25 +186,30 @@ async fn login_api_key_flag(startup: Startup, def: &'static ProviderDef) -> Exit
             exit::ExitKind::RequestedFailure,
         );
     }
-    login_api_key(startup, def).await
+    login_api_key(startup, product, def).await
 }
 
 /// No flag: the device flow when asked, else the browser when the provider
 /// offers it, else a prompted key.
-async fn login_default(startup: Startup, def: &'static ProviderDef, device_auth: bool) -> ExitCode {
+async fn login_default(
+    startup: Startup,
+    product: Product,
+    def: &'static ProviderDef,
+    device_auth: bool,
+) -> ExitCode {
     if device_auth {
-        return login_oauth(startup, def, Method::Device).await;
+        return login_oauth(startup, product, def, Method::Device).await;
     }
     if def.offers(Method::Browser) {
         if !edge::terminal_snapshot().stdin_tty {
             return no_terminal();
         }
-        return login_oauth(startup, def, Method::Browser).await;
+        return login_oauth(startup, product, def, Method::Browser).await;
     }
-    login_prompted_key(startup, def).await
+    login_prompted_key(startup, product, def).await
 }
 
-async fn choose_provider(startup: Startup, api_key: bool) -> ExitCode {
+async fn choose_provider(startup: Startup, product: Product, api_key: bool) -> ExitCode {
     use std::io::BufRead as _;
     if !edge::terminal_snapshot().stdin_tty {
         return no_terminal();
@@ -160,12 +248,12 @@ async fn choose_provider(startup: Startup, api_key: bool) -> ExitCode {
         return unknown_provider(selection);
     };
     if api_key {
-        return login_api_key_flag(startup, def).await;
+        return login_api_key_flag(startup, product, def).await;
     }
-    login_default(startup, def, false).await
+    login_default(startup, product, def, false).await
 }
 
-async fn login_api_key(startup: Startup, def: &'static ProviderDef) -> ExitCode {
+async fn login_api_key(startup: Startup, product: Product, def: &'static ProviderDef) -> ExitCode {
     if edge::terminal_snapshot().stdin_tty {
         return no_terminal();
     }
@@ -190,10 +278,14 @@ async fn login_api_key(startup: Startup, def: &'static ProviderDef) -> ExitCode 
             );
         }
     };
-    store_api_key(startup, def, key).await
+    store_api_key(startup, product, def, key).await
 }
 
-async fn login_prompted_key(startup: Startup, def: &'static ProviderDef) -> ExitCode {
+async fn login_prompted_key(
+    startup: Startup,
+    product: Product,
+    def: &'static ProviderDef,
+) -> ExitCode {
     if !edge::terminal_snapshot().stdin_tty {
         return no_terminal();
     }
@@ -218,71 +310,83 @@ async fn login_prompted_key(startup: Startup, def: &'static ProviderDef) -> Exit
             );
         }
     };
-    store_api_key(startup, def, key).await
+    store_api_key(startup, product, def, key).await
 }
 
-async fn store_api_key(startup: Startup, def: &'static ProviderDef, key: String) -> ExitCode {
-    let path = startup.data_root.join("auth.json");
-    match dal_provider::store_api_key(&path, def.id, key).await {
-        Ok(()) => {
+async fn store_api_key(
+    startup: Startup,
+    product: Product,
+    def: &'static ProviderDef,
+    key: String,
+) -> ExitCode {
+    let AuthHost {
+        host,
+        auth_path,
+        ..
+    } = match start_auth_host(startup, product).await {
+        Ok(auth) => auth,
+        Err(code) => return code,
+    };
+    let (sender, pasted) = oneshot::channel();
+    let _ = sender.send(key);
+    let (io, _events) = LoginIo::channel(Some(pasted), CancellationToken::new());
+    let outcome = host.login(def.id, Method::ApiKey, io).await;
+    shutdown_auth_host(host).await;
+    match outcome {
+        Ok(_) => {
             let message = crate::cli::texts::saved_api_key(def.name);
             let _ = writeln!(std::io::stdout().lock(), "{message}");
             exit::code(exit::ExitKind::Success)
         }
-        Err(error) => provider_error("login", &error, &path),
+        Err(error) => host_auth_error("login", &error, &auth_path),
     }
 }
 
-async fn login_oauth(startup: Startup, def: &'static ProviderDef, method: Method) -> ExitCode {
-    let auth_path = startup.data_root.join("auth.json");
-    let site = match login_site(&startup) {
-        Ok(site) => site,
-        Err(error) => return provider_error("login", &error, &auth_path),
+async fn login_oauth(
+    startup: Startup,
+    product: Product,
+    def: &'static ProviderDef,
+    method: Method,
+) -> ExitCode {
+    let AuthHost {
+        host,
+        auth_path,
+        ..
+    } = match start_auth_host(startup, product).await {
+        Ok(auth) => auth,
+        Err(code) => return code,
     };
     let cancel = CancellationToken::new();
-    let (paste, paste_receiver) = tokio::sync::oneshot::channel();
+    let (paste, paste_receiver) = oneshot::channel();
     let (io, events) = LoginIo::channel(Some(paste_receiver), cancel.clone());
     let outcome = super::drive(
         &cancel,
-        run_with_paste(def.id, method, io, events, paste, &site),
+        run_with_paste(&host, def.id, method, io, events, paste),
     )
     .await;
+    shutdown_auth_host(host).await;
     match outcome {
         Err(signal) => exit::code(exit::ExitKind::Signal(signal)),
-        Ok(Ok(credential)) => {
-            let message = success_message(def, &credential);
+        Ok(Ok(outcome)) => {
+            let message = success_message(def, &outcome);
             let _ = writeln!(std::io::stdout().lock(), "{message}");
             exit::code(exit::ExitKind::Success)
         }
-        Ok(Err(error)) => provider_error("login", &error, &auth_path),
+        Ok(Err(error)) => host_auth_error("login", &error, &auth_path),
     }
 }
 
-pub(super) fn login_site(startup: &Startup) -> Result<LoginSite, ProviderError> {
-    let user_agent = dal_provider::user_agent(
-        env!("CARGO_PKG_VERSION"),
-        std::env::consts::OS,
-        "",
-        std::env::consts::ARCH,
-    );
-    LoginSite::new(
-        startup.data_root.join("auth.json"),
-        startup.data_root.join("cache"),
-        user_agent,
-    )
-}
-
-/// Runs the login, prints its progress, and reads one masked paste from the
-/// keyboard once the flow asks for it.
+/// Runs the login through the shared host, prints its progress, and reads
+/// one masked paste from the keyboard once the flow asks for it.
 async fn run_with_paste(
+    host: &Host,
     provider: &str,
     method: Method,
     io: LoginIo,
     mut events: tokio::sync::mpsc::Receiver<LoginProgress>,
     paste: tokio::sync::oneshot::Sender<String>,
-    site: &LoginSite,
-) -> Result<Credential, ProviderError> {
-    let run = dal_provider::login(provider, method, io, site);
+) -> Result<LoginOutcome, HostError> {
+    let run = host.login(provider, method, io);
     tokio::pin!(run);
     let mut paste = Some(paste);
     let mut raw_mode = None;
@@ -294,7 +398,9 @@ async fn run_with_paste(
             Some(event) = events.recv() => {
                 if matches!(event, LoginProgress::AskPaste { .. }) && raw_mode.is_none() {
                     raw_mode = Some(RawModeGuard::enable().map_err(|error| {
-                        ProviderError::AuthWrite { reason: error.to_string() }
+                        HostError::Provider(ProviderError::AuthWrite {
+                            reason: error.to_string(),
+                        })
                     })?);
                 }
                 login_progress(event);
@@ -307,7 +413,7 @@ async fn run_with_paste(
                             let _ = current.send(line);
                         }
                     }
-                    Err(_) => return Err(ProviderError::LoginCancelled),
+                    Err(_) => return Err(HostError::Provider(ProviderError::LoginCancelled)),
                 }
             }
         }
@@ -415,29 +521,44 @@ fn login_progress(progress: LoginProgress) {
     }
 }
 
-fn success_message(def: &ProviderDef, credential: &Credential) -> String {
-    match credential {
-        Credential::OAuth(OAuthCredential {
-            account_id: Some(account),
-            ..
-        }) => format!("Signed in with ChatGPT. Account {account}."),
-        Credential::OAuth(_) => crate::cli::texts::signed_in(def.name),
-        _ => crate::cli::texts::SAVED_PROVIDER.into(),
+fn success_message(def: &ProviderDef, outcome: &LoginOutcome) -> String {
+    match (&outcome.method, &outcome.account) {
+        (Method::ApiKey, _) => crate::cli::texts::SAVED_PROVIDER.into(),
+        (_, Some(account)) => format!("Signed in with ChatGPT. Account {account}."),
+        _ => crate::cli::texts::signed_in(def.name),
     }
 }
 
-fn status(data_root: &Path, vars: &crate::VarsMap) -> ExitCode {
+async fn status_command(startup: Startup, product: Product) -> ExitCode {
+    let AuthHost {
+        host,
+        data_root,
+        vars,
+        ..
+    } = match start_auth_host(startup, product).await {
+        Ok(auth) => auth,
+        Err(code) => return code,
+    };
+    let code = status(&host, &data_root, &vars).await;
+    shutdown_auth_host(host).await;
+    code
+}
+
+async fn status(host: &Host, data_root: &Path, vars: &crate::VarsMap) -> ExitCode {
     let path = data_root.join("auth.json");
-    let store = match AuthStore::load(&path) {
-        Ok(store) => store,
-        Err(error) => return provider_error("login status", &error, &path),
+    let stored = match host.stored_credentials().await {
+        Ok(stored) => stored,
+        Err(error) => return host_auth_error("login status", &error, &path),
     };
     let mut ready = false;
     let mut first_missing = None;
     let mut output = String::new();
     for def in dal_provider::login_providers() {
         let provider = def.id;
-        let kind = stored_kind(&store, provider);
+        let kind = stored
+            .iter()
+            .find(|row| row.provider.as_ref() == provider)
+            .map(stored_kind);
         let environment_key = def.key.is_some_and(|key| {
             key.env.iter().any(|name| {
                 vars.get(std::ffi::OsStr::new(name))
@@ -478,10 +599,10 @@ fn status(data_root: &Path, vars: &crate::VarsMap) -> ExitCode {
     exit::code(exit::ExitKind::RequestedFailure)
 }
 
-fn stored_kind(store: &AuthStore, provider: &str) -> Option<String> {
-    match store.credential(provider)? {
-        Credential::ApiKey { .. } => Some("api_key".to_owned()),
-        Credential::OAuth(credential) => Some(match credential.expires_at {
+fn stored_kind(row: &StoredCredential) -> String {
+    match row.kind {
+        CredentialKind::ApiKey => "api_key".to_owned(),
+        CredentialKind::OAuth => match row.expires_at {
             Some(seconds) => jiff::Timestamp::from_second(seconds).ok().map_or_else(
                 || "oauth".to_owned(),
                 |timestamp| {
@@ -493,8 +614,7 @@ fn stored_kind(store: &AuthStore, provider: &str) -> Option<String> {
                 },
             ),
             None => "oauth".to_owned(),
-        }),
-        Credential::None => None,
+        },
     }
 }
 

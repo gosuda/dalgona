@@ -127,21 +127,19 @@ fn print_json(rows: &[&CatalogEntry]) -> std::io::Result<()> {
 }
 
 fn print_table(rows: &[&CatalogEntry]) -> std::io::Result<()> {
-    let provider_width = rows
+    let providers: Vec<String> = rows.iter().map(|entry| visible(&entry.provider)).collect();
+    let ids: Vec<String> = rows.iter().map(|entry| visible(&entry.id)).collect();
+    let contexts: Vec<String> = rows.iter().map(|entry| visible(&context_text(entry))).collect();
+    let provider_width = providers
         .iter()
-        .map(|entry| entry.provider.len())
+        .map(String::len)
         .max()
         .unwrap_or(8)
         .max(8);
-    let id_width = rows
+    let id_width = ids.iter().map(String::len).max().unwrap_or(2).max(2);
+    let context_width = contexts
         .iter()
-        .map(|entry| entry.id.len())
-        .max()
-        .unwrap_or(2)
-        .max(2);
-    let context_width = rows
-        .iter()
-        .map(|entry| context_text(entry).len())
+        .map(String::len)
         .max()
         .unwrap_or(7)
         .max(7);
@@ -151,19 +149,36 @@ fn print_table(rows: &[&CatalogEntry]) -> std::io::Result<()> {
         "{:<provider_width$}  {:<id_width$}  {:<context_width$}  PRICE",
         "PROVIDER", "ID", "CONTEXT"
     )?;
-    for entry in rows {
-        let context = context_text(entry);
+    for (((entry, provider), id), context) in rows.iter().zip(&providers).zip(&ids).zip(&contexts) {
         let price = model_price(entry)
             .as_ref()
             .map_or_else(|| "-".to_owned(), format_price);
         writeln!(
             stdout,
-            "{:<provider_width$}  {:<id_width$}  {:<context_width$}  {price}",
-            entry.provider, entry.id, context
+            "{provider:<provider_width$}  {id:<id_width$}  {context:<context_width$}  {price}",
         )?;
     }
     let (source, _, date) = price_source();
     writeln!(stdout, "Prices: {source}, fetched {date}.")
+}
+
+/// Renders a catalog field for the terminal table with control characters
+/// replaced, so a provider-supplied value that reaches this layer still
+/// cannot move the cursor or start an escape sequence.
+fn visible(value: &str) -> String {
+    if value.chars().all(|character| !character.is_control()) {
+        return value.to_owned();
+    }
+    value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                char::REPLACEMENT_CHARACTER
+            } else {
+                character
+            }
+        })
+        .collect()
 }
 
 fn context_text(entry: &CatalogEntry) -> String {

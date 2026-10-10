@@ -202,6 +202,12 @@ impl PtyProcess {
         .map_err(io::Error::from)
     }
 
+    /// Reads the slave-side terminal attributes, so a test can prove the
+    /// child restored them (no leaked raw mode) after it exits.
+    pub fn termios(&self) -> io::Result<rustix::termios::Termios> {
+        rustix::termios::tcgetattr(&self.slave).map_err(io::Error::from)
+    }
+
     /// Returns every byte read from the pseudoterminal master so far.
     #[must_use]
     pub fn output(&self) -> &[u8] {

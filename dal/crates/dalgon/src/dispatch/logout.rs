@@ -1,33 +1,42 @@
 use std::{io::Write, path::Path, process::ExitCode};
 
+use dal_agent::{HostError, Product};
 use dal_provider::{Catalog, CatalogSource, ProviderConfig, ProviderError};
 
-use crate::{Startup, cli, exit, two_lines};
+use super::login::{AuthHost, shutdown_auth_host, start_auth_host};
+use crate::{Config, Startup, cli, exit, two_lines};
 
-/// Removes one stored provider credential or every credential.
-pub(crate) async fn run(args: cli::ProviderArgs, startup: Startup) -> ExitCode {
+/// Removes one stored provider credential or every credential through the
+/// shared [`dal_agent::Host`] operation, the same path the terminal and RPC
+/// front ends use.
+pub(crate) async fn run(args: cli::ProviderArgs, startup: Startup, product: Product) -> ExitCode {
     if let Some(provider) = args.provider.as_deref()
         && !super::login::is_login_provider(provider)
     {
         return super::login::unknown_provider(provider);
     }
     let all = args.provider.is_none();
-    let path = startup.data_root.join("auth.json");
-    let site = match super::login::login_site(&startup) {
-        Ok(site) => site,
-        Err(error) => return auth_error(&error, &path),
+    let config = startup.config.clone();
+    let AuthHost { host, auth_path, .. } = match start_auth_host(startup, product).await {
+        Ok(auth) => auth,
+        Err(code) => return code,
     };
+    let path = auth_path;
     let mut removed: Vec<Box<str>> = Vec::new();
     for provider in args
         .provider
         .as_deref()
         .map_or_else(|| super::login::provider_ids().collect(), |one| vec![one])
     {
-        match dal_provider::sign_out(Some(provider), &site).await {
+        match host.logout(Some(provider)).await {
             Ok(done) => removed.extend(done),
-            Err(error) => return auth_error(&error, &path),
+            Err(error) => {
+                shutdown_auth_host(host).await;
+                return logout_error(&error, &path);
+            }
         }
     }
+    shutdown_auth_host(host).await;
     let removed: Vec<&str> = removed.iter().map(AsRef::as_ref).collect();
     if all {
         let message = if removed.is_empty() {
@@ -36,7 +45,7 @@ pub(crate) async fn run(args: cli::ProviderArgs, startup: Startup) -> ExitCode {
             crate::cli::texts::LOGOUT_ALL
         };
         let _ = writeln!(std::io::stdout().lock(), "{message}");
-        warn_saved_model_provider(&startup, &removed);
+        warn_saved_model_provider(&config, &removed);
         return exit::code(exit::ExitKind::Success);
     }
     let provider = args.provider.as_deref().unwrap_or_default();
@@ -46,28 +55,27 @@ pub(crate) async fn run(args: cli::ProviderArgs, startup: Startup) -> ExitCode {
         format!("Removed credentials for {provider}.")
     };
     let _ = writeln!(std::io::stdout().lock(), "{message}");
-    warn_saved_model_provider(&startup, &removed);
+    warn_saved_model_provider(&config, &removed);
     exit::code(exit::ExitKind::Success)
 }
 
-fn warn_saved_model_provider(startup: &Startup, removed: &[&str]) {
+fn warn_saved_model_provider(config: &Config, removed: &[&str]) {
     if removed.is_empty() {
         return;
     }
-    let Ok(config) = ProviderConfig::from_config(&startup.config) else {
+    let Ok(provider_config) = ProviderConfig::from_config(config) else {
         return;
     };
-    let Some(reference) = startup.config.model() else {
+    let Some(reference) = config.model() else {
         return;
     };
-    let sources = config
+    let sources = provider_config
         .providers
         .iter()
         .cloned()
         .map(|provider| (provider, CatalogSource::Typed))
         .collect();
-    let aliases = startup
-        .config
+    let aliases = config
         .aliases()
         .iter()
         .map(|(name, target)| (name.clone(), target.clone()))
@@ -81,6 +89,13 @@ fn warn_saved_model_provider(startup: &Startup, removed: &[&str]) {
     }
     let message = crate::cli::texts::saved_model_provider_warning(&model.entry.id, &model.provider);
     let _ = writeln!(std::io::stderr().lock(), "{message}");
+}
+
+fn logout_error(error: &HostError, path: &Path) -> ExitCode {
+    let HostError::Provider(error) = error else {
+        return super::login::host_auth_error("logout", error, path);
+    };
+    auth_error(error, path)
 }
 
 fn auth_error(error: &ProviderError, path: &Path) -> ExitCode {

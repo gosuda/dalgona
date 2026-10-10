@@ -24,6 +24,9 @@ path = "src/lib.rs"
 [features]
 default = ["tui"]
 tui = ["dep:dal-tui"]
+# Enables the loopback sign-in endpoint override for binary-boundary tests;
+# never enable it in a released binary.
+test-support = ["dal-agent/test-support"]
 
 [dependencies]
 clap = { version = "=4.6.7", features = ["derive", "string"] }
@@ -57,6 +60,7 @@ windows-sys.workspace = true
 
 [dev-dependencies]
 clap_mangen = "=0.3.3"
+dal-agent = { path = "../dal-agent", version = "=0.1.0", features = ["test-support"] }
 tempfile.workspace = true
 
 [lints]

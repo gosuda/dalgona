@@ -226,8 +226,8 @@ async fn run_command(
         }
         Some(cli::Commands::Plugin(args)) => dispatch::plugin(args.clone(), startup, product).await,
         Some(cli::Commands::Rules(args)) => dispatch::rules(args.clone(), startup, product).await,
-        Some(cli::Commands::Login(args)) => dispatch::login(args.clone(), startup).await,
-        Some(cli::Commands::Logout(args)) => dispatch::logout(args.clone(), startup).await,
+        Some(cli::Commands::Login(args)) => dispatch::login(args.clone(), startup, product).await,
+        Some(cli::Commands::Logout(args)) => dispatch::logout(args.clone(), startup, product).await,
         Some(cli::Commands::Models(args)) => dispatch::models(args.clone(), startup).await,
         Some(cli::Commands::Docs(_)) => two_lines(
             cli::texts::internal_error("edge", "the docs command was dispatched twice"),
