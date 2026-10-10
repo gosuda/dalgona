@@ -58,8 +58,12 @@ const GIT_CALL_TIMEOUT: Duration = Duration::from_secs(60);
 /// Skip reason of a step the run never started because it was cancelled.
 const CANCELLED_SKIP: &str = "the run was cancelled";
 
+mod merge_locks;
+
 #[cfg(test)]
 mod tests;
+
+use merge_locks::MergeLocks;
 
 /// The report cells of child sessions by session id.
 type ReportCells = Arc<Mutex<HashMap<SessionId, ReportCell>>>;
@@ -68,7 +72,7 @@ type ReportCells = Arc<Mutex<HashMap<SessionId, ReportCell>>>;
 pub(crate) struct Runtime {
     owners: Arc<Mutex<HashMap<SessionId, Owner>>>,
     /// One merge lock per workspace path, shared by every session on it.
-    merge_locks: Arc<Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>>,
+    merge_locks: MergeLocks,
     /// The report cell of each live child session, read by its parent's run
     /// when the child ends.
     reports: ReportCells,
@@ -183,9 +187,9 @@ struct SessionState {
     last_delivery_error: Option<String>,
     /// The last turn ended because the context window overflowed.
     last_turn_overflowed: bool,
-    /// One merge lock per workspace: every run of this session applies its
-    /// patches to the same checkout one at a time.
-    merge_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Shared with every run of this session, so patches reach one checkout
+    /// one at a time.
+    merge_locks: MergeLocks,
     /// The report cells of the child sessions this runtime hosts.
     reports: ReportCells,
     /// Waits the owner answers without blocking its message loop; dropping
@@ -227,7 +231,7 @@ impl Runtime {
         };
         Ok(Self {
             owners: Arc::new(Mutex::new(HashMap::new())),
-            merge_locks: Arc::new(Mutex::new(HashMap::new())),
+            merge_locks: MergeLocks::default(),
             reports: Arc::new(Mutex::new(HashMap::new())),
             config: Arc::new(config),
             sleep,
@@ -354,18 +358,6 @@ impl Runtime {
             .map_err(|_| ServiceError::failed(None, "orchestration owner is closed"))?
     }
 
-    /// The one merge lock of a workspace: every session on the same checkout
-    /// applies its patches through it, one at a time.
-    fn merge_lock(&self, workspace: &Path) -> Arc<tokio::sync::Mutex<()>> {
-        let key = workspace
-            .canonicalize()
-            .unwrap_or_else(|_| workspace.to_path_buf());
-        let mut locks = self
-            .merge_locks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Arc::clone(locks.entry(key).or_default())
-    }
     async fn open(&self, start: SessionStart, cx: HookCx) -> Result<(), HookError> {
         let session = cx.session;
         let parent = cx.parent;
@@ -427,7 +419,7 @@ impl Runtime {
             unconfirmed_jobs: Vec::new(),
             last_delivery_error: None,
             last_turn_overflowed: false,
-            merge_lock: self.merge_lock(start.workspace.as_path()),
+            merge_locks: self.merge_locks.clone(),
             reports: Arc::clone(&self.reports),
             waits: tokio::task::JoinSet::new(),
         };
@@ -2031,7 +2023,7 @@ impl SessionState {
             input,
             cancel: cancel.clone(),
             live_tasks: Mutex::new(HashMap::new()),
-            merge_lock: Arc::clone(&self.merge_lock),
+            merge_locks: self.merge_locks.clone(),
             reports: Arc::clone(&self.reports),
             child_max_steps: self.config.agents.child_max_steps,
             child_max_minutes: self.config.agents.child_max_minutes,
@@ -2568,7 +2560,7 @@ struct Coordinator {
     input: Option<String>,
     cancel: CancellationToken,
     live_tasks: Mutex<HashMap<JobId, dal_agent::ext::ScopeHandle>>,
-    merge_lock: Arc<tokio::sync::Mutex<()>>,
+    merge_locks: MergeLocks,
     reports: ReportCells,
     /// Tool rounds one child turn may use, for the grace reason.
     child_max_steps: u32,
@@ -3453,7 +3445,7 @@ impl Coordinator {
         patch: &Path,
         changed: &[PathBuf],
     ) -> WorktreeEnd {
-        let _guard = self.merge_lock.lock().await;
+        let _hold = self.merge_locks.hold(&self.workspace).await;
         let top_text = top.display().to_string();
         let patch_text = patch.display().to_string();
         let checked = self

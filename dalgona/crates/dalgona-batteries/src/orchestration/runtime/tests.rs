@@ -95,6 +95,63 @@ struct Host {
     this: Weak<Host>,
     runtime: Mutex<Option<(Runtime, SessionId)>>,
     changed: tokio::sync::Notify,
+    apply_gate: Option<Arc<ApplyGate>>,
+}
+
+fn is_plain_apply(argv: &[std::ffi::OsString]) -> bool {
+    argv.iter().any(|word| word == "apply") && !argv.iter().any(|word| word == "--check")
+}
+
+/// Parks every plain `git apply` of the hosts that share it until the test
+/// releases one, and logs who entered and left.
+struct ApplyGate {
+    log: Mutex<Vec<ApplyEvent>>,
+    changed: tokio::sync::Notify,
+    release: tokio::sync::Semaphore,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApplyEvent {
+    Enter(SessionId),
+    Exit(SessionId),
+}
+
+impl ApplyGate {
+    fn new() -> Self {
+        Self {
+            log: Mutex::new(Vec::new()),
+            changed: tokio::sync::Notify::new(),
+            release: tokio::sync::Semaphore::new(0),
+        }
+    }
+
+    async fn pass(&self, session: SessionId) {
+        locked(&self.log).push(ApplyEvent::Enter(session));
+        self.changed.notify_waiters();
+        if let Ok(permit) = self.release.acquire().await {
+            permit.forget();
+        }
+        locked(&self.log).push(ApplyEvent::Exit(session));
+        self.changed.notify_waiters();
+    }
+
+    fn events(&self) -> Vec<ApplyEvent> {
+        locked(&self.log).clone()
+    }
+
+    async fn entered(&self, count: usize) {
+        loop {
+            let changed = self.changed.notified();
+            let entered = locked(&self.log)
+                .iter()
+                .filter(|event| matches!(event, ApplyEvent::Enter(_)))
+                .count();
+            if entered >= count {
+                return;
+            }
+            changed.await;
+        }
+    }
 }
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -234,10 +291,18 @@ impl Services for Host {
     }
 
     fn run(&self, _who: &Caller, req: RunRequest) -> ServiceFuture<'_, RunOutput> {
+        let parked = self
+            .apply_gate
+            .clone()
+            .filter(|_| is_plain_apply(&req.argv))
+            .zip(locked(&self.runtime).as_ref().map(|(_, session)| *session));
         let mut script = locked(&self.script);
         script.run_requests.push(req);
         let reply = script.run_outputs.pop_front();
         Box::pin(async move {
+            if let Some((gate, session)) = parked {
+                gate.pass(session).await;
+            }
             reply
                 .ok_or_else(|| ServiceError::failed(None, "no git output was scripted"))?
                 .map_err(|message| ServiceError::failed(None, message))
@@ -594,9 +659,18 @@ impl Fixture {
     async fn open_owner(
         config: crate::orchestration::OrchestrationConfig,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let runtime = Runtime::new(config)?;
+        Self::open_on(Runtime::new(config)?, None).await
+    }
+
+    /// Opens one more session of `runtime`; sessions that share a runtime
+    /// share its workspace merge locks.
+    async fn open_on(
+        runtime: Runtime,
+        apply_gate: Option<Arc<ApplyGate>>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let host = Arc::new_cyclic(|this| Host {
             this: this.clone(),
+            apply_gate,
             ..Host::default()
         });
         let session = SessionId::new_v7();
@@ -1362,6 +1436,13 @@ fn isolation_config()
     let mut config = parse_config(None)?;
     config.data_root = Some(std::env::temp_dir().join("orchestration-script-data"));
     Ok(config)
+}
+
+#[tokio::test]
+async fn opening_a_session_registers_no_workspace_lock() -> TestResult {
+    let fixture = Fixture::open_config(isolation_config()?).await?;
+    assert_eq!(fixture.runtime.merge_locks.len(), 0);
+    Ok(())
 }
 
 #[tokio::test]
@@ -2359,6 +2440,10 @@ async fn a_failed_delivery_poll_is_reported_once_to_the_owner() -> TestResult {
     Ok(())
 }
 
+const ISOLATED_WRITE: &str = r#"{"action":"run","steps":[{"name":"write","prompt":"write","tools":["patch"],"isolation":"worktree"}]}"#;
+
+type GitAnswer = Result<RunOutput, &'static str>;
+
 /// The git answers of one isolated task up to its saved patch: preflight,
 /// the worktree, the staged diff, and the changed names.
 fn isolated_prefix() -> Vec<GitAnswer> {
@@ -2380,6 +2465,58 @@ fn failed_output(stderr: &str) -> RunOutput {
         stderr_tail: stderr.as_bytes().to_vec(),
         ..output("")
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn sessions_on_one_workspace_apply_their_patches_one_at_a_time() -> TestResult {
+    let mut config = isolation_config()?;
+    config.goal.enabled = false;
+    let runtime = Runtime::new(config)?;
+    let gate = Arc::new(ApplyGate::new());
+    let first = Fixture::open_on(runtime.clone(), Some(Arc::clone(&gate))).await?;
+    let second = Fixture::open_on(runtime.clone(), Some(Arc::clone(&gate))).await?;
+    for fixture in [&first, &second] {
+        let mut script = fixture.script();
+        script.run_outputs.extend(isolated_prefix());
+        script.run_outputs.extend((0..4).map(|_| Ok(output(""))));
+    }
+    first.tool(ISOLATED_WRITE).await?;
+    second.tool(ISOLATED_WRITE).await?;
+    let window = std::time::Duration::from_secs(5);
+    tokio::time::timeout(window, gate.entered(1)).await?;
+    let Some(ApplyEvent::Enter(holder)) = gate.events().first().copied() else {
+        return Err("no merge reached apply".into());
+    };
+    let waiter = if holder == first.session {
+        second.session
+    } else {
+        first.session
+    };
+    let overlapped = tokio::time::timeout(std::time::Duration::from_secs(1), gate.entered(2)).await;
+    assert!(
+        overlapped.is_err(),
+        "the second merge reached apply while the first held the checkout"
+    );
+    gate.release.add_permits(1);
+    tokio::time::timeout(window, gate.entered(2)).await?;
+    gate.release.add_permits(1);
+    let (first_report, second_report) = (first.ended_run().await?, second.ended_run().await?);
+    assert!(first_report.contains("isolation: merged"), "{first_report}");
+    assert!(
+        second_report.contains("isolation: merged"),
+        "{second_report}"
+    );
+    assert_eq!(
+        gate.events(),
+        [
+            ApplyEvent::Enter(holder),
+            ApplyEvent::Exit(holder),
+            ApplyEvent::Enter(waiter),
+            ApplyEvent::Exit(waiter),
+        ]
+    );
+    assert_eq!(runtime.merge_locks.len(), 0);
+    Ok(())
 }
 
 #[derive(Deserialize)]
