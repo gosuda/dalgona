@@ -101,9 +101,11 @@ fn prompt_and_remember(
         }
         if Instant::now() >= deadline {
             let cause = if busy {
-                "busy status never cleared"
+                "busy status still visible".to_string()
+            } else if stable == 0 {
+                "output still arriving".to_string()
             } else {
-                "output never went quiet"
+                format!("quiet-and-idle for only {stable} of 3 required polls")
             };
             return Err(
                 format!("turn frame never settled after the reply arrived: {cause}").into(),
