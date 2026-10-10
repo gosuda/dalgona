@@ -1624,7 +1624,10 @@ async fn commit_restores_earlier_deletes_when_a_later_delete_fails() {
         .map(|entry| entry.file_name())
         .filter(|name| name.to_string_lossy().contains(".dalgon-trash"))
         .collect();
-    assert!(leftovers.is_empty(), "trash files left behind: {leftovers:?}");
+    assert!(
+        leftovers.is_empty(),
+        "trash files left behind: {leftovers:?}"
+    );
 }
 
 #[tokio::test]

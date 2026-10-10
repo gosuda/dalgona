@@ -465,10 +465,7 @@ async fn a_handle_dropped_before_its_first_poll_stays_cancelled() {
     drop(scope);
     quiesced(&shared).await;
     assert_eq!(handle.status(), HandleStatus::Cancelled);
-    assert!(matches!(
-        handle.result().await,
-        Err(ScopeError::Cancelled)
-    ));
+    assert!(matches!(handle.result().await, Err(ScopeError::Cancelled)));
     assert_eq!(
         held.inferred.load(Ordering::SeqCst),
         0,
