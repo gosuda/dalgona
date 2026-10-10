@@ -219,3 +219,46 @@ impl Session {
         &self.promoted
     }
 }
+
+/// An incremental fold over declared journal records.
+///
+/// Pushes records one at a time so a tool that attributes each record's
+/// change keeps one running fold instead of replaying every prefix;
+/// `session()` returns the session the pushed records declare, the same
+/// answer [`Session::replay_declared`] gives for the same records.
+pub struct DeclaredFold {
+    replay: Replay,
+}
+
+impl Default for DeclaredFold {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DeclaredFold {
+    /// An empty fold.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            replay: Replay::new(),
+        }
+    }
+
+    /// Folds one more declared record.
+    ///
+    /// # Errors
+    /// Same contract as [`Session::replay_declared`].
+    pub fn push(&mut self, record: &Record) -> Result<(), ReplayError> {
+        self.replay.record(record)
+    }
+
+    /// The session the pushed records declare so far.
+    ///
+    /// # Errors
+    /// Same contract as [`Session::replay_declared`].
+    pub fn session(&mut self) -> Result<Session, ReplayError> {
+        self.replay.declared_tail()?;
+        Ok(self.replay.session.clone())
+    }
+}

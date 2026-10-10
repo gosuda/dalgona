@@ -988,6 +988,13 @@ fn replay_declared_keeps_the_open_turn_unrepaired() {
         .filter(|entry| matches!(entry.kind, EntryKind::ToolResult { .. }))
         .count();
     assert_eq!(repairs, 0, "no repair entries in the declared fold");
+    // A journal ending inside a turn declares the live fold's shape —
+    // `Running` at the boundary step — not `Idle`.
+    assert!(
+        matches!(declared.phase(), Phase::Running { turn, .. } if *turn == id(3)),
+        "an unterminated turn must surface as Running: {:?}",
+        declared.phase()
+    );
 }
 
 const LOST: &str = "Tool call was not completed: dalgon stopped before it finished.";
