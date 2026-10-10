@@ -61,16 +61,17 @@ fn quit_cleanly(terminal: &mut PtyProcess) -> TestResult {
     Err("dalgon stayed alive after repeated submit/Ctrl-D quit attempts".into())
 }
 
-/// Types `text`, submits it, waits for the scripted reply, then waits for the
-/// status row to idle. A mid-turn capture can hold the reply twice — once in
-/// committed transcript rows and once in the live block's assistant text — so
-/// row counts are only stable once the turn state clears.
+/// Types `text`, submits it, waits for the scripted reply, then waits for
+/// the frame to go quiet. A mid-turn capture can hold the reply twice —
+/// once in committed transcript rows and once in the live block's
+/// assistant text — so row counts are only stable once the turn state
+/// clears.
 fn prompt_and_remember(
     terminal: &mut PtyProcess,
-    columns: u16,
-    rows: u16,
     text: &str,
     reply: &str,
+    columns: u16,
+    rows: u16,
 ) -> Result<VtRecorder, Box<dyn Error + Send + Sync>> {
     terminal.write(text.as_bytes())?;
     terminal.collect_for(SETTLE)?;
@@ -128,7 +129,7 @@ fn cjk_reply_wraps_on_cell_boundary() -> TestResult {
     terminal.wait_for(dal_tui::copy::ids::COMPOSER_PLACEHOLDER.as_bytes(), SPAWN)?;
     // The needle must fit inside one wrapped row: the reply splits into
     // 46 + 4 cells of characters, so wait only on its first 40 clusters.
-    let recorder = prompt_and_remember(&mut terminal, 100, 30, "go", &"漢".repeat(40))?;
+    let recorder = prompt_and_remember(&mut terminal, "go", &"漢".repeat(40), 100, 30)?;
     let rendered = all_text(&recorder);
     assert_eq!(
         rendered.matches('漢').count(),
@@ -175,7 +176,7 @@ fn ambiguous_chars_widen_under_cjk_locale() -> TestResult {
     narrow.args(["--screen", "inline"]);
     let mut terminal = PtyProcess::spawn(&mut narrow, 100, 30)?;
     terminal.wait_for(dal_tui::copy::ids::COMPOSER_PLACEHOLDER.as_bytes(), SPAWN)?;
-    let recorder = prompt_and_remember(&mut terminal, 100, 30, "go", needle)?;
+    let recorder = prompt_and_remember(&mut terminal, "go", needle, 100, 30)?;
     let narrow_rows = dotted_rows(&recorder);
     assert_eq!(
         narrow_rows,
@@ -190,7 +191,7 @@ fn ambiguous_chars_widen_under_cjk_locale() -> TestResult {
         .args(["--screen", "inline"]);
     let mut terminal = PtyProcess::spawn(&mut cjk, 100, 30)?;
     terminal.wait_for(dal_tui::copy::ids::COMPOSER_PLACEHOLDER.as_bytes(), SPAWN)?;
-    let recorder = prompt_and_remember(&mut terminal, 100, 30, "go", needle)?;
+    let recorder = prompt_and_remember(&mut terminal, "go", needle, 100, 30)?;
     let cjk_rows = dotted_rows(&recorder);
     assert_eq!(
         cjk_rows,
@@ -215,7 +216,7 @@ fn backspace_removes_flag_cluster_whole() -> TestResult {
     terminal.collect_for(SETTLE)?;
     terminal.write(b"\x7f")?;
     terminal.collect_for(SETTLE)?;
-    let recorder = prompt_and_remember(&mut terminal, 100, 30, "", "done")?;
+    let recorder = prompt_and_remember(&mut terminal, "", "done", 100, 30)?;
     let text = all_text(&recorder);
     assert!(
         text.lines().any(|line| line.trim_end() == "> ab"),
@@ -245,7 +246,7 @@ fn backspace_removes_zwj_and_combining_clusters_whole() -> TestResult {
     terminal.collect_for(SETTLE)?;
     terminal.write(b"\x7f")?;
     terminal.collect_for(SETTLE)?;
-    let recorder = prompt_and_remember(&mut terminal, 100, 30, "", "done")?;
+    let recorder = prompt_and_remember(&mut terminal, "", "done", 100, 30)?;
     let text = all_text(&recorder);
     assert!(
         text.lines().any(|line| line.trim_end() == "> gon"),
@@ -272,7 +273,7 @@ fn wide_cluster_at_text_margin_moves_whole() -> TestResult {
     // 漢 overflow it, so 漢 must move whole onto the next rendered row.
     let mut input = "x".repeat(69);
     input.push('漢');
-    let recorder = prompt_and_remember(&mut terminal, 80, 24, &input, "done")?;
+    let recorder = prompt_and_remember(&mut terminal, &input, "done", 80, 24)?;
     let text = all_text(&recorder);
     assert!(
         text.lines().any(|line| line.trim_end() == "> 漢"),
@@ -293,7 +294,7 @@ fn flag_pair_measures_two_cells_at_wrap_boundary() -> TestResult {
     command.args(["--screen", "inline"]);
     let mut terminal = PtyProcess::spawn(&mut command, 80, 24)?;
     terminal.wait_for(dal_tui::copy::ids::COMPOSER_PLACEHOLDER.as_bytes(), SPAWN)?;
-    let recorder = prompt_and_remember(&mut terminal, 80, 24, "go", "🇯🇵yz")?;
+    let recorder = prompt_and_remember(&mut terminal, "go", "🇯🇵yz", 80, 24)?;
     let text = all_text(&recorder);
     assert!(
         text.lines()
@@ -320,7 +321,7 @@ fn split_utf8_sequence_buffers_until_complete() -> TestResult {
     }
     terminal.write(b"b")?;
     terminal.collect_for(SETTLE)?;
-    let recorder = prompt_and_remember(&mut terminal, 100, 30, "", "done")?;
+    let recorder = prompt_and_remember(&mut terminal, "", "done", 100, 30)?;
     let text = all_text(&recorder);
     assert!(
         text.lines().any(|line| line.trim_end() == "> a日b"),

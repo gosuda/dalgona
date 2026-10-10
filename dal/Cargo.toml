@@ -70,22 +70,9 @@ allow_attributes_without_reason = "deny"
 exit = "deny"
 disallowed_methods = "deny"
 
-# Fast feedback: line tables keep backtraces readable while compiling much
-# faster than full debug info; the few runtime-heavy dependencies stay
-# optimized so test execution stays fast.
+# Fast feedback: line tables keep backtraces readable while compiling much faster than full debug info.
 [profile.dev]
 debug = "line-tables-only"
-
-[profile.dev.package.sonic-rs]
-opt-level = 3
-[profile.dev.package.blake3]
-opt-level = 3
-[profile.dev.package.regex]
-opt-level = 2
-[profile.dev.package.ratatui]
-opt-level = 2
-[profile.dev.package.proptest]
-opt-level = 2
 
 # Fast feedback: Faster Tests
 [profile.test]
