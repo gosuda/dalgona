@@ -129,7 +129,7 @@ pub async fn serve_rpc_draining(
     let mut pending: FuturesUnordered<Pending> = FuturesUnordered::new();
     let mut drain_replies = 0;
 
-    loop {
+    'serve: loop {
         tokio::select! {
             biased;
             () = tokio::time::sleep_until(draining_until.unwrap_or_else(tokio::time::Instant::now)),
@@ -163,10 +163,28 @@ pub async fn serve_rpc_draining(
                 }
             }
             frame = writer.next_queued_frame() => {
-                if let Some(text) = frame
-                    && let Err(error) = writer.write_frame(&text).await
-                {
-                    tracing::debug!(%error, "frame write failed");
+                if let Some(text) = frame {
+                    // Keep drain cancellation and its deadline polled while a
+                    // backpressured peer is still receiving a queued frame.
+                    let write = writer.write_frame(&text);
+                    tokio::pin!(write);
+                    loop {
+                        tokio::select! {
+                            biased;
+                            () = tokio::time::sleep_until(
+                                draining_until.unwrap_or_else(tokio::time::Instant::now),
+                            ), if draining_until.is_some() => break 'serve,
+                            () = drain.cancelled(), if draining_until.is_none() => {
+                                draining_until = Some(tokio::time::Instant::now() + DRAIN_GRACE);
+                            }
+                            result = &mut write => {
+                                if let Err(error) = result {
+                                    tracing::debug!(%error, "frame write failed");
+                                }
+                                break;
+                            }
+                        }
+                    }
                 }
             }
             _ = pending.next(), if !pending.is_empty() => {}

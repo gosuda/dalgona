@@ -8,7 +8,7 @@ use sonic_rs::JsonValueTrait;
 use tokio_util::sync::CancellationToken;
 
 use super::{Rpc, assert_error, initialize, rig};
-use crate::rpc::{MAX_DRAIN_REPLIES, host_error};
+use crate::rpc::{DRAIN_GRACE, MAX_DRAIN_REPLIES, host_error};
 use crate::serve_rpc_draining;
 use crate::transport::MemoryTransport;
 
@@ -103,6 +103,34 @@ async fn a_draining_connection_bounds_replies_during_a_connected_flood() {
     assert_eq!(
         replies, MAX_DRAIN_REPLIES,
         "requests past the cap must earn no further draining replies"
+    );
+}
+
+#[tokio::test]
+async fn a_draining_connection_stops_a_stalled_frame_write_at_the_deadline() {
+    let rig = rig(&[]).await;
+    let drain = CancellationToken::new();
+    let (transport, _peer) = MemoryTransport::pair(1);
+    let writer = transport.writer();
+    writer
+        .write_frame("first")
+        .await
+        .expect("first frame written");
+    writer
+        .enqueue_frame("second".to_owned())
+        .expect("second frame queued");
+    let started = Instant::now();
+    let server = serve_rpc_draining(rig.host.clone(), transport, drain.clone());
+    drain.cancel();
+
+    tokio::time::timeout(Duration::from_secs(3), server)
+        .await
+        .expect("stalled frame write observes drain deadline")
+        .expect("rpc serve ends cleanly");
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= DRAIN_GRACE,
+        "stalled frame write ended before the drain grace elapsed: {elapsed:?}"
     );
 }
 
