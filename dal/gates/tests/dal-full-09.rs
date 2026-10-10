@@ -83,7 +83,7 @@ const INVENTORIES: [(&str, &[&str]); 6] = [
             "dal-full-09",
         ],
     ),
-    ("login", &["login-tui-01"]),
+    ("login", &["login-cli-pty-01", "login-tui-01"]),
 ];
 
 const RELEASE_TARGETS: [&str; 4] = [
