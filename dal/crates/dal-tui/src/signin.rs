@@ -112,8 +112,15 @@ impl Drop for LoginRun {
 
 /// What the flow overlay knows so far.
 #[derive(Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent flow flags; a bitset loses legibility"
+)]
 struct FlowView {
     url: Option<String>,
+    /// Whether the URL passed the http(s) check, making it safe to open in
+    /// the browser and to emit as a terminal hyperlink.
+    url_trusted: bool,
     code: Option<String>,
     opened: bool,
     paste_hint: Option<String>,
@@ -331,12 +338,10 @@ impl SignIn {
         };
         match progress {
             LoginProgress::OpenUrl { url } => {
-                flow.opened = io.open_url(&url).is_ok();
-                flow.url = Some(url);
+                set_url(flow, url, io);
             }
             LoginProgress::ShowCode { url, code } => {
-                flow.opened = io.open_url(&url).is_ok();
-                flow.url = Some(url);
+                set_url(flow, url, io);
                 flow.code = Some(code);
             }
             LoginProgress::AskPaste { hint } => {
@@ -399,14 +404,17 @@ fn flow_rows(
     let mut url_rows = Vec::new();
     if let Some(url) = &flow.url {
         head.push(RenderRow::plain(ids::LOGIN_OPEN_URL, Role::Text));
+        let trusted = flow.url_trusted;
         url_rows = url_chunks(url, width, mode)
             .into_iter()
             .map(|chunk| {
-                let mut row = RenderRow::plain(chunk, Role::Text);
-                row.links.push(RenderLink {
-                    range: 0..row.text.len(),
-                    url: url.clone(),
-                });
+                let mut row = RenderRow::plain(escape(&chunk), Role::Text);
+                if trusted {
+                    row.links.push(RenderLink {
+                        range: 0..row.text.len(),
+                        url: url.clone(),
+                    });
+                }
                 row
             })
             .collect();
@@ -459,13 +467,27 @@ fn flow_rows(
         if let Some(last) = url_rows.last_mut() {
             last.text = crate::width::take_cells(&last.text, width.saturating_sub(1), mode) + "…";
             last.links.clear();
-            last.links.push(RenderLink {
-                range: 0..last.text.len(),
-                url: flow.url.clone().unwrap_or_default(),
-            });
+            if flow.url_trusted
+                && let Some(url) = &flow.url
+            {
+                last.links.push(RenderLink {
+                    range: 0..last.text.len(),
+                    url: url.clone(),
+                });
+            }
         }
     }
     head.into_iter().chain(url_rows).chain(tail).collect()
+}
+
+/// Records the flow URL: only a validated http(s) URL reaches the desktop
+/// opener or becomes a terminal hyperlink; anything else stays visible as
+/// escaped text so the user can still read what the host sent.
+fn set_url(flow: &mut FlowView, url: String, io: &dyn TermIo) {
+    let trusted = crate::render::valid_http_url(&url);
+    flow.opened = trusted && io.open_url(&url).is_ok();
+    flow.url = Some(url);
+    flow.url_trusted = trusted;
 }
 
 /// Splits `url` into rows of at most `width` cells.
@@ -588,7 +610,183 @@ fn cells(text: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Mutex, PoisonError};
+
     use super::*;
+
+    /// Records every URL the desktop opener is asked to open.
+    #[derive(Default)]
+    struct OpenRecorder {
+        opened: Mutex<Vec<String>>,
+    }
+
+    impl OpenRecorder {
+        fn take(&self) -> Vec<String> {
+            std::mem::take(&mut *self.opened.lock().unwrap_or_else(PoisonError::into_inner))
+        }
+    }
+
+    impl TermIo for OpenRecorder {
+        fn enable_raw(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn disable_raw(&self) {}
+        fn size(&self) -> std::io::Result<(u16, u16)> {
+            Ok((80, 24))
+        }
+        fn write(&self, _bytes: &[u8]) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn read(&self, _timeout: std::time::Duration) -> std::io::Result<Vec<u8>> {
+            Ok(Vec::new())
+        }
+        fn raise_tstp(&self) {}
+        fn open_url(&self, url: &str) -> std::io::Result<()> {
+            self.opened
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(url.to_owned());
+            Ok(())
+        }
+    }
+
+    fn flow_sign_in() -> SignIn {
+        SignIn {
+            provider: "test".into(),
+            stage: Stage::Flow(Box::default()),
+            run: None,
+        }
+    }
+
+    fn painted(sign_in: &SignIn) -> String {
+        let theme = crate::theme::load(
+            &crate::ThemeRequest::Palette,
+            crate::ColorMode::Never,
+            None,
+            None,
+        )
+        .expect("palette theme loads");
+        let mut out = Vec::new();
+        for row in sign_in.rows(80, WidthMode::Narrow, 24) {
+            crate::screen::driver::write_styled_text(
+                &mut out, &row.text, &row.spans, &row.links, row.role, &theme,
+            );
+        }
+        String::from_utf8(out).expect("terminal output is UTF-8")
+    }
+
+    #[test]
+    fn a_login_url_with_terminal_controls_opens_nothing_and_links_nothing() {
+        let io = OpenRecorder::default();
+        let mut sign_in = flow_sign_in();
+        let payload = "https://example.test/login?\u{1b}]52;c;\u{7}\r\n".to_owned();
+        sign_in.progress(LoginProgress::OpenUrl { url: payload }, &io);
+
+        assert!(
+            io.take().is_empty(),
+            "a control-byte URL must not reach the opener"
+        );
+        let rows = sign_in.rows(80, WidthMode::Narrow, 24);
+        let shown: String = rows.iter().map(|row| row.text.as_str()).collect();
+        assert!(
+            shown.contains("\\u{1b}"),
+            "the payload stays visible: {shown}"
+        );
+        assert!(shown.contains("\\a"), "the payload stays visible: {shown}");
+        assert!(shown.contains("\\r"), "the payload stays visible: {shown}");
+        assert!(shown.contains("\\n"), "the payload stays visible: {shown}");
+        for row in &rows {
+            assert!(
+                !row.text.chars().any(char::is_control),
+                "no control survives: {:?}",
+                row.text
+            );
+            assert!(
+                row.links.is_empty(),
+                "no link is built for an invalid URL: {:?}",
+                row.text
+            );
+        }
+    }
+
+    #[test]
+    fn login_rows_emit_no_terminal_controls_for_a_hostile_url() {
+        let io = OpenRecorder::default();
+        let mut sign_in = flow_sign_in();
+        let payload = "https://example.test/x?\u{1b}]52;c;copied\u{7}\r\n".to_owned();
+        sign_in.progress(LoginProgress::OpenUrl { url: payload }, &io);
+
+        let bytes = painted(&sign_in);
+        assert!(!bytes.contains('\u{7}'), "BEL never reaches the terminal");
+        assert!(
+            !bytes.contains("\u{1b}]"),
+            "no OSC sequence opens from a payload: {bytes}"
+        );
+        assert!(bytes.contains("\\u{1b}"), "the payload is visible text");
+    }
+
+    #[test]
+    fn an_https_login_url_opens_once_and_links_every_chunk() {
+        let io = OpenRecorder::default();
+        let mut sign_in = flow_sign_in();
+        let url = "https://example.test/oauth/authorize?client_id=abc&state=xyz".to_owned();
+        sign_in.progress(
+            LoginProgress::ShowCode {
+                url: url.clone(),
+                code: "ABCD-1234".into(),
+            },
+            &io,
+        );
+
+        assert_eq!(io.take(), [url.as_str()]);
+        let rows = sign_in.rows(80, WidthMode::Narrow, 24);
+        let linked: Vec<&str> = rows
+            .iter()
+            .flat_map(|row| row.links.iter())
+            .map(|link| link.url.as_str())
+            .collect();
+        assert!(!linked.is_empty(), "a valid URL stays clickable");
+        assert!(linked.iter().all(|target| *target == url.as_str()));
+        let shown: String = rows.iter().map(|row| row.text.as_str()).collect();
+        assert!(shown.contains("https://example.test/oauth/authorize"));
+    }
+
+    #[test]
+    fn login_rows_emit_one_clean_osc8_link_for_a_valid_url() {
+        let io = OpenRecorder::default();
+        let mut sign_in = flow_sign_in();
+        let url = "https://example.test/oauth/authorize?client_id=abc".to_owned();
+        sign_in.progress(LoginProgress::OpenUrl { url: url.clone() }, &io);
+
+        let bytes = painted(&sign_in);
+        assert_eq!(
+            bytes.matches("\u{1b}]8;;https://example.test/").count(),
+            1,
+            "one validated OSC 8 target: {bytes}"
+        );
+        assert!(!bytes.contains('\u{7}'), "BEL never reaches the terminal");
+    }
+
+    #[test]
+    fn a_non_http_login_url_is_shown_but_neither_opened_nor_linked() {
+        let io = OpenRecorder::default();
+        let mut sign_in = flow_sign_in();
+        sign_in.progress(
+            LoginProgress::OpenUrl {
+                url: "file:///etc/passwd".into(),
+            },
+            &io,
+        );
+
+        assert_eq!(io.take(), [] as [String; 0]);
+        let rows = sign_in.rows(80, WidthMode::Narrow, 24);
+        let shown: String = rows.iter().map(|row| row.text.as_str()).collect();
+        assert!(
+            shown.contains("file:///etc/passwd"),
+            "the URL stays visible for diagnosis: {shown}"
+        );
+        assert!(rows.iter().all(|row| row.links.is_empty()));
+    }
 
     #[test]
     fn urls_wrap_by_cells_and_keep_every_character() {

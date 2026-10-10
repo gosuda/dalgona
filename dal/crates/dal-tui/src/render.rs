@@ -829,12 +829,27 @@ fn plain_url(text: &str) -> Option<(usize, String)> {
     Some((candidate.len(), candidate.to_owned()))
 }
 
+/// Reports whether `url` names a character a terminal could read as a
+/// control sequence: a C0/C1 code or DEL.
+fn has_terminal_control(url: &str) -> bool {
+    url.chars().any(char::is_control)
+}
+
 fn valid_link_url(url: &str) -> bool {
-    !url.bytes()
-        .any(|byte| byte.is_ascii_control() || byte == b'\x7f')
+    !has_terminal_control(url)
         && url
             .strip_prefix("file://")
             .is_some_and(|path| std::path::Path::new(path).is_absolute())
+}
+
+/// Reports whether `url` is an absolute http(s) URL safe to open in the
+/// desktop browser and to emit as a terminal hyperlink: the scheme is http
+/// or https, and no character is a terminal control or whitespace.
+pub(crate) fn valid_http_url(url: &str) -> bool {
+    (url.starts_with("https://") || url.starts_with("http://"))
+        && !url
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
 }
 
 fn escape_linked(text: &str, links: Vec<RenderLink>) -> (String, Vec<RenderLink>) {
@@ -847,9 +862,9 @@ fn escape_linked(text: &str, links: Vec<RenderLink>) -> (String, Vec<RenderLink>
             '\n' => escaped.push_str("\\n"),
             '\r' => escaped.push_str("\\r"),
             '\u{7}' => escaped.push_str("\\a"),
-            character if character.is_control() => {
+            character if character.is_control() || crate::width::is_bidi_control(character) => {
                 use std::fmt::Write as _;
-                let _ = write!(escaped, "\\u{{{}}}", u32::from(character));
+                let _ = write!(escaped, "\\u{{{:x}}}", u32::from(character));
             }
             character => escaped.push(character),
         }
@@ -1364,5 +1379,42 @@ mod tests {
             .and_then(|row| row.links.first())
             .expect("clipped tool result keeps its file link");
         assert_eq!(link.url, path);
+    }
+
+    #[test]
+    fn bidi_override_and_isolate_payloads_stay_visible_in_logical_order() {
+        let rows = super::prose_rows(
+            "run: mv a b \u{202e}evil\u{202c} \u{2066}ok\u{2069}\u{61c}\u{200e}\u{200f}\u{202a}\u{202b}\u{202d}",
+            80,
+            WidthMode::Narrow,
+        );
+        let text: String = rows.iter().map(|row| row.text.as_str()).collect();
+        assert_eq!(
+            text,
+            "run: mv a b \\u{202e}evil\\u{202c} \\u{2066}ok\\u{2069}\\u{61c}\\u{200e}\\u{200f}\\u{202a}\\u{202b}\\u{202d}"
+        );
+        assert!(
+            !text.chars().any(crate::width::is_bidi_control),
+            "no bidi control survives: {text}"
+        );
+    }
+
+    #[test]
+    fn bidi_payloads_wrap_by_their_visible_escape_width() {
+        let rows = super::prose_rows("pad pad \u{202e}x", 12, WidthMode::Narrow);
+        let text: String = rows.iter().map(|row| row.text.as_str()).collect();
+        assert!(
+            rows.iter()
+                .all(|row| crate::width::width(&row.text, WidthMode::Narrow) <= 12),
+            "every row fits the cap: {text}"
+        );
+        assert_eq!(text, "pad pad \\u{202e}x");
+        assert!(rows.len() > 1, "the eight-cell escape wraps past the cap");
+    }
+
+    #[test]
+    fn arabic_and_hebrew_prose_render_untouched() {
+        let rows = super::prose_rows("مرحبا שלום", 80, WidthMode::Narrow);
+        assert_eq!(rows[0].text, "مرحبا שלום");
     }
 }

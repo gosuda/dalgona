@@ -461,7 +461,8 @@ fn write_row(out: &mut Vec<u8>, row: &RenderRow, theme: &ResolvedTheme, image_su
     write_styled_text(out, &row.text, &row.spans, &row.links, row.role, theme);
 }
 
-fn write_styled_text(
+/// Writes one row's text with its spans, links, and role applied.
+pub(crate) fn write_styled_text(
     out: &mut Vec<u8>,
     text: &str,
     spans: &[RenderSpan],
@@ -610,5 +611,72 @@ mod tests {
         assert!(output.contains(
             "\x1b]8;;file:///workspace/main.rs\x1b\\\x1b[4mfile:///workspace/main.rs\x1b[24m\x1b]8;;\x1b\\"
         ));
+    }
+
+    #[test]
+    fn approval_dialog_rows_emit_no_payload_terminal_controls() {
+        let theme = crate::theme::load(
+            &crate::ThemeRequest::Palette,
+            crate::ColorMode::Never,
+            None,
+            None,
+        )
+        .expect("palette theme loads");
+        let mut dialog = crate::dialog::DialogUi::default();
+        dialog.resync(vec![dal_core::Request {
+            id: dal_core::RequestId::new_v7(),
+            turn: None,
+            owner: dal_core::Owner::Core,
+            question: dal_core::Question::Approval {
+                tool: "exec".into(),
+                preview: dal_core::Preview {
+                    title: "command".into(),
+                    body: "run: \u{202e}rm -rf /\u{202c}\u{1b}\u{7}\n\u{2066}ok\u{2069}".into(),
+                    digest: None,
+                },
+                grant: None,
+                call: None,
+            },
+            timeout: std::time::Duration::from_secs(30),
+            default: dal_core::Answer::Decline,
+        }]);
+        let rows = dialog.rendered_rows(
+            80,
+            24,
+            crate::WidthMode::Narrow,
+            crate::diagram::DiagramSettings::default(),
+            &crate::diagram::RenderCache::default(),
+        );
+        assert_ne!(rows.len(), 0, "the dialog renders rows");
+        let mut output = Vec::new();
+        for row in &rows {
+            super::write_styled_text(
+                &mut output,
+                &row.text,
+                &row.spans,
+                &row.links,
+                row.role,
+                &theme,
+            );
+        }
+        let output = String::from_utf8(output).expect("terminal output is UTF-8");
+        assert!(
+            output.contains("run: \\u{202e}rm -rf /\\u{202c}\\u{1b}\\a"),
+            "the override stays visible in logical order: {output}"
+        );
+        assert!(output.contains("\\u{2066}ok\\u{2069}"));
+        assert!(
+            !output.contains('\u{202e}'),
+            "no bidi control reaches the terminal"
+        );
+        assert!(
+            !output.contains('\u{2066}'),
+            "no isolate reaches the terminal"
+        );
+        assert!(!output.contains('\u{7}'), "BEL never reaches the terminal");
+        assert!(
+            !output.contains("\u{1b}]"),
+            "no OSC sequence opens from a payload: {output}"
+        );
     }
 }
