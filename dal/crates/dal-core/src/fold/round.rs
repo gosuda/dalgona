@@ -343,7 +343,7 @@ impl Session {
             }));
         }
         if matches!(stop, TurnEndStop::Cancelled) {
-            self.cancel_open_questions(now, emit);
+            self.cancel_open_questions(turn, now, emit);
         }
         emit.records.push(Record::TurnEnd {
             at: now,
@@ -412,7 +412,8 @@ impl Session {
         if follow_up.is_none() && !self.queued_inputs.is_empty() {
             self.discard_queued(turn, emit);
         }
-        self.open_questions.clear();
+        self.open_questions
+            .retain(|(_, question)| question.turn != Some(turn));
         self.argument_overrides.clear();
         self.pending_compaction = None;
         self.turn_flags = TurnFlags::default();

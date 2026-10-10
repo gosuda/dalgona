@@ -299,6 +299,7 @@ fn session_grant_accepts_a_mapped_tool_name() {
         request,
         super::types::QuestionRef {
             tool: Some(tool.into()),
+            turn: None,
         },
     ));
     session.preflight_session_grant(request).unwrap();
@@ -328,6 +329,115 @@ fn session_grant_accepts_a_mapped_tool_name() {
             Record::AllowAlways { tool: recorded, .. }
         ] if **recorded == *tool
     ));
+}
+
+fn open_request(turn: Option<TurnId>, question: Question) -> Request {
+    Request {
+        id: RequestId::new_v7(),
+        turn,
+        owner: crate::Owner::Core,
+        question,
+        timeout: std::time::Duration::from_secs(30),
+        default: Answer::Decline,
+    }
+}
+
+#[test]
+fn turn_cancel_keeps_turnless_questions_waiting() {
+    let mut session = session();
+    let turn = begin(&mut session);
+    send(
+        &mut session,
+        Event::RequestStarted {
+            turn,
+            model: route(),
+            family: Family::Chat,
+        },
+    )
+    .unwrap();
+    let owned = open_request(
+        Some(turn),
+        Question::Confirm {
+            text: "Proceed?".into(),
+        },
+    );
+    let turnless = open_request(
+        None,
+        Question::Grant {
+            ext: "web".into(),
+            origin: "bundled".into(),
+            capabilities: vec!["net".into()],
+            detail: None,
+        },
+    );
+    send(
+        &mut session,
+        Event::RequestOpened {
+            request: owned.clone(),
+        },
+    )
+    .unwrap();
+    send(
+        &mut session,
+        Event::RequestOpened {
+            request: turnless.clone(),
+        },
+    )
+    .unwrap();
+    let out = send(
+        &mut session,
+        Event::Cancel {
+            scope: CancelScope::Turn(turn),
+            partial: None,
+        },
+    )
+    .unwrap();
+    let mut journal = Vec::new();
+    append_emitted(&out, &mut journal);
+    assert!(
+        journal.iter().any(|record| matches!(
+            record,
+            Record::Resolved { request, answer: Answer::Cancel, .. } if *request == owned.id
+        )),
+        "the ending turn's question resolves as Cancel"
+    );
+    assert!(
+        !journal.iter().any(|record| matches!(
+            record,
+            Record::Resolved { request, .. } if *request == turnless.id
+        )),
+        "the turnless grant question gains no terminal record"
+    );
+    assert_eq!(
+        session
+            .open_questions
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>(),
+        vec![turnless.id],
+        "the turnless question survives the turn close"
+    );
+    assert!(matches!(session.phase(), Phase::Idle));
+    let out = send(
+        &mut session,
+        Event::GrantResolved {
+            request: turnless.id,
+            answer: Answer::Approve,
+            by: Some(client()),
+            was_default: false,
+        },
+    )
+    .unwrap();
+    let mut journal = Vec::new();
+    append_emitted(&out, &mut journal);
+    assert!(
+        journal.iter().any(|record| matches!(
+            record,
+            Record::Resolved { request, answer: Answer::Approve, .. } if *request == turnless.id
+        )),
+        "the surviving turnless question still resolves by answer"
+    );
+    assert_eq!(session.open_questions, []);
 }
 
 #[test]

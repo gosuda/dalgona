@@ -138,7 +138,13 @@ impl Session {
             | Question::Confirm { .. }
             | Question::Text { .. } => None,
         };
-        self.open_questions.push((request.id, QuestionRef { tool }));
+        self.open_questions.push((
+            request.id,
+            QuestionRef {
+                tool,
+                turn: request.turn,
+            },
+        ));
     }
 
     pub(super) fn queue_steer(&mut self, text: Box<str>, effects: &mut Vec<Effect>) {
@@ -221,12 +227,26 @@ impl Session {
         Ok(())
     }
 
-    /// Resolves every still-open question as a core cancellation: a
-    /// cancelled turn ends with its approvals answered, so a withdrawal or
+    /// Resolves the ending turn's still-open questions as core cancellations:
+    /// a cancelled turn ends with its approvals answered, so a withdrawal or
     /// expiry that lands after the close still finds its terminal record
     /// already journaled instead of dropping it as unknown.
-    pub(super) fn cancel_open_questions(&mut self, now: jiff::Timestamp, emit: &mut Emit) {
-        for (request, _) in self.open_questions.drain(..) {
+    ///
+    /// Turnless questions keep waiting: the broker resolves only the ending
+    /// turn's slots, so a service-grant question asked outside any turn must
+    /// not gain a durable Cancel record while its broker waiter stays open.
+    pub(super) fn cancel_open_questions(
+        &mut self,
+        turn: TurnId,
+        now: jiff::Timestamp,
+        emit: &mut Emit,
+    ) {
+        let open = std::mem::take(&mut self.open_questions);
+        for (request, question) in open {
+            if question.turn != Some(turn) {
+                self.open_questions.push((request, question));
+                continue;
+            }
             let by = ClientId::new("core");
             emit.records.push(Record::Resolved {
                 at: now,

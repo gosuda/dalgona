@@ -572,6 +572,12 @@ pub(super) enum QueuedInput {
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct QuestionRef {
     pub(super) tool: Option<Box<str>>,
+    /// The turn that opened the question, when it belongs to a turn.
+    ///
+    /// Turnless questions (a slash command's grant question) outlive any
+    /// turn and end only by answer, deadline, or their caller giving up,
+    /// matching the broker contract.
+    pub(super) turn: Option<TurnId>,
 }
 /// Usage and file-change totals accumulated for the open turn.
 ///
