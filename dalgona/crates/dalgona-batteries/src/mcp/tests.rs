@@ -478,12 +478,11 @@ fn crash_stdio_decl(marker: &Path) -> McpServerDecl {
 }
 
 #[cfg(unix)]
-#[tokio::test]
-async fn stdio_call_crash_reports_bounded_stderr() {
+async fn crashed_echo_result(decl: McpServerDecl) -> (bool, String) {
     let entry = fold_tool_name(SKILL, SERVER, "");
     let echo = fold_tool_name(SKILL, SERVER, "echo");
     let mut fixture = HostedFixture::new(
-        stderr_crash_stdio_decl(),
+        decl,
         vec![
             scripted_tool_step("entry-1", &entry, "{}"),
             scripted_final_step(),
@@ -499,25 +498,70 @@ async fn stdio_call_crash_reports_bounded_stderr() {
 
     fixture.prompt().await;
     fixture.turn_ended().await;
-    let results = fixture.tool_results(&echo);
+    let mut results = fixture.tool_results(&echo);
     assert_eq!(results.len(), 1);
-    assert!(results[0].0);
-    assert!(results[0].1.contains("status 1"), "{results:?}");
-    assert!(
-        results[0].1.contains("crash stderr line one")
-            && results[0].1.contains("crash stderr line two"),
-        "{results:?}"
-    );
-    assert!(
-        results[0].1.len() <= STDERR_RING + 1024,
-        "stderr excerpt exceeded the ring bound: {}",
-        results[0].1.len()
-    );
+    let result = results.remove(0);
     fixture.shutdown().await;
+    result
 }
 
 #[cfg(unix)]
-fn stderr_crash_stdio_decl() -> McpServerDecl {
+#[tokio::test]
+async fn stdio_call_crash_reports_bounded_stderr() {
+    let result = crashed_echo_result(stderr_crash_stdio_decl(
+        r"
+      head -c 70000 /dev/zero | tr '\0' x >&2
+      printf '\ncrash stderr line one\ncrash stderr line two\n' >&2
+      exit 1
+",
+    ))
+    .await;
+    assert!(result.0);
+    assert!(result.1.contains("status 1"), "{result:?}");
+    assert!(
+        result.1.contains("crash stderr line one") && result.1.contains("crash stderr line two"),
+        "{result:?}"
+    );
+    assert!(
+        result.1.len() <= STDERR_RING + 1024,
+        "stderr excerpt exceeded the ring bound: {}",
+        result.1.len()
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn stdio_crash_diagnostic_waits_for_stderr_held_by_grandchild() {
+    let result = crashed_echo_result(stderr_crash_stdio_decl(
+        r#"
+      fifo="$TMPDIR/dalgona-stderr-sync-$$"
+      mkfifo "$fifo"
+      (
+        read -r _ < "$fifo"
+        rm -f "$fifo"
+        head -c 70000 /dev/zero | tr '\0' x >&2
+        printf '\ngrandchild final marker\n' >&2
+      ) </dev/null >/dev/null &
+      exec 3>"$fifo"
+      exit 1
+"#,
+    ))
+    .await;
+    assert!(result.0);
+    assert!(result.1.contains("status 1"), "{result:?}");
+    assert!(
+        result.1.contains("grandchild final marker"),
+        "diagnostic omitted stderr written after the server exited: {result:?}"
+    );
+    assert!(
+        result.1.len() <= STDERR_RING + 1024,
+        "stderr excerpt exceeded the ring bound: {}",
+        result.1.len()
+    );
+}
+
+#[cfg(unix)]
+fn stderr_crash_stdio_decl(on_call: &str) -> McpServerDecl {
     McpServerDecl::Stdio {
         command: vec![
             "/bin/sh".into(),
@@ -534,13 +578,12 @@ while IFS= read -r line; do
       printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"echo","inputSchema":{"type":"object","properties":{}}}],"ttlMs":10000}}\n' "$id"
       ;;
     *'"method":"tools/call"'*)
-      head -c 70000 /dev/zero | tr '\0' x >&2
-      printf '\ncrash stderr line one\ncrash stderr line two\n' >&2
-      exit 1
+@@CALL@@
       ;;
   esac
 done
 "#
+            .replace("@@CALL@@", on_call.trim_matches('\n'))
             .into(),
         ],
         env: BTreeMap::new(),

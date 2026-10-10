@@ -228,11 +228,12 @@ impl StdioTransport {
         };
         drop(child);
         self.reader_task.abort();
-        self.stderr_task.abort();
-        match outcome {
+        let result = match outcome {
             Ok(()) => Ok(()),
             Err(code) => Err(self.exited_error(code).await),
-        }
+        };
+        self.stderr_task.abort();
+        result
     }
 
     /// Sends an MCP notification without allocating a response slot.
