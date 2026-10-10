@@ -137,17 +137,21 @@ impl Runtime {
         let caller = self.caller.clone();
         let lineage = self.lineage.clone().with_ledger(ledger);
         Box::pin(synthetic::enter(lineage, async move {
+            let run = async {
+                let stream = services
+                    .infer_stream(&caller, request)
+                    .await
+                    .map_err(service_error)?;
+                synthetic::collect(stream).await.map_err(|failure| {
+                    if failure == InferFailure::Cancelled {
+                        ScopeError::Cancelled
+                    } else {
+                        ScopeError::Infer(failure)
+                    }
+                })
+            };
             tokio::select! {
-                opened = services.infer_stream(&caller, request) => {
-                    let stream = opened.map_err(service_error)?;
-                    synthetic::collect(stream).await.map_err(|failure| {
-                        if failure == InferFailure::Cancelled {
-                            ScopeError::Cancelled
-                        } else {
-                            ScopeError::Infer(failure)
-                        }
-                    })
-                }
+                result = run => result,
                 () = cancel.cancelled() => Err(ScopeError::Cancelled),
             }
         }))
@@ -473,21 +477,23 @@ struct Inner {
 
 impl Drop for Inner {
     fn drop(&mut self) {
-        self.shared.ledger.cancel.cancel();
         let handles = std::mem::take(&mut locked(&self.shared.book).all);
         for handle in handles {
             let state = &handle.state;
-            if terminal(*state.status.borrow()) {
+            let mut result = locked(&state.result);
+            if result.is_some() {
                 continue;
             }
-            state.cancel.cancel();
-            *locked(&state.result) = Some(Err(ScopeError::Cancelled));
+            *result = Some(Err(ScopeError::Cancelled));
             state.status.send_replace(HandleStatus::Cancelled);
+            drop(result);
+            state.cancel.cancel();
             self.shared.progress.send_if_modified(|count| {
                 *count += 1;
                 true
             });
         }
+        self.shared.ledger.cancel.cancel();
         self.tasks
             .get_mut()
             .unwrap_or_else(PoisonError::into_inner)
@@ -788,8 +794,18 @@ async fn drive(shared: Arc<Shared>, handle: ScopeHandle, gate: oneshot::Receiver
             gate.try_recv().is_ok()
         }
     };
-    let outcome = if granted && !state.cancel.is_cancelled() {
-        state.status.send_replace(HandleStatus::Running);
+    let started = if granted {
+        let result = locked(&state.result);
+        if result.is_some() || state.cancel.is_cancelled() {
+            false
+        } else {
+            state.status.send_replace(HandleStatus::Running);
+            true
+        }
+    } else {
+        false
+    };
+    let outcome = if started {
         work(state.cancel.clone()).await
     } else {
         Err(ScopeError::Cancelled)
@@ -811,6 +827,10 @@ fn finish(
         }
         Err(_) => HandleStatus::Failed,
     };
+    let mut slot = locked(&state.result);
+    if slot.is_some() {
+        return;
+    }
     let result = match outcome {
         Ok((value, usage)) => {
             if let Some(usage) = usage {
@@ -821,8 +841,9 @@ fn finish(
         }
         Err(error) => Err(error),
     };
-    *locked(&state.result) = Some(result);
+    *slot = Some(result);
     state.status.send_replace(status);
+    drop(slot);
     if status == HandleStatus::Failed && shared.on_error == OnError::Cancel {
         shared.ledger.refuse(ScopeError::Cancelled);
     }
@@ -858,3 +879,6 @@ fn charge_of(usage: &Usage) -> ScopeUsage {
         cost_usd: usage.cost_usd,
     }
 }
+
+#[cfg(test)]
+mod tests;
