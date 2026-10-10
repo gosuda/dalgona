@@ -38,8 +38,7 @@ impl Drop for Root {
     }
 }
 
-fn build(user_toml: &str) -> Result<Product, Box<dyn Error>> {
-    let root = Root::create()?;
+fn build_in(root: &Root, user_toml: &str) -> Result<Product, Box<dyn Error>> {
     let factory = dalgona::product();
     let config = Config::load(
         ConfigProduct::Dalgona,
@@ -52,6 +51,24 @@ fn build(user_toml: &str) -> Result<Product, Box<dyn Error>> {
         config: &config,
     };
     Ok(dalgona::build(&cx)?)
+}
+
+fn build(user_toml: &str) -> Result<Product, Box<dyn Error>> {
+    build_in(&Root::create()?, user_toml)
+}
+
+fn write_plugin(root: &Root, name: &str) -> io::Result<()> {
+    let directory = root.0.join("plugins").join(name);
+    fs::create_dir_all(&directory)?;
+    fs::write(
+        directory.join("plugin.star"),
+        format!(
+            "load(\"@dal/v1\", \"dal\")\n\
+             def run(ctx, args):\n    return None\n\
+             t = dal.tool(description = \"d\", input = dal.schema(), run = run)\n\
+             plugin = dal.plugin(name = \"{name}\", version = \"0.1.0\", tools = {{\"{name}_tool\": t}})\n"
+        ),
+    )
 }
 
 fn names(product: &Product) -> BTreeSet<&str> {
@@ -267,5 +284,48 @@ fn batteries_register_in_name_byte_order_after_the_builtins() -> Result<(), Box<
     sorted.sort_unstable();
     assert_eq!(batteries, sorted);
     assert_eq!(batteries.len(), 11);
+    Ok(())
+}
+
+#[test]
+fn a_listed_plugin_must_exist_under_this_products_data_root() -> Result<(), Box<dyn Error>> {
+    let other_product = Root::create()?;
+    write_plugin(&other_product, "ghost")?;
+    let root = Root::create()?;
+    let error = build_in(&root, "plugins = [\"ghost\"]\n")
+        .err()
+        .ok_or("a plugin installed under another root was accepted")?
+        .to_string();
+    let expected = root.0.join("plugins").join("ghost");
+    assert!(
+        error.contains("\"ghost\"")
+            && error.contains("`plugins`")
+            && error.contains(&expected.display().to_string()),
+        "{error}"
+    );
+
+    write_plugin(&root, "ghost")?;
+    let product = build_in(&root, "plugins = [\"ghost\"]\n")?;
+    assert!(names(&product).contains("ghost"));
+    Ok(())
+}
+
+#[test]
+fn a_user_plugin_never_shadows_a_bundled_or_builtin_extension() -> Result<(), Box<dyn Error>> {
+    for (name, holder) in [
+        ("ask", "plugin \"ask\""),
+        ("subagent", "the built-in extension subagent"),
+    ] {
+        let root = Root::create()?;
+        write_plugin(&root, name)?;
+        let error = build_in(&root, &format!("plugins = [\"{name}\"]\n"))
+            .err()
+            .ok_or_else(|| format!("a user plugin replaced the {name} extension"))?
+            .to_string();
+        assert_eq!(
+            error,
+            format!("extension \"{name}\" is already registered by {holder}")
+        );
+    }
     Ok(())
 }
