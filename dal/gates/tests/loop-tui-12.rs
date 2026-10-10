@@ -86,6 +86,9 @@ fn pty_transcript_replays_to_the_committed_snapshot() -> Result<(), Box<dyn Erro
             None => row,
         })
         .filter(|row| !row.trim().is_empty())
+        // Host notices depend on the runner environment — e.g. the fd soft
+        // limit lift fires only where the inherited ceiling is below target.
+        .filter(|row| !row.starts_with("[dal-agent]"))
         .collect();
     assert!(
         rows.iter().any(|row| row.contains("snapshot reply text")),
