@@ -330,7 +330,7 @@ fn default_for(question: &Question) -> Answer {
 /// The request deadline for a fold-minted question.
 #[expect(
     clippy::duration_suboptimal_units,
-    reason = "MSRV 1.90 lacks const Duration::from_mins"
+    reason = "Duration::from_mins is not stable at MSRV 1.90 (rust#140881)"
 )]
 pub(crate) fn default_timeout(question: &Question) -> Duration {
     match question {
@@ -365,3 +365,4 @@ fn slot_for(
 
 #[cfg(test)]
 mod tests;
+// weave: run 'weave explain dal/crates/dal-agent/src/broker.rs' for per-hunk detail, 'weave check' to verify your resolution

@@ -48,22 +48,30 @@ use crate::{
 
 /// The exact fallback notice prefix. The final error text follows one space.
 const FALLBACK_NOTICE: &str = "Falling back from WebSockets to HTTPS transport.";
+
 /// Idle sockets live for less than five minutes and no more than 55 minutes.
 #[expect(
     clippy::duration_suboptimal_units,
-    reason = "MSRV 1.90 lacks const Duration::from_mins"
+    reason = "Duration::from_mins is not stable at MSRV 1.90 (rust#140881)"
 )]
 const WS_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
+/// A socket is not reused for a new stream once it exceeds this age; live
+/// and unclaimed idle sockets may outlive it.
 #[expect(
     clippy::duration_suboptimal_units,
-    reason = "MSRV 1.90 lacks const Duration::from_mins"
+    reason = "Duration::from_mins is not stable at MSRV 1.90 (rust#140881)"
 )]
 const WS_MAX_AGE: Duration = Duration::from_secs(55 * 60);
+
 const BETA_HEADER: &str = "responses_websockets=2026-02-06";
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
 type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
+
 type SleepFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
+
 type Sleeper = Arc<dyn Fn(Duration) -> SleepFuture + Send + Sync>;
 
 /// A family-specific request accepted by the shared WebSocket state machine.
@@ -1065,3 +1073,4 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests;
+// weave: run 'weave explain dal/crates/dal-provider/src/ws.rs' for per-hunk detail, 'weave check' to verify your resolution

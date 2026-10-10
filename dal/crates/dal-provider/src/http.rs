@@ -35,26 +35,35 @@ use crate::error::{LimitError, ProviderError};
 
 /// Bound on TCP and TLS connection setup.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// Bound from request start to the response status line and headers.
 pub const RESPONSE_HEADER_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Bound on the gap between two body reads of a response.
 pub const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+
 /// Total bound on one non-streaming request.
 pub const NON_STREAM_TOTAL_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// Total bound on one remote compaction request.
 pub const COMPACT_TIMEOUT: Duration = Duration::from_secs(600);
+
 /// Total bound on one account usage request.
 pub const USAGE_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// Total bound on one OAuth token or device-code request.
 pub const OAUTH_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// How long a sign-in flow waits for the browser callback or device approval.
 #[expect(
     clippy::duration_suboptimal_units,
-    reason = "MSRV 1.90 lacks const Duration::from_mins"
+    reason = "Duration::from_mins is not stable at MSRV 1.90 (rust#140881)"
 )]
 pub const LOGIN_WAIT: Duration = Duration::from_secs(15 * 60);
+
 /// Largest WebSocket message accepted.
 pub const WS_MESSAGE_LIMIT: usize = 16 << 20;
+
 /// Largest non-streaming response body accepted.
 pub const BODY_LIMIT: usize = 16 << 20;
 
@@ -440,3 +449,4 @@ fn transport(family: Family, reason: String) -> ProviderError {
 
 #[cfg(test)]
 mod tests;
+// weave: run 'weave explain dal/crates/dal-provider/src/http.rs' for per-hunk detail, 'weave check' to verify your resolution

@@ -42,7 +42,7 @@ use super::{DREAM_SIDECAR_NAME, PROBE_INTERVAL_HOURS};
 /// dream-job idle interval: 20 minutes without input.
 #[expect(
     clippy::duration_suboptimal_units,
-    reason = "Duration::from_mins is a runtime fn until Rust 1.91; MSRV is 1.90"
+    reason = "Duration::from_mins is not a stable const fn (rust#140881)"
 )]
 const IDLE_INTERVAL: Duration = Duration::from_secs(20 * 60);
 
@@ -321,3 +321,4 @@ impl Task {
         self.services.notify(&self.caller, notice);
     }
 }
+// weave: run 'weave explain dalgona/crates/dalgona-batteries/src/history/task.rs' for per-hunk detail, 'weave check' to verify your resolution
