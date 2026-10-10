@@ -53,6 +53,10 @@ struct Script {
     delivered: HashSet<JobId>,
     lines: VecDeque<dal_core::JobLines>,
     line_reads: Vec<Option<u64>>,
+    /// A failure the host answers the next job-lines read with.
+    lines_error: Option<&'static str>,
+    /// A failure the host answers the next sidecar write with.
+    sidecar_write_error: Option<&'static str>,
     /// The sidecar files the session wrote, by name.
     sidecar_files: std::collections::HashMap<String, Vec<u8>>,
     /// A refusal the host answers every start with.
@@ -515,10 +519,14 @@ impl Services for Host {
                 )),
             },
             JobsOp::Lines { after, .. } => {
-                script.line_reads.push(after);
-                let mut lines = script.lines.front().cloned().unwrap_or_default();
-                lines.lines.retain(|line| line.seq > after.unwrap_or(0));
-                Ok(JobsReply::Lines(lines))
+                if let Some(message) = script.lines_error.take() {
+                    Err(ServiceError::failed(None, message))
+                } else {
+                    script.line_reads.push(after);
+                    let mut lines = script.lines.front().cloned().unwrap_or_default();
+                    lines.lines.retain(|line| line.seq > after.unwrap_or(0));
+                    Ok(JobsReply::Lines(lines))
+                }
             }
             JobsOp::Take { limit } => Ok(Self::take_reports(&mut script, limit)),
             JobsOp::Commit { ids } => Self::commit_reports(&mut script, ids),
@@ -577,6 +585,10 @@ impl Services for Host {
                 None
             }
             SidecarOp::Write { name, bytes } => {
+                if let Some(message) = script.sidecar_write_error.take() {
+                    drop(script);
+                    return Box::pin(async move { Err(ServiceError::failed(None, message)) });
+                }
                 script.sidecar_files.insert(name.to_string(), bytes);
                 None
             }
@@ -1279,6 +1291,56 @@ async fn abort_continues_when_the_jobs_list_fails() -> TestResult {
     Ok(())
 }
 
+#[tokio::test]
+async fn list_with_ids_shows_the_requested_job_past_the_limit() -> TestResult {
+    let fixture = Fixture::open().await?;
+    let wanted = JobId::new_v7();
+    {
+        let mut script = fixture.script();
+        for index in 0..super::super::agents_tool::LIST_RUNS_LIMIT {
+            script.jobs.push((
+                JobStatus {
+                    id: JobId::new_v7(),
+                    label: format!("filler-{index}").into(),
+                    state: JobStateView::Running,
+                    log: None,
+                    last_activity_at: dal_core::Timestamp::now(),
+                },
+                None,
+                String::new(),
+            ));
+        }
+        script.jobs.push((
+            JobStatus {
+                id: wanted,
+                label: "target".into(),
+                state: JobStateView::Running,
+                log: None,
+                last_activity_at: dal_core::Timestamp::now(),
+            },
+            None,
+            String::new(),
+        ));
+    }
+    let unfiltered = fixture.tool(r#"{"action":"list"}"#).await?;
+    assert!(
+        !unfiltered.contains("target: running"),
+        "the unfiltered list still stops at the limit: {unfiltered}"
+    );
+    let filtered = fixture
+        .tool(&format!(r#"{{"action":"list","ids":["{wanted}"]}}"#))
+        .await?;
+    assert!(
+        filtered.contains(&format!("{wanted} target: running")),
+        "the requested job is shown: {filtered}"
+    );
+    assert!(
+        !filtered.contains("filler-0"),
+        "other jobs stay hidden: {filtered}"
+    );
+    Ok(())
+}
+
 async fn wait_for_starts(fixture: &Fixture, count: usize) -> TestResult {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
@@ -1712,6 +1774,87 @@ async fn monitor_lines_reach_a_wake_and_old_live_jobs_show_silence() -> TestResu
     );
     let listing = fixture.tool(r#"{"action":"list"}"#).await?;
     assert!(listing.contains("silent"), "{listing}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_failing_monitor_read_neither_stops_later_jobs_nor_stays_silent() -> TestResult {
+    let fixture = Fixture::open().await?;
+    let (broken, healthy) = (JobId::new_v7(), JobId::new_v7());
+    {
+        let mut script = fixture.script();
+        for (id, label) in [(broken, "broken"), (healthy, "healthy")] {
+            script.jobs.push((
+                JobStatus {
+                    id,
+                    label: label.into(),
+                    state: JobStateView::Running,
+                    log: None,
+                    last_activity_at: dal_core::Timestamp::now(),
+                },
+                None,
+                String::new(),
+            ));
+        }
+        script.lines.push_back(dal_core::JobLines {
+            lines: vec![dal_core::JobLine {
+                seq: 1,
+                text: "healthy READY".into(),
+            }],
+            next: 1,
+            dropped: 0,
+            ended: false,
+        });
+        script.lines_error = Some("the lines service is down");
+    }
+    for (job, filter) in [(broken, "BROKEN"), (healthy, "READY")] {
+        let args = format!(r#"{{"action":"watch","job":"{job}","filter":"{filter}"}}"#);
+        fixture
+            .runtime
+            .tool(
+                fixture.session,
+                fixture.caller(),
+                CallId::new("monitor"),
+                "monitor",
+                RawJson::parse(&args)?,
+                CancellationToken::new(),
+            )
+            .await?;
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        loop {
+            let changed = fixture.host.changed.notified();
+            if fixture
+                .script()
+                .wakes
+                .iter()
+                .any(|text| text.contains("healthy READY"))
+            {
+                break;
+            }
+            changed.await;
+        }
+    })
+    .await?;
+    assert!(
+        !fixture.script().line_reads.is_empty(),
+        "a job after the failing one is still polled"
+    );
+    let monitor_notices = fixture
+        .script()
+        .notices
+        .iter()
+        .filter(|notice| notice.kind.as_ref() == "orchestration.monitor")
+        .count();
+    assert_eq!(monitor_notices, 1, "the poll failure is reported once");
+    assert!(
+        fixture
+            .script()
+            .notices
+            .iter()
+            .any(|notice| notice.text.contains("the lines service is down")),
+        "the notice names the cause"
+    );
     Ok(())
 }
 
@@ -2271,6 +2414,39 @@ async fn an_overflowed_turn_blocks_with_the_overflow_reason_and_a_plain_failure_
 }
 
 #[tokio::test(start_paused = true)]
+async fn an_unsavable_provider_error_block_rolls_back_and_is_reported() -> TestResult {
+    let fixture = Fixture::open_goal().await?;
+    fixture.create_goal("write the parser").await?;
+    let turn = goal_turn();
+    // A user prompt itself persists the goal; arm the failure after input
+    // so it hits the provider-error block at turn end.
+    fixture.user_input().await?;
+    fixture.begin_turn(turn).await?;
+    fixture.script().sidecar_write_error = Some("the sidecar store is down");
+    fixture.end_turn(turn, Stop::Failed, "").await?;
+    let shown = fixture.runtime.command(fixture.session, "goal", "").await?;
+    assert!(
+        !shown.contains("blocked: provider error ended the turn (retries exhausted)"),
+        "memory must match the unblocked file: {shown}"
+    );
+    assert!(
+        fixture.script().notices.iter().any(|notice| {
+            notice.kind.as_ref() == "orchestration.goal"
+                && notice.text.contains("the sidecar store is down")
+        }),
+        "the failed block is reported"
+    );
+    // The next provider-error stop retries the block once the store answers.
+    fixture.user_turn(turn, Stop::Failed, "").await?;
+    let shown = fixture.runtime.command(fixture.session, "goal", "").await?;
+    assert!(
+        shown.contains("blocked: provider error ended the turn (retries exhausted)"),
+        "{shown}"
+    );
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
 async fn automatic_turn_continuation_is_ready_at_once() -> TestResult {
     let fixture = Fixture::open_goal().await?;
     fixture.create_goal("write the parser").await?;
@@ -2788,6 +2964,73 @@ async fn queued_worktree_items_create_no_checkout_until_a_worker_is_free() -> Te
     Ok(())
 }
 
+#[tokio::test]
+async fn a_task_cancelled_while_queued_for_a_worker_never_starts() -> TestResult {
+    let fixture = Fixture::open_config(isolation_config()?).await?;
+    let hold = CancellationToken::new();
+    {
+        let mut script = fixture.script();
+        script.hold = Some(hold.clone());
+        script.run_outputs.extend(isolated_prefix());
+        script.run_outputs.extend((0..40).map(|_| Ok(output(""))));
+    }
+    fixture.tool(r#"{"action":"run","steps":[{"name":"pool","prompt":"edit {{item}}","items":["one","two"],"workers":1,"tools":["patch"],"isolation":"worktree"}]}"#).await?;
+    wait_for_starts(&fixture, 1).await?;
+    // Both task jobs exist once the second item parks in the slot wait.
+    let tasks = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let tasks = fixture
+                .script()
+                .jobs
+                .iter()
+                .filter(|(_, parent, _)| parent.is_some())
+                .map(|(job, _, _)| job.id)
+                .collect::<Vec<_>>();
+            if tasks.len() == 2 {
+                return tasks;
+            }
+            fixture.host.changed.notified().await;
+        }
+    })
+    .await
+    .map_err(|_| "the queued task job never appeared")?;
+    assert!(
+        fixture.script().starts[0].1.name.contains("one"),
+        "task jobs spawn in item order"
+    );
+    // Let the owner file both task registrations before the cancel lands.
+    fixture.pump().await;
+    let reply = fixture
+        .tool(&format!(r#"{{"action":"cancel","ids":["{}"]}}"#, tasks[1]))
+        .await?;
+    assert!(reply.contains("cancelled 1"), "{reply}");
+    hold.cancel();
+    fixture.ended_run().await?;
+    assert_eq!(
+        fixture.script().starts.len(),
+        1,
+        "the cancelled item never started"
+    );
+    assert_eq!(
+        fixture.worktree_adds(),
+        1,
+        "the cancelled item holds no checkout"
+    );
+    let settled = fixture
+        .script()
+        .jobs
+        .iter()
+        .find(|(job, _, _)| job.id == tasks[1])
+        .is_some_and(|(job, _, text)| {
+            matches!(
+                job.state,
+                JobStateView::Done(dal_core::JobOutcome::Cancelled)
+            ) && text.contains("cancelled")
+        });
+    assert!(settled, "the queued item settles cancelled");
+    Ok(())
+}
+
 mod step_tests {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
@@ -2800,8 +3043,8 @@ mod step_tests {
 
     use super::super::super::pool::IndexCollector;
     use super::super::super::workflow::{Isolation, Items, Step};
-    use super::super::Coordinator;
     use super::super::merge_locks::MergeLocks;
+    use super::super::{Coordinator, LiveTasks};
     use crate::work::support::FakeServices;
 
     fn task_step(name: &str) -> Step {
@@ -2835,7 +3078,7 @@ mod step_tests {
             label: "run".into(),
             input: None,
             cancel: CancellationToken::new(),
-            live_tasks: Mutex::new(HashMap::new()),
+            tasks: Mutex::new(LiveTasks::default()),
             merge_locks: MergeLocks::default(),
             reports: Arc::default(),
             child_max_steps: 0,

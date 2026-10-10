@@ -185,6 +185,9 @@ struct SessionState {
     /// The last delivery-poll failure already reported to the owner; a
     /// repeated failure with the same cause is not reported again.
     last_delivery_error: Option<String>,
+    /// The last monitor-poll failure already reported to the owner; a
+    /// repeated failure with the same cause is not reported again.
+    last_monitor_error: Option<String>,
     /// The last turn ended because the context window overflowed.
     last_turn_overflowed: bool,
     /// Shared with every run of this session, so patches reach one checkout
@@ -418,6 +421,7 @@ impl Runtime {
             delivery_refused: false,
             unconfirmed_jobs: Vec::new(),
             last_delivery_error: None,
+            last_monitor_error: None,
             last_turn_overflowed: false,
             merge_locks: self.merge_locks.clone(),
             reports: Arc::clone(&self.reports),
@@ -925,27 +929,19 @@ impl SessionState {
     }
 
     /// Polls every watched job's output lines and flushes deliverable
-    /// monitor batches to the arbiter as P3.
+    /// monitor batches to the arbiter as P3. One job's failing read neither
+    /// starves the later jobs of the same tick nor fails silently: the read
+    /// is retried next tick and the failure is reported once per cause.
     async fn poll_monitors(&mut self) -> Result<(), ServiceError> {
         if !self.config.monitor.enabled {
             return Ok(());
         }
         let config = self.monitor_config();
         let mut effects = Vec::new();
+        let mut failure = None;
         for job in self.monitors.job_ids() {
-            let read = self.read_job_lines(job).await?;
-            for line in &read.lines {
-                effects.extend(super::monitor::delivery::on_output(
-                    &mut self.monitors,
-                    job,
-                    &line.text,
-                    dal_core::Timestamp::now(),
-                    &config,
-                ));
-            }
-            if read.ended {
-                super::monitor::state::on_job_end(&mut self.monitors, job);
-                self.line_cursors.remove(&job);
+            if let Some(cause) = self.poll_one_monitor(job, &config, &mut effects).await {
+                failure.get_or_insert(cause);
             }
         }
         effects.extend(super::monitor::delivery::flush(
@@ -956,7 +952,57 @@ impl SessionState {
         for effect in effects {
             self.apply_monitor_effect(effect);
         }
+        match failure {
+            Some(cause) => self.report_monitor_error(cause),
+            None => self.last_monitor_error = None,
+        }
         Ok(())
+    }
+
+    /// Reads one watched job's new lines into `effects`. Returns the failure
+    /// cause when the read fails; the cursor stays, so the next tick retries
+    /// the same read.
+    async fn poll_one_monitor(
+        &mut self,
+        job: JobId,
+        config: &MonitorConfig,
+        effects: &mut Vec<super::monitor::state::MonitorEffect>,
+    ) -> Option<String> {
+        let read = match self.read_job_lines(job).await {
+            Ok(read) => read,
+            Err(error) => return Some(error.to_string()),
+        };
+        for line in &read.lines {
+            effects.extend(super::monitor::delivery::on_output(
+                &mut self.monitors,
+                job,
+                &line.text,
+                dal_core::Timestamp::now(),
+                config,
+            ));
+        }
+        if read.ended {
+            super::monitor::state::on_job_end(&mut self.monitors, job);
+            self.line_cursors.remove(&job);
+        }
+        None
+    }
+
+    /// Reports a monitor-poll failure to the owner once per distinct cause.
+    /// The poll retries every tick, so repeating the same text would spam.
+    fn report_monitor_error(&mut self, cause: String) {
+        if self.last_monitor_error.as_deref() == Some(cause.as_str()) {
+            return;
+        }
+        self.services.notify(
+            &self.caller,
+            Notice {
+                turn: None,
+                kind: "orchestration.monitor".into(),
+                text: format!("monitor polling failed: {cause}. It will be retried.").into(),
+            },
+        );
+        self.last_monitor_error = Some(cause);
     }
 
     /// Reads one watched job's new lines without waiting.
@@ -1550,7 +1596,10 @@ impl SessionState {
         Ok(())
     }
 
-    /// Blocks an active goal mechanically after a provider-error stop.
+    /// Blocks an active goal mechanically after a provider-error stop. When
+    /// the sidecar write fails, the block is rolled back so memory still
+    /// matches the file, and the failure is reported; the next
+    /// provider-error stop retries the block.
     async fn block_goal_on_provider_error(&mut self) {
         let now = dal_core::Timestamp::now();
         let Some(store) = self.goal.as_mut() else {
@@ -1562,6 +1611,7 @@ impl SessionState {
         if goal.status != super::GoalStatus::Active {
             return;
         }
+        let previous = goal.clone();
         goal.status = super::GoalStatus::Blocked;
         goal.blocked = Some(super::goal::sidecar::BlockedReason {
             reason: super::goal::policy::PROVIDER_REASON.into(),
@@ -1569,7 +1619,27 @@ impl SessionState {
             mechanical: true,
         });
         goal.updated_at = now;
-        let _ = self.save_goal().await;
+        if let Err(error) = self.save_goal().await {
+            if let Some(goal) = self
+                .goal
+                .as_mut()
+                .and_then(|store| store.sidecar.as_mut())
+                .and_then(|side| side.goal.as_mut())
+            {
+                *goal = previous;
+            }
+            self.services.notify(
+                &self.caller,
+                Notice {
+                    turn: None,
+                    kind: "orchestration.goal".into(),
+                    text: format!(
+                        "the goal could not be blocked after a provider error: {error}. It stays active and will be retried."
+                    )
+                    .into(),
+                },
+            );
+        }
     }
 
     fn goal_signature(&self, reply_text: &str, todos: &TodoSummary) -> Option<String> {
@@ -1896,8 +1966,9 @@ impl SessionState {
         }
     }
 
-    /// Lists child sessions, then live run and task jobs. Live jobs idle
-    /// for more than ten minutes carry their silence suffix.
+    /// Lists child sessions, then live run and task jobs. Named ids show
+    /// only those sessions and jobs. Live jobs idle for more than ten
+    /// minutes carry their silence suffix.
     async fn list_agents(&mut self, requested: Vec<String>) -> Result<String, ServiceError> {
         let AgentsReply::Listed(agents) =
             self.services.agents(&self.caller, AgentsOp::List).await?
@@ -1918,7 +1989,11 @@ impl SessionState {
         let now = dal_core::Timestamp::now();
         for job in jobs
             .iter()
-            .filter(|job| matches!(job.state, JobStateView::Running | JobStateView::Detached))
+            .filter(|job| {
+                matches!(job.state, JobStateView::Running | JobStateView::Detached)
+                    && (requested.is_empty()
+                        || requested.iter().any(|id| id == &job.id.to_string()))
+            })
             .take(super::agents_tool::LIST_RUNS_LIMIT)
         {
             let mut line = format!("{} {}: running", job.id, job.label);
@@ -2022,7 +2097,7 @@ impl SessionState {
             label: label.to_owned(),
             input,
             cancel: cancel.clone(),
-            live_tasks: Mutex::new(HashMap::new()),
+            tasks: Mutex::new(LiveTasks::default()),
             merge_locks: self.merge_locks.clone(),
             reports: Arc::clone(&self.reports),
             child_max_steps: self.config.agents.child_max_steps,
@@ -2542,6 +2617,15 @@ enum ItemError {
     Failed(String),
 }
 
+/// The scope handles of one run's started children by task job, plus the
+/// cancels that arrived before their child started. Shared under one lock
+/// so publishing a handle and recording a cancel cannot interleave.
+#[derive(Default)]
+struct LiveTasks {
+    live: HashMap<JobId, dal_agent::ext::ScopeHandle>,
+    cancelled: HashSet<JobId>,
+}
+
 /// One background workflow run: owns its children through a scope, applies
 /// the worktree isolation policy, settles every task job, and settles the
 /// run's single top-level report. The owner task hears every task job and
@@ -2559,7 +2643,11 @@ struct Coordinator {
     label: String,
     input: Option<String>,
     cancel: CancellationToken,
-    live_tasks: Mutex<HashMap<JobId, dal_agent::ext::ScopeHandle>>,
+    /// Live scope handles by task job, plus task cancels that arrived
+    /// before their child started. One lock makes publishing a handle and
+    /// recording a cancel atomic: a cancel can neither miss a starting
+    /// child nor strand an entry for one.
+    tasks: Mutex<LiveTasks>,
     merge_locks: MergeLocks,
     reports: ReportCells,
     /// Tool rounds one child turn may use, for the grace reason.
@@ -2893,8 +2981,10 @@ impl Coordinator {
             self.await_worker_slot(step, scope, pending, collector)
                 .await;
         }
-        if self.cancel.is_cancelled() {
-            self.finish_unstarted_task(task, index, item, label, TaskState::Cancelled, collector)
+        // A run cancel and a task cancel that arrived while the item waited
+        // for its worker slot both settle the item before it holds anything.
+        if self.cancel.is_cancelled() || self.take_cancelled(task) {
+            self.finish_unstarted_task(task, member, label, TaskState::Cancelled, collector)
                 .await;
             return Ok(());
         }
@@ -2904,8 +2994,7 @@ impl Coordinator {
                 Err(reason) => {
                     self.finish_unstarted_task(
                         task,
-                        index,
-                        item,
+                        member,
                         label,
                         TaskState::Failed(format!("worktree: {reason}")),
                         collector,
@@ -2928,10 +3017,23 @@ impl Coordinator {
                 return Ok(());
             }
         };
-        self.live_tasks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(task, handle.clone());
+        // Publishes the handle atomically against a concurrent cancel: the
+        // handle is always published, and a run cancel or pre-start task
+        // cancel observed here cancels it at once. The item then settles
+        // through the normal path, so its worktree is removed only after
+        // the child ends.
+        let cancel_now = {
+            let mut tasks = self
+                .tasks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let cancel_now = self.cancel.is_cancelled() || tasks.cancelled.remove(&task);
+            tasks.live.insert(task, handle.clone());
+            cancel_now
+        };
+        if cancel_now {
+            handle.cancel();
+        }
         pending.insert(
             handle.id(),
             PendingTask {
@@ -3028,10 +3130,16 @@ impl Coordinator {
         let Some(task) = pending.remove(&handle.id()) else {
             return true;
         };
-        self.live_tasks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&task.task);
+        {
+            let mut tasks = self
+                .tasks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            tasks.live.remove(&task.task);
+            // A cancel that landed after the child ended has no handle to
+            // reach; drop its entry with the handle.
+            tasks.cancelled.remove(&task.task);
+        }
         let index = task.index;
         let result = self.finish_child(task, handle).await;
         collector.insert(index, result);
@@ -3040,14 +3148,32 @@ impl Coordinator {
 
     fn on_control(&self, control: RunControl) {
         let RunControl::CancelTask(job) = control;
-        if let Some(handle) = self
-            .live_tasks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&job)
-        {
+        let handle = {
+            let mut tasks = self
+                .tasks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            tasks.live.get(&job).cloned().or_else(|| {
+                // The task registered but its child never started: it
+                // waits for a worker slot or a worktree, so no handle
+                // exists yet. `start_item` publishes under this same
+                // lock and observes the entry instead.
+                tasks.cancelled.insert(job);
+                None
+            })
+        };
+        if let Some(handle) = handle {
             handle.cancel();
         }
+    }
+
+    /// Takes a task cancel that arrived before its child started.
+    fn take_cancelled(&self, task: JobId) -> bool {
+        self.tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .cancelled
+            .remove(&task)
     }
 
     /// Builds one child's start spec; the scope starts and awaits it.
@@ -3095,12 +3221,12 @@ impl Coordinator {
     async fn finish_unstarted_task(
         &self,
         task: JobId,
-        index: usize,
-        item: Option<&str>,
+        member: (usize, Option<&str>),
         label: String,
         state: TaskState,
         collector: &mut IndexCollector,
     ) {
+        let (index, item) = member;
         let body = match &state {
             TaskState::Failed(reason) => reason.clone().into_boxed_str(),
             _ => state.word().into(),
