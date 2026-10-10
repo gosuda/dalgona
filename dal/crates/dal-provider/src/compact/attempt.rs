@@ -102,9 +102,13 @@ pub(crate) async fn openai_codex(
 ) -> AttemptResult {
     let (retained_users, body) =
         codex_compaction_body(&wire.body).map_err(AttemptFailure::Provider)?;
-    let token = crate::family::codex::access_token(&wire).to_owned();
-    let authorization = format!("Bearer {token}");
-    let redactions = [("authorization", authorization.as_str())];
+    let secrets = crate::family::codex::secrets(&wire);
+    let redactions: Vec<(&str, &str)> = wire
+        .headers
+        .iter()
+        .filter(|(name, _)| matches!(*name, "authorization" | "chatgpt-account-id"))
+        .map(|(name, value)| (*name, value.as_str()))
+        .collect();
     let url = http::endpoint(Family::Codex, base_url, crate::family::codex::PATH)
         .map_err(AttemptFailure::Provider)?;
     let mut request = client.post(url);
@@ -145,7 +149,7 @@ pub(crate) async fn openai_codex(
         wire.model,
         retained_users,
         &read_failed,
-        &token,
+        &secrets,
         cancel,
     )
     .await
@@ -263,9 +267,13 @@ where
     let decoded = decode_api_error(&bytes);
     let mut message = decoded.message.unwrap_or_default();
     redact(&mut message, redactions);
+    let mut code = decoded.code;
+    if let Some(code) = &mut code {
+        redact(code, redactions);
+    }
     Ok(Some(AttemptFailure::Response {
         status,
-        code: decoded.code,
+        code,
         message,
         retry_after,
     }))

@@ -136,6 +136,9 @@ pub(crate) struct AnthropicWire {
     pub(crate) user_agent: Option<String>,
     /// The JSON body.
     pub(crate) body: Vec<u8>,
+    /// The replay binding of signed thinking blocks: the digest of the system
+    /// blocks and tool list this body sends.
+    pub(crate) prefix: Box<str>,
 }
 
 impl AnthropicWire {
@@ -170,6 +173,7 @@ impl fmt::Debug for AnthropicWire {
             .field("headers", &headers)
             .field("user_agent", &self.user_agent)
             .field("body_len", &self.body.len())
+            .field("prefix", &self.prefix)
             .finish()
     }
 }
@@ -235,6 +239,9 @@ pub(crate) fn build(
         headers.push(("x-app", claude_fingerprint::X_APP.to_owned()));
     }
 
+    let system = system_blocks(&request.system, oauth);
+    let tools = tools(request, oauth);
+    let prefix = prefix_fingerprint(&system, &tools);
     let body = Body {
         model,
         max_tokens: match input.thinking {
@@ -242,15 +249,9 @@ pub(crate) fn build(
             _ => base_max_tokens(input.max_output),
         },
         stream: !input.summarize,
-        system: system_blocks(&request.system, oauth),
-        messages: messages(
-            request,
-            model,
-            input.compaction,
-            oauth,
-            &prefix_fingerprint(request, oauth),
-        )?,
-        tools: tools(request, oauth),
+        system,
+        messages: messages(request, model, input.compaction, oauth, &prefix)?,
+        tools,
         tool_choice: (!request.tools.is_empty()).then_some(ToolChoice::Auto),
         thinking: match input.thinking {
             AnthropicThinking::Omit => None,
@@ -277,6 +278,7 @@ pub(crate) fn build(
         headers,
         user_agent,
         body,
+        prefix,
     })
 }
 
@@ -751,17 +753,17 @@ fn replayable(raw: &RawJson) -> bool {
 /// wire system blocks and wire tool list. A stored block whose binding
 /// differs from the current digest was produced under a different prefix
 /// and the API rejects its signature, so it must not be replayed.
-pub(crate) fn prefix_fingerprint(request: &ModelRequest, oauth: bool) -> Box<str> {
+fn prefix_fingerprint(system: &[SystemBlock<'_>], tools: &[Tool<'_>]) -> Box<str> {
     let mut digest = Sha256::new();
     let mut field = |bytes: &[u8]| {
         let length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
         digest.update(length.to_le_bytes());
         digest.update(bytes);
     };
-    for block in system_blocks(&request.system, oauth) {
+    for block in system {
         field(block.text.as_bytes());
     }
-    for tool in tools(request, oauth) {
+    for tool in tools {
         field(tool.name.as_bytes());
         field(tool.description.as_bytes());
         field(tool.input_schema.as_str().as_bytes());

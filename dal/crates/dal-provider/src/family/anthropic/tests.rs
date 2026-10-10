@@ -773,6 +773,22 @@ fn bound_replay_body_with_tools(system: &str, prefix: &str, tools: Vec<ModelTool
     String::from_utf8(build(&input, AnthropicAuth::ApiKey("sk-ant")).unwrap().body).unwrap()
 }
 
+fn wire_prefix(request: &ModelRequest) -> Box<str> {
+    let input = AnthropicRequest {
+        request,
+        max_output: None,
+        thinking: AnthropicThinking::Omit,
+        effort: None,
+        display_supported: false,
+        temperature: None,
+        compaction: None,
+        summarize: false,
+    };
+    build(&input, AnthropicAuth::ApiKey("sk-ant"))
+        .unwrap()
+        .prefix
+}
+
 #[test]
 fn changed_system_prompt_drops_the_stale_thinking_block() {
     // The block was produced under a prefix the current request no longer
@@ -793,7 +809,7 @@ fn unchanged_prefix_keeps_the_signed_block_without_the_binding_member() {
         }],
         vec![],
     );
-    let prefix = prefix_fingerprint(&request, false).to_string();
+    let prefix = wire_prefix(&request).to_string();
     let body = bound_replay_body("Be brief.", &prefix);
     assert!(body.contains(r#""type":"thinking","thinking":"private","signature":"signed""#));
     assert!(!body.contains("dal_prefix"));
@@ -812,7 +828,7 @@ fn a_changed_tool_list_drops_the_stale_thinking_block() {
             grammar: None,
         }],
     );
-    let prefix = prefix_fingerprint(&request, false).to_string();
+    let prefix = wire_prefix(&request).to_string();
     let tools = vec![tool("read"), tool("grep")];
     let body = bound_replay_body_with_tools("Be brief.", &prefix, tools);
     assert!(!body.contains("signature"));

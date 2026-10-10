@@ -55,7 +55,7 @@ fn wire_for_session(model: &str, session_id: SessionId) -> CodexWire {
     CodexWire {
             headers: vec![
                 ("authorization", String::from("Bearer test-token")),
-                ("chatgpt-account-id", String::from("account")),
+                ("chatgpt-account-id", String::from("acct-7f3a9c")),
                 ("originator", String::from(crate::auth::oauth::CODEX_ORIGINATOR)),
                 ("session-id", session.clone()),
                 ("thread-id", session.clone()),
@@ -411,6 +411,55 @@ async fn websocket_close_frame_preserves_code_and_reason() -> Result<(), Box<dyn
     assert_eq!(
         error.to_string(),
         "websocket closed by server before response.completed. (code 1011: busy)"
+    );
+    servers.abort_all();
+    Ok(())
+}
+
+#[tokio::test]
+async fn codex_websocket_errors_redact_the_bearer_token_and_account_id()
+-> Result<(), Box<dyn Error>> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let base = format!("http://{}/backend-api/codex", listener.local_addr()?);
+    let mut servers = tokio::task::JoinSet::new();
+    servers.spawn(async move {
+        let (tcp, _) = listener.accept().await.expect("client connects");
+        let mut socket = accept_async(tcp).await.expect("handshake succeeds");
+        let _ = socket.next().await;
+        socket
+            .send(Message::Text(TEXT_DELTA.into()))
+            .await
+            .expect("first event reaches client");
+        socket
+            .send(Message::Text(
+                r#"{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"echo test-token / acct-7f3a9c"}}"#
+                    .into(),
+            ))
+            .await
+            .expect("error event reaches client");
+    });
+    let sessions = fast_sessions(Arc::new(AtomicU64::new(0)));
+    let (notice, _) = notices();
+    let wire = wire("gpt-6-luna");
+    let mut stream = open_stream(&sessions, &base, &wire, &notice).await;
+    assert!(matches!(
+        stream.next().await,
+        Some(Ok(StreamEvent::TextDelta { text })) if text == "x"
+    ));
+    let error = stream
+        .next()
+        .await
+        .expect("error frame is delivered")
+        .expect_err("error frame ends the stream");
+    assert!(matches!(
+        &error,
+        ProviderError::Status { status: 400, message, .. }
+            if message == "echo <redacted> / <redacted>"
+    ));
+    let shown = format!("{error:?} {error}");
+    assert!(
+        !shown.contains("test-token") && !shown.contains("acct-7f3a9c"),
+        "{shown}"
     );
     servers.abort_all();
     Ok(())
@@ -927,6 +976,24 @@ async fn responses_errors_redact_api_key_without_scrubbing_success_events()
     server.join_next().await.expect("server completes")?;
     Ok(())
 }
+#[test]
+fn websocket_errors_redact_every_request_secret() {
+    let secrets = [Box::from("tok-secret"), Box::from("acct-secret")];
+    let error = websocket_error(
+        r#"{"type":"error","status":400,"error":{"type":"bad","message":"tok-secret / acct-secret"}}"#,
+        Family::Codex,
+        "gpt-test",
+        &secrets,
+    )
+    .expect("error frame maps to a typed error");
+    let shown = error.to_string();
+    assert!(shown.contains("<redacted> / <redacted>"), "{shown}");
+    assert!(
+        !shown.contains("tok-secret") && !shown.contains("acct-secret"),
+        "{shown}"
+    );
+}
+
 #[tokio::test]
 async fn responses_six_failed_handshakes_fall_back_once() -> Result<(), Box<dyn Error>> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;

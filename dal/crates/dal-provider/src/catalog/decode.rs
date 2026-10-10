@@ -18,6 +18,28 @@ use crate::{
     thinking::{Effort, ThinkingSupport},
 };
 
+/// Replaces terminal control characters (C0, DEL, and C1) in a
+/// provider-supplied catalog identifier with the replacement character, so a
+/// configured or compromised provider cannot smuggle newlines or escape
+/// sequences through model ids or display names into CLI output or the
+/// models cache.
+pub(crate) fn sanitize_identifier(value: &str) -> Box<str> {
+    if value.chars().all(|character| !character.is_control()) {
+        return value.into();
+    }
+    value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                char::REPLACEMENT_CHARACTER
+            } else {
+                character
+            }
+        })
+        .collect::<String>()
+        .into_boxed_str()
+}
+
 pub(crate) fn decode_openai_models(
     provider: &ProviderEntry,
     bytes: &[u8],
@@ -28,12 +50,13 @@ pub(crate) fn decode_openai_models(
         .data
         .into_iter()
         .map(|model| {
-            let base = capability_row(&builtins, provider, &model.id)
+            let id = sanitize_identifier(&model.id);
+            let base = capability_row(&builtins, provider, &id)
                 .cloned()
-                .unwrap_or_else(|| default_entry(provider, &model.id));
+                .unwrap_or_else(|| default_entry(provider, &id));
             let mut entry = CatalogEntry {
                 provider: provider.id.clone(),
-                id: model.id.clone().into_boxed_str(),
+                id,
                 display: base.display,
                 listing: Listing::Listed,
                 context_window: base.context_window,
@@ -88,11 +111,11 @@ pub(crate) fn decode_codex_models(
                 .transpose()?;
             Ok(CatalogEntry {
                 provider: provider.id.clone(),
-                id: model.slug.clone().into_boxed_str(),
+                id: sanitize_identifier(&model.slug),
                 display: model
                     .display_name
-                    .unwrap_or_else(|| model.slug.clone())
-                    .into_boxed_str(),
+                    .as_deref()
+                    .map_or_else(|| sanitize_identifier(&model.slug), sanitize_identifier),
                 listing: if model.visibility == "list" {
                     Listing::Listed
                 } else {
@@ -113,7 +136,7 @@ pub(crate) fn decode_codex_models(
                 supports_reasoning_summaries: model.supports_reasoning_summaries,
                 tool_support: ToolSupport::Any,
                 custom_grammar: false,
-                temperature_allowed: compiled_temperature(provider.id.as_ref(), &model.slug),
+                temperature_allowed: compiled_temperature(provider.id.as_ref(), &sanitize_identifier(&model.slug)),
                 display_supported: false,
             })
         })
@@ -142,11 +165,11 @@ pub(crate) fn decode_anthropic_page(
             });
             CatalogEntry {
                 provider: provider.id.clone(),
-                id: model.id.clone().into_boxed_str(),
+                id: sanitize_identifier(&model.id),
                 display: model
                     .display_name
-                    .unwrap_or_else(|| model.id.clone())
-                    .into_boxed_str(),
+                    .as_deref()
+                    .map_or_else(|| sanitize_identifier(&model.id), sanitize_identifier),
                 listing: Listing::Listed,
                 context_window: model.max_input_tokens,
                 max_output: model.max_tokens,
@@ -160,7 +183,7 @@ pub(crate) fn decode_anthropic_page(
                 supports_reasoning_summaries: false,
                 tool_support: ToolSupport::Any,
                 custom_grammar: false,
-                temperature_allowed: compiled_temperature(provider.id.as_ref(), &model.id),
+                temperature_allowed: compiled_temperature(provider.id.as_ref(), &sanitize_identifier(&model.id)),
                 display_supported: false,
             }
         })

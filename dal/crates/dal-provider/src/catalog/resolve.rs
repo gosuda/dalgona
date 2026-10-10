@@ -30,11 +30,7 @@ pub fn resolve(
     aliases: &[(Box<str>, Box<str>)],
     reference: &str,
 ) -> Result<ResolvedModel, ResolveError> {
-    let expanded = aliases
-        .iter()
-        .find(|(name, _)| name.as_ref() == reference)
-        .map_or(reference, |(_, target)| target.as_ref());
-    resolve_expanded(catalog, expanded)
+    resolve_expanded(catalog, expand_alias(aliases, reference), None)
 }
 
 /// Resolves the model a route names.
@@ -47,7 +43,8 @@ pub fn resolve(
 /// resolve by their id.
 ///
 /// # Errors
-/// Returns the bare-id error when both spellings fail.
+/// Returns the bare-id error when both spellings fail, or when the only
+/// match belongs to a different API family than the route.
 pub fn resolve_route(
     catalog: &Catalog,
     aliases: &[(Box<str>, Box<str>)],
@@ -56,8 +53,16 @@ pub fn resolve_route(
     let ModelRoute::Api { family, model } = route else {
         return resolve(catalog, aliases, route.id());
     };
-    let bare = resolve(catalog, aliases, model);
-    if !matches!(bare, Err(ResolveError::UnknownModel { .. })) {
+    let in_family = |resolved: ResolvedModel| {
+        matches!(&resolved.route, ModelRoute::Api { family: found, .. } if found == family)
+            .then_some(resolved)
+    };
+    let bare = resolve_expanded(catalog, expand_alias(aliases, model), Some(*family))
+        .and_then(|resolved| in_family(resolved).ok_or_else(|| unknown_model(model)));
+    if !matches!(
+        bare,
+        Err(ResolveError::UnknownModel { .. } | ResolveError::AmbiguousModel { .. })
+    ) {
         return bare;
     }
     let prefix = match family {
@@ -68,10 +73,27 @@ pub fn resolve_route(
             .find(|def| def.family == *family)
             .map_or("", |def| def.id),
     };
-    resolve(catalog, aliases, &format!("{prefix}/{model}")).or(bare)
+    match resolve(catalog, aliases, &format!("{prefix}/{model}"))
+        .ok()
+        .and_then(in_family)
+    {
+        Some(resolved) => Ok(resolved),
+        None => bare,
+    }
 }
 
-fn resolve_expanded(catalog: &Catalog, reference: &str) -> Result<ResolvedModel, ResolveError> {
+fn expand_alias<'a>(aliases: &'a [(Box<str>, Box<str>)], reference: &'a str) -> &'a str {
+    aliases
+        .iter()
+        .find(|(name, _)| name.as_ref() == reference)
+        .map_or(reference, |(_, target)| target.as_ref())
+}
+
+fn resolve_expanded(
+    catalog: &Catalog,
+    reference: &str,
+    family: Option<Family>,
+) -> Result<ResolvedModel, ResolveError> {
     if reference.starts_with("dalgon/") {
         return resolve_harness(reference);
     }
@@ -84,19 +106,19 @@ fn resolve_expanded(catalog: &Catalog, reference: &str) -> Result<ResolvedModel,
         {
             return resolve_qualified(catalog, provider_entry, id, reference);
         }
-        if let Some((owner, family)) = family_provider(provider)
+        if let Some((owner, owner_family)) = family_provider(provider)
             && let Some(provider_entry) = catalog
                 .providers
                 .iter()
                 .find(|(candidate, _)| candidate.id.as_ref() == owner)
                 .map(|(provider, _)| provider)
-                .filter(|provider_entry| provider_entry.family == family)
+                .filter(|provider_entry| provider_entry.family == owner_family)
         {
             return resolve_qualified(catalog, provider_entry, id, reference);
         }
-        return resolve_unknown_provider(catalog, reference);
+        return resolve_bare(catalog, reference, family);
     }
-    resolve_bare(catalog, reference)
+    resolve_bare(catalog, reference, family)
 }
 
 /// Maps a family-qualified route prefix to the provider that serves it.
@@ -174,18 +196,24 @@ fn resolve_qualified(
     })
 }
 
-fn resolve_unknown_provider(
+fn resolve_bare(
     catalog: &Catalog,
-    reference: &str,
+    id: &str,
+    family: Option<Family>,
 ) -> Result<ResolvedModel, ResolveError> {
-    resolve_bare(catalog, reference)
-}
-
-fn resolve_bare(catalog: &Catalog, id: &str) -> Result<ResolvedModel, ResolveError> {
+    let serves_family = |entry: &CatalogEntry| {
+        family.is_none_or(|family| {
+            catalog
+                .providers
+                .iter()
+                .any(|(provider, _)| provider.id == entry.provider && provider.family == family)
+        })
+    };
     let mut matches: Vec<&CatalogEntry> = Vec::new();
     for candidate in listing_candidates(id).into_iter().flatten() {
         for entry in &catalog.entries {
             if entry.id.as_ref() == candidate
+                && serves_family(entry)
                 && !matches
                     .iter()
                     .any(|matched| matched.provider == entry.provider)
@@ -221,6 +249,7 @@ fn resolve_bare(catalog: &Catalog, id: &str) -> Result<ResolvedModel, ResolveErr
         }
     }
 }
+
 pub(crate) fn typed_entry(catalog: &Catalog, provider: &ProviderEntry, id: &str) -> CatalogEntry {
     if let Some(row) = capability_row(&catalog.entries, provider, id) {
         let mut entry = row.clone();

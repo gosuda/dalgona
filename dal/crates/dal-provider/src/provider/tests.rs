@@ -1143,3 +1143,78 @@ async fn a_body_read_failure_mid_stream_is_a_retryable_transport_error_at_any_cu
         assert_eq!(events.iter().filter(|event| event.is_err()).count(), 1);
     }
 }
+
+#[tokio::test]
+async fn credential_failures_redact_every_oauth_secret_including_account_id() {
+    let credential = Credential::OAuth(OAuthCredential {
+        access_token: crate::auth::credential::SecretString::from("tok-access"),
+        refresh_token: crate::auth::credential::SecretString::from("tok-refresh"),
+        expires_at: None,
+        id_token: Some(String::from("tok-id")),
+        account_id: Some(String::from("acct-secret")),
+    });
+    for body in [
+        r#"{"error":{"code":"echo-acct-secret","message":"tok-access acct-secret"}}"#,
+        r#"{"error":{"code":"echo-acct\u002dsecret","message":"tok\u002daccess acct\u002dsecret"}}"#,
+    ] {
+        let response = reqwest::Response::from(
+            hyper::http::Response::builder()
+                .status(400)
+                .body(reqwest::Body::from(body.to_owned()))
+                .expect("valid response"),
+        );
+        let failure = super::request::status_failure(
+            response,
+            Family::Responses,
+            &credential,
+            &[],
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("body reads")
+        .expect("not cancelled");
+        assert!(matches!(
+            &failure,
+            crate::lifecycle::AttemptFailure::Response { code: Some(code), message, .. }
+                if code == "echo-<redacted>" && message == "<redacted> <redacted>"
+        ));
+    }
+}
+
+#[tokio::test]
+async fn credential_failures_redact_an_account_id_taken_from_the_id_token() {
+    let claims = r#"{"https://api.openai.com/auth":{"chatgpt_account_id":"acct-claim-9d2e"}}"#;
+    let credential = Credential::OAuth(OAuthCredential {
+        access_token: crate::auth::credential::SecretString::from("tok-access"),
+        refresh_token: crate::auth::credential::SecretString::from("tok-refresh"),
+        expires_at: None,
+        id_token: Some(format!(
+            "h.{}.s",
+            base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, claims)
+        )),
+        account_id: None,
+    });
+    let response = reqwest::Response::from(
+        hyper::http::Response::builder()
+            .status(400)
+            .body(reqwest::Body::from(
+                r#"{"error":{"code":"bad_request","message":"echo acct-claim-9d2e"}}"#.to_owned(),
+            ))
+            .expect("valid response"),
+    );
+    let failure = super::request::status_failure(
+        response,
+        Family::Responses,
+        &credential,
+        &[],
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("body reads")
+    .expect("not cancelled");
+    assert!(matches!(
+        &failure,
+        crate::lifecycle::AttemptFailure::Response { message, .. } if message == "echo <redacted>"
+    ));
+    assert!(!format!("{failure:?}").contains("acct-claim-9d2e"));
+}

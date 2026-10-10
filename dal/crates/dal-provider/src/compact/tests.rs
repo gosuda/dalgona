@@ -1,6 +1,6 @@
 use super::*;
 use super::{
-    attempt::{chat, openai_responses},
+    attempt::{chat, openai_codex, openai_responses},
     bodies::{
         codex_compaction_body, compact_responses_body, decode_codex_events, parse_anthropic_block,
         parse_responses_output, retain_user_messages,
@@ -10,10 +10,13 @@ use super::{
 use std::time::Duration;
 use std::{borrow::Cow, sync::atomic::AtomicBool};
 
-use dal_core::{Family, RawJson};
+use dal_core::{Family, RawJson, SessionId};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 
-use crate::{error::ProviderError, http, lifecycle::AttemptFailure, sse::SseEvent};
+use crate::{
+    error::ProviderError, family::codex::CodexWire, http, lifecycle::AttemptFailure, sse::SseEvent,
+};
 
 #[test]
 fn responses_compaction_body_preserves_wire_values_byte_for_byte() {
@@ -80,7 +83,7 @@ async fn codex_stream_without_compaction_item_is_typed_missing() {
         String::from("gpt-6").into_boxed_str(),
         Vec::new(),
         &read_failed,
-        "",
+        &[],
         &cancel,
     )
     .await;
@@ -118,7 +121,7 @@ async fn codex_stream_keeps_first_compaction_alias_raw() {
         String::from("gpt-6").into_boxed_str(),
         Vec::new(),
         &read_failed,
-        "secret",
+        &[Box::from("secret")],
         &cancel,
     )
     .await
@@ -134,7 +137,7 @@ fn codex_error_message_redacts_token_without_rewriting_output_items() {
             message: String::from("secret rejected"),
             retry_after: Some(Duration::from_secs(2)),
         },
-        "secret",
+        &[Box::from("secret")],
     );
     assert!(matches!(
         error,
@@ -248,4 +251,66 @@ async fn cancelling_an_in_flight_responses_compaction_drops_the_request() {
     while attempts.join_next().await.is_some() {}
     servers.abort_all();
     while servers.join_next().await.is_some() {}
+}
+
+async fn codex_compaction_failure(body: &str) -> AttemptFailure {
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("loopback bind");
+    let address = listener.local_addr().expect("listener address");
+    let response = format!(
+        "HTTP/1.1 400 Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let mut servers = tokio::task::JoinSet::new();
+    servers.spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("request accepted");
+        let mut seen = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        while !seen.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = socket.read(&mut chunk).await.expect("request read");
+            seen.extend_from_slice(&chunk[..read]);
+        }
+        socket
+            .write_all(response.as_bytes())
+            .await
+            .expect("response written");
+    });
+    let wire = CodexWire {
+        headers: vec![
+            ("authorization", String::from("Bearer tok-secret")),
+            ("chatgpt-account-id", String::from("acct-secret")),
+        ],
+        body: br#"{"model":"m","instructions":"i","input":[],"store":false,"stream":true}"#
+            .to_vec(),
+        model: Box::from("m"),
+        session_id: SessionId::new_v7(),
+        user_agent: String::from("dalgon/test (test test; x64)"),
+    };
+    let failure = openai_codex(
+        &http::build_client(),
+        &format!("http://{address}/v1"),
+        wire,
+        &CancellationToken::new(),
+    )
+    .await
+    .expect_err("a 400 response is a failure");
+    servers.abort_all();
+    while servers.join_next().await.is_some() {}
+    failure
+}
+
+#[tokio::test]
+async fn codex_compaction_failures_redact_access_token_and_account_id() {
+    for body in [
+        r#"{"error":{"code":"echo-acct-secret","message":"tok-secret / acct-secret"}}"#,
+        r#"{"error":{"code":"echo-acct\u002dsecret","message":"tok\u002dsecret / acct\u002dsecret"}}"#,
+    ] {
+        let failure = codex_compaction_failure(body).await;
+        assert!(matches!(
+            &failure,
+            AttemptFailure::Response { status: 400, code: Some(code), message, .. }
+                if code == "echo-<redacted>" && message == "<redacted> / <redacted>"
+        ));
+    }
 }

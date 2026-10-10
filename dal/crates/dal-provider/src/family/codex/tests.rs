@@ -1,5 +1,6 @@
 use std::{error::Error, sync::Arc, time::Duration};
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use dal_core::{ContextItem, ModelToolSpec, Purpose, RequestParams, SessionId, ThinkingLevel};
 use sonic_rs::JsonValueTrait;
 use tokio::{
@@ -32,6 +33,26 @@ fn wire_with_context(
     reasoning_summaries: bool,
     context: Vec<ContextItem>,
 ) -> super::CodexWire {
+    wire_with_credential(
+        model,
+        reasoning_summaries,
+        context,
+        &OAuthCredential {
+            access_token: SecretString::from("test-access"),
+            refresh_token: SecretString::from("test-refresh"),
+            expires_at: None,
+            id_token: None,
+            account_id: Some(String::from("acct-7f3a9c")),
+        },
+    )
+}
+
+fn wire_with_credential(
+    model: &str,
+    reasoning_summaries: bool,
+    context: Vec<ContextItem>,
+    credential: &OAuthCredential,
+) -> super::CodexWire {
     let session_id = SessionId::new_v7();
     let request = dal_core::ModelRequest {
         purpose: Purpose::Turn,
@@ -50,20 +71,13 @@ fn wire_with_context(
         },
         cache_key: Some(format!("{session_id}:1").into_boxed_str()),
     };
-    let credential = OAuthCredential {
-        access_token: SecretString::from("test-access"),
-        refresh_token: SecretString::from("test-refresh"),
-        expires_at: None,
-        id_token: None,
-        account_id: Some(String::from("account")),
-    };
     build(&CodexRequest {
         request: &request,
         thinking: WireThinking::OpenAi {
             effort: Some("high"),
         },
         reasoning_summaries,
-        credential: &credential,
+        credential,
         session_id,
         user_agent: "dalgon/test (Linux test; x86_64)",
     })
@@ -199,6 +213,94 @@ async fn codex_https_preserves_luna_reserve_mapping() -> Result<(), Box<dyn Erro
     Ok(())
 }
 
+async fn failure_for(
+    status: u16,
+    body: &str,
+    wire: super::CodexWire,
+) -> Result<AttemptFailure, Box<dyn Error>> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let base = format!("http://{}", listener.local_addr()?);
+    let response = http_response(status, &[], body);
+    let mut server = tokio::task::JoinSet::new();
+    server.spawn(async move {
+        let (mut socket, _) = listener.accept().await?;
+        read_request(&mut socket).await?;
+        socket.write_all(response.as_bytes()).await
+    });
+    let Err(error) = https(&reqwest::Client::new(), &base, wire).await else {
+        return Err("error response unexpectedly opened a stream".into());
+    };
+    server.join_next().await.expect("server completes")??;
+    Ok(error)
+}
+
+fn assert_no_secret(shown: &str) {
+    assert!(
+        !shown.contains("test-access") && !shown.contains("acct-7f3a9c"),
+        "{shown}"
+    );
+}
+
+#[tokio::test]
+async fn codex_https_failures_redact_access_token_and_account_id() -> Result<(), Box<dyn Error>> {
+    for body in [
+        r#"{"error":{"code":"bad_request","message":"echo test-access / acct-7f3a9c"}}"#,
+        r#"{"error":{"code":"bad_request","message":"echo test\u002daccess / acct\u002d7f3a9c"}}"#,
+    ] {
+        let failure = failure_for(400, body, wire(true)).await?;
+        assert!(matches!(
+            &failure,
+            AttemptFailure::Response { status: 400, code: Some(code), message, .. }
+                if code == "bad_request" && message == "echo <redacted> / <redacted>"
+        ));
+        assert_no_secret(&format!("{failure:?}"));
+    }
+    for body in [
+        r#"{"error":{"type":"usage_limit_reached","message":"limit test-access acct-7f3a9c"}}"#,
+        r#"{"error":{"type":"usage_limit_reached","message":"limit test\u002daccess acct\u002d7f3a9c"}}"#,
+    ] {
+        let failure = failure_for(429, body, wire(true)).await?;
+        let AttemptFailure::Provider(error) = &failure else {
+            return Err("a 429 usage limit maps to a typed provider error".into());
+        };
+        assert!(matches!(
+            error,
+            ProviderError::UsageLimit { message, .. } if message == "limit <redacted> <redacted>"
+        ));
+        assert_no_secret(&format!("{failure:?} {error}"));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn codex_https_redacts_an_account_id_taken_from_the_id_token() -> Result<(), Box<dyn Error>> {
+    let claims = r#"{"https://api.openai.com/auth":{"chatgpt_account_id":"acct-claim-9d2e"}}"#;
+    let wire = wire_with_credential(
+        "gpt-test",
+        true,
+        Vec::new(),
+        &OAuthCredential {
+            access_token: SecretString::from("test-access"),
+            refresh_token: SecretString::from("test-refresh"),
+            expires_at: None,
+            id_token: Some(format!("h.{}.s", URL_SAFE_NO_PAD.encode(claims))),
+            account_id: None,
+        },
+    );
+    let failure = failure_for(
+        400,
+        r#"{"error":{"code":"bad_request","message":"echo acct-claim-9d2e"}}"#,
+        wire,
+    )
+    .await?;
+    assert!(matches!(
+        &failure,
+        AttemptFailure::Response { message, .. } if message == "echo <redacted>"
+    ));
+    assert!(!format!("{failure:?}").contains("acct-claim-9d2e"));
+    Ok(())
+}
+
 #[tokio::test]
 async fn codex_https_idle_timeout_is_stream_cut() -> Result<(), Box<dyn Error>> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -311,7 +413,7 @@ fn codex_body_omits_sampling_and_verbosity_and_uses_session_identity_headers() {
             .iter()
             .find(|(name, _)| *name == "chatgpt-account-id")
             .map(|(_, value)| value.as_str()),
-        Some("account")
+        Some("acct-7f3a9c")
     );
     assert_eq!(wire.user_agent, "dalgon/test (Linux test; x86_64)");
     assert_eq!(

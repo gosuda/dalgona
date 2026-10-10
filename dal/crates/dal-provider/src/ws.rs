@@ -37,7 +37,10 @@ use uuid::Uuid;
 
 use crate::{
     error::{LimitError, ProviderError},
-    family::{codex, responses},
+    family::{
+        codex::{self, redact, redact_provider_error},
+        responses,
+    },
     http::{self, STREAM_IDLE_TIMEOUT, WS_MESSAGE_LIMIT},
     retry::{self, RequestState, RetryDecision},
     stream::{EventStream, NoticeSink, StreamEvent},
@@ -96,10 +99,10 @@ impl WsWire<'_> {
         }
     }
 
-    fn secret(&self) -> &str {
+    fn secrets(&self) -> Vec<Box<str>> {
         match self {
-            Self::Codex(wire) => codex::access_token(wire),
-            Self::Responses(wire) => &wire.secret,
+            Self::Codex(wire) => codex::secrets(wire),
+            Self::Responses(wire) => vec![wire.secret.clone()],
         }
     }
 
@@ -192,7 +195,7 @@ struct Source {
     cancel: CancellationToken,
     finished: bool,
     turn: Option<OwnedMutexGuard<()>>,
-    secret: Box<str>,
+    secrets: Vec<Box<str>>,
 }
 
 struct HandshakeFailure {
@@ -403,7 +406,7 @@ impl WsSessions {
             clock: Arc::clone(&self.clock),
             cancel: drive.cancel.clone(),
             finished: false,
-            secret: drive.wire.secret().into(),
+            secrets: drive.wire.secrets(),
             turn: drive.turn.take(),
         };
         let session_on_cancel = Arc::clone(&drive.session);
@@ -425,7 +428,7 @@ impl WsSessions {
             reason: String::from("WebSocket handshake failed"),
         });
         let failure_text = last_failure.to_string();
-        let error = redact(&failure_text, drive.wire.secret()).into_owned();
+        let error = redact(&failure_text, &drive.wire.secrets()).into_owned();
         (drive.notices)(format!("{FALLBACK_NOTICE} {error}"));
         WsTurn::HttpsFallback
     }
@@ -587,7 +590,7 @@ impl Source {
                         return Some(Err(ProviderError::Limit(LimitError::WsMessage)));
                     }
                     if let Some(error) =
-                        websocket_error(text.as_str(), self.family, &self.model, &self.secret)
+                        websocket_error(text.as_str(), self.family, &self.model, &self.secrets)
                     {
                         return Some(Err(error));
                     }
@@ -595,7 +598,7 @@ impl Source {
                     let terminal = match self.decoder.feed(text.as_str(), &mut batch) {
                         Ok(terminal) => terminal,
                         Err(mut error) => {
-                            redact_provider_error(&mut error, &self.secret);
+                            redact_provider_error(&mut error, &self.secrets);
                             return Some(Err(error));
                         }
                     };
@@ -614,7 +617,7 @@ impl Source {
                     }));
                 }
                 Some(Ok(Message::Close(frame))) => {
-                    return Some(Err(close_error(frame, &self.secret)));
+                    return Some(Err(close_error(frame, &self.secrets)));
                 }
                 Some(Ok(_)) => {}
                 Some(Err(WsError::Capacity(_))) => {
@@ -726,7 +729,7 @@ async fn first_frame(
     cancel: &CancellationToken,
 ) -> Result<Message, Box<HandshakeFailure>> {
     let family = wire.family();
-    let secret = wire.secret();
+    let secrets = wire.secrets();
     loop {
         let next = tokio::select! {
             () = cancel.cancelled() => {
@@ -770,7 +773,7 @@ async fn first_frame(
                     status: None,
                     code: None,
                     message: String::from("WebSocket closed before its first event"),
-                    error: close_error(frame, secret),
+                    error: close_error(frame, &secrets),
                     mapped: None,
                 }));
             }
@@ -835,7 +838,7 @@ fn status_failure(
 ) -> Box<HandshakeFailure> {
     let family = wire.family();
     let model = wire.model();
-    let body = body.map(|body| redact(&body, wire.secret()).into_owned());
+    let body = body.map(|body| redact(&body, &wire.secrets()).into_owned());
     let parsed = body
         .as_deref()
         .and_then(|body| sonic_rs::from_str::<sonic_rs::Value>(body).ok());
@@ -970,7 +973,12 @@ fn websocket_status(data: &str) -> Option<u16> {
         .and_then(|status| u16::try_from(status).ok())
 }
 
-fn websocket_error(data: &str, family: Family, model: &str, secret: &str) -> Option<ProviderError> {
+fn websocket_error(
+    data: &str,
+    family: Family,
+    model: &str,
+    secrets: &[Box<str>],
+) -> Option<ProviderError> {
     let value = sonic_rs::from_str::<sonic_rs::Value>(data).ok()?;
     if value.get("type").and_then(JsonValueTrait::as_str) != Some("error") {
         return None;
@@ -986,9 +994,9 @@ fn websocket_error(data: &str, family: Family, model: &str, secret: &str) -> Opt
         .or_else(|| value.get("message").and_then(JsonValueTrait::as_str))
         .or_else(|| value.get("detail").and_then(JsonValueTrait::as_str))
         .unwrap_or_default();
-    let message = redact(message, secret).into_owned();
+    let message = redact(message, secrets).into_owned();
     let code = error_code(&value);
-    let safe_data = redact(data, secret);
+    let safe_data = redact(data, secrets);
     if let Some(status) = status {
         if family == Family::Codex
             && let Some(error) = crate::usage::map_codex_error(status, safe_data.as_ref(), model)
@@ -1017,10 +1025,10 @@ fn websocket_error(data: &str, family: Family, model: &str, secret: &str) -> Opt
     })
 }
 
-fn close_error(frame: Option<CloseFrame>, secret: &str) -> ProviderError {
+fn close_error(frame: Option<CloseFrame>, secrets: &[Box<str>]) -> ProviderError {
     ProviderError::WsClosed {
         code: frame.map(|frame| {
-            let reason = redact(frame.reason.as_str(), secret).into_owned();
+            let reason = redact(frame.reason.as_str(), secrets).into_owned();
             (u16::from(frame.code), reason)
         }),
     }
@@ -1038,52 +1046,6 @@ fn cancelled(family: Family) -> ProviderError {
     ProviderError::Transport {
         family,
         reason: String::from("request cancelled"),
-    }
-}
-
-fn redact<'a>(text: &'a str, secret: &str) -> std::borrow::Cow<'a, str> {
-    if secret.is_empty() || !text.contains(secret) {
-        std::borrow::Cow::Borrowed(text)
-    } else {
-        std::borrow::Cow::Owned(text.replace(secret, "<redacted>"))
-    }
-}
-
-fn redact_provider_error(error: &mut ProviderError, secret: &str) {
-    if secret.is_empty() {
-        return;
-    }
-    let redact_string = |value: &mut String| {
-        if value.contains(secret) {
-            *value = value.replace(secret, "<redacted>");
-        }
-    };
-    match error {
-        ProviderError::Transport {
-            reason: message, ..
-        }
-        | ProviderError::Status { message, .. }
-        | ProviderError::InvalidRequest { message }
-        | ProviderError::RateLimited { message, .. }
-        | ProviderError::RetryAfterTooLong { message, .. }
-        | ProviderError::Quota { message }
-        | ProviderError::UsageNotIncluded { message }
-        | ProviderError::ReserveUnavailable { message, .. }
-        | ProviderError::TokenExchange { message, .. }
-        | ProviderError::DeviceCode { message, .. } => redact_string(message),
-        ProviderError::ContextOverflow { code, message, .. } => {
-            redact_string(code);
-            redact_string(message);
-        }
-        ProviderError::Protocol { detail, .. } => redact_string(detail),
-        ProviderError::UsageLimit { model, message } => {
-            redact_string(model);
-            redact_string(message);
-        }
-        ProviderError::WsClosed {
-            code: Some((_, reason)),
-        } => redact_string(reason),
-        _ => {}
     }
 }
 
