@@ -31,15 +31,6 @@ use crate::session::dispatch::grant_covers;
 use crate::session::service_grants::{CallKey, Covering};
 use crate::session::tasks::SessionTasks;
 
-/// Session approval policy for the services `run` slot.
-fn service_policy(mode: ApprovalMode) -> Policy {
-    Policy {
-        mode,
-        answerer_attached: false,
-        allow_always: std::collections::BTreeSet::new(),
-    }
-}
-
 /// Tool identity attributed to services `run` approvals.
 #[expect(
     clippy::expect_used,
@@ -96,7 +87,7 @@ pub(crate) struct SessionRt {
     procs: Arc<Mutex<HashMap<JobId, Proc>>>,
     env_snapshot: Vec<(OsString, OsString)>,
     launcher: Result<Launcher, crate::proc::sandbox::SandboxSetupError>,
-    policy: Policy,
+    approval: ApprovalMode,
     cancel: CancellationToken,
     proofs: std::sync::Mutex<HashMap<CallId, SpawnProof>>,
     jobs_dir: PathBuf,
@@ -131,7 +122,7 @@ impl SessionRt {
             procs,
             env_snapshot,
             launcher,
-            policy: service_policy(approval),
+            approval,
             cancel,
             proofs: std::sync::Mutex::new(HashMap::new()),
             jobs_dir,
@@ -228,9 +219,9 @@ impl SessionRt {
 impl ToolCxRuntime for SessionRt {
     fn decide_run(&self) -> dal_core::Decision {
         let policy = Policy {
-            mode: self.policy.mode,
+            mode: self.approval,
             answerer_attached: self.shared.attached_approval(),
-            allow_always: self.policy.allow_always.clone(),
+            allow_always: self.shared.allow_always().as_ref().clone(),
         };
         policy.decide(&service_tool(), &service_class())
     }

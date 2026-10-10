@@ -33,6 +33,7 @@ pub(crate) struct Shared {
     inner: Mutex<SharedInner>,
     ext: Mutex<ExtSnap>,
     promoted: Mutex<Arc<BTreeSet<Name>>>,
+    allow_always: Mutex<Arc<BTreeSet<Name>>>,
     tool_allowlist: OnceLock<Arc<BTreeSet<Name>>>,
     /// The tool-round bound the next turn takes; the turn consumes it.
     next_turn_step_cap: Mutex<Option<std::num::NonZeroU32>>,
@@ -85,6 +86,7 @@ impl Shared {
                 rows: Arc::from([]),
             }),
             promoted: Mutex::new(Arc::new(BTreeSet::new())),
+            allow_always: Mutex::new(Arc::new(BTreeSet::new())),
             tool_allowlist: OnceLock::new(),
             next_turn_step_cap: Mutex::new(None),
             service_grants: ServiceGrants::default(),
@@ -96,6 +98,16 @@ impl Shared {
         Arc::clone(
             &self
                 .promoted
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+
+    /// Returns the session-wide always-allowed tools, as of the last sync.
+    pub(crate) fn allow_always(&self) -> Arc<BTreeSet<Name>> {
+        Arc::clone(
+            &self
+                .allow_always
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         )
@@ -144,14 +156,15 @@ impl Shared {
             .approval()
     }
 
-    /// Refreshes the fold-owned promotion set on every call, then republishes
-    /// current-leaf extension records when the fold's leaf or record count
-    /// moved since the last publication.
+    /// Refreshes fold-owned promotion and always-allowed sets on every call,
+    /// then republishes current-leaf extension records when the fold's leaf
+    /// or record count moved since the last publication.
     ///
     /// The actor is the only caller; readers get immutable snapshots and
     /// never wait on the actor, so a hook awaiting the actor cannot block a
     /// record read. The memo guard below applies only to extension records.
     pub(crate) fn sync_ext(&self, fold: &Session) {
+        self.sync_allow_always(fold);
         self.sync_promoted(fold);
         let key = (fold.leaf_entry(), fold.ext_len());
         let mut snap = self
@@ -181,6 +194,16 @@ impl Shared {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if promoted.len() != fold.promoted().len() {
             *promoted = Arc::new(fold.promoted().clone());
+        }
+    }
+
+    fn sync_allow_always(&self, fold: &Session) {
+        let mut allow_always = self
+            .allow_always
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if allow_always.as_ref() != fold.allow_always() {
+            *allow_always = Arc::new(fold.allow_always().clone());
         }
     }
 
@@ -370,5 +393,38 @@ impl Shared {
                 Subscriber::close(&shared);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sync_ext_publishes_fold_allow_always() {
+        let (fold, _) = Session::replay(
+            [dal_core::Record::AllowAlways {
+                at: jiff::Timestamp::UNIX_EPOCH,
+                tool: "run".into(),
+                by: dal_core::ClientId::new("tui"),
+            }],
+            jiff::Timestamp::UNIX_EPOCH,
+        )
+        .expect("allow-always record replays");
+        let shared = Shared::new(
+            false,
+            Gen::new(std::num::NonZeroU64::MIN),
+            ThinkingLevel::Medium,
+            ApprovalMode::Ask,
+            Mode::Normal,
+        );
+
+        shared.sync_ext(&fold);
+
+        assert!(
+            shared
+                .allow_always()
+                .contains(&Name::parse("run").expect("run name parses"))
+        );
     }
 }
