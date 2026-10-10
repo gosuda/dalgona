@@ -171,6 +171,13 @@ struct SessionState {
     /// The grant for the services the delivery poll uses was refused; the
     /// poll stays off until a prompt, command, or tool call.
     delivery_refused: bool,
+    /// Job reports a delivered wake carried whose acknowledgement the host
+    /// has not confirmed. A wake that reached the session is never repeated;
+    /// each tick retries only this acknowledgement.
+    unconfirmed_jobs: Vec<Unconfirmed>,
+    /// The last delivery-poll failure already reported to the owner; a
+    /// repeated failure with the same cause is not reported again.
+    last_delivery_error: Option<String>,
     /// The last turn ended because the context window overflowed.
     last_turn_overflowed: bool,
     /// One merge lock per workspace: every run of this session applies its
@@ -181,6 +188,13 @@ struct SessionState {
     /// Waits the owner answers without blocking its message loop; dropping
     /// the state aborts them.
     waits: tokio::task::JoinSet<()>,
+}
+
+/// A delivered job report the host has not confirmed. `omitted` records that
+/// a successful commit already left the id out of its reply.
+struct Unconfirmed {
+    id: JobId,
+    omitted: bool,
 }
 
 /// One live workflow run the owner task tracks on behalf of its
@@ -407,6 +421,8 @@ impl Runtime {
             goal_timer: None,
             goal_grant: None,
             delivery_refused: false,
+            unconfirmed_jobs: Vec::new(),
+            last_delivery_error: None,
             last_turn_overflowed: false,
             merge_lock: self.merge_lock(start.workspace.as_path()),
             reports: Arc::clone(&self.reports),
@@ -589,7 +605,11 @@ impl SessionState {
             self.arbiter.admit_goal(prompt, Instant::now());
         }
         let _ = self.poll_monitors().await;
-        let _ = self.deliver_ready().await;
+        self.retry_job_acknowledgement().await;
+        match self.deliver_ready().await {
+            Ok(()) => self.last_delivery_error = None,
+            Err(error) => self.report_delivery_error(error.to_string()),
+        }
         self.publish_status();
     }
 
@@ -664,13 +684,17 @@ impl SessionState {
                 if carries_goal {
                     self.record_goal_delivery();
                 }
-                self.commit_wake_jobs(&job_ids).await?;
                 self.arbiter.commit(&job_ids);
                 for id in &job_ids {
                     self.run_reports.remove(id);
                 }
                 self.settle_monitor_wake(monitor_only, monitor_batches);
                 self.requeue_monitor_remainder(&ready, monitor_batches);
+                let pending = job_ids
+                    .into_iter()
+                    .map(|id| Unconfirmed { id, omitted: false })
+                    .collect();
+                self.acknowledge_jobs(pending, true).await;
                 if carries_goal {
                     self.save_goal().await?;
                 }
@@ -696,12 +720,10 @@ impl SessionState {
         Ok(())
     }
 
-    /// Commits the job reports a delivered wake carried.
-    async fn commit_wake_jobs(&self, job_ids: &[JobId]) -> Result<(), ServiceError> {
-        if job_ids.is_empty() {
-            return Ok(());
-        }
-        let committed = self
+    /// Commits the job reports a delivered wake carried and returns the ids
+    /// the host newly marked delivered.
+    async fn commit_wake_jobs(&self, job_ids: &[JobId]) -> Result<Vec<JobId>, ServiceError> {
+        match self
             .services
             .jobs(
                 &self.caller,
@@ -709,14 +731,84 @@ impl SessionState {
                     ids: job_ids.to_vec(),
                 },
             )
-            .await?;
-        if !matches!(committed, JobsReply::Committed { .. }) {
-            return Err(ServiceError::failed(
+            .await?
+        {
+            JobsReply::Committed { ids } if ids.iter().all(|id| job_ids.contains(id)) => Ok(ids),
+            JobsReply::Committed { .. } => Err(ServiceError::failed(
+                None,
+                "the host committed a different set of job reports",
+            )),
+            _ => Err(ServiceError::failed(
                 None,
                 "job reports could not be committed",
-            ));
+            )),
         }
-        Ok(())
+    }
+
+    /// Acknowledges the reports of a wake that already reached the session.
+    /// An id stays pending until the host confirms it, so a failed or partial
+    /// acknowledgement is retried without repeating the wake. A repeated
+    /// commit returns none, so an id the host omits twice is not held and
+    /// settles. The first failure of a wake raises a notice.
+    async fn acknowledge_jobs(&mut self, pending: Vec<Unconfirmed>, announce: bool) {
+        if pending.is_empty() {
+            return;
+        }
+        let ids: Vec<JobId> = pending.iter().map(|job| job.id).collect();
+        let (kept, cause) = match self.commit_wake_jobs(&ids).await {
+            Ok(committed) => {
+                let kept: Vec<Unconfirmed> = pending
+                    .into_iter()
+                    .filter(|job| !committed.contains(&job.id))
+                    .filter(|job| !job.omitted)
+                    .map(|job| Unconfirmed {
+                        id: job.id,
+                        omitted: true,
+                    })
+                    .collect();
+                (kept, "the host confirmed only part of them".to_owned())
+            }
+            Err(error) => (pending, error.to_string()),
+        };
+        if kept.is_empty() {
+            return;
+        }
+        if announce {
+            self.services.notify(
+                &self.caller,
+                Notice {
+                    turn: None,
+                    kind: "orchestration.delivery".into(),
+                    text: format!(
+                        "{} job report(s) reached the session but are not yet confirmed as delivered: {cause}. The acknowledgement is retried; the wake is not repeated.",
+                        kept.len()
+                    )
+                    .into(),
+                },
+            );
+        }
+        self.unconfirmed_jobs.extend(kept);
+    }
+
+    async fn retry_job_acknowledgement(&mut self) {
+        let pending = std::mem::take(&mut self.unconfirmed_jobs);
+        self.acknowledge_jobs(pending, false).await;
+    }
+    /// Reports a delivery-poll failure to the owner once per distinct cause.
+    /// The poll retries every tick, so repeating the same text would spam.
+    fn report_delivery_error(&mut self, cause: String) {
+        if self.last_delivery_error.as_deref() == Some(cause.as_str()) {
+            return;
+        }
+        self.services.notify(
+            &self.caller,
+            Notice {
+                turn: None,
+                kind: "orchestration.delivery".into(),
+                text: format!("automatic delivery failed: {cause}. It will be retried.").into(),
+            },
+        );
+        self.last_delivery_error = Some(cause);
     }
 
     /// A wake for another source evaluates the goal verdict on the Idle

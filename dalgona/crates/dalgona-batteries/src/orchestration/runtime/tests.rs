@@ -62,6 +62,25 @@ struct Script {
     prompts: Vec<(SessionId, String)>,
     /// Await calls served so far; each later one reports a new entry.
     awaits: u64,
+    /// Scripted answers to the next commits, oldest first; an empty queue
+    /// commits every id.
+    commit_replies: VecDeque<CommitReply>,
+    /// The ids of every commit the host served.
+    commits: Vec<Vec<JobId>>,
+    /// The ids of every release the host served.
+    releases: Vec<Vec<JobId>>,
+    /// A refusal the host answers the next wake with.
+    wake_refusal: Option<&'static str>,
+    /// A failure the host answers the next release with.
+    release_fail: Option<&'static str>,
+}
+
+/// How the scripted host answers one commit.
+enum CommitReply {
+    /// The host fails the call; no id is committed.
+    Fail(&'static str),
+    /// The host commits only the first id and returns it alone.
+    First,
 }
 
 /// A host that answers only the services a session owner uses when it
@@ -170,6 +189,30 @@ impl Host {
             .collect();
         script.taken.extend(reports.iter().map(|report| report.id));
         JobsReply::Taken(reports)
+    }
+    fn commit_reports(script: &mut Script, mut ids: Vec<JobId>) -> Result<JobsReply, ServiceError> {
+        script.commits.push(ids.clone());
+        match script.commit_replies.pop_front() {
+            Some(CommitReply::Fail(message)) => return Err(ServiceError::failed(None, message)),
+            Some(CommitReply::First) => ids.truncate(1),
+            None => {}
+        }
+        script.delivered.extend(ids.iter().copied());
+        for id in &ids {
+            script.taken.remove(id);
+        }
+        Ok(JobsReply::Committed { ids })
+    }
+
+    fn release_reports(script: &mut Script, ids: Vec<JobId>) -> Result<JobsReply, ServiceError> {
+        if let Some(message) = script.release_fail.take() {
+            return Err(ServiceError::failed(None, message));
+        }
+        script.releases.push(ids.clone());
+        for id in &ids {
+            script.taken.remove(id);
+        }
+        Ok(JobsReply::Released { ids })
     }
 }
 
@@ -402,19 +445,8 @@ impl Services for Host {
                 Ok(JobsReply::Lines(lines))
             }
             JobsOp::Take { limit } => Ok(Self::take_reports(&mut script, limit)),
-            JobsOp::Commit { ids } => {
-                script.delivered.extend(ids.iter().copied());
-                for id in &ids {
-                    script.taken.remove(id);
-                }
-                Ok(JobsReply::Committed { ids })
-            }
-            JobsOp::Release { ids } => {
-                for id in &ids {
-                    script.taken.remove(id);
-                }
-                Ok(JobsReply::Released { ids })
-            }
+            JobsOp::Commit { ids } => Self::commit_reports(&mut script, ids),
+            JobsOp::Release { ids } => Self::release_reports(&mut script, ids),
             JobsOp::Hold { .. } | JobsOp::Unhold { .. } => Ok(JobsReply::Held(Vec::new())),
             _ => Err(ServiceError::failed(None, "unscripted job operation")),
         };
@@ -442,7 +474,12 @@ impl Services for Host {
             }
             TurnOp::Cancel => Box::pin(async { Ok(TurnOpReply::Cancelled) }),
             TurnOp::Wake { text, .. } => {
-                locked(&self.script).wakes.push(text.into());
+                let mut script = locked(&self.script);
+                if let Some(message) = script.wake_refusal.take() {
+                    return Box::pin(async move { Err(ServiceError::failed(None, message)) });
+                }
+                script.wakes.push(text.into());
+                drop(script);
                 self.changed.notify_waiters();
                 Box::pin(async { Ok(TurnOpReply::Woken) })
             }
@@ -2181,6 +2218,126 @@ async fn a_turn_that_called_a_tool_resets_the_toolless_streak() -> TestResult {
         fixture.counters()?.toolless_streak,
         0,
         "the settled hook sees the tool call the turn made"
+    );
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_accepted_wake_keeps_its_acknowledgement_until_the_host_confirms_every_report()
+-> TestResult {
+    let fixture = Fixture::open().await?;
+    let (first, second) = (
+        fixture.done_job("first report"),
+        fixture.done_job("second report"),
+    );
+    fixture.script().commit_replies.extend([
+        CommitReply::Fail("the jobs service is restarting"),
+        CommitReply::First,
+    ]);
+    tokio::time::advance(std::time::Duration::from_millis(300)).await;
+    fixture.pump().await;
+    assert_eq!(fixture.wake_count(), 1);
+    assert!(
+        fixture
+            .host
+            .notices()
+            .iter()
+            .any(|notice| &*notice.kind == "orchestration.delivery"
+                && notice.text.contains("the jobs service is restarting")),
+        "the failed acknowledgement is reported to the owner"
+    );
+    assert!(fixture.script().delivered.is_empty());
+    for _ in 0..3 {
+        tokio::time::advance(std::time::Duration::from_millis(250)).await;
+        fixture.pump().await;
+    }
+    let script = fixture.script();
+    assert_eq!(script.wakes.len(), 1, "the wake is never repeated");
+    assert_eq!(
+        script.delivered,
+        HashSet::from([first, second]),
+        "every report is eventually confirmed"
+    );
+    assert!(script.taken.is_empty());
+    assert_eq!(
+        script.releases,
+        Vec::<Vec<JobId>>::new(),
+        "no release on the accepted path"
+    );
+    assert_eq!(script.commits.len(), 3, "failure, partial, then the rest");
+    assert_eq!(script.commits[0].len(), 2);
+    assert_eq!(script.commits[1].len(), 2);
+    assert_eq!(
+        script.commits[2].len(),
+        1,
+        "only the unconfirmed id is retried"
+    );
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_confirmed_wake_commits_once_and_a_refused_wake_releases_and_requeues_once() -> TestResult
+{
+    let fixture = Fixture::open().await?;
+    let job = fixture.done_job("only report");
+    fixture.script().wake_refusal = Some("the turn service refused");
+    tokio::time::advance(std::time::Duration::from_millis(300)).await;
+    fixture.pump().await;
+    for _ in 0..3 {
+        tokio::time::advance(std::time::Duration::from_millis(250)).await;
+        fixture.pump().await;
+    }
+    let script = fixture.script();
+    assert_eq!(script.releases, vec![vec![job]], "released exactly once");
+    assert_eq!(
+        script.wakes.len(),
+        1,
+        "the report is requeued and woken once"
+    );
+    assert_eq!(script.commits, vec![vec![job]], "committed exactly once");
+    assert!(script.delivered.contains(&job));
+    drop(script);
+    let delivery: Vec<_> = fixture
+        .host
+        .notices()
+        .into_iter()
+        .filter(|notice| &*notice.kind == "orchestration.delivery")
+        .collect();
+    assert_eq!(delivery.len(), 1, "the refused wake is reported once");
+    assert!(
+        delivery[0].text.contains("the turn service refused"),
+        "{}",
+        delivery[0].text
+    );
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_delivery_poll_is_reported_once_to_the_owner() -> TestResult {
+    let fixture = Fixture::open().await?;
+    fixture.done_job("doomed report");
+    {
+        let mut script = fixture.script();
+        script.wake_refusal = Some("the turn service refused");
+        script.release_fail = Some("the jobs service is restarting");
+    }
+    tokio::time::advance(std::time::Duration::from_millis(300)).await;
+    fixture.pump().await;
+    for _ in 0..3 {
+        tokio::time::advance(std::time::Duration::from_millis(250)).await;
+        fixture.pump().await;
+    }
+    let delivery: Vec<_> = fixture
+        .host
+        .notices()
+        .into_iter()
+        .filter(|notice| &*notice.kind == "orchestration.delivery")
+        .collect();
+    assert_eq!(delivery.len(), 1, "one notice per distinct cause");
+    assert!(
+        delivery[0].text.contains("the jobs service is restarting"),
+        "{}",
+        delivery[0].text
     );
     Ok(())
 }
