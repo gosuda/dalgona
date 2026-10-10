@@ -468,3 +468,188 @@ fn dev_run_continue_adopts_a_kept_root() -> Result<(), Box<dyn Error>> {
     assert!(Path::new(&root).exists(), "adopted root {root} was removed");
     Ok(())
 }
+
+/// `dalgon dev` inspects journals without the product's config or
+/// workspace resolution: a corrupt `dal.toml` must not block surgery.
+/// Reverting the early dispatch fails the subcommand on the config
+/// error before the journal is read.
+#[test]
+fn dev_journal_replay_survives_broken_user_config() -> Result<(), Box<dyn Error>> {
+    let fixture = CliFixture::new()?;
+    let session = fixture.data.join("session-broken-config");
+    fs::create_dir_all(&session)?;
+    let journal = write_journal(&session, &sample_records(&fixture.data, None)?)?;
+    fixture.write_config("provider = ")?;
+    let output = fixture.output(&[
+        "dev",
+        "journal",
+        "replay",
+        journal.to_str().expect("utf8 path"),
+    ])?;
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("records: 5"),
+        "{}",
+        stdout(&output)
+    );
+    Ok(())
+}
+
+/// A sidecar NAME is one path component: `..`, separators, and absolute
+/// spellings must not read outside the session directory. Reverting the
+/// component check lets `<session> ../outside.txt` dump the sibling.
+#[test]
+fn dev_journal_sidecar_rejects_a_traversal_name() -> Result<(), Box<dyn Error>> {
+    let fixture = CliFixture::new()?;
+    let session = fixture.data.join("session-trav");
+    fs::create_dir_all(&session)?;
+    write_journal(&session, &sample_records(&fixture.data, None)?)?;
+    fs::write(fixture.data.join("outside.txt"), "outside bytes")?;
+    for name in ["..", "../outside.txt", "/outside.txt", "a/b"] {
+        let output = fixture.output(&[
+            "dev",
+            "journal",
+            "sidecar",
+            session.to_str().expect("utf8 path"),
+            name,
+        ])?;
+        assert!(!output.status.success(), "{name} dumped");
+    }
+    Ok(())
+}
+
+/// `expect.file.equals` compares bytes, not a trimmed shape: a file
+/// holding `exact` must not satisfy an expectation of `exact\n`.
+/// Reverting to the trimmed comparison accepts the trailing newline.
+#[test]
+fn dev_run_expect_file_equals_is_byte_exact() -> Result<(), Box<dyn Error>> {
+    let fixture = CliFixture::new()?;
+    let scenario = write_scenario(
+        &fixture,
+        &[
+            r#"{"write":{"path":"exact.txt","text":"exact"}}"#,
+            r#"{"expect":{"file":{"path":"exact.txt","equals":"exact\n"}}}"#,
+        ],
+    )?;
+    let output = fixture.output(&["dev", "run", scenario.to_str().expect("utf8 path")])?;
+    assert!(
+        !output.status.success(),
+        "the trailing newline was trimmed away"
+    );
+    Ok(())
+}
+
+/// `expect.request` must still answer a request an earlier update
+/// expectation drained: the queue, not only fresh polls, holds it.
+/// Reverting the queue check leaves the open request unmatched until
+/// the timeout fails the scenario.
+#[test]
+fn dev_run_answers_a_request_drained_by_an_update_expectation() -> Result<(), Box<dyn Error>> {
+    let fixture = CliFixture::new()?;
+    let scenario = write_scenario(
+        &fixture,
+        &[
+            r#"{"provider":{"script":[{"kind":"events","events":[{"type":"tool_calls_done","calls":[{"id":"call-1","name":"exec","args":{"kind":"parsed","value":{"command":"echo hi","timeout_seconds":60}}}]},{"type":"usage","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":5,"reasoning_tokens":null,"cache_write_tokens":0,"cost_usd":null}},{"type":"stop","reason":"tool_use"}]},{"kind":"events","events":[{"type":"text_delta","text":"done"},{"type":"tool_calls_done","calls":[]},{"type":"usage","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":5,"reasoning_tokens":null,"cache_write_tokens":0,"cost_usd":null}},{"type":"stop","reason":"end_turn"}]}]}}"#,
+            r#"{"set_approval":"ask"}"#,
+            r#"{"prompt":"run echo hi"}"#,
+            r#"{"expect":{"update":{"kind":"request_opened"}}}"#,
+            r#"{"expect":{"request":{"kind":"approval","answer":"approve"}}}"#,
+            r#"{"expect":{"update":{"kind":"turn_ended","contains":"end_turn"}}}"#,
+        ],
+    )?;
+    let output = fixture.output(&[
+        "dev",
+        "run",
+        "--consent",
+        scenario.to_str().expect("utf8 path"),
+    ])?;
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("scenario passed"),
+        "{}",
+        stdout(&output)
+    );
+    Ok(())
+}
+
+/// A request an expectation answered leaves the open queue: a later
+/// `answer` step finds nothing open instead of re-answering the settled
+/// id. Reverting the removal reaches `agent.answer` and surfaces the
+/// broker's rejection instead of `no open request`.
+#[test]
+fn dev_run_rejects_a_second_answer_to_a_settled_request() -> Result<(), Box<dyn Error>> {
+    let fixture = CliFixture::new()?;
+    let scenario = write_scenario(
+        &fixture,
+        &[
+            r#"{"provider":{"script":[{"kind":"events","events":[{"type":"tool_calls_done","calls":[{"id":"call-1","name":"exec","args":{"kind":"parsed","value":{"command":"echo hi","timeout_seconds":60}}}]},{"type":"usage","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":5,"reasoning_tokens":null,"cache_write_tokens":0,"cost_usd":null}},{"type":"stop","reason":"tool_use"}]},{"kind":"events","events":[{"type":"text_delta","text":"done"},{"type":"tool_calls_done","calls":[]},{"type":"usage","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":5,"reasoning_tokens":null,"cache_write_tokens":0,"cost_usd":null}},{"type":"stop","reason":"end_turn"}]}]}}"#,
+            r#"{"set_approval":"ask"}"#,
+            r#"{"prompt":"run echo hi"}"#,
+            r#"{"expect":{"request":{"kind":"approval","answer":"approve"}}}"#,
+            r#"{"answer":"approve"}"#,
+        ],
+    )?;
+    let output = fixture.output(&[
+        "dev",
+        "run",
+        "--consent",
+        scenario.to_str().expect("utf8 path"),
+    ])?;
+    assert!(!output.status.success());
+    let text = stderr(&output);
+    assert!(text.contains("no open request"), "{text}");
+    Ok(())
+}
+
+/// A write through a symlinked directory inside an adopted workspace
+/// must not escape: canonical containment resolves the link before the
+/// lexical join. Reverting to the string check writes `leak.txt`
+/// outside the workspace.
+#[cfg(unix)]
+#[test]
+fn dev_run_rejects_a_write_through_a_workspace_symlink() -> Result<(), Box<dyn Error>> {
+    let fixture = CliFixture::new()?;
+    let root = fixture.data.join("adopted");
+    let work = root.join("work");
+    fs::create_dir_all(&work)?;
+    fs::create_dir_all(root.join("data"))?;
+    std::os::unix::fs::symlink(&fixture.home, work.join("escape"))?;
+    let scenario = write_scenario(
+        &fixture,
+        &[r#"{"write":{"path":"escape/leak.txt","text":"leaked"}}"#],
+    )?;
+    let output = fixture.output(&[
+        "dev",
+        "run",
+        "--root",
+        root.to_str().expect("utf8 path"),
+        scenario.to_str().expect("utf8 path"),
+    ])?;
+    assert!(!output.status.success(), "the symlink wrote outside");
+    let text = stderr(&output);
+    assert!(text.contains("escapes the workspace"), "{text}");
+    assert!(!fixture.home.join("leak.txt").exists());
+    Ok(())
+}
+
+/// A journal ending inside a turn declares `Running`, not `Idle`: the
+/// attributed session shows the open turn the records imply.
+#[test]
+fn dev_fold_reports_a_trailing_open_turn_as_running() -> Result<(), Box<dyn Error>> {
+    let fixture = CliFixture::new()?;
+    let session = fixture.data.join("session-running");
+    fs::create_dir_all(&session)?;
+    let journal = write_journal(&session, &sample_records(&fixture.data, None)?)?;
+    let output = fixture.output(&["dev", "fold", journal.to_str().expect("utf8 path")])?;
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stdout(&output);
+    let last = text.lines().next_back().unwrap_or_default();
+    assert!(last.contains("TurnStart"), "{text}");
+    // `~phase` marks a changed phase field: before the fix the journal
+    // folded to Idle, so the declared Running phase never appeared.
+    assert!(
+        last.contains("~phase"),
+        "expected a Running phase, got: {text}"
+    );
+    Ok(())
+}

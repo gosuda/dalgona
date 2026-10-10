@@ -11,8 +11,8 @@ use crate::exit;
 
 /// Prints each journal line with the folded fields it changed.
 ///
-/// Each record replays the journal prefix, so cost grows quadratically with
-/// line count; journals hold hundreds of records, not millions.
+/// One running declared fold pushes each record, so attribution costs one
+/// fold per line plus the session clone the diff needs.
 pub(super) fn run(path: &Path) -> Result<ExitCode, DevError> {
     let lines = util::read_lines(path)?;
     if lines.records.is_empty() {
@@ -26,9 +26,10 @@ pub(super) fn run(path: &Path) -> Result<ExitCode, DevError> {
         let _ = writeln!(out, "torn tail: {} bytes ignored", lines.torn);
     }
     let mut prior: BTreeMap<String, String> = BTreeMap::new();
+    let mut fold = util::DeclaredLines::new(path);
     for (index, line) in lines.records.iter().enumerate() {
         let record = util::decode_line(path, line, index)?;
-        let session = util::fold_declared(path, &lines.records[..=index])?;
+        let session = fold.push(&record)?;
         let fields = util::fields(&session);
         let mut delta = String::new();
         for (name, value) in &fields {

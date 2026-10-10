@@ -269,6 +269,15 @@ fn list(dir: &Path, journal: &Path, out: &mut dyn Write) -> Result<ExitCode, Dev
 
 /// Dumps one sidecar as UTF-8 text, or a hex listing when it is binary.
 fn dump(dir: &Path, name: &str, out: &mut dyn Write) -> Result<ExitCode, DevError> {
+    // A sidecar name is one path component: `..`, separators, and
+    // absolute spellings must not read outside the session directory.
+    let one = Path::new(name).file_name().is_some_and(|file| file == name);
+    if !one {
+        return Err(DevError::NoSidecar {
+            path: dir.display().to_string(),
+            name: name.to_owned(),
+        });
+    }
     let path: PathBuf = dir.join(name);
     if !path.is_file() {
         return Err(DevError::NoSidecar {

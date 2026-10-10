@@ -4,7 +4,7 @@
 .SH NAME
 dalgon\-dev\-run \- Drive a scripted headless session from a scenario file (one step JSON per line).
 .SH SYNOPSIS
-\fBdalgon dev run\fR [\fB\-\-keep\fR] [\fB\-\-root\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fIFILE\fR> 
+\fBdalgon dev run\fR [\fB\-\-keep\fR] [\fB\-\-root\fR] [\fB\-\-consent\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fIFILE\fR> 
 .SH DESCRIPTION
 Drive a scripted headless session from a scenario file (one step JSON per line).
 .SH OPTIONS
@@ -14,6 +14,9 @@ Keep the run\*(Aqs data root and workspace for inspection
 .TP
 \fB\-\-root\fR \fI<DIR>\fR
 Reuse an earlier kept run root instead of building a fresh one, so `resume` and `continue` session steps find a populated store
+.TP
+\fB\-\-consent\fR
+Permit in\-band authorization: `answer` steps, `set_approval`, an `expect.request` answer, or a config\-declared `approval` act with the operator\*(Aqs privileges, so the scenario file alone cannot grant them
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help

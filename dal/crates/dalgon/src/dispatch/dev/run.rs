@@ -196,6 +196,7 @@ struct RunCx {
     keep: bool,
     data_root: PathBuf,
     workspace: PathBuf,
+    workspace_canonical: PathBuf,
     scenario_dir: PathBuf,
     vars: VarsMap,
     helper: Option<PathBuf>,
@@ -240,12 +241,19 @@ impl RunCx {
                 source,
             })?;
         }
+        // The containment boundary is canonicalized once: a later write
+        // resolves through the workspace's own links, never the strings.
+        let workspace_canonical = workspace.canonicalize().map_err(|source| DevError::Read {
+            path: workspace.display().to_string(),
+            source,
+        })?;
         Ok(Self {
             root_path,
             root,
             keep,
             data_root,
             workspace,
+            workspace_canonical,
             scenario_dir,
             vars,
             helper,
@@ -590,7 +598,11 @@ impl RunCx {
         Ok(())
     }
 
-    /// Resolves a scenario path inside the workspace, rejecting escapes.
+    /// Resolves a scenario path inside the workspace, rejecting escapes
+    /// — including through symlinks an adopted `--root` workspace may
+    /// hold. The deepest existing ancestor is canonicalized and must sit
+    /// under the canonical workspace; the not-yet-created tail is then
+    /// appended syntactically.
     fn inside_workspace(&self, path: &Path) -> Result<PathBuf, String> {
         let escapes = path.is_absolute()
             || path.components().any(|part| {
@@ -602,7 +614,26 @@ impl RunCx {
         if escapes {
             return Err(format!("path `{}` escapes the workspace", path.display()));
         }
-        Ok(self.workspace.join(path))
+        let target = self.workspace.join(path);
+        let mut probe = target.as_path();
+        let mut tail = Vec::new();
+        while !probe.exists() {
+            let Some(name) = probe.file_name() else {
+                break;
+            };
+            tail.push(name.to_os_string());
+            let Some(parent) = probe.parent() else {
+                break;
+            };
+            probe = parent;
+        }
+        let resolved = probe
+            .canonicalize()
+            .map_err(|_| format!("path `{}` cannot resolve", target.display()))?;
+        if !resolved.starts_with(&self.workspace_canonical) {
+            return Err(format!("path `{}` escapes the workspace", path.display()));
+        }
+        Ok(tail.iter().rev().fold(resolved, |acc, name| acc.join(name)))
     }
 
     /// Resolves the selected session kind against the run workspace.
@@ -921,6 +952,29 @@ impl RunCx {
             .map_or(DEFAULT_TIMEOUT, Duration::from_millis);
         let deadline = Instant::now() + timeout;
         loop {
+            // A request an earlier expectation drained waits in the queue:
+            // match the queue first so it is answered, not waited out.
+            if let Some(index) = self
+                .open_requests
+                .iter()
+                .position(|(_, kind)| *kind == spec.kind)
+            {
+                let Some((id, _)) = self.open_requests.remove(index) else {
+                    continue;
+                };
+                if let Some(answer) = &spec.answer {
+                    let agent = self
+                        .agent
+                        .as_ref()
+                        .ok_or_else(|| fail("no session".to_owned()))?;
+                    agent
+                        .answer(id, answer.clone())
+                        .await
+                        .map_err(|error| fail(format!("answer rejected: {error}")))?;
+                }
+                let _ = writeln!(out, "{line:>4}  request {}", spec.kind);
+                return Ok(());
+            }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 return Err(fail(format!(
@@ -929,32 +983,15 @@ impl RunCx {
                     timeout.as_millis()
                 )));
             }
-            let Some(update) = self.poll(remaining, line).await? else {
+            // `track` queues every opened request; `continue` re-checks the
+            // queue so it is the single match path.
+            let Some(_update) = self.poll(remaining, line).await? else {
                 return Err(fail(format!(
                     "no `{}` request within {}ms",
                     spec.kind,
                     timeout.as_millis()
                 )));
             };
-            let UpdateKind::RequestOpened(request) = &update.kind else {
-                continue;
-            };
-            if wire_type(&request.question) != spec.kind {
-                continue;
-            }
-            let id = request.id;
-            if let Some(answer) = &spec.answer {
-                let agent = self
-                    .agent
-                    .as_ref()
-                    .ok_or_else(|| fail("no session".to_owned()))?;
-                agent
-                    .answer(id, answer.clone())
-                    .await
-                    .map_err(|error| fail(format!("answer rejected: {error}")))?;
-            }
-            let _ = writeln!(out, "{line:>4}  request {}", spec.kind);
-            return Ok(());
         }
     }
 
@@ -1019,11 +1056,7 @@ impl RunCx {
                 spec.path.display()
             )));
         }
-        if spec
-            .equals
-            .as_ref()
-            .is_some_and(|want| text.trim_end() != want.trim_end())
-        {
+        if spec.equals.as_ref().is_some_and(|want| text != *want) {
             return Err(fail(format!(
                 "{} does not equal the expected text",
                 spec.path.display()

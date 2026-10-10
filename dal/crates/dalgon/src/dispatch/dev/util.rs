@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-use dal_core::{Record, Session, Timestamp, decode};
+use dal_core::{DeclaredFold, Record, Session, Timestamp, decode};
 
 use super::DevError;
 
@@ -76,18 +76,37 @@ pub(super) fn fold(path: &Path, lines: &[Vec<u8>]) -> Result<Session, DevError> 
         })
 }
 
-/// Folds journal lines into the session they declare, without replay's
-/// crash-recovery synthesis: `dev fold` attributes each record's state
-/// change, so an open turn must stay open.
-pub(super) fn fold_declared(path: &Path, lines: &[Vec<u8>]) -> Result<Session, DevError> {
-    let mut records = Vec::with_capacity(lines.len());
-    for (index, line) in lines.iter().enumerate() {
-        records.push(decode_line(path, line, index)?);
+/// One running declared fold for `dev fold`: pushes records one at a
+/// time so attribution keeps a single fold instead of replaying every
+/// prefix, while reporting replay failures against the journal path.
+pub(super) struct DeclaredLines<'a> {
+    fold: DeclaredFold,
+    path: &'a Path,
+}
+
+impl<'a> DeclaredLines<'a> {
+    /// An empty fold reporting errors against `path`.
+    pub(super) fn new(path: &'a Path) -> Self {
+        Self {
+            fold: DeclaredFold::new(),
+            path,
+        }
     }
-    Session::replay_declared(records).map_err(|source| DevError::Replay {
-        path: path.display().to_string(),
-        source,
-    })
+
+    /// Folds one decoded record and returns the session it declares.
+    ///
+    /// # Errors
+    /// `Replay` on a contradiction or unsupported version.
+    pub(super) fn push(&mut self, record: &Record) -> Result<Session, DevError> {
+        self.fold.push(record).map_err(|source| DevError::Replay {
+            path: self.path.display().to_string(),
+            source,
+        })?;
+        self.fold.session().map_err(|source| DevError::Replay {
+            path: self.path.display().to_string(),
+            source,
+        })
+    }
 }
 
 /// Folds a journal file end to end.

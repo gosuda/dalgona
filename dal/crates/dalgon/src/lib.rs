@@ -130,6 +130,18 @@ pub fn run(factory: ProductFactory) -> ExitCode {
         Ok(captured) => captured,
         Err(code) => return code,
     };
+    // `dalgon dev` drives its own data root and workspace: broken user
+    // configuration or product assembly must not block journal surgery
+    // or a scenario run, so it dispatches before either is built.
+    if let Some(cli::Commands::Dev(args)) = &cli.command {
+        let runtime = match tokio_runtime(&vars, factory.binary) {
+            Ok(runtime) => runtime,
+            Err(code) => return code,
+        };
+        let code = runtime.block_on(dispatch::dev(args, vars, cwd, edge::current_exe()));
+        runtime.shutdown_timeout(Duration::from_millis(500));
+        return code;
+    }
     let startup = match assemble_startup(&factory, &cli, vars, cwd) {
         Ok(startup) => startup,
         Err(code) => return code,
@@ -141,27 +153,36 @@ pub fn run(factory: ProductFactory) -> ExitCode {
         Ok(product) => product,
         Err(code) => return code,
     };
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
+    let runtime = match tokio_runtime(&startup.vars, factory.binary) {
+        Ok(runtime) => runtime,
+        Err(code) => return code,
+    };
+    let code = runtime.block_on(run_command(factory, cli, startup, product));
+    runtime.shutdown_timeout(Duration::from_millis(500));
+    code
+}
+
+/// Builds the shared multi-thread runtime, mapping a build failure to the
+/// edge's typed exit.
+fn tokio_runtime(
+    vars: &VarsMap,
+    binary: &'static str,
+) -> Result<tokio::runtime::Runtime, ExitCode> {
+    tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .max_blocking_threads(64)
         .build()
-    {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            let log_path = edge::log_file_path(&startup.vars, factory.binary);
-            return two_lines(
+        .map_err(|error| {
+            let log_path = edge::log_file_path(vars, binary);
+            two_lines(
                 cli::texts::internal_error_at(
                     "edge",
                     &format!("cannot start the runtime: {error}"),
                     &log_path,
                 ),
                 exit::ExitKind::Internal,
-            );
-        }
-    };
-    let code = runtime.block_on(run_command(factory, cli, startup, product));
-    runtime.shutdown_timeout(Duration::from_millis(500));
-    code
+            )
+        })
 }
 
 /// Dispatches the parsed command over the built product.
@@ -220,8 +241,8 @@ async fn run_command(
         }
         Some(cli::Commands::Plugin(args)) => dispatch::plugin(args.clone(), startup, product).await,
         Some(cli::Commands::Rules(args)) => dispatch::rules(args.clone(), startup, product).await,
-        Some(cli::Commands::Dev(args)) => {
-            dispatch::dev(args, startup.vars, startup.cwd, startup.helper).await
+        Some(cli::Commands::Dev(_)) => {
+            unreachable!("the dev command dispatches before product assembly")
         }
         Some(cli::Commands::Login(args)) => dispatch::login(args.clone(), startup).await,
         Some(cli::Commands::Logout(args)) => dispatch::logout(args.clone(), startup).await,
