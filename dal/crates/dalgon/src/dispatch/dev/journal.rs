@@ -279,7 +279,13 @@ fn dump(dir: &Path, name: &str, out: &mut dyn Write) -> Result<ExitCode, DevErro
         });
     }
     let path: PathBuf = dir.join(name);
-    if !path.is_file() {
+    // `symlink_metadata` does not follow links: a sidecar that names a
+    // symlink resolves outside the session directory and is refused.
+    let meta = fs::symlink_metadata(&path).map_err(|_| DevError::NoSidecar {
+        path: dir.display().to_string(),
+        name: name.to_owned(),
+    })?;
+    if meta.file_type().is_symlink() || !meta.is_file() {
         return Err(DevError::NoSidecar {
             path: dir.display().to_string(),
             name: name.to_owned(),
