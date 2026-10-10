@@ -186,9 +186,11 @@ const FACADE_NAMES: [&str; 10] = [
     "tools", "models", "net", "ask", "state", "agents", "jobs", "turn", "env", "mcp",
 ];
 
-/// The largest `ctx.scope` concurrency limit (E05); the host enforces the
-/// same cap, but a script must learn of a bad limit as an API error, not as
-/// a terminal denial after the host refuses the scope.
+/// The largest `ctx.scope` concurrency limit exposed by Starlark (E05).
+/// `MAX_SCOPE_LIMIT` enforces 64 here; the host separately enforces its
+/// broader global member cap of 500 in `dal-agent/src/ext/scope.rs`
+/// (`GLOBAL_MEMBER_CAP`). A script must learn of a bad limit as an API error,
+/// not as a terminal denial after the host refuses the scope.
 const MAX_SCOPE_LIMIT: u16 = 64;
 
 /// The facade groups a `ctx` exposes (§R03 catalog table).
