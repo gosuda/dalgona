@@ -19,6 +19,7 @@ use dal_core::{
     JobsOp, JobsReply, ModelRequest, Notice, Question, RawJson, RunOutput, RunRequest, SessionId,
     SidecarOp, StateError, StateOp, StateRecord, Stop, TurnOp, TurnOpReply,
 };
+use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
 use super::Runtime;
@@ -2340,3 +2341,217 @@ async fn a_failed_delivery_poll_is_reported_once_to_the_owner() -> TestResult {
     );
     Ok(())
 }
+
+/// The git answers of one isolated task up to its saved patch: preflight,
+/// the worktree, the staged diff, and the changed names.
+fn isolated_prefix() -> Vec<GitAnswer> {
+    vec![
+        Ok(output("git version 2.47.0")),
+        Ok(output("/tmp")),
+        Ok(output("head")),
+        Ok(output("snapshot")),
+        Ok(output("")),
+        Ok(output("")),
+        Ok(output("diff --git a/code b/code\n")),
+        Ok(output("code\n")),
+    ]
+}
+
+fn failed_output(stderr: &str) -> RunOutput {
+    RunOutput {
+        status: dal_core::ExitStatusKind::Exited(1),
+        stderr_tail: stderr.as_bytes().to_vec(),
+        ..output("")
+    }
+}
+
+#[derive(Deserialize)]
+struct RetainedRecord {
+    reason: String,
+    base: String,
+    worktree: String,
+}
+
+impl Fixture {
+    fn git_calls(&self, matches: impl Fn(&[std::ffi::OsString]) -> bool) -> Vec<Vec<String>> {
+        self.script()
+            .run_requests
+            .iter()
+            .filter(|request| matches(&request.argv))
+            .map(|request| {
+                request
+                    .argv
+                    .iter()
+                    .map(|word| word.to_string_lossy().into_owned())
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn git_verb_calls(&self, verb: &str) -> Vec<Vec<String>> {
+        self.git_calls(|argv| argv.iter().any(|word| word == verb))
+    }
+
+    fn plain_apply_calls(&self) -> usize {
+        self.git_calls(is_plain_apply).len()
+    }
+
+    fn task_artifact(&self, file: ArtifactFile) -> Result<Vec<u8>, &'static str> {
+        let script = self.script();
+        let task = script
+            .jobs
+            .iter()
+            .find(|(_, parent, _)| parent.is_some())
+            .ok_or("task absent")?
+            .0
+            .id;
+        script
+            .artifacts
+            .iter()
+            .find(|(job, saved, _)| *job == task && *saved == file)
+            .map(|(_, _, bytes)| bytes.clone())
+            .ok_or("artifact absent")
+    }
+
+    fn task_text(&self) -> Result<String, &'static str> {
+        self.script()
+            .jobs
+            .iter()
+            .find(|(_, parent, _)| parent.is_some())
+            .map(|(_, _, text)| text.clone())
+            .ok_or("task absent")
+    }
+}
+
+/// Runs one isolated task whose patch the checkout refuses: `tail` answers
+/// the git calls from the apply check on.
+async fn retained_run(
+    tail: Vec<GitAnswer>,
+) -> Result<(Fixture, String), Box<dyn std::error::Error>> {
+    let fixture = Fixture::open_config(isolation_config()?).await?;
+    {
+        let mut script = fixture.script();
+        script.run_outputs.extend(isolated_prefix());
+        script.run_outputs.extend(tail);
+    }
+    fixture.tool(ISOLATED_WRITE).await?;
+    let report = fixture.ended_run().await?;
+    Ok((fixture, report))
+}
+
+/// The worktree path and its retained target of the one `git worktree move`.
+fn moved_worktree(fixture: &Fixture) -> Result<(String, String), &'static str> {
+    let moves = fixture.git_verb_calls("move");
+    let [argv] = moves.as_slice() else {
+        return Err("exactly one worktree move is expected");
+    };
+    Ok((argv[5].clone(), argv[6].clone()))
+}
+
+#[tokio::test]
+async fn a_refused_apply_check_retains_the_worktree_and_never_applies() -> TestResult {
+    let (fixture, report) = retained_run(vec![
+        Ok(failed_output("error: patch failed: code:1")),
+        Ok(output("")),
+        Ok(output("")),
+    ])
+    .await?;
+    assert!(report.contains("isolation: retained"), "{report}");
+    assert!(!report.contains("isolation: merged"), "{report}");
+    assert_eq!(fixture.plain_apply_calls(), 0);
+    assert_eq!(fixture.git_verb_calls("remove"), Vec::<Vec<String>>::new());
+    assert!(
+        fixture
+            .task_artifact(ArtifactFile::DeltaPatch)?
+            .starts_with(b"diff")
+    );
+    let (dir, target) = moved_worktree(&fixture)?;
+    assert!(target.starts_with(&format!("{dir}.retained-")), "{target}");
+    assert_eq!(fixture.git_verb_calls("prune").len(), 1);
+    let record: RetainedRecord =
+        sonic_rs::from_slice(&fixture.task_artifact(ArtifactFile::RetainedJson)?)?;
+    assert_eq!(
+        record.reason,
+        "the changes did not apply cleanly (error: patch failed: code:1)"
+    );
+    assert_eq!(record.base, "snapshot");
+    assert_eq!(record.worktree, target);
+    let text = fixture.task_text()?;
+    assert!(
+        text.contains(&format!("isolation: retained at {target}")),
+        "{text}"
+    );
+    assert!(text.contains("error: patch failed: code:1"), "{text}");
+    assert!(text.contains("apply --3way"), "{text}");
+    assert_eq!(fixture.runtime.merge_locks.len(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_refused_apply_keeps_the_worktree_in_place_when_the_move_fails() -> TestResult {
+    let (fixture, report) = retained_run(vec![
+        Ok(output("")),
+        Ok(failed_output("error: patch does not apply")),
+        Ok(failed_output("fatal: cannot move")),
+    ])
+    .await?;
+    assert!(report.contains("isolation: retained"), "{report}");
+    assert!(!report.contains("isolation: merged"), "{report}");
+    assert_eq!(fixture.plain_apply_calls(), 1);
+    assert_eq!(fixture.git_verb_calls("remove"), Vec::<Vec<String>>::new());
+    assert_eq!(fixture.git_verb_calls("prune"), Vec::<Vec<String>>::new());
+    assert!(
+        fixture
+            .task_artifact(ArtifactFile::DeltaPatch)?
+            .starts_with(b"diff")
+    );
+    let (dir, _) = moved_worktree(&fixture)?;
+    let record: RetainedRecord =
+        sonic_rs::from_slice(&fixture.task_artifact(ArtifactFile::RetainedJson)?)?;
+    assert_eq!(
+        record.worktree, dir,
+        "a failed move leaves the tree where it is"
+    );
+    assert_eq!(
+        record.reason,
+        "the changes did not apply cleanly (error: patch does not apply)"
+    );
+    let text = fixture.task_text()?;
+    assert!(
+        text.contains(&format!("isolation: retained at {dir}")),
+        "{text}"
+    );
+    assert!(text.contains("error: patch does not apply"), "{text}");
+    assert!(
+        text.contains("the worktree could not be moved: fatal: cannot move"),
+        "{text}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_failed_prune_still_retains_the_moved_worktree_and_says_so() -> TestResult {
+    let (fixture, report) = retained_run(vec![
+        Ok(output("")),
+        Ok(failed_output("error: conflict in code")),
+        Ok(output("")),
+        Ok(failed_output("fatal: prune denied")),
+    ])
+    .await?;
+    assert!(report.contains("isolation: retained"), "{report}");
+    assert!(!report.contains("isolation: merged"), "{report}");
+    assert_eq!(fixture.plain_apply_calls(), 1);
+    assert_eq!(fixture.git_verb_calls("remove"), Vec::<Vec<String>>::new());
+    let (_, target) = moved_worktree(&fixture)?;
+    let record: RetainedRecord =
+        sonic_rs::from_slice(&fixture.task_artifact(ArtifactFile::RetainedJson)?)?;
+    assert_eq!(record.worktree, target);
+    let text = fixture.task_text()?;
+    assert!(text.contains("error: conflict in code"), "{text}");
+    assert!(
+        text.contains("stale worktree records remain: fatal: prune denied"),
+        "{text}"
+    );
+    Ok(())
+}
+// weave: run 'weave explain dalgona/crates/dalgona-batteries/src/orchestration/runtime/tests.rs' for per-hunk detail, 'weave check' to verify your resolution
