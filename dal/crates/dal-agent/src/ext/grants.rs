@@ -372,6 +372,18 @@ impl GrantStore {
         })
     }
 
+    /// Denies one MCP reservation without prompting: headless runs,
+    /// cancellation, and the ask timeout all settle the same way.
+    async fn deny_mcp(&self, key: &McpGrantKey, reservation: &Arc<Notify>) -> GrantOutcome {
+        self.finalize_mcp(
+            key,
+            Err(ServiceError::Denied(DenyReason::NotGranted)),
+            None,
+            reservation,
+        )
+        .await
+    }
+
     async fn ensure_declared_mcp_inner(
         &self,
         who: &Caller,
@@ -418,6 +430,9 @@ impl GrantStore {
             (GrantState::Absent, Some(notify)) => notify,
             _ => return Err(ServiceError::Cancelled),
         };
+        if !self.answerer_attached() {
+            return self.deny_mcp(&key, &notify).await;
+        }
         let capabilities = key
             .key
             .services
@@ -449,24 +464,8 @@ impl GrantStore {
         self.publish_request_update(dal_core::UpdateKind::RequestOpened(request.clone()));
         tokio::select! {
             biased;
-            () = cancel.cancelled() => {
-                self.finalize_mcp(
-                    &key,
-                    Err(ServiceError::Denied(DenyReason::NotGranted)),
-                    None,
-                    &notify,
-                )
-                .await
-            }
-            () = tokio::time::sleep(self.ask_timeout) => {
-                self.finalize_mcp(
-                    &key,
-                    Err(ServiceError::Denied(DenyReason::NotGranted)),
-                    None,
-                    &notify,
-                )
-                .await
-            }
+            () = cancel.cancelled() => self.deny_mcp(&key, &notify).await,
+            () = tokio::time::sleep(self.ask_timeout) => self.deny_mcp(&key, &notify).await,
             () = notify.notified() => self.take_mcp(&key),
             Settled { answer, by, .. } = answer => {
                 let (outcome, mut row) = Self::decide(&key.key, &answer, by.clone());
