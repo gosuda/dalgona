@@ -76,6 +76,20 @@ pub(super) fn fold(path: &Path, lines: &[Vec<u8>]) -> Result<Session, DevError> 
         })
 }
 
+/// Folds journal lines into the session they declare, without replay's
+/// crash-recovery synthesis: `dev fold` attributes each record's state
+/// change, so an open turn must stay open.
+pub(super) fn fold_declared(path: &Path, lines: &[Vec<u8>]) -> Result<Session, DevError> {
+    let mut records = Vec::with_capacity(lines.len());
+    for (index, line) in lines.iter().enumerate() {
+        records.push(decode_line(path, line, index)?);
+    }
+    Session::replay_declared(records).map_err(|source| DevError::Replay {
+        path: path.display().to_string(),
+        source,
+    })
+}
+
 /// Folds a journal file end to end.
 pub(super) fn load(path: &Path) -> Result<(Vec<Vec<u8>>, usize, Session), DevError> {
     let lines = read_lines(path)?;

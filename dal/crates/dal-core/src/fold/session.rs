@@ -138,6 +138,22 @@ impl Session {
             .ok_or_else(|| contradiction("generation id space exhausted"))
     }
 
+    /// Reconstructs the session exactly as the journal declares it, without
+    /// the crash-recovery records [`Session::replay`] synthesizes: an open
+    /// turn stays open, started jobs stay started, and the generation stays
+    /// the last boot's. Journal inspection uses this so attribution maps to
+    /// written records, not synthetic repairs.
+    ///
+    /// # Errors
+    /// Same contract as [`Session::replay`].
+    pub fn replay_declared(records: impl IntoIterator<Item = Record>) -> Result<Self, ReplayError> {
+        let mut replay = Replay::new();
+        for record in records {
+            replay.record(&record)?;
+        }
+        replay.finish_declared()
+    }
+
     /// Decodes lines and replays them, preserving unsupported-version errors.
     ///
     /// # Errors

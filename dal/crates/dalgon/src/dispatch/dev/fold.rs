@@ -28,7 +28,7 @@ pub(super) fn run(path: &Path) -> Result<ExitCode, DevError> {
     let mut prior: BTreeMap<String, String> = BTreeMap::new();
     for (index, line) in lines.records.iter().enumerate() {
         let record = util::decode_line(path, line, index)?;
-        let session = util::fold(path, &lines.records[..=index])?;
+        let session = util::fold_declared(path, &lines.records[..=index])?;
         let fields = util::fields(&session);
         let mut delta = String::new();
         for (name, value) in &fields {

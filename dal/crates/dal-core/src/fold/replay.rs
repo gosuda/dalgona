@@ -347,6 +347,18 @@ impl Replay {
         Ok(())
     }
 
+    /// Folds the declared records into a session without crash-recovery
+    /// synthesis: open turns stay open and no repair, orphan, or boot
+    /// records are minted, so journal inspection attributes state to the
+    /// written records only.
+    pub(super) fn finish_declared(mut self) -> Result<Session, ReplayError> {
+        self.calls.retain(|known| !known.settled);
+        self.reserve_counters()?;
+        let mut session = self.session;
+        session.restore_branch_state()?;
+        Ok(session)
+    }
+
     pub(super) fn finish(
         mut self,
         now: jiff::Timestamp,
