@@ -34,6 +34,7 @@ pub use session::backend::canonicalize_existing_prefix;
 /// The sign-in vocabulary of [`Host::login`], [`Host::logout`], and
 /// [`Host::stored_credentials`], so front ends need no provider crate.
 pub mod login {
+    pub use crate::host::LoginId;
     pub use crate::host::LoginOutcome;
     pub use dal_provider::{
         CredentialKind, LoginIo, LoginProgress, Method, PASTE_HINT, PROGRESS_CAPACITY,

@@ -496,3 +496,186 @@ async fn closing_the_connection_cancels_a_pending_login() {
     );
     assert!(!auth.exists());
 }
+
+#[tokio::test]
+async fn cancel_before_completion_cancels_the_waiter_and_reports_true() {
+    let (rig, _fake) = fake_rig(TokenReply::Issue).await;
+    let auth = rig.data().join("auth.json");
+    with_rpc(&rig, |mut rpc| async move {
+        initialize(&mut rpc).await;
+        rpc.call(1, "host/subscribe", sonic_rs::json!({})).await;
+        let reply = rpc
+            .call(
+                2,
+                "auth/login",
+                sonic_rs::json!({"provider": "openai-codex", "method": "browser"}),
+            )
+            .await;
+        let pending = result(&reply);
+        assert_eq!(pending["state"].as_str(), Some("pending"));
+        let login_id = pending["loginId"].as_u64().expect("login id");
+        let reply = rpc
+            .call(3, "auth/cancel", sonic_rs::json!({"loginId": login_id}))
+            .await;
+        assert_eq!(result(&reply), &sonic_rs::json!({"cancelled": true}));
+        let finished = login_finished(&mut rpc).await;
+        assert_eq!(finished["state"].as_str(), Some("failed"), "{finished}");
+        assert_eq!(
+            finished["detail"].as_str(),
+            Some("sign-in cancelled."),
+            "{finished}"
+        );
+        assert!(!auth.exists(), "a cancelled login stores nothing");
+        let reply = rpc
+            .call(4, "auth/cancel", sonic_rs::json!({"loginId": login_id}))
+            .await;
+        assert_eq!(result(&reply), &sonic_rs::json!({"cancelled": false}));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn cancel_after_completion_reports_false() {
+    let (rig, _fake) = fake_rig(TokenReply::Issue).await;
+    with_rpc(&rig, |mut rpc| async move {
+        initialize(&mut rpc).await;
+        rpc.call(1, "host/subscribe", sonic_rs::json!({})).await;
+        let reply = rpc
+            .call(
+                2,
+                "auth/login",
+                sonic_rs::json!({"provider": "openai-codex", "method": "browser"}),
+            )
+            .await;
+        let pending = result(&reply);
+        let login_id = pending["loginId"].as_u64().expect("login id");
+        let url = pending["url"].as_str().expect("authorize url").to_owned();
+        follow_authorize_url(&url, "auth-code")
+            .await
+            .expect("callback");
+        let finished = login_finished(&mut rpc).await;
+        assert_eq!(finished["state"].as_str(), Some("ready"), "{finished}");
+        // The finished login forgets its id just after the update is
+        // published, so poll until the id is gone.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let mut id = 3;
+        loop {
+            let reply = rpc
+                .call(id, "auth/cancel", sonic_rs::json!({"loginId": login_id}))
+                .await;
+            if result(&reply) == &sonic_rs::json!({"cancelled": false}) {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "a finished login forgets its id"
+            );
+            id += 1;
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn cancel_with_an_unknown_or_malformed_id_is_false_or_invalid_params() {
+    let (rig, _fake) = fake_rig(TokenReply::Issue).await;
+    with_rpc(&rig, |mut rpc| async move {
+        initialize(&mut rpc).await;
+        let reply = rpc
+            .call(1, "auth/cancel", sonic_rs::json!({"loginId": 999_999}))
+            .await;
+        assert_eq!(result(&reply), &sonic_rs::json!({"cancelled": false}));
+        let reply = rpc.call(2, "auth/cancel", sonic_rs::json!({})).await;
+        assert_error(
+            &reply,
+            -32602,
+            "invalid params for auth/cancel: missing member `loginId`",
+        );
+        let reply = rpc
+            .call(3, "auth/cancel", sonic_rs::json!({"loginId": "1"}))
+            .await;
+        assert_error(
+            &reply,
+            -32602,
+            "invalid params for auth/cancel: member `loginId` must be an integer",
+        );
+        let reply = rpc
+            .call(4, "auth/cancel", sonic_rs::json!({"loginId": -1}))
+            .await;
+        assert_error(
+            &reply,
+            -32602,
+            "invalid params for auth/cancel: member `loginId` must be a positive integer",
+        );
+        let reply = rpc.call(5, "auth/cancel", sonic_rs::json!([])).await;
+        assert_invalid_params(&reply, "auth/cancel", "object");
+    })
+    .await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn the_remote_client_cancels_a_pending_login() {
+    use crate::remote::{
+        CancellableLogin, RemoteEndpoint, RemoteHost, RemoteHostUpdate, RemoteLoginMethod,
+    };
+
+    let (rig, _fake) = fake_rig(TokenReply::Issue).await;
+    let socket_dir = rig.dir.path().join("sock");
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&socket_dir)
+            .expect("private socket directory");
+    }
+    let socket = socket_dir.join("rpc.sock");
+    let serve_host = rig.host.clone();
+    let server = crate::serve_local(&socket, None, None, move |transport| {
+        let host = serve_host.clone();
+        Box::pin(crate::serve_rpc(host, transport))
+    });
+    let client = async {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !socket.exists() {
+            assert!(tokio::time::Instant::now() < deadline, "socket appears");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let host = RemoteHost::connect(RemoteEndpoint::LocalSocket(socket.clone()))
+            .await
+            .expect("connect");
+        let mut updates = host.subscribe().await.expect("subscribe");
+        let login = host
+            .login_cancellable("openai-codex", RemoteLoginMethod::Browser)
+            .await
+            .expect("login");
+        let CancellableLogin::Pending { login_id, url, .. } = login else {
+            panic!("a browser login is pending, got {login:?}");
+        };
+        assert!(url.contains("/oauth/authorize"), "{url}");
+        assert!(host.cancel_login(login_id).await.expect("cancel"));
+        loop {
+            let update = tokio::time::timeout(Duration::from_secs(10), updates.next())
+                .await
+                .expect("update in time")
+                .expect("update");
+            if let RemoteHostUpdate::LoginFinished {
+                provider,
+                ready,
+                detail,
+            } = update
+            {
+                assert_eq!(provider, "openai-codex");
+                assert!(!ready);
+                assert_eq!(detail.as_deref(), Some("sign-in cancelled."));
+                break;
+            }
+        }
+        assert!(!host.cancel_login(login_id).await.expect("recancel"));
+    };
+    tokio::select! {
+        outcome = server => panic!("the local server ended: {outcome:?}"),
+        () = client => {}
+    }
+}

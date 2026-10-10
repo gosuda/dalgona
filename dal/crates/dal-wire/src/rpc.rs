@@ -452,6 +452,7 @@ async fn dispatch(
             Err(error) => fail(error),
             Ok(()) => auth::auth_login(host, state, writer, id, params).await,
         },
+        "auth/cancel" => run!("auth", || async { auth::auth_cancel(host, params) }),
         "auth/logout" => run!("auth", || auth::auth_logout(host, params)),
         _ => fail(ErrorObject {
             code: -32601,

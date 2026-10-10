@@ -16,18 +16,20 @@ pub(crate) fn is_child_policy_record(ext: &str, kind: &str) -> bool {
     ext == CHILD_POLICY_EXT && kind == CHILD_POLICY_KIND
 }
 
-pub use auth::LoginOutcome;
+pub use auth::{LoginId, LoginOutcome};
 pub use ops::DocEntry;
 
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
 use dal_core::{CallId, Config, SessionId, Stop, Workspace};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use crate::admission::Admission;
 use crate::ext::generation::Generation;
@@ -198,6 +200,11 @@ pub(crate) struct HostState {
     /// Names reserved while a new session is being opened.
     pub(crate) name_claims: Mutex<HashMap<(Workspace, Box<str>), SessionId>>,
     pub(crate) subscribers: Mutex<Vec<mpsc::UnboundedSender<HostUpdate>>>,
+    /// Pending OAuth logins by cancel id; `auth/cancel` fires them. Entries
+    /// leave on completion or cancel, so an id never outlives its attempt.
+    pub(crate) logins: Mutex<HashMap<LoginId, CancellationToken>>,
+    /// Next pending-login id; ids start at 1 and never repeat.
+    pub(crate) next_login: AtomicU64,
     pub(crate) shared: Arc<HostShared>,
     /// The futures of the extensions' `Attach` controllers; shutdown aborts them.
     pub(crate) attached: Mutex<tokio::task::JoinSet<()>>,

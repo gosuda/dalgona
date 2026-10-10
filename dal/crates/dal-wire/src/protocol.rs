@@ -116,6 +116,7 @@ pub fn protocol_schema() -> Value {
             "host/unsubscribe",
             "auth/status",
             "auth/login",
+            "auth/cancel",
             "auth/logout"
         ]),
     );

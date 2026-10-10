@@ -81,6 +81,8 @@ impl Host {
                 sessions: std::sync::Mutex::default(),
                 name_claims: std::sync::Mutex::default(),
                 subscribers: std::sync::Mutex::default(),
+                logins: std::sync::Mutex::default(),
+                next_login: std::sync::atomic::AtomicU64::new(1),
                 shared,
                 attached: std::sync::Mutex::default(),
             }),

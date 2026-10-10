@@ -4,6 +4,11 @@
 //! calls. The provider layer owns the flows; the host adds the one terminal
 //! [`HostUpdate::LoginFinished`] per login and the typed error mapping.
 
+use std::sync::PoisonError;
+use std::sync::atomic::Ordering;
+
+use tokio_util::sync::CancellationToken;
+
 use dal_provider::{Credential, LoginIo, LoginSite, Method, StoredCredential};
 
 use super::{Host, HostUpdate};
@@ -18,6 +23,27 @@ pub struct LoginOutcome {
     pub method: Method,
     /// The account the sign-in names, when the provider reports one.
     pub account: Option<Box<str>>,
+}
+
+/// Identifies one pending OAuth login for cancellation.
+///
+/// Minted when the login starts; forgotten when the login completes or is
+/// cancelled, so an id never outlives its attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct LoginId(u64);
+
+impl LoginId {
+    /// Wraps a raw id.
+    #[must_use]
+    pub const fn new(id: u64) -> Self {
+        Self(id)
+    }
+
+    /// The wire value of this id.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
 }
 
 impl Host {
@@ -64,6 +90,50 @@ impl Host {
                 Credential::ApiKey { .. } | Credential::None => None,
             },
         })
+    }
+
+    /// Tracks one pending OAuth login under a fresh id and returns the id
+    /// with the token that cancels the flow.
+    ///
+    /// The caller owns the attempt's lifecycle: [`Host::finish_login`]
+    /// forgets a finished login, and [`Host::cancel_login`] fires a pending
+    /// one. Either removes the entry, so an id never outlives its attempt.
+    pub fn register_login(&self) -> (LoginId, CancellationToken) {
+        let login = LoginId::new(self.state.next_login.fetch_add(1, Ordering::SeqCst));
+        let cancel = CancellationToken::new();
+        self.state
+            .logins
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(login, cancel.clone());
+        (login, cancel)
+    }
+
+    /// Forgets a finished login without firing its token.
+    pub fn finish_login(&self, login: LoginId) {
+        self.state
+            .logins
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&login);
+    }
+
+    /// Cancels a pending login: fires its token and forgets the id.
+    ///
+    /// Returns whether a pending attempt was cancelled: false when the id
+    /// is unknown or its login already finished.
+    pub fn cancel_login(&self, login: LoginId) -> bool {
+        let Some(cancel) = self
+            .state
+            .logins
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&login)
+        else {
+            return false;
+        };
+        cancel.cancel();
+        true
     }
 
     /// Removes the stored credential of `provider`, or of every provider when

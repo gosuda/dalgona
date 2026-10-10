@@ -1,16 +1,18 @@
-//! `auth/status`, `auth/login`, and `auth/logout` for version-1 RPC.
+//! `auth/status`, `auth/login`, `auth/cancel`, and `auth/logout` for version-1 RPC.
 //!
 //! Every sign-in runs through [`Host::login`]. An OAuth login answers
-//! `pending` with its URL (and device code) as soon as the flow reports one,
-//! then keeps running inside the same handler future: the workspace forbids
-//! `tokio::spawn`, so the waiter lives in the connection's task set. The
-//! host publishes one `login_finished` update when the flow ends.
+//! `pending` with its `loginId` and URL (and device code) as soon as the
+//! flow reports one, then keeps running inside the same handler future: the
+//! workspace forbids `tokio::spawn`, so the waiter lives in the
+//! connection's task set. `auth/cancel` fires the attempt's token by
+//! `loginId`; the host publishes one `login_finished` update when the flow
+//! ends, ready or cancelled.
 
 use std::sync::Arc;
 
 use dal_agent::Host;
 use dal_agent::login::{
-    CredentialKind, LoginIo, LoginProgress, Method, StoredCredential, login_providers,
+    CredentialKind, LoginId, LoginIo, LoginProgress, Method, StoredCredential, login_providers,
 };
 use serde::Serialize;
 use sonic_rs::Value;
@@ -193,17 +195,20 @@ impl Reply<'_> {
     }
 }
 
-/// A running login registered with its connection, so closing the
-/// connection cancels the flow. Dropping the slot cancels the login too.
+/// A running login registered with its connection and the host, so closing
+/// the connection or `auth/cancel` cancels the flow. Dropping the slot
+/// cancels the login too and forgets both registrations.
 struct LoginSlot {
     state: Arc<Mutex<Conn>>,
     key: String,
     cancel: CancellationToken,
+    host: Host,
+    login: LoginId,
 }
 
 impl LoginSlot {
-    async fn register(state: &Arc<Mutex<Conn>>, key: String) -> Self {
-        let cancel = CancellationToken::new();
+    async fn register(state: &Arc<Mutex<Conn>>, host: &Host, key: String) -> Self {
+        let (login, cancel) = host.register_login();
         state
             .lock()
             .await
@@ -213,17 +218,21 @@ impl LoginSlot {
             state: Arc::clone(state),
             key,
             cancel,
+            host: host.clone(),
+            login,
         }
     }
 
     async fn release(self) {
         self.state.lock().await.logins.remove(&self.key);
+        self.host.finish_login(self.login);
     }
 }
 
 impl Drop for LoginSlot {
     fn drop(&mut self) {
         self.cancel.cancel();
+        self.host.finish_login(self.login);
         if let Ok(mut locked) = self.state.try_lock() {
             locked.logins.remove(&self.key);
         }
@@ -238,7 +247,8 @@ async fn run_oauth(
     provider: &str,
     method: Method,
 ) -> Result<Option<Value>, ErrorObject> {
-    let slot = LoginSlot::register(reply.state, id_key(reply.id)).await;
+    let slot = LoginSlot::register(reply.state, host, id_key(reply.id)).await;
+    let login_id = slot.login.get();
     let (io, mut events) = LoginIo::channel(None, slot.cancel.clone());
     let login = host.login(provider, method, io);
     tokio::pin!(login);
@@ -248,19 +258,24 @@ async fn run_oauth(
             biased;
             outcome = &mut login => {
                 break match (outcome, replied) {
-                    (Ok(_), false) => Ok(Some(sonic_rs::json!({"state": "ready"}))),
+                    (Ok(_), false) => Ok(Some(sonic_rs::json!({"state": "ready", "loginId": login_id}))),
                     (Ok(_) | Err(_), true) => Ok(None),
                     (Err(error), false) => Err(host_error(error)),
                 };
             }
             Some(event) = events.recv() => {
                 let pending = match event {
-                    LoginProgress::OpenUrl { url } => {
-                        Some(sonic_rs::json!({"state": "pending", "url": url}))
-                    }
-                    LoginProgress::ShowCode { url, code } => {
-                        Some(sonic_rs::json!({"state": "pending", "url": url, "userCode": code}))
-                    }
+                    LoginProgress::OpenUrl { url } => Some(sonic_rs::json!({
+                        "state": "pending",
+                        "loginId": login_id,
+                        "url": url
+                    })),
+                    LoginProgress::ShowCode { url, code } => Some(sonic_rs::json!({
+                        "state": "pending",
+                        "loginId": login_id,
+                        "url": url,
+                        "userCode": code
+                    })),
                     LoginProgress::AskPaste { .. } | LoginProgress::Exchanging => None,
                 };
                 if let (Some(result), false) = (pending, replied) {
@@ -272,6 +287,22 @@ async fn run_oauth(
     };
     slot.release().await;
     outcome
+}
+
+/// Handles `auth/cancel`: fires a pending login's cancel token by `loginId`.
+///
+/// Answers whether a pending attempt was cancelled: false when the id is
+/// unknown or its login already finished. Cancelling resolves the login's
+/// waiter with the typed cancellation, which the host reports as a failed
+/// `login_finished` update; the `auth/login` request already answered
+/// `pending`, so no second reply follows it.
+pub(crate) fn auth_cancel(host: &Host, params: &Value) -> Result<Value, ErrorObject> {
+    let raw = super::opt_i64("auth/cancel", params, "loginId")?
+        .ok_or_else(|| invalid_params("auth/cancel", "missing member `loginId`"))?;
+    let login = u64::try_from(raw).map(LoginId::new).map_err(|_| {
+        invalid_params("auth/cancel", "member `loginId` must be a positive integer")
+    })?;
+    Ok(sonic_rs::json!({"cancelled": host.cancel_login(login)}))
 }
 
 /// Handles `auth/logout`: removes one provider's stored credential, or all.

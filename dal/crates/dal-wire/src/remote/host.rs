@@ -14,7 +14,8 @@ use super::agent::RemoteAgent;
 use super::conn::Shared;
 use super::decode::{decode, encode, malformed, opt_string, session_id, string};
 use super::{
-    RemoteAuthRow, RemoteEndpoint, RemoteHostUpdate, RemoteLogin, RemoteLoginMethod, RemoteModel,
+    CancellableLogin, RemoteAuthRow, RemoteEndpoint, RemoteHostUpdate, RemoteLogin,
+    RemoteLoginMethod, RemoteModel,
 };
 use crate::error::WireError;
 
@@ -231,7 +232,75 @@ impl RemoteHost {
         provider: &str,
         method: RemoteLoginMethod,
     ) -> Result<RemoteLogin, WireError> {
-        let params = match method {
+        let result = self
+            .shared
+            .call("auth/login", Self::login_params(provider, method))
+            .await?;
+        match string(&result, "state")? {
+            "ready" => Ok(RemoteLogin::Ready),
+            "pending" => Ok(RemoteLogin::Pending {
+                url: string(&result, "url")?.to_owned(),
+                user_code: opt_string(&result, "userCode"),
+            }),
+            _ => Err(malformed("state")),
+        }
+    }
+
+    /// Logs in through `auth/login`, keeping the pending attempt's cancel id.
+    ///
+    /// An API-key login finishes at once and answers
+    /// [`CancellableLogin::Ready`]; a browser or device login answers
+    /// [`CancellableLogin::Pending`] with the `loginId` to pass to
+    /// [`Self::cancel_login`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WireError`] when the call fails.
+    pub async fn login_cancellable(
+        &self,
+        provider: &str,
+        method: RemoteLoginMethod,
+    ) -> Result<CancellableLogin, WireError> {
+        let result = self
+            .shared
+            .call("auth/login", Self::login_params(provider, method))
+            .await?;
+        match string(&result, "state")? {
+            "ready" => Ok(CancellableLogin::Ready),
+            "pending" => Ok(CancellableLogin::Pending {
+                login_id: result
+                    .get("loginId")
+                    .and_then(JsonValueTrait::as_u64)
+                    .ok_or_else(|| malformed("loginId"))?,
+                url: string(&result, "url")?.to_owned(),
+                user_code: opt_string(&result, "userCode"),
+            }),
+            _ => Err(malformed("state")),
+        }
+    }
+
+    /// Cancels a pending login through `auth/cancel`.
+    ///
+    /// Returns whether a pending attempt was cancelled: false when the id is
+    /// unknown or its login already finished.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WireError`] when the call fails.
+    pub async fn cancel_login(&self, login_id: u64) -> Result<bool, WireError> {
+        let result = self
+            .shared
+            .call("auth/cancel", sonic_rs::json!({"loginId": login_id}))
+            .await?;
+        result
+            .get("cancelled")
+            .and_then(JsonValueTrait::as_bool)
+            .ok_or_else(|| malformed("cancelled"))
+    }
+
+    /// Builds the `auth/login` params for one method.
+    fn login_params(provider: &str, method: RemoteLoginMethod) -> Value {
+        match method {
             RemoteLoginMethod::ApiKey(key) => {
                 sonic_rs::json!({"provider": provider, "method": "api_key", "apiKey": key})
             }
@@ -241,15 +310,6 @@ impl RemoteHost {
             RemoteLoginMethod::Device => {
                 sonic_rs::json!({"provider": provider, "method": "device"})
             }
-        };
-        let result = self.shared.call("auth/login", params).await?;
-        match string(&result, "state")? {
-            "ready" => Ok(RemoteLogin::Ready),
-            "pending" => Ok(RemoteLogin::Pending {
-                url: string(&result, "url")?.to_owned(),
-                user_code: opt_string(&result, "userCode"),
-            }),
-            _ => Err(malformed("state")),
         }
     }
 
