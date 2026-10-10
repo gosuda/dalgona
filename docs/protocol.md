@@ -4,14 +4,22 @@ Framing over stdio or a local socket; `initialize` negotiates capabilities. The 
 
 | method | params | result | capability |
 |---|---|---|---|
-| initialize | hello | ready | core |
-| session/list | none | sessions | core |
-| session/open | id | session | core |
-| session/subscribe | id | stream | core |
-| session/close | id | ok | core |
-| blob/read | id | bytes | core |
-| protocol/schema | none | schema | core |
+| initialize | protocolVersion, capabilities | ready | none |
+| protocol/schema | none | schema | none |
+| commands/list | none | commands | none |
+| session/list | limit, cursor, search | sessions | sessions |
+| session/open | ref | session | sessions |
+| session/close | sessionId | ok | sessions |
+| session/view | sessionId, limit, before | view | sessions |
+| session/subscribe | sessionId, gen, after | stream | sessions |
+| session/unsubscribe | sessionId | ok | sessions |
+| session/submit | sessionId, command | reply | sessions |
+| session/answer | sessionId, requestId, answer | ok | sessions |
+| blob/read | sessionId, blobId | bytes | blobs |
+| models/list | none | models | models |
 | docs/read | uri | text | docs |
+| host/subscribe | none | stream | host.updates |
+| host/unsubscribe | none | ok | host.updates |
 | auth/status | none | providers | auth |
 | auth/login | provider, method, apiKey | pending, then ok | auth |
 | auth/cancel | loginId | cancelled | auth |

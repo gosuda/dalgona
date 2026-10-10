@@ -49,6 +49,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
       - run: cargo build --locked -p dalgona --bin dalgona
+      - run: cargo build --locked --release -p dalgona --bin dalgona
       - run: cargo test --locked -p gates --test dalgona-boot-01 --test dalgona-boot-02 --test dalgona-boot-03 --test dalgona-boot-04 --test dalgona-boot-05 --test dalgona-boot-06 --test dalgona-boot-07 --test dalgona-boot-08 --test dalgona-boot-09 --test dalgona-boot-10 --test dalgona-boot-11
       - run: cargo test --locked -p gates --release --test dalgona-orchestration-01 --test dalgona-orchestration-02 --test dalgona-orchestration-03 --test dalgona-orchestration-04 --test dalgona-orchestration-05 --test dalgona-orchestration-06 --test dalgona-orchestration-07
       - run: cargo test --locked -p gates --test dalgona-batteries-01 --test dalgona-batteries-02 --test dalgona-batteries-03 --test dalgona-batteries-04 --test dalgona-batteries-05 --test dalgona-batteries-06 --test dalgona-batteries-07 --test dalgona-batteries-08 --test dalgona-batteries-09 --test dalgona-batteries-10 --test dalgona-batteries-11 --test dalgona-batteries-12 --test dalgona-batteries-13 --test dalgona-batteries-14 --test dalgona-batteries-15 --test dalgona-batteries-16 --test dalgona-batteries-17 --test dalgona-batteries-18
