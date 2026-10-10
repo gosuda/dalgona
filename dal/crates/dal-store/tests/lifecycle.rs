@@ -1185,16 +1185,19 @@ mod permissions {
         fs::File::create(dir.join("probe")).is_err()
     }
 
+    const UNENFORCED: &str = "chmod is not enforced for this user (root or an ACL bypass), so the permission contract cannot be exercised; run the permission tests unprivileged";
+
     #[tokio::test]
     async fn unwritable_data_root_fails_the_first_append_with_the_path_and_recovers() {
         let (temp, store) = setup("life-eacces");
         let root = temp.path().join("data");
         fs::create_dir_all(&root).expect("create data root");
         chmod(&root, 0o500);
-        if !enforced(&root) {
+        let was_enforced = enforced(&root);
+        if !was_enforced {
             chmod(&root, 0o700);
-            return;
         }
+        assert!(was_enforced, "{UNENFORCED}");
         let id = SessionId::new_v7();
         let mut journal = store.create_session(id);
         let refused = journal
@@ -1227,10 +1230,11 @@ mod permissions {
         journal.close().await.expect("session closes");
         let path = store.session_file(id);
         chmod(&path, 0o000);
-        if fs::File::open(&path).is_ok() {
+        let was_enforced = fs::File::open(&path).is_err();
+        if !was_enforced {
             chmod(&path, 0o600);
-            return;
         }
+        assert!(was_enforced, "{UNENFORCED}");
         let refused = store
             .open_session(id)
             .await
@@ -1265,10 +1269,11 @@ mod permissions {
             .expect("session has a parent")
             .to_path_buf();
         chmod(&workspace_dir, 0o500);
-        if !enforced(&workspace_dir) {
+        let was_enforced = enforced(&workspace_dir);
+        if !was_enforced {
             chmod(&workspace_dir, 0o700);
-            return;
         }
+        assert!(was_enforced, "{UNENFORCED}");
         let refused = store
             .delete(id)
             .expect_err("delete cannot remove the directory");
@@ -1277,6 +1282,100 @@ mod permissions {
             matches!(&refused, StoreError::Io { path, .. } if path == &session_dir),
             "typed Io naming the session directory, got {refused:?}"
         );
+    }
+}
+
+/// Path-shape faults that fail for every user, root included, so each error
+/// contract is exercised without depending on permission bits.
+#[cfg(unix)]
+mod path_faults {
+    use super::*;
+
+    #[tokio::test]
+    async fn blocked_data_root_fails_the_first_append_with_the_path_and_recovers() {
+        let (temp, store) = setup("life-blocked-root");
+        let root = temp.path().join("data");
+        fs::write(&root, b"not a directory").expect("occupy the data root with a file");
+        let id = SessionId::new_v7();
+        let mut journal = store.create_session(id);
+        let refused = journal
+            .append(vec![user(1, "no room")])
+            .await
+            .expect_err("a data root that is a file refuses the first write");
+        assert!(
+            matches!(&refused, StoreError::Io { path, .. } if path.starts_with(&root)),
+            "typed Io naming a path under the root, got {refused:?}"
+        );
+        assert!(!store.session_file(id).exists(), "no journal was created");
+        fs::remove_file(&root).expect("clear the blocker");
+        journal
+            .append(vec![user(1, "room now")])
+            .await
+            .expect("the same session retries once the cause is removed");
+        journal.close().await.expect("session closes");
+    }
+
+    #[tokio::test]
+    async fn unopenable_journal_fails_open_with_the_path_and_releases_the_lock() {
+        let (_temp, store) = setup("life-unopenable");
+        let id = SessionId::new_v7();
+        let mut journal = store.create_session(id);
+        journal
+            .append(vec![user(1, "sealed")])
+            .await
+            .expect("append");
+        journal.close().await.expect("session closes");
+        let path = store.session_file(id);
+        let bytes = fs::read(&path).expect("read journal");
+        fs::remove_file(&path).expect("remove journal");
+        fs::create_dir(&path).expect("occupy the journal path with a directory");
+        let refused = store
+            .open_session(id)
+            .await
+            .expect_err("a journal that is a directory is not opened");
+        let text = refused.to_string();
+        assert!(
+            text.contains("open") && text.contains(&path.display().to_string()),
+            "names the operation and path: {text}"
+        );
+        fs::remove_dir(&path).expect("clear the blocker");
+        fs::write(&path, bytes).expect("restore journal");
+        let (mut reopened, _) = store
+            .open_session(id)
+            .await
+            .expect("the failed open did not leak the session lock");
+        reopened.close().await.expect("session closes");
+    }
+
+    #[tokio::test]
+    async fn delete_with_an_inaccessible_session_directory_reports_its_path() {
+        let (_temp, store) = setup("life-blocked-delete");
+        let id = SessionId::new_v7();
+        let mut journal = store.create_session(id);
+        journal.append(vec![user(1, "keep")]).await.expect("append");
+        journal.close().await.expect("session closes");
+        let session_dir = store
+            .session_file(id)
+            .parent()
+            .expect("journal has a directory")
+            .to_path_buf();
+        let workspace_dir = session_dir
+            .parent()
+            .expect("session has a parent")
+            .to_path_buf();
+        let moved = workspace_dir.with_extension("moved");
+        fs::rename(&workspace_dir, &moved).expect("move the workspace directory aside");
+        fs::write(&workspace_dir, b"not a directory").expect("occupy its path with a file");
+        let refused = store
+            .delete(id)
+            .expect_err("a session behind a file cannot be reached");
+        assert!(
+            matches!(&refused, StoreError::Io { path, .. } if path == &session_dir),
+            "typed Io naming the session directory, got {refused:?}"
+        );
+        fs::remove_file(&workspace_dir).expect("clear the blocker");
+        fs::rename(&moved, &workspace_dir).expect("restore the workspace directory");
+        store.delete(id).expect("delete once the cause is removed");
     }
 }
 

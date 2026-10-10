@@ -11,7 +11,16 @@ use crate::{
 };
 
 /// Names the session layout owns; a sidecar of the same name would replace live session state.
-const RESERVED: [&str; 5] = ["journal.jsonl", "lock", "info.json", "blobs", "jobs"];
+/// Compared ASCII case-insensitively because Windows and default macOS volumes fold case.
+const RESERVED: [&str; 7] = [
+    "journal.jsonl",
+    "lock",
+    "lock.owner",
+    "info.json",
+    "blobs",
+    "jobs",
+    "sidecar",
+];
 
 /// Reads and atomically writes private files within one file-backed session.
 #[derive(Debug)]
@@ -89,7 +98,10 @@ impl<'session> Sidecar<'session> {
                 reason: "sidecar name must be 1 to 64 ASCII alphanumeric, '.', '_', or '-' characters and must not start with '.'".into(),
             });
         }
-        if RESERVED.contains(&name) {
+        if RESERVED
+            .iter()
+            .any(|reserved| reserved.eq_ignore_ascii_case(name))
+        {
             return Err(StoreError::Invalid {
                 reason: format!("sidecar name {name:?} is reserved for the session's own files")
                     .into(),
@@ -234,6 +246,109 @@ mod tests {
         }
 
         assert!(!paths.directory().join("../outside").exists());
+    }
+
+    #[test]
+    fn layout_owned_names_are_rejected_and_leave_the_session_unchanged() {
+        let (_root, paths) = sidecar();
+        let sidecar = Sidecar::new(&paths);
+        let extension = Name::parse("ext").expect("valid extension name");
+        let state = SidecarName::parse("state").expect("valid sidecar name");
+        sidecar
+            .for_extension(&extension)
+            .write(&state, b"extension state")
+            .expect("create the extension sidecar directory");
+        fs::write(paths.lock(), b"lock").expect("write lock file");
+        let before = listing(paths.directory());
+
+        for reserved in [
+            "journal.jsonl",
+            "lock",
+            "info.json",
+            "blobs",
+            "jobs",
+            "sidecar",
+        ] {
+            assert!(
+                matches!(
+                    sidecar.write(reserved, b"no"),
+                    Err(StoreError::Invalid { .. })
+                ),
+                "write of {reserved:?} must be rejected"
+            );
+            assert!(
+                matches!(sidecar.read(reserved), Err(StoreError::Invalid { .. })),
+                "read of {reserved:?} must be rejected"
+            );
+        }
+
+        assert_eq!(listing(paths.directory()), before);
+        assert_eq!(
+            fs::read(paths.lock()).expect("read lock file"),
+            b"lock",
+            "the lock file is untouched"
+        );
+        assert_eq!(
+            fs::read(paths.sidecar_dir().join("ext").join("state")).expect("read extension state"),
+            b"extension state"
+        );
+    }
+
+    #[test]
+    fn lock_owner_marker_and_case_variants_of_layout_names_are_rejected() {
+        let (_root, paths) = sidecar();
+        let sidecar = Sidecar::new(&paths);
+        fs::write(paths.sidecar("lock.owner"), b"4242\n").expect("write lock owner");
+        let before = listing(paths.directory());
+
+        for reserved in [
+            "journal.jsonl",
+            "lock",
+            "lock.owner",
+            "info.json",
+            "blobs",
+            "jobs",
+            "sidecar",
+        ] {
+            for name in [reserved.to_ascii_uppercase(), reserved.replace('o', "O")] {
+                assert!(
+                    matches!(sidecar.write(&name, b"no"), Err(StoreError::Invalid { .. })),
+                    "write of {name:?} must be rejected"
+                );
+                assert!(
+                    matches!(sidecar.read(&name), Err(StoreError::Invalid { .. })),
+                    "read of {name:?} must be rejected"
+                );
+            }
+        }
+        assert!(matches!(
+            sidecar.write("lock.owner", b"no"),
+            Err(StoreError::Invalid { .. })
+        ));
+
+        assert_eq!(listing(paths.directory()), before);
+        assert_eq!(
+            fs::read(paths.sidecar("lock.owner")).expect("read lock owner"),
+            b"4242\n",
+            "the owner marker is untouched"
+        );
+    }
+
+    fn listing(directory: &std::path::Path) -> Vec<(PathBuf, bool)> {
+        let mut entries = Vec::new();
+        let mut pending = vec![directory.to_path_buf()];
+        while let Some(current) = pending.pop() {
+            for entry in fs::read_dir(&current).expect("list session directory") {
+                let path = entry.expect("directory entry").path();
+                let is_dir = path.is_dir();
+                if is_dir {
+                    pending.push(path.clone());
+                }
+                entries.push((path, is_dir));
+            }
+        }
+        entries.sort();
+        entries
     }
 
     #[test]

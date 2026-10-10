@@ -1,5 +1,8 @@
-use super::{ExecArgs, ExecEvent, ExecJob, ExecOutcome, ExecState, ExecTransition};
-use dal_core::CallId;
+use super::{
+    ExecArgs, ExecEvent, ExecJob, ExecOutcome, ExecState, ExecTool, ExecTransition, ValidatedCall,
+};
+use dal_agent::{ProcResult, ProcStatus, ToolError, ext::ToolOutcome};
+use dal_core::{CallId, JobOutcome};
 use std::{
     path::Path,
     time::{Duration, Instant},
@@ -269,7 +272,7 @@ fn final_text_omits_success_status_and_empty_preview() {
 }
 
 #[cfg(unix)]
-fn write_exec_fixture(path: &Path, command: &str) {
+fn write_exec_fixture(path: &Path, command: &str, timeout_seconds: u64) {
     let usage = sonic_rs::json!({
         "input_tokens": 1,
         "cached_input_tokens": 0,
@@ -287,7 +290,7 @@ fn write_exec_fixture(path: &Path, command: &str) {
                 "name": "exec",
                 "args": {
                     "kind": "parsed",
-                    "value": {"command": command, "timeout_seconds": 10}
+                    "value": {"command": command, "timeout_seconds": timeout_seconds}
                 }
             }]},
             {"type": "usage", "usage": usage},
@@ -315,15 +318,23 @@ fn write_exec_fixture(path: &Path, command: &str) {
 }
 
 #[cfg(unix)]
-#[tokio::test]
-async fn exec_child_gets_provenance_after_captured_environment_overlays() {
+struct ExecRun {
+    workspace: tempfile::TempDir,
+    thread: dal_core::SessionId,
+    settled: dal_core::ToolOutcomeView,
+}
+
+/// Runs one scripted exec call through a real host and returns its settled result.
+#[cfg(unix)]
+async fn run_scripted_exec(
+    command: &str,
+    timeout_seconds: u64,
+    env_vars: BTreeMap<OsString, OsString>,
+) -> ExecRun {
     let data = tempfile::tempdir().expect("create data root");
     let workspace_dir = tempfile::tempdir().expect("create workspace");
-    let fixture_path = data.path().join("exec-provenance.jsonl");
-    write_exec_fixture(
-        &fixture_path,
-        r#"printf '%s\n' "$DAL_THREAD_ID" "$DAL_TOOL_CALL_ID" > provenance.txt"#,
-    );
+    let fixture_path = data.path().join("exec-fixture.jsonl");
+    write_exec_fixture(&fixture_path, command, timeout_seconds);
     let user = format!(
         "model = \"openai/gpt-6\"\napproval = \"all\"\n[providers.scripted]\nfixture = {:?}\n",
         fixture_path.to_string_lossy()
@@ -338,16 +349,7 @@ async fn exec_child_gets_provenance_after_captured_environment_overlays() {
         bundled: Vec::new(),
     };
     let env = Env {
-        vars: BTreeMap::from([
-            (
-                OsString::from("DAL_THREAD_ID"),
-                OsString::from("captured-thread"),
-            ),
-            (
-                OsString::from("DAL_TOOL_CALL_ID"),
-                OsString::from("captured-call"),
-            ),
-        ]),
+        vars: env_vars,
         cwd: workspace_dir.path().to_path_buf(),
         sandbox_helper: None,
     };
@@ -356,7 +358,7 @@ async fn exec_child_gets_provenance_after_captured_environment_overlays() {
     let agent = host
         .open(
             SessionRef::Ephemeral { workspace },
-            ClientId::new("exec-provenance-test"),
+            ClientId::new("exec-outcome-test"),
         )
         .await
         .expect("open session");
@@ -375,23 +377,208 @@ async fn exec_child_gets_provenance_after_captured_environment_overlays() {
         })
         .await
         .expect("submit prompt");
-    assert!(matches!(reply, dal_core::Reply::Accepted { .. }));
-    tokio::time::timeout(Duration::from_secs(10), async {
+    assert!(
+        matches!(reply, dal_core::Reply::Accepted { .. }),
+        "got {reply:?}"
+    );
+    let settled = tokio::time::timeout(Duration::from_secs(20), async {
+        let mut settled = None;
         loop {
             let Some(Delivery::Update(update)) = updates.next().await else {
                 panic!("session ended before the exec turn ended");
             };
-            if matches!(update.kind, UpdateKind::TurnEnded { .. }) {
-                break;
+            match &update.kind {
+                UpdateKind::ToolSettled { outcome, .. } => settled = Some(outcome.clone()),
+                UpdateKind::TurnEnded { .. } => break,
+                _ => {}
             }
         }
+        settled
     })
     .await
-    .expect("wait for exec turn");
-    let contents = tokio::fs::read_to_string(workspace_dir.path().join("provenance.txt"))
-        .await
-        .expect("read provenance output");
-    assert_eq!(contents, format!("{thread}\nexec-call\n"));
+    .expect("wait for exec turn")
+    .expect("the exec call settled");
     let shutdown = host.shutdown(Duration::from_secs(1)).await;
     assert_eq!(shutdown.sessions_closed, 1);
+    ExecRun {
+        workspace: workspace_dir,
+        thread,
+        settled,
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn exec_child_gets_provenance_after_captured_environment_overlays() {
+    let run = run_scripted_exec(
+        r#"printf '%s\n' "$DAL_THREAD_ID" "$DAL_TOOL_CALL_ID" > provenance.txt"#,
+        10,
+        BTreeMap::from([
+            (
+                OsString::from("DAL_THREAD_ID"),
+                OsString::from("captured-thread"),
+            ),
+            (
+                OsString::from("DAL_TOOL_CALL_ID"),
+                OsString::from("captured-call"),
+            ),
+        ]),
+    )
+    .await;
+    assert!(!run.settled.is_error, "got {:?}", run.settled);
+    let contents = tokio::fs::read_to_string(run.workspace.path().join("provenance.txt"))
+        .await
+        .expect("read provenance output");
+    assert_eq!(contents, format!("{}\nexec-call\n", run.thread));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn exec_reports_a_nonzero_exit_as_an_error_with_the_code() {
+    let run = run_scripted_exec("echo partial; exit 3", 10, BTreeMap::new()).await;
+    assert!(run.settled.is_error, "got {:?}", run.settled);
+    assert!(
+        run.settled.text.contains("partial")
+            && run.settled.text.contains("Full output: ")
+            && run.settled.text.ends_with("\nCommand exited with code 3"),
+        "got {:?}",
+        run.settled.text
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn exec_reports_a_signalled_command_as_an_error_with_the_signal() {
+    let run = run_scripted_exec("kill -KILL $$", 10, BTreeMap::new()).await;
+    assert!(run.settled.is_error, "got {:?}", run.settled);
+    assert!(
+        run.settled
+            .text
+            .ends_with("\nCommand was killed by signal 9"),
+        "got {:?}",
+        run.settled.text
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn exec_reports_a_timed_out_command_as_an_error_with_the_limit() {
+    let run = run_scripted_exec("sleep 60", 1, BTreeMap::new()).await;
+    assert!(run.settled.is_error, "got {:?}", run.settled);
+    assert!(
+        run.settled
+            .text
+            .ends_with("\nCommand timed out after 1 seconds"),
+        "got {:?}",
+        run.settled.text
+    );
+}
+
+fn settled(
+    status: ProcStatus,
+    timeout_seconds: Option<u64>,
+    preview: &[u8],
+) -> (ToolOutcome, ExecJob) {
+    let timeout = timeout_seconds.map(Duration::from_secs);
+    let mut job = ExecJob::new(CallId::new("call-1"), "cmd".into(), timeout);
+    job.on(ExecEvent::Spawned { at: Instant::now() });
+    let validated = ValidatedCall {
+        command: "cmd".into(),
+        cwd: Path::new("/workspace").to_path_buf(),
+        timeout,
+        timeout_seconds,
+        foreground: None,
+    };
+    let result = ProcResult {
+        status,
+        outcome: JobOutcome::Lost,
+        preview: preview.into(),
+        log_path: Path::new("/session/jobs/call.log").to_path_buf(),
+        stdout_prefix: Box::default(),
+        stdout_prefix_overflowed: false,
+        denial_seen: false,
+        completion_tail: Box::default(),
+    };
+    let outcome = ExecTool::settle(&mut job, &validated, Ok(result), false);
+    (outcome, job)
+}
+
+fn error_text(outcome: ToolOutcome) -> String {
+    match outcome {
+        ToolOutcome::Err(error) => error.to_string(),
+        other => panic!("expected a tool error, got {other:?}"),
+    }
+}
+
+#[test]
+fn settle_maps_a_zero_exit_to_success_without_a_status_line() {
+    let (outcome, job) = settled(ProcStatus::Exited { code: 0 }, None, b"done");
+    assert!(matches!(job.state, ExecState::Done));
+    let ToolOutcome::Ok(output) = outcome else {
+        panic!("a zero exit must succeed, got {outcome:?}");
+    };
+    assert_eq!(
+        output.to_string(),
+        "done\nFull output: /session/jobs/call.log"
+    );
+}
+
+#[test]
+fn settle_maps_each_failed_terminal_status_to_its_own_error_text() {
+    let preview = b"tail";
+    let output = "tail\nFull output: /session/jobs/call.log";
+    let cases = [
+        (
+            ProcStatus::Exited { code: 3 },
+            None,
+            "Command exited with code 3",
+        ),
+        (
+            ProcStatus::Exited { code: -1 },
+            None,
+            "Command exited with code -1",
+        ),
+        (
+            ProcStatus::Signaled { signal: 9 },
+            None,
+            "Command was killed by signal 9",
+        ),
+        (
+            ProcStatus::TimedOut,
+            Some(5),
+            "Command timed out after 5 seconds",
+        ),
+        (ProcStatus::TimedOut, None, "Command timed out"),
+        (ProcStatus::Cancelled, Some(5), "Command aborted"),
+    ];
+    for (status, timeout_seconds, line) in cases {
+        let (outcome, job) = settled(status, timeout_seconds, preview);
+        assert!(matches!(job.state, ExecState::Done), "{status:?}");
+        assert_eq!(
+            error_text(outcome),
+            format!("{output}\n{line}"),
+            "{status:?}"
+        );
+    }
+}
+
+#[test]
+fn settle_passes_a_wait_failure_through_without_touching_the_job() {
+    let mut job = ExecJob::new(CallId::new("call-1"), "cmd".into(), None);
+    job.on(ExecEvent::Spawned { at: Instant::now() });
+    let validated = ValidatedCall {
+        command: "cmd".into(),
+        cwd: Path::new("/workspace").to_path_buf(),
+        timeout: None,
+        timeout_seconds: None,
+        foreground: None,
+    };
+    let outcome = ExecTool::settle(
+        &mut job,
+        &validated,
+        Err(ToolError::message("wait failed")),
+        false,
+    );
+    assert_eq!(error_text(outcome), "wait failed");
+    assert!(matches!(job.state, ExecState::Running));
 }

@@ -366,11 +366,14 @@ async fn delete_reports_a_failed_parent_directory_sync() {
             .permissions();
         permissions.set_mode(0o300);
         fs::set_permissions(&workspace_dir, permissions).expect("drop directory read permission");
-        // Root reads through permission bits, so the sync failure is unreachable there.
-        if fs::read_dir(&workspace_dir).is_ok() {
+        let enforced = fs::read_dir(&workspace_dir).is_err();
+        if !enforced {
             let _ = fs::set_permissions(&workspace_dir, fs::Permissions::from_mode(0o700));
-            return;
         }
+        assert!(
+            enforced,
+            "chmod is not enforced for this user (root or an ACL bypass), so the directory-sync failure is unreachable; run this test unprivileged"
+        );
 
         let result = store.delete(id);
         let _ = fs::set_permissions(&workspace_dir, fs::Permissions::from_mode(0o700));
