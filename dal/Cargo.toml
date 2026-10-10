@@ -70,14 +70,24 @@ allow_attributes_without_reason = "deny"
 exit = "deny"
 disallowed_methods = "deny"
 
-# Fast feedback: line tables keep backtraces readable while compiling much faster than full debug info.
+# Fast feedback for dev profile
 [profile.dev]
-debug = "line-tables-only"
+debug     = "limited"
 
-# Fast feedback: Faster Tests
+# Bypass the heavy linker for DWARF debug info (macOS/Linux).
+# Keeps debug info in object files instead of packing it into the binary.
+split-debuginfo = "unpacked"
+
+# Increase optimization slightly
+# Setting this to 1 can sometimes make the compiler generate cleaner code 
+# that LLVM backend can process faster, without doing heavy optimizations.
+opt-level = 1
+
+# Fast feedback for test profile
 [profile.test]
 opt-level = 3
-debug = "line-tables-only"
+debug     = "limited"
+split-debuginfo = "unpacked"
 
 [profile.dist]
 inherits = "release"

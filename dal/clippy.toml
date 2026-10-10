@@ -1,6 +1,9 @@
 allow-panic-in-tests = true
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true
+cognitive-complexity-threshold = 15
+type-complexity-threshold = 250
+too-many-arguments-threshold = 10
 disallowed-methods = [
     "std::env::set_current_dir",
     "std::env::current_dir",
