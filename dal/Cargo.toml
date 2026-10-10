@@ -5,7 +5,7 @@ members = ["gates", "crates/*"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.90"
+rust-version = "1.99.0"
 license-file = "../LICENSE.md"
 repository = "https://github.com/gosuda/dalgona"
 
@@ -74,7 +74,6 @@ disallowed_methods = "deny"
 # faster than full debug info; the few runtime-heavy dependencies stay
 # optimized so test execution stays fast.
 [profile.dev]
-opt-level = 1
 debug = "line-tables-only"
 
 [profile.dev.package.sonic-rs]
@@ -87,6 +86,11 @@ opt-level = 2
 opt-level = 2
 [profile.dev.package.proptest]
 opt-level = 2
+
+# Fast feedback: Faster Tests
+[profile.test]
+opt-level = 3
+debug = "line-tables-only"
 
 [profile.dist]
 inherits = "release"
