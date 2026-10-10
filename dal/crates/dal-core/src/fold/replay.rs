@@ -148,6 +148,16 @@ impl Replay {
                 self.session.delivered_jobs.extend(jobs.iter().copied());
             }
             Record::Job { job, event, .. } => self.job(*job, event)?,
+            Record::Reminder(Entry {
+                kind: EntryKind::Reminder { source, .. },
+                ..
+            }) if source.as_ref() == "jobs.finished" => {
+                // The live path writes this reminder and then drains
+                // `ended_jobs`; replaying the record consumes the pending
+                // entries the same way, so a reopened session does not
+                // re-emit reminders the journal already delivered.
+                self.session.ended_jobs.clear();
+            }
             _ => {}
         }
         Ok(())
@@ -412,6 +422,13 @@ impl Replay {
             job: *job,
             event: JobEvent::Orphaned,
         }));
+        // The synthesized orphans are the jobs' terminal records: settle them
+        // through the session too, or a reopened session lists them as live.
+        // They stay in `ended_jobs` so the next turn's `jobs.finished`
+        // reminder reports the loss once.
+        for (job, _) in std::mem::take(&mut self.started_jobs) {
+            self.session.job_settled(job, JobOutcome::Lost);
+        }
         let mut session = self.session;
         session.restore_branch_state()?;
         let generation = session.next_generation()?;

@@ -1972,6 +1972,52 @@ fn replay_accepts_legacy_job_start_without_kind() {
 }
 
 #[test]
+fn replayed_jobs_follow_journal_records_not_replay_state() {
+    let settled = JobId::parse("01890f47-36b0-7cc4-8000-000000000002").unwrap();
+    let live_at_close = JobId::parse("01890f47-36b0-7cc4-8000-000000000003").unwrap();
+    let records = [
+        Record::Job {
+            at: stamp(),
+            job: settled,
+            event: JobEvent::Started {
+                kind: Some("exec".into()),
+            },
+        },
+        Record::Job {
+            at: stamp(),
+            job: settled,
+            event: JobEvent::Settled { outcome: None },
+        },
+        // The recorded reminder consumed the settled job in the live fold;
+        // replaying it must drain the pending entry the same way.
+        Record::Reminder(Entry {
+            id: entry(1),
+            parent: None,
+            at: stamp(),
+            kind: EntryKind::Reminder {
+                source: "jobs.finished".into(),
+                text: "jobs.finished: one".into(),
+            },
+        }),
+        Record::Job {
+            at: stamp(),
+            job: live_at_close,
+            event: JobEvent::Started {
+                kind: Some("exec".into()),
+            },
+        },
+    ];
+    let (session, _) = Session::replay(records, stamp()).unwrap();
+    // The orphan synthesized at finish settles the still-open job: nothing
+    // stays live, and the pending reminder queue holds only that loss.
+    assert_eq!(session.live_jobs.as_slice(), []);
+    assert_eq!(
+        session.ended_jobs.as_slice(),
+        [(live_at_close, JobOutcome::Lost)]
+    );
+}
+
+#[test]
 fn blob_journal_parts_preserve_stored_lengths() {
     let blob = crate::BlobId::from_bytes(b"stored payload");
     let text = part_to_journal(&Part::Blob {
