@@ -755,6 +755,69 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the process-boundary test owns its subprocess environment and streams"
+    )]
+    fn wire_streams_keep_protocol_private_across_child_exec() -> io::Result<()> {
+        use std::io::{Read, Write};
+        use std::os::fd::AsRawFd;
+        use std::process::{Command, Stdio};
+
+        const CHILD: &str = "DAL_TEST_WIRE_STREAMS_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let mut streams = super::isolate_wire_streams()?;
+            let mut request = String::new();
+            streams.reader.read_to_string(&mut request)?;
+            assert_eq!(request, "protocol request\n");
+            streams.writer.write_all(b"protocol reply\n")?;
+            std::io::stdout().write_all(b"parent diagnostic\n")?;
+            let mut input = [0_u8; 1];
+            assert_eq!(std::io::stdin().read(&mut input)?, 0);
+            for stream in [&streams.reader, &streams.writer] {
+                assert!(rustix::io::fcntl_getfd(stream)?.contains(rustix::io::FdFlags::CLOEXEC));
+            }
+            let status = Command::new("/bin/sh")
+                .args([
+                    "-c",
+                    "for fd in \"$@\"; do if (eval \": <&$fd\") 2>/dev/null; then exit 31; fi; done; printf 'child diagnostic\\n'",
+                    "wire-child",
+                ])
+                .arg(streams.reader.as_raw_fd().to_string())
+                .arg(streams.writer.as_raw_fd().to_string())
+                .status()?;
+            assert!(status.success(), "{status}");
+            return Ok(());
+        }
+
+        let mut child = Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "edge::tests::wire_streams_keep_protocol_private_across_child_exec",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        let mut input = child.stdin.take().expect("piped input");
+        input.write_all(b"protocol request\n")?;
+        drop(input);
+        let output = child.wait_with_output()?;
+        let protocol = String::from_utf8_lossy(&output.stdout);
+        let diagnostic = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{protocol}\n{diagnostic}");
+        assert!(protocol.contains("protocol reply\n"), "{protocol}");
+        assert!(!protocol.contains("diagnostic"), "{protocol}");
+        assert!(diagnostic.contains("parent diagnostic\n"), "{diagnostic}");
+        assert!(diagnostic.contains("child diagnostic\n"), "{diagnostic}");
+        Ok(())
+    }
+
     #[test]
     fn family_table_maps_aliases_and_rejects_unknown_binaries() {
         assert_eq!(super::family_for_binary("dalgon"), Some("dal"));
