@@ -60,10 +60,7 @@ fn termios_text(pty: &PtyProcess) -> io::Result<String> {
     let termios = pty.termios()?;
     Ok(format!(
         "{:?} {:?} {:?} {:?}",
-        termios.input_modes,
-        termios.output_modes,
-        termios.control_modes,
-        termios.local_modes
+        termios.input_modes, termios.output_modes, termios.control_modes, termios.local_modes
     ))
 }
 
@@ -137,7 +134,10 @@ async fn ctrl_c_on_a_pty_cancels_the_wait_and_restores_the_terminal() -> TestRes
         Ok::<_, io::Error>((status, output, after))
     })
     .await??;
-    assert!(!status.success(), "cancellation fails the login, got {status}");
+    assert!(
+        !status.success(),
+        "cancellation fails the login, got {status}"
+    );
     assert!(
         !auth_json(home.path()).exists(),
         "cancellation stores no credential"

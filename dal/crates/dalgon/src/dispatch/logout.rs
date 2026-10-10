@@ -17,7 +17,9 @@ pub(crate) async fn run(args: cli::ProviderArgs, startup: Startup, product: Prod
     }
     let all = args.provider.is_none();
     let config = startup.config.clone();
-    let AuthHost { host, auth_path, .. } = match start_auth_host(startup, product).await {
+    let AuthHost {
+        host, auth_path, ..
+    } = match start_auth_host(startup, product).await {
         Ok(auth) => auth,
         Err(code) => return code,
     };

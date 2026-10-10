@@ -147,7 +147,11 @@ pub(super) fn host_auth_error(module: &str, error: &HostError, path: &Path) -> E
     match error {
         HostError::Provider(error) => provider_error(module, error, path),
         error => two_lines(
-            crate::cli::texts::internal_error_at(module, &error.to_string(), &path.join("cache").join("dal.log")),
+            crate::cli::texts::internal_error_at(
+                module,
+                &error.to_string(),
+                &path.join("cache").join("dal.log"),
+            ),
             exit::ExitKind::Internal,
         ),
     }
@@ -320,9 +324,7 @@ async fn store_api_key(
     key: String,
 ) -> ExitCode {
     let AuthHost {
-        host,
-        auth_path,
-        ..
+        host, auth_path, ..
     } = match start_auth_host(startup, product).await {
         Ok(auth) => auth,
         Err(code) => return code,
@@ -349,9 +351,7 @@ async fn login_oauth(
     method: Method,
 ) -> ExitCode {
     let AuthHost {
-        host,
-        auth_path,
-        ..
+        host, auth_path, ..
     } = match start_auth_host(startup, product).await {
         Ok(auth) => auth,
         Err(code) => return code,

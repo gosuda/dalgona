@@ -252,9 +252,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use dal_agent::login::{
-        CredentialKind, LoginId, LoginIo, LoginOutcome, LoginProgress, Method,
-    };
+    use dal_agent::login::{CredentialKind, LoginId, LoginIo, LoginOutcome, LoginProgress, Method};
     use dal_agent::login_fake::{FakeOAuth, TokenReply, USER_CODE, follow_authorize_url};
     use dal_agent::{Env, Host, HostError, Product};
     use dal_core::{Config, ConfigProduct};
@@ -550,10 +548,8 @@ mod tests {
                 };
                 cancel.cancel();
             };
-            let (outcome, ()) = tokio::join!(
-                rig.backend.login("openai-codex", Method::Browser, io),
-                user
-            );
+            let (outcome, ()) =
+                tokio::join!(rig.backend.login("openai-codex", Method::Browser, io), user);
             let error = outcome.expect_err("cancelled");
             assert!(is_cancelled(&error), "{error}");
             assert!(!rig.auth_json().exists());
@@ -571,10 +567,8 @@ mod tests {
                 };
                 rig.drop_first_connection();
             };
-            let (outcome, ()) = tokio::join!(
-                rig.backend.login("openai-codex", Method::Browser, io),
-                user
-            );
+            let (outcome, ()) =
+                tokio::join!(rig.backend.login("openai-codex", Method::Browser, io), user);
             let message = backend_message(outcome.expect_err("the connection dropped"))
                 .expect("a backend error");
             assert_eq!(message, "the connection dropped during sign-in.");

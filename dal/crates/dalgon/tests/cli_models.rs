@@ -138,7 +138,10 @@ fn insecure_auth_permissions_keep_the_auth_repair_diagnostic() -> Result<(), Box
 }
 
 /// Serves one model-list response, then closes.
-type ModelServer = (std::net::SocketAddr, thread::JoinHandle<std::io::Result<()>>);
+type ModelServer = (
+    std::net::SocketAddr,
+    thread::JoinHandle<std::io::Result<()>>,
+);
 
 fn serve_models_once(body: Vec<u8>) -> Result<ModelServer, Box<dyn Error>> {
     let listener = TcpListener::bind("127.0.0.1:0")?;

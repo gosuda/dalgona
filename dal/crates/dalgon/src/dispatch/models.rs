@@ -129,20 +129,13 @@ fn print_json(rows: &[&CatalogEntry]) -> std::io::Result<()> {
 fn print_table(rows: &[&CatalogEntry]) -> std::io::Result<()> {
     let providers: Vec<String> = rows.iter().map(|entry| visible(&entry.provider)).collect();
     let ids: Vec<String> = rows.iter().map(|entry| visible(&entry.id)).collect();
-    let contexts: Vec<String> = rows.iter().map(|entry| visible(&context_text(entry))).collect();
-    let provider_width = providers
+    let contexts: Vec<String> = rows
         .iter()
-        .map(String::len)
-        .max()
-        .unwrap_or(8)
-        .max(8);
+        .map(|entry| visible(&context_text(entry)))
+        .collect();
+    let provider_width = providers.iter().map(String::len).max().unwrap_or(8).max(8);
     let id_width = ids.iter().map(String::len).max().unwrap_or(2).max(2);
-    let context_width = contexts
-        .iter()
-        .map(String::len)
-        .max()
-        .unwrap_or(7)
-        .max(7);
+    let context_width = contexts.iter().map(String::len).max().unwrap_or(7).max(7);
     let mut stdout = std::io::stdout().lock();
     writeln!(
         stdout,

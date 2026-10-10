@@ -136,7 +136,10 @@ pub(crate) fn decode_codex_models(
                 supports_reasoning_summaries: model.supports_reasoning_summaries,
                 tool_support: ToolSupport::Any,
                 custom_grammar: false,
-                temperature_allowed: compiled_temperature(provider.id.as_ref(), &sanitize_identifier(&model.slug)),
+                temperature_allowed: compiled_temperature(
+                    provider.id.as_ref(),
+                    &sanitize_identifier(&model.slug),
+                ),
                 display_supported: false,
             })
         })
@@ -183,7 +186,10 @@ pub(crate) fn decode_anthropic_page(
                 supports_reasoning_summaries: false,
                 tool_support: ToolSupport::Any,
                 custom_grammar: false,
-                temperature_allowed: compiled_temperature(provider.id.as_ref(), &sanitize_identifier(&model.id)),
+                temperature_allowed: compiled_temperature(
+                    provider.id.as_ref(),
+                    &sanitize_identifier(&model.id),
+                ),
                 display_supported: false,
             }
         })

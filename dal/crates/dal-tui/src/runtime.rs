@@ -2392,7 +2392,7 @@ mod run_command_tests {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
             .expect("runtime");
-        let held = Held(Arc::new(Notify::new()));
+        let held = Held(Arc::new(Notify::new()), SessionId::new_v7());
         let inflight =
             start_run(runtime.handle(), &held, run_command()).expect("the worker thread starts");
         let (done, joined) = std::sync::mpsc::channel();
@@ -2613,6 +2613,10 @@ mod loop_tests {
 
     impl TuiAgent for FakeAgent {
         type Subscription = Silent;
+
+        fn session(&self) -> SessionId {
+            SessionId::new_v7()
+        }
 
         fn view(&self, _page: PageReq) -> impl Future<Output = Result<View, TuiError>> {
             std::future::ready(Ok(idle_view()))
