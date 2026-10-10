@@ -934,6 +934,69 @@ fn replay_repairs_aborted_turn() {
     ));
 }
 
+/// `replay_declared` must NOT run crash-recovery synthesis: the same open
+/// turn stays open so journal inspection attributes state to the written
+/// records only.
+#[test]
+fn replay_declared_keeps_the_open_turn_unrepaired() {
+    let session_id = crate::id::SessionId::parse("01890f47-36b0-7cc4-8000-000000000001").unwrap();
+    let header = crate::journal::Header {
+        id: session_id,
+        at: stamp(),
+        workspace: workspace_root(),
+        product: crate::journal::Product::Dal,
+        from: None,
+    };
+    let call = CallId::new("call");
+    let assistant = Entry {
+        id: entry(1),
+        parent: None,
+        at: stamp(),
+        kind: EntryKind::Assistant {
+            api: Family::Chat,
+            model: "test".into(),
+            content: vec![Block::ToolCall {
+                id: call.clone(),
+                name: "read_file".into(),
+                input: RawJson::parse("{}").unwrap(),
+            }],
+            usage: usage(1),
+            stop: AssistantStop::ToolUse,
+        },
+    };
+    let records = [
+        Record::Session(header),
+        Record::TurnStart {
+            at: stamp(),
+            turn: id(3),
+        },
+        Record::Assistant(assistant),
+        Record::ToolStart {
+            at: stamp(),
+            turn: id(3),
+            call,
+        },
+    ];
+    let declared = Session::replay_declared(records).unwrap();
+    // Replay mints a fresh boot generation and repair ToolResult entries;
+    // the declared fold must mint neither.
+    assert_eq!(declared.generation, None);
+    let repairs = declared
+        .tree
+        .entries
+        .values()
+        .filter(|entry| matches!(entry.kind, EntryKind::ToolResult { .. }))
+        .count();
+    assert_eq!(repairs, 0, "no repair entries in the declared fold");
+    // A journal ending inside a turn declares the live fold's shape —
+    // `Running` at the boundary step — not `Idle`.
+    assert!(
+        matches!(declared.phase(), Phase::Running { turn, .. } if *turn == id(3)),
+        "an unterminated turn must surface as Running: {:?}",
+        declared.phase()
+    );
+}
+
 const LOST: &str = "Tool call was not completed: dalgon stopped before it finished.";
 
 fn open_turn(session: &mut Session, journal: &mut Vec<Record>) -> TurnId {

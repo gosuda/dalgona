@@ -482,3 +482,48 @@ fn early_drop_cancels_once_and_stop_is_delivered_once() {
     drop(finished);
     assert_eq!(script.aborted_streams(), 1);
 }
+
+proptest::proptest! {
+    /// The replay decoder must never panic on arbitrary input: every failure
+    /// path surfaces a typed `ScriptError`, never a crash or silent misdecode.
+    #[test]
+    fn from_replay_never_panics_on_arbitrary_bytes(
+        bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..=512),
+    ) {
+        let _ = Script::from_replay(&bytes);
+    }
+
+    /// Near-miss lines: a well-formed `events` envelope whose event objects are
+    /// fuzzed must decode or fail typed — never panic.
+    #[test]
+    fn from_replay_fuzzed_event_objects(
+        payloads in proptest::collection::vec("[ -~]{0,60}", 1..=4),
+    ) {
+        let events: Vec<String> = payloads.iter().map(|p| format!("{{{p}}}")).collect();
+        let line = format!("{{\"kind\":\"events\",\"events\":[{}]}}", events.join(","));
+        let _ = Script::from_replay(line.as_bytes());
+    }
+
+    /// Typed events carrying fuzzed scalar fields stay valid JSON but probe
+    /// every field validator: reason strings, ids, names, numbers.
+    #[test]
+    fn from_replay_typed_events_with_fuzzed_fields(
+        reason in "[ -~]{0,40}",
+        call_id in "[ -~]{0,24}",
+        tool_name in "[ -~]{0,24}",
+        tokens in proptest::prelude::any::<u64>(),
+    ) {
+        let events = format!(
+            "[{{\"type\":\"tool_call_started\",\"id\":{i},\"name\":{n}}},\
+              {{\"type\":\"usage\",\"usage\":{{\"input_tokens\":{t},\"output_tokens\":{t}}}}},\
+              {{\"type\":\"stop\",\"reason\":{r}}}]",
+            i = sonic_rs::to_string(&call_id).expect("escapes"),
+            n = sonic_rs::to_string(&tool_name).expect("escapes"),
+            t = tokens,
+            r = sonic_rs::to_string(&reason).expect("escapes"),
+        );
+        let line = format!("{{\"kind\":\"events\",\"events\":{events}}}");
+        // Accepted or rejected, the decoder must answer — never panic.
+        let _ = Script::from_replay(line.as_bytes());
+    }
+}

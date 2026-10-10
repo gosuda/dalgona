@@ -266,14 +266,23 @@ pub fn scan_head(line: &[u8]) -> Option<ScannedHead> {
 /// Returns [`DecodeError`] for a missing or unsupported version, an
 /// unknown record kind, malformed JSON, or an invalid member.
 pub fn decode(line: &[u8]) -> Result<Decoded, DecodeError> {
-    let text = std::str::from_utf8(line.trim_ascii_end())
-        .map_err(|_| invalid(0, "journal lines are UTF-8"))?;
+    // `trim_ascii_end` also strips `\x0c`, which is ASCII but not JSON
+    // whitespace; a strict codec tolerates only the four JSON whitespace
+    // bytes at the line boundary.
+    let end = line
+        .iter()
+        .rposition(|byte| !matches!(byte, b' ' | b'\t' | b'\n' | b'\r'))
+        .map_or(0, |index| index + 1);
+    let text =
+        std::str::from_utf8(&line[..end]).map_err(|_| invalid(0, "journal lines are UTF-8"))?;
     let mut members: Members<'_> = Vec::new();
     let mut version_member: Option<Member<'_>> = None;
     let mut type_member: Option<Member<'_>> = None;
     let mut duplicate_member: Option<DecodeError> = None;
+    let mut object_tail = 0usize;
     for member in super::scan::scan_members(text, 0)? {
         let offset = member.offset;
+        object_tail = offset + member.value.len();
         match member.name.as_ref() {
             "v" => {
                 if version_member.is_some() {
@@ -302,6 +311,19 @@ pub fn decode(line: &[u8]) -> Result<Decoded, DecodeError> {
                 }
             }
         }
+    }
+    // The member scanner stops at the record's closing brace; anything that
+    // follows it is trailing garbage, which a whole-line codec must reject.
+    // Only the four JSON whitespace bytes may sit between `}` and the line
+    // end — other Unicode whitespace is not legal JSON.
+    if text
+        .get(object_tail..)
+        .is_none_or(|tail| tail.trim_matches(|c| matches!(c, ' ' | '\t' | '\n' | '\r')) != "}")
+    {
+        return Err(invalid(
+            object_tail,
+            "trailing bytes after the record object",
+        ));
     }
     let Some(version) = version_member else {
         return Err(DecodeError::MissingVersion);

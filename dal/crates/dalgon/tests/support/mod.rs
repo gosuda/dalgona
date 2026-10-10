@@ -7,7 +7,7 @@ use std::{
     error::Error,
     fs,
     io::{self, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Output, Stdio},
 };
 
@@ -35,6 +35,11 @@ impl CliFixture {
             config,
             data,
         })
+    }
+
+    /// The working directory the fixture launches the binary in.
+    pub(crate) fn cwd(&self) -> &Path {
+        self.root.path()
     }
 
     pub(crate) fn auth_file(&self) -> PathBuf {

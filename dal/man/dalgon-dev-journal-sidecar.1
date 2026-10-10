@@ -1,0 +1,19 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH dalgon-dev-journal-sidecar 1  "dalgon-dev-journal-sidecar " 
+.SH NAME
+dalgon\-dev\-journal\-sidecar \- List or dump the sidecar files in a session directory.
+.SH SYNOPSIS
+\fBdalgon dev journal sidecar\fR [\fB\-h\fR|\fB\-\-help\fR] <\fIDIR\fR> [\fINAME\fR] 
+.SH DESCRIPTION
+List or dump the sidecar files in a session directory.
+.SH OPTIONS
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+<\fIDIR\fR>
+The session directory holding journal.jsonl and its sidecars
+.TP
+[\fINAME\fR]
+Dump one sidecar instead of listing them
