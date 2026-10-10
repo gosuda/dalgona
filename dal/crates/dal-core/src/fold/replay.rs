@@ -2,8 +2,8 @@ use super::helpers::{entry_weight, parse_job_kind};
 use super::types::{MAX_WAKE_RUN, PRODUCT_VERSION, Step, Tree, TurnStage};
 use super::{
     BTreeMap, Block, CallId, Effect, Emit, Entry, EntryId, EntryKind, EntryView, JobEvent, JobId,
-    JobKind, JournalPart, Name, NonZeroU64, Phase, Record, ReplayError, Session, TurnEndStop,
-    TurnId,
+    JobKind, JobOutcome, JournalPart, Name, NonZeroU64, Phase, Record, ReplayError, Session,
+    TurnEndStop, TurnId,
 };
 
 impl Tree {
@@ -52,6 +52,22 @@ pub(super) struct ReplayCall {
 
 pub(super) const TOOL_LOST: &str =
     "Tool call was not completed: dalgon stopped before it finished.";
+
+/// The [`JobOutcome`] a terminal `JobEvent` declares. `Settled` carries
+/// its outcome when the writer recorded one; the rest name their cause.
+fn job_outcome(event: &JobEvent) -> JobOutcome {
+    match event {
+        JobEvent::Settled { outcome } => outcome.clone().unwrap_or(JobOutcome::Lost),
+        JobEvent::Cancelled { .. } => JobOutcome::Cancelled,
+        JobEvent::Killed => JobOutcome::Failed {
+            message: "killed".into(),
+        },
+        JobEvent::TimedOut => JobOutcome::Failed {
+            message: "timed out".into(),
+        },
+        JobEvent::Orphaned | JobEvent::Started { .. } => JobOutcome::Lost,
+    }
+}
 
 pub(super) fn contradiction(detail: impl Into<Box<str>>) -> ReplayError {
     ReplayError::Contradiction {
@@ -294,6 +310,13 @@ impl Replay {
                     return Err(contradiction("job started more than once"));
                 }
                 self.started_jobs.push((job, kind));
+                // Journal job records are a declared source too: mirror
+                // them into the session so live/ended jobs inspect the
+                // written history, not just update records.
+                match kind {
+                    Some(kind) => self.session.job_started(job, kind),
+                    None => self.session.live_jobs.push((job, None)),
+                }
             }
             JobEvent::Settled { .. }
             | JobEvent::Cancelled { .. }
@@ -304,6 +327,7 @@ impl Replay {
                     return Err(contradiction("job ended without a start"));
                 }
                 self.started_jobs.retain(|(started, _)| *started != job);
+                self.session.job_settled(job, job_outcome(event));
             }
         }
         Ok(())

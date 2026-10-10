@@ -2547,3 +2547,51 @@ fn replay_rejects_out_of_order_turn_ids() {
         turn_end_record(2),
     ]));
 }
+
+/// Journal job records are a declared source too: `dev fold` and other
+/// declared-state projections must see live and ended jobs, not only
+/// update records. Reverting the mirror in `Replay::job` leaves both
+/// ledgers empty.
+#[test]
+fn declared_fold_mirrors_job_records_into_session_jobs() {
+    let at = stamp();
+    let job = JobId::parse("01890f47-36b0-7cc4-8000-000000000003").unwrap();
+    let mut fold = DeclaredFold::new();
+    fold.push(&Record::Job {
+        at,
+        job,
+        event: JobEvent::Started {
+            kind: Some("exec".into()),
+        },
+    })
+    .unwrap();
+    assert!(matches!(
+        fold.session().unwrap().live_jobs.as_slice(),
+        [(id, Some(JobKind::Exec))] if *id == job
+    ));
+    fold.push(&Record::Job {
+        at,
+        job,
+        event: JobEvent::Settled {
+            outcome: Some(JobOutcome::Exited { code: 0 }),
+        },
+    })
+    .unwrap();
+    let session = fold.session().unwrap();
+    assert_eq!(session.live_jobs.len(), 0);
+    assert!(matches!(
+        session.ended_jobs.as_slice(),
+        [(id, JobOutcome::Exited { code: 0 })] if *id == job
+    ));
+}
+
+/// `DeclaredFold::session` is a borrow: repeat calls hand back the same
+/// session so per-record diffing costs no clone. Reverting to an owned
+/// return moves the addresses.
+#[test]
+fn declared_fold_session_borrows_instead_of_cloning() {
+    let mut fold = DeclaredFold::new();
+    let first = std::ptr::from_ref(fold.session().unwrap());
+    let second = std::ptr::from_ref(fold.session().unwrap());
+    assert_eq!(first, second);
+}
