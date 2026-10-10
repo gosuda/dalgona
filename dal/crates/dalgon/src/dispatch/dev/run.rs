@@ -208,7 +208,10 @@ struct RunCx {
     host: Option<Host>,
     agent: Option<Agent>,
     subscription: Option<Subscription>,
-    open_requests: VecDeque<(RequestId, String)>,
+    /// `(id, kind, consumed)`: `consumed` marks a request an `expect.request`
+    /// already observed, so the next expectation waits for a new opening
+    /// while an `answer` step can still claim it.
+    open_requests: VecDeque<(RequestId, String, bool)>,
     last_turn: Option<TurnId>,
 }
 
@@ -537,10 +540,10 @@ impl RunCx {
                     Some(kind) => self
                         .open_requests
                         .iter()
-                        .position(|(_, request_kind)| request_kind == kind)
+                        .position(|(_, request_kind, _)| request_kind == kind)
                         .and_then(|index| self.open_requests.remove(index)),
                 }
-                .map(|(id, _)| id)
+                .map(|(id, ..)| id)
                 .ok_or_else(|| fail("no open request to answer".to_owned()))?;
                 let agent = self
                     .agent
@@ -558,14 +561,14 @@ impl RunCx {
 
     /// Closes the session and host so the run root can be removed cleanly.
     async fn finish(&mut self, out: &mut impl Write) {
-        self.agent = None;
+        let had_session = self.agent.take().is_some();
         self.subscription = None;
         if let Some(host) = self.host.take() {
             let report = host.shutdown(std::time::Duration::from_secs(3)).await;
             // Shutdown reports what it completed, not a guarantee: work
             // still pending means deleting the run root would drop journals
             // the session still owns, so it is kept like `--root`.
-            if work_remains(&report) {
+            if work_remains(&report, had_session) {
                 self.root = Some(self.root_path.clone());
                 let _ = writeln!(
                     out,
@@ -899,11 +902,12 @@ impl RunCx {
     fn track(&mut self, update: &Update) {
         match &update.kind {
             UpdateKind::TurnStarted { turn, .. } => self.last_turn = Some(*turn),
-            UpdateKind::RequestOpened(request) => self
-                .open_requests
-                .push_back((request.id, wire_type(&request.question))),
+            UpdateKind::RequestOpened(request) => {
+                self.open_requests
+                    .push_back((request.id, wire_type(&request.question), false));
+            }
             UpdateKind::RequestResolved { id, .. } => {
-                self.open_requests.retain(|(open, _)| *open != *id);
+                self.open_requests.retain(|(open, ..)| *open != *id);
             }
             _ => {}
         }
@@ -975,12 +979,12 @@ impl RunCx {
             if let Some(index) = self
                 .open_requests
                 .iter()
-                .position(|(_, kind)| *kind == spec.kind)
+                .position(|(_, kind, consumed)| *kind == spec.kind && !*consumed)
             {
                 if let Some(answer) = &spec.answer {
                     // Only an answered request leaves the queue: observing
                     // must not strand it for a later `answer` step.
-                    let Some((id, _)) = self.open_requests.remove(index) else {
+                    let Some((id, ..)) = self.open_requests.remove(index) else {
                         continue;
                     };
                     let agent = self
@@ -991,6 +995,11 @@ impl RunCx {
                         .answer(id, answer.clone())
                         .await
                         .map_err(|error| fail(format!("answer rejected: {error}")))?;
+                } else {
+                    // An observed-but-unanswered request stays answerable,
+                    // yet cannot satisfy a second expectation: the scenario
+                    // waits for a fresh `RequestOpened`.
+                    self.open_requests[index].2 = true;
                 }
                 let _ = writeln!(out, "{line:>4}  request {}", spec.kind);
                 return Ok(());
@@ -1146,11 +1155,14 @@ fn resolve(scenario_dir: &Path, path: &Path) -> PathBuf {
 /// quote tricks from hiding a key the strict loader would honor; text the
 /// real decoder rejects fails later in `Config::load` anyway.
 /// True when the shutdown report shows work still in flight — tasks the
-/// host could not close inside its grace window, or a session that did
-/// not reach quiet. A `true` verdict keeps the run root for `--root`
-/// inspection instead of deleting the journals mid-flight.
-fn work_remains(report: &dal_agent::ShutdownReport) -> bool {
-    report.tasks_remaining > 0 || !report.status_quiet
+/// host could not close inside its grace window, a session that did not
+/// reach quiet, or a session the run opened that never closed. A `true`
+/// verdict keeps the run root for `--root` inspection instead of deleting
+/// the journals mid-flight.
+fn work_remains(report: &dal_agent::ShutdownReport, session_opened: bool) -> bool {
+    report.tasks_remaining > 0
+        || !report.status_quiet
+        || (session_opened && report.sessions_closed == 0)
 }
 
 /// The largest timeout a scenario may declare. A `timeout_ms` past one
@@ -1855,15 +1867,38 @@ mod tests {
             status_quiet: true,
             tasks_remaining: 0,
         };
-        assert!(!work_remains(&base));
-        assert!(work_remains(&dal_agent::ShutdownReport {
-            tasks_remaining: 1,
-            ..base
-        }));
-        assert!(work_remains(&dal_agent::ShutdownReport {
-            status_quiet: false,
-            ..base
-        }));
+        assert!(!work_remains(&base, true));
+        assert!(!work_remains(&base, false));
+        assert!(work_remains(
+            &dal_agent::ShutdownReport {
+                tasks_remaining: 1,
+                ..base
+            },
+            true
+        ));
+        assert!(work_remains(
+            &dal_agent::ShutdownReport {
+                status_quiet: false,
+                ..base
+            },
+            true
+        ));
+        // A session the run opened but shutdown could not close keeps the
+        // root: its actor still owns the journals while it detaches.
+        assert!(work_remains(
+            &dal_agent::ShutdownReport {
+                sessions_closed: 0,
+                ..base
+            },
+            true
+        ));
+        assert!(!work_remains(
+            &dal_agent::ShutdownReport {
+                sessions_closed: 0,
+                ..base
+            },
+            false
+        ));
     }
 
     /// A fixture path with quotes, backslashes, or a newline must

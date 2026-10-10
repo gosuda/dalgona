@@ -601,6 +601,39 @@ fn dev_run_rejects_a_second_answer_to_a_settled_request() -> Result<(), Box<dyn 
     Ok(())
 }
 
+/// An observed-but-unanswered request must not satisfy a second
+/// expectation of the same kind: the scenario waits for a fresh
+/// `RequestOpened` that never arrives and fails on its timeout instead
+/// of passing silently. Reverting the consumed marker lets the first
+/// opening answer both expectations.
+#[test]
+fn dev_run_expect_request_consumes_each_opening_once() -> Result<(), Box<dyn Error>> {
+    let fixture = CliFixture::new()?;
+    let scenario = write_scenario(
+        &fixture,
+        &[
+            r#"{"provider":{"script":[{"kind":"events","events":[{"type":"tool_calls_done","calls":[{"id":"call-1","name":"exec","args":{"kind":"parsed","value":{"command":"echo hi","timeout_seconds":60}}}]},{"type":"usage","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":5,"reasoning_tokens":null,"cache_write_tokens":0,"cost_usd":null}},{"type":"stop","reason":"tool_use"}]},{"kind":"events","events":[{"type":"text_delta","text":"done"},{"type":"tool_calls_done","calls":[]},{"type":"usage","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":5,"reasoning_tokens":null,"cache_write_tokens":0,"cost_usd":null}},{"type":"stop","reason":"end_turn"}]}]}}"#,
+            r#"{"set_approval":"ask"}"#,
+            r#"{"prompt":"run echo hi"}"#,
+            r#"{"expect":{"request":{"kind":"approval","timeout_ms":3000}}}"#,
+            r#"{"expect":{"request":{"kind":"approval","timeout_ms":500}}}"#,
+        ],
+    )?;
+    let output = fixture.output(&[
+        "dev",
+        "run",
+        "--consent",
+        scenario.to_str().expect("utf8 path"),
+    ])?;
+    assert!(!output.status.success(), "{}", stdout(&output));
+    let text = stderr(&output);
+    assert!(
+        text.contains("no `approval` request within 500ms"),
+        "{text}"
+    );
+    Ok(())
+}
+
 /// A write through a symlinked directory inside an adopted workspace
 /// must not escape: canonical containment resolves the link before the
 /// lexical join. Reverting to the string check writes `leak.txt`
