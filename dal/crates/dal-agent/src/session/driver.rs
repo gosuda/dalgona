@@ -192,12 +192,16 @@ impl Driver {
         for effect in std::mem::take(&mut batch.effects) {
             match effect {
                 dal_core::Effect::Infer(plan) => {
+                    self.bind_turn_step_cap(plan.turn);
                     self.infer(plan.turn, plan.params, &batch).await;
                 }
                 dal_core::Effect::Dispatch { turn, units } => {
                     self.dispatch(turn, units, &batch).await;
                 }
                 dal_core::Effect::Compact { turn, first_kept } => {
+                    if let Some(turn) = turn {
+                        self.bind_turn_step_cap(turn);
+                    }
                     self.compact(turn, first_kept).await;
                 }
                 dal_core::Effect::Command { cmd, by } => {
@@ -303,7 +307,7 @@ impl Driver {
                 provider: None,
                 image_profile: None,
                 context_window: None,
-                step_cap: deps.shared.take_next_turn_step_cap(),
+                step_cap: None,
                 round: 0,
                 calls: Vec::new(),
                 resolved: Vec::new(),
@@ -312,6 +316,26 @@ impl Driver {
                 usage: None,
             }
         })
+    }
+
+    /// Binds a pending prompt bound when the driver receives the active
+    /// turn's first effect, rather than when a lazy state lookup happens to
+    /// materialize it. Stale effects queued for an earlier turn cannot claim
+    /// the bound after the actor has opened the new turn.
+    fn bind_turn_step_cap(&mut self, turn: TurnId) {
+        if self.turns.contains_key(&turn) {
+            return;
+        }
+        let active = self
+            .control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .running();
+        if active != Some(turn) {
+            return;
+        }
+        let step_cap = self.deps.shared.take_next_turn_step_cap();
+        self.turn(turn).step_cap = step_cap;
     }
 
     /// Stops one turn: cancels its token and confirms through the fold.
