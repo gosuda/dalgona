@@ -51,6 +51,10 @@ fn file_is_private_impl(file: &File) -> io::Result<bool> {
 }
 
 #[cfg(not(unix))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the unix variant fails on metadata reads; this stub shares the signature"
+)]
 fn file_is_private_impl(file: &File) -> io::Result<bool> {
     let _ = file;
     Ok(true)
