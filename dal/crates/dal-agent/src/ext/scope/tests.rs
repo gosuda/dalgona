@@ -42,6 +42,7 @@ struct Held {
     close_replies: Mutex<VecDeque<AgentsResult>>,
     started: Mutex<Vec<SessionId>>,
     closed: Mutex<Vec<SessionId>>,
+    hold_start: Mutex<Option<oneshot::Receiver<()>>>,
     awaiting: AtomicUsize,
     inferred: AtomicUsize,
 }
@@ -86,7 +87,13 @@ impl Services for Held {
             AgentsOp::Start(_) => {
                 let id = member();
                 locked(&self.started).push(id);
-                Ok(AgentsReply::Started { id })
+                let held = locked(&self.hold_start)
+                    .take()
+                    .unwrap_or_else(|| oneshot::channel().1);
+                return Box::pin(async move {
+                    let _ = held.await;
+                    Ok(AgentsReply::Started { id })
+                });
             }
             AgentsOp::Await { .. } => {
                 self.awaiting.fetch_add(1, Ordering::SeqCst);
@@ -199,6 +206,7 @@ fn rig() -> Rig {
         close_replies: Mutex::new(VecDeque::new()),
         started: Mutex::new(Vec::new()),
         closed: Mutex::new(Vec::new()),
+        hold_start: Mutex::new(None),
         awaiting: AtomicUsize::new(0),
         inferred: AtomicUsize::new(0),
     });
@@ -563,5 +571,29 @@ async fn a_failed_close_is_reported_with_the_wait_error() {
         format!(
             "the await broke; closing child session {member} also failed: the close broke. Retry cancelling that session."
         )
+    );
+}
+
+#[tokio::test]
+async fn a_cancelled_start_closes_the_child_it_created() {
+    let rig = rig();
+    // The start lingers past the cancel, as a live backend start does, so
+    // the child opens while the scope is already cancelling.
+    let (hold_tx, hold_rx) = oneshot::channel::<()>();
+    locked(&rig.held.hold_start).replace(hold_rx);
+    let handle = rig.scope.agent(start()).expect("admitted");
+    until(|| locked(&rig.held.hold_start).is_none()).await;
+    rig.scope.cancel();
+    hold_tx.send(()).expect("the gate opens");
+    timed(handle.result())
+        .await
+        .expect_err("the handle cancels");
+    assert_eq!(handle.status(), HandleStatus::Cancelled);
+    let started = locked(&rig.held.started).clone();
+    assert_eq!(started.len(), 1, "the start drained and created its child");
+    assert_eq!(
+        *locked(&rig.held.closed),
+        vec![started[0]],
+        "the cancelled start rolled its child back"
     );
 }

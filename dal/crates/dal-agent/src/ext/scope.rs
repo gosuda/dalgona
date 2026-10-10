@@ -119,6 +119,22 @@ async fn close_after_failure(
     }
 }
 
+/// Closes the child a cancelled start may have created, so no member
+/// session outlives its cancelled handle. A start that never opened a
+/// child leaves nothing to close.
+async fn close_cancelled_start(
+    services: &Arc<dyn Services>,
+    caller: &Caller,
+    child: &Arc<Mutex<Option<SessionId>>>,
+    started: Result<AgentsReply, ServiceError>,
+) {
+    let Ok(AgentsReply::Started { id }) = started else {
+        return;
+    };
+    *locked(child) = Some(id);
+    let _ = services.agents(caller, AgentsOp::Cancel { id }).await;
+}
+
 impl Runtime {
     fn price(&self, route: &ModelRoute) -> Option<ModelPrice> {
         match &self.price {
@@ -166,13 +182,17 @@ impl Runtime {
         let services = Arc::clone(&self.services);
         let caller = self.caller.clone();
         Box::pin(async move {
-            let started = tokio::select! {
-                reply = services.agents(&caller, AgentsOp::Start(start)) => {
-                    reply.map_err(service_error)?
-                }
-                () = cancel.cancelled() => return Err(ScopeError::Cancelled),
-            };
-            let id = match started {
+            // The start is drained even when the scope is cancelled: the
+            // backend may already have opened the child, and dropping the
+            // call would strand that half-created child. A child the
+            // cancelled start produced is closed, so no member outlives
+            // its cancelled handle.
+            let started = services.agents(&caller, AgentsOp::Start(start)).await;
+            if cancel.is_cancelled() {
+                close_cancelled_start(&services, &caller, &child, started).await;
+                return Err(ScopeError::Cancelled);
+            }
+            let id = match started.map_err(service_error)? {
                 AgentsReply::Started { id } => id,
                 AgentsReply::Refused { reason } => {
                     return Err(ScopeError::Failed(reason.to_string().into()));
