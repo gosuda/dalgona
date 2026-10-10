@@ -62,10 +62,18 @@ fn pty_transcript_replays_to_the_committed_snapshot() -> Result<(), Box<dyn Erro
     let replayed = loaded.replay(80, 24);
     // The live workspace row ends in the run's random tempdir; normalize
     // everything from the tempdir marker onward or every run drifts there.
+    // The temp root itself is spelled per-platform (`/tmp` on Linux,
+    // `$TMPDIR`/`private` forms on macOS), so fold it to a stable `/tmp`.
+    let temp = std::env::temp_dir();
+    let temp_canonical = temp.canonicalize().unwrap_or_else(|_| temp.clone());
     let rows: Vec<String> = replayed
         .screen_rows()
         .into_iter()
         .chain(replayed.scrollback_rows())
+        .map(|row| {
+            row.replace(temp_canonical.to_string_lossy().as_ref(), "/tmp")
+                .replace(temp.to_string_lossy().as_ref(), "/tmp")
+        })
         .map(|row| match row.find("dalgon-gates-") {
             Some(at) => format!("{}<workspace>", &row[..at]),
             None => row,
