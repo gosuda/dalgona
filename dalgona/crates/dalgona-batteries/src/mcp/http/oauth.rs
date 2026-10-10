@@ -368,14 +368,25 @@ where
             &record.scopes,
             Some(refresh_token.as_str()),
         )?;
-        persist(token.clone()).await?;
         Ok(Some(token))
     };
-    tokio::select! {
+    let result = tokio::select! {
         () = cancel.cancelled() => Err(McpError::NoAskFrontEnd),
         result = coordinator.run(&key, record.access_token.as_str(), operation) => result,
+    }?;
+    // Persist only the settled winner: an interactive login published during
+    // the flight supersedes the flight's token and must not be overwritten.
+    // Waiters wake after settle, so `current` already holds the winner.
+    if result.is_some() {
+        let winner = coordinator.current(&key).await.or(result);
+        if let Some(token) = winner.clone() {
+            persist(token).await?;
+        }
+        return Ok(winner);
     }
+    Ok(result)
 }
+
 
 /// Maps a failed token-endpoint status for a refresh.
 ///
@@ -1511,6 +1522,122 @@ mod tests {
             allowed
                 .into_iter()
                 .all(|address| address.ip().is_loopback())
+        );
+    }
+
+    async fn gated_token_server(
+        listener: TcpListener,
+        count: Arc<AtomicUsize>,
+        gate: tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let (stream, _) = listener.accept().await.expect("token request");
+        count.fetch_add(1, Ordering::Relaxed);
+        let mut reader = BufReader::new(stream);
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.expect("token headers");
+            if line == "\r\n" {
+                break;
+            }
+        }
+        gate.await.expect("release gate");
+        let body =
+            r#"{"access_token":"stale-access","refresh_token":"stale-refresh","token_type":"Bearer"}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        reader
+            .get_mut()
+            .write_all(response.as_bytes())
+            .await
+            .expect("token response");
+    }
+
+    #[tokio::test]
+    async fn a_superseded_refresh_does_not_persist_its_stale_token() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("token listener");
+        let address = listener.local_addr().expect("token address");
+        let count = Arc::new(AtomicUsize::new(0));
+        let (gate_tx, gate_rx) = tokio::sync::oneshot::channel::<()>();
+        let server = gated_token_server(listener, Arc::clone(&count), gate_rx);
+        let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("OAuth client");
+        let discovery = Discovery {
+            issuer: format!("http://{address}/issuer"),
+            resource: format!("http://{address}/mcp"),
+            authorization_endpoint: Url::parse(&format!("http://{address}/authorize"))
+                .expect("authorize endpoint"),
+            token_endpoint: Url::parse(&format!("http://{address}/token")).expect("token endpoint"),
+            registration_endpoint: None,
+            scopes: Vec::new(),
+            require_issuer_parameter: false,
+        };
+        let oauth = OAuthClient {
+            client,
+            policy: NetworkPolicy::for_target(&discovery.token_endpoint),
+        };
+        let record = TokenRecord {
+            client_id: "client".to_owned(),
+            access_token: "old-access".to_owned(),
+            refresh_token: Some("old-refresh".to_owned()),
+            scopes: Vec::new(),
+        };
+        let coordinator = Arc::new(auth::RefreshCoordinator::new());
+        let persisted = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let key = auth::refresh_key(&discovery.issuer, &discovery.resource);
+        let cancel = CancellationToken::new();
+        let log = Arc::clone(&persisted);
+        let refreshing = refresh(
+            &coordinator,
+            &oauth,
+            &discovery,
+            &record,
+            Duration::from_secs(5),
+            &cancel,
+            move |token| async move {
+                log.lock()
+                    .expect("persist log")
+                    .push(token.access_token.clone());
+                Ok::<(), McpError>(())
+            },
+        );
+        let publisher = async {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while count.load(Ordering::Relaxed) == 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the refresh flight reached the token endpoint");
+            coordinator
+                .publish(
+                    &key,
+                    TokenRecord {
+                        client_id: "client".to_owned(),
+                        access_token: "interactive-access".to_owned(),
+                        refresh_token: None,
+                        scopes: Vec::new(),
+                    },
+                )
+                .await;
+            gate_tx.send(()).expect("release the flight");
+        };
+        let (updated, (), ()) = tokio::join!(refreshing, publisher, server);
+        let updated = updated.expect("refresh response");
+        assert_eq!(
+            updated.as_ref().map(|token| token.access_token.as_str()),
+            Some("interactive-access"),
+            "the caller adopts the published winner, not the superseded flight"
+        );
+        assert_eq!(
+            persisted.lock().expect("persist log").as_slice(),
+            &["interactive-access".to_owned()],
+            "only the settled winner persists"
         );
     }
 

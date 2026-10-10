@@ -79,22 +79,26 @@ impl RefreshSlot {
     /// interactive record superseded it while it ran.
     async fn settle(&self, flight: &Arc<RefreshFlight>) {
         let fresh = flight.fresh().await;
-        let mut state = self.state.lock().await;
-        if !state
-            .flight
-            .as_ref()
-            .is_some_and(|current| Arc::ptr_eq(current, flight))
         {
-            return;
+            let mut state = self.state.lock().await;
+            if state
+                .flight
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, flight))
+            {
+                if let Some(fresh) = fresh
+                    && !state.superseded
+                {
+                    state.last = Some(fresh);
+                }
+                state.flight = None;
+                state.task = None;
+                state.superseded = false;
+            }
         }
-        if let Some(fresh) = fresh
-            && !state.superseded
-        {
-            state.last = Some(fresh);
-        }
-        state.flight = None;
-        state.task = None;
-        state.superseded = false;
+        // Wake waiters only after the slot settled, so callers that then read
+        // `current` observe the published winner instead of a stale flight.
+        flight.notify.notify_waiters();
     }
 }
 
@@ -174,6 +178,17 @@ impl RefreshCoordinator {
         state.superseded = state.flight.is_some();
         state.last = Some(record);
         slot.cancelled.store(false, Ordering::SeqCst);
+    }
+
+    /// The record the slot last settled or published.
+    ///
+    /// Read this only after `run` returned: waiters wake once the flight
+    /// settled, so the slot already holds the flight's token or the newer
+    /// record that superseded it.
+    pub(crate) async fn current(&self, key: &str) -> Option<TokenRecord> {
+        let slot = self.slot(key).await;
+        let state = slot.state.lock().await;
+        state.last.clone()
     }
 
     /// Runs one interactive authorization prompt for the credential.
@@ -271,7 +286,6 @@ impl RefreshCoordinator {
 impl RefreshFlight {
     async fn finish(&self, result: Result<Option<TokenRecord>, McpError>) {
         *self.result.lock().await = Some(result);
-        self.notify.notify_waiters();
     }
 
     async fn fresh(&self) -> Option<TokenRecord> {
