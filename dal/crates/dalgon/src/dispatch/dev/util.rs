@@ -183,10 +183,19 @@ fn sort_brace_groups(text: &str) -> String {
         out.push_str(&rest[..=open]);
         let mut depth = 1_usize;
         let mut close = None;
+        // Braces inside a quoted string tokenize nothing.
+        let mut quoted = false;
+        let mut escaped = false;
         for (at, ch) in rest[open + 1..].char_indices() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
             match ch {
-                '{' => depth += 1,
-                '}' => {
+                '\\' if quoted => escaped = true,
+                '"' => quoted = !quoted,
+                '{' if !quoted => depth += 1,
+                '}' if !quoted => {
                     depth -= 1;
                     if depth == 0 {
                         close = Some(open + 1 + at);
@@ -224,11 +233,21 @@ fn split_items(inner: &str) -> Vec<&str> {
     let mut items = Vec::new();
     let mut depth = 0_usize;
     let mut start = 0;
+    // Quoted text is a single value: neither a comma nor a bracket inside a
+    // JSON string tokenizes, so `"x,y"` or `"a[b"` never distorts the split.
+    let mut quoted = false;
+    let mut escaped = false;
     for (at, ch) in inner.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
         match ch {
-            '(' | '[' | '{' => depth += 1,
-            ')' | ']' | '}' => depth = depth.saturating_sub(1),
-            ',' if depth == 0 => {
+            '\\' if quoted => escaped = true,
+            '"' => quoted = !quoted,
+            '(' | '[' | '{' if !quoted => depth += 1,
+            ')' | ']' | '}' if !quoted => depth = depth.saturating_sub(1),
+            ',' if depth == 0 && !quoted => {
                 items.push(&inner[start..at]);
                 start = at + 1;
             }
@@ -261,6 +280,27 @@ mod tests {
         assert_eq!(
             sort_brace_groups("x = {\nz = {\nb,\na\n},\na = 1\n}"),
             "x = {a = 1,\n    z = {a,\n    b}}"
+        );
+    }
+
+    /// A comma inside a JSON string tokenizes no boundary: `{"a":"x,y","b":2}`
+    /// compares as two fields, not three. Reverting to the bracket-only
+    /// split misaligns equal sessions and reports false diffs.
+    #[test]
+    fn quoted_commas_keep_a_field_whole() {
+        assert_eq!(
+            sort_brace_groups("x = {\nb = 2,\na = \"x,y\"\n}"),
+            "x = {a = \"x,y\",\n    b = 2}"
+        );
+        // A quote-bearing bracket never opens a nested split either.
+        assert_eq!(
+            sort_brace_groups("x = {\nb = 2,\na = \"p[q\"\n}"),
+            "x = {a = \"p[q\",\n    b = 2}"
+        );
+        // An escaped quote inside the string stays inside it.
+        assert_eq!(
+            sort_brace_groups("x = {\nb = 2,\na = \"p,\\\"q\"\n}"),
+            "x = {a = \"p,\\\"q\",\n    b = 2}"
         );
     }
 }
