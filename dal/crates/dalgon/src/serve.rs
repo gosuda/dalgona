@@ -175,10 +175,6 @@ fn owner_only_acl(path: &Path) -> io::Result<()> {
 /// # Errors
 /// Returns a typed wire, store, or stream-I/O error. User-correctable startup
 /// refusals are written to `stderr` and return exit code 1.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one server carries host, listener, store, and stream surfaces"
-)]
 pub async fn run(
     host: Host,
     args: ServeArgs,

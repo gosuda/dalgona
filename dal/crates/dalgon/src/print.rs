@@ -405,10 +405,6 @@ async fn run_print_inner(
 
 /// Emits the turn's terminal output: failure mapping, denial short-circuit,
 /// the optional last-message file, and the json or text trailer.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the trailer consumes the whole loop state at once"
-)]
 async fn emit_print_result(
     stop: Stop,
     denial_count: usize,

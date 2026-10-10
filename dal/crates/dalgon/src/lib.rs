@@ -258,10 +258,6 @@ async fn run_command(
 }
 
 /// Runs one headless prompt turn over the host agent.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one headless run carries cli, vars, paths, and host state"
-)]
 async fn run_headless(
     cli: &cli::Cli,
     vars: VarsMap,
