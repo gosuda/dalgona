@@ -1156,7 +1156,11 @@ fn work_remains(report: &dal_agent::ShutdownReport) -> bool {
 /// The largest timeout a scenario may declare. A `timeout_ms` past one
 /// day is a malformed scenario, and on platforms with a narrower clock
 /// range the arithmetic would overflow outright.
-const MAX_TIMEOUT: Duration = Duration::from_hours(24);
+#[expect(
+    clippy::duration_suboptimal_units,
+    reason = "Duration::from_hours is not yet const-stable (rust#140881)"
+)]
+const MAX_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// The deadline for one expectation: the declared timeout bounded by the
 /// scenario limit, then the platform clock.
