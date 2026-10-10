@@ -140,6 +140,10 @@ pub(crate) fn argv_verify_head(top: &str) -> Vec<String> {
     ]
 }
 
+// `git stash create` only accepts an optional message; unlike `stash push`, it
+// has no include-untracked mode. Keep this tracked-only base deliberate: task
+// worktrees capture new files during merge-back with `git add -A`.
+
 pub(crate) fn argv_stash_create(top: &str) -> Vec<String> {
     vec![
         "git".to_owned(),
