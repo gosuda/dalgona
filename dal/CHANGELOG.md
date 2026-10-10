@@ -5,7 +5,7 @@
 - Keep cancelled scope handles terminal when upstream work finishes late. Scope cancellation also closes inference streams that have already opened.
 - Show bidirectional controls as visible escape sequences in approval text. Reject control-bearing sign-in URLs before opening a browser or writing a terminal hyperlink.
 - Fix extension file services rejecting paths outside the workspace and reporting path and I/O failures. Missing files still return no content. Path checks do not provide isolation from concurrent filesystem changes.
-- Fix patch rename destination validation across all supported edit dialects. Revalidate the destination before commit and remove an installed destination if the apply fails.
+- Fix patch rename destination validation across all supported edit dialects. Revalidate the destination before commit and remove an installed destination if the apply fails. Path checks do not provide isolation from concurrent filesystem changes: a directory entry swapped for a link between validation and write can still redirect the rename.
 - Add `auth/cancel`: `auth/login` reports a `loginId` while a sign-in attempt is pending, and `auth/cancel` aborts it by id, so a remote client no longer waits out a login timeout to stop an attempt.
 - Require a serve token before `dalgon --public` binds, and name the bound address in the plain-HTTP warning it prints. Loopback serves stay unchanged.
 - Fix a failed patch delete leaving earlier deletes missing: when a later delete in the same patch cannot move to its trash file, earlier deletes are restored so "Nothing was written" stays true.
