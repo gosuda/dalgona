@@ -1169,24 +1169,29 @@ impl SessionState {
         for handle in self.runs.values() {
             handle.cancel.cancel();
         }
+        super::monitor::state::stop_all(&mut self.monitors);
+        let services = self.services.as_ref();
+        let caller = &self.caller;
         let deadline = TokioInstant::now() + Duration::from_secs(4);
-        while !self.runs.is_empty() {
-            match timeout_at(deadline, self.receiver.recv()).await {
-                Ok(Some(Message::RunEnd { run })) => {
-                    self.runs.remove(&run);
-                }
-                Ok(Some(Message::ReserveChildren { reply, .. })) => {
-                    let _ = reply.send(Err(0));
-                }
-                Ok(Some(_)) => {}
-                Ok(None) | Err(_) => {
-                    self.runs.clear();
-                    break;
+        let runs = &mut self.runs;
+        let receiver = &mut self.receiver;
+        let (sweep, ()) = tokio::join!(cancel_descendants(services, caller), async {
+            while !runs.is_empty() {
+                match timeout_at(deadline, receiver.recv()).await {
+                    Ok(Some(Message::RunEnd { run })) => {
+                        runs.remove(&run);
+                    }
+                    Ok(Some(Message::ReserveChildren { reply, .. })) => {
+                        let _ = reply.send(Err(0));
+                    }
+                    Ok(Some(_)) => {}
+                    Ok(None) | Err(_) => {
+                        runs.clear();
+                        break;
+                    }
                 }
             }
-        }
-        super::monitor::state::stop_all(&mut self.monitors);
-        let sweep = cancel_descendants(self.services.as_ref(), &self.caller).await;
+        });
         if let Some(failures) = sweep.failure_text() {
             self.services.notify(
                 &self.caller,
