@@ -86,7 +86,7 @@ impl Capture {
                 Line::Events(events) => encode_events(events),
                 Line::Fail(message) => Ok(format!(
                     "{{\"kind\":\"fail\",\"message\":{}}}",
-                    json_str(message)
+                    json_str(&scrub(message))
                 )),
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -100,12 +100,16 @@ impl Capture {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn push_events(&self, events: Vec<StreamEvent>) {
-        self.lock().push(Line::Events(events));
-    }
-
-    fn push_fail(&self, message: String) {
-        self.lock().push(Line::Fail(message));
+    /// Appends a sealed step and its failure line under one lock, so a
+    /// second live stream cannot interleave a line between them.
+    fn push(&self, sealed: Option<Vec<StreamEvent>>, failure: Option<String>) {
+        let mut lines = self.lock();
+        if let Some(events) = sealed {
+            lines.push(Line::Events(events));
+        }
+        if let Some(message) = failure {
+            lines.push(Line::Fail(message));
+        }
     }
 }
 
@@ -168,12 +172,7 @@ pub fn record(stream: EventStream, capture: Capture) -> EventStream {
                     }
                 }
             };
-            if let Some(events) = sealed {
-                capture.push_events(events);
-            }
-            if let Some(message) = failure {
-                capture.push_fail(message);
-            }
+            capture.push(sealed, failure);
             item.map(|item| (item, (inner, capture, shared)))
         },
     );
@@ -194,12 +193,7 @@ pub fn record(stream: EventStream, capture: Capture) -> EventStream {
                 )
             }
         };
-        if let Some(events) = sealed {
-            capture.push_events(events);
-        }
-        if let Some(message) = failure {
-            capture.push_fail(message);
-        }
+        capture.push(sealed, failure);
     })
 }
 
@@ -282,10 +276,22 @@ pub fn chaos(stream: EventStream, spec: Chaos) -> EventStream {
             {
                 tokio::time::sleep(delay).await;
             }
-            item.map(|item| (item, (Some(inner), spec, index + 1)))
+            item.map(|item| {
+                // A terminal item ends the stream: drop the inner stream
+                // now (running its cancellation) so no later source item
+                // can reach `next` past the terminal guard.
+                let inner = (!terminal(&item)).then_some(inner);
+                (item, (inner, spec, index + 1))
+            })
         },
     );
     EventStream::new(source, || {})
+}
+
+/// Whether a yielded item ends the stream under the `EventStream`
+/// contract: a `Stop` terminal or an error.
+fn terminal(item: &Result<StreamEvent, ProviderError>) -> bool {
+    matches!(item, Ok(StreamEvent::Stop { .. }) | Err(_))
 }
 
 /// The replay grammar could not represent a stream step.
@@ -398,7 +404,78 @@ pub fn encode_event(event: &StreamEvent) -> Result<RawJson, ReplayError> {
             format!("{{\"type\":\"stop\",\"reason\":{}}}", json_str(&reason))
         }
     };
-    RawJson::parse(&text).map_err(|_| encode_err("encoded wire is not valid JSON"))
+    // The exported fixture is meant to be committed, so encode scrubs
+    // credential-shaped tokens instead of trusting every producer to
+    // redact before `record` saw the event.
+    RawJson::parse(&scrub(&text)).map_err(|_| encode_err("encoded wire is not valid JSON"))
+}
+
+/// Redacts credential-shaped tokens from exported fixture text.
+///
+/// Transports already scrub the secrets they own; this lexical pass covers
+/// the rest — a provider echoing an authorization header or embedding a
+/// token in an error body — by matching the prefixes real credentials
+/// take (`Bearer`, `sk-*`, `xox*`, `gh*_`, `AKIA`, JWT `eyJ`) followed by
+/// at least eight token characters.
+fn scrub(text: &str) -> String {
+    fn token(byte: u8) -> bool {
+        byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_')
+    }
+    const PREFIXES: &[&str] = &[
+        "sk-",
+        "sk_live_",
+        "sk_test_",
+        "sk-ant-",
+        "rk-",
+        "pk_live_",
+        "xoxb-",
+        "xoxp-",
+        "xoxa-",
+        "xoxr-",
+        "xoxs-",
+        "xapp-",
+        "ghp_",
+        "gho_",
+        "ghu_",
+        "ghs_",
+        "ghr_",
+        "github_pat_",
+        "glpat-",
+        "xai-",
+        "AIza",
+        "AKIA",
+        "ASIA",
+        "ya29.",
+        "dop_v1_",
+        "shpat_",
+    ];
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut after_bearer = false;
+    let mut at = 0;
+    while at < bytes.len() {
+        if token(bytes[at]) {
+            let start = at;
+            while at < bytes.len() && token(bytes[at]) {
+                at += 1;
+            }
+            let word = &text[start..at];
+            let secretish = (after_bearer && word.len() >= 8)
+                || PREFIXES
+                    .iter()
+                    .any(|prefix| word.starts_with(prefix) && word.len() >= prefix.len() + 8)
+                || (word.starts_with("eyJ") && word.len() >= 12);
+            after_bearer = word == "Bearer";
+            out.push_str(if secretish { "[redacted]" } else { word });
+        } else {
+            // Non-token byte: ASCII punctuation or a UTF-8 lead byte — copy
+            // the whole character.
+            let width = text[at..].chars().next().map_or(1, char::len_utf8);
+            out.push_str(&text[at..at + width]);
+            at += width;
+        }
+    }
+    out
 }
 
 /// Encodes one step's events into a `{"kind":"events","events":[...]}` line.
@@ -594,5 +671,86 @@ mod tests {
         assert_eq!(lines.len(), 2, "{lines:?}");
         assert!(lines[1].contains("\"fail\""), "{}", lines[1]);
         Script::from_replay(lines.join("\n").as_bytes()).expect("joined fixture parses");
+    }
+}
+
+#[cfg(test)]
+mod dev_review_tests {
+    //! Boundary proofs for the dev-helper review fixes: atomic capture
+    //! pairs, chaos terminal drop, and credential scrubbing on export.
+
+    use super::*;
+
+    /// A chaos-injected terminal must end the stream: the inner source
+    /// is dropped so a trailing source item cannot reach `next` past the
+    /// terminal guard. Reverting the drop yields the trailing item, and
+    /// the guard panics in debug builds.
+    #[tokio::test]
+    async fn chaos_terminal_drop_ends_the_inner_stream() {
+        let source = stream::iter(vec![
+            Ok(StreamEvent::TextDelta { text: "one".into() }),
+            Ok(StreamEvent::TextDelta { text: "two".into() }),
+        ]);
+        let mut stream = chaos(
+            EventStream::new(source, || {}),
+            Chaos::inject(
+                0,
+                StreamEvent::Stop {
+                    reason: StopReason::EndTurn,
+                },
+            ),
+        );
+        assert!(matches!(
+            stream.next().await,
+            Some(Ok(StreamEvent::Stop { .. }))
+        ));
+        assert!(stream.next().await.is_none());
+    }
+
+    /// Each stream's sealed step and its failure line land under one
+    /// lock, so a second live stream cannot interleave between them —
+    /// `replay` proves the pairs stay adjacent.
+    #[tokio::test]
+    async fn capture_pairs_each_step_with_its_failure() {
+        let capture = Capture::default();
+        let source = |tag: &str| {
+            stream::iter(vec![
+                Ok(StreamEvent::TextDelta {
+                    text: tag.to_owned(),
+                }),
+                Err(ProviderError::InvalidRequest {
+                    message: format!("stream {tag} blew up"),
+                }),
+            ])
+        };
+        let mut a = record(EventStream::new(source("a"), || {}), capture.clone());
+        let mut b = record(EventStream::new(source("b"), || {}), capture.clone());
+        // Drive both into their buffered step before either ends so the
+        // sealed pairs are the only shape replay can parse.
+        let _ = a.next().await;
+        let _ = b.next().await;
+        while a.next().await.is_some() {}
+        while b.next().await.is_some() {}
+        let fixture = capture.replay().expect("each pair stays adjacent");
+        assert_eq!(fixture.len(), 4, "{fixture:?}");
+        assert_eq!(capture.steps().len(), 2);
+        assert_eq!(capture.failures().len(), 2);
+    }
+
+    /// A raw capture carries the wire verbatim, but the exported replay
+    /// script must never leak credential-shaped material: the export
+    /// scrubs token shapes out of the fixture text.
+    #[tokio::test]
+    async fn record_scrubs_credential_shapes_from_the_fixture() {
+        let capture = Capture::default();
+        let source = stream::iter(vec![Err(ProviderError::InvalidRequest {
+            message: "upstream sent Bearer sk-live-abcdefghij1234".to_owned(),
+        })]);
+        let mut stream = record(EventStream::new(source, || {}), capture.clone());
+        while stream.next().await.is_some() {}
+        let fixture = capture.replay().expect("fixture parses");
+        let text = fixture.join("\n");
+        assert!(!text.contains("sk-live-abcdefghij1234"), "{text}");
+        assert!(text.contains("[redacted]"), "{text}");
     }
 }
