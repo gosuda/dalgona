@@ -13,14 +13,15 @@ use dal_core::{
     Answer, BlobId, ClientId, ErrorTriple, Expect, JobId, Question, RequestId, Service, SessionId,
     TurnId,
 };
-use dal_store::{BlobError, StoreError};
+use dal_store::{BlobError, MAX_SIDECAR_VALUE, StoreError};
 
 /// The number of wake-started turns in a row the core accepts before it
 /// refuses the next wake with [`DenyReason::WakeLimit`].
 const WAKE_LIMIT: u32 = 20;
 
-/// The most bytes one sidecar value may hold.
-pub(crate) const SIDECAR_VALUE_LIMIT: u64 = 1_048_576;
+/// The most bytes one sidecar value may hold. The read bound in
+/// [`dal_store`] enforces the same cap, so one constant governs both sides.
+pub(crate) const SIDECAR_VALUE_LIMIT: u64 = MAX_SIDECAR_VALUE;
 
 /// The bounded resource an admission wait was waiting for.
 #[non_exhaustive]

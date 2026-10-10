@@ -1,6 +1,10 @@
 //! Checked, session-scoped access to private sidecar files.
 
-use std::{fs, io, path::PathBuf};
+use std::{
+    fs,
+    io::{self, Read},
+    path::PathBuf,
+};
 
 use dal_core::{Name, SidecarName};
 
@@ -21,6 +25,10 @@ const RESERVED: [&str; 7] = [
     "jobs",
     "sidecar",
 ];
+
+/// The most bytes one extension sidecar value may hold. Reads refuse larger
+/// files so an oversized sidecar cannot drive a large allocation.
+pub const MAX_SIDECAR_VALUE: u64 = 1_048_576;
 
 /// Reads and atomically writes private files within one file-backed session.
 #[derive(Debug)]
@@ -122,23 +130,59 @@ impl ExtensionSidecar<'_> {
             .map_err(|source| util::io_err(&directory, source))?;
         util::sync_dir(self.paths.directory())?;
         util::sync_dir(&self.paths.sidecar_dir())?;
+        // The recursive create may add the session directory itself while a
+        // lazy journal has not landed yet, so its entry under the workspace
+        // directory needs a parent sync like `Sidecar::write`.
+        if let Some(parent) = self.paths.directory().parent() {
+            util::sync_dir(parent)?;
+        }
         util::write_atomic(&self.path(name), bytes, FileMode::Mode0600)
     }
 
     /// Reads the named extension sidecar bytes without decoding its payload.
     ///
+    /// The file's size is checked before its bytes are read, so an oversized
+    /// or adversarial sidecar cannot drive a large allocation.
+    ///
     /// # Errors
     /// Returns [`StoreError::NotFound`] with the sidecar path when it is missing,
-    /// or [`StoreError::Io`] for another read failure.
+    /// [`StoreError::SidecarTooLarge`] when the file exceeds
+    /// [`MAX_SIDECAR_VALUE`], or [`StoreError::Io`] for another read failure.
     pub fn read(&self, name: &SidecarName) -> Result<Vec<u8>, StoreError> {
         let path = self.path(name);
-        match fs::read(&path) {
-            Ok(bytes) => Ok(bytes),
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
             Err(source) if source.kind() == io::ErrorKind::NotFound => {
-                Err(StoreError::NotFound { path })
+                return Err(StoreError::NotFound { path });
             }
-            Err(source) => Err(util::io_err(&path, source)),
+            Err(source) => return Err(util::io_err(&path, source)),
+        };
+        if !metadata.is_file() {
+            return Err(StoreError::Invalid {
+                reason: "sidecar value is not a regular file".into(),
+            });
         }
+        if metadata.len() > MAX_SIDECAR_VALUE {
+            return Err(StoreError::SidecarTooLarge {
+                name: name.as_str().into(),
+                bytes: metadata.len(),
+            });
+        }
+        let file = fs::File::open(&path).map_err(|source| util::io_err(&path, source))?;
+        // One byte over the cap turns a value grown between the stat and the
+        // read into an error instead of a silently truncated value.
+        let mut value = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
+        file.take(MAX_SIDECAR_VALUE + 1)
+            .read_to_end(&mut value)
+            .map_err(|source| util::io_err(&path, source))?;
+        let read_bytes = u64::try_from(value.len()).unwrap_or(u64::MAX);
+        if read_bytes > MAX_SIDECAR_VALUE {
+            return Err(StoreError::SidecarTooLarge {
+                name: name.as_str().into(),
+                bytes: read_bytes,
+            });
+        }
+        Ok(value)
     }
 
     fn directory(&self) -> PathBuf {
@@ -420,6 +464,51 @@ mod tests {
             error,
             StoreError::NotFound { path } if path == expected_path
         ));
+    }
+
+    #[test]
+    fn extension_read_refuses_a_value_over_the_sidecar_cap() {
+        let (_root, paths) = sidecar();
+        let extension = Name::parse("ext").expect("valid extension name");
+        let name = SidecarName::parse("big").expect("valid sidecar name");
+        let oversized = vec![0_u8; usize::try_from(MAX_SIDECAR_VALUE).expect("cap fits") + 1];
+
+        std::fs::create_dir_all(paths.sidecar_dir().join("ext"))
+            .expect("create extension sidecar directory");
+        std::fs::write(paths.sidecar_dir().join("ext").join("big"), &oversized)
+            .expect("write oversized sidecar");
+
+        let error = Sidecar::new(&paths)
+            .for_extension(&extension)
+            .read(&name)
+            .expect_err("oversized sidecar refused");
+        assert_eq!(
+            error.to_string(),
+            StoreError::SidecarTooLarge {
+                name: "big".into(),
+                bytes: u64::try_from(oversized.len()).expect("length fits"),
+            }
+            .to_string()
+        );
+    }
+
+    #[test]
+    fn extension_read_accepts_a_value_at_the_sidecar_cap() {
+        let (_root, paths) = sidecar();
+        let extension = Name::parse("ext").expect("valid extension name");
+        let name = SidecarName::parse("full").expect("valid sidecar name");
+        let value = vec![b'x'; usize::try_from(MAX_SIDECAR_VALUE).expect("cap fits")];
+
+        std::fs::create_dir_all(paths.sidecar_dir().join("ext"))
+            .expect("create extension sidecar directory");
+        std::fs::write(paths.sidecar_dir().join("ext").join("full"), &value)
+            .expect("write capped sidecar");
+
+        let read = Sidecar::new(&paths)
+            .for_extension(&extension)
+            .read(&name)
+            .expect("capped sidecar reads");
+        assert_eq!(read, value);
     }
 
     #[cfg(unix)]

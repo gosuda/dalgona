@@ -7,6 +7,8 @@ use std::{io, path::Path, path::PathBuf};
 
 use dal_core::{BlobId, EntryId, SessionId};
 
+use crate::sidecar::MAX_SIDECAR_VALUE;
+
 /// A session operation failed.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -81,6 +83,14 @@ pub enum StoreError {
         path: PathBuf,
         /// The operating-system error.
         source: Box<io::Error>,
+    },
+    /// An extension sidecar value exceeds the sidecar cap.
+    #[error("sidecar value for \"{name}\" is {bytes} bytes; the limit is {MAX_SIDECAR_VALUE}.")]
+    SidecarTooLarge {
+        /// The sidecar name.
+        name: Box<str>,
+        /// The rejected length in bytes.
+        bytes: u64,
     },
     /// `--resume` was given an empty argument.
     #[error("--resume needs a session id or name")]
