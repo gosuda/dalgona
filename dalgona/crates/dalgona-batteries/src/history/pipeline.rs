@@ -462,35 +462,40 @@ impl Engine {
         }
         let window = request.budget.window_tokens.ok_or(Decline::UnknownWindow)?;
         let mut candidates = self.render(&request, &profile, &permit).await?;
-        self.load_reused(&request, &mut candidates).await?;
-        candidates = self
-            .render_missing(candidates, &profile, Arc::clone(&permit))
-            .await?;
-        let unmatched = unmatched_known(&request, &candidates);
         let pool = drawable(&candidates);
         if pool.is_empty() {
             return Err(Decline::NothingToDraw.into());
         }
         let selected = self.select(&request, &profile, window, &candidates, &pool)?;
+        self.load_selected(&request, &mut candidates, &selected)
+            .await?;
+        candidates = self
+            .render_missing(candidates, &profile, Arc::clone(&permit))
+            .await?;
+        let unmatched = unmatched_known(&request, &candidates);
         let drawn = assemble(&request, &profile, &mut candidates, &selected, &unmatched)?;
         drawn.verify()?;
         sink.commit(request.span, drawn).await
     }
 
-    async fn load_reused(
+    /// Fetches stored PNGs for the selected reusable candidates only; an
+    /// unselected reused page keeps its record for the index without a fetch.
+    async fn load_selected(
         &self,
         request: &Request,
         candidates: &mut [Candidate],
+        selected: &[usize],
     ) -> Result<(), CompactError> {
         let Some(blobs) = request.blobs.as_ref() else {
-            for candidate in candidates {
+            for candidate in candidates.iter_mut() {
                 if candidate.png.is_none() {
                     candidate.reused = None;
                 }
             }
             return Ok(());
         };
-        for candidate in candidates {
+        for &index in selected {
+            let candidate = &mut candidates[index];
             let Some(record) = candidate.reused.take() else {
                 continue;
             };
@@ -645,7 +650,15 @@ fn profile_height(profile: &ImageProfile) -> u32 {
 }
 
 fn png_len(candidate: &Candidate) -> usize {
-    candidate.png.as_ref().map_or(0, Vec::len)
+    if let Some(png) = &candidate.png {
+        return png.len();
+    }
+    match &candidate.reused {
+        Some(LetterRecord::Compaction { png_bytes, .. }) => {
+            usize::try_from(*png_bytes).unwrap_or(0)
+        }
+        _ => 0,
+    }
 }
 
 #[expect(
@@ -674,7 +687,9 @@ fn drawable(candidates: &[Candidate]) -> Vec<usize> {
     candidates
         .iter()
         .enumerate()
-        .filter(|(_, candidate)| candidate.png.is_some())
+        .filter(|(_, candidate)| {
+            candidate.png.is_some() || (candidate.drawable && candidate.reused.is_some())
+        })
         .map(|(index, _)| index)
         .collect()
 }
@@ -769,7 +784,9 @@ fn draw_missing(
     let grid = profile_grid(profile);
     let glyphs = font.glyphs().map_err(|_| Decline::Font)?;
     for candidate in &mut candidates {
-        if candidate.png.is_some() || !candidate.drawable {
+        // Reused pages keep their stored PNG or, when not selected, stay
+        // hidden; only fresh drawable pages render here.
+        if candidate.png.is_some() || !candidate.drawable || candidate.reused.is_some() {
             continue;
         }
         let items = std::mem::take(&mut candidate.items);
@@ -854,7 +871,9 @@ fn assemble(
             fresh += 1;
             format!("history/{}.{}", request.ordinal, fresh)
         };
-        let visibility = if candidate.png.is_none() {
+        let visibility = if candidate.png.is_none()
+            && (!candidate.drawable || candidate.reused.is_none())
+        {
             LetterVisibility::ShownAsText
         } else if selected.contains(&position) {
             LetterVisibility::Drawn
