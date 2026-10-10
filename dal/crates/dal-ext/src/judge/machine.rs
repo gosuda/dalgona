@@ -290,10 +290,6 @@ impl Judge {
         Ok(())
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "one judge call carries the request shape end to end"
-    )]
     async fn call<T, Render, Parse>(
         &self,
         feature: &str,

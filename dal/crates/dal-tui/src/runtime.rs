@@ -464,10 +464,6 @@ fn boot<A: TuiAgent>(
     Ok((surfaces, painter, theme, probe, decoder))
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the loop's inputs are the run's own locals; grouping adds a shell"
-)]
 fn run_loop<A, M, S>(
     io: &dyn TermIo,
     opts: &TuiOptions,

@@ -38,10 +38,6 @@ pub(crate) fn child_workspace(
 }
 
 /// Builds one parent-scoped start operation; no parent grant is copied.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one start operation carries every spawn field"
-)]
 pub(crate) fn start_child(
     call: CallId,
     name: &str,

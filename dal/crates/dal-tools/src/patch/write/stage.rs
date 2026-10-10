@@ -784,7 +784,6 @@ fn diff_hunks(before: &[u8], after: &[u8]) -> Vec<DiffHunk> {
 }
 
 #[expect(
-    clippy::too_many_arguments,
     clippy::too_many_lines,
     reason = "one proof carries the session, path pair, and locator inputs"
 )]

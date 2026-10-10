@@ -152,10 +152,6 @@ impl Painter {
         result
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "one paint pass carries every inline render input"
-    )]
     fn inline_bytes(
         &mut self,
         out: &mut Vec<u8>,
