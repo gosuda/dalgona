@@ -103,20 +103,33 @@ pub(crate) async fn scripted_session(
     Ok(GateHarness { host, agent })
 }
 
-/// Probes whether `pid` still runs, portable across gate platforms.
-pub(crate) fn process_alive(pid: u32) -> bool {
+/// Probes whether `pid` still runs an image named `name`, portable across
+/// gate platforms. A bare liveness probe lies on Windows: PIDs recycle fast
+/// enough that a killed target's number lands on an unrelated system process
+/// (seen on windows-11-arm as a live svchost under the dead sleep's PID), so
+/// the probe verifies the process identity, not just the number.
+pub(crate) fn process_named_alive(pid: u32, name: &str) -> bool {
     #[cfg(target_os = "linux")]
-    let alive = PathBuf::from(format!("/proc/{pid}")).exists();
+    let alive = std::fs::read_to_string(format!("/proc/{pid}/comm"))
+        .is_ok_and(|comm| comm.trim().contains(name));
     #[cfg(target_os = "macos")]
-    let alive = Command::new("/bin/kill")
-        .args(["-0", &pid.to_string()])
-        .status()
-        .is_ok_and(|status| status.success());
+    let alive = Command::new("/bin/ps")
+        .args(["-p", &pid.to_string(), "-o", "comm="])
+        .output()
+        .is_ok_and(|output| String::from_utf8_lossy(&output.stdout).contains(name));
     #[cfg(windows)]
     let alive = Command::new("powershell.exe")
-        .args(["-NoProfile", "-Command", &format!("Get-Process -Id {pid}")])
-        .status()
-        .is_ok_and(|status| status.success());
+        .args([
+            "-NoProfile",
+            "-Command",
+            &format!("(Get-Process -Id {pid} -ErrorAction SilentlyContinue).ProcessName"),
+        ])
+        .output()
+        .is_ok_and(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .contains(name)
+        });
     alive
 }
 

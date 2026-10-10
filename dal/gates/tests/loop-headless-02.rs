@@ -100,7 +100,7 @@ async fn cancel_mid_exec_kills_grandchild_and_ends_once() -> Result<(), Box<dyn 
     assert!(cancelled, "exec must have started before cancellation");
     assert_eq!(turn_ends, 1);
     let pid = fs::read_to_string(pid_file)?.trim().parse::<u32>()?;
-    assert!(!support::process_alive(pid));
+    assert!(!support::process_named_alive(pid, "sleep"));
     let _ = harness.host.shutdown(Duration::from_secs(1)).await;
     Ok(())
 }
