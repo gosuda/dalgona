@@ -556,6 +556,7 @@ impl UsageChecker {
 
         let mut secrets = vec![oauth.access_token.clone(), oauth.refresh_token.clone()];
         secrets.extend(oauth.id_token.as_deref().map(SecretString::from));
+        secrets.push(SecretString::from(identity.account_id.as_str()));
         let fetch = Fetch {
             client: self.client.clone(),
             url: self.url.clone(),
