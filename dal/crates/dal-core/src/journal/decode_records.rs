@@ -266,7 +266,14 @@ pub fn scan_head(line: &[u8]) -> Option<ScannedHead> {
 /// Returns [`DecodeError`] for a missing or unsupported version, an
 /// unknown record kind, malformed JSON, or an invalid member.
 pub fn decode(line: &[u8]) -> Result<Decoded, DecodeError> {
-    let text = std::str::from_utf8(line.trim_ascii_end())
+    // `trim_ascii_end` also strips `\x0c`, which is ASCII but not JSON
+    // whitespace; a strict codec tolerates only the four JSON whitespace
+    // bytes at the line boundary.
+    let end = line
+        .iter()
+        .rposition(|byte| !matches!(byte, b' ' | b'\t' | b'\n' | b'\r'))
+        .map_or(0, |index| index + 1);
+    let text = std::str::from_utf8(&line[..end])
         .map_err(|_| invalid(0, "journal lines are UTF-8"))?;
     let mut members: Members<'_> = Vec::new();
     let mut version_member: Option<Member<'_>> = None;
