@@ -72,15 +72,13 @@ disallowed_methods = "deny"
 
 # Fast feedback for dev profile
 [profile.dev]
-# 1. Limit debug info to just line tables (removes variable/type info).
-# Reduces clean build times by ~9% and rebuilds by ~21%.
-debug = "line-tables-only"
+debug     = "limited"
 
-# 2. Bypass the heavy linker for DWARF debug info (macOS/Linux).
+# Bypass the heavy linker for DWARF debug info (macOS/Linux).
 # Keeps debug info in object files instead of packing it into the binary.
 split-debuginfo = "unpacked"
 
-# 3. Increase optimization slightly
+# Increase optimization slightly
 # Setting this to 1 can sometimes make the compiler generate cleaner code 
 # that LLVM backend can process faster, without doing heavy optimizations.
 opt-level = 1
@@ -88,6 +86,7 @@ opt-level = 1
 # Fast feedback for test profile
 [profile.test]
 opt-level = 3
+debug     = "limited"
 split-debuginfo = "unpacked"
 
 [profile.dist]
