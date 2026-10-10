@@ -147,6 +147,8 @@ pub enum HostUpdate {
     },
     /// A provider sign-in has reached its one terminal outcome.
     LoginFinished {
+        /// The attempt that finished.
+        login: LoginId,
         /// The provider that was signed in to.
         provider: Box<str>,
         /// Whether the credential is stored and ready.

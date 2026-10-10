@@ -18,13 +18,13 @@ use dal_agent::ext::{
     BoxFuture, EventStream, ExtensionBuilder, Hook, HookCx, HookError, ModelCx, ModelError,
     ModelHandler, ModelRecord,
 };
-use dal_agent::{Agent, Delivery, Env, Host, Product, ServiceError, SessionRef};
+use dal_agent::{Agent, Delivery, Env, Host, Product, ServiceError, SessionRef, Subscription};
 use dal_core::ext::BeforeTurn;
 use dal_core::{
     AgentStart, AgentsOp, AgentsReply, ApprovalMode, CallId, Caps, ClientId, Command, CommandName,
     CommandSpec, Config, ConfigProduct, Expect, ModelId, ModelInfo, ModelRequest, Name, Origin,
-    Output, Part, RawJson, Reply, Save, ServiceSet, SessionId, ThinkingLevel, ToolClass, ToolSpec,
-    TurnState, UpdateKind, Visibility, Workspace,
+    Output, Part, RawJson, Reply, Save, ServiceSet, SessionId, Stop, ThinkingLevel, ToolClass,
+    ToolSpec, TurnState, UpdateKind, Visibility, Workspace,
 };
 use dal_provider::{ProviderError, StreamEvent, ToolArgs};
 
@@ -638,6 +638,21 @@ impl Rig {
         }
     }
 
+    async fn child_updates(&self, id: SessionId) -> Subscription {
+        let agent = self
+            .host
+            .open(
+                SessionRef::Resume {
+                    key: id.to_string().into(),
+                    workspace: Workspace::new(self.workspace.clone()).expect("workspace"),
+                },
+                ClientId::new("probe"),
+            )
+            .await
+            .expect("resume child");
+        agent.subscribe_listen(None).expect("subscribe")
+    }
+
     async fn child_view(&self, id: SessionId) -> dal_core::View {
         let agent = self
             .host
@@ -652,6 +667,26 @@ impl Rig {
             .expect("resume child");
         agent.view(dal_core::PageReq::default()).expect("view")
     }
+}
+
+/// The stop reason of the session's turn number `number`, read from the
+/// stream; earlier turns the stream replays are skipped.
+async fn turn_stop(updates: &mut Subscription, number: u64) -> Stop {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(delivery) = updates.next().await {
+            let Delivery::Update(update) = delivery else {
+                continue;
+            };
+            if let UpdateKind::TurnEnded { turn, stop } = &update.kind
+                && turn.get() == number
+            {
+                return *stop;
+            }
+        }
+        panic!("the update stream closed before turn {number} ended");
+    })
+    .await
+    .unwrap_or_else(|_| panic!("turn {number} did not end"))
 }
 
 #[tokio::test]
@@ -805,12 +840,15 @@ async fn a_bounded_prompt_stops_the_prompted_turn_after_one_step() {
     rig.run("spawn", "*").await;
     let child = rig.child(0);
     rig.settled(child, 1).await;
+    let mut updates = rig.child_updates(child).await;
     rig.probe.queue("alpha");
     rig.probe.queue("alpha");
     rig.run("prompt-child", &format!("{child} 1")).await;
-    rig.settled(child, 2).await;
-    // Give a wrongly continuing turn time to open its second request.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        turn_stop(&mut updates, 2).await,
+        Stop::MaxSteps,
+        "the bound, not the model, ended the prompted turn"
+    );
     assert_eq!(
         rig.probe.requests().len(),
         2,

@@ -13,6 +13,7 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::HostError;
+use crate::host::LoginId;
 use crate::login_fake::{
     ACCESS_TOKEN, ACCOUNT_ID, FakeOAuth, REFRESH_TOKEN, TokenReply, USER_CODE, follow_authorize_url,
 };
@@ -117,6 +118,7 @@ async fn codex_browser_login_completes_on_the_loopback_callback() {
     assert_eq!(
         finished(&mut subscription).await,
         [HostUpdate::LoginFinished {
+            login: LoginId::new(1),
             provider: "openai-codex".into(),
             ready: true,
             detail: None,
@@ -219,6 +221,7 @@ async fn cancelling_a_pending_login_reports_cancellation_and_stores_nothing() {
     assert_eq!(
         finished(&mut subscription).await,
         [HostUpdate::LoginFinished {
+            login: LoginId::new(1),
             provider: "openai-codex".into(),
             ready: false,
             detail: Some("sign-in cancelled.".into()),
@@ -245,6 +248,7 @@ async fn a_login_nobody_completes_times_out_after_fifteen_minutes() {
     assert_eq!(
         finished(&mut subscription).await,
         [HostUpdate::LoginFinished {
+            login: LoginId::new(1),
             provider: "openai-codex".into(),
             ready: false,
             detail: Some("sign-in timed out after 15 minutes.".into()),
@@ -284,6 +288,7 @@ async fn a_rejected_exchange_reports_the_token_error_and_stores_nothing() {
     assert_eq!(
         finished(&mut subscription).await,
         [HostUpdate::LoginFinished {
+            login: LoginId::new(1),
             provider: "openai-codex".into(),
             ready: false,
             detail: Some(text.into()),
@@ -333,6 +338,29 @@ async fn an_unsupported_method_fails_once_and_writes_nothing() {
         finished(&mut subscription).await.as_slice(),
         [HostUpdate::LoginFinished { ready: false, .. }]
     ));
+}
+
+#[tokio::test]
+async fn each_login_names_its_own_attempt_in_its_finished_update() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let server = FakeOAuth::start(TokenReply::Issue).await.expect("server");
+    let host = host_in(dir.path(), &server).await;
+    let mut subscription = host.subscribe();
+    let (io, _events) = LoginIo::channel(None, CancellationToken::new());
+    let _ = host.login("openai", Method::Browser, io).await;
+    let (io, _events) = LoginIo::channel(None, CancellationToken::new());
+    let _ = host
+        .login_as(LoginId::new(77), "openai", Method::Browser, io)
+        .await;
+    let logins: Vec<LoginId> = finished(&mut subscription)
+        .await
+        .into_iter()
+        .map(|update| match update {
+            HostUpdate::LoginFinished { login, .. } => login,
+            other => panic!("not a login update: {other:?}"),
+        })
+        .collect();
+    assert_eq!(logins, [LoginId::new(1), LoginId::new(77)]);
 }
 
 #[tokio::test]

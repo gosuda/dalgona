@@ -70,6 +70,12 @@ pub(crate) struct AgentInner {
 }
 
 impl Agent {
+    /// Returns the identity of the session this handle is bound to.
+    #[must_use]
+    pub fn session(&self) -> SessionId {
+        self.inner.session
+    }
+
     /// Snapshots the materialized view from the shared snapshot.
     ///
     /// # Errors

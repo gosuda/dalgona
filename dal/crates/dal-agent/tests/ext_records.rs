@@ -483,6 +483,7 @@ async fn an_open_ask_survives_its_answerer_detaching() {
     let script = turn_script("probe", "{}");
     let (fixture, agent) = start(vec![asker_extension(Arc::clone(&seen))], script).await;
     let subscription = agent.subscribe(None).expect("subscription");
+    let mut listener = agent.subscribe_listen(None).expect("listener");
     until_ok(async || {
         agent
             .submit(Command::Prompt {
@@ -495,19 +496,23 @@ async fn an_open_ask_survives_its_answerer_detaching() {
     })
     .await;
     let request = tokio::time::timeout(WAIT, async {
-        loop {
-            let open = agent.view(dal_core::PageReq::default()).expect("view").open;
-            if let Some(request) = open.first() {
+        while let Some(delivery) = listener.next().await {
+            if let Delivery::Update(update) = delivery
+                && let UpdateKind::RequestOpened(request) = &update.kind
+            {
                 return request.id;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
         }
+        panic!("the update stream closed before the ask opened");
     })
     .await
     .expect("the tool opened a request");
 
     drop(subscription);
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    agent
+        .poll_status()
+        .await
+        .expect("the session actor drained its queue after the detach");
     let open = agent.view(dal_core::PageReq::default()).expect("view").open;
     assert_eq!(
         open.iter().map(|open| open.id).collect::<Vec<_>>(),
@@ -520,6 +525,18 @@ async fn an_open_ask_survives_its_answerer_detaching() {
             .is_none(),
         "the ask has not resolved"
     );
+    while let Ok(Some(delivery)) = tokio::time::timeout(Duration::ZERO, listener.next()).await {
+        if let Delivery::Update(update) = delivery {
+            assert!(
+                !matches!(
+                    update.kind,
+                    UpdateKind::RequestResolved { .. } | UpdateKind::TurnEnded { .. }
+                ),
+                "the detach resolved the ask: {:?}",
+                update.kind
+            );
+        }
+    }
 
     let mut subscription = agent.subscribe(None).expect("resubscription");
     let answer = Answer::Value(RawJson::parse("\"ada\"").expect("answer json"));

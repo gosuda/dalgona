@@ -29,7 +29,7 @@ pub struct LoginOutcome {
 ///
 /// Minted when the login starts; forgotten when the login completes or is
 /// cancelled, so an id never outlives its attempt.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize)]
 pub struct LoginId(u64);
 
 impl LoginId {
@@ -47,7 +47,35 @@ impl LoginId {
 }
 
 impl Host {
-    /// Signs in to `provider` with `method` and stores the credential.
+    /// Mints a fresh attempt id that no other login of this host uses.
+    fn mint_login_id(&self) -> LoginId {
+        LoginId::new(self.state.next_login.fetch_add(1, Ordering::SeqCst))
+    }
+
+    /// Signs in to `provider` with `method` and stores the credential under a
+    /// fresh attempt id.
+    ///
+    /// See [`Host::login_as`] for the flow and its guarantees.
+    ///
+    /// # Errors
+    /// Returns [`HostError::Provider`] with the typed sign-in failure.
+    pub async fn login(
+        &self,
+        provider: &str,
+        method: Method,
+        io: LoginIo,
+    ) -> Result<LoginOutcome, HostError> {
+        self.login_as(self.mint_login_id(), provider, method, io)
+            .await
+    }
+
+    /// Signs in to `provider` with `method` and stores the credential as
+    /// attempt `login`.
+    ///
+    /// `login` names this attempt in the one [`HostUpdate::LoginFinished`] it
+    /// publishes, so a waiter that holds the id cannot take another attempt's
+    /// outcome for the same provider as its own. Use an id from
+    /// [`Host::register_login`] when the attempt must be cancellable by id.
     ///
     /// OAuth methods report [`dal_provider::LoginProgress`] on
     /// [`LoginIo::progress`], read one pasted value from [`LoginIo::paste`]
@@ -64,8 +92,9 @@ impl Host {
     /// Returns [`HostError::Provider`] with the typed sign-in failure:
     /// an unsupported method, cancellation, the 15-minute deadline, a callback
     /// or token-exchange failure, or an `auth.json` error.
-    pub async fn login(
+    pub async fn login_as(
         &self,
+        login: LoginId,
         provider: &str,
         method: Method,
         io: LoginIo,
@@ -77,6 +106,7 @@ impl Host {
             Err(error) => (false, Some(Box::<str>::from(error.to_string()))),
         };
         self.publish(&HostUpdate::LoginFinished {
+            login,
             provider: provider.into(),
             ready,
             detail,
@@ -99,7 +129,7 @@ impl Host {
     /// forgets a finished login, and [`Host::cancel_login`] fires a pending
     /// one. Either removes the entry, so an id never outlives its attempt.
     pub fn register_login(&self) -> (LoginId, CancellationToken) {
-        let login = LoginId::new(self.state.next_login.fetch_add(1, Ordering::SeqCst));
+        let login = self.mint_login_id();
         let cancel = CancellationToken::new();
         self.state
             .logins
