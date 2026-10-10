@@ -47,6 +47,10 @@ pub const USAGE_TIMEOUT: Duration = Duration::from_secs(15);
 /// Total bound on one OAuth token or device-code request.
 pub const OAUTH_TIMEOUT: Duration = Duration::from_secs(15);
 /// How long a sign-in flow waits for the browser callback or device approval.
+#[expect(
+    clippy::duration_suboptimal_units,
+    reason = "Duration::from_mins is not stable at MSRV 1.90 (rust#140881)"
+)]
 pub const LOGIN_WAIT: Duration = Duration::from_secs(15 * 60);
 /// Largest WebSocket message accepted.
 pub const WS_MESSAGE_LIMIT: usize = 16 << 20;

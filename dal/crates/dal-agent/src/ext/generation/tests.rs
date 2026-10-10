@@ -467,6 +467,66 @@ fn reload_splice_replaces_only_the_plugin_tail() {
 }
 
 #[test]
+fn reload_splice_keeps_rebuilt_builtins_at_their_startup_position() {
+    use super::splice_plugins;
+
+    // `/reload` rebuilds a builtin in place (the skills/letter pair): the
+    // replacement must land at its startup index or the canonical order
+    // shifts and the published non-`User` names diverge.
+    let current = Generation::build(
+        ValidatedExtensions::validate(
+            vec![
+                ext("a", Origin::Builtin).build().expect("product a"),
+                ext("skills", Origin::Builtin)
+                    .build()
+                    .expect("product skills"),
+                ext("b", Origin::Builtin).build().expect("product b"),
+                ext("battery", Origin::Bundled)
+                    .build()
+                    .expect("product battery"),
+                ext("p1", Origin::User).build().expect("plugin p1"),
+            ],
+            None,
+        )
+        .expect("current validates"),
+    );
+    let base: Vec<&str> = current
+        .extensions
+        .iter()
+        .filter(|ext| ext.origin() != Origin::User)
+        .map(super::super::Extension::name)
+        .collect();
+    let next = Generation::build(
+        ValidatedExtensions::validate(
+            splice_plugins(
+                &current.extensions,
+                vec![ext("p2", Origin::User).build().expect("plugin p2")],
+                vec![
+                    ext("skills", Origin::Builtin)
+                        .build()
+                        .expect("rebuilt skills"),
+                ],
+            ),
+            None,
+        )
+        .expect("replacement validates"),
+    );
+    let next_base: Vec<&str> = next
+        .extensions
+        .iter()
+        .filter(|ext| ext.origin() != Origin::User)
+        .map(super::super::Extension::name)
+        .collect();
+    assert_eq!(base, next_base, "non-plugin names keep startup order");
+    let order: Vec<&str> = next
+        .extensions
+        .iter()
+        .map(super::super::Extension::name)
+        .collect();
+    assert_eq!(order, vec!["a", "skills", "b", "battery", "p2"]);
+}
+
+#[test]
 fn generation_rejects_duplicate_doc_uris() {
     let only = ext("manual", Origin::User)
         .doc("index", "Index", "first")
