@@ -51,7 +51,8 @@ const FALLBACK_NOTICE: &str = "Falling back from WebSockets to HTTPS transport."
     reason = "Duration::from_mins is not a stable const fn (rust#140881)"
 )]
 const WS_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-/// A socket never outlives one login flow; a stale link fails closed.
+/// A socket is not reused for a new stream once it exceeds this age; live
+/// and unclaimed idle sockets may outlive it.
 #[expect(
     clippy::duration_suboptimal_units,
     reason = "Duration::from_mins is not a stable const fn (rust#140881)"
