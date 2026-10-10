@@ -10,7 +10,6 @@
 use std::time::Duration;
 
 use futures::stream;
-use tokio::sync::Mutex;
 
 use dal_core::RawJson;
 
@@ -29,7 +28,7 @@ use crate::{
 /// `Stop` seals its events step and appends a `fail` line, keeping the
 /// fixture a valid replay of the observed failure.
 #[derive(Clone, Default)]
-pub struct Capture(std::sync::Arc<Mutex<Vec<Line>>>);
+pub struct Capture(std::sync::Arc<std::sync::Mutex<Vec<Line>>>);
 
 enum Line {
     Events(Vec<StreamEvent>),
@@ -44,10 +43,9 @@ impl Capture {
     }
 
     /// Every sealed events step, in arrival order.
-    pub async fn steps(&self) -> Vec<Vec<StreamEvent>> {
-        self.0
-            .lock()
-            .await
+    #[must_use]
+    pub fn steps(&self) -> Vec<Vec<StreamEvent>> {
+        self.lock()
             .iter()
             .filter_map(|line| match line {
                 Line::Events(events) => Some(events.clone()),
@@ -57,10 +55,9 @@ impl Capture {
     }
 
     /// Every recorded stream-failure message, in arrival order.
-    pub async fn failures(&self) -> Vec<String> {
-        self.0
-            .lock()
-            .await
+    #[must_use]
+    pub fn failures(&self) -> Vec<String> {
+        self.lock()
             .iter()
             .filter_map(|line| match line {
                 Line::Fail(message) => Some(message.clone()),
@@ -78,14 +75,15 @@ impl Capture {
     /// # Errors
     /// Returns `Err` when an event cannot encode into the replay grammar or
     /// the joined fixture fails the grammar.
-    pub async fn replay(&self) -> Result<Vec<String>, ReplayError> {
+    pub fn replay(&self) -> Result<Vec<String>, ReplayError> {
         let lines = self
-            .0
             .lock()
-            .await
             .iter()
             .map(|line| match line {
-                Line::Events(events) => encode_step(events),
+                // A partial events step encodes without per-line grammar
+                // checks: its terminating `fail` step is a separate line, so
+                // the pair validates together against `from_replay` below.
+                Line::Events(events) => encode_events(events),
                 Line::Fail(message) => Ok(format!(
                     "{{\"kind\":\"fail\",\"message\":{}}}",
                     json_str(message)
@@ -96,12 +94,18 @@ impl Capture {
         Ok(lines)
     }
 
-    async fn push_events(&self, events: Vec<StreamEvent>) {
-        self.0.lock().await.push(Line::Events(events));
+    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<Line>> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    async fn push_fail(&self, message: String) {
-        self.0.lock().await.push(Line::Fail(message));
+    fn push_events(&self, events: Vec<StreamEvent>) {
+        self.lock().push(Line::Events(events));
+    }
+
+    fn push_fail(&self, message: String) {
+        self.lock().push(Line::Fail(message));
     }
 }
 
@@ -112,48 +116,98 @@ impl Capture {
 /// appends a `fail` line; the stream ending mid-step seals the tail and
 /// appends a `fail` line, so a cut stays replayable.
 pub fn record(stream: EventStream, capture: Capture) -> EventStream {
+    // The step buffer and failure dedupe live behind one mutex shared with
+    // the cancel path: a dropped or cancelled stream seals its open step and
+    // appends the `fail` line instead of losing the prefix.
+    let shared = std::sync::Arc::new(std::sync::Mutex::new(RecordCx {
+        open: Vec::new(),
+        failed: false,
+    }));
     let source = stream::unfold(
-        (stream, capture, Vec::new(), false),
-        |(mut inner, capture, mut open, mut failed)| async move {
+        (stream, capture.clone(), shared.clone()),
+        |(mut inner, capture, shared)| async move {
             let item = inner.next().await;
-            match &item {
-                Some(Ok(event)) => {
-                    open.push(event.clone());
-                    // A new events block follows any recorded failure, so the
-                    // dedupe flag re-arms for this step.
-                    failed = false;
-                    if matches!(event, StreamEvent::Stop { .. }) {
-                        capture.push_events(std::mem::take(&mut open)).await;
+            let (sealed, failure) = {
+                let mut cx = shared
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                match &item {
+                    Some(Ok(event)) => {
+                        cx.open.push(event.clone());
+                        // A new events block follows any recorded failure, so
+                        // the dedupe flag re-arms for this step.
+                        cx.failed = false;
+                        let sealed = matches!(event, StreamEvent::Stop { .. })
+                            .then(|| std::mem::take(&mut cx.open));
+                        (sealed, None)
+                    }
+                    Some(Err(error)) => {
+                        let sealed = (!cx.open.is_empty()).then(|| std::mem::take(&mut cx.open));
+                        let failure = (!cx.failed).then(|| {
+                            cx.failed = true;
+                            error.to_string()
+                        });
+                        (sealed, failure)
+                    }
+                    None => {
+                        // A Stop already sealed the step: only an unterminated
+                        // tail earns a `fail` line, so a clean stream records
+                        // exactly its `events` step.
+                        let (sealed, failure) = if cx.open.is_empty() {
+                            (None, None)
+                        } else {
+                            (
+                                Some(std::mem::take(&mut cx.open)),
+                                (!cx.failed).then(|| {
+                                    cx.failed = true;
+                                    "stream ended without a terminal event".to_owned()
+                                }),
+                            )
+                        };
+                        (sealed, failure)
                     }
                 }
-                Some(Err(error)) => {
-                    if !open.is_empty() {
-                        capture.push_events(std::mem::take(&mut open)).await;
-                    }
-                    if !failed {
-                        capture.push_fail(error.to_string()).await;
-                        failed = true;
-                    }
-                }
-                None => {
-                    // A Stop already sealed the step: only an unterminated
-                    // tail earns a `fail` line, so a clean stream records
-                    // exactly its `events` step.
-                    if !open.is_empty() {
-                        capture.push_events(std::mem::take(&mut open)).await;
-                        if !failed {
-                            capture
-                                .push_fail("stream ended without a terminal event".to_owned())
-                                .await;
-                            failed = true;
-                        }
-                    }
-                }
+            };
+            if let Some(events) = sealed {
+                capture.push_events(events);
             }
-            item.map(|item| (item, (inner, capture, open, failed)))
+            if let Some(message) = failure {
+                capture.push_fail(message);
+            }
+            item.map(|item| (item, (inner, capture, shared)))
         },
     );
-    EventStream::new(source, || {})
+    EventStream::new(source, move || {
+        let (sealed, failure) = {
+            let mut cx = shared
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if cx.open.is_empty() {
+                (None, None)
+            } else {
+                (
+                    Some(std::mem::take(&mut cx.open)),
+                    (!cx.failed).then(|| {
+                        cx.failed = true;
+                        "stream dropped mid-step".to_owned()
+                    }),
+                )
+            }
+        };
+        if let Some(events) = sealed {
+            capture.push_events(events);
+        }
+        if let Some(message) = failure {
+            capture.push_fail(message);
+        }
+    })
+}
+
+/// One in-progress events step plus the per-stream failure dedupe flag,
+/// shared between the unfold loop and the cancel path.
+struct RecordCx {
+    open: Vec<StreamEvent>,
+    failed: bool,
 }
 
 /// Faults injected into one provider stream, addressed by event index.
@@ -356,6 +410,15 @@ pub fn encode_event(event: &StreamEvent) -> Result<RawJson, ReplayError> {
 /// Returns `Err` when an event cannot encode or the joined line fails the
 /// replay grammar.
 pub fn encode_step(events: &[StreamEvent]) -> Result<String, ReplayError> {
+    let line = encode_events(events)?;
+    Script::from_replay(line.as_bytes()).map_err(ReplayError::Grammar)?;
+    Ok(line)
+}
+
+/// Encodes one step's events into a `{"kind":"events","events":[...]}` line
+/// without grammar validation: a partial prefix's `fail` step is a separate
+/// line, so a sequence containing it must validate as a whole.
+fn encode_events(events: &[StreamEvent]) -> Result<String, ReplayError> {
     let events = events
         .iter()
         .enumerate()
@@ -371,9 +434,7 @@ pub fn encode_step(events: &[StreamEvent]) -> Result<String, ReplayError> {
         .map(RawJson::as_str)
         .collect::<Vec<_>>()
         .join(",");
-    let line = format!("{{\"kind\":\"events\",\"events\":[{joined}]}}");
-    Script::from_replay(line.as_bytes()).map_err(ReplayError::Grammar)?;
-    Ok(line)
+    Ok(format!("{{\"kind\":\"events\",\"events\":[{joined}]}}"))
 }
 
 fn encode_err(detail: &'static str) -> ReplayError {
@@ -423,7 +484,7 @@ mod tests {
             assert!(items.iter().all(Result::is_ok));
         }
 
-        let lines = capture.replay().await.expect("captured steps encode");
+        let lines = capture.replay().expect("captured steps encode");
         let first = FIXTURE.lines().next().expect("fixture has lines");
         assert_eq!(lines, vec![first.to_owned(), first.to_owned()]);
 
@@ -487,5 +548,51 @@ mod tests {
         }])
         .expect_err("a stop without usage fails the grammar");
         assert!(matches!(err, ReplayError::Grammar(_)), "{err:?}");
+    }
+
+    /// A stream dropped mid-step must still seal its partial events step and
+    /// append a `fail` line: the fixture records what was observed. Without
+    /// the shared cancel state, the prefix silently disappears.
+    #[tokio::test]
+    async fn record_seals_the_open_step_when_the_stream_drops() {
+        let source = stream::iter(vec![Ok(StreamEvent::TextDelta {
+            text: "partial".to_owned(),
+        })]);
+        let inner = EventStream::new(source, || {});
+        let capture = Capture::new();
+        let mut wrapped = record(inner, capture.clone());
+        // Pull the event into the in-progress buffer first: the buffer is
+        // what the cancel path seals.
+        let _ = wrapped.next().await;
+        drop(wrapped);
+        let steps = capture.steps();
+        assert_eq!(
+            steps,
+            vec![vec![StreamEvent::TextDelta {
+                text: "partial".to_owned()
+            }]]
+        );
+        assert_eq!(capture.failures(), ["stream dropped mid-step"]);
+    }
+
+    /// A partial events step plus its `fail` step validate together: the
+    /// replay grammar counts the pair as one step, so encoding them per line
+    /// rejects a prefix the joined fixture accepts.
+    #[tokio::test]
+    async fn replay_validates_a_partial_step_with_its_fail_line() {
+        let source = stream::iter(vec![
+            Ok(StreamEvent::TextDelta {
+                text: "partial".to_owned(),
+            }),
+            Err(ProviderError::StreamCut),
+        ]);
+        let inner = EventStream::new(source, || {});
+        let capture = Capture::new();
+        let mut wrapped = record(inner, capture.clone());
+        let _ = drain(&mut wrapped).await;
+        let lines = capture.replay().expect("the pair validates");
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[1].contains("\"fail\""), "{}", lines[1]);
+        Script::from_replay(lines.join("\n").as_bytes()).expect("joined fixture parses");
     }
 }
