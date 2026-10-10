@@ -128,19 +128,9 @@ impl Listing {
                     (candidate.mtime_ms, candidate.id_text.as_ref()) < (cursor.0, cursor.1.as_str())
                 });
             }
-            let more = candidates.len() > limit;
-            candidates.truncate(limit);
-            let next_before = if more {
-                candidates.last().map(|candidate| {
-                    format!("{}:{}", candidate.mtime_ms, candidate.id).into_boxed_str()
-                })
-            } else {
-                None
-            };
-            let items = candidates
-                .iter()
-                .filter_map(|candidate| self.read_candidate_info(candidate, workspace))
-                .collect::<Vec<_>>();
+            let (items, next_before) = fill_page(&candidates, limit, |candidate| {
+                self.read_candidate_info(candidate, workspace)
+            });
             return Ok(Page { items, next_before });
         };
         let search = search.to_ascii_lowercase();
@@ -540,6 +530,41 @@ impl Listing {
             );
     }
 }
+
+/// Fills one listing page from newest-first candidates, skipping unreadable
+/// sessions without underfilling the page.
+///
+/// Reads continue past failures until `limit` sessions resolve or the
+/// candidates run out. The cursor names the last returned session only when
+/// candidates remain past it, so paging terminates with `None` and never
+/// repeats or skips a readable session.
+fn fill_page<T>(
+    candidates: &[Candidate],
+    limit: usize,
+    mut read: impl FnMut(&Candidate) -> Option<T>,
+) -> (Vec<T>, Option<Box<str>>) {
+    let mut items = Vec::with_capacity(limit.min(candidates.len()));
+    let mut last_key: Option<Box<str>> = None;
+    let mut consumed: usize = 0;
+    for candidate in candidates {
+        if items.len() == limit {
+            break;
+        }
+        consumed += 1;
+        let Some(item) = read(candidate) else {
+            continue;
+        };
+        last_key = Some(format!("{}:{}", candidate.mtime_ms, candidate.id).into_boxed_str());
+        items.push(item);
+    }
+    let next_before = if consumed < candidates.len() {
+        last_key
+    } else {
+        None
+    };
+    (items, next_before)
+}
+
 /// Converts one directory entry into a listing candidate.
 ///
 /// Entries that cannot be inspected — an unreadable file type, journal stat,
@@ -924,6 +949,60 @@ mod tests {
             .expect("open journal to set mtime");
         file.set_times(FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_millis(millis)))
             .expect("set journal mtime");
+    }
+
+    fn candidate(mtime_ms: i64, id: SessionId) -> Candidate {
+        Candidate {
+            id,
+            directory: PathBuf::from("/nonexistent"),
+            journal_bytes: 0,
+            journal_mtime: UNIX_EPOCH,
+            mtime_ms,
+            id_text: id.to_string().into(),
+        }
+    }
+
+    #[test]
+    fn backfill_skips_unreadable_sessions_without_underfilling() {
+        let ids = [
+            "0192aa00-0000-7000-8000-000000000001",
+            "0192aa00-0000-7000-8000-000000000002",
+            "0192aa00-0000-7000-8000-000000000003",
+            "0192aa00-0000-7000-8000-000000000004",
+            "0192aa00-0000-7000-8000-000000000005",
+        ]
+        .map(session_id);
+        // Newest first; the two newest journals fail to read.
+        let candidates: Vec<Candidate> = ids
+            .iter()
+            .enumerate()
+            .map(|(index, id)| {
+                let rank = i64::try_from(index).expect("five test candidates fit");
+                candidate(50 - 10 * rank, *id)
+            })
+            .collect();
+        let unreadable = [ids[0], ids[1]];
+        let read =
+            |candidate: &Candidate| (!unreadable.contains(&candidate.id)).then_some(candidate.id);
+        let (items, next_before) = super::fill_page(&candidates, 2, read);
+        assert_eq!(items, vec![ids[2], ids[3]], "the page fills past failures");
+        let cursor =
+            super::parse_cursor(&next_before.expect("sessions remain")).expect("cursor parses");
+        let rest: Vec<Candidate> = candidates
+            .iter()
+            .filter(|candidate| {
+                (candidate.mtime_ms, candidate.id_text.as_ref()) < (cursor.0, cursor.1.as_str())
+            })
+            .map(|entry| candidate(entry.mtime_ms, entry.id))
+            .collect();
+        let read_rest =
+            |candidate: &Candidate| (!unreadable.contains(&candidate.id)).then_some(candidate.id);
+        let (tail, next_before) = super::fill_page(&rest, 2, read_rest);
+        assert_eq!(tail, vec![ids[4]], "every readable session appears once");
+        assert_eq!(next_before, None, "paging terminates at the last session");
+        let (empty, next_before) = super::fill_page(&candidates, 2, |_| None::<SessionId>);
+        assert_eq!(empty, [], "no readable session means no cursor");
+        assert_eq!(next_before, None, "no readable session means no cursor");
     }
 
     #[test]
