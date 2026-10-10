@@ -100,7 +100,14 @@ fn prompt_and_remember(
             last_len = output.len();
         }
         if Instant::now() >= deadline {
-            return Err("turn frame stayed busy after the reply arrived".into());
+            let cause = if busy {
+                "busy status never cleared"
+            } else {
+                "output never went quiet"
+            };
+            return Err(
+                format!("turn frame never settled after the reply arrived: {cause}").into(),
+            );
         }
     }
 }
