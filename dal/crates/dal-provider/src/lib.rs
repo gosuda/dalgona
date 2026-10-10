@@ -9,6 +9,7 @@ mod family;
 mod http;
 mod lifecycle;
 mod provider;
+mod replay;
 mod retry;
 mod scripted;
 mod sse;
@@ -44,6 +45,7 @@ pub use provider::{
     AuthStyle, Http, Provider, ProviderConfig, ProviderConfigError, ProviderEntry,
     ProviderIdentity, ProviderSet, ScriptedSelection, Transport,
 };
+pub use replay::{Capture, Chaos, ReplayError, chaos, encode_event, encode_step, record};
 pub use retry::{
     MAX_RETRY_WAIT, RequestState, RetryAfterTooLong, RetryDecision, classify, delay_for_attempt,
 };
