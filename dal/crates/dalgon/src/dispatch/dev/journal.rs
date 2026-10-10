@@ -119,8 +119,8 @@ fn diff(before: &Path, after: &Path) -> Result<ExitCode, DevError> {
 }
 
 /// Whether two paths name the same file: canonicalized equality catches
-/// relative spellings and symlinks, and the device/inode pair catches hard
-/// links where both paths resolve canonically.
+/// relative spellings and symlinks, and `same_inode` catches hard links
+/// where both paths resolve canonically.
 fn same_file(input: &Path, output: &Path) -> bool {
     let source = input.canonicalize().ok();
     if let Ok(target) = output.canonicalize() {
@@ -149,9 +149,17 @@ fn same_inode(left: &Path, right: &Path) -> bool {
 #[cfg(windows)]
 fn same_inode(left: &Path, right: &Path) -> bool {
     use std::os::windows::fs::MetadataExt;
+    // Stable std exposes no by-handle file identity on Windows
+    // (rust#63010), so compare every stable metadata field: a hard link
+    // shares them all, and refusing a byte-and-time-identical twin is
+    // the safe answer either way.
     match (fs::metadata(left), fs::metadata(right)) {
         (Ok(a), Ok(b)) => {
-            (a.volume_serial_number(), a.file_index()) == (b.volume_serial_number(), b.file_index())
+            a.file_attributes() == b.file_attributes()
+                && a.file_size() == b.file_size()
+                && a.creation_time() == b.creation_time()
+                && a.last_access_time() == b.last_access_time()
+                && a.last_write_time() == b.last_write_time()
         }
         _ => false,
     }
