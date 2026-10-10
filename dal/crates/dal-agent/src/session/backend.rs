@@ -397,11 +397,20 @@ impl Backend {
         } = deps;
         let canonical_root = std::fs::canonicalize(workspace.as_path())
             .unwrap_or_else(|_| workspace.as_path().to_path_buf());
+        // The snapshot reaches every spawned child underneath the request
+        // overrides, so host-borne git redirectors (`GIT_DIR`,
+        // `GIT_CONFIG_*`, …) would silently move git outside the grant roots
+        // with no argv evidence. Denying on ambient operator configuration at
+        // each spawn gate would turn environments into per-call failures, so
+        // the redirect set is scrubbed once here instead; children fall back
+        // to normal cwd-anchored discovery. Request overrides are still
+        // vetted per spawn by the grant gates.
         let env_snapshot = host
             .shared
             .env
             .vars
             .iter()
+            .filter(|(key, _)| !is_git_redirect_var(key))
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect();
         let scheme_store = Arc::new(dal_store::Store::new(
@@ -562,6 +571,40 @@ impl Backend {
             state: Arc::clone(&self.host),
         }
     }
+}
+
+/// Reports whether an environment variable can redirect git outside the grant
+/// roots without argv evidence.
+///
+/// This mirrors the request-override vetting in `dispatch::git_env_in_roots`:
+/// path-bearing selectors, the ref namespace, git's alternate config files,
+/// git's internal `-c` relay channel, and the env-borne `-c` scheme. Anything
+/// else (identity, protocol policy, tracing, …) passes through untouched.
+fn is_git_redirect_var(key: &std::ffi::OsString) -> bool {
+    let Some(key) = key.to_str() else {
+        return false;
+    };
+    // Environment names resolve case-insensitively on Windows, so lowercase
+    // spellings reach git under the canonical names there: match ASCII
+    // case-insensitively everywhere.
+    key.eq_ignore_ascii_case("GIT_DIR")
+        || key.eq_ignore_ascii_case("GIT_WORK_TREE")
+        || key.eq_ignore_ascii_case("GIT_NAMESPACE")
+        || key.eq_ignore_ascii_case("GIT_COMMON_DIR")
+        || key.eq_ignore_ascii_case("GIT_EXEC_PATH")
+        || key.eq_ignore_ascii_case("GIT_OBJECT_DIRECTORY")
+        || key.eq_ignore_ascii_case("GIT_INDEX_FILE")
+        || key.eq_ignore_ascii_case("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        || key.eq_ignore_ascii_case("GIT_CONFIG_GLOBAL")
+        || key.eq_ignore_ascii_case("GIT_CONFIG_SYSTEM")
+        || key.eq_ignore_ascii_case("GIT_CONFIG_COUNT")
+        || key.eq_ignore_ascii_case("GIT_CONFIG_PARAMETERS")
+        || key
+            .get(.."GIT_CONFIG_KEY_".len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("GIT_CONFIG_KEY_"))
+        || key
+            .get(.."GIT_CONFIG_VALUE_".len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("GIT_CONFIG_VALUE_"))
 }
 
 impl SessionBackend for Backend {
@@ -1829,6 +1872,49 @@ mod tests {
             .await
             .expect("cancel is a reply");
         assert_eq!(reply, AgentsReply::Cancelled { id: child });
+    }
+
+    #[test]
+    fn snapshot_scrub_covers_the_git_redirect_set() {
+        for name in [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_NAMESPACE",
+            "GIT_COMMON_DIR",
+            "GIT_EXEC_PATH",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_INDEX_FILE",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_CONFIG_GLOBAL",
+            "GIT_CONFIG_SYSTEM",
+            "GIT_CONFIG_COUNT",
+            "GIT_CONFIG_PARAMETERS",
+            "GIT_CONFIG_KEY_0",
+            "GIT_CONFIG_VALUE_12",
+            // Windows resolves environment names case-insensitively.
+            "git_dir",
+            "Git_Namespace",
+            "git_config_count",
+            "git_config_key_0",
+        ] {
+            assert!(
+                is_git_redirect_var(&std::ffi::OsString::from(name)),
+                "{name} must be scrubbed from the snapshot"
+            );
+        }
+        for name in [
+            "PATH",
+            "HOME",
+            "GIT_CONFIG",
+            "GIT_CONFIG_KEY",
+            "GIT_AUTHOR_NAME",
+            "GIT_PAGER",
+        ] {
+            assert!(
+                !is_git_redirect_var(&std::ffi::OsString::from(name)),
+                "{name} must survive the snapshot scrub"
+            );
+        }
     }
 }
 

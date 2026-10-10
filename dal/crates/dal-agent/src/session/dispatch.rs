@@ -1115,7 +1115,15 @@ impl ToolCxRuntime for CallRuntime {
             return Err(ToolError::Denied(dal_core::DenyReason::NotGranted));
         };
         let bound = proof.digest;
-        if !approved.prefix().is_empty() && !grant_covers(&approved, argv, &opts.cwd) {
+        // The prefix match authenticates scoped grants; the git checks below
+        // apply to every approval shape, including empty-prefix one-shot and
+        // allow-all grants whose roots still bind. Only the request overrides
+        // are vetted here: the host snapshot is operator-controlled ambient
+        // authority, and denying on it would turn operator environments into
+        // per-call grant failures. Snapshot-borne `GIT_*` belongs to a
+        // capture-time scrub instead.
+        let prefix_ok = approved.prefix().is_empty() || grant_covers(&approved, argv, &opts.cwd);
+        if !prefix_ok || !git_spawn_in_roots(argv, &opts.env, &opts.cwd, approved.roots()) {
             return Err(ToolError::Denied(dal_core::DenyReason::out_of_scope(
                 self.tool.as_str(),
             )));
@@ -1188,8 +1196,10 @@ impl ToolCxRuntime for CallRuntime {
 
 /// Checks one grant-bound spawn: the grant's whitespace-split prefix tokens
 /// start the actual argv with exact tokens and the cwd sits below a grant
-/// root. Git path selectors (`-C`, `--git-dir`, and `--work-tree`) are checked against
-/// the same roots, resolving relative operands from the effective directory.
+/// root. Git repository selectors (`-C`, `--git-dir`, `--work-tree`,
+/// `--namespace`, `--bare`, `--exec-path`, `--super-prefix`, and `-c` /
+/// `--config` / `--config-env` assignments) are checked against the same
+/// roots, resolving relative operands from the effective directory.
 /// An empty prefix never matches here; one-shot approvals carry none.
 pub(crate) fn grant_covers(approved: &Approved, argv: &[std::ffi::OsString], cwd: &Path) -> bool {
     if approved.prefix().is_empty() || argv.is_empty() {
@@ -1206,23 +1216,46 @@ pub(crate) fn grant_covers(approved: &Approved, argv: &[std::ffi::OsString], cwd
         && git_paths_in_roots(argv, cwd, approved.roots())
 }
 
-/// Checks every git path selector in the global argument portion.
+/// Reports whether an argv program name invokes git.
 ///
-/// Git applies relative `-C` paths successively, so each one becomes the
-/// effective directory for later path operands. `--git-dir` and `--work-tree`
-/// are checked against that final directory. Unknown options are skipped;
-/// `--` ends option parsing. Invalid or missing operands fail closed.
+/// The stem match is ASCII case-insensitive because Windows executes
+/// `GIT.EXE` for `git`; an undecodable stem matches nothing and skips the
+/// git checks like any other foreign program.
+fn is_git_program(program: &std::ffi::OsStr) -> bool {
+    Path::new(program)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .is_some_and(|stem| stem.eq_ignore_ascii_case("git"))
+}
+
+/// Checks every git repository selector in the argument list.
+///
+/// Only the global portion is scanned: git applies wrapper selectors solely
+/// before the subcommand, so the first non-dash token ends the scan and
+/// later tokens are the subcommand's own flags (e.g. `switch -c`). Git
+/// applies relative `-C` paths successively, so each one becomes
+/// the effective directory for later path operands. `--git-dir`,
+/// `--work-tree`, `--super-prefix`, and `--exec-path=<path>` are confined to
+/// the roots from that final directory; `--namespace` (any form), bare
+/// `--bare`, and `-c` / `--config` assignments to `core.bare` (unless
+/// explicitly false), `core.hooksPath` outside the roots, or `core.worktree`
+/// outside the roots fail closed, as do `--config-env` assignments and
+/// config includes (their values arrive elsewhere, invisible here). Other
+/// `-c` keys (e.g. `receive.denyCurrentBranch`) carry no repository redirect
+/// and are allowed, as are the pager, `[--no-]-replace-objects`, and
+/// path-printing flags. `--` ends option parsing. Invalid or missing
+/// operands fail closed.
 fn git_paths_in_roots(argv: &[std::ffi::OsString], cwd: &Path, roots: &[PathBuf]) -> bool {
     let Some(program) = argv.first() else {
         return false;
     };
-    if Path::new(program).file_stem() != Some(std::ffi::OsStr::new("git")) {
+    if !is_git_program(program) {
         return true;
     }
     let Some(base) = git_c_base(argv, cwd, roots) else {
         return false;
     };
-    git_dirs_in_roots(argv, &base, roots)
+    git_selectors_in_roots(argv, &base, roots)
 }
 
 fn git_c_base(argv: &[std::ffi::OsString], cwd: &Path, roots: &[PathBuf]) -> Option<PathBuf> {
@@ -1233,36 +1266,59 @@ fn git_c_base(argv: &[std::ffi::OsString], cwd: &Path, roots: &[PathBuf]) -> Opt
         if arg == std::ffi::OsStr::new("--") {
             break;
         }
-        if arg == std::ffi::OsStr::new("--git-dir") || arg == std::ffi::OsStr::new("--work-tree") {
-            argv.get(index + 1)?;
-            index += 2;
-            continue;
-        }
         if arg == std::ffi::OsStr::new("-C") {
             let path = argv.get(index + 1)?;
             base = checked_git_path(&base, path, roots)?;
             index += 2;
             continue;
         }
-        let text = arg.to_str()?;
-        let Some(path) = text.strip_prefix("-C") else {
-            index += 1;
+        // Selectors taking a separate operand contribute no `-C` hop, but the
+        // operand is still consumed: a value like `-Cfoo` is data for `-c`,
+        // not a directory change. Bare `--exec-path` takes no separate
+        // operand (it only prints), so it stays out of this list.
+        if arg == std::ffi::OsStr::new("--git-dir")
+            || arg == std::ffi::OsStr::new("--work-tree")
+            || arg == std::ffi::OsStr::new("-c")
+            || arg == std::ffi::OsStr::new("--config")
+            || arg == std::ffi::OsStr::new("--config-env")
+            || arg == std::ffi::OsStr::new("--namespace")
+            || arg == std::ffi::OsStr::new("--super-prefix")
+        {
+            argv.get(index + 1)?;
+            index += 2;
             continue;
-        };
-        base = checked_git_path(&base, std::ffi::OsStr::new(path), roots)?;
+        }
+        let text = arg.to_str()?;
+        // Anything else dash-led is self-contained (`-c<kv>`, `--opt=<v>`,
+        // pager-style switches): no operand to consume. The first non-dash
+        // token is the subcommand, after which git applies no more global
+        // selectors, so the scan ends there.
+        if !text.starts_with('-') {
+            break;
+        }
+        if let Some(path) = text.strip_prefix("-C") {
+            base = checked_git_path(&base, std::ffi::OsStr::new(path), roots)?;
+        }
         index += 1;
     }
     Some(base)
 }
 
-fn git_dirs_in_roots(argv: &[std::ffi::OsString], base: &Path, roots: &[PathBuf]) -> bool {
+fn git_selectors_in_roots(argv: &[std::ffi::OsString], base: &Path, roots: &[PathBuf]) -> bool {
+    // Relative `core.worktree` values resolve against the git dir rather than
+    // the working directory, so gather the explicit `--git-dir` anchors here;
+    // the `-C` base below covers the discovered-repo case.
+    let git_dirs = git_dir_operands(argv, base);
     let mut index = 1;
     while index < argv.len() {
         let arg = &argv[index];
         if arg == std::ffi::OsStr::new("--") {
             break;
         }
-        if arg == std::ffi::OsStr::new("--git-dir") || arg == std::ffi::OsStr::new("--work-tree") {
+        if arg == std::ffi::OsStr::new("--git-dir")
+            || arg == std::ffi::OsStr::new("--work-tree")
+            || arg == std::ffi::OsStr::new("--super-prefix")
+        {
             let Some(path) = argv.get(index + 1) else {
                 return false;
             };
@@ -1272,19 +1328,358 @@ fn git_dirs_in_roots(argv: &[std::ffi::OsString], base: &Path, roots: &[PathBuf]
             index += 2;
             continue;
         }
+        // `--namespace` selects an alternate ref namespace and `--bare` flips
+        // the repository to bare semantics: neither carries a filesystem path,
+        // so neither can be confined to roots. Deny on sight.
+        if arg == std::ffi::OsStr::new("--namespace") || arg == std::ffi::OsStr::new("--bare") {
+            return false;
+        }
+        if arg == std::ffi::OsStr::new("-c") || arg == std::ffi::OsStr::new("--config") {
+            let Some(kv) = argv.get(index + 1) else {
+                return false;
+            };
+            if !git_config_in_roots(kv, base, &git_dirs, roots) {
+                return false;
+            }
+            index += 2;
+            continue;
+        }
+        if arg == std::ffi::OsStr::new("--config-env") {
+            let Some(kv) = argv.get(index + 1) else {
+                return false;
+            };
+            if !git_config_env_in_roots(kv) {
+                return false;
+            }
+            index += 2;
+            continue;
+        }
         let Some(text) = arg.to_str() else {
             return false;
         };
+        if text.strip_prefix("--namespace=").is_some() {
+            return false;
+        }
         if let Some(path) = text
             .strip_prefix("--git-dir=")
             .or_else(|| text.strip_prefix("--work-tree="))
-            && checked_git_path(base, std::ffi::OsStr::new(path), roots).is_none()
+            .or_else(|| text.strip_prefix("--super-prefix="))
+            .or_else(|| text.strip_prefix("--exec-path="))
         {
-            return false;
+            if checked_git_path(base, std::ffi::OsStr::new(path), roots).is_none() {
+                return false;
+            }
+            index += 1;
+            continue;
+        }
+        if let Some(kv) = text
+            .strip_prefix("--config=")
+            .or_else(|| text.strip_prefix("-c"))
+        {
+            if !git_config_in_roots(std::ffi::OsStr::new(kv), base, &git_dirs, roots) {
+                return false;
+            }
+            index += 1;
+            continue;
+        }
+        if let Some(kv) = text.strip_prefix("--config-env=") {
+            if !git_config_env_in_roots(std::ffi::OsStr::new(kv)) {
+                return false;
+            }
+            index += 1;
+            continue;
+        }
+        // Anything else dash-led is a benign or inert flag (bare
+        // `--exec-path` only prints; pager, `[--no-]-replace-objects`, and
+        // path-printing flags never redirect). The first non-dash token is
+        // the subcommand: git applies global selectors only before it, so
+        // later tokens are the subcommand's own flags (e.g. `switch -c`)
+        // and need no check.
+        if !text.starts_with('-') {
+            break;
         }
         index += 1;
     }
     true
+}
+
+/// Collects the explicit `--git-dir` operands as resolved paths.
+///
+/// These anchor relative `core.worktree` values. Collection itself never
+/// fails: unresolvable operands are skipped here and denied by the main scan,
+/// whose verdict conjoins with every anchor check below.
+fn git_dir_operands(argv: &[std::ffi::OsString], base: &Path) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let mut index = 1;
+    while index < argv.len() {
+        let arg = &argv[index];
+        if arg == std::ffi::OsStr::new("--") {
+            break;
+        }
+        if arg == std::ffi::OsStr::new("--git-dir") {
+            if let Some(path) = argv.get(index + 1) {
+                dirs.extend(resolve_git_path(base, path));
+            }
+            index += 2;
+            continue;
+        }
+        let Some(text) = arg.to_str() else {
+            index += 1;
+            continue;
+        };
+        if !text.starts_with('-') {
+            break;
+        }
+        if let Some(path) = text.strip_prefix("--git-dir=") {
+            dirs.extend(resolve_git_path(base, std::ffi::OsStr::new(path)));
+        }
+        index += 1;
+    }
+    dirs
+}
+
+/// Checks one `-c` / `--config` assignment against the roots.
+///
+/// `core.worktree` carries a work-tree path: absolute values confine
+/// directly, relative ones resolve against the git dir, so they require
+/// explicit `--git-dir` anchors and must stay inside the roots from the `-C`
+/// base and from every anchor. Without an explicit `--git-dir` the anchor is
+/// whichever repository git discovers upward, which argv cannot name: fail
+/// closed. `core.hooksPath` selects executed hook programs: absolute values
+/// confine to the roots (in-roots hooks are baseline trust, like the repo's
+/// own hooks), relative values carry no verifiable anchor and fail closed.
+/// `include.path` and `includeIf.*.path` pull in whole config files whose
+/// content cannot be verified here, so they fail closed. `core.bare` flips
+/// repository semantics without carrying a path, so only an explicit false
+/// passes. Any other key carries no repository redirect and is allowed.
+fn git_config_in_roots(
+    kv: &std::ffi::OsStr,
+    base: &Path,
+    git_dirs: &[PathBuf],
+    roots: &[PathBuf],
+) -> bool {
+    let Some(kv) = kv.to_str() else {
+        return false;
+    };
+    let Some((key, value)) = kv.split_once('=') else {
+        return false;
+    };
+    if key.eq_ignore_ascii_case("core.worktree") {
+        if value.is_empty() {
+            return false;
+        }
+        let value = std::ffi::OsStr::new(value);
+        if Path::new(value).is_absolute() {
+            return checked_git_path(base, value, roots).is_some();
+        }
+        if git_dirs.is_empty() {
+            return false;
+        }
+        return checked_git_path(base, value, roots).is_some()
+            && git_dirs
+                .iter()
+                .all(|dir| checked_git_path(dir, value, roots).is_some());
+    }
+    if key.eq_ignore_ascii_case("core.hookspath") {
+        if value.is_empty() {
+            return false;
+        }
+        let value = std::ffi::OsStr::new(value);
+        if !Path::new(value).is_absolute() {
+            return false;
+        }
+        return checked_git_path(base, value, roots).is_some();
+    }
+    if key.eq_ignore_ascii_case("core.bare") {
+        return is_falsy_git_bool(value);
+    }
+    if is_include_path_key(key) {
+        return false;
+    }
+    true
+}
+
+/// Reports whether a `-c` key pulls in another config file.
+///
+/// The pulled file's content cannot be verified from argv (it can itself set
+/// `core.worktree` or `core.hooksPath`), so these keys fail closed. Matching
+/// is ASCII case-insensitive on the section and key; the `includeIf`
+/// condition keeps its case but needs no parsing here.
+fn is_include_path_key(key: &str) -> bool {
+    const PREFIX_LEN: usize = "includeif.".len();
+    const SUFFIX_LEN: usize = ".path".len();
+    if key.eq_ignore_ascii_case("include.path") {
+        return true;
+    }
+    if key.len() <= PREFIX_LEN + SUFFIX_LEN {
+        return false;
+    }
+    key.get(..PREFIX_LEN)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("includeif."))
+        && key
+            .get(key.len() - SUFFIX_LEN..)
+            .is_some_and(|suffix| suffix.eq_ignore_ascii_case(".path"))
+}
+
+/// Checks one `--config-env` assignment against the roots.
+///
+/// The value arrives via the environment, so redirect-capable keys
+/// (`core.worktree`, `core.hooksPath`, `core.bare`, and config includes)
+/// cannot be verified from argv and fail closed; every other key is allowed.
+fn git_config_env_in_roots(kv: &std::ffi::OsStr) -> bool {
+    let Some(kv) = kv.to_str() else {
+        return false;
+    };
+    let Some((name, _envvar)) = kv.split_once('=') else {
+        return false;
+    };
+    !(name.eq_ignore_ascii_case("core.worktree")
+        || name.eq_ignore_ascii_case("core.hookspath")
+        || name.eq_ignore_ascii_case("core.bare")
+        || is_include_path_key(name))
+}
+
+/// Reports whether a git boolean spelling disables an option.
+fn is_falsy_git_bool(value: &str) -> bool {
+    value.is_empty()
+        || value.eq_ignore_ascii_case("false")
+        || value.eq_ignore_ascii_case("no")
+        || value.eq_ignore_ascii_case("off")
+        || value.eq_ignore_ascii_case("0")
+}
+
+/// Checks git's repository-selecting environment overrides.
+///
+/// `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`, `GIT_EXEC_PATH`,
+/// `GIT_OBJECT_DIRECTORY`, and `GIT_INDEX_FILE` carry paths: empty values
+/// behave as unset, anything else must resolve inside the roots from the
+/// spawn cwd (environment work-tree paths anchor on the startup directory,
+/// unlike `--work-tree`). `GIT_NAMESPACE` carries no path
+/// and cannot be confined, so any non-empty value fails closed. The same
+/// holds for `GIT_CONFIG_PARAMETERS` (git's internal `-c` relay channel,
+/// never set legitimately on a top-level spawn yet honored when present, as
+/// verified against the installed git) and for `GIT_CONFIG_GLOBAL` /
+/// `GIT_CONFIG_SYSTEM` (alternate config files, loaded before argv config
+/// and able to carry the same redirects). The `GIT_CONFIG_COUNT` /
+/// `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n` scheme applies env-borne `-c`
+/// assignments the same way and is classified per pair below. Other programs
+/// ignore these variables and skip the check. Only request overrides are
+/// vetted here; the host snapshot is scrubbed of the same names at capture.
+pub(crate) fn git_env_in_roots(
+    argv: &[std::ffi::OsString],
+    env: &[(std::ffi::OsString, std::ffi::OsString)],
+    cwd: &Path,
+    roots: &[PathBuf],
+) -> bool {
+    let Some(program) = argv.first() else {
+        return false;
+    };
+    if !is_git_program(program) {
+        return true;
+    }
+    for (key, value) in env {
+        let Some(name) = key.to_str() else {
+            continue;
+        };
+        // Environment names resolve case-insensitively on Windows, so
+        // `git_dir` reaches git as `GIT_DIR` there: match ASCII
+        // case-insensitively everywhere.
+        let denied = name.eq_ignore_ascii_case("GIT_NAMESPACE")
+            || name.eq_ignore_ascii_case("GIT_CONFIG_PARAMETERS")
+            || name.eq_ignore_ascii_case("GIT_CONFIG_GLOBAL")
+            || name.eq_ignore_ascii_case("GIT_CONFIG_SYSTEM")
+            || name.eq_ignore_ascii_case("GIT_ALTERNATE_OBJECT_DIRECTORIES");
+        // Object store and index locations resolve from the spawn cwd like
+        // `GIT_DIR`; the alternate list cannot be confined element-wise, so
+        // it denies instead.
+        let confined = name.eq_ignore_ascii_case("GIT_DIR")
+            || name.eq_ignore_ascii_case("GIT_WORK_TREE")
+            || name.eq_ignore_ascii_case("GIT_COMMON_DIR")
+            || name.eq_ignore_ascii_case("GIT_EXEC_PATH")
+            || name.eq_ignore_ascii_case("GIT_OBJECT_DIRECTORY")
+            || name.eq_ignore_ascii_case("GIT_INDEX_FILE");
+        if !denied && !confined {
+            continue;
+        }
+        if value.is_empty() {
+            continue;
+        }
+        if denied || checked_git_path(cwd, value, roots).is_none() {
+            return false;
+        }
+    }
+    git_env_config_in_roots(env, cwd, roots)
+}
+
+/// Checks env-borne `-c` assignments against the roots.
+///
+/// Each `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n` pair classifies exactly
+/// like an argv `-c` assignment, except the git-dir anchor set is empty:
+/// relative `core.worktree` and `core.hooksPath` values fail closed, absolute
+/// ones confine from the spawn cwd. A missing count behaves as unset; a
+/// malformed count or an absurd pair budget fails closed rather than looping
+/// unboundedly.
+fn git_env_config_in_roots(
+    env: &[(std::ffi::OsString, std::ffi::OsString)],
+    cwd: &Path,
+    roots: &[PathBuf],
+) -> bool {
+    // Later duplicates win in the spawned child (`Command::envs` overwrites),
+    // so validation reads the last match, never the first.
+    let lookup = |name: &str| {
+        env.iter()
+            .rfind(|(key, _)| {
+                key.to_str()
+                    .is_some_and(|key| key.eq_ignore_ascii_case(name))
+            })
+            .map(|(_, value)| value)
+    };
+    let Some(count) = lookup("GIT_CONFIG_COUNT") else {
+        return true;
+    };
+    let Some(count) = count.to_str() else {
+        return false;
+    };
+    if count.is_empty() {
+        return true;
+    }
+    let Ok(count) = count.parse::<usize>() else {
+        return false;
+    };
+    if count > 64 {
+        return false;
+    }
+    for index in 0..count {
+        let key_name = format!("GIT_CONFIG_KEY_{index}");
+        let value_name = format!("GIT_CONFIG_VALUE_{index}");
+        let Some(key) = lookup(&key_name) else {
+            continue;
+        };
+        let mut kv = key.clone();
+        kv.push("=");
+        if let Some(value) = lookup(&value_name) {
+            kv.push(value);
+        }
+        if !git_config_in_roots(&kv, cwd, &[], roots) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Checks every git escape hatch on one spawn, regardless of approval shape.
+///
+/// Empty-prefix approvals (one-shot and allow-all grants) skip the argv
+/// prefix match by design, but their roots still bind: an auto-approved
+/// `git --git-dir=/outside` or a request `GIT_DIR` outside the roots must
+/// fail the same way a scoped grant would. Non-git programs pass through.
+pub(crate) fn git_spawn_in_roots(
+    argv: &[std::ffi::OsString],
+    env: &[(std::ffi::OsString, std::ffi::OsString)],
+    cwd: &Path,
+    roots: &[PathBuf],
+) -> bool {
+    git_paths_in_roots(argv, cwd, roots) && git_env_in_roots(argv, env, cwd, roots)
 }
 
 fn checked_git_path(base: &Path, path: &std::ffi::OsStr, roots: &[PathBuf]) -> Option<PathBuf> {
@@ -1738,5 +2133,781 @@ mod tests {
             "status".into(),
         ];
         assert!(grant_covers(&approved, &work_tree_equals, &workspace));
+    }
+    #[test]
+    fn git_namespace_and_bare_are_denied() {
+        let temp = tempfile::tempdir().expect("temporary grant roots");
+        let workspace = temp.path().join("agent-workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let approved = Approved::new(
+            CallId::new("namespace-grant"),
+            None,
+            Box::new([std::ffi::OsString::from("git")]),
+            Box::new([workspace.clone()]),
+            None,
+        );
+
+        let baseline: Vec<std::ffi::OsString> = vec!["git".into(), "status".into()];
+        assert!(grant_covers(&approved, &baseline, &workspace));
+
+        let mut namespaced_equals = std::ffi::OsString::from("--namespace=");
+        namespaced_equals.push("agent");
+        for argv in [
+            vec!["git".into(), namespaced_equals, "status".into()],
+            vec![
+                "git".into(),
+                "--namespace".into(),
+                "agent".into(),
+                "status".into(),
+            ],
+            vec!["git".into(), "--namespace=".into(), "status".into()],
+            vec!["git".into(), "--namespace".into()],
+            vec!["git".into(), "--bare".into(), "status".into()],
+        ] {
+            assert!(!grant_covers(&approved, &argv, &workspace));
+        }
+    }
+    #[test]
+    fn git_config_worktree_stays_inside_roots() {
+        fn config_argv(flag: &str, kv: &str) -> Vec<std::ffi::OsString> {
+            vec!["git".into(), flag.into(), kv.into(), "status".into()]
+        }
+        let temp = tempfile::tempdir().expect("temporary grant roots");
+        let outer = temp.path().join("outer-repo");
+        let workspace = outer.join("agent-workspace");
+        let nested = workspace.join("nested-repo");
+        let workspace_git = workspace.join(".git");
+        let git_nested = workspace_git.join("nested-repo");
+        let outside = outer.join("outside");
+        for dir in [&nested, &workspace_git, &git_nested, &outside] {
+            std::fs::create_dir_all(dir).expect("grant fixture directory");
+        }
+        let approved = Approved::new(
+            CallId::new("config-grant"),
+            None,
+            Box::new([std::ffi::OsString::from("git")]),
+            Box::new([workspace.clone()]),
+            None,
+        );
+
+        // A relative value without an explicit `--git-dir` resolves against
+        // whichever repository git discovers upward, which argv cannot name:
+        // fail closed even when the `-C`-anchored join stays inside.
+        assert!(!grant_covers(
+            &approved,
+            &config_argv("-c", "core.worktree=nested-repo"),
+            &workspace
+        ));
+        let absolute_inside =
+            std::ffi::OsString::from(format!("core.worktree={}", nested.display()));
+        let mut absolute_argv: Vec<std::ffi::OsString> =
+            vec!["git".into(), "-c".into(), absolute_inside, "status".into()];
+        assert!(grant_covers(&approved, &absolute_argv, &workspace));
+
+        let absolute_outside =
+            std::ffi::OsString::from(format!("core.worktree={}", outside.display()));
+        absolute_argv[2] = absolute_outside.clone();
+        assert!(!grant_covers(&approved, &absolute_argv, &workspace));
+        assert!(!grant_covers(
+            &approved,
+            &config_argv("--config", &absolute_outside.to_string_lossy()),
+            &workspace
+        ));
+        let mut stuck = std::ffi::OsString::from("-c");
+        stuck.push(&absolute_outside);
+        assert!(!grant_covers(
+            &approved,
+            &["git".into(), stuck, "status".into()],
+            &workspace
+        ));
+        assert!(!grant_covers(
+            &approved,
+            &config_argv("-c", "core.worktree=../outside"),
+            &workspace
+        ));
+        assert!(!grant_covers(
+            &approved,
+            &config_argv("-c", "core.worktree="),
+            &workspace
+        ));
+        assert!(!grant_covers(
+            &approved,
+            &config_argv("-c", "core.bare"),
+            &workspace
+        ));
+        assert!(!grant_covers(
+            &approved,
+            &["git".into(), "-c".into()],
+            &workspace
+        ));
+
+        // Relative values must also hold from each explicit `--git-dir` anchor.
+        let anchored_inside: Vec<std::ffi::OsString> = vec![
+            "git".into(),
+            "--git-dir".into(),
+            ".git".into(),
+            "-c".into(),
+            "core.worktree=nested-repo".into(),
+            "status".into(),
+        ];
+        assert!(grant_covers(&approved, &anchored_inside, &workspace));
+        let anchored_outside: Vec<std::ffi::OsString> = vec![
+            "git".into(),
+            "--git-dir".into(),
+            ".git".into(),
+            "-c".into(),
+            "core.worktree=../outside".into(),
+            "status".into(),
+        ];
+        assert!(!grant_covers(&approved, &anchored_outside, &workspace));
+    }
+    #[test]
+    fn git_exec_path_and_super_prefix_stay_inside_roots() {
+        let temp = tempfile::tempdir().expect("temporary grant roots");
+        let outer = temp.path().join("outer-repo");
+        let workspace = outer.join("agent-workspace");
+        let nested = workspace.join("nested-repo");
+        let bin = workspace.join("bin");
+        for dir in [&nested, &bin] {
+            std::fs::create_dir_all(dir).expect("grant fixture directory");
+        }
+        let approved = Approved::new(
+            CallId::new("exec-path-grant"),
+            None,
+            Box::new([std::ffi::OsString::from("git")]),
+            Box::new([workspace.clone()]),
+            None,
+        );
+
+        let mut exec_inside = std::ffi::OsString::from("--exec-path=");
+        exec_inside.push(bin.as_os_str());
+        let exec_argv: [std::ffi::OsString; 3] = ["git".into(), exec_inside, "status".into()];
+        assert!(grant_covers(&approved, &exec_argv, &workspace));
+        let mut exec_outside = std::ffi::OsString::from("--exec-path=");
+        exec_outside.push(outer.as_os_str());
+        let exec_outside_argv: [std::ffi::OsString; 3] =
+            ["git".into(), exec_outside, "status".into()];
+        assert!(!grant_covers(&approved, &exec_outside_argv, &workspace));
+        // Bare `--exec-path` only prints the exec path and exits.
+        let bare_exec: [std::ffi::OsString; 3] =
+            ["git".into(), "--exec-path".into(), "status".into()];
+        assert!(grant_covers(&approved, &bare_exec, &workspace));
+
+        let super_inside: [std::ffi::OsString; 4] = [
+            "git".into(),
+            "--super-prefix".into(),
+            "nested-repo".into(),
+            "status".into(),
+        ];
+        assert!(grant_covers(&approved, &super_inside, &workspace));
+        let mut super_outside = std::ffi::OsString::from("--super-prefix=");
+        super_outside.push(outer.as_os_str());
+        let super_outside_argv: [std::ffi::OsString; 3] =
+            ["git".into(), super_outside, "status".into()];
+        assert!(!grant_covers(&approved, &super_outside_argv, &workspace));
+
+        // Pager flags never redirect the repository.
+        for flag in ["-P", "--no-pager", "-p", "--paginate"] {
+            let argv: Vec<std::ffi::OsString> = vec!["git".into(), flag.into(), "status".into()];
+            assert!(grant_covers(&approved, &argv, &workspace));
+        }
+    }
+    #[test]
+    fn git_env_redirects_stay_inside_roots() {
+        let temp = tempfile::tempdir().expect("temporary grant roots");
+        let outer = temp.path().join("outer-repo");
+        let workspace = outer.join("agent-workspace");
+        let nested = workspace.join("nested-repo");
+        let workspace_git = workspace.join(".git");
+        for dir in [&nested, &workspace_git] {
+            std::fs::create_dir_all(dir).expect("grant fixture directory");
+        }
+        let roots = [workspace.clone()];
+        let git: Vec<std::ffi::OsString> = vec!["git".into(), "status".into()];
+        let pair = |key: &str, value: &str| {
+            (
+                std::ffi::OsString::from(key),
+                std::ffi::OsString::from(value),
+            )
+        };
+        let absolute_outside = outer.as_os_str().to_os_string();
+
+        assert!(git_env_in_roots(&git, &[], &workspace, &roots));
+        assert!(git_env_in_roots(
+            &git,
+            &[pair("GIT_DIR", ".git")],
+            &workspace,
+            &roots
+        ));
+        assert!(git_env_in_roots(
+            &git,
+            &[pair("GIT_DIR", "")],
+            &workspace,
+            &roots
+        ));
+        assert!(!git_env_in_roots(
+            &git,
+            &[(
+                std::ffi::OsString::from("GIT_DIR"),
+                absolute_outside.clone()
+            )],
+            &workspace,
+            &roots
+        ));
+        assert!(git_env_in_roots(
+            &git,
+            &[pair("GIT_WORK_TREE", "nested-repo")],
+            &workspace,
+            &roots
+        ));
+        assert!(!git_env_in_roots(
+            &git,
+            &[(
+                std::ffi::OsString::from("GIT_WORK_TREE"),
+                absolute_outside.clone()
+            )],
+            &workspace,
+            &roots
+        ));
+        assert!(!git_env_in_roots(
+            &git,
+            &[pair("GIT_NAMESPACE", "agent")],
+            &workspace,
+            &roots
+        ));
+        assert!(git_env_in_roots(
+            &git,
+            &[pair("GIT_NAMESPACE", "")],
+            &workspace,
+            &roots
+        ));
+        assert!(!git_env_in_roots(
+            &git,
+            &[(
+                std::ffi::OsString::from("GIT_COMMON_DIR"),
+                absolute_outside.clone()
+            )],
+            &workspace,
+            &roots
+        ));
+        assert!(!git_env_in_roots(
+            &git,
+            &[(
+                std::ffi::OsString::from("GIT_EXEC_PATH"),
+                absolute_outside.clone()
+            )],
+            &workspace,
+            &roots
+        ));
+        // Other programs ignore these variables; unrelated keys pass through.
+        let other: Vec<std::ffi::OsString> = vec!["ls".into(), "status".into()];
+        assert!(git_env_in_roots(
+            &other,
+            &[(
+                std::ffi::OsString::from("GIT_DIR"),
+                absolute_outside.clone()
+            )],
+            &workspace,
+            &roots
+        ));
+        assert!(git_env_in_roots(
+            &git,
+            &[(std::ffi::OsString::from("PAGER"), absolute_outside.clone())],
+            &workspace,
+            &roots
+        ));
+    }
+    #[test]
+    fn git_env_config_schemes_stay_inside_roots() {
+        let temp = tempfile::tempdir().expect("temporary grant roots");
+        let outer = temp.path().join("outer-repo");
+        let workspace = outer.join("agent-workspace");
+        let nested = workspace.join("nested-repo");
+        std::fs::create_dir_all(&nested).expect("grant fixture directory");
+        let roots = [workspace.clone()];
+        let git: Vec<std::ffi::OsString> = vec!["git".into(), "status".into()];
+        let pair = |key: &str, value: &str| {
+            (
+                std::ffi::OsString::from(key),
+                std::ffi::OsString::from(value),
+            )
+        };
+        let config = |count: &str, entries: &[(&str, &str)]| {
+            let mut env = vec![pair("GIT_CONFIG_COUNT", count)];
+            for (index, (key, value)) in entries.iter().enumerate() {
+                env.push(pair(&format!("GIT_CONFIG_KEY_{index}"), key));
+                env.push(pair(&format!("GIT_CONFIG_VALUE_{index}"), value));
+            }
+            env
+        };
+        let outside = outer.join("outside");
+        std::fs::create_dir_all(&outside).expect("outside directory");
+
+        // No count behaves as unset, even with stray pairs present.
+        assert!(git_env_in_roots(
+            &git,
+            &[pair("GIT_CONFIG_KEY_0", "core.bare")],
+            &workspace,
+            &roots
+        ));
+        // Benign keys pass through the scheme untouched.
+        assert!(git_env_in_roots(
+            &git,
+            &config("1", &[("user.name", "agent")]),
+            &workspace,
+            &roots
+        ));
+        // Absolute redirect-capable values confine from the spawn cwd.
+        assert!(git_env_in_roots(
+            &git,
+            &config("1", &[("core.worktree", &nested.to_string_lossy())]),
+            &workspace,
+            &roots
+        ));
+        assert!(!git_env_in_roots(
+            &git,
+            &config("1", &[("core.worktree", &outside.to_string_lossy())]),
+            &workspace,
+            &roots
+        ));
+        // Relative values carry no argv-visible anchor: fail closed.
+        assert!(!git_env_in_roots(
+            &git,
+            &config("1", &[("core.worktree", "nested-repo")]),
+            &workspace,
+            &roots
+        ));
+        assert!(!git_env_in_roots(
+            &git,
+            &config("1", &[("core.hooksPath", &outside.to_string_lossy())]),
+            &workspace,
+            &roots
+        ));
+        assert!(!git_env_in_roots(
+            &git,
+            &config("2", &[("user.name", "agent"), ("core.bare", "true")]),
+            &workspace,
+            &roots
+        ));
+        // Malformed counts and absurd budgets fail closed, not unbounded.
+        assert!(!git_env_in_roots(
+            &git,
+            &[pair("GIT_CONFIG_COUNT", "many")],
+            &workspace,
+            &roots
+        ));
+        assert!(!git_env_in_roots(
+            &git,
+            &[pair("GIT_CONFIG_COUNT", "1000000")],
+            &workspace,
+            &roots
+        ));
+        assert!(git_env_in_roots(
+            &git,
+            &[pair("GIT_CONFIG_COUNT", "")],
+            &workspace,
+            &roots
+        ));
+        assert!(git_env_in_roots(
+            &git,
+            &[pair("GIT_CONFIG_COUNT", "0")],
+            &workspace,
+            &roots
+        ));
+    }
+    #[test]
+    fn git_config_bare_needs_an_explicit_false() {
+        fn config_argv(flag: &str, kv: &str) -> Vec<std::ffi::OsString> {
+            vec!["git".into(), flag.into(), kv.into(), "status".into()]
+        }
+        let temp = tempfile::tempdir().expect("temporary grant roots");
+        let workspace = temp.path().join("agent-workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let approved = Approved::new(
+            CallId::new("bare-grant"),
+            None,
+            Box::new([std::ffi::OsString::from("git")]),
+            Box::new([workspace.clone()]),
+            None,
+        );
+        for truthy in ["true", "yes", "1", "on"] {
+            assert!(
+                !grant_covers(
+                    &approved,
+                    &config_argv("-c", &format!("core.bare={truthy}")),
+                    &workspace
+                ),
+                "core.bare={truthy} must fail closed"
+            );
+        }
+        for falsy in ["false", "no", "off", "0"] {
+            assert!(
+                grant_covers(
+                    &approved,
+                    &config_argv("-c", &format!("core.bare={falsy}")),
+                    &workspace
+                ),
+                "core.bare={falsy} redirects nothing"
+            );
+        }
+        assert!(grant_covers(
+            &approved,
+            &config_argv("-c", "receive.denyCurrentBranch=false"),
+            &workspace
+        ));
+        assert!(grant_covers(
+            &approved,
+            &config_argv("-c", "advice.detachedHead=false"),
+            &workspace
+        ));
+    }
+    #[test]
+    fn git_config_hookspath_and_includes_stay_inside_roots() {
+        fn config_argv(flag: &str, kv: &str) -> Vec<std::ffi::OsString> {
+            vec!["git".into(), flag.into(), kv.into(), "status".into()]
+        }
+        let temp = tempfile::tempdir().expect("temporary grant roots");
+        let outer = temp.path().join("outer-repo");
+        let workspace = outer.join("agent-workspace");
+        let nested = workspace.join("nested-repo");
+        let hooks = workspace.join("hooks");
+        let outside = outer.join("outside");
+        for dir in [&nested, &hooks, &outside] {
+            std::fs::create_dir_all(dir).expect("grant fixture directory");
+        }
+        let approved = Approved::new(
+            CallId::new("hooks-grant"),
+            None,
+            Box::new([std::ffi::OsString::from("git")]),
+            Box::new([workspace.clone()]),
+            None,
+        );
+        // Verified live: an outside hooks dir runs its hooks on commit.
+        assert!(grant_covers(
+            &approved,
+            &config_argv("-c", &format!("core.hooksPath={}", hooks.display())),
+            &workspace
+        ));
+        assert!(!grant_covers(
+            &approved,
+            &config_argv("-c", &format!("core.hooksPath={}", outside.display())),
+            &workspace
+        ));
+        assert!(!grant_covers(
+            &approved,
+            &config_argv("-c", "core.hooksPath=hooks"),
+            &workspace
+        ));
+        assert!(!grant_covers(
+            &approved,
+            &config_argv("-c", &format!("include.path={}", nested.display())),
+            &workspace
+        ));
+        assert!(!grant_covers(
+            &approved,
+            &config_argv("-c", "includeIf.gitdir:/work/.path=/tmp/inc"),
+            &workspace
+        ));
+    }
+    #[test]
+    fn git_config_env_keys_fail_closed() {
+        fn config_argv(flag: &str, kv: &str) -> Vec<std::ffi::OsString> {
+            vec!["git".into(), flag.into(), kv.into(), "status".into()]
+        }
+        let temp = tempfile::tempdir().expect("temporary grant roots");
+        let workspace = temp.path().join("agent-workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let approved = Approved::new(
+            CallId::new("config-env-grant"),
+            None,
+            Box::new([std::ffi::OsString::from("git")]),
+            Box::new([workspace.clone()]),
+            None,
+        );
+        assert!(!grant_covers(
+            &approved,
+            &config_argv("--config-env", "core.worktree=HOME"),
+            &workspace
+        ));
+        let mut config_env_equals = std::ffi::OsString::from("--config-env=");
+        config_env_equals.push("core.worktree=HOME");
+        assert!(!grant_covers(
+            &approved,
+            &["git".into(), config_env_equals, "status".into()],
+            &workspace
+        ));
+        assert!(!grant_covers(
+            &approved,
+            &config_argv("--config-env", "core.bare=FLAG"),
+            &workspace
+        ));
+        assert!(grant_covers(
+            &approved,
+            &config_argv("--config-env", "advice.detachedHead=FLAG"),
+            &workspace
+        ));
+        // The env value is just a name here, so redirect-capable keys fail
+        // closed however the variable is spelled.
+        assert!(!grant_covers(
+            &approved,
+            &config_argv("--config-env", "core.hooksPath=E"),
+            &workspace
+        ));
+        assert!(!grant_covers(
+            &approved,
+            &config_argv("--config-env", "include.path=E"),
+            &workspace
+        ));
+    }
+    #[test]
+    fn git_env_relay_and_files_fail_closed() {
+        let temp = tempfile::tempdir().expect("temporary grant roots");
+        let workspace = temp.path().join("agent-workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let roots = [workspace.clone()];
+        let git: Vec<std::ffi::OsString> = vec!["git".into(), "status".into()];
+        let pair = |key: &str, value: &str| {
+            (
+                std::ffi::OsString::from(key),
+                std::ffi::OsString::from(value),
+            )
+        };
+        // The internal `-c` relay channel is never legitimate top-level.
+        assert!(!git_env_in_roots(
+            &git,
+            &[pair("GIT_CONFIG_PARAMETERS", "'user.name=agent'")],
+            &workspace,
+            &roots
+        ));
+        assert!(git_env_in_roots(
+            &git,
+            &[pair("GIT_CONFIG_PARAMETERS", "")],
+            &workspace,
+            &roots
+        ));
+        // Alternate config files load before argv config: fail closed.
+        assert!(!git_env_in_roots(
+            &git,
+            &[pair("GIT_CONFIG_GLOBAL", "/outside/gitconfig")],
+            &workspace,
+            &roots
+        ));
+        assert!(!git_env_in_roots(
+            &git,
+            &[pair("GIT_CONFIG_SYSTEM", "/outside/gitconfig")],
+            &workspace,
+            &roots
+        ));
+    }
+    #[test]
+    fn git_spawn_gate_ignores_approval_shape() {
+        // Both spawn doors apply this helper with no prefix input: scoped,
+        // one-shot, and allow-all approvals all deny the same escapes.
+        let temp = tempfile::tempdir().expect("temporary grant roots");
+        let outer = temp.path().join("outer-repo");
+        let workspace = outer.join("agent-workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let roots = [workspace.clone()];
+        let outside = outer.as_os_str().to_os_string();
+        let mut git_dir = std::ffi::OsString::from("--git-dir=");
+        git_dir.push(&outside);
+        let argv: Vec<std::ffi::OsString> = vec!["git".into(), git_dir, "status".into()];
+        assert!(!git_spawn_in_roots(&argv, &[], &workspace, &roots));
+        let git: Vec<std::ffi::OsString> = vec!["git".into(), "status".into()];
+        assert!(git_spawn_in_roots(&git, &[], &workspace, &roots));
+        assert!(!git_spawn_in_roots(
+            &git,
+            &[(std::ffi::OsString::from("GIT_DIR"), outside.clone())],
+            &workspace,
+            &roots
+        ));
+    }
+    #[test]
+    fn git_env_duplicate_keys_use_the_last_match() {
+        // Later duplicates win in the child (`Command::envs` overwrites), so
+        // a benign first count cannot mask a hostile later one, and vice
+        // versa. The per-variable loop already denies on any hostile entry.
+        let temp = tempfile::tempdir().expect("temporary grant roots");
+        let outer = temp.path().join("outer-repo");
+        let workspace = outer.join("agent-workspace");
+        let outside = outer.join("outside");
+        for dir in [&workspace, &outside] {
+            std::fs::create_dir_all(dir).expect("grant fixture directory");
+        }
+        let roots = [workspace.clone()];
+        let git: Vec<std::ffi::OsString> = vec!["git".into(), "status".into()];
+        let pair = |key: &str, value: &str| {
+            (
+                std::ffi::OsString::from(key),
+                std::ffi::OsString::from(value),
+            )
+        };
+        assert!(!git_env_in_roots(
+            &git,
+            &[
+                pair("GIT_CONFIG_COUNT", "1"),
+                pair("GIT_CONFIG_KEY_0", "user.name"),
+                pair("GIT_CONFIG_VALUE_0", "agent"),
+                pair("GIT_CONFIG_COUNT", "2"),
+                pair("GIT_CONFIG_KEY_1", "core.bare"),
+                pair("GIT_CONFIG_VALUE_1", "true"),
+            ],
+            &workspace,
+            &roots
+        ));
+        assert!(git_env_in_roots(
+            &git,
+            &[
+                pair("GIT_CONFIG_COUNT", "1"),
+                pair("GIT_CONFIG_KEY_0", "core.bare"),
+                pair("GIT_CONFIG_VALUE_0", "true"),
+                pair("GIT_CONFIG_COUNT", "1"),
+                pair("GIT_CONFIG_KEY_0", "user.name"),
+                pair("GIT_CONFIG_VALUE_0", "agent"),
+            ],
+            &workspace,
+            &roots
+        ));
+        assert!(!git_env_in_roots(
+            &git,
+            &[
+                pair("GIT_DIR", ".git"),
+                (
+                    std::ffi::OsString::from("GIT_DIR"),
+                    outside.as_os_str().to_os_string()
+                ),
+            ],
+            &workspace,
+            &roots
+        ));
+    }
+    #[test]
+    fn git_subcommand_flags_are_not_global_selectors() {
+        // Git applies wrapper selectors only before the subcommand: later
+        // tokens are the subcommand's own flags, so ordinary in-root
+        // workflows (`switch -c`, `grep -c`) keep working. Post-command
+        // wrapper spellings are rejected by git itself, hence benign.
+        let temp = tempfile::tempdir().expect("temporary grant roots");
+        let outer = temp.path().join("outer-repo");
+        let workspace = outer.join("agent-workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let approved = Approved::new(
+            CallId::new("subcommand-grant"),
+            None,
+            Box::new([std::ffi::OsString::from("git")]),
+            Box::new([workspace.clone()]),
+            None,
+        );
+        for argv in [
+            vec!["git".into(), "switch".into(), "-c".into(), "feature".into()],
+            vec!["git".into(), "grep".into(), "-c".into(), "pattern".into()],
+            vec!["git".into(), "grep".into(), "-C3".into(), "pattern".into()],
+            vec![
+                "git".into(),
+                "status".into(),
+                "--git-dir".into(),
+                "x".into(),
+            ],
+        ] {
+            assert!(grant_covers(&approved, &argv, &workspace));
+        }
+        // Pre-command selectors still gate: the stop only narrows the scan.
+        let mut outside_git_dir = std::ffi::OsString::from("--git-dir=");
+        outside_git_dir.push(outer.as_os_str());
+        assert!(!grant_covers(
+            &approved,
+            &["git".into(), outside_git_dir, "status".into()],
+            &workspace
+        ));
+    }
+    #[test]
+    fn git_env_names_match_case_insensitively() {
+        // Windows resolves environment names case-insensitively, so lowercase
+        // spellings reach git under the canonical names there.
+        let temp = tempfile::tempdir().expect("temporary grant roots");
+        let outer = temp.path().join("outer-repo");
+        let workspace = outer.join("agent-workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let roots = [workspace.clone()];
+        let git: Vec<std::ffi::OsString> = vec!["git".into(), "status".into()];
+        let pair = |key: &str, value: &str| {
+            (
+                std::ffi::OsString::from(key),
+                std::ffi::OsString::from(value),
+            )
+        };
+        assert!(!git_env_in_roots(
+            &git,
+            &[pair("git_dir", "/outside/repo")],
+            &workspace,
+            &roots
+        ));
+        assert!(!git_env_in_roots(
+            &git,
+            &[pair("Git_Namespace", "agent")],
+            &workspace,
+            &roots
+        ));
+        assert!(!git_env_in_roots(
+            &git,
+            &[
+                pair("git_config_count", "1"),
+                pair("git_config_key_0", "core.bare"),
+                pair("git_config_value_0", "true"),
+            ],
+            &workspace,
+            &roots
+        ));
+    }
+    #[test]
+    fn git_program_and_object_env_close_remnants() {
+        // `GIT.EXE` invokes git on Windows: the gates cannot key on exact
+        // `git`. Object store and index locations select repository
+        // components, so they confine like `GIT_DIR`; the alternates list
+        // cannot be confined element-wise and denies instead.
+        let temp = tempfile::tempdir().expect("temporary grant roots");
+        let outer = temp.path().join("outer-repo");
+        let workspace = outer.join("agent-workspace");
+        let objects = workspace.join("objects");
+        std::fs::create_dir_all(&objects).expect("objects directory");
+        let roots = [workspace.clone()];
+        let git: Vec<std::ffi::OsString> = vec!["git".into(), "status".into()];
+        let pair = |key: &str, value: &str| {
+            (
+                std::ffi::OsString::from(key),
+                std::ffi::OsString::from(value),
+            )
+        };
+        let outside = outer.join("outside");
+        std::fs::create_dir_all(&outside).expect("outside directory");
+        let git_exe: Vec<std::ffi::OsString> =
+            vec!["GIT.EXE".into(), "--namespace".into(), "x".into()];
+        assert!(!git_spawn_in_roots(&git_exe, &[], &workspace, &roots));
+        let git_exe_ok: Vec<std::ffi::OsString> = vec!["GIT.EXE".into(), "status".into()];
+        assert!(git_spawn_in_roots(&git_exe_ok, &[], &workspace, &roots));
+        assert!(git_env_in_roots(
+            &git,
+            &[pair("GIT_OBJECT_DIRECTORY", "objects")],
+            &workspace,
+            &roots
+        ));
+        assert!(!git_env_in_roots(
+            &git,
+            &[pair(
+                "GIT_OBJECT_DIRECTORY",
+                outside.to_string_lossy().as_ref()
+            )],
+            &workspace,
+            &roots
+        ));
+        assert!(!git_env_in_roots(
+            &git,
+            &[pair(
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                outside.to_string_lossy().as_ref()
+            )],
+            &workspace,
+            &roots
+        ));
     }
 }

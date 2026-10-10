@@ -27,7 +27,7 @@ use crate::ext::{BoxFuture, Caller, Doc};
 use crate::host::HostState;
 use crate::jobs::{JobRecord, JobTable};
 use crate::proc::{Launcher, Proc, SpawnOpts, spawn_process};
-use crate::session::dispatch::grant_covers;
+use crate::session::dispatch::{git_spawn_in_roots, grant_covers};
 use crate::session::service_grants::{CallKey, Covering};
 use crate::session::tasks::SessionTasks;
 
@@ -328,7 +328,12 @@ impl ToolCxRuntime for SessionRt {
             Ok(launcher) => launcher,
             Err(setup) => return Err(setup.tool_error()),
         };
-        if !approved.prefix().is_empty() && !grant_covers(&approved, argv, &opts.cwd) {
+        // The prefix match authenticates scoped grants; the git checks below
+        // apply to every approval shape, including empty-prefix grants whose
+        // roots still bind. Only the request overrides are vetted here; the
+        // host snapshot is scrubbed of git redirectors at capture instead.
+        let prefix_ok = approved.prefix().is_empty() || grant_covers(&approved, argv, &opts.cwd);
+        if !prefix_ok || !git_spawn_in_roots(argv, &opts.env, &opts.cwd, approved.roots()) {
             return Err(ToolError::Denied(DenyReason::out_of_scope(
                 service_tool().as_str(),
             )));
