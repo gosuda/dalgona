@@ -298,10 +298,14 @@ impl RunCx {
                         })?
                     }
                 };
-                if declares_root_approval(&text) {
-                    self.require_consent(line, "a config-declared `approval`")?;
-                }
                 self.config_text.push(text);
+                // The gate reads the joined config through the real TOML
+                // decoder: quoting tricks cannot hide a key, and fragments
+                // spread across config steps still resolve. Any authorizing
+                // key needs the invoker's --consent.
+                if let Some(key) = gated_config_key(&self.config_text.join("\n")) {
+                    self.require_consent(line, &format!("a config-declared `{key}`"))?;
+                }
                 let _ = writeln!(out, "{line:>4}  config");
             }
             Step::Plugin(wire) => {
@@ -419,6 +423,7 @@ impl RunCx {
                 format!("follow_up -> {}", reply_line(&reply))
             }
             Step::Run { name, args } => {
+                self.require_consent(line, "running a built-in command in-band")?;
                 let reply = self
                     .submit(
                         Command::Run {
@@ -556,7 +561,18 @@ impl RunCx {
         self.agent = None;
         self.subscription = None;
         if let Some(host) = self.host.take() {
-            let _ = host.shutdown(std::time::Duration::from_secs(3)).await;
+            let report = host.shutdown(std::time::Duration::from_secs(3)).await;
+            // Shutdown reports what it completed, not a guarantee: work
+            // still pending means deleting the run root would drop journals
+            // the session still owns, so it is kept like `--root`.
+            if work_remains(&report) {
+                self.root = Some(self.root_path.clone());
+                let _ = writeln!(
+                    out,
+                    "shutdown left {} task(s), status_quiet={} — keeping run root",
+                    report.tasks_remaining, report.status_quiet
+                );
+            }
         }
         if self.keep || self.root.is_some() {
             let _ = writeln!(out, "kept run root: {}", self.root_path.display());
@@ -678,8 +694,10 @@ impl RunCx {
             text.insert_str(0, &format!("plugins = [{list}]\n"));
         }
         if let Some(fixture) = &self.provider_fixture {
-            let escaped = fixture.to_string_lossy().replace('\\', "\\\\");
-            let _ = writeln!(text, "\n[providers.scripted]\nfixture = \"{escaped}\"");
+            // The TOML serializer, not an escape table: quotes, newlines,
+            // and control characters cannot produce malformed config.
+            let rendered = toml_string(fixture.to_string_lossy().as_ref());
+            let _ = writeln!(text, "\n[providers.scripted]\nfixture = {rendered}");
         }
         text
     }
@@ -902,7 +920,7 @@ impl RunCx {
         let timeout = spec
             .timeout_ms
             .map_or(DEFAULT_TIMEOUT, Duration::from_millis);
-        let deadline = Instant::now() + timeout;
+        let deadline = deadline(timeout, line)?;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
@@ -950,7 +968,7 @@ impl RunCx {
         let timeout = spec
             .timeout_ms
             .map_or(DEFAULT_TIMEOUT, Duration::from_millis);
-        let deadline = Instant::now() + timeout;
+        let deadline = deadline(timeout, line)?;
         loop {
             // A request an earlier expectation drained waits in the queue:
             // match the queue first so it is answered, not waited out.
@@ -959,10 +977,12 @@ impl RunCx {
                 .iter()
                 .position(|(_, kind)| *kind == spec.kind)
             {
-                let Some((id, _)) = self.open_requests.remove(index) else {
-                    continue;
-                };
                 if let Some(answer) = &spec.answer {
+                    // Only an answered request leaves the queue: observing
+                    // must not strand it for a later `answer` step.
+                    let Some((id, _)) = self.open_requests.remove(index) else {
+                        continue;
+                    };
                     let agent = self
                         .agent
                         .as_ref()
@@ -1118,22 +1138,98 @@ fn resolve(scenario_dir: &Path, path: &Path) -> PathBuf {
 /// A config text that sets the root `approval` key authorizes in-band: the
 /// root key only binds before the first table header, so scanning that
 /// prefix is enough — a table-scoped `approval` is a provider's own setting.
-fn declares_root_approval(text: &str) -> bool {
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if line.starts_with('[') {
-            return false;
-        }
-        if let Some((key, _)) = line.split_once('=')
-            && key.trim().trim_matches('"') == "approval"
-        {
-            return true;
-        }
+/// The first config key that authorizes the product to act on its own:
+/// a root `approval` mode, any `[providers.*]` wiring, or a credential or
+/// endpoint setting at any level. A repository-controlled scenario could
+/// point a credential-bearing request at an endpoint it owns, so every
+/// such key needs the invoker's `--consent`. Decoding through `toml` keeps
+/// quote tricks from hiding a key the strict loader would honor; text the
+/// real decoder rejects fails later in `Config::load` anyway.
+/// True when the shutdown report shows work still in flight — tasks the
+/// host could not close inside its grace window, or a session that did
+/// not reach quiet. A `true` verdict keeps the run root for `--root`
+/// inspection instead of deleting the journals mid-flight.
+fn work_remains(report: &dal_agent::ShutdownReport) -> bool {
+    report.tasks_remaining > 0 || !report.status_quiet
+}
+
+/// The largest timeout a scenario may declare. A `timeout_ms` past one
+/// day is a malformed scenario, and on platforms with a narrower clock
+/// range the arithmetic would overflow outright.
+const MAX_TIMEOUT: Duration = Duration::from_hours(24);
+
+/// The deadline for one expectation: the declared timeout bounded by the
+/// scenario limit, then the platform clock.
+fn deadline(timeout: Duration, line: usize) -> Result<Instant, DevError> {
+    if timeout > MAX_TIMEOUT {
+        return Err(DevError::Step {
+            line,
+            detail: format!(
+                "timeout_ms {} exceeds the {}s scenario limit",
+                timeout.as_millis(),
+                MAX_TIMEOUT.as_secs()
+            ),
+        });
     }
-    false
+    Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| DevError::Step {
+            line,
+            detail: format!(
+                "timeout_ms {} exceeds the platform clock range",
+                timeout.as_millis()
+            ),
+        })
+}
+
+/// One Rust string as one TOML basic-string literal. The document
+/// serializer cannot emit a bare scalar, so a one-key map carries it.
+#[expect(
+    clippy::expect_used,
+    reason = "serializing a one-key string map cannot fail"
+)]
+fn toml_string(value: &str) -> String {
+    const KEY: &str = "v";
+    let doc = toml::to_string(&toml::map::Map::from_iter([(
+        KEY.to_owned(),
+        toml::Value::String(value.to_owned()),
+    )]))
+    .expect("a string value always serializes");
+    doc.trim_end()
+        .strip_prefix("v = ")
+        .unwrap_or("\"\"")
+        .to_owned()
+}
+
+fn gated_config_key(text: &str) -> Option<String> {
+    const GATED: &[&str] = &[
+        "providers",
+        "provider",
+        "key_env",
+        "api_key",
+        "base_url",
+        "token",
+        "credential",
+        "credentials",
+        "secret",
+        "auth",
+        "bearer",
+    ];
+    fn scan(table: &toml::Table, root: bool) -> Option<String> {
+        for (key, value) in table {
+            if (root && key == "approval") || GATED.contains(&key.as_str()) {
+                return Some(key.clone());
+            }
+            if let Some(inner) = value.as_table()
+                && let Some(hit) = scan(inner, false)
+            {
+                return Some(hit);
+            }
+        }
+        None
+    }
+    let table = toml::from_str::<toml::Table>(text).ok()?;
+    scan(&table, true)
 }
 
 /// Collects every journal.jsonl under `dir`.
@@ -1739,4 +1835,79 @@ fn decode_expect(
         return Ok(Step::ExpectQuiet(ms));
     }
     Err(invalid("expectation could not be decoded".to_owned()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{gated_config_key, toml_string, work_remains};
+
+    /// `dev run` consults the shutdown report before deleting the root:
+    /// leftover tasks or a non-quiet session keep it. Reverting to the
+    /// unconditional delete drops journals mid-flight.
+    #[test]
+    fn work_remains_follows_the_shutdown_report() {
+        let base = dal_agent::ShutdownReport {
+            sessions_closed: 1,
+            status_quiet: true,
+            tasks_remaining: 0,
+        };
+        assert!(!work_remains(&base));
+        assert!(work_remains(&dal_agent::ShutdownReport {
+            tasks_remaining: 1,
+            ..base
+        }));
+        assert!(work_remains(&dal_agent::ShutdownReport {
+            status_quiet: false,
+            ..base
+        }));
+    }
+
+    /// A fixture path with quotes, backslashes, or a newline must
+    /// round-trip through the config TOML instead of corrupting it.
+    /// Reverting to raw interpolation breaks the decode for each shape.
+    #[test]
+    fn toml_string_round_trips_hostile_paths() {
+        for path in [
+            "/plain/path",
+            "C:\\Users\\a\\fixture.jsonl",
+            "has \"a quote\" inside",
+            "line1\nline2",
+            "tab\there",
+        ] {
+            let doc = format!("fixture = {}", toml_string(path));
+            let parsed: toml::Table = toml::from_str(&doc).expect(&doc);
+            assert_eq!(
+                parsed["fixture"].as_str(),
+                Some(path),
+                "round-trip failed for {path:?}"
+            );
+        }
+    }
+
+    /// The consent gate reads the decoded TOML, not the literal text: a
+    /// provider credential key or a root `approval` gates in any quoting
+    /// or table form. Reverting to the text scan misses the
+    /// single-quoted and dotted-table shapes.
+    #[test]
+    fn gated_config_key_reads_the_decoded_toml() {
+        for text in [
+            "approval = \"all\"",
+            "approval = 'all'",
+            "[providers.test-api]\napi_key = \"x\"",
+            "providers.scripted.base_url = \"http://x\"",
+            "providers.test.key_env = \"X\"",
+            "[providers.a.b]\ntoken = \"x\"",
+        ] {
+            assert!(gated_config_key(text).is_some(), "{text}");
+        }
+        for text in [
+            "plugins = []",
+            "model = \"openai/gpt-6-luna\"",
+            "# approval = \"all\"",
+            "not toml at all {{{",
+            "",
+        ] {
+            assert!(gated_config_key(text).is_none(), "{text}");
+        }
+    }
 }
