@@ -36,6 +36,7 @@ struct Held {
     stream: Mutex<Option<EventStream>>,
     report: Mutex<VecDeque<oneshot::Receiver<AgentReport>>>,
     awaiting: AtomicUsize,
+    inferred: AtomicUsize,
 }
 
 impl Services for Held {
@@ -120,6 +121,7 @@ impl Services for Held {
         never!()
     }
     fn infer_stream(&self, _who: &Caller, _req: ModelRequest) -> ServiceFuture<'_, EventStream> {
+        self.inferred.fetch_add(1, Ordering::SeqCst);
         let stream = locked(&self.stream).take().expect("one scripted stream");
         Box::pin(async move { Ok(stream) })
     }
@@ -175,6 +177,7 @@ fn rig() -> Rig {
         }))),
         report: Mutex::new(VecDeque::new()),
         awaiting: AtomicUsize::new(0),
+        inferred: AtomicUsize::new(0),
     });
     let caller = Caller::new(
         "scope-test".parse::<Name>().expect("name"),
@@ -444,4 +447,31 @@ async fn a_finished_handle_is_accounted_once_and_survives_scope_drop() {
     ));
     assert_eq!(requests(&shared), 1);
     assert_eq!((done(&shared), progress(&shared)), (1, 1));
+}
+
+#[tokio::test]
+async fn a_handle_dropped_before_its_first_poll_stays_cancelled() {
+    let rig = rig();
+    let handle = rig.scope.infer(request()).expect("admitted");
+    let Rig {
+        scope,
+        shared,
+        held,
+        ..
+    } = rig;
+    // No yield between launch and drop: the drive is granted before it has
+    // ever polled, and the cancelled handle must not restart to Running or
+    // reach upstream work.
+    drop(scope);
+    quiesced(&shared).await;
+    assert_eq!(handle.status(), HandleStatus::Cancelled);
+    assert!(matches!(
+        handle.result().await,
+        Err(ScopeError::Cancelled)
+    ));
+    assert_eq!(
+        held.inferred.load(Ordering::SeqCst),
+        0,
+        "the drive never starts upstream work for a cancelled handle"
+    );
 }
