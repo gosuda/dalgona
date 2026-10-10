@@ -301,21 +301,31 @@ where
     let agent = opts
         .rt
         .block_on(host.open(opts.session.clone(), ClientId::new("dal-tui")))?;
-    let view = opts.rt.block_on(agent.view(snapshot_page()?))?;
-    let session_id = view.session.id;
-    let subscription = opts
-        .rt
-        .block_on(agent.subscribe(Some((view.r#gen, view.seq))))?;
-    let commands = opts.rt.block_on(host.commands())?;
-    let mut pump = Pump::spawn(opts, subscription);
-    let state = Arc::new(Mutex::new(TermState::new()));
-    let hook = PanicHookGuard::install(Arc::clone(&state));
-    io.enable_raw()
-        .map_err(|error| crate::term::te_raw_mode_failed(&error.to_string()))?;
-    state
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .set_raw(true);
+    let session_id = agent.session();
+    let attach = || {
+        let view = opts.rt.block_on(agent.view(snapshot_page()?))?;
+        let subscription = opts
+            .rt
+            .block_on(agent.subscribe(Some((view.r#gen, view.seq))))?;
+        let commands = opts.rt.block_on(host.commands())?;
+        let pump = Pump::spawn(opts, subscription);
+        let state = Arc::new(Mutex::new(TermState::new()));
+        let hook = PanicHookGuard::install(Arc::clone(&state));
+        io.enable_raw()
+            .map_err(|error| crate::term::te_raw_mode_failed(&error.to_string()))?;
+        state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .set_raw(true);
+        Ok::<_, TuiError>((view, commands, pump, state, hook))
+    };
+    let (view, commands, mut pump, state, hook) = match attach() {
+        Ok(attached) => attached,
+        Err(error) => {
+            let _ = opts.rt.block_on(host.close(session_id));
+            return Err(error);
+        }
+    };
 
     let outcome = run_loop(
         io,
@@ -2076,20 +2086,25 @@ mod tests {
 
 #[cfg(test)]
 mod run_command_tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
-    use dal_core::{Answer, Command, Gen, Output, PageReq, Reply, RequestId, Seq, View};
+    use dal_agent::SessionRef;
+    use dal_agent::login::{LoginIo, LoginOutcome, Method, StoredCredential};
+    use dal_core::{
+        Answer, ClientId, Command, CommandSpec, Gen, Output, PageReq, Reply, RequestId, Seq,
+        SessionId, View, Workspace,
+    };
     use tokio::sync::Notify;
 
-    use super::{Session, start_run};
-    use crate::TuiError;
-    use crate::backend::{TuiAgent, TuiDelivery, TuiSubscription};
+    use super::{Session, run, start_run};
+    use crate::backend::{TuiAgent, TuiDelivery, TuiHost, TuiSubscription};
+    use crate::{ColorMode, EnvFacts, Screen, ThemeRequest, TuiError, TuiOptions};
 
     /// An agent whose `submit` waits for the test, like a plugin command
     /// holding on a grant question that only the terminal can answer.
     #[derive(Clone)]
-    struct Held(Arc<Notify>);
+    struct Held(Arc<Notify>, SessionId);
 
     struct Silent;
 
@@ -2103,6 +2118,10 @@ mod run_command_tests {
 
     impl TuiAgent for Held {
         type Subscription = Silent;
+
+        fn session(&self) -> SessionId {
+            self.1
+        }
 
         fn view(
             &self,
@@ -2138,6 +2157,102 @@ mod run_command_tests {
         }
     }
 
+    /// A host whose sessions open but never produce a view, recording closes.
+    #[derive(Clone)]
+    struct Recording {
+        id: SessionId,
+        closed: Arc<Mutex<Vec<SessionId>>>,
+    }
+
+    impl TuiHost for Recording {
+        type Agent = Held;
+
+        fn open(
+            &self,
+            _session: SessionRef,
+            _client: ClientId,
+        ) -> impl Future<Output = Result<Held, TuiError>> {
+            std::future::ready(Ok(Held(Arc::new(Notify::new()), self.id)))
+        }
+
+        fn commands(&self) -> impl Future<Output = Result<Arc<[CommandSpec]>, TuiError>> {
+            std::future::ready(Ok(Arc::from(Vec::new())))
+        }
+
+        fn close(&self, id: SessionId) -> impl Future<Output = Result<(), TuiError>> {
+            self.closed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(id);
+            std::future::ready(Ok(()))
+        }
+
+        fn login(
+            &self,
+            _provider: &str,
+            _method: Method,
+            _io: LoginIo,
+        ) -> impl Future<Output = Result<LoginOutcome, TuiError>> {
+            std::future::ready(Err(TuiError::Terminal("sign-in is not under test".into())))
+        }
+
+        fn logout(
+            &self,
+            _provider: Option<&str>,
+        ) -> impl Future<Output = Result<Vec<Box<str>>, TuiError>> {
+            std::future::ready(Ok(Vec::new()))
+        }
+
+        fn stored_credentials(
+            &self,
+        ) -> impl Future<Output = Result<Vec<StoredCredential>, TuiError>> {
+            std::future::ready(Ok(Vec::new()))
+        }
+    }
+
+    #[test]
+    fn a_session_whose_first_view_fails_is_closed_before_run_returns() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        let workspace = Workspace::new(std::env::temp_dir()).expect("absolute workspace");
+        let opts = TuiOptions {
+            session: SessionRef::Ephemeral { workspace },
+            screen: Screen::Inline,
+            theme_request: ThemeRequest::Palette,
+            default_model: None,
+            images: false,
+            diagrams: false,
+            motion: false,
+            editor: "true".into(),
+            color: ColorMode::Never,
+            binary: "dal",
+            env: EnvFacts {
+                stdin_tty: true,
+                ..EnvFacts::default()
+            },
+            rt: runtime.handle().clone(),
+        };
+        let host = Recording {
+            id: SessionId::new_v7(),
+            closed: Arc::default(),
+        };
+        let io = crate::term::fake_term_io(Vec::new());
+
+        let outcome = run(&host, &opts, &io, || Ok(Vec::new()), |_| Ok(()));
+
+        assert!(
+            matches!(outcome, Err(TuiError::Terminal(_))),
+            "the view error is the one returned: {outcome:?}"
+        );
+        let closed = host
+            .closed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert_eq!(closed, vec![host.id], "the opened session was released");
+    }
+
     fn run_command() -> Command {
         Command::Run {
             name: "goal".into(),
@@ -2151,7 +2266,7 @@ mod run_command_tests {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
             .expect("runtime");
-        let held = Held(Arc::new(Notify::new()));
+        let held = Held(Arc::new(Notify::new()), SessionId::new_v7());
         let mut session = Session {
             inflight: Some(
                 start_run(runtime.handle(), &held, run_command())

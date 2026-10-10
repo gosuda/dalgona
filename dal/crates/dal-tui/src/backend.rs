@@ -39,6 +39,9 @@ pub trait TuiAgent: Clone + Send + Sync + 'static {
     /// The session subscription implementation.
     type Subscription: TuiSubscription;
 
+    /// The identity of the opened session, known before any view is read.
+    fn session(&self) -> SessionId;
+
     /// Reads one bounded page of the session view.
     async fn view(&self, page: PageReq) -> Result<View, TuiError>;
     /// Subscribes after a view's generation and sequence.
@@ -145,6 +148,10 @@ impl TuiAgent for Agent {
 
     fn workspace_is_local(&self) -> bool {
         true
+    }
+
+    fn session(&self) -> SessionId {
+        self.session()
     }
 }
 
