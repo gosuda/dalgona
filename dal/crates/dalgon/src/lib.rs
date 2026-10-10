@@ -220,7 +220,9 @@ async fn run_command(
         }
         Some(cli::Commands::Plugin(args)) => dispatch::plugin(args.clone(), startup, product).await,
         Some(cli::Commands::Rules(args)) => dispatch::rules(args.clone(), startup, product).await,
-        Some(cli::Commands::Dev(args)) => dispatch::dev(args),
+        Some(cli::Commands::Dev(args)) => {
+            dispatch::dev(args, startup.vars, startup.cwd, startup.helper).await
+        }
         Some(cli::Commands::Login(args)) => dispatch::login(args.clone(), startup).await,
         Some(cli::Commands::Logout(args)) => dispatch::logout(args.clone(), startup).await,
         Some(cli::Commands::Models(args)) => dispatch::models(args.clone(), startup).await,

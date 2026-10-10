@@ -13,7 +13,7 @@ use dal_core::{Gen, Header, Product, Record, SessionId, Timestamp, TurnId, Works
 use support::CliFixture;
 
 fn nz(value: u64) -> NonZeroU64 {
-    NonZeroU64::new(value).expect("nonzero")
+    NonZeroU64::new(value).unwrap_or(NonZeroU64::MIN)
 }
 
 /// Writes a real journal through the wire codec so the dev commands decode
@@ -144,7 +144,9 @@ fn dev_journal_torn_leaves_a_tail_replay_rejects() -> Result<(), Box<dyn Error>>
     ])?;
     assert!(output.status.success(), "{}", stderr(&output));
     let torn_bytes = fs::read(&torn)?;
-    assert!(torn_bytes.len() < fs::metadata(&journal)?.len() as usize);
+    assert!(
+        torn_bytes.len() < usize::try_from(fs::metadata(&journal)?.len()).unwrap_or(usize::MAX)
+    );
     let replay = fixture.output(&[
         "dev",
         "journal",
@@ -209,5 +211,72 @@ fn dev_fold_attributes_fields_to_records() -> Result<(), Box<dyn Error>> {
         text.contains('+'),
         "expected field additions on the first folds: {text}"
     );
+    Ok(())
+}
+
+/// Writes one scenario file next to the fixture root so step paths resolve
+/// against its directory.
+fn write_scenario(fixture: &CliFixture, lines: &[&str]) -> Result<PathBuf, Box<dyn Error>> {
+    let path = fixture
+        .data
+        .join(format!("scenario-{}.jsonl", SessionId::new_v7()));
+    fs::write(&path, lines.join("\n"))?;
+    Ok(path)
+}
+
+#[test]
+fn dev_run_drives_a_scripted_session() -> Result<(), Box<dyn Error>> {
+    let fixture = CliFixture::new()?;
+    let scenario = write_scenario(
+        &fixture,
+        &[
+            r#"{"provider":{"script":[{"kind":"events","events":[{"type":"text_delta","text":"hello from the script"},{"type":"tool_calls_done","calls":[]},{"type":"usage","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":5,"reasoning_tokens":null,"cache_write_tokens":0,"cost_usd":null}},{"type":"stop","reason":"end_turn"}]}]}}"#,
+            r#"{"write":{"path":"seed.txt","text":"seeded bytes"}}"#,
+            r#"{"prompt":"say hi"}"#,
+            r#"{"expect":{"update":"turn_ended"}}"#,
+            r#"{"expect":{"journal":"TurnEnd"}}"#,
+            r#"{"expect":{"file":{"path":"seed.txt","contains":"seeded"}}}"#,
+            r#"{"comment":"the turn ended and the journal records it"}"#,
+        ],
+    )?;
+    let output = fixture.output(&["dev", "run", scenario.to_str().expect("utf8 path")])?;
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("accepted turn 1"), "{text}");
+    assert!(text.contains("update turn_ended"), "{text}");
+    assert!(text.contains("journal TurnEnd"), "{text}");
+    assert!(text.contains("scenario passed"), "{text}");
+    Ok(())
+}
+
+#[test]
+fn dev_run_surfaces_and_answers_an_approval_request() -> Result<(), Box<dyn Error>> {
+    let fixture = CliFixture::new()?;
+    let scenario = write_scenario(
+        &fixture,
+        &[
+            r#"{"provider":{"script":[{"kind":"events","events":[{"type":"tool_calls_done","calls":[{"id":"call-1","name":"exec","args":{"kind":"parsed","value":{"command":"echo hi","timeout_seconds":60}}}]},{"type":"usage","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":5,"reasoning_tokens":null,"cache_write_tokens":0,"cost_usd":null}},{"type":"stop","reason":"tool_use"}]},{"kind":"events","events":[{"type":"text_delta","text":"done"},{"type":"tool_calls_done","calls":[]},{"type":"usage","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":5,"reasoning_tokens":null,"cache_write_tokens":0,"cost_usd":null}},{"type":"stop","reason":"end_turn"}]}]}}"#,
+            r#"{"set_approval":"ask"}"#,
+            r#"{"prompt":"run echo hi"}"#,
+            r#"{"expect":{"request":{"kind":"approval","answer":"approve"}}}"#,
+            r#"{"expect":{"update":{"kind":"turn_ended","contains":"end_turn"}}}"#,
+        ],
+    )?;
+    let output = fixture.output(&["dev", "run", scenario.to_str().expect("utf8 path")])?;
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("request approval"), "{text}");
+    assert!(text.contains("scenario passed"), "{text}");
+    Ok(())
+}
+
+#[test]
+fn dev_run_fails_closed_when_no_provider_is_given() -> Result<(), Box<dyn Error>> {
+    let fixture = CliFixture::new()?;
+    let scenario = write_scenario(&fixture, &[r#"{"prompt":"hi"}"#])?;
+    let output = fixture.output(&["dev", "run", scenario.to_str().expect("utf8 path")])?;
+    assert!(!output.status.success());
+    let text = stderr(&output);
+    assert!(text.contains("provider"), "{text}");
     Ok(())
 }

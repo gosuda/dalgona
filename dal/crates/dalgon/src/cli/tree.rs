@@ -272,10 +272,22 @@ pub(crate) struct DevArgs {
 
 #[derive(Clone, Debug, Subcommand)]
 pub(crate) enum DevSubcommand {
+    #[command(about = texts::DEV_RUN_HELP)]
+    Run(DevRunArgs),
     #[command(about = texts::DEV_JOURNAL_HELP)]
     Journal(DevJournalArgs),
     #[command(about = texts::DEV_FOLD_HELP)]
     Fold(DevFoldArgs),
+}
+
+#[derive(Clone, Debug, Args)]
+pub(crate) struct DevRunArgs {
+    /// The scenario file: one step JSON object per nonblank line.
+    #[arg(value_name = "FILE")]
+    pub(crate) file: PathBuf,
+    /// Keep the run's data root and workspace for inspection.
+    #[arg(long)]
+    pub(crate) keep: bool,
 }
 
 #[derive(Clone, Debug, Args)]

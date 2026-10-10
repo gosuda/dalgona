@@ -1,10 +1,12 @@
-//! `dalgon dev` dispatch: journal surgery and the fold explainer.
+//! `dalgon dev` dispatch: journal surgery, the fold explainer, and scenario runs.
 //!
-//! These commands read stored session state for debugging. They never open a
-//! `Host`, so they work on directories the store left behind without locks.
+//! `journal` and `fold` read stored session state for debugging; they never
+//! open a `Host`, so they work on directories the store left behind without
+//! locks. `run` drives a scripted headless session inside a fresh run root.
 
 mod fold;
 mod journal;
+mod run;
 mod util;
 
 use std::fmt;
@@ -47,6 +49,15 @@ pub(super) enum DevError {
     SamePath {
         path: String,
     },
+    Scenario {
+        path: String,
+        line: usize,
+        detail: String,
+    },
+    Step {
+        line: usize,
+        detail: String,
+    },
 }
 
 impl DevError {
@@ -67,6 +78,12 @@ impl DevError {
             }
             Self::NoSidecar { .. } => "Run without NAME to list the sidecars that exist.",
             Self::SamePath { .. } => "Pass a different output path so the source journal survives.",
+            Self::Scenario { .. } => {
+                "Each line needs one JSON object with exactly one step key; see `dalgon dev run --help`."
+            }
+            Self::Step { .. } => {
+                "The step failed inside a real session; the detail names the session's reply."
+            }
         }
     }
 }
@@ -90,6 +107,12 @@ impl fmt::Display for DevError {
             Self::SamePath { path } => {
                 write!(out, "{path}: input and output must differ")
             }
+            Self::Scenario { path, line, detail } => {
+                write!(out, "{path}:{line}: {detail}")
+            }
+            Self::Step { line, detail } => {
+                write!(out, "step {line}: {detail}")
+            }
         }
     }
 }
@@ -106,10 +129,16 @@ impl std::error::Error for DevError {
 }
 
 /// Runs one `dalgon dev` subcommand, rendering failures to their exit codes.
-pub(crate) fn run(args: &cli::DevArgs) -> ExitCode {
+pub(crate) async fn run(
+    args: &cli::DevArgs,
+    vars: crate::VarsMap,
+    cwd: std::path::PathBuf,
+    helper: Option<std::path::PathBuf>,
+) -> ExitCode {
     let result = match &args.command {
         cli::DevSubcommand::Journal(args) => journal::run(args),
         cli::DevSubcommand::Fold(args) => fold::run(&args.file),
+        cli::DevSubcommand::Run(args) => run::run(args, vars, cwd, helper).await,
     };
     match result {
         Ok(code) => code,
