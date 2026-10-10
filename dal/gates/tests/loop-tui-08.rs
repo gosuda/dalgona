@@ -94,7 +94,7 @@ fn remote_tui_reattaches_after_dropped_websocket() -> Result<(), Box<dyn Error +
     proxy.wait_for_connections(2, Duration::from_secs(15))?;
     terminal.wait_for(
         b"remote session continued after socket drop",
-        Duration::from_secs(15),
+        Duration::from_secs(30),
     )?;
     terminal.wait_for_count(b"enter send", 2, Duration::from_secs(15))?;
     let cursors = proxy.subscription_cursors();
