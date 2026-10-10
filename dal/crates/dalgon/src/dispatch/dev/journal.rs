@@ -146,7 +146,18 @@ fn same_inode(left: &Path, right: &Path) -> bool {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn same_inode(left: &Path, right: &Path) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    match (fs::metadata(left), fs::metadata(right)) {
+        (Ok(a), Ok(b)) => {
+            (a.volume_serial_number(), a.file_index()) == (b.volume_serial_number(), b.file_index())
+        }
+        _ => false,
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 fn same_inode(_left: &Path, _right: &Path) -> bool {
     false
 }

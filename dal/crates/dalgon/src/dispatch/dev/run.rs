@@ -49,8 +49,15 @@ pub(super) async fn run(
         .file
         .parent()
         .filter(|dir| !dir.as_os_str().is_empty())
-        .map_or_else(|| cwd.clone(), Path::to_path_buf);
-    let mut run = RunCx::new(scenario_dir, vars, helper, args.keep, args.root.clone())?;
+        .map_or_else(|| cwd.clone(), |dir| resolve(&cwd, dir));
+    let mut run = RunCx::new(
+        scenario_dir,
+        vars,
+        helper,
+        args.keep,
+        args.root.clone(),
+        args.consent,
+    )?;
 
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
@@ -196,6 +203,7 @@ struct RunCx {
     config_text: Vec<String>,
     plugins: Vec<String>,
     session_kind: SessionKind,
+    consent: bool,
     host: Option<Host>,
     agent: Option<Agent>,
     subscription: Option<Subscription>,
@@ -215,6 +223,7 @@ impl RunCx {
         helper: Option<PathBuf>,
         keep: bool,
         root: Option<PathBuf>,
+        consent: bool,
     ) -> Result<Self, DevError> {
         let root_path = root.clone().unwrap_or_else(|| {
             std::env::temp_dir().join(format!(
@@ -244,6 +253,7 @@ impl RunCx {
             config_text: Vec::new(),
             plugins: Vec::new(),
             session_kind: SessionKind::New(None),
+            consent,
             host: None,
             agent: None,
             subscription: None,
@@ -271,7 +281,8 @@ impl RunCx {
                 self.require_pre_session(line)?;
                 let text = match wire {
                     ConfigWire::Text(text) => text,
-                    ConfigWire::File { file } => {
+                    ConfigWire::File(wire) => {
+                        let file = wire.file;
                         let path = resolve(&self.scenario_dir, &file);
                         std::fs::read_to_string(&path).map_err(|source| DevError::Read {
                             path: path.display().to_string(),
@@ -279,6 +290,9 @@ impl RunCx {
                         })?
                     }
                 };
+                if declares_root_approval(&text) {
+                    self.require_consent(line, "a config-declared `approval`")?;
+                }
                 self.config_text.push(text);
                 let _ = writeln!(out, "{line:>4}  config");
             }
@@ -452,6 +466,7 @@ impl RunCx {
                 format!("model {id} -> {}", reply_line(&reply))
             }
             Step::SetApproval(mode) => {
+                self.require_consent(line, "setting approval in-band")?;
                 let mode = approval_mode(&mode).map_err(fail)?;
                 let reply = self
                     .submit(
@@ -495,10 +510,15 @@ impl RunCx {
                 format!("rename -> {}", reply_line(&reply))
             }
             Step::Export { path, format } => {
+                let path = path
+                    .map(|path| self.inside_workspace(&path))
+                    .transpose()
+                    .map_err(fail)?;
                 let reply = self.submit(Command::Export { path, format }, line).await?;
                 format!("export -> {}", reply_line(&reply))
             }
             Step::Answer { kind, answer } => {
+                self.require_consent(line, "answering a request in-band")?;
                 let id = match &kind {
                     None => self.open_requests.pop_front(),
                     Some(kind) => self
@@ -541,6 +561,20 @@ impl RunCx {
             line,
             detail: format!("{what} needs a turn: submit a prompt first"),
         })
+    }
+
+    /// Fails closed when a step authorizes in-band without `--consent`:
+    /// consent must come from the invoker's command line, never from the
+    /// scenario file.
+    fn require_consent(&self, line: usize, what: &str) -> Result<(), DevError> {
+        if self.consent {
+            Ok(())
+        } else {
+            Err(DevError::Step {
+                line,
+                detail: format!("{what} needs the invoker's consent: pass --consent"),
+            })
+        }
     }
 
     /// Session steps may not follow the session's inputs.
@@ -594,8 +628,8 @@ impl RunCx {
     /// Builds the user config text from scenario config lines and the provider.
     fn user_config(&self) -> String {
         // `ask` is the default: a scenario that wants patch or exec calls
-        // declares `approval = "all"` in a config step, like the product
-        // itself requires.
+        // declares `approval = "all"` in a config step under `--consent`,
+        // like the product itself requires.
         let mut text = if self.config_text.is_empty() {
             "model = \"openai-responses/gpt-6\"\napproval = \"ask\"\n".to_owned()
         } else {
@@ -634,7 +668,8 @@ impl RunCx {
                 }
                 (name, DEVPROBE_STAR.to_owned())
             }
-            PluginWire::File { name, file } => {
+            PluginWire::File(wire) => {
+                let PluginFileWire { name, file } = wire;
                 let path = resolve(&self.scenario_dir, &file);
                 let source = std::fs::read_to_string(&path).map_err(|source| DevError::Read {
                     path: path.display().to_string(),
@@ -878,6 +913,9 @@ impl RunCx {
         out: &mut impl Write,
     ) -> Result<(), DevError> {
         let fail = |detail: String| DevError::Step { line, detail };
+        if spec.answer.is_some() {
+            self.require_consent(line, "answering a request in-band")?;
+        }
         let timeout = spec
             .timeout_ms
             .map_or(DEFAULT_TIMEOUT, Duration::from_millis);
@@ -1044,6 +1082,27 @@ fn resolve(scenario_dir: &Path, path: &Path) -> PathBuf {
     }
 }
 
+/// A config text that sets the root `approval` key authorizes in-band: the
+/// root key only binds before the first table header, so scanning that
+/// prefix is enough — a table-scoped `approval` is a provider's own setting.
+fn declares_root_approval(text: &str) -> bool {
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') {
+            return false;
+        }
+        if let Some((key, _)) = line.split_once('=')
+            && key.trim().trim_matches('"') == "approval"
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Collects every journal.jsonl under `dir`.
 fn find_journals(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
@@ -1124,7 +1183,14 @@ struct ProviderWire {
 #[serde(untagged)]
 enum ConfigWire {
     Text(String),
-    File { file: PathBuf },
+    File(ConfigFileWire),
+}
+
+/// `{"config": {"file": f}}` — TOML text loaded from a scenario-relative path.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConfigFileWire {
+    file: PathBuf,
 }
 
 /// `{"plugin": "devprobe"}` bundles the probe, or `{"plugin": {"name": n,
@@ -1133,7 +1199,15 @@ enum ConfigWire {
 #[serde(untagged)]
 enum PluginWire {
     Bundled(String),
-    File { name: String, file: PathBuf },
+    File(PluginFileWire),
+}
+
+/// The file form of a plugin step.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PluginFileWire {
+    name: String,
+    file: PathBuf,
 }
 
 /// `{"session": ...}` — a session shape or a named string.
@@ -1166,7 +1240,14 @@ struct SessionSpecWire {
 #[serde(untagged)]
 enum NewSessionWire {
     Flag(bool),
-    Named { name: String },
+    Named(NewSessionNamedWire),
+}
+
+/// `{"new": {"name": ...}}` — a named fresh session.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NewSessionNamedWire {
+    name: String,
 }
 
 /// `{"write": ...}` — a workspace-relative file.
@@ -1206,7 +1287,15 @@ enum PromptExpectWire {
 #[serde(untagged)]
 enum RunWire {
     Name(String),
-    Spec { name: String, args: Option<String> },
+    Spec(RunSpecWire),
+}
+
+/// `{"run": {"name": n, "args": a}}` — a command with arguments.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunSpecWire {
+    name: String,
+    args: Option<String>,
 }
 
 /// `{"compact": ...}` — a bare flag or a focus.
@@ -1214,7 +1303,14 @@ enum RunWire {
 #[serde(untagged)]
 enum CompactWire {
     Flag(bool),
-    Focus { focus: String },
+    Focus(CompactFocusWire),
+}
+
+/// `{"compact": {"focus": ...}}` — a focused compaction.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompactFocusWire {
+    focus: String,
 }
 
 /// `{"export": ...}` — an export target.
@@ -1230,10 +1326,15 @@ struct ExportWire {
 #[serde(untagged)]
 enum AnswerWire {
     Simple(SimpleAnswer),
-    Targeted {
-        request: String,
-        answer: SimpleAnswer,
-    },
+    Targeted(TargetedAnswerWire),
+}
+
+/// `{"answer": {"request": k, "answer": a}}` — an answer for a kind.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TargetedAnswerWire {
+    request: String,
+    answer: SimpleAnswer,
 }
 
 /// A plain answer: a named outcome or `{"value": <any JSON>}`.
@@ -1241,7 +1342,14 @@ enum AnswerWire {
 #[serde(untagged)]
 enum SimpleAnswer {
     Name(AnswerName),
-    Value { value: RawJson },
+    Value(SimpleAnswerValueWire),
+}
+
+/// `{"value": <any JSON>}` — a typed answer payload.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SimpleAnswerValueWire {
+    value: RawJson,
 }
 
 /// The named broker answers.
@@ -1393,7 +1501,7 @@ impl StepWire {
                         ));
                     }
                     (Some(NewSessionWire::Flag(true)) | None, None) => SessionKind::New(None),
-                    (Some(NewSessionWire::Named { name }), None) => SessionKind::New(Some(name)),
+                    (Some(NewSessionWire::Named(wire)), None) => SessionKind::New(Some(wire.name)),
                     (None, Some(key)) => SessionKind::Resume(key),
                     (Some(_), Some(_)) => {
                         return Err(invalid(
@@ -1432,7 +1540,7 @@ impl StepWire {
         if let Some(wire) = self.run {
             let (name, args) = match wire {
                 RunWire::Name(name) => (name, String::new()),
-                RunWire::Spec { name, args } => (name, args.unwrap_or_default()),
+                RunWire::Spec(spec) => (spec.name, spec.args.unwrap_or_default()),
             };
             return Ok(Step::Run { name, args });
         }
@@ -1467,7 +1575,7 @@ impl StepWire {
                     ));
                 }
                 CompactWire::Flag(true) => None,
-                CompactWire::Focus { focus } => Some(focus),
+                CompactWire::Focus(wire) => Some(wire.focus),
             }));
         }
         if let Some(name) = self.rename {
@@ -1482,7 +1590,7 @@ impl StepWire {
         if let Some(wire) = self.answer {
             let (kind, simple) = match wire {
                 AnswerWire::Simple(simple) => (None, simple),
-                AnswerWire::Targeted { request, answer } => (Some(request), answer),
+                AnswerWire::Targeted(wire) => (Some(wire.request), wire.answer),
             };
             return Ok(Step::Answer {
                 kind,
@@ -1509,7 +1617,7 @@ fn decode_answer(simple: SimpleAnswer) -> Answer {
         SimpleAnswer::Name(AnswerName::ApproveForSession) => Answer::ApproveForSession,
         SimpleAnswer::Name(AnswerName::Decline) => Answer::Decline,
         SimpleAnswer::Name(AnswerName::Cancel) => Answer::Cancel,
-        SimpleAnswer::Value { value } => Answer::Value(value),
+        SimpleAnswer::Value(wire) => Answer::Value(wire.value),
     }
 }
 

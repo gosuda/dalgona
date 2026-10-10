@@ -273,8 +273,8 @@ pub fn decode(line: &[u8]) -> Result<Decoded, DecodeError> {
         .iter()
         .rposition(|byte| !matches!(byte, b' ' | b'\t' | b'\n' | b'\r'))
         .map_or(0, |index| index + 1);
-    let text = std::str::from_utf8(&line[..end])
-        .map_err(|_| invalid(0, "journal lines are UTF-8"))?;
+    let text =
+        std::str::from_utf8(&line[..end]).map_err(|_| invalid(0, "journal lines are UTF-8"))?;
     let mut members: Members<'_> = Vec::new();
     let mut version_member: Option<Member<'_>> = None;
     let mut type_member: Option<Member<'_>> = None;

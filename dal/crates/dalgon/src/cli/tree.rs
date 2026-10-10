@@ -292,6 +292,11 @@ pub(crate) struct DevRunArgs {
     /// `resume` and `continue` session steps find a populated store.
     #[arg(long, value_name = "DIR")]
     pub(crate) root: Option<PathBuf>,
+    /// Permit in-band authorization: `answer` steps, `set_approval`, an
+    /// `expect.request` answer, or a config-declared `approval` act with the
+    /// operator's privileges, so the scenario file alone cannot grant them.
+    #[arg(long)]
+    pub(crate) consent: bool,
 }
 
 #[derive(Clone, Debug, Args)]

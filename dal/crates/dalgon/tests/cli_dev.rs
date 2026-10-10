@@ -269,11 +269,110 @@ fn dev_run_surfaces_and_answers_an_approval_request() -> Result<(), Box<dyn Erro
             r#"{"expect":{"update":{"kind":"turn_ended","contains":"end_turn"}}}"#,
         ],
     )?;
-    let output = fixture.output(&["dev", "run", scenario.to_str().expect("utf8 path")])?;
+    let output = fixture.output(&[
+        "dev",
+        "run",
+        "--consent",
+        scenario.to_str().expect("utf8 path"),
+    ])?;
     assert!(output.status.success(), "{}", stderr(&output));
     let text = stdout(&output);
     assert!(text.contains("request approval"), "{text}");
     assert!(text.contains("scenario passed"), "{text}");
+    Ok(())
+}
+
+/// In-band authorization must come from the invoker's command line: without
+/// `--consent`, `set_approval`, an `answer` step, an `expect.request`
+/// answer, and a config-declared `approval` all fail closed. Reverting the
+/// guard turns each denial into the step's own failure or a pass.
+#[test]
+fn dev_run_denies_in_band_authorization_without_consent() -> Result<(), Box<dyn Error>> {
+    let fixture = CliFixture::new()?;
+    for (name, line) in [
+        ("set_approval", r#"{"set_approval":"all"}"#),
+        ("answer", r#"{"answer":"approve"}"#),
+        (
+            "expect-answer",
+            r#"{"expect":{"request":{"kind":"approval","answer":"approve"}}}"#,
+        ),
+        ("config-approval", r#"{"config":"approval = \"all\""}"#),
+    ] {
+        let scenario = write_scenario(&fixture, &[line])?;
+        let output = fixture.output(&["dev", "run", scenario.to_str().expect("utf8 path")])?;
+        assert!(!output.status.success(), "{name} passed without --consent");
+        let text = stderr(&output);
+        assert!(text.contains("--consent"), "{name}: {text}");
+    }
+    Ok(())
+}
+
+/// An export path is a write like any other: it must stay inside the run
+/// workspace. Reverting the containment check lets the export target escape
+/// to `../out.md`.
+#[test]
+fn dev_run_rejects_an_export_path_outside_the_workspace() -> Result<(), Box<dyn Error>> {
+    let fixture = CliFixture::new()?;
+    let scenario = write_scenario(
+        &fixture,
+        &[
+            r#"{"provider":{"script":[{"kind":"events","events":[{"type":"text_delta","text":"hi"},{"type":"tool_calls_done","calls":[]},{"type":"usage","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":5,"reasoning_tokens":null,"cache_write_tokens":0,"cost_usd":null}},{"type":"stop","reason":"end_turn"}]}]}}"#,
+            r#"{"export":{"path":"../out.md","format":"markdown"}}"#,
+        ],
+    )?;
+    let output = fixture.output(&["dev", "run", scenario.to_str().expect("utf8 path")])?;
+    assert!(!output.status.success(), "the escape exported");
+    let text = stderr(&output);
+    assert!(text.contains("escapes the workspace"), "{text}");
+    Ok(())
+}
+
+/// Object step variants decode strictly: a typo'd key must fail the scenario
+/// instead of being silently dropped. Reverting `deny_unknown_fields` on any
+/// of these structs lets the line decode.
+#[test]
+fn dev_run_rejects_unknown_keys_in_step_objects() -> Result<(), Box<dyn Error>> {
+    let fixture = CliFixture::new()?;
+    for line in [
+        r#"{"run":{"name":"compact","bogus":1}}"#,
+        r#"{"plugin":{"name":"probe","file":"probe.star","bogus":1}}"#,
+        r#"{"answer":{"request":"approval","answer":"approve","bogus":1}}"#,
+        r#"{"config":{"file":"cfg.toml","bogus":1}}"#,
+        r#"{"session":{"new":{"name":"x","bogus":1}}}"#,
+        r#"{"expect":{"request":{"kind":"approval","answer":{"value":1,"bogus":2}}}}"#,
+    ] {
+        let scenario = write_scenario(&fixture, &[line])?;
+        let output = fixture.output(&["dev", "run", scenario.to_str().expect("utf8 path")])?;
+        assert!(!output.status.success(), "{line} decoded");
+        let text = stderr(&output);
+        assert!(
+            text.contains("bogus") || text.contains("not a step object"),
+            "{line}: {text}"
+        );
+    }
+    Ok(())
+}
+
+/// A scenario reached by a relative path anchors its directory at the
+/// invocation cwd: `{file}` reads resolve beside the scenario file, not
+/// against the run's data root or workspace.
+#[test]
+fn dev_run_resolves_scenario_files_beside_a_relative_scenario() -> Result<(), Box<dyn Error>> {
+    let fixture = CliFixture::new()?;
+    let dir = fixture.cwd().join("scen");
+    fs::create_dir_all(&dir)?;
+    fs::write(dir.join("probe.star"), "# probe\n")?;
+    let scenario = dir.join("scenario.jsonl");
+    fs::write(
+        &scenario,
+        "{\"plugin\":{\"name\":\"probe\",\"file\":\"probe.star\"}}\n",
+    )?;
+    let output = fixture.output(&["dev", "run", "scen/scenario.jsonl"])?;
+    assert!(
+        output.status.success(),
+        "the plugin file must resolve beside the scenario: {}",
+        stderr(&output)
+    );
     Ok(())
 }
 
