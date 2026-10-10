@@ -916,7 +916,7 @@ impl Actor {
     ) -> FoldOutcome {
         match work {
             TurnWork::Answered { resolved } => {
-                self.queue_resolved(&resolved, queue);
+                self.queue_resolved_or_cancel(&resolved, queue);
             }
             TurnWork::WatcherVerdict {
                 turn,
@@ -954,7 +954,7 @@ impl Actor {
                         .broker
                         .resolve_turn(turn, Answer::Cancel, core_client());
                     for item in resolved {
-                        self.queue_resolved(&item, queue);
+                        self.queue_resolved_or_cancel(&item, queue);
                     }
                     outcome.cancelled_end = Some(turn);
                 }
@@ -1380,7 +1380,7 @@ impl Actor {
                     .broker
                     .resolve_turn(*turn, Answer::Cancel, core_client());
                 for item in resolved {
-                    self.queue_resolved(&item, queue);
+                    self.queue_resolved_or_cancel(&item, queue);
                 }
                 // A cancelled turn holds `TurnEnded` until the driver
                 // confirms: `Effect::Stop` lands after the in-flight call's
@@ -1393,6 +1393,14 @@ impl Actor {
             _ => {}
         }
         self.publish(kind);
+    }
+
+    /// Queues a resolution when durable, otherwise cancels its waiter.
+    fn queue_resolved_or_cancel(&mut self, item: &Resolved, queue: &mut VecDeque<Effect>) {
+        if self.queue_resolved(item, queue) {
+            return;
+        }
+        self.broker.cancel(item);
     }
 
     /// Steps one broker resolution into queued effects without recursing.
