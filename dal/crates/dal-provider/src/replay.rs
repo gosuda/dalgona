@@ -381,6 +381,16 @@ pub fn encode_event(event: &StreamEvent) -> Result<RawJson, ReplayError> {
                     "replay payload carries credential-shaped bytes; redact the capture first",
                 ));
             }
+            // Raw-text scrubbing sees escapes, not decoded text: `"ak\u0049A..."`
+            // decodes into a credential the byte scan cannot see, so decoded
+            // leaves (keys included) go through the same check.
+            if let Ok(item) = sonic_rs::from_str::<sonic_rs::Value>(payload.item.as_str())
+                && decoded_secret(&item)
+            {
+                return Err(encode_err(
+                    "replay payload decodes to credential-shaped text; redact the capture first",
+                ));
+            }
             let family = sonic_rs::to_string(&payload.family)
                 .map_err(|_| encode_err("family not serializable"))?;
             let model = sonic_rs::to_string(&payload.model)
@@ -442,10 +452,31 @@ pub fn encode_event(event: &StreamEvent) -> Result<RawJson, ReplayError> {
 /// the rest — a provider echoing an authorization header or embedding a
 /// token in an error body — by matching the prefixes real credentials
 /// take (`Bearer`, `sk-*`, `xox*`, `gh*_`, `AKIA`, JWT `eyJ`) followed by
-/// at least eight token characters.
+/// at least eight token characters. A bare authorization scheme needs a
+/// stronger signal — sixteen-plus mixed-case characters — so prose words
+/// like `basic` never redact the text after them.
 fn scrub(text: &str) -> String {
     String::from_utf8(scrub_bytes(text.as_bytes()))
         .unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned())
+}
+
+/// True when any decoded string leaf of `item` — keys included — carries
+/// credential-shaped text. Escaped input like `"sk\u002d..."` hides from a
+/// raw-bytes scrub but not from the decoded tree.
+fn decoded_secret(item: &sonic_rs::Value) -> bool {
+    use sonic_rs::{JsonContainerTrait, JsonValueTrait};
+    if let Some(text) = item.as_str() {
+        return scrub(text) != text;
+    }
+    if let Some(items) = item.as_array() {
+        return items.iter().any(decoded_secret);
+    }
+    if let Some(map) = item.as_object() {
+        return map
+            .iter()
+            .any(|(key, value)| scrub(key) != key || decoded_secret(value));
+    }
+    false
 }
 
 fn scrub_bytes(bytes: &[u8]) -> Vec<u8> {
@@ -504,7 +535,13 @@ fn scrub_bytes(bytes: &[u8]) -> Vec<u8> {
                 at += 1;
             }
             let word = &bytes[start..at];
-            let secretish = (after_scheme && word.len() >= 8)
+            // A bare scheme word is prose too (`use basic functionality`),
+            // so the token it precedes must look high-entropy: at least
+            // sixteen characters with a non-lowercase byte. Prose words stay
+            // lowercase and rarely stretch that far; credentials do.
+            let secretish = (after_scheme
+                && word.len() >= 16
+                && word.iter().any(|byte| !byte.is_ascii_lowercase()))
                 || PREFIXES.iter().any(|prefix| {
                     word.starts_with(prefix.as_bytes()) && word.len() >= prefix.len() + 8
                 })
@@ -586,14 +623,27 @@ fn rescrub_split_text(events: &[StreamEvent]) -> Option<Vec<StreamEvent>> {
             })
             .collect(),
     );
-    changed |= refill_bytes(
-        out.iter_mut()
-            .filter_map(|event| match event {
-                StreamEvent::ToolArgsDelta { fragment, .. } => Some(fragment),
-                _ => None,
-            })
-            .collect(),
-    );
+    // Parallel calls interleave `ToolArgsDelta` events: one call's text can
+    // sit inside another's credential, so a joined stream hides what the
+    // per-call payload carries. Scrub each call's fragments on their own.
+    let mut calls: Vec<String> = Vec::new();
+    for event in &out {
+        if let StreamEvent::ToolArgsDelta { id, .. } = event
+            && !calls.iter().any(|seen| seen == id)
+        {
+            calls.push(id.clone());
+        }
+    }
+    for call in &calls {
+        changed |= refill_bytes(
+            out.iter_mut()
+                .filter_map(|event| match event {
+                    StreamEvent::ToolArgsDelta { id, fragment } if id == call => Some(fragment),
+                    _ => None,
+                })
+                .collect(),
+        );
+    }
     changed.then_some(out)
 }
 
@@ -716,7 +766,7 @@ mod tests {
     fn scrub_redacts_authorization_schemes_case_insensitively() {
         for text in [
             "Authorization: BEARER SomeLongTokenValue1234",
-            "authorization: DiGeSt abcdef12345678",
+            "authorization: DiGeSt abcdef123456789012",
             "x: NEGOTIATE YmFzZTY0LWtleS12YWx1ZQ==",
         ] {
             let redacted = scrub(text);
@@ -727,6 +777,23 @@ mod tests {
         }
         // The token alone is still a prefix-shaped secret.
         assert!(scrub("note: no scheme").contains("note: no scheme"));
+    }
+
+    /// Bare scheme words are prose too: `use basic functionality` must
+    /// export byte-stable, never `use basic [redacted]`. The post-scheme
+    /// token only redacts when it looks high-entropy.
+    #[test]
+    fn scrub_leaves_prose_after_a_scheme_word() {
+        for text in [
+            "use basic functionality",
+            "a token bucket limits retries",
+            "digest mode is documented",
+        ] {
+            assert_eq!(scrub(text), text, "prose was redacted: {text}");
+        }
+        // A real credential after a scheme still redacts.
+        let secret = scrub("Authorization: Bearer Ab3Cd5Ef7Gh9Jk1Lm3N");
+        assert!(secret.contains("[redacted]"), "{secret}");
     }
 
     /// A `replay` payload must reach its family/model verbatim, so scrub
@@ -777,6 +844,71 @@ mod tests {
             "split credential survived: {lines}"
         );
         assert!(lines.contains("[redacted]"), "nothing redacted: {lines}");
+    }
+
+    /// Interleaved calls each keep their own byte stream: a second call's
+    /// text between one call's `Bearer ` and its token must not consume the
+    /// scheme marker. Joining every call's fragments lets it through.
+    #[test]
+    fn encode_rescrubs_args_fragments_per_call() {
+        let events = [
+            StreamEvent::ToolArgsDelta {
+                id: "a".into(),
+                fragment: b"Bearer ".to_vec(),
+            },
+            StreamEvent::ToolArgsDelta {
+                id: "b".into(),
+                fragment: br#"{"x":1}"#.to_vec(),
+            },
+            StreamEvent::ToolArgsDelta {
+                id: "a".into(),
+                fragment: b"Ab3Cd5Ef7Gh9Jk1L".to_vec(),
+            },
+        ];
+        let lines = encode_events(&events).expect("args deltas encode");
+        assert!(
+            lines.contains("[redacted]"),
+            "cross-call join hid the credential: {lines}"
+        );
+        // The innocent call's bytes survive untouched — JSON-escaped in
+        // the encoded line exactly as delivered.
+        assert!(lines.contains(r#"{\"x\":1}"#), "{lines}");
+    }
+
+    /// `\uXXXX` escapes decode into text the raw-bytes scrub never sees:
+    /// an escaped credential inside a replay payload must still refuse
+    /// export. Reverting to raw-text-only scrubbing accepts it.
+    #[test]
+    fn encode_rejects_an_escaped_credential_in_a_replay_payload() {
+        let events = [StreamEvent::Replay {
+            payload: ReplayPayload {
+                family: Family::Anthropic,
+                model: "test-model".into(),
+                item: RawJson::parse(r#"{"token":"sk-abc123456789012"}"#).expect("payload json"),
+            },
+        }];
+        // Direct form refused by the raw scrub already; the escaped form is
+        // the gap the decoded-leaf check closes.
+        let escaped = [StreamEvent::Replay {
+            payload: ReplayPayload {
+                family: Family::Anthropic,
+                model: "test-model".into(),
+                item: RawJson::parse(r#"{"token":"sk-abc123456789012"}"#).expect("payload json"),
+            },
+        }];
+        assert!(encode_events(&events).is_err());
+        assert!(encode_events(&escaped).is_err());
+        let unicode_escaped = [StreamEvent::Replay {
+            payload: ReplayPayload {
+                family: Family::Anthropic,
+                model: "test-model".into(),
+                // `sk` is raw text but the `-` arrives as an escape: the raw
+                // scrub sees no `sk-` prefix, the decoded value carries one.
+                item: RawJson::parse(r#"{"token":"sk\u002dabc123456789012"}"#)
+                    .expect("payload json"),
+            },
+        }];
+        assert!(encode_events(&unicode_escaped).is_err());
     }
 
     /// Concurrent captures serialize in wrap order, not completion order:
