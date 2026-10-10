@@ -100,7 +100,7 @@ fn prompt_and_remember(
             last_len = output.len();
         }
         if Instant::now() >= deadline {
-            return Ok(probe);
+            return Err("turn frame stayed busy after the reply arrived".into());
         }
     }
 }
