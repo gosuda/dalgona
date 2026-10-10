@@ -220,6 +220,24 @@ async fn store_key(
     })
 }
 
+async fn forward_paste(
+    flow_paste: Option<oneshot::Sender<String>>,
+    paste: Option<oneshot::Receiver<String>>,
+) -> Infallible {
+    let Some(receiver) = paste else {
+        drop(flow_paste);
+        return std::future::pending::<Infallible>().await;
+    };
+    let Ok(text) = receiver.await else {
+        drop(flow_paste);
+        return std::future::pending::<Infallible>().await;
+    };
+    if let Some(sender) = flow_paste {
+        let _flow_ended = sender.send(text);
+    }
+    std::future::pending::<Infallible>().await
+}
+
 async fn run_flow(
     provider: &str,
     method: Method,
@@ -249,14 +267,7 @@ async fn run_flow(
             cancel.cancel();
         }
     };
-    let forward = async move {
-        if let (Some(sender), Some(receiver)) = (flow_paste, paste)
-            && let Ok(text) = receiver.await
-        {
-            let _flow_ended = sender.send(text);
-        }
-        std::future::pending::<Infallible>().await
-    };
+    let forward = forward_paste(flow_paste, paste);
     tokio::select! {
         biased;
         result = flow.run(&report, &cancel) => result,

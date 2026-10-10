@@ -610,6 +610,25 @@ async fn a_dropped_paste_sender_leaves_the_browser_callback_able_to_finish_the_l
 }
 
 #[tokio::test]
+async fn a_closed_host_paste_receiver_closes_the_flow_paste_channel() {
+    let (flow_sender, flow_receiver) = oneshot::channel::<String>();
+    let (paste_sender, paste_receiver) = oneshot::channel::<String>();
+    let forward = super::super::forward_paste(Some(flow_sender), Some(paste_receiver));
+    tokio::pin!(forward);
+    drop(paste_sender);
+
+    let flow_closed = timeout(GUARD, async {
+        tokio::select! {
+            result = flow_receiver => result,
+            never = &mut forward => match never {},
+        }
+    })
+    .await
+    .expect("the flow paste channel closes within the guard");
+    assert!(flow_closed.is_err());
+}
+
+#[tokio::test]
 async fn cancelling_a_claude_login_that_waits_for_input_writes_nothing() {
     let fixture = Fixture::new(claude_server()).await;
     let site = fixture.site();
