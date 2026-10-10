@@ -269,7 +269,11 @@ pub async fn run(
     };
 
     if args.public {
-        writeln!(stderr, "{}", crate::cli::texts::SERVE_PUBLIC_WARNING)?;
+        writeln!(
+            stderr,
+            "{}",
+            crate::cli::texts::serve_public_warning(local_addr)
+        )?;
     }
     let url = format!("http://{local_addr}");
     let details = listen_details(args.public, &token_file, local_addr);
@@ -594,6 +598,38 @@ mod tests {
             lines,
             [
                 format!("dalgon: serve.token is invalid: {}", token_file.display()),
+                "Run dalgon serve token --force to write a new token.".to_owned(),
+            ]
+        );
+    }
+    #[test]
+    fn public_warning_names_the_bound_address() {
+        let bound: SocketAddr = "0.0.0.0:7437".parse().unwrap();
+        assert_eq!(
+            crate::cli::texts::serve_public_warning(bound),
+            "dalgon: warning: --public serves 0.0.0.0:7437 over plain HTTP; the serve token crosses the network in plain text."
+        );
+    }
+
+    #[test]
+    fn public_token_rejects_empty_files_with_user_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let token_file = dir.path().join("serve.token");
+        fs::write(&token_file, b"").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&token_file, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        assert!(matches!(
+            validate_public_token(&token_file),
+            Err(TokenFileError::Empty)
+        ));
+        let lines = crate::cli::texts::serve_public_token_empty(&token_file);
+        assert_eq!(
+            lines,
+            [
+                format!("dalgon: serve.token is empty: {}", token_file.display()),
                 "Run dalgon serve token --force to write a new token.".to_owned(),
             ]
         );

@@ -1,5 +1,6 @@
 //! Shared user-facing text: help lines and two-line command diagnostics.
 
+use std::net::SocketAddr;
 use std::path::Path;
 
 pub(crate) const ROOT_HELP: &str = "Run the dal coding agent.";
@@ -110,8 +111,11 @@ pub(crate) const RULE_TEST_SOURCE_HELP: &str = "Select the input stream to test.
 pub(crate) const RULE_TEST_TOOL_HELP: &str =
     "Name the tool for a tool-source test (default: patch).";
 pub(crate) const RULE_TEST_PATH_HELP: &str = "Set the path context for a tool-source test.";
-pub(crate) const SERVE_PUBLIC_WARNING: &str =
-    "dalgon: warning: --public uses plain HTTP; the serve token crosses the network in plain text.";
+pub(crate) fn serve_public_warning(addr: SocketAddr) -> String {
+    format!(
+        "dalgon: warning: --public serves {addr} over plain HTTP; the serve token crosses the network in plain text."
+    )
+}
 pub(crate) const SERVE_STOPPED: &str = "dalgon serve stopped.";
 pub(crate) const RPC_ONE_JSON_PER_LINE: &str = "dalgon rpc: one JSON object per line.";
 pub(crate) const ACP_ONE_MESSAGE_PER_LINE: &str = "dalgon acp: one JSON-RPC message per line.";
