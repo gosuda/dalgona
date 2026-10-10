@@ -48,14 +48,14 @@ const FALLBACK_NOTICE: &str = "Falling back from WebSockets to HTTPS transport."
 /// Idle sockets live for less than five minutes and no more than 55 minutes.
 #[expect(
     clippy::duration_suboptimal_units,
-    reason = "Duration::from_mins is not a stable const fn (rust#140881)"
+    reason = "Duration::from_mins is not stable at MSRV 1.90 (rust#140881)"
 )]
 const WS_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// A socket is not reused for a new stream once it exceeds this age; live
 /// and unclaimed idle sockets may outlive it.
 #[expect(
     clippy::duration_suboptimal_units,
-    reason = "Duration::from_mins is not a stable const fn (rust#140881)"
+    reason = "Duration::from_mins is not stable at MSRV 1.90 (rust#140881)"
 )]
 const WS_MAX_AGE: Duration = Duration::from_secs(55 * 60);
 const BETA_HEADER: &str = "responses_websockets=2026-02-06";

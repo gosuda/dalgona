@@ -262,11 +262,15 @@ fn default_for(question: &Question) -> Answer {
 }
 
 /// The request deadline for a fold-minted question.
+#[expect(
+    clippy::duration_suboptimal_units,
+    reason = "Duration::from_mins is not stable at MSRV 1.90 (rust#140881)"
+)]
 pub(crate) fn default_timeout(question: &Question) -> Duration {
     match question {
         Question::Approval { .. } => Duration::from_secs(300),
         Question::Grant { .. } => Duration::from_secs(120),
-        _ => Duration::from_mins(30),
+        _ => Duration::from_secs(30 * 60),
     }
 }
 
