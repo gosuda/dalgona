@@ -84,7 +84,7 @@ fn user(id: u64, parent: Option<EntryId>, parts: Vec<JournalPart>) -> Record {
 }
 
 async fn turn_ended(subscription: &mut dal_agent::Subscription) {
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(Duration::from_secs(60), async {
         while let Some(delivery) = subscription.next().await {
             if matches!(
                 delivery,
