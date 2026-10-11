@@ -1057,16 +1057,30 @@ mod win {
                         // restoring it now would switch the root off Low under
                         // another live run's AppContainer.
                         let last = state.holders.get(&key).is_some_and(|h| h.len() == 1);
-                        if access == GENERIC_ALL_ACCESS
+                        // A failed label restore keeps the whole cleanup
+                        // (holder + both snapshots) so the next transact's
+                        // reap retries it — removing the holder now would
+                        // orphan the snapshot and strand the root on the
+                        // injected Low label forever.
+                        let label_kept = if access == GENERIC_ALL_ACCESS
                             && last
-                            && let Some(orig) = state.orig_label.remove(&key)
+                            && let Some(orig) = state.orig_label.get(&key).cloned()
                         {
-                            let _ = restore_label(path, orig);
+                            if restore_label(path, orig).is_ok() {
+                                state.orig_label.remove(&key);
+                                false
+                            } else {
+                                true
+                            }
+                        } else {
+                            false
+                        };
+                        if !label_kept {
+                            if last {
+                                state.orig.remove(&key);
+                            }
+                            state.remove_holder(&key, guid, access);
                         }
-                        if last {
-                            state.orig.remove(&key);
-                        }
-                        state.remove_holder(&key, guid, access);
                     }
                     Ok(())
                 });
@@ -1632,14 +1646,22 @@ mod win {
         Ok(planted)
     }
 
-    /// Top-level program files under a `PATH` dir the container may still
-    /// resolve — executables and the DLLs loaders pull from the same dir.
-    const PATH_GRANT_LIMIT: usize = 128;
+    /// Program files under a `PATH` dir the container may still resolve —
+    /// executables and the DLLs loaders pull from the same dir. Coverage
+    /// is top-level only and capped by `PATH_GRANT_LIMIT`: every entry
+    /// costs a real DACL write (~150 ms each), and the only alternative
+    /// (an inheritable RX ACE via `SetNamedSecurityInfoW`) re-propagates
+    /// the dir's whole inherited set through every existing descendant —
+    /// minutes on large trees, ~11 min for a recursive pass on a real
+    /// PATH set. 512 keeps the common tool dirs fully covered while the
+    /// bound stays sorted, so which files miss a grant is deterministic
+    /// rather than enumeration-dependent.
+    const PATH_GRANT_LIMIT: usize = 512;
     fn path_grant_files(dir: &Path) -> Vec<PathBuf> {
         let Ok(read_dir) = std::fs::read_dir(dir) else {
             return Vec::new();
         };
-        read_dir
+        let mut files: Vec<PathBuf> = read_dir
             .filter_map(Result::ok)
             .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
             .map(|entry| entry.path())
@@ -1651,8 +1673,10 @@ mod win {
                     )
                 })
             })
-            .take(PATH_GRANT_LIMIT)
-            .collect()
+            .collect();
+        files.sort();
+        files.truncate(PATH_GRANT_LIMIT);
+        files
     }
 
     /// Plants the grant plan under per-edit transacts. A fatal (writable
@@ -1888,21 +1912,51 @@ mod win {
         }
     }
 
+    /// Collects the std streams as `(startup_fields, inheritable)`:
+    /// `GetStdHandle` yields NULL/INVALID when a stream is absent (a
+    /// daemon or test host without a console). Such values inside the
+    /// handle list or the startup struct make `CreateProcessW` bail with
+    /// `ERROR_INVALID_PARAMETER`, so the attr list carries only real
+    /// handles and the STARTF fields fall back to NULL.
+    fn std_handles() -> (
+        [windows_sys::Win32::Foundation::HANDLE; 3],
+        Vec<windows_sys::Win32::Foundation::HANDLE>,
+    ) {
+        let mut fields = [
+            unsafe { GetStdHandle(STD_INPUT_HANDLE) },
+            unsafe { GetStdHandle(STD_OUTPUT_HANDLE) },
+            unsafe { GetStdHandle(STD_ERROR_HANDLE) },
+        ];
+        let mut inheritable = Vec::with_capacity(3);
+        for handle in &mut fields {
+            if handle.is_null() || *handle == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+                *handle = ptr::null_mut();
+            } else {
+                inheritable.push(*handle);
+            }
+        }
+        (fields, inheritable)
+    }
+
     /// Builds the proc-thread attribute list: the container security
-    /// capabilities plus the three-handle inheritance bound.
+    /// capabilities plus, when any std handle is real, the inheritance
+    /// bound. An empty handle list attribute is itself rejected by
+    /// `CreateProcessW`, so the attribute count shrinks to match.
     fn attributes(
         profile: &Profile,
         capabilities: &[SID_AND_ATTRIBUTES],
-        std_handles: &[windows_sys::Win32::Foundation::HANDLE; 3],
+        std_handles: &[windows_sys::Win32::Foundation::HANDLE],
     ) -> Result<AttrList, String> {
+        let count = u32::from(!std_handles.is_empty()) + 1;
         let mut list_size = 0usize;
-        unsafe { InitializeProcThreadAttributeList(ptr::null_mut(), 2, 0, &raw mut list_size) };
+        unsafe { InitializeProcThreadAttributeList(ptr::null_mut(), count, 0, &raw mut list_size) };
         if list_size == 0 {
             return Err(last_error("size the attribute list"));
         }
         let mut buffer = vec![0u8; list_size];
         let list: LPPROC_THREAD_ATTRIBUTE_LIST = buffer.as_mut_ptr().cast();
-        if unsafe { InitializeProcThreadAttributeList(list, 2, 0, &raw mut list_size) } == FALSE {
+        if unsafe { InitializeProcThreadAttributeList(list, count, 0, &raw mut list_size) } == FALSE
+        {
             return Err(last_error("initialize the attribute list"));
         }
         let mut security = SECURITY_CAPABILITIES {
@@ -1925,18 +1979,19 @@ mod win {
             )
         };
         let handles_set = security_set != FALSE
-            && unsafe {
-                UpdateProcThreadAttribute(
-                    list,
-                    0,
-                    usize::try_from(PROC_THREAD_ATTRIBUTE_HANDLE_LIST)
-                        .map_err(|_| last_error("attribute number"))?,
-                    std_handles.as_ptr().cast(),
-                    std::mem::size_of_val(std_handles),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                )
-            } != FALSE;
+            && (std_handles.is_empty()
+                || unsafe {
+                    UpdateProcThreadAttribute(
+                        list,
+                        0,
+                        usize::try_from(PROC_THREAD_ATTRIBUTE_HANDLE_LIST)
+                            .map_err(|_| last_error("attribute number"))?,
+                        std_handles.as_ptr().cast(),
+                        std::mem::size_of_val(std_handles),
+                        ptr::null_mut(),
+                        ptr::null_mut(),
+                    )
+                } != FALSE);
         if !handles_set {
             unsafe { DeleteProcThreadAttributeList(list) };
             return Err(last_error("set the process attributes"));
@@ -2092,13 +2147,8 @@ mod win {
         let _run = RunGuard::take(&edge, &profile.guid)?;
         let planted = plant_grants(&edge, roots, Path::new(executable), &profile)?;
 
-        let std_handles = [
-            unsafe { GetStdHandle(STD_INPUT_HANDLE) },
-            unsafe { GetStdHandle(STD_OUTPUT_HANDLE) },
-            unsafe { GetStdHandle(STD_ERROR_HANDLE) },
-        ];
-
-        let attrs = attributes(&profile, &capabilities, &std_handles)
+        let (startup_std, inheritable) = std_handles();
+        let attrs = attributes(&profile, &capabilities, &inheritable)
             .inspect_err(|_| drop(lift_all(&edge, &planted, &profile)))?;
 
         let mut command: Vec<u16> = Vec::new();
@@ -2113,9 +2163,9 @@ mod win {
         info.StartupInfo.cb = u32::try_from(std::mem::size_of::<STARTUPINFOEXW>())
             .map_err(|_| "STARTUPINFOEXW overflows u32".to_string())?;
         info.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
-        info.StartupInfo.hStdInput = std_handles[0];
-        info.StartupInfo.hStdOutput = std_handles[1];
-        info.StartupInfo.hStdError = std_handles[2];
+        info.StartupInfo.hStdInput = startup_std[0];
+        info.StartupInfo.hStdOutput = startup_std[1];
+        info.StartupInfo.hStdError = startup_std[2];
         info.lpAttributeList = attrs.as_ptr();
         let mut process: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
         // `lpApplicationName` stays NULL: under an AppContainer token the
@@ -2129,7 +2179,10 @@ mod win {
                 command.as_mut_ptr(),
                 ptr::null(),
                 ptr::null(),
-                1, // bInheritHandles, bounded by PROC_THREAD_ATTRIBUTE_HANDLE_LIST
+                // With no handle list, TRUE would hand the sandbox child
+                // every inheritable parent handle — bypassing the ACL
+                // boundary this attribute is meant to bound.
+                i32::from(!inheritable.is_empty()),
                 CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
                 ptr::null(),
                 ptr::null(),
@@ -2138,8 +2191,26 @@ mod win {
             )
         };
         if spawned == FALSE {
+            // Both codes mean this Windows edition or policy refuses
+            // AppContainer child launches outright: `ERROR_INVALID_PARAMETER`
+            // on Windows Server (accepts the profile/SID calls but not the
+            // process token — verified by bisect) and
+            // `ERROR_APPCONTAINER_REQUIRED` on the windows-11-arm CI image.
+            const ERROR_INVALID_PARAMETER: u32 = 87;
+            const ERROR_APPCONTAINER_REQUIRED: u32 = 4250;
+            // The code first: the lift runs more API calls and would
+            // overwrite `GetLastError`.
+            let raw = unsafe { GetLastError() };
+            let error = format!("dalgon sandbox: spawn the sandboxed process failed ({raw}).");
             lift_all(&edge, &planted, &profile);
-            return Err(last_error("spawn the sandboxed process"));
+            // Name the cause rather than reporting a bare code.
+            return Err(
+                if raw == ERROR_INVALID_PARAMETER || raw == ERROR_APPCONTAINER_REQUIRED {
+                    format!("{error}; this Windows edition cannot launch AppContainer processes")
+                } else {
+                    error
+                },
+            );
         }
 
         let job = kill_on_close_job().and_then(|job| {
@@ -2179,6 +2250,75 @@ mod win {
             return Err(error);
         }
         u8::try_from(code & 0xFF).map_or(Ok(ExitCode::from(126)), |c| Ok(ExitCode::from(c)))
+    }
+
+    #[cfg(test)]
+    mod spawn_tests {
+        use super::*;
+
+        /// Serializes tests that edit process-global environment — the
+        /// parallel harness runs tests on separate threads but shares the
+        /// process env block, so a scoped PATH edit must hold the lock to
+        /// avoid leaking into a concurrent `spawn`'s ambient capture.
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+        /// The full plant→spawn→lift pipeline must actually run a
+        /// permitted program — every existing gate only asserts denial, so
+        /// a sandbox that cannot launch anything would still pass. The
+        /// program runs from a test-owned dir rather than `System32`:
+        /// Server DACLs neither carry `ALL APPLICATION PACKAGES` there nor
+        /// let an administrator `WRITE_DAC` it, so the real directory
+        /// cannot be granted on those images at all. PATH is clamped to
+        /// the fixture dir so the grant phase stays a handful of ACEs; the
+        /// assertion is on the child really running.
+        #[test]
+        fn sandboxed_program_runs_to_success() {
+            let _env = ENV_LOCK.lock().expect("env lock poisoned");
+            // SAFETY: serialized by ENV_LOCK; PATH is restored before the
+            // assert — `remove_var` when it was originally absent so no
+            // empty PATH leaks out either.
+            let env: std::collections::HashMap<OsString, OsString> = std::env::vars_os().collect();
+            // Windows env names are case-insensitive but `vars_os` keeps
+            // the stored case (`SYSTEMROOT` here), so compare folded.
+            let get = |name: &str| {
+                env.iter()
+                    .find(|(key, _)| key.as_os_str().eq_ignore_ascii_case(OsStr::new(name)))
+                    .map(|(_, value)| value.clone())
+            };
+            let dir = tempfile::tempdir().expect("program dir");
+            let whoami = dir.path().join("whoami.exe");
+            std::fs::copy(
+                Path::new(&get("SystemRoot").expect("SystemRoot")).join("System32\\whoami.exe"),
+                &whoami,
+            )
+            .expect("copy whoami");
+            let old_path = get("PATH");
+            unsafe { std::env::set_var("PATH", dir.path()) };
+            let root = tempfile::tempdir().expect("temp root");
+            let result = spawn(
+                &[root.path().to_path_buf()],
+                whoami.as_os_str(),
+                &[OsString::from("/all")],
+            );
+            match old_path {
+                Some(path) => unsafe { std::env::set_var("PATH", path) },
+                None => unsafe { std::env::remove_var("PATH") },
+            }
+            match result {
+                // Client editions launch the container child.
+                Ok(code) => {
+                    assert_eq!(code, ExitCode::SUCCESS, "sandboxed whoami exited {code:?}");
+                }
+                // Windows Server (87) and the windows-11-arm CI image
+                // (4250) accept the AppContainer setup calls but reject the
+                // child launch — that refusal must stay legible rather
+                // than a bare error code.
+                Err(message) => assert!(
+                    message.contains("cannot launch AppContainer processes"),
+                    "unexpected sandbox refusal: {message}"
+                ),
+            }
+        }
     }
 }
 
