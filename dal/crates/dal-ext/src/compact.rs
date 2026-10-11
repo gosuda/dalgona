@@ -19,13 +19,18 @@ pub(super) fn usage_of(inference: &Inference) -> Option<Usage> {
 
 /// Registers dal's native-first, text-summary compaction chain.
 ///
+/// `remote` is a primary compactor and `summary` a fallback compactor, so
+/// every other extension's primary compactor, such as a bundled battery's,
+/// runs between them: `remote`, then the batteries, then `summary`.
+///
 /// # Errors
 ///
-/// Returns the builder's registration error for an invalid identity.
+/// Fails with [`RegistrationError`] when the builder rejects the extension
+/// name or one of the compactors.
 pub fn extension() -> Result<Extension, RegistrationError> {
     ExtensionBuilder::new("compact", env!("CARGO_PKG_VERSION"), ServiceSet::default())?
         .compactor("remote", Arc::new(remote::Remote))
-        .compactor("summary", Arc::new(summary::Summary))
+        .fallback_compactor("summary", Arc::new(summary::Summary))
         .build()
 }
 
@@ -34,11 +39,13 @@ mod tests {
     use super::extension;
 
     #[test]
-    fn registers_remote_before_summary() {
+    fn registers_remote_first_and_summary_as_the_fallback() {
         let extension = extension().expect("the built-in compact extension is valid");
         let compactors = extension.compactors();
         assert_eq!(compactors.len(), 2);
         assert_eq!(compactors[0].0.as_ref(), "remote");
+        assert!(!extension.is_fallback_compactor("remote"));
         assert_eq!(compactors[1].0.as_ref(), "summary");
+        assert!(extension.is_fallback_compactor("summary"));
     }
 }

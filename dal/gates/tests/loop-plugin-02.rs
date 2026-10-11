@@ -1,9 +1,8 @@
+//! Cold plugin errors report the Starlark location; real startup rejects absent extension libraries.
 #![expect(
     clippy::disallowed_methods,
     reason = "SC test invokes the real startup path"
 )]
-
-//! Real-process startup rejects absent extension libraries.
 
 #[expect(
     dead_code,

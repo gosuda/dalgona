@@ -1,6 +1,10 @@
-//! A deterministic `ScriptHost` recording every adapter call for assertions.
+//! A deterministic recording [`ScriptHost`] double plus reply and service
+//! helpers for the runtime tests.
 
-#![expect(clippy::expect_used, reason = "SC test")]
+#![expect(
+    clippy::expect_used,
+    reason = "integration tests use unwrap/expect/panic freely per repo test convention"
+)]
 
 use std::collections::HashMap;
 use std::num::NonZeroU64;
@@ -12,8 +16,8 @@ use dal_agent::ServiceError;
 use dal_agent::ext::generation::catalog::Catalog;
 use dal_agent::ext::script::{
     CancelTarget, Cleanup, Collect, EffectStatus, Entry, EvalEnvironment, FailureCode,
-    HostTerminal, Invocation, InvocationId, OpFailure, OpOutcome, OpRecord, OpRequest, Parent,
-    ScopeId, ScriptCx, ScriptHost, Submit, TaskId,
+    HostTerminal, Invocation, InvocationId, OpFailure, OpOutcome, OpRecord, OpRequest, OpValue,
+    Parent, ScopeId, ScriptCx, ScriptHost, Submit, TaskId,
 };
 use dal_agent::ext::services::ServiceFuture;
 use dal_agent::ext::tool::{RawValue, ToolCx, ToolOutcome};
@@ -26,52 +30,84 @@ use dal_core::{
     TurnOpReply,
 };
 
-/// Recorded host events; fields are kept for failure diagnosis even when a
-/// given run only matches on the variant.
+/// One host-facets interaction observed by `RecordingHost`, in call order.
 #[derive(Clone, Debug)]
-#[expect(
-    dead_code,
-    reason = "recorded for diagnosis; not every field is asserted"
-)]
-pub(crate) enum HostRecord {
+pub enum HostRecord {
+    /// A cell was admitted through `begin`.
     Begin {
+        /// Parent invocation, or `None` for a root cell.
         parent: Option<InvocationId>,
+        /// The admitted entry declaration.
         entry: Entry,
+        /// The minted invocation.
         invocation: InvocationId,
+        /// The effect ceiling resolved for the entry.
         ceiling: OpSet,
+        /// The execution phase of the entry.
         phase: Phase,
     },
+    /// A host facets call was received.
     Call {
+        /// The calling invocation.
         invocation: InvocationId,
+        /// The caller name from the invocation environment.
         caller: Box<str>,
+        /// The requested operation.
         op: OpId,
+        /// The raw call arguments.
         args: RawJson,
     },
+    /// A scope was opened.
     OpenScope {
+        /// The opening invocation.
         invocation: InvocationId,
+        /// The requested scope specification.
         spec: ScopeSpec,
+        /// The minted scope id.
         scope: ScopeId,
     },
+    /// A background operation was submitted.
     Submit {
+        /// The submitting invocation.
         invocation: InvocationId,
+        /// The scope receiving the submit.
         scope: ScopeId,
+        /// The submitted request.
         request: OpRequest,
     },
+    /// A collect was requested.
     Collect {
+        /// The collecting invocation.
         invocation: InvocationId,
+        /// What is being collected.
         which: Collect,
     },
+    /// A cancel was delivered.
     Cancel {
+        /// The cancelling invocation.
         invocation: InvocationId,
+        /// What is being cancelled.
         target: CancelTarget,
     },
+    /// An invocation finished.
     Finish {
+        /// The finished invocation.
         invocation: InvocationId,
     },
 }
 
+/// A host misbehavior injected into the async half of a host call.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Fault {
+    /// `call` panics inside its future.
+    Call,
+    /// `collect` panics inside its future.
+    Collect,
+}
+
 /// A deterministic host for exercising Starlark adapters at `ScriptHost`.
-pub(crate) struct RecordingHost {
+pub struct RecordingHost {
+    fault: Option<Fault>,
     environment: Arc<EvalEnvironment>,
     catalog: Catalog,
     replies: Mutex<HashMap<OpId, OpOutcome>>,
@@ -82,7 +118,9 @@ pub(crate) struct RecordingHost {
 }
 
 impl RecordingHost {
-    pub(crate) fn new(
+    /// Builds a host with the default one-minute budget and scripted replies.
+    #[must_use]
+    pub fn new(
         extensions: &[Extension],
         allowed: OpSet,
         replies: impl IntoIterator<Item = (OpId, OpOutcome)>,
@@ -90,16 +128,41 @@ impl RecordingHost {
         Self::with_budget(extensions, allowed, replies, Duration::from_secs(60))
     }
 
-    pub(crate) fn with_budget(
+    /// Builds a host with scripted replies and an explicit budget.
+    #[must_use]
+    pub fn with_budget(
         extensions: &[Extension],
         allowed: OpSet,
         replies: impl IntoIterator<Item = (OpId, OpOutcome)>,
         budget: Duration,
     ) -> Arc<Self> {
+        Self::build(extensions, allowed, replies, budget, None)
+    }
+
+    /// A host whose `fault` fires the first time the faulted call runs.
+    #[must_use]
+    pub fn faulty(extensions: &[Extension], fault: Fault) -> Arc<Self> {
+        Self::build(
+            extensions,
+            OpSet::EMPTY,
+            [],
+            Duration::from_secs(60),
+            Some(fault),
+        )
+    }
+
+    fn build(
+        extensions: &[Extension],
+        allowed: OpSet,
+        replies: impl IntoIterator<Item = (OpId, OpOutcome)>,
+        budget: Duration,
+        fault: Option<Fault>,
+    ) -> Arc<Self> {
         let generation = GenerationId::new(NonZeroU64::MIN);
         let environment = EvalEnvironment::capture(generation, allowed, None, [0; 32])
             .expect("test environment is below the capture limit");
         Arc::new(Self {
+            fault,
             environment: Arc::new(environment),
             catalog: Catalog::for_test(extensions),
             replies: Mutex::new(replies.into_iter().collect()),
@@ -110,7 +173,9 @@ impl RecordingHost {
         })
     }
 
-    pub(crate) fn script_cx(self: &Arc<Self>) -> ScriptCx {
+    /// Returns a script context that runs cells against this host.
+    #[must_use]
+    pub fn script_cx(self: &Arc<Self>) -> ScriptCx {
         ScriptCx::new(
             Arc::clone(self) as Arc<dyn ScriptHost>,
             Arc::clone(&self.environment),
@@ -118,7 +183,13 @@ impl RecordingHost {
         )
     }
 
-    pub(crate) fn records(&self) -> Vec<HostRecord> {
+    /// Returns every host-facets record observed so far, oldest first.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the record log lock is poisoned.
+    #[must_use]
+    pub fn records(&self) -> Vec<HostRecord> {
         self.records.lock().expect("host records lock").clone()
     }
 
@@ -179,7 +250,11 @@ impl ScriptHost for RecordingHost {
                     "no scripted reply",
                 )
             });
-        Box::pin(async move { reply })
+        let explode = self.fault == Some(Fault::Call);
+        Box::pin(async move {
+            assert!(!explode, "injected host call fault");
+            reply
+        })
     }
 
     fn open_scope(
@@ -218,7 +293,11 @@ impl ScriptHost for RecordingHost {
             invocation: invocation.id(),
             which,
         });
-        Box::pin(async { Ok(Box::default()) })
+        let explode = self.fault == Some(Fault::Collect);
+        Box::pin(async move {
+            assert!(!explode, "injected host collect fault");
+            Ok(Box::default())
+        })
     }
 
     fn cancel(&self, invocation: &Arc<Invocation>, target: CancelTarget) {
@@ -273,7 +352,9 @@ fn allocate_id(counter: &AtomicU64, what: &'static str) -> Result<NonZeroU64, Ho
     }
 }
 
-pub(crate) fn failed(op: OpId, code: FailureCode, message: &str) -> OpOutcome {
+/// Builds a failed operation reply with the given code and message.
+#[must_use]
+pub fn failed(op: OpId, code: FailureCode, message: &str) -> OpOutcome {
     OpOutcome::Failed {
         failure: OpFailure {
             code,
@@ -288,11 +369,32 @@ pub(crate) fn failed(op: OpId, code: FailureCode, message: &str) -> OpOutcome {
     }
 }
 
-pub(crate) fn native_op(op: NativeOp) -> OpId {
+/// A successful operation reply carrying raw JSON text.
+///
+/// # Panics
+///
+/// Panics if `json` is not well-formed JSON.
+#[must_use]
+pub fn completed_json(op: OpId, json: &str) -> OpOutcome {
+    OpOutcome::Ok {
+        value: OpValue::Json(RawJson::parse(json).expect("reply JSON is well formed")),
+        record: OpRecord {
+            call: CallId::new("script-host-test"),
+            op,
+            status: EffectStatus::Completed,
+        },
+    }
+}
+
+/// Wraps a native operation as an operation id.
+#[must_use]
+pub fn native_op(op: NativeOp) -> OpId {
     OpId::Native(op)
 }
 
-pub(crate) fn test_services() -> Arc<dyn Services> {
+/// Returns a services handle that refuses every effect.
+#[must_use]
+pub fn test_services() -> Arc<dyn Services> {
     Arc::new(NoServices)
 }
 
@@ -411,13 +513,30 @@ impl Services for NoServices {
     }
 }
 
-pub(crate) fn tool_cx_approved(script: ScriptCx) -> ToolCx<'static> {
+/// Builds a tool context over `test_services` and the given script context.
+#[must_use]
+pub fn tool_cx(script: ScriptCx) -> ToolCx<'static> {
+    ToolCx::for_test(test_services()).with_script(script)
+}
+
+/// Builds a tool context whose authorization approves every request.
+#[must_use]
+pub fn tool_cx_approved(script: ScriptCx) -> ToolCx<'static> {
     ToolCx::for_test_approved(test_services()).with_script(script)
 }
 
-pub(crate) fn eval_args(code: &str) -> String {
+/// A pure eval request (`uses = []`): `ToolCx::for_test` authorization is
+/// fail-closed, so a cell that asks for effects would be denied before it
+/// runs. `RecordingHost` does not gate calls on the ceiling, so a pure cell
+/// still reaches the scripted replies.
+///
+/// # Panics
+///
+/// Panics if the code cannot be encoded as a JSON string.
+#[must_use]
+pub fn eval_args(code: &str) -> String {
     format!(
-        "{{\"code\":{}}}",
+        "{{\"code\":{},\"uses\":[]}}",
         sonic_rs::to_string(code).expect("string JSON")
     )
 }

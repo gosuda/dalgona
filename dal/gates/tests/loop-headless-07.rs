@@ -1,9 +1,8 @@
+//! JSON mode emits exactly one result or one error.
 #![expect(
     clippy::disallowed_methods,
     reason = "SC test invokes the real CLI boundary"
 )]
-
-//! JSON mode emits exactly one result or one error.
 #[expect(
     dead_code,
     reason = "gate support helpers are shared across independent test targets"

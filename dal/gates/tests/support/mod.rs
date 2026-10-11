@@ -38,6 +38,8 @@ fn build_dalgon_binaries() -> Result<BTreeMap<String, PathBuf>, String> {
             "-p",
             "dalgon",
             "--bins",
+            "--features",
+            "test-support",
             "--locked",
             "--message-format=json",
         ])

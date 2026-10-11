@@ -23,6 +23,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
+use dal_agent::ToolError;
 use dal_agent::ext::tool::ArgError;
 use dal_agent::ext::{BoxFuture, Tool, ToolCall, ToolCx, ToolOutcome, ToolOutput};
 use dal_core::{
@@ -104,7 +105,7 @@ pub async fn apply_replacement(
         return Err(ApplyError::ObserverBlocked(blocked.clone()));
     }
     let preview = preview_for_plan(&plan);
-    cx.authorize(preview).await.map_err(ApplyError::Blocked)?;
+    let _approved = cx.authorize(preview).await.map_err(ApplyError::Blocked)?;
     let output = write::commit(&session, plan, observers).await;
     match output.error_class {
         Some(class) => Err(ApplyError::Engine(ir::EngineError::new(class, output.text))),
@@ -286,7 +287,7 @@ impl PatchTool {
                 // owner supplies the exact dirty handle once its public API lands).
                 ToolOutcome::Ok(Box::new(ToolOutput::from_text(text.as_str())))
             }
-            Err(deny) => ToolOutcome::Err(dal_agent::ToolError::Denied(deny)),
+            Err(deny) => ToolOutcome::Err(ToolError::Denied(deny)),
         }
     }
 
@@ -331,7 +332,7 @@ fn preview_for_plan(plan: &ir::Plan) -> Preview {
             after_hex
         ));
         if let Some(dest) = file.renamed_to.as_ref() {
-            preview_lines.push(format!("  -> {}", dest.display()));
+            preview_lines.push(format!("  -> {}", dest.path.display()));
         }
         for hunk in &file.hunks {
             preview_lines.push(format!(

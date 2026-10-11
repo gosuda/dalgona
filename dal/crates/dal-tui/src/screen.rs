@@ -1,5 +1,5 @@
 //! Inline live-block driver and alternate-screen renderer.
 
 pub(crate) mod driver;
-pub mod fullscreen;
+pub(crate) mod fullscreen;
 pub mod inline;

@@ -1,3 +1,4 @@
+//! Gate-full scenario 3: sandbox probes reject tool calls outside allowed roots.
 #![expect(clippy::unwrap_used, reason = "SC test")]
 #![expect(clippy::expect_used, reason = "SC test")]
 #![expect(
@@ -5,7 +6,6 @@
     reason = "SC test launches the real dalgon sandbox boundary"
 )]
 
-//! `rm` tool request fixtures and scripted file-removal turns.
 #[expect(
     dead_code,
     reason = "gate support helpers are shared across independent test targets"
@@ -130,7 +130,7 @@ fn tool_error_text(update: &Value) -> Option<String> {
     }
     outcome
         .get("text")
-        .and_then(|value| value.as_str())
+        .and_then(Value::as_str)
         .map(str::to_owned)
 }
 
@@ -211,7 +211,7 @@ async fn run_sandbox_probe() -> Result<(String, bool), Box<dyn Error + Send + Sy
         .ok_or_else(|| io::Error::other("RPC session/open failed"))?;
     let session_id = result
         .get("sessionId")
-        .and_then(|value| value.as_str())
+        .and_then(Value::as_str)
         .ok_or_else(|| io::Error::other("RPC session/open omitted sessionId"))?;
     let generation = result
         .get("gen")
@@ -261,13 +261,13 @@ async fn run_sandbox_probe() -> Result<(String, bool), Box<dyn Error + Send + Sy
             }
             continue;
         }
-        if frame.get("method").and_then(|value| value.as_str()) != Some("session/update") {
+        if frame.get("method").and_then(Value::as_str) != Some("session/update") {
             continue;
         }
         let Some(update) = frame.get("params").and_then(|params| params.get("update")) else {
             continue;
         };
-        let update_type = update.get("type").and_then(|value| value.as_str());
+        let update_type = update.get("type").and_then(Value::as_str);
         if update_type == Some("tool_settled") {
             error_text = tool_error_text(update);
         }

@@ -1,6 +1,6 @@
 use super::{
     CallId, Deserialize, Deserializer, Duration, EntryId, JobId, JobOutcome, Name, RawJson,
-    Serialize, SessionId, Stop, Tagged, Workspace, de,
+    Serialize, SessionId, SidecarName, Stop, Tagged, Workspace, de,
 };
 
 /// Configuration for starting a child agent session.
@@ -146,6 +146,19 @@ pub enum Receipt {
 pub enum AgentsOp {
     /// Starts a child agent session.
     Start(AgentStart),
+    /// Starts one prompt turn on an idle child and optionally interrupts it
+    /// after the supplied grace duration.
+    Prompt {
+        /// The child session to prompt.
+        id: SessionId,
+        /// The prompt content.
+        text: Box<str>,
+        /// The duration after which the prompted turn is interrupted.
+        interrupt: Option<Duration>,
+        /// The most tool rounds the prompted turn may run; absent leaves
+        /// the turn unbounded. It bounds that one turn only.
+        max_steps: Option<std::num::NonZeroU32>,
+    },
     /// Waits for a child session to finish.
     Await {
         /// The child session to await.
@@ -457,12 +470,12 @@ pub enum SidecarOp {
     /// Reads a named sidecar value.
     Read {
         /// The sidecar name.
-        name: Name,
+        name: SidecarName,
     },
     /// Writes bytes to a named sidecar value.
     Write {
         /// The sidecar name.
-        name: Name,
+        name: SidecarName,
         /// The bytes to store.
         bytes: Vec<u8>,
     },

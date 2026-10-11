@@ -249,8 +249,8 @@ async fn a_refused_child_start_is_a_typed_error_not_a_cancellation() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let escaped = outcome.escaped.as_deref().expect("the escape case ran");
     assert!(
-        escaped.starts_with("Err(Denied"),
-        "an out-of-scope workspace is denied: {escaped}"
+        escaped.starts_with("Ok(Refused") && escaped.contains("WorkspaceOutsideRoot"),
+        "an out-of-scope workspace is refused with its reason: {escaped}"
     );
     let id_named = outcome.id_named.as_deref().expect("the id-name case ran");
     assert!(

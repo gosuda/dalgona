@@ -1,11 +1,12 @@
 use std::{
     cell::RefCell,
     fs,
+    future::Future,
     io::ErrorKind,
     pin::pin,
     rc::Rc,
     sync::atomic::{AtomicU32, Ordering},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use dal_core::Family;
@@ -16,17 +17,25 @@ use tokio::{
     sync::Notify,
 };
 
-use super::engine::{commit, fresh_credential};
+use super::engine::fresh_credential;
 use super::*;
 use crate::auth::credential::{AuthStore, Credential, OAuthCredential, SecretString};
-use crate::auth::oauth::{CODEX_CLIENT_ID, unix_now};
-use tokio_util::sync::CancellationToken;
+use crate::auth::oauth::unix_now;
+use crate::{ProviderDef, find};
 
 const OLD_ACCESS: &str = "old-access-secret";
 const OLD_REFRESH: &str = "old-refresh-secret";
 const NEW_ACCESS: &str = "new-access-secret";
 const NEW_REFRESH: &str = "new-refresh-secret";
 const NEW_TOKENS: &str = r#"{"access_token":"new-access-secret","refresh_token":"new-refresh-secret","expires_in":3600,"token_type":"Bearer"}"#;
+
+fn codex_def() -> &'static ProviderDef {
+    find("openai-codex").expect("the table has the openai-codex row")
+}
+
+fn claude_def() -> &'static ProviderDef {
+    find("anthropic").expect("the table has the anthropic row")
+}
 
 struct TestDir(PathBuf);
 
@@ -56,8 +65,8 @@ impl Drop for TestDir {
 
 enum Reply {
     Json(u16, String),
-    /// Holds the connection open without answering, then signals.
-    Stall(Rc<Notify>),
+    /// Waits after reading the request before answering.
+    JsonAfterNotify(Rc<Notify>, Rc<Notify>, u16, String),
 }
 
 struct Seen {
@@ -159,7 +168,6 @@ async fn write_response(stream: &TcpStream, status: u16, body: &str) {
 }
 
 async fn serve(listener: TcpListener, replies: Vec<Reply>, seen: &RefCell<Vec<Seen>>) {
-    let mut stalled = Vec::new();
     for reply in replies {
         let (stream, _) = listener.accept().await.expect("accept");
         let (head, body) = read_request(&stream).await;
@@ -170,9 +178,10 @@ async fn serve(listener: TcpListener, replies: Vec<Reply>, seen: &RefCell<Vec<Se
         });
         match reply {
             Reply::Json(status, body) => write_response(&stream, status, &body).await,
-            Reply::Stall(signal) => {
-                stalled.push(stream);
-                signal.notify_one();
+            Reply::JsonAfterNotify(started, release, status, body) => {
+                started.notify_one();
+                release.notified().await;
+                write_response(&stream, status, &body).await;
             }
         }
     }
@@ -218,7 +227,7 @@ async fn sixty_four_callers_across_two_refreshers_send_one_request() {
     let second = refresher(&dir.auth(), &base);
     let callers = (0..64).map(|index| {
         let refresher = if index % 2 == 0 { &first } else { &second };
-        refresher.refresh(OAuthProvider::OpenAiCodex, &held, RefreshReason::Expiring)
+        refresher.refresh(codex_def(), &held, RefreshReason::Expiring)
     });
     let replies = vec![Reply::Json(200, String::from(NEW_TOKENS))];
     let (results, seen) = with_server(listener, replies, join_all(callers)).await;
@@ -232,7 +241,7 @@ async fn sixty_four_callers_across_two_refreshers_send_one_request() {
     );
     assert_eq!(
         body.get("client_id").and_then(JsonValueTrait::as_str),
-        Some(CODEX_CLIENT_ID)
+        codex_def().oauth.map(|oauth| oauth.client_id)
     );
     assert_eq!(
         body.get("refresh_token").and_then(JsonValueTrait::as_str),
@@ -268,10 +277,8 @@ async fn external_writer_before_the_lock_prevents_any_request() {
     let external = open_lock_file(&lock_path(&dir.auth()).expect("lock path")).expect("open lock");
     external.try_lock().expect("external lock");
     let client = async {
-        let expiring =
-            refresher.refresh(OAuthProvider::OpenAiCodex, &held, RefreshReason::Expiring);
-        let rejected =
-            refresher.refresh(OAuthProvider::OpenAiCodex, &held, RefreshReason::Rejected);
+        let expiring = refresher.refresh(codex_def(), &held, RefreshReason::Expiring);
+        let rejected = refresher.refresh(codex_def(), &held, RefreshReason::Rejected);
         let writer = async {
             tokio::time::sleep(Duration::from_millis(100)).await;
             seed(
@@ -303,14 +310,14 @@ async fn forced_refresh_ignores_the_window_only_for_an_unchanged_token() {
     let refresher = refresher(&dir.auth(), &base);
     let client = async {
         let early = refresher
-            .refresh(OAuthProvider::OpenAiCodex, &held, RefreshReason::Expiring)
+            .refresh(codex_def(), &held, RefreshReason::Expiring)
             .await;
         let forced = refresher
-            .refresh(OAuthProvider::OpenAiCodex, &held, RefreshReason::Rejected)
+            .refresh(codex_def(), &held, RefreshReason::Rejected)
             .await;
         // A second 401 on the old token finds the changed token: no request.
         let again = refresher
-            .refresh(OAuthProvider::OpenAiCodex, &held, RefreshReason::Rejected)
+            .refresh(codex_def(), &held, RefreshReason::Rejected)
             .await;
         (early, forced, again)
     };
@@ -343,7 +350,7 @@ async fn transient_failure_retries_once_after_one_second() {
         Reply::Json(503, String::from(r#"{"error":"temporarily_unavailable"}"#)),
         Reply::Json(200, String::from(NEW_TOKENS)),
     ];
-    let client = refresher.refresh(OAuthProvider::OpenAiCodex, &held, RefreshReason::Expiring);
+    let client = refresher.refresh(codex_def(), &held, RefreshReason::Expiring);
     let (result, seen) = with_server(listener, replies, client).await;
 
     assert_eq!(
@@ -365,7 +372,7 @@ async fn repeated_transient_failure_gives_status_without_secrets() {
     let refresher = refresher(&dir.auth(), &base);
     let echo = format!("backend down for {OLD_REFRESH}");
     let replies = vec![Reply::Json(503, echo.clone()), Reply::Json(503, echo)];
-    let client = refresher.refresh(OAuthProvider::OpenAiCodex, &held, RefreshReason::Expiring);
+    let client = refresher.refresh(codex_def(), &held, RefreshReason::Expiring);
     let (result, seen) = with_server(listener, replies, client).await;
 
     let error = result.expect_err("two 503 fail");
@@ -394,7 +401,7 @@ async fn rejected_refresh_token_is_sign_in_expired_after_one_request() {
         let (listener, base) = listen().await;
         let refresher = refresher(&dir.auth(), &base);
         let replies = vec![Reply::Json(400, String::from(body))];
-        let client = refresher.refresh(OAuthProvider::OpenAiCodex, &held, RefreshReason::Rejected);
+        let client = refresher.refresh(codex_def(), &held, RefreshReason::Rejected);
         let (result, seen) = with_server(listener, replies, client).await;
 
         let error = result.expect_err("rejected refresh token");
@@ -409,75 +416,190 @@ async fn rejected_refresh_token_is_sign_in_expired_after_one_request() {
 }
 
 #[tokio::test]
-async fn cancelled_refresh_releases_locks_and_keeps_the_prior_credential() {
+async fn cancelled_refresh_persists_rotated_credential() {
     let dir = TestDir::new("cancel");
     let held = codex(OLD_ACCESS, OLD_REFRESH, Some(unix_now() + 10));
     seed(&dir.auth(), held.clone());
-    let before = fs::read(dir.auth()).expect("read seed");
     let (listener, base) = listen().await;
     let refresher = refresher(&dir.auth(), &base);
-    let stalled = Rc::new(Notify::new());
+    let started = Rc::new(Notify::new());
+    let release = Rc::new(Notify::new());
     let client = async {
-        // Cancel only once the server holds the request: mid-request.
         tokio::select! {
-            _ = refresher.refresh(OAuthProvider::OpenAiCodex, &held, RefreshReason::Expiring) => {
-                panic!("the stalled refresh must not finish");
+            biased;
+            () = started.notified() => {}
+            _ = refresher.refresh(codex_def(), &held, RefreshReason::Expiring) => {
+                panic!("the refresh completed before cancellation")
             }
-            () = stalled.notified() => {}
         }
-        assert_eq!(fs::read(dir.auth()).expect("read after cancel"), before);
-        let probe = open_lock_file(&lock_path(&dir.auth()).expect("lock path")).expect("open lock");
-        probe.try_lock().expect("the file lock was released");
-        drop(probe);
-        refresher
-            .refresh(OAuthProvider::OpenAiCodex, &held, RefreshReason::Expiring)
+        // The second caller must join while the first request is still waiting.
+        let second = refresher.refresh(codex_def(), &held, RefreshReason::Expiring);
+        tokio::pin!(second);
+        futures::future::poll_fn(|cx| {
+            let _ = second.as_mut().poll(cx);
+            std::task::Poll::Ready(())
+        })
+        .await;
+        release.notify_one();
+        let result = tokio::time::timeout(Duration::from_secs(1), second)
             .await
+            .expect("the second caller waits for the in-flight refresh")
+            .expect("the persisted refresh is reused");
+        let fresh = oauth(result);
+        assert_eq!(fresh.access_token.expose(), NEW_ACCESS);
+        Credential::OAuth(fresh)
     };
     let replies = vec![
-        Reply::Stall(Rc::clone(&stalled)),
+        Reply::JsonAfterNotify(
+            Rc::clone(&started),
+            Rc::clone(&release),
+            200,
+            String::from(NEW_TOKENS),
+        ),
+        Reply::Json(500, String::from(r#"{"error":"duplicate refresh"}"#)),
+    ];
+    let (result, seen) = with_server(listener, replies, client).await;
+
+    assert_eq!(oauth(result).access_token.expose(), NEW_ACCESS);
+    assert_eq!(seen.len(), 1);
+    let on_disk = stored(&dir.auth());
+    assert_eq!(on_disk.access_token.expose(), NEW_ACCESS);
+    assert_eq!(on_disk.refresh_token.expose(), NEW_REFRESH);
+    let probe = open_lock_file(&lock_path(&dir.auth()).expect("lock path")).expect("open lock");
+    probe.try_lock().expect("the file lock was released");
+}
+
+#[tokio::test]
+async fn shutdown_drains_an_abandoned_in_flight_refresh_and_refuses_new_ones() {
+    let dir = TestDir::new("shutdown");
+    let held = codex(OLD_ACCESS, OLD_REFRESH, Some(unix_now() + 10));
+    seed(&dir.auth(), held.clone());
+    let (listener, base) = listen().await;
+    let refresher = refresher(&dir.auth(), &base);
+    let started = Rc::new(Notify::new());
+    let release = Rc::new(Notify::new());
+    let client = async {
+        tokio::select! {
+            biased;
+            () = started.notified() => {}
+            _ = refresher.refresh(codex_def(), &held, RefreshReason::Expiring) => {
+                panic!("the refresh completed before the request reached the server")
+            }
+        }
+        let mut drain = Box::pin(refresher.shutdown());
+        futures::future::poll_fn(|cx| {
+            assert!(drain.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), drain)
+            .await
+            .expect("shutdown drains the abandoned refresh");
+    };
+    let replies = vec![
+        Reply::JsonAfterNotify(
+            Rc::clone(&started),
+            Rc::clone(&release),
+            200,
+            String::from(NEW_TOKENS),
+        ),
+        Reply::Json(500, String::from(r#"{"error":"duplicate refresh"}"#)),
+    ];
+    let ((), seen) = with_server(listener, replies, client).await;
+
+    assert_eq!(seen.len(), 1);
+    let on_disk = stored(&dir.auth());
+    assert_eq!(on_disk.access_token.expose(), NEW_ACCESS);
+    assert_eq!(on_disk.refresh_token.expose(), NEW_REFRESH);
+    let error = refresher
+        .refresh(codex_def(), &held, RefreshReason::Rejected)
+        .await
+        .expect_err("shutdown refuses new refreshes");
+    assert!(
+        matches!(error, ProviderError::Transport { .. }),
+        "{error:?}"
+    );
+    assert_no_secret(&error, &[NEW_ACCESS, NEW_REFRESH]);
+}
+
+#[tokio::test]
+async fn failed_in_flight_refresh_gives_a_later_caller_a_fresh_attempt() {
+    let dir = TestDir::new("stale");
+    let held = codex(OLD_ACCESS, OLD_REFRESH, Some(unix_now() + 10));
+    seed(&dir.auth(), held.clone());
+    let (listener, base) = listen().await;
+    let refresher = refresher(&dir.auth(), &base);
+    let started = Rc::new(Notify::new());
+    let release = Rc::new(Notify::new());
+    let client = async {
+        // The only caller drops its wait once the request is on the wire;
+        // the in-flight task then fails alone.
+        tokio::select! {
+            biased;
+            () = started.notified() => {}
+            _ = refresher.refresh(codex_def(), &held, RefreshReason::Expiring) => {
+                panic!("the refresh completed before cancellation")
+            }
+        }
+        release.notify_one();
+        // The failed task holds the auth file lock until its future ends,
+        // through the exhausted retry; wait for that before the next caller.
+        let probe = open_lock_file(&lock_path(&dir.auth()).expect("lock path")).expect("open lock");
+        loop {
+            match probe.try_lock() {
+                Ok(()) => break,
+                Err(fs::TryLockError::WouldBlock) => tokio::time::sleep(LOCK_POLL).await,
+                Err(error) => panic!("probe the auth file lock: {error}"),
+            }
+        }
+        drop(probe);
+        // The server now succeeds. The new caller must run a fresh refresh
+        // instead of receiving the finished task's stale error.
+        let result = refresher
+            .refresh(codex_def(), &held, RefreshReason::Expiring)
+            .await
+            .expect("a finished failed task must be retried fresh");
+        let fresh = oauth(result);
+        assert_eq!(fresh.access_token.expose(), NEW_ACCESS);
+        Credential::OAuth(fresh)
+    };
+    let hiccup = String::from(r#"{"error":"server hiccup"}"#);
+    let replies = vec![
+        Reply::JsonAfterNotify(
+            Rc::clone(&started),
+            Rc::clone(&release),
+            500,
+            hiccup.clone(),
+        ),
+        Reply::Json(500, hiccup),
         Reply::Json(200, String::from(NEW_TOKENS)),
     ];
     let (result, seen) = with_server(listener, replies, client).await;
 
+    assert_eq!(oauth(result).access_token.expose(), NEW_ACCESS);
+    assert_eq!(seen.len(), 3, "two failed attempts, then one fresh one");
+    let body = sonic_rs::from_str::<sonic_rs::Value>(&seen[2].body).expect("JSON body");
     assert_eq!(
-        oauth(result.expect("next caller refreshes"))
-            .access_token
-            .expose(),
-        NEW_ACCESS
+        body.get("refresh_token").and_then(JsonValueTrait::as_str),
+        Some(OLD_REFRESH),
+        "the fresh attempt retries the stored refresh token"
     );
-    assert_eq!(seen.len(), 2);
-    assert_eq!(stored(&dir.auth()).access_token.expose(), NEW_ACCESS);
-}
-
-#[test]
-fn cancelled_commit_writes_nothing() {
-    let dir = TestDir::new("commit");
-    let held = codex(OLD_ACCESS, OLD_REFRESH, Some(unix_now() + 10));
-    seed(&dir.auth(), held);
-    let before = fs::read(dir.auth()).expect("read seed");
-    let mut store = AuthStore::load(dir.auth()).expect("load");
-    let cancel = CancellationToken::new();
-    cancel.cancel();
-    let fresh = Credential::OAuth(codex(NEW_ACCESS, NEW_REFRESH, Some(unix_now() + 3600)));
-    let error = commit(&cancel, &mut store, "openai-codex", fresh.clone())
-        .expect_err("a cancelled commit is refused");
-    assert!(matches!(error, ProviderError::AuthWrite { .. }));
-    assert_eq!(fs::read(dir.auth()).expect("read after"), before);
-
-    commit(&CancellationToken::new(), &mut store, "openai-codex", fresh).expect("live commit");
-    assert_eq!(stored(&dir.auth()).access_token.expose(), NEW_ACCESS);
+    let on_disk = stored(&dir.auth());
+    assert_eq!(on_disk.access_token.expose(), NEW_ACCESS);
+    assert_eq!(on_disk.refresh_token.expose(), NEW_REFRESH);
 }
 
 #[test]
 fn production_endpoints_are_the_documented_urls() {
     let endpoints = TokenEndpoints::production();
     assert_eq!(
-        endpoints.url(OAuthProvider::Anthropic).as_str(),
-        "https://platform.claude.com/v1/oauth/token"
+        endpoints.url(claude_def()).map(url::Url::as_str),
+        Some("https://platform.claude.com/v1/oauth/token")
     );
     assert_eq!(
-        endpoints.url(OAuthProvider::OpenAiCodex).as_str(),
-        "https://auth.openai.com/oauth/token"
+        endpoints.url(codex_def()).map(url::Url::as_str),
+        Some("https://auth.openai.com/oauth/token")
     );
 }
 
@@ -491,13 +613,12 @@ fn anthropic_refresh_keeps_no_codex_identity_and_old_refresh_token_when_omitted(
         account_id: None,
     };
     let body = br#"{"access_token":"a2","expires_in":60}"#;
-    let fresh =
-        fresh_credential(OAuthProvider::Anthropic, &stored, body, 1_000).expect("valid body");
+    let fresh = fresh_credential(claude_def(), &stored, body, 1_000).expect("valid body");
     assert_eq!(fresh.access_token.expose(), "a2");
     assert_eq!(fresh.refresh_token.expose(), OLD_REFRESH);
     assert_eq!(fresh.expires_at, Some(1_060));
     assert_eq!((fresh.id_token, fresh.account_id), (None, None));
-    let error = fresh_credential(OAuthProvider::Anthropic, &stored, br#"{"access_token":"#, 0)
+    let error = fresh_credential(claude_def(), &stored, br#"{"access_token":"#, 0)
         .expect_err("truncated body");
     assert!(matches!(
         error,
@@ -506,4 +627,68 @@ fn anthropic_refresh_keeps_no_codex_identity_and_old_refresh_token_when_omitted(
             ..
         }
     ));
+}
+
+#[tokio::test]
+async fn the_proactive_window_holds_for_skewed_and_extreme_expiry() {
+    let now = unix_now();
+    let cases = [
+        (Some(i64::MIN), true),
+        (Some(now - 100_000), true),
+        (Some(now), true),
+        (Some(now + PROACTIVE_WINDOW_SECS - 5), true),
+        (Some(now + PROACTIVE_WINDOW_SECS + 5), false),
+        (Some(i64::MAX), false),
+        (None, false),
+    ];
+    for (expires_at, inside) in cases {
+        let dir = TestDir::new("window");
+        seed(&dir.auth(), codex(NEW_ACCESS, NEW_REFRESH, Some(i64::MAX)));
+        let held = codex(OLD_ACCESS, OLD_REFRESH, expires_at);
+        let credential = refresher(&dir.auth(), "http://127.0.0.1:1")
+            .refresh(codex_def(), &held, RefreshReason::Expiring)
+            .await
+            .expect("no request is needed");
+        let expected = if inside { NEW_ACCESS } else { OLD_ACCESS };
+        assert_eq!(
+            oauth(credential).access_token.expose(),
+            expected,
+            "{expires_at:?}"
+        );
+    }
+}
+
+#[test]
+fn hostile_token_responses_are_typed_errors_and_never_echo_the_body() {
+    let stored = codex(OLD_ACCESS, OLD_REFRESH, Some(1));
+    let hostile: [&[u8]; 8] = [
+        br#"{"access_token":""}"#,
+        br#"{"access_token":"a","expires_in":"3600"}"#,
+        br#"{"expires_in":3600}"#,
+        b"leaked-body-secret <html>",
+        b"\xFF\xFE leaked-body-secret",
+        b"[]",
+        b"null",
+        b"",
+    ];
+    for body in hostile {
+        let error =
+            fresh_credential(codex_def(), &stored, body, 0).expect_err("not a token response");
+        assert!(matches!(error, ProviderError::Transport { .. }), "{body:?}");
+        assert!(!error.to_string().contains("leaked-body-secret"), "{error}");
+    }
+}
+
+#[test]
+fn extreme_expires_in_saturates_and_negative_is_already_expired() {
+    let stored = codex(OLD_ACCESS, OLD_REFRESH, Some(1));
+    let at = |expires_in: i64| {
+        let body = format!(r#"{{"access_token":"a","expires_in":{expires_in}}}"#);
+        fresh_credential(codex_def(), &stored, body.as_bytes(), 1_000)
+            .expect("valid body")
+            .expires_at
+    };
+    assert_eq!(at(i64::MAX), Some(i64::MAX));
+    assert_eq!(at(-100), Some(900));
+    assert_eq!(at(0), Some(1_000));
 }

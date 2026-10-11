@@ -7,28 +7,37 @@
 //! resolutions report back to the actor for journaling.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use dal_core::ext::ToolCallEvent;
 use dal_core::{
-    Answer, CallId, ClientId, GrantSpec, JobEnd, JobId, Name, Owner, Policy, Preview, Question,
-    RawJson, Request, ResolvedCall, SessionId, SettledOutcome, ToolClass, TurnId, Unit, Workspace,
+    Answer, CallId, ClientId, GrantSpec, JobEnd, JobId, Mode, Name, Owner, Policy, Preview,
+    Question, RawJson, Request, ResolvedCall, SessionId, SettledOutcome, ToolClass, TurnId, Unit,
+    Workspace,
 };
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use super::backend::Backend;
-use super::context::{DeferredTool, is_core_tool_search, tool_search_query, tool_search_results};
-use crate::broker::{Broker, Resolved, default_timeout};
+use super::context::{
+    DeferredTool, is_core_tool_search, resolve_named, tool_search_query, tool_search_results,
+};
+use crate::broker::{Broker, Resolution, Resolved, Settled, default_timeout};
 use crate::ext::generation::Generation;
 use crate::ext::hooks::{HookScope, dispatch_tool_call, hook_fanout};
 use crate::ext::overlay::TurnTools;
-use crate::ext::tool::{Approved, CallSnapshot, ToolCall, ToolCx, ToolCxRuntime, ToolOutcome};
+use crate::ext::tool::{
+    Approved, CallSnapshot, Tool, ToolCall, ToolCx, ToolCxRuntime, ToolOutcome,
+};
 use crate::ext::{BoxFuture, Caller, CallerKind, Doc, ScriptCx, Services};
 use crate::jobs::JobTable;
 use crate::proc::{Proc, SpawnOpts, spawn_process};
 use crate::session::actor::TurnWork;
+use crate::session::contain::contained;
+use crate::session::service_grants::{CallKey, Invocation, scope_roots};
 use crate::session::tasks::SessionTasks;
 
 /// A call ready to run with its resolved details.
@@ -57,6 +66,8 @@ pub(crate) struct DispatchCtx {
     pub turn: TurnId,
     /// The session workspace.
     pub workspace: Workspace,
+    /// The execution mode the rewritten-argument resolve path gates on.
+    pub mode: Mode,
     /// The turn's generation snapshot.
     pub generation: Arc<Generation>,
     /// The turn's overlay tools, frozen at turn start.
@@ -94,6 +105,9 @@ pub(crate) struct SettledCall {
     pub call: CallId,
     /// The call's terminal outcome.
     pub outcome: SettledOutcome,
+    /// Milliseconds the tool ran, approval waits excluded; `None` when the
+    /// call never ran.
+    pub elapsed_ms: Option<u64>,
     /// Journal reports in the order the call produced them.
     pub reports: Vec<TurnWork>,
 }
@@ -190,6 +204,7 @@ pub(crate) async fn run_unit(
             turn: ctx.turn,
             call: item.call.clone(),
             outcome: item.outcome.clone(),
+            elapsed_ms: item.elapsed_ms,
         });
     }
     settled
@@ -230,35 +245,54 @@ async fn run_one_owned(ctx: DispatchCtx, ready: ReadyCall) -> SettledCall {
 /// runtime; the ladder denial text rides the denial reason.
 async fn run_one(ctx: &DispatchCtx, ready: &ReadyCall) -> SettledCall {
     let reports = Arc::new(Mutex::new(Vec::new()));
-    let outcome = run_one_inner(ctx, ready, &reports).await;
+    let mut elapsed_ms = None;
+    let outcome = run_one_inner(ctx, ready, &reports, &mut elapsed_ms).await;
     let buffered = std::mem::take(&mut *reports.lock().await);
     SettledCall {
         call: ready.call.clone(),
         outcome,
+        elapsed_ms,
         reports: buffered,
     }
 }
 
-/// Runs one call body, buffering its journal reports.
+/// Milliseconds a tool ran since `started`, minus the `waited` time it spent
+/// on approval answers. The clock is monotonic, so wall-clock steps never
+/// show up in the result.
+fn execution_ms(started: Instant, waited: Duration) -> u64 {
+    u64::try_from(started.elapsed().saturating_sub(waited).as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Answers a `tool_search` call from the deferred tool catalog.
+fn tool_search_outcome(ctx: &DispatchCtx, ready: &ReadyCall) -> SettledOutcome {
+    match tool_search_query(&ready.args) {
+        Ok(query) => SettledOutcome::Ok {
+            text: tool_search_results(&query, &ctx.deferred_search),
+            data: None,
+        },
+        Err(error) => SettledOutcome::Err {
+            text: format!("invalid arguments for tool_search: {error}").into(),
+        },
+    }
+}
+
+/// Runs one call body, buffering its journal reports. `elapsed_ms` is set
+/// only when a tool ran: calls blocked before execution leave it unset.
 async fn run_one_inner(
     ctx: &DispatchCtx,
     ready: &ReadyCall,
     reports: &Arc<Mutex<Vec<TurnWork>>>,
+    elapsed_ms: &mut Option<u64>,
 ) -> SettledOutcome {
     if is_core_tool_search(&ctx.generation, &ctx.tools, &ready.name) {
         reports.lock().await.push(TurnWork::CallStarted {
             turn: ctx.turn,
             call: ready.call.clone(),
         });
-        return match tool_search_query(&ready.args) {
-            Ok(query) => SettledOutcome::Ok {
-                text: tool_search_results(&query, &ctx.deferred_search),
-                data: None,
-            },
-            Err(error) => SettledOutcome::Err {
-                text: format!("invalid arguments for tool_search: {error}").into(),
-            },
-        };
+        let started = Instant::now();
+        let outcome = tool_search_outcome(ctx, ready);
+        *elapsed_ms = Some(execution_ms(started, Duration::ZERO));
+        return outcome;
     }
     let Some((tool, _)) = ctx.tools.tool(&ctx.generation, &ready.name) else {
         return SettledOutcome::Err {
@@ -292,8 +326,36 @@ async fn run_one_inner(
         }
         HookArgs::Args(args) => args,
     };
-    let caller = tool_caller(ctx, ready);
-    let runtime = CallRuntime::new(ctx, ready, args.clone(), Arc::clone(reports));
+    if args.as_str() != ready.args.as_str() {
+        let (promoted, result) = resolve_named(
+            &ctx.generation,
+            &ctx.tools,
+            &ready.name,
+            &args,
+            ctx.mode,
+            &ctx.workspace,
+        );
+        if result.is_err() {
+            return failed_outcome(&ResolvedCall {
+                call: ready.call.clone(),
+                name: ready.name.clone(),
+                promoted,
+                result,
+            });
+        }
+    }
+    let invocation = Invocation::next();
+    let caller = tool_caller(ctx, ready, invocation);
+    let approval_wait = Arc::new(AtomicU64::new(0));
+    let runtime = CallRuntime::new(
+        ctx,
+        ready,
+        caller.ext().clone(),
+        invocation,
+        args.clone(),
+        Arc::clone(reports),
+        Arc::clone(&approval_wait),
+    );
     let cx = ToolCx::new(
         caller,
         ready.call.clone(),
@@ -312,7 +374,10 @@ async fn run_one_inner(
         None => cx,
     };
     let call = ToolCall::new(ready.call.as_str(), args);
-    let outcome = tool.run(call, cx).await;
+    let started = Instant::now();
+    let outcome = run_contained(&*tool, call, cx).await;
+    let waited = Duration::from_nanos(approval_wait.load(Ordering::Relaxed));
+    *elapsed_ms = Some(execution_ms(started, waited));
     map_outcome(outcome)
 }
 
@@ -350,7 +415,9 @@ async fn run_hooks(ctx: &DispatchCtx, event: &ToolCallEvent, args: RawJson) -> H
         )
         .await;
         if let Some(reason) = step.block {
-            return HookArgs::Blocked { reason };
+            return HookArgs::Blocked {
+                reason: format!("blocked by {}: {reason}", extension.name()).into(),
+            };
         }
         current = step.args;
     }
@@ -363,7 +430,7 @@ async fn run_hooks(ctx: &DispatchCtx, event: &ToolCallEvent, args: RawJson) -> H
 /// origin, and declared `inject` set, exactly as `run_hooks` mints a hook
 /// caller. A tool no extension owns keeps its own name, builtin origin, and
 /// an empty set.
-fn tool_caller(ctx: &DispatchCtx, ready: &ReadyCall) -> Caller {
+fn tool_caller(ctx: &DispatchCtx, ready: &ReadyCall, invocation: Invocation) -> Caller {
     let generation_owner = ctx
         .generation
         .tools
@@ -404,6 +471,25 @@ fn tool_caller(ctx: &DispatchCtx, ready: &ReadyCall) -> Caller {
         CallerKind::Tool,
         Some(ctx.turn),
     )
+    .with_invocation(invocation)
+}
+
+/// Runs one tool call and turns a panic into a visible tool error.
+///
+/// A panic would otherwise end the session driver task and leave the turn
+/// waiting for a result that never comes. The error text names the tool and
+/// carries the panic message, so the model and the client both see it.
+async fn run_contained(tool: &dyn Tool, call: ToolCall, cx: ToolCx<'_>) -> ToolOutcome {
+    let name = tool.name().clone();
+    match contained(async move { tool.run(call, cx).await }).await {
+        Ok(outcome) => outcome,
+        Err(panic) => ToolOutcome::Err(crate::error::ToolError::Message {
+            message: format!(
+                "The {name} tool crashed and did not finish: {panic}. Report this to the tool's author, or try a different approach."
+            )
+            .into(),
+        }),
+    }
 }
 
 /// Maps one terminal tool outcome to its settlement.
@@ -500,6 +586,7 @@ struct GrantCover {
     /// The detached job bounding the grant, absent for session grants.
     job: Option<JobId>,
 }
+
 fn job_is_live(jobs: &JobTable, job: Option<JobId>) -> bool {
     job.is_none_or(|id| jobs.is_live(id))
 }
@@ -512,6 +599,12 @@ struct CallRuntime {
     call: CallId,
     /// The running tool.
     tool: Name,
+    /// The extension that owns the tool; its `run` service calls ride the
+    /// grant this call earns.
+    ext: Name,
+    invocation: Option<Invocation>,
+    /// The session the call runs in.
+    session: SessionId,
     /// The final arguments after hooks.
     args: RawJson,
     /// The ladder policy snapshot.
@@ -544,17 +637,13 @@ struct CallRuntime {
     handle: crate::session::SessionHandle,
     /// Journal reports buffered for the driver to forward in order.
     reports: Arc<Mutex<Vec<TurnWork>>>,
+    /// Nanoseconds this call spent waiting for approval answers, which the
+    /// dispatcher subtracts from the tool's run time.
+    approval_wait: Arc<AtomicU64>,
     /// Turn approval grants.
     ledger: Arc<Mutex<GrantLedger>>,
     /// The authorization proof state: the bound digest once approved.
     auth: Mutex<Option<AuthProof>>,
-    /// The pre-acquired process and fd permits for exec spawns.
-    permit: Mutex<
-        Option<(
-            tokio::sync::OwnedSemaphorePermit,
-            crate::admission::FdPermit,
-        )>,
-    >,
     /// The session owner for detached background work.
     tasks: SessionTasks,
     /// The cancellation token bounding this call.
@@ -573,13 +662,19 @@ impl CallRuntime {
     fn new(
         ctx: &DispatchCtx,
         ready: &ReadyCall,
+        ext: Name,
+        invocation: Invocation,
         args: RawJson,
         reports: Arc<Mutex<Vec<TurnWork>>>,
+        approval_wait: Arc<AtomicU64>,
     ) -> Self {
         Self {
             turn: Some(ctx.turn),
             call: ready.call.clone(),
             tool: ready.name.clone(),
+            ext,
+            invocation: Some(invocation),
+            session: ctx.session,
             args,
             policy: ctx.policy.clone(),
             broker: Arc::clone(&ctx.broker),
@@ -596,10 +691,10 @@ impl CallRuntime {
             host: Arc::clone(ctx.backend.host_state()),
             handle: ctx.backend.handle().clone(),
             reports,
+            approval_wait,
             tasks: ctx.backend.tasks().clone(),
             ledger: Arc::clone(&ctx.ledger),
             auth: Mutex::new(None),
-            permit: Mutex::new(None),
             cancel: ctx.cancel.clone(),
         }
     }
@@ -611,6 +706,49 @@ impl CallRuntime {
     /// mints on approval, records session grants, and denies with
     /// model-visible text otherwise.
     async fn authorize_inner(
+        &self,
+        call: &CallId,
+        preview: Preview,
+        cancel: &CancellationToken,
+    ) -> Result<Approved, dal_core::DenyReason> {
+        let approved = self.authorize_ladder(call, preview, cancel).await?;
+        self.lend_service_grant();
+        Ok(approved)
+    }
+
+    /// Lends the scoped grant a tool's classification carries to the `run`
+    /// calls its extension makes for this call. Any approval earns it, an
+    /// answered ask or an allow by policy alike.
+    fn lend_service_grant(&self) {
+        let Ok(ToolClass::Exec {
+            grant: Some(spec), ..
+        }) = self.approval_class()
+        else {
+            return;
+        };
+        let prefix = spec
+            .argv_prefix
+            .split_ascii_whitespace()
+            .map(std::ffi::OsString::from)
+            .collect();
+        let Some(invocation) = self.invocation else {
+            return;
+        };
+        let roots = scope_roots(
+            spec.roots,
+            &self.host.shared.data_root,
+            self.workspace.as_path(),
+            self.session,
+        );
+        self.shared.service_grants().register(
+            CallKey::new(self.ext.clone(), invocation),
+            prefix,
+            roots,
+        );
+    }
+
+    /// The approval ladder itself, before any grant lending.
+    async fn authorize_ladder(
         &self,
         call: &CallId,
         preview: Preview,
@@ -684,6 +822,7 @@ impl CallRuntime {
         cancel: &CancellationToken,
     ) -> Result<Approved, dal_core::DenyReason> {
         use dal_core::DenyReason;
+        let mut approved = Approved::new(self.call.clone(), digest, prefix, roots, job);
         if !job_is_live(&*self.jobs.lock().await, job) {
             return Err(DenyReason::NotGranted);
         }
@@ -730,10 +869,10 @@ impl CallRuntime {
                         what: "file descriptors unavailable".into(),
                     },
                 })?;
-            *self.permit.lock().await = Some((permit, fd_permit));
+            approved = approved.with_permits(permit, fd_permit);
         }
         *self.auth.lock().await = Some(AuthProof { digest });
-        Ok(Approved::new(self.call.clone(), digest, prefix, roots, job))
+        Ok(approved)
     }
 }
 
@@ -759,24 +898,44 @@ impl CallRuntime {
                 roots: spec.roots,
                 until: JobEnd(JobId::new_v7()),
             }),
+            call: Some(call.clone()),
         };
         let secs = default_timeout(&question).as_secs();
         let deadline = tokio::time::Instant::now() + default_timeout(&question);
         let owner = tool_owner(&self.generation, &self.tools, &self.tool);
         let (request, waiter) = self.broker.open(owner, question, turn, deadline);
-        self.report_asked(&request).await;
+        if self.report_asked(&request).await.is_err() {
+            if let Ok(resolved) =
+                self.broker
+                    .answer(request.id, Answer::Cancel, ClientId::new("core"))
+            {
+                self.broker.cancel(&resolved);
+            }
+            return Err(dal_core::DenyReason::Unavailable {
+                what: "session closed while opening approval".into(),
+            });
+        }
+        let asked_at = Instant::now();
         let answered = tokio::select! {
             biased;
             () = cancel.cancelled() => None,
             () = self.cancel.cancelled() => None,
             outcome = waiter => Some(outcome),
         };
-        let Some((answer, by)) = answered else {
+        let blocked = u64::try_from(asked_at.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        self.approval_wait.fetch_add(blocked, Ordering::Relaxed);
+        let Some(Settled {
+            answer,
+            by,
+            resolution,
+        }) = answered
+        else {
             return Err(DenyReason::Unavailable {
                 what: "turn cancelled".into(),
             });
         };
-        self.report_answered(&request, &answer, &by, false).await;
+        self.report_answered(&request, &answer, &by, resolution, false)
+            .await;
         match answer {
             Answer::Approve | Answer::ApproveForSession => {
                 let roots = grant.clone().map_or_else(
@@ -798,17 +957,16 @@ impl CallRuntime {
                 self.finish_approval(preview.digest, Box::new([]), roots, None, &class, cancel)
                     .await
             }
-            Answer::Decline => Err(DenyReason::out_of_scope(if by.as_str() == "core" {
-                format!(
-                    "Permission denied {} needed approval and no one answered within {secs} s.",
+            Answer::Decline => Err(DenyReason::out_of_scope(match resolution {
+                Resolution::Unavailable => format!(
+                    "Permission denied: {} needed approval and no one answered within {secs} s.",
                     self.tool.as_str()
-                )
-            } else {
-                format!(
+                ),
+                Resolution::Answered | Resolution::Cancelled => format!(
                     "Permission denied: {} was declined by {}.",
                     self.tool.as_str(),
                     by.as_str()
-                )
+                ),
             })),
             Answer::Cancel => Err(DenyReason::Unavailable {
                 what: "approval cancelled".into(),
@@ -825,15 +983,15 @@ impl CallRuntime {
     /// `Asked` goes straight to the actor: the ask blocks this call until
     /// an answer arrives, so a deferred buffer would publish the request
     /// only after the answer it is supposed to enable.
-    async fn report_asked(&self, request: &Request) {
-        self.shared
-            .publish(dal_core::UpdateKind::RequestOpened(request.clone()));
-        let _ = self
-            .handle
+    async fn report_asked(&self, request: &Request) -> Result<(), crate::error::AgentError> {
+        self.handle
             .work(TurnWork::Asked {
                 request: request.clone(),
             })
-            .await;
+            .await?;
+        self.shared
+            .publish(dal_core::UpdateKind::RequestOpened(request.clone()));
+        Ok(())
     }
 
     /// Buffers one broker resolution for journaling.
@@ -842,6 +1000,7 @@ impl CallRuntime {
         request: &Request,
         answer: &Answer,
         by: &ClientId,
+        resolution: Resolution,
         was_default: bool,
     ) {
         self.reports.lock().await.push(TurnWork::Answered {
@@ -849,6 +1008,7 @@ impl CallRuntime {
                 request: request.clone(),
                 answer: answer.clone(),
                 by: by.clone(),
+                resolution,
                 was_default,
             },
         });
@@ -883,7 +1043,23 @@ fn tool_owner(generation: &Generation, tools: &TurnTools, name: &Name) -> Owner 
     }
 }
 
+impl Drop for CallRuntime {
+    /// The call is over; the jobs it started now bound its run grant.
+    fn drop(&mut self) {
+        if let Some(invocation) = self.invocation {
+            self.shared
+                .service_grants()
+                .call_ended(&CallKey::new(self.ext.clone(), invocation));
+        }
+    }
+}
+
 impl ToolCxRuntime for CallRuntime {
+    fn decide_run(&self) -> dal_core::Decision {
+        self.policy
+            .decide(&super::rt::service_tool(), &super::rt::service_class())
+    }
+
     fn authorize(
         &self,
         call: &CallId,
@@ -895,11 +1071,32 @@ impl ToolCxRuntime for CallRuntime {
         Box::pin(async move { self.authorize_inner(&call, preview, &cancel).await })
     }
 
+    fn authorize_approved(
+        &self,
+        _call: &CallId,
+        preview: Preview,
+        cancel: &CancellationToken,
+    ) -> BoxFuture<'_, Result<Approved, dal_core::DenyReason>> {
+        let cancel = cancel.clone();
+        Box::pin(async move {
+            let class = self.approval_class()?;
+            self.finish_approval(
+                preview.digest,
+                Box::new([]),
+                Box::new([self.workspace.as_path().to_path_buf()]),
+                None,
+                &class,
+                &cancel,
+            )
+            .await
+        })
+    }
+
     fn spawn(
         &self,
         argv: &[std::ffi::OsString],
         opts: SpawnOpts,
-        approved: Approved,
+        mut approved: Approved,
     ) -> Result<Proc, crate::error::ToolError> {
         use crate::error::ToolError;
         if let Some(job) = approved.job() {
@@ -918,15 +1115,20 @@ impl ToolCxRuntime for CallRuntime {
             return Err(ToolError::Denied(dal_core::DenyReason::NotGranted));
         };
         let bound = proof.digest;
-        if !approved.prefix().is_empty() && !grant_covers(&approved, argv, &opts.cwd) {
+        // The prefix match authenticates scoped grants; the git checks below
+        // apply to every approval shape, including empty-prefix one-shot and
+        // allow-all grants whose roots still bind. Only the request overrides
+        // are vetted here: the host snapshot is operator-controlled ambient
+        // authority, and denying on it would turn operator environments into
+        // per-call grant failures. Snapshot-borne `GIT_*` belongs to a
+        // capture-time scrub instead.
+        let prefix_ok = approved.prefix().is_empty() || grant_covers(&approved, argv, &opts.cwd);
+        if !prefix_ok || !git_spawn_in_roots(argv, &opts.env, &opts.cwd, approved.roots()) {
             return Err(ToolError::Denied(dal_core::DenyReason::out_of_scope(
                 self.tool.as_str(),
             )));
         }
-        let permit = match self.permit.try_lock() {
-            Ok(mut guard) => guard.take(),
-            Err(_) => None,
-        };
+        let permit = approved.take_permits();
         let Some((permit, fd_permit)) = permit else {
             return Err(ToolError::Denied(dal_core::DenyReason::NotGranted));
         };
@@ -994,12 +1196,12 @@ impl ToolCxRuntime for CallRuntime {
 
 /// Checks one grant-bound spawn: the grant's whitespace-split prefix tokens
 /// start the actual argv with exact tokens and the cwd sits below a grant
-/// root. An empty prefix never matches here; one-shot approvals carry none.
-pub(crate) fn grant_covers(
-    approved: &Approved,
-    argv: &[std::ffi::OsString],
-    cwd: &std::path::Path,
-) -> bool {
+/// root. Git repository selectors (`-C`, `--git-dir`, `--work-tree`,
+/// `--namespace`, `--bare`, `--exec-path`, `--super-prefix`, and `-c` /
+/// `--config` / `--config-env` assignments) are checked against the same
+/// roots, resolving relative operands from the effective directory.
+/// An empty prefix never matches here; one-shot approvals carry none.
+pub(crate) fn grant_covers(approved: &Approved, argv: &[std::ffi::OsString], cwd: &Path) -> bool {
     if approved.prefix().is_empty() || argv.is_empty() {
         return false;
     }
@@ -1011,6 +1213,490 @@ pub(crate) fn grant_covers(
         }
     }
     crate::proc::cwd_in_roots(cwd, approved.roots())
+        && git_paths_in_roots(argv, cwd, approved.roots())
+}
+
+/// Reports whether an argv program name invokes git.
+///
+/// The stem match is ASCII case-insensitive because Windows executes
+/// `GIT.EXE` for `git`; an undecodable stem matches nothing and skips the
+/// git checks like any other foreign program.
+fn is_git_program(program: &std::ffi::OsStr) -> bool {
+    Path::new(program)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .is_some_and(|stem| stem.eq_ignore_ascii_case("git"))
+}
+
+/// Checks every git repository selector in the argument list.
+///
+/// Only the global portion is scanned: git applies wrapper selectors solely
+/// before the subcommand, so the first non-dash token ends the scan and
+/// later tokens are the subcommand's own flags (e.g. `switch -c`). Git
+/// applies relative `-C` paths successively, so each one becomes
+/// the effective directory for later path operands. `--git-dir`,
+/// `--work-tree`, `--super-prefix`, and `--exec-path=<path>` are confined to
+/// the roots from that final directory; `--namespace` (any form), bare
+/// `--bare`, and `-c` / `--config` assignments to `core.bare` (unless
+/// explicitly false), `core.hooksPath` outside the roots, or `core.worktree`
+/// outside the roots fail closed, as do `--config-env` assignments and
+/// config includes (their values arrive elsewhere, invisible here). Other
+/// `-c` keys (e.g. `receive.denyCurrentBranch`) carry no repository redirect
+/// and are allowed, as are the pager, `[--no-]-replace-objects`, and
+/// path-printing flags. `--` ends option parsing. Invalid or missing
+/// operands fail closed.
+fn git_paths_in_roots(argv: &[std::ffi::OsString], cwd: &Path, roots: &[PathBuf]) -> bool {
+    let Some(program) = argv.first() else {
+        return false;
+    };
+    if !is_git_program(program) {
+        return true;
+    }
+    let Some(base) = git_c_base(argv, cwd, roots) else {
+        return false;
+    };
+    git_selectors_in_roots(argv, &base, roots)
+}
+
+fn git_c_base(argv: &[std::ffi::OsString], cwd: &Path, roots: &[PathBuf]) -> Option<PathBuf> {
+    let mut base = cwd.to_path_buf();
+    let mut index = 1;
+    while index < argv.len() {
+        let arg = &argv[index];
+        if arg == std::ffi::OsStr::new("--") {
+            break;
+        }
+        if arg == std::ffi::OsStr::new("-C") {
+            let path = argv.get(index + 1)?;
+            base = checked_git_path(&base, path, roots)?;
+            index += 2;
+            continue;
+        }
+        // Selectors taking a separate operand contribute no `-C` hop, but the
+        // operand is still consumed: a value like `-Cfoo` is data for `-c`,
+        // not a directory change. Bare `--exec-path` takes no separate
+        // operand (it only prints), so it stays out of this list.
+        if arg == std::ffi::OsStr::new("--git-dir")
+            || arg == std::ffi::OsStr::new("--work-tree")
+            || arg == std::ffi::OsStr::new("-c")
+            || arg == std::ffi::OsStr::new("--config")
+            || arg == std::ffi::OsStr::new("--config-env")
+            || arg == std::ffi::OsStr::new("--namespace")
+            || arg == std::ffi::OsStr::new("--super-prefix")
+        {
+            argv.get(index + 1)?;
+            index += 2;
+            continue;
+        }
+        let text = arg.to_str()?;
+        // Anything else dash-led is self-contained (`-c<kv>`, `--opt=<v>`,
+        // pager-style switches): no operand to consume. The first non-dash
+        // token is the subcommand, after which git applies no more global
+        // selectors, so the scan ends there.
+        if !text.starts_with('-') {
+            break;
+        }
+        if let Some(path) = text.strip_prefix("-C") {
+            base = checked_git_path(&base, std::ffi::OsStr::new(path), roots)?;
+        }
+        index += 1;
+    }
+    Some(base)
+}
+
+fn git_selectors_in_roots(argv: &[std::ffi::OsString], base: &Path, roots: &[PathBuf]) -> bool {
+    // Relative `core.worktree` values resolve against the git dir rather than
+    // the working directory, so gather the explicit `--git-dir` anchors here;
+    // the `-C` base below covers the discovered-repo case.
+    let git_dirs = git_dir_operands(argv, base);
+    let mut index = 1;
+    while index < argv.len() {
+        let arg = &argv[index];
+        if arg == std::ffi::OsStr::new("--") {
+            break;
+        }
+        if arg == std::ffi::OsStr::new("--git-dir")
+            || arg == std::ffi::OsStr::new("--work-tree")
+            || arg == std::ffi::OsStr::new("--super-prefix")
+        {
+            let Some(path) = argv.get(index + 1) else {
+                return false;
+            };
+            if checked_git_path(base, path, roots).is_none() {
+                return false;
+            }
+            index += 2;
+            continue;
+        }
+        // `--namespace` selects an alternate ref namespace and `--bare` flips
+        // the repository to bare semantics: neither carries a filesystem path,
+        // so neither can be confined to roots. Deny on sight.
+        if arg == std::ffi::OsStr::new("--namespace") || arg == std::ffi::OsStr::new("--bare") {
+            return false;
+        }
+        if arg == std::ffi::OsStr::new("-c") || arg == std::ffi::OsStr::new("--config") {
+            let Some(kv) = argv.get(index + 1) else {
+                return false;
+            };
+            if !git_config_in_roots(kv, base, &git_dirs, roots) {
+                return false;
+            }
+            index += 2;
+            continue;
+        }
+        if arg == std::ffi::OsStr::new("--config-env") {
+            let Some(kv) = argv.get(index + 1) else {
+                return false;
+            };
+            if !git_config_env_in_roots(kv) {
+                return false;
+            }
+            index += 2;
+            continue;
+        }
+        let Some(text) = arg.to_str() else {
+            return false;
+        };
+        if text.strip_prefix("--namespace=").is_some() {
+            return false;
+        }
+        if let Some(path) = text
+            .strip_prefix("--git-dir=")
+            .or_else(|| text.strip_prefix("--work-tree="))
+            .or_else(|| text.strip_prefix("--super-prefix="))
+            .or_else(|| text.strip_prefix("--exec-path="))
+        {
+            if checked_git_path(base, std::ffi::OsStr::new(path), roots).is_none() {
+                return false;
+            }
+            index += 1;
+            continue;
+        }
+        if let Some(kv) = text
+            .strip_prefix("--config=")
+            .or_else(|| text.strip_prefix("-c"))
+        {
+            if !git_config_in_roots(std::ffi::OsStr::new(kv), base, &git_dirs, roots) {
+                return false;
+            }
+            index += 1;
+            continue;
+        }
+        if let Some(kv) = text.strip_prefix("--config-env=") {
+            if !git_config_env_in_roots(std::ffi::OsStr::new(kv)) {
+                return false;
+            }
+            index += 1;
+            continue;
+        }
+        // Anything else dash-led is a benign or inert flag (bare
+        // `--exec-path` only prints; pager, `[--no-]-replace-objects`, and
+        // path-printing flags never redirect). The first non-dash token is
+        // the subcommand: git applies global selectors only before it, so
+        // later tokens are the subcommand's own flags (e.g. `switch -c`)
+        // and need no check.
+        if !text.starts_with('-') {
+            break;
+        }
+        index += 1;
+    }
+    true
+}
+
+/// Collects the explicit `--git-dir` operands as resolved paths.
+///
+/// These anchor relative `core.worktree` values. Collection itself never
+/// fails: unresolvable operands are skipped here and denied by the main scan,
+/// whose verdict conjoins with every anchor check below.
+fn git_dir_operands(argv: &[std::ffi::OsString], base: &Path) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let mut index = 1;
+    while index < argv.len() {
+        let arg = &argv[index];
+        if arg == std::ffi::OsStr::new("--") {
+            break;
+        }
+        if arg == std::ffi::OsStr::new("--git-dir") {
+            if let Some(path) = argv.get(index + 1) {
+                dirs.extend(resolve_git_path(base, path));
+            }
+            index += 2;
+            continue;
+        }
+        let Some(text) = arg.to_str() else {
+            index += 1;
+            continue;
+        };
+        if !text.starts_with('-') {
+            break;
+        }
+        if let Some(path) = text.strip_prefix("--git-dir=") {
+            dirs.extend(resolve_git_path(base, std::ffi::OsStr::new(path)));
+        }
+        index += 1;
+    }
+    dirs
+}
+
+/// Checks one `-c` / `--config` assignment against the roots.
+///
+/// `core.worktree` carries a work-tree path: absolute values confine
+/// directly, relative ones resolve against the git dir, so they require
+/// explicit `--git-dir` anchors and must stay inside the roots from the `-C`
+/// base and from every anchor. Without an explicit `--git-dir` the anchor is
+/// whichever repository git discovers upward, which argv cannot name: fail
+/// closed. `core.hooksPath` selects executed hook programs: absolute values
+/// confine to the roots (in-roots hooks are baseline trust, like the repo's
+/// own hooks), relative values carry no verifiable anchor and fail closed.
+/// `include.path` and `includeIf.*.path` pull in whole config files whose
+/// content cannot be verified here, so they fail closed. `core.bare` flips
+/// repository semantics without carrying a path, so only an explicit false
+/// passes. Any other key carries no repository redirect and is allowed.
+fn git_config_in_roots(
+    kv: &std::ffi::OsStr,
+    base: &Path,
+    git_dirs: &[PathBuf],
+    roots: &[PathBuf],
+) -> bool {
+    let Some(kv) = kv.to_str() else {
+        return false;
+    };
+    let Some((key, value)) = kv.split_once('=') else {
+        return false;
+    };
+    if key.eq_ignore_ascii_case("core.worktree") {
+        if value.is_empty() {
+            return false;
+        }
+        let value = std::ffi::OsStr::new(value);
+        if Path::new(value).is_absolute() {
+            return checked_git_path(base, value, roots).is_some();
+        }
+        if git_dirs.is_empty() {
+            return false;
+        }
+        return checked_git_path(base, value, roots).is_some()
+            && git_dirs
+                .iter()
+                .all(|dir| checked_git_path(dir, value, roots).is_some());
+    }
+    if key.eq_ignore_ascii_case("core.hookspath") {
+        if value.is_empty() {
+            return false;
+        }
+        let value = std::ffi::OsStr::new(value);
+        if !Path::new(value).is_absolute() {
+            return false;
+        }
+        return checked_git_path(base, value, roots).is_some();
+    }
+    if key.eq_ignore_ascii_case("core.bare") {
+        return is_falsy_git_bool(value);
+    }
+    if is_include_path_key(key) {
+        return false;
+    }
+    true
+}
+
+/// Reports whether a `-c` key pulls in another config file.
+///
+/// The pulled file's content cannot be verified from argv (it can itself set
+/// `core.worktree` or `core.hooksPath`), so these keys fail closed. Matching
+/// is ASCII case-insensitive on the section and key; the `includeIf`
+/// condition keeps its case but needs no parsing here.
+fn is_include_path_key(key: &str) -> bool {
+    const PREFIX_LEN: usize = "includeif.".len();
+    const SUFFIX_LEN: usize = ".path".len();
+    if key.eq_ignore_ascii_case("include.path") {
+        return true;
+    }
+    if key.len() <= PREFIX_LEN + SUFFIX_LEN {
+        return false;
+    }
+    key.get(..PREFIX_LEN)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("includeif."))
+        && key
+            .get(key.len() - SUFFIX_LEN..)
+            .is_some_and(|suffix| suffix.eq_ignore_ascii_case(".path"))
+}
+
+/// Checks one `--config-env` assignment against the roots.
+///
+/// The value arrives via the environment, so redirect-capable keys
+/// (`core.worktree`, `core.hooksPath`, `core.bare`, and config includes)
+/// cannot be verified from argv and fail closed; every other key is allowed.
+fn git_config_env_in_roots(kv: &std::ffi::OsStr) -> bool {
+    let Some(kv) = kv.to_str() else {
+        return false;
+    };
+    let Some((name, _envvar)) = kv.split_once('=') else {
+        return false;
+    };
+    !(name.eq_ignore_ascii_case("core.worktree")
+        || name.eq_ignore_ascii_case("core.hookspath")
+        || name.eq_ignore_ascii_case("core.bare")
+        || is_include_path_key(name))
+}
+
+/// Reports whether a git boolean spelling disables an option.
+fn is_falsy_git_bool(value: &str) -> bool {
+    value.is_empty()
+        || value.eq_ignore_ascii_case("false")
+        || value.eq_ignore_ascii_case("no")
+        || value.eq_ignore_ascii_case("off")
+        || value.eq_ignore_ascii_case("0")
+}
+
+/// Checks git's repository-selecting environment overrides.
+///
+/// `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`, `GIT_EXEC_PATH`,
+/// `GIT_OBJECT_DIRECTORY`, and `GIT_INDEX_FILE` carry paths: empty values
+/// behave as unset, anything else must resolve inside the roots from the
+/// spawn cwd (environment work-tree paths anchor on the startup directory,
+/// unlike `--work-tree`). `GIT_NAMESPACE` carries no path
+/// and cannot be confined, so any non-empty value fails closed. The same
+/// holds for `GIT_CONFIG_PARAMETERS` (git's internal `-c` relay channel,
+/// never set legitimately on a top-level spawn yet honored when present, as
+/// verified against the installed git) and for `GIT_CONFIG_GLOBAL` /
+/// `GIT_CONFIG_SYSTEM` (alternate config files, loaded before argv config
+/// and able to carry the same redirects). The `GIT_CONFIG_COUNT` /
+/// `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n` scheme applies env-borne `-c`
+/// assignments the same way and is classified per pair below. Other programs
+/// ignore these variables and skip the check. Only request overrides are
+/// vetted here; the host snapshot is scrubbed of the same names at capture.
+pub(crate) fn git_env_in_roots(
+    argv: &[std::ffi::OsString],
+    env: &[(std::ffi::OsString, std::ffi::OsString)],
+    cwd: &Path,
+    roots: &[PathBuf],
+) -> bool {
+    let Some(program) = argv.first() else {
+        return false;
+    };
+    if !is_git_program(program) {
+        return true;
+    }
+    for (key, value) in env {
+        let Some(name) = key.to_str() else {
+            continue;
+        };
+        // Environment names resolve case-insensitively on Windows, so
+        // `git_dir` reaches git as `GIT_DIR` there: match ASCII
+        // case-insensitively everywhere.
+        let denied = name.eq_ignore_ascii_case("GIT_NAMESPACE")
+            || name.eq_ignore_ascii_case("GIT_CONFIG_PARAMETERS")
+            || name.eq_ignore_ascii_case("GIT_CONFIG_GLOBAL")
+            || name.eq_ignore_ascii_case("GIT_CONFIG_SYSTEM")
+            || name.eq_ignore_ascii_case("GIT_ALTERNATE_OBJECT_DIRECTORIES");
+        // Object store and index locations resolve from the spawn cwd like
+        // `GIT_DIR`; the alternate list cannot be confined element-wise, so
+        // it denies instead.
+        let confined = name.eq_ignore_ascii_case("GIT_DIR")
+            || name.eq_ignore_ascii_case("GIT_WORK_TREE")
+            || name.eq_ignore_ascii_case("GIT_COMMON_DIR")
+            || name.eq_ignore_ascii_case("GIT_EXEC_PATH")
+            || name.eq_ignore_ascii_case("GIT_OBJECT_DIRECTORY")
+            || name.eq_ignore_ascii_case("GIT_INDEX_FILE");
+        if !denied && !confined {
+            continue;
+        }
+        if value.is_empty() {
+            continue;
+        }
+        if denied || checked_git_path(cwd, value, roots).is_none() {
+            return false;
+        }
+    }
+    git_env_config_in_roots(env, cwd, roots)
+}
+
+/// Checks env-borne `-c` assignments against the roots.
+///
+/// Each `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n` pair classifies exactly
+/// like an argv `-c` assignment, except the git-dir anchor set is empty:
+/// relative `core.worktree` and `core.hooksPath` values fail closed, absolute
+/// ones confine from the spawn cwd. A missing count behaves as unset; a
+/// malformed count or an absurd pair budget fails closed rather than looping
+/// unboundedly.
+fn git_env_config_in_roots(
+    env: &[(std::ffi::OsString, std::ffi::OsString)],
+    cwd: &Path,
+    roots: &[PathBuf],
+) -> bool {
+    // Later duplicates win in the spawned child (`Command::envs` overwrites),
+    // so validation reads the last match, never the first.
+    let lookup = |name: &str| {
+        env.iter()
+            .rfind(|(key, _)| {
+                key.to_str()
+                    .is_some_and(|key| key.eq_ignore_ascii_case(name))
+            })
+            .map(|(_, value)| value)
+    };
+    let Some(count) = lookup("GIT_CONFIG_COUNT") else {
+        return true;
+    };
+    let Some(count) = count.to_str() else {
+        return false;
+    };
+    if count.is_empty() {
+        return true;
+    }
+    let Ok(count) = count.parse::<usize>() else {
+        return false;
+    };
+    if count > 64 {
+        return false;
+    }
+    for index in 0..count {
+        let key_name = format!("GIT_CONFIG_KEY_{index}");
+        let value_name = format!("GIT_CONFIG_VALUE_{index}");
+        let Some(key) = lookup(&key_name) else {
+            continue;
+        };
+        let mut kv = key.clone();
+        kv.push("=");
+        if let Some(value) = lookup(&value_name) {
+            kv.push(value);
+        }
+        if !git_config_in_roots(&kv, cwd, &[], roots) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Checks every git escape hatch on one spawn, regardless of approval shape.
+///
+/// Empty-prefix approvals (one-shot and allow-all grants) skip the argv
+/// prefix match by design, but their roots still bind: an auto-approved
+/// `git --git-dir=/outside` or a request `GIT_DIR` outside the roots must
+/// fail the same way a scoped grant would. Non-git programs pass through.
+pub(crate) fn git_spawn_in_roots(
+    argv: &[std::ffi::OsString],
+    env: &[(std::ffi::OsString, std::ffi::OsString)],
+    cwd: &Path,
+    roots: &[PathBuf],
+) -> bool {
+    git_paths_in_roots(argv, cwd, roots) && git_env_in_roots(argv, env, cwd, roots)
+}
+
+fn checked_git_path(base: &Path, path: &std::ffi::OsStr, roots: &[PathBuf]) -> Option<PathBuf> {
+    let resolved = resolve_git_path(base, path)?;
+    crate::proc::cwd_in_roots(&resolved, roots).then_some(resolved)
+}
+
+fn resolve_git_path(base: &Path, path: &std::ffi::OsStr) -> Option<PathBuf> {
+    if path.is_empty() {
+        return None;
+    }
+    let path = Path::new(path);
+    Some(if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
+    })
 }
 
 /// Parks one detached child: binds pending grant intents, reserves the job
@@ -1137,9 +1823,29 @@ pub(crate) async fn direct_call(backend: &Backend, name: &str, args: RawJson) ->
     direct_call_seeded(backend, seed).await
 }
 
+/// Finds the tool a nested call names.
+///
+/// Scripts and extensions call tools on the session's behalf, so they meet
+/// its tool allowlist like the model does. A name outside the list finds
+/// nothing, like an unknown tool.
+fn nested_tool<'a>(
+    backend: &Backend,
+    generation: &'a Generation,
+    name: &Name,
+) -> Option<&'a Arc<dyn Tool>> {
+    let permitted = backend
+        .shared()
+        .tool_allowlist()
+        .is_none_or(|allowed| allowed.contains(name));
+    if !permitted {
+        return None;
+    }
+    generation.tool(name).map(|(tool, _)| tool)
+}
+
 /// Runs one seeded nested call through the checked tool path (R03 R04).
 pub(crate) async fn direct_call_seeded(backend: &Backend, seed: NestedCall) -> ToolOutcome {
-    use dal_core::{ApprovalMode, DenyReason};
+    use dal_core::DenyReason;
     let NestedCall {
         name,
         args,
@@ -1159,7 +1865,7 @@ pub(crate) async fn direct_call_seeded(backend: &Backend, seed: NestedCall) -> T
         }));
     };
     let generation = backend.host_state().shared.generation.borrow().clone();
-    let Some((tool, _)) = generation.tool(&name) else {
+    let Some(tool) = nested_tool(backend, &generation, &name) else {
         return ToolOutcome::Err(crate::error::ToolError::message(format!(
             "unknown tool {}.",
             name.as_str()
@@ -1171,28 +1877,24 @@ pub(crate) async fn direct_call_seeded(backend: &Backend, seed: NestedCall) -> T
             (
                 broker.unwrap_or_else(|| Arc::clone(backend.broker())),
                 shared.unwrap_or_else(|| Arc::clone(backend.shared())),
-                attached.unwrap_or_else(|| backend.shared().attached()),
+                attached.unwrap_or_else(|| backend.shared().attached_approval()),
             )
         },
         |(broker, shared)| (broker, shared, true),
     );
-    let approved_cell = caller.cell_approved();
+    let policy = nested_policy(caller.cell_approved(), attached);
     let tool = Arc::clone(tool);
     let reports = Arc::new(Mutex::new(Vec::new()));
     let runtime = CallRuntime {
+        approval_wait: Arc::default(),
         turn,
         call: call.clone(),
         tool: name.clone(),
+        ext: caller.ext().clone(),
+        invocation: None,
+        session: backend.session(),
         args: args.clone(),
-        policy: Policy {
-            mode: if approved_cell {
-                ApprovalMode::All
-            } else {
-                ApprovalMode::Ask
-            },
-            answerer_attached: attached,
-            allow_always: std::collections::BTreeSet::new(),
-        },
+        policy,
         broker,
         generation: Arc::clone(&generation),
         tools: TurnTools::empty(),
@@ -1210,7 +1912,6 @@ pub(crate) async fn direct_call_seeded(backend: &Backend, seed: NestedCall) -> T
         tasks: backend.tasks().clone(),
         ledger: Arc::new(Mutex::new(GrantLedger::new())),
         auth: Mutex::new(None),
-        permit: Mutex::new(None),
         cancel,
     };
     let cx = ToolCx::new(
@@ -1230,11 +1931,26 @@ pub(crate) async fn direct_call_seeded(backend: &Backend, seed: NestedCall) -> T
         Some(script) => cx.with_script(script),
         None => cx,
     };
-    let outcome = tool.run(ToolCall::new(call.as_str(), args), cx).await;
+    let outcome = run_contained(&*tool, ToolCall::new(call.as_str(), args), cx).await;
     for report in std::mem::take(&mut *reports.lock().await) {
         let _ = backend.handle().work(report).await;
     }
     outcome
+}
+
+/// The approval policy of one nested call: an approved eval cell runs
+/// without asking; every other nested call asks.
+fn nested_policy(approved_cell: bool, answerer_attached: bool) -> Policy {
+    let mode = if approved_cell {
+        dal_core::ApprovalMode::All
+    } else {
+        dal_core::ApprovalMode::Ask
+    };
+    Policy {
+        mode,
+        answerer_attached,
+        allow_always: std::collections::BTreeSet::new(),
+    }
 }
 
 /// Mints a unique call identity for one turn-less direct call.
@@ -1248,6 +1964,15 @@ fn direct_call_id() -> CallId {
 mod tests {
     use super::*;
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn execution_time_excludes_approval_waits() {
+        let started = Instant::now()
+            .checked_sub(Duration::from_millis(500))
+            .expect("monotonic clock has run for half a second");
+        let ms = execution_ms(started, Duration::from_millis(200));
+        assert!((300..500).contains(&ms), "{ms}");
+    }
 
     #[test]
     fn job_scoped_grant_requires_a_live_job() -> Result<(), crate::error::ToolError> {
@@ -1268,5 +1993,921 @@ mod tests {
         assert!(!job_is_live(&jobs, Some(id)));
         assert!(job_is_live(&jobs, None));
         Ok(())
+    }
+    #[test]
+    fn git_c_and_git_dir_stay_inside_a_nested_workspace() {
+        let temp = tempfile::tempdir().expect("temporary grant roots");
+        let outer = temp.path().join("outer-repo");
+        let workspace = outer.join("agent-workspace");
+        let nested = workspace.join("nested-repo");
+        let workspace_git = workspace.join(".git");
+        let outside_git = outer.join("outside.git");
+        let inside_git = workspace.join("outside.git");
+        std::fs::create_dir_all(&nested).expect("nested repository");
+        std::fs::create_dir_all(&workspace_git).expect("workspace git directory");
+        std::fs::create_dir_all(&inside_git).expect("nested relative git directory");
+        std::fs::create_dir_all(&outside_git).expect("outside git directory");
+        let approved = Approved::new(
+            CallId::new("git-grant"),
+            None,
+            Box::new([std::ffi::OsString::from("git")]),
+            Box::new([workspace.clone()]),
+            None,
+        );
+
+        let nested_relative = vec![
+            "git".into(),
+            "-C".into(),
+            "nested-repo".into(),
+            "status".into(),
+        ];
+        assert!(grant_covers(&approved, &nested_relative, &workspace));
+        let enclosing_absolute = vec![
+            "git".into(),
+            "-C".into(),
+            outer.as_os_str().to_os_string(),
+            "status".into(),
+        ];
+        assert!(!grant_covers(&approved, &enclosing_absolute, &workspace));
+
+        let reordered_git_dir = vec![
+            "git".into(),
+            "--git-dir".into(),
+            "../outside.git".into(),
+            "-C".into(),
+            "..".into(),
+            "status".into(),
+        ];
+        assert!(!grant_covers(&approved, &reordered_git_dir, &nested));
+
+        let git_dir_relative = vec![
+            "git".into(),
+            "--git-dir".into(),
+            ".git".into(),
+            "status".into(),
+        ];
+        assert!(grant_covers(&approved, &git_dir_relative, &workspace));
+        let mut outside_git_arg = std::ffi::OsString::from("--git-dir=");
+        outside_git_arg.push(outside_git.as_os_str());
+        let outside_git_dir = vec!["git".into(), outside_git_arg, "status".into()];
+        assert!(!grant_covers(&approved, &outside_git_dir, &workspace));
+    }
+    #[test]
+    fn git_work_tree_stays_inside_a_nested_workspace() {
+        let temp = tempfile::tempdir().expect("temporary grant roots");
+        let outer = temp.path().join("outer-repo");
+        let workspace = outer.join("agent-workspace");
+        let nested = workspace.join("nested-repo");
+        let workspace_git = workspace.join(".git");
+        let outside_git = outer.join("outside.git");
+        let inside_git = workspace.join("outside.git");
+        let work_tree_dash_c = workspace.join("-Cnested");
+        std::fs::create_dir_all(&nested).expect("nested repository");
+        std::fs::create_dir_all(&workspace_git).expect("workspace git directory");
+        std::fs::create_dir_all(&inside_git).expect("nested relative git directory");
+        std::fs::create_dir_all(&outside_git).expect("outside git directory");
+        std::fs::create_dir_all(&work_tree_dash_c).expect("dash-prefixed work tree");
+        let approved = Approved::new(
+            CallId::new("work-tree-grant"),
+            None,
+            Box::new([std::ffi::OsString::from("git")]),
+            Box::new([workspace.clone()]),
+            None,
+        );
+
+        let work_tree_relative = vec![
+            "git".into(),
+            "--git-dir".into(),
+            ".git".into(),
+            "--work-tree".into(),
+            "nested-repo".into(),
+            "status".into(),
+        ];
+        assert!(grant_covers(&approved, &work_tree_relative, &workspace));
+
+        let work_tree_absolute = vec![
+            "git".into(),
+            "--git-dir".into(),
+            ".git".into(),
+            "--work-tree".into(),
+            outer.as_os_str().to_os_string(),
+            "status".into(),
+        ];
+        assert!(!grant_covers(&approved, &work_tree_absolute, &workspace));
+
+        let mut outside_work_tree_arg = std::ffi::OsString::from("--work-tree=");
+        outside_work_tree_arg.push(outer.as_os_str());
+        let outside_work_tree_equals = vec![
+            "git".into(),
+            "--git-dir".into(),
+            ".git".into(),
+            outside_work_tree_arg,
+            "status".into(),
+        ];
+        assert!(!grant_covers(
+            &approved,
+            &outside_work_tree_equals,
+            &workspace
+        ));
+        let work_tree_operand_that_looks_like_c = vec![
+            "git".into(),
+            "--work-tree".into(),
+            "-Cnested".into(),
+            "--git-dir".into(),
+            "../outside.git".into(),
+            "status".into(),
+        ];
+        assert!(!grant_covers(
+            &approved,
+            &work_tree_operand_that_looks_like_c,
+            &workspace,
+        ));
+
+        let mut nested_work_tree_arg = std::ffi::OsString::from("--work-tree=");
+        nested_work_tree_arg.push(nested.as_os_str());
+        let work_tree_equals = vec![
+            "git".into(),
+            "--git-dir".into(),
+            ".git".into(),
+            nested_work_tree_arg,
+            "status".into(),
+        ];
+        assert!(grant_covers(&approved, &work_tree_equals, &workspace));
+    }
+    #[test]
+    fn git_namespace_and_bare_are_denied() {
+        let temp = tempfile::tempdir().expect("temporary grant roots");
+        let workspace = temp.path().join("agent-workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let approved = Approved::new(
+            CallId::new("namespace-grant"),
+            None,
+            Box::new([std::ffi::OsString::from("git")]),
+            Box::new([workspace.clone()]),
+            None,
+        );
+
+        let baseline: Vec<std::ffi::OsString> = vec!["git".into(), "status".into()];
+        assert!(grant_covers(&approved, &baseline, &workspace));
+
+        let mut namespaced_equals = std::ffi::OsString::from("--namespace=");
+        namespaced_equals.push("agent");
+        for argv in [
+            vec!["git".into(), namespaced_equals, "status".into()],
+            vec![
+                "git".into(),
+                "--namespace".into(),
+                "agent".into(),
+                "status".into(),
+            ],
+            vec!["git".into(), "--namespace=".into(), "status".into()],
+            vec!["git".into(), "--namespace".into()],
+            vec!["git".into(), "--bare".into(), "status".into()],
+        ] {
+            assert!(!grant_covers(&approved, &argv, &workspace));
+        }
+    }
+    #[test]
+    fn git_config_worktree_stays_inside_roots() {
+        fn config_argv(flag: &str, kv: &str) -> Vec<std::ffi::OsString> {
+            vec!["git".into(), flag.into(), kv.into(), "status".into()]
+        }
+        let temp = tempfile::tempdir().expect("temporary grant roots");
+        let outer = temp.path().join("outer-repo");
+        let workspace = outer.join("agent-workspace");
+        let nested = workspace.join("nested-repo");
+        let workspace_git = workspace.join(".git");
+        let git_nested = workspace_git.join("nested-repo");
+        let outside = outer.join("outside");
+        for dir in [&nested, &workspace_git, &git_nested, &outside] {
+            std::fs::create_dir_all(dir).expect("grant fixture directory");
+        }
+        let approved = Approved::new(
+            CallId::new("config-grant"),
+            None,
+            Box::new([std::ffi::OsString::from("git")]),
+            Box::new([workspace.clone()]),
+            None,
+        );
+
+        // A relative value without an explicit `--git-dir` resolves against
+        // whichever repository git discovers upward, which argv cannot name:
+        // fail closed even when the `-C`-anchored join stays inside.
+        assert!(!grant_covers(
+            &approved,
+            &config_argv("-c", "core.worktree=nested-repo"),
+            &workspace
+        ));
+        let absolute_inside =
+            std::ffi::OsString::from(format!("core.worktree={}", nested.display()));
+        let mut absolute_argv: Vec<std::ffi::OsString> =
+            vec!["git".into(), "-c".into(), absolute_inside, "status".into()];
+        assert!(grant_covers(&approved, &absolute_argv, &workspace));
+
+        let absolute_outside =
+            std::ffi::OsString::from(format!("core.worktree={}", outside.display()));
+        absolute_argv[2] = absolute_outside.clone();
+        assert!(!grant_covers(&approved, &absolute_argv, &workspace));
+        assert!(!grant_covers(
+            &approved,
+            &config_argv("--config", &absolute_outside.to_string_lossy()),
+            &workspace
+        ));
+        let mut stuck = std::ffi::OsString::from("-c");
+        stuck.push(&absolute_outside);
+        assert!(!grant_covers(
+            &approved,
+            &["git".into(), stuck, "status".into()],
+            &workspace
+        ));
+        assert!(!grant_covers(
+            &approved,
+            &config_argv("-c", "core.worktree=../outside"),
+            &workspace
+        ));
+        assert!(!grant_covers(
+            &approved,
+            &config_argv("-c", "core.worktree="),
+            &workspace
+        ));
+        assert!(!grant_covers(
+            &approved,
+            &config_argv("-c", "core.bare"),
+            &workspace
+        ));
+        assert!(!grant_covers(
+            &approved,
+            &["git".into(), "-c".into()],
+            &workspace
+        ));
+
+        // Relative values must also hold from each explicit `--git-dir` anchor.
+        let anchored_inside: Vec<std::ffi::OsString> = vec![
+            "git".into(),
+            "--git-dir".into(),
+            ".git".into(),
+            "-c".into(),
+            "core.worktree=nested-repo".into(),
+            "status".into(),
+        ];
+        assert!(grant_covers(&approved, &anchored_inside, &workspace));
+        let anchored_outside: Vec<std::ffi::OsString> = vec![
+            "git".into(),
+            "--git-dir".into(),
+            ".git".into(),
+            "-c".into(),
+            "core.worktree=../outside".into(),
+            "status".into(),
+        ];
+        assert!(!grant_covers(&approved, &anchored_outside, &workspace));
+    }
+    #[test]
+    fn git_exec_path_and_super_prefix_stay_inside_roots() {
+        let temp = tempfile::tempdir().expect("temporary grant roots");
+        let outer = temp.path().join("outer-repo");
+        let workspace = outer.join("agent-workspace");
+        let nested = workspace.join("nested-repo");
+        let bin = workspace.join("bin");
+        for dir in [&nested, &bin] {
+            std::fs::create_dir_all(dir).expect("grant fixture directory");
+        }
+        let approved = Approved::new(
+            CallId::new("exec-path-grant"),
+            None,
+            Box::new([std::ffi::OsString::from("git")]),
+            Box::new([workspace.clone()]),
+            None,
+        );
+
+        let mut exec_inside = std::ffi::OsString::from("--exec-path=");
+        exec_inside.push(bin.as_os_str());
+        let exec_argv: [std::ffi::OsString; 3] = ["git".into(), exec_inside, "status".into()];
+        assert!(grant_covers(&approved, &exec_argv, &workspace));
+        let mut exec_outside = std::ffi::OsString::from("--exec-path=");
+        exec_outside.push(outer.as_os_str());
+        let exec_outside_argv: [std::ffi::OsString; 3] =
+            ["git".into(), exec_outside, "status".into()];
+        assert!(!grant_covers(&approved, &exec_outside_argv, &workspace));
+        // Bare `--exec-path` only prints the exec path and exits.
+        let bare_exec: [std::ffi::OsString; 3] =
+            ["git".into(), "--exec-path".into(), "status".into()];
+        assert!(grant_covers(&approved, &bare_exec, &workspace));
+
+        let super_inside: [std::ffi::OsString; 4] = [
+            "git".into(),
+            "--super-prefix".into(),
+            "nested-repo".into(),
+            "status".into(),
+        ];
+        assert!(grant_covers(&approved, &super_inside, &workspace));
+        let mut super_outside = std::ffi::OsString::from("--super-prefix=");
+        super_outside.push(outer.as_os_str());
+        let super_outside_argv: [std::ffi::OsString; 3] =
+            ["git".into(), super_outside, "status".into()];
+        assert!(!grant_covers(&approved, &super_outside_argv, &workspace));
+
+        // Pager flags never redirect the repository.
+        for flag in ["-P", "--no-pager", "-p", "--paginate"] {
+            let argv: Vec<std::ffi::OsString> = vec!["git".into(), flag.into(), "status".into()];
+            assert!(grant_covers(&approved, &argv, &workspace));
+        }
+    }
+    #[test]
+    fn git_env_redirects_stay_inside_roots() {
+        let temp = tempfile::tempdir().expect("temporary grant roots");
+        let outer = temp.path().join("outer-repo");
+        let workspace = outer.join("agent-workspace");
+        let nested = workspace.join("nested-repo");
+        let workspace_git = workspace.join(".git");
+        for dir in [&nested, &workspace_git] {
+            std::fs::create_dir_all(dir).expect("grant fixture directory");
+        }
+        let roots = [workspace.clone()];
+        let git: Vec<std::ffi::OsString> = vec!["git".into(), "status".into()];
+        let pair = |key: &str, value: &str| {
+            (
+                std::ffi::OsString::from(key),
+                std::ffi::OsString::from(value),
+            )
+        };
+        let absolute_outside = outer.as_os_str().to_os_string();
+
+        assert!(git_env_in_roots(&git, &[], &workspace, &roots));
+        assert!(git_env_in_roots(
+            &git,
+            &[pair("GIT_DIR", ".git")],
+            &workspace,
+            &roots
+        ));
+        assert!(git_env_in_roots(
+            &git,
+            &[pair("GIT_DIR", "")],
+            &workspace,
+            &roots
+        ));
+        assert!(!git_env_in_roots(
+            &git,
+            &[(
+                std::ffi::OsString::from("GIT_DIR"),
+                absolute_outside.clone()
+            )],
+            &workspace,
+            &roots
+        ));
+        assert!(git_env_in_roots(
+            &git,
+            &[pair("GIT_WORK_TREE", "nested-repo")],
+            &workspace,
+            &roots
+        ));
+        assert!(!git_env_in_roots(
+            &git,
+            &[(
+                std::ffi::OsString::from("GIT_WORK_TREE"),
+                absolute_outside.clone()
+            )],
+            &workspace,
+            &roots
+        ));
+        assert!(!git_env_in_roots(
+            &git,
+            &[pair("GIT_NAMESPACE", "agent")],
+            &workspace,
+            &roots
+        ));
+        assert!(git_env_in_roots(
+            &git,
+            &[pair("GIT_NAMESPACE", "")],
+            &workspace,
+            &roots
+        ));
+        assert!(!git_env_in_roots(
+            &git,
+            &[(
+                std::ffi::OsString::from("GIT_COMMON_DIR"),
+                absolute_outside.clone()
+            )],
+            &workspace,
+            &roots
+        ));
+        assert!(!git_env_in_roots(
+            &git,
+            &[(
+                std::ffi::OsString::from("GIT_EXEC_PATH"),
+                absolute_outside.clone()
+            )],
+            &workspace,
+            &roots
+        ));
+        // Other programs ignore these variables; unrelated keys pass through.
+        let other: Vec<std::ffi::OsString> = vec!["ls".into(), "status".into()];
+        assert!(git_env_in_roots(
+            &other,
+            &[(
+                std::ffi::OsString::from("GIT_DIR"),
+                absolute_outside.clone()
+            )],
+            &workspace,
+            &roots
+        ));
+        assert!(git_env_in_roots(
+            &git,
+            &[(std::ffi::OsString::from("PAGER"), absolute_outside.clone())],
+            &workspace,
+            &roots
+        ));
+    }
+    #[test]
+    fn git_env_config_schemes_stay_inside_roots() {
+        let temp = tempfile::tempdir().expect("temporary grant roots");
+        let outer = temp.path().join("outer-repo");
+        let workspace = outer.join("agent-workspace");
+        let nested = workspace.join("nested-repo");
+        std::fs::create_dir_all(&nested).expect("grant fixture directory");
+        let roots = [workspace.clone()];
+        let git: Vec<std::ffi::OsString> = vec!["git".into(), "status".into()];
+        let pair = |key: &str, value: &str| {
+            (
+                std::ffi::OsString::from(key),
+                std::ffi::OsString::from(value),
+            )
+        };
+        let config = |count: &str, entries: &[(&str, &str)]| {
+            let mut env = vec![pair("GIT_CONFIG_COUNT", count)];
+            for (index, (key, value)) in entries.iter().enumerate() {
+                env.push(pair(&format!("GIT_CONFIG_KEY_{index}"), key));
+                env.push(pair(&format!("GIT_CONFIG_VALUE_{index}"), value));
+            }
+            env
+        };
+        let outside = outer.join("outside");
+        std::fs::create_dir_all(&outside).expect("outside directory");
+
+        // No count behaves as unset, even with stray pairs present.
+        assert!(git_env_in_roots(
+            &git,
+            &[pair("GIT_CONFIG_KEY_0", "core.bare")],
+            &workspace,
+            &roots
+        ));
+        // Benign keys pass through the scheme untouched.
+        assert!(git_env_in_roots(
+            &git,
+            &config("1", &[("user.name", "agent")]),
+            &workspace,
+            &roots
+        ));
+        // Absolute redirect-capable values confine from the spawn cwd.
+        assert!(git_env_in_roots(
+            &git,
+            &config("1", &[("core.worktree", &nested.to_string_lossy())]),
+            &workspace,
+            &roots
+        ));
+        assert!(!git_env_in_roots(
+            &git,
+            &config("1", &[("core.worktree", &outside.to_string_lossy())]),
+            &workspace,
+            &roots
+        ));
+        // Relative values carry no argv-visible anchor: fail closed.
+        assert!(!git_env_in_roots(
+            &git,
+            &config("1", &[("core.worktree", "nested-repo")]),
+            &workspace,
+            &roots
+        ));
+        assert!(!git_env_in_roots(
+            &git,
+            &config("1", &[("core.hooksPath", &outside.to_string_lossy())]),
+            &workspace,
+            &roots
+        ));
+        assert!(!git_env_in_roots(
+            &git,
+            &config("2", &[("user.name", "agent"), ("core.bare", "true")]),
+            &workspace,
+            &roots
+        ));
+        // Malformed counts and absurd budgets fail closed, not unbounded.
+        assert!(!git_env_in_roots(
+            &git,
+            &[pair("GIT_CONFIG_COUNT", "many")],
+            &workspace,
+            &roots
+        ));
+        assert!(!git_env_in_roots(
+            &git,
+            &[pair("GIT_CONFIG_COUNT", "1000000")],
+            &workspace,
+            &roots
+        ));
+        assert!(git_env_in_roots(
+            &git,
+            &[pair("GIT_CONFIG_COUNT", "")],
+            &workspace,
+            &roots
+        ));
+        assert!(git_env_in_roots(
+            &git,
+            &[pair("GIT_CONFIG_COUNT", "0")],
+            &workspace,
+            &roots
+        ));
+    }
+    #[test]
+    fn git_config_bare_needs_an_explicit_false() {
+        fn config_argv(flag: &str, kv: &str) -> Vec<std::ffi::OsString> {
+            vec!["git".into(), flag.into(), kv.into(), "status".into()]
+        }
+        let temp = tempfile::tempdir().expect("temporary grant roots");
+        let workspace = temp.path().join("agent-workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let approved = Approved::new(
+            CallId::new("bare-grant"),
+            None,
+            Box::new([std::ffi::OsString::from("git")]),
+            Box::new([workspace.clone()]),
+            None,
+        );
+        for truthy in ["true", "yes", "1", "on"] {
+            assert!(
+                !grant_covers(
+                    &approved,
+                    &config_argv("-c", &format!("core.bare={truthy}")),
+                    &workspace
+                ),
+                "core.bare={truthy} must fail closed"
+            );
+        }
+        for falsy in ["false", "no", "off", "0"] {
+            assert!(
+                grant_covers(
+                    &approved,
+                    &config_argv("-c", &format!("core.bare={falsy}")),
+                    &workspace
+                ),
+                "core.bare={falsy} redirects nothing"
+            );
+        }
+        assert!(grant_covers(
+            &approved,
+            &config_argv("-c", "receive.denyCurrentBranch=false"),
+            &workspace
+        ));
+        assert!(grant_covers(
+            &approved,
+            &config_argv("-c", "advice.detachedHead=false"),
+            &workspace
+        ));
+    }
+    #[test]
+    fn git_config_hookspath_and_includes_stay_inside_roots() {
+        fn config_argv(flag: &str, kv: &str) -> Vec<std::ffi::OsString> {
+            vec!["git".into(), flag.into(), kv.into(), "status".into()]
+        }
+        let temp = tempfile::tempdir().expect("temporary grant roots");
+        let outer = temp.path().join("outer-repo");
+        let workspace = outer.join("agent-workspace");
+        let nested = workspace.join("nested-repo");
+        let hooks = workspace.join("hooks");
+        let outside = outer.join("outside");
+        for dir in [&nested, &hooks, &outside] {
+            std::fs::create_dir_all(dir).expect("grant fixture directory");
+        }
+        let approved = Approved::new(
+            CallId::new("hooks-grant"),
+            None,
+            Box::new([std::ffi::OsString::from("git")]),
+            Box::new([workspace.clone()]),
+            None,
+        );
+        // Verified live: an outside hooks dir runs its hooks on commit.
+        assert!(grant_covers(
+            &approved,
+            &config_argv("-c", &format!("core.hooksPath={}", hooks.display())),
+            &workspace
+        ));
+        assert!(!grant_covers(
+            &approved,
+            &config_argv("-c", &format!("core.hooksPath={}", outside.display())),
+            &workspace
+        ));
+        assert!(!grant_covers(
+            &approved,
+            &config_argv("-c", "core.hooksPath=hooks"),
+            &workspace
+        ));
+        assert!(!grant_covers(
+            &approved,
+            &config_argv("-c", &format!("include.path={}", nested.display())),
+            &workspace
+        ));
+        assert!(!grant_covers(
+            &approved,
+            &config_argv("-c", "includeIf.gitdir:/work/.path=/tmp/inc"),
+            &workspace
+        ));
+    }
+    #[test]
+    fn git_config_env_keys_fail_closed() {
+        fn config_argv(flag: &str, kv: &str) -> Vec<std::ffi::OsString> {
+            vec!["git".into(), flag.into(), kv.into(), "status".into()]
+        }
+        let temp = tempfile::tempdir().expect("temporary grant roots");
+        let workspace = temp.path().join("agent-workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let approved = Approved::new(
+            CallId::new("config-env-grant"),
+            None,
+            Box::new([std::ffi::OsString::from("git")]),
+            Box::new([workspace.clone()]),
+            None,
+        );
+        assert!(!grant_covers(
+            &approved,
+            &config_argv("--config-env", "core.worktree=HOME"),
+            &workspace
+        ));
+        let mut config_env_equals = std::ffi::OsString::from("--config-env=");
+        config_env_equals.push("core.worktree=HOME");
+        assert!(!grant_covers(
+            &approved,
+            &["git".into(), config_env_equals, "status".into()],
+            &workspace
+        ));
+        assert!(!grant_covers(
+            &approved,
+            &config_argv("--config-env", "core.bare=FLAG"),
+            &workspace
+        ));
+        assert!(grant_covers(
+            &approved,
+            &config_argv("--config-env", "advice.detachedHead=FLAG"),
+            &workspace
+        ));
+        // The env value is just a name here, so redirect-capable keys fail
+        // closed however the variable is spelled.
+        assert!(!grant_covers(
+            &approved,
+            &config_argv("--config-env", "core.hooksPath=E"),
+            &workspace
+        ));
+        assert!(!grant_covers(
+            &approved,
+            &config_argv("--config-env", "include.path=E"),
+            &workspace
+        ));
+    }
+    #[test]
+    fn git_env_relay_and_files_fail_closed() {
+        let temp = tempfile::tempdir().expect("temporary grant roots");
+        let workspace = temp.path().join("agent-workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let roots = [workspace.clone()];
+        let git: Vec<std::ffi::OsString> = vec!["git".into(), "status".into()];
+        let pair = |key: &str, value: &str| {
+            (
+                std::ffi::OsString::from(key),
+                std::ffi::OsString::from(value),
+            )
+        };
+        // The internal `-c` relay channel is never legitimate top-level.
+        assert!(!git_env_in_roots(
+            &git,
+            &[pair("GIT_CONFIG_PARAMETERS", "'user.name=agent'")],
+            &workspace,
+            &roots
+        ));
+        assert!(git_env_in_roots(
+            &git,
+            &[pair("GIT_CONFIG_PARAMETERS", "")],
+            &workspace,
+            &roots
+        ));
+        // Alternate config files load before argv config: fail closed.
+        assert!(!git_env_in_roots(
+            &git,
+            &[pair("GIT_CONFIG_GLOBAL", "/outside/gitconfig")],
+            &workspace,
+            &roots
+        ));
+        assert!(!git_env_in_roots(
+            &git,
+            &[pair("GIT_CONFIG_SYSTEM", "/outside/gitconfig")],
+            &workspace,
+            &roots
+        ));
+    }
+    #[test]
+    fn git_spawn_gate_ignores_approval_shape() {
+        // Both spawn doors apply this helper with no prefix input: scoped,
+        // one-shot, and allow-all approvals all deny the same escapes.
+        let temp = tempfile::tempdir().expect("temporary grant roots");
+        let outer = temp.path().join("outer-repo");
+        let workspace = outer.join("agent-workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let roots = [workspace.clone()];
+        let outside = outer.as_os_str().to_os_string();
+        let mut git_dir = std::ffi::OsString::from("--git-dir=");
+        git_dir.push(&outside);
+        let argv: Vec<std::ffi::OsString> = vec!["git".into(), git_dir, "status".into()];
+        assert!(!git_spawn_in_roots(&argv, &[], &workspace, &roots));
+        let git: Vec<std::ffi::OsString> = vec!["git".into(), "status".into()];
+        assert!(git_spawn_in_roots(&git, &[], &workspace, &roots));
+        assert!(!git_spawn_in_roots(
+            &git,
+            &[(std::ffi::OsString::from("GIT_DIR"), outside.clone())],
+            &workspace,
+            &roots
+        ));
+    }
+    #[test]
+    fn git_env_duplicate_keys_use_the_last_match() {
+        // Later duplicates win in the child (`Command::envs` overwrites), so
+        // a benign first count cannot mask a hostile later one, and vice
+        // versa. The per-variable loop already denies on any hostile entry.
+        let temp = tempfile::tempdir().expect("temporary grant roots");
+        let outer = temp.path().join("outer-repo");
+        let workspace = outer.join("agent-workspace");
+        let outside = outer.join("outside");
+        for dir in [&workspace, &outside] {
+            std::fs::create_dir_all(dir).expect("grant fixture directory");
+        }
+        let roots = [workspace.clone()];
+        let git: Vec<std::ffi::OsString> = vec!["git".into(), "status".into()];
+        let pair = |key: &str, value: &str| {
+            (
+                std::ffi::OsString::from(key),
+                std::ffi::OsString::from(value),
+            )
+        };
+        assert!(!git_env_in_roots(
+            &git,
+            &[
+                pair("GIT_CONFIG_COUNT", "1"),
+                pair("GIT_CONFIG_KEY_0", "user.name"),
+                pair("GIT_CONFIG_VALUE_0", "agent"),
+                pair("GIT_CONFIG_COUNT", "2"),
+                pair("GIT_CONFIG_KEY_1", "core.bare"),
+                pair("GIT_CONFIG_VALUE_1", "true"),
+            ],
+            &workspace,
+            &roots
+        ));
+        assert!(git_env_in_roots(
+            &git,
+            &[
+                pair("GIT_CONFIG_COUNT", "1"),
+                pair("GIT_CONFIG_KEY_0", "core.bare"),
+                pair("GIT_CONFIG_VALUE_0", "true"),
+                pair("GIT_CONFIG_COUNT", "1"),
+                pair("GIT_CONFIG_KEY_0", "user.name"),
+                pair("GIT_CONFIG_VALUE_0", "agent"),
+            ],
+            &workspace,
+            &roots
+        ));
+        assert!(!git_env_in_roots(
+            &git,
+            &[
+                pair("GIT_DIR", ".git"),
+                (
+                    std::ffi::OsString::from("GIT_DIR"),
+                    outside.as_os_str().to_os_string()
+                ),
+            ],
+            &workspace,
+            &roots
+        ));
+    }
+    #[test]
+    fn git_subcommand_flags_are_not_global_selectors() {
+        // Git applies wrapper selectors only before the subcommand: later
+        // tokens are the subcommand's own flags, so ordinary in-root
+        // workflows (`switch -c`, `grep -c`) keep working. Post-command
+        // wrapper spellings are rejected by git itself, hence benign.
+        let temp = tempfile::tempdir().expect("temporary grant roots");
+        let outer = temp.path().join("outer-repo");
+        let workspace = outer.join("agent-workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let approved = Approved::new(
+            CallId::new("subcommand-grant"),
+            None,
+            Box::new([std::ffi::OsString::from("git")]),
+            Box::new([workspace.clone()]),
+            None,
+        );
+        for argv in [
+            vec!["git".into(), "switch".into(), "-c".into(), "feature".into()],
+            vec!["git".into(), "grep".into(), "-c".into(), "pattern".into()],
+            vec!["git".into(), "grep".into(), "-C3".into(), "pattern".into()],
+            vec![
+                "git".into(),
+                "status".into(),
+                "--git-dir".into(),
+                "x".into(),
+            ],
+        ] {
+            assert!(grant_covers(&approved, &argv, &workspace));
+        }
+        // Pre-command selectors still gate: the stop only narrows the scan.
+        let mut outside_git_dir = std::ffi::OsString::from("--git-dir=");
+        outside_git_dir.push(outer.as_os_str());
+        assert!(!grant_covers(
+            &approved,
+            &["git".into(), outside_git_dir, "status".into()],
+            &workspace
+        ));
+    }
+    #[test]
+    fn git_env_names_match_case_insensitively() {
+        // Windows resolves environment names case-insensitively, so lowercase
+        // spellings reach git under the canonical names there.
+        let temp = tempfile::tempdir().expect("temporary grant roots");
+        let outer = temp.path().join("outer-repo");
+        let workspace = outer.join("agent-workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let roots = [workspace.clone()];
+        let git: Vec<std::ffi::OsString> = vec!["git".into(), "status".into()];
+        let pair = |key: &str, value: &str| {
+            (
+                std::ffi::OsString::from(key),
+                std::ffi::OsString::from(value),
+            )
+        };
+        assert!(!git_env_in_roots(
+            &git,
+            &[pair("git_dir", "/outside/repo")],
+            &workspace,
+            &roots
+        ));
+        assert!(!git_env_in_roots(
+            &git,
+            &[pair("Git_Namespace", "agent")],
+            &workspace,
+            &roots
+        ));
+        assert!(!git_env_in_roots(
+            &git,
+            &[
+                pair("git_config_count", "1"),
+                pair("git_config_key_0", "core.bare"),
+                pair("git_config_value_0", "true"),
+            ],
+            &workspace,
+            &roots
+        ));
+    }
+    #[test]
+    fn git_program_and_object_env_close_remnants() {
+        // `GIT.EXE` invokes git on Windows: the gates cannot key on exact
+        // `git`. Object store and index locations select repository
+        // components, so they confine like `GIT_DIR`; the alternates list
+        // cannot be confined element-wise and denies instead.
+        let temp = tempfile::tempdir().expect("temporary grant roots");
+        let outer = temp.path().join("outer-repo");
+        let workspace = outer.join("agent-workspace");
+        let objects = workspace.join("objects");
+        std::fs::create_dir_all(&objects).expect("objects directory");
+        let roots = [workspace.clone()];
+        let git: Vec<std::ffi::OsString> = vec!["git".into(), "status".into()];
+        let pair = |key: &str, value: &str| {
+            (
+                std::ffi::OsString::from(key),
+                std::ffi::OsString::from(value),
+            )
+        };
+        let outside = outer.join("outside");
+        std::fs::create_dir_all(&outside).expect("outside directory");
+        let git_exe: Vec<std::ffi::OsString> =
+            vec!["GIT.EXE".into(), "--namespace".into(), "x".into()];
+        assert!(!git_spawn_in_roots(&git_exe, &[], &workspace, &roots));
+        let git_exe_ok: Vec<std::ffi::OsString> = vec!["GIT.EXE".into(), "status".into()];
+        assert!(git_spawn_in_roots(&git_exe_ok, &[], &workspace, &roots));
+        assert!(git_env_in_roots(
+            &git,
+            &[pair("GIT_OBJECT_DIRECTORY", "objects")],
+            &workspace,
+            &roots
+        ));
+        assert!(!git_env_in_roots(
+            &git,
+            &[pair(
+                "GIT_OBJECT_DIRECTORY",
+                outside.to_string_lossy().as_ref()
+            )],
+            &workspace,
+            &roots
+        ));
+        assert!(!git_env_in_roots(
+            &git,
+            &[pair(
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                outside.to_string_lossy().as_ref()
+            )],
+            &workspace,
+            &roots
+        ));
     }
 }

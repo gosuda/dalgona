@@ -6,11 +6,17 @@ use std::error::Error;
 
 use dal_core::Timestamp;
 
-use super::super::{ControllerMode, GoalStatus};
+use super::super::monitor::{InflightCounts, inflight_counts};
+use super::super::{ControllerMode, GoalStatus, StopKind};
 use super::ops::{
-    GoalCommand, GoalScope, apply_goal_command, create_goal, get_goal, parse_goal_command,
+    GoalCommand, GoalScope, TodoSummary, UpdateTarget, apply_goal_command, clear_recovery_doc,
+    continuation_line, continuation_unknown, continuation_unsaved, create_goal, format_duration,
+    get_goal, parse_goal_command, salvage_next_goal, update_goal,
 };
-use super::policy::{PromptKind, on_user_prompt, progress_signature, record_goal_turn};
+use super::policy::{
+    DenyReason, GoalPath, PromptKind, Verdict, VerdictInput, on_user_prompt, progress_signature,
+    provider_block_active, record_delivery, record_turn_output, verdict,
+};
 use super::prompt::{build_prompt, escape_objective};
 use super::sidecar::{BlockedReason, Goal, GoalSidecar, decode_sidecar, encode_sidecar};
 
@@ -51,6 +57,23 @@ fn active_sidecar() -> Result<(GoalSidecar, GoalScope<'static>), Box<dyn Error>>
         ts("2026-09-25T10:15:30.123Z")?,
     )?;
     Ok((sidecar, ctx))
+}
+
+/// One verdict input over an active goal with idle defaults.
+fn base_input<'a>(goal: &'a Goal, inflight: &'a InflightCounts) -> VerdictInput<'a> {
+    VerdictInput {
+        goal,
+        path: GoalPath::AfterTurn,
+        idle: true,
+        pending_user_messages: false,
+        continuation_pending: false,
+        last_turn_context_overflow: false,
+        last_stop: StopKind::Completed,
+        signature: "g1:0/0:abcd1234",
+        open_todos: 0,
+        total_todos: 0,
+        inflight,
+    }
 }
 
 #[test]
@@ -195,6 +218,220 @@ fn create_goal_reports_exact_texts() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn assert_update_audit_errors(
+    sidecar: &mut GoalSidecar,
+    ctx: &GoalScope<'_>,
+    now: Timestamp,
+    todos: &TodoSummary,
+    quiet: &InflightCounts,
+) {
+    let busy_todos = TodoSummary {
+        open: 2,
+        total: 3,
+        first_titles: vec!["parse".into(), "test".into()],
+    };
+    assert_eq!(
+        update_goal(
+            sidecar,
+            ctx,
+            UpdateTarget::Complete,
+            None,
+            &busy_todos,
+            quiet,
+            now
+        )
+        .unwrap_err()
+        .to_string(),
+        "update_goal: 2 todo tasks are still open: parse; test."
+    );
+    let busy = inflight_counts(1, 0, 0, false, false);
+    assert_eq!(
+        update_goal(
+            sidecar,
+            ctx,
+            UpdateTarget::Blocked,
+            Some("need a fact"),
+            todos,
+            &busy,
+            now
+        )
+        .unwrap_err()
+        .to_string(),
+        "update_goal: blocked is rejected while 1 job can still deliver. End the turn and let them wake you."
+    );
+    assert_eq!(
+        update_goal(
+            sidecar,
+            ctx,
+            UpdateTarget::Blocked,
+            Some("need a fact"),
+            todos,
+            quiet,
+            now
+        )
+        .unwrap_err()
+        .to_string(),
+        "update_goal: blocked is rejected until the goal has had 3 goal turns since it became active or the user last spoke; it has had 0."
+    );
+}
+
+#[test]
+fn update_goal_reports_exact_ordered_errors() {
+    let now = ts("2026-09-25T10:15:30.123Z").expect("timestamp literal");
+    let (mut sidecar, ctx) = active_sidecar().expect("active goal");
+    let todos = TodoSummary {
+        open: 0,
+        total: 0,
+        first_titles: Vec::new(),
+    };
+    let quiet = InflightCounts::default();
+    assert_eq!(
+        update_goal(
+            &mut empty_sidecar("s1"),
+            &ctx,
+            UpdateTarget::Complete,
+            None,
+            &todos,
+            &quiet,
+            now
+        )
+        .unwrap_err()
+        .to_string(),
+        "update_goal: no goal in this session."
+    );
+    sidecar.goal.as_mut().expect("goal missing").status = GoalStatus::Paused;
+    assert_eq!(
+        update_goal(
+            &mut sidecar,
+            &ctx,
+            UpdateTarget::Complete,
+            None,
+            &todos,
+            &quiet,
+            now
+        )
+        .unwrap_err()
+        .to_string(),
+        "update_goal: the goal is paused, not active."
+    );
+    sidecar.goal.as_mut().expect("goal missing").status = GoalStatus::Active;
+    assert_eq!(
+        update_goal(
+            &mut sidecar,
+            &ctx,
+            UpdateTarget::Blocked,
+            None,
+            &todos,
+            &quiet,
+            now
+        )
+        .unwrap_err()
+        .to_string(),
+        "update_goal: reason is required when status is blocked."
+    );
+    assert_eq!(
+        update_goal(
+            &mut sidecar,
+            &ctx,
+            UpdateTarget::Blocked,
+            Some("   "),
+            &todos,
+            &quiet,
+            now
+        )
+        .unwrap_err()
+        .to_string(),
+        "update_goal: reason is required when status is blocked."
+    );
+    assert_eq!(
+        update_goal(
+            &mut sidecar,
+            &ctx,
+            UpdateTarget::Complete,
+            Some("done-ish"),
+            &todos,
+            &quiet,
+            now
+        )
+        .unwrap_err()
+        .to_string(),
+        "update_goal: reason must not be given when status is complete."
+    );
+    assert_update_audit_errors(&mut sidecar, &ctx, now, &todos, &quiet);
+}
+
+#[test]
+fn blocked_parts_list_status_order_and_asks_alone() -> Result<(), Box<dyn Error>> {
+    let now = ts("2026-09-25T10:15:30.123Z")?;
+    let (mut sidecar, ctx) = active_sidecar()?;
+    let todos = TodoSummary {
+        open: 0,
+        total: 0,
+        first_titles: Vec::new(),
+    };
+    let mixed = inflight_counts(2, 1, 0, true, true);
+    assert_eq!(
+        update_goal(
+            &mut sidecar,
+            &ctx,
+            UpdateTarget::Blocked,
+            Some("x"),
+            &todos,
+            &mixed,
+            now
+        )
+        .unwrap_err()
+        .to_string(),
+        "update_goal: blocked is rejected while 2 jobs · 1 monitor · goal · loop guard can still deliver. End the turn and let them wake you."
+    );
+    let asks_only = inflight_counts(0, 0, 3, false, false);
+    assert_eq!(
+        update_goal(
+            &mut sidecar,
+            &ctx,
+            UpdateTarget::Blocked,
+            Some("x"),
+            &todos,
+            &asks_only,
+            now
+        )
+        .unwrap_err()
+        .to_string(),
+        "update_goal: blocked is rejected while asks can still deliver. End the turn and let them wake you."
+    );
+    Ok(())
+}
+
+#[test]
+fn blocked_success_is_nonmechanical_with_reason_line() -> Result<(), Box<dyn Error>> {
+    let now = ts("2026-09-25T10:15:30.123Z")?;
+    let (mut sidecar, ctx) = active_sidecar()?;
+    sidecar.goal.as_mut().ok_or("goal missing")?.turns = 3;
+    let todos = TodoSummary {
+        open: 0,
+        total: 0,
+        first_titles: Vec::new(),
+    };
+    let reply = update_goal(
+        &mut sidecar,
+        &ctx,
+        UpdateTarget::Blocked,
+        Some("waiting on the user"),
+        &todos,
+        &InflightCounts::default(),
+        now,
+    )?;
+    assert!(reply.contains("goal g1: blocked"));
+    assert!(reply.contains("blocked: waiting on the user"));
+    let goal = sidecar.goal.as_ref().ok_or("goal missing")?;
+    assert_eq!(goal.status, GoalStatus::Blocked);
+    assert_eq!(
+        goal.blocked.as_ref().map(|blocked| blocked.mechanical),
+        Some(false)
+    );
+    Ok(())
+}
+
 #[test]
 fn goal_commands_reply_exactly() -> Result<(), Box<dyn Error>> {
     let now = ts("2026-09-25T10:15:30.123Z")?;
@@ -235,19 +472,147 @@ fn goal_commands_reply_exactly() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn pause_on_complete_reports_the_update_error() -> Result<(), Box<dyn Error>> {
+    let now = ts("2026-09-25T10:15:30.123Z")?;
+    let (mut sidecar, ctx) = active_sidecar()?;
+    let todos = TodoSummary {
+        open: 0,
+        total: 0,
+        first_titles: Vec::new(),
+    };
+    update_goal(
+        &mut sidecar,
+        &ctx,
+        UpdateTarget::Complete,
+        None,
+        &todos,
+        &InflightCounts::default(),
+        now,
+    )?;
+    assert_eq!(
+        apply_goal_command(&mut sidecar, &ctx, &GoalCommand::Pause, now),
+        "update_goal: the goal is complete, not active."
+    );
+    Ok(())
+}
+
+#[test]
+fn verdict_denies_in_plan_order() -> Result<(), Box<dyn Error>> {
+    let (sidecar, _) = active_sidecar()?;
+    let quiet = InflightCounts::default();
+    let goal = sidecar.goal.as_ref().ok_or("goal missing")?;
+    assert_eq!(
+        verdict(&base_input(goal, &quiet)),
+        Verdict::Continue {
+            prompt: PromptKind::Full,
+            stall: false,
+        }
+    );
+    let goal = sidecar.goal.as_ref().ok_or("goal missing")?;
+    let mut input = base_input(goal, &quiet);
+    input.last_turn_context_overflow = true;
+    assert_eq!(verdict(&input), Verdict::Deny(DenyReason::ContextOverflow));
+    let goal = sidecar.goal.as_ref().ok_or("goal missing")?;
+    let mut input = base_input(goal, &quiet);
+    input.pending_user_messages = true;
+    assert_eq!(verdict(&input), Verdict::Deny(DenyReason::NotEligible));
+    let goal = sidecar.goal.as_ref().ok_or("goal missing")?;
+    let mut input = base_input(goal, &quiet);
+    input.continuation_pending = true;
+    assert_eq!(verdict(&input), Verdict::Deny(DenyReason::SingleFlight));
+    Ok(())
+}
+
+#[test]
+fn verdict_tracks_repetition_unattended_and_cap() -> Result<(), Box<dyn Error>> {
+    let (mut sidecar, _) = active_sidecar()?;
+    let quiet = InflightCounts::default();
+    {
+        let goal = sidecar.goal.as_mut().ok_or("goal missing")?;
+        goal.recent_hashes = vec!["h".into(), "h".into(), "h".into()];
+    }
+    let goal = sidecar.goal.as_ref().ok_or("goal missing")?;
+    assert_eq!(
+        verdict(&base_input(goal, &quiet)),
+        Verdict::Deny(DenyReason::Repetition)
+    );
+    assert_eq!(
+        DenyReason::Repetition.mechanical_reason(),
+        Some("repeated assistant output")
+    );
+    assert_eq!(DenyReason::Stale.mechanical_reason(), None);
+    assert_eq!(DenyReason::SingleFlight.mechanical_reason(), None);
+    {
+        let goal = sidecar.goal.as_mut().ok_or("goal missing")?;
+        goal.recent_hashes.clear();
+        goal.unattended = 150;
+    }
+    let goal = sidecar.goal.as_ref().ok_or("goal missing")?;
+    let mut input = base_input(goal, &quiet);
+    input.path = GoalPath::Idle;
+    assert_eq!(verdict(&input), Verdict::Deny(DenyReason::Unattended));
+    {
+        let goal = sidecar.goal.as_mut().ok_or("goal missing")?;
+        goal.unattended = 0;
+        goal.consecutive = 8;
+    }
+    let goal = sidecar.goal.as_ref().ok_or("goal missing")?;
+    let mut input = base_input(goal, &quiet);
+    input.path = GoalPath::Recovery;
+    input.idle = false;
+    input.last_stop = StopKind::Error;
+    assert_eq!(verdict(&input), Verdict::Deny(DenyReason::Cap));
+    Ok(())
+}
+
+#[test]
+fn stale_returns_without_state_and_length_recovers_once() -> Result<(), Box<dyn Error>> {
+    let (mut sidecar, _) = active_sidecar()?;
+    let quiet = InflightCounts::default();
+    {
+        let goal = sidecar.goal.as_mut().ok_or("goal missing")?;
+        goal.last_signature = Some("g1:0/0:abcd1234".into());
+    }
+    let goal = sidecar.goal.as_ref().ok_or("goal missing")?;
+    assert_eq!(
+        verdict(&base_input(goal, &quiet)),
+        Verdict::Deny(DenyReason::Stale)
+    );
+    {
+        let goal = sidecar.goal.as_mut().ok_or("goal missing")?;
+        goal.last_signature = None;
+        goal.toolless_streak = 3;
+    }
+    let goal = sidecar.goal.as_ref().ok_or("goal missing")?;
+    let mut input = base_input(goal, &quiet);
+    input.path = GoalPath::Idle;
+    input.last_stop = StopKind::Length;
+    assert_eq!(
+        verdict(&input),
+        Verdict::Continue {
+            prompt: PromptKind::Minimal,
+            stall: true,
+        }
+    );
+    {
+        let goal = sidecar.goal.as_mut().ok_or("goal missing")?;
+        goal.length_recoveries = 1;
+    }
+    let goal = sidecar.goal.as_ref().ok_or("goal missing")?;
+    let mut input = base_input(goal, &quiet);
+    input.path = GoalPath::Idle;
+    input.last_stop = StopKind::Length;
+    assert_eq!(verdict(&input), Verdict::Deny(DenyReason::LengthExhausted));
+    Ok(())
+}
+
+#[test]
 fn goal_turn_accounting_resets_consecutive_on_signature_change() -> Result<(), Box<dyn Error>> {
     let (mut sidecar, _) = active_sidecar()?;
     for turn in 0..8 {
         let goal = sidecar.goal.as_mut().ok_or("goal missing")?;
-        record_goal_turn(
-            goal,
-            &format!("output {turn}"),
-            true,
-            10,
-            5,
-            "g1:0/0:same",
-            PromptKind::Full,
-        );
+        record_delivery(goal, "g1:0/0:same", PromptKind::Full);
+        record_turn_output(goal, &format!("output {turn}"), true, 10, 5);
     }
     let goal = sidecar.goal.as_ref().ok_or("goal missing")?;
     assert_eq!(goal.consecutive, 8);
@@ -257,15 +622,8 @@ fn goal_turn_accounting_resets_consecutive_on_signature_change() -> Result<(), B
     assert_eq!(goal.toolless_streak, 0);
     assert_eq!(goal.recent_hashes.len(), 3);
     let goal = sidecar.goal.as_mut().ok_or("goal missing")?;
-    record_goal_turn(
-        goal,
-        "new work",
-        false,
-        1,
-        1,
-        "g1:0/0:changed",
-        PromptKind::Full,
-    );
+    record_delivery(goal, "g1:0/0:changed", PromptKind::Full);
+    record_turn_output(goal, "new work", false, 1, 1);
     let goal = sidecar.goal.as_ref().ok_or("goal missing")?;
     assert_eq!(goal.consecutive, 1);
     assert_eq!(goal.toolless_streak, 1);
@@ -350,5 +708,114 @@ fn prompts_escape_in_order_and_stall_after_three_toolless_turns() -> Result<(), 
     let minimal = build_prompt(goal, PromptKind::Minimal, 2, &[]);
     assert!(minimal.starts_with("Your previous response was cut off"));
     assert_eq!(escape_objective("a&b<c>d"), "a&amp;b&lt;c&gt;d");
+    Ok(())
+}
+
+#[test]
+fn durations_continuations_and_recovery_shape() {
+    assert_eq!(format_duration(48), "48.0s");
+    assert_eq!(format_duration(252), "4m12s");
+    assert_eq!(
+        continuation_line(&ControllerMode::Run),
+        "automatic turns: run"
+    );
+    assert_eq!(
+        continuation_line(&ControllerMode::Paused {
+            reason: "paused by the user"
+        }),
+        "automatic turns: paused (paused by the user)"
+    );
+    assert_eq!(
+        continuation_line(&ControllerMode::Stopped),
+        "automatic turns: stopped. Only /continuation run starts them again."
+    );
+    assert_eq!(
+        continuation_unknown(),
+        "continuation: use run, pause, or stop."
+    );
+    assert_eq!(
+        continuation_unsaved("automatic turns: stopped.", "denied"),
+        "automatic turns: stopped. (not saved: denied)"
+    );
+    assert_eq!(salvage_next_goal(b"{\"next_goal\":7}"), Some(7));
+    assert_eq!(salvage_next_goal(b"broken"), None);
+    let doc = clear_recovery_doc("s9", ControllerMode::Stopped, 3);
+    assert!(doc.ends_with(b"\n"));
+    assert!(String::from_utf8_lossy(&doc).contains("\"controller\":\"stopped\""));
+}
+
+#[test]
+fn verdict_paths_gate_eligibility_stale_and_recovery() -> Result<(), Box<dyn Error>> {
+    let (mut sidecar, _) = active_sidecar()?;
+    let quiet = InflightCounts::default();
+    {
+        let goal = sidecar.goal.as_mut().ok_or("goal missing")?;
+        goal.last_signature = Some("g1:0/0:abcd1234".into());
+    }
+    let goal = sidecar.goal.as_ref().ok_or("goal missing")?;
+    // The user grace behaves like the after-turn path: stale on the same
+    // signature, and it needs a completed or length stop.
+    let mut grace = base_input(goal, &quiet);
+    grace.path = GoalPath::UserGrace;
+    assert_eq!(
+        verdict(&grace),
+        Verdict::Deny(DenyReason::Stale),
+        "the grace is stale on the delivered signature"
+    );
+    grace.last_stop = StopKind::Filter;
+    assert_eq!(
+        verdict(&grace),
+        Verdict::Deny(DenyReason::NotEligible),
+        "the grace continues only a completed or length stop"
+    );
+    grace.last_stop = StopKind::Completed;
+    grace.signature = "g1:0/0:11111111";
+    assert!(
+        matches!(verdict(&grace), Verdict::Continue { .. }),
+        "the grace continues a moved signature"
+    );
+    // Recovery is eligible whatever the last stop, and never stale.
+    let mut recovery = base_input(goal, &quiet);
+    recovery.path = GoalPath::Recovery;
+    recovery.last_stop = StopKind::Error;
+    assert!(
+        matches!(verdict(&recovery), Verdict::Continue { .. }),
+        "recovery continues after the provider error"
+    );
+    // Idle needs an idle session and is never stale.
+    let mut idle = base_input(goal, &quiet);
+    idle.path = GoalPath::Idle;
+    idle.idle = false;
+    assert_eq!(
+        verdict(&idle),
+        Verdict::Deny(DenyReason::NotEligible),
+        "the idle path needs an idle session"
+    );
+    idle.idle = true;
+    assert!(
+        matches!(verdict(&idle), Verdict::Continue { .. }),
+        "the idle path is never stale"
+    );
+    Ok(())
+}
+
+#[test]
+fn provider_block_detects_only_the_mechanical_provider_reason() -> Result<(), Box<dyn Error>> {
+    let (mut sidecar, _) = active_sidecar()?;
+    let goal = sidecar.goal.as_mut().ok_or("goal missing")?;
+    goal.status = GoalStatus::Blocked;
+    goal.blocked = Some(BlockedReason {
+        reason: "provider error ended the turn (retries exhausted)".into(),
+        at: ts("2026-09-25T10:15:30.123Z")?,
+        mechanical: true,
+    });
+    assert!(provider_block_active(goal));
+    goal.blocked.as_mut().ok_or("block missing")?.mechanical = false;
+    assert!(!provider_block_active(goal));
+    goal.blocked.as_mut().ok_or("block missing")?.mechanical = true;
+    goal.blocked.as_mut().ok_or("block missing")?.reason = "waiting on the user".into();
+    assert!(!provider_block_active(goal));
+    goal.status = GoalStatus::Active;
+    assert!(!provider_block_active(goal));
     Ok(())
 }

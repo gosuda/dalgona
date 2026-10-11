@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     ffi::{OsStr, OsString},
     io,
     process::Stdio,
@@ -12,15 +12,15 @@ use dal_core::RawJson;
 use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
 use sonic_rs::JsonValueTrait;
 use tokio::{
-    io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader},
-    process::{ChildStdin, ChildStdout, Command},
-    sync::{Mutex, mpsc},
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    process::{ChildStderr, ChildStdin, ChildStdout, Command},
+    sync::{Mutex, mpsc, watch},
     time::timeout,
 };
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 
 use crate::mcp::{
-    Budgets, McpError, TransportError,
+    Budgets, McpError, STDERR_RING, TransportError, stderr_diagnostic,
     tools::{Key, ServerDecl, resolve_executable},
 };
 
@@ -43,7 +43,10 @@ pub(crate) struct StdioTransport {
     child: Arc<Mutex<Box<dyn ChildWrapper>>>,
     stdin: Arc<Mutex<Option<ChildStdin>>>,
     pending: Pending,
+    stderr_tail: Arc<Mutex<VecDeque<u8>>>,
+    stderr_done: watch::Receiver<bool>,
     reader_task: AbortOnDropHandle<()>,
+    stderr_task: AbortOnDropHandle<()>,
     cancel: CancellationToken,
 }
 
@@ -69,7 +72,7 @@ impl StdioTransport {
         let stdin = child.stdin().take();
         let stdout = child.stdout().take();
         let stderr = child.stderr().take();
-        let (Some(stdin), Some(stdout), Some(_stderr)) = (stdin, stdout, stderr) else {
+        let (Some(stdin), Some(stdout), Some(stderr)) = (stdin, stdout, stderr) else {
             let _ = child.start_kill();
             let _ = child.wait().await;
             return Err(McpError::Start {
@@ -81,25 +84,42 @@ impl StdioTransport {
         let child = Arc::new(Mutex::new(child));
         let stdin = Arc::new(Mutex::new(Some(stdin)));
         let pending = Arc::new(Mutex::new(HashMap::new()));
+        let stderr_tail = Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_RING)));
+        let (stderr_done_tx, stderr_done_rx) = watch::channel(false);
         let cancel = CancellationToken::new();
         #[expect(
             clippy::disallowed_methods,
-            reason = "stdio server owns the abort-on-drop stdout drain"
+            reason = "stdio server owns the abort-on-drop reader task"
         )]
         let reader_task = AbortOnDropHandle::new(tokio::spawn(read_stdout(
             stdout,
             Arc::clone(&child),
             Arc::clone(&stdin),
             Arc::clone(&pending),
+            Arc::clone(&stderr_tail),
+            stderr_done_rx.clone(),
             key.clone(),
             cancel.clone(),
         )));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "stdio server owns the abort-on-drop stderr drain"
+        )]
+        let stderr_task = AbortOnDropHandle::new(tokio::spawn(read_stderr(
+            stderr,
+            Arc::clone(&stderr_tail),
+            stderr_done_tx,
+        )));
+
         Ok(Self {
             key,
             child,
             stdin,
             pending,
+            stderr_tail,
+            stderr_done: stderr_done_rx,
             reader_task,
+            stderr_task,
             cancel,
         })
     }
@@ -145,18 +165,14 @@ impl StdioTransport {
         let write = async {
             let mut stdin = self.stdin.lock().await;
             let Some(stdin) = stdin.as_mut() else {
-                return Err(McpError::Exited {
-                    key: self.key.display(),
-                    code: process_status(&self.child).await,
-                });
+                let code = wait_child(&self.child, cancel).await;
+                return Err(self.exited_error(code).await);
             };
             if stdin.write_all(body.as_str().as_bytes()).await.is_err()
                 || stdin.write_all(b"\n").await.is_err()
             {
-                return Err(McpError::Exited {
-                    key: self.key.display(),
-                    code: process_status(&self.child).await,
-                });
+                let code = wait_child(&self.child, cancel).await;
+                return Err(self.exited_error(code).await);
             }
             Ok(())
         };
@@ -177,6 +193,21 @@ impl StdioTransport {
         self.pending.lock().await.remove(&id);
     }
 
+    /// Returns the bounded stderr excerpt retained for crash diagnostics.
+    pub(crate) async fn stderr_excerpt(&self) -> String {
+        read_stderr_excerpt(&self.stderr_tail).await
+    }
+    async fn exited_error(&self, code: i32) -> McpError {
+        let mut stderr_done = self.stderr_done.clone();
+        wait_for_stderr(&mut stderr_done).await;
+        let excerpt = self.stderr_excerpt().await;
+        McpError::Exited {
+            key: self.key.display(),
+            code,
+            diagnostic: stderr_diagnostic(&excerpt),
+        }
+    }
+
     /// Closes stdin, waits for the grace period, then kills and reaps the process tree.
     pub(crate) async fn shutdown(&self, grace: Duration) -> Result<(), McpError> {
         clear_pending(&self.pending).await;
@@ -184,28 +215,24 @@ impl StdioTransport {
         self.stdin.lock().await.take();
 
         let mut child = self.child.lock().await;
-        let result = match timeout(grace, child.wait()).await {
+        let outcome = match timeout(grace, child.wait()).await {
             Ok(Ok(_)) => Ok(()),
-            Ok(Err(_)) => Err(McpError::Exited {
-                key: self.key.display(),
-                code: -1,
-            }),
+            Ok(Err(_)) => Err(-1),
             Err(_) => match child.start_kill() {
                 Ok(()) => match timeout(POST_KILL_WAIT, child.wait()).await {
                     Ok(Ok(_)) => Ok(()),
-                    Ok(Err(_)) | Err(_) => Err(McpError::Exited {
-                        key: self.key.display(),
-                        code: -1,
-                    }),
+                    Ok(Err(_)) | Err(_) => Err(-1),
                 },
-                Err(_) => Err(McpError::Exited {
-                    key: self.key.display(),
-                    code: -1,
-                }),
+                Err(_) => Err(-1),
             },
         };
         drop(child);
         self.reader_task.abort();
+        let result = match outcome {
+            Ok(()) => Ok(()),
+            Err(code) => Err(self.exited_error(code).await),
+        };
+        self.stderr_task.abort();
         result
     }
 
@@ -218,10 +245,8 @@ impl StdioTransport {
         let write = async {
             let mut stdin = self.stdin.lock().await;
             let Some(stdin) = stdin.as_mut() else {
-                return Err(TransportError::Mcp(McpError::Exited {
-                    key: self.key.display(),
-                    code: process_status(&self.child).await,
-                }));
+                let code = wait_child(&self.child, cancel).await;
+                return Err(TransportError::Mcp(self.exited_error(code).await));
             };
             stdin
                 .write_all(body.as_str().as_bytes())
@@ -278,9 +303,46 @@ fn exit_code(status: std::process::ExitStatus) -> i32 {
     }
 }
 
-async fn process_status(child: &Arc<Mutex<Box<dyn ChildWrapper>>>) -> i32 {
+async fn wait_child(child: &Arc<Mutex<Box<dyn ChildWrapper>>>, cancel: &CancellationToken) -> i32 {
     let mut child = child.lock().await;
-    child.try_wait().ok().flatten().map_or(-1, exit_code)
+    tokio::select! {
+        () = cancel.cancelled() => -1,
+        result = timeout(POST_KILL_WAIT, child.wait()) => match result {
+            Ok(Ok(status)) => exit_code(status),
+            Ok(Err(_)) | Err(_) => -1,
+        },
+    }
+}
+async fn read_stderr_excerpt(tail: &Arc<Mutex<VecDeque<u8>>>) -> String {
+    let mut tail = tail.lock().await;
+    String::from_utf8_lossy(tail.make_contiguous()).into_owned()
+}
+
+async fn wait_for_stderr(done: &mut watch::Receiver<bool>) {
+    if *done.borrow() {
+        return;
+    }
+    let _ = timeout(POST_KILL_WAIT, async {
+        while done.changed().await.is_ok() && !*done.borrow() {}
+    })
+    .await;
+}
+
+async fn crash_error(
+    child: &Arc<Mutex<Box<dyn ChildWrapper>>>,
+    stderr_tail: &Arc<Mutex<VecDeque<u8>>>,
+    stderr_done: &mut watch::Receiver<bool>,
+    key: &Key,
+    cancel: &CancellationToken,
+) -> McpError {
+    let code = wait_child(child, cancel).await;
+    wait_for_stderr(stderr_done).await;
+    let excerpt = read_stderr_excerpt(stderr_tail).await;
+    McpError::Exited {
+        key: key.display(),
+        code,
+        diagnostic: stderr_diagnostic(&excerpt),
+    }
 }
 
 /// Resolves the declared argv[0] on the captured PATH snapshot.
@@ -368,11 +430,17 @@ async fn spawn_child(
         })
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "stdio reader receives the process-owned channels and cancellation token"
+)]
 async fn read_stdout(
     stdout: ChildStdout,
     child: Arc<Mutex<Box<dyn ChildWrapper>>>,
     stdin: Arc<Mutex<Option<ChildStdin>>>,
     pending: Pending,
+    stderr_tail: Arc<Mutex<VecDeque<u8>>>,
+    mut stderr_done: watch::Receiver<bool>,
     key: Key,
     cancel: CancellationToken,
 ) {
@@ -385,14 +453,9 @@ async fn read_stdout(
         let line = match line {
             Ok(Some(line)) => line,
             Ok(None) => {
-                fail_pending(
-                    &pending,
-                    McpError::Exited {
-                        key: key.display(),
-                        code: process_status(&child).await,
-                    },
-                )
-                .await;
+                let error =
+                    crash_error(&child, &stderr_tail, &mut stderr_done, &key, &cancel).await;
+                fail_pending(&pending, error).await;
                 return;
             }
             Err(_) => {
@@ -440,14 +503,9 @@ async fn read_stdout(
                 && (stdin.write_all(response.as_bytes()).await.is_err()
                     || stdin.write_all(b"\n").await.is_err())
             {
-                fail_pending(
-                    &pending,
-                    McpError::Exited {
-                        key: key.display(),
-                        code: -1,
-                    },
-                )
-                .await;
+                let error =
+                    crash_error(&child, &stderr_tail, &mut stderr_done, &key, &cancel).await;
+                fail_pending(&pending, error).await;
                 return;
             }
             continue;
@@ -564,4 +622,28 @@ async fn fail_pending(pending: &Pending, error: McpError) {
 
 async fn clear_pending(pending: &Pending) {
     pending.lock().await.clear();
+}
+
+async fn read_stderr(
+    mut stderr: ChildStderr,
+    tail: Arc<Mutex<VecDeque<u8>>>,
+    done: watch::Sender<bool>,
+) {
+    let mut buffer = [0_u8; 4096];
+    loop {
+        let count = match stderr.read(&mut buffer).await {
+            Ok(0) | Err(_) => break,
+            Ok(count) => count,
+        };
+        let mut tail = tail.lock().await;
+        if count >= STDERR_RING {
+            tail.clear();
+            tail.extend(&buffer[count - STDERR_RING..count]);
+            continue;
+        }
+        let excess = tail.len().saturating_add(count).saturating_sub(STDERR_RING);
+        tail.drain(..excess);
+        tail.extend(&buffer[..count]);
+    }
+    let _ = done.send(true);
 }

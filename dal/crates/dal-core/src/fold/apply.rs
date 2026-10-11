@@ -1,8 +1,10 @@
 use super::helpers::{HookTarget, StreamEnd, invalid};
+use super::round::Settlement;
 use super::types::{QuestionRef, QueuedInput};
 use super::{
-    Answer, CompactLimits, Effect, Emit, Event, Family, JobId, JobKind, JobOutcome, Limits,
-    ModelRoute, Name, Part, Phase, Question, Rejection, Reply, Request, RequestId, Session, TurnId,
+    Answer, ClientId, CompactLimits, Effect, Emit, Event, Family, JobId, JobKind, JobOutcome,
+    Limits, ModelRoute, Name, Part, Phase, Question, Record, Rejection, Reply, Request, RequestId,
+    Session, TurnId, UpdateKind,
 };
 
 impl Session {
@@ -35,26 +37,16 @@ impl Session {
                 who,
                 purpose,
                 usage,
-            } => {
-                if matches!(&self.phase, Phase::Running { .. }) {
-                    self.turn_totals.add_usage(usage)?;
-                }
-                emit.records.push(super::Record::Inferred {
-                    at,
-                    who,
-                    purpose,
-                    usage,
-                });
-            }
+            } => return self.inferred(at, who, purpose, usage, emit),
             Event::RequestOpened { request } => self.request_opened(&request),
             Event::GrantResolved {
                 request,
                 answer,
                 by,
                 was_default,
-            } => return self.grant_resolved(request, &answer, by.is_some(), was_default),
-            Event::JobStarted { job, kind } => self.job_started(job, kind),
-            Event::JobSettled { job, outcome } => self.job_settled(job, outcome),
+            } => return self.grant_resolved(request, &answer, by, was_default, now, emit),
+            Event::JobStarted { job, kind } => self.job_started(job, kind, emit),
+            Event::JobSettled { job, outcome } => self.job_settled(job, outcome, emit),
             Event::Wake {
                 text,
                 sources,
@@ -95,7 +87,15 @@ impl Session {
                 turn,
                 call,
                 outcome,
-            } => return self.settled(turn, &call, outcome, now, emit, effects),
+                elapsed_ms,
+            } => {
+                let settlement = Settlement {
+                    call,
+                    outcome,
+                    elapsed_ms,
+                };
+                return self.settled(turn, settlement, now, emit, effects);
+            }
             Event::Boundary { turn } => return self.boundary(turn, now, true, emit, effects),
             Event::Limits {
                 window,
@@ -110,19 +110,47 @@ impl Session {
         Ok(())
     }
 
-    pub(super) fn request_opened(&mut self, request: &Request) {
-        if let Question::Approval { tool, .. } = &request.question {
-            let question = QuestionRef {
-                tool: Some(tool.clone()),
-            };
-            self.open_questions.push((request.id, question));
+    fn inferred(
+        &mut self,
+        at: jiff::Timestamp,
+        who: crate::Owner,
+        purpose: crate::InferredPurpose,
+        usage: super::Usage,
+        emit: &mut Emit,
+    ) -> Result<(), Rejection> {
+        if matches!(&self.phase, Phase::Running { .. }) {
+            self.turn_totals.add_usage(usage)?;
         }
+        emit.records.push(super::Record::Inferred {
+            at,
+            who,
+            purpose,
+            usage,
+        });
+        Ok(())
+    }
+
+    pub(super) fn request_opened(&mut self, request: &Request) {
+        let tool = match &request.question {
+            Question::Approval { tool, .. } => Some(tool.clone()),
+            Question::Grant { .. }
+            | Question::Select { .. }
+            | Question::Confirm { .. }
+            | Question::Text { .. } => None,
+        };
+        self.open_questions.push((
+            request.id,
+            QuestionRef {
+                tool,
+                turn: request.turn,
+            },
+        ));
     }
 
     pub(super) fn queue_steer(&mut self, text: Box<str>, effects: &mut Vec<Effect>) {
         self.queued_inputs
             .push(QueuedInput::Steer(vec![Part::Text { text }]));
-        effects.push(Effect::Reply(Ok(Reply::Queued)));
+        effects.push(Effect::Reply(Ok(Reply::Queued { turn: None })));
     }
 
     pub(super) fn request_started(&mut self, turn: TurnId, model: ModelRoute, family: Family) {
@@ -149,8 +177,10 @@ impl Session {
         &mut self,
         request: RequestId,
         answer: &Answer,
-        attributed: bool,
+        by: Option<ClientId>,
         was_default: bool,
+        now: jiff::Timestamp,
+        emit: &mut Emit,
     ) -> Result<(), Rejection> {
         let Some(index) = self
             .open_questions
@@ -159,7 +189,7 @@ impl Session {
         else {
             return Ok(());
         };
-        let grant = if *answer == Answer::ApproveForSession && !was_default && attributed {
+        let grant = if *answer == Answer::ApproveForSession && !was_default && by.is_some() {
             self.open_questions[index]
                 .1
                 .tool
@@ -173,29 +203,92 @@ impl Session {
             None
         };
         self.open_questions.remove(index);
+        let by = by.unwrap_or_else(|| ClientId::new("core"));
+        emit.records.push(Record::Resolved {
+            at: now,
+            request,
+            answer: answer.clone(),
+            by: by.clone(),
+            was_default,
+        });
         if let Some(name) = grant {
+            emit.records.push(Record::AllowAlways {
+                at: now,
+                tool: name.as_str().into(),
+                by: by.clone(),
+            });
             self.allow_always.insert(name);
         }
+        emit.updates.push(UpdateKind::RequestResolved {
+            id: request,
+            answer: answer.clone(),
+            by,
+        });
         Ok(())
     }
 
-    pub(super) fn job_started(&mut self, job: JobId, kind: JobKind) {
+    /// Resolves the ending turn's still-open questions as core cancellations:
+    /// a cancelled turn ends with its approvals answered, so a withdrawal or
+    /// expiry that lands after the close still finds its terminal record
+    /// already journaled instead of dropping it as unknown.
+    ///
+    /// Turnless questions keep waiting: the broker resolves only the ending
+    /// turn's slots, so a service-grant question asked outside any turn must
+    /// not gain a durable Cancel record while its broker waiter stays open.
+    pub(super) fn cancel_open_questions(
+        &mut self,
+        turn: TurnId,
+        now: jiff::Timestamp,
+        emit: &mut Emit,
+    ) {
+        let open = std::mem::take(&mut self.open_questions);
+        for (request, question) in open {
+            if question.turn != Some(turn) {
+                self.open_questions.push((request, question));
+                continue;
+            }
+            let by = ClientId::new("core");
+            emit.records.push(Record::Resolved {
+                at: now,
+                request,
+                answer: Answer::Cancel,
+                by: by.clone(),
+                was_default: false,
+            });
+            emit.updates.push(UpdateKind::RequestResolved {
+                id: request,
+                answer: Answer::Cancel,
+                by,
+            });
+        }
+    }
+
+    /// Records a started job and tells clients once.
+    ///
+    /// A manual compaction is a phase of the session, not a job a client counts.
+    pub(super) fn job_started(&mut self, job: JobId, kind: JobKind, emit: &mut Emit) {
         if self.live_jobs.iter().any(|(id, _)| *id == job) {
             return;
         }
         self.live_jobs.push((job, Some(kind)));
-        if kind == JobKind::Compaction && matches!(&self.phase, Phase::Compacting { job: None }) {
-            self.phase = Phase::Compacting { job: Some(job) };
+        if kind == JobKind::Compaction {
+            if matches!(&self.phase, Phase::Compacting { job: None }) {
+                self.phase = Phase::Compacting { job: Some(job) };
+            }
+            return;
         }
+        emit.updates.push(UpdateKind::JobStarted { job });
     }
 
-    pub(super) fn job_settled(&mut self, job: JobId, outcome: JobOutcome) {
+    /// Records a settled job and tells clients once.
+    pub(super) fn job_settled(&mut self, job: JobId, outcome: JobOutcome, emit: &mut Emit) {
         let Some(index) = self.live_jobs.iter().position(|(id, _)| *id == job) else {
             return;
         };
         let (_, kind) = self.live_jobs.remove(index);
         if kind != Some(JobKind::Compaction) {
             self.ended_jobs.push((job, outcome));
+            emit.updates.push(UpdateKind::JobSettled { job });
             return;
         }
         if matches!(&self.phase, Phase::Compacting { job: Some(active) } if *active == job) {

@@ -115,6 +115,10 @@ pub(super) fn host_update(params: &Value) -> Result<Option<RemoteHostUpdate>, Wi
             parent: session_id(update, "parentId")?,
         },
         "login_finished" => RemoteHostUpdate::LoginFinished {
+            login_id: update
+                .get("loginId")
+                .and_then(JsonValueTrait::as_u64)
+                .ok_or_else(|| malformed("loginId"))?,
             provider: string(update, "provider")?.to_owned(),
             ready: string(update, "state")? == "ready",
             detail: opt_string(update, "detail"),

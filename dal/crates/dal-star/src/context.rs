@@ -141,12 +141,14 @@ impl<'v> StarlarkValue<'v> for ContextValue {
             return Some(facade(
                 heap,
                 group,
-                &self.inv,
-                &self.host,
-                self.loaded.as_ref(),
-                self.script.as_ref(),
-                self.runtime.clone(),
-                None,
+                &FacadeDeps {
+                    invocation: &self.inv,
+                    host: &self.host,
+                    loaded: self.loaded.as_ref(),
+                    script: self.script.as_ref(),
+                    runtime: &self.runtime,
+                    scope: None,
+                },
             ));
         }
         if attribute == "config" {
@@ -183,6 +185,13 @@ starlark::methods_static!(CTX_METHODS = ctx_methods);
 const FACADE_NAMES: [&str; 10] = [
     "tools", "models", "net", "ask", "state", "agents", "jobs", "turn", "env", "mcp",
 ];
+
+/// The largest `ctx.scope` concurrency limit exposed by Starlark (E05).
+/// `MAX_SCOPE_LIMIT` enforces 64 here; the host separately enforces its
+/// broader global member cap of 500 in `dal-agent/src/ext/scope.rs`
+/// (`GLOBAL_MEMBER_CAP`). A script must learn of a bad limit as an API error,
+/// not as a terminal denial after the host refuses the scope.
+const MAX_SCOPE_LIMIT: u16 = 64;
 
 /// The facade groups a `ctx` exposes (§R03 catalog table).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -394,26 +403,37 @@ fn parse_export_key(group: FacadeGroup, key: &str) -> starlark::Result<OpId> {
     }))
 }
 
+/// The host-owned state one facade borrows.
+///
+/// Facade allocation and scheduled-scope minting read the same immutable
+/// invocation seam; grouping the arguments keeps both call sites under the
+/// function-argument ceiling without duplicating Arc clones.
+pub(crate) struct FacadeDeps<'a> {
+    /// The owning invocation.
+    pub(crate) invocation: &'a Arc<Invocation>,
+    /// The host seam.
+    pub(crate) host: &'a Arc<dyn ScriptHost>,
+    /// The validated plugin, when this entry is an export.
+    pub(crate) loaded: Option<&'a Arc<crate::validate::LoadedPlugin>>,
+    /// The model runtime context, when this entry is a scripted model.
+    pub(crate) script: Option<&'a ScriptCx>,
+    /// The tokio runtime the synchronous call path blocks on.
+    pub(crate) runtime: &'a tokio::runtime::Handle,
+    /// The shared scope state, present only on scheduled facades.
+    pub(crate) scope: Option<&'a Arc<ScopeShared>>,
+}
+
 /// Allocates one facade value bound to `inv`; `scope` makes it scheduled.
-pub(crate) fn facade<'v>(
-    heap: Heap<'v>,
-    group: FacadeGroup,
-    inv: &Arc<Invocation>,
-    host: &Arc<dyn ScriptHost>,
-    loaded: Option<&Arc<crate::validate::LoadedPlugin>>,
-    script: Option<&ScriptCx>,
-    runtime: tokio::runtime::Handle,
-    scope: Option<Arc<ScopeShared>>,
-) -> Value<'v> {
+pub(crate) fn facade<'v>(heap: Heap<'v>, group: FacadeGroup, deps: &FacadeDeps) -> Value<'v> {
     heap.alloc(FacadeValue {
-        inv: inv.id(),
+        inv: deps.invocation.id(),
         group,
-        invocation: Arc::clone(inv),
-        host: Arc::clone(host),
-        scheduled: scope,
-        loaded: loaded.cloned(),
-        script: script.cloned(),
-        runtime,
+        invocation: Arc::clone(deps.invocation),
+        host: Arc::clone(deps.host),
+        scheduled: deps.scope.cloned(),
+        loaded: deps.loaded.cloned(),
+        script: deps.script.cloned(),
+        runtime: deps.runtime.clone(),
     })
 }
 
@@ -514,7 +534,7 @@ fn ctx_methods(builder: &mut MethodsBuilder) {
         };
         let limit = u16::try_from(limit)
             .ok()
-            .filter(|limit| *limit >= 1)
+            .filter(|limit| (1..=MAX_SCOPE_LIMIT).contains(limit))
             .ok_or_else(|| api_error("ctx.scope: limit must be in 1..=64"))?;
         let on_error = match on_error.unwrap_or("cancel") {
             "cancel" => OnError::Cancel,
@@ -620,13 +640,17 @@ fn scope_budget_count(value: &value::Value, field: &str) -> starlark::Result<u64
         .map_err(|_| api_error(format!("ctx.scope: `{field}` must be non-negative")))
 }
 
-#[expect(
-    clippy::cast_precision_loss,
-    reason = "budget magnitudes far below 2^53 make the conversion exact in practice"
-)]
 fn scope_budget_usd(value: &value::Value) -> starlark::Result<f64> {
     let number = match value {
-        value::Value::Int(value) => *value as f64,
+        value::Value::Int(value) => {
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "ints are bounded to ±(2^53 - 1) and convert exactly"
+            )]
+            {
+                *value as f64
+            }
+        }
         value::Value::Num(value) => *value,
         _ => return Err(api_error("ctx.scope: `usd` must be a number")),
     };
@@ -636,13 +660,17 @@ fn scope_budget_usd(value: &value::Value) -> starlark::Result<f64> {
     Ok(number)
 }
 
-#[expect(
-    clippy::cast_precision_loss,
-    reason = "wall-clock seconds far below 2^53 make the conversion exact in practice"
-)]
 fn scope_budget_duration(value: &value::Value) -> starlark::Result<std::time::Duration> {
     let seconds = match value {
-        value::Value::Int(value) => *value as f64,
+        value::Value::Int(value) => {
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "ints are bounded to ±(2^53 - 1) and convert exactly"
+            )]
+            {
+                *value as f64
+            }
+        }
         value::Value::Num(value) => *value,
         _ => return Err(api_error("ctx.scope: `wall` must be a number of seconds")),
     };
@@ -710,3 +738,4 @@ fn phase_name(phase: Phase) -> &'static str {
         Phase::Hook(_) => "hook",
     }
 }
+// weave: run 'weave explain dal/crates/dal-star/src/context.rs' for per-hunk detail, 'weave check' to verify your resolution

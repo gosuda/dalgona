@@ -968,3 +968,24 @@ fn retry_after_date_parser_accepts_http_date_and_rejects_garbage() {
     );
     assert_eq!(retry_after_seconds("not a date", now), None);
 }
+
+#[test]
+fn hostile_retry_after_values_never_panic_or_shorten_the_wait() {
+    let now = timestamp("Mon, 15 Jul 2024 16:24:59 +0000");
+    let wait =
+        |value: &str| crate::retry::delay_for_attempt(1, retry_after_seconds(value, now), 1.0);
+    assert_eq!(wait("7"), Ok(Duration::from_secs(7)));
+    assert_eq!(wait("  7  "), Ok(Duration::from_secs(7)));
+    assert_eq!(wait("60"), Ok(Duration::from_secs(60)));
+    assert_eq!(wait("61").unwrap_err().seconds, 61);
+    assert_eq!(wait("-5"), Ok(Duration::ZERO));
+    assert_eq!(wait("NaN"), Ok(Duration::from_secs(1)));
+    assert_eq!(wait("inf").unwrap_err().seconds, u64::MAX);
+    assert_eq!(wait("1e400").unwrap_err().seconds, u64::MAX);
+    assert_eq!(wait(""), Ok(Duration::from_secs(1)));
+    assert_eq!(wait("Mon, 15 Jul 2024 16:24:00 GMT"), Ok(Duration::ZERO));
+    assert_eq!(
+        wait("Mon, 15 Jul 2024 16:26:59 GMT").unwrap_err().seconds,
+        120
+    );
+}

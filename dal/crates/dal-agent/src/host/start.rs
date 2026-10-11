@@ -50,6 +50,17 @@ impl Host {
             .collect();
         let (generation_tx, _) = tokio::sync::watch::channel(Arc::new(generation));
         let plugin_base = HostShared::base_names(&generation_tx.borrow());
+        let login_site = dal_provider::LoginSite::new(
+            product.data_root.join("auth.json"),
+            product.data_root.join("cache"),
+            dal_provider::user_agent(
+                env!("CARGO_PKG_VERSION"),
+                std::env::consts::OS,
+                "",
+                std::env::consts::ARCH,
+            ),
+        )
+        .map_err(HostError::Provider)?;
         let providers = provider_set(&config, &env, &product.data_root)?;
         let shared = Arc::new(HostShared {
             config,
@@ -62,12 +73,16 @@ impl Host {
             commands,
             generation: generation_tx,
             catalog: std::sync::RwLock::new(None),
+            login_site: std::sync::RwLock::new(login_site),
             plugin_base,
         });
         let host = Self {
             state: Arc::new(HostState {
                 sessions: std::sync::Mutex::default(),
+                name_claims: std::sync::Mutex::default(),
                 subscribers: std::sync::Mutex::default(),
+                logins: std::sync::Mutex::default(),
+                next_login: std::sync::atomic::AtomicU64::new(1),
                 shared,
                 attached: std::sync::Mutex::default(),
             }),

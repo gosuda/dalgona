@@ -21,9 +21,9 @@ use std::{
 use dal_agent::{
     Env, Product, SessionRef,
     ext::{
-        ArgError, BoxFuture, EventStream, ExtensionBuilder, ModelCx, ModelError, ModelHandler,
-        ModelRecord, PrivateTool, RawValue, ScopeError, ScopeValue, Tool, ToolCx, ToolOutcome,
-        ToolOutput,
+        ArgError, BoxFuture, EventStream, Extension, ExtensionBuilder, ModelCx, ModelError,
+        ModelHandler, ModelRecord, PrivateTool, RawValue, ScopeError, ScopeValue, Tool, ToolCx,
+        ToolOutcome, ToolOutput,
     },
 };
 use dal_core::{
@@ -34,6 +34,49 @@ use dal_core::{
 };
 use dal_provider::{ProviderError, StopReason, StreamEvent as ProviderEvent};
 use support::{TestDir, scripted_session};
+
+fn probe_extension(
+    private: PrivateTool,
+    private_name: String,
+    state: &Arc<Mutex<ObservedErrors>>,
+    calls: Arc<AtomicUsize>,
+    max_private_results: Arc<AtomicUsize>,
+) -> Result<Extension, Box<dyn Error + Send + Sync>> {
+    let mut builder = ExtensionBuilder::new("gate-model-probes", "0.1.0", ServiceSet::EMPTY)?
+        .model(model_record(
+            "gate/probe",
+            Arc::new(ProbeHandler {
+                private,
+                state: Arc::clone(state),
+            }),
+        )?)
+        .model(model_record(
+            "gate/cycle",
+            Arc::new(CycleHandler {
+                state: Arc::clone(state),
+            }),
+        )?);
+    for index in 0..6 {
+        let next = (index < 5).then(|| format!("gate/depth-{}", index + 1));
+        builder = builder.model(model_record(
+            &format!("gate/depth-{index}"),
+            Arc::new(DepthHandler {
+                next,
+                state: Arc::clone(state),
+            }),
+        )?);
+    }
+    Ok(builder
+        .model(model_record(
+            "gate/round-model",
+            Arc::new(RoundModel {
+                private_name,
+                calls,
+                max_private_results,
+            }),
+        )?)
+        .build()?)
+}
 
 #[derive(Default)]
 struct ObservedErrors {
@@ -373,39 +416,13 @@ async fn synthetic_cycle_depth_round_and_unpriced_errors_are_typed()
     let state = Arc::new(Mutex::new(ObservedErrors::default()));
     let calls = Arc::new(AtomicUsize::new(0));
     let max_private_results = Arc::new(AtomicUsize::new(0));
-    let mut builder = ExtensionBuilder::new("gate-model-probes", "0.1.0", ServiceSet::EMPTY)?
-        .model(model_record(
-            "gate/probe",
-            Arc::new(ProbeHandler {
-                private,
-                state: Arc::clone(&state),
-            }),
-        )?)
-        .model(model_record(
-            "gate/cycle",
-            Arc::new(CycleHandler {
-                state: Arc::clone(&state),
-            }),
-        )?);
-    for index in 0..6 {
-        let next = (index < 5).then(|| format!("gate/depth-{}", index + 1));
-        builder = builder.model(model_record(
-            &format!("gate/depth-{index}"),
-            Arc::new(DepthHandler {
-                next,
-                state: Arc::clone(&state),
-            }),
-        )?);
-    }
-    builder = builder.model(model_record(
-        "gate/round-model",
-        Arc::new(RoundModel {
-            private_name,
-            calls: Arc::clone(&calls),
-            max_private_results: Arc::clone(&max_private_results),
-        }),
+    product.extensions.push(probe_extension(
+        private,
+        private_name,
+        &state,
+        Arc::clone(&calls),
+        Arc::clone(&max_private_results),
     )?);
-    product.extensions.push(builder.build()?);
     let env = Env {
         vars: support::captured_shell_vars(),
         cwd: workspace.path().to_path_buf(),

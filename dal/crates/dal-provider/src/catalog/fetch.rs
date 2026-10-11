@@ -13,10 +13,8 @@ use super::{
     decode::{decode_anthropic_page, decode_codex_models, decode_openai_models},
 };
 use crate::{
-    auth::credential::Credential,
     error::ProviderError,
     http::{self, Exchange, NON_STREAM_TOTAL_TIMEOUT},
-    provider::{AuthStyle, ProviderEntry},
 };
 
 /// Fetches provider rows, atomically updates `models.json`, and falls back to
@@ -99,7 +97,10 @@ where
     match fetch.provider.family {
         Family::Chat | Family::Responses => {
             let url = http::endpoint(fetch.provider.family, &fetch.provider.base_url, "models")?;
-            let headers = auth_headers(fetch.provider, fetch.credential)?;
+            let headers = fetch
+                .provider
+                .shape()
+                .headers(fetch.provider, fetch.credential)?;
             let body = get_body(fetch, url, headers, sleep).await?;
             decode_openai_models(fetch.provider, &body)
         }
@@ -108,7 +109,10 @@ where
             let mut url = http::endpoint(Family::Codex, &fetch.provider.base_url, "models")?;
             url.query_pairs_mut()
                 .append_pair("client_version", fetch.version);
-            let headers = codex_headers(fetch.provider, fetch.credential)?;
+            let headers = fetch
+                .provider
+                .shape()
+                .headers(fetch.provider, fetch.credential)?;
             let body = get_body(fetch, url, headers, sleep).await?;
             decode_codex_models(fetch.provider, &body)
         }
@@ -124,7 +128,10 @@ where
     D: Future<Output = ()>,
 {
     let base_url = http::endpoint(Family::Anthropic, &fetch.provider.base_url, "v1/models")?;
-    let headers = anthropic_headers(fetch.provider, fetch.credential)?;
+    let headers = fetch
+        .provider
+        .shape()
+        .headers(fetch.provider, fetch.credential)?;
     let mut seen_cursors = std::collections::HashSet::new();
     let mut rows = Vec::new();
     let mut cursor: Option<String> = None;
@@ -194,71 +201,4 @@ where
         });
     }
     http::read_body(family, response).await
-}
-fn auth_headers(
-    provider: &ProviderEntry,
-    credential: &Credential,
-) -> Result<Vec<(String, String)>, ProviderError> {
-    match credential {
-        Credential::ApiKey { key } => Ok(vec![(
-            match provider.auth {
-                AuthStyle::Bearer => String::from("authorization"),
-                AuthStyle::XApiKey => String::from("x-api-key"),
-            },
-            match provider.auth {
-                AuthStyle::Bearer => format!("Bearer {}", key.expose()),
-                AuthStyle::XApiKey => key.expose().to_owned(),
-            },
-        )]),
-        Credential::OAuth(oauth) => Ok(vec![(
-            String::from("authorization"),
-            format!("Bearer {}", oauth.access_token.expose()),
-        )]),
-        Credential::None => Err(no_credentials(provider)),
-    }
-}
-
-fn anthropic_headers(
-    provider: &ProviderEntry,
-    credential: &Credential,
-) -> Result<Vec<(String, String)>, ProviderError> {
-    let mut headers = auth_headers(provider, credential)?;
-    headers.push((
-        String::from("anthropic-version"),
-        String::from("2023-06-01"),
-    ));
-    if matches!(credential, Credential::OAuth(_)) {
-        headers.push((
-            String::from("anthropic-beta"),
-            String::from("claude-code-20250219,oauth-2025-04-20"),
-        ));
-        headers.push((String::from("x-app"), String::from("cli")));
-    }
-    Ok(headers)
-}
-
-fn codex_headers(
-    provider: &ProviderEntry,
-    credential: &Credential,
-) -> Result<Vec<(String, String)>, ProviderError> {
-    let Credential::OAuth(oauth) = credential else {
-        return Err(no_credentials(provider));
-    };
-    let Some(account_id) = oauth.account_id.as_ref() else {
-        return Err(ProviderError::NoAccountId);
-    };
-    Ok(vec![
-        (
-            String::from("authorization"),
-            format!("Bearer {}", oauth.access_token.expose()),
-        ),
-        (String::from("chatgpt-account-id"), account_id.clone()),
-        (String::from("originator"), String::from("dalgon")),
-    ])
-}
-
-fn no_credentials(provider: &ProviderEntry) -> ProviderError {
-    ProviderError::NoCredentials {
-        provider: provider.id.to_string(),
-    }
 }

@@ -26,6 +26,7 @@ use crate::error::{AgentError, ValidationError};
 use crate::ext::command::CommandCx;
 use crate::ext::{Caller, CallerKind};
 use crate::session::actor::TurnWork;
+use crate::session::contain::contained;
 use crate::session::driver::DriverDeps;
 use crate::session::tasks::SessionTasks;
 
@@ -137,10 +138,12 @@ async fn run_handler(
         Some(script) => cx.with_script(script),
         None => cx,
     };
-    handler
-        .run(args, cx)
-        .await
-        .map_err(|error| invalid(&error.to_string()))
+    match contained(async move { handler.run(args, cx).await }).await {
+        Ok(result) => result.map_err(|error| invalid(&error.to_string())),
+        Err(panic) => Err(invalid(&format!(
+            "Command {name} crashed and did not finish: {panic}. Report this to the command's author."
+        ))),
+    }
 }
 
 /// Cancels one background job without failing a missing row.

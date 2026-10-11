@@ -6,25 +6,25 @@ use regex::RegexSet;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, LazyLock};
 
-/// A stream-class check the calibrated gate can fire.
+/// The calibrated stream rules the guard watches output for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum G8Rule {
-    /// Placeholder text left in added code.
+    /// An ellipsis in place of written code.
     Placeholder,
-    /// A bare TODO marker.
+    /// A `todo` marker in output that should name real work.
     BareTodo,
-    /// An empty or filler comment.
+    /// A comment line with no comment text.
     EmptyComment,
-    /// A `== true` comparison.
+    /// A boolean comparison written as `== true`.
     EqTrue,
-    /// A leftover debug print.
+    /// A debug print left in the patch.
     DebugPrint,
-    /// A decorative section divider.
+    /// A banner of repeated punctuation in place of a section heading.
     SectionDivider,
 }
 
 impl G8Rule {
-    /// Every stream rule in check order.
+    /// Every rule, in index order used by the shared regex set.
     pub const ALL: [G8Rule; 6] = [
         Self::Placeholder,
         Self::BareTodo,
@@ -34,7 +34,7 @@ impl G8Rule {
         Self::SectionDivider,
     ];
 
-    /// Returns the rule's config name.
+    /// The rule name used in calibration tables and reports.
     #[must_use]
     pub fn name(self) -> &'static str {
         match self {
@@ -47,7 +47,7 @@ impl G8Rule {
         }
     }
 
-    /// Parses a config name back into its rule.
+    /// Parses the rule name used in the core `g8_calibrated_rules` list.
     #[must_use]
     pub fn parse(name: &str) -> Option<G8Rule> {
         match name {
@@ -80,31 +80,31 @@ impl G8Rule {
     }
 }
 
-/// One labeled sample line.
+/// One labeled stream sample used to calibrate a rule.
 #[derive(Debug, Clone)]
 pub struct Sample {
-    /// The sample text.
+    /// The line of output being classified.
     pub text: Box<str>,
-    /// Whether the sample is a positive instance.
+    /// Whether the sample is a true rule hit (`false` marks a false positive).
     pub positive: bool,
 }
 
-/// Labeled samples for one rule.
+/// The labeled samples for one rule.
 #[derive(Debug, Clone, Default)]
 pub struct SampleSet {
-    /// The collected samples.
+    /// The samples, in label order.
     pub samples: Vec<Sample>,
 }
 
-/// Per-rule labeled sample sets.
+/// Labeled sample sets per rule, supplied by the calibration store.
 #[derive(Debug, Clone, Default)]
 pub struct Calibration {
-    /// The sets keyed by rule.
+    /// One set per calibrated rule.
     pub sets: BTreeMap<G8Rule, SampleSet>,
 }
 
 impl Calibration {
-    /// Returns an empty calibration.
+    /// A calibration with no labeled samples; admits no rule.
     #[must_use]
     pub fn none() -> Calibration {
         Self::default()
@@ -234,9 +234,7 @@ impl Watch {
     }
 
     fn check_line(&mut self, line: &str) -> Option<StreamVerdict> {
-        let Ok(regexes) = REGEXES.as_ref() else {
-            return None;
-        };
+        let regexes = REGEXES.as_ref().ok()?;
         let matches = regexes.matches(line);
         for rule in G8Rule::ALL {
             if !matches.matched(rule.index()) {

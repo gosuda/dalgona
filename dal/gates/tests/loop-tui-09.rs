@@ -24,7 +24,10 @@ mod pty;
 )]
 mod support;
 
-use std::{error::Error, time::Duration};
+use std::{
+    error::Error,
+    time::{Duration, Instant},
+};
 
 use pty::{PtyProcess, dalgon_command, dalgon_command_with_fixture};
 use support::TestDir;
@@ -170,7 +173,7 @@ fn approval_dialog_ignores_garbage_keystrokes() -> TestResult {
     let mut terminal = PtyProcess::spawn(&mut command, 100, 30)?;
     terminal.wait_for(dal_tui::copy::ids::COMPOSER_PLACEHOLDER.as_bytes(), SPAWN)?;
     terminal.write(b"run the command\r")?;
-    terminal.wait_for(b"Allow this command?", SPAWN)?;
+    terminal.wait_for(dal_tui::copy::ids::DIALOG_ACTIONS_SHORT.as_bytes(), SPAWN)?;
     terminal.write(b"\xff\x00\x08\x7f\x1b[A\x1b[Bx\x0b\x0c")?;
     terminal.collect_for(SETTLE)?;
     assert!(
@@ -187,6 +190,64 @@ fn approval_dialog_ignores_garbage_keystrokes() -> TestResult {
     Ok(())
 }
 
+fn shows(terminal: &PtyProcess, text: &str) -> bool {
+    let needle = text.as_bytes();
+    terminal
+        .output()
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
+#[test]
+fn keys_typed_as_an_approval_opens_never_answer_it() -> TestResult {
+    let dir = TestDir::new()?;
+    let marker = dir.path().join("approved-by-type-ahead");
+    let command_text = format!("touch {}", shell_quote(&marker));
+    let fixture = exec_fixture(&command_text, "turn finished")?;
+    let mut command = dalgon_command_with_fixture(dir.path(), &fixture)?;
+    command.args(["--screen", "inline", "--approval", "ask"]);
+    let mut terminal = PtyProcess::spawn(&mut command, 100, 30)?;
+    terminal.wait_for(dal_tui::copy::ids::COMPOSER_PLACEHOLDER.as_bytes(), SPAWN)?;
+    terminal.write(b"run the command\r")?;
+    let locked = format!(
+        "{} · {}",
+        dal_tui::copy::ids::APPROVAL_ESC_DENIES,
+        dal_tui::copy::ids::DIALOG_ARMING
+    );
+    let deadline = Instant::now() + SPAWN;
+    while !shows(&terminal, &locked) {
+        assert!(
+            !marker.exists(),
+            "a key typed as the approval opened allowed the command"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "the approval never showed locked answer keys"
+        );
+        terminal.write(b"y")?;
+        terminal.collect_for(Duration::from_millis(5))?;
+    }
+    terminal.collect_for(SETTLE)?;
+    assert!(
+        !marker.exists(),
+        "keys typed while the approval was locked must not allow the command"
+    );
+
+    terminal.wait_for(dal_tui::copy::ids::DIALOG_ACTIONS_SHORT.as_bytes(), SPAWN)?;
+    terminal.collect_for(SETTLE)?;
+    assert!(
+        !marker.exists(),
+        "dropped keys must not be replayed once the approval is armed"
+    );
+    terminal.write(b"y")?;
+    terminal.wait_for(b"turn finished", SPAWN)?;
+    assert!(
+        marker.exists(),
+        "a key pressed after the armed hint answers the approval"
+    );
+    Ok(())
+}
+
 #[test]
 fn input_during_working_turn_stays_sane() -> TestResult {
     let dir = TestDir::new()?;
@@ -198,7 +259,7 @@ fn input_during_working_turn_stays_sane() -> TestResult {
     let mut terminal = PtyProcess::spawn(&mut command, 100, 30)?;
     terminal.wait_for(dal_tui::copy::ids::COMPOSER_PLACEHOLDER.as_bytes(), SPAWN)?;
     terminal.write(b"go\r")?;
-    terminal.wait_for(b"Allow this command?", SPAWN)?;
+    terminal.wait_for(dal_tui::copy::ids::DIALOG_ACTIONS_SHORT.as_bytes(), SPAWN)?;
     terminal.write(b"y")?;
     terminal.wait_for(dal_tui::copy::ids::STATE_WORKING.as_bytes(), SPAWN)?;
     terminal.write(b"queued text\x1b[A\x1b[B\x1b[Z\x05\x19")?;

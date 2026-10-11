@@ -89,6 +89,18 @@ impl Arbiter {
         self.last_activity = Some(now);
     }
 
+    /// Drops a goal continuation text that no wake has taken.
+    pub(crate) fn drop_goal(&mut self) {
+        self.goal = None;
+    }
+
+    /// Whether the next wake carries a source other than the goal: the
+    /// recovery text, taken job reports, or a monitor batch. The goal
+    /// verdict runs on the Idle path only at such a wake.
+    pub(crate) fn wake_has_other_sources(&self, jobs: &[JobReport]) -> bool {
+        self.recovery.is_some() || !jobs.is_empty() || !self.monitor.is_empty()
+    }
+
     /// A user prompt resumes paused mode but never stopped.
     pub(crate) fn on_user_prompt(&mut self) {
         if matches!(self.mode, ControllerMode::Paused { .. }) {
@@ -96,6 +108,12 @@ impl Arbiter {
         }
     }
 
+    /// User cancellation pauses automatic turns.
+    pub(crate) fn on_user_cancel(&mut self) {
+        self.mode = ControllerMode::Paused {
+            reason: "cancelled by the user",
+        };
+    }
     /// Pauses automatic turns with a fixed owner-selected reason.
     pub(crate) fn pause(&mut self, reason: &'static str) {
         self.mode = ControllerMode::Paused { reason };
@@ -144,11 +162,12 @@ impl Arbiter {
         &self,
         items: &[Ready],
         max_bytes: usize,
-    ) -> (String, Vec<&'static str>, Vec<JobId>) {
+    ) -> (String, Vec<&'static str>, Vec<JobId>, usize) {
         let mut text = String::new();
         let mut sources = Vec::new();
         let mut included = Vec::new();
         let mut run_report_included = false;
+        let mut monitor_batches = 0;
         for item in items {
             let (source, body, ids) = match item {
                 Ready::Recovery(body) => ("loop_guard", body.clone(), Vec::new()),
@@ -177,6 +196,7 @@ impl Arbiter {
                     if take == 0 {
                         continue;
                     }
+                    monitor_batches += take;
                     let mut body = String::new();
                     for batch in &batches[..take] {
                         body.push('\n');
@@ -200,7 +220,7 @@ impl Arbiter {
             text.push('\n');
             text.push_str(CLAIM_HONESTY);
         }
-        (text, sources, included)
+        (text, sources, included, monitor_batches)
     }
 
     /// Counts how many leading monitor batches fit in the remaining budget

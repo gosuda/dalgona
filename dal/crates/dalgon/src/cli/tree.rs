@@ -212,14 +212,43 @@ pub(crate) struct ServeTokenArgs {
     pub(crate) force: bool,
 }
 
+/// The `--socket [FILE]` selection for `dalgon rpc`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum RpcSocket {
+    /// `--socket` was given without a value: use the default path under
+    /// the data root.
+    Auto,
+    /// `--socket FILE` was given: listen on `FILE`.
+    Path(PathBuf),
+}
+
+impl std::str::FromStr for RpcSocket {
+    type Err = std::convert::Infallible;
+
+    /// Parses one `--socket` value into its choice.
+    ///
+    /// clap feeds the missing-value sentinel (NUL) when the flag appears
+    /// without a value; NUL can never occur in a real `execve` argument,
+    /// so the sentinel is unambiguous.
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value.as_bytes() == [0] {
+            Ok(Self::Auto)
+        } else {
+            Ok(Self::Path(PathBuf::from(value)))
+        }
+    }
+}
+
 #[derive(Clone, Debug, Args)]
 pub(crate) struct RpcArgs {
-    #[arg(long, value_name = "FILE", num_args = 0..=1, help = texts::RPC_SOCKET_HELP)]
-    #[expect(
-        clippy::option_option,
-        reason = "Some(None) passes the default socket; None omits the flag"
+    #[arg(
+        long,
+        value_name = "FILE",
+        num_args = 0..=1,
+        default_missing_value = "\u{0}",
+        help = texts::RPC_SOCKET_HELP
     )]
-    pub(crate) socket: Option<Option<PathBuf>>,
+    pub(crate) socket: Option<RpcSocket>,
 }
 
 #[derive(Debug, Args)]

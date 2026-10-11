@@ -44,15 +44,16 @@ use super::overlay::Overlay;
 use super::tool::{RawValue, Tool, ToolCxRuntime, ToolOutcome};
 use super::{Caller, CallerKind};
 use crate::Broker;
-use crate::error::{ServiceError, ToolError};
-use crate::proc::{ProcResult, ProcStatus, SpawnOpts};
+use crate::broker::{Resolution, Settled};
+use crate::error::{SIDECAR_VALUE_LIMIT, ServiceError, ToolError};
+use crate::proc::{ProcResult, ProcStatus, SpawnOpts, StopReason};
 use dal_core::ExitStatusKind;
 use dal_core::ext::{McpDeclaration, McpRequest, McpResponse};
 use dal_core::{
     AgentsOp, AgentsReply, Answer, CallId, ClientId, DenyReason, EntryId, FetchRequest,
     FetchResponse, Inference, JobsOp, JobsReply, ModelRequest, Name, Notice, Origin, Owner,
-    Preview, Question, RequestId, RunOutput, RunRequest, Service, SidecarOp, Site, StateError,
-    StateNs, StateOp, StateRecord, TurnOp, TurnOpReply, Visibility, Workspace,
+    Preview, Question, Request, RequestId, RunOutput, RunRequest, Service, SidecarOp, Site,
+    StateError, StateNs, StateOp, StateRecord, TurnOp, TurnOpReply, Visibility, Workspace,
 };
 use dal_provider::EventStream;
 use tokio::sync::watch;
@@ -80,49 +81,71 @@ pub struct SessionServices {
     history: Arc<[String]>,
     sites: HashMap<Name, Option<Site>>,
     cancel: CancellationToken,
+    turn_cancel: Arc<dyn Fn(dal_core::TurnId) -> Option<CancellationToken> + Send + Sync>,
+    resolutions: std::sync::Arc<crate::session::ResolutionInbox>,
     ask_timeout: Duration,
     ephemeral: bool,
     workspace: Workspace,
     ask_open: Mutex<Option<RequestId>>,
+    run_open: Mutex<Option<RequestId>>,
     next_call: AtomicU64,
 }
 
-/// Releases the session's single open-ask slot on drop and resolves the
-/// broker request as `Cancel`, so every exit from `ask` — including the
-/// caller dropping the future — frees the next ask and retires the
-/// question it published. A stranded slot would deny every later ask as
-/// busy; a stranded request would stay answerable on every front end
-/// while nobody consumes its reply.
+/// Releases one extension-ask slot on drop and resolves the broker request
+/// as `Cancel`, so every exit from `ask` — including the caller dropping
+/// the future — retires the question it published. A stranded request would
+/// stay answerable on every front end while nobody consumes its reply. The
+/// withdrawal is the request's first resolution: the broker mark here wins
+/// late answers, and the actor-owned inbox journals it before the fold
+/// broadcasts the retirement after the record. The slot stays occupied
+/// until the actor marks the terminal record settled, so no new ask opens
+/// before the previous withdrawal is durable.
 struct AskSlot<'a> {
     slot: &'a Mutex<Option<RequestId>>,
     broker: &'a Broker,
-    backend: &'a dyn SessionBackend,
-    request: RequestId,
+    backend: Arc<dyn SessionBackend>,
+    request: Request,
     armed: bool,
 }
 
 impl Drop for AskSlot<'_> {
     fn drop(&mut self) {
-        *self
-            .slot
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-        if !self.armed {
+        let Some(resolved) = self.withdrawn() else {
+            // Disarmed by normal settlement, or resolved elsewhere: free
+            // only the id this guard owned.
+            let mut slot = self
+                .slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if slot.is_some_and(|id| id == self.request.id) {
+                *slot = None;
+            }
             return;
+        };
+        self.backend.request_resolved(resolved);
+    }
+}
+
+impl AskSlot<'_> {
+    /// Marks the withdrawal in the broker and renders the resolution to
+    /// journal, or `None` when the guard was disarmed or the request was
+    /// already resolved.
+    fn withdrawn(&mut self) -> Option<crate::broker::Resolved> {
+        if !self.armed {
+            return None;
         }
         let by = ClientId::new("core");
-        if self
+        let answered = self
             .broker
-            .answer(self.request, Answer::Cancel, by.clone())
-            .is_ok()
-        {
-            self.backend
-                .publish_update(dal_core::UpdateKind::RequestResolved {
-                    id: self.request,
-                    answer: Answer::Cancel,
-                    by,
-                });
-        }
+            .answer(self.request.id, Answer::Cancel, by.clone())
+            .is_ok();
+        answered.then(|| crate::broker::Resolved {
+            request: self.request.clone(),
+            answer: Answer::Cancel,
+            by,
+            resolution: Resolution::Cancelled,
+            was_default: false,
+        })
     }
 }
 
@@ -152,6 +175,13 @@ impl SessionServices {
         grants.set_request_update(Arc::new(move |update| {
             update_backend.publish_update(update);
         }));
+        let open_backend = Arc::clone(&backend);
+        grants.set_request_open(Arc::new(move |request| {
+            let backend = Arc::clone(&open_backend);
+            Box::pin(async move { backend.request_opened(request).await })
+        }));
+        let answerer_backend = Arc::clone(&backend);
+        grants.set_answerer(Arc::new(move || answerer_backend.answerer_attached()));
         Self {
             grants,
             broker: deps.broker,
@@ -163,11 +193,31 @@ impl SessionServices {
             history: deps.history,
             sites: deps.sites,
             cancel: deps.cancel,
+            turn_cancel: deps.turn_cancel,
+            resolutions: deps.resolutions,
             ask_timeout: deps.ask_timeout,
             ephemeral: deps.ephemeral,
             workspace: deps.workspace,
             ask_open: Mutex::new(None),
+            run_open: Mutex::new(None),
             next_call: AtomicU64::new(1),
+        }
+    }
+    /// Binds the call to its caller's turn token while that turn is live.
+    /// Once the turn has ended (or the caller is turnless), work belongs to
+    /// the session: a job that outlives its turn keeps running until the
+    /// session stops, so it takes the session token rather than a
+    /// cancellation that belongs to nothing it spawned.
+    fn call_cancel(&self, who: &Caller) -> Result<CancellationToken, ServiceError> {
+        let Some(turn) = who.turn else {
+            return Ok(self.cancel.clone());
+        };
+        match (self.turn_cancel)(turn) {
+            // A fired token fails before any gate or wait: the turn is
+            // already cancelled, so no new work may start under it.
+            Some(token) if token.is_cancelled() => Err(ServiceError::Cancelled),
+            Some(token) => Ok(token),
+            None => Ok(self.cancel.clone()),
         }
     }
 
@@ -250,11 +300,15 @@ impl SessionServices {
             if matches!(who.kind, CallerKind::Cell { .. }) || who.origin == Origin::Builtin {
                 return Ok(());
             }
-            let grant = self.grants.ensure(&who, service, &cancel).await?;
+            let grant = self
+                .grants
+                .ensure(&who, service, &cancel)
+                .await
+                .map_err(|error| error.naming_grant(service, who.ext.as_str()))?;
             if grant.key().allows(service) {
                 Ok(())
             } else {
-                Err(ServiceError::Denied(DenyReason::NotGranted))
+                Err(ServiceError::service_not_granted(service, who.ext.as_str()))
             }
         })
     }
@@ -290,6 +344,160 @@ impl SessionServices {
             other => ServiceError::failed(Some(Service::Run), other.to_string()),
         }
     }
+
+    /// Maps a ladder denial onto the service error surface. A call with no
+    /// one to ask fails closed with the shared headless text that names
+    /// the fix, exactly like a gated tool call.
+    fn map_deny(reason: DenyReason) -> ServiceError {
+        ServiceError::Denied(match reason {
+            DenyReason::NoFrontEnd => {
+                DenyReason::out_of_scope(dal_core::headless_denial_text("run", dal_core::Rung::All))
+            }
+            reason => reason,
+        })
+    }
+
+    /// Opens one exec approval for a services `run` call and runs it after
+    /// approval, exactly like the exec tool ladder: answerable by attached
+    /// front ends, fail closed with a clear message when none can answer.
+    async fn run_with_approval(
+        &self,
+        who: &Caller,
+        call: &CallId,
+        preview: Preview,
+        req: RunRequest,
+        cancel: CancellationToken,
+    ) -> Result<RunOutput, ServiceError> {
+        let Some(turn) = who.turn else {
+            return Err(ServiceError::Denied(DenyReason::out_of_scope(
+                dal_core::headless_denial_text("run", dal_core::Rung::All),
+            )));
+        };
+        let question = Question::Approval {
+            tool: "run".into(),
+            preview: preview.clone(),
+            grant: None,
+            call: Some(call.clone()),
+        };
+        let secs = crate::broker::default_timeout(&question).as_secs();
+        let owner = Owner::Extension {
+            name: who.ext.as_str().into(),
+            origin: origin_name(who.origin).into(),
+        };
+        let deadline = Instant::now() + crate::broker::default_timeout(&question);
+        let (request, waiter) = {
+            let mut open = self
+                .run_open
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // A separate run slot keeps service approvals independent of
+            // `ask`: check, open, and set stay atomic under one lock so no
+            // broker slot leaks on the busy path.
+            if let Some(prev) = *open
+                && !self.resolutions.take_settled(prev)
+            {
+                return Err(ServiceError::ask_busy());
+            }
+            let (request, waiter) = self.broker.open(owner, question, turn, deadline);
+            *open = Some(request.id);
+            (request, waiter)
+        };
+        let mut guard = AskSlot {
+            slot: &self.run_open,
+            broker: &self.broker,
+            backend: Arc::clone(&self.backend),
+            request: request.clone(),
+            armed: true,
+        };
+        self.backend
+            .request_opened(request.clone())
+            .await
+            .map_err(|error| ServiceError::failed(Some(Service::Run), error.to_string()))?;
+        self.backend
+            .publish_update(dal_core::UpdateKind::RequestOpened(request.clone()));
+        let settled = tokio::select! {
+            biased;
+            () = cancel.cancelled() => None,
+            () = self.cancel.cancelled() => None,
+            outcome = waiter => Some(outcome),
+        };
+        let Some(Settled {
+            answer,
+            by,
+            resolution,
+        }) = settled
+        else {
+            return Err(ServiceError::Cancelled);
+        };
+        guard.armed = false;
+        // The answer settled the waiter: later drops must not withdraw, so
+        // the slot frees now instead of after the process ends.
+        drop(guard);
+        match (resolution, answer) {
+            (_, Answer::Approve | Answer::ApproveForSession) => {
+                let approved = tokio::select! {
+                    biased;
+                    () = self.cancel.cancelled() => return Err(ServiceError::Cancelled),
+                    result = self.rt.authorize_approved(call, preview, &cancel) => {
+                        result.map_err(Self::map_deny)?
+                    }
+                };
+                self.run_spawned(req, approved, &cancel).await
+            }
+            (_, Answer::Decline) => Err(ServiceError::Denied(DenyReason::out_of_scope(
+                match resolution {
+                    Resolution::Unavailable => format!(
+                        "Permission denied: run needed approval and no one answered within {secs} s."
+                    ),
+                    Resolution::Answered | Resolution::Cancelled => {
+                        format!("Permission denied: run was declined by {}.", by.as_str())
+                    }
+                },
+            ))),
+            (_, Answer::Cancel) => Err(ServiceError::Denied(DenyReason::Unavailable {
+                what: "approval cancelled".into(),
+            })),
+            _ => Err(ServiceError::Denied(DenyReason::out_of_scope(
+                "Permission denied: run.",
+            ))),
+        }
+    }
+
+    /// Spawns one approved services run and waits for its output.
+    async fn run_spawned(
+        &self,
+        req: RunRequest,
+        approved: crate::ext::tool::Approved,
+        cancel: &CancellationToken,
+    ) -> Result<RunOutput, ServiceError> {
+        let opts = SpawnOpts {
+            cwd: req
+                .cwd
+                .unwrap_or_else(|| self.workspace.as_path().to_path_buf()),
+            timeout: req.timeout,
+            env: req
+                .env
+                .into_iter()
+                .map(|(key, value)| {
+                    (
+                        std::ffi::OsString::from(String::from(key)),
+                        std::ffi::OsString::from(String::from(value)),
+                    )
+                })
+                .collect(),
+            stdout_prefix_limit: usize::try_from(req.stdout_prefix_limit).unwrap_or(usize::MAX),
+        };
+        let mut child = self
+            .rt
+            .spawn(&req.argv, opts, approved)
+            .map_err(Self::run_failure)?;
+        let result = tokio::select! {
+            result = child.wait(cancel) => result,
+            () = self.cancel.cancelled() => child.stop(StopReason::Cancelled).await,
+        }
+        .map_err(Self::run_failure)?;
+        Ok(run_output_of(&result))
+    }
 }
 
 /// Maps a finished child onto the run service output.
@@ -323,7 +531,7 @@ pub const MCP_UNAVAILABLE_TEXT: &str =
 /// Fixed surface text for sidecar use in an ephemeral session.
 ///
 /// [`Services::sidecar`] returns the machine-readable
-/// `Denied(Unavailable { what: "sidecar" })`; front ends render this text
+/// `Denied(Unavailable { what: "sidecar (ephemeral session)" })`; front ends render this text
 /// next to it.
 pub const SIDECAR_EPHEMERAL_TEXT: &str = "sidecar is unavailable for ephemeral sessions";
 
@@ -370,38 +578,40 @@ impl Services for SessionServices {
         let who = who.clone();
         Box::pin(async move {
             Self::check_inject(&who, Service::Run)?;
-            self.gated(&who, Service::Run).await?;
+            let cancel = self.call_cancel(&who)?;
+            self.gated_with(&who, Service::Run, cancel.clone()).await?;
             req.validate_env()
                 .map_err(|error| ServiceError::failed(Some(Service::Run), error.to_string()))?;
             let preview = self.run_preview(&req);
             let call = self.next_call_id();
-            let approved = self
-                .rt
-                .authorize(&call, preview, &self.cancel)
-                .await
-                .map_err(ServiceError::Denied)?;
-            let opts = SpawnOpts {
-                cwd: req
-                    .cwd
-                    .unwrap_or_else(|| self.workspace.as_path().to_path_buf()),
-                timeout: req.timeout,
-                env: req
-                    .env
-                    .into_iter()
-                    .map(|(key, value)| {
-                        (
-                            std::ffi::OsString::from(String::from(key)),
-                            std::ffi::OsString::from(String::from(value)),
-                        )
-                    })
-                    .collect(),
+            let covered = tokio::select! {
+                biased;
+                () = self.cancel.cancelled() => return Err(ServiceError::Cancelled),
+                result = self.rt.covered_run(&who, &call, &req, &preview, &cancel) => {
+                    result.map_err(Self::map_deny)?
+                }
             };
-            let mut child = self
-                .rt
-                .spawn(&req.argv, opts, approved)
-                .map_err(Self::run_failure)?;
-            let result = child.wait(&self.cancel).await.map_err(Self::run_failure)?;
-            Ok(run_output_of(&result))
+            if let Some(approved) = covered {
+                return self.run_spawned(req, approved, &cancel).await;
+            }
+            match self.rt.decide_run() {
+                dal_core::Decision::Allow => {
+                    let approved = tokio::select! {
+                        biased;
+                        () = self.cancel.cancelled() => return Err(ServiceError::Cancelled),
+                        result = self.rt.authorize(&call, preview, &cancel) => {
+                            result.map_err(Self::map_deny)?
+                        }
+                    };
+                    self.run_spawned(req, approved, &cancel).await
+                }
+                dal_core::Decision::Deny { reason } => Err(Self::map_deny(reason)),
+                dal_core::Decision::Ask { .. } => {
+                    self.run_with_approval(&who, &call, preview, req, cancel)
+                        .await
+                }
+                _ => Err(ServiceError::Denied(DenyReason::out_of_scope("run"))),
+            }
         })
     }
 
@@ -420,17 +630,34 @@ impl Services for SessionServices {
         let confirm = matches!(question, Question::Confirm { .. });
         Box::pin(async move {
             Self::check_inject(&who, Service::Ask)?;
+            let cancel = self.call_cancel(&who)?;
             let Some(turn) = who.turn else {
                 return Err(ServiceError::turn_not_running());
             };
+            // With no answering front end attached at the moment of raise
+            // (print mode, --json, the router, A2A, child sessions), the
+            // question takes its fail-closed default at once and no request
+            // opens. A request raised while one is attached keeps waiting if
+            // it detaches: only the absolute timeout ends it, so a client can
+            // reattach.
+            if !self.backend.answerer_attached() {
+                return Ok(None);
+            }
             // One guard across check, open, and set: `open` is synchronous,
             // so two concurrent asks cannot both slip through.
-            let (request_id, answer) = {
+            let (request, answer) = {
                 let mut open = self
                     .ask_open
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if open.is_some() {
+                // The previous guard withdrew through the durable owner;
+                // its slot reopens only after the actor journals the
+                // terminal record. Check, open, and set stay under one
+                // lock: `open` is synchronous, so two concurrent asks
+                // cannot both slip through and no broker slot leaks.
+                if let Some(prev) = *open
+                    && !self.resolutions.take_settled(prev)
+                {
                     return Err(ServiceError::ask_busy());
                 }
                 let owner = Owner::Extension {
@@ -440,51 +667,55 @@ impl Services for SessionServices {
                 let deadline = Instant::now() + self.ask_timeout;
                 let (request, answer) = self.broker.open(owner, question, turn, deadline);
                 *open = Some(request.id);
-                // Front ends learn a request exists only from this update:
-                // without it the question is unanswerable and the caller
-                // waits out the timeout for nothing.
-                self.backend
-                    .publish_update(dal_core::UpdateKind::RequestOpened(request.clone()));
-                (request.id, answer)
+                (request, answer)
             };
             // The guard clears the slot on every exit — including the
             // caller dropping this future — so a cancellation can strand
             // neither the session's one open ask nor its broker request.
+            // It guards the actor route too: a failed route drops the
+            // guard, which withdraws the never-published question.
             let mut guard = AskSlot {
                 slot: &self.ask_open,
                 broker: &self.broker,
-                backend: self.backend.as_ref(),
-                request: request_id,
+                backend: Arc::clone(&self.backend),
+                request: request.clone(),
                 armed: true,
             };
+            self.backend
+                .request_opened(request.clone())
+                .await
+                .map_err(|error| ServiceError::failed(Some(Service::Ask), error.to_string()))?;
+            // Front ends learn a request exists only from this update:
+            // without it the question is unanswerable and the caller
+            // waits out the timeout for nothing.
+            self.backend
+                .publish_update(dal_core::UpdateKind::RequestOpened(request.clone()));
             tokio::select! {
                 biased;
+                () = cancel.cancelled() => Err(ServiceError::Cancelled),
                 () = self.cancel.cancelled() => Err(ServiceError::Cancelled),
                 () = sleep(self.ask_timeout) => Ok(None),
-                (answer, by) = answer => {
+                Settled { answer, resolution, .. } = answer => {
                     guard.armed = false;
-                    self.backend
-                        .publish_update(dal_core::UpdateKind::RequestResolved {
-                            id: request_id,
-                            answer: answer.clone(),
-                            by,
-                        });
-                    match answer {
-                        value @ Answer::Value(_) => Ok(Some(value)),
+                    match (resolution, answer) {
+                        // No controller answered: the fail-closed default,
+                        // never a dismissal and never an interruption.
+                        (Resolution::Unavailable, _) => Ok(None),
+                        (_, value @ Answer::Value(_)) => Ok(Some(value)),
                         // Confirmation front ends answer with approve and
                         // decline rather than typed booleans; normalize
                         // both before the script sees them.
-                        Answer::Approve if confirm => Ok(Some(Answer::Value(
+                        (_, Answer::Approve) if confirm => Ok(Some(Answer::Value(
                             dal_core::RawJson::parse("true")
                                 .map_err(|error| ServiceError::failed(Some(Service::Ask), error.to_string()))?,
                         ))),
-                        Answer::Decline if confirm => Ok(Some(Answer::Value(
+                        (_, Answer::Decline) if confirm => Ok(Some(Answer::Value(
                             dal_core::RawJson::parse("false")
                                 .map_err(|error| ServiceError::failed(Some(Service::Ask), error.to_string()))?,
                         ))),
                         // Turn cancellation resolves the open request as
                         // `Cancel`; dismissal arrives as `Decline`.
-                        Answer::Cancel => Err(ServiceError::Cancelled),
+                        (_, Answer::Cancel) => Err(ServiceError::Cancelled),
                         _ => Ok(None),
                     }
                 },
@@ -542,7 +773,12 @@ impl Services for SessionServices {
         Box::pin(async move {
             Self::check_inject(&who, Service::Jobs)?;
             self.gated(&who, Service::Jobs).await?;
-            self.backend.jobs(&who.ext, op).await
+            let top_level = matches!(op, JobsOp::Spawn { parent: None, .. });
+            let reply = self.backend.jobs(&who.ext, op).await?;
+            if let (true, JobsReply::Spawned { id }) = (top_level, &reply) {
+                self.rt.job_started(&who, *id);
+            }
+            Ok(reply)
         })
     }
 
@@ -587,16 +823,21 @@ impl Services for SessionServices {
             self.gated(&who, Service::Sidecar).await?;
             if self.ephemeral {
                 return Err(ServiceError::Denied(DenyReason::Unavailable {
-                    what: "sidecar".into(),
+                    what: "sidecar (ephemeral session)".into(),
                 }));
             }
             match op {
-                SidecarOp::Read { name } => self.backend.sidecar_read(&name).await,
-                SidecarOp::Write { name, bytes } => self
-                    .backend
-                    .sidecar_write(&name, bytes)
-                    .await
-                    .map(|()| None),
+                SidecarOp::Read { name } => self.backend.sidecar_read(who.ext(), &name).await,
+                SidecarOp::Write { name, bytes } => {
+                    let size = bytes.len() as u64;
+                    if size > SIDECAR_VALUE_LIMIT {
+                        return Err(ServiceError::sidecar_too_large(name.as_str(), size));
+                    }
+                    self.backend
+                        .sidecar_write(who.ext(), &name, bytes)
+                        .await
+                        .map(|()| None)
+                }
                 SidecarOp::Artifact { job, file, bytes } => self
                     .backend
                     .sidecar_artifact(job, file, bytes)
@@ -673,6 +914,15 @@ impl Services for SessionServices {
         kind: &str,
         body: Box<RawValue>,
     ) -> ServiceFuture<'_, EntryId> {
+        if who.ext.as_str() == crate::host::CHILD_POLICY_EXT
+            && kind == crate::host::CHILD_POLICY_KIND
+        {
+            return Box::pin(async {
+                Err(ServiceError::Denied(DenyReason::out_of_scope(
+                    "child policy records are host-owned.",
+                )))
+            });
+        }
         let ext = who.ext.clone();
         let kind: Box<str> = kind.into();
         Box::pin(async move { self.backend.append_record(&ext, &kind, *body).await })

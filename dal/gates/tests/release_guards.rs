@@ -1,10 +1,3 @@
-#![cfg_attr(
-    unix,
-    expect(
-        clippy::disallowed_methods,
-        reason = "SC release gate runs the publish script and reads PATH"
-    )
-)]
 //! Release presence, lockstep, and path-dependency guards.
 #[path = "release_support/mod.rs"]
 #[expect(
@@ -111,6 +104,10 @@ fn release_publish_failure_wraps_cargo_error() -> Result<(), Box<dyn Error>> {
         "[package]\nname = \"tiny\"\nversion.workspace = true\nedition.workspace = true\n",
     )?;
     fs::write(workspace.path().join("tiny/src/lib.rs"), "")?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the guard test needs the ambient PATH to locate the real cargo"
+    )]
     let real_path = std::env::var_os("PATH").ok_or_else(|| io::Error::other("PATH is not set"))?;
     let real_cargo = executable_in_path(&real_path, "cargo")
         .ok_or_else(|| io::Error::other("cargo is not on PATH"))?;

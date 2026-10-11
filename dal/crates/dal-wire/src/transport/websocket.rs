@@ -17,7 +17,7 @@ use futures::StreamExt;
 use hyper::header::HeaderValue;
 use hyper::upgrade::Upgraded;
 use hyper_util::rt::TokioIo;
-use tokio::io::AsyncWrite;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Role, frame::coding::CloseCode};
@@ -51,6 +51,8 @@ struct WsFlags {
     closed: AtomicBool,
     /// True when a binary frame arrived (close code 1003).
     binary: AtomicBool,
+    /// True when a message broke the size limit; the transport ends without a close frame.
+    overrun: AtomicBool,
 }
 
 impl WebSocketTransport {
@@ -74,15 +76,20 @@ impl WebSocketTransport {
 
     /// Builds a server transport from an upgraded stream with the frame cap applied.
     pub async fn accept(stream: Upgraded) -> Self {
+        Self::server(TokioIo::new(stream)).await
+    }
+
+    /// Builds a server transport over any byte stream with the frame cap applied.
+    pub(crate) async fn server<S>(io: S) -> Self
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
         let config = WebSocketConfig::default()
             .max_message_size(Some(WS_FRAME_CAP))
             .max_frame_size(Some(WS_FRAME_CAP));
-        let socket = tokio_tungstenite::WebSocketStream::from_raw_socket(
-            TokioIo::new(stream),
-            Role::Server,
-            Some(config),
-        )
-        .await;
+        let socket =
+            tokio_tungstenite::WebSocketStream::from_raw_socket(io, Role::Server, Some(config))
+                .await;
         let (sink, stream) = socket.split();
         Self::halves(Box::pin(stream), Box::pin(sink))
     }
@@ -155,7 +162,10 @@ impl WebSocketTransport {
                     self.flags.closed.store(true, Ordering::Release);
                     return Err(ReadFrameError::EndOfInput);
                 }
-                Some(Err(_)) => {
+                Some(Err(error)) => {
+                    if matches!(error, WsError::Capacity(_)) {
+                        self.flags.overrun.store(true, Ordering::Release);
+                    }
                     self.flags.closed.store(true, Ordering::Release);
                     return Err(ReadFrameError::Closed);
                 }
@@ -254,6 +264,11 @@ impl AsyncWrite for WsWrite {
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         let this = self.get_mut();
+        if this.flags.overrun.load(Ordering::Acquire) {
+            // The peer broke the size limit: end the transport without a close frame.
+            this.close_sent = true;
+            return Poll::Ready(Ok(()));
+        }
         if !this.close_sent {
             let code = if this.flags.binary.load(Ordering::Acquire) {
                 CloseCode::Unsupported
@@ -288,7 +303,9 @@ impl AsyncWrite for WsWrite {
 /// upgrade helper before the handshake, and the upgrade driver re-checks the
 /// presented headers after it completes; the expected policy travels here so
 /// direct callers cannot bypass it. This task runs the version-1 connection
-/// to completion. Disconnection leaves sessions and turns running.
+/// to completion. Disconnection leaves sessions and turns running. When
+/// `drain` fires the connection answers new requests with `-32009` and closes
+/// within the drain grace.
 ///
 /// # Errors
 ///
@@ -298,6 +315,7 @@ pub async fn serve_websocket(
     upgraded: Upgraded,
     token: Option<SecretToken>,
     allowed_origins: &[HeaderValue],
+    drain: tokio_util::sync::CancellationToken,
 ) -> Result<(), WireError> {
     tracing::debug!(
         public = token.is_some(),
@@ -305,5 +323,10 @@ pub async fn serve_websocket(
         "serving websocket connection"
     );
     let transport = WebSocketTransport::accept(upgraded).await;
-    crate::rpc::serve_rpc(host, crate::transport::Transport::websocket(transport)).await
+    crate::rpc::serve_rpc_draining(
+        host,
+        crate::transport::Transport::websocket(transport),
+        drain,
+    )
+    .await
 }

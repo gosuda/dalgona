@@ -54,6 +54,14 @@ fn overload_retries_and_ends_overloaded_but_plain_503_ends_in_status() {
         classify(None, Some("overloaded_error"), "busy", &anthropic),
         RetryDecision::Retry(ProviderError::Overloaded)
     ));
+    assert!(matches!(
+        classify(None, Some("server_busy"), "busy", &anthropic),
+        RetryDecision::Retry(ProviderError::Overloaded)
+    ));
+    assert!(matches!(
+        classify(None, Some("servers are currently busy"), "busy", &anthropic),
+        RetryDecision::Retry(ProviderError::Overloaded)
+    ));
     for status in [503, 408, 500, 502, 504] {
         assert!(matches!(
             classify(Some(status), Some("other"), "busy", &RESPONSES),

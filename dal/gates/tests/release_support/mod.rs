@@ -14,7 +14,7 @@ use std::{
 pub(crate) type Run = Result<(i32, String, String), Box<dyn Error>>;
 
 pub(crate) fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").clone()
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
 /// The bash that runs the release scripts.

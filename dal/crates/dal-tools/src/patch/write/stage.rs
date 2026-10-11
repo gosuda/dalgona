@@ -1,16 +1,16 @@
 //! Staging: guards, proofs, and before/after image construction.
 
-use std::path::{Path, PathBuf};
+use std::{borrow::Cow, path::Path};
 
 use super::super::{
     ir::{
         Action, DiffHunk, DiffLine, DiffLineKind, Edit, EngineError, ErrorClass, Guard, Locator,
-        Operation, StagedFileOwned,
+        Operation, RenameTarget, StagedFileOwned,
     },
-    resolve::{decode, line_count},
+    resolve::{decode, line_count, resolve_path},
 };
 
-use super::PatchSession;
+use super::{PatchSession, ensure_regular_target, non_regular_target};
 
 pub(crate) async fn stage_replacement(
     display: &Path,
@@ -117,7 +117,7 @@ enum StagePlan {
     Ready(StagedFileOwned),
     Changes {
         content_edits: Vec<Edit>,
-        rename_to: Option<PathBuf>,
+        rename_to: Option<RenameTarget>,
     },
 }
 
@@ -198,7 +198,7 @@ async fn classify_edits(
     canonical: &Path,
     edits: Vec<Edit>,
 ) -> Result<StagePlan, EngineError> {
-    let mut rename_to: Option<PathBuf> = None;
+    let mut rename_to: Option<RenameTarget> = None;
     let mut content_edits = Vec::new();
     for edit in edits {
         match edit {
@@ -209,20 +209,29 @@ async fn classify_edits(
                         "patch: overlapping rename in one file.".to_owned(),
                     ));
                 }
+                let (dest_display, dest_canonical) = resolve_path(&session.workspace, &to)?;
                 if let Some(reference) = reference {
                     prove_reference(
                         session,
                         style,
+                        canonical,
                         display,
                         &super::super::ir::Locator::Gap { before_line: 0 },
                         0,
                         &reference,
-                    )?;
+                    )
+                    .await?;
                 }
-                rename_to = Some(to);
+                rename_to = Some(RenameTarget {
+                    path: dest_display,
+                    absolute_path: dest_canonical,
+                });
             }
             Edit::Create { path, body, .. } => {
-                if tokio::fs::metadata(canonical).await.is_ok() {
+                if let Ok(metadata) = tokio::fs::metadata(canonical).await {
+                    if !metadata.is_file() {
+                        return Err(non_regular_target(display));
+                    }
                     return Err(EngineError::new(
                         ErrorClass::File,
                         format!("patch: {} already exists.", display.display()),
@@ -244,11 +253,13 @@ async fn classify_edits(
                     prove_reference(
                         session,
                         style,
+                        canonical,
                         display,
                         &super::super::ir::Locator::Gap { before_line: 0 },
                         0,
                         &reference,
-                    )?;
+                    )
+                    .await?;
                 }
                 let before = read_target(canonical, display).await?;
                 return Ok(StagePlan::Ready(StagedFileOwned {
@@ -375,10 +386,35 @@ fn gap_replacement(
 fn raw_offset(text: &super::super::resolve::Text, offset: usize) -> usize {
     let removed = text
         .removed_cr_offsets
-        .iter()
-        .filter(|pos| **pos < offset)
-        .count();
+        .partition_point(|position| *position < offset);
     offset + removed + if text.bom { 3 } else { 0 }
+}
+
+/// Replace-all needs a whole-tag guard or Seen coverage of every line.
+fn require_whole_file_coverage(
+    cx: &ChangeCx<'_>,
+    guard: &Guard,
+    index: usize,
+) -> Result<(), EngineError> {
+    if !matches!(guard, Guard::Seen) {
+        return Ok(());
+    }
+    let count = super::super::resolve::line_count(cx.text);
+    let digest = *blake3::hash(cx.before).as_bytes();
+    let path_str = cx.display.to_string_lossy().replace('\\', "/");
+    if cx
+        .session
+        .seen
+        .covers(cx.session.session, &path_str, digest, 1, count as u64)
+    {
+        return Ok(());
+    }
+    Err(EngineError::new(
+        ErrorClass::Proof,
+        format!(
+            "patch: changes[{index}]: all needs tag. Read the whole file with read and copy the tag from its last line."
+        ),
+    ))
 }
 
 /// `Locator::Text`: match `old` against the view; unique, hinted by
@@ -393,7 +429,8 @@ fn text_replacements(
 ) -> Result<Vec<(usize, usize, Vec<u8>)>, EngineError> {
     let (old, line_hint, all) = needle;
     let view = String::from_utf8_lossy(&cx.text.view).into_owned();
-    let matches = find_text_matches(&view, old);
+    let found = find_text_match_set(&view, old);
+    let matches = &found.spans;
     if matches.is_empty() {
         return Err(EngineError::new(
             ErrorClass::Resolve,
@@ -404,7 +441,13 @@ fn text_replacements(
             ),
         ));
     }
-    let replacement = render_body(body, cx.text);
+    let stripped_body = found.prefix_start.and_then(|start| {
+        let normalized_body = normalize_crlf(body);
+        strip_numbered_prefixes(&normalized_body)
+            .filter(|(body_start, _)| *body_start == start)
+            .map(|(_, body)| body)
+    });
+    let replacement = render_body(stripped_body.as_deref().unwrap_or(body), cx.text);
     let planned = |start: usize, end: usize| match action {
         Action::Replace => (raw_offset(cx.text, start), raw_offset(cx.text, end)),
         Action::InsertBefore => {
@@ -417,24 +460,7 @@ fn text_replacements(
         }
     };
     if all {
-        // Replace-all requires whole-tag or Seen coverage of every line.
-        if matches!(guard, Guard::Seen) {
-            let count = super::super::resolve::line_count(cx.text);
-            let digest = *blake3::hash(cx.before).as_bytes();
-            let path_str = cx.display.to_string_lossy().replace('\\', "/");
-            if !cx
-                .session
-                .seen
-                .covers(cx.session.session, &path_str, digest, 1, count as u64)
-            {
-                return Err(EngineError::new(
-                    ErrorClass::Proof,
-                    format!(
-                        "patch: changes[{index}]: all needs tag. Read the whole file with read and copy the tag from its last line."
-                    ),
-                ));
-            }
-        }
+        require_whole_file_coverage(cx, guard, index)?;
         return Ok(matches
             .iter()
             .rev()
@@ -445,9 +471,20 @@ fn text_replacements(
             .collect());
     }
     if let Some(hint) = line_hint {
-        let selected = matches
-            .iter()
-            .find(|(start, _)| view[..*start].matches('\n').count() + 1 == hint);
+        let selected = hint
+            .checked_sub(1)
+            .and_then(|line| cx.text.line_starts.get(line).copied())
+            .and_then(|line_start| {
+                let line_end = cx
+                    .text
+                    .line_starts
+                    .get(hint)
+                    .copied()
+                    .unwrap_or(cx.text.view.len());
+                matches
+                    .iter()
+                    .find(|(start, _)| *start >= line_start && *start < line_end)
+            });
         return match selected {
             Some((start, end)) => {
                 let (start, end) = planned(*start, *end);
@@ -849,7 +886,9 @@ async fn prove_guard(
                 ),
             ))
         }
-        Guard::Reference(token) => prove_reference(session, style, display, locator, index, token),
+        Guard::Reference(token) => {
+            prove_reference(session, style, canonical, display, locator, index, token).await
+        }
         Guard::DefTag(expected) => {
             // Definition-tag proof resolves the named definition through the
             // single parser service and compares its current tag.
@@ -916,14 +955,16 @@ async fn prove_guard(
     }
 }
 
-fn prove_reference(
+async fn prove_reference(
     session: &PatchSession,
     style: super::super::ir::DialectId,
+    canonical: &Path,
     display: &Path,
     locator: &Locator,
     index: usize,
     token: &str,
 ) -> Result<(), EngineError> {
+    ensure_regular_target(canonical, display).await?;
     let reference = super::super::snapshot::ReadRef::parse(token).ok_or_else(|| {
         EngineError::new(
             ErrorClass::Proof,
@@ -948,7 +989,7 @@ fn prove_reference(
         })?;
     // Digest continuity: current workspace bytes must equal the captured snapshot.
     // Snapshot.path is workspace-relative; always resolve against the session workspace.
-    let current = std::fs::read(session.workspace.join(display)).unwrap_or_default();
+    let current = tokio::fs::read(canonical).await.unwrap_or_default();
     if blake3::hash(&current).as_bytes() != &snapshot.digest {
         return Err(EngineError::new(
             ErrorClass::Stale,
@@ -1014,6 +1055,7 @@ fn destructive_footprint(locator: &Locator) -> Option<(usize, usize)> {
 }
 
 async fn read_target(canonical: &Path, display: &Path) -> Result<Vec<u8>, EngineError> {
+    ensure_regular_target(canonical, display).await?;
     tokio::fs::read(canonical).await.map_err(|error| {
         EngineError::new(
             ErrorClass::File,
@@ -1044,9 +1086,7 @@ fn line_byte_range(
     let map = |offset: usize| {
         let removed = text
             .removed_cr_offsets
-            .iter()
-            .filter(|pos| **pos < offset)
-            .count();
+            .partition_point(|position| *position < offset);
         offset + removed + if text.bom { 3 } else { 0 }
     };
     (map(start), map(end))
@@ -1062,21 +1102,250 @@ fn render_body(body: &str, text: &super::super::resolve::Text) -> Vec<u8> {
     }
 }
 
-fn find_text_matches(haystack: &str, needle: &str) -> Vec<(usize, usize)> {
+#[derive(Debug)]
+struct TextMatchSet {
+    spans: Vec<(usize, usize)>,
+    prefix_start: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct LineSpan {
+    start: usize,
+    content_end: usize,
+    end: usize,
+}
+
+#[cfg(test)]
+static MATCH_COMPARISONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[inline]
+fn note_match_comparison() {
+    #[cfg(test)]
+    MATCH_COMPARISONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn find_text_match_set(haystack: &str, needle: &str) -> TextMatchSet {
     if needle.is_empty() {
-        return Vec::new();
+        return TextMatchSet {
+            spans: Vec::new(),
+            prefix_start: None,
+        };
     }
-    let mut matches = Vec::new();
-    let mut start = 0;
-    while let Some(index) = haystack[start..].find(needle) {
-        let absolute = start + index;
-        matches.push((absolute, absolute + needle.len()));
-        start = absolute + 1;
-        if start >= haystack.len() {
-            break;
+    let normalized = normalize_crlf(needle);
+    let exact = byte_match_spans(haystack, &normalized);
+    if !exact.is_empty() {
+        return TextMatchSet {
+            spans: exact,
+            prefix_start: None,
+        };
+    }
+    if line_spans(&normalized).len() > 1
+        && let Some((prefix_start, stripped)) = strip_numbered_prefixes(&normalized)
+    {
+        let healed = byte_match_spans(haystack, &stripped);
+        if !healed.is_empty() {
+            return TextMatchSet {
+                spans: healed,
+                prefix_start: Some(prefix_start),
+            };
+        }
+        let canonical = canonical_line_matches(haystack, &stripped);
+        if !canonical.is_empty() {
+            return TextMatchSet {
+                spans: canonical,
+                prefix_start: Some(prefix_start),
+            };
         }
     }
-    matches
+    TextMatchSet {
+        spans: canonical_line_matches(haystack, &normalized),
+        prefix_start: None,
+    }
+}
+
+fn byte_match_spans(haystack: &str, needle: &str) -> Vec<(usize, usize)> {
+    let starts = kmp_positions(haystack.as_bytes(), needle.as_bytes());
+    starts
+        .into_iter()
+        .map(|start| (start, start + needle.len()))
+        .collect()
+}
+
+fn kmp_positions<T: Eq>(haystack: &[T], needle: &[T]) -> Vec<usize> {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return Vec::new();
+    }
+    let prefix = kmp_prefix(needle);
+    let mut positions = Vec::new();
+    let mut matched = 0_usize;
+    for (index, value) in haystack.iter().enumerate() {
+        loop {
+            note_match_comparison();
+            if *value == needle[matched] {
+                matched += 1;
+                break;
+            }
+            if matched == 0 {
+                break;
+            }
+            matched = prefix[matched - 1];
+        }
+        if matched == needle.len() {
+            positions.push(index + 1 - needle.len());
+            matched = prefix[matched - 1];
+        }
+    }
+    positions
+}
+
+fn kmp_prefix<T: Eq>(needle: &[T]) -> Vec<usize> {
+    let mut prefix = vec![0; needle.len()];
+    let mut matched = 0_usize;
+    for index in 1..needle.len() {
+        loop {
+            note_match_comparison();
+            if needle[index] == needle[matched] {
+                matched += 1;
+                break;
+            }
+            if matched == 0 {
+                break;
+            }
+            matched = prefix[matched - 1];
+        }
+        prefix[index] = matched;
+    }
+    prefix
+}
+
+fn line_spans(value: &str) -> Vec<LineSpan> {
+    let mut spans = Vec::new();
+    let mut start = 0_usize;
+    for (offset, byte) in value.as_bytes().iter().enumerate() {
+        if *byte == b'\n' {
+            spans.push(LineSpan {
+                start,
+                content_end: offset,
+                end: offset + 1,
+            });
+            start = offset + 1;
+        }
+    }
+    if start < value.len() {
+        spans.push(LineSpan {
+            start,
+            content_end: value.len(),
+            end: value.len(),
+        });
+    }
+    spans
+}
+
+fn canonical_line_matches(haystack: &str, needle: &str) -> Vec<(usize, usize)> {
+    let haystack_lines = line_spans(haystack);
+    let needle_lines = line_spans(needle);
+    if needle_lines.is_empty() || needle_lines.len() > haystack_lines.len() {
+        return Vec::new();
+    }
+    let haystack_keys: Vec<String> = haystack_lines
+        .iter()
+        .map(|span| canonical_line(&haystack[span.start..span.content_end]))
+        .collect();
+    let needle_keys: Vec<String> = needle_lines
+        .iter()
+        .map(|span| canonical_line(&needle[span.start..span.content_end]))
+        .collect();
+    let needle_has_final_newline = needle_lines
+        .last()
+        .is_some_and(|line| line.end > line.content_end);
+    kmp_positions(&haystack_keys, &needle_keys)
+        .into_iter()
+        .filter_map(|start| {
+            let first = haystack_lines[start];
+            let last = haystack_lines[start + needle_lines.len() - 1];
+            if needle_has_final_newline && last.end == last.content_end {
+                return None;
+            }
+            let end = if needle_has_final_newline {
+                last.end
+            } else {
+                last.content_end
+            };
+            Some((first.start, end))
+        })
+        .collect()
+}
+
+fn canonical_line(line: &str) -> String {
+    let mut canonical = String::with_capacity(line.len());
+    for character in line.chars() {
+        let replacement = match character {
+            '\u{2018}' | '\u{2019}' | '\u{201B}' | '\u{2032}' => "'",
+            '\u{201C}' | '\u{201D}' | '\u{201F}' | '\u{2033}' => "\"",
+            '\u{2010}'..='\u{2015}' | '\u{2212}' => "-",
+            '\u{00A0}' | '\u{2007}' | '\u{202F}' => " ",
+            '\u{2026}' => "...",
+            _ => {
+                canonical.push(character);
+                continue;
+            }
+        };
+        canonical.push_str(replacement);
+    }
+    canonical.trim_end_matches([' ', '\t', '\r']).to_owned()
+}
+
+fn normalize_crlf(value: &str) -> Cow<'_, str> {
+    if !value.as_bytes().contains(&b'\r') {
+        return Cow::Borrowed(value);
+    }
+    Cow::Owned(value.replace("\r\n", "\n"))
+}
+
+fn strip_numbered_prefixes(value: &str) -> Option<(usize, String)> {
+    let spans = line_spans(value);
+    if spans.len() < 2 {
+        return None;
+    }
+    let mut first = None;
+    let mut expected = None;
+    let mut stripped = String::with_capacity(value.len());
+    for span in spans {
+        let line = &value[span.start..span.content_end];
+        let colon = line.as_bytes().iter().position(|byte| *byte == b':')?;
+        if colon == 0 || !line.as_bytes()[..colon].iter().all(u8::is_ascii_digit) {
+            return None;
+        }
+        let number = line[..colon].parse::<usize>().ok()?;
+        if let Some(next) = expected {
+            if number != next {
+                return None;
+            }
+        } else if first.is_some() {
+            return None;
+        } else {
+            first = Some(number);
+        }
+        expected = number.checked_add(1);
+        stripped.push_str(&line[colon + 1..]);
+        if span.end > span.content_end {
+            stripped.push('\n');
+        }
+    }
+    let start = first?;
+    Some((start, stripped))
+}
+
+#[cfg(test)]
+fn find_text_matches(haystack: &str, needle: &str) -> Vec<(usize, usize)> {
+    find_text_match_set(haystack, needle).spans
+}
+
+#[cfg(test)]
+pub(crate) fn find_text_matches_linear_probe(haystack: &str, needle: &str) -> usize {
+    MATCH_COMPARISONS.store(0, std::sync::atomic::Ordering::Relaxed);
+    let _ = find_text_matches(haystack, needle);
+    MATCH_COMPARISONS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 fn resolve_error(

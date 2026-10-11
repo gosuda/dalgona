@@ -3,7 +3,7 @@
 //! The release process owns the snapshot bytes; this module owns the row
 //! shape, the `include!` hookup, and the compiled lookups.
 
-use dal_core::ModelPrice;
+use dal_core::{ModelPrice, PriceTier};
 
 pub(crate) struct PriceRow {
     pub(crate) model: &'static str,
@@ -13,7 +13,38 @@ pub(crate) struct PriceRow {
     pub(crate) reasoning: Option<f64>,
 }
 
+pub(crate) struct TierRow {
+    pub(crate) model: &'static str,
+    pub(crate) tiers: &'static [PriceTier],
+}
+
 include!("../prices_generated.rs");
+
+const fn model_is_before(left: &str, right: &str) -> bool {
+    let left_bytes = left.as_bytes();
+    let right_bytes = right.as_bytes();
+    let mut index = 0;
+    while index < left_bytes.len() && index < right_bytes.len() {
+        if left_bytes[index] != right_bytes[index] {
+            return left_bytes[index] < right_bytes[index];
+        }
+        index += 1;
+    }
+    left_bytes.len() < right_bytes.len()
+}
+
+pub(crate) const fn tier_rows_are_sorted_unique(rows: &[TierRow]) -> bool {
+    let mut index = 1;
+    while index < rows.len() {
+        if !model_is_before(rows[index - 1].model, rows[index].model) {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+const _: () = assert!(tier_rows_are_sorted_unique(PRICE_TIER_ROWS));
 
 /// Returns whether the exact provider/model pair is marked for temperature in
 /// the compiled models.dev snapshot.
@@ -32,11 +63,18 @@ pub fn compiled_price(model: &str) -> Option<ModelPrice> {
         .binary_search_by_key(&model, |row| row.model)
         .ok()?;
     let row = &PRICE_ROWS[index];
+    let tiers = PRICE_TIER_ROWS
+        .binary_search_by_key(&model, |row| row.model)
+        .ok()
+        .map_or_else(Box::<[PriceTier]>::default, |index| {
+            PRICE_TIER_ROWS[index].tiers.to_vec().into_boxed_slice()
+        });
     Some(ModelPrice {
         input: row.input.unwrap_or(0.0),
         cached_input: row.cached_input.unwrap_or(0.0),
         output: row.output.unwrap_or(0.0),
         reasoning: row.reasoning.unwrap_or(0.0),
+        tiers,
     })
 }
 

@@ -1,0 +1,172 @@
+//! A draining connection answers new requests with `-32009` instead of running
+//! them, and a host that is shut down maps to the same code.
+
+use std::time::{Duration, Instant};
+
+use dal_agent::HostError;
+use sonic_rs::JsonValueTrait;
+use tokio_util::sync::CancellationToken;
+
+use super::{Rpc, assert_error, initialize, rig};
+use crate::rpc::{DRAIN_GRACE, MAX_DRAIN_REPLIES, host_error};
+use crate::serve_rpc_draining;
+use crate::transport::MemoryTransport;
+
+const DRAINING_TEXT: &str = "the server is shutting down and accepts no new requests";
+const DRAINING_HINT: &str = "Wait for the server to start again, then reconnect.";
+
+#[tokio::test]
+async fn a_draining_connection_rejects_new_requests_with_server_draining() {
+    let rig = rig(&[]).await;
+    let drain = CancellationToken::new();
+    let (transport, peer) = MemoryTransport::pair(64);
+    let server = serve_rpc_draining(rig.host.clone(), transport, drain.clone());
+    let client = async {
+        let mut rpc = Rpc::new(peer);
+        initialize(&mut rpc).await;
+        let before = rpc.call(1, "session/list", sonic_rs::json!({})).await;
+        assert!(
+            before.get("error").is_none(),
+            "served before drain: {before}"
+        );
+
+        drain.cancel();
+        let reply = rpc.call(2, "session/list", sonic_rs::json!({})).await;
+        assert_error(&reply, -32009, DRAINING_TEXT);
+        assert_eq!(reply["error"]["data"]["hint"].as_str(), Some(DRAINING_HINT));
+    };
+    let (outcome, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(server, client)
+    })
+    .await
+    .expect("draining connection ends");
+    outcome.expect("rpc serve ends cleanly");
+}
+
+/// A client that keeps sending after drain must not starve the deadline or
+/// make the unbounded writer outbox grow without limit.
+#[tokio::test]
+async fn a_draining_connection_bounds_replies_during_a_connected_flood() {
+    let rig = rig(&[]).await;
+    let drain = CancellationToken::new();
+    let (transport, peer) = MemoryTransport::pair(64);
+    let server = serve_rpc_draining(rig.host.clone(), transport, drain.clone());
+    let client = async {
+        let mut rpc = Rpc::new(peer);
+        initialize(&mut rpc).await;
+        let started = Instant::now();
+        drain.cancel();
+        let (incoming, mut outgoing) = rpc.into_parts();
+        let mut sent = 0_i64;
+        let mut replies = 0_usize;
+        loop {
+            tokio::select! {
+                frame = outgoing.recv() => {
+                    let Some(frame) = frame else { break };
+                    let value: sonic_rs::Value = sonic_rs::from_str(&frame).expect("reply json");
+                    if value["error"]["code"].as_i64() == Some(-32009) {
+                        replies += 1;
+                    }
+                }
+                result = incoming.send(
+                    sonic_rs::to_string(&sonic_rs::json!({
+                        "jsonrpc": "2.0",
+                        "id": sent,
+                        "method": "session/list",
+                        "params": {},
+                    }))
+                    .expect("request json"),
+                ), if sent < 50_000 => {
+                    if result.is_err() {
+                        break;
+                    }
+                    sent += 1;
+                }
+            }
+        }
+        (sent, replies, started.elapsed())
+    };
+    let (outcome, (sent, replies, elapsed)) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(server, client)
+    })
+    .await
+    .expect("draining connection closes despite the flood");
+    outcome.expect("rpc serve ends cleanly");
+    assert!(
+        elapsed <= Duration::from_secs(3),
+        "draining connection exceeded the grace bound: {elapsed:?}"
+    );
+    assert!(
+        sent > i64::try_from(MAX_DRAIN_REPLIES).expect("cap fits i64") * 4,
+        "the client did not cross the cap with a sustained flood: {sent}"
+    );
+    assert_eq!(
+        replies, MAX_DRAIN_REPLIES,
+        "requests past the cap must earn no further draining replies"
+    );
+}
+
+#[tokio::test]
+async fn a_draining_connection_stops_a_stalled_frame_write_at_the_deadline() {
+    let rig = rig(&[]).await;
+    let drain = CancellationToken::new();
+    let (transport, _peer) = MemoryTransport::pair(1);
+    let writer = transport.writer();
+    writer
+        .write_frame("first")
+        .await
+        .expect("first frame written");
+    writer
+        .enqueue_frame("second".to_owned())
+        .expect("second frame queued");
+    let started = Instant::now();
+    let server = serve_rpc_draining(rig.host.clone(), transport, drain.clone());
+    drain.cancel();
+
+    tokio::time::timeout(Duration::from_secs(3), server)
+        .await
+        .expect("stalled frame write observes drain deadline")
+        .expect("rpc serve ends cleanly");
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= DRAIN_GRACE,
+        "stalled frame write ended before the drain grace elapsed: {elapsed:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_draining_connection_closes_after_the_grace_period_without_a_client_hangup() {
+    let rig = rig(&[]).await;
+    let drain = CancellationToken::new();
+    let (transport, peer) = MemoryTransport::pair(64);
+    let (ended_tx, ended_rx) = tokio::sync::oneshot::channel();
+    let server = async {
+        let outcome = serve_rpc_draining(rig.host.clone(), transport, drain.clone()).await;
+        let _ = ended_tx.send(());
+        outcome
+    };
+    let client = async {
+        let mut rpc = Rpc::new(peer);
+        initialize(&mut rpc).await;
+        drain.cancel();
+        // The client stays connected; the server must still end on its own.
+        tokio::time::timeout(Duration::from_secs(5), ended_rx)
+            .await
+            .expect("server closes within the grace period")
+            .expect("server reports its end");
+        drop(rpc);
+    };
+    let (outcome, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(server, client)
+    })
+    .await
+    .expect("draining connection ends");
+    outcome.expect("rpc serve ends cleanly");
+}
+
+#[test]
+fn a_host_that_is_shut_down_maps_to_server_draining() {
+    let error = host_error(HostError::Closed);
+    assert_eq!(error.code, -32009);
+    assert_eq!(error.message, DRAINING_TEXT);
+}

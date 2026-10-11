@@ -1,5 +1,6 @@
 #![expect(clippy::unwrap_used, reason = "SC test")]
 #![expect(clippy::expect_used, reason = "SC test")]
+
 //! Exercises eval cell service injection and `EvalOnly` tool visibility.
 
 #[expect(

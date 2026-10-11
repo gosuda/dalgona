@@ -130,8 +130,7 @@ fn validate_plugin_sections(config: &dalgon::Config) -> Result<(), dalgon::Build
     }
     for (name, _) in config.plugin_configs() {
         match name {
-            "work" if has_configured_plugin(config, name) => {}
-            "work" => {
+            "work" if !has_configured_plugin(config, name) => {
                 return Err(section_error(
                     "plugin.work",
                     PluginConfigError::WrongSection {

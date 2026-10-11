@@ -9,9 +9,9 @@ use dal_core::ToolClass;
 use dal_core::ext::{BeforeRequest, BeforeTurn};
 use dal_core::{CallId, TurnId};
 use dal_core::{
-    Caps, Channel, InputEvent, InputVerdict, ModelInfo, ModelRoute, Name, Origin, Part, RawJson,
-    RequestParams, ServiceSet, SessionId, StateError, StateOp, StateRecord, StreamVerdict,
-    ToolCallEvent, ToolCallVerdict,
+    Caps, InputEvent, InputVerdict, ModelInfo, ModelRoute, Name, Origin, Part, RawJson,
+    RequestParams, ServiceSet, SessionId, StateError, StateOp, StateRecord, ToolCallEvent,
+    ToolCallVerdict,
 };
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -21,8 +21,8 @@ use super::{
     dispatch_input, dispatch_tool_call, effective_deadline,
 };
 use super::{
-    BeforeTurnStep, DispatchCx, InputStep, LosslessQueue, LossyQueue, StreamWatch, ToolCallStep,
-    ToolDecision, WatchFactory, join_before_turn,
+    BeforeTurnStep, DispatchCx, InputStep, LosslessQueue, LossyQueue, ToolCallStep, ToolDecision,
+    join_before_turn,
 };
 use crate::ext::services::ServiceFuture;
 use crate::ext::{BoxFuture, Caller, CallerKind, Hook, HookError, Services};
@@ -359,6 +359,8 @@ impl Hook<BeforeTurn, Option<String>> for TurnHook {
 
 #[tokio::test]
 async fn before_turn_joins_without_changing_cached_prefix() {
+    use dal_core::{EntryId, EntryKind, EntryView, JournalPart};
+
     let caller = caller();
     let services: Arc<dyn Services> = Arc::new(NoSvcs);
     let cancel = CancellationToken::new();
@@ -367,7 +369,6 @@ async fn before_turn_joins_without_changing_cached_prefix() {
         turn: TurnId::new(std::num::NonZeroU64::MIN),
         text: "prompt".into(),
     };
-    let cached_prefix = "cached-bytes";
     let hooks_one: Vec<Arc<dyn Hook<BeforeTurn, Option<String>>>> = vec![Arc::new(TurnHook {
         text: Some("a".into()),
     })];
@@ -379,8 +380,41 @@ async fn before_turn_joins_without_changing_cached_prefix() {
         let step: BeforeTurnStep = dispatch_before_turn(ext, &cx, hooks, &event).await;
         texts.extend(step.texts);
     }
-    assert_eq!(join_before_turn(&texts).as_deref(), Some("a\n\nb"));
-    assert_eq!(cached_prefix, "cached-bytes");
+    let joined = join_before_turn(&texts).expect("both hooks contributed text");
+    assert_eq!(joined, "a\n\nb");
+
+    let entry = |id: u64, kind: EntryKind| EntryView {
+        id: EntryId::new(std::num::NonZeroU64::new(id).expect("entry id")),
+        parent: std::num::NonZeroU64::new(id - 1).map(EntryId::new),
+        kind,
+    };
+    let user = |id: u64, text: &str| {
+        entry(
+            id,
+            EntryKind::User {
+                parts: vec![JournalPart::Text { text: text.into() }],
+            },
+        )
+    };
+    let hook = entry(
+        2,
+        EntryKind::Reminder {
+            source: dal_core::BEFORE_TURN_SOURCE.into(),
+            text: joined.into(),
+        },
+    );
+    let turn_one = vec![user(1, "prompt"), hook];
+    let mut later = turn_one.clone();
+    later.push(user(3, "next prompt"));
+
+    let before = crate::session::context::context_items(&turn_one);
+    let after = crate::session::context::context_items(&later);
+    assert_eq!(before.len(), 2, "the hook text is one context item");
+    assert_eq!(
+        after.get(..before.len()),
+        Some(before.as_slice()),
+        "a later entry leaves the earlier context bytes, hook text included, unchanged"
+    );
 }
 
 struct HotHook;
@@ -457,49 +491,4 @@ async fn observer_queue_drops_oldest_and_lossless_queue_backpressures() {
     assert_eq!(lossless.len(), 64);
     assert_eq!(lossless.pop(), Some(0));
     assert_eq!(lossless.len(), 63);
-}
-
-struct OneWatcher {
-    feeds: Mutex<u32>,
-}
-
-impl StreamWatch for OneWatcher {
-    fn feed(&mut self, _channel: Channel, _delta: &str) -> StreamVerdict {
-        *self.feeds.lock().expect("feeds") += 1;
-        StreamVerdict::Continue
-    }
-
-    fn finish(&mut self) -> StreamVerdict {
-        StreamVerdict::Continue
-    }
-}
-
-struct OneFactory;
-
-impl WatchFactory for OneFactory {
-    fn start(&self, _turn: &super::TurnInfo<'_>) -> Option<Box<dyn StreamWatch>> {
-        None
-    }
-}
-
-#[test]
-fn watch_factory_starts_once_and_watcher_is_synchronous() {
-    let factory = OneFactory;
-    assert!(
-        factory
-            .start(&super::TurnInfo::new(
-                SessionId::new_v7(),
-                TurnId::new(std::num::NonZeroU64::MIN),
-            ))
-            .is_none()
-    );
-    let mut watcher = OneWatcher {
-        feeds: Mutex::new(0),
-    };
-    assert!(matches!(
-        watcher.feed(Channel::Text, "delta"),
-        StreamVerdict::Continue
-    ));
-    assert!(matches!(watcher.finish(), StreamVerdict::Continue));
-    assert_eq!(*watcher.feeds.lock().expect("feeds"), 1);
 }

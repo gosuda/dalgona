@@ -362,6 +362,10 @@ pub struct ToolOutcomeView {
     pub text: Box<str>,
     /// Images included with the result.
     pub images: Vec<BlobId>,
+    /// Milliseconds the tool ran on a monotonic clock, approval waits
+    /// excluded; absent when the call never ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u64>,
 }
 
 /// Whether an extension's status source is still working.

@@ -16,6 +16,29 @@ pub(crate) fn invalid_params(method: &str, detail: impl Into<String>) -> ErrorOb
     }
 }
 
+/// Prefixes a bare `-32602` error with `invalid params for <method>`.
+///
+/// Every `-32602` reply leaves the server in that one shape, whichever
+/// handler built it.
+pub(crate) fn normalize_invalid_params(method: &str, error: ErrorObject) -> ErrorObject {
+    if error.code == -32602 && !error.message.starts_with("invalid params for") {
+        invalid_params(method, error.message)
+    } else {
+        error
+    }
+}
+
+/// Builds the `-32009` error object for a server that no longer takes requests.
+pub(crate) fn server_draining() -> ErrorObject {
+    ErrorObject {
+        code: -32009,
+        message: "the server is shutting down and accepts no new requests".to_owned(),
+        data: Some(sonic_rs::json!({
+            "hint": "Wait for the server to start again, then reconnect.",
+        })),
+    }
+}
+
 /// Maps one request id to its cancel-table key.
 pub(crate) fn id_key(id: &Id) -> String {
     match id {
@@ -166,12 +189,17 @@ pub(crate) fn host_error(error: HostError) -> ErrorObject {
             message: format!("internal error: admission wait expired: no free {limit} slot"),
             data: Some(hint_value()),
         },
-        HostError::Closed => ErrorObject {
-            code: -32603,
-            message: "internal error: the host is shut down".to_owned(),
-            data: Some(hint_value()),
-        },
+        HostError::Closed => server_draining(),
         HostError::Store(error) => store_error(&error),
+        HostError::Provider(error) => ErrorObject {
+            code: -32603,
+            message: format!("internal error: {error}"),
+            data: Some(
+                error
+                    .fix()
+                    .map_or_else(hint_value, |fix| Value::from(fix.as_str())),
+            ),
+        },
         other => ErrorObject {
             code: -32603,
             message: format!("internal error: {other}"),

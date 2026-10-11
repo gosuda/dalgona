@@ -424,6 +424,9 @@ pub enum Event {
         call: CallId,
         /// The call's terminal outcome.
         outcome: SettledOutcome,
+        /// Milliseconds the tool ran on a monotonic clock, approval waits
+        /// excluded; `None` when the call never ran.
+        elapsed_ms: Option<u64>,
     },
     /// Begin the next request at a turn boundary.
     Boundary {
@@ -507,6 +510,9 @@ pub enum Effect {
         turn: TurnId,
         /// The durable stop reason.
         stop: Stop,
+        /// Whether the turn ended because the context window overflowed, by
+        /// the fold's own classification of the provider reply.
+        overflowed: bool,
     },
 }
 
@@ -566,6 +572,12 @@ pub(super) enum QueuedInput {
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct QuestionRef {
     pub(super) tool: Option<Box<str>>,
+    /// The turn that opened the question, when it belongs to a turn.
+    ///
+    /// Turnless questions (a slash command's grant question) outlive any
+    /// turn and end only by answer, deadline, or their caller giving up,
+    /// matching the broker contract.
+    pub(super) turn: Option<TurnId>,
 }
 /// Usage and file-change totals accumulated for the open turn.
 ///
@@ -691,10 +703,22 @@ fn checked_add(total: u64, value: u64) -> Result<u64, Rejection> {
     })
 }
 
+/// How far the turn's context-overflow recovery has gone.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) enum Overflow {
+    /// No overflow this turn, or recovered after compaction.
+    #[default]
+    Clear,
+    /// A compaction is under way or done for this turn's overflow.
+    Compacted,
+    /// The overflow could not be recovered and the turn is ending on it.
+    Unrecovered,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct TurnFlags {
     pub(super) interrupts: u32,
-    pub(super) overflowed: bool,
+    pub(super) overflow: Overflow,
     pub(super) pending_suppressed: Vec<Box<str>>,
     pub(super) suppressed_notice: bool,
     pub(super) end_after_boundary: bool,

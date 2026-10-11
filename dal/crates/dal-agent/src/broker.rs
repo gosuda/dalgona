@@ -26,7 +26,8 @@ fn core_client() -> ClientId {
 /// Resolved slots older than their deadline plus this grace are pruned.
 const RETENTION_GRACE: Duration = Duration::from_secs(3600);
 
-/// Coordinates request ownership, answer attribution, deadlines, and turn cancellation.
+/// Coordinates request ownership, answer attribution, deadlines, and durable
+/// resolution delivery.
 pub struct Broker {
     pub(crate) state: Mutex<BrokerState>,
 }
@@ -39,23 +40,50 @@ pub(crate) struct BrokerState {
 pub(crate) struct RequestSlot {
     request: Request,
     turn: Option<TurnId>,
-    answer: Option<oneshot::Sender<(Answer, ClientId)>>,
+    answer: Option<oneshot::Sender<Settled>>,
     resolved_by: Option<ClientId>,
     deadline: Instant,
 }
 
-/// The answering end of one open request; resolves to the winning answer.
+/// How an open request reached its answer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Resolution {
+    /// A client answered.
+    Answered,
+    /// No controller answered before the deadline, so the broker applied
+    /// the request's fail-closed default. This is not a user decision.
+    Unavailable,
+    /// The turn ended, or the request went away, before any answer.
+    Cancelled,
+}
+
+/// The settled end of one request, as its waiter sees it.
+#[derive(Debug)]
+pub(crate) struct Settled {
+    /// The winning answer, or the request default when unavailable.
+    pub(crate) answer: Answer,
+    /// The winning client, `core` for deadlines and cancellation.
+    pub(crate) by: ClientId,
+    /// How the request reached this answer.
+    pub(crate) resolution: Resolution,
+}
+
+/// The answering end of one open request; resolves to its settled end.
 pub(crate) struct AnswerWait {
-    rx: oneshot::Receiver<(Answer, ClientId)>,
+    rx: oneshot::Receiver<Settled>,
 }
 
 impl Future for AnswerWait {
-    type Output = (Answer, ClientId);
+    type Output = Settled;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match Pin::new(&mut self.rx).poll(cx) {
-            Poll::Ready(Ok(resolved)) => Poll::Ready(resolved),
-            Poll::Ready(Err(_)) => Poll::Ready((Answer::Cancel, core_client())),
+            Poll::Ready(Ok(settled)) => Poll::Ready(settled),
+            Poll::Ready(Err(_)) => Poll::Ready(Settled {
+                answer: Answer::Cancel,
+                by: core_client(),
+                resolution: Resolution::Cancelled,
+            }),
             Poll::Pending => Poll::Pending,
         }
     }
@@ -70,6 +98,8 @@ pub(crate) struct Resolved {
     pub(crate) answer: Answer,
     /// The winning client, `core` for deadlines and cancellation.
     pub(crate) by: ClientId,
+    /// How the broker reached this resolution.
+    pub(crate) resolution: Resolution,
     /// Whether the broker selected the request default.
     pub(crate) was_default: bool,
 }
@@ -85,23 +115,26 @@ impl Broker {
         }
     }
 
-    /// Opens a broker-owned request and returns its waiter.
+    /// Opens a broker-owned request and returns its waiter. A request with
+    /// a turn ends with that turn; one without (a slash command's grant
+    /// question) ends only by answer, deadline, or its caller giving up.
     pub(crate) fn open(
         &self,
         owner: Owner,
         question: Question,
-        turn: TurnId,
+        turn: impl Into<Option<TurnId>>,
         deadline: Instant,
     ) -> (Request, AnswerWait) {
+        let turn = turn.into();
         let request = Request {
             id: RequestId::new_v7(),
-            turn: Some(turn),
+            turn,
             owner,
             default: default_for(&question),
             timeout: deadline.saturating_duration_since(Instant::now()),
             question,
         };
-        let (waiter, slot) = slot_for(&request, Some(turn), deadline);
+        let (waiter, slot) = slot_for(&request, turn, deadline);
         let mut state = self
             .state
             .lock()
@@ -151,13 +184,11 @@ impl Broker {
             )));
         }
         slot.resolved_by = Some(by.clone());
-        if let Some(sender) = slot.answer.take() {
-            let _ = sender.send((answer.clone(), by.clone()));
-        }
         Ok(Resolved {
             request: slot.request.clone(),
             answer,
             by,
+            resolution: Resolution::Answered,
             was_default: false,
         })
     }
@@ -178,13 +209,11 @@ impl Broker {
                 continue;
             }
             slot.resolved_by = Some(by.clone());
-            if let Some(sender) = slot.answer.take() {
-                let _ = sender.send((answer.clone(), by.clone()));
-            }
             resolved.push(Resolved {
                 request: slot.request.clone(),
                 answer: answer.clone(),
                 by: by.clone(),
+                resolution: Resolution::Cancelled,
                 was_default: false,
             });
         }
@@ -208,13 +237,11 @@ impl Broker {
             let by = core_client();
             slot.resolved_by = Some(by.clone());
             let answer = slot.request.default.clone();
-            if let Some(sender) = slot.answer.take() {
-                let _ = sender.send((answer.clone(), by.clone()));
-            }
             resolved.push(Resolved {
                 request: slot.request.clone(),
                 answer,
                 by,
+                resolution: Resolution::Unavailable,
                 was_default: true,
             });
         }
@@ -234,6 +261,45 @@ impl Broker {
         open_order.retain(|id| slots.contains_key(id));
         resolved
     }
+
+    /// Delivers a broker resolution after the owning actor has journaled it.
+    pub(crate) fn release(&self, resolved: &Resolved) {
+        let sender = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .slots
+            .get_mut(&resolved.request.id)
+            .and_then(|slot| slot.answer.take());
+        let Some(sender) = sender else {
+            return;
+        };
+        let _ = sender.send(Settled {
+            answer: resolved.answer.clone(),
+            by: resolved.by.clone(),
+            resolution: resolved.resolution,
+        });
+    }
+
+    /// Cancels a waiter whose answer could not be made durable.
+    pub(crate) fn cancel(&self, resolved: &Resolved) {
+        let sender = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .slots
+            .get_mut(&resolved.request.id)
+            .and_then(|slot| slot.answer.take());
+        let Some(sender) = sender else {
+            return;
+        };
+        let _ = sender.send(Settled {
+            answer: Answer::Cancel,
+            by: core_client(),
+            resolution: Resolution::Cancelled,
+        });
+    }
+
     /// Lists unresolved requests, oldest first.
     pub(crate) fn open_requests(&self) -> Vec<Request> {
         let state = self
@@ -296,3 +362,7 @@ fn slot_for(
         },
     )
 }
+
+#[cfg(test)]
+mod tests;
+// weave: run 'weave explain dal/crates/dal-agent/src/broker.rs' for per-hunk detail, 'weave check' to verify your resolution

@@ -7,10 +7,14 @@ use dal_agent::ext::{
     ArgError, BoxFuture, ExtensionBuilder, RawValue, Tool, ToolCall, ToolCx, ToolOutcome,
     ToolOutput,
 };
-use dal_core::{ModelInfo, Name, RegistrationError, ToolClass, ToolSpec, Visibility, Workspace};
-use sonic_rs::JsonContainerTrait;
+use dal_core::{
+    DenyReason, ModelInfo, Name, RawJson, RegistrationError, ToolClass, ToolSpec, Visibility,
+    Workspace,
+};
 
-use super::agents_tool::{AGENTS_DESCRIPTION, AGENTS_SCHEMA, REPORT_DESCRIPTION, REPORT_SCHEMA};
+use super::agents_tool::{
+    AGENTS_DESCRIPTION, AGENTS_SCHEMA, REPORT_DESCRIPTION, REPORT_SCHEMA, REPORT_TOOL_NAME,
+};
 use super::goal::ops::{
     CREATE_GOAL_DESCRIPTION, CREATE_GOAL_SCHEMA, GET_GOAL_DESCRIPTION, GET_GOAL_SCHEMA,
     UPDATE_GOAL_DESCRIPTION, UPDATE_GOAL_SCHEMA,
@@ -33,33 +37,28 @@ impl Tool for OrchestrationTool {
         Arc::clone(&self.spec)
     }
 
-    fn classify(&self, args: &RawValue, _workspace: &Workspace) -> Result<ToolClass, ArgError> {
+    fn classify(&self, args: &RawValue, workspace: &Workspace) -> Result<ToolClass, ArgError> {
         if self.name.as_str() != "agents" {
             return Ok(ToolClass::Other);
         }
-        let parsed: sonic_rs::Value = sonic_rs::from_str(args.as_str())
-            .map_err(|error| ArgError::message(error.to_string()))?;
-        let action = parsed
-            .as_object()
-            .and_then(|object| object.get(&"action"))
-            .and_then(sonic_rs::JsonValueTrait::as_str)
-            .unwrap_or_default();
-        Ok(if action == "run" {
-            ToolClass::Exec {
-                read_only: false,
-                grant: None,
-            }
-        } else {
-            ToolClass::Read
-        })
+        let action = self.decode(args)?;
+        Ok(super::agents_tool::approval_class(
+            &action,
+            workspace.as_path(),
+            self.runtime.config().data_root.as_deref(),
+        ))
     }
 
-    fn run<'a>(&'a self, call: ToolCall, cx: ToolCx<'a>) -> BoxFuture<'a, ToolOutcome> {
+    fn run<'a>(&'a self, call: ToolCall, mut cx: ToolCx<'a>) -> BoxFuture<'a, ToolOutcome> {
         Box::pin(async move {
+            if let Err(reason) = self.approve(&call.args, &mut cx).await {
+                return ToolOutcome::Err(ToolError::Denied(reason));
+            }
             match self
                 .runtime
                 .tool(
                     cx.session(),
+                    cx.caller().clone(),
                     call.id,
                     self.name.as_str(),
                     call.args,
@@ -71,6 +70,51 @@ impl Tool for OrchestrationTool {
                 Err(error) => service_failure(error),
             }
         })
+    }
+}
+
+impl OrchestrationTool {
+    /// Decodes one `agents` call against the configured saved workflows.
+    fn decode(&self, args: &RawValue) -> Result<super::agents_tool::AgentAction, ArgError> {
+        let saved = self
+            .runtime
+            .config()
+            .workflows
+            .as_ref()
+            .and_then(|workflows| sonic_rs::to_string(workflows).ok())
+            .and_then(|text| RawJson::parse(&text).ok());
+        super::agents_tool::decode_action(args, saved.as_ref())
+            .map_err(|error| ArgError::message(error.to_string()))
+    }
+
+    /// Asks once for an `agents run` that is not read-only. The approved
+    /// call carries the git grant the run's own `run` calls ride on.
+    /// A call that does not decode goes on to the runtime, which words the
+    /// refusal.
+    async fn approve(&self, args: &RawValue, cx: &mut ToolCx<'_>) -> Result<(), DenyReason> {
+        if self.name.as_str() != "agents" {
+            return Ok(());
+        }
+        let Ok(action) = self.decode(args) else {
+            return Ok(());
+        };
+        let super::agents_tool::AgentAction::Run {
+            label, workflow, ..
+        } = &action
+        else {
+            return Ok(());
+        };
+        let class = super::agents_tool::approval_class(
+            &action,
+            cx.workspace().as_path(),
+            self.runtime.config().data_root.as_deref(),
+        );
+        if matches!(class, ToolClass::Read) {
+            return Ok(());
+        }
+        cx.authorize(super::agents_tool::approval_preview(label, workflow))
+            .await
+            .map(drop)
     }
 }
 
@@ -124,7 +168,7 @@ pub(crate) fn report_tool(
     runtime: &Runtime,
 ) -> Result<(Arc<dyn Tool>, Visibility), RegistrationError> {
     Ok((
-        build_tool(runtime, "report", REPORT_DESCRIPTION, REPORT_SCHEMA)?,
+        build_tool(runtime, REPORT_TOOL_NAME, REPORT_DESCRIPTION, REPORT_SCHEMA)?,
         Visibility::Model,
     ))
 }
@@ -176,4 +220,43 @@ pub(crate) fn register(
         )?;
     }
     Ok(builder)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AGENTS_DESCRIPTION, AGENTS_SCHEMA, Runtime, ToolClass, Workspace, build_tool};
+    use dal_agent::ext::RawValue;
+
+    #[test]
+    fn the_registered_agents_tool_mints_the_git_run_grant() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut config = crate::orchestration::parse_config(None)?;
+        let data = std::env::temp_dir().join("orchestration-data");
+        config.data_root = Some(data.clone());
+        let runtime = Runtime::new(config)?;
+        let tool = build_tool(&runtime, "agents", AGENTS_DESCRIPTION, AGENTS_SCHEMA)?;
+        let workspace = Workspace::new(std::env::temp_dir())?;
+        let args = RawValue::parse(
+            r#"{"action":"run","steps":[{"name":"write","prompt":"write","tools":["patch"],"isolation":"worktree"}]}"#,
+        )?;
+        let class = tool.classify(&args, &workspace)?;
+        let ToolClass::Exec {
+            read_only,
+            grant: Some(grant),
+        } = class
+        else {
+            return Err("the agents tool must classify a write run with a grant".into());
+        };
+        assert!(!read_only);
+        assert_eq!(grant.argv_prefix.as_ref(), "git");
+        assert_eq!(
+            grant.roots,
+            vec![
+                workspace.as_path().to_path_buf(),
+                data.join("worktrees"),
+                data.join("isolation"),
+            ]
+        );
+        Ok(())
+    }
 }

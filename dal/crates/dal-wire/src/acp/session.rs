@@ -18,8 +18,10 @@ pub(super) async fn cancel_session(
     writer: &FrameWriter,
     params: &Value,
 ) {
-    let Some(session) =
-        crate::rpc::opt_string(params, "sessionId").and_then(|text| SessionId::parse(&text).ok())
+    let Some(session) = crate::rpc::opt_string("session/cancel", params, "sessionId")
+        .ok()
+        .flatten()
+        .and_then(|text| SessionId::parse(&text).ok())
     else {
         return;
     };

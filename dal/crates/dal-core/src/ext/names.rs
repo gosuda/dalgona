@@ -16,6 +16,84 @@ pub(super) fn valid_name(value: &str) -> bool {
             })
     }
 }
+/// A checked session-sidecar file name.
+///
+/// [`SidecarName::parse`] accepts 1 to 64 bytes made from lowercase ASCII
+/// letters, digits, `.`, `_`, and `-`. The first byte must be a letter or
+/// digit; `.` and `..` are not valid names.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct SidecarName(pub(super) Box<str>);
+
+/// A sidecar name that does not match its file-name grammar.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[error(
+    "invalid sidecar name {name:?}; use 1 to 64 lowercase ASCII letters, digits, '.', '_' or '-' and do not use '..'"
+)]
+pub struct SidecarNameError {
+    /// The rejected text.
+    pub name: Box<str>,
+}
+
+fn valid_sidecar_name(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 64
+        && bytes
+            .first()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        && bytes.iter().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
+        })
+        && !matches!(value, "." | "..")
+}
+
+impl SidecarName {
+    /// Parses a session-sidecar file name.
+    ///
+    /// # Errors
+    /// Returns [`SidecarNameError`] when the file-name grammar is violated.
+    pub fn parse(value: &str) -> Result<Self, SidecarNameError> {
+        if valid_sidecar_name(value) {
+            Ok(Self(value.into()))
+        } else {
+            Err(SidecarNameError { name: value.into() })
+        }
+    }
+
+    /// Returns the validated file name.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for SidecarName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for SidecarName {
+    type Err = SidecarNameError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse(value)
+    }
+}
+
+impl Serialize for SidecarName {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for SidecarName {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = Box::<str>::deserialize(deserializer)?;
+        Self::parse(&value).map_err(de::Error::custom)
+    }
+}
 
 /// The longest mapped tool name in bytes.
 pub const MAPPED_TOOL_NAME_MAX: usize = 200;

@@ -1,4 +1,5 @@
-//! Codex's device-code fallback for hosts that cannot bind the browser callback.
+//! The device-code sign-in, also the fallback for hosts that cannot bind the
+//! browser callback.
 //!
 //! Polling stays here so the authorization flow owns one deadline and one
 //! cancellation token, while the browser and device paths share token exchange.
@@ -13,11 +14,10 @@ use tokio_util::sync::CancellationToken;
 use crate::ProviderError;
 
 use super::oauth::{
-    CODEX_CLIENT_ID, LoginEndpoints, LoginProgress, OAuthHttp, decode_json, error_message,
-    post_json, report_progress,
+    DeviceUrls, LoginProgress, OAuthHttp, decode_json, error_message, post_json, report_progress,
 };
 
-/// The device authorization result required by the ordinary Codex token exchange.
+/// The device authorization result required by the ordinary token exchange.
 ///
 /// The returned verifier is provided by the device endpoint. It is deliberately
 /// not formatted with `Debug` or included in errors.
@@ -67,25 +67,25 @@ where
     }
 }
 
-/// Request and poll a Codex device code until approval, cancellation, or timeout.
+/// Request and poll a device code until approval, cancellation, or timeout.
 ///
 /// The remote service's 403 and 404 poll responses both mean that approval is
 /// pending. Polling waits the server-provided interval between requests and is
 /// bounded by `deadline`; cancellation drops the current request or sleep.
 pub(crate) async fn run(
     http: &OAuthHttp<'_>,
-    endpoints: &LoginEndpoints,
+    family: Family,
+    client_id: &'static str,
+    urls: &DeviceUrls,
     deadline: Instant,
     progress: &(dyn Fn(LoginProgress) + Send + Sync),
     cancel: &CancellationToken,
 ) -> Result<DeviceGrant, ProviderError> {
     let start = post_json(
         http,
-        Family::Codex,
-        &endpoints.codex_device_usercode,
-        &DeviceCodeRequest {
-            client_id: CODEX_CLIENT_ID,
-        },
+        family,
+        &urls.usercode,
+        &DeviceCodeRequest { client_id },
     )
     .await?;
     if !(200..300).contains(&start.status) {
@@ -104,7 +104,7 @@ pub(crate) async fn run(
     report_progress(
         progress,
         LoginProgress::ShowCode {
-            url: endpoints.codex_device_page.as_str().to_owned(),
+            url: urls.page.as_str().to_owned(),
             code: device.user_code.clone(),
         },
         cancel,
@@ -114,8 +114,8 @@ pub(crate) async fn run(
         wait_for_next_poll(deadline, interval, cancel).await?;
         let poll = post_json(
             http,
-            Family::Codex,
-            &endpoints.codex_device_token,
+            family,
+            &urls.poll,
             &DevicePollRequest {
                 device_auth_id: &device.device_auth_id,
                 user_code: &device.user_code,

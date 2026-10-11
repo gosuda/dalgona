@@ -230,7 +230,10 @@ impl From<&CatalogEntry> for CachedEntry {
 
 impl CachedEntry {
     fn into_catalog_entry(self) -> Result<CatalogEntry, CacheError> {
-        if self.provider.is_empty() || self.id.is_empty() || self.display.is_empty() {
+        let provider = super::decode::sanitize_identifier(&self.provider);
+        let id = super::decode::sanitize_identifier(&self.id);
+        let display = super::decode::sanitize_identifier(&self.display);
+        if provider.is_empty() || id.is_empty() || display.is_empty() {
             return Err(CacheError::Invalid(
                 "models cache contains an empty provider, id, or display name".into(),
             ));
@@ -260,9 +263,9 @@ impl CachedEntry {
             CachedThinking::UnknownAdaptive => ThinkingSupport::UnknownAdaptive,
         };
         Ok(CatalogEntry {
-            provider: self.provider.into_boxed_str(),
-            id: self.id.into_boxed_str(),
-            display: self.display.into_boxed_str(),
+            provider,
+            id,
+            display,
             listing: if self.hidden {
                 Listing::Hidden
             } else {

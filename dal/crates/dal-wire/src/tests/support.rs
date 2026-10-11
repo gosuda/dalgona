@@ -7,12 +7,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use dal_agent::error::ToolError;
 use dal_agent::ext::tool::{ArgError, RawValue, Tool, ToolCall, ToolCx, ToolOutcome, ToolOutput};
 use dal_agent::ext::{BoxFuture, ExtensionBuilder};
 use dal_agent::{Env, Host, Product};
 use dal_core::{
-    Config, ConfigProduct, ModelInfo, Name, RawJson, ServiceSet, ToolClass, ToolSpec, Visibility,
-    Workspace,
+    Config, ConfigProduct, ModelInfo, Name, Preview, RawJson, ServiceSet, ToolClass, ToolSpec,
+    Visibility, Workspace,
 };
 use sonic_rs::{JsonValueTrait, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -176,8 +177,18 @@ impl Tool for AskTool {
         Ok(ToolClass::Patch)
     }
 
-    fn run<'a>(&'a self, _call: ToolCall, _cx: ToolCx<'a>) -> BoxFuture<'a, ToolOutcome> {
-        Box::pin(async { ToolOutcome::Ok(Box::new(ToolOutput::from_text("asked-ok"))) })
+    fn run<'a>(&'a self, _call: ToolCall, mut cx: ToolCx<'a>) -> BoxFuture<'a, ToolOutcome> {
+        Box::pin(async move {
+            let preview = Preview {
+                title: "ask".into(),
+                body: String::new().into(),
+                digest: None,
+            };
+            match cx.authorize(preview).await {
+                Ok(_) => ToolOutcome::Ok(Box::new(ToolOutput::from_text("asked-ok"))),
+                Err(reason) => ToolOutcome::Err(ToolError::Denied(reason)),
+            }
+        })
     }
 }
 
@@ -246,10 +257,15 @@ pub(super) fn text_step(chunks: &[&str], input: u64, output: u64) -> String {
 
 /// One replay step that calls the `gate` tool and stops for tool use.
 pub(super) fn gate_step(call: &str) -> String {
+    tool_step(call, "gate")
+}
+
+/// One replay step that calls the tool `name` and stops for tool use.
+pub(super) fn tool_step(call: &str, name: &str) -> String {
     let events = sonic_rs::json!([
-        {"type": "tool_call_started", "id": call, "name": "gate"},
+        {"type": "tool_call_started", "id": call, "name": name},
         {"type": "tool_calls_done", "calls": [
-            {"id": call, "name": "gate", "args": {"kind": "parsed", "value": {}}}
+            {"id": call, "name": name, "args": {"kind": "parsed", "value": {}}}
         ]},
         usage_event(1, 1),
         {"type": "stop", "reason": "tool_use"},
@@ -296,6 +312,17 @@ impl Rpc {
             sonic_rs::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
         self.send_raw(&sonic_rs::to_string(&frame).expect("frame json"))
             .await;
+    }
+
+    /// Splits the peer after setup so a flood can send and receive
+    /// independently in one select loop.
+    pub(super) fn into_parts(
+        self,
+    ) -> (
+        tokio::sync::mpsc::Sender<String>,
+        tokio::sync::mpsc::Receiver<String>,
+    ) {
+        self.peer.into_parts()
     }
 
     /// Sends one notification.
@@ -373,6 +400,18 @@ pub(super) fn assert_error(reply: &Value, code: i64, message: &str) {
         Some(message),
         "error message in {reply}"
     );
+}
+
+/// Asserts a `-32602` refusal scoped to `method` that names the bad value.
+#[track_caller]
+pub(super) fn assert_invalid_params(reply: &Value, method: &str, bad: &str) {
+    assert_eq!(reply["error"]["code"].as_i64(), Some(-32602), "{reply}");
+    let message = reply["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.starts_with(&format!("invalid params for {method}: ")),
+        "{reply}"
+    );
+    assert!(message.contains(bad), "{reply}");
 }
 
 /// Returns a successful reply's result, failing on an error reply.
@@ -559,4 +598,146 @@ pub(super) async fn with_serve<F>(
     };
     let (waited, ()) = tokio::join!(handle.wait(), driven);
     waited.expect("serve drains cleanly");
+}
+
+/// Reopens `session` and returns the text of its result for the tool `name`
+/// whose error flag equals `error`; panics with the journal entries when no
+/// such result exists.
+pub(super) async fn result_text(rig: &Rig, session: &str, name: &str, error: bool) -> String {
+    let agent = rig
+        .host
+        .open(
+            dal_agent::SessionRef::Resume {
+                key: session.into(),
+                workspace: rig.core_workspace(),
+            },
+            crate::protocol::mint_client_id("test"),
+        )
+        .await
+        .expect("the session reopens");
+    let view = agent
+        .view(dal_core::PageReq::default())
+        .expect("session view");
+    view.entries
+        .items
+        .iter()
+        .find_map(|entry| match &entry.kind {
+            dal_core::EntryKind::ToolResult {
+                name: tool,
+                error: failed,
+                parts,
+                ..
+            } if tool.as_ref() == name && *failed == error => {
+                parts.iter().find_map(|part| match part {
+                    dal_core::JournalPart::Text { text } => Some(text.to_string()),
+                    _ => None,
+                })
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "no result for tool {name} with error={error}: {:?}",
+                view.entries.items
+            )
+        })
+}
+
+/// Reopens `session` and returns the text of its error result for the tool
+/// `name`; panics with the journal entries when no such result exists.
+pub(super) async fn denied_result_text(rig: &Rig, session: &str, name: &str) -> String {
+    let agent = rig
+        .host
+        .open(
+            dal_agent::SessionRef::Resume {
+                key: session.into(),
+                workspace: rig.core_workspace(),
+            },
+            crate::protocol::mint_client_id("test"),
+        )
+        .await
+        .expect("the session reopens");
+    let view = agent
+        .view(dal_core::PageReq::default())
+        .expect("session view");
+    view.entries
+        .items
+        .iter()
+        .find_map(|entry| match &entry.kind {
+            dal_core::EntryKind::ToolResult {
+                name: tool,
+                error: true,
+                parts,
+                ..
+            } if tool.as_ref() == name => parts.iter().find_map(|part| match part {
+                dal_core::JournalPart::Text { text } => Some(text.to_string()),
+                _ => None,
+            }),
+            _ => None,
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "the denied call left an error result: {:?}",
+                view.entries.items
+            )
+        })
+}
+
+/// An extension whose `probe_ask` tool raises one text question through the
+/// `ask` service and reports `answered` or `default` as its result text.
+pub(super) fn ask_probe_extension() -> dal_agent::ext::Extension {
+    let inject = ServiceSet::from_names(["ask"]).expect("ask service");
+    ExtensionBuilder::new("askprobe", "0.0.0", inject)
+        .expect("extension name")
+        .tool(Arc::new(AskProbe::new()), Visibility::Model)
+        .build()
+        .expect("ask probe extension builds")
+}
+
+struct AskProbe {
+    name: Name,
+    spec: Arc<ToolSpec>,
+}
+
+impl AskProbe {
+    fn new() -> Self {
+        let name = Name::parse("probe_ask").expect("tool name");
+        let spec = Arc::new(ToolSpec {
+            name: name.clone(),
+            description: "Asks one question through the ask service.".into(),
+            parameters: RawJson::parse(r#"{"type":"object","properties":{}}"#)
+                .expect("schema json"),
+            grammar: None,
+        });
+        Self { name, spec }
+    }
+}
+
+impl Tool for AskProbe {
+    fn name(&self) -> &Name {
+        &self.name
+    }
+
+    fn spec(&self, _model: &ModelInfo) -> Arc<ToolSpec> {
+        Arc::clone(&self.spec)
+    }
+
+    fn classify(&self, _args: &RawValue, _ws: &Workspace) -> Result<ToolClass, ArgError> {
+        Ok(ToolClass::Read)
+    }
+
+    fn run<'a>(&'a self, _call: ToolCall, cx: ToolCx<'a>) -> BoxFuture<'a, ToolOutcome> {
+        Box::pin(async move {
+            let question = dal_core::Question::Text {
+                prompt: "who?".into(),
+                placeholder: None,
+            };
+            let text = match cx.services().ask(cx.caller(), question).await {
+                Ok(Some(_)) => "answered",
+                Ok(None) => "default",
+                Err(_) => "failed",
+            };
+            ToolOutcome::Ok(Box::new(ToolOutput::from_text(text)))
+        })
+    }
 }

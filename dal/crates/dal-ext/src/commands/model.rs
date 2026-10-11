@@ -4,13 +4,27 @@
 //! over the network. `/model` resolves against the cached catalog rows only;
 //! config aliases fall to `Unknown` until a config read seam lands.
 
-use dal_agent::ext::command::{CommandCx, SaveError};
-use dal_core::command::{Chooser, Command, ErrorTriple, FrontAction, Output, Reply};
-use dal_core::{Family, Mode, ModelRoute, ThinkingLevel};
 use std::fmt::Write as _;
 
-/// The three provider ids dal signs in to.
-const PROVIDERS: [&str; 3] = ["anthropic", "openai", "openai-codex"];
+use dal_agent::ext::command::{CommandCx, SaveError};
+use dal_agent::login::{find_provider, login_providers};
+use dal_core::command::{Chooser, Command, ErrorTriple, FrontAction, Output, Reply};
+use dal_core::{Family, Mode, ModelRoute, ThinkingLevel};
+
+/// The provider ids dal signs in to, from the provider layer.
+fn providers() -> Vec<&'static str> {
+    login_providers().iter().map(|def| def.id).collect()
+}
+
+/// The provider ids as prose: `a, b, and c`.
+fn provider_phrase(ids: &[&str]) -> String {
+    match ids {
+        [] => String::new(),
+        [only] => (*only).to_owned(),
+        [first, second] => format!("{first} and {second}"),
+        [rest @ .., last] => format!("{}, and {last}", rest.join(", ")),
+    }
+}
 
 /// The thinking levels `/thinking` accepts, in display order.
 const THINKING_NAMES: [&str; 7] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
@@ -132,7 +146,8 @@ pub(super) fn unknown_mode(arg: &str) -> ErrorTriple {
 
 /// The unknown-provider pair for `/login` and `/logout`.
 pub(super) fn unknown_provider(cmd: &str, provider: &str) -> ErrorTriple {
-    let fix = match super::suggest_in(&PROVIDERS, provider) {
+    let ids = providers();
+    let fix = match super::suggest_in(&ids, provider) {
         Some(close) => {
             format!("Did you mean {close}? Type /{cmd} to pick from the list.")
         }
@@ -140,7 +155,7 @@ pub(super) fn unknown_provider(cmd: &str, provider: &str) -> ErrorTriple {
     };
     super::error_triple(
         format!("Unknown provider \"{provider}\""),
-        "dalgon signs in to anthropic, openai, and openai-codex",
+        format!("dalgon signs in to {}", provider_phrase(&ids)),
         fix,
     )
 }
@@ -255,12 +270,7 @@ pub(super) enum ModelResolution {
 
 /// Maps a provider id to the API family its models route through.
 fn provider_family(provider: &str) -> Family {
-    match provider {
-        "anthropic" => Family::Anthropic,
-        "openai-codex" => Family::Codex,
-        "openai" => Family::Responses,
-        _ => Family::Chat,
-    }
+    find_provider(provider).map_or(Family::Chat, |def| def.family)
 }
 
 /// Resolves a `/model` argument against cached `(provider, id)` rows.
@@ -420,7 +430,7 @@ fn login_or_logout(cmd: &str, chooser: Chooser, arg: Option<&str>) -> Result<Rep
             filter: "".into(),
         });
     };
-    if !PROVIDERS.contains(&provider) {
+    if !providers().contains(&provider) {
         return Err(unknown_provider(cmd, provider));
     }
     let provider: Box<str> = provider.into();

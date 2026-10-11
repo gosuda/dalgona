@@ -1097,7 +1097,7 @@ fn update_shape(update: &Update) -> (String, String) {
 fn reply_line(reply: &Reply) -> String {
     match reply {
         Reply::Accepted { turn, .. } => format!("accepted turn {}", turn.get()),
-        Reply::Queued => "queued".to_owned(),
+        Reply::Queued { .. } => "queued".to_owned(),
         Reply::Done(_) => "done".to_owned(),
         Reply::Choose { .. } => "choose".to_owned(),
         Reply::Front(_) => "front".to_owned(),

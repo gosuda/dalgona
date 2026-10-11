@@ -12,11 +12,13 @@ use dal_agent::ext::services::ServiceFuture;
 use dal_agent::ext::{
     Caller, Doc, EventStream, Extension, RawValue, Services, Tool, ToolCall, ToolCx, ToolOutcome,
 };
-use dal_core::ext::{McpDeclaration, McpRequest, McpResponse, Visibility};
+use dal_core::ext::{
+    McpDeclaration, McpRequest, McpResponse, StateError, StateOp, StateRecord, Visibility,
+};
 use dal_core::{
     AgentsOp, AgentsReply, Answer, EntryId, FetchRequest, FetchResponse, Inference, JobsOp,
-    JobsReply, ModelRequest, Notice, Question, RawJson, RunOutput, RunRequest, SidecarOp,
-    StateError, StateOp, StateRecord, TurnOp, TurnOpReply,
+    JobsReply, ModelRequest, Notice, Question, RawJson, RunOutput, RunRequest, SidecarOp, TurnOp,
+    TurnOpReply,
 };
 
 pub(crate) type TestResult = Result<(), Box<dyn StdError>>;
@@ -188,15 +190,15 @@ impl Services for Host {
         unavailable()
     }
 
-    fn sidecar(&self, _who: &Caller, _op: SidecarOp) -> ServiceFuture<'_, Option<Vec<u8>>> {
-        unavailable()
-    }
-
     fn state(
         &self,
         _who: &Caller,
         _op: StateOp,
     ) -> ServiceFuture<'_, Result<StateRecord, StateError>> {
+        unavailable()
+    }
+
+    fn sidecar(&self, _who: &Caller, _op: SidecarOp) -> ServiceFuture<'_, Option<Vec<u8>>> {
         unavailable()
     }
 

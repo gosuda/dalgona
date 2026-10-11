@@ -1,9 +1,12 @@
 //! Provider transport helpers: error decoding, redaction, permits, and refresh.
 
-use std::{pin::Pin, sync::Arc};
+use std::{
+    pin::Pin,
+    sync::{Arc, Mutex},
+};
 
 use dal_core::Family;
-use futures::{Stream, StreamExt};
+use futures::{Stream, StreamExt, future::ready};
 use serde::Deserialize;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio_util::sync::CancellationToken;
@@ -11,10 +14,11 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     auth::{
         credential::{Credential, OAuthCredential},
-        refresh::{OAuthProvider, RefreshReason, Refresher},
+        refresh::{RefreshReason, Refresher},
     },
     error::{ProviderError, UsageCheckReason},
     family,
+    provider::{ProviderDef, ProviderEntry},
     stream::{EventStream, StreamEvent},
 };
 
@@ -70,12 +74,26 @@ pub(crate) fn decode_response(
     provider: &str,
     model: &str,
     oauth: bool,
+    replay_prefix: Option<&str>,
     secrets: Vec<Box<str>>,
 ) -> EventStream {
-    let chunks = response.bytes_stream().map(|chunk| match chunk {
-        Ok(bytes) => bytes.to_vec(),
-        Err(_) => Vec::new(),
-    });
+    let read_failure: Arc<Mutex<Option<ProviderError>>> = Arc::default();
+    let chunks = response
+        .bytes_stream()
+        .scan(Arc::clone(&read_failure), move |slot, chunk| {
+            ready(match chunk {
+                Ok(bytes) => Some(bytes.to_vec()),
+                Err(error) => {
+                    // An idle stall stays a cut, like the Codex HTTPS stream.
+                    if !error.is_timeout()
+                        && let Ok(mut failure) = slot.lock()
+                    {
+                        *failure = Some(crate::http::from_reqwest(family, error));
+                    }
+                    None
+                }
+            })
+        });
     let events = crate::sse::decode_stream(chunks);
     let decoded: Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>> =
         match family {
@@ -92,10 +110,18 @@ pub(crate) fn decode_response(
                 events,
                 model.into(),
                 oauth,
+                replay_prefix,
             )),
         };
-    let safe_errors =
-        decoded.map(move |result| result.map_err(|error| redact_provider_error(error, &secrets)));
+    // A body read failure ends the byte source, so the decoder would report
+    // it as a cut (or as a protocol error for a half-read frame); the transport
+    // failure is the retryable truth.
+    let safe_errors = decoded.map(move |result| {
+        result.map_err(|error| {
+            let failure = read_failure.lock().ok().and_then(|mut slot| slot.take());
+            redact_provider_error(failure.unwrap_or(error), &secrets)
+        })
+    });
     EventStream::new(safe_errors, || {})
 }
 
@@ -187,7 +213,7 @@ pub(crate) fn redact_provider_error(error: ProviderError, secrets: &[Box<str>]) 
     }
 }
 
-fn redact_text(mut text: String, secrets: &[Box<str>]) -> String {
+pub(crate) fn redact_text(mut text: String, secrets: &[Box<str>]) -> String {
     for secret in secrets {
         if !secret.is_empty() && text.contains(secret.as_ref()) {
             text = text.replace(secret.as_ref(), "<redacted>");
@@ -256,39 +282,35 @@ pub(crate) fn hold_permit(stream: EventStream, permit: OwnedSemaphorePermit) -> 
 
 pub(crate) async fn refresh_expiring(
     refresher: &Refresher,
-    provider: &str,
-    family: Family,
+    entry: &ProviderEntry,
     credential: &Credential,
     cancel: &CancellationToken,
 ) -> Result<Credential, ProviderError> {
     let Credential::OAuth(held) = credential else {
         return Ok(credential.clone());
     };
-    let Some(provider_kind) = OAuthProvider::from_id(provider) else {
+    let Some(def) = entry.def.filter(|def| def.oauth.is_some()) else {
         return Ok(credential.clone());
     };
     tokio::select! {
         biased;
         () = cancel.cancelled() => Err(ProviderError::Transport {
-            family,
+            family: entry.family,
             reason: String::from("provider request cancelled while refreshing credentials"),
         }),
-        credential = refresher.refresh(provider_kind, held, RefreshReason::Expiring) => credential,
+        credential = refresher.refresh(def, held, RefreshReason::Expiring) => credential,
     }
 }
 pub(crate) async fn refresh_credential(
     refresher: Arc<Refresher>,
     provider: Box<str>,
+    def: Option<&'static ProviderDef>,
     held: OAuthCredential,
 ) -> Result<Credential, ProviderError> {
-    {
-        let Some(provider_kind) = OAuthProvider::from_id(&provider) else {
-            return Err(ProviderError::SignInExpired {
-                provider: provider.to_string(),
-            });
-        };
-        refresher
-            .refresh(provider_kind, &held, RefreshReason::Rejected)
-            .await
-    }
+    let Some(def) = def.filter(|def| def.oauth.is_some()) else {
+        return Err(ProviderError::SignInExpired {
+            provider: provider.to_string(),
+        });
+    };
+    refresher.refresh(def, &held, RefreshReason::Rejected).await
 }

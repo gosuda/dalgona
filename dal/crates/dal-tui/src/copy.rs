@@ -27,6 +27,22 @@ pub mod ids {
     pub const HINT_IDLE_LEGACY: &str = "enter send · ctrl+j newline · esc interrupt · f1 help";
     /// Short idle hint for narrow layouts.
     pub const HINT_IDLE_SHORT: &str = "enter send · f1 help";
+    /// Submit entry of the folded hint row.
+    pub const HINT_SEND: &str = "enter send";
+    /// Newline entry of the folded hint row on kitty-keyboard terminals.
+    pub const HINT_NEWLINE: &str = "shift+enter newline";
+    /// Newline entry of the folded hint row on legacy terminals.
+    pub const HINT_NEWLINE_LEGACY: &str = "ctrl+j newline";
+    /// Interrupt entry of the folded hint row.
+    pub const HINT_INTERRUPT: &str = "esc interrupt";
+    /// Help entry of the folded hint row.
+    pub const HINT_HELP: &str = "f1 help";
+    /// Transcript navigation entries shown while a viewport owns scrolling.
+    pub const HINT_TRANSCRIPT: &str = "pgup pgdn page · end latest";
+    /// Search filter-row match count.
+    pub const SEARCH_MATCHES: &str = "· {n} hit|s";
+    /// Search filter-row empty result.
+    pub const SEARCH_NO_MATCHES: &str = "no matches";
     /// Empty composer placeholder.
     pub const COMPOSER_PLACEHOLDER: &str = "Ask dal to change code. / for commands.";
     /// Status shown without a selected model.
@@ -183,6 +199,8 @@ pub mod ids {
         "The plugin {ext} from {origin} asks for these services. It gets only what you allow.";
     /// Short dialog action row.
     pub const DIALOG_ACTIONS_SHORT: &str = "y allow · a session · n deny";
+    /// Dialog hint while the answer keys are still locked.
+    pub const DIALOG_ARMING: &str = "answer keys ready in a moment";
     /// Dialog preview overflow footer.
     pub const DIALOG_BODY_MORE: &str = "... {n} more line|s · pgdn";
     /// Count of queued requests.
@@ -260,6 +278,57 @@ pub mod ids {
     /// Unsupported picker notice.
     pub const PICKER_UNSUPPORTED: &str =
         "This picker is not available in the terminal client. Use another client.";
+    /// Login picker title.
+    pub const LOGIN_PICKER_TITLE: &str = "Pick a provider to sign in to · type to filter";
+    /// Logout picker title.
+    pub const LOGOUT_PICKER_TITLE: &str = "Pick a provider to sign out of · type to filter";
+    /// Logout picker row for one stored credential.
+    pub const LOGOUT_ROW: &str = "{provider} · {kind}";
+    /// Logout picker row that removes every stored credential.
+    pub const LOGOUT_ALL_ROW: &str = "All providers";
+    /// Remove-all confirmation text.
+    pub const LOGOUT_ALL_TITLE: &str = "Remove all credentials for every provider.";
+    /// Remove-all confirmation accept button.
+    pub const LOGOUT_ALL_REMOVE: &str = "Remove all";
+    /// Remove-all confirmation decline button.
+    pub const LOGOUT_ALL_KEEP: &str = "Keep them";
+    /// Output after one provider's credential was removed.
+    pub const LOGOUT_REMOVED: &str = "Removed credentials for {provider}.";
+    /// Output after every credential was removed.
+    pub const LOGOUT_REMOVED_ALL: &str = "Removed all credentials.";
+    /// Output when nothing was stored.
+    pub const LOGOUT_NONE: &str =
+        "No stored credentials. Environment variables such as ANTHROPIC_API_KEY stay set.";
+    /// Extra output line when the saved model needs a removed credential.
+    pub const LOGOUT_SAVED_MODEL: &str =
+        "The saved model \"{id}\" needs {provider} credentials. Type /model to pick another model.";
+    /// Output after a sign-in finished.
+    pub const LOGIN_SIGNED_IN: &str =
+        "Signed in to {provider}. Type /model to use one of its models.";
+    /// API-key prompt title.
+    pub const LOGIN_KEY_TITLE: &str = "Paste your {provider} API key";
+    /// API-key prompt key guide.
+    pub const LOGIN_KEY_HINT: &str = "enter save · esc cancel";
+    /// Sign-in flow title.
+    pub const LOGIN_TITLE: &str = "Signing in to {provider}";
+    /// Browser sign-in instruction above the URL.
+    pub const LOGIN_OPEN_URL: &str = "Open this URL in a browser:";
+    /// Shown when the desktop opened the browser.
+    pub const LOGIN_OPENED: &str = "Your browser was opened.";
+    /// Device sign-in instruction.
+    pub const LOGIN_DEVICE: &str = "Enter this code there: {code}";
+    /// Sign-in wait line.
+    pub const LOGIN_WAITING: &str = "Waiting for sign-in...";
+    /// Token exchange line.
+    pub const LOGIN_EXCHANGING: &str = "Exchanging the sign-in code...";
+    /// Sign-in key guide while a paste is offered.
+    pub const LOGIN_PASTE_KEYS: &str = "enter send · esc cancel";
+    /// Sign-in key guide with no paste offered.
+    pub const LOGIN_KEYS: &str = "esc cancel";
+    /// Shown after the user cancelled and the flow is stopping.
+    pub const LOGIN_CANCELLING: &str = "Cancelling sign-in...";
+    /// Key guide after a failure.
+    pub const LOGIN_FAILED_KEYS: &str = "any key closes";
     /// Settings title.
     pub const SETTINGS_TITLE: &str = "Settings · changes are session-only until saved";
     /// Model settings label.
@@ -330,6 +399,14 @@ pub const DECK: &[(&str, &str)] = &[
     ("hint.idle", ids::HINT_IDLE),
     ("hint.idle.legacy", ids::HINT_IDLE_LEGACY),
     ("hint.idle.short", ids::HINT_IDLE_SHORT),
+    ("hint.send", ids::HINT_SEND),
+    ("hint.newline", ids::HINT_NEWLINE),
+    ("hint.newline.legacy", ids::HINT_NEWLINE_LEGACY),
+    ("hint.interrupt", ids::HINT_INTERRUPT),
+    ("hint.help", ids::HINT_HELP),
+    ("hint.transcript", ids::HINT_TRANSCRIPT),
+    ("search.matches", ids::SEARCH_MATCHES),
+    ("search.noMatches", ids::SEARCH_NO_MATCHES),
     ("composer.placeholder", ids::COMPOSER_PLACEHOLDER),
     ("status.nomodel", ids::STATUS_NO_MODEL),
     ("status.signedin", ids::STATUS_SIGNED_IN),
@@ -405,6 +482,7 @@ pub const DECK: &[(&str, &str)] = &[
     ("grant.title", ids::GRANT_TITLE),
     ("grant.body", ids::GRANT_BODY),
     ("dialog.actions.short", ids::DIALOG_ACTIONS_SHORT),
+    ("dialog.arming", ids::DIALOG_ARMING),
     ("dialog.bodyMore", ids::DIALOG_BODY_MORE),
     ("request.more", ids::REQUEST_MORE),
     ("request.resolvedBy", ids::REQUEST_RESOLVED_BY),
@@ -441,6 +519,30 @@ pub const DECK: &[(&str, &str)] = &[
     ("picker.hint", ids::PICKER_HINT),
     ("picker.empty", ids::PICKER_EMPTY),
     ("picker.unsupported", ids::PICKER_UNSUPPORTED),
+    ("picker.login.title", ids::LOGIN_PICKER_TITLE),
+    ("picker.logout.title", ids::LOGOUT_PICKER_TITLE),
+    ("logout.row", ids::LOGOUT_ROW),
+    ("logout.allRow", ids::LOGOUT_ALL_ROW),
+    ("logout.all.title", ids::LOGOUT_ALL_TITLE),
+    ("logout.all.remove", ids::LOGOUT_ALL_REMOVE),
+    ("logout.all.keep", ids::LOGOUT_ALL_KEEP),
+    ("logout.removed", ids::LOGOUT_REMOVED),
+    ("logout.removedAll", ids::LOGOUT_REMOVED_ALL),
+    ("logout.none", ids::LOGOUT_NONE),
+    ("logout.savedModel", ids::LOGOUT_SAVED_MODEL),
+    ("login.signedIn", ids::LOGIN_SIGNED_IN),
+    ("login.key.title", ids::LOGIN_KEY_TITLE),
+    ("login.key.hint", ids::LOGIN_KEY_HINT),
+    ("login.title", ids::LOGIN_TITLE),
+    ("login.openUrl", ids::LOGIN_OPEN_URL),
+    ("login.opened", ids::LOGIN_OPENED),
+    ("login.device", ids::LOGIN_DEVICE),
+    ("login.waiting", ids::LOGIN_WAITING),
+    ("login.exchanging", ids::LOGIN_EXCHANGING),
+    ("login.pasteKeys", ids::LOGIN_PASTE_KEYS),
+    ("login.keys", ids::LOGIN_KEYS),
+    ("login.cancelling", ids::LOGIN_CANCELLING),
+    ("login.failedKeys", ids::LOGIN_FAILED_KEYS),
     ("tree.hint", ids::TREE_HINT),
     ("settings.title", ids::SETTINGS_TITLE),
     ("settings.model", ids::SETTINGS_MODEL),

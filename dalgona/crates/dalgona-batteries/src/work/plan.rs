@@ -35,16 +35,6 @@ pub(crate) enum Phase {
     Awaiting,
 }
 
-impl Phase {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Off => "off",
-            Self::Planning => "planning",
-            Self::Awaiting => "awaiting",
-        }
-    }
-}
-
 #[derive(Debug, Default)]
 pub(crate) struct BatteryState {
     phases: Mutex<HashMap<SessionId, Phase>>,
@@ -640,7 +630,7 @@ mod host_tests {
             ]
         );
         assert_eq!(host.state.phase(host.session), Phase::Off);
-        let (quiet, _) = host.status()?;
+        let (quiet, _) = host.status();
         assert!(quiet);
         assert_eq!(host.guard("patch", ToolClass::Patch).await?, None);
         Ok(())
@@ -861,7 +851,7 @@ mod host_tests {
                 }
                 assert_eq!(host.plan_command("on"), "a plan is already awaiting review");
                 assert_eq!(host.plan_command(""), "a plan is already awaiting review");
-                let (quiet, _) = host.status()?;
+                let (quiet, _) = host.status();
                 assert!(!quiet);
                 assert_eq!(host.plan_command("off"), "Plan mode is off.");
                 TestResult::Ok(())
@@ -876,7 +866,7 @@ mod host_tests {
         assert_eq!(result, "interrupted");
         assert_eq!(host.state.phase(host.session), Phase::Off);
         assert_eq!(states(&host)?, [("submitted".to_owned(), true)]);
-        let (quiet, _) = host.status()?;
+        let (quiet, _) = host.status();
         assert!(quiet);
         Ok(())
     }

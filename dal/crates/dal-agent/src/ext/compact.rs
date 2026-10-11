@@ -18,7 +18,9 @@
 use std::sync::Arc;
 
 use dal_core::CompactedHistory;
-use dal_core::{ContextItem, EntryId, ModelRoute, Part, RequestParams, SessionId, Usage};
+use dal_core::{
+    ContextItem, EntryId, ModelRoute, Part, RequestParams, SessionId, Usage, estimate_text_tokens,
+};
 
 use super::{BoxFuture, Caller, ExtRecord, Services};
 use crate::error::ServiceError;
@@ -34,11 +36,31 @@ pub struct CoveredEntry {
     pub entry: EntryId,
     /// True when this entry starts a completed user turn.
     pub starts_user_turn: bool,
-    /// Heuristic token estimate for this entry, four characters per token.
+    /// Heuristic token estimate for this entry, 3.5 characters per token.
     /// Never a measured count; providers report only whole-request usage.
     pub estimated_tokens: u64,
     /// Model context content for this entry.
     pub content: ContextItem,
+    /// Reminder text carried outside the model context when this entry is a
+    /// reminder that is not model context. Compactors that draw the journal
+    /// keep the reminder's place and text; the context itself stays empty.
+    pub note: Option<Box<str>>,
+}
+
+impl CoveredEntry {
+    /// Builds one covered entry and estimates its token cost from the
+    /// serialized content.
+    pub(crate) fn new(entry: EntryId, starts_user_turn: bool, content: ContextItem) -> Self {
+        let estimated_tokens =
+            sonic_rs::to_string(&content).map_or(0, |text| estimate_text_tokens(&text));
+        Self {
+            entry,
+            starts_user_turn,
+            estimated_tokens,
+            content,
+            note: None,
+        }
+    }
 }
 
 /// Borrowed compaction input. The span is selected by the caller.
@@ -64,6 +86,10 @@ pub struct CompactInput<'a> {
     pub image_profile: Option<ImageProfile>,
     /// Images in the retained context outside the covered prefix.
     pub images_elsewhere: usize,
+    /// Bytes those images occupy in the request: the decoded length of each
+    /// inline image and the stored length of each image blob. A compactor
+    /// that adds images subtracts this from its own request byte budget.
+    pub image_bytes_elsewhere: u64,
     /// Summary text carried forward from an earlier compaction.
     pub carried: Option<Box<str>>,
     /// Total projected token count for the branch.
@@ -73,11 +99,15 @@ pub struct CompactInput<'a> {
 }
 
 impl CompactInput<'_> {
-    /// Returns the selected context; never re-runs the cut.
+    /// Returns the selected model context; never re-runs the cut.
+    ///
+    /// Reminder entries other than the text a `before_turn` hook added are not
+    /// model context and are left out.
     #[must_use]
     pub fn covered_context(&self) -> Arc<[ContextItem]> {
         self.covered
             .iter()
+            .filter(|entry| entry.note.is_none())
             .map(|entry| entry.content.clone())
             .collect()
     }
@@ -213,4 +243,33 @@ pub trait Compactor: Send + Sync + 'static {
         input: CompactInput<'a>,
         services: Arc<dyn Services>,
     ) -> BoxFuture<'a, Result<Option<Compaction>, CompactError>>;
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroU64;
+
+    use super::*;
+
+    fn entry() -> EntryId {
+        EntryId::new(NonZeroU64::MIN)
+    }
+
+    fn user_text(text: String) -> ContextItem {
+        ContextItem::User {
+            parts: vec![Part::Text { text: text.into() }],
+        }
+    }
+
+    #[test]
+    fn covered_entry_estimates_from_serialized_characters() {
+        let plain = CoveredEntry::new(entry(), true, user_text("x".repeat(700)));
+        assert!(
+            plain.estimated_tokens >= 200,
+            "700 characters at 3.5 per token is at least 200 tokens, got {}",
+            plain.estimated_tokens
+        );
+        let accented = CoveredEntry::new(entry(), true, user_text("é".repeat(700)));
+        assert_eq!(accented.estimated_tokens, plain.estimated_tokens);
+    }
 }

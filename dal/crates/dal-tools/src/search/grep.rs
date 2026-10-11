@@ -418,7 +418,7 @@ async fn narrow(
     };
     match search
         .index
-        .search_candidates(workspace, clauses, ignore_case, index_scope)
+        .search_candidates(workspace, clauses, ignore_case, index_scope.directory())
         .await
     {
         Ok(Some(candidates)) => {

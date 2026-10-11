@@ -97,6 +97,7 @@ pub(super) struct PartialPrice {
     pub(super) cached_input: Option<f64>,
     pub(super) output: Option<f64>,
     pub(super) reasoning: Option<f64>,
+    pub(super) tiers: Option<Box<[crate::model::PriceTier]>>,
 }
 
 impl PartialPrice {
@@ -107,9 +108,13 @@ impl PartialPrice {
         self.cached_input = later.cached_input.or(self.cached_input);
         self.output = later.output.or(self.output);
         self.reasoning = later.reasoning.or(self.reasoning);
+        if let Some(tiers) = &later.tiers {
+            self.tiers = Some(tiers.to_vec().into_boxed_slice());
+        }
     }
 
     pub(super) fn finish(self, model_id: &str) -> Result<crate::model::ModelPrice, ConfigError> {
+        let tiers = self.tiers.unwrap_or_default();
         match (self.input, self.cached_input, self.output, self.reasoning) {
             (Some(input), Some(cached_input), Some(output), Some(reasoning)) => {
                 Ok(crate::model::ModelPrice {
@@ -117,6 +122,7 @@ impl PartialPrice {
                     cached_input,
                     output,
                     reasoning,
+                    tiers,
                 })
             }
             (input, cached_input, output, reasoning) => {
@@ -206,4 +212,5 @@ pub(super) struct PriceText {
     pub(super) cached_input: Option<toml::Value>,
     pub(super) output: Option<toml::Value>,
     pub(super) reasoning: Option<toml::Value>,
+    pub(super) tiers: Option<toml::Value>,
 }

@@ -5,33 +5,25 @@
 )]
 mod support;
 
-use std::{error::Error, fs, path::PathBuf};
+use std::{
+    error::Error,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use dal_agent::{Delivery, Env, SessionRef};
 use dal_core::{Command, Config, ConfigProduct, Expect, Part, Reply, Stop, UpdateKind, Workspace};
-use support::{TestDir, scripted_session};
+use support::{GateHarness, TestDir, scripted_session};
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "SC headless scenario is one long script"
-)]
-#[tokio::test]
-async fn headless_tools_preserve_call_order_and_see_patch()
--> Result<(), Box<dyn Error + Send + Sync>> {
-    let data = TestDir::new()?;
-    let workspace = TestDir::new()?;
-    fs::write(workspace.path().join("test.txt"), "before\n")?;
-    let fixtures =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../crates/dalgon/tests/fixtures");
-    fs::copy(
-        fixtures.join("process/grandchild.sh"),
-        workspace.path().join("grandchild.sh"),
-    )?;
-    let replay_fixture = fixtures.join("replay/loop-headless.jsonl");
+async fn scripted_headless(
+    replay: &Path,
+    workspace: &TestDir,
+    data: &TestDir,
+) -> Result<GateHarness, Box<dyn Error + Send + Sync>> {
     let factory = dalgon::product();
     let user = format!(
         "model = \"openai-responses/gpt-6\"\napproval = \"all\"\nedit_style = \"replace\"\n[providers.scripted]\nfixture = {:?}\n",
-        replay_fixture.to_string_lossy()
+        replay.to_string_lossy()
     );
     let config = Config::load(
         ConfigProduct::Dalgon,
@@ -51,9 +43,25 @@ async fn headless_tools_preserve_call_order_and_see_patch()
     let session = SessionRef::Ephemeral {
         workspace: Workspace::new(workspace.path().to_path_buf())?,
     };
-    let harness = scripted_session(product, config, env, session).await?;
+    scripted_session(product, config, env, session).await
+}
+
+#[tokio::test]
+async fn headless_tools_preserve_call_order_and_see_patch()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let data = TestDir::new()?;
+    let workspace = TestDir::new()?;
+    fs::write(workspace.path().join("test.txt"), "before\n")?;
+    let fixtures =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../crates/dalgon/tests/fixtures");
+    fs::copy(
+        fixtures.join("process/grandchild.sh"),
+        workspace.path().join("grandchild.sh"),
+    )?;
+    let replay = fixtures.join("replay/loop-headless.jsonl");
+    let harness = scripted_headless(&replay, &workspace, &data).await?;
     let mut subscription = harness.agent.subscribe(None)?;
-    let reply = harness
+    let accepted = harness
         .agent
         .submit(Command::Prompt {
             expect: Expect::Idle,
@@ -62,7 +70,7 @@ async fn headless_tools_preserve_call_order_and_see_patch()
             }],
         })
         .await?;
-    assert!(matches!(reply, Reply::Accepted { .. }));
+    assert!(matches!(accepted, Reply::Accepted { .. }));
 
     let mut started = Vec::<(String, String)>::new();
     let mut settled = Vec::<String>::new();
@@ -86,11 +94,8 @@ async fn headless_tools_preserve_call_order_and_see_patch()
                     read_results.push(sonic_rs::to_string(outcome)?);
                 }
             }
-            UpdateKind::TurnEnded {
-                stop: Stop::EndTurn,
-                ..
-            } => {
-                ended = true;
+            UpdateKind::TurnEnded { stop, .. } => {
+                ended = *stop == Stop::EndTurn;
                 break;
             }
             _ => {}

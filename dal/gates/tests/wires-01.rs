@@ -1,10 +1,9 @@
+//! Stdio and socket wire requests: framing, dispatch, and drop semantics.
 #![expect(clippy::expect_used, reason = "SC test")]
 #![expect(
     clippy::disallowed_methods,
     reason = "SC test exercises real wire binaries"
 )]
-
-//! Stdio and socket wire requests: framing, dispatch, and drop semantics.
 #[expect(
     dead_code,
     reason = "gate support helpers are shared across independent test targets"
@@ -300,6 +299,161 @@ fn wire_clients_answer_each_supported_surface() -> Result<(), Box<dyn Error + Se
     assert!(
         codex.get("result").is_some(),
         "Codex initialize returns a result"
+    );
+    Ok(())
+}
+
+/// Sends one ACP request and returns every raw stdout line up to its reply.
+#[cfg(target_os = "linux")]
+fn acp_call(
+    stdin: &mut std::process::ChildStdin,
+    lines: &std::sync::mpsc::Receiver<String>,
+    seen: &mut Vec<String>,
+    frame: &str,
+    id: u64,
+) -> Result<sonic_rs::Value, Box<dyn Error + Send + Sync>> {
+    writeln!(stdin, "{frame}")?;
+    stdin.flush()?;
+    loop {
+        let line = lines.recv_timeout(std::time::Duration::from_secs(30))?;
+        seen.push(line.clone());
+        let Ok(value) = sonic_rs::from_str::<sonic_rs::Value>(&line) else {
+            continue;
+        };
+        if value.get("id").and_then(sonic_rs::Value::as_u64) == Some(id)
+            && value.get("method").is_none()
+        {
+            return Ok(value);
+        }
+    }
+}
+
+/// Runs initialize, session/new, and one prompt; returns the prompt reply.
+#[cfg(target_os = "linux")]
+fn acp_prompt_turn(
+    stdin: &mut std::process::ChildStdin,
+    lines: &std::sync::mpsc::Receiver<String>,
+    seen: &mut Vec<String>,
+    workspace: &std::path::Path,
+) -> Result<sonic_rs::Value, Box<dyn Error + Send + Sync>> {
+    acp_call(
+        stdin,
+        lines,
+        seen,
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientInfo":{"name":"gate"}}}"#,
+        1,
+    )?;
+    let session = acp_call(
+        stdin,
+        lines,
+        seen,
+        &format!(
+            r#"{{"jsonrpc":"2.0","id":2,"method":"session/new","params":{{"cwd":{:?},"mcpServers":[]}}}}"#,
+            workspace.to_string_lossy()
+        ),
+        2,
+    )?;
+    let session_id = session
+        .get("result")
+        .and_then(|result| result.get("sessionId"))
+        .and_then(sonic_rs::Value::as_str)
+        .ok_or("session/new returned no session id")?
+        .to_owned();
+    acp_call(
+        stdin,
+        lines,
+        seen,
+        &format!(
+            r#"{{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{{"sessionId":"{session_id}","prompt":[{{"type":"text","text":"run the tool"}}]}}}}"#
+        ),
+        3,
+    )
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn acp_stream_survives_tool_child_writing_to_process_stdout()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    use std::io::{BufRead, BufReader};
+
+    let dir = TestDir::new()?;
+    let home = dir.path().join("home");
+    let workspace = dir.path().join("workspace");
+    let data_home = home.join(".local/share");
+    fs::create_dir_all(home.join(".config/dal"))?;
+    fs::create_dir_all(&workspace)?;
+    let replay = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../crates/dalgon/tests/fixtures/replay/acp-stdout-tool.jsonl");
+    fs::write(
+        home.join(".config/dal/dal.toml"),
+        format!(
+            "model = \"openai/gpt-6-luna\"\napproval = \"all\"\n[providers.scripted]\nfixture = {:?}\n",
+            replay.to_string_lossy()
+        ),
+    )?;
+    let mut child = Command::new(dalgon_binary("dalgon")?)
+        .current_dir(&workspace)
+        .env_clear()
+        .envs(support::captured_shell_vars())
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_DATA_HOME", &data_home)
+        .env("NO_COLOR", "1")
+        .env("OPENAI_API_KEY", "sk-test")
+        .arg("acp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut stdin = child.stdin.take().expect("stdin");
+    let stdout = child.stdout.take().expect("stdout");
+    let stderr = child.stderr.take().expect("stderr");
+    let mut guard = ChildGuard(child);
+    let (sender, lines) = std::sync::mpsc::channel::<String>();
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(stdout).split(b'\n').map_while(Result::ok) {
+            if sender
+                .send(String::from_utf8_lossy(&line).into_owned())
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = std::io::Read::read_to_string(&mut BufReader::new(stderr), &mut text);
+        text
+    });
+
+    let mut seen = Vec::<String>::new();
+    let prompt = acp_prompt_turn(&mut stdin, &lines, &mut seen, &workspace)?;
+    drop(stdin);
+    guard.0.wait()?;
+    reader.join().map_err(|_| "stdout reader panicked")?;
+    seen.extend(lines.try_iter());
+    let stderr_text = stderr_reader.join().map_err(|_| "stderr reader panicked")?;
+
+    assert_eq!(
+        prompt
+            .get("result")
+            .and_then(|result| result.get("stopReason"))
+            .and_then(sonic_rs::Value::as_str),
+        Some("end_turn"),
+        "the prompt turn must finish; stderr: {stderr_text}"
+    );
+    for line in &seen {
+        let frame: sonic_rs::Value = sonic_rs::from_str(line)
+            .map_err(|error| format!("stdout carried a non-JSON line {line:?}: {error}"))?;
+        assert_eq!(
+            frame.get("jsonrpc").and_then(sonic_rs::Value::as_str),
+            Some("2.0"),
+            "stdout carried a frame without jsonrpc 2.0: {line}"
+        );
+    }
+    assert!(
+        stderr_text.contains("TOOL-OUTPUT-LINE") && stderr_text.contains("TOOL-OUTPUT-PARTIAL"),
+        "tool output aimed at the process stdout must land on stderr; stderr: {stderr_text}"
     );
     Ok(())
 }

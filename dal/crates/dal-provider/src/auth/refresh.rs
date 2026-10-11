@@ -1,7 +1,7 @@
 //! Serialized OAuth token refresh over `auth.json`.
 //!
 //! One [`Refresher`] owns one `auth.json` path. Inside a process each OAuth
-//! credential key (`anthropic`, `openai-codex`) has one async mutex; across
+//! credential key has one async mutex; across
 //! processes an exclusive advisory lock on the sibling `auth.json.lock`
 //! (`std::fs::File::try_lock`, polled without blocking the runtime)
 //! serializes every refresher of the same file. Holding both, the refresher
@@ -18,19 +18,16 @@
 //!   refresh token, and the new tokens are committed by the atomic rename of
 //!   [`AuthStore::store`].
 //!
-//! The commit is the last step. Each locked refresh owns a
-//! [`CancellationToken`] that fires when its future is dropped; the commit
-//! runs on the blocking pool owning both lock guards and first checks that
-//! token. That check is the commit's linearization point: a cancellation
-//! before it sends no write, leaves `auth.json` byte-for-byte unchanged, and
-//! releases both locks; once past it, the single atomic rename runs to its
-//! end before the locks release, so the file is never half-written and no
-//! write starts after a cancellation. All file I/O runs on the blocking pool.
+//! The commit is the last step. A caller can drop its future while it waits
+//! for either lock; the per-key slot keeps an in-flight task so a later caller
+//! awaits that same refresh. The task keeps the auth file lock through the
+//! bounded exchange and atomic commit. The commit runs on the blocking pool
+//! and all file I/O runs there. The file is never half-written, and a rotated
+//! refresh token is not discarded by cancellation.
 //! Nothing here reads the environment or keeps process-global state, and no
 //! error text or log line carries a token.
 //!
 //! [`AuthStore::store`]: crate::auth::credential::AuthStore::store
-//! [`CancellationToken`]: tokio_util::sync::CancellationToken
 
 use std::{
     fs::{File, OpenOptions, TryLockError},
@@ -43,7 +40,7 @@ use crate::{error::ProviderError, http::OAUTH_TIMEOUT};
 mod endpoints;
 mod engine;
 
-pub use endpoints::{OAuthProvider, RefreshReason, TokenEndpoints};
+pub use endpoints::{RefreshReason, TokenEndpoints};
 pub use engine::Refresher;
 
 /// Seconds before `expires_at` at which a proactive refresh starts.
@@ -60,11 +57,6 @@ pub(crate) const LOCK_POLL: Duration = Duration::from_millis(20);
 /// its file writes.
 pub(crate) const LOCK_WAIT: Duration =
     Duration::from_secs(2 * OAUTH_TIMEOUT.as_secs() + RETRY_DELAY.as_secs() + 5);
-
-/// Token endpoint paths under a replay or test base, matching the paths of
-/// `CODEX_TOKEN_URL` and `CLAUDE_TOKEN_URL`.
-pub(crate) const ANTHROPIC_TOKEN_PATH: &str = "v1/oauth/token";
-pub(crate) const CODEX_TOKEN_PATH: &str = "oauth/token";
 
 /// Token-endpoint error codes that mean the refresh token is dead; the user
 /// must sign in again and no retry can help.

@@ -2,6 +2,10 @@ use super::*;
 use dal_core::{Config, ConfigProduct};
 use std::path::Path;
 
+const OPENAI_URL: &str = "https://api.openai.com/v1";
+const CODEX_URL: &str = "https://chatgpt.com/backend-api/codex";
+const ANTHROPIC_URL: &str = "https://api.anthropic.com";
+
 fn parse(input: &str) -> Result<ProviderConfig, ProviderConfigError> {
     let config = Config::load(
         ConfigProduct::Dalgon,

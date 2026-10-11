@@ -5,7 +5,7 @@ use std::{collections::BTreeSet, fmt::Write as _};
 
 use serde::{Deserialize, Deserializer, Serialize, de};
 
-use super::rounds::{FindingIdentity, identity};
+use super::rounds::{FindingIdentity, identity, outstanding_findings, stored_findings};
 use super::{
     DIFF_TRUNCATION_MARKER, FOCUS_TRUNCATION_MARKER, MAX_ERROR_BYTES, MAX_FINDINGS,
     REVIEW_REPLY_FORMAT, ReviewError, utf8_prefix,
@@ -283,7 +283,10 @@ pub(crate) fn settle_reply(
         return Ok(format!("Converged after {round} rounds: no new findings."));
     }
     if round >= max_rounds {
-        return Err(ReviewError::CapReached { rounds: max_rounds });
+        return Err(ReviewError::CapReached {
+            rounds: max_rounds,
+            outstanding: outstanding_findings(&stored_findings(reply)),
+        });
     }
     Ok(render_report(
         round,
@@ -295,7 +298,7 @@ pub(crate) fn settle_reply(
 }
 
 impl Severity {
-    const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Critical => "critical",
             Self::Major => "major",
@@ -303,14 +306,16 @@ impl Severity {
         }
     }
 }
+const COMMAND_PROMPT_BASE: &str = "Review the current changes with the review tool. The user ran /review, which grants one restart; call review with restart set to true.";
+
 pub(crate) fn command_prompt(focus: &str) -> String {
     if focus.is_empty() {
-        return "Review the current changes with the review tool.".to_owned();
+        return COMMAND_PROMPT_BASE.to_owned();
     }
     let focus = if focus.len() > 500 {
         format!("{}{}", utf8_prefix(focus, 500), FOCUS_TRUNCATION_MARKER)
     } else {
         focus.to_owned()
     };
-    format!("Review the current changes with the review tool.\nFocus: {focus}")
+    format!("{COMMAND_PROMPT_BASE}\nFocus: {focus}")
 }

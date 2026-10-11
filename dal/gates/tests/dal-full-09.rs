@@ -1,17 +1,17 @@
+//! Gate ledgers verify manifest targets and reject private planning paths or row citations.
 #![expect(clippy::unwrap_used, reason = "SC test")]
 #![expect(
     clippy::disallowed_methods,
     reason = "SC test inspects tracked public content"
 )]
 
-//! Gate ledgers: manifest test names match public targets and pending state.
 use std::{
     error::Error,
     path::{Path, PathBuf},
     process::Command,
 };
 
-const INVENTORIES: [(&str, &[&str]); 6] = [
+const INVENTORIES: [(&str, &[&str]); 7] = [
     (
         "loop-headless",
         &[
@@ -41,6 +41,7 @@ const INVENTORIES: [(&str, &[&str]); 6] = [
             "loop-tui-10",
             "loop-tui-11",
             "loop-tui-12",
+            "loop-tui-13",
         ],
     ),
     (
@@ -83,6 +84,7 @@ const INVENTORIES: [(&str, &[&str]); 6] = [
             "dal-full-09",
         ],
     ),
+    ("login", &["login-cli-pty-01", "login-tui-01"]),
 ];
 
 const RELEASE_TARGETS: [&str; 4] = [
@@ -213,3 +215,4 @@ fn has_row_number(bytes: &[u8]) -> bool {
     }
     false
 }
+// weave: run 'weave explain dal/gates/tests/dal-full-09.rs' for per-hunk detail, 'weave check' to verify your resolution

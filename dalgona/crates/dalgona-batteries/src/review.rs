@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
 //! The review battery: one reviewer round over the session's git changes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 pub mod config;
@@ -15,12 +15,12 @@ mod tests;
 pub use config::{ReviewConfig, ReviewConfigError};
 
 use dal_agent::ext::{
-    ArgError, BoxFuture, Extension, ExtensionBuilder, RawValue, StatusCx, StatusSnapshot, ToolCall,
-    ToolCx, ToolOutcome, ToolOutput,
+    ArgError, BoxFuture, Extension, ExtensionBuilder, HookCx, HookError, ObserveHook, RawValue,
+    StatusCx, StatusSnapshot, ToolCall, ToolCx, ToolOutcome, ToolOutput,
 };
 use dal_core::{
-    CommandName, CommandSpec, Name, RawJson, RegistrationError, ServiceSet, SessionId, ToolClass,
-    ToolSpec, Workspace,
+    CommandName, CommandSpec, Name, RawJson, RegistrationError, ServiceSet, SessionEnd, SessionId,
+    ToolClass, ToolSpec, Workspace,
 };
 
 const REVIEW_COMMAND_ARGS_HINT: &str = "[focus]";
@@ -47,8 +47,10 @@ pub(crate) enum ReviewError {
     Parse { round: u8, reason: Box<str> },
     #[error("reviewer returned {count} findings; the cap is 50; resolve the reported ones first")]
     TooManyFindings { count: usize },
-    #[error("review session reached the cap of {rounds} rounds; start a new review with /review")]
-    CapReached { rounds: u8 },
+    #[error(
+        "review session reached the cap of {rounds} rounds with these findings still open:\n{outstanding}\nStop and tell the user. The user must run /review first; /review grants one restart. Only then call review with restart set to true."
+    )]
+    CapReached { rounds: u8, outstanding: Box<str> },
     #[error("workspace status exceeds {limit} bytes; commit or stash unrelated changes")]
     StatusTooLarge { limit: usize },
 }
@@ -75,7 +77,14 @@ pub const REVIEW_DOC: &str = concat!(
     "verdict is clean or no finding is new; otherwise the report lists every\n",
     "finding marked new or repeat and asks for the new findings. After\n",
     "`max_rounds` (1 to 10, default 3) non-converged rounds the review session\n",
-    "reaches its cap and a new `/review` starts a new session. The reviewer\n",
+    "reaches its cap and stops. The review then reports the findings still open\n",
+    "and asks the user what to do. The model never starts a new session on\n",
+    "its own. The user must run `/review` before the model calls `review`\n",
+    "with `restart` set to true; `/review` grants one restart. The\n",
+    "`/review` command asks the model to call `review` with `restart` set to\n",
+    "true.\n",
+    "`restart` only takes effect at the cap; mid-session it continues the open\n",
+    "rounds. The reviewer\n",
     "model is `reviewer_model` (empty selects the session model); the diff base\n",
     "is `diff_base` (empty selects `HEAD`).\n",
 );
@@ -92,7 +101,9 @@ impl ReviewTool {
         let name = Name::parse("review")?;
         let parameters = RawJson::parse(concat!(
             r#"{"type":"object","properties":{"focus":{"type":"string","#,
-            r#""description":"What the reviewer should look at first."}},"#,
+            r#""description":"What the reviewer should look at first."},"#,
+            r#""restart":{"type":"boolean","#,
+            r#""description":"Use true only after the user runs /review; /review grants one restart before you call review with restart set to true."}},"#,
             r#""additionalProperties":false}"#,
         ))
         .map_err(|_| RegistrationError::InvalidParameters)?;
@@ -129,15 +140,22 @@ impl dal_agent::ext::Tool for ReviewTool {
 
     fn run<'a>(&'a self, call: ToolCall, cx: ToolCx<'a>) -> BoxFuture<'a, ToolOutcome> {
         Box::pin(async move {
-            let focus = match sonic_rs::from_str::<ReviewArgs>(call.args.as_str()) {
-                Ok(args) => args.focus,
+            let args = match sonic_rs::from_str::<ReviewArgs>(call.args.as_str()) {
+                Ok(args) => args,
                 Err(error) => {
                     return ToolOutcome::Err(dal_agent::ToolError::message(format!(
                         "review: invalid input: {error}."
                     )));
                 }
             };
-            review_round(&self.cfg, &self.status, &cx, focus.as_deref()).await
+            review_round(
+                &self.cfg,
+                &self.status,
+                &cx,
+                args.focus.as_deref(),
+                args.request(),
+            )
+            .await
         })
     }
 }
@@ -146,11 +164,24 @@ impl dal_agent::ext::Tool for ReviewTool {
 #[serde(deny_unknown_fields)]
 struct ReviewArgs {
     focus: Option<String>,
+    #[serde(default)]
+    restart: bool,
+}
+
+impl ReviewArgs {
+    fn request(&self) -> rounds::RoundRequest {
+        if self.restart {
+            rounds::RoundRequest::Restart
+        } else {
+            rounds::RoundRequest::Continue
+        }
+    }
 }
 
 struct ReviewStatus {
     max_rounds: u8,
     running: Mutex<HashMap<SessionId, Vec<u8>>>,
+    restart_authorized: Mutex<HashSet<SessionId>>,
 }
 
 impl ReviewStatus {
@@ -159,7 +190,37 @@ impl ReviewStatus {
         Self {
             max_rounds,
             running: Mutex::new(HashMap::new()),
+            restart_authorized: Mutex::new(HashSet::new()),
         }
+    }
+
+    /// Records one restart authorization for `session`, granted by the
+    /// `/review` command.
+    fn authorize_restart(&self, session: SessionId) {
+        self.restart_authorized
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(session);
+    }
+
+    /// Consumes the one restart authorization for `session`, if present.
+    ///
+    /// The next review call consumes the grant whatever it asks, so a
+    /// stale grant cannot restart a later session.
+    #[must_use]
+    fn take_restart_authorization(&self, session: SessionId) -> bool {
+        self.restart_authorized
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&session)
+    }
+
+    /// Drops an unused restart authorization when the owning session closes.
+    fn session_end(&self, session: SessionId) {
+        self.restart_authorized
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&session);
     }
 
     fn lock(&self) -> MutexGuard<'_, HashMap<SessionId, Vec<u8>>> {
@@ -189,6 +250,17 @@ impl ReviewStatus {
             max_rounds: self.max_rounds,
         })
         .ok()
+    }
+}
+
+struct SessionEndHook {
+    status: Arc<ReviewStatus>,
+}
+
+impl ObserveHook<SessionEnd> for SessionEndHook {
+    fn call(&self, input: SessionEnd, _cx: HookCx) -> BoxFuture<'static, Result<(), HookError>> {
+        self.status.session_end(input.session);
+        Box::pin(async { Ok(()) })
     }
 }
 
@@ -225,7 +297,9 @@ impl dal_agent::ext::StatusPoll for ReviewStatus {
     }
 }
 
-struct ReviewCommand;
+struct ReviewCommand {
+    status: Arc<ReviewStatus>,
+}
 
 impl dal_agent::ext::CommandHandler for ReviewCommand {
     fn run<'a>(
@@ -235,6 +309,7 @@ impl dal_agent::ext::CommandHandler for ReviewCommand {
     ) -> dal_agent::ext::BoxFuture<'a, Result<dal_core::Reply, dal_agent::error::ServiceError>>
     {
         Box::pin(async move {
+            self.status.authorize_restart(cx.session());
             let prompt = reply::command_prompt(args.trim());
             let content = vec![dal_core::Part::Text {
                 text: prompt.into(),
@@ -255,9 +330,18 @@ async fn review_round(
     status: &Arc<ReviewStatus>,
     cx: &ToolCx<'_>,
     focus: Option<&str>,
+    request: rounds::RoundRequest,
 ) -> ToolOutcome {
     let services = cx.services();
     let caller = cx.caller().clone();
+    // One /review grants one restart. Consume it before mapping the
+    // request, whatever this call asks, so a stale grant cannot ride a
+    // later self-initiated restart.
+    let authorized = status.take_restart_authorization(cx.session());
+    let request = match (request, authorized) {
+        (rounds::RoundRequest::Restart, true) => rounds::RoundRequest::Restart,
+        _ => rounds::RoundRequest::Continue,
+    };
     let raw_records = match services.records(&caller, "review").await {
         Ok(records) => records,
         Err(error) => return service_outcome(error),
@@ -266,7 +350,7 @@ async fn review_round(
         .iter()
         .filter_map(|record| sonic_rs::from_str(record.as_str()).ok())
         .collect();
-    let work_round = match rounds::next_round(&records, cfg.max_rounds) {
+    let work_round = match rounds::next_round(&records, cfg.max_rounds, request) {
         Ok(work_round) => work_round,
         Err(error) => return ToolOutcome::Err(dal_agent::ToolError::message(error.to_string())),
     };
@@ -324,15 +408,9 @@ async fn review_round(
         new_count: new,
         findings: rounds::stored_findings(&reviewer_reply),
     };
-    let Ok(record_body) = sonic_rs::to_string(&record) else {
-        return ToolOutcome::Err(dal_agent::ToolError::message(
-            "review: the record did not serialize.".to_owned(),
-        ));
-    };
-    let Ok(record_body) = RawJson::parse(&record_body) else {
-        return ToolOutcome::Err(dal_agent::ToolError::message(
-            "review: the record did not serialize.".to_owned(),
-        ));
+    let record_body = match record_body(&record) {
+        Ok(record_body) => record_body,
+        Err(outcome) => return *outcome,
     };
     if let Err(error) = services
         .append_record(&caller, "review", Box::new(record_body))
@@ -351,6 +429,16 @@ async fn review_round(
         Ok(text) => ToolOutcome::Ok(Box::new(ToolOutput::from_text(text))),
         Err(error) => ToolOutcome::Err(dal_agent::ToolError::message(error.to_string())),
     }
+}
+
+fn record_body(record: &rounds::ReviewRecord) -> Result<RawJson, Box<ToolOutcome>> {
+    let unserializable = || {
+        Box::new(ToolOutcome::Err(dal_agent::ToolError::message(
+            "review: the record did not serialize.".to_owned(),
+        )))
+    };
+    let body = sonic_rs::to_string(record).map_err(|_| unserializable())?;
+    RawJson::parse(&body).map_err(|_| unserializable())
 }
 
 struct GitCapture {
@@ -458,6 +546,9 @@ pub fn review(cfg: ReviewConfig) -> Result<Extension, RegistrationError> {
         ServiceSet::from_names(["run", "infer"])?,
     )?
     .with_origin(dal_core::Origin::Bundled, None)
+    .on_session_end_lossless(SessionEndHook {
+        status: Arc::clone(&status),
+    })
     .tool(Arc::new(tool), dal_core::Visibility::Model)
     .command(
         CommandSpec {
@@ -465,7 +556,9 @@ pub fn review(cfg: ReviewConfig) -> Result<Extension, RegistrationError> {
             summary: REVIEW_COMMAND_SUMMARY.into(),
             args_hint: Some(REVIEW_COMMAND_ARGS_HINT.into()),
         },
-        Arc::new(ReviewCommand),
+        Arc::new(ReviewCommand {
+            status: Arc::clone(&status),
+        }),
     )
     .status_kind("review", status)
     .build()

@@ -3,21 +3,25 @@
 //! Each variant's display text is the product text. Callers match the
 //! variant; front ends print [`std::error::Error::to_string`].
 
-use std::{io, path::PathBuf};
+use std::{io, path::Path, path::PathBuf};
 
 use dal_core::{BlobId, EntryId, SessionId};
+
+use crate::sidecar::MAX_SIDECAR_VALUE;
 
 /// A session operation failed.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum StoreError {
     /// Another process holds the session lock.
-    #[error("{}", locked_text(.session, *.pid))]
+    #[error("{}", locked_text(.session, *.pid, .path))]
     Locked {
         /// The session that is open elsewhere.
         session: SessionId,
         /// The pid text from the lock file, when it parses.
         pid: Option<u32>,
+        /// The lock file that refused the acquisition.
+        path: PathBuf,
     },
     /// The journal names a format this build does not read.
     #[error(
@@ -79,6 +83,14 @@ pub enum StoreError {
         path: PathBuf,
         /// The operating-system error.
         source: Box<io::Error>,
+    },
+    /// An extension sidecar value exceeds the sidecar cap.
+    #[error("sidecar value for \"{name}\" is {bytes} bytes; the limit is {MAX_SIDECAR_VALUE}.")]
+    SidecarTooLarge {
+        /// The sidecar name.
+        name: Box<str>,
+        /// The rejected length in bytes.
+        bytes: u64,
     },
     /// `--resume` was given an empty argument.
     #[error("--resume needs a session id or name")]
@@ -149,11 +161,11 @@ pub enum StoreError {
     #[error(transparent)]
     Blob(#[from] BlobError),
 }
-
-fn locked_text(session: &SessionId, pid: Option<u32>) -> String {
+fn locked_text(session: &SessionId, pid: Option<u32>, path: &Path) -> String {
+    let lock = path.display();
     match pid {
-        Some(pid) => format!("session {session} is open in process {pid}"),
-        None => format!("session {session} is open in another process"),
+        Some(pid) => format!("session {session} is open in process {pid} (lock {lock})"),
+        None => format!("session {session} is open in another process (lock {lock})"),
     }
 }
 

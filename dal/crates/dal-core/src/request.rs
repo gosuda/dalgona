@@ -18,7 +18,7 @@ use std::time::Duration;
 use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
 
-use crate::id::{JobId, RequestId, TurnId};
+use crate::id::{CallId, JobId, RequestId, TurnId};
 use crate::raw::{RawJson, Tagged};
 
 /// A preview shown with a question or approval request.
@@ -120,6 +120,11 @@ pub enum Question {
         preview: Preview,
         /// A grant that applies only to this call, when present.
         grant: Option<CallGrant>,
+        /// The provider's identity of the tool call this approval gates,
+        /// when a call opened it. Wires use it to name the call that its
+        /// tool-call updates announced; it is not the request id.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call: Option<CallId>,
     },
     /// Ask the user to grant an extension its declared capabilities.
     Grant {
@@ -163,6 +168,8 @@ struct ApprovalQuestionFields {
     tool: Box<str>,
     preview: Preview,
     grant: Option<CallGrant>,
+    #[serde(default)]
+    call: Option<CallId>,
 }
 
 #[derive(Deserialize)]
@@ -208,6 +215,7 @@ impl<'de> Deserialize<'de> for Question {
                     tool: fields.tool,
                     preview: fields.preview,
                     grant: fields.grant,
+                    call: fields.call,
                 })
             }
             "grant" => {

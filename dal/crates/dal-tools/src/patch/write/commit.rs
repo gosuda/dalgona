@@ -7,7 +7,8 @@ use super::super::ir::{
     StagedFileOwned,
 };
 
-use super::PatchSession;
+use super::super::resolve::revalidate_path;
+use super::{PatchSession, ensure_regular_target, non_regular_target};
 
 fn lock_table()
 -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>> {
@@ -41,7 +42,7 @@ async fn prepare_write_set(
         if file.op == super::super::ir::Operation::Rename
             && let Some(dest) = file.renamed_to.as_ref()
         {
-            lock_paths.push(session.workspace.join(dest));
+            lock_paths.push(dest.absolute_path.clone());
         }
     }
     lock_paths.sort_by(|left, right| {
@@ -64,7 +65,14 @@ async fn prepare_write_set(
         guards.push(guard.lock_owned().await);
     }
     for file in &ordered {
+        revalidate_path(&session.workspace, &file.path, &file.absolute_path)?;
+        if let Some(dest) = file.renamed_to.as_ref() {
+            revalidate_path(&session.workspace, &dest.path, &dest.absolute_path)?;
+        }
+    }
+    for file in &ordered {
         if let Some(expected) = file.before.as_deref() {
+            ensure_regular_target(&file.absolute_path, &file.path).await?;
             let current = tokio::fs::read(&file.absolute_path)
                 .await
                 .unwrap_or_default();
@@ -78,7 +86,10 @@ async fn prepare_write_set(
                     ),
                 ));
             }
-        } else if tokio::fs::metadata(&file.absolute_path).await.is_ok() {
+        } else if let Ok(metadata) = tokio::fs::metadata(&file.absolute_path).await {
+            if !metadata.is_file() {
+                return Err(non_regular_target(&file.path));
+            }
             drop(guards);
             return Err(EngineError::new(
                 ErrorClass::File,
@@ -109,7 +120,7 @@ pub(crate) async fn apply_files(
     for file in &plan.files {
         session.index.dirty(&session.workspace, &file.path);
         if let Some(renamed_to) = file.renamed_to.as_ref() {
-            session.index.dirty(&session.workspace, renamed_to);
+            session.index.dirty(&session.workspace, &renamed_to.path);
         }
     }
     // Phase B: ordered target operations (updates, deletes, renames).
@@ -123,6 +134,10 @@ pub(crate) async fn apply_files(
         }
         let trash = trash_path(session, &file.absolute_path);
         if let Err(error) = tokio::fs::rename(&file.absolute_path, &trash).await {
+            // Best-effort restore of deletes already moved to trash.
+            for (src, trash) in trash_paths.iter().rev() {
+                let _ = tokio::fs::rename(trash, src).await;
+            }
             cleanup_temps(&temps).await;
             return Err(EngineError::new(
                 ErrorClass::Io,
@@ -206,6 +221,11 @@ async fn stage_temp(
     seen_dirs: &mut std::collections::HashSet<PathBuf>,
 ) -> Result<(), EngineError> {
     if file.op == super::super::ir::Operation::Delete {
+        let parent = file
+            .absolute_path
+            .parent()
+            .unwrap_or(session.workspace.as_path());
+        seen_dirs.insert(parent.to_path_buf());
         return Ok(());
     }
     let Some(after) = file.after.as_deref() else {
@@ -213,7 +233,7 @@ async fn stage_temp(
     };
     let target_abs = if file.op == super::super::ir::Operation::Rename {
         match file.renamed_to.as_ref() {
-            Some(dest) => session.workspace.join(dest),
+            Some(dest) => dest.absolute_path.clone(),
             None => file.absolute_path.clone(),
         }
     } else {
@@ -221,19 +241,23 @@ async fn stage_temp(
     };
     // No-replace: rename destinations must be absent at prepare and commit.
     if file.op == super::super::ir::Operation::Rename
-        && tokio::fs::metadata(&target_abs).await.is_ok()
+        && let Ok(metadata) = tokio::fs::metadata(&target_abs).await
     {
         cleanup_temps(temps).await;
         let dest = file
             .renamed_to
             .as_ref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default();
+            .map_or(file.path.as_path(), |dest| dest.path.as_path());
+        if !metadata.is_file() {
+            return Err(non_regular_target(dest));
+        }
         return Err(EngineError::new(
             ErrorClass::File,
             format!(
-                "patch: cannot rename {} to {dest}: {dest} exists.",
-                file.path.display()
+                "patch: cannot rename {} to {}: {} exists.",
+                file.path.display(),
+                dest.display(),
+                dest.display()
             ),
         ));
     }
@@ -275,8 +299,13 @@ async fn stage_temp(
         ));
     }
     temps.push((target_abs.clone(), temp));
-    if let Some(parent) = file.absolute_path.parent() {
-        seen_dirs.insert(parent.to_path_buf());
+    seen_dirs.insert(parent.to_path_buf());
+    if file.op == super::super::ir::Operation::Rename {
+        let source_parent = file
+            .absolute_path
+            .parent()
+            .unwrap_or(session.workspace.as_path());
+        seen_dirs.insert(source_parent.to_path_buf());
     }
     Ok(())
 }
@@ -284,10 +313,26 @@ async fn stage_temp(
 /// Best-effort restore of completed targets from staged before bytes.
 async fn restore_completed(plan: &Plan, completed: &[PathBuf]) {
     for file in &plan.files {
-        if completed.contains(&file.absolute_path)
-            && let Some(before) = file.before.as_deref()
+        if completed.contains(&file.absolute_path) {
+            if let Some(before) = file.before.as_deref() {
+                let _ = tokio::fs::write(&file.absolute_path, before).await;
+            } else {
+                let _ = tokio::fs::remove_file(&file.absolute_path).await;
+            }
+        }
+    }
+    remove_installed_destinations(plan, completed).await;
+}
+
+/// Best-effort removal of rename destinations that were installed before a
+/// later failure; destinations were proven absent, so removal restores them.
+async fn remove_installed_destinations(plan: &Plan, completed: &[PathBuf]) {
+    for file in &plan.files {
+        if file.op == super::super::ir::Operation::Rename
+            && let Some(dest) = file.renamed_to.as_ref()
+            && completed.contains(&dest.absolute_path)
         {
-            let _ = tokio::fs::write(&file.absolute_path, before).await;
+            let _ = tokio::fs::remove_file(&dest.absolute_path).await;
         }
     }
 }
@@ -319,6 +364,7 @@ async fn trash_rename_source(
                 }
             }
         }
+        remove_installed_destinations(plan, completed).await;
         for (src, trash) in trash_moves.iter().rev() {
             let _ = tokio::fs::rename(trash, src).await;
         }
@@ -351,7 +397,7 @@ fn report_output(session: &PatchSession, plan: &Plan) -> Output {
             renamed_to: file
                 .renamed_to
                 .as_ref()
-                .map(|path| path.to_string_lossy().replace('\\', "/").into()),
+                .map(|dest| dest.path.to_string_lossy().replace('\\', "/").into()),
         });
         display_files.push(DiffFile {
             path: file.path.to_string_lossy().replace('\\', "/").into(),
@@ -359,7 +405,7 @@ fn report_output(session: &PatchSession, plan: &Plan) -> Output {
             renamed_to: file
                 .renamed_to
                 .as_ref()
-                .map(|path| path.to_string_lossy().replace('\\', "/").into()),
+                .map(|dest| dest.path.to_string_lossy().replace('\\', "/").into()),
             hunks: file.hunks.clone(),
         });
         // Register echo rows under the new digest for Seen transfer.
@@ -434,4 +480,91 @@ fn nonce_u128() -> u128 {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |duration| u64::from(duration.subsec_nanos()));
     (u128::from(first) << 64) | (u128::from(std::process::id()) << 32) | u128::from(nanos)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{num::NonZeroU64, path::PathBuf, sync::Arc};
+
+    use dal_core::{CallId, GenerationId, SessionId, TurnId};
+
+    use crate::{
+        patch::{
+            ir::{DialectId, ErrorClass, Operation, Plan, RenameTarget, StagedFileOwned},
+            snapshot::SnapshotStore,
+        },
+        search::index::Index,
+    };
+
+    use super::super::PatchSession;
+    use super::apply_files;
+
+    #[tokio::test]
+    async fn restore_completed_removes_create_after_later_temp_install_failure() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let workspace = directory.path();
+        let source = workspace.join("source.txt");
+        let created = workspace.join("created");
+        let destination = workspace.join("other/");
+
+        tokio::fs::write(&source, b"source\n")
+            .await
+            .expect("seed rename source");
+
+        let session = PatchSession {
+            workspace: workspace.to_path_buf(),
+            session: SessionId::new_v7(),
+            generation: GenerationId::new(NonZeroU64::MIN),
+            turn: TurnId::new(NonZeroU64::MIN),
+            call: CallId::new("restore-create"),
+            consumer: dal_core::Consumer::Model,
+            symbols: false,
+            seen: crate::Seen::new(),
+            index: Index::new(None),
+            snapshots: Arc::new(SnapshotStore::new([7; 16])),
+            cutoff: Some(u64::MAX),
+        };
+        let plan = Plan {
+            style: DialectId::Replace,
+            files: vec![
+                StagedFileOwned {
+                    path: PathBuf::from("created"),
+                    absolute_path: created.clone(),
+                    before: None,
+                    after: Some(b"created\n".to_vec().into_boxed_slice()),
+                    op: Operation::Create,
+                    renamed_to: None,
+                    hunks: Vec::new(),
+                },
+                StagedFileOwned {
+                    path: PathBuf::from("source.txt"),
+                    absolute_path: source.clone(),
+                    before: Some(b"source\n".to_vec().into_boxed_slice()),
+                    after: Some(b"renamed\n".to_vec().into_boxed_slice()),
+                    op: Operation::Rename,
+                    renamed_to: Some(RenameTarget {
+                        path: PathBuf::from("other/"),
+                        absolute_path: destination,
+                    }),
+                    hunks: Vec::new(),
+                },
+            ],
+            findings: Vec::new(),
+        };
+
+        let error = apply_files(&session, &plan)
+            .await
+            .expect_err("later rename install must fail");
+
+        assert_eq!(error.class, ErrorClass::Io);
+        assert!(error.message.contains("Nothing was written"), "{error}");
+        assert!(
+            tokio::fs::metadata(created).await.is_err(),
+            "completed create must be removed during restore"
+        );
+        assert_eq!(
+            tokio::fs::read(source).await.expect("read source"),
+            b"source\n"
+        );
+    }
 }

@@ -18,8 +18,8 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use dal_agent::ext::script::{
-    CancelTarget, Collect, HostTerminal, Invocation, InvocationId, OpOutcome, ScopeId, ScriptCx,
-    ScriptHost, TaskId,
+    CancelTarget, Collect, FailureCode, HostTerminal, Invocation, InvocationId, OpFailure,
+    OpOutcome, ScopeId, ScriptCx, ScriptHost, TaskId,
 };
 use dal_core::{
     ModelRoute, ScopeSpec,
@@ -33,9 +33,9 @@ use starlark::starlark_simple_value;
 use starlark::values::{Heap, NoSerialize, StarlarkValue, Trace, Value, ValueLike};
 
 use crate::adapter::OpAdapter;
-use crate::context::{FacadeGroup, facade, frame_of};
+use crate::context::{FacadeDeps, FacadeGroup, facade, frame_of};
 use crate::error::api_error;
-use crate::outcome::{project_outcome, settled_outcome, terminal_error};
+use crate::outcome::{boundary_failure, project_outcome, settled_outcome, terminal_error};
 
 /// The shared scope state adapters minted through a scope facade check.
 ///
@@ -128,12 +128,14 @@ impl<'v> StarlarkValue<'v> for ScopeValue {
         Some(facade(
             heap,
             group,
-            &self.invocation,
-            &self.host,
-            self.loaded.as_ref(),
-            self.script.as_ref(),
-            self.runtime.clone(),
-            Some(Arc::clone(&self.shared)),
+            &FacadeDeps {
+                invocation: &self.invocation,
+                host: &self.host,
+                loaded: self.loaded.as_ref(),
+                script: self.script.as_ref(),
+                runtime: &self.runtime,
+                scope: Some(&self.shared),
+            },
         ))
     }
 
@@ -220,10 +222,23 @@ impl ScopeValue {
         let collected = self
             .runtime
             .block_on(task)
-            .map_err(|_| terminal_error(HostTerminal::Cancelled))?
+            .map_err(|error| collect_join_failure(&error))?
             .map_err(terminal_error)?;
         Ok(collected.into_vec())
     }
+}
+
+/// Maps a failed collect task: a host panic is an indeterminate failure the
+/// script can see, and only a cancelled task reads as cancellation.
+fn collect_join_failure(error: &tokio::task::JoinError) -> starlark::Error {
+    if error.is_panic() {
+        return boundary_failure(OpFailure {
+            code: FailureCode::Indeterminate,
+            message: "the host panicked while collecting scope results".into(),
+            details: None,
+        });
+    }
+    terminal_error(HostTerminal::Cancelled)
 }
 
 #[starlark_module]
@@ -387,7 +402,7 @@ impl TaskValue {
         let collected = self
             .runtime
             .block_on(task)
-            .map_err(|_| terminal_error(HostTerminal::Cancelled))?
+            .map_err(|error| collect_join_failure(&error))?
             .map_err(terminal_error)?;
         collected
             .into_vec()

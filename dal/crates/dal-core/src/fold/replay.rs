@@ -452,6 +452,7 @@ impl Replay {
                             text: TOOL_LOST.into(),
                         }],
                         changes: Vec::new(),
+                        elapsed_ms: None,
                     },
                 )
                 .map_err(|_| contradiction("entry id space exhausted during crash repair"))?;

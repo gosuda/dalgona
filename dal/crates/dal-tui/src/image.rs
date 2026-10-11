@@ -30,7 +30,7 @@ pub fn resolve_rung(env: &EnvFacts, probe: ImageProbe, images: bool) -> Option<R
     if !images {
         return None;
     }
-    let multiplexer = env.tmux || env.sty || env.zellij;
+    let multiplexer = env.multiplexer.tmux || env.multiplexer.sty || env.multiplexer.zellij;
     if multiplexer {
         if kitty_marker(env) && probe.kitty_ok {
             return Some(Rung::KittyPlaceholders);
@@ -146,7 +146,7 @@ mod tests {
             Some(Rung::KittyDirect)
         );
         let mut mux = env();
-        mux.tmux = true;
+        mux.multiplexer.tmux = true;
         mux.term = Some("xterm-kitty".to_owned());
         assert_eq!(
             resolve_rung(

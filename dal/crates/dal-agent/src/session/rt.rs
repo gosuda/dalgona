@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use dal_core::{
     ApprovalMode, BlobId, CallId, DenyReason, EntryId, EntryKind, EntryView, JobId, JournalPart,
-    Name, Policy, Preview, SessionId, ToolClass, Workspace,
+    Name, Policy, Preview, RunRequest, SessionId, ToolClass, Workspace,
 };
 use serde::Deserialize;
 use tokio::sync::{Mutex, OwnedSemaphorePermit};
@@ -23,33 +23,25 @@ use crate::error::{SchemeError, ToolError};
 use crate::ext::generation::Generation;
 use crate::ext::scheme::{LetterSourceIndex, SchemeCx, SchemeCxRuntime, SchemeResolveContext};
 use crate::ext::tool::{Approved, ToolCxRuntime};
-use crate::ext::{BoxFuture, Doc};
+use crate::ext::{BoxFuture, Caller, Doc};
 use crate::host::HostState;
 use crate::jobs::{JobRecord, JobTable};
 use crate::proc::{Launcher, Proc, SpawnOpts, spawn_process};
-use crate::session::dispatch::grant_covers;
+use crate::session::dispatch::{git_spawn_in_roots, grant_covers};
+use crate::session::service_grants::{CallKey, Covering};
 use crate::session::tasks::SessionTasks;
-
-/// Session approval policy for the services `run` slot.
-fn service_policy(mode: ApprovalMode) -> Policy {
-    Policy {
-        mode,
-        answerer_attached: false,
-        allow_always: std::collections::BTreeSet::new(),
-    }
-}
 
 /// Tool identity attributed to services `run` approvals.
 #[expect(
     clippy::expect_used,
     reason = "\"run\" is a fixed literal that always satisfies the name grammar"
 )]
-fn service_tool() -> Name {
+pub(crate) fn service_tool() -> Name {
     Name::parse("run").expect("literal service tool name parses")
 }
 
 /// Class of the services `run` slot: an impure process execution.
-fn service_class() -> ToolClass {
+pub(crate) fn service_class() -> ToolClass {
     ToolClass::Exec {
         read_only: false,
         grant: None,
@@ -95,7 +87,7 @@ pub(crate) struct SessionRt {
     procs: Arc<Mutex<HashMap<JobId, Proc>>>,
     env_snapshot: Vec<(OsString, OsString)>,
     launcher: Result<Launcher, crate::proc::sandbox::SandboxSetupError>,
-    policy: Policy,
+    approval: ApprovalMode,
     cancel: CancellationToken,
     proofs: std::sync::Mutex<HashMap<CallId, SpawnProof>>,
     jobs_dir: PathBuf,
@@ -130,12 +122,25 @@ impl SessionRt {
             procs,
             env_snapshot,
             launcher,
-            policy: service_policy(approval),
+            approval,
             cancel,
             proofs: std::sync::Mutex::new(HashMap::new()),
             jobs_dir,
             tasks,
         }
+    }
+
+    /// The live grant that covers one `run` request `who` made, if any.
+    async fn covering(&self, who: &Caller, req: &RunRequest) -> Option<Covering> {
+        let key = CallKey::of(who)?;
+        let cwd = req
+            .cwd
+            .as_deref()
+            .unwrap_or_else(|| self.workspace.as_path());
+        let jobs = self.jobs.lock().await;
+        self.shared
+            .service_grants()
+            .cover(&key, &req.argv, cwd, &jobs)
     }
 
     /// Acquires the process permit for one allowed services run.
@@ -187,9 +192,40 @@ impl SessionRt {
             })?;
         Ok((process, fds))
     }
+    /// Mints the spawn proof for one allowed services run: process and fd
+    /// permits plus the digest-bound proof the spawn door consumes.
+    async fn mint_allow(
+        &self,
+        call: &CallId,
+        preview: Preview,
+        cancel: &CancellationToken,
+    ) -> Result<Approved, DenyReason> {
+        let (permit, fds) = self.acquire(cancel).await?;
+        let digest = preview.digest;
+        self.proofs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(call.clone(), (digest, permit, fds, None));
+        Ok(Approved::new(
+            call.clone(),
+            digest,
+            Box::new([]),
+            Box::new([self.workspace.as_path().to_path_buf()]),
+            None,
+        ))
+    }
 }
 
 impl ToolCxRuntime for SessionRt {
+    fn decide_run(&self) -> dal_core::Decision {
+        let policy = Policy {
+            mode: self.approval,
+            answerer_attached: self.shared.attached_approval(),
+            allow_always: self.shared.allow_always().as_ref().clone(),
+        };
+        policy.decide(&service_tool(), &service_class())
+    }
+
     fn authorize(
         &self,
         call: &CallId,
@@ -199,28 +235,69 @@ impl ToolCxRuntime for SessionRt {
         let call = call.clone();
         let cancel = cancel.clone();
         Box::pin(async move {
-            let tool = service_tool();
-            match self.policy.decide(&tool, &service_class()) {
-                dal_core::Decision::Allow => {
-                    let (permit, fds) = self.acquire(&cancel).await?;
-                    let digest = preview.digest;
-                    self.proofs
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .insert(call.clone(), (digest, permit, fds));
-                    Ok(Approved::new(
-                        call,
-                        digest,
-                        Box::new([]),
-                        Box::new([self.workspace.as_path().to_path_buf()]),
-                        None,
-                    ))
-                }
-                dal_core::Decision::Deny { reason } => Err(reason),
+            match self.decide_run() {
+                dal_core::Decision::Allow => self.mint_allow(&call, preview, &cancel).await,
+                dal_core::Decision::Deny { reason } => Err(match reason {
+                    DenyReason::NoFrontEnd => DenyReason::out_of_scope(
+                        dal_core::headless_denial_text("run", dal_core::rung(&service_class())),
+                    ),
+                    reason => reason,
+                }),
+                // The services layer routes `Ask` through the session
+                // broker; a direct authorize has no question to open.
                 dal_core::Decision::Ask { .. } => Err(DenyReason::NoFrontEnd),
-                _ => Err(DenyReason::out_of_scope(tool.as_str())),
+                _ => Err(DenyReason::out_of_scope(service_tool().as_str())),
             }
         })
+    }
+
+    fn authorize_approved(
+        &self,
+        call: &CallId,
+        preview: Preview,
+        cancel: &CancellationToken,
+    ) -> BoxFuture<'_, Result<Approved, DenyReason>> {
+        let call = call.clone();
+        let cancel = cancel.clone();
+        Box::pin(async move { self.mint_allow(&call, preview, &cancel).await })
+    }
+
+    fn covered_run<'a>(
+        &'a self,
+        who: &'a Caller,
+        call: &'a CallId,
+        req: &'a RunRequest,
+        preview: &'a Preview,
+        cancel: &'a CancellationToken,
+    ) -> BoxFuture<'a, Result<Option<Approved>, DenyReason>> {
+        Box::pin(async move {
+            if self.covering(who, req).await.is_none() {
+                return Ok(None);
+            }
+            let (permit, fds) = self.acquire(cancel).await?;
+            // The wait for a slot may outlast the run that earned the grant.
+            let Some(covering) = self.covering(who, req).await else {
+                return Err(DenyReason::NotGranted);
+            };
+            let digest = preview.digest;
+            self.proofs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(call.clone(), (digest, permit, fds, CallKey::of(who)));
+            Ok(Some(Approved::new(
+                call.clone(),
+                digest,
+                covering.prefix,
+                covering.roots,
+                covering.job,
+            )))
+        })
+    }
+
+    fn job_started(&self, who: &Caller, job: JobId) {
+        if let Some(key) = CallKey::of(who) {
+            self.shared.service_grants().bind_job(&key, job);
+        }
     }
 
     fn spawn(
@@ -234,14 +311,29 @@ impl ToolCxRuntime for SessionRt {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(approved.call());
-        let Some((digest, permit, fd_permit)) = proof else {
+        let Some((digest, permit, fd_permit, key)) = proof else {
             return Err(ToolError::Denied(DenyReason::NotGranted));
         };
+        if let Some(key) = key {
+            let Ok(jobs) = self.jobs.try_lock() else {
+                return Err(ToolError::Denied(DenyReason::NotGranted));
+            };
+            if approved.job().is_some_and(|job| !jobs.is_live(job))
+                || !self.shared.service_grants().is_live(&key, &jobs)
+            {
+                return Err(ToolError::Denied(DenyReason::NotGranted));
+            }
+        }
         let launcher = match &self.launcher {
             Ok(launcher) => launcher,
             Err(setup) => return Err(setup.tool_error()),
         };
-        if !approved.prefix().is_empty() && !grant_covers(&approved, argv, &opts.cwd) {
+        // The prefix match authenticates scoped grants; the git checks below
+        // apply to every approval shape, including empty-prefix grants whose
+        // roots still bind. Only the request overrides are vetted here; the
+        // host snapshot is scrubbed of git redirectors at capture instead.
+        let prefix_ok = approved.prefix().is_empty() || grant_covers(&approved, argv, &opts.cwd);
+        if !prefix_ok || !git_spawn_in_roots(argv, &opts.env, &opts.cwd, approved.roots()) {
             return Err(ToolError::Denied(DenyReason::out_of_scope(
                 service_tool().as_str(),
             )));
@@ -641,6 +733,7 @@ type SpawnProof = (
     Option<[u8; 32]>,
     OwnedSemaphorePermit,
     crate::admission::FdPermit,
+    Option<CallKey>,
 );
 
 pub(crate) fn resolve_extension_scheme(

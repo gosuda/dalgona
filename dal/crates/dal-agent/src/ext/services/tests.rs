@@ -17,8 +17,8 @@ use dal_core::ext::{McpBlock, McpDeclaration, McpServerDecl};
 use dal_core::{
     AgentsOp, AgentsReply, Answer, Budget, CallId, ClientId, DenyReason, EntryId, Inference, JobId,
     JobsOp, JobsReply, ModelRequest, ModelRoute, Name, OnError, Origin, Purpose, Question, RawJson,
-    RequestParams, ScopeSpec, Service, ServiceSet, SessionId, SidecarOp, Site, StateError, StateOp,
-    StateRecord, TurnId, TurnOp, TurnOpReply, Workspace,
+    RequestParams, ScopeSpec, Service, ServiceSet, SessionId, SidecarName, SidecarOp, Site,
+    StateError, StateOp, StateRecord, TurnId, TurnOp, TurnOpReply, Workspace,
 };
 use tokio::sync::watch;
 use tokio::task::JoinSet;
@@ -28,7 +28,6 @@ use tokio_util::sync::CancellationToken;
 use super::SessionServicesDeps;
 use super::{Caller, CallerKind, ServiceFuture, Services, SessionBackend, SessionServices};
 use crate::Broker;
-use crate::broker::BrokerState;
 use crate::error::ServiceError;
 use crate::ext::Doc;
 use crate::ext::generation::{Generation, ValidatedExtensions};
@@ -51,6 +50,10 @@ struct FakeBackend {
     rows: Mutex<Vec<crate::ext::ExtRecord>>,
     blobs: Mutex<HashMap<[u8; 32], Vec<u8>>>,
     updates: Mutex<Vec<dal_core::UpdateKind>>,
+    /// Resolutions the ask guard asked the actor to journal.
+    resolved: Mutex<Vec<crate::broker::Resolved>>,
+    resolutions: Arc<crate::session::ResolutionInbox>,
+    headless: std::sync::atomic::AtomicBool,
 }
 
 impl SessionBackend for FakeBackend {
@@ -135,12 +138,17 @@ impl SessionBackend for FakeBackend {
         Box::pin(async move { Ok(reply) })
     }
 
-    fn sidecar_read(&self, _name: &Name) -> ServiceFuture<'_, Option<Vec<u8>>> {
+    fn sidecar_read(&self, _ext: &Name, _name: &SidecarName) -> ServiceFuture<'_, Option<Vec<u8>>> {
         let value = self.sidecar_value.lock().unwrap().clone();
         Box::pin(async move { Ok(value) })
     }
 
-    fn sidecar_write(&self, name: &Name, bytes: Vec<u8>) -> ServiceFuture<'_, ()> {
+    fn sidecar_write(
+        &self,
+        _ext: &Name,
+        name: &SidecarName,
+        bytes: Vec<u8>,
+    ) -> ServiceFuture<'_, ()> {
         assert!(
             !name.as_str().is_empty(),
             "sidecar name travels with the write"
@@ -178,6 +186,20 @@ impl SessionBackend for FakeBackend {
     fn publish_update(&self, update: dal_core::UpdateKind) {
         self.updates.lock().unwrap().push(update);
     }
+    fn request_opened(&self, _request: dal_core::Request) -> ServiceFuture<'_, ()> {
+        Box::pin(async { Ok(()) })
+    }
+    fn request_resolved(&self, resolved: crate::broker::Resolved) {
+        self.resolutions.mark_settled(resolved.request.id);
+        self.resolved
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(resolved);
+    }
+
+    fn answerer_attached(&self) -> bool {
+        !self.headless.load(std::sync::atomic::Ordering::SeqCst)
+    }
 
     fn notify(&self, _notice: dal_core::Notice) {
         unreachable!("this test never notifies")
@@ -209,6 +231,7 @@ struct SpawnRecord {
     argv: Vec<OsString>,
     cwd: PathBuf,
     env: Vec<(OsString, OsString)>,
+    stdout_prefix_limit: usize,
 }
 
 type SpawnLog = Mutex<Vec<SpawnRecord>>;
@@ -258,6 +281,18 @@ impl Default for FakeRt {
 }
 
 impl ToolCxRuntime for FakeRt {
+    fn decide_run(&self) -> dal_core::Decision {
+        dal_core::Decision::Allow
+    }
+
+    fn authorize_approved(
+        &self,
+        call: &CallId,
+        preview: dal_core::Preview,
+        cancel: &CancellationToken,
+    ) -> crate::ext::BoxFuture<'_, Result<Approved, DenyReason>> {
+        self.authorize(call, preview, cancel)
+    }
     fn workspace(&self) -> &Workspace {
         &self.workspace
     }
@@ -314,6 +349,7 @@ impl ToolCxRuntime for FakeRt {
             argv: argv.to_vec(),
             cwd: opts.cwd,
             env: opts.env,
+            stdout_prefix_limit: opts.stdout_prefix_limit,
         });
         Err(crate::error::ToolError::Spawn {
             path: argv.first().map(PathBuf::from).unwrap_or_default(),
@@ -341,6 +377,7 @@ struct Fixture {
     rt: Arc<FakeRt>,
     temp: tempfile::TempDir,
     cancel: CancellationToken,
+    turn_token: CancellationToken,
     generation: watch::Sender<Arc<Generation>>,
 }
 
@@ -359,12 +396,7 @@ fn ephemeral_fixture(ask_timeout: Duration) -> Fixture {
 
 fn assemble(ask_timeout: Duration, ephemeral: bool) -> Fixture {
     let temp = tempfile::tempdir().unwrap();
-    let broker = Arc::new(Broker {
-        state: Mutex::new(BrokerState {
-            slots: HashMap::new(),
-            open_order: VecDeque::new(),
-        }),
-    });
+    let broker = Arc::new(Broker::new());
     let grants = Arc::new(
         GrantStore::with_runtime(
             temp.path().to_path_buf(),
@@ -388,6 +420,7 @@ fn assemble(ask_timeout: Duration, ephemeral: bool) -> Fixture {
     );
     let (generation, generation_rx) = watch::channel(generation_of(Vec::new()));
     let overlay = Arc::new(crate::ext::overlay::Overlay::default());
+    let turn_token = CancellationToken::new();
     let services = Arc::new(SessionServices::new(SessionServicesDeps {
         grants,
         broker: Arc::clone(&broker),
@@ -398,7 +431,12 @@ fn assemble(ask_timeout: Duration, ephemeral: bool) -> Fixture {
         overlay: Arc::clone(&overlay),
         history: Arc::from(["first".to_owned(), "second".to_owned()]),
         sites,
+        turn_cancel: {
+            let live = turn_token.clone();
+            Arc::new(move |_| Some(live.clone()))
+        },
         cancel: cancel.clone(),
+        resolutions: Arc::clone(&backend.resolutions),
         ask_timeout,
         ephemeral,
         workspace,
@@ -410,6 +448,7 @@ fn assemble(ask_timeout: Duration, ephemeral: bool) -> Fixture {
         rt,
         temp,
         cancel,
+        turn_token,
         generation,
     }
 }
@@ -437,9 +476,11 @@ fn answer_next(broker: &Broker, answer: Answer) {
         .next()
         .expect("an open request")
         .id;
-    broker
+    let resolved = broker
         .answer(id, answer, ClientId::new("test-front-end"))
         .expect("answer sends");
+    // The helper stands in for the actor's journal-then-release step.
+    broker.release(&resolved);
     broker
         .state
         .lock()
@@ -533,6 +574,7 @@ async fn open_asks_counts_only_user_questions_and_requires_injection() {
                 digest: None,
             },
             grant: None,
+            call: None,
         },
         turn(),
         tokio::time::Instant::now() + Duration::from_secs(30),
@@ -659,7 +701,7 @@ async fn services_use_one_shared_capability_gate() {
     answer_next(&ghost.broker, Answer::Approve);
     match ephemeral.join().await {
         Err(ServiceError::Denied(DenyReason::Unavailable { what })) => {
-            assert_eq!(&*what, "sidecar");
+            assert_eq!(&*what, "sidecar (ephemeral session)");
             assert_eq!(
                 super::SIDECAR_EPHEMERAL_TEXT,
                 "sidecar is unavailable for ephemeral sessions",
@@ -668,6 +710,137 @@ async fn services_use_one_shared_capability_gate() {
         Err(other) => panic!("the denial names the wrong resource: {other:?}"),
         Ok(_) => panic!("expected an unavailable sidecar"),
     }
+}
+
+fn sidecar_read() -> SidecarOp {
+    SidecarOp::Read {
+        name: "slot".parse().unwrap(),
+    }
+}
+
+#[tokio::test]
+async fn a_command_caller_without_a_turn_is_asked_for_the_grant_it_lacks() {
+    let fx = fixture(Duration::from_secs(30));
+    *fx.backend.sidecar_value.lock().unwrap() = Some(b"value".to_vec());
+    let who = caller("focus", &["sidecar"], None);
+
+    let services = Arc::clone(&fx.services);
+    let first = {
+        let who = who.clone();
+        spawn(async move { services.sidecar(&who, sidecar_read()).await })
+    };
+    await_open(&fx.broker).await;
+    let open = fx.broker.open_requests();
+    assert_eq!(open.len(), 1);
+    assert_eq!(
+        open[0].turn, None,
+        "a command question has no turn to end with"
+    );
+    assert!(
+        matches!(&open[0].question, Question::Grant { ext, capabilities, .. }
+            if &**ext == "focus" && capabilities.iter().map(|c| &**c).eq(["sidecar"])),
+        "the question names the plugin and its declared services: {:?}",
+        open[0].question
+    );
+    answer_next(&fx.broker, Answer::Approve);
+    assert_eq!(first.join().await.unwrap(), Some(b"value".to_vec()));
+
+    let again = fx.services.sidecar(&who, sidecar_read()).await.unwrap();
+    assert_eq!(again, Some(b"value".to_vec()));
+    assert_eq!(
+        open_count(&fx.broker),
+        0,
+        "the approval is stored: no second ask"
+    );
+}
+
+#[tokio::test]
+async fn a_declined_command_grant_denies_and_asks_again_next_time() {
+    let fx = fixture(Duration::from_secs(30));
+    let who = caller("focus", &["sidecar"], None);
+
+    let services = Arc::clone(&fx.services);
+    let declined = {
+        let who = who.clone();
+        spawn(async move { services.sidecar(&who, sidecar_read()).await })
+    };
+    await_open(&fx.broker).await;
+    answer_next(&fx.broker, Answer::Decline);
+    assert!(matches!(declined.join().await, Err(ServiceError::Declined)));
+
+    let services = Arc::clone(&fx.services);
+    let retried = spawn(async move { services.sidecar(&who, sidecar_read()).await });
+    await_open(&fx.broker).await;
+    answer_next(&fx.broker, Answer::Decline);
+    assert!(matches!(retried.join().await, Err(ServiceError::Declined)));
+}
+
+#[tokio::test]
+async fn a_grant_question_with_no_answering_front_end_is_denied_at_once() {
+    for turn in [None, Some(turn())] {
+        let fx = fixture(Duration::from_secs(30));
+        fx.backend
+            .headless
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let who = caller("focus", &["sidecar"], turn);
+        let denied = tokio::time::timeout(
+            Duration::from_secs(5),
+            fx.services.sidecar(&who, sidecar_read()),
+        )
+        .await
+        .expect("a headless grant question never waits out its timeout");
+        assert!(
+            matches!(
+                &denied,
+                Err(ServiceError::Denied(DenyReason::ServiceNotGranted { service, plugin }))
+                    if *service == Service::Sidecar && &**plugin == "focus"
+            ),
+            "{denied:?}"
+        );
+        assert_eq!(open_count(&fx.broker), 0, "no request opens for nobody");
+
+        fx.backend
+            .headless
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        *fx.backend.sidecar_value.lock().unwrap() = Some(b"value".to_vec());
+        let services = Arc::clone(&fx.services);
+        let asked = spawn(async move { services.sidecar(&who, sidecar_read()).await });
+        await_open(&fx.broker).await;
+        answer_next(&fx.broker, Answer::Approve);
+        assert_eq!(
+            asked.join().await.unwrap(),
+            Some(b"value".to_vec()),
+            "the denial does not strand the key: a front end attached later is asked"
+        );
+    }
+}
+
+#[tokio::test]
+async fn sidecar_rejects_values_over_limit() {
+    let fx = fixture(Duration::from_secs(30));
+    let who = caller("focus", &["sidecar"], Some(turn()));
+    let services = Arc::clone(&fx.services);
+    let operation = spawn(async move {
+        services
+            .sidecar(
+                &who,
+                SidecarOp::Write {
+                    name: "large".parse().unwrap(),
+                    bytes: vec![0; 1_048_577],
+                },
+            )
+            .await
+    });
+    await_open(&fx.broker).await;
+    answer_next(&fx.broker, Answer::Approve);
+    let error = operation
+        .join()
+        .await
+        .expect_err("oversized sidecar refused");
+    assert_eq!(
+        error.to_string(),
+        ServiceError::sidecar_too_large("large", 1_048_577).to_string()
+    );
 }
 
 #[tokio::test]
@@ -705,7 +878,7 @@ async fn rust_infer_is_trusted_and_script_infer_is_gated() {
         .unwrap_err();
     assert!(matches!(
         error,
-        ServiceError::Denied(DenyReason::NotGranted)
+        ServiceError::Denied(DenyReason::ServiceNotGranted { .. })
     ));
 
     let services = Arc::clone(&fx.services);
@@ -831,6 +1004,35 @@ async fn run_checks_call_grant_then_exec_ladder() {
     assert!(matches!(error, ServiceError::Failed { .. }));
     assert_eq!(*fx.rt.ladder_asks.lock().unwrap(), 3);
     assert_eq!(fx.rt.spawns.lock().unwrap().len(), 4);
+}
+
+#[tokio::test]
+async fn run_hands_the_requested_stdout_prefix_limit_to_the_spawn() {
+    let fx = fixture(Duration::from_secs(30));
+    let workspace = fx.temp.path().to_path_buf();
+    fx.rt
+        .script
+        .lock()
+        .unwrap()
+        .push_back(AuthorizeScript::AskThenApprove {
+            prefix: vec![OsString::from("git")],
+            roots: vec![workspace.clone()],
+        });
+    let who = caller("focus", &["run"], Some(turn()));
+    let mut request = run_request(&["git", "status"], workspace);
+    request.stdout_prefix_limit = 4096;
+    let services = Arc::clone(&fx.services);
+    let call = spawn(async move { services.run(&who, request).await });
+    await_open(&fx.broker).await;
+    answer_next(&fx.broker, Answer::Approve);
+    let error = call.join().await.unwrap_err();
+    assert!(matches!(error, ServiceError::Failed { .. }));
+    let spawns = fx.rt.spawns.lock().unwrap();
+    assert_eq!(spawns.len(), 1);
+    assert_eq!(
+        spawns[0].stdout_prefix_limit, 4096,
+        "the child keeps the stdout prefix the caller asked for"
+    );
 }
 
 #[tokio::test]
@@ -1165,12 +1367,194 @@ async fn a_dropped_ask_resolves_its_broker_request() {
             .any(|u| matches!(u, dal_core::UpdateKind::RequestOpened(_))),
         "the question was published: {updates:?}"
     );
+    drop(updates);
+    let resolved = fx.backend.resolved.lock().unwrap();
     assert!(
-        updates.iter().any(|u| matches!(
-            u,
-            dal_core::UpdateKind::RequestResolved { answer, .. }
-                if *answer == dal_core::Answer::Cancel
-        )),
-        "the retired question resolves as Cancel: {updates:?}"
+        resolved
+            .iter()
+            .any(|r| r.answer == dal_core::Answer::Cancel),
+        "the retired question was routed to the actor as Cancel: {resolved:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_ask_with_no_answerer_attached_defaults_at_once() {
+    let fx = fixture(Duration::from_secs(60));
+    fx.backend
+        .headless
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let who = caller("focus", &["ask"], Some(turn()));
+    let answer = tokio::time::timeout(
+        Duration::from_secs(1),
+        fx.services.ask(
+            &who,
+            Question::Text {
+                prompt: "why?".into(),
+                placeholder: None,
+            },
+        ),
+    )
+    .await
+    .expect("a headless ask never waits for its timeout")
+    .expect("a headless ask is a default, not an error");
+    assert_eq!(answer, None, "the fail-closed default is no answer");
+    assert!(
+        fx.broker.open_requests().is_empty(),
+        "no request opens for a front end nobody runs"
+    );
+    assert!(fx.backend.updates.lock().unwrap().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_open_ask_times_out_at_its_absolute_deadline() {
+    let fx = fixture(Duration::from_secs(60));
+    let services = Arc::clone(&fx.services);
+    let who = caller("focus", &["ask"], Some(turn()));
+    let mut asked = JoinSet::new();
+    asked.spawn(async move {
+        services
+            .ask(
+                &who,
+                Question::Text {
+                    prompt: "why?".into(),
+                    placeholder: None,
+                },
+            )
+            .await
+    });
+    await_open(&fx.broker).await;
+
+    tokio::time::advance(Duration::from_secs(59)).await;
+    assert!(
+        asked.try_join_next().is_none(),
+        "the question stays open until its absolute deadline"
+    );
+    assert_eq!(fx.broker.open_requests().len(), 1);
+
+    tokio::time::advance(Duration::from_secs(1)).await;
+    let outcome = asked
+        .join_next()
+        .await
+        .expect("the ask settles")
+        .expect("the ask task joins");
+    assert!(
+        matches!(outcome, Ok(None)),
+        "the absolute timeout resolves to no answer: {outcome:?}"
+    );
+}
+/// A fired turn token cancels turn-scoped service calls without touching
+/// the session token.
+#[tokio::test]
+async fn a_fired_turn_token_cancels_turn_scoped_calls() {
+    let fx = fixture(Duration::from_secs(30));
+    fx.turn_token.cancel();
+    let run = fx
+        .services
+        .run(
+            &caller("focus", &["run"], Some(turn())),
+            run_request(&["echo"], fx.temp.path().to_path_buf()),
+        )
+        .await;
+    assert!(
+        matches!(run, Err(ServiceError::Cancelled)),
+        "a dead turn must not run: {run:?}"
+    );
+    let ask = fx
+        .services
+        .ask(
+            &caller("focus", &["ask"], Some(turn())),
+            Question::Text {
+                prompt: "proceed?".into(),
+                placeholder: None,
+            },
+        )
+        .await;
+    assert!(
+        matches!(ask, Err(ServiceError::Cancelled)),
+        "a dead turn must not ask: {ask:?}"
+    );
+}
+
+/// The reserved child-policy identity is denied at the extension door, on
+/// any session, while ordinary records still pass.
+#[tokio::test]
+async fn the_child_policy_identity_is_denied_to_extensions() {
+    let fx = fixture(Duration::from_secs(30));
+    let body = || Box::new(RawJson::parse("{}").unwrap());
+    let forged = fx
+        .services
+        .append_record(
+            &caller("dal-agent", &["sidecar"], None),
+            "child_policy",
+            body(),
+        )
+        .await;
+    assert!(
+        matches!(forged, Err(ServiceError::Denied(_))),
+        "a forged child policy must be denied: {forged:?}"
+    );
+    assert!(
+        fx.services
+            .append_record(&caller("dal-agent", &["sidecar"], None), "notes", body())
+            .await
+            .is_ok(),
+        "an ordinary dal-agent record must pass"
+    );
+    assert!(
+        fx.services
+            .append_record(&caller("focus", &["sidecar"], None), "child_policy", body())
+            .await
+            .is_ok(),
+        "another extension's own kind must pass"
+    );
+}
+
+/// A dropped ask reopens only after its withdrawal reaches the durable
+/// owner: the next ask is never answered from a stale slot.
+#[tokio::test]
+async fn a_dropped_ask_reopens_after_its_withdrawal_settles() {
+    let fx = fixture(Duration::from_secs(30));
+    let ask = |services: Arc<SessionServices>| async move {
+        let who = caller("focus", &["ask"], Some(turn()));
+        services
+            .ask(
+                &who,
+                Question::Text {
+                    prompt: "proceed?".into(),
+                    placeholder: None,
+                },
+            )
+            .await
+    };
+    let first = spawn(ask(Arc::clone(&fx.services)));
+    await_open(&fx.broker).await;
+    drop(first);
+    for _ in 0..100 {
+        if !fx.backend.resolved.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        fx.backend.resolved.lock().unwrap().len(),
+        1,
+        "the dropped ask must withdraw exactly once"
+    );
+    let second = spawn(ask(Arc::clone(&fx.services)));
+    // `await_open` counts settled slots too: wait for a new unresolved one.
+    for _ in 0..100 {
+        if !fx.broker.open_requests().is_empty() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    answer_next(&fx.broker, Answer::Decline);
+    assert!(
+        second
+            .join()
+            .await
+            .expect("the reopened ask resolves")
+            .is_none(),
+        "the slot must reopen after the settle"
     );
 }

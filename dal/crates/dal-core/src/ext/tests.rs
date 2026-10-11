@@ -1,10 +1,11 @@
 use super::{
-    AgentInfo, AgentReport, AgentStart, AgentState, AgentsOp, AgentsReply, CallId, Channel,
-    CommandName, EntryId, FetchMethod, FetchRequest, FetchResponse, HookEvent, HookMismatch,
-    HookOutcome, HookVerdict, InputVerdict, JobId, Mail, MailMode, McpRequest, McpResponse, Name,
-    Part, RUST_STREAM_EVENT, RawJson, RegistrationError, RepeatMode, RuleRecord, RunRequest,
-    RunRequestError, STAR_EVENTS, Service, ServiceSet, SessionId, Stop, StreamVerdict,
-    ToolCallEvent, ToolCallVerdict, ToolClass, TurnId, valid_tool_parameters, valid_version,
+    AgentInfo, AgentRefusal, AgentReport, AgentStart, AgentState, AgentsOp, AgentsReply, CallId,
+    Channel, CommandName, EntryId, FetchMethod, FetchRequest, FetchResponse, HookEvent,
+    HookMismatch, HookOutcome, HookVerdict, InputVerdict, JobId, Mail, MailMode, McpRequest,
+    McpResponse, Name, Part, RUST_STREAM_EVENT, RawJson, RegistrationError, RepeatMode, RuleRecord,
+    RunRequest, RunRequestError, STAR_EVENTS, Service, ServiceSet, SessionId, SidecarName, Stop,
+    StreamVerdict, ToolCallEvent, ToolCallVerdict, ToolClass, TurnId, valid_tool_parameters,
+    valid_version,
 };
 
 use std::num::NonZeroU64;
@@ -29,6 +30,35 @@ fn rule_record(patterns: Vec<Box<str>>, repeat_gap: Option<u16>) -> RuleRecord {
         report: false,
         enabled: true,
     }
+}
+
+#[test]
+fn sidecar_name_enforces_file_name_grammar_and_serde() -> TestResult {
+    let maximum = "a".repeat(64);
+    assert_eq!(SidecarName::parse(&maximum)?.as_str(), maximum);
+    assert_eq!(SidecarName::parse("goal.json")?.as_str(), "goal.json");
+    assert_eq!(SidecarName::parse("a..b")?.as_str(), "a..b");
+    for invalid in [
+        "",
+        ".hidden",
+        "-leading-dash",
+        "..",
+        "bad/name",
+        "Bad.json",
+        &"a".repeat(65),
+    ] {
+        assert!(SidecarName::parse(invalid).is_err(), "{invalid:?}");
+        assert!(
+            sonic_rs::from_str::<SidecarName>(&format!("{invalid:?}")).is_err(),
+            "{invalid:?} must be rejected by serde"
+        );
+    }
+    let encoded = sonic_rs::to_string(&SidecarName::parse("goal.json")?)?;
+    assert_eq!(
+        sonic_rs::from_str::<SidecarName>(&encoded)?,
+        SidecarName::parse("goal.json")?
+    );
+    Ok(())
 }
 
 #[test]
@@ -424,6 +454,7 @@ fn child_agent_replies_preserve_typed_state_and_report_pointer() -> TestResult {
     };
     let replies = [
         AgentsReply::Started { id },
+        AgentsReply::Prompted { id },
         AgentsReply::Await { report },
         AgentsReply::Cancelled { id },
         AgentsReply::Listed(vec![info]),
@@ -544,6 +575,57 @@ fn mailbox_values_keep_mode_and_cursor() -> TestResult {
     let encoded = sonic_rs::to_string(&reply)?;
     assert_eq!(sonic_rs::from_str::<AgentsReply>(&encoded)?, reply);
 
+    Ok(())
+}
+
+#[test]
+fn a_refused_start_round_trips_with_its_typed_reason_and_text() -> TestResult {
+    let cases = [
+        (
+            AgentRefusal::MaxDepth { max_depth: 2 },
+            "child sessions cannot start children here: agents.max_depth = 2.",
+        ),
+        (
+            AgentRefusal::WorkspaceUnresolved,
+            "the child workspace cannot be resolved.",
+        ),
+        (
+            AgentRefusal::WorkspaceOutsideRoot,
+            "the child workspace must stay inside the caller's workspace.",
+        ),
+        (
+            AgentRefusal::ModelUnroutable {
+                model: "acme/none".into(),
+            },
+            "the child model acme/none cannot be routed.",
+        ),
+    ];
+    for (reason, text) in cases {
+        assert_eq!(reason.to_string(), text);
+        let reply = AgentsReply::Refused { reason };
+        let encoded = sonic_rs::to_string(&reply)?;
+        assert_eq!(sonic_rs::from_str::<AgentsReply>(&encoded)?, reply);
+    }
+    let encoded = sonic_rs::to_string(&AgentsReply::Refused {
+        reason: AgentRefusal::MaxDepth { max_depth: 1 },
+    })?;
+    assert_eq!(
+        encoded,
+        r#"{"type":"refused","value":{"reason":{"type":"max_depth","maxDepth":1}}}"#
+    );
+    Ok(())
+}
+
+#[test]
+fn child_prompt_operation_round_trips_interrupt_deadline() -> TestResult {
+    let prompt = AgentsOp::Prompt {
+        id: SessionId::new_v7(),
+        text: "Call report with the work you completed.".into(),
+        interrupt: Some(Duration::from_secs(60)),
+        max_steps: std::num::NonZeroU32::new(1),
+    };
+    let encoded = sonic_rs::to_string(&prompt)?;
+    assert_eq!(sonic_rs::from_str::<AgentsOp>(&encoded)?, prompt);
     Ok(())
 }
 

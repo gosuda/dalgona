@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
-//! Shared orchestration vocabulary: controller modes, stop kinds, job views,
-//! and read-only status projections. One definition lives here; the owner
-//! task, the arbiter, and the companion reducers all use these items.
+//! Shared orchestration vocabulary: controller modes, stop kinds, and job views.
+//! One definition lives here; the owner task, the arbiter, and the companion
+//! reducers all use these items.
 
 /// Controller mode shared with the companion monitor and goal reducers.
-/// The paused reason is observable as status text.
+/// The paused state is shown by the status suffix.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ControllerMode {
     Run,

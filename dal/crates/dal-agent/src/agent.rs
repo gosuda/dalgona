@@ -42,6 +42,20 @@ pub struct Subscription {
     port: SubscriberPort,
 }
 
+/// Which request kinds one subscriber may answer.
+///
+/// The two roles come from the front end's declarations: the TUI holds
+/// both, a wire client holds the kinds it named in `initialize`, and a
+/// listen-only subscriber holds neither. A role without its declaration
+/// resolves at once while the other still waits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AnswerScope {
+    /// The subscriber may resolve approval requests.
+    pub approval: bool,
+    /// The subscriber may answer extension questions.
+    pub ask: bool,
+}
+
 pub(crate) struct AgentInner {
     pub(crate) session: SessionId,
     pub(crate) client: ClientId,
@@ -56,6 +70,12 @@ pub(crate) struct AgentInner {
 }
 
 impl Agent {
+    /// Returns the identity of the session this handle is bound to.
+    #[must_use]
+    pub fn session(&self) -> SessionId {
+        self.inner.session
+    }
+
     /// Snapshots the materialized view from the shared snapshot.
     ///
     /// # Errors
@@ -105,14 +125,39 @@ impl Agent {
     }
 
     /// Registers a subscriber at the given cursor on the shared snapshot.
-    /// The subscriber counts as an attached answerer: approval requests wait
-    /// for it before falling back to headless denial.
+    /// The subscriber counts as an attached answerer for approvals and
+    /// asks: approval requests wait for it before falling back to headless
+    /// denial, and extension questions wait for it before taking the
+    /// fail-closed default.
     ///
     /// # Errors
     /// This operation currently has no error cases and always returns `Ok`.
     pub fn subscribe(&self, after: Option<(Gen, Seq)>) -> Result<Subscription, AgentError> {
+        self.subscribe_scoped(
+            after,
+            AnswerScope {
+                approval: true,
+                ask: true,
+            },
+        )
+    }
+
+    /// Registers a subscriber with one answerer role per request kind.
+    /// The delivery stream is the same either way; only the raise-time
+    /// default changes per kind.
+    ///
+    /// # Errors
+    /// This operation currently has no error cases and always returns `Ok`.
+    pub fn subscribe_scoped(
+        &self,
+        after: Option<(Gen, Seq)>,
+        scope: AnswerScope,
+    ) -> Result<Subscription, AgentError> {
         Ok(Subscription {
-            port: self.inner.shared.subscribe(after, true),
+            port: self
+                .inner
+                .shared
+                .subscribe(after, scope.approval, scope.ask),
         })
     }
 
@@ -124,9 +169,13 @@ impl Agent {
     /// # Errors
     /// This operation currently has no error cases and always returns `Ok`.
     pub fn subscribe_listen(&self, after: Option<(Gen, Seq)>) -> Result<Subscription, AgentError> {
-        Ok(Subscription {
-            port: self.inner.shared.subscribe(after, false),
-        })
+        self.subscribe_scoped(
+            after,
+            AnswerScope {
+                approval: false,
+                ask: false,
+            },
+        )
     }
 
     /// Submits a command through the fold; full channels apply backpressure.

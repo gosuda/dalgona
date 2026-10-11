@@ -337,7 +337,7 @@ async fn candidates(
             let clauses = [vec![name.as_bytes().to_vec()]];
             match search
                 .index
-                .search_candidates(workspace, &clauses, false, index_scope)
+                .search_candidates(workspace, &clauses, false, index_scope.directory())
                 .await
             {
                 Ok(Some(paths)) => Ok(paths),

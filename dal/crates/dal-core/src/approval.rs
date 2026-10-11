@@ -2,7 +2,11 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{config::ApprovalMode, ext::Name, id::CallId};
+use crate::{
+    config::ApprovalMode,
+    ext::{Name, Service},
+    id::CallId,
+};
 use std::{collections::BTreeSet, path::PathBuf};
 
 /// The class a tool computes from its arguments.
@@ -138,6 +142,13 @@ pub enum DenyReason {
     NotInjected,
     /// The required capability was not granted.
     NotGranted,
+    /// The required capability was not granted for a named extension.
+    ServiceNotGranted {
+        /// The service that lacks a grant.
+        service: Service,
+        /// The extension or battery that requested the service.
+        plugin: Box<str>,
+    },
     /// No interactive approval frontend is attached.
     NoFrontEnd,
     /// A required resource is unavailable.

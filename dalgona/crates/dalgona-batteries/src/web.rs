@@ -36,8 +36,8 @@ the only value), `api_key_env`, `timeout_secs` (1 to 300, default 30),
 2097152), and `max_markdown_bytes` (default 131072). The battery needs
 the `net` and `env` permissions; a missing permission makes each call
 fail with a denied error naming the service. Requests go through the
-host `net` service only; loopback HTTP(S) URLs use that same service
-and remain subject to the host's network policy.";
+host `net` service only. Requests to loopback HTTP(S) URLs use that same
+service and remain subject to the host's network policy.";
 
 /// Config section `[plugin.web]`.
 #[derive(Debug, Clone, serde::Deserialize)]

@@ -2,7 +2,7 @@
 
 /// Built-in commands that report and manage the active session.
 pub mod commands;
-/// Context compaction over the active session's transcript.
+/// Built-in compaction: remote models and the local text summary.
 pub mod compact;
 pub mod docs;
 pub mod docsgen;

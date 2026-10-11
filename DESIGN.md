@@ -95,6 +95,14 @@ app, then composer, then editor. The legacy column (no kitty protocol) is the co
 for a non-kitty terminal; never leave a binding kitty-only. Full map: `design-tui.md`
 section 8.
 
+A dialog never takes consent from type-ahead. Each request dialog starts locked: for
+500 ms after its first frame it drops every key but an unmodified Esc, which only denies
+or dismisses. The hint row reads `esc denies · answer keys ready in a moment` while
+locked and lists the answer keys (`y allow · a session · n deny · v view · esc denies`
+for an approval or grant) only once they act, so a user or a gate that sees the keys can
+press one. Dropped keys are never queued. A request that follows another starts locked
+again. Only a key pressed after the answer keys are on screen can approve.
+
 ## Voice
 
 The register details sit in `BRANDING.md`. The style summary: sentence case; verb-first

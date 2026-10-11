@@ -8,10 +8,11 @@ use std::{
 
 use dal_core::{CallId, GenerationId, SessionId, TurnId};
 
+#[cfg(feature = "symbols")]
+use super::ir::StagedFileOwned;
 use super::{
     ir::{
-        Diff, Edit, EngineError, ErrorClass, FindingSeverity, Output, Plan, StagedBatch,
-        StagedFile, StagedFileOwned,
+        Diff, Edit, EngineError, ErrorClass, FindingSeverity, Output, Plan, StagedBatch, StagedFile,
     },
     resolve::{check_overlap, resolve_path},
     snapshot::SnapshotStore,
@@ -47,13 +48,33 @@ pub struct PatchSession {
     pub cutoff: Option<u64>,
 }
 
+pub(super) fn non_regular_target(display: &Path) -> EngineError {
+    EngineError::new(
+        ErrorClass::File,
+        format!("patch: {} is not a regular file.", display.display()),
+    )
+}
+
+pub(super) async fn ensure_regular_target(
+    canonical: &Path,
+    display: &Path,
+) -> Result<(), EngineError> {
+    if let Ok(metadata) = tokio::fs::metadata(canonical).await
+        && !metadata.is_file()
+    {
+        return Err(non_regular_target(display));
+    }
+    Ok(())
+}
+
 /// Parses, resolves, proves, and stages one payload without writing.
 ///
 /// The returned plan owns complete before/after bytes; observers run on it
 /// before any authorization decision.
 ///
 /// # Errors
-/// Returns [`EngineError`] when decoding, proving, or staging the payload fails.
+/// Returns the engine error when parsing, resolution, guard proofs, or
+/// staging refuse the payload; nothing is written on error.
 pub async fn plan(
     session: &PatchSession,
     style: super::ir::DialectId,
@@ -113,6 +134,19 @@ pub async fn plan(
                 .map_or(0, |bytes| bytes.len())
                 .saturating_add(staged.after.as_ref().map_or(0, |bytes| bytes.len())),
         );
+        if let Some(dest) = staged.renamed_to.as_ref()
+            && tokio::fs::metadata(&dest.absolute_path).await.is_ok()
+        {
+            return Err(EngineError::new(
+                ErrorClass::File,
+                format!(
+                    "patch: cannot rename {} to {}: {} already exists.",
+                    display.display(),
+                    dest.path.display(),
+                    dest.path.display()
+                ),
+            ));
+        }
         files.push(staged);
     }
     let staged_mib = staged_bytes.div_ceil(1 << 20);
@@ -125,7 +159,10 @@ pub async fn plan(
         ));
     }
     // No-op elimination: every file identical is an error.
-    if files.iter().all(|file| file.before == file.after) {
+    if files
+        .iter()
+        .all(|file| file.before == file.after && file.renamed_to.is_none())
+    {
         return Err(EngineError::new(
             ErrorClass::Resolve,
             "patch: the edits produce no change.".to_owned(),
@@ -166,8 +203,14 @@ pub async fn commit(
     mut plan: Plan,
     observers: &[Arc<dyn super::ir::EditObserver>],
 ) -> Output {
-    let findings = inspect(session, &plan, observers).await;
-    if let Some(blocked) = findings
+    // Pre-approval inspection (patch.rs, patch::apply_replacement) already ran
+    // the observers on this exact plan; re-running would double-count each
+    // edit in per-turn guard accounting. Inspect only when findings are empty.
+    if plan.findings.is_empty() {
+        plan.findings = inspect(session, &plan, observers).await;
+    }
+    if let Some(blocked) = plan
+        .findings
         .iter()
         .find(|finding| finding.severity == FindingSeverity::Block)
     {
@@ -181,7 +224,6 @@ pub async fn commit(
             },
         };
     }
-    plan.findings = findings;
     match commit::apply_files(session, &plan).await {
         Ok(output) => output,
         Err(error) => Output {

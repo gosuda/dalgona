@@ -3,6 +3,7 @@
 //! goal-turn accounting, and mechanical blocks.
 
 use super::super::StopKind;
+use super::super::monitor::InflightCounts;
 use super::sidecar::Goal;
 
 /// Milliseconds after a user-started turn before a continuation may run.
@@ -16,6 +17,8 @@ pub(crate) const REPETITION_REASON: &str = "repeated assistant output";
 pub(crate) const LENGTH_REASON: &str = "output truncation repeated";
 /// Mechanical block reason for the unattended limit.
 pub(crate) const UNATTENDED_REASON: &str = "unattended continuation limit reached";
+/// Mechanical block reason for an exhausted provider.
+pub(crate) const PROVIDER_REASON: &str = "provider error ended the turn (retries exhausted)";
 /// Mechanical block reason for an unrecovered context overflow.
 pub(crate) const OVERFLOW_REASON: &str =
     "context overflow ended the turn (compaction did not recover)";
@@ -30,8 +33,14 @@ pub(crate) const STALL_TURNS: u32 = 3;
 /// Where a continuation decision runs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum GoalPath {
+    /// A recovery turn after an interruption.
+    Recovery,
     /// The wake after a turn ended.
     AfterTurn,
+    /// The grace window after a user-started turn.
+    UserGrace,
+    /// An idle wake with no turn behind it.
+    Idle,
 }
 
 /// Which prompt a granted continuation carries.
@@ -92,11 +101,17 @@ pub(crate) enum Verdict {
 
 /// Everything the verdict reads: the goal, the wake path, turn facts, the
 /// progress signature, todo counts, and live inflight counts.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the continuation decision table fixes this input shape"
+)]
 pub(crate) struct VerdictInput<'a> {
     /// The goal under decision.
     pub(crate) goal: &'a Goal,
     /// Where the decision runs.
     pub(crate) path: GoalPath,
+    /// Whether the session is idle.
+    pub(crate) idle: bool,
     /// Whether a user message is pending.
     pub(crate) pending_user_messages: bool,
     /// Whether a continuation is already scheduled.
@@ -107,6 +122,24 @@ pub(crate) struct VerdictInput<'a> {
     pub(crate) last_stop: StopKind,
     /// Progress signature of the last assistant output.
     pub(crate) signature: &'a str,
+    /// Open todo tasks from the session todo record.
+    #[expect(
+        dead_code,
+        reason = "the continuation decision table fixes this input shape"
+    )]
+    pub(crate) open_todos: usize,
+    /// Total todo tasks from the session todo record.
+    #[expect(
+        dead_code,
+        reason = "the continuation decision table fixes this input shape"
+    )]
+    pub(crate) total_todos: usize,
+    /// Live inflight counts from the session.
+    #[expect(
+        dead_code,
+        reason = "the continuation decision table fixes this input shape"
+    )]
+    pub(crate) inflight: &'a InflightCounts,
 }
 
 /// Decides eligibility without consulting the deny table: active status and
@@ -120,7 +153,13 @@ pub(crate) fn eligible(input: &VerdictInput<'_>) -> bool {
     if input.goal.status != GoalStatus::Active || input.pending_user_messages {
         return false;
     }
-    matches!(input.path, GoalPath::AfterTurn) && matches!(input.last_stop, Completed | Length)
+    match input.path {
+        GoalPath::Recovery => true,
+        GoalPath::AfterTurn | GoalPath::UserGrace => {
+            matches!(input.last_stop, Completed | Length)
+        }
+        GoalPath::Idle => input.idle,
+    }
 }
 
 /// Counts the trailing run of equal output hashes.
@@ -154,7 +193,7 @@ pub(crate) fn verdict(input: &VerdictInput<'_>) -> Verdict {
     if input.goal.consecutive >= CAP_TURNS {
         return Verdict::Deny(DenyReason::Cap);
     }
-    if matches!(input.path, GoalPath::AfterTurn)
+    if matches!(input.path, GoalPath::AfterTurn | GoalPath::UserGrace)
         && input.goal.last_signature.as_deref() == Some(input.signature)
     {
         return Verdict::Deny(DenyReason::Stale);
@@ -206,18 +245,11 @@ pub(crate) fn progress_signature(
     format!("{goal_id}:{open_todos}/{total_todos}:{hash}")
 }
 
-/// Records one goal turn: delivery counters and signature on P4 arrival,
-/// tool-less streak and output hash at turn end, plus turn usage. The output
-/// hash history retains only the last three entries.
-pub(crate) fn record_goal_turn(
-    goal: &mut Goal,
-    output_text: &str,
-    tool_called: bool,
-    tokens: u64,
-    elapsed_seconds: u64,
-    signature: &str,
-    prompt: PromptKind,
-) {
+/// Counts one delivered continuation: one more consecutive, unattended, and
+/// goal turn, the delivered signature, and the length-recovery count. Call it
+/// once per continuation, when its wake is accepted; a continuation that a
+/// user prompt drops or that never delivers leaves these counters unchanged.
+pub(crate) fn record_delivery(goal: &mut Goal, signature: &str, prompt: PromptKind) {
     if goal.last_signature.as_deref() != Some(signature) {
         goal.consecutive = 0;
     }
@@ -230,6 +262,18 @@ pub(crate) fn record_goal_turn(
     } else {
         goal.length_recoveries = 0;
     }
+}
+
+/// Records the facts of one finished turn: the tool-less streak, the output
+/// hash, and the turn usage. The output hash history retains only the last
+/// three entries.
+pub(crate) fn record_turn_output(
+    goal: &mut Goal,
+    output_text: &str,
+    tool_called: bool,
+    tokens: u64,
+    elapsed_seconds: u64,
+) {
     if tool_called {
         goal.toolless_streak = 0;
     } else {
@@ -259,4 +303,16 @@ pub(crate) fn on_user_prompt(goal: &mut Goal) {
         goal.unattended = 0;
         goal.turns = 0;
     }
+}
+
+/// Whether the goal sits in the provider-error mechanical block whose
+/// reactivating prompt runs the next verdict on the [`GoalPath::Recovery`]
+/// path.
+#[must_use]
+pub(crate) fn provider_block_active(goal: &Goal) -> bool {
+    goal.status == super::super::GoalStatus::Blocked
+        && goal
+            .blocked
+            .as_ref()
+            .is_some_and(|blocked| blocked.mechanical && blocked.reason.as_ref() == PROVIDER_REASON)
 }

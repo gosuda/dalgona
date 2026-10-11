@@ -12,7 +12,6 @@ use sonic_rs::JsonValueMutTrait;
 
 use super::*;
 use crate::auth::credential::OAuthCredential;
-use crate::http::build_client;
 
 const ACCESS: &str = "at-1";
 const REFRESH: &str = "rt-secret";
@@ -423,8 +422,14 @@ async fn listen() -> (TcpListener, String) {
 }
 
 fn checker(base: &str, timeout: Duration, clock: &TestClock) -> UsageChecker {
-    UsageChecker::with_timing(build_client(), base, "dalgon/test", timeout, clock.clock())
-        .expect("loopback base")
+    UsageChecker::with_timing(
+        LazyClient::default(),
+        base,
+        "dalgon/test",
+        timeout,
+        clock.clock(),
+    )
+    .expect("loopback base")
 }
 
 async fn read_head(stream: &TcpStream) -> String {

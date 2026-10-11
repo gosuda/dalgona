@@ -1,5 +1,5 @@
+//! Gate-full scenario 7: hook deadlines end scopes and cancel handles.
 #![expect(clippy::expect_used, reason = "SC test")]
-#![expect(missing_docs, reason = "SC test")]
 
 #[expect(
     dead_code,
@@ -260,11 +260,11 @@ fn assert_cancelled(handles: &[ScopeHandle]) {
     );
 }
 
+#[tokio::test(start_paused = true)]
 #[expect(
     clippy::too_many_lines,
-    reason = "SC hook deadline scenario is one long script"
+    reason = "the hook-deadline scenario drives setup, cancellation, and shutdown in one walkthrough"
 )]
-#[tokio::test(start_paused = true)]
 async fn hook_deadline_ends_scope_and_cancels_handles() -> Result<(), Box<dyn Error + Send + Sync>>
 {
     let data = TestDir::new()?;
@@ -327,12 +327,14 @@ async fn hook_deadline_ends_scope_and_cancels_handles() -> Result<(), Box<dyn Er
                 text: "trigger the deadline hook".into(),
             }],
         })
-        .await?;
+        .await
+        .map_err(|error| format!("deadline prompt submit: {error}"))?;
     assert!(matches!(first, Reply::Accepted { .. }));
     wait_for_members(&state, MEMBER_COUNT).await;
     tokio::time::advance(Duration::from_secs(5)).await;
-    wait_for_turn_end(&mut updates, Stop::EndTurn).await?;
-
+    wait_for_turn_end(&mut updates, Stop::EndTurn)
+        .await
+        .map_err(|error| format!("deadline turn end: {error}"))?;
     let groups = state.groups.lock().expect("scope group mutex").clone();
     assert_eq!(groups.len(), 1);
     assert_cancelled(groups.first().unwrap());
@@ -353,7 +355,8 @@ async fn hook_deadline_ends_scope_and_cancels_handles() -> Result<(), Box<dyn Er
                 text: "cancel the owning hook turn".into(),
             }],
         })
-        .await?
+        .await
+        .map_err(|error| format!("cancel-turn prompt submit: {error}"))?
     else {
         return Err("the cancellation prompt was not accepted".into());
     };
@@ -363,22 +366,28 @@ async fn hook_deadline_ends_scope_and_cancels_handles() -> Result<(), Box<dyn Er
         .submit(Command::Cancel {
             scope: CancelScope::Turn(turn),
         })
-        .await?;
+        .await
+        .map_err(|error| format!("cancel command submit: {error}"))?;
     assert!(matches!(cancelled, Reply::Done(_)));
-    wait_for_turn_end(&mut updates, Stop::Cancelled).await?;
+    wait_for_turn_end(&mut updates, Stop::Cancelled)
+        .await
+        .map_err(|error| format!("cancelled turn end: {error}"))?;
 
     let groups = state.groups.lock().expect("scope group mutex").clone();
     assert_eq!(groups.len(), 2);
     assert_cancelled(groups.get(1).unwrap());
     assert_eq!(state.active.load(Ordering::SeqCst), 0);
     assert_eq!(state.dropped.load(Ordering::SeqCst), 2 * MEMBER_COUNT);
-    {
+    let starts_len = state.hook_started.lock().expect("hook start mutex").len();
+    let ends_len = state.hook_finished.lock().expect("hook finish mutex").len();
+    let end_after_start = {
         let starts = state.hook_started.lock().expect("hook start mutex");
         let ends = state.hook_finished.lock().expect("hook finish mutex");
-        assert_eq!(starts.len(), 2);
-        assert_eq!(ends.len(), 2);
-        assert!(ends[1].duration_since(starts[1]) < Duration::from_secs(5));
-    }
+        ends[1].duration_since(starts[1]) < Duration::from_secs(5)
+    };
+    assert_eq!(starts_len, 2);
+    assert_eq!(ends_len, 2);
+    assert!(end_after_start);
     let _ = harness.host.shutdown(Duration::from_secs(1)).await;
     Ok(())
 }

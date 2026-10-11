@@ -7,6 +7,7 @@
 //! whose display text is the exact refusal notice, so the chain can fall
 //! through to the text summary.
 
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,6 +25,7 @@ use super::draw::{DrawError, Grid, draw, paginate};
 use super::records::{LetterRecord, RecordError};
 use super::selection::{
     LetterVisibility, entry_id, history_index_line, index_text, select_oldest_plus_newest,
+    select_oldest_plus_newest_by_bytes,
 };
 use super::spans::{CompactPiece, HistoryError, Item, SourceError, Span, items};
 use super::{CARRIED_PREFIX, HISTORY_HEADER, PNG_BYTE_BUDGET, RENDER_TIMEOUT_MS, SAVINGS_FACTOR};
@@ -79,7 +81,7 @@ pub(crate) enum Decline {
     PngBudget {
         /// Encoded bytes of the first candidate image.
         need: usize,
-        /// The configured byte budget.
+        /// The byte budget left for drawn images.
         limit: usize,
     },
     /// Drawing exceeded the per-render timeout.
@@ -138,8 +140,18 @@ pub(crate) struct Budget {
     pub(crate) total_tokens: u64,
     /// Images already elsewhere in the request.
     pub(crate) images_elsewhere: usize,
+    /// Bytes those images already occupy in the request.
+    pub(crate) image_bytes_elsewhere: usize,
     /// Fraction of the window billable to images.
     pub(crate) share: f64,
+}
+/// Stores and loads PNG blobs used by the history image pipeline.
+pub(crate) trait BlobStore: Send + Sync + 'static {
+    /// Returns the digest of the stored bytes.
+    fn put(&self, png: Vec<u8>) -> BoxFuture<'_, Result<[u8; 32], CompactError>>;
+
+    /// Loads one blob by its content digest.
+    fn get(&self, digest: [u8; 32]) -> BoxFuture<'_, Result<Option<Vec<u8>>, CompactError>>;
 }
 
 /// Reads source bytes for one exact journal span.
@@ -149,6 +161,15 @@ pub(crate) trait SourceReader: Send + Sync + 'static {
     /// # Errors
     /// Returns the source failure when the journal range is unavailable.
     fn read(&self, span: Span) -> Result<Vec<u8>, SourceError>;
+}
+
+/// One stored letter of an earlier compaction on the current path.
+#[derive(Clone, Debug)]
+pub(crate) struct KnownLetter {
+    /// The stored `letter` record.
+    pub(crate) record: LetterRecord,
+    /// The stored PNG bytes, when a caller has already loaded them.
+    pub(crate) png: Option<Vec<u8>>,
 }
 
 /// One frozen compaction request.
@@ -162,6 +183,8 @@ pub(crate) struct Request {
     text_tokens: u64,
     pieces: Arc<[CompactPiece]>,
     source: Arc<dyn SourceReader>,
+    known: Arc<[KnownLetter]>,
+    blobs: Option<Arc<dyn BlobStore>>,
 }
 
 impl Request {
@@ -191,7 +214,23 @@ impl Request {
             }),
             pieces: pieces.into(),
             source,
+            known: Arc::from(Vec::new()),
+            blobs: None,
         }
+    }
+
+    /// Returns the request with the stored letters of earlier compactions.
+    #[must_use]
+    pub(crate) fn with_known(mut self, known: Vec<KnownLetter>) -> Self {
+        self.known = known.into();
+        self
+    }
+
+    /// Returns the request with its lazy PNG blob source.
+    #[must_use]
+    pub(crate) fn with_blob_store(mut self, blobs: Arc<dyn BlobStore>) -> Self {
+        self.blobs = Some(blobs);
+        self
     }
 
     /// Returns the request with an earlier summary carried in front of the images.
@@ -225,8 +264,20 @@ pub(crate) struct DrawnLetter {
     pub(crate) png: Vec<u8>,
     /// The `letter` record to commit with the compaction.
     pub(crate) record: LetterRecord,
-    /// The source index line to publish with the record.
-    pub(crate) index_line: Box<str>,
+    /// True when this letter reuses a stored record instead of appending a
+    /// new one.
+    pub(crate) reused: bool,
+}
+
+/// The `letter://` index line of one candidate letter.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct IndexLine {
+    /// Letter id, `history/<ordinal>.<index>`.
+    pub(crate) id: Box<str>,
+    /// How the compacted message shows the letter.
+    pub(crate) visibility: LetterVisibility,
+    /// The index line to publish for the letter.
+    pub(crate) text: Box<str>,
 }
 
 /// The committed shape of one history compaction.
@@ -236,6 +287,8 @@ pub(crate) struct Drawn {
     pub(crate) slots: Vec<Slot>,
     /// Letters whose images appear in `slots`.
     pub(crate) letters: Vec<DrawnLetter>,
+    /// The index line of every candidate letter, drawn or not, in path order.
+    pub(crate) index: Vec<IndexLine>,
     /// Image bill plus the text estimate of all text parts.
     pub(crate) parts_tokens: u64,
 }
@@ -260,12 +313,26 @@ impl Drawn {
         if bill > self.parts_tokens {
             return Err(Decline::Inconsistent);
         }
-        self.letters.iter().try_for_each(DrawnLetter::verify)
+        let drawn: Vec<&IndexLine> = self
+            .index
+            .iter()
+            .filter(|line| line.visibility == LetterVisibility::Drawn)
+            .collect();
+        if drawn.len() != self.letters.len() {
+            return Err(Decline::Inconsistent);
+        }
+        self.letters.iter().try_for_each(|letter| {
+            let line = drawn
+                .iter()
+                .find(|line| line.id.as_ref() == letter.record.id())
+                .ok_or(Decline::Inconsistent)?;
+            letter.verify(line)
+        })
     }
 }
 
 impl DrawnLetter {
-    fn verify(&self) -> Result<(), Decline> {
+    fn verify(&self, line: &IndexLine) -> Result<(), Decline> {
         let LetterRecord::Compaction {
             png_blob,
             png_bytes,
@@ -282,7 +349,8 @@ impl DrawnLetter {
         if digest.as_str() != png_blob
             || !same_size
             || self.record.spans().is_empty()
-            || self.index_line.as_ref() != expected_index
+            || line.id.as_ref() != id
+            || line.text.as_ref() != expected_index
         {
             return Err(Decline::Inconsistent);
         }
@@ -330,7 +398,10 @@ impl Limits {
 struct Candidate {
     items: Vec<Item>,
     spans: Vec<Span>,
+    rows_used: u16,
+    drawable: bool,
     png: Option<Vec<u8>>,
+    reused: Option<LetterRecord>,
 }
 
 /// Runs the image pipeline under the process-wide render gate.
@@ -390,30 +461,92 @@ impl Engine {
             return Err(Decline::NothingToDraw.into());
         }
         let window = request.budget.window_tokens.ok_or(Decline::UnknownWindow)?;
-        let mut candidates = self.render(&request, &profile, Arc::clone(&permit)).await?;
+        let mut candidates = self.render(&request, &profile, &permit).await?;
         let pool = drawable(&candidates);
         if pool.is_empty() {
             return Err(Decline::NothingToDraw.into());
         }
         let selected = self.select(&request, &profile, window, &candidates, &pool)?;
-        let drawn = assemble(&request, &profile, &mut candidates, &selected)?;
+        self.load_selected(&request, &mut candidates, &selected)
+            .await?;
+        candidates = self
+            .render_missing(candidates, &profile, Arc::clone(&permit))
+            .await?;
+        let unmatched = unmatched_known(&request, &candidates);
+        let drawn = assemble(&request, &profile, &mut candidates, &selected, &unmatched)?;
         drawn.verify()?;
         sink.commit(request.span, drawn).await
+    }
+
+    /// Fetches stored PNGs for the selected reusable candidates only; an
+    /// unselected reused page keeps its record for the index without a fetch.
+    async fn load_selected(
+        &self,
+        request: &Request,
+        candidates: &mut [Candidate],
+        selected: &[usize],
+    ) -> Result<(), CompactError> {
+        let Some(blobs) = request.blobs.as_ref() else {
+            for candidate in candidates.iter_mut() {
+                if candidate.png.is_none() {
+                    candidate.reused = None;
+                }
+            }
+            return Ok(());
+        };
+        for &index in selected {
+            let candidate = &mut candidates[index];
+            let Some(record) = candidate.reused.take() else {
+                continue;
+            };
+            if candidate.png.is_some() {
+                candidate.reused = Some(record);
+                continue;
+            }
+            if let Some(png) = read_png(blobs, &record).await? {
+                candidate.png = Some(png);
+                candidate.reused = Some(record);
+            }
+        }
+        Ok(())
     }
 
     async fn render(
         &self,
         request: &Request,
         profile: &ImageProfile,
-        permit: Arc<tokio::sync::OwnedSemaphorePermit>,
+        permit: &Arc<tokio::sync::OwnedSemaphorePermit>,
     ) -> Result<Vec<Candidate>, Decline> {
         let font = Arc::clone(&self.font);
         let source = Arc::clone(&request.source);
         let pieces = Arc::clone(&request.pieces);
-        let grid = profile_grid(profile);
+        let known = Arc::clone(&request.known);
+        let profile = *profile;
+        let permit = Arc::clone(permit);
         let worker = tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            render_pages(&font, grid, &pieces, source.as_ref())
+            render_pages(&font, &profile, &pieces, source.as_ref(), &known)
+        });
+        match timeout(self.limits.render, worker).await {
+            Err(_) => Err(Decline::RenderTimeout {
+                millis: self.limits.render.as_millis(),
+            }),
+            Ok(Err(_)) => Err(Decline::Worker),
+            Ok(Ok(rendered)) => rendered,
+        }
+    }
+
+    async fn render_missing(
+        &self,
+        candidates: Vec<Candidate>,
+        profile: &ImageProfile,
+        permit: Arc<tokio::sync::OwnedSemaphorePermit>,
+    ) -> Result<Vec<Candidate>, Decline> {
+        let font = Arc::clone(&self.font);
+        let profile = *profile;
+        let worker = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            draw_missing(&font, &profile, candidates)
         });
         match timeout(self.limits.render, worker).await {
             Err(_) => Err(Decline::RenderTimeout {
@@ -460,19 +593,20 @@ impl Engine {
             });
         }
         let first = png_len(&candidates[pool[0]]);
-        let mut bytes = 0_usize;
-        let pool = keep(&pool, |index| {
-            let next = bytes.saturating_add(png_len(&candidates[index]));
-            let fits = next <= self.limits.png_bytes;
-            if fits {
-                bytes = next;
-            }
-            fits
-        });
+        let sizes: Vec<usize> = pool
+            .iter()
+            .map(|index| png_len(&candidates[*index]))
+            .collect();
+        let png_budget = self
+            .limits
+            .png_bytes
+            .saturating_sub(request.budget.image_bytes_elsewhere);
+        let kept = select_oldest_plus_newest_by_bytes(&sizes, png_budget);
+        let pool = kept.into_iter().map(|slot| pool[slot]).collect::<Vec<_>>();
         if pool.is_empty() {
             return Err(Decline::PngBudget {
                 need: first,
-                limit: self.limits.png_bytes,
+                limit: png_budget,
             });
         }
         let saving_cap = scaled(self.limits.savings, request.text_tokens);
@@ -516,7 +650,15 @@ fn profile_height(profile: &ImageProfile) -> u32 {
 }
 
 fn png_len(candidate: &Candidate) -> usize {
-    candidate.png.as_ref().map_or(0, Vec::len)
+    if let Some(png) = &candidate.png {
+        return png.len();
+    }
+    match &candidate.reused {
+        Some(LetterRecord::Compaction { png_bytes, .. }) => {
+            usize::try_from(*png_bytes).unwrap_or(0)
+        }
+        _ => 0,
+    }
 }
 
 #[expect(
@@ -545,26 +687,79 @@ fn drawable(candidates: &[Candidate]) -> Vec<usize> {
     candidates
         .iter()
         .enumerate()
-        .filter(|(_, candidate)| candidate.png.is_some())
+        .filter(|(_, candidate)| {
+            candidate.png.is_some() || (candidate.drawable && candidate.reused.is_some())
+        })
         .map(|(index, _)| index)
         .collect()
 }
 
+/// Stored compaction letters that no candidate reused stay listed as not drawn.
+/// Their records remain on the branch; none is deleted. Skill captures and
+/// dream summaries never enter the image reuse or hidden-image counts.
+fn unmatched_known(request: &Request, candidates: &[Candidate]) -> Vec<LetterRecord> {
+    let reused: HashSet<&str> = candidates
+        .iter()
+        .filter_map(|candidate| candidate.reused.as_ref())
+        .map(LetterRecord::id)
+        .collect();
+    request
+        .known
+        .iter()
+        .filter(|known| matches!(known.record, LetterRecord::Compaction { .. }))
+        .filter(|known| !reused.contains(known.record.id()))
+        .map(|known| known.record.clone())
+        .collect()
+}
+
+/// Returns true when a stored letter cannot be shown on the current grid:
+/// its cell pitch differs, or its image exceeds the grid.
+pub(crate) fn stale(record: &LetterRecord, profile: &ImageProfile) -> bool {
+    let LetterRecord::Compaction {
+        cell,
+        width,
+        height,
+        ..
+    } = record
+    else {
+        return true;
+    };
+    *cell != [profile.cell_w, profile.cell_h]
+        || *width > profile_width(profile)
+        || *height > profile_height(profile)
+}
+
 fn render_pages(
     font: &Font,
-    grid: Grid,
+    profile: &ImageProfile,
     pieces: &[CompactPiece],
     source: &dyn SourceReader,
+    known: &[KnownLetter],
 ) -> Result<Vec<Candidate>, Decline> {
+    let grid = profile_grid(profile);
     let glyphs = font.glyphs().map_err(|_| Decline::Font)?;
     let built = items(pieces, |span| source.read(span))?;
+    let mut known_index = HashMap::with_capacity(known.len());
+    for (index, known) in known.iter().enumerate() {
+        if matches!(known.record, LetterRecord::Compaction { .. }) {
+            known_index
+                .entry(span_key(known.record.spans()))
+                .or_insert(index);
+        }
+    }
     let mut out = Vec::new();
     for page in paginate(glyphs, grid, &built) {
         let spans = page_spans(&page.items);
         if spans.is_empty() {
             continue;
         }
-        let png = if page.drawable {
+        let reused = known_index
+            .get(&span_key(&spans))
+            .and_then(|index| known.get(*index))
+            .filter(|known| !stale(&known.record, profile));
+        let png = if let Some(known) = reused {
+            known.png.clone()
+        } else if page.drawable {
             Some(draw(glyphs, grid, &page)?)
         } else {
             None
@@ -572,10 +767,61 @@ fn render_pages(
         out.push(Candidate {
             items: page.items,
             spans,
+            rows_used: page.rows_used,
+            drawable: page.drawable,
             png,
+            reused: reused.map(|known| known.record.clone()),
         });
     }
     Ok(out)
+}
+
+fn draw_missing(
+    font: &Font,
+    profile: &ImageProfile,
+    mut candidates: Vec<Candidate>,
+) -> Result<Vec<Candidate>, Decline> {
+    let grid = profile_grid(profile);
+    let glyphs = font.glyphs().map_err(|_| Decline::Font)?;
+    for candidate in &mut candidates {
+        // Reused pages keep their stored PNG or, when not selected, stay
+        // hidden; only fresh drawable pages render here.
+        if candidate.png.is_some() || !candidate.drawable || candidate.reused.is_some() {
+            continue;
+        }
+        let items = std::mem::take(&mut candidate.items);
+        let page = super::draw::Page {
+            items,
+            rows_used: candidate.rows_used,
+            drawable: candidate.drawable,
+        };
+        candidate.png = Some(draw(glyphs, grid, &page)?);
+        candidate.items = page.items;
+    }
+    Ok(candidates)
+}
+
+fn span_key(spans: &[Span]) -> Vec<(u64, u32, u32, u32)> {
+    spans
+        .iter()
+        .map(|span| (span.entry.get(), span.part, span.off, span.len))
+        .collect()
+}
+
+async fn read_png(
+    blobs: &Arc<dyn BlobStore>,
+    record: &LetterRecord,
+) -> Result<Option<Vec<u8>>, CompactError> {
+    let LetterRecord::Compaction { png_blob, .. } = record else {
+        return Ok(None);
+    };
+    let Ok(digest) = blake3::Hash::from_hex(png_blob.as_str()) else {
+        return Ok(None);
+    };
+    let Some(png) = blobs.get(*digest.as_bytes()).await? else {
+        return Ok(None);
+    };
+    Ok((blake3::hash(&png).to_hex().as_str() == png_blob.as_str()).then_some(png))
 }
 
 fn page_spans(items: &[Item]) -> Vec<Span> {
@@ -599,6 +845,7 @@ fn assemble(
     profile: &ImageProfile,
     candidates: &mut [Candidate],
     selected: &[usize],
+    unmatched: &[LetterRecord],
 ) -> Result<Drawn, Decline> {
     let next_value = request
         .span
@@ -612,30 +859,64 @@ fn assemble(
         slots.push(Slot::Text(format!("{CARRIED_PREFIX}{carried}").into()));
     }
     let mut letters = Vec::new();
+    let mut index: Vec<IndexLine> = Vec::with_capacity(candidates.len());
     let mut hidden = Vec::new();
     let mut shown_as_text = 0_usize;
-    let total = candidates.len();
+    let mut fresh = 0_usize;
+    let total = candidates.len() + unmatched.len();
     for (position, candidate) in candidates.iter_mut().enumerate() {
-        let index = position + 1;
-        let id = format!("history/{}.{index}", request.ordinal);
-        if selected.contains(&position) {
-            slots.push(Slot::Text(format!("letter://{id}").into()));
-            slots.push(Slot::Image(letters.len()));
-            letters.push(letter(profile, candidate, &id, next)?);
-        } else if candidate.png.is_none() {
-            shown_as_text += 1;
-            let text = letter_text(&id, request.session, &candidate.items);
-            let lead = format!(
-                "letter://{id} is shown as text because it holds characters that the font cannot draw:\n{text}"
-            );
-            slots.push(Slot::Text(lead.into()));
+        let id = if let Some(record) = &candidate.reused {
+            record.id().to_string()
         } else {
-            hidden.push((position, entry_range(&candidate.spans)));
+            fresh += 1;
+            format!("history/{}.{}", request.ordinal, fresh)
+        };
+        let visibility =
+            if candidate.png.is_none() && (!candidate.drawable || candidate.reused.is_none()) {
+                LetterVisibility::ShownAsText
+            } else if selected.contains(&position) {
+                LetterVisibility::Drawn
+            } else {
+                LetterVisibility::NotDrawn
+            };
+        let (first, last) = entry_range(&candidate.spans);
+        index.push(IndexLine {
+            id: Box::from(id.as_str()),
+            visibility,
+            text: history_index_line(&id, first, last, visibility).into(),
+        });
+        match visibility {
+            LetterVisibility::Drawn => {
+                slots.push(Slot::Text(format!("letter://{id}").into()));
+                slots.push(Slot::Image(letters.len()));
+                letters.push(letter(profile, candidate, &id, next)?);
+            }
+            LetterVisibility::ShownAsText => {
+                shown_as_text += 1;
+                let text = letter_text(&id, request.session, &candidate.items);
+                let lead = format!(
+                    "letter://{id} is shown as text because it holds characters that the font cannot draw:\n{text}"
+                );
+                slots.push(Slot::Text(lead.into()));
+            }
+            LetterVisibility::NotDrawn => hidden.push((Box::from(id.as_str()), (first, last))),
         }
     }
+    for record in unmatched {
+        let (first, last) = entry_range(record.spans());
+        let id = record.id();
+        index.push(IndexLine {
+            id: Box::from(id),
+            visibility: LetterVisibility::NotDrawn,
+            text: history_index_line(id, first, last, LetterVisibility::NotDrawn).into(),
+        });
+        hidden.push((Box::from(id), (first, last)));
+    }
+    index.sort_by_key(|line| letter_id_parts(&line.id));
+    hidden.sort_by_key(|(id, _)| letter_id_parts(id));
     let shown = letters.len() + shown_as_text;
     slots.push(Slot::Text(
-        index_text(shown, total, &hidden_ranges(request.ordinal, &hidden)).into(),
+        index_text(shown, total, &hidden_ranges(&hidden)).into(),
     ));
     let text_bytes: usize = slots
         .iter()
@@ -649,6 +930,7 @@ fn assemble(
     Ok(Drawn {
         slots,
         letters,
+        index,
         parts_tokens: images
             .saturating_mul(profile.image_tokens)
             .saturating_add(text_tokens),
@@ -662,6 +944,14 @@ fn letter(
     next: EntryId,
 ) -> Result<DrawnLetter, Decline> {
     let png = candidate.png.take().ok_or(Decline::Inconsistent)?;
+    if let Some(record) = candidate.reused.clone() {
+        LetterRecord::check(&record, next)?;
+        return Ok(DrawnLetter {
+            png,
+            record,
+            reused: true,
+        });
+    }
     let record = LetterRecord::Compaction {
         v: 1,
         id: id.to_string(),
@@ -674,39 +964,38 @@ fn letter(
         letters: Vec::new(),
     };
     LetterRecord::check(&record, next)?;
-    let (first, last) = entry_range(&candidate.spans);
-    let index_line = history_index_line(record.id(), first, last, LetterVisibility::Drawn);
+
     Ok(DrawnLetter {
         png,
         record,
-        index_line: index_line.into(),
+        reused: false,
     })
 }
 
-fn hidden_ranges(ordinal: u32, hidden: &[(usize, (u64, u64))]) -> String {
-    let mut groups: Vec<(usize, usize, u64, u64)> = Vec::new();
-    for (position, (first, last)) in hidden {
+fn hidden_ranges(hidden: &[(Box<str>, (u64, u64))]) -> String {
+    let mut groups: Vec<(u32, u32, u32, u64, u64)> = Vec::new();
+    for (id, (first, last)) in hidden {
+        let Some((ordinal, index)) = letter_id_parts(id) else {
+            continue;
+        };
         match groups.last_mut() {
-            Some(group) if group.1 + 1 == *position => {
-                group.1 = *position;
-                group.2 = group.2.min(*first);
-                group.3 = group.3.max(*last);
+            Some(group) if group.0 == ordinal && group.2 + 1 == index => {
+                group.2 = index;
+                group.3 = group.3.min(*first);
+                group.4 = group.4.max(*last);
             }
-            _ => groups.push((*position, *position, *first, *last)),
+            _ => groups.push((ordinal, index, index, *first, *last)),
         }
     }
     let named: Vec<String> = groups
         .iter()
         .take(MAX_HIDDEN_GROUPS)
-        .map(|(from, to, first, last)| {
+        .map(|&(ordinal, from, to, first, last)| {
             if from == to {
-                let id = format!("history/{ordinal}.{}", from + 1);
-                format!("letter://{id} (entries {first}-{last})")
+                format!("letter://history/{ordinal}.{from} (entries {first}-{last})")
             } else {
                 format!(
-                    "letter://history/{ordinal}.{} to letter://history/{ordinal}.{} (entries {first}-{last})",
-                    from + 1,
-                    to + 1
+                    "letter://history/{ordinal}.{from} to letter://history/{ordinal}.{to} (entries {first}-{last})"
                 )
             }
         })
@@ -720,6 +1009,12 @@ fn hidden_ranges(ordinal: u32, hidden: &[(usize, (u64, u64))]) -> String {
         );
     }
     text
+}
+
+/// Splits a `history/<ordinal>.<index>` id into its numbers.
+fn letter_id_parts(id: &str) -> Option<(u32, u32)> {
+    let (ordinal, index) = id.strip_prefix("history/")?.split_once('.')?;
+    Some((ordinal.parse().ok()?, index.parse().ok()?))
 }
 
 /// Renders the exact per-letter source text of one letter from its items.

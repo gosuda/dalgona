@@ -59,3 +59,26 @@ fn saved_input_rule_uses_saved_text() {
     let workflow = find_saved(&valid_table(), "audit", Some("routes")).expect("input given");
     assert_eq!(workflow.label, "audit");
 }
+
+#[test]
+fn saved_names_sort_with_reasons() {
+    let listed = saved_names(&valid_table());
+    let names: Vec<&str> = listed.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(names, ["audit", "broken", "plain", "wordy"]);
+    assert!(listed[0].1.is_none());
+    assert!(listed[2].1.is_none());
+    assert!(
+        listed[1]
+            .1
+            .as_deref()
+            .unwrap_or("")
+            .contains("1 to 32 steps")
+    );
+    assert!(
+        listed[3]
+            .1
+            .as_deref()
+            .unwrap_or("")
+            .contains("at most 200 characters")
+    );
+}

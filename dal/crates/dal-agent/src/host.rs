@@ -1,21 +1,40 @@
 //! Host-owned live sessions and their process-independent inputs.
 
+mod auth;
+
 mod history;
+
 pub(crate) mod ops;
+
 mod registry;
+
 mod start;
 
+/// Extension record identity for a child session's durable start policy.
+pub(crate) const CHILD_POLICY_EXT: &str = "dal-agent";
+
+/// Extension record kind for a child session's durable start policy.
+pub(crate) const CHILD_POLICY_KIND: &str = "child_policy";
+
+/// Reports whether an extension record uses the host-owned child-policy identity.
+pub(crate) fn is_child_policy_record(ext: &str, kind: &str) -> bool {
+    ext == CHILD_POLICY_EXT && kind == CHILD_POLICY_KIND
+}
+
+pub use auth::{LoginId, LoginOutcome};
 pub use ops::DocEntry;
 
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
 use dal_core::{CallId, Config, SessionId, Stop, Workspace};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use crate::admission::Admission;
 use crate::ext::generation::Generation;
@@ -30,6 +49,18 @@ pub struct Env {
     pub cwd: PathBuf,
     /// The executable used to run the sandbox helper, when the edge provides one.
     pub sandbox_helper: Option<PathBuf>,
+}
+
+impl Env {
+    /// Builds an environment with no variables and no sandbox helper whose working directory is `root`.
+    #[must_use]
+    pub fn data_root(root: PathBuf) -> Self {
+        Self {
+            vars: BTreeMap::new(),
+            cwd: root,
+            sandbox_helper: None,
+        }
+    }
 }
 
 /// Selects a durable, ephemeral, or child session in an explicit workspace.
@@ -119,6 +150,17 @@ pub enum HostUpdate {
         /// The child stop reason.
         stop: Stop,
     },
+    /// A provider sign-in has reached its one terminal outcome.
+    LoginFinished {
+        /// The attempt that finished.
+        login: LoginId,
+        /// The provider that was signed in to.
+        provider: Box<str>,
+        /// Whether the credential is stored and ready.
+        ready: bool,
+        /// The failure text, when the sign-in did not finish.
+        detail: Option<Box<str>>,
+    },
 }
 
 /// The aggregate outcome of orderly host shutdown.
@@ -162,7 +204,14 @@ pub struct Host {
 
 pub(crate) struct HostState {
     pub(crate) sessions: Mutex<HashMap<SessionId, SessionEntry>>,
+    /// Names reserved while a new session is being opened.
+    pub(crate) name_claims: Mutex<HashMap<(Workspace, Box<str>), SessionId>>,
     pub(crate) subscribers: Mutex<Vec<mpsc::UnboundedSender<HostUpdate>>>,
+    /// Pending OAuth logins by cancel id; `auth/cancel` fires them. Entries
+    /// leave on completion or cancel, so an id never outlives its attempt.
+    pub(crate) logins: Mutex<HashMap<LoginId, CancellationToken>>,
+    /// Next pending-login id; ids start at 1 and never repeat.
+    pub(crate) next_login: AtomicU64,
     pub(crate) shared: Arc<HostShared>,
     /// The futures of the extensions' `Attach` controllers; shutdown aborts them.
     pub(crate) attached: Mutex<tokio::task::JoinSet<()>>,
@@ -175,6 +224,25 @@ impl HostState {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .retain(|sender| sender.send((*update).clone()).is_ok());
+    }
+}
+
+pub(crate) struct NameClaim {
+    pub(crate) state: Arc<HostState>,
+    pub(crate) key: (Workspace, Box<str>),
+    pub(crate) id: SessionId,
+}
+
+impl Drop for NameClaim {
+    fn drop(&mut self) {
+        let mut claims = self
+            .state
+            .name_claims
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if claims.get(&self.key).is_some_and(|id| *id == self.id) {
+            claims.remove(&self.key);
+        }
     }
 }
 
@@ -202,6 +270,9 @@ pub(crate) struct HostShared {
     pub(crate) catalog: std::sync::RwLock<Option<dal_provider::Catalog>>,
     /// Non-plugin extension names in startup order; reloads preserve them.
     pub(crate) plugin_base: Vec<Box<str>>,
+    /// Where sign-in reads and writes: the credential file, the model cache,
+    /// and the endpoints. Only tests replace the endpoints.
+    pub(crate) login_site: std::sync::RwLock<dal_provider::LoginSite>,
 }
 
 impl HostShared {
@@ -242,6 +313,8 @@ pub(crate) struct SessionEntry {
     pub(crate) tasks: crate::session::tasks::SessionTasks,
     /// The session workspace.
     pub(crate) workspace: Workspace,
+    /// The reservation that keeps this session's display name unique while live.
+    pub(crate) _name_claim: Option<NameClaim>,
     /// The child depth, zero for top-level sessions.
     pub(crate) depth: u32,
     /// The parent session, when this session is a subagent.
@@ -263,6 +336,8 @@ pub(crate) struct SessionEntry {
     /// The member report has been taken: a set flag ends the member for
     /// mailbox addressing even though its session stays listable.
     pub(crate) reported: std::sync::atomic::AtomicBool,
+    /// Whether the one grace prompt has already been consumed.
+    pub(crate) prompted: std::sync::atomic::AtomicBool,
 }
 
 /// The architecture product passed to [`Host::start`].

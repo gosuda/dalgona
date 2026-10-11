@@ -2,6 +2,10 @@
     clippy::disallowed_methods,
     reason = "SC test launches the real server process"
 )]
+#![expect(
+    dead_code,
+    reason = "gate support exposes helpers shared across independent targets"
+)]
 
 //! WebSocket authorization failures do not disclose token values.
 

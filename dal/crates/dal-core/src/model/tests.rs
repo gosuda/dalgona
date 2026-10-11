@@ -19,6 +19,7 @@ fn price(input: f64, cached_input: f64, output: f64, reasoning: f64) -> ModelPri
         cached_input,
         output,
         reasoning,
+        tiers: Box::default(),
     }
 }
 

@@ -490,6 +490,23 @@ async fn spawn_returns_the_exact_success_text() {
 }
 
 #[tokio::test]
+async fn a_refused_spawn_shows_the_model_the_exact_reason() {
+    let services = FakeServices::with(vec![Ok(AgentsReply::Refused {
+        reason: dal_core::AgentRefusal::MaxDepth { max_depth: 1 },
+    })]);
+    let outcome = agent()
+        .run(
+            call(r#"{"action":"spawn","name":"worker","prompt":"inspect"}"#),
+            ToolCx::for_test(share(&services)),
+        )
+        .await;
+    assert_eq!(
+        outcome_text(outcome).expect_err("a refused spawn is an error"),
+        "child sessions cannot start children here: agents.max_depth = 1."
+    );
+}
+
+#[tokio::test]
 async fn wait_returns_the_report_and_publishes_the_completion_notice() {
     let id = dal_core::SessionId::new_v7();
     let services = FakeServices::with(vec![

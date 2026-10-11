@@ -5,14 +5,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dal_core::{
-    ClientId, Effect, Gen, ListQuery, Page, PageReq, Session, SessionEnd, SessionId, SessionInfo,
-    SessionStart, Timestamp, UpdateKind, Workspace,
+    ApprovalMode, ClientId, Effect, Gen, ListQuery, Name, Page, PageReq, Record, Session,
+    SessionEnd, SessionId, SessionInfo, SessionStart, Timestamp, UpdateKind, Workspace,
 };
 use dal_store::{Journal, Store};
+use serde::Deserialize;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
-use super::{Host, HostSubscription, HostUpdate, SessionEntry, SessionRef, ShutdownReport};
+use super::{
+    Host, HostSubscription, HostUpdate, NameClaim, SessionEntry, SessionRef, ShutdownReport,
+};
 use crate::agent::{Agent, AgentInner};
 use crate::broker::Broker;
 use crate::error::HostError;
@@ -65,6 +68,63 @@ const ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 /// Sweep interval of the shutdown quiet wait; polls are bounded reads.
 const STATUS_QUIET_POLL: Duration = Duration::from_millis(50);
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChildPolicyBody {
+    tools: Option<Vec<Box<str>>>,
+    approval: ApprovalMode,
+}
+
+struct ChildPolicy {
+    tools: Option<Vec<Name>>,
+    approval: ApprovalMode,
+}
+
+fn parse_child_policy_tool(name: &str) -> Result<Name, HostError> {
+    Name::parse_mapped_tool(name).map_err(|error| HostError::Config {
+        message: format!("invalid child policy tool {name:?}: {error}").into(),
+    })
+}
+
+/// Reads the one host-owned child-policy record a journal carries; a journal
+/// without one leaves the session unrestricted and on the configured mode.
+/// The child-start path writes exactly one, so a second occurrence is a
+/// forgery and fails the replay instead of letting the newest record win.
+fn replay_child_policy(records: &[Record]) -> Result<Option<ChildPolicy>, HostError> {
+    let mut found = records.iter().filter(|record| {
+        matches!(
+            record,
+            Record::Ext { ext, kind, .. }
+                if super::is_child_policy_record(ext.as_ref(), kind.as_ref())
+        )
+    });
+    let Some(Record::Ext { body, .. }) = found.next() else {
+        return Ok(None);
+    };
+    if found.next().is_some() {
+        return Err(HostError::Config {
+            message: "journal carries more than one child policy record".into(),
+        });
+    }
+    let body: ChildPolicyBody =
+        sonic_rs::from_str(body.as_str()).map_err(|error| HostError::Config {
+            message: format!("invalid child policy record: {error}").into(),
+        })?;
+    let tools = body
+        .tools
+        .map(|names| {
+            names
+                .into_iter()
+                .map(|name| parse_child_policy_tool(&name))
+                .collect()
+        })
+        .transpose()?;
+    Ok(Some(ChildPolicy {
+        tools,
+        approval: body.approval,
+    }))
+}
+
 /// The replayed state a spawned session starts from.
 struct ReplayedSession {
     /// The session fold built from journal replay.
@@ -109,6 +169,16 @@ struct WiredSession {
     jobs: Arc<tokio::sync::Mutex<crate::jobs::JobTable>>,
 }
 
+/// The extension surface minted when a session is wired.
+struct WiredExtensions {
+    /// The grant store backing ask and run approvals.
+    grants: Arc<GrantStore>,
+    /// The extension overlay published for the session.
+    overlay: Arc<crate::ext::overlay::Overlay>,
+    /// The extension generation live at wire time.
+    generation: Arc<Generation>,
+}
+
 impl Host {
     /// Resolves a session reference, replays its journal, and spawns its actor.
     ///
@@ -130,7 +200,8 @@ impl Host {
         if let Some(entry) = self.entry_of(resolved.id) {
             return Ok(Self::bind(&entry, resolved.id, by));
         }
-        self.spawn_session(resolved, by, None).await
+        let name_claim = self.claim_name(&resolved)?;
+        self.spawn_session(resolved, by, None, name_claim).await
     }
 
     /// Flushes one session, stops its actor, and removes it from the table.
@@ -223,6 +294,10 @@ impl Host {
                 sessions_closed += 1;
             }
         }
+        // Provider shutdown joins its internally bounded refresh tasks. Do not
+        // wrap this await in `close_grace`: dropping that waiter would detach
+        // a credential write that can still commit after host shutdown.
+        self.state.shared.providers.shutdown().await;
         let tasks_remaining = task_owners.iter().fold(0_usize, |total, tasks| {
             total.saturating_add(tasks.tracked())
         });
@@ -468,6 +543,61 @@ impl Host {
         }
     }
 
+    fn claim_name(&self, resolved: &ResolvedRef) -> Result<Option<NameClaim>, HostError> {
+        let Some(name) = resolved.name.as_ref() else {
+            return Ok(None);
+        };
+        let key = (resolved.workspace.clone(), name.clone());
+        let mut claims = self
+            .state
+            .name_claims
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let name_taken = |id| {
+            dal_store::StoreError::NameTaken {
+                name: name.clone(),
+                id,
+            }
+            .into()
+        };
+        if let Some(id) = claims.get(&key).copied() {
+            return Err(name_taken(id));
+        }
+        {
+            let sessions = self
+                .state
+                .sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let live = sessions.iter().find_map(|(id, entry)| {
+                if entry.workspace != resolved.workspace {
+                    return None;
+                }
+                let view = entry
+                    .shared
+                    .snapshot(crate::session::projection::SnapshotArgs {
+                        generation: entry.generation,
+                        id: *id,
+                        workspace: entry.workspace.clone(),
+                        open: Vec::new(),
+                        updated_at: Timestamp::now(),
+                        created_at: None,
+                        archived: None,
+                        page: PageReq::default(),
+                    });
+                (view.session.name.as_deref() == Some(name)).then_some(*id)
+            });
+            if let Some(id) = live {
+                return Err(name_taken(id));
+            }
+        }
+        claims.insert(key.clone(), resolved.id);
+        Ok(Some(NameClaim {
+            state: Arc::clone(&self.state),
+            key,
+            id: resolved.id,
+        }))
+    }
     /// Opens or creates the journal for `resolved` and applies its name.
     async fn open_session_journal(
         &self,
@@ -502,11 +632,20 @@ impl Host {
     ) -> Result<ReplayedSession, HostError> {
         let generation = journal.generation();
         let thinking = self.state.shared.config.thinking();
-        let approval = self.state.shared.config.approval();
+        let policy = replay_child_policy(journal.records())?;
+        let approval = policy.as_ref().map_or_else(
+            || self.state.shared.config.approval(),
+            |policy| policy.approval,
+        );
         let mode = self.state.shared.config.mode();
         let (fold, effects) = Session::replay_with(
             dal_core::Settings {
-                model: None,
+                model: self
+                    .state
+                    .shared
+                    .config
+                    .model()
+                    .map(dal_core::ModelRoute::from_id),
                 thinking,
                 approval,
                 name: None,
@@ -528,6 +667,11 @@ impl Host {
             mode,
         ));
         shared.restore_fold(&fold);
+        if let Some(policy) = &policy
+            && let Some(tools) = &policy.tools
+        {
+            shared.restrict_tools(tools);
+        }
         let initial_entries: Arc<[dal_core::EntryView]> = shared.leaf_entries().into();
         let jobs_table = if resolved.ephemeral {
             crate::jobs::JobTable::new()
@@ -624,32 +768,29 @@ impl Host {
             jobs_dir: backend.jobs_dir().to_path_buf(),
             tasks: tasks.clone(),
         }));
-        let grants = Arc::new(
-            GrantStore::with_runtime(
-                self.state.shared.data_root.clone(),
-                ASK_TIMEOUT,
-                Arc::clone(&broker),
-            )
-            .map_err(|error| HostError::Config {
-                message: error.to_string().into(),
-            })?,
-        );
-        let ext_generation = self.state.shared.generation.borrow().clone();
-        let overlay = Arc::new(crate::ext::overlay::Overlay::with_grants(
-            Arc::clone(&grants),
-            cancel.clone(),
-        ));
+        let extensions = self.grants_and_overlay(&broker, cancel)?;
+        let turn_control = Arc::clone(&ports.control);
         let services = Arc::new(SessionServices::new(SessionServicesDeps {
-            grants,
+            grants: extensions.grants,
             broker: Arc::clone(&broker),
             backend: backend.clone(),
             rt,
-            mcp_client: ext_generation.mcp().map(|(_, client)| Arc::clone(client)),
+            mcp_client: extensions
+                .generation
+                .mcp()
+                .map(|(_, client)| Arc::clone(client)),
             generation: self.state.shared.generation.subscribe(),
-            overlay: Arc::clone(&overlay),
+            overlay: Arc::clone(&extensions.overlay),
             history: opening_texts,
             sites: HashMap::new(),
+            turn_cancel: Arc::new(move |turn| {
+                turn_control
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .token_for(turn)
+            }),
             cancel: cancel.clone(),
+            resolutions: handle.resolutions(),
             ask_timeout: ASK_TIMEOUT,
             ephemeral: resolved.ephemeral,
             workspace: resolved.workspace.clone(),
@@ -665,12 +806,41 @@ impl Host {
             task,
             backend,
             services,
-            overlay,
-            ext_generation,
+            overlay: extensions.overlay,
+            ext_generation: extensions.generation,
             generation,
             broker,
             shared,
             jobs,
+        })
+    }
+
+    /// Loads the grant store, extension overlay, and live generation for a
+    /// session being wired.
+    fn grants_and_overlay(
+        &self,
+        broker: &Arc<Broker>,
+        cancel: &CancellationToken,
+    ) -> Result<WiredExtensions, HostError> {
+        let grants = Arc::new(
+            GrantStore::with_runtime(
+                self.state.shared.data_root.clone(),
+                ASK_TIMEOUT,
+                Arc::clone(broker),
+            )
+            .map_err(|error| HostError::Config {
+                message: error.to_string().into(),
+            })?,
+        );
+        let overlay = Arc::new(crate::ext::overlay::Overlay::with_grants(
+            Arc::clone(&grants),
+            cancel.clone(),
+        ));
+        let ext_generation = self.state.shared.generation.borrow().clone();
+        Ok(WiredExtensions {
+            grants,
+            overlay,
+            generation: ext_generation,
         })
     }
 
@@ -719,6 +889,7 @@ impl Host {
         cancel: CancellationToken,
         tasks: &SessionTasks,
         by: ClientId,
+        name_claim: Option<NameClaim>,
     ) -> Agent {
         let id = resolved.id;
         let control = wired.ports.control.clone();
@@ -764,6 +935,7 @@ impl Host {
                     broker: ports.broker,
                     services: wired.services.clone(),
                     tasks: tasks.clone(),
+                    _name_claim: name_claim,
                     workspace: ports.workspace,
                     depth: resolved.depth,
                     parent: resolved.parent,
@@ -775,6 +947,7 @@ impl Host {
                     backend: Arc::clone(&wired.backend),
                     overlay: wired.overlay,
                     reported: std::sync::atomic::AtomicBool::new(false),
+                    prompted: std::sync::atomic::AtomicBool::new(false),
                 },
             );
         if let Some(parent) = resolved.parent {
@@ -794,6 +967,7 @@ impl Host {
         resolved: ResolvedRef,
         by: ClientId,
         journal: Option<Journal>,
+        name_claim: Option<NameClaim>,
     ) -> Result<Agent, HostError> {
         let (mut journal, resumed) = self.open_session_journal(&resolved, journal).await?;
         let replayed = self.replay_session(&resolved, &mut journal).await?;
@@ -804,7 +978,7 @@ impl Host {
             .await?;
         self.observe_start(&resolved, &wired, &cancel, resumed)
             .await;
-        Ok(self.activate_session(&resolved, wired, cancel, &tasks, by))
+        Ok(self.activate_session(&resolved, wired, cancel, &tasks, by, name_claim))
     }
 
     /// Launches a pre-branched journal as a child session of `parent`.
@@ -830,7 +1004,8 @@ impl Host {
             parent: Some(parent),
             name: None,
         };
-        self.spawn_session(resolved, by, Some(journal)).await?;
+        self.spawn_session(resolved, by, Some(journal), None)
+            .await?;
         Ok(id)
     }
 
@@ -947,7 +1122,7 @@ impl Host {
         workspaces
     }
 
-    fn publish(&self, update: &HostUpdate) {
+    pub(crate) fn publish(&self, update: &HostUpdate) {
         self.state.publish(update);
     }
 }
@@ -1056,5 +1231,57 @@ fn snapshot_args(entry: &SessionPorts) -> crate::session::projection::SnapshotAr
         created_at: None,
         archived: None,
         page: PageReq::default(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use dal_core::{RawJson, Record, Timestamp};
+
+    use super::replay_child_policy;
+
+    fn policy_record(ext: &str, kind: &str, body: &str) -> Record {
+        Record::Ext {
+            at: Timestamp::UNIX_EPOCH,
+            ext: ext.into(),
+            kind: kind.into(),
+            body: RawJson::parse(body).expect("record body parses"),
+        }
+    }
+
+    #[test]
+    fn a_single_policy_record_replays() {
+        let records = [policy_record(
+            "dal-agent",
+            "child_policy",
+            r#"{"tools":["read_file"],"approval":"ask"}"#,
+        )];
+        let policy = replay_child_policy(&records)
+            .expect("policy replays")
+            .expect("policy present");
+        assert_eq!(policy.tools.map(|tools| tools.len()), Some(1));
+    }
+
+    #[test]
+    fn a_second_policy_record_fails_the_replay() {
+        let records = [
+            policy_record(
+                "dal-agent",
+                "child_policy",
+                r#"{"tools":["read_file"],"approval":"ask"}"#,
+            ),
+            policy_record(
+                "dal-agent",
+                "child_policy",
+                r#"{"tools":null,"approval":"all"}"#,
+            ),
+        ];
+        assert!(replay_child_policy(&records).is_err());
+    }
+
+    #[test]
+    fn other_records_leave_the_session_unrestricted() {
+        let records = [policy_record("focus", "child_policy", "{}")];
+        assert!(replay_child_policy(&records).expect("replays").is_none());
     }
 }

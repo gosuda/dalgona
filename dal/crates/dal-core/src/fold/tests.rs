@@ -7,12 +7,15 @@ use std::{num::NonZeroU64, path::PathBuf};
 fn id(value: u64) -> TurnId {
     TurnId::new(NonZeroU64::new(value).unwrap())
 }
+
 fn entry(value: u64) -> EntryId {
     EntryId::new(NonZeroU64::new(value).unwrap())
 }
+
 fn stamp() -> jiff::Timestamp {
     jiff::Timestamp::UNIX_EPOCH
 }
+
 fn workspace_root() -> crate::workspace::Workspace {
     #[cfg(unix)]
     let root = PathBuf::from("/");
@@ -20,21 +23,26 @@ fn workspace_root() -> crate::workspace::Workspace {
     let root = PathBuf::from("C:\\");
     crate::workspace::Workspace::new(root).unwrap()
 }
+
 fn session() -> Session {
     Session::replay([], stamp()).unwrap().0
 }
+
 fn client() -> ClientId {
     ClientId::new("test")
 }
+
 fn name(value: &str) -> Name {
     Name::parse(value).unwrap()
 }
+
 fn route() -> ModelRoute {
     ModelRoute::Api {
         family: Family::Chat,
         model: "test-model".into(),
     }
 }
+
 fn usage(tokens: u64) -> Usage {
     Usage {
         input_tokens: tokens,
@@ -45,6 +53,7 @@ fn usage(tokens: u64) -> Usage {
         cost_usd: None,
     }
 }
+
 fn prompt(text: &str) -> Event {
     Event::Command {
         cmd: Command::Prompt {
@@ -54,6 +63,7 @@ fn prompt(text: &str) -> Event {
         by: client(),
     }
 }
+
 fn guard(turn: TurnId) -> Event {
     Event::Guard {
         turn,
@@ -62,11 +72,13 @@ fn guard(turn: TurnId) -> Event {
         outcome: HookOutcome::new(HookEvent::BeforeTurn, HookVerdict::BeforeTurn(None)).unwrap(),
     }
 }
+
 fn send(session: &mut Session, event: Event) -> Result<Vec<Effect>, Rejection> {
     let mut out = Vec::new();
     session.step(event, stamp(), &mut out)?;
     Ok(out)
 }
+
 fn begin(session: &mut Session) -> TurnId {
     send(session, prompt("question")).unwrap();
     let turn = match session.phase() {
@@ -76,6 +88,7 @@ fn begin(session: &mut Session) -> TurnId {
     send(session, guard(turn)).unwrap();
     turn
 }
+
 fn limits(min_tokens: u64) -> Event {
     Event::Limits {
         window: 100_000,
@@ -89,6 +102,7 @@ fn limits(min_tokens: u64) -> Event {
         },
     }
 }
+
 fn inference(stop: Stop, calls: &[(&str, &str)], tokens: u64) -> Inference {
     let mut events = vec![StreamEvent::Usage(usage(tokens))];
     for (call, tool) in calls {
@@ -101,6 +115,7 @@ fn inference(stop: Stop, calls: &[(&str, &str)], tokens: u64) -> Inference {
     events.push(StreamEvent::Stop(stop));
     Inference { events }
 }
+
 fn stream_result(session: &mut Session, turn: TurnId, response: Inference) -> Vec<Effect> {
     send(
         session,
@@ -114,6 +129,7 @@ fn stream_result(session: &mut Session, turn: TurnId, response: Inference) -> Ve
     )
     .unwrap()
 }
+
 fn only_tool_result(records: &[Record]) -> &Entry {
     records
         .iter()
@@ -123,6 +139,7 @@ fn only_tool_result(records: &[Record]) -> &Entry {
         })
         .unwrap()
 }
+
 fn append_emitted(out: &[Effect], records: &mut Vec<Record>) {
     for effect in out {
         if let Effect::Emit(emit) = effect {
@@ -130,6 +147,7 @@ fn append_emitted(out: &[Effect], records: &mut Vec<Record>) {
         }
     }
 }
+
 fn same_replayed_state(live: &Session, records: &[Record]) {
     let replayed = Session::replay(records.iter().cloned(), stamp()).unwrap().0;
     assert_eq!(replayed.phase, live.phase);
@@ -144,6 +162,7 @@ fn same_replayed_state(live: &Session, records: &[Record]) {
     assert_eq!(replayed.projected_bytes, live.projected_bytes);
     assert_eq!(replayed.turn_totals, live.turn_totals);
 }
+
 fn one_read_round(session: &mut Session, turn: TurnId, call: &str, tokens: u64) -> Vec<Effect> {
     stream_result(
         session,
@@ -182,10 +201,12 @@ fn one_read_round(session: &mut Session, turn: TurnId, call: &str, tokens: u64) 
                 text: "read".into(),
                 data: None,
             },
+            elapsed_ms: None,
         },
     )
     .unwrap()
 }
+
 fn compact_summary(before: u64, after: u64) -> CompactionSummary {
     CompactionSummary {
         compactor: name("summary"),
@@ -230,6 +251,65 @@ fn settle_manual_compaction(session: &mut Session, before: u64, after: u64) -> V
     out
 }
 
+fn job_updates(effects: &[Effect]) -> Vec<&UpdateKind> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Emit(emit) => Some(emit.updates.iter()),
+            _ => None,
+        })
+        .flatten()
+        .collect()
+}
+
+#[test]
+fn running_jobs_publish_start_and_settle_once_and_compaction_stays_private() {
+    let mut session = session();
+    let exec = JobId::parse("01890f47-36b0-7cc4-8000-000000000011").unwrap();
+    let started = Event::JobStarted {
+        job: exec,
+        kind: JobKind::Exec,
+    };
+    let out = send(&mut session, started.clone()).unwrap();
+    assert!(matches!(
+        job_updates(&out)[..],
+        [UpdateKind::JobStarted { job }] if *job == exec
+    ));
+    let repeat = send(&mut session, started).unwrap();
+    assert!(
+        job_updates(&repeat).is_empty(),
+        "a repeated start is silent"
+    );
+    let settled = Event::JobSettled {
+        job: exec,
+        outcome: JobOutcome::Exited { code: 0 },
+    };
+    let out = send(&mut session, settled.clone()).unwrap();
+    assert!(matches!(
+        job_updates(&out)[..],
+        [UpdateKind::JobSettled { job }] if *job == exec
+    ));
+    let repeat = send(&mut session, settled).unwrap();
+    assert!(
+        job_updates(&repeat).is_empty(),
+        "an unknown settle is silent"
+    );
+
+    let compaction = JobId::parse("01890f47-36b0-7cc4-8000-000000000012").unwrap();
+    let out = send(
+        &mut session,
+        Event::JobStarted {
+            job: compaction,
+            kind: JobKind::Compaction,
+        },
+    )
+    .unwrap();
+    assert!(
+        job_updates(&out).is_empty(),
+        "compaction is a phase, not a job"
+    );
+}
+
 #[test]
 fn session_grant_accepts_a_mapped_tool_name() {
     let tool = "deploy.web-x.list";
@@ -239,17 +319,145 @@ fn session_grant_accepts_a_mapped_tool_name() {
         request,
         super::types::QuestionRef {
             tool: Some(tool.into()),
+            turn: None,
         },
     ));
     session.preflight_session_grant(request).unwrap();
+    let mut emit = Emit::default();
     session
-        .grant_resolved(request, &Answer::ApproveForSession, true, false)
+        .grant_resolved(
+            request,
+            &Answer::ApproveForSession,
+            Some(client()),
+            false,
+            stamp(),
+            &mut emit,
+        )
         .unwrap();
     assert!(
         session
             .allow_always()
             .contains(&Name::parse_mapped_tool(tool).unwrap())
     );
+    assert!(matches!(
+        emit.records.as_slice(),
+        [
+            Record::Resolved {
+                answer: Answer::ApproveForSession,
+                ..
+            },
+            Record::AllowAlways { tool: recorded, .. }
+        ] if **recorded == *tool
+    ));
+}
+
+fn open_request(turn: Option<TurnId>, question: Question) -> Request {
+    Request {
+        id: RequestId::new_v7(),
+        turn,
+        owner: crate::Owner::Core,
+        question,
+        timeout: std::time::Duration::from_secs(30),
+        default: Answer::Decline,
+    }
+}
+
+#[test]
+fn turn_cancel_keeps_turnless_questions_waiting() {
+    let mut session = session();
+    let turn = begin(&mut session);
+    send(
+        &mut session,
+        Event::RequestStarted {
+            turn,
+            model: route(),
+            family: Family::Chat,
+        },
+    )
+    .unwrap();
+    let owned = open_request(
+        Some(turn),
+        Question::Confirm {
+            text: "Proceed?".into(),
+        },
+    );
+    let turnless = open_request(
+        None,
+        Question::Grant {
+            ext: "web".into(),
+            origin: "bundled".into(),
+            capabilities: vec!["net".into()],
+            detail: None,
+        },
+    );
+    send(
+        &mut session,
+        Event::RequestOpened {
+            request: owned.clone(),
+        },
+    )
+    .unwrap();
+    send(
+        &mut session,
+        Event::RequestOpened {
+            request: turnless.clone(),
+        },
+    )
+    .unwrap();
+    let out = send(
+        &mut session,
+        Event::Cancel {
+            scope: CancelScope::Turn(turn),
+            partial: None,
+        },
+    )
+    .unwrap();
+    let mut journal = Vec::new();
+    append_emitted(&out, &mut journal);
+    assert!(
+        journal.iter().any(|record| matches!(
+            record,
+            Record::Resolved { request, answer: Answer::Cancel, .. } if *request == owned.id
+        )),
+        "the ending turn's question resolves as Cancel"
+    );
+    assert!(
+        !journal.iter().any(|record| matches!(
+            record,
+            Record::Resolved { request, .. } if *request == turnless.id
+        )),
+        "the turnless grant question gains no terminal record"
+    );
+    assert_eq!(
+        session
+            .open_questions
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>(),
+        vec![turnless.id],
+        "the turnless question survives the turn close"
+    );
+    assert!(matches!(session.phase(), Phase::Idle));
+    let out = send(
+        &mut session,
+        Event::GrantResolved {
+            request: turnless.id,
+            answer: Answer::Approve,
+            by: Some(client()),
+            was_default: false,
+        },
+    )
+    .unwrap();
+    let mut journal = Vec::new();
+    append_emitted(&out, &mut journal);
+    assert!(
+        journal.iter().any(|record| matches!(
+            record,
+            Record::Resolved { request, answer: Answer::Approve, .. } if *request == turnless.id
+        )),
+        "the surviving turnless question still resolves by answer"
+    );
+    assert_eq!(session.open_questions, []);
 }
 
 #[test]
@@ -324,6 +532,44 @@ fn steer_cell_holds_16() {
 }
 
 #[test]
+fn adjacent_text_deltas_journal_as_one_block() {
+    let mut session = session();
+    let turn = begin(&mut session);
+    let delta = |text: &str| StreamEvent::Delta {
+        channel: StreamChannel::Text,
+        text: text.into(),
+    };
+    let response = Inference {
+        events: vec![
+            delta("Hello "),
+            delta("streamed "),
+            delta("world."),
+            StreamEvent::Usage(usage(10)),
+            StreamEvent::Stop(Stop::EndTurn),
+        ],
+    };
+    let out = stream_result(&mut session, turn, response);
+    let mut records = Vec::new();
+    append_emitted(&out, &mut records);
+    let content = records
+        .iter()
+        .find_map(|record| match record {
+            Record::Assistant(entry) => match &entry.kind {
+                EntryKind::Assistant { content, .. } => Some(content.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("the stream journals one assistant entry");
+    assert_eq!(
+        content,
+        vec![Block::Text {
+            text: "Hello streamed world.".into()
+        }]
+    );
+}
+
+#[test]
 fn steer_at_final_response_extends_turn() {
     let mut session = session();
     let turn = begin(&mut session);
@@ -343,7 +589,7 @@ fn steer_at_final_response_extends_turn() {
     .unwrap();
     assert!(matches!(
         queued.as_slice(),
-        [Effect::Reply(Ok(Reply::Queued))]
+        [Effect::Reply(Ok(Reply::Queued { turn: None }))]
     ));
     let boundary = send(&mut session, Event::Boundary { turn }).unwrap();
     assert!(
@@ -423,6 +669,122 @@ fn cancel_discards_queued_input() {
     )));
     assert!(emit.updates.iter().any(|update| matches!(update, UpdateKind::Notice(notice) if notice.kind.as_ref() == "discarded" && notice.text.as_ref() == "first\nsecond\nthird")));
     assert!(matches!(session.phase(), Phase::Idle));
+}
+
+fn follow_up(turn: TurnId, text: &str) -> Event {
+    Event::Command {
+        cmd: Command::FollowUp {
+            turn,
+            content: vec![Part::Text { text: text.into() }],
+        },
+        by: client(),
+    }
+}
+
+fn cancel_queued(turn: TurnId) -> Event {
+    Event::Command {
+        cmd: Command::CancelQueued { turn },
+        by: client(),
+    }
+}
+
+fn queued_turn(effects: &[Effect]) -> TurnId {
+    effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Reply(Ok(Reply::Queued { turn })) => *turn,
+            _ => None,
+        })
+        .expect("a follow-up reply names its turn")
+}
+
+fn notices(effects: &[Effect]) -> Vec<(&str, &str)> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Emit(emit) => Some(&emit.updates),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|update| match update {
+            UpdateKind::Notice(notice) => Some((notice.kind.as_ref(), notice.text.as_ref())),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn queued_follow_up_reply_names_its_turn_and_a_steer_reply_does_not() {
+    let mut session = session();
+    let turn = begin(&mut session);
+    let queued = send(&mut session, follow_up(turn, "next")).unwrap();
+    assert_eq!(queued_turn(&queued), id(2));
+    let steered = send(
+        &mut session,
+        Event::Steer {
+            turn,
+            text: "now".into(),
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        steered.as_slice(),
+        [Effect::Reply(Ok(Reply::Queued { turn: None }))]
+    ));
+}
+
+#[test]
+fn cancel_queued_removes_only_the_named_follow_up() {
+    let mut session = session();
+    let turn = begin(&mut session);
+    let first = queued_turn(&send(&mut session, follow_up(turn, "first")).unwrap());
+    let second = queued_turn(&send(&mut session, follow_up(turn, "second")).unwrap());
+    assert_eq!(session.follow_ups_queued(), 2);
+
+    let out = send(&mut session, cancel_queued(first)).unwrap();
+
+    assert!(
+        out.iter()
+            .any(|effect| matches!(effect, Effect::Reply(Ok(Reply::Done(Output::Nothing)))))
+    );
+    assert_eq!(notices(&out), [("discarded", "first")]);
+    assert_eq!(session.follow_ups_queued(), 1);
+    assert!(matches!(session.phase(), Phase::Running { turn: active, .. } if *active == turn));
+
+    stream_result(&mut session, turn, inference(Stop::EndTurn, &[], 10));
+    send(&mut session, Event::Boundary { turn }).unwrap();
+    assert!(
+        matches!(session.phase(), Phase::Settling { follow_up: Some((next, _)), .. } if *next == second),
+        "the surviving follow-up starts next: {:?}",
+        session.phase()
+    );
+}
+
+#[test]
+fn cancel_queued_rejects_an_id_that_is_not_queued() {
+    let mut session = session();
+    let turn = begin(&mut session);
+    let queued = queued_turn(&send(&mut session, follow_up(turn, "only")).unwrap());
+    send(&mut session, cancel_queued(queued)).unwrap();
+
+    let Err(Rejection::Invalid { reason }) = send(&mut session, cancel_queued(queued)) else {
+        panic!("a consumed queue id must be rejected");
+    };
+    assert_eq!(
+        reason.as_ref(),
+        "turn 2 has no queued follow-up. If the follow-up already started, cancel its turn instead."
+    );
+    assert!(matches!(
+        send(&mut session, cancel_queued(id(99))),
+        Err(Rejection::Invalid { .. })
+    ));
+    assert!(
+        matches!(
+            send(&mut session, cancel_queued(turn)),
+            Err(Rejection::Invalid { .. })
+        ),
+        "the running turn is not a queued follow-up"
+    );
 }
 
 #[test]
@@ -1008,6 +1370,7 @@ fn open_turn(session: &mut Session, journal: &mut Vec<Record>) -> TurnId {
     append_emitted(&send(session, guard(turn)).unwrap(), journal);
     turn
 }
+
 fn resolved_call(
     call: &str,
     tool: &str,
@@ -1021,6 +1384,7 @@ fn resolved_call(
         result,
     }
 }
+
 fn results_of(records: &[Record], call: &str) -> Vec<(bool, Vec<JournalPart>)> {
     let call = CallId::new(call);
     records
@@ -1039,9 +1403,11 @@ fn results_of(records: &[Record], call: &str) -> Vec<(bool, Vec<JournalPart>)> {
         })
         .collect()
 }
+
 fn text_part(text: &str) -> Vec<JournalPart> {
     vec![JournalPart::Text { text: text.into() }]
 }
+
 fn assistant_record(entry_id: u64, calls: &[&str]) -> Record {
     Record::Assistant(Entry {
         id: entry(entry_id),
@@ -1063,6 +1429,7 @@ fn assistant_record(entry_id: u64, calls: &[&str]) -> Record {
         },
     })
 }
+
 fn result_record(entry_id: u64, call: &str) -> Record {
     Record::ToolResult(Entry {
         id: entry(entry_id),
@@ -1074,9 +1441,11 @@ fn result_record(entry_id: u64, call: &str) -> Record {
             error: false,
             parts: text_part("ok"),
             changes: Vec::new(),
+            elapsed_ms: None,
         },
     })
 }
+
 fn start_record(turn: u64, call: &str) -> Record {
     Record::ToolStart {
         at: stamp(),
@@ -1084,12 +1453,14 @@ fn start_record(turn: u64, call: &str) -> Record {
         call: CallId::new(call),
     }
 }
+
 fn turn_start_record(turn: u64) -> Record {
     Record::TurnStart {
         at: stamp(),
         turn: id(turn),
     }
 }
+
 fn turn_end_record(turn: u64) -> Record {
     Record::TurnEnd {
         at: stamp(),
@@ -1099,6 +1470,7 @@ fn turn_end_record(turn: u64) -> Record {
         changes: Vec::new(),
     }
 }
+
 fn contradicts(records: Vec<Record>) -> bool {
     matches!(
         Session::replay(records, stamp()),
@@ -1162,6 +1534,7 @@ fn promoted_call_runs_and_promotes_only_after_success() {
                     text: "found".into(),
                     data: None,
                 },
+                elapsed_ms: None,
             },
         )
         .unwrap();
@@ -1262,6 +1635,7 @@ fn unsuccessful_promoting_calls_do_not_promote() {
                     turn,
                     call: CallId::new("call"),
                     outcome,
+                    elapsed_ms: None,
                 },
             )
             .unwrap(),
@@ -1341,6 +1715,7 @@ fn every_resolved_call_gets_exactly_one_result() {
                 text: call.into(),
                 data: None,
             },
+            elapsed_ms: None,
         };
         append_emitted(&send(&mut session, settled).unwrap(), &mut journal);
     }
@@ -1656,6 +2031,7 @@ fn cloned_entries_without_turn_records_replay() {
                     text: "read".into(),
                     data: None,
                 },
+                elapsed_ms: None,
             },
         )
         .unwrap(),
@@ -2049,6 +2425,7 @@ proptest::proptest! {
                 turn,
                 call: CallId::new(call.as_str()),
                 outcome: SettledOutcome::Ok { text: "result".into(), data: None },
+                elapsed_ms: None,
             }).unwrap();
             append_emitted(&settled, &mut journal);
         }
@@ -2099,6 +2476,7 @@ fn receipt_effect_precedes_reply_and_publish() {
         Some(Effect::Reply(Ok(Reply::Done(Output::Nothing))))
     ));
 }
+
 #[test]
 fn set_mode_persists_and_replays() {
     let mut session = session();
@@ -2162,7 +2540,7 @@ fn wake_opens_with_wake_source() {
 }
 
 #[test]
-fn before_turn_texts_join_into_user_entry() {
+fn before_turn_text_journals_its_own_reminder_after_user_entry() {
     let mut session = session();
     send(&mut session, prompt("question")).unwrap();
     let turn = match session.phase() {
@@ -2190,26 +2568,30 @@ fn before_turn_texts_join_into_user_entry() {
             _ => None,
         })
         .expect("before_turn verdict emits records");
-    assert!(matches!(
-        emit.records.as_slice(),
-        [Record::TurnStart { turn: started, .. }, Record::User(_)]
-        if *started == turn
-    ));
-    let entry = emit
-        .records
-        .iter()
-        .find_map(|record| match record {
-            Record::User(entry) => Some(entry),
-            _ => None,
-        })
-        .expect("user entry journaled");
-    let EntryKind::User { parts } = &entry.kind else {
+    let [
+        Record::TurnStart { turn: started, .. },
+        Record::User(user),
+        Record::Reminder(reminder),
+    ] = emit.records.as_slice()
+    else {
+        panic!(
+            "opening journals turn start, user, reminder: {:?}",
+            emit.records
+        );
+    };
+    assert_eq!(*started, turn);
+    let EntryKind::User { parts } = &user.kind else {
         panic!("user record holds a user entry");
     };
     assert!(matches!(
         parts.as_slice(),
-        [JournalPart::Text { text: first }, JournalPart::Text { text: second }]
-        if first.as_ref() == "question" && second.as_ref() == "\n\nfirst\nsecond"
+        [JournalPart::Text { text }] if text.as_ref() == "question"
+    ));
+    assert_eq!(reminder.parent, Some(user.id));
+    assert!(matches!(
+        &reminder.kind,
+        EntryKind::Reminder { source, text }
+        if source.as_ref() == crate::BEFORE_TURN_SOURCE && text.as_ref() == "first\nsecond"
     ));
     assert!(emit.updates.iter().any(
         |update| matches!(update, UpdateKind::TurnStarted { turn: started, .. } if *started == turn)
@@ -2220,6 +2602,108 @@ fn before_turn_texts_join_into_user_entry() {
             .any(|update| matches!(update, UpdateKind::Tree(_)))
     );
     assert!(matches!(session.phase(), Phase::Running { .. }));
+}
+
+#[test]
+fn before_turn_text_without_a_free_entry_id_is_rejected_before_the_phase_moves() {
+    let mut session = session();
+    send(&mut session, prompt("question")).unwrap();
+    let turn = match session.phase() {
+        Phase::Opening { turn, .. } => *turn,
+        phase => panic!("prompt did not open a turn: {phase:?}"),
+    };
+    session.next_entry = None;
+    let guard = |text: Option<&str>| Event::Guard {
+        turn,
+        call: None,
+        extension: None,
+        outcome: HookOutcome::new(
+            HookEvent::BeforeTurn,
+            HookVerdict::BeforeTurn(text.map(Into::into)),
+        )
+        .unwrap(),
+    };
+    assert!(matches!(
+        send(&mut session, guard(Some("hint"))),
+        Err(Rejection::Invalid { .. })
+    ));
+    assert!(matches!(session.phase(), Phase::Opening { .. }));
+    send(&mut session, guard(None)).unwrap();
+    assert!(matches!(session.phase(), Phase::Running { .. }));
+}
+
+#[test]
+fn settled_elapsed_reaches_the_journal_the_update_and_the_replayed_view() {
+    let mut session = session();
+    let mut journal = Vec::new();
+    let turn = open_turn(&mut session, &mut journal);
+    let streamed = stream_result(
+        &mut session,
+        turn,
+        inference(Stop::EndTurn, &[("call", "read_file")], 10),
+    );
+    append_emitted(&streamed, &mut journal);
+    let resolved = send(
+        &mut session,
+        Event::Resolved {
+            turn,
+            calls: vec![resolved_call(
+                "call",
+                "read_file",
+                false,
+                Ok(ToolClass::Read),
+            )],
+            answerer_attached: false,
+        },
+    )
+    .unwrap();
+    append_emitted(&resolved, &mut journal);
+    let started = send(
+        &mut session,
+        Event::CallStarted {
+            turn,
+            call: CallId::new("call"),
+        },
+    )
+    .unwrap();
+    append_emitted(&started, &mut journal);
+    let settled = send(
+        &mut session,
+        Event::Settled {
+            turn,
+            call: CallId::new("call"),
+            outcome: SettledOutcome::Ok {
+                text: "read".into(),
+                data: None,
+            },
+            elapsed_ms: Some(42),
+        },
+    )
+    .unwrap();
+    append_emitted(&settled, &mut journal);
+
+    assert!(matches!(
+        &only_tool_result(&journal).kind,
+        EntryKind::ToolResult {
+            elapsed_ms: Some(42),
+            ..
+        }
+    ));
+    let outcome = settled
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Emit(emit) => Some(emit),
+            _ => None,
+        })
+        .flat_map(|emit| emit.updates.iter())
+        .find_map(|update| match update {
+            UpdateKind::ToolSettled { outcome, .. } => Some(outcome),
+            _ => None,
+        })
+        .expect("settling a call publishes its outcome");
+    assert_eq!(outcome.elapsed_ms, Some(42));
+    let replayed = Session::replay(journal.iter().cloned(), stamp()).unwrap().0;
+    assert_eq!(replayed.tree, session.tree);
 }
 
 #[test]
@@ -2299,6 +2783,7 @@ fn turn_end_sums_usage_across_tool_rounds() {
                 text: "result".into(),
                 data: None,
             },
+            elapsed_ms: None,
         },
     )
     .unwrap();
@@ -2546,4 +3031,246 @@ fn replay_rejects_out_of_order_turn_ids() {
         turn_start_record(2),
         turn_end_record(2),
     ]));
+}
+
+#[test]
+fn tokens_since_compaction_estimate_uses_the_shared_character_rate() {
+    let text = "a".repeat(35);
+    let mut session = session();
+    let mut journal = Vec::new();
+    let prompted = send(
+        &mut session,
+        Event::Command {
+            cmd: Command::Prompt {
+                expect: Expect::Idle,
+                content: vec![Part::Text {
+                    text: text.clone().into(),
+                }],
+            },
+            by: client(),
+        },
+    )
+    .unwrap();
+    append_emitted(&prompted, &mut journal);
+    let turn = match session.phase() {
+        Phase::Opening { turn, .. } => *turn,
+        phase => panic!("prompt did not open a turn: {phase:?}"),
+    };
+    append_emitted(&send(&mut session, guard(turn)).unwrap(), &mut journal);
+    // The branch estimate and the shared estimator agree on the same text.
+    assert_eq!(
+        session.tokens_since_last_compaction(),
+        crate::tokens::estimate_text_tokens(&text),
+    );
+}
+
+#[test]
+fn overflow_failures_mark_turn_end_overflowed() {
+    let mut session = session();
+    send(&mut session, limits(0)).unwrap();
+    let turn = begin(&mut session);
+    let first = send(
+        &mut session,
+        Event::StreamEnded {
+            turn,
+            model: route(),
+            family: Family::Chat,
+            result: Err(InferFailure::Overflow {
+                code: "context".into(),
+                message: "too large".into(),
+            }),
+            partial: None,
+        },
+    )
+    .unwrap();
+    assert!(first.iter().any(
+        |effect| matches!(effect, Effect::Compact { turn: Some(active), .. } if *active == turn)
+    ));
+    send(
+        &mut session,
+        Event::CompactionSettled {
+            turn: Some(turn),
+            outcome: Ok(compact_summary(100, 50)),
+        },
+    )
+    .unwrap();
+    let failed = send(
+        &mut session,
+        Event::StreamEnded {
+            turn,
+            model: route(),
+            family: Family::Chat,
+            result: Err(InferFailure::Overflow {
+                code: "context".into(),
+                message: "still too large".into(),
+            }),
+            partial: None,
+        },
+    )
+    .unwrap();
+    assert!(
+        failed.iter().any(|effect| matches!(
+            effect,
+            Effect::Stop {
+                overflowed: true,
+                ..
+            }
+        )),
+        "a second overflow in one round ends the turn overflowed"
+    );
+}
+
+#[test]
+fn a_failure_that_is_not_overflow_leaves_the_mark_off() {
+    let mut session = session();
+    send(&mut session, limits(0)).unwrap();
+    let turn = begin(&mut session);
+    let failed = send(
+        &mut session,
+        Event::StreamEnded {
+            turn,
+            model: route(),
+            family: Family::Chat,
+            result: Err(InferFailure::Fatal {
+                message: "refused".into(),
+                fix: None,
+            }),
+            partial: None,
+        },
+    )
+    .unwrap();
+    assert!(
+        failed.iter().any(|effect| matches!(
+            effect,
+            Effect::Stop {
+                overflowed: false,
+                ..
+            }
+        )),
+        "a plain failure is not an overflow"
+    );
+}
+
+#[test]
+fn an_overflow_without_a_compactor_still_marks_the_turn() {
+    let mut session = session();
+    send(
+        &mut session,
+        Event::Limits {
+            window: 100_000,
+            max_steps: 0,
+            compact: CompactLimits {
+                threshold: 0.85,
+                min_tokens: 1,
+                keep_tokens: 20_000,
+                enabled: true,
+                compactor_available: false,
+            },
+        },
+    )
+    .unwrap();
+    let turn = begin(&mut session);
+    let failed = send(
+        &mut session,
+        Event::StreamEnded {
+            turn,
+            model: route(),
+            family: Family::Chat,
+            result: Err(InferFailure::Overflow {
+                code: "context".into(),
+                message: "too large".into(),
+            }),
+            partial: None,
+        },
+    )
+    .unwrap();
+    assert!(
+        failed.iter().any(|effect| matches!(
+            effect,
+            Effect::Stop {
+                overflowed: true,
+                ..
+            }
+        )),
+        "an overflow with no compactor ends the turn overflowed"
+    );
+}
+
+#[test]
+fn an_overflow_failure_journals_the_same_line_as_any_other_failure() {
+    let mut session = session();
+    send(&mut session, limits(0)).unwrap();
+    let turn = begin(&mut session);
+    let overflow = |message: &str| Event::StreamEnded {
+        turn,
+        model: route(),
+        family: Family::Chat,
+        result: Err(InferFailure::Overflow {
+            code: "context".into(),
+            message: message.into(),
+        }),
+        partial: None,
+    };
+    send(&mut session, overflow("too large")).unwrap();
+    send(
+        &mut session,
+        Event::CompactionSettled {
+            turn: Some(turn),
+            outcome: Ok(compact_summary(100, 50)),
+        },
+    )
+    .unwrap();
+    let failed = send(&mut session, overflow("still too large")).unwrap();
+    let mut journal = Vec::new();
+    append_emitted(&failed, &mut journal);
+    let Some(record @ Record::TurnEnd { .. }) = journal.last() else {
+        panic!("the failed turn wrote no turn_end record: {journal:?}");
+    };
+    let line = String::from_utf8(crate::journal::encode(record).unwrap()).unwrap();
+    assert!(
+        line.contains(
+            "\"stop\":{\"failed\":\"Context overflow recovery failed: still too large\"},"
+        ),
+        "the overflow mark never reaches the journal: {line}"
+    );
+    assert!(!line.contains("overflow\":"), "{line}");
+}
+
+#[test]
+fn a_failed_overflow_compaction_marks_the_turn_overflowed() {
+    let mut session = session();
+    send(&mut session, limits(0)).unwrap();
+    let turn = begin(&mut session);
+    send(
+        &mut session,
+        Event::StreamEnded {
+            turn,
+            model: route(),
+            family: Family::Chat,
+            result: Err(InferFailure::Overflow {
+                code: "context".into(),
+                message: "too large".into(),
+            }),
+            partial: None,
+        },
+    )
+    .unwrap();
+    let failed = send(
+        &mut session,
+        Event::CompactionSettled {
+            turn: Some(turn),
+            outcome: Err("compactor failed".into()),
+        },
+    )
+    .unwrap();
+    assert!(
+        failed.iter().any(|effect| matches!(
+            effect,
+            Effect::Stop {
+                overflowed: true,
+                ..
+            }
+        )),
+        "a compaction that fails while recovering an overflow ends the turn overflowed"
+    );
 }

@@ -13,6 +13,8 @@ pub enum Owner {
     Picker,
     /// Global application actions.
     App,
+    /// Transcript scrolling and jumping while a viewport owns them.
+    Transcript,
     /// Composer editing and submission.
     Composer,
     /// Text cursor movement and editing.
@@ -144,8 +146,8 @@ pub enum Action {
     TranscriptPageUp,
     /// Scroll the transcript downward.
     TranscriptPageDown,
-    /// Jump to the latest transcript entry.
-    JumpLatest,
+    /// Jump the transcript to the latest entry.
+    TranscriptJumpLatest,
 }
 
 /// A normalized key code and modifier set.
@@ -206,6 +208,7 @@ pub fn validate(table: &[Binding]) -> Result<(), TuiError> {
             Owner::Dialog => "dialog",
             Owner::Picker => "picker",
             Owner::App => "app",
+            Owner::Transcript => "transcript",
             Owner::Composer => "composer",
             Owner::Editor => "editor",
         };
@@ -263,39 +266,57 @@ pub fn resolve_in(key: Key, kitty: bool, owners: &[Owner]) -> Option<Action> {
 
 /// Returns the compact action labels used by F1 help.
 #[must_use]
-pub fn help_labels() -> Vec<(&'static str, &'static str)> {
+pub fn help_labels() -> Vec<(String, &'static str)> {
     BINDINGS
         .iter()
-        .filter(|binding| binding.owner == Owner::App)
+        .filter(|binding| matches!(binding.owner, Owner::App | Owner::Transcript))
         .map(|binding| (key_label(binding.default), binding.label))
         .collect()
 }
 
-fn key_label(key: Key) -> &'static str {
-    match (key.code, key.modifiers) {
-        (KeyCode::F(1), _) => "f1",
-        (KeyCode::F(3), _) => "f3",
-        (KeyCode::Esc, _) => "esc",
-        (KeyCode::Enter, _) => "enter",
-        (KeyCode::Tab, _) => "tab",
-        (KeyCode::Char('c'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => "ctrl+c",
-        (KeyCode::Char('d'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => "ctrl+d",
-        (KeyCode::Char('o'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => "ctrl+o",
-        (KeyCode::Char('t'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => "ctrl+t",
-        (KeyCode::Char('l'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => "ctrl+l",
-        (KeyCode::Char('z'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => "ctrl+z",
-        (KeyCode::Char('f'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
-            "ctrl+shift+f"
+/// Names a key chord in lowercase, modifiers first: `ctrl+up`, `pgdn`, `f1`.
+fn key_label(key: Key) -> String {
+    let mut label = String::new();
+    for (modifier, name) in [
+        (KeyModifiers::CONTROL, "ctrl+"),
+        (KeyModifiers::ALT, "alt+"),
+        (KeyModifiers::SHIFT, "shift+"),
+    ] {
+        if key.modifiers.contains(modifier) {
+            label.push_str(name);
         }
-        _ => "key",
     }
+    match key.code {
+        KeyCode::Char(character) => label.extend(character.to_lowercase()),
+        KeyCode::F(number) => {
+            label.push('f');
+            label.push_str(&number.to_string());
+        }
+        KeyCode::Esc => label.push_str("esc"),
+        KeyCode::Enter => label.push_str("enter"),
+        KeyCode::Tab => label.push_str("tab"),
+        KeyCode::Backspace => label.push_str("backspace"),
+        KeyCode::Up => label.push_str("up"),
+        KeyCode::Down => label.push_str("down"),
+        KeyCode::Left => label.push_str("left"),
+        KeyCode::Right => label.push_str("right"),
+        KeyCode::Home => label.push_str("home"),
+        KeyCode::End => label.push_str("end"),
+        KeyCode::PageUp => label.push_str("pgup"),
+        KeyCode::PageDown => label.push_str("pgdn"),
+        other => {
+            let name = format!("{other:?}");
+            label.push_str(&name.to_lowercase());
+        }
+    }
+    label
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         Action, BINDINGS, Binding, InputEvent, Key, KeyDecoder, Owner, help_labels, resolve,
-        validate,
+        resolve_in, validate,
     };
     use crossterm::event::{KeyCode, KeyModifiers};
     use std::time::{Duration, Instant};
@@ -307,8 +328,62 @@ mod tests {
         assert!(
             help_labels()
                 .iter()
-                .any(|(key, label)| *key == "f1" && *label == "Help")
+                .any(|(key, label)| key == "f1" && *label == "Help")
         );
+    }
+
+    #[test]
+    fn help_names_every_app_key_without_a_placeholder() {
+        let labels = help_labels();
+        assert_ne!(labels.len(), 0);
+        for (key, label) in &labels {
+            assert!(
+                key != "key" && !key.is_empty(),
+                "{label} must show its real key, got {key:?}"
+            );
+        }
+        let named = |wanted: &str| labels.iter().any(|(key, _)| key == wanted);
+        for wanted in [
+            "ctrl+up",
+            "ctrl+down",
+            "ctrl+g",
+            "ctrl+r",
+            "pgup",
+            "pgdn",
+            "ctrl+shift+f",
+        ] {
+            assert!(named(wanted), "{wanted} is missing from {labels:?}");
+        }
+    }
+
+    #[test]
+    fn end_is_a_composer_key_and_the_viewport_jump_key() {
+        let end = Key::new(KeyCode::End, KeyModifiers::NONE);
+        let composer_context = [Owner::App, Owner::Composer, Owner::Editor];
+        assert_eq!(
+            resolve_in(end, false, &composer_context),
+            Some(Action::LineEnd),
+            "End belongs to the composer line end outside a viewport"
+        );
+        assert_eq!(
+            resolve_in(end, true, &composer_context),
+            Some(Action::LineEnd)
+        );
+        assert_eq!(
+            resolve_in(end, false, &[Owner::Dialog, Owner::Picker]),
+            Some(Action::PickerLast),
+            "a picker keeps its own End binding"
+        );
+        assert_eq!(
+            resolve_in(end, false, &[Owner::App, Owner::Transcript]),
+            Some(Action::TranscriptJumpLatest),
+            "a viewport owns End for jump to latest"
+        );
+        let jump = help_labels()
+            .into_iter()
+            .find(|(key, _)| key == "end")
+            .map(|(_, label)| label);
+        assert_eq!(jump, Some("Jump to latest"));
     }
 
     #[test]
@@ -360,6 +435,74 @@ mod tests {
                 InputEvent::Key(Key::new(KeyCode::Up, KeyModifiers::CONTROL)),
                 InputEvent::Key(Key::new(KeyCode::Enter, KeyModifiers::SHIFT)),
             ]
+        );
+    }
+
+    #[test]
+    fn the_delete_key_decodes_from_the_legacy_tilde_form() {
+        let mut decoder = KeyDecoder::default();
+        assert_eq!(
+            decoder.feed(b"\x1b[3~", Instant::now()),
+            [InputEvent::Key(Key::new(
+                KeyCode::Delete,
+                KeyModifiers::NONE
+            ))]
+        );
+    }
+
+    #[test]
+    fn escape_aborts_partial_csi_without_leaking_literal_text() {
+        let start = Instant::now();
+        let mut decoder = KeyDecoder::default();
+        assert_eq!(
+            decoder.feed(b"\x1b[<0;10;\x1b[C", start),
+            [InputEvent::Key(Key::new(
+                KeyCode::Right,
+                KeyModifiers::NONE
+            ))]
+        );
+    }
+
+    #[test]
+    fn unmapped_control_aborts_partial_csi_without_leaking_literal_text() {
+        let start = Instant::now();
+        let mut decoder = KeyDecoder::default();
+        assert_eq!(
+            decoder.feed(b"\x1b[<0;10;\x1ca", start),
+            [InputEvent::Key(Key::new(
+                KeyCode::Char('a'),
+                KeyModifiers::NONE
+            ))]
+        );
+    }
+
+    #[test]
+    fn control_byte_aborts_partial_csi_sequence() {
+        let start = Instant::now();
+        let mut decoder = KeyDecoder::default();
+        assert_eq!(decoder.feed(b"\x1b[<0;10;", start).len(), 0);
+        assert_eq!(
+            decoder.feed(&[0x03], start + Duration::from_millis(1)),
+            [InputEvent::Key(Key::new(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL
+            ))]
+        );
+        assert_eq!(
+            decoder.feed(b"x", start + Duration::from_millis(2)),
+            [InputEvent::Key(Key::new(
+                KeyCode::Char('x'),
+                KeyModifiers::NONE
+            ))]
+        );
+
+        let mut decoder = KeyDecoder::default();
+        assert_eq!(
+            decoder.feed(b"\x1b[<0;10;\x03", start),
+            [InputEvent::Key(Key::new(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL
+            ))]
         );
     }
 

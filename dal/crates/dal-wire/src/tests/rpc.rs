@@ -3,13 +3,17 @@ use std::time::Duration;
 use dal_core::{Command, Expect, Part, RequestId};
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
 
-use super::support::{Rig, Rpc, assert_error, initialize, result, rig, text_step};
+use super::support::{
+    Rig, Rpc, assert_error, assert_invalid_params, initialize, result, rig, text_step,
+};
 use crate::serve_rpc;
 use crate::transport::MemoryTransport;
 
 mod auth;
 mod backpressure;
+mod capabilities;
 mod concurrency;
+mod drain;
 mod foreign;
 mod order;
 mod schema;
@@ -198,11 +202,7 @@ async fn unknown_types_rejected() {
                 sonic_rs::json!({"sessionId": session, "command": {"type": "frobnicate"}}),
             )
             .await;
-        assert_error(
-            &command,
-            -32602,
-            r#"invalid params for session/submit: unknown command type "frobnicate""#,
-        );
+        assert_invalid_params(&command, "session/submit", "frobnicate");
         let answer = rpc
             .call(
                 4,
@@ -214,11 +214,7 @@ async fn unknown_types_rejected() {
                 }),
             )
             .await;
-        assert_error(
-            &answer,
-            -32602,
-            r#"invalid params for session/answer: unknown answer type "maybe""#,
-        );
+        assert_invalid_params(&answer, "session/answer", "maybe");
         let after = rpc
             .call(5, "session/view", sonic_rs::json!({"sessionId": session}))
             .await;
@@ -227,6 +223,247 @@ async fn unknown_types_rejected() {
             seq,
             "a rejected type changed the session"
         );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn malformed_optional_members_are_invalid_params() {
+    let rig = rig(&[]).await;
+    let ws = rig.ws();
+    with_rpc(&rig, async |mut rpc| {
+        initialize(&mut rpc).await;
+        let session = open(
+            &mut rpc,
+            1,
+            sonic_rs::json!({"type": "new", "workspace": ws}),
+        )
+        .await;
+        let cases = [
+            ("session/list", sonic_rs::json!({"limit": "10"}), "limit"),
+            ("session/list", sonic_rs::json!({"limit": 1.5}), "limit"),
+            ("session/list", sonic_rs::json!({"cursor": 7}), "cursor"),
+            ("session/list", sonic_rs::json!({"search": ["x"]}), "search"),
+            (
+                "session/view",
+                sonic_rs::json!({"sessionId": session, "before": 3}),
+                "before",
+            ),
+            (
+                "session/subscribe",
+                sonic_rs::json!({"sessionId": session, "gen": "1"}),
+                "gen",
+            ),
+            (
+                "session/subscribe",
+                sonic_rs::json!({"sessionId": session, "after": "1"}),
+                "after",
+            ),
+            ("docs/read", sonic_rs::json!({"uri": 5}), "uri"),
+        ];
+        for (id, (method, params, member)) in (2..).zip(cases) {
+            let reply = rpc.call(id, method, params).await;
+            assert_invalid_params(&reply, method, member);
+        }
+        let reply = rpc.call(50, "session/list", sonic_rs::json!([])).await;
+        assert_invalid_params(&reply, "session/list", "object");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn every_command_tag_reaches_the_decoder() {
+    let rig = rig(&[]).await;
+    let ws = rig.ws();
+    let tags = [
+        "prompt",
+        "steer",
+        "follow_up",
+        "cancel_queued",
+        "cancel",
+        "set_model",
+        "set_thinking",
+        "set_approval",
+        "set_mode",
+        "compact",
+        "move_leaf",
+        "fork",
+        "rename",
+        "set_scoped_models",
+        "export",
+        "reload_plugins",
+        "run",
+    ];
+    with_rpc(&rig, async |mut rpc| {
+        initialize(&mut rpc).await;
+        let session = open(
+            &mut rpc,
+            1,
+            sonic_rs::json!({"type": "new", "workspace": ws}),
+        )
+        .await;
+        for (id, tag) in (2..).zip(tags) {
+            let reply = rpc
+                .call(
+                    id,
+                    "session/submit",
+                    sonic_rs::json!({"sessionId": session, "command": {"type": tag}}),
+                )
+                .await;
+            let message = reply["error"]["message"].as_str().unwrap_or_default();
+            assert!(
+                !message.contains(tag),
+                "tag {tag} was refused before decoding: {reply}"
+            );
+        }
+        let clone = rpc
+            .call(
+                50,
+                "session/submit",
+                sonic_rs::json!({"sessionId": session, "command": {"type": "clone"}}),
+            )
+            .await;
+        assert_invalid_params(&clone, "session/submit", "no entries to clone");
+        let unknown = rpc
+            .call(
+                100,
+                "session/submit",
+                sonic_rs::json!({"sessionId": session, "command": {"type": "frobnicate"}}),
+            )
+            .await;
+        assert_invalid_params(&unknown, "session/submit", "frobnicate");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn commands_beyond_the_old_allowlist_run_over_rpc() {
+    let rig = rig(&[]).await;
+    let ws = rig.ws();
+    with_rpc(&rig, async |mut rpc| {
+        initialize(&mut rpc).await;
+        let session = open(
+            &mut rpc,
+            1,
+            sonic_rs::json!({"type": "new", "workspace": ws}),
+        )
+        .await;
+        let done = sonic_rs::json!({"type": "done", "output": {"type": "nothing"}});
+        let mode = rpc
+            .call(
+                2,
+                "session/submit",
+                sonic_rs::json!({
+                    "sessionId": session,
+                    "command": {"type": "set_mode", "mode": "normal", "save": "session_only"},
+                }),
+            )
+            .await;
+        assert_eq!(result(&mode), &done);
+        let scoped = rpc
+            .call(
+                3,
+                "session/submit",
+                sonic_rs::json!({
+                    "sessionId": session,
+                    "command": {"type": "set_scoped_models", "scopedModels": []},
+                }),
+            )
+            .await;
+        assert_eq!(result(&scoped), &done);
+        let queued = rpc
+            .call(
+                4,
+                "session/submit",
+                sonic_rs::json!({
+                    "sessionId": session,
+                    "command": {"type": "cancel_queued", "turn": 1},
+                }),
+            )
+            .await;
+        assert_invalid_params(&queued, "session/submit", "turn 1");
+        let reload = rpc
+            .call(
+                5,
+                "session/submit",
+                sonic_rs::json!({"sessionId": session, "command": {"type": "reload_plugins"}}),
+            )
+            .await;
+        assert_invalid_params(&reload, "session/submit", "plugins cannot reload");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn session_submit_rejects_export_paths_outside_the_workspace() {
+    let rig = rig(&[]).await;
+    let ws = rig.ws();
+    let outside_absolute = rig.dir.path().join("rpc-absolute.md");
+    let outside_traversal = rig.dir.path().join("rpc-traversal.md");
+    with_rpc(&rig, async |mut rpc| {
+        initialize(&mut rpc).await;
+        let session = open(
+            &mut rpc,
+            1,
+            sonic_rs::json!({"type": "new", "workspace": ws}),
+        )
+        .await;
+        let absolute = rpc
+            .call(
+                2,
+                "session/submit",
+                sonic_rs::json!({
+                    "sessionId": session,
+                    "command": {
+                        "type": "export",
+                        "path": outside_absolute,
+                        "format": "markdown",
+                    },
+                }),
+            )
+            .await;
+        assert_eq!(
+            absolute["error"]["code"].as_i64(),
+            Some(-32602),
+            "{absolute}"
+        );
+        let traversal = rpc
+            .call(
+                3,
+                "session/submit",
+                sonic_rs::json!({
+                    "sessionId": session,
+                    "command": {
+                        "type": "export",
+                        "path": "../rpc-traversal.md",
+                        "format": "markdown",
+                    },
+                }),
+            )
+            .await;
+        assert_eq!(
+            traversal["error"]["code"].as_i64(),
+            Some(-32602),
+            "{traversal}"
+        );
+        let relative = rpc
+            .call(
+                4,
+                "session/submit",
+                sonic_rs::json!({
+                    "sessionId": session,
+                    "command": {
+                        "type": "export",
+                        "path": "rpc-relative.md",
+                        "format": "markdown",
+                    },
+                }),
+            )
+            .await;
+        result(&relative);
+        assert!(!outside_absolute.exists());
+        assert!(!outside_traversal.exists());
+        assert!(rig.workspace.join("rpc-relative.md").exists());
     })
     .await;
 }

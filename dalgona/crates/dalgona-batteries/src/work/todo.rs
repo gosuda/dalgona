@@ -25,17 +25,6 @@ pub(crate) enum TodoState {
     Cancelled,
 }
 
-impl TodoState {
-    pub(crate) const fn as_str(&self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::InProgress => "in_progress",
-            Self::Done => "done",
-            Self::Cancelled => "cancelled",
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct TodoItem {
     pub subject: String,
@@ -813,12 +802,9 @@ mod host_tests {
             "- [ ] Fix the parser (in progress)\n- [ ] Add tests\n- [x] Write the plan"
         );
 
-        let (quiet, status) = host.status()?;
+        let (quiet, status) = host.status();
         assert!(quiet);
-        assert_eq!(
-            status,
-            r#"{"plan_mode":false,"plan_state":"off","todos":[{"subject":"Fix the parser","state":"in_progress"},{"subject":"Add tests","state":"pending"},{"subject":"Write the plan","state":"done"}]}"#
-        );
+        assert_eq!(status.as_deref(), Some("1/3 done · Fix the parser"));
         Ok(())
     }
 

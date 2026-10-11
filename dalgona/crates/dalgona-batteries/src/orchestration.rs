@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
 //! Orchestration battery: one owner task per session, strict session-start config.
 
+pub(crate) mod admission;
 pub(crate) mod agents_tool;
 pub(crate) mod arbiter;
 mod commands;
@@ -15,6 +16,7 @@ mod tests;
 mod tools;
 pub(crate) mod types;
 pub(crate) mod workflow;
+pub(crate) mod worktree;
 
 pub(crate) use types::{ControllerMode, GoalStatus, JobsView, StopKind};
 
@@ -27,7 +29,33 @@ use dal_core::{Origin, RegistrationError, ServiceSet};
 pub const CLAIM_HONESTY: &str = "Reports are claims, not proof. Before you rely on one:\n1. Rebuild the task's scope from its prompt: every file, change, and check it owed.\n2. Read the changed files and run the checks yourself. A summary proves nothing.\n3. Check both ways: nothing owed is missing, and nothing outside the scope changed.\nIf a check fails, start a new run with exact instructions, or fix it yourself.";
 
 /// Manual page text registered under `dalgona://orchestration`.
-pub const ORCHESTRATION_DOC: &str = "# Orchestration\n\nThe orchestration extension coordinates background jobs, monitored output, goals, and child-agent workflows. Use `agents` to run, wait for, cancel, or list workflows. Use `monitor` to watch matching output from a background job. Use `create_goal`, `update_goal`, and `get_goal` with `/goal` to manage a durable session goal. `/continuation` controls automatic turns, and `/abort` cancels active orchestration work. Automatic reminders are delivered only when the session is ready; child reports are claims, not proof.\n\n## Jobs and cancellation\n\nJobs run under one owner task per session with a bounded queue. `cancel` names a job or a turn and ends it through one cancellation tree; cascade cancellation reaches every descendant. Host shutdown closes every open session and stops timers, child sessions, processes, and background jobs before the process exits.\n\n## Agents, scopes, and budgets\n\nChild agents are admitted in FIFO order into a scope. A scope carries a budget of requests, tokens, and usd, and usage rolls up through nested scopes to the parent ledger. Admission fails when the budget is exhausted or a usd-budgeted model has no known price. A scope opened inside a hook dies at that hook's deadline. Reports from children are claims, not proof: rebuild the promised scope, inspect the changed files, and run the checks before trusting one.\n\n## Wake and turns\n\nA turn started by a wake rather than a user prompt counts against a limit of 20 consecutive wake-started turns. The twenty-first wake is refused and the refusal is journaled; a user prompt resets the count.\n\n## Mailbox\n\nAgent-to-agent mail travels through the journal-backed mailbox with per-pair FIFO order and cursor-based reads. The delivery mode is `aside`, `steer`, or `next_turn`: an aside is delivered without steering the current turn, steer joins the running turn, and next_turn queues for the following one. A send returns a receipt naming the outcome: delivered, woken, buffered, full, or gone.\n\n## Synthetic models and private tools\n\nA synthetic model is a model route whose handler emits a normal event stream; usage inside it is journaled against the run that made it. A handler may bind private tools that exist only for that call; a private tool that is not declared in the request may not shadow a session tool, and the collision fails closed.\n";
+pub const ORCHESTRATION_DOC: &str = concat!(
+    "# Orchestration\n\n",
+    "The orchestration extension coordinates background jobs, monitored output, goals, and child-agent workflows. ",
+    "Use `agents` to run, wait for, cancel, or list workflows. ",
+    "Use `monitor` to watch matching output from a background job. ",
+    "Use `create_goal`, `update_goal`, and `get_goal` with `/goal` to manage a durable session goal. ",
+    "`/continuation` controls automatic turns, and `/abort` cancels active orchestration work. ",
+    "Automatic reminders are delivered only when the session is ready; child reports are claims, not proof.\n\n",
+    "## Agents, jobs, cancel, and shutdown\n\n",
+    "Each `agents` run and each background job belongs to one session. ",
+    "Cancel stops the run and its descendants; host shutdown cancels what is still active before the session closes. ",
+    "Every child run ends with exactly one report message to its parent, and a report is a claim to verify.\n\n",
+    "## Wakes\n\n",
+    "A wake starts a turn without a user prompt. A session accepts 20 wake-started turns in a row; ",
+    "the 21st wake is refused, and a user prompt resets the count.\n\n",
+    "## Scope, budget, and deadline\n\n",
+    "A scope caps concurrent model handles with a limit; handles past the limit wait in FIFO order. ",
+    "Its budget bounds requests, tokens, wall time, and cost, and an `on_error` policy decides what one failed handle does to its siblings. ",
+    "A scope created inside a hook is cancelled when the hook deadline passes; there is no separate timeout setting.\n\n",
+    "## Mailbox\n\n",
+    "Sessions in one tree exchange messages through a mailbox. Each message carries a mode: ",
+    "`aside` delivers without steering the current turn, `steer` steers the running turn, and `next_turn` queues for the recipient's next turn. ",
+    "Reading the mailbox does not consume messages; a full waiting queue returns `Full`, and an out-of-tree or finished recipient returns `Gone`.\n\n",
+    "## Synthetic models\n\n",
+    "A synthetic model is a plugin-defined model id whose handler can forward to another model. ",
+    "Only the handler may forward, and only once: a second forward is refused. Private tool calls run inside the handler and never reach the session, a private tool cannot shadow a session tool, a cycle is refused, and a chain of more than four routes is refused.\n",
+);
 
 /// Enables or disables one orchestration sub-battery.
 #[derive(Clone, Debug, serde::Deserialize)]
@@ -117,6 +145,11 @@ pub struct OrchestrationConfig {
     pub agents: OrchestrationAgentsConfig,
     /// Optional named saved workflows.
     pub workflows: Option<toml::Value>,
+    /// Host data root for isolated task worktrees and artifacts. The entry
+    /// supplies it at assembly; without it a worktree step refuses the run
+    /// before any job starts, because the battery never falls back to the
+    /// real checkout.
+    pub data_root: Option<std::path::PathBuf>,
 }
 
 /// Configuration decode error for the orchestration battery.
@@ -126,14 +159,16 @@ pub struct OrchestrationConfigError(ConfigErrorKind);
 
 #[derive(Debug, thiserror::Error)]
 enum ConfigErrorKind {
+    /// Configuration could not be decoded from TOML.
     #[error("plugin.orchestration: {0}")]
     Decode(#[from] toml::de::Error),
-    #[error("plugin.orchestration.{key} must be an integer from {min} to {max}")]
-    Range {
-        key: &'static str,
-        min: u32,
-        max: u32,
-    },
+    /// A run setting was outside its accepted range.
+    #[error("{0}")]
+    Agents(String),
+    /// A sub-battery was disabled while a dependent sub-battery is on.
+    #[error("{0}")]
+    Coherence(String),
+    /// The monitor sub-battery configuration was invalid.
     #[error(transparent)]
     Monitor(#[from] monitor::state::MonitorConfigError),
 }
@@ -183,29 +218,8 @@ pub fn parse_config(
     };
     let raw: RawConfig = section.clone().try_into()?;
     let monitor = monitor::state::parse_config(raw.monitor.as_ref())?;
-    let agents = &raw.agents;
-    if !(1..=1_000).contains(&agents.child_max_steps) {
-        return Err(OrchestrationConfigError(ConfigErrorKind::Range {
-            key: "agents.child_max_steps",
-            min: 1,
-            max: 1_000,
-        }));
-    }
-    if !(1..=600).contains(&agents.child_max_minutes) {
-        return Err(OrchestrationConfigError(ConfigErrorKind::Range {
-            key: "agents.child_max_minutes",
-            min: 1,
-            max: 600,
-        }));
-    }
-    if !(1..=64).contains(&agents.max_runs) {
-        return Err(OrchestrationConfigError(ConfigErrorKind::Range {
-            key: "agents.max_runs",
-            min: 1,
-            max: 64,
-        }));
-    }
-    Ok(OrchestrationConfig {
+    let agents = decode_agents_settings(&raw.agents)?;
+    let config = OrchestrationConfig {
         loop_guard: raw.loop_guard,
         sleep: raw.sleep,
         monitor: OrchestrationMonitorConfig {
@@ -219,9 +233,49 @@ pub fn parse_config(
         inflight: raw.inflight,
         goal: raw.goal,
         arbiter: raw.arbiter,
-        agents: raw.agents,
+        agents,
         workflows: raw.workflows,
-    })
+        data_root: None,
+    };
+    if let Some(text) = coherence_refusal(&config) {
+        return Err(OrchestrationConfigError(ConfigErrorKind::Coherence(text)));
+    }
+    Ok(config)
+}
+
+/// Decodes and validates the run settings table through the admission
+/// module, which owns the exact range texts.
+fn decode_agents_settings(
+    table: &OrchestrationAgentsConfig,
+) -> Result<OrchestrationAgentsConfig, OrchestrationConfigError> {
+    let encoded = format!(
+        "{{\"child_max_steps\":{},\"child_max_minutes\":{},\"max_runs\":{}}}",
+        table.child_max_steps, table.child_max_minutes, table.max_runs
+    );
+    let raw = dal_core::RawJson::parse(&encoded)
+        .map_err(|error| OrchestrationConfigError(ConfigErrorKind::Agents(error.to_string())))?;
+    admission::decode_settings(&raw)
+        .map_err(|text| OrchestrationConfigError(ConfigErrorKind::Agents(text)))?;
+    Ok(table.clone())
+}
+
+/// Names the first cross-table coherence refusal, if any: `arbiter` and
+/// `inflight` cannot be off while `goal`, `monitor`, or `agents` is on.
+fn coherence_refusal(config: &OrchestrationConfig) -> Option<String> {
+    let on = [
+        ("goal", config.goal.enabled),
+        ("monitor", config.monitor.enabled),
+        ("agents", config.agents.enabled),
+    ]
+    .into_iter()
+    .find_map(|(name, on)| on.then_some(name))?;
+    if !config.arbiter.enabled {
+        return Some(monitor::state::coherence_error("arbiter", on));
+    }
+    if !config.inflight.enabled {
+        return Some(monitor::state::coherence_error("inflight", on));
+    }
+    None
 }
 
 /// Builds the orchestration extension registration. Effects begin only after
@@ -246,15 +300,16 @@ pub fn orchestration(config: OrchestrationConfig) -> Result<Extension, Registrat
         || config.monitor.enabled
         || config.arbiter.enabled
         || config.agents.enabled;
+    let status_enabled = config.inflight.enabled;
     let turn_end_enabled = config.loop_guard.enabled
         || config.goal.enabled
         || config.monitor.enabled
-        || config.arbiter.enabled;
+        || config.arbiter.enabled
+        || status_enabled;
     let settled_enabled = config.goal.enabled
         || config.monitor.enabled
         || config.arbiter.enabled
         || config.agents.enabled;
-    let status_enabled = config.inflight.enabled;
     let tool_result_enabled = config.goal.enabled || config.monitor.enabled;
     let runtime = runtime::Runtime::new(config)?;
     let inject = ServiceSet::from_names(["agents", "jobs", "turn", "sidecar", "run", "ask"])?;
@@ -269,6 +324,9 @@ pub fn orchestration(config: OrchestrationConfig) -> Result<Extension, Registrat
     }
     if input_enabled {
         builder = builder.on_input(runtime::InputHook(runtime.clone()));
+    }
+    if status_enabled {
+        builder = builder.on_before_turn(runtime::BeforeTurnHook(runtime.clone()));
     }
     if tool_hook_enabled {
         builder = builder.on_tool_call(runtime::ToolCallHook(runtime.clone()));

@@ -60,7 +60,7 @@ pub(super) struct ProviderSetInner {
     pub(super) data_dir: PathBuf,
     pub(super) cache_dir: PathBuf,
     pub(super) env: EnvSnapshot,
-    pub(super) clients: HashMap<Box<str>, reqwest::Client>,
+    pub(super) clients: HashMap<Box<str>, http::LazyClient>,
     pub(super) providers: HashMap<Box<str>, ProviderSlot>,
     pub(super) ws: WsSessions,
     pub(super) notices: Mutex<HashMap<SessionId, crate::thinking::SessionNotices>>,
@@ -71,7 +71,7 @@ pub(super) struct ProviderSetInner {
 
 pub(super) struct ProviderSlot {
     pub(super) entry: ProviderEntry,
-    pub(super) client: reqwest::Client,
+    pub(super) client: http::LazyClient,
     pub(super) permits: Arc<Semaphore>,
 }
 
@@ -111,17 +111,14 @@ impl ProviderSet {
         endpoints: TokenEndpoints,
     ) -> Result<Self, ProviderError> {
         let user_agent = identity.user_agent().into_boxed_str();
-        let mut clients = HashMap::new();
+        let mut clients: HashMap<Box<str>, http::LazyClient> = HashMap::new();
         let mut providers = HashMap::with_capacity(config.providers.len());
         let mut usage = HashMap::new();
 
         for provider in &config.providers {
             http::check_base_url(provider.family, &provider.base_url)?;
             let origin = origin_key(&provider.base_url, provider.family)?;
-            let client = clients
-                .entry(origin)
-                .or_insert_with(http::build_client)
-                .clone();
+            let client = clients.entry(origin).or_default().clone();
             let concurrency = usize::try_from(provider.max_concurrent_requests)
                 .ok()
                 .filter(|limit| {
@@ -234,7 +231,13 @@ impl ProviderSet {
                 message: format!("provider {} is not configured", resolved.provider),
             })?;
         let credential = self.credential(&resolved.provider)?;
-        Provider::new(resolved, slot.entry.clone(), credential, &slot.client, self)
+        Provider::new(
+            resolved,
+            slot.entry.clone(),
+            credential,
+            slot.client.get(),
+            self,
+        )
     }
 
     /// Returns the shared replay script when `[providers.scripted]` is set.
@@ -306,14 +309,13 @@ impl ProviderSet {
         let refresh_cancel = tokio_util::sync::CancellationToken::new();
         let credential = super::transport::refresh_expiring(
             &self.inner.refresher,
-            provider_id,
-            slot.entry.family,
+            &slot.entry,
             &credential,
             &refresh_cancel,
         )
         .await?;
         let fetch = crate::catalog::ModelFetch {
-            client: &slot.client,
+            client: slot.client.get(),
             provider: &slot.entry,
             credential: &credential,
             cache_dir: &self.inner.cache_dir,
@@ -345,6 +347,14 @@ impl ProviderSet {
             reference
         };
         crate::catalog::resolve(catalog, &self.inner.config.aliases, reference)
+    }
+
+    /// Stops OAuth credential refreshes and waits for every refresh task still
+    /// running, so none keeps the auth-file lock or commits tokens after the
+    /// host that owns this set is gone. Later refreshes fail with
+    /// [`ProviderError::Transport`].
+    pub async fn shutdown(&self) {
+        self.inner.refresher.shutdown().await;
     }
 
     /// Clears all WebSocket and once-per-session notice state for `session`.

@@ -27,7 +27,7 @@ fn arbiter_priority_and_budget() {
     let reports = vec![report(true), report(false)];
     let ids: Vec<JobId> = reports.iter().map(|report| report.id).collect();
     let items = arbiter.collect(reports);
-    let (text, sources, included) = arbiter.compose(&items, INJECTION_BUDGET);
+    let (text, sources, included, _) = arbiter.compose(&items, INJECTION_BUDGET);
     assert_eq!(sources, ["loop_guard", "jobs", "monitor"]);
     assert_eq!(included, ids);
     assert!(text.contains("recover"));
@@ -46,7 +46,8 @@ fn arbiter_monitor_fit_matches_compose() {
     let take = Arbiter::fit_monitor(&batches, 0, 250);
     assert_eq!(take, 2);
     let items = vec![Ready::Monitor(batches)];
-    let (text, sources, _) = arbiter.compose(&items, 250);
+    let (text, sources, _, batches) = arbiter.compose(&items, 250);
+    assert_eq!(batches, take);
     assert_eq!(sources, ["monitor"]);
     assert!(text.contains(&"a".repeat(100)));
     assert!(!text.contains(&"c".repeat(100)));
@@ -57,7 +58,7 @@ fn arbiter_budget_leaves_overflow_for_next_wake() {
     let arbiter = Arbiter::new();
     let reports: Vec<JobReport> = (0..30).map(|_| report(false)).collect();
     let items = vec![Ready::Jobs(reports)];
-    let (first, _, included) = arbiter.compose(&items, INJECTION_BUDGET);
+    let (first, _, included, _) = arbiter.compose(&items, INJECTION_BUDGET);
     assert!(first.len() <= INJECTION_BUDGET);
     assert!(!included.is_empty() && included.len() < 30);
 }
@@ -75,7 +76,7 @@ fn arbiter_busy_releases() {
         text: "late".to_owned(),
         from_run: false,
     }])];
-    let (_, _, included) = arbiter.compose(&items, INJECTION_BUDGET);
+    let (_, _, included, _) = arbiter.compose(&items, INJECTION_BUDGET);
     assert_eq!(included, [id]);
 }
 
@@ -89,6 +90,20 @@ fn arbiter_limit_pauses() {
     arbiter.on_user_prompt();
     assert_eq!(arbiter.mode(), ControllerMode::Stopped);
     arbiter.on_continuation_run();
+    assert_eq!(arbiter.mode(), ControllerMode::Run);
+}
+
+#[test]
+fn arbiter_cancel_keeps_reports() {
+    let mut arbiter = Arbiter::new();
+    arbiter.on_continuation_run();
+    let at = now();
+    arbiter.push_monitor("batch".to_owned(), at);
+    arbiter.on_user_cancel();
+    assert!(matches!(arbiter.mode(), ControllerMode::Paused { .. }));
+    let items = arbiter.collect(Vec::new());
+    assert_eq!(items.len(), 1);
+    arbiter.on_user_prompt();
     assert_eq!(arbiter.mode(), ControllerMode::Run);
 }
 
@@ -129,7 +144,7 @@ fn arbiter_exactly_once_model() {
                 }])];
                 let mode = arbiter.mode();
                 if mode == ControllerMode::Run {
-                    let (_, _, included) = arbiter.compose(&items, INJECTION_BUDGET);
+                    let (_, _, included, _) = arbiter.compose(&items, INJECTION_BUDGET);
                     if next() % 4 == 0 {
                         arbiter.release(&included);
                     } else {
@@ -137,6 +152,9 @@ fn arbiter_exactly_once_model() {
                         delivered.extend(included);
                     }
                 }
+            } else if roll == 1 {
+                arbiter.on_user_cancel();
+                arbiter.on_user_prompt();
             }
             let _ = (step, at);
         }

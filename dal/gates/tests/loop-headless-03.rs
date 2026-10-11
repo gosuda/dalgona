@@ -1,9 +1,8 @@
+//! Killed processes resume as aborted turns with synthetic tool results.
 #![expect(
     clippy::disallowed_methods,
     reason = "SC test kills a real host process"
 )]
-
-//! Killed processes resume as aborted turns with synthetic tool results.
 #[expect(
     dead_code,
     reason = "gate support helpers are shared across independent test targets"

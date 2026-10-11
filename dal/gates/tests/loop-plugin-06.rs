@@ -1,3 +1,5 @@
+#![expect(clippy::expect_used, reason = "SC test")]
+#![expect(clippy::unwrap_used, reason = "SC test")]
 //! Exercises Starlark TTSR rules against replayed model streams.
 
 #[expect(
@@ -13,10 +15,10 @@ use std::{
     time::Duration,
 };
 
-use dal_agent::{Delivery, Env, SessionRef, ext::ExtensionBuilder};
+use dal_agent::{Delivery, Env, SessionRef, Subscription, ext::ExtensionBuilder};
 use dal_core::{
     Command, Config, ConfigProduct, EntryKind, Expect, Part, Reply, ServiceSet, Stop, UpdateKind,
-    Workspace, ext::Name,
+    View, Workspace, ext::Name,
 };
 use dal_ext::ttsr::{
     TtsrWatchFactory,
@@ -25,36 +27,12 @@ use dal_ext::ttsr::{
     readers::EditStyle,
     record::RecordSource,
 };
-use support::{TestDir, scripted_session};
+use support::{GateHarness, TestDir, scripted_session};
 
-const RULE_PLUGIN: &str = r#"load("@dal/v1", "dal")
-
-rule = dal.rule(
-    pattern = "TRIPWIRE",
-    text = "Respect the gate rule.",
-    interrupt_mode = "always",
-)
-
-plugin = dal.plugin(
-    name = "gate-ttsr",
-    version = "0.1.0",
-    rules = {"retry-control": rule},
-)
-"#;
-
-const REPLAY: &str = concat!(
-    "{\"kind\":\"events\",\"events\":[{\"type\":\"text_delta\",\"text\":\"partial attempt one TRIPWIRE\"},{\"type\":\"tool_calls_done\",\"calls\":[]},{\"type\":\"usage\",\"usage\":{\"input_tokens\":1,\"cached_input_tokens\":0,\"output_tokens\":1,\"reasoning_tokens\":null,\"cache_write_tokens\":0,\"cost_usd\":null}},{\"type\":\"stop\",\"reason\":\"end_turn\"}]}\n",
-    "{\"kind\":\"events\",\"events\":[{\"type\":\"text_delta\",\"text\":\"partial attempt two TRIPWIRE\"},{\"type\":\"tool_calls_done\",\"calls\":[]},{\"type\":\"usage\",\"usage\":{\"input_tokens\":1,\"cached_input_tokens\":0,\"output_tokens\":1,\"reasoning_tokens\":null,\"cache_write_tokens\":0,\"cost_usd\":null}},{\"type\":\"stop\",\"reason\":\"end_turn\"}]}\n",
-    "{\"kind\":\"events\",\"events\":[{\"type\":\"text_delta\",\"text\":\"partial attempt three TRIPWIRE\"},{\"type\":\"tool_calls_done\",\"calls\":[]},{\"type\":\"usage\",\"usage\":{\"input_tokens\":1,\"cached_input_tokens\":0,\"output_tokens\":1,\"reasoning_tokens\":null,\"cache_write_tokens\":0,\"cost_usd\":null}},{\"type\":\"stop\",\"reason\":\"end_turn\"}]}\n",
-    "{\"kind\":\"events\",\"events\":[{\"type\":\"text_delta\",\"text\":\"final answer after the retry cap: TRIPWIRE\"},{\"type\":\"tool_calls_done\",\"calls\":[]},{\"type\":\"usage\",\"usage\":{\"input_tokens\":1,\"cached_input_tokens\":0,\"output_tokens\":1,\"reasoning_tokens\":null,\"cache_write_tokens\":0,\"cost_usd\":null}},{\"type\":\"stop\",\"reason\":\"end_turn\"}]}\n",
-);
-
-#[expect(clippy::too_many_lines, reason = "SC ttsr scenario is one long script")]
-#[tokio::test]
-async fn ttsr_replay_interrupts_injects_and_retries_at_most_three_times()
--> Result<(), Box<dyn Error + Send + Sync>> {
-    let data = TestDir::new()?;
-    let workspace = TestDir::new()?;
+async fn scripted_ttsr_session(
+    data: &TestDir,
+    workspace: &TestDir,
+) -> Result<(GateHarness, Subscription), Box<dyn Error + Send + Sync>> {
     let plugin_dir = data.path().join("plugins/gate-ttsr");
     fs::create_dir_all(&plugin_dir)?;
     fs::write(plugin_dir.join("plugin.star"), RULE_PLUGIN)?;
@@ -142,42 +120,11 @@ async fn ttsr_replay_interrupts_injects_and_retries_at_most_three_times()
         workspace: Workspace::new(workspace.path().to_path_buf())?,
     };
     let harness = scripted_session(product, config, env, session).await?;
-    let mut subscription = harness.agent.subscribe(None)?;
-    let reply = harness
-        .agent
-        .submit(Command::Prompt {
-            expect: Expect::Idle,
-            content: vec![Part::Text {
-                text: "Return the scripted response.".into(),
-            }],
-        })
-        .await?;
-    assert!(matches!(reply, Reply::Accepted { .. }));
-    let mut rule_updates = 0;
-    let mut ended = false;
-    while !ended {
-        let delivery = tokio::time::timeout(Duration::from_secs(5), subscription.next()).await?;
-        let Some(delivery) = delivery else { break };
-        let Delivery::Update(update) = delivery else {
-            continue;
-        };
-        match &update.kind {
-            UpdateKind::RuleFired { rule, .. } if rule.as_ref() == "retry-control" => {
-                rule_updates += 1;
-            }
-            UpdateKind::TurnEnded {
-                stop: Stop::EndTurn,
-                ..
-            } => ended = true,
-            _ => {}
-        }
-    }
-    assert!(ended, "the scripted response must reach a completed turn");
-    assert_eq!(
-        rule_updates, 3,
-        "the fourth match must not retry the interrupted response"
-    );
-    let view = harness.agent.view(dal_core::PageReq::default())?;
+    let subscription = harness.agent.subscribe(None)?;
+    Ok((harness, subscription))
+}
+
+fn assert_replay_view(view: &View) {
     let reminders: Vec<_> = view
         .entries
         .items
@@ -220,6 +167,72 @@ async fn ttsr_replay_interrupts_injects_and_retries_at_most_three_times()
         .collect::<String>();
     assert_eq!(assistant_text, "final answer after the retry cap: TRIPWIRE");
     assert!(!assistant_text.contains("partial attempt"));
+}
+
+const RULE_PLUGIN: &str = r#"load("@dal/v1", "dal")
+
+rule = dal.rule(
+    pattern = "TRIPWIRE",
+    text = "Respect the gate rule.",
+    interrupt_mode = "always",
+)
+
+plugin = dal.plugin(
+    name = "gate-ttsr",
+    version = "0.1.0",
+    rules = {"retry-control": rule},
+)
+"#;
+
+const REPLAY: &str = concat!(
+    "{\"kind\":\"events\",\"events\":[{\"type\":\"text_delta\",\"text\":\"partial attempt one TRIPWIRE\"},{\"type\":\"tool_calls_done\",\"calls\":[]},{\"type\":\"usage\",\"usage\":{\"input_tokens\":1,\"cached_input_tokens\":0,\"output_tokens\":1,\"reasoning_tokens\":null,\"cache_write_tokens\":0,\"cost_usd\":null}},{\"type\":\"stop\",\"reason\":\"end_turn\"}]}\n",
+    "{\"kind\":\"events\",\"events\":[{\"type\":\"text_delta\",\"text\":\"partial attempt two TRIPWIRE\"},{\"type\":\"tool_calls_done\",\"calls\":[]},{\"type\":\"usage\",\"usage\":{\"input_tokens\":1,\"cached_input_tokens\":0,\"output_tokens\":1,\"reasoning_tokens\":null,\"cache_write_tokens\":0,\"cost_usd\":null}},{\"type\":\"stop\",\"reason\":\"end_turn\"}]}\n",
+    "{\"kind\":\"events\",\"events\":[{\"type\":\"text_delta\",\"text\":\"partial attempt three TRIPWIRE\"},{\"type\":\"tool_calls_done\",\"calls\":[]},{\"type\":\"usage\",\"usage\":{\"input_tokens\":1,\"cached_input_tokens\":0,\"output_tokens\":1,\"reasoning_tokens\":null,\"cache_write_tokens\":0,\"cost_usd\":null}},{\"type\":\"stop\",\"reason\":\"end_turn\"}]}\n",
+    "{\"kind\":\"events\",\"events\":[{\"type\":\"text_delta\",\"text\":\"final answer after the retry cap: TRIPWIRE\"},{\"type\":\"tool_calls_done\",\"calls\":[]},{\"type\":\"usage\",\"usage\":{\"input_tokens\":1,\"cached_input_tokens\":0,\"output_tokens\":1,\"reasoning_tokens\":null,\"cache_write_tokens\":0,\"cost_usd\":null}},{\"type\":\"stop\",\"reason\":\"end_turn\"}]}\n",
+);
+
+#[tokio::test]
+async fn ttsr_replay_interrupts_injects_and_retries_at_most_three_times()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let data = TestDir::new()?;
+    let workspace = TestDir::new()?;
+    let (harness, mut subscription) = scripted_ttsr_session(&data, &workspace).await?;
+    let accepted = harness
+        .agent
+        .submit(Command::Prompt {
+            expect: Expect::Idle,
+            content: vec![Part::Text {
+                text: "Return the scripted response.".into(),
+            }],
+        })
+        .await?;
+    assert!(matches!(accepted, Reply::Accepted { .. }));
+    let mut rule_updates = 0;
+    let mut ended = false;
+    while !ended {
+        let delivery = tokio::time::timeout(Duration::from_secs(5), subscription.next()).await?;
+        let Some(delivery) = delivery else { break };
+        let Delivery::Update(update) = delivery else {
+            continue;
+        };
+        match &update.kind {
+            UpdateKind::RuleFired { rule, .. } if rule.as_ref() == "retry-control" => {
+                rule_updates += 1;
+            }
+            UpdateKind::TurnEnded {
+                stop: Stop::EndTurn,
+                ..
+            } => ended = true,
+            _ => {}
+        }
+    }
+    assert!(ended, "the scripted response must reach a completed turn");
+    assert_eq!(
+        rule_updates, 3,
+        "the fourth match must not retry the interrupted response"
+    );
+    let view = harness.agent.view(dal_core::PageReq::default())?;
+    assert_replay_view(&view);
     let _ = harness.host.shutdown(Duration::from_secs(1)).await;
     Ok(())
 }

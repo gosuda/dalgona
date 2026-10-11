@@ -1,10 +1,10 @@
 use super::helpers::{
     compact_notice, entry_weight, invalid, parts_to_text, wrong_turn, zero_usage,
 };
-use super::types::{ManualCompletion, QueuedInput};
+use super::types::{ManualCompletion, Overflow, QueuedInput};
 use super::{
-    CallId, CancelScope, CompactionReason, CompactionSummary, Effect, Emit, Entry, EntryId,
-    EntryKind, Expect, JournalPart, ModelRequestPlan, NonZeroU64, Notice, Output, PartialResponse,
+    CancelScope, CompactionReason, CompactionSummary, Effect, Emit, Entry, EntryId, EntryKind,
+    Expect, JournalPart, ModelRequestPlan, NonZeroU64, Notice, Output, Part, PartialResponse,
     PendingCall, Phase, Record, Rejection, Reply, Session, SettingsView, Step, TreeDelta,
     TurnEndStop, TurnId, TurnSource, TurnStage, UpdateKind,
 };
@@ -36,6 +36,51 @@ impl Session {
                 Err(wrong_turn(Expect::After(turn), self.turn_state()))
             }
         }
+    }
+
+    /// Removes one queued follow-up by the turn id its reply named.
+    ///
+    /// The removed text returns in a `discarded` notice so a client can
+    /// restore it to the composer.
+    pub(super) fn cancel_queued(
+        &mut self,
+        turn: TurnId,
+        emit: &mut Emit,
+        effects: &mut Vec<Effect>,
+    ) -> Result<(), Rejection> {
+        let Some(content) = self.take_queued_follow_up(turn) else {
+            return Err(Rejection::Invalid {
+                reason: format!(
+                    "turn {turn} has no queued follow-up. If the follow-up already started, cancel its turn instead."
+                )
+                .into(),
+            });
+        };
+        emit.updates.push(UpdateKind::Notice(Notice {
+            turn: Some(turn),
+            kind: "discarded".into(),
+            text: parts_to_text(&content).into(),
+        }));
+        effects.push(Effect::Reply(Ok(Reply::Done(Output::Nothing))));
+        Ok(())
+    }
+
+    fn take_queued_follow_up(&mut self, turn: TurnId) -> Option<Vec<Part>> {
+        let index = self.queued_inputs.iter().position(|item| {
+            matches!(
+                item,
+                QueuedInput::FollowUp { turn: queued, source: TurnSource::FollowUp { .. } }
+                    if *queued == turn
+            )
+        })?;
+        let QueuedInput::FollowUp {
+            source: TurnSource::FollowUp { content, .. },
+            ..
+        } = self.queued_inputs.remove(index)
+        else {
+            return None;
+        };
+        Some(content)
     }
 
     pub(super) fn compaction_settled(
@@ -98,6 +143,7 @@ impl Session {
                     self.continue_after_compaction(turn, effects);
                     return Ok(());
                 };
+                self.turn_flags.overflow = Overflow::Unrecovered;
                 self.end_turn(
                     turn,
                     TurnEndStop::Failed { message },
@@ -257,28 +303,29 @@ impl Session {
         emit: &mut Emit,
     ) -> Result<(), Rejection> {
         for item in calls {
-            self.result_entry(&item.call, &item.name, render(&item.name), true, now, emit)?;
+            self.result_entry(item, render(&item.name), true, None, now, emit)?;
         }
         Ok(())
     }
 
     pub(super) fn result_entry(
         &mut self,
-        call: &CallId,
-        name: &str,
+        item: &PendingCall,
         text: Box<str>,
         error: bool,
+        elapsed_ms: Option<u64>,
         now: jiff::Timestamp,
         emit: &mut Emit,
     ) -> Result<(), Rejection> {
         let entry = self.entry(
             now,
             EntryKind::ToolResult {
-                call: call.clone(),
-                name: name.into(),
+                call: item.call.clone(),
+                name: item.name.clone(),
                 error,
                 parts: vec![JournalPart::Text { text }],
                 changes: Vec::new(),
+                elapsed_ms,
             },
         )?;
         let view = self.tree.append(entry.clone());

@@ -35,7 +35,7 @@ use url::Url;
 
 use crate::auth::credential::{Credential, SecretString, codex_identity};
 use crate::error::{ProviderError, UsageCheckReason};
-use crate::http::{Exchange, USAGE_TIMEOUT, endpoint, read_body, send};
+use crate::http::{Exchange, LazyClient, USAGE_TIMEOUT, endpoint, read_body, send};
 
 /// The Codex model id of Luna Reserve.
 pub const LUNA_RESERVE_MODEL: &str = "gpt-reserve";
@@ -440,7 +440,7 @@ fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {
 
 /// The account usage reader one host shares across its sessions.
 pub(crate) struct UsageChecker {
-    client: reqwest::Client,
+    client: LazyClient,
     url: Url,
     user_agent: Arc<str>,
     timeout: Duration,
@@ -465,7 +465,7 @@ impl UsageChecker {
     ///
     /// Every [`endpoint`] failure of the derived usage URL.
     pub(crate) fn new(
-        client: reqwest::Client,
+        client: LazyClient,
         codex_base: &str,
         user_agent: &str,
     ) -> Result<Self, ProviderError> {
@@ -479,7 +479,7 @@ impl UsageChecker {
     }
 
     fn with_timing(
-        client: reqwest::Client,
+        client: LazyClient,
         codex_base: &str,
         user_agent: &str,
         timeout: Duration,
@@ -556,6 +556,7 @@ impl UsageChecker {
 
         let mut secrets = vec![oauth.access_token.clone(), oauth.refresh_token.clone()];
         secrets.extend(oauth.id_token.as_deref().map(SecretString::from));
+        secrets.push(SecretString::from(identity.account_id.as_str()));
         let fetch = Fetch {
             client: self.client.clone(),
             url: self.url.clone(),
@@ -620,7 +621,7 @@ impl Drop for InflightGuard {
 
 /// One usage request with everything it needs owned.
 struct Fetch {
-    client: reqwest::Client,
+    client: LazyClient,
     url: Url,
     user_agent: Arc<str>,
     timeout: Duration,
@@ -636,6 +637,7 @@ impl Fetch {
     async fn run(self) -> UsageOutcome {
         let request = self
             .client
+            .get()
             .get(self.url.clone())
             .bearer_auth(self.token.expose())
             .header("chatgpt-account-id", self.account_id.as_str())

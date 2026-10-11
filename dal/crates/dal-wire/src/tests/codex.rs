@@ -99,11 +99,13 @@ fn questions() -> Vec<Question> {
                 roots: vec!["/w".into()],
                 until: JobEnd(JobId::new_v7()),
             }),
+            call: None,
         },
         Question::Approval {
             tool: "patch".into(),
             preview: preview("src/lib.rs", "+fn main() {}"),
             grant: None,
+            call: None,
         },
         Question::Grant {
             ext: "web".into(),
@@ -195,6 +197,7 @@ fn item_and_turn_notifications_match_pinned_schema() {
                     is_error: true,
                     text: "exit 2".into(),
                     images: Vec::new(),
+                    elapsed_ms: None,
                 },
             },
             UpdateKind::TurnEnded {

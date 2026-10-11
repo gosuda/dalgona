@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use dal_agent::login::{LoginIo, LoginOutcome, Method, StoredCredential};
 use dal_agent::{Agent, Delivery, Host, SessionRef, Subscription};
 use dal_core::{
     Answer, ClientId, Command, CommandSpec, ExtStatus, Gen, PageReq, Reply, RequestId, Seq,
@@ -38,6 +39,9 @@ pub trait TuiAgent: Clone + Send + Sync + 'static {
     /// The session subscription implementation.
     type Subscription: TuiSubscription;
 
+    /// The identity of the opened session, known before any view is read.
+    fn session(&self) -> SessionId;
+
     /// Reads one bounded page of the session view.
     async fn view(&self, page: PageReq) -> Result<View, TuiError>;
     /// Subscribes after a view's generation and sequence.
@@ -48,6 +52,12 @@ pub trait TuiAgent: Clone + Send + Sync + 'static {
     async fn answer(&self, id: RequestId, answer: Answer) -> Result<(), TuiError>;
     /// Returns busy extension status rows already published at attach time.
     fn ext_status(&self) -> Vec<ExtStatus>;
+    /// Whether the session workspace lives on this machine's disk. A remote
+    /// host's workspace path names the host's disk, so the default denies and
+    /// no client reads a workspace it does not own; the in-process host allows.
+    fn workspace_is_local(&self) -> bool {
+        false
+    }
 }
 
 /// A host that can open a session and expose its command registry.
@@ -55,7 +65,7 @@ pub trait TuiAgent: Clone + Send + Sync + 'static {
     async_fn_in_trait,
     reason = "the terminal drives these futures on a blocking runtime handle"
 )]
-pub trait TuiHost: Send + 'static {
+pub trait TuiHost: Clone + Send + Sync + 'static {
     /// The opened session handle.
     type Agent: TuiAgent;
 
@@ -65,6 +75,19 @@ pub trait TuiHost: Send + 'static {
     async fn commands(&self) -> Result<Arc<[CommandSpec]>, TuiError>;
     /// Releases the opened session after the terminal has been restored.
     async fn close(&self, id: SessionId) -> Result<(), TuiError>;
+    /// Signs in to one provider; the contract of [`Host::login`]. A remote
+    /// host answers with the URL, then waits for its `login_finished` update.
+    async fn login(
+        &self,
+        provider: &str,
+        method: Method,
+        io: LoginIo,
+    ) -> Result<LoginOutcome, TuiError>;
+    /// Removes one provider's stored credential, or every stored credential
+    /// when `provider` is `None`, and returns the providers that had one.
+    async fn logout(&self, provider: Option<&str>) -> Result<Vec<Box<str>>, TuiError>;
+    /// Lists the stored credentials without their secrets.
+    async fn stored_credentials(&self) -> Result<Vec<StoredCredential>, TuiError>;
 }
 
 impl TuiHost for Host {
@@ -80,6 +103,23 @@ impl TuiHost for Host {
 
     async fn close(&self, id: SessionId) -> Result<(), TuiError> {
         Ok(self.close(id).await?)
+    }
+
+    async fn login(
+        &self,
+        provider: &str,
+        method: Method,
+        io: LoginIo,
+    ) -> Result<LoginOutcome, TuiError> {
+        Ok(self.login(provider, method, io).await?)
+    }
+
+    async fn logout(&self, provider: Option<&str>) -> Result<Vec<Box<str>>, TuiError> {
+        Ok(self.logout(provider).await?)
+    }
+
+    async fn stored_credentials(&self) -> Result<Vec<StoredCredential>, TuiError> {
+        Ok(self.stored_credentials().await?)
     }
 }
 
@@ -104,6 +144,14 @@ impl TuiAgent for Agent {
 
     fn ext_status(&self) -> Vec<ExtStatus> {
         self.ext_status()
+    }
+
+    fn workspace_is_local(&self) -> bool {
+        true
+    }
+
+    fn session(&self) -> SessionId {
+        self.session()
     }
 }
 

@@ -1,11 +1,19 @@
 //! Live blocks fed by sequenced updates; settled rows commit exactly once.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use dal_core::{ExtStatus, Stop, StreamChannel, Update, UpdateKind};
 
 const EXT_VISIBLE_ROWS: usize = 3;
+
+/// Braille spinner frames; chrome is ASCII or braille per the design contract.
+pub(crate) const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// The interval between spinner frames; coalescing caps the loop at 60 Hz and
+/// the spinner animates well under it.
+const SPINNER_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Lifecycle of one live block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +43,7 @@ pub struct ChildRow {
 #[derive(Debug, Default)]
 pub struct Live {
     assistant_text: String,
+    stream: RefCell<crate::markdown::MarkdownStream>,
     assistant_open: bool,
     tool_cards: HashMap<String, ToolCard>,
     tool_order: Vec<String>,
@@ -42,6 +51,9 @@ pub struct Live {
     notices: Vec<String>,
     committed: HashSet<String>,
     ext_busy: BTreeMap<Box<str>, ExtStatus>,
+    jobs: HashSet<dal_core::JobId>,
+    spinner_frame: usize,
+    spinner_last: Option<Instant>,
 }
 
 /// One tool card from started through settled.
@@ -56,6 +68,23 @@ struct ToolCard {
 }
 
 impl Live {
+    /// Advances the braille spinner one frame per tick interval; the loop
+    /// drives it, and `DAL_NO_MOTION` simply stops calling it.
+    pub fn spin(&mut self, now: Instant) {
+        let last = self.spinner_last.get_or_insert(now);
+        if now.saturating_duration_since(*last) < SPINNER_INTERVAL {
+            return;
+        }
+        *last = now;
+        self.spinner_frame = self.spinner_frame.wrapping_add(1) % SPINNER_FRAMES.len();
+    }
+
+    /// The braille spinner cell for this tick.
+    #[must_use]
+    pub fn spinner_cell(&self) -> &'static str {
+        SPINNER_FRAMES[self.spinner_frame]
+    }
+
     /// Applies one sequenced update; unknown kinds change nothing and report false.
     pub fn apply_update(&mut self, update: &Update) -> bool {
         match &update.kind {
@@ -97,7 +126,7 @@ impl Live {
                 if let Some(card) = self.tool_cards.get_mut(call.as_str()) {
                     card.state = BlockState::Settling;
                     card.settled = Some(!outcome.is_error);
-                    card.duration = Some(card.started.elapsed());
+                    card.duration = outcome.elapsed_ms.map(Duration::from_millis);
                     card.tail = outcome.text.to_string();
                     true
                 } else {
@@ -126,13 +155,15 @@ impl Live {
                     self.notices.push(line);
                 }
                 self.assistant_open = false;
+                // No tool outlives its turn: a card whose settle update never came
+                // (a cancelled call) must not keep a `working` row.
                 for card in self.tool_cards.values_mut() {
-                    if card.state == BlockState::Settling {
-                        card.state = BlockState::Settled;
-                    }
+                    card.state = BlockState::Settled;
                 }
                 true
             }
+            UpdateKind::JobStarted { job } => self.jobs.insert(*job),
+            UpdateKind::JobSettled { job } => self.jobs.remove(job),
             UpdateKind::ExtStatus(status) => {
                 self.set_ext_status(status);
                 true
@@ -173,8 +204,8 @@ impl Live {
             .values()
             .take(shown)
             .map(|status| {
+                let ext = crate::width::escape(&status.ext);
                 if let Some(text) = &status.text {
-                    let ext = crate::width::escape(&status.ext);
                     let text = crate::width::escape(&one_line(text));
                     crate::copy::render(
                         crate::copy::ids::EXT_ROW,
@@ -182,7 +213,6 @@ impl Live {
                         1,
                     )
                 } else {
-                    let ext = crate::width::escape(&status.ext);
                     crate::copy::render(crate::copy::ids::EXT_BUSY, &[("ext", ext.as_str())], 1)
                 }
             })
@@ -208,7 +238,30 @@ impl Live {
     /// Drains completed assistant prose after its entry has committed.
     pub fn take_assistant_text(&mut self) -> String {
         self.assistant_open = false;
+        self.stream.get_mut().reset();
         std::mem::take(&mut self.assistant_text)
+    }
+
+    /// The last `limit` rows of the assistant text as markdown, rendering only the
+    /// lines completed since the previous call.
+    pub(crate) fn assistant_rows(
+        &self,
+        cap: usize,
+        full: usize,
+        mode: crate::width::WidthMode,
+        limit: usize,
+    ) -> Vec<crate::render::RenderRow> {
+        self.stream
+            .borrow_mut()
+            .rows(&self.assistant_text, cap, full, mode, limit)
+    }
+
+    /// Returns how long the tool call `call` has run: the settled duration, or
+    /// the time since it started when its settle update has not arrived yet.
+    #[must_use]
+    pub fn tool_elapsed(&self, call: &str) -> Option<Duration> {
+        let card = self.tool_cards.get(call)?;
+        Some(card.duration.unwrap_or_else(|| card.started.elapsed()))
     }
 
     /// Returns running tool cards and their latest bounded progress.
@@ -219,11 +272,13 @@ impl Live {
             .filter_map(|id| {
                 let card = self.tool_cards.get(id)?;
                 (card.state == BlockState::Open).then(|| {
-                    format!(
-                        "working  {} · {}",
-                        crate::width::escape(&card.name),
-                        one_line(&card.tail)
-                    )
+                    let name = crate::width::escape(&card.name);
+                    let tail = one_line(&card.tail);
+                    if tail.is_empty() {
+                        format!("working  {name}")
+                    } else {
+                        format!("working  {name} · {tail}")
+                    }
                 })
             })
             .collect()
@@ -257,6 +312,12 @@ impl Live {
         settled
     }
 
+    /// How many background jobs the host reported started and not yet settled.
+    #[must_use]
+    pub fn running_jobs(&self) -> usize {
+        self.jobs.len()
+    }
+
     /// Borrows notices in arrival order for the live block.
     #[must_use]
     pub fn notices(&self) -> &[String] {
@@ -279,10 +340,12 @@ impl Live {
     /// Rebuilds transient state from a fresh view after replay was lost.
     pub fn reset_after_resync(&mut self) {
         self.assistant_text.clear();
+        self.stream.get_mut().reset();
         self.assistant_open = false;
         self.tool_cards.clear();
         self.tool_order.clear();
         self.emitted_tools.clear();
+        self.jobs.clear();
     }
 
     /// Commits settled rows exactly once per entry id.
@@ -332,9 +395,9 @@ impl Live {
 
 fn turn_end_line(stop: Stop) -> Option<String> {
     match stop {
+        Stop::EndTurn | Stop::Cancelled | Stop::MaxSteps | Stop::Failed => None,
         Stop::Length => Some(crate::copy::ids::TURN_LENGTH.to_owned()),
         Stop::Filter => Some(crate::copy::ids::TURN_FILTER.to_owned()),
-        _ => None,
     }
 }
 
@@ -395,8 +458,28 @@ fn summarize(rows: &[ChildRow]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChildRow, aggregate_children};
+    use super::{ChildRow, Live, SPINNER_FRAMES, aggregate_children};
     use dal_core::{ExtState, ExtStatus, Gen, Seq, Update, UpdateKind};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn the_spinner_advances_braille_frames_from_ticks() {
+        let start = Instant::now();
+        let mut live = Live::default();
+        assert_eq!(live.spinner_cell(), SPINNER_FRAMES[0]);
+        // A tick inside the interval keeps the frame the loop started on.
+        live.spin(start);
+        assert_eq!(live.spinner_cell(), SPINNER_FRAMES[0]);
+        for step in 1..SPINNER_FRAMES.len() * 2 {
+            let at = start + Duration::from_millis(100 * u64::try_from(step).unwrap_or(u64::MAX));
+            live.spin(at);
+            assert_eq!(
+                live.spinner_cell(),
+                SPINNER_FRAMES[step % SPINNER_FRAMES.len()],
+                "tick {step} advances the braille run and wraps it"
+            );
+        }
+    }
 
     fn status_update(seq: u64, ext: &str, state: ExtState, text: Option<&str>) -> Update {
         let seq = Seq::new(std::num::NonZeroU64::new(seq).unwrap_or(std::num::NonZeroU64::MIN));
@@ -409,6 +492,35 @@ mod tests {
                 text: text.map(Into::into),
             }),
         }
+    }
+
+    #[test]
+    fn running_tool_row_has_no_dangling_separator_before_any_progress() {
+        let mut live = super::Live::default();
+        let seq = |value: u64| {
+            Seq::new(std::num::NonZeroU64::new(value).unwrap_or(std::num::NonZeroU64::MIN))
+        };
+        let started = Update {
+            r#gen: Gen::new(std::num::NonZeroU64::MIN),
+            seq: seq(1),
+            kind: UpdateKind::ToolStarted {
+                call: dal_core::CallId::new("call-1"),
+                tool: "exec".into(),
+                args: dal_core::RawJson::null(),
+            },
+        };
+        assert!(live.apply_update(&started));
+        assert_eq!(live.running_tool_rows(), ["working  exec"]);
+        let progress = Update {
+            r#gen: Gen::new(std::num::NonZeroU64::MIN),
+            seq: seq(2),
+            kind: UpdateKind::ToolProgress {
+                call: dal_core::CallId::new("call-1"),
+                tail: "compiling".into(),
+            },
+        };
+        assert!(live.apply_update(&progress));
+        assert_eq!(live.running_tool_rows(), ["working  exec · compiling"]);
     }
 
     #[test]
@@ -556,5 +668,95 @@ mod tests {
             card.state = BlockState::Settled;
         }
         assert_eq!(live.activity(), None);
+    }
+
+    #[test]
+    fn a_cancelled_turn_leaves_no_working_row() {
+        let mut live = super::Live::default();
+        let update = |seq: u64, kind| Update {
+            r#gen: Gen::new(std::num::NonZeroU64::MIN),
+            seq: Seq::new(std::num::NonZeroU64::new(seq).unwrap_or(std::num::NonZeroU64::MIN)),
+            kind,
+        };
+        assert!(live.apply_update(&update(
+            1,
+            UpdateKind::ToolStarted {
+                call: dal_core::CallId::new("call-1"),
+                tool: "exec".into(),
+                args: dal_core::RawJson::null(),
+            },
+        )));
+        assert_eq!(live.running_tool_rows(), ["working  exec"]);
+        assert!(live.apply_update(&update(
+            2,
+            UpdateKind::TurnEnded {
+                turn: dal_core::TurnId::new(std::num::NonZeroU64::MIN),
+                stop: dal_core::Stop::Cancelled,
+            },
+        )));
+        assert_eq!(live.running_tool_rows().len(), 0);
+        assert_eq!(live.activity(), None);
+    }
+
+    #[test]
+    fn started_and_settled_job_updates_drive_the_running_count() {
+        let mut live = super::Live::default();
+        let update = |seq: u64, kind| Update {
+            r#gen: Gen::new(std::num::NonZeroU64::MIN),
+            seq: Seq::new(std::num::NonZeroU64::new(seq).unwrap_or(std::num::NonZeroU64::MIN)),
+            kind,
+        };
+        let first = dal_core::JobId::new_v7();
+        let second = dal_core::JobId::new_v7();
+        live.apply_update(&update(1, UpdateKind::JobStarted { job: first }));
+        live.apply_update(&update(2, UpdateKind::JobStarted { job: second }));
+        live.apply_update(&update(3, UpdateKind::JobStarted { job: second }));
+        assert_eq!(live.running_jobs(), 2);
+        live.apply_update(&update(4, UpdateKind::JobSettled { job: first }));
+        assert_eq!(live.running_jobs(), 1);
+    }
+
+    #[test]
+    fn streamed_rows_follow_deltas_and_start_over_after_the_text_is_taken() {
+        use crate::width::WidthMode;
+        let mut live = super::Live::default();
+        let delta = |seq: u64, text: &str| Update {
+            r#gen: Gen::new(std::num::NonZeroU64::MIN),
+            seq: Seq::new(std::num::NonZeroU64::new(seq).unwrap_or(std::num::NonZeroU64::MIN)),
+            kind: UpdateKind::Delta {
+                turn: dal_core::TurnId::new(std::num::NonZeroU64::MIN),
+                channel: dal_core::StreamChannel::Text,
+                text: text.into(),
+            },
+        };
+        let rows = |live: &Live| -> Vec<String> {
+            live.assistant_rows(40, 40, WidthMode::Narrow, usize::MAX)
+                .into_iter()
+                .map(|row| row.text)
+                .collect()
+        };
+        live.apply_update(&delta(1, "first li"));
+        assert_eq!(rows(&live), ["first li"]);
+        live.apply_update(&delta(2, "ne\nsecond"));
+        assert_eq!(rows(&live), ["first line", "second"]);
+        live.take_assistant_text();
+        live.apply_update(&delta(3, "fresh"));
+        assert_eq!(rows(&live), ["fresh"]);
+    }
+
+    #[test]
+    fn a_resync_forgets_jobs_the_lost_replay_may_have_settled() {
+        let mut live = super::Live::default();
+        let started = Update {
+            r#gen: Gen::new(std::num::NonZeroU64::MIN),
+            seq: Seq::new(std::num::NonZeroU64::MIN),
+            kind: UpdateKind::JobStarted {
+                job: dal_core::JobId::new_v7(),
+            },
+        };
+        live.apply_update(&started);
+        assert_eq!(live.running_jobs(), 1);
+        live.reset_after_resync();
+        assert_eq!(live.running_jobs(), 0);
     }
 }

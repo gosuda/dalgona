@@ -71,6 +71,8 @@ pub enum RemoteHostUpdate {
     },
     /// A provider login finished.
     LoginFinished {
+        /// The `loginId` of the attempt that finished.
+        login_id: u64,
         /// The provider id.
         provider: String,
         /// True when the credential is ready.
@@ -94,6 +96,19 @@ pub struct RemoteModel {
     pub name: String,
     /// The context window, when known.
     pub context_window: Option<u32>,
+}
+
+/// One `auth/status` provider row.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoteAuthRow {
+    /// The provider id.
+    pub provider: String,
+    /// `ready`, `not_configured`, or `expired`.
+    pub state: String,
+    /// The stored credential kind (`api_key` or `oauth`) when `auth.json`
+    /// holds one, and absent when the provider is ready from the environment
+    /// or not configured.
+    pub detail: Option<String>,
 }
 
 /// One `auth/login` method.
@@ -124,6 +139,24 @@ pub enum RemoteLogin {
     /// The flow waits on the user; completion arrives as
     /// [`RemoteHostUpdate::LoginFinished`].
     Pending {
+        /// The URL to open.
+        url: String,
+        /// The device code to enter, for device flows.
+        user_code: Option<String>,
+    },
+}
+
+/// One `auth/login` outcome that keeps the pending attempt's cancel id.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CancellableLogin {
+    /// The credential is stored and ready; there is nothing to cancel.
+    Ready,
+    /// The flow waits on the user; completion arrives as
+    /// [`RemoteHostUpdate::LoginFinished`]. Cancel it with
+    /// `RemoteHost::cancel_login`.
+    Pending {
+        /// The `loginId` to pass to `auth/cancel`.
+        login_id: u64,
         /// The URL to open.
         url: String,
         /// The device code to enter, for device flows.

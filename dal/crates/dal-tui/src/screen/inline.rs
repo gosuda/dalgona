@@ -72,12 +72,10 @@ mod tests {
         );
 
         let shrink = shrink_bytes(22, 2, true);
-        #[expect(
-            clippy::naive_bytecount,
-            reason = "a one-off test assert does not warrant the bytecount dependency"
-        )]
-        let k_count = shrink.iter().filter(|byte| **byte == b'K').count();
-        assert_eq!(k_count, 2);
+        assert_eq!(
+            shrink.iter().filter(|byte| matches!(**byte, b'K')).count(),
+            2
+        );
         assert!(shrink.windows(3).all(|window| window != b"\x1b[J"));
     }
 }

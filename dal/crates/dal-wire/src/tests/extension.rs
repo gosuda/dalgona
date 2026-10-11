@@ -302,10 +302,6 @@ fn a2a_scenario() {
     );
 }
 
-#[expect(
-    clippy::large_futures,
-    reason = "one scenario drives every router surface in one future"
-)]
 async fn router_scenario(rig: &Rig, gauge: &Arc<Gauge>) {
     let mut host_updates = rig.host.subscribe();
     let request = async |addr: std::net::SocketAddr| {
@@ -319,7 +315,9 @@ async fn router_scenario(rig: &Rig, gauge: &Arc<Gauge>) {
         )
         .await
     };
-    let driver = async {
+    // The driver future is large; boxing it keeps the closure that
+    // `with_serve` holds small enough for `clippy::large_futures`.
+    let driver = Box::pin(async {
         let session = loop {
             let update = tokio::time::timeout(super::support::WAIT, host_updates.next())
                 .await
@@ -357,15 +355,17 @@ async fn router_scenario(rig: &Rig, gauge: &Arc<Gauge>) {
             }
         }
         assert_eq!(seen, 2, "the session published busy then quiet");
-    };
-    with_serve(rig, router_options(rig), async |addr| {
-        let (reply, ()) = tokio::join!(request(addr), driver);
-        assert_eq!(reply.status, 200, "{}", reply.body);
-        let body = sse_data(&reply.body).join("\n");
-        assert!(body.contains("done"), "{body}");
-        assert!(!body.contains("focus"), "{body}");
-        assert!(!body.contains("ext_status"), "{body}");
-        assert!(!reply.head.contains("focus"), "{}", reply.head);
+    });
+    with_serve(rig, router_options(rig), |addr| {
+        Box::pin(async move {
+            let (reply, ()) = tokio::join!(request(addr), driver);
+            assert_eq!(reply.status, 200, "{}", reply.body);
+            let body = sse_data(&reply.body).join("\n");
+            assert!(body.contains("done"), "{body}");
+            assert!(!body.contains("focus"), "{body}");
+            assert!(!body.contains("ext_status"), "{body}");
+            assert!(!reply.head.contains("focus"), "{}", reply.head);
+        })
     })
     .await;
 }

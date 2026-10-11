@@ -112,14 +112,16 @@ impl Session {
             .is_some_and(|entry| matches!(&entry.kind, EntryKind::Compaction { .. }))
     }
 
-    /// Returns same-model tokens since compaction, or an estimate from the active branch.
+    /// Returns same-model tokens since compaction, or an estimate from the
+    /// active branch at the shared 3.5-characters-per-token rate; the branch
+    /// projection tracks byte lengths, so bytes stand in for characters.
     #[must_use]
     pub fn tokens_since_last_compaction(&self) -> u64 {
         self.last_usage
             .as_ref()
             .filter(|(_, _, compactions)| *compactions == self.compactions)
             .map_or_else(
-                || self.projected_bytes.div_ceil(4),
+                || crate::tokens::estimate_tokens(self.projected_bytes),
                 |(_, tokens, _)| *tokens,
             )
     }

@@ -5,29 +5,29 @@
 //! in [`SessionServices`]. It also backs [`ToolCxRuntime`]: approval ladder,
 //! process launch, job parking, scheme resolution, and workspace access.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
-use dal_core::ext::Mail as ExtMail;
+use dal_core::ext::{Mail as ExtMail, Service, SidecarName};
 use dal_core::{
-    AgentInfo, AgentReport, AgentState, AgentsOp, AgentsReply, BlobId, EntryId, FetchMethod,
-    FetchRequest, FetchResponse, Inference, JobsOp, JobsReply, MailMode, ModelRequest, Name,
-    Notice, Part, Service, SessionId, StateError, StateOp, StateRecord, TurnOp, TurnOpReply,
-    Workspace,
+    AgentInfo, AgentRefusal, AgentReport, AgentState, AgentsOp, AgentsReply, ApprovalMode, BlobId,
+    Command, EntryId, Expect, FetchMethod, FetchRequest, FetchResponse, Inference, JobsOp,
+    JobsReply, MailMode, ModelRequest, Name, Notice, Part, RawJson, Reply, Request, SessionId,
+    StateError, StateOp, StateRecord, TurnOp, TurnOpReply, Workspace,
 };
 use dal_provider::EventStream;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use crate::broker::Broker;
-use crate::error::{AgentError, ServiceError};
+use crate::error::{AgentError, DenyReason, HostError, ServiceError};
 use crate::ext::ExtRecord;
 use crate::ext::services::{ServiceFuture, SessionBackend, SessionServices};
 use crate::ext::tool::RawValue;
 use crate::host::HostState;
-use crate::session::SessionHandle;
 use crate::session::shared::Shared;
 use crate::session::tasks::SessionTasks;
+use crate::session::{ExtRecordRequest, SessionHandle};
 
 /// Inputs for one session data-plane.
 pub(crate) struct BackendDeps {
@@ -55,6 +55,62 @@ pub(crate) struct BackendDeps {
 
 fn record_session_closed() -> ServiceError {
     ServiceError::failed(None, "the session closed before the record was journaled.")
+}
+
+/// Encodes the durable start policy of one child session: its tool
+/// allowlist and the approval mode it inherits from its parent.
+fn child_policy_body(
+    tools: Option<&[Name]>,
+    approval: ApprovalMode,
+) -> Result<RawJson, ServiceError> {
+    #[derive(serde::Serialize)]
+    struct Policy<'a> {
+        tools: Option<Vec<&'a str>>,
+        approval: ApprovalMode,
+    }
+    let tools = tools.map(|names| names.iter().map(Name::as_str).collect());
+    let body = sonic_rs::to_string(&Policy { tools, approval })
+        .map_err(|error| ServiceError::failed(None, error.to_string()))?;
+    RawJson::parse(&body).map_err(|error| ServiceError::failed(None, error.to_string()))
+}
+
+/// Moves the child onto the parent's approval mode; a no-op when they
+/// already agree.
+async fn copy_child_approval(
+    child: &crate::agent::Agent,
+    approval: ApprovalMode,
+) -> Result<(), AgentError> {
+    if child.inner.shared.approval() == approval {
+        return Ok(());
+    }
+    child
+        .submit(dal_core::Command::SetApproval {
+            mode: approval,
+            save: dal_core::Save::SessionOnly,
+        })
+        .await
+        .map(|_| ())
+}
+
+/// Runs the prompted turn's interrupt inside the child's task group: after
+/// `delay` the named turn is cancelled, and the timer dies with the session.
+fn spawn_prompt_interrupt(
+    tasks: &SessionTasks,
+    handle: SessionHandle,
+    turn: dal_core::TurnId,
+    delay: std::time::Duration,
+) {
+    tasks.spawn(async move {
+        tokio::time::sleep(delay).await;
+        let _ = handle
+            .submit(
+                Command::Cancel {
+                    scope: dal_core::CancelScope::Turn(turn),
+                },
+                dal_core::ClientId::new("core"),
+            )
+            .await;
+    });
 }
 
 fn write_isolation_artifact(
@@ -137,6 +193,171 @@ fn blob_id_from_digest(digest: [u8; 32]) -> Result<BlobId, ServiceError> {
     BlobId::parse(encoded).map_err(|_| ServiceError::failed(None, "the blob digest is invalid"))
 }
 
+/// A workspace path and its resolved location at the time of the check.
+#[must_use]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Confined {
+    relative: PathBuf,
+    resolved: PathBuf,
+}
+
+impl Confined {
+    /// The canonical location below the canonical root. Components that do
+    /// not exist yet are appended as written.
+    #[must_use]
+    pub(crate) fn resolved(&self) -> &Path {
+        &self.resolved
+    }
+
+    /// Resolves the same relative path again and proves it still names the
+    /// same location inside the root.
+    ///
+    /// # Errors
+    ///
+    /// Returns the refusal of [`confine`] when the path now leaves the root,
+    /// and [`ConfineError::Changed`] when it now resolves elsewhere inside
+    /// the root, such as through a link created since the first resolution.
+    pub(crate) fn recheck(&self, root: &Path) -> Result<(), ConfineError> {
+        if confine(root, &self.relative)?.resolved == self.resolved {
+            Ok(())
+        } else {
+            Err(ConfineError::Changed)
+        }
+    }
+}
+
+/// Why a path is not contained in a workspace root.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub(crate) enum ConfineError {
+    /// The path is empty.
+    #[error("the path is empty")]
+    Empty,
+    /// The path is absolute or carries a platform prefix.
+    #[error("the path is absolute")]
+    Absolute,
+    /// The path climbs with a `..` component.
+    #[error("the path climbs out of its directory with `..`")]
+    ParentDir,
+    /// The path resolves outside the root.
+    #[error("the path resolves outside the workspace")]
+    Outside,
+    /// The root or a component of the path exists but cannot be resolved,
+    /// such as a dangling link.
+    #[error("the path cannot be resolved")]
+    Unresolvable,
+    /// The path resolves to a different location than it did before.
+    #[error("the path now resolves to a different location")]
+    Changed,
+}
+
+/// Proves that `raw` names a location inside `root`.
+///
+/// # Errors
+///
+/// Returns [`ConfineError`] when `raw` is empty, absolute, carries a
+/// platform prefix, climbs with `..`, resolves outside the root, or runs
+/// through a component that exists but cannot be resolved.
+pub(crate) fn confine(root: &Path, raw: &Path) -> Result<Confined, ConfineError> {
+    if raw.as_os_str().is_empty() {
+        return Err(ConfineError::Empty);
+    }
+    let mut relative = PathBuf::new();
+    for component in raw.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => return Err(ConfineError::Absolute),
+            Component::ParentDir => return Err(ConfineError::ParentDir),
+            Component::CurDir => {}
+            Component::Normal(part) => relative.push(part),
+        }
+    }
+    if relative.as_os_str().is_empty() {
+        return Err(ConfineError::Empty);
+    }
+    let canonical_root = std::fs::canonicalize(root).map_err(|_| ConfineError::Unresolvable)?;
+    let resolved = canonicalize_existing_prefix(&canonical_root.join(&relative))
+        .ok_or(ConfineError::Unresolvable)?;
+    if !resolved.starts_with(&canonical_root) {
+        return Err(ConfineError::Outside);
+    }
+    Ok(Confined { relative, resolved })
+}
+
+/// Canonicalizes the deepest existing ancestor and re-appends the missing
+/// tail. Returns `None` when a component exists but cannot be resolved.
+///
+/// This resolves the path at the time of the call. It does not prevent
+/// concurrent directory replacement before a later filesystem operation.
+#[must_use]
+pub fn canonicalize_existing_prefix(path: &Path) -> Option<PathBuf> {
+    let mut tail: Vec<&std::ffi::OsStr> = Vec::new();
+    let mut current = path;
+    loop {
+        match std::fs::canonicalize(current) {
+            Ok(mut resolved) => {
+                resolved.extend(tail.iter().rev());
+                return Some(resolved);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if std::fs::symlink_metadata(current).is_ok() {
+                    return None;
+                }
+                tail.push(current.file_name()?);
+                current = current.parent()?;
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
+/// Resolves a script-supplied path inside the session root on a blocking
+/// thread.
+async fn confine_path(
+    root: PathBuf,
+    path: &str,
+    service: Service,
+) -> Result<Confined, ServiceError> {
+    let raw = PathBuf::from(path);
+    let outcome = tokio::task::spawn_blocking(move || confine(&root, &raw))
+        .await
+        .map_err(|error| ServiceError::failed(Some(service), error.to_string()))?;
+    outcome.map_err(|error| refusal(service, path, error))
+}
+
+/// Proves on a blocking thread that a staged path still resolves to the same
+/// location inside the session root.
+async fn recheck_path(
+    root: PathBuf,
+    confined: Confined,
+    path: &str,
+    service: Service,
+) -> Result<Confined, ServiceError> {
+    let (confined, outcome) = tokio::task::spawn_blocking(move || {
+        let outcome = confined.recheck(&root);
+        (confined, outcome)
+    })
+    .await
+    .map_err(|error| ServiceError::failed(Some(service), error.to_string()))?;
+    outcome
+        .map(|()| confined)
+        .map_err(|error| refusal(service, path, error))
+}
+
+fn refusal(service: Service, path: &str, error: ConfineError) -> ServiceError {
+    match error {
+        ConfineError::Unresolvable => {
+            ServiceError::failed(Some(service), format!("{service} \"{path}\": {error}"))
+        }
+        _ => ServiceError::Denied(DenyReason::out_of_scope(format!("path \"{path}\""))),
+    }
+}
+
+fn fs_failure(service: Service, path: &str, error: &std::io::Error) -> ServiceError {
+    ServiceError::failed(
+        Some(service),
+        format!("{service} \"{path}\" failed: {error}"),
+    )
+}
+
 /// Host data-plane for one live session.
 pub(crate) struct Backend {
     session: SessionId,
@@ -176,11 +397,20 @@ impl Backend {
         } = deps;
         let canonical_root = std::fs::canonicalize(workspace.as_path())
             .unwrap_or_else(|_| workspace.as_path().to_path_buf());
+        // The snapshot reaches every spawned child underneath the request
+        // overrides, so host-borne git redirectors (`GIT_DIR`,
+        // `GIT_CONFIG_*`, …) would silently move git outside the grant roots
+        // with no argv evidence. Denying on ambient operator configuration at
+        // each spawn gate would turn environments into per-call failures, so
+        // the redirect set is scrubbed once here instead; children fall back
+        // to normal cwd-anchored discovery. Request overrides are still
+        // vetted per spawn by the grant gates.
         let env_snapshot = host
             .shared
             .env
             .vars
             .iter()
+            .filter(|(key, _)| !is_git_redirect_var(key))
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect();
         let scheme_store = Arc::new(dal_store::Store::new(
@@ -323,7 +553,7 @@ impl Backend {
         let mut current = self.session;
         for _ in 0..=sessions.len() {
             let entry = sessions.get(&current)?;
-            if entry.shared.attached() {
+            if entry.shared.attached_approval() {
                 return Some((Arc::clone(&entry.broker), Arc::clone(&entry.shared)));
             }
             current = entry.parent?;
@@ -336,23 +566,6 @@ impl Backend {
         &self.cancel
     }
 
-    /// Joins a workspace-relative path, refusing escapes from the root.
-    fn contained(&self, path: &str) -> Option<PathBuf> {
-        let joined = self.canonical_root.join(path);
-        let resolved = if joined.exists() {
-            std::fs::canonicalize(&joined).unwrap_or(joined)
-        } else if let Some(parent) = joined.parent() {
-            let canonical_parent =
-                std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
-            canonical_parent.join(joined.file_name()?)
-        } else {
-            joined
-        };
-        resolved
-            .starts_with(&self.canonical_root)
-            .then_some(resolved)
-    }
-
     fn host(&self) -> crate::host::Host {
         crate::host::Host {
             state: Arc::clone(&self.host),
@@ -360,27 +573,70 @@ impl Backend {
     }
 }
 
+/// Reports whether an environment variable can redirect git outside the grant
+/// roots without argv evidence.
+///
+/// This mirrors the request-override vetting in `dispatch::git_env_in_roots`:
+/// path-bearing selectors, the ref namespace, git's alternate config files,
+/// git's internal `-c` relay channel, and the env-borne `-c` scheme. Anything
+/// else (identity, protocol policy, tracing, …) passes through untouched.
+fn is_git_redirect_var(key: &std::ffi::OsString) -> bool {
+    let Some(key) = key.to_str() else {
+        return false;
+    };
+    // Environment names resolve case-insensitively on Windows, so lowercase
+    // spellings reach git under the canonical names there: match ASCII
+    // case-insensitively everywhere.
+    key.eq_ignore_ascii_case("GIT_DIR")
+        || key.eq_ignore_ascii_case("GIT_WORK_TREE")
+        || key.eq_ignore_ascii_case("GIT_NAMESPACE")
+        || key.eq_ignore_ascii_case("GIT_COMMON_DIR")
+        || key.eq_ignore_ascii_case("GIT_EXEC_PATH")
+        || key.eq_ignore_ascii_case("GIT_OBJECT_DIRECTORY")
+        || key.eq_ignore_ascii_case("GIT_INDEX_FILE")
+        || key.eq_ignore_ascii_case("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        || key.eq_ignore_ascii_case("GIT_CONFIG_GLOBAL")
+        || key.eq_ignore_ascii_case("GIT_CONFIG_SYSTEM")
+        || key.eq_ignore_ascii_case("GIT_CONFIG_COUNT")
+        || key.eq_ignore_ascii_case("GIT_CONFIG_PARAMETERS")
+        || key
+            .get(.."GIT_CONFIG_KEY_".len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("GIT_CONFIG_KEY_"))
+        || key
+            .get(.."GIT_CONFIG_VALUE_".len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("GIT_CONFIG_VALUE_"))
+}
+
 impl SessionBackend for Backend {
     fn fs_read(&self, path: &str) -> ServiceFuture<'_, Option<Vec<u8>>> {
-        let resolved = self.contained(path);
+        let root = self.canonical_root.clone();
+        let path = path.to_owned();
         Box::pin(async move {
-            let Some(resolved) = resolved else {
-                return Ok(None);
-            };
-            Ok(tokio::fs::read(resolved).await.ok())
+            let confined = confine_path(root.clone(), &path, Service::FsRead).await?;
+            let confined = recheck_path(root, confined, &path, Service::FsRead).await?;
+            match tokio::fs::read(confined.resolved()).await {
+                Ok(bytes) => Ok(Some(bytes)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(fs_failure(Service::FsRead, &path, &error)),
+            }
         })
     }
 
     fn fs_write(&self, path: &str, bytes: Vec<u8>) -> ServiceFuture<'_, ()> {
-        let resolved = self.contained(path);
+        let root = self.canonical_root.clone();
+        let path = path.to_owned();
         Box::pin(async move {
-            if let Some(resolved) = resolved {
-                if let Some(parent) = resolved.parent() {
-                    let _ = tokio::fs::create_dir_all(parent).await;
-                }
-                let _ = tokio::fs::write(resolved, bytes).await;
+            let service = Service::FsWrite;
+            let confined = confine_path(root.clone(), &path, service).await?;
+            if let Some(parent) = confined.resolved().parent() {
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .map_err(|error| fs_failure(service, &path, &error))?;
             }
-            Ok(())
+            let confined = recheck_path(root, confined, &path, service).await?;
+            tokio::fs::write(confined.resolved(), bytes)
+                .await
+                .map_err(|error| fs_failure(service, &path, &error))
         })
     }
 
@@ -502,7 +758,7 @@ impl SessionBackend for Backend {
     ) -> ServiceFuture<'_, ()> {
         let data_root = self.host.shared.data_root.clone();
         let session = self.session.to_string();
-        let task = format!("{job:?}");
+        let task = job.to_string();
         Box::pin(async move {
             tokio::task::spawn_blocking(move || {
                 write_isolation_artifact(&data_root, &session, &task, file.file_name(), &bytes)
@@ -544,6 +800,20 @@ impl SessionBackend for Backend {
             rx.await.map_err(|_| record_session_closed())?
         })
     }
+    fn request_opened(&self, request: Request) -> ServiceFuture<'_, ()> {
+        let handle = self.handle.clone();
+        Box::pin(async move {
+            handle
+                .work(crate::session::actor::TurnWork::Asked { request })
+                .await
+                .map_err(|error| ServiceError::failed(None, error.to_string()))
+        })
+    }
+
+    fn request_resolved(&self, resolved: crate::broker::Resolved) {
+        self.handle
+            .work_detached(crate::session::actor::TurnWork::Answered { resolved });
+    }
 
     fn ext_records(&self) -> Arc<[ExtRecord]> {
         self.shared.ext_records()
@@ -570,32 +840,45 @@ impl SessionBackend for Backend {
         })
     }
 
-    fn sidecar_read(&self, name: &Name) -> ServiceFuture<'_, Option<Vec<u8>>> {
+    fn sidecar_read(&self, ext: &Name, name: &SidecarName) -> ServiceFuture<'_, Option<Vec<u8>>> {
+        let ext = ext.clone();
         let name = name.clone();
         Box::pin(async move {
             let (tx, rx) = oneshot::channel();
-            let _ = self
-                .handle
-                .sidecar(crate::session::SidecarOp::Read { name, reply: tx })
-                .await;
-            Ok(rx.await.unwrap_or(None))
+            self.handle
+                .sidecar(crate::session::SidecarOp::Read {
+                    ext,
+                    name,
+                    reply: tx,
+                })
+                .await
+                .map_err(|error| ServiceError::failed(None, error.to_string()))?;
+            let result = rx.await.map_err(|_| record_session_closed())?;
+            result.map_err(|error| ServiceError::failed(Some(Service::Sidecar), error))
         })
     }
 
-    fn sidecar_write(&self, name: &Name, bytes: Vec<u8>) -> ServiceFuture<'_, ()> {
+    fn sidecar_write(
+        &self,
+        ext: &Name,
+        name: &SidecarName,
+        bytes: Vec<u8>,
+    ) -> ServiceFuture<'_, ()> {
+        let ext = ext.clone();
         let name = name.clone();
         Box::pin(async move {
             let (tx, rx) = oneshot::channel();
-            let _ = self
-                .handle
+            self.handle
                 .sidecar(crate::session::SidecarOp::Write {
+                    ext,
                     name,
                     bytes,
                     reply: tx,
                 })
-                .await;
-            let _ = rx.await;
-            Ok(())
+                .await
+                .map_err(|error| ServiceError::failed(None, error.to_string()))?;
+            let result = rx.await.map_err(|_| record_session_closed())?;
+            result.map_err(|error| ServiceError::failed(Some(Service::Sidecar), error))
         })
     }
 
@@ -665,6 +948,10 @@ impl SessionBackend for Backend {
         self.shared.publish(update);
     }
 
+    fn answerer_attached(&self) -> bool {
+        self.shared.attached_ask()
+    }
+
     fn notify(&self, notice: Notice) {
         self.shared.publish(dal_core::UpdateKind::Notice(notice));
     }
@@ -680,33 +967,69 @@ impl SessionBackend for Backend {
     }
 }
 
+fn cancel_child(id: SessionId, result: Result<(), HostError>) -> Result<AgentsReply, ServiceError> {
+    result
+        .map(|()| AgentsReply::Cancelled { id })
+        .map_err(|error| {
+            ServiceError::failed(
+                Some(Service::Agents),
+                format!("could not cancel child session {id}: {error}"),
+            )
+        })
+}
+
+fn refused(reason: AgentRefusal) -> AgentsReply {
+    AgentsReply::Refused { reason }
+}
+
+fn child_start_error(error: impl std::fmt::Display) -> ServiceError {
+    ServiceError::failed(
+        Some(Service::Agents),
+        format!("could not start child session: {error}"),
+    )
+}
+
 impl Backend {
+    /// Provider-wire name of the trusted child completion tool. It follows
+    /// the `<plugin>__<local>` wire convention, and the `orchestration`
+    /// extension name is already claimed by the Bundled battery, so a User
+    /// plugin cannot mint the same wire name without an extension-name
+    /// conflict; plain `report` no longer matches.
+    const CHILD_REPORT_TOOL_NAME: &str = "orchestration__report";
+
     async fn agents_op(&self, op: AgentsOp) -> Result<AgentsReply, ServiceError> {
-        Ok(match op {
-            AgentsOp::Start(start) => return self.agent_start(start).await,
+        match op {
+            AgentsOp::Start(start) => self.agent_start(start).await,
+            AgentsOp::Prompt {
+                id,
+                text,
+                interrupt,
+                max_steps,
+            } => Ok(self.agent_prompt(id, text, interrupt, max_steps).await),
             AgentsOp::Await { id, timeout } => {
                 if self.is_child(id) {
-                    self.agent_await(id, timeout).await
+                    Ok(self.agent_await(id, timeout).await)
                 } else {
-                    AgentsReply::Cancelled { id }
+                    Ok(AgentsReply::Cancelled { id })
                 }
             }
             AgentsOp::Cancel { id } => {
                 if self.is_child(id) {
-                    let _ = self.host().close(id).await;
+                    cancel_child(id, self.host().close(id).await)
+                } else {
+                    Ok(AgentsReply::Cancelled { id })
                 }
-                AgentsReply::Cancelled { id }
             }
-            AgentsOp::List => AgentsReply::Listed(self.agent_list()),
+            AgentsOp::List => Ok(AgentsReply::Listed(self.agent_list())),
             AgentsOp::Send {
                 to,
                 text,
                 mode,
                 reply_to,
-            } => self.agent_send(to, text, mode, reply_to).await,
-            AgentsOp::Recv { after, timeout } => self.agent_recv(after, timeout).await,
-            _ => AgentsReply::Cancelled { id: self.session },
-        })
+            } => Ok(self.agent_send(to, text, mode, reply_to).await),
+            AgentsOp::Recv { after, timeout } => Ok(self.agent_recv(after, timeout).await),
+            _ => Ok(AgentsReply::Cancelled { id: self.session }),
+        }
     }
 
     /// Returns whether `id` is a live child of this session: an agents
@@ -721,58 +1044,56 @@ impl Backend {
             .is_some_and(|entry| entry.parent == Some(self.session))
     }
 
-    async fn agent_start(&self, start: dal_core::AgentStart) -> Result<AgentsReply, ServiceError> {
-        let workspace = start
-            .workspace
-            .clone()
-            .unwrap_or_else(|| self.workspace.clone());
-        // A child workspace must stay inside the caller's root: an
-        // absolute path outside it would widen the `agents` grant into
-        // tool access across the whole filesystem. The lexical spelling
-        // lies — `/root/../etc` starts with `/root` — so containment is
-        // checked on canonical paths; a workspace that cannot be resolved
-        // fails closed. The checked canonical path is the one the child
-        // receives: re-resolving the lexical spelling later would race a
-        // swapped symlink into an outside root.
-        let Some(child_root) = std::fs::canonicalize(workspace.as_path()).ok() else {
-            return Err(ServiceError::failed(
-                Some(Service::Agents),
-                format!(
-                    "the child workspace {} does not exist or cannot be resolved",
-                    workspace.as_path().display()
-                ),
-            ));
-        };
-        // The containment root is the one `Backend::new` captured: a
-        // replaceable symlink at the session workspace must not shift the
-        // boundary a child is compared against mid-session.
-        let parent_root = self.canonical_root.clone();
-        if !child_root.starts_with(&parent_root) {
-            return Err(ServiceError::Denied(dal_core::DenyReason::out_of_scope(
-                format!(
-                    "{} is outside the session workspace {}",
-                    child_root.display(),
-                    parent_root.display()
-                ),
-            )));
+    /// The depth limit when this session may not start a child: a child
+    /// of this session would sit one level deeper than `agents.max_depth`.
+    fn depth_refusal(&self) -> Option<u32> {
+        let max = self.host.shared.config.agents().max_depth.get();
+        let depth = self
+            .host
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&self.session)
+            .map_or(0, |entry| entry.depth);
+        (depth + 1 > max).then_some(max)
+    }
+
+    /// Resolves the child workspace and keeps it inside the caller's root:
+    /// an absolute path outside it would widen the `agents` grant into
+    /// tool access across the whole filesystem. The lexical spelling
+    /// lies — `/root/../etc` starts with `/root` — so containment is
+    /// checked on canonical paths; a workspace that cannot be resolved
+    /// fails closed. The checked canonical path is the one the child
+    /// receives: re-resolving the lexical spelling later would race a
+    /// swapped symlink into an outside root. The containment root is the
+    /// one `Backend::new` captured, so a replaceable symlink at the
+    /// session workspace cannot shift the boundary mid-session.
+    fn child_workspace(&self, requested: Option<&Workspace>) -> Result<Workspace, AgentRefusal> {
+        let workspace = requested.unwrap_or(&self.workspace);
+        let child_root = std::fs::canonicalize(workspace.as_path())
+            .map_err(|_| AgentRefusal::WorkspaceUnresolved)?;
+        if !child_root.starts_with(&self.canonical_root) {
+            return Err(AgentRefusal::WorkspaceOutsideRoot);
         }
-        let workspace = Workspace::new(child_root).map_err(|error| {
-            ServiceError::failed(
-                Some(Service::Agents),
-                format!("the child workspace is not usable: {error}"),
-            )
-        })?;
+        Workspace::new(child_root).map_err(|_| AgentRefusal::WorkspaceUnresolved)
+    }
+
+    async fn agent_start(&self, start: dal_core::AgentStart) -> Result<AgentsReply, ServiceError> {
+        if let Some(max_depth) = self.depth_refusal() {
+            return Ok(refused(AgentRefusal::MaxDepth { max_depth }));
+        }
+        let workspace = match self.child_workspace(start.workspace.as_ref()) {
+            Ok(workspace) => workspace,
+            Err(reason) => return Ok(refused(reason)),
+        };
         // An explicit child model the catalog cannot route refuses the
         // start; silently inheriting the caller's model would run a
         // different program than the one requested.
         let model = self.resolve_child_model(start.model.as_deref()).await;
-        if let Some(reference) = start.model.as_deref()
-            && model.is_none()
-        {
-            return Err(ServiceError::failed(
-                Some(Service::Agents),
-                format!("the child model \"{reference}\" is not in the catalog or an alias"),
-            ));
+        if let (Some(requested), None) = (start.model.as_deref(), &model) {
+            return Ok(refused(AgentRefusal::ModelUnroutable {
+                model: requested.into(),
+            }));
         }
         let host = self.host();
         let child = host
@@ -788,13 +1109,54 @@ impl Backend {
                 dal_core::ClientId::new("core"),
             )
             .await
-            .map_err(|error| {
-                ServiceError::failed(
-                    Some(Service::Agents),
-                    format!("the child session could not start: {error}"),
-                )
-            })?;
+            .map_err(child_start_error)?;
         let child_id = child.inner.session;
+        // The child is restricted before its first turn: a start that sets
+        // `tools` runs with exactly those tools, on every turn and across
+        // reloads, and an absent list leaves the child unrestricted.
+        // The restriction and the inherited approval mode are journaled
+        // through the child's actor first: a start whose policy cannot be
+        // recorded leaves no half-restricted child behind.
+        let Ok(body) = child_policy_body(start.tools.as_deref(), self.shared.approval()) else {
+            let _ = self.host().close(child_id).await;
+            return Err(child_start_error("could not encode the child start policy"));
+        };
+        let Ok(ext) = Name::parse(crate::host::CHILD_POLICY_EXT) else {
+            let _ = self.host().close(child_id).await;
+            return Err(child_start_error("could not encode the child start policy"));
+        };
+        let (reply, receipt) = oneshot::channel();
+        let queued = child
+            .inner
+            .handle
+            .ext_record(ExtRecordRequest {
+                ext,
+                kind: crate::host::CHILD_POLICY_KIND.into(),
+                body,
+                reply,
+            })
+            .await
+            .is_ok();
+        let persisted = queued && receipt.await.is_ok_and(|result| result.is_ok());
+        if !persisted {
+            let _ = self.host().close(child_id).await;
+            return Err(child_start_error(
+                "could not journal the child start policy",
+            ));
+        }
+        // Keep the live snapshot in step with the durable policy before the
+        // first prompt enters the child.
+        if let Some(names) = &start.tools {
+            child.inner.shared.restrict_tools(names);
+        }
+        // The child starts under the approval mode its parent runs under now,
+        // not the configured default. When the mode cannot be set the child
+        // does not start.
+        let approval = self.shared.approval();
+        if let Err(error) = copy_child_approval(&child, approval).await {
+            let _ = self.host().close(child_id).await;
+            return Err(child_start_error(error));
+        }
         let mut prompt = start.prompt.to_string();
         if let Some(system) = start.system.as_ref().or(start.role.as_ref()) {
             prompt = format!("System: {system}\n\n{prompt}");
@@ -808,13 +1170,8 @@ impl Backend {
                 .await
         {
             let _ = host.close(child_id).await;
-            return Err(ServiceError::failed(
-                Some(Service::Agents),
-                format!("the child session could not take its model; it was closed again: {error}"),
-            ));
+            return Err(child_start_error(error));
         }
-        // A refused start must not collapse into `Cancelled`: the typed
-        // error is the only way a caller learns which precondition failed.
         if let Err(error) = child
             .submit(dal_core::Command::Prompt {
                 expect: dal_core::Expect::Idle,
@@ -825,12 +1182,93 @@ impl Backend {
             .await
         {
             let _ = host.close(child_id).await;
-            return Err(ServiceError::failed(
-                Some(Service::Agents),
-                format!("the child session could not take its prompt: {error}"),
-            ));
+            return Err(child_start_error(error));
         }
         Ok(AgentsReply::Started { id: child_id })
+    }
+
+    /// Starts one prompt turn on an idle child of this session and
+    /// optionally interrupts it after `interrupt`. A child takes one
+    /// prompt this way: the slot is claimed before the turn starts and
+    /// released only when the child refuses it.
+    async fn agent_prompt(
+        &self,
+        id: SessionId,
+        text: Box<str>,
+        interrupt: Option<std::time::Duration>,
+        max_steps: Option<std::num::NonZeroU32>,
+    ) -> AgentsReply {
+        let Some((handle, child_tasks, child_shared)) = self.claim_prompt_slot(id) else {
+            return AgentsReply::Cancelled { id };
+        };
+        // The bound belongs to the one turn this prompt starts: the turn
+        // takes it when it begins, and a refused prompt clears it.
+        child_shared.set_next_turn_step_cap(max_steps);
+        let reply = handle
+            .submit(
+                Command::Prompt {
+                    expect: Expect::Idle,
+                    content: vec![Part::Text { text }],
+                },
+                dal_core::ClientId::new("core"),
+            )
+            .await;
+        let Ok(Reply::Accepted { turn, .. }) = reply else {
+            child_shared.set_next_turn_step_cap(None);
+            self.release_prompt_slot(id);
+            return AgentsReply::Cancelled { id };
+        };
+        if let Some(delay) = interrupt {
+            spawn_prompt_interrupt(&child_tasks, handle, turn, delay);
+        }
+        AgentsReply::Prompted { id }
+    }
+
+    /// Claims the child's single prompt slot: only the caller's own live
+    /// child, and only the first time.
+    fn claim_prompt_slot(
+        &self,
+        id: SessionId,
+    ) -> Option<(SessionHandle, SessionTasks, Arc<Shared>)> {
+        let sessions = self
+            .host
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = sessions
+            .get(&id)
+            .filter(|entry| entry.parent == Some(self.session))?;
+        entry
+            .prompted
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .is_ok()
+            .then(|| {
+                (
+                    entry.handle.clone(),
+                    entry.tasks.clone(),
+                    Arc::clone(&entry.shared),
+                )
+            })
+    }
+
+    /// Gives back the prompt slot after the child refused the prompt.
+    fn release_prompt_slot(&self, id: SessionId) {
+        if let Some(entry) = self
+            .host
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&id)
+        {
+            entry
+                .prompted
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 
     /// Resolves a child model reference; unresolvable keeps the default.
@@ -922,18 +1360,42 @@ impl Backend {
 
     /// Builds the completion report from the child's last assistant entry.
     /// `stop` is the child's durable terminal stop, read off its projection;
-    /// `view.turn` alone only knows the turn ended, not why.
+    /// `view.turn` alone only knows the turn ended, not why. An explicit
+    /// `orchestration__report` tool call on any assistant entry wins over the
+    /// last text.
     fn child_report(id: SessionId, view: &dal_core::View, stop: dal_core::Stop) -> AgentsReply {
+        #[derive(serde::Deserialize)]
+        struct ReportInput {
+            report: Box<str>,
+        }
+
         let mut text = String::new();
+        let mut reported_text = None;
         let mut entry = view.entries.items.last().map(|item| item.id);
+        let mut latest_assistant = true;
         for item in view.entries.items.iter().rev() {
-            if let dal_core::EntryKind::Assistant { content, .. } = &item.kind {
+            let dal_core::EntryKind::Assistant { content, .. } = &item.kind else {
+                continue;
+            };
+            if latest_assistant {
                 for block in content.iter().rev() {
                     if let dal_core::Block::Text { text: chunk } = block {
                         text.insert_str(0, chunk);
                     }
                 }
                 entry = Some(item.id);
+                latest_assistant = false;
+            }
+            reported_text = content.iter().rev().find_map(|block| {
+                let dal_core::Block::ToolCall { name, input, .. } = block else {
+                    return None;
+                };
+                (name.as_ref() == Self::CHILD_REPORT_TOOL_NAME)
+                    .then_some(input)
+                    .and_then(|input| sonic_rs::from_str::<ReportInput>(input.as_str()).ok())
+                    .map(|fields| fields.report)
+            });
+            if reported_text.is_some() {
                 break;
             }
         }
@@ -942,7 +1404,7 @@ impl Backend {
         AgentsReply::Await {
             report: AgentReport {
                 stop,
-                text: text.into(),
+                text: reported_text.unwrap_or_else(|| text.into_boxed_str()),
                 session: id,
                 entry,
             },
@@ -1092,5 +1554,479 @@ impl Backend {
             host: Arc::clone(&self.host),
             script: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroU64;
+
+    use super::*;
+    use crate::host::{Env, Host, Product, SessionRef};
+    use crate::session::control::ControlCell;
+    use crate::session::{ActorRequest, ResolutionInbox};
+    use dal_core::{ApprovalMode, CallId, ClientId, Config, ConfigProduct, Workspace};
+
+    #[tokio::test]
+    async fn prompt_interrupt_targets_ended_turn_without_cancelling_successor() {
+        let prompted = dal_core::TurnId::new(NonZeroU64::MIN);
+        let successor = dal_core::TurnId::new(NonZeroU64::new(2).expect("nonzero turn"));
+        let control = Arc::new(std::sync::Mutex::new(ControlCell::new()));
+        let successor_token = {
+            let mut control = control
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            control.begin_turn(prompted);
+            control.end_turn(prompted);
+            control.begin_turn(successor)
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let handle = SessionHandle::new(
+            SessionId::new_v7(),
+            tx,
+            Arc::clone(&control),
+            Arc::new(ResolutionInbox::new()),
+        );
+        let tasks = SessionTasks::new();
+        spawn_prompt_interrupt(&tasks, handle, prompted, std::time::Duration::ZERO);
+
+        let request = rx.recv().await.expect("timer submits a cancellation");
+        let ActorRequest::Submit { command, reply, .. } = request else {
+            panic!("timer submitted an unrelated actor request");
+        };
+        assert_eq!(
+            command,
+            Command::Cancel {
+                scope: dal_core::CancelScope::Turn(prompted),
+            }
+        );
+        reply
+            .send(Ok(Reply::Done(dal_core::Output::Nothing)))
+            .expect("timer is waiting for the command reply");
+        assert!(!successor_token.is_cancelled());
+        tasks.stop().await;
+    }
+
+    #[test]
+    fn cancel_child_reports_non_lifecycle_close_failures() {
+        let id = SessionId::new_v7();
+        let error = HostError::Config {
+            message: "close refused".into(),
+        };
+        let result = cancel_child(id, Err(error)).expect_err("close failure must propagate");
+        assert_eq!(
+            result.to_string(),
+            format!("could not cancel child session {id}: close refused")
+        );
+    }
+
+    #[tokio::test]
+    async fn closed_child_refuses_approval_copy() {
+        let temp = tempfile::tempdir().expect("temporary data root");
+        let data = temp.path().join("data");
+        let workspace_path = temp.path().join("workspace");
+        std::fs::create_dir_all(&data).expect("data root");
+        std::fs::create_dir_all(&workspace_path).expect("workspace");
+        let config = Config::load(ConfigProduct::Dalgon, &data, "", None).expect("config");
+        let workspace = Workspace::new(workspace_path.clone()).expect("workspace value");
+        let env = Env::data_root(workspace_path);
+        let host = Host::start(
+            Product {
+                name: "dal",
+                data_root: data,
+                defaults: "",
+                extensions: Vec::new(),
+                bundled: Vec::new(),
+            },
+            config,
+            env,
+        )
+        .await
+        .expect("host");
+        let root = host
+            .open(
+                SessionRef::New {
+                    workspace: workspace.clone(),
+                    name: None,
+                },
+                ClientId::new("backend-test"),
+            )
+            .await
+            .expect("root");
+        let child = host
+            .open(
+                SessionRef::Child {
+                    parent: root.inner.session,
+                    call: CallId::new("approval-copy"),
+                    workspace,
+                    name: None,
+                },
+                ClientId::new("backend-test"),
+            )
+            .await
+            .expect("child");
+        host.close(child.inner.session).await.expect("close child");
+        assert!(
+            copy_child_approval(&child, ApprovalMode::All)
+                .await
+                .is_err(),
+            "a closed child must refuse the approval copy"
+        );
+        host.close(root.inner.session).await.expect("close root");
+    }
+
+    /// A real host with one root session and one child of it.
+    async fn host_with_child() -> (Host, SessionId, SessionId, tempfile::TempDir) {
+        let temp = tempfile::tempdir().expect("temporary data root");
+        let data = temp.path().join("data");
+        let workspace_path = temp.path().join("workspace");
+        std::fs::create_dir_all(&data).expect("data root");
+        std::fs::create_dir_all(&workspace_path).expect("workspace");
+        let config = Config::load(ConfigProduct::Dalgon, &data, "", None).expect("config");
+        let workspace = Workspace::new(workspace_path.clone()).expect("workspace value");
+        let host = Host::start(
+            Product {
+                name: "dal",
+                data_root: data,
+                defaults: "",
+                extensions: Vec::new(),
+                bundled: Vec::new(),
+            },
+            config,
+            Env::data_root(workspace_path),
+        )
+        .await
+        .expect("host");
+        let root = host
+            .open(
+                SessionRef::New {
+                    workspace: workspace.clone(),
+                    name: None,
+                },
+                ClientId::new("backend-test"),
+            )
+            .await
+            .expect("root");
+        let root_id = root.inner.session;
+        let child = host
+            .open(
+                SessionRef::Child {
+                    parent: root_id,
+                    call: CallId::new("refusal"),
+                    workspace,
+                    name: None,
+                },
+                ClientId::new("backend-test"),
+            )
+            .await
+            .expect("child");
+        (host, root_id, child.inner.session, temp)
+    }
+
+    fn backend_of(host: &Host, id: SessionId) -> Arc<Backend> {
+        let sessions = host
+            .state
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Arc::clone(&sessions.get(&id).expect("live session").backend)
+    }
+
+    #[tokio::test]
+    async fn fs_services_confine_paths_and_report_failures() {
+        let (host, root, child, temp) = host_with_child().await;
+        let backend = backend_of(&host, root);
+        let workspace = temp.path().join("workspace");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir(&outside).expect("outside directory");
+
+        for path in ["new/../../outside/file", "../outside/file"] {
+            let result = backend.fs_write(path, b"escape".to_vec()).await;
+            assert!(result.is_err(), "{path} must be refused");
+        }
+        let absolute = outside.join("absolute.txt");
+        let result = backend
+            .fs_write(absolute.to_string_lossy().as_ref(), b"escape".to_vec())
+            .await;
+        assert!(result.is_err(), "absolute path must be refused");
+        assert!(!outside.join("file").exists());
+        assert!(!outside.join("absolute.txt").exists());
+
+        backend
+            .fs_write("nested/path/file.txt", b"inside".to_vec())
+            .await
+            .expect("nested write");
+        assert_eq!(
+            backend.fs_read("nested/path/file.txt").await.expect("read"),
+            Some(b"inside".to_vec())
+        );
+
+        std::fs::create_dir(workspace.join("directory")).expect("directory");
+        assert!(backend.fs_read("directory").await.is_err());
+        assert_eq!(
+            backend.fs_read("missing").await.expect("missing read"),
+            None
+        );
+
+        host.close(child).await.expect("close child");
+        host.close(root).await.expect("close session");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fs_write_refuses_a_symlink_swap_before_directory_creation() {
+        let (host, root, child, temp) = host_with_child().await;
+        let backend = backend_of(&host, root);
+        let workspace = temp.path().join("workspace");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir(&outside).expect("outside directory");
+        std::os::unix::fs::symlink(&outside, workspace.join("link")).expect("outside link");
+        assert!(
+            backend
+                .fs_write("link/file.txt", b"escape".to_vec())
+                .await
+                .is_err()
+        );
+        assert!(!outside.join("file.txt").exists());
+
+        let future = backend.fs_write("staged/file.txt", b"escape".to_vec());
+        std::os::unix::fs::symlink(&outside, workspace.join("staged")).expect("swap symlink");
+        assert!(future.await.is_err());
+        assert!(!outside.join("staged").exists());
+
+        host.close(child).await.expect("close child");
+        host.close(root).await.expect("close session");
+    }
+
+    fn start_in(workspace: Option<Workspace>, model: Option<&str>) -> dal_core::AgentStart {
+        dal_core::AgentStart {
+            call: CallId::new("refused-start"),
+            name: "member".into(),
+            prompt: "work".into(),
+            model: model.map(Into::into),
+            role: None,
+            system: None,
+            tools: None,
+            workspace,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_start_past_max_depth_reaches_the_parent_with_its_reason() {
+        let (host, _root, child, _temp) = host_with_child().await;
+        let reply = backend_of(&host, child)
+            .agents_op(AgentsOp::Start(start_in(None, None)))
+            .await
+            .expect("a refusal is a reply");
+        let AgentsReply::Refused { reason } = reply else {
+            panic!("expected a refusal, got {reply:?}");
+        };
+        assert_eq!(reason, AgentRefusal::MaxDepth { max_depth: 1 });
+        assert_eq!(
+            reason.to_string(),
+            "child sessions cannot start children here: agents.max_depth = 1."
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_refusals_name_the_reason() {
+        let (host, root, _child, temp) = host_with_child().await;
+        let backend = backend_of(&host, root);
+        let outside = Workspace::new(temp.path().to_path_buf()).expect("outside workspace");
+        let missing =
+            Workspace::new(temp.path().join("workspace").join("absent")).expect("absent workspace");
+        for (workspace, expected) in [
+            (outside, AgentRefusal::WorkspaceOutsideRoot),
+            (missing, AgentRefusal::WorkspaceUnresolved),
+        ] {
+            let reply = backend
+                .agents_op(AgentsOp::Start(start_in(Some(workspace), None)))
+                .await
+                .expect("a refusal is a reply");
+            assert_eq!(reply, AgentsReply::Refused { reason: expected });
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unroutable_model_refuses_the_start_with_its_name() {
+        let (host, root, _child, _temp) = host_with_child().await;
+        let reply = backend_of(&host, root)
+            .agents_op(AgentsOp::Start(start_in(None, Some("acme/none"))))
+            .await
+            .expect("a refusal is a reply");
+        assert_eq!(
+            reply,
+            AgentsReply::Refused {
+                reason: AgentRefusal::ModelUnroutable {
+                    model: "acme/none".into()
+                }
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_child_still_reports_cancelled() {
+        let (host, root, child, _temp) = host_with_child().await;
+        let reply = backend_of(&host, root)
+            .agents_op(AgentsOp::Cancel { id: child })
+            .await
+            .expect("cancel is a reply");
+        assert_eq!(reply, AgentsReply::Cancelled { id: child });
+    }
+
+    #[test]
+    fn snapshot_scrub_covers_the_git_redirect_set() {
+        for name in [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_NAMESPACE",
+            "GIT_COMMON_DIR",
+            "GIT_EXEC_PATH",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_INDEX_FILE",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_CONFIG_GLOBAL",
+            "GIT_CONFIG_SYSTEM",
+            "GIT_CONFIG_COUNT",
+            "GIT_CONFIG_PARAMETERS",
+            "GIT_CONFIG_KEY_0",
+            "GIT_CONFIG_VALUE_12",
+            // Windows resolves environment names case-insensitively.
+            "git_dir",
+            "Git_Namespace",
+            "git_config_count",
+            "git_config_key_0",
+        ] {
+            assert!(
+                is_git_redirect_var(&std::ffi::OsString::from(name)),
+                "{name} must be scrubbed from the snapshot"
+            );
+        }
+        for name in [
+            "PATH",
+            "HOME",
+            "GIT_CONFIG",
+            "GIT_CONFIG_KEY",
+            "GIT_AUTHOR_NAME",
+            "GIT_PAGER",
+        ] {
+            assert!(
+                !is_git_redirect_var(&std::ffi::OsString::from(name)),
+                "{name} must survive the snapshot scrub"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    fn fixture() -> Result<(tempfile::TempDir, PathBuf, PathBuf), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("root");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir(&root)?;
+        std::fs::create_dir(&outside)?;
+        Ok((temp, root, outside))
+    }
+
+    #[test]
+    fn lexical_refusals_precede_any_filesystem_access() {
+        let missing = Path::new("/nonexistent-dal-confine-root");
+        for (raw, expected) in [
+            ("", ConfineError::Empty),
+            ("/etc/passwd", ConfineError::Absolute),
+            ("../x", ConfineError::ParentDir),
+            ("a/../b", ConfineError::ParentDir),
+            ("new/../../outside/file", ConfineError::ParentDir),
+        ] {
+            assert_eq!(confine(missing, Path::new(raw)), Err(expected), "{raw}");
+        }
+    }
+
+    #[test]
+    fn a_missing_tail_resolves_below_the_canonical_root() -> TestResult {
+        let (_temp, root, _outside) = fixture()?;
+        let confined = confine(&root, Path::new("./new/deep/file.txt"))?;
+        assert_eq!(
+            confined.resolved(),
+            std::fs::canonicalize(&root)?.join("new/deep/file.txt")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_file_cannot_be_used_as_a_parent_directory() -> TestResult {
+        let (_temp, root, _outside) = fixture()?;
+        std::fs::write(root.join("file"), b"existing content")?;
+        assert_eq!(
+            confine(&root, Path::new("file/child")),
+            Err(ConfineError::Unresolvable)
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn links_out_of_the_root_are_refused_through_missing_tails() -> TestResult {
+        let (_temp, root, outside) = fixture()?;
+        std::os::unix::fs::symlink(&outside, root.join("link"))?;
+        assert_eq!(
+            confine(&root, Path::new("link/new/file")),
+            Err(ConfineError::Outside)
+        );
+        assert_eq!(
+            confine(&root, Path::new("link")),
+            Err(ConfineError::Outside)
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_link_is_unresolvable_not_trusted() -> TestResult {
+        let (_temp, root, outside) = fixture()?;
+        std::os::unix::fs::symlink(outside.join("absent"), root.join("dangling"))?;
+        assert_eq!(
+            confine(&root, Path::new("dangling")),
+            Err(ConfineError::Unresolvable)
+        );
+        assert_eq!(
+            confine(&root, Path::new("dangling/file")),
+            Err(ConfineError::Unresolvable)
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_inside_the_root_is_followed_and_rechecked() -> TestResult {
+        let (_temp, root, _outside) = fixture()?;
+        std::fs::create_dir(root.join("real"))?;
+        std::os::unix::fs::symlink(root.join("real"), root.join("alias"))?;
+        let confined = confine(&root, Path::new("alias/file"))?;
+        assert_eq!(
+            confined.resolved(),
+            std::fs::canonicalize(&root)?.join("real/file")
+        );
+        confined.recheck(&root)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recheck_catches_a_link_swapped_in_after_resolution() -> TestResult {
+        let (_temp, root, outside) = fixture()?;
+        let confined = confine(&root, Path::new("staged/file"))?;
+        std::os::unix::fs::symlink(&outside, root.join("staged"))?;
+        assert_eq!(confined.recheck(&root), Err(ConfineError::Outside));
+        std::fs::remove_file(root.join("staged"))?;
+        std::fs::create_dir(root.join("elsewhere"))?;
+        std::os::unix::fs::symlink(root.join("elsewhere"), root.join("staged"))?;
+        assert_eq!(confined.recheck(&root), Err(ConfineError::Changed));
+        Ok(())
     }
 }

@@ -282,8 +282,8 @@ fn repeat_text(rule: &Rule, cfg: &RulesConfig) -> String {
     let resolved = resolve_cfg(rule, cfg);
     match resolved.mode {
         RepeatMode::AfterGap => format!("repeat every {} turns", resolved.gap),
-        // The core enum is non-exhaustive; an unknown future mode repeats
-        // like `once`.
+        // `Once` and the non-exhaustive unknown future modes repeat like
+        // `once`.
         _ => "repeat once".to_owned(),
     }
 }

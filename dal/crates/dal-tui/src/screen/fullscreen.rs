@@ -1,59 +1,146 @@
-//! Alternate-screen renderer: header, viewport, bottom stack, search.
+//! Alternate-screen renderer: header, notices, viewport, bottom stack, search.
 
-/// Fullscreen scroll and follow state.
-#[derive(Debug, Default, Clone)]
-pub struct Viewport {
-    /// Whether the viewport follows the live edge.
-    pub follow: bool,
-    /// Detached scroll offset from the live edge.
-    pub offset: usize,
-    /// Search filter row text, when open.
-    pub search: Option<String>,
+use std::cell::Cell;
+
+/// Fullscreen scroll, follow, and search state.
+///
+/// The follow machine is explicit and total: `follow` holds exactly when the
+/// window sticks to the live edge. Scrolling up detaches and freezes the
+/// window at an absolute row, so new content never moves the view; End
+/// re-attaches; a page never passes the oldest row.
+#[derive(Debug, Clone)]
+pub(crate) struct Viewport {
+    follow: bool,
+    /// Absolute top row of the frozen window while detached.
+    anchor: usize,
+    /// Search filter text, while the filter row is open.
+    search: Option<String>,
+    /// Visible window height observed at the last render; one page of scrolling.
+    page: Cell<usize>,
+}
+
+impl Default for Viewport {
+    fn default() -> Self {
+        Self::following()
+    }
 }
 
 impl Viewport {
     /// Creates a following viewport.
     #[must_use]
-    pub fn following() -> Self {
+    pub(crate) fn following() -> Self {
         Self {
             follow: true,
-            offset: 0,
+            anchor: 0,
             search: None,
+            page: Cell::new(0),
         }
     }
 
-    /// Detaches follow on scroll; shows the stopped-follow cue.
-    pub fn scroll_up(&mut self) {
-        self.follow = false;
-        self.offset += 1;
+    /// Whether the window sticks to the live edge.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn follows(&self) -> bool {
+        self.follow
     }
 
-    /// Re-attaches follow at the latest entry.
-    pub fn jump_latest(&mut self) {
+    /// Remembers the visible window height: one page of scrolling.
+    pub(crate) fn observe(&self, height: usize) {
+        self.page.set(height);
+    }
+
+    /// Top row of the visible window for `rows` transcript rows and a window
+    /// `height` rows tall. A detached view stays frozen at its anchor even as
+    /// rows arrive; a resize that grows the window pulls the top down so the
+    /// window never passes the live edge.
+    #[must_use]
+    pub(crate) fn window_top(&self, rows: usize, height: usize) -> usize {
+        if self.follow {
+            return rows.saturating_sub(height);
+        }
+        self.anchor.min(rows.saturating_sub(height))
+    }
+
+    /// Highest top row a window of the observed height can take over `rows`.
+    fn limit(&self, rows: usize) -> usize {
+        rows.saturating_sub(self.page.get().max(1))
+    }
+
+    /// Page up: detaches and moves the frozen window one page toward the
+    /// oldest row. A page is the visible window height, never one row.
+    pub(crate) fn scroll_up(&mut self, rows: usize) {
+        let page = self.page.get().max(1);
+        if self.follow {
+            self.anchor = self.limit(rows);
+            self.follow = false;
+        }
+        self.anchor = self.anchor.min(self.limit(rows)).saturating_sub(page);
+    }
+
+    /// Page down: moves the frozen window one page toward the live edge,
+    /// never past a full window of newest rows. A following view is already
+    /// at the edge.
+    pub(crate) fn scroll_down(&mut self, rows: usize) {
+        if self.follow {
+            return;
+        }
+        let page = self.page.get().max(1);
+        self.anchor = self.anchor.saturating_add(page).min(self.limit(rows));
+    }
+
+    /// Pins the window top to `row`, as a search match does, clamped so the
+    /// frozen window stays a full window inside the transcript.
+    pub(crate) fn jump_to(&mut self, row: usize, rows: usize) {
+        self.follow = false;
+        self.anchor = row.min(self.limit(rows));
+    }
+
+    /// Re-attaches follow at the live edge.
+    pub(crate) fn jump_latest(&mut self) {
         self.follow = true;
-        self.offset = 0;
+        self.anchor = 0;
     }
 
     /// Opens the filter row over the viewport top.
-    pub fn open_search(&mut self) {
+    pub(crate) fn open_search(&mut self) {
         self.search = Some(String::new());
     }
 
     /// Closes search and returns focus to the composer.
-    pub fn close_search(&mut self) {
+    pub(crate) fn close_search(&mut self) {
         self.search = None;
     }
 
-    /// Returns the follow-stopped cue when detached.
+    /// The open filter text, while the row shows.
     #[must_use]
-    pub fn cue(&self) -> Option<&'static str> {
+    pub(crate) fn search_text(&self) -> Option<&str> {
+        self.search.as_deref()
+    }
+
+    /// Types one character into the open filter row; closed stays closed.
+    pub(crate) fn type_search(&mut self, character: char) {
+        if let Some(query) = &mut self.search {
+            query.push(character);
+        }
+    }
+
+    /// Removes the last character from the open filter row.
+    pub(crate) fn backspace_search(&mut self) {
+        if let Some(query) = &mut self.search {
+            query.pop();
+        }
+    }
+
+    /// The follow-stopped cue while the view is detached.
+    #[must_use]
+    pub(crate) fn cue(&self) -> Option<&'static str> {
         (!self.follow).then_some(crate::copy::ids::FOLLOW_STOPPED)
     }
 }
 
 /// Returns the header row count: one row when wide and tall enough.
 #[must_use]
-pub const fn header_rows(width: u16, height: u16) -> usize {
+pub(crate) const fn header_rows(width: u16, height: u16) -> usize {
     if width >= 60 && height >= 14 { 1 } else { 0 }
 }
 
@@ -71,12 +158,185 @@ mod tests {
     #[test]
     fn scroll_detaches_and_end_reattaches() {
         let mut viewport = Viewport::following();
-        viewport.scroll_up();
+        viewport.scroll_up(60);
         assert_eq!(
             viewport.cue(),
             Some("following stopped · press end to jump to the latest")
         );
+        assert!(!viewport.follows());
         viewport.jump_latest();
         assert_eq!(viewport.cue(), None);
+        assert!(viewport.follows());
+    }
+
+    #[test]
+    fn default_viewport_follows_the_live_edge() {
+        let viewport = Viewport::default();
+        assert!(viewport.follows());
+        assert_eq!(viewport.window_top(40, 10), 30);
+    }
+
+    #[test]
+    fn scrolling_moves_a_page_not_one_row() {
+        let mut viewport = Viewport::following();
+        viewport.observe(10);
+        viewport.scroll_up(60);
+        // The window top was 50; one page of 10 moves it to 40.
+        assert_eq!(viewport.window_top(60, 10), 40);
+        viewport.scroll_up(60);
+        assert_eq!(viewport.window_top(60, 10), 30);
+    }
+
+    #[test]
+    fn scrolling_past_the_top_stays_at_the_oldest_row() {
+        let mut viewport = Viewport::following();
+        viewport.observe(10);
+        for _ in 0..20 {
+            viewport.scroll_up(60);
+        }
+        assert_eq!(viewport.window_top(60, 10), 0);
+        assert!(!viewport.follows());
+        viewport.jump_latest();
+        assert!(viewport.follows());
+        assert_eq!(viewport.window_top(60, 10), 50);
+    }
+
+    #[test]
+    fn detaching_freezes_the_window_while_rows_arrive() {
+        let mut viewport = Viewport::following();
+        viewport.observe(10);
+        viewport.scroll_up(60);
+        assert_eq!(viewport.window_top(60, 10), 40);
+        // Twenty new rows arrive; the frozen window does not move.
+        assert_eq!(viewport.window_top(80, 10), 40);
+    }
+
+    #[test]
+    fn page_down_clamps_at_the_newest_window() {
+        let mut viewport = Viewport::following();
+        viewport.observe(10);
+        viewport.scroll_up(60);
+        for _ in 0..20 {
+            viewport.scroll_down(60);
+        }
+        assert_eq!(viewport.window_top(60, 10), 50);
+        assert!(!viewport.follows(), "only End re-attaches follow");
+        viewport.jump_latest();
+        assert_eq!(viewport.window_top(60, 10), 50);
+    }
+
+    #[test]
+    fn page_down_while_following_changes_nothing() {
+        let mut viewport = Viewport::following();
+        viewport.observe(10);
+        viewport.scroll_down(60);
+        assert!(viewport.follows());
+        assert_eq!(viewport.window_top(60, 10), 50);
+    }
+
+    #[test]
+    fn jump_to_pins_a_row_and_end_returns_to_follow() {
+        let mut viewport = Viewport::following();
+        viewport.observe(10);
+        viewport.jump_to(7, 60);
+        assert_eq!(viewport.window_top(60, 10), 7);
+        viewport.jump_latest();
+        assert!(viewport.follows());
+        assert_eq!(viewport.window_top(60, 10), 50);
+    }
+
+    mod window_props {
+        use super::Viewport;
+        use proptest::prelude::*;
+
+        #[derive(Debug, Clone, Copy)]
+        enum Step {
+            Up,
+            Down,
+            Latest,
+            Jump(usize),
+            Rows(usize),
+        }
+
+        fn step() -> impl Strategy<Value = Step> {
+            prop_oneof![
+                Just(Step::Up),
+                Just(Step::Down),
+                Just(Step::Latest),
+                (0usize..400).prop_map(Step::Jump),
+                (0usize..400).prop_map(Step::Rows),
+            ]
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(256))]
+
+            /// Whatever the key sequence, the window stays inside the
+            /// transcript, a detached view never moves under arriving rows,
+            /// and End always re-attaches at the live edge.
+            #[test]
+            fn offset_clamps_and_end_always_follows(
+                height in 1usize..40,
+                steps in prop::collection::vec(step(), 0..60),
+            ) {
+                let mut viewport = Viewport::following();
+                viewport.observe(height);
+                let mut rows = 100usize;
+                for step in steps {
+                    match step {
+                        Step::Up => viewport.scroll_up(rows),
+                        Step::Down => viewport.scroll_down(rows),
+                        Step::Latest => viewport.jump_latest(),
+                        Step::Jump(row) => viewport.jump_to(row, rows),
+                        Step::Rows(count) => {
+                            let before = viewport.window_top(rows, height);
+                            let detached = !viewport.follows();
+                            let grown = rows.max(count);
+                            if detached && before <= grown.saturating_sub(height) {
+                                prop_assert_eq!(viewport.window_top(grown, height), before);
+                            }
+                            rows = grown;
+                        }
+                    }
+                    let top = viewport.window_top(rows, height);
+                    prop_assert!(top <= rows.saturating_sub(height));
+                }
+                viewport.jump_latest();
+                prop_assert!(viewport.follows());
+                prop_assert_eq!(viewport.window_top(rows, height), rows.saturating_sub(height));
+            }
+
+            /// Paging up from anywhere never passes the oldest row.
+            #[test]
+            fn paging_up_stops_at_the_oldest_row(
+                rows in 0usize..300,
+                height in 1usize..40,
+                presses in 0usize..80,
+            ) {
+                let mut viewport = Viewport::following();
+                viewport.observe(height);
+                for _ in 0..presses {
+                    viewport.scroll_up(rows);
+                }
+                let floor = if presses == 0 { rows.saturating_sub(height) } else {
+                    rows.saturating_sub(height).saturating_sub(presses * height)
+                };
+                prop_assert_eq!(viewport.window_top(rows, height), floor);
+            }
+        }
+    }
+
+    #[test]
+    fn search_opens_types_and_closes() {
+        let mut viewport = Viewport::following();
+        assert_eq!(viewport.search_text(), None);
+        viewport.open_search();
+        assert_eq!(viewport.search_text(), Some(""));
+        viewport.type_search('a');
+        viewport.type_search('b');
+        viewport.backspace_search();
+        assert_eq!(viewport.search_text(), Some("a"));
+        viewport.close_search();
+        assert_eq!(viewport.search_text(), None);
     }
 }

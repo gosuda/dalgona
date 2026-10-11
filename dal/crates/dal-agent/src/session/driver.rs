@@ -54,9 +54,12 @@ const PARALLEL_READS: usize = 4;
 
 /// Bound for hook waits inside one turn.
 const TURN_DEADLINE: Duration = Duration::from_secs(600);
+
 /// A provider stream this quiet is a stall, not a slow model.
 const STREAM_IDLE_REPORT: Duration = Duration::from_secs(30);
+
 const COMPACTION_MIN_TOKENS: u64 = 1;
+
 const COMPACTION_KEEP_TOKENS: u64 = 20_000;
 
 struct OwnedWatcher {
@@ -117,6 +120,8 @@ struct TurnState {
     provider: Option<Box<str>>,
     image_profile: Option<dal_provider::ImageProfile>,
     context_window: Option<u64>,
+    /// The most tool rounds this turn may run, when a prompt bounded it.
+    step_cap: Option<std::num::NonZeroU32>,
     /// The request round within the turn.
     round: u32,
     /// Streamed tool calls in response order.
@@ -187,20 +192,28 @@ impl Driver {
         for effect in std::mem::take(&mut batch.effects) {
             match effect {
                 dal_core::Effect::Infer(plan) => {
+                    self.bind_turn_step_cap(plan.turn);
                     self.infer(plan.turn, plan.params, &batch).await;
                 }
                 dal_core::Effect::Dispatch { turn, units } => {
                     self.dispatch(turn, units, &batch).await;
                 }
                 dal_core::Effect::Compact { turn, first_kept } => {
+                    if let Some(turn) = turn {
+                        self.bind_turn_step_cap(turn);
+                    }
                     self.compact(turn, first_kept).await;
                 }
                 dal_core::Effect::Command { cmd, by } => {
                     let route = self.last_model.clone().map(|(route, _)| route);
                     commands::run_command(&self.deps, &mut self.scoped, route, cmd, by).await;
                 }
-                dal_core::Effect::Stop { turn, stop } => {
-                    self.observe_turn_end(turn, stop).await;
+                dal_core::Effect::Stop {
+                    turn,
+                    stop,
+                    overflowed,
+                } => {
+                    self.observe_turn_end(turn, stop, overflowed).await;
                     self.observe_settled(turn).await;
                     self.stop(turn, stop).await;
                 }
@@ -216,14 +229,19 @@ impl Driver {
         for (request, waiter) in std::mem::take(&mut batch.asks) {
             let handle = self.deps.handle.clone();
             self.deps.tasks.spawn(async move {
-                let (answer, by) = waiter.await;
+                let crate::broker::Settled {
+                    answer,
+                    by,
+                    resolution,
+                } = waiter.await;
                 let _ = handle
                     .work(TurnWork::Answered {
                         resolved: crate::broker::Resolved {
                             request,
                             answer,
                             by,
-                            was_default: false,
+                            resolution,
+                            was_default: resolution == crate::broker::Resolution::Unavailable,
                         },
                     })
                     .await;
@@ -253,20 +271,26 @@ impl Driver {
     /// Returns the turn state, creating it on first touch of the turn.
     ///
     /// The turn binds the bypass-cell token when the actor already opened
-    /// it (`TurnStarted` is journaled before any driver effect), so an
-    /// out-of-band `cancel` stops the stream; a late/stale turn falls back
-    /// to a standalone token exactly as before.
+    /// it (`TurnStarted` is journaled before any driver effect), in either
+    /// phase: opening hooks run before the journal sees `TurnStart`, so an
+    /// opening touch binds the opening token `cancel` fires. A turn with no
+    /// live token is stale or still replaying; it binds an inert token no
+    /// cancel fires, never the session token, so a stop cannot leak across
+    /// turns.
     fn turn(&mut self, turn: TurnId) -> &mut TurnState {
         let deps = &self.deps;
         let cancel = self
             .control
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .token(turn)
+            .token_for(turn)
             .unwrap_or_default();
         self.turns.entry(turn).or_insert_with(|| {
             let generation = deps.host.shared.generation.borrow().clone();
-            let tools = deps.overlay.publish(&generation, deps.shared.promoted());
+            let tools = deps
+                .overlay
+                .publish(&generation, deps.shared.promoted())
+                .restricted_to(deps.shared.tool_allowlist());
             let script = crate::session::script::SessionScriptHost::for_generation(
                 deps.session,
                 &deps.backend,
@@ -283,6 +307,7 @@ impl Driver {
                 provider: None,
                 image_profile: None,
                 context_window: None,
+                step_cap: None,
                 round: 0,
                 calls: Vec::new(),
                 resolved: Vec::new(),
@@ -291,6 +316,26 @@ impl Driver {
                 usage: None,
             }
         })
+    }
+
+    /// Binds a pending prompt bound when the driver receives the active
+    /// turn's first effect, rather than when a lazy state lookup happens to
+    /// materialize it. Stale effects queued for an earlier turn cannot claim
+    /// the bound after the actor has opened the new turn.
+    fn bind_turn_step_cap(&mut self, turn: TurnId) {
+        if self.turns.contains_key(&turn) {
+            return;
+        }
+        let active = self
+            .control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .running();
+        if active != Some(turn) {
+            return;
+        }
+        let step_cap = self.deps.shared.take_next_turn_step_cap();
+        self.turn(turn).step_cap = step_cap;
     }
 
     /// Stops one turn: cancels its token and confirms through the fold.
@@ -380,12 +425,16 @@ impl Driver {
             enabled: true,
             compactor_available: !self.turn(turn).generation.compactors.entries().is_empty(),
         };
+        let max_steps = self
+            .turn(turn)
+            .step_cap
+            .map_or(0, std::num::NonZeroU32::get);
         self.report(TurnWork::RequestStarted {
             turn,
             model: resolved.route.clone(),
             family: resolved.family,
             window: resolved.entry.context_window.map_or(0, u64::from),
-            max_steps: 0,
+            max_steps,
             compact,
         })
         .await;
@@ -469,7 +518,7 @@ impl Driver {
             let event = match item {
                 Ok(event) => event,
                 Err(error) => {
-                    failed = Some(self.failure(&error));
+                    failed = Some(self.failure(error));
                     break;
                 }
             };
@@ -540,28 +589,23 @@ struct ResolvedRequest {
 impl Driver {
     /// Resolves the request route through the catalog, caching it for commands.
     async fn resolve_model(&self, turn: TurnId) -> Result<ResolvedRequest, Box<str>> {
-        let reference = match self.turn_model(turn) {
-            Some(route) => match (
-                &route,
-                self.turns
-                    .get(&turn)
-                    .and_then(|state| state.provider.as_deref()),
-            ) {
-                (ModelRoute::Api { model, .. }, Some(provider)) => {
-                    format!("{provider}/{model}")
-                }
-                _ => crate::host::ops::request_reference(&route),
-            },
-            None => self
-                .deps
-                .host
-                .shared
-                .config
-                .model()
-                .unwrap_or("")
-                .to_owned(),
+        let Some(route) = self.turn_model(turn) else {
+            return self.resolve_default_model().await;
         };
-        self.resolve_reference(&reference).await
+        let provider = self
+            .turns
+            .get(&turn)
+            .and_then(|state| state.provider.as_deref());
+        match (&route, provider) {
+            (ModelRoute::Api { model, .. }, Some(provider)) => {
+                self.resolve_reference(&format!("{provider}/{model}"), None)
+                    .await
+            }
+            _ => {
+                self.resolve_reference(&crate::host::ops::request_reference(&route), Some(&route))
+                    .await
+            }
+        }
     }
 
     async fn resolve_default_model(&self) -> Result<ResolvedRequest, Box<str>> {
@@ -573,10 +617,15 @@ impl Driver {
             .model()
             .unwrap_or("")
             .to_owned();
-        self.resolve_reference(&reference).await
+        self.resolve_reference(&reference, None).await
     }
 
-    async fn resolve_reference(&self, reference: &str) -> Result<ResolvedRequest, Box<str>> {
+    /// Resolves `reference`, or the model `route` names when one is given.
+    async fn resolve_reference(
+        &self,
+        reference: &str,
+        route: Option<&ModelRoute>,
+    ) -> Result<ResolvedRequest, Box<str>> {
         if reference.is_empty() {
             return Err("no model configured: set dal.toml [models] default.".into());
         }
@@ -603,9 +652,11 @@ impl Driver {
             .iter()
             .map(|(name, target)| (name.clone(), target.clone()))
             .collect();
-        let resolved = dal_provider::resolve(&catalog, &aliases, reference).map_err(|error| {
-            format!("model {reference} did not resolve: {error}").into_boxed_str()
-        })?;
+        let resolved = match route {
+            Some(route) => dal_provider::resolve_route(&catalog, &aliases, route),
+            None => dal_provider::resolve(&catalog, &aliases, reference),
+        }
+        .map_err(|error| format!("model {reference} did not resolve: {error}").into_boxed_str())?;
         Ok(ResolvedRequest {
             family: api_family(&resolved.route).unwrap_or(Family::Chat),
             provider: resolved.provider.clone(),
@@ -712,7 +763,7 @@ impl Driver {
         crate::ext::hooks::clamp_params(current, &info.caps)
     }
 
-    /// Renders the system prompt with before-turn hook text on first request.
+    /// Renders the system prompt for one provider request.
     fn system(
         &mut self,
         turn: TurnId,
@@ -938,16 +989,19 @@ impl Driver {
     }
 
     /// Maps a transport error onto the classified failure surface.
-    fn failure(&self, error: &dal_provider::ProviderError) -> InferFailure {
+    ///
+    /// The provider's own classification is kept for overflow (a context
+    /// window error or an HTTP 413) so the fold can compact and retry. A
+    /// retryable failure that reaches this point has already used its whole
+    /// retry budget, and the fold ignores `Retryable`, so it ends the turn as
+    /// `Fatal`.
+    fn failure(&self, error: dal_provider::ProviderError) -> InferFailure {
         if self.deps.cancel.is_cancelled() {
             return InferFailure::Cancelled;
         }
-        if let dal_provider::ProviderError::Synthetic(failure) = error {
-            return failure.clone();
-        }
-        InferFailure::Fatal {
-            message: error.to_string().into(),
-            fix: None,
+        match InferFailure::from(error) {
+            InferFailure::Retryable { message, .. } => InferFailure::Fatal { message, fix: None },
+            classified => classified,
         }
     }
 
@@ -977,7 +1031,7 @@ impl Driver {
         self.report(TurnWork::Resolved {
             turn,
             calls: resolved,
-            answerer_attached: self.deps.shared.attached(),
+            answerer_attached: self.deps.shared.attached_approval(),
         })
         .await;
     }
@@ -1018,6 +1072,7 @@ impl Driver {
             process_env: Arc::clone(&self.deps.host.shared.env),
             turn,
             workspace: self.deps.workspace.clone(),
+            mode: self.deps.host.shared.config.mode(),
             generation: Arc::clone(&state.generation),
             tools: state.tools.clone(),
             deferred_search: Arc::clone(&state.deferred_search),
@@ -1089,14 +1144,18 @@ impl Driver {
         }
     }
 
-    async fn observe_turn_end(&self, turn: TurnId, stop: Stop) {
+    async fn observe_turn_end(&self, turn: TurnId, stop: Stop, overflowed: bool) {
         let Some(state) = self.turns.get(&turn) else {
             return;
         };
         let generation = Arc::clone(&state.generation);
         let cancel = state.cancel.clone();
         let script = state.script.attach(None);
-        let event = TurnEnd { turn, stop };
+        let event = TurnEnd {
+            turn,
+            stop,
+            overflowed,
+        };
         let mut report = ObserverReport::default();
         let scope = HookScope {
             services: &self.deps.services,
@@ -1263,12 +1322,10 @@ impl Driver {
             .and_then(|first| entries.iter().position(|entry| entry.id == first))
             .unwrap_or(entries.len());
         let covered = covered_entries(&entries[..cut]);
-        let images_elsewhere = entries
+        let retained = entries[cut..]
             .iter()
-            .enumerate()
-            .filter(|(index, _entry)| *index >= cut)
-            .map(|(_, entry)| image_count(entry))
-            .sum();
+            .map(retained_images)
+            .fold(RetainedImages::default(), RetainedImages::add);
         let carried = entries.iter().rev().find_map(|entry| match &entry.kind {
             dal_core::EntryKind::Compaction {
                 summary: Some(summary),
@@ -1276,7 +1333,8 @@ impl Driver {
             } => Some(summary.clone()),
             _ => None,
         });
-        let outcome = match covered.first().zip(covered.last()) {
+        let has_context = covered.iter().any(|entry| entry.note.is_none());
+        let outcome = match covered.first().zip(covered.last()).filter(|_| has_context) {
             Some((first, last)) => {
                 let context = self.compact_model_context(turn).await;
                 self.compact_span(match context {
@@ -1287,7 +1345,7 @@ impl Driver {
                         first_kept,
                         total,
                         measured,
-                        images_elsewhere,
+                        retained,
                         carried,
                         route,
                         image_profile,
@@ -1360,7 +1418,7 @@ impl Driver {
             first_kept,
             total,
             measured,
-            images_elsewhere,
+            retained,
             carried,
             route,
             image_profile,
@@ -1400,7 +1458,8 @@ impl Driver {
                 first_kept,
                 context_window: window,
                 image_profile,
-                images_elsewhere,
+                images_elsewhere: retained.count,
+                image_bytes_elsewhere: retained.bytes,
                 carried: carried.clone(),
                 total_tokens: total,
                 params: params.clone(),
@@ -1410,6 +1469,13 @@ impl Driver {
                 .await
             {
                 Ok(Some(compaction)) => {
+                    if compaction_has_reserved_policy_record(&compaction) {
+                        refused = Some(
+                            "compactor attempted to write the host-owned child policy record."
+                                .into(),
+                        );
+                        continue;
+                    }
                     return Ok(summarize(
                         &entry.name,
                         measured.unwrap_or(total),
@@ -1429,6 +1495,15 @@ impl Driver {
         }
         Err(refused.unwrap_or_else(|| "no compactor registered.".into()))
     }
+}
+
+fn compaction_has_reserved_policy_record(compaction: &crate::ext::compact::Compaction) -> bool {
+    let crate::ext::compact::Replacement::Parts { letters, .. } = &compaction.replacement else {
+        return false;
+    };
+    letters.iter().any(|letter| {
+        crate::host::is_child_policy_record(letter.ext.as_str(), letter.kind.as_ref())
+    })
 }
 
 fn settled_reply_text(entries: &[EntryView]) -> Box<str> {
@@ -1462,7 +1537,7 @@ struct CompactedSpan<'a> {
     first_kept: Option<dal_core::EntryId>,
     total: u64,
     measured: Option<u64>,
-    images_elsewhere: usize,
+    retained: RetainedImages,
     carried: Option<Box<str>>,
     route: ModelRoute,
     image_profile: Option<dal_provider::ImageProfile>,
@@ -1486,6 +1561,20 @@ fn covered_entries(items: &[EntryView]) -> Vec<crate::ext::compact::CoveredEntry
             user_open = false;
             continue;
         }
+        if let dal_core::EntryKind::Reminder { source, text } = &item.kind
+            && source.as_ref() != dal_core::BEFORE_TURN_SOURCE
+        {
+            let mut entry = crate::ext::compact::CoveredEntry::new(
+                item.id,
+                false,
+                ContextItem::User { parts: Vec::new() },
+            );
+            entry.note = Some(text.clone());
+            entry.estimated_tokens = 0;
+            user_open = false;
+            out.push(entry);
+            continue;
+        }
         let Some(content) = crate::session::context::context_items(std::slice::from_ref(item))
             .into_iter()
             .next()
@@ -1495,37 +1584,67 @@ fn covered_entries(items: &[EntryView]) -> Vec<crate::ext::compact::CoveredEntry
         };
         let starts = matches!(content, ContextItem::User { .. }) && !user_open;
         user_open = matches!(content, ContextItem::User { .. });
-        out.push(crate::ext::compact::CoveredEntry {
-            entry: item.id,
-            starts_user_turn: starts,
-            estimated_tokens: estimate_tokens(&content),
-            content,
-        });
+        out.push(crate::ext::compact::CoveredEntry::new(
+            item.id, starts, content,
+        ));
     }
     out
 }
 
-fn image_count(entry: &EntryView) -> usize {
+/// The images that stay in the request after a compaction cut.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct RetainedImages {
+    /// Number of images.
+    count: usize,
+    /// Bytes the images occupy: decoded length of inline images, stored
+    /// length of blobs.
+    bytes: u64,
+}
+
+impl RetainedImages {
+    fn add(self, other: Self) -> Self {
+        Self {
+            count: self.count.saturating_add(other.count),
+            bytes: self.bytes.saturating_add(other.bytes),
+        }
+    }
+}
+
+/// Counts one entry's images and sums their bytes.
+fn retained_images(entry: &EntryView) -> RetainedImages {
     let (dal_core::EntryKind::User { parts }
     | dal_core::EntryKind::ToolResult { parts, .. }
     | dal_core::EntryKind::Compaction { parts, .. }) = &entry.kind
     else {
-        return 0;
+        return RetainedImages::default();
     };
     parts
         .iter()
-        .filter(|part| match part {
-            JournalPart::Image { .. } | JournalPart::ImageBlob { .. } => true,
-            JournalPart::Blob { mime, .. } => mime.starts_with("image/"),
-            JournalPart::Text { .. } | JournalPart::TextBlob { .. } => false,
+        .filter_map(|part| match part {
+            JournalPart::Image { base64, .. } => Some(decoded_base64_len(base64)),
+            JournalPart::ImageBlob { bytes, .. } => Some(*bytes),
+            JournalPart::Blob { mime, bytes, .. } if mime.starts_with("image/") => Some(*bytes),
+            JournalPart::Blob { .. } | JournalPart::Text { .. } | JournalPart::TextBlob { .. } => {
+                None
+            }
         })
-        .count()
+        .map(|bytes| RetainedImages { count: 1, bytes })
+        .fold(RetainedImages::default(), RetainedImages::add)
 }
 
-/// Heuristic token estimate: four characters per token.
-fn estimate_tokens(content: &ContextItem) -> u64 {
-    let bytes = sonic_rs::to_string(content).map_or(0, |text| text.len() as u64);
-    bytes / 4
+/// The decoded length of a base64 string, without decoding it.
+fn decoded_base64_len(base64: &str) -> u64 {
+    let padding = base64
+        .bytes()
+        .rev()
+        .take_while(|byte| *byte == b'=')
+        .count();
+    let length = u64::try_from(base64.len()).unwrap_or(u64::MAX);
+    let padding = u64::try_from(padding).unwrap_or(u64::MAX);
+    (length / 4)
+        .saturating_mul(3)
+        .saturating_add((length % 4).saturating_sub(1))
+        .saturating_sub(padding.min(2))
 }
 
 /// Builds model-visible tool descriptions for section rendering.
@@ -1541,6 +1660,7 @@ fn descriptions(
         .tools
         .entries()
         .iter()
+        .filter(|entry| turn_tools.permits(&entry.name))
         .filter_map(|entry| generation.tool(&entry.name))
         .map(|(tool, _)| tool.identity(info))
         .chain(overlay.map(|entry| entry.tool.identity(info)))
@@ -1631,7 +1751,7 @@ fn summarize(
 ) -> dal_core::CompactionSummary {
     let covered_tokens: u64 = covered.iter().map(|entry| entry.estimated_tokens).sum();
     let summary = compaction.summary_text().map(str::to_owned);
-    let summary_tokens = summary.as_ref().map_or(0, |text| text.len() as u64 / 4);
+    let summary_tokens = summary.as_deref().map_or(0, dal_core::estimate_text_tokens);
     let replay = match compaction.history() {
         Some(history) => {
             let items: Vec<&str> = history
@@ -1756,5 +1876,45 @@ fn compactor_name(
         parts,
         parts_tokens,
         letters,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroU64;
+
+    use super::*;
+    use crate::ext::ExtRecord;
+    use dal_core::EntryId;
+
+    fn letter(kind: &str) -> ExtRecord {
+        ExtRecord {
+            ext: Name::parse(crate::host::CHILD_POLICY_EXT).expect("reserved name parses"),
+            kind: kind.into(),
+            body: RawJson::parse("{}").expect("record body parses"),
+        }
+    }
+
+    fn parts(letter: ExtRecord) -> crate::ext::compact::Compaction {
+        let entry = EntryId::new(NonZeroU64::MIN);
+        crate::ext::compact::Compaction {
+            span: (entry, entry),
+            replacement: crate::ext::compact::Replacement::Parts {
+                parts: Vec::new(),
+                letters: vec![letter],
+                parts_tokens: 0,
+            },
+            usage: None,
+        }
+    }
+
+    #[test]
+    fn compaction_rejects_host_policy_identity_but_allows_ordinary_record_kind() {
+        assert!(compaction_has_reserved_policy_record(&parts(letter(
+            crate::host::CHILD_POLICY_KIND,
+        ))));
+        assert!(!compaction_has_reserved_policy_record(&parts(letter(
+            "ordinary",
+        ))));
     }
 }

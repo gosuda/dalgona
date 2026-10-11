@@ -25,6 +25,7 @@ use super::{
 };
 
 mod observation;
+mod rename_containment;
 
 fn change_edit(path: &str, locator: Locator, action: Action, body: &str) -> Edit {
     change_edit_guard(path, locator, action, Guard::Quoted, body)
@@ -1410,10 +1411,9 @@ async fn stage_classify_create_delete_rename() {
     .await
     .expect("rename plans");
     assert_eq!(staged.op, Operation::Rename);
-    assert_eq!(
-        staged.renamed_to.as_deref(),
-        Some(std::path::Path::new("b.txt"))
-    );
+    let dest = staged.renamed_to.as_ref().expect("rename destination");
+    assert_eq!(dest.path, std::path::Path::new("b.txt"));
+    assert_eq!(dest.absolute_path, dir.path().join("b.txt"));
     assert_eq!(&*staged.after.expect("after"), b"P\nb\n");
     // Two renames in one payload conflict.
     let error = stage_one(
@@ -1438,6 +1438,196 @@ async fn stage_classify_create_delete_rename() {
     .await
     .expect_err("double rename rejects");
     assert_eq!(error.class, super::ir::ErrorClass::Resolve);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "std has no mkfifo and rustix compiles mkfifoat out on Apple targets"
+)]
+async fn patch_rejects_fifo_before_reading() {
+    use std::{process::Command, time::Duration};
+
+    let dir = tempfile::tempdir().expect("temp workspace");
+    let fifo = dir.path().join("pipe");
+    let status = Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("create fifo");
+    assert!(status.success(), "mkfifo failed with {status}");
+    let session = test_session(dir.path(), false);
+    let path = std::path::Path::new("pipe");
+    let result = tokio::time::timeout(
+        Duration::from_secs(1),
+        stage::stage_file(
+            &session,
+            DialectId::Replace,
+            path,
+            &fifo,
+            vec![change_edit(
+                "pipe",
+                Locator::Whole,
+                Action::Replace,
+                "replacement\n",
+            )],
+        ),
+    )
+    .await
+    .expect("FIFO patch must return without blocking");
+    let error = result.expect_err("FIFO patch must be rejected");
+    assert_eq!(error.class, super::ir::ErrorClass::File);
+    assert!(error.message.contains("pipe"), "{}", error.message);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "std has no mkfifo and rustix compiles mkfifoat out on Apple targets"
+)]
+async fn patch_rejects_fifo_reference_before_reading() {
+    use std::{process::Command, time::Duration};
+
+    let dir = tempfile::tempdir().expect("temp workspace");
+    let fifo = dir.path().join("pipe");
+    let status = Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("create fifo");
+    assert!(status.success(), "mkfifo failed with {status}");
+    let session = test_session(dir.path(), false);
+    let path = std::path::Path::new("pipe");
+    let (reference, _) = session
+        .snapshots
+        .capture(
+            session.session,
+            session.generation,
+            session.consumer,
+            path,
+            b"source\n",
+        )
+        .expect("capture FIFO reference");
+    let result = tokio::time::timeout(
+        Duration::from_secs(1),
+        stage::stage_file(
+            &session,
+            DialectId::HashlineLight,
+            path,
+            &fifo,
+            vec![Edit::Delete {
+                index: 0,
+                path: path.to_path_buf(),
+                reference: Some(reference.display().to_string()),
+            }],
+        ),
+    )
+    .await
+    .expect("FIFO reference patch must return without blocking");
+    let error = result.expect_err("FIFO reference patch must be rejected");
+    assert_eq!(error.class, super::ir::ErrorClass::File);
+    assert!(error.message.contains("pipe"), "{}", error.message);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "std has no mkfifo and rustix compiles mkfifoat out on Apple targets"
+)]
+async fn commit_rejects_fifo_after_staging() {
+    use std::{process::Command, time::Duration};
+
+    let dir = tempfile::tempdir().expect("temp workspace");
+    let path = dir.path().join("pipe");
+    tokio::fs::write(&path, b"before\n")
+        .await
+        .expect("seed regular file");
+    let session = test_session(dir.path(), false);
+    let staged = plan(
+        &session,
+        DialectId::Replace,
+        "{\"changes\":[{\"path\":\"pipe\",\"old\":\"before\",\"new\":\"after\"}]}",
+    )
+    .await
+    .expect("stage regular file patch");
+
+    tokio::fs::remove_file(&path)
+        .await
+        .expect("remove regular file");
+    let status = Command::new("mkfifo")
+        .arg(&path)
+        .status()
+        .expect("create fifo");
+    assert!(status.success(), "mkfifo failed with {status}");
+
+    let output = tokio::time::timeout(Duration::from_secs(1), commit(&session, staged, &[]))
+        .await
+        .expect("FIFO commit must return without blocking");
+    assert_eq!(output.error_class, Some(super::ir::ErrorClass::File));
+    assert!(output.text.contains("pipe"), "{}", output.text);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn commit_restores_earlier_deletes_when_a_later_delete_fails() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("temp workspace");
+    let locked = dir.path().join("locked");
+    std::fs::create_dir(&locked).expect("locked dir");
+    std::fs::write(dir.path().join("first.txt"), b"first\n").expect("seed first");
+    std::fs::write(locked.join("second.txt"), b"second\n").expect("seed second");
+    let session = test_session(dir.path(), false);
+    let mut staged = plan(
+        &session,
+        DialectId::ApplyPatch,
+        "*** Begin Patch\n*** Delete File: first.txt\n*** Delete File: locked/second.txt\n*** End Patch\n",
+    )
+    .await
+    .expect("stage two deletes");
+    // The read-only directory must be the delete that fails: commit visits
+    // files in plan order, and lexical order already puts first.txt first.
+    staged
+        .files
+        .sort_by(|left, right| left.path.cmp(&right.path));
+    let mut permissions = std::fs::metadata(&locked)
+        .expect("locked metadata")
+        .permissions();
+    permissions.set_mode(0o555);
+    std::fs::set_permissions(&locked, permissions).expect("lock the directory");
+
+    let output = commit(&session, staged, &[]).await;
+
+    let mut permissions = std::fs::metadata(&locked)
+        .expect("locked metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&locked, permissions).expect("unlock the directory");
+    assert_eq!(output.error_class, Some(super::ir::ErrorClass::Io));
+    assert!(
+        output.text.contains("Nothing was written"),
+        "{}",
+        output.text
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("first.txt")).expect("first delete restored"),
+        b"first\n"
+    );
+    assert_eq!(
+        std::fs::read(locked.join("second.txt")).expect("second file intact"),
+        b"second\n"
+    );
+    let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+        .expect("read workspace")
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.file_name())
+        .filter(|name| name.to_string_lossy().contains(".dalgon-trash"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "trash files left behind: {leftovers:?}"
+    );
 }
 
 #[tokio::test]
@@ -2233,4 +2423,46 @@ async fn stage_symbol_locator_and_needle_narrowing() {
     .await
     .expect_err("def tag on lines rejects");
     assert_eq!(error.class, super::ir::ErrorClass::Resolve);
+}
+#[tokio::test]
+async fn text_locator_accepts_canonical_equivalence() {
+    let dir = tempfile::tempdir().expect("temp workspace");
+    let session = test_session(dir.path(), false);
+    let path = std::path::Path::new("a.txt");
+    let locator = Locator::Text {
+        old: "let value = 'ok'".to_owned(),
+        line_hint: None,
+        all: false,
+        window: Window::BeforePayload,
+        context: None,
+        at_eof: false,
+    };
+    let staged = stage_one(
+        &session,
+        path,
+        "let value = ‘ok’  \r\n".as_bytes(),
+        vec![change_edit(
+            "a.txt",
+            locator,
+            Action::Replace,
+            "let value = 'new'",
+        )],
+    )
+    .await
+    .expect("canonical text plans");
+    assert_eq!(
+        &*staged.after.expect("after"),
+        "let value = 'new'\r\n".as_bytes()
+    );
+}
+
+#[test]
+fn text_locator_large_file_has_linear_work() {
+    let haystack = format!("{}c", "a".repeat(512 * 1024));
+    let needle = format!("{}b", "a".repeat(2048));
+    let comparisons = super::write::stage::find_text_matches_linear_probe(&haystack, &needle);
+    assert!(
+        comparisons <= haystack.len().saturating_add(needle.len()) * 4,
+        "matcher comparisons grew superlinearly: {comparisons}"
+    );
 }

@@ -41,16 +41,19 @@ const LOOP: &str =
     r"\b(?:while|until|for)\b(?s:.*?)[^A-Za-z0-9_.\-/](?:/(?:usr/)?bin/)?sleep\s+[0-9]";
 const TRAILING: &str = r"[;&|]\s*(?:/(?:usr/)?bin/)?sleep\s+[0-9]+(?:\.[0-9]+)?\s*\)?\s*$";
 
+fn compile(pattern: &str) -> Result<Regex, Box<regex_automata::meta::BuildError>> {
+    Regex::new(pattern).map_err(Box::new)
+}
 impl SleepClassifier {
     pub(crate) fn new() -> Result<Self, Box<regex_automata::meta::BuildError>> {
         Ok(Self {
-            wrapper: Regex::new(WRAPPER)?,
-            power_management: Regex::new(POWER_MANAGEMENT)?,
-            sleep_call: Regex::new(SLEEP_CALL)?,
-            pure: Regex::new(PURE)?,
-            leading: Regex::new(LEADING)?,
-            loop_call: Regex::new(LOOP)?,
-            trailing: Regex::new(TRAILING)?,
+            wrapper: compile(WRAPPER)?,
+            power_management: compile(POWER_MANAGEMENT)?,
+            sleep_call: compile(SLEEP_CALL)?,
+            pure: compile(PURE)?,
+            leading: compile(LEADING)?,
+            loop_call: compile(LOOP)?,
+            trailing: compile(TRAILING)?,
         })
     }
 

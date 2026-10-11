@@ -3,16 +3,26 @@
 
 use std::error::Error;
 
-use dal_core::RawJson;
+use dal_core::{RawJson, Timestamp};
 use sonic_rs::{JsonValueTrait, Value};
 
-use super::LOOP_HARD_STOP_REASON;
-use super::guard::{GuardEffects, GuardState, GuardVerdict, on_tool_call, reset};
+use super::guard::{
+    GuardEffects, GuardState, GuardVerdict, canonical_args, on_tool_call, parse_args, reset,
+};
 use super::rewrite::rewrite_exec_args;
 use super::sleep::{SleepClassifier, SleepRule, SleepWait};
+use super::{LOOP_HARD_STOP_REASON, silence_suffix};
 
 fn raw(value: &str) -> Result<RawJson, Box<dyn Error>> {
     Ok(RawJson::parse(value)?)
+}
+
+#[test]
+fn canonical_args_sort_nested_keys_and_map_null_to_object() -> Result<(), Box<dyn Error>> {
+    let canonical = canonical_args(&parse_args(&raw(r#"{"z":1,"a":{"y":2,"x":[3,4]}}"#)?)?)?;
+    assert_eq!(canonical.as_ref(), r#"{"a":{"x":[3,4],"y":2},"z":1}"#);
+    assert_eq!(canonical_args(&parse_args(&raw("null")?)?)?.as_ref(), "{}");
+    Ok(())
 }
 
 #[test]
@@ -209,4 +219,17 @@ fn rewrite_preserves_a_short_existing_window() -> Result<(), Box<dyn Error>> {
     let args = raw(r#"{"command":"sleep 30","foreground_s":2}"#)?;
     assert_eq!(rewrite_exec_args(&args, wait)?, None);
     Ok(())
+}
+
+#[test]
+fn silence_suffix_has_a_strict_ten_minute_boundary() {
+    let last = Timestamp::UNIX_EPOCH;
+    assert_eq!(
+        silence_suffix(last, last + jiff::SignedDuration::from_secs(600)),
+        None
+    );
+    assert_eq!(
+        silence_suffix(last, last + jiff::SignedDuration::from_secs(601)).as_deref(),
+        Some(" · silent 10m")
+    );
 }

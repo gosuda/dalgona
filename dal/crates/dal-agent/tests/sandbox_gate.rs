@@ -68,6 +68,7 @@ impl Tool for SpawnProbe {
                 cwd: cx.workspace().as_path().to_path_buf(),
                 timeout: None,
                 env: Vec::new(),
+                stdout_prefix_limit: 0,
             };
             let mut proc = match cx.spawn(&argv, opts, approved) {
                 Ok(proc) => proc,

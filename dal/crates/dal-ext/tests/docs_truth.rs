@@ -4,7 +4,6 @@
     reason = "integration fixture failures must fail at their specific setup boundary"
 )]
 
-use dal_core::{Config, ConfigProduct};
 use dal_ext::docs::{
     DocsSnapshot, Lookup, Manual, Miss, listing, lookup, miss_lines, nearest, page_valid,
     prompt_line, read_miss_line, render_index, scheme_valid, snapshot as live_snapshot, wire_error,
@@ -12,7 +11,6 @@ use dal_ext::docs::{
 use dal_ext::docsgen::{GenArgs, Scheme, generate};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 fn repo_root() -> PathBuf {
@@ -77,11 +75,11 @@ fn fixture(names: &[(&str, &str)]) -> (tempfile_guard::Guard, GenArgs) {
 
 mod tempfile_guard {
     use std::path::PathBuf;
-    pub(crate) struct Guard {
+    pub(super) struct Guard {
         dir: PathBuf,
     }
     impl Guard {
-        pub(crate) fn new() -> Self {
+        pub(super) fn new() -> Self {
             // Clock resolution alone can collide on hosts whose timer is
             // coarser than as_nanos implies (two tests in the same tick
             // would share a dir and cross-write pages), so a per-process
@@ -99,7 +97,7 @@ mod tempfile_guard {
             std::fs::create_dir_all(&dir).unwrap();
             Self { dir }
         }
-        pub(crate) fn dir(&self) -> &PathBuf {
+        pub(super) fn dir(&self) -> &PathBuf {
             &self.dir
         }
     }
@@ -552,6 +550,10 @@ fn prompt_line_matches_product() {
 
 #[test]
 fn truth_config_page() {
+    use std::fmt::Write as _;
+
+    use dal_core::{Config, ConfigProduct};
+
     let pages = load_manual();
     let config = pages.get("config").expect("config page");
     let mut scalar_toml = String::new();
@@ -967,6 +969,8 @@ fn miss_write_error_is_reported() {
     // A closed pipe surfaces as a write failure, never a panic: the index
     // bytes are finite and writing them to an always-failing sink returns its
     // error. The process exit code follows the CLI part's pipe rule (open).
+    use std::io::Write as _;
+
     struct Failing;
     impl std::io::Write for Failing {
         fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {

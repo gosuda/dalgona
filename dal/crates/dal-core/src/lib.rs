@@ -11,6 +11,7 @@ mod journal;
 mod model;
 mod raw;
 mod request;
+mod tokens;
 mod update;
 mod view;
 mod workspace;
@@ -31,20 +32,20 @@ pub use config::{
 };
 pub use content::{ContentError, ContentLimits, Part};
 pub use ext::{
-    AgentInfo, AgentReport, AgentStart, AgentState, AgentsOp, AgentsOpError, AgentsReply,
-    ArtifactFile, Budget, Capability, Channel, Claimant, CommandName, CommandSpec, Consumer,
-    ExitStatusKind, ExportId, ExportKind, FetchMethod, FetchRequest, FetchResponse, FindEntry,
-    FindPage, HandleStatus, HookEvent, HookMismatch, HookOutcome, HookVerdict, InputEvent,
-    InputVerdict, InterruptMode, JobCounts, JobEndEvent, JobEnds, JobLine, JobLines, JobReport,
-    JobStateView, JobStatus, JobsError, JobsOp, JobsReply, MailMode, McpRequest, McpResponse,
-    ModelId, Name, NameError, NativeOp, OnError, OpId, OpSet, Origin, PluginSource, Provenance,
-    RUST_STREAM_EVENT, ReadView, Receipt, RegistrationError, RepeatMode, Revision, RuleFile,
-    RuleRecord, RunOutput, RunRequest, RunRequestError, STAR_EVENTS, Scope, ScopeSpec,
+    AgentInfo, AgentRefusal, AgentReport, AgentStart, AgentState, AgentsOp, AgentsOpError,
+    AgentsReply, ArtifactFile, Budget, Capability, Channel, Claimant, CommandName, CommandSpec,
+    Consumer, ExitStatusKind, ExportId, ExportKind, FetchMethod, FetchRequest, FetchResponse,
+    FindEntry, FindPage, HandleStatus, HookEvent, HookMismatch, HookOutcome, HookVerdict,
+    InputEvent, InputVerdict, InterruptMode, JobCounts, JobEndEvent, JobEnds, JobLine, JobLines,
+    JobReport, JobStateView, JobStatus, JobsError, JobsOp, JobsReply, MailMode, McpRequest,
+    McpResponse, ModelId, Name, NameError, NativeOp, OnError, OpId, OpSet, Origin, PluginSource,
+    Provenance, RUST_STREAM_EVENT, ReadView, Receipt, RegistrationError, RepeatMode, Revision,
+    RuleFile, RuleRecord, RunOutput, RunRequest, RunRequestError, STAR_EVENTS, Scope, ScopeSpec,
     ScopeSpecError, ScopeUsage, SearchHit, SearchPage, Service, ServiceSet, SessionEnd,
-    SessionStart, Settled, SidecarOp, Site, SkillRecord, SourceRow, StateError, StateKey,
-    StateKeyError, StateNs, StateOp, StateRecord, StreamVerdict, SymbolHit, SymbolPage,
-    ToolCallEvent, ToolCallVerdict, ToolData, ToolResultEvent, ToolSpec, TurnOp, TurnOpReply,
-    UsesError, ViewNode, Visibility, WakeError, valid_tool_parameters, valid_version,
+    SessionStart, Settled, SidecarName, SidecarNameError, SidecarOp, Site, SkillRecord, SourceRow,
+    StateError, StateKey, StateKeyError, StateNs, StateOp, StateRecord, StreamVerdict, SymbolHit,
+    SymbolPage, ToolCallEvent, ToolCallVerdict, ToolData, ToolResultEvent, ToolSpec, TurnOp,
+    TurnOpReply, UsesError, ViewNode, Visibility, WakeError, valid_tool_parameters, valid_version,
 };
 pub use fold::{
     CompactLimits, CompactionExtRecord, CompactionReason, CompactionSummary, DeclaredFold, Effect,
@@ -58,21 +59,22 @@ pub use id::{
 };
 pub use jiff::Timestamp;
 pub use journal::{
-    AssistantStop, Block, Branch, BranchError, BranchMode, DecodeError, Decoded, EncodeError,
-    Entry, EntryKind, Header, InferredPurpose, JobEvent, JobKind, JobOutcome, JournalPart, Mail,
-    Product, Record, ScannedHead, Source, TreeKind, TurnEndStop, VERSION as JOURNAL_VERSION,
-    branch, decode, encode, scan_head,
+    AssistantStop, BEFORE_TURN_SOURCE, Block, Branch, BranchError, BranchMode, DecodeError,
+    Decoded, EncodeError, Entry, EntryKind, Header, InferredPurpose, JobEvent, JobKind, JobOutcome,
+    JournalPart, Mail, Product, Record, ScannedHead, Source, TreeKind, TurnEndStop,
+    VERSION as JOURNAL_VERSION, branch, decode, encode, scan_head,
 };
 pub use model::{
     AssistantPart, Caps, CompactOutcome, CompactedHistory, ContextItem, Family, InferFailure,
     Inference, MAX_SYNTHETIC_DEPTH, ModelInfo, ModelPrice, ModelRequest, ModelRoute, ModelToolSpec,
-    Purpose, ReplaySource, RequestParams, RouteError, Stop, StreamChannel, StreamEvent,
+    PriceTier, Purpose, ReplaySource, RequestParams, RouteError, Stop, StreamChannel, StreamEvent,
     ThinkingLevel, Usage, check_synthetic_chain,
 };
 pub use raw::{RawJson, RawJsonError};
 pub use request::{
     Answer, AnswerValue, CallGrant, Choice, JobEnd, Owner, Preview, Question, Request,
 };
+pub use tokens::{estimate_text_tokens, estimate_tokens};
 pub use update::{ExtState, ExtStatus, Notice, ToolOutcomeView, TurnCause, Update, UpdateKind};
 pub use view::{
     AutoCompaction, EntryView, FileChange, ListQuery, Page, PageReq, PageReqError, SessionInfo,

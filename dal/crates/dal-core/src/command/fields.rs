@@ -23,6 +23,11 @@ pub(super) struct TurnCommandFields {
 }
 
 #[derive(Deserialize)]
+pub(super) struct QueuedCommandFields {
+    pub(super) turn: TurnId,
+}
+
+#[derive(Deserialize)]
 pub(super) struct ScopeCommandFields {
     pub(super) scope: CancelScope,
 }
@@ -98,6 +103,7 @@ impl<'de> Deserialize<'de> for Command {
                 "prompt",
                 "steer",
                 "follow_up",
+                "cancel_queued",
                 "cancel",
                 "set_model",
                 "set_thinking",
@@ -123,6 +129,11 @@ impl<'de> Deserialize<'de> for Command {
                     expect: wire.expect,
                     content: wire.content,
                 })
+            }
+            "cancel_queued" => {
+                let wire: QueuedCommandFields =
+                    sonic_rs::from_str(tagged.raw()).map_err(de::Error::custom)?;
+                Ok(Self::CancelQueued { turn: wire.turn })
             }
             "steer" => {
                 let wire: TurnCommandFields =

@@ -1,4 +1,5 @@
 //! A scripted provider drives one real turn through the public API.
+#![expect(clippy::expect_used, reason = "test assertions abort on failure")]
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::time::Duration;
@@ -18,6 +19,25 @@ impl dal_agent::ext::Hook<dal_core::ext::BeforeTurn, Option<String>> for NoteHoo
     ) -> dal_agent::ext::BoxFuture<'static, Result<Option<String>, dal_agent::ext::HookError>> {
         Box::pin(async { Ok(Some(String::from("hook-note"))) })
     }
+}
+
+/// The `before_turn` text sits in its own reminder right after the user entry.
+fn assert_hook_text_is_its_own_reminder(view: &dal_core::View) {
+    let items = &view.entries.items;
+    let user = items.first().expect("the prompt journals a user entry");
+    let hook = items.get(1).expect("the hook text journals a reminder");
+    assert!(
+        matches!(&user.kind, dal_core::EntryKind::User { parts } if parts.len() == 1),
+        "the hook text is not joined to the user entry: {user:?}"
+    );
+    assert!(
+        matches!(
+            &hook.kind,
+            dal_core::EntryKind::Reminder { source, text }
+                if source.as_ref() == dal_core::BEFORE_TURN_SOURCE && text.as_ref() == "hook-note"
+        ),
+        "the hook text follows as a reminder: {hook:?}"
+    );
 }
 
 #[tokio::test]
@@ -112,11 +132,7 @@ async fn scripted_prompt_runs_a_turn() {
         "turn runs to TurnEnded on the scripted fixture ({last})"
     );
     let view = agent.view(dal_core::PageReq::default()).expect("view");
-    let dump = format!("{view:?}");
-    assert!(
-        dump.contains("hook-note"),
-        "before_turn text joins the journaled entry ({dump})"
-    );
+    assert_hook_text_is_its_own_reminder(&view);
 }
 #[tokio::test]
 async fn login_stores_api_key_at_mode_0600() {
@@ -137,7 +153,15 @@ async fn login_stores_api_key_at_mode_0600() {
         sandbox_helper: None,
     };
     let host = Host::start(product, config, env).await.expect("host");
-    host.login("openai", "sk-test-key").await.expect("login");
+    let (key, pasted) = tokio::sync::oneshot::channel();
+    key.send("sk-test-key".to_owned()).expect("open channel");
+    let (io, _progress) = dal_agent::login::LoginIo::channel(
+        Some(pasted),
+        tokio_util::sync::CancellationToken::new(),
+    );
+    host.login("openai", dal_agent::login::Method::ApiKey, io)
+        .await
+        .expect("login");
     let path = data.join("auth.json");
     let text = std::fs::read_to_string(&path).expect("auth.json");
     assert!(text.contains("sk-test-key"), "key persists in the store");
@@ -150,4 +174,105 @@ async fn login_stores_api_key_at_mode_0600() {
             .mode();
         assert_eq!(mode & 0o777, 0o600, "store is owner-only");
     }
+}
+
+/// A host whose only provider is the scripted fixture and whose default model
+/// is the family-qualified `openai-responses/gpt-6`, which no catalog lists.
+async fn qualified_model_host() -> (Host, Workspace, tempfile::TempDir) {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let data = tmp.path().join("data");
+    let workspace_dir = tmp.path().join("w");
+    std::fs::create_dir_all(&data).expect("data dir");
+    std::fs::create_dir_all(&workspace_dir).expect("workspace dir");
+    let fixture = data.join("script.jsonl");
+    std::fs::write(&fixture, FIXTURE).expect("fixture");
+    let user = format!(
+        "model = \"openai-responses/gpt-6\"\n\n[providers.scripted]\nfixture = \"{}\"\n",
+        fixture.to_string_lossy().replace('\\', "\\\\")
+    );
+    let config =
+        Config::load(ConfigProduct::Dalgon, &data, "", Some(user.as_str())).expect("config");
+    let product = Product {
+        name: "dal",
+        data_root: data,
+        defaults: "",
+        extensions: Vec::new(),
+        bundled: Vec::new(),
+    };
+    let env = Env {
+        vars: BTreeMap::new(),
+        cwd: workspace_dir.clone(),
+        sandbox_helper: None,
+    };
+    let host = Host::start(product, config, env).await.expect("host");
+    let workspace = Workspace::new(workspace_dir).expect("workspace");
+    (host, workspace, tmp)
+}
+
+/// A family-qualified model id the catalog never lists still reaches the
+/// scripted provider: the default route keeps its family but not its prefix.
+#[tokio::test]
+async fn scripted_turn_ends_on_a_family_qualified_unlisted_model() {
+    let (host, workspace, _tmp) = qualified_model_host().await;
+    let agent = host
+        .open(SessionRef::Ephemeral { workspace }, ClientId::new("probe"))
+        .await
+        .expect("open");
+    let mut subscription = agent.subscribe(None).expect("subscribe");
+    agent
+        .submit(Command::Prompt {
+            expect: Expect::Idle,
+            content: vec![Part::Text { text: "hi".into() }],
+        })
+        .await
+        .expect("submit");
+    let stop = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let delivery = subscription.next().await.expect("stream open");
+            if let dal_agent::Delivery::Update(update) = delivery
+                && let dal_core::UpdateKind::TurnEnded { stop, .. } = update.kind
+            {
+                break stop;
+            }
+        }
+    })
+    .await
+    .expect("turn ends");
+    assert_eq!(stop, dal_core::Stop::EndTurn);
+}
+
+/// The router relay resolves a route by the same rule as a session turn: a
+/// route that names an unlisted model by family reaches its provider.
+#[tokio::test]
+async fn relay_opens_a_family_route_for_an_unlisted_model() {
+    let (host, _workspace, _tmp) = qualified_model_host().await;
+    let route = dal_core::ModelRoute::Api {
+        family: dal_core::Family::Responses,
+        model: "gpt-6".into(),
+    };
+    let request = dal_core::ModelRequest {
+        purpose: dal_core::Purpose::Turn,
+        model: route.clone(),
+        system: "".into(),
+        tools: std::sync::Arc::from(Vec::new()),
+        context: std::sync::Arc::from(vec![dal_core::ContextItem::User {
+            parts: vec![Part::Text { text: "hi".into() }],
+        }]),
+        params: dal_core::RequestParams::default(),
+        cache_key: None,
+    };
+    let mut stream = host
+        .relay(ClientId::new("router"), route, request)
+        .await
+        .expect("relay resolves the unlisted model");
+    let mut text = String::new();
+    while let Some(item) = tokio::time::timeout(Duration::from_secs(10), stream.next())
+        .await
+        .expect("stream item in time")
+    {
+        if let dal_provider::StreamEvent::TextDelta { text: delta } = item.expect("event") {
+            text.push_str(&delta);
+        }
+    }
+    assert_eq!(text, "Hello");
 }

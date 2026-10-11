@@ -54,7 +54,7 @@ pub fn model_options(models: Vec<ModelInfo>) -> Vec<ModelOption> {
         .collect()
 }
 
-fn route_label(route: &ModelRoute) -> String {
+pub(crate) fn route_label(route: &ModelRoute) -> String {
     match route {
         ModelRoute::Api { family, model } => {
             let provider = match family {
@@ -78,6 +78,8 @@ pub(crate) enum PickerAction {
         enabled: bool,
         save: dal_core::command::Save,
     },
+    /// Open the remove-all confirmation.
+    ConfirmLogoutAll,
 }
 
 #[derive(Clone, Debug)]

@@ -2,7 +2,8 @@
 //! Monitor lifecycle: the `monitor` tool contract, watch validation with the
 //! exact error texts, config parsing, and stop/rearm.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt::Write as _;
 
 use dal_core::{JobId, RawJson, Timestamp};
 use regex_automata::meta::Regex;
@@ -14,16 +15,40 @@ use super::super::JobsView;
 pub(crate) const MONITOR_DESCRIPTION: &str = "Watch the output of one of your background exec jobs and get the lines that match filter as messages, without polling. The watch ends when the job ends; the job's own report still arrives. At most 16 watches at once.";
 
 /// Input schema for the model-visible `monitor` tool.
-pub(crate) const MONITOR_SCHEMA: &str = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"enum\":[\"watch\",\"stop\",\"rearm\"]},\"job\":{\"type\":\"string\",\"description\":\"The UUIDv7 job id. watch only.\"},\"filter\":{\"type\":\"string\",\"description\":\"A regex; each matching output line is an event. watch only.\"},\"description\":{\"type\":\"string\",\"maxLength\":80},\"id\":{\"type\":\"string\",\"description\":\"The monitor id, m<n>. stop and rearm only.\"}},\"required\":[\"action\"],\"additionalProperties\":false}";
+pub(crate) const MONITOR_SCHEMA: &str = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"enum\":[\"watch\",\"stop\",\"rearm\"]},\"job\":{\"type\":\"string\",\"description\":\"The UUIDv7 job id. watch only.\"},\"filter\":{\"type\":\"string\",\"maxLength\":1024,\"description\":\"A regex; each matching output line is an event. watch only.\"},\"description\":{\"type\":\"string\",\"maxLength\":80},\"id\":{\"type\":\"string\",\"description\":\"The monitor id, m<n>. stop and rearm only.\"}},\"required\":[\"action\"],\"additionalProperties\":false}";
 
-/// Maximum live monitors per session, including paused ones.
+/// Pause notice delivered with the wake that reaches the wake budget.
+pub(crate) const PAUSE_NOTICE: &str = "Monitor paused after repeated updates. The job's report still arrives when it ends; use monitor rearm only for intermediate events.";
+
+/// Mute notice delivered once when a monitor reaches its fire budget.
+pub(crate) const MUTED_NOTICE: &str = "auto-muted: fire budget (200/24h) reached; rearm to resume";
+
+/// Maximum live monitors per session, including paused and muted ones.
 pub(crate) const MAX_LIVE_MONITORS: usize = 16;
+
+/// Longest accepted `filter` regex source, in Unicode scalar values.
+pub(crate) const MAX_FILTER_CHARS: usize = 1024;
+
+/// Compiled-NFA heap ceiling for one `filter`, in bytes.
+const FILTER_SIZE_LIMIT: usize = 1 << 20;
+
+/// Matched lines delivered per monitor in a rolling 24 hours.
+pub(crate) const FIRE_BUDGET: usize = 200;
+
+/// Output characters retained per line (Unicode scalar values).
+pub(crate) const MAX_RETAINED_LINE: usize = 65_536;
+
+/// Shared-queue character overhead reserved outside `max_chars`.
+pub(crate) const QUEUE_OVERHEAD: u64 = 512;
 
 /// Monitor delivery state owned by the orchestration core's one task.
 #[derive(Debug)]
 pub(crate) struct MonitorState {
     pub(super) next_id: u64,
     pub(super) monitors: HashMap<MonitorId, Monitor>,
+    pub(super) output: VecDeque<OutputLine>,
+    pub(super) last_flush: Option<Timestamp>,
+    pub(super) monitor_only_wakes: u16,
 }
 
 impl Default for MonitorState {
@@ -31,6 +56,9 @@ impl Default for MonitorState {
         Self {
             next_id: 1,
             monitors: HashMap::new(),
+            output: VecDeque::new(),
+            last_flush: None,
+            monitor_only_wakes: 0,
         }
     }
 }
@@ -43,8 +71,15 @@ impl MonitorState {
     pub(crate) fn live_count(&self) -> usize {
         self.monitors
             .values()
-            .filter(|monitor| !monitor.stopped && !monitor.paused)
+            .filter(|monitor| !monitor.stopped && !monitor.paused && !monitor.muted)
             .count()
+    }
+
+    /// The distinct jobs with at least one retained watch, so one line read
+    /// serves every watch on the same job.
+    pub(crate) fn job_ids(&self) -> Vec<JobId> {
+        let jobs: HashSet<JobId> = self.monitors.values().map(|monitor| monitor.job).collect();
+        jobs.into_iter().collect()
     }
 }
 
@@ -71,8 +106,24 @@ impl MonitorId {
 pub(crate) struct Monitor {
     pub(super) job: JobId,
     pub(super) job_display: Box<str>,
+    pub(super) filter: Regex,
+    pub(super) description: Box<str>,
     pub(super) paused: bool,
     pub(super) stopped: bool,
+    pub(super) muted: bool,
+    pub(super) matched_at: VecDeque<Timestamp>,
+    pub(super) matched_lines: u32,
+    pub(super) last_batch_at: Option<Timestamp>,
+    pub(super) last_batch_fingerprint: Option<Box<str>>,
+    pub(super) overflow_lines: u32,
+}
+
+/// One queued matching output line.
+#[derive(Clone, Debug)]
+pub(crate) struct OutputLine {
+    pub(super) monitor: MonitorId,
+    pub(super) text: Box<str>,
+    pub(super) at: Timestamp,
 }
 
 /// Monitor table configuration with plan defaults.
@@ -186,6 +237,14 @@ fn checked_integer(
     Ok(raw)
 }
 
+/// Renders the cross-table coherence error for session-start validation,
+/// which the orchestration core owns across all its tables.
+pub(crate) fn coherence_error(off_table: &str, on_table: &str) -> String {
+    format!(
+        "orchestration: [plugin.orchestration.{off_table}] cannot be off while {on_table} is on."
+    )
+}
+
 /// A validated `monitor` tool call.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct MonitorRequest {
@@ -217,6 +276,8 @@ pub(crate) enum MonitorError {
     NotRunning { job: Box<str> },
     #[error("monitor: filter is not a valid regex: {error}.")]
     BadFilter { error: Box<str> },
+    #[error("monitor: filter is longer than {max} characters.")]
+    FilterTooLong { max: usize },
     #[error("monitor: 16 monitors are live; stop one first.")]
     Full,
     #[error("monitor: no monitor {id}.")]
@@ -259,6 +320,48 @@ impl MonitorReply {
             Self::Rearmed { monitor } => format!("rearmed {}.", monitor.render()),
         }
     }
+}
+
+/// One deliverable P3 batch: event lines under one header.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct MonitorBatch {
+    pub monitor: MonitorId,
+    pub job_display: Box<str>,
+    pub description: Box<str>,
+    pub lines: Vec<Box<str>>,
+    pub dropped: u32,
+}
+
+impl MonitorBatch {
+    /// Renders the header, the event lines, and the overflow trailer.
+    pub(crate) fn text(&self) -> String {
+        let mut text = format!(
+            "Monitor {} ({}) from job {}:",
+            self.monitor.render(),
+            self.description,
+            self.job_display
+        );
+        for line in &self.lines {
+            text.push('\n');
+            text.push_str(line);
+        }
+        if self.dropped > 0 {
+            let _ = write!(
+                text,
+                "\n({} more lines from {} were dropped.)",
+                self.dropped, self.description
+            );
+        }
+        text
+    }
+}
+
+/// Reducer effects returned to the orchestration core for P3 routing.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum MonitorEffect {
+    Batch(MonitorBatch),
+    Notice(Box<str>),
+    Stopped(MonitorId),
 }
 
 /// Reads one optional string member; a wrong-typed member counts as absent
@@ -311,6 +414,11 @@ pub(crate) fn parse_request(args: &RawJson) -> Result<MonitorRequest, MonitorErr
                     field: "filter".into(),
                 });
             };
+            if filter.chars().count() > MAX_FILTER_CHARS {
+                return Err(MonitorError::FilterTooLong {
+                    max: MAX_FILTER_CHARS,
+                });
+            }
             Ok(MonitorRequest {
                 action: MonitorAction::Watch {
                     job,
@@ -377,9 +485,6 @@ pub(crate) fn watch(
             if !jobs.is_live_top_level_exec(job_id) {
                 return Err(MonitorError::NotRunning { job: job.clone() });
             }
-            Regex::new(filter).map_err(|error| MonitorError::BadFilter {
-                error: error.to_string().into(),
-            })?;
             let live = state
                 .monitors
                 .values()
@@ -388,6 +493,12 @@ pub(crate) fn watch(
             if live >= MAX_LIVE_MONITORS {
                 return Err(MonitorError::Full);
             }
+            let compiled = Regex::builder()
+                .configure(Regex::config().nfa_size_limit(Some(FILTER_SIZE_LIMIT)))
+                .build(filter)
+                .map_err(|error| MonitorError::BadFilter {
+                    error: error.to_string().into(),
+                })?;
             let id = MonitorId(state.next_id);
             state.next_id = state.next_id.saturating_add(1);
             let reply_description: Box<str> = description
@@ -398,8 +509,16 @@ pub(crate) fn watch(
                 Monitor {
                     job: job_id,
                     job_display: job.clone(),
+                    filter: compiled,
+                    description: reply_description.clone(),
                     paused: false,
                     stopped: false,
+                    muted: false,
+                    matched_at: VecDeque::new(),
+                    matched_lines: 0,
+                    last_batch_at: None,
+                    last_batch_fingerprint: None,
+                    overflow_lines: 0,
                 },
             );
             Ok(MonitorReply::Watching {
@@ -433,12 +552,22 @@ pub(crate) fn watch(
                 });
             }
             monitor.stopped = false;
+            monitor.muted = false;
             monitor.paused = false;
             Ok(MonitorReply::Rearmed {
                 monitor: monitor_id,
             })
         }
     }
+}
+
+/// Ends every watch on an ended job and drops its queued lines; a later
+/// rearm reports `no monitor`.
+pub(crate) fn on_job_end(state: &mut MonitorState, job: JobId) {
+    state.monitors.retain(|_, monitor| monitor.job != job);
+    state
+        .output
+        .retain(|line| state.monitors.contains_key(&line.monitor));
 }
 
 /// Stops every live watch without ending it; rearms stay possible while

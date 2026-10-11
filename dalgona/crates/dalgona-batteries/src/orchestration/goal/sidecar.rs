@@ -6,7 +6,6 @@ use dal_core::Timestamp;
 use serde::{Deserialize, Serialize};
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
 
-use super::super::monitor::GoalPreview;
 use super::super::{ControllerMode, GoalStatus};
 
 /// Wire name for one goal lifecycle state.
@@ -98,7 +97,7 @@ mod controller_serde {
 
 /// Renders one timestamp as RFC 3339 UTC with exactly three fractional
 /// digits and `Z`, truncating sub-millisecond precision.
-fn format_millis(stamp: Timestamp) -> String {
+pub(crate) fn format_millis(stamp: Timestamp) -> String {
     let text = stamp.to_string();
     let body = text.strip_suffix('Z').unwrap_or(&text);
     match body.split_once('.') {
@@ -261,9 +260,17 @@ pub(crate) enum GoalError {
         "goal: the goal file is damaged: {error}. dalgona continues no goal until you run /goal clear."
     )]
     Damaged { error: Box<str> },
+    /// A sidecar write failed.
+    #[error("goal: saving the goal failed: {message}.")]
+    SaveFailed { message: Box<str> },
     /// The sidecar service is unavailable.
     #[error("goal: the session store is not available: {message}.")]
-    StoreUnavailable { message: Box<str> },
+    StoreUnavailable {
+        message: Box<str>,
+        /// The user or the host refused the service grant (a decline, or a
+        /// denial with no front end to ask).
+        refused: bool,
+    },
     /// An unfinished goal blocks creation.
     #[error(
         "create_goal: this session already has an unfinished goal ({id}, {status}). Use update_goal when it is complete."
@@ -399,20 +406,4 @@ pub(crate) fn encode_sidecar(sidecar: &GoalSidecar) -> Result<Vec<u8>, GoalError
     let mut text = sonic_rs::to_string(sidecar).map_err(|error: sonic_rs::Error| damaged(error))?;
     text.push('\n');
     Ok(text.into_bytes())
-}
-
-/// Projects one goal to its read-only status preview, truncating the
-/// objective to its first 32 Unicode scalar values.
-#[must_use]
-pub(crate) fn goal_projection(goal: Option<&Goal>) -> Option<GoalPreview> {
-    goal.map(|goal| GoalPreview {
-        id: goal.id.clone(),
-        status: goal.status,
-        objective: goal
-            .objective
-            .chars()
-            .take(32)
-            .collect::<String>()
-            .into_boxed_str(),
-    })
 }

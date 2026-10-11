@@ -3,12 +3,19 @@ use super::helpers::{
     unsettled_calls, zero_usage,
 };
 use super::replay::TOOL_LOST;
-use super::types::TurnFlags;
+use super::types::{Overflow, TurnFlags};
 use super::{
     CallId, Effect, Emit, Entry, EntryKind, Notice, Part, PartialResponse, Phase, Record,
     Rejection, RequestParams, Session, SettledOutcome, Step, Stop, ToolOutcomeView, TreeDelta,
     TurnEndStop, TurnId, TurnSource, TurnStage, UpdateKind,
 };
+
+/// One dispatcher result: the call, how it ended, and how long its tool ran.
+pub(super) struct Settlement {
+    pub(super) call: CallId,
+    pub(super) outcome: SettledOutcome,
+    pub(super) elapsed_ms: Option<u64>,
+}
 
 impl Session {
     pub(super) fn call_started(
@@ -46,8 +53,7 @@ impl Session {
     pub(super) fn settled(
         &mut self,
         turn: TurnId,
-        call: &CallId,
-        outcome: SettledOutcome,
+        settlement: Settlement,
         now: jiff::Timestamp,
         emit: &mut Emit,
         effects: &mut Vec<Effect>,
@@ -60,7 +66,12 @@ impl Session {
             } if *active == turn => (*round, pending.clone()),
             _ => return Ok(()),
         };
-        let Some(index) = pending.iter().position(|item| item.call == *call) else {
+        let Settlement {
+            call,
+            outcome,
+            elapsed_ms,
+        } = settlement;
+        let Some(index) = pending.iter().position(|item| item.call == call) else {
             return Ok(());
         };
         let item = pending.remove(index);
@@ -74,7 +85,7 @@ impl Session {
                 false,
             ),
         };
-        self.result_entry(&item.call, &item.name, text.clone(), is_error, now, emit)?;
+        self.result_entry(&item, text.clone(), is_error, elapsed_ms, now, emit)?;
         if succeeded
             && let Some(tool) = item.promotes
             && !self.promoted.contains(&tool)
@@ -93,6 +104,7 @@ impl Session {
                 is_error,
                 text,
                 images: Vec::new(),
+                elapsed_ms,
             },
         });
         if pending.is_empty() {
@@ -287,6 +299,12 @@ impl Session {
         emit: &mut Emit,
         effects: &mut Vec<Effect>,
     ) -> Result<(), Rejection> {
+        // The mark reaches only the in-memory stop effect, never the journal
+        // record, and is consumed here whether or not the turn is active.
+        let overflowed = self.turn_flags.overflow == Overflow::Unrecovered;
+        if overflowed {
+            self.turn_flags.overflow = Overflow::Clear;
+        }
         let stage = match &self.phase {
             Phase::Running {
                 turn: active,
@@ -317,12 +335,15 @@ impl Session {
             &stop,
             TurnEndStop::Done | TurnEndStop::Length | TurnEndStop::Filter | TurnEndStop::MaxSteps
         );
-        if let TurnEndStop::Failed { message } = &stop {
+        if let TurnEndStop::Failed { message, .. } = &stop {
             emit.updates.push(UpdateKind::Notice(Notice {
                 turn: Some(turn),
                 kind: "turn.failed".into(),
                 text: message.clone(),
             }));
+        }
+        if matches!(stop, TurnEndStop::Cancelled) {
+            self.cancel_open_questions(turn, now, emit);
         }
         emit.records.push(Record::TurnEnd {
             at: now,
@@ -345,6 +366,7 @@ impl Session {
         effects.push(Effect::Stop {
             turn,
             stop: update_stop,
+            overflowed,
         });
         Ok(())
     }
@@ -390,7 +412,8 @@ impl Session {
         if follow_up.is_none() && !self.queued_inputs.is_empty() {
             self.discard_queued(turn, emit);
         }
-        self.open_questions.clear();
+        self.open_questions
+            .retain(|(_, question)| question.turn != Some(turn));
         self.argument_overrides.clear();
         self.pending_compaction = None;
         self.turn_flags = TurnFlags::default();

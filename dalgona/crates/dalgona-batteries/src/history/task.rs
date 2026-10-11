@@ -9,12 +9,11 @@
 //! runs while a turn is active.
 //!
 //! Open seams (owned by sibling parts, recorded in the node report): the
-//! `dream.json` service name (`Name` rejects the dot, so the task uses
-//! `dream` and the `Name`-to-path mapping belongs to the sidecar backend),
-//! and letter body text for the judge summary (letter records carry ids,
-//! digests, spans, and prior summaries, but no journal text, so the shared
-//! context is assembled from what the records carry until the prompt skills
-//! and letter part shares its text assembly).
+//! `dream.json` sidecar uses the sidecar file-name grammar, and letter body
+//! text for the judge summary (letter records carry ids, digests, spans, and
+//! prior summaries, but no journal text, so the shared context is assembled
+//! from what the records carry until the prompt skills and letter part shares
+//! its text assembly).
 
 mod consolidate;
 
@@ -26,7 +25,7 @@ use std::time::Duration;
 
 use dal_agent::error::ServiceError;
 use dal_agent::ext::{Caller, Services};
-use dal_core::ext::{JobsOp, Name, SidecarOp};
+use dal_core::ext::{JobsOp, SidecarName, SidecarOp};
 use dal_core::{DenyReason, JobId, Notice, SessionId};
 use dal_ext::judge::Judge;
 use jiff::{Timestamp, ToSpan};
@@ -199,7 +198,7 @@ impl Task {
 
     /// Loads `dream.json` and rebuilds counts from the letter records.
     async fn startup(&mut self) {
-        let Ok(name) = Name::parse(DREAM_SIDECAR_NAME) else {
+        let Ok(name) = SidecarName::parse(DREAM_SIDECAR_NAME) else {
             self.unavailable = true;
             return;
         };
@@ -208,7 +207,9 @@ impl Task {
             .sidecar(&self.caller, SidecarOp::Read { name })
             .await
         {
-            Err(ServiceError::Denied(DenyReason::Unavailable { what })) if &*what == "sidecar" => {
+            Err(ServiceError::Denied(DenyReason::Unavailable { what }))
+                if &*what == "sidecar (ephemeral session)" =>
+            {
                 self.unavailable = true;
             }
             Err(_) | Ok(None) => {}
@@ -320,3 +321,4 @@ impl Task {
         self.services.notify(&self.caller, notice);
     }
 }
+// weave: run 'weave explain dalgona/crates/dalgona-batteries/src/history/task.rs' for per-hunk detail, 'weave check' to verify your resolution

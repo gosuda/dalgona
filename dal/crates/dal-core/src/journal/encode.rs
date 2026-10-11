@@ -117,6 +117,7 @@ fn encode_message_entries(record: &Record) -> Result<Vec<u8>, EncodeError> {
                 error,
                 parts,
                 changes,
+                elapsed_ms,
             } = &entry.kind
             else {
                 return Err(EncodeError::MismatchedKind);
@@ -131,6 +132,7 @@ fn encode_message_entries(record: &Record) -> Result<Vec<u8>, EncodeError> {
                 error: *error,
                 parts: JournalPartsWire(parts),
                 changes,
+                elapsed_ms: *elapsed_ms,
             })
         }
         Record::Reminder(entry) => {

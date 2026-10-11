@@ -61,15 +61,18 @@ fn build_opts(
     let env = EnvFacts {
         stdin_tty: snapshot.stdin_tty,
         path: vars.get(OsStr::new("PATH")).cloned(),
+        home: owned(vars, "HOME").or_else(|| owned(vars, "USERPROFILE")),
         term: owned(vars, "TERM"),
         term_program: owned(vars, "TERM_PROGRAM"),
         colorterm: owned(vars, "COLORTERM"),
         colorfgbg: owned(vars, "COLORFGBG"),
         wt_session: owned(vars, "WT_SESSION"),
         wt_version: owned(vars, "WT_VERSION"),
-        tmux: vars.contains_key(OsStr::new("TMUX")),
-        sty: vars.contains_key(OsStr::new("STY")),
-        zellij: vars.contains_key(OsStr::new("ZELLIJ")),
+        multiplexer: dal_tui::MultiplexerFacts {
+            tmux: vars.contains_key(OsStr::new("TMUX")),
+            sty: vars.contains_key(OsStr::new("STY")),
+            zellij: vars.contains_key(OsStr::new("ZELLIJ")),
+        },
         width_mode: WidthMode::from_locale([
             captured(vars, "LC_ALL").unwrap_or(""),
             captured(vars, "LC_CTYPE").unwrap_or(""),
@@ -84,6 +87,10 @@ fn build_opts(
             ConfigScreen::Inline => Screen::Inline,
             ConfigScreen::Fullscreen => Screen::Fullscreen,
         },
+        default_model: config
+            .model()
+            .filter(|model| !model.is_empty())
+            .map(Into::into),
         theme_request: match config.theme() {
             "auto" => ThemeRequest::Auto,
             "palette" => ThemeRequest::Palette,
@@ -310,11 +317,10 @@ fn remote_model_options(
     models
         .into_iter()
         .map(|model| {
-            let reference = match model.provider.as_str() {
-                "openai" | "openai-codex" | "anthropic" => {
-                    format!("{}/{}", model.provider, model.id)
-                }
-                _ => model.id,
+            let reference = if dal_provider::find(&model.provider).is_some() {
+                format!("{}/{}", model.provider, model.id)
+            } else {
+                model.id
             };
             dal_tui::picker::ModelOption {
                 label: format!("{} · {reference}", model.name),

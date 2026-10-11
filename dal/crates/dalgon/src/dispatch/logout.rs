@@ -1,40 +1,45 @@
 use std::{io::Write, path::Path, process::ExitCode};
 
-use dal_provider::{AuthStore, Catalog, CatalogSource, ProviderConfig, ProviderError};
+use dal_agent::{HostError, Product};
+use dal_provider::{Catalog, CatalogSource, ProviderConfig, ProviderError};
 
-use crate::{Startup, cli, exit, two_lines};
+use super::login::{AuthHost, shutdown_auth_host, start_auth_host};
+use crate::{Config, Startup, cli, exit, two_lines};
 
-/// Removes one stored provider credential or every credential.
-pub(crate) async fn run(args: cli::ProviderArgs, startup: Startup) -> ExitCode {
-    let providers: Vec<&str> = match args.provider.as_deref() {
-        Some(provider) if super::login::LOGIN_PROVIDERS.contains(&provider) => vec![provider],
-        Some(provider) => {
-            return two_lines(
-                [
-                    format!("dalgon: unknown provider \"{provider}\""),
-                    crate::cli::texts::LOGIN_PROVIDER_HINT.into(),
-                ],
-                exit::ExitKind::Usage,
-            );
-        }
-        None => super::login::LOGIN_PROVIDERS.to_vec(),
-    };
-    let all = args.provider.is_none();
-    let path = startup.data_root.join("auth.json");
-    let mut removed = Vec::new();
-    for provider in providers {
-        let mut store = match AuthStore::load(&path) {
-            Ok(store) => store,
-            Err(error) => return auth_error(&error, &path),
-        };
-        if store.credential(provider).is_none() {
-            continue;
-        }
-        if let Err(error) = dal_provider::logout(provider, &mut store).await {
-            return auth_error(&error, &path);
-        }
-        removed.push(provider);
+/// Removes one stored provider credential or every credential through the
+/// shared [`dal_agent::Host`] operation, the same path the terminal and RPC
+/// front ends use.
+pub(crate) async fn run(args: cli::ProviderArgs, startup: Startup, product: Product) -> ExitCode {
+    if let Some(provider) = args.provider.as_deref()
+        && !super::login::is_login_provider(provider)
+    {
+        return super::login::unknown_provider(provider);
     }
+    let all = args.provider.is_none();
+    let config = startup.config.clone();
+    let AuthHost {
+        host, auth_path, ..
+    } = match start_auth_host(startup, product).await {
+        Ok(auth) => auth,
+        Err(code) => return code,
+    };
+    let path = auth_path;
+    let mut removed: Vec<Box<str>> = Vec::new();
+    for provider in args
+        .provider
+        .as_deref()
+        .map_or_else(|| super::login::provider_ids().collect(), |one| vec![one])
+    {
+        match host.logout(Some(provider)).await {
+            Ok(done) => removed.extend(done),
+            Err(error) => {
+                shutdown_auth_host(host).await;
+                return logout_error(&error, &path);
+            }
+        }
+    }
+    shutdown_auth_host(host).await;
+    let removed: Vec<&str> = removed.iter().map(AsRef::as_ref).collect();
     if all {
         let message = if removed.is_empty() {
             crate::cli::texts::LOGOUT_NONE
@@ -42,7 +47,7 @@ pub(crate) async fn run(args: cli::ProviderArgs, startup: Startup) -> ExitCode {
             crate::cli::texts::LOGOUT_ALL
         };
         let _ = writeln!(std::io::stdout().lock(), "{message}");
-        warn_saved_model_provider(&startup, &removed);
+        warn_saved_model_provider(&config, &removed);
         return exit::code(exit::ExitKind::Success);
     }
     let provider = args.provider.as_deref().unwrap_or_default();
@@ -52,28 +57,27 @@ pub(crate) async fn run(args: cli::ProviderArgs, startup: Startup) -> ExitCode {
         format!("Removed credentials for {provider}.")
     };
     let _ = writeln!(std::io::stdout().lock(), "{message}");
-    warn_saved_model_provider(&startup, &removed);
+    warn_saved_model_provider(&config, &removed);
     exit::code(exit::ExitKind::Success)
 }
 
-fn warn_saved_model_provider(startup: &Startup, removed: &[&str]) {
+fn warn_saved_model_provider(config: &Config, removed: &[&str]) {
     if removed.is_empty() {
         return;
     }
-    let Ok(config) = ProviderConfig::from_config(&startup.config) else {
+    let Ok(provider_config) = ProviderConfig::from_config(config) else {
         return;
     };
-    let Some(reference) = startup.config.model() else {
+    let Some(reference) = config.model() else {
         return;
     };
-    let sources = config
+    let sources = provider_config
         .providers
         .iter()
         .cloned()
         .map(|provider| (provider, CatalogSource::Typed))
         .collect();
-    let aliases = startup
-        .config
+    let aliases = config
         .aliases()
         .iter()
         .map(|(name, target)| (name.clone(), target.clone()))
@@ -89,8 +93,15 @@ fn warn_saved_model_provider(startup: &Startup, removed: &[&str]) {
     let _ = writeln!(std::io::stderr().lock(), "{message}");
 }
 
+fn logout_error(error: &HostError, path: &Path) -> ExitCode {
+    let HostError::Provider(error) = error else {
+        return super::login::host_auth_error("logout", error, path);
+    };
+    auth_error(error, path)
+}
+
 fn auth_error(error: &ProviderError, path: &Path) -> ExitCode {
-    let (what, hint) = match &error {
+    let (what, hint) = match error {
         ProviderError::AuthFileInvalid { message, .. } => (
             format!("dalgon: auth.json is not valid JSON: {message}"),
             crate::cli::texts::AUTH_INVALID_HINT.to_owned(),

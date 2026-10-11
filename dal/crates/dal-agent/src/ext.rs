@@ -9,20 +9,35 @@ use std::num::NonZeroU32;
 use crate::Env;
 
 mod builder;
+
 pub mod command;
+
 pub mod compact;
+
 pub mod docs;
+
 pub mod generation;
+
 pub mod grants;
+
 pub mod hooks;
+
 pub mod mcp;
+
 pub(crate) mod overlay;
+
 pub mod prompt;
+
 pub mod scheme;
+
 pub mod scope;
+
 pub mod script;
+
 pub mod services;
+
 pub(crate) mod synthetic;
+
 pub mod tool;
 
 pub use builder::{Extension, ExtensionBuilder};
@@ -58,6 +73,8 @@ use dal_core::{
     Caps, Inference, ModelId, ModelRequest, Name, Origin, RawJson, ScopeSpec, ServiceSet,
     SessionId, TurnId,
 };
+
+use crate::session::service_grants::Invocation as CallInvocation;
 pub use dal_provider::EventStream;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -76,6 +93,7 @@ pub struct Caller {
     state_version: NonZeroU32,
     kind: CallerKind,
     turn: Option<TurnId>,
+    invocation: Option<CallInvocation>,
 }
 
 /// How a [`Caller`] was minted.
@@ -110,7 +128,21 @@ impl Caller {
             state_version,
             kind,
             turn,
+            invocation: None,
         }
+    }
+
+    /// Names the dispatched tool call this caller was minted for.
+    #[must_use]
+    pub(crate) fn with_invocation(mut self, invocation: CallInvocation) -> Self {
+        self.invocation = Some(invocation);
+        self
+    }
+
+    /// The dispatched tool call this caller was minted for, when it came
+    /// from one.
+    pub(crate) fn invocation(&self) -> Option<CallInvocation> {
+        self.invocation
     }
 
     /// Borrows the owning extension name.

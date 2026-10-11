@@ -93,6 +93,16 @@ impl Default for CallState {
     }
 }
 
+/// The scalars one judge call needs, grouped so `call` stays under the
+/// argument limit.
+struct CallSpec<'a> {
+    feature: &'a str,
+    questions: usize,
+    turn: Option<TurnId>,
+    deadline_ms: Option<u64>,
+    system: &'static str,
+}
+
 impl Judge {
     /// Opens or retrieves the live judge for one session.
     ///
@@ -117,7 +127,7 @@ impl Judge {
             services,
             caller,
             session_route,
-            session_model_id: _,
+            session_model_id,
         } = open;
         let model = if config.model.is_empty() {
             session_route
@@ -136,8 +146,15 @@ impl Judge {
         let probe_result = services.infer(&caller, probe).await;
         let (gate, model_id) = match probe_result {
             Ok(_) if config.gate == GateSetting::Off => (Gate::Off, Box::from("")),
-            Ok(inference) => {
-                let model_id = Box::<str>::from(inference_text(inference).trim());
+            Ok(_) => {
+                // The probe reply is model output, never an identity: the
+                // ledger names the configured judge model, else the
+                // session's resolved model.
+                let model_id = if config.model.is_empty() {
+                    session_model_id
+                } else {
+                    Box::<str>::from(&*config.model)
+                };
                 (
                     Gate::Ready {
                         model_id: model_id.clone(),
@@ -246,11 +263,13 @@ impl Judge {
         let questions = Arc::new(questions);
         let render_questions = Arc::clone(&questions);
         self.call(
-            feature,
-            question_count,
-            turn,
-            deadline_ms,
-            SYSTEM_LINE,
+            CallSpec {
+                feature,
+                questions: question_count,
+                turn,
+                deadline_ms,
+                system: SYSTEM_LINE,
+            },
             move || render_envelope(shared, render_questions.as_slice()),
             move |reply| parse_answers(reply, questions.as_slice()),
         )
@@ -266,11 +285,13 @@ impl Judge {
         validate_shared(shared)?;
         self.ensure_ready()?;
         self.call(
-            "history",
-            1,
-            None,
-            None,
-            SUMMARY_SYSTEM_LINE,
+            CallSpec {
+                feature: "history",
+                questions: 1,
+                turn: None,
+                deadline_ms: None,
+                system: SUMMARY_SYSTEM_LINE,
+            },
             || render_summary(shared, prompt),
             |reply| Ok(reply.to_owned()),
         )
@@ -292,11 +313,7 @@ impl Judge {
 
     async fn call<T, Render, Parse>(
         &self,
-        feature: &str,
-        questions: usize,
-        turn: Option<TurnId>,
-        deadline_ms: Option<u64>,
-        system: &'static str,
+        spec: CallSpec<'_>,
         render: Render,
         parse: Parse,
     ) -> Result<T, JudgeError>
@@ -305,6 +322,13 @@ impl Judge {
         Render: FnOnce() -> String + Send,
         Parse: FnOnce(&str) -> Result<T, JudgeError> + Send,
     {
+        let CallSpec {
+            feature,
+            questions,
+            turn,
+            deadline_ms,
+            system,
+        } = spec;
         let (call, exhausted) = self.reserve_call(turn);
         let mut settlement =
             CallSettlement::new(Arc::clone(&self.inner), call, turn, feature, questions);
@@ -471,10 +495,6 @@ fn split_inference(inference: Inference) -> (String, u64, u64) {
         }
     }
     (text, input_tokens, output_tokens)
-}
-
-fn inference_text(inference: Inference) -> String {
-    split_inference(inference).0
 }
 
 fn provider_error(error: &ServiceError) -> JudgeError {

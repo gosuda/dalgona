@@ -218,7 +218,7 @@ pub(crate) async fn decode_codex_events<S>(
     model: Box<str>,
     retained_users: Vec<RawJson>,
     read_failed: &AtomicBool,
-    token: &str,
+    secrets: &[Box<str>],
     cancel: &CancellationToken,
 ) -> AttemptResult
 where
@@ -251,7 +251,9 @@ where
         let terminal = match decoder.feed(&event.data, &mut ignored) {
             Ok(terminal) => terminal,
             Err(error) => {
-                return Err(AttemptFailure::Provider(redact_stream_error(error, token)));
+                return Err(AttemptFailure::Provider(redact_stream_error(
+                    error, secrets,
+                )));
             }
         };
         let head: CompactEventHead = sonic_rs::from_str(&event.data).map_err(|error| {

@@ -34,6 +34,7 @@ use super::{
 use crate::host::HostShared;
 use crate::host::ops::request_reference;
 use crate::session::SessionHandle;
+use crate::session::contain::{contained, crashed_tool};
 use crate::session::turn::{RequestDeps, StreamConverter, infer_stream};
 
 mod relay;
@@ -285,10 +286,6 @@ fn scoped(inner: EventStream, lineage: Lineage, guard: DropGuard) -> EventStream
 }
 
 /// Runs one registered model for `request` and returns its stream.
-#[expect(
-    clippy::too_many_lines,
-    reason = "cohesive stream-opening state machine; extraction would split one invariant"
-)]
 pub(crate) async fn open(
     deps: &RequestDeps,
     found: Found,
@@ -303,21 +300,7 @@ pub(crate) async fn open(
         return failed(failure_of(error));
     }
     let shared = &deps.host.shared;
-    let session = {
-        let sessions = deps
-            .host
-            .sessions
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        sessions.get(&deps.session).map(|entry| {
-            (
-                entry.handle.clone(),
-                Arc::clone(&entry.services),
-                entry.workspace.clone(),
-                entry.backend.script_services(),
-            )
-        })
-    };
+    let session = session_parts(deps);
     let extension = &found.generation.extensions[found.ext];
     let who = Owner::Extension {
         name: extension.name().into(),
@@ -326,11 +309,11 @@ pub(crate) async fn open(
     let next = Lineage {
         chain,
         who: Some(who),
-        journal: session.as_ref().map(|(handle, _, _, _)| handle.clone()),
+        journal: session.as_ref().map(|parts| parts.handle.clone()),
         ledger: outer.ledger,
     };
     let workspace = match session.as_ref() {
-        Some((_, _, workspace, _)) => workspace.clone(),
+        Some(parts) => parts.workspace.clone(),
         None => match relay::workspace(shared) {
             Ok(workspace) => workspace,
             Err(error) => {
@@ -342,7 +325,7 @@ pub(crate) async fn open(
         },
     };
     let services: Arc<dyn Services> = match &session {
-        Some((_, services, _, _)) => Arc::clone(services),
+        Some(parts) => Arc::clone(&parts.services),
         None => Arc::new(relay::RelayServices::new(deps.clone())),
     };
     let name = match dal_core::Name::parse(extension.name()) {
@@ -376,9 +359,7 @@ pub(crate) async fn open(
         handler: mint(CallerKind::Handler),
         lineage: next.clone(),
         services,
-        script_services: session
-            .as_ref()
-            .and_then(|(_, _, _, services)| services.clone()),
+        script_services: session.as_ref().and_then(|parts| parts.script.clone()),
         workspace,
         model_export: found.record.export.clone(),
         forwarded: AtomicBool::new(false),
@@ -397,6 +378,30 @@ pub(crate) async fn open(
         Ok(stream) => scoped(stream, next, guard),
         Err(error) => failed(failure_of(error)),
     }
+}
+
+/// The session-owned pieces a synthetic run snapshots before it opens.
+struct SessionParts {
+    handle: SessionHandle,
+    services: Arc<dyn Services>,
+    workspace: Workspace,
+    script: Option<Arc<crate::ext::services::SessionServices>>,
+}
+
+/// Snapshots the caller's session handle, services, workspace, and script
+/// services so the model runs against one consistent view.
+fn session_parts(deps: &RequestDeps) -> Option<SessionParts> {
+    let sessions = deps
+        .host
+        .sessions
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    sessions.get(&deps.session).map(|entry| SessionParts {
+        handle: entry.handle.clone(),
+        services: Arc::clone(&entry.services),
+        workspace: entry.workspace.clone(),
+        script: entry.backend.script_services(),
+    })
 }
 
 struct Run {
@@ -418,7 +423,7 @@ fn lookup_price(shared: &HostShared, key: &str) -> Option<ModelPrice> {
     shared
         .config
         .price_for_model(key)
-        .copied()
+        .cloned()
         .or_else(|| dal_provider::compiled_price(key))
 }
 
@@ -836,11 +841,12 @@ async fn call_private(
         id: CallId::new(call.id.as_str()),
         args: args.clone(),
     };
-    match tool.run(tool_call, cx).await {
-        ToolOutcome::Ok(output) => (false, output.to_string()),
-        ToolOutcome::Err(error) => (true, error.to_string()),
-        ToolOutcome::Interrupted => (true, "Tool call interrupted by user.".into()),
-        ToolOutcome::Detached(job) => (true, format!("tool detached as job {job}")),
+    match contained(async move { tool.run(tool_call, cx).await }).await {
+        Ok(ToolOutcome::Ok(output)) => (false, output.to_string()),
+        Ok(ToolOutcome::Err(error)) => (true, error.to_string()),
+        Ok(ToolOutcome::Interrupted) => (true, "Tool call interrupted by user.".into()),
+        Ok(ToolOutcome::Detached(job)) => (true, format!("tool detached as job {job}")),
+        Err(panic) => (true, crashed_tool(tool.name(), &panic)),
     }
 }
 

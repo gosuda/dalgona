@@ -11,6 +11,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
+use dal_agent::login::LoginId;
 use dal_agent::{Agent, Host};
 use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
@@ -22,19 +23,23 @@ use crate::jsonrpc::{ErrorObject, Id, Message, decode_jsonrpc, encode_jsonrpc};
 use crate::protocol::{capability_error, mint_client_id, negotiate_capabilities};
 use crate::transport::{FrameWriter, ReadFrameError, Transport};
 
+mod auth;
 mod fail;
 mod misc;
 pub(crate) mod session;
 pub(crate) mod subs;
 
 pub(crate) use fail::{
-    agent_error, decode_params, hint_value, host_error, id_key, invalid_params, scheme_error,
-    to_value,
+    agent_error, decode_params, hint_value, host_error, id_key, invalid_params,
+    normalize_invalid_params, scheme_error, server_draining, to_value,
 };
 pub(crate) use subs::{host_notifier, send_resync, session_pump};
 
 /// Maximum in-flight requests before the reader pauses.
 pub(crate) const MAX_IN_FLIGHT: usize = 256;
+
+/// Maximum rejection frames queued after a connection starts draining.
+pub(crate) const MAX_DRAIN_REPLIES: usize = 64;
 
 /// Grace period for draining handlers after transport end.
 pub(crate) const DRAIN_GRACE: Duration = Duration::from_secs(1);
@@ -47,6 +52,15 @@ pub(crate) struct Conn {
     pub client: dal_core::ClientId,
     /// Negotiated capability names.
     pub caps: Vec<String>,
+    /// Whether the client declared the `approval` answerer role in
+    /// `initialize`. Read from the raw posted list: the protocol enabled
+    /// set keeps only method capabilities, so this never appears in the
+    /// `initialize` reply.
+    pub answer_approval: bool,
+    /// Whether the client declared the `ask` answerer role in `initialize`,
+    /// spelled `ask` or `question`. Read from the raw posted list, never
+    /// echoed in the reply.
+    pub answer_ask: bool,
     /// Sessions touched by this connection; dropping releases the holds.
     pub agents: HashMap<dal_core::SessionId, Agent>,
     /// Active session subscriptions: generation fence plus cancel token.
@@ -55,6 +69,9 @@ pub(crate) struct Conn {
     pub host_sub: Option<CancellationToken>,
     /// Cancel token per in-flight request id for `$/cancel_request`.
     pub inflight: HashMap<String, CancellationToken>,
+    /// Running OAuth logins by their minted `LoginId`; closing the connection
+    /// cancels them.
+    pub logins: HashMap<LoginId, CancellationToken>,
     /// Next subscription fence value.
     pub fence: u64,
 }
@@ -65,10 +82,13 @@ impl Conn {
             initialized: false,
             client,
             caps: Vec::new(),
+            answer_approval: false,
+            answer_ask: false,
             agents: HashMap::new(),
             subs: HashMap::new(),
             host_sub: None,
             inflight: HashMap::new(),
+            logins: HashMap::new(),
             fence: 0,
         }
     }
@@ -88,15 +108,35 @@ impl Conn {
 /// # Errors
 ///
 /// Returns [`WireError`] when the transport fails or a reply cannot be framed.
-pub async fn serve_rpc(host: Host, mut transport: Transport) -> Result<(), WireError> {
+pub async fn serve_rpc(host: Host, transport: Transport) -> Result<(), WireError> {
+    serve_rpc_draining(host, transport, CancellationToken::new()).await
+}
+
+/// Serves one connection like [`serve_rpc`] until `drain` fires.
+///
+/// # Errors
+///
+/// Returns [`WireError`] when the transport fails or a reply cannot be framed.
+pub async fn serve_rpc_draining(
+    host: Host,
+    mut transport: Transport,
+    drain: CancellationToken,
+) -> Result<(), WireError> {
+    let mut draining_until: Option<tokio::time::Instant> = None;
     let writer = transport.writer();
     let state = Arc::new(Mutex::new(Conn::new(mint_client_id("rpc"))));
     let stop = CancellationToken::new();
     let mut pending: FuturesUnordered<Pending> = FuturesUnordered::new();
+    let mut drain_replies = 0;
 
-    loop {
+    'serve: loop {
         tokio::select! {
             biased;
+            () = tokio::time::sleep_until(draining_until.unwrap_or_else(tokio::time::Instant::now)),
+                if draining_until.is_some() => break,
+            () = drain.cancelled(), if draining_until.is_none() => {
+                draining_until = Some(tokio::time::Instant::now() + DRAIN_GRACE);
+            }
             frame = transport.read_frame(), if pending.len() < MAX_IN_FLIGHT => {
                 let ended = matches!(
                     frame,
@@ -105,8 +145,16 @@ pub async fn serve_rpc(host: Host, mut transport: Transport) -> Result<(), WireE
                         | ReadFrameError::FrameTooLarge(_))
                 );
                 if let Ok(line) = frame
-                    && let Some(task) =
-                        on_frame(&host, Arc::clone(&state), &writer, &stop, &line).await
+                    && let Some(task) = on_frame(
+                        &host,
+                        Arc::clone(&state),
+                        &writer,
+                        &stop,
+                        draining_until.is_some(),
+                        &mut drain_replies,
+                        &line,
+                    )
+                    .await
                 {
                     pending.push(task);
                 }
@@ -115,27 +163,56 @@ pub async fn serve_rpc(host: Host, mut transport: Transport) -> Result<(), WireE
                 }
             }
             frame = writer.next_queued_frame() => {
-                if let Some(text) = frame
-                    && let Err(error) = writer.write_frame(&text).await
-                {
-                    tracing::debug!(%error, "frame write failed");
+                if let Some(text) = frame {
+                    // Keep drain cancellation and its deadline polled while a
+                    // backpressured peer is still receiving a queued frame.
+                    let write = writer.write_frame(&text);
+                    tokio::pin!(write);
+                    loop {
+                        tokio::select! {
+                            biased;
+                            () = tokio::time::sleep_until(
+                                draining_until.unwrap_or_else(tokio::time::Instant::now),
+                            ), if draining_until.is_some() => break 'serve,
+                            () = drain.cancelled(), if draining_until.is_none() => {
+                                draining_until = Some(tokio::time::Instant::now() + DRAIN_GRACE);
+                            }
+                            result = &mut write => {
+                                if let Err(error) = result {
+                                    tracing::debug!(%error, "frame write failed");
+                                }
+                                break;
+                            }
+                        }
+                    }
                 }
             }
             _ = pending.next(), if !pending.is_empty() => {}
         }
     }
 
+    cancel_logins(&state).await;
     if !pending.is_empty() {
-        let _ = tokio::time::timeout(DRAIN_GRACE, async {
-            while pending.next().await.is_some() {}
-        })
-        .await;
+        let grace = draining_until.map_or(DRAIN_GRACE, |until| {
+            until.saturating_duration_since(tokio::time::Instant::now())
+        });
+        let _ =
+            tokio::time::timeout(grace, async { while pending.next().await.is_some() {} }).await;
     }
     cancel_all(&state).await;
-    while let Some(text) = writer.take_queued_frame() {
-        let _ = writer.write_frame(&text).await;
+    if draining_until.is_none() {
+        while let Some(text) = writer.take_queued_frame() {
+            let _ = writer.write_frame(&text).await;
+        }
     }
+    transport.close().await;
     Ok(())
+}
+
+/// Answers one request with an error and starts no handler.
+async fn reject(writer: &FrameWriter, id: Id, error: ErrorObject) -> Option<Pending> {
+    send(writer, &Message::Error { id, error }).await;
+    None
 }
 
 type Pending = futures::future::BoxFuture<'static, ()>;
@@ -146,58 +223,49 @@ async fn on_frame(
     state: Arc<Mutex<Conn>>,
     writer: &FrameWriter,
     stop: &CancellationToken,
+    draining: bool,
+    drain_replies: &mut usize,
     line: &str,
 ) -> Option<Pending> {
+    if draining && *drain_replies >= MAX_DRAIN_REPLIES {
+        return None;
+    }
     let message = match decode_jsonrpc(line) {
         Ok(message) => message,
         Err(error) => {
-            send(
-                writer,
-                &Message::Error {
-                    id: error.id,
-                    error: ErrorObject {
-                        code: error.code,
-                        message: error.message,
-                        data: None,
-                    },
-                },
-            )
-            .await;
-            return None;
+            if draining {
+                *drain_replies += 1;
+            }
+            let object = ErrorObject {
+                code: error.code,
+                message: error.message,
+                data: None,
+            };
+            return reject(writer, error.id, object).await;
         }
     };
     match message {
+        Message::Request { id, .. } if draining => {
+            *drain_replies += 1;
+            reject(writer, id, server_draining()).await
+        }
         Message::Request { id, method, params } => {
             let initialized = state.lock().await.initialized;
             if !initialized && method != "initialize" && method != "protocol/schema" {
-                send(
-                    writer,
-                    &Message::Error {
-                        id,
-                        error: ErrorObject {
-                            code: -32006,
-                            message: "initialize must be the first request".to_owned(),
-                            data: None,
-                        },
-                    },
-                )
-                .await;
-                return None;
+                let object = ErrorObject {
+                    code: -32006,
+                    message: "initialize must be the first request".to_owned(),
+                    data: None,
+                };
+                return reject(writer, id, object).await;
             }
             if initialized && method == "initialize" {
-                send(
-                    writer,
-                    &Message::Error {
-                        id,
-                        error: ErrorObject {
-                            code: -32600,
-                            message: "initialize was already called".to_owned(),
-                            data: None,
-                        },
-                    },
-                )
-                .await;
-                return None;
+                let object = ErrorObject {
+                    code: -32600,
+                    message: "initialize was already called".to_owned(),
+                    data: None,
+                };
+                return reject(writer, id, object).await;
             }
             let child = stop.child_token();
             let key = id_key(&id);
@@ -320,6 +388,14 @@ async fn cancel_all(state: &Arc<Mutex<Conn>>) {
     }
 }
 
+/// Cancels every running OAuth login so the flows end and publish their
+/// outcome while the connection drains.
+async fn cancel_logins(state: &Arc<Mutex<Conn>>) {
+    for token in state.lock().await.logins.values() {
+        token.cancel();
+    }
+}
+
 /// Queues one message for the serving task to write; producers never block
 /// on the writer lock, so the returned future is already resolved. A failed
 /// enqueue only logs, the read loop observes closure.
@@ -390,9 +466,13 @@ async fn dispatch(
         "host/unsubscribe" => {
             run!("host.updates", || misc::host_unsubscribe(state, params))
         }
-        "auth/status" => run!("auth", || misc::auth_status(host, params)),
-        "auth/login" => run!("auth", || misc::auth_login(host, params)),
-        "auth/logout" => run!("auth", || async { misc::auth_logout() }),
+        "auth/status" => run!("auth", || auth::auth_status(host, params)),
+        "auth/login" => match require_cap(state, "auth").await {
+            Err(error) => fail(error),
+            Ok(()) => auth::auth_login(host, state, writer, id, params).await,
+        },
+        "auth/cancel" => run!("auth", || async { auth::auth_cancel(host, params) }),
+        "auth/logout" => run!("auth", || auth::auth_logout(host, params)),
         _ => fail(ErrorObject {
             code: -32601,
             message: format!(r#"unknown method "{method}""#),
@@ -427,13 +507,9 @@ where
     Fut: Future<Output = Result<Value, ErrorObject>>,
 {
     require_cap(state, capability).await?;
-    run().await.map_err(|error| {
-        if error.code == -32602 && !error.message.starts_with("invalid params for") {
-            invalid_params(method, error.message)
-        } else {
-            error
-        }
-    })
+    run()
+        .await
+        .map_err(|error| normalize_invalid_params(method, error))
 }
 
 /// Handles `initialize`: negotiates version 1 and the capability intersection.
@@ -461,9 +537,18 @@ async fn initialize(state: &Arc<Mutex<Conn>>, params: &Value) -> Result<Value, E
         .unwrap_or_default();
     let negotiated = negotiate_capabilities(&requested);
     let name = crate::protocol::client_name(params, "rpc");
+    let answer_approval = requested.iter().any(|name| name == "approval");
+    // The ask role accepts two spellings, `ask` and `question`. Either
+    // declaration grants the role; capability-gated methods ignore both,
+    // so the `initialize` reply never echoes them.
+    let answer_ask = requested
+        .iter()
+        .any(|name| name == "ask" || name == "question");
     let mut locked = state.lock().await;
     locked.client = mint_client_id(&name);
     locked.caps.clone_from(&negotiated);
+    locked.answer_approval = answer_approval;
+    locked.answer_ask = answer_ask;
     locked.initialized = true;
     let client = locked.client.as_str().to_owned();
     drop(locked);
@@ -510,15 +595,71 @@ pub(crate) fn crate_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-/// Reads an optional string member.
-pub(crate) fn opt_string(params: &Value, name: &str) -> Option<String> {
-    params
-        .get(name)
-        .and_then(|value| value.as_str())
-        .map(str::to_owned)
+/// Looks up one member of a method's params object.
+///
+/// An omitted member is `Ok(None)`. Params that are not an object are an
+/// error, so a caller never reads "no members" out of a malformed request.
+fn member<'a>(
+    method: &str,
+    params: &'a Value,
+    name: &str,
+) -> Result<Option<&'a Value>, ErrorObject> {
+    if !params.is_object() {
+        return Err(invalid_params(method, "params must be an object"));
+    }
+    Ok(params.get(name))
 }
 
-/// Reads an optional integer member.
-pub(crate) fn opt_i64(params: &Value, name: &str) -> Option<i64> {
-    params.get(name).and_then(Value::as_i64)
+/// Reads an optional string member.
+///
+/// Omitted is `Ok(None)`; a present member of any other type, `null`
+/// included, is `-32602`, so a malformed value never selects the default.
+pub(crate) fn opt_string(
+    method: &str,
+    params: &Value,
+    name: &str,
+) -> Result<Option<String>, ErrorObject> {
+    let Some(value) = member(method, params, name)? else {
+        return Ok(None);
+    };
+    let text = value
+        .as_str()
+        .ok_or_else(|| invalid_params(method, format!("member `{name}` must be a string")))?;
+    Ok(Some(text.to_owned()))
+}
+
+/// Reads an optional string member that a client may send as `null`.
+///
+/// Omitted and `null` are both `Ok(None)`; any other non-string is `-32602`.
+pub(crate) fn opt_nullable_string(
+    method: &str,
+    params: &Value,
+    name: &str,
+) -> Result<Option<String>, ErrorObject> {
+    if member(method, params, name)?.is_some_and(Value::is_null) {
+        return Ok(None);
+    }
+    opt_string(method, params, name)
+}
+
+/// Reads a required string member.
+pub(crate) fn req_string(method: &str, params: &Value, name: &str) -> Result<String, ErrorObject> {
+    opt_string(method, params, name)?
+        .ok_or_else(|| invalid_params(method, format!("missing member `{name}`")))
+}
+
+/// Reads an optional integer member; omitted is `Ok(None)`, any other
+/// non-integer is `-32602`.
+pub(crate) fn opt_i64(
+    method: &str,
+    params: &Value,
+    name: &str,
+) -> Result<Option<i64>, ErrorObject> {
+    let Some(value) = member(method, params, name)? else {
+        return Ok(None);
+    };
+    let number = value
+        .as_i64()
+        .ok_or_else(|| invalid_params(method, format!("member `{name}` must be an integer")))?;
+    Ok(Some(number))
 }

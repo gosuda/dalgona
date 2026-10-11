@@ -86,7 +86,8 @@ enum AgentAction {
 ///
 /// # Errors
 ///
-/// Returns the builder's registration error for an invalid identity or tool.
+/// Fails with [`RegistrationError`] when the builder rejects the extension
+/// name, the tool registration, or the hook.
 pub fn extension() -> Result<Extension, RegistrationError> {
     let inject = ServiceSet::from_names(["agents"])?;
     ExtensionBuilder::new("subagent", env!("CARGO_PKG_VERSION"), inject)?
@@ -141,9 +142,13 @@ impl Tool for AgentTool {
 
 impl AgentTool {
     /// Decodes the action and dispatches one child operation.
+    ///
+    /// The per-op routing is intentionally linear and readable side by side;
+    /// splitting it would scatter the shared preamble (admission, span,
+    /// journal).
     #[expect(
         clippy::too_many_lines,
-        reason = "one dispatch walks every agent op in place"
+        reason = "linear per-op dispatch; each branch shares the same preamble"
     )]
     async fn drive(&self, call: ToolCall, mut cx: ToolCx<'_>) -> ToolOutcome {
         let action = match decode_action(call.args.as_str()) {
@@ -187,6 +192,9 @@ impl AgentTool {
                             )
                             .into_boxed_str(),
                         )))
+                    }
+                    Ok(AgentsReply::Refused { reason }) => {
+                        ToolOutcome::Err(ToolError::message(reason.to_string()))
                     }
                     Ok(_) => ToolOutcome::Err(ToolError::message(
                         "agents service returned an unexpected reply",

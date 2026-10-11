@@ -145,6 +145,16 @@ pub fn take_cells(text: &str, max: usize, mode: WidthMode) -> String {
     result
 }
 
+/// Reports whether a character is a Unicode bidirectional-control code that
+/// can reorder surrounding text in a bidi terminal: the Arabic letter mark,
+/// the direction marks, the embeddings and overrides, and the isolates.
+pub(crate) fn is_bidi_control(character: char) -> bool {
+    matches!(
+        character,
+        '\u{61c}' | '\u{200e}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+    )
+}
+
 /// Makes control characters visible before they reach the terminal or width calculator.
 #[must_use]
 pub fn escape(text: &str) -> String {
@@ -155,9 +165,9 @@ pub fn escape(text: &str) -> String {
             '\n' => escaped.push_str("\\n"),
             '\r' => escaped.push_str("\\r"),
             '\u{7}' => escaped.push_str("\\a"),
-            character if character.is_control() => {
+            character if character.is_control() || is_bidi_control(character) => {
                 use std::fmt::Write as _;
-                let _ = write!(escaped, "\\u{{{}}}", u32::from(character));
+                let _ = write!(escaped, "\\u{{{:x}}}", u32::from(character));
             }
             character => escaped.push(character),
         }
@@ -193,6 +203,26 @@ mod tests {
         let escaped = escape("\t\u{7}");
         assert_eq!(escaped, "\\t\\a");
         assert_eq!(width(&escaped, WidthMode::Narrow), 4);
+    }
+
+    #[test]
+    fn bidi_controls_escape_to_visible_code_points() {
+        let payload = "a\u{61c}\u{200e}\u{200f}\u{202a}\u{202b}\u{202c}\u{202d}\u{202e}\u{2066}\u{2067}\u{2068}\u{2069}b";
+        let escaped = escape(payload);
+        assert_eq!(
+            escaped,
+            "a\\u{61c}\\u{200e}\\u{200f}\\u{202a}\\u{202b}\\u{202c}\\u{202d}\\u{202e}\\u{2066}\\u{2067}\\u{2068}\\u{2069}b"
+        );
+        assert!(
+            !escaped.chars().any(super::is_bidi_control),
+            "no bidi control survives: {escaped}"
+        );
+    }
+
+    #[test]
+    fn arabic_and_hebrew_text_survive_escape_untouched() {
+        let text = "مرحبا שלום http://example.test/المستخدم?x=1";
+        assert_eq!(escape(text), text);
     }
 
     #[test]

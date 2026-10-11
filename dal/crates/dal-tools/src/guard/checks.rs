@@ -58,6 +58,9 @@ pub(super) fn placeholder(added: &str) -> Option<Rejection> {
         "-- ... rest of implementation",
         "(* ... rest of implementation *)",
     ];
+    if added.is_empty() {
+        return None;
+    }
     let mut matched = false;
     let mut remaining = added.to_owned();
     for phrase in PHRASES {
@@ -113,11 +116,16 @@ fn standalone_ellipsis(line: &str) -> bool {
     })
 }
 
+/// The parse gate verdict for one staged file.
 #[derive(Debug, Clone)]
 pub(super) enum GateOutcome<'a> {
+    /// The post-image parses; run the checks with its tree.
     Pass(Option<&'a Parsed>),
+    /// The pre-image already failed to parse; record nothing and keep edits.
     Exempt(Option<&'a Parsed>),
+    /// The post-image does not parse; reject the edit with the given reason.
     Reject(Rejection),
+    /// The file type is not guarded; take no action.
     Skipped,
 }
 
@@ -208,25 +216,25 @@ fn first_syntax_error(tree: &Tree) -> Option<Node<'_>> {
     None
 }
 
-/// A guard check identifier.
+/// The guard rule a finding came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Rule {
-    /// The guard-wrap check.
+    /// Function grew past the nesting/wrap band.
     GuardWrap,
-    /// The broad-handler check.
+    /// One handler catches every error type.
     BroadHandler,
-    /// The helper check.
+    /// A function only forwards to another function.
     Helper,
-    /// The new-warning check.
+    /// A previously clean file gained a warning in this edit.
     NewWarning,
-    /// The commented-out-code check.
+    /// A comment carries a whole block of commented-out code.
     CommentedOutCode,
-    /// A stream-class check carrying its G8 rule.
+    /// A calibrated stream rule fired; payload names the rule.
     Stream(G8Rule),
 }
 
 impl Rule {
-    /// Returns the rule's canonical check name.
+    /// The rule name used in reports and the findings document.
     #[must_use]
     pub fn name(self) -> &'static str {
         match self {
@@ -240,47 +248,50 @@ impl Rule {
     }
 }
 
-/// One located finding: rule, span, and matched line text.
+/// One guard finding on a staged file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Finding {
     /// The rule that fired.
     pub rule: Rule,
-    /// The 1-based line the finding starts on.
+    /// First affected line, one-based.
     pub line: u32,
-    /// The 1-based line the finding ends on.
+    /// Last affected line, one-based; equals `line` for single-line findings.
     pub line_end: u32,
-    /// Whether the finding spans the whole line.
+    /// Whether the finding spans the whole lines it names.
     pub whole_line: bool,
-    /// The matched line text.
+    /// The user-facing finding text.
     pub text: Box<str>,
 }
 
-/// A file's per-rule outcome.
+/// The guard verdict for one file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
-    /// No findings.
+    /// The file passed every check.
     Clean,
-    /// At least one finding.
+    /// The file produced findings.
     Findings,
-    /// The file was not checked.
+    /// The file type is not guarded.
     Skipped,
 }
 
-/// One file's verdict, findings, and metrics.
+/// Findings and metrics for one file in one turn.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FileFindings {
-    /// The checked path.
+    /// Path relative to the workspace root.
     pub path: Box<str>,
-    /// The file's outcome.
+    /// The overall verdict for the file.
     pub verdict: Verdict,
-    /// Located findings in the file.
+    /// Individual findings, in source order.
     pub items: Vec<Finding>,
-    /// Metrics collected for the file, when measured.
+    /// File-level metrics, when the file could be parsed.
     pub metrics: Option<metrics::FileMetrics>,
 }
 
+/// One diff hunk split into removed lines and added lines with numbers.
 pub(super) struct Hunk {
+    /// Lines the edit removes, verbatim.
     pub removed: Vec<Box<str>>,
+    /// Lines the edit adds, with their one-based post-image numbers.
     pub added: Vec<(u32, Box<str>)>,
 }
 
