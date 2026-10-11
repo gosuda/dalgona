@@ -31,6 +31,8 @@ use crate::{
 pub struct Capture(std::sync::Arc<std::sync::Mutex<Vec<Line>>>);
 
 enum Line {
+    /// A reserved slot a live stream has not sealed yet.
+    Vacant,
     Events(Vec<StreamEvent>),
     Fail(String),
 }
@@ -42,26 +44,26 @@ impl Capture {
         Self::default()
     }
 
-    /// Every sealed events step, in arrival order.
+    /// Every sealed events step, in operation-start order.
     #[must_use]
     pub fn steps(&self) -> Vec<Vec<StreamEvent>> {
         self.lock()
             .iter()
             .filter_map(|line| match line {
                 Line::Events(events) => Some(events.clone()),
-                Line::Fail(_) => None,
+                Line::Vacant | Line::Fail(_) => None,
             })
             .collect()
     }
 
-    /// Every recorded stream-failure message, in arrival order.
+    /// Every recorded stream-failure message, in operation-start order.
     #[must_use]
     pub fn failures(&self) -> Vec<String> {
         self.lock()
             .iter()
             .filter_map(|line| match line {
                 Line::Fail(message) => Some(message.clone()),
-                Line::Events(_) => None,
+                Line::Vacant | Line::Events(_) => None,
             })
             .collect()
     }
@@ -79,15 +81,18 @@ impl Capture {
         let lines = self
             .lock()
             .iter()
-            .map(|line| match line {
+            .filter_map(|line| match line {
+                // A live stream's reserved slots are not sealed yet: the
+                // fixture keeps only completed operations.
+                Line::Vacant => None,
                 // A partial events step encodes without per-line grammar
                 // checks: its terminating `fail` step is a separate line, so
                 // the pair validates together against `from_replay` below.
-                Line::Events(events) => encode_events(events),
-                Line::Fail(message) => Ok(format!(
+                Line::Events(events) => Some(encode_events(events)),
+                Line::Fail(message) => Some(Ok(format!(
                     "{{\"kind\":\"fail\",\"message\":{}}}",
                     json_str(&scrub(message))
-                )),
+                ))),
             })
             .collect::<Result<Vec<_>, _>>()?;
         Script::from_replay(lines.join("\n").as_bytes()).map_err(ReplayError::Grammar)?;
@@ -100,15 +105,25 @@ impl Capture {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Appends a sealed step and its failure line under one lock, so a
-    /// second live stream cannot interleave a line between them.
-    fn push(&self, sealed: Option<Vec<StreamEvent>>, failure: Option<String>) {
+    /// Reserves one operation's two slots — events step plus failure line —
+    /// at wrap time, so concurrent streams ordered A then B serialize their
+    /// steps as A then B even when B reaches its terminal first.
+    fn reserve(&self) -> usize {
+        let mut lines = self.lock();
+        lines.push(Line::Vacant);
+        lines.push(Line::Vacant);
+        lines.len() - 2
+    }
+
+    /// Fills the reserved slots under one lock: the events step and the
+    /// failure line land together and in reservation order.
+    fn fill(&self, slot: usize, sealed: Option<Vec<StreamEvent>>, failure: Option<String>) {
         let mut lines = self.lock();
         if let Some(events) = sealed {
-            lines.push(Line::Events(events));
+            lines[slot] = Line::Events(events);
         }
         if let Some(message) = failure {
-            lines.push(Line::Fail(message));
+            lines[slot + 1] = Line::Fail(message);
         }
     }
 }
@@ -123,13 +138,16 @@ pub fn record(stream: EventStream, capture: Capture) -> EventStream {
     // The step buffer and failure dedupe live behind one mutex shared with
     // the cancel path: a dropped or cancelled stream seals its open step and
     // appends the `fail` line instead of losing the prefix.
+    // The step slots are reserved when the operation wraps: completion
+    // order never reorders the fixture relative to call order.
+    let slot = capture.reserve();
     let shared = std::sync::Arc::new(std::sync::Mutex::new(RecordCx {
         open: Vec::new(),
         failed: false,
     }));
     let source = stream::unfold(
         (stream, capture.clone(), shared.clone()),
-        |(mut inner, capture, shared)| async move {
+        move |(mut inner, capture, shared)| async move {
             let item = inner.next().await;
             let (sealed, failure) = {
                 let mut cx = shared
@@ -172,7 +190,7 @@ pub fn record(stream: EventStream, capture: Capture) -> EventStream {
                     }
                 }
             };
-            capture.push(sealed, failure);
+            capture.fill(slot, sealed, failure);
             item.map(|item| (item, (inner, capture, shared)))
         },
     );
@@ -193,7 +211,7 @@ pub fn record(stream: EventStream, capture: Capture) -> EventStream {
                 )
             }
         };
-        capture.push(sealed, failure);
+        capture.fill(slot, sealed, failure);
     })
 }
 
@@ -355,6 +373,24 @@ pub fn encode_event(event: &StreamEvent) -> Result<RawJson, ReplayError> {
             }
         }
         StreamEvent::Replay { payload } => {
+            // `item` must reach the same family/model verbatim: scrub must
+            // never rewrite inside it, so a credential-shaped payload
+            // refuses export instead of silently mutating replay bytes.
+            if scrub(payload.item.as_str()) != payload.item.as_str() {
+                return Err(encode_err(
+                    "replay payload carries credential-shaped bytes; redact the capture first",
+                ));
+            }
+            // Raw-text scrubbing sees escapes, not decoded text: `"ak\u0049A..."`
+            // decodes into a credential the byte scan cannot see, so decoded
+            // leaves (keys included) go through the same check.
+            if let Ok(item) = sonic_rs::from_str::<sonic_rs::Value>(payload.item.as_str())
+                && decoded_secret(&item)
+            {
+                return Err(encode_err(
+                    "replay payload decodes to credential-shaped text; redact the capture first",
+                ));
+            }
             let family = sonic_rs::to_string(&payload.family)
                 .map_err(|_| encode_err("family not serializable"))?;
             let model = sonic_rs::to_string(&payload.model)
@@ -416,11 +452,51 @@ pub fn encode_event(event: &StreamEvent) -> Result<RawJson, ReplayError> {
 /// the rest — a provider echoing an authorization header or embedding a
 /// token in an error body — by matching the prefixes real credentials
 /// take (`Bearer`, `sk-*`, `xox*`, `gh*_`, `AKIA`, JWT `eyJ`) followed by
-/// at least eight token characters.
+/// at least eight token characters. A bare authorization scheme needs a
+/// stronger signal — sixteen-plus mixed-case characters — so prose words
+/// like `basic` never redact the text after them.
 fn scrub(text: &str) -> String {
+    String::from_utf8(scrub_bytes(text.as_bytes()))
+        .unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned())
+}
+
+/// True when any decoded string leaf of `item` — keys included — carries
+/// credential-shaped text. Escaped input like `"sk\u002d..."` hides from a
+/// raw-bytes scrub but not from the decoded tree.
+fn decoded_secret(item: &sonic_rs::Value) -> bool {
+    use sonic_rs::{JsonContainerTrait, JsonValueTrait};
+    if let Some(text) = item.as_str() {
+        return scrub(text) != text;
+    }
+    if let Some(items) = item.as_array() {
+        return items.iter().any(decoded_secret);
+    }
+    if let Some(map) = item.as_object() {
+        return map
+            .iter()
+            .any(|(key, value)| scrub(key) != key || decoded_secret(value));
+    }
+    false
+}
+
+fn scrub_bytes(bytes: &[u8]) -> Vec<u8> {
     fn token(byte: u8) -> bool {
         byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_')
     }
+    /// Authorization schemes; a credential follows their keyword. The
+    /// match is case-insensitive — `bearer` and `Basic` hide as easily as
+    /// `Bearer`.
+    const SCHEMES: &[&str] = &[
+        "bearer",
+        "basic",
+        "digest",
+        "negotiate",
+        "oauth",
+        "token",
+        "apikey",
+        "api-key",
+        "aws4-hmac-sha256",
+    ];
     const PREFIXES: &[&str] = &[
         "sk-",
         "sk_live_",
@@ -449,9 +525,8 @@ fn scrub(text: &str) -> String {
         "dop_v1_",
         "shpat_",
     ];
-    let bytes = text.as_bytes();
-    let mut out = String::with_capacity(text.len());
-    let mut after_bearer = false;
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut after_scheme = false;
     let mut at = 0;
     while at < bytes.len() {
         if token(bytes[at]) {
@@ -459,20 +534,27 @@ fn scrub(text: &str) -> String {
             while at < bytes.len() && token(bytes[at]) {
                 at += 1;
             }
-            let word = &text[start..at];
-            let secretish = (after_bearer && word.len() >= 8)
-                || PREFIXES
-                    .iter()
-                    .any(|prefix| word.starts_with(prefix) && word.len() >= prefix.len() + 8)
-                || (word.starts_with("eyJ") && word.len() >= 12);
-            after_bearer = word == "Bearer";
-            out.push_str(if secretish { "[redacted]" } else { word });
+            let word = &bytes[start..at];
+            // A bare scheme word is prose too (`use basic functionality`),
+            // so the token it precedes must look high-entropy: at least
+            // sixteen characters with a non-lowercase byte. Prose words stay
+            // lowercase and rarely stretch that far; credentials do.
+            let secretish = (after_scheme
+                && word.len() >= 16
+                && word.iter().any(|byte| !byte.is_ascii_lowercase()))
+                || PREFIXES.iter().any(|prefix| {
+                    word.starts_with(prefix.as_bytes()) && word.len() >= prefix.len() + 8
+                })
+                || (word.starts_with(b"eyJ") && word.len() >= 12);
+            after_scheme = SCHEMES
+                .iter()
+                .any(|scheme| word.eq_ignore_ascii_case(scheme.as_bytes()));
+            out.extend_from_slice(if secretish { b"[redacted]" } else { word });
         } else {
-            // Non-token byte: ASCII punctuation or a UTF-8 lead byte — copy
-            // the whole character.
-            let width = text[at..].chars().next().map_or(1, char::len_utf8);
-            out.push_str(&text[at..at + width]);
-            at += width;
+            // Non-token byte: punctuation, whitespace, or part of a UTF-8
+            // multibyte character — copied verbatim either way.
+            out.push(bytes[at]);
+            at += 1;
         }
     }
     out
@@ -496,6 +578,8 @@ pub fn encode_step(events: &[StreamEvent]) -> Result<String, ReplayError> {
 /// without grammar validation: a partial prefix's `fail` step is a separate
 /// line, so a sequence containing it must validate as a whole.
 fn encode_events(events: &[StreamEvent]) -> Result<String, ReplayError> {
+    let rewritten = rescrub_split_text(events);
+    let events = rewritten.as_deref().unwrap_or(events);
     let events = events
         .iter()
         .enumerate()
@@ -514,6 +598,111 @@ fn encode_events(events: &[StreamEvent]) -> Result<String, ReplayError> {
     Ok(format!("{{\"kind\":\"events\",\"events\":[{joined}]}}"))
 }
 
+/// A credential split across event texts survives per-event scrubbing:
+/// scrub each channel's concatenated text, then refill the events in
+/// order so every emitted byte is redacted. The concatenation is the
+/// semantic payload — boundary placement is arbitrary once a redaction
+/// lands — so rewritten boundaries approximate the originals. Returns
+/// `None` when nothing needed redaction.
+fn rescrub_split_text(events: &[StreamEvent]) -> Option<Vec<StreamEvent>> {
+    let mut out = events.to_vec();
+    let mut changed = false;
+    changed |= refill(
+        out.iter_mut()
+            .filter_map(|event| match event {
+                StreamEvent::TextDelta { text } => Some(text),
+                _ => None,
+            })
+            .collect(),
+    );
+    changed |= refill(
+        out.iter_mut()
+            .filter_map(|event| match event {
+                StreamEvent::ReasoningDelta { text } => Some(text),
+                _ => None,
+            })
+            .collect(),
+    );
+    // Parallel calls interleave `ToolArgsDelta` events: one call's text can
+    // sit inside another's credential, so a joined stream hides what the
+    // per-call payload carries. Scrub each call's fragments on their own.
+    let mut calls: Vec<String> = Vec::new();
+    for event in &out {
+        if let StreamEvent::ToolArgsDelta { id, .. } = event
+            && !calls.iter().any(|seen| seen == id)
+        {
+            calls.push(id.clone());
+        }
+    }
+    for call in &calls {
+        changed |= refill_bytes(
+            out.iter_mut()
+                .filter_map(|event| match event {
+                    StreamEvent::ToolArgsDelta { id, fragment } if id == call => Some(fragment),
+                    _ => None,
+                })
+                .collect(),
+        );
+    }
+    changed.then_some(out)
+}
+
+/// Scrubs the concatenation of `fields`, then redistributes the result:
+/// each field keeps its original length until the last one absorbs the
+/// remainder. No-op when the joined text carries nothing shaped like a
+/// credential.
+fn refill(fields: Vec<&mut String>) -> bool {
+    let joined: String = fields.iter().map(|field| field.as_str()).collect();
+    let scrubbed = scrub(&joined);
+    if scrubbed == joined {
+        return false;
+    }
+    let mut cursor = scrubbed.as_str();
+    let last = fields.len().saturating_sub(1);
+    for (index, field) in fields.into_iter().enumerate() {
+        let mut take = if index == last {
+            cursor.len()
+        } else {
+            field.len().min(cursor.len())
+        };
+        while !cursor.is_char_boundary(take) {
+            take -= 1;
+        }
+        let (head, tail) = cursor.split_at(take);
+        head.clone_into(field);
+        cursor = tail;
+    }
+    debug_assert!(cursor.is_empty(), "refill dropped scrubbed bytes");
+    true
+}
+
+/// Byte-level [`refill`] for tool-arg fragments, which may split a UTF-8
+/// character mid-token legitimately.
+fn refill_bytes(fields: Vec<&mut Vec<u8>>) -> bool {
+    let joined: Vec<u8> = fields
+        .iter()
+        .flat_map(|field| field.iter().copied())
+        .collect();
+    let scrubbed = scrub_bytes(&joined);
+    if scrubbed == joined {
+        return false;
+    }
+    let mut cursor = scrubbed.as_slice();
+    let last = fields.len().saturating_sub(1);
+    for (index, field) in fields.into_iter().enumerate() {
+        let take = if index == last {
+            cursor.len()
+        } else {
+            field.len().min(cursor.len())
+        };
+        let (head, tail) = cursor.split_at(take);
+        *field = head.to_vec();
+        cursor = tail;
+    }
+    debug_assert!(cursor.is_empty(), "refill dropped scrubbed bytes");
+    true
+}
+
 fn encode_err(detail: &'static str) -> ReplayError {
     ReplayError::Encode { index: 0, detail }
 }
@@ -524,10 +713,11 @@ fn json_str(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use dal_core::Family;
+    use dal_core::{Family, RawJson};
 
     use super::*;
     use crate::scripted::Script;
+    use crate::stream::ReplayPayload;
 
     const FIXTURE: &str = concat!(
         r#"{"kind":"events","events":["#,
@@ -567,6 +757,207 @@ mod tests {
 
         // The emitted fixture round-trips back through the replay decoder.
         Script::from_replay(lines.join("\n").as_bytes()).expect("emitted replay parses");
+    }
+
+    /// Exported replays must not carry secrets: scrub recognizes auth
+    /// schemes case-insensitively. Reverting to a lowercase-only match
+    /// leaks `BEARER <token>` verbatim.
+    #[test]
+    fn scrub_redacts_authorization_schemes_case_insensitively() {
+        for text in [
+            "Authorization: BEARER SomeLongTokenValue1234",
+            "authorization: DiGeSt abcdef123456789012",
+            "x: NEGOTIATE YmFzZTY0LWtleS12YWx1ZQ==",
+        ] {
+            let redacted = scrub(text);
+            assert!(
+                redacted.contains("[redacted]"),
+                "scheme not redacted in {redacted}"
+            );
+        }
+        // The token alone is still a prefix-shaped secret.
+        assert!(scrub("note: no scheme").contains("note: no scheme"));
+    }
+
+    /// Bare scheme words are prose too: `use basic functionality` must
+    /// export byte-stable, never `use basic [redacted]`. The post-scheme
+    /// token only redacts when it looks high-entropy.
+    #[test]
+    fn scrub_leaves_prose_after_a_scheme_word() {
+        for text in [
+            "use basic functionality",
+            "a token bucket limits retries",
+            "digest mode is documented",
+        ] {
+            assert_eq!(scrub(text), text, "prose was redacted: {text}");
+        }
+        // A real credential after a scheme still redacts.
+        let secret = scrub("Authorization: Bearer Ab3Cd5Ef7Gh9Jk1Lm3N");
+        assert!(secret.contains("[redacted]"), "{secret}");
+    }
+
+    /// A `replay` payload must reach its family/model verbatim, so scrub
+    /// must never rewrite inside it: a credential-shaped item refuses
+    /// export instead of silently mutating replay bytes.
+    #[test]
+    fn encode_rejects_a_credential_shaped_replay_payload() {
+        let events = [StreamEvent::Replay {
+            payload: ReplayPayload {
+                family: Family::Anthropic,
+                model: "test-model".into(),
+                item: RawJson::parse(r#"{"text":"Bearer abc1234567890def"}"#)
+                    .expect("payload json"),
+            },
+        }];
+        assert!(
+            encode_events(&events).is_err(),
+            "a credential-shaped payload encoded"
+        );
+        // The same shape without secrets exports.
+        let clean = [StreamEvent::Replay {
+            payload: ReplayPayload {
+                family: Family::Anthropic,
+                model: "test-model".into(),
+                item: RawJson::parse(r#"{"text":"plain reasoning"}"#).expect("payload json"),
+            },
+        }];
+        assert!(encode_events(&clean).is_ok());
+    }
+
+    /// A credential split across two deltas reassembles inside the joined
+    /// export: the capture must rescrub channel text across event
+    /// boundaries, not per event. Reverting to per-event scrubbing lets
+    /// the split token through.
+    #[test]
+    fn encode_rescrubs_a_credential_split_across_deltas() {
+        let events = [
+            StreamEvent::TextDelta {
+                text: "key: eyJhbGciOiJIUzI1NiJ".into(),
+            },
+            StreamEvent::TextDelta {
+                text: "9.signature".into(),
+            },
+        ];
+        let lines = encode_events(&events).expect("split deltas encode");
+        assert!(
+            !lines.contains("eyJhbGciOiJIUzI1NiJ9"),
+            "split credential survived: {lines}"
+        );
+        assert!(lines.contains("[redacted]"), "nothing redacted: {lines}");
+    }
+
+    /// Interleaved calls each keep their own byte stream: a second call's
+    /// text between one call's `Bearer ` and its token must not consume the
+    /// scheme marker. Joining every call's fragments lets it through.
+    #[test]
+    fn encode_rescrubs_args_fragments_per_call() {
+        let events = [
+            StreamEvent::ToolArgsDelta {
+                id: "a".into(),
+                fragment: b"Bearer ".to_vec(),
+            },
+            StreamEvent::ToolArgsDelta {
+                id: "b".into(),
+                fragment: br#"{"x":1}"#.to_vec(),
+            },
+            StreamEvent::ToolArgsDelta {
+                id: "a".into(),
+                fragment: b"Ab3Cd5Ef7Gh9Jk1L".to_vec(),
+            },
+        ];
+        let lines = encode_events(&events).expect("args deltas encode");
+        assert!(
+            lines.contains("[redacted]"),
+            "cross-call join hid the credential: {lines}"
+        );
+        // The innocent call's bytes survive untouched — JSON-escaped in
+        // the encoded line exactly as delivered.
+        assert!(lines.contains(r#"{\"x\":1}"#), "{lines}");
+    }
+
+    /// `\uXXXX` escapes decode into text the raw-bytes scrub never sees:
+    /// an escaped credential inside a replay payload must still refuse
+    /// export. Reverting to raw-text-only scrubbing accepts it.
+    #[test]
+    fn encode_rejects_an_escaped_credential_in_a_replay_payload() {
+        let events = [StreamEvent::Replay {
+            payload: ReplayPayload {
+                family: Family::Anthropic,
+                model: "test-model".into(),
+                item: RawJson::parse(r#"{"token":"sk-abc123456789012"}"#).expect("payload json"),
+            },
+        }];
+        // Direct form refused by the raw scrub already; the escaped form is
+        // the gap the decoded-leaf check closes.
+        let escaped = [StreamEvent::Replay {
+            payload: ReplayPayload {
+                family: Family::Anthropic,
+                model: "test-model".into(),
+                item: RawJson::parse(r#"{"token":"sk-abc123456789012"}"#).expect("payload json"),
+            },
+        }];
+        assert!(encode_events(&events).is_err());
+        assert!(encode_events(&escaped).is_err());
+        let unicode_escaped = [StreamEvent::Replay {
+            payload: ReplayPayload {
+                family: Family::Anthropic,
+                model: "test-model".into(),
+                // `sk` is raw text but the `-` arrives as an escape: the raw
+                // scrub sees no `sk-` prefix, the decoded value carries one.
+                item: RawJson::parse(r#"{"token":"sk\u002dabc123456789012"}"#)
+                    .expect("payload json"),
+            },
+        }];
+        assert!(encode_events(&unicode_escaped).is_err());
+    }
+
+    /// Concurrent captures serialize in wrap order, not completion order:
+    /// slots are reserved when `record` wraps the stream. Reverting to a
+    /// terminal push lets the later-started stream's lines land first.
+    #[tokio::test]
+    async fn record_preserves_start_order_when_streams_complete_out_of_order() {
+        let replay_a = concat!(
+            r#"{"kind":"events","events":["#,
+            r#"{"type":"text_delta","text":"first-a"},"#,
+            r#"{"type":"tool_calls_done","calls":[]},"#,
+            r#"{"type":"usage","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1,"reasoning_tokens":null,"cache_write_tokens":0,"cost_usd":null}},"#,
+            r#"{"type":"stop","reason":"end_turn"}]}"#,
+        );
+        let replay_b = concat!(
+            r#"{"kind":"events","events":["#,
+            r#"{"type":"text_delta","text":"second-b"},"#,
+            r#"{"type":"tool_calls_done","calls":[]},"#,
+            r#"{"type":"usage","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1,"reasoning_tokens":null,"cache_write_tokens":0,"cost_usd":null}},"#,
+            r#"{"type":"stop","reason":"end_turn"}]}"#,
+        );
+        let capture = Capture::new();
+        let mut stream_a = record(
+            Script::from_replay(replay_a.as_bytes())
+                .expect("script a")
+                .open()
+                .expect("open a"),
+            capture.clone(),
+        );
+        let mut stream_b = record(
+            Script::from_replay(replay_b.as_bytes())
+                .expect("script b")
+                .open()
+                .expect("open b"),
+            capture.clone(),
+        );
+        // B completes first; A's reserved slot still precedes it.
+        let _ = drain(&mut stream_b).await;
+        let _ = drain(&mut stream_a).await;
+        let lines = capture.replay().expect("capture encodes");
+        let a_at = lines
+            .iter()
+            .position(|line| line.contains("first-a"))
+            .expect("a's events line");
+        let b_at = lines
+            .iter()
+            .position(|line| line.contains("second-b"))
+            .expect("b's events line");
+        assert!(a_at < b_at, "completion order leaked into the capture");
     }
 
     #[tokio::test]

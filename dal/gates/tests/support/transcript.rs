@@ -213,12 +213,33 @@ pub fn assert_snapshot(gate: &str, name: &str, rows: &[String]) -> io::Result<()
     fs::create_dir_all(&root)?;
     fs::write(&actual, &rendered)?;
 
-    let first_diff = blessed
-        .lines()
+    let blessed_rows: Vec<&str> = blessed.lines().collect();
+    let first_diff = blessed_rows
+        .iter()
         .zip(normalized.iter())
         .position(|(want, got)| want != got)
         .map(|index| index + 1)
-        .map_or_else(|| "length".to_owned(), |line| format!("row {line}"));
+        .map_or_else(
+            || {
+                let shared = blessed_rows.len().min(normalized.len());
+                if normalized.len() > shared {
+                    format!(
+                        "length: {} extra actual row(s) starting at row {}: {:?}",
+                        normalized.len() - shared,
+                        shared + 1,
+                        &normalized[shared..]
+                    )
+                } else {
+                    format!(
+                        "length: {} missing row(s) starting at row {}: expected {:?}",
+                        shared - normalized.len(),
+                        normalized.len() + 1,
+                        &blessed_rows[normalized.len()..]
+                    )
+                }
+            },
+            |line| format!("row {line}"),
+        );
     Err(io::Error::other(format!(
         "snapshot drift at {first_diff}: {} vs {} — bless with DAL_SNAPSHOT_UPDATE=1 if intended",
         expected.display(),

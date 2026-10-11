@@ -324,12 +324,20 @@ impl Host {
     #[must_use]
     pub fn subscribe(&self) -> HostSubscription {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let pending_changed =
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
         self.state
             .subscribers
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(tx);
-        HostSubscription { receiver: rx }
+            .push(super::Subscriber {
+                sender: tx,
+                pending_changed: pending_changed.clone(),
+            });
+        HostSubscription {
+            receiver: rx,
+            pending_changed,
+        }
     }
 
     fn entry_of(&self, id: SessionId) -> Option<SessionPorts> {

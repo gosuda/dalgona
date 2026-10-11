@@ -145,12 +145,22 @@ impl Default for ShutdownReport {
 /// A stream of host lifecycle updates. Dropping it unregisters the subscriber.
 pub struct HostSubscription {
     pub(crate) receiver: mpsc::UnboundedReceiver<HostUpdate>,
+    /// Sessions with a `SessionChanged` queued but not yet delivered here.
+    pub(crate) pending_changed:
+        std::sync::Arc<std::sync::Mutex<std::collections::HashSet<SessionId>>>,
 }
 
 impl HostSubscription {
     /// Returns the next host update, or `None` after host shutdown.
     pub async fn next(&mut self) -> Option<HostUpdate> {
-        self.receiver.recv().await
+        let update = self.receiver.recv().await?;
+        if let HostUpdate::SessionChanged { session } = &update {
+            self.pending_changed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(session);
+        }
+        Some(update)
     }
 }
 
@@ -162,10 +172,22 @@ pub struct Host {
 
 pub(crate) struct HostState {
     pub(crate) sessions: Mutex<HashMap<SessionId, SessionEntry>>,
-    pub(crate) subscribers: Mutex<Vec<mpsc::UnboundedSender<HostUpdate>>>,
+    pub(crate) subscribers: Mutex<Vec<Subscriber>>,
     pub(crate) shared: Arc<HostShared>,
     /// The futures of the extensions' `Attach` controllers; shutdown aborts them.
     pub(crate) attached: Mutex<tokio::task::JoinSet<()>>,
+}
+
+/// One live subscriber channel plus its coalescing state.
+pub(crate) struct Subscriber {
+    /// The update channel.
+    pub(crate) sender: mpsc::UnboundedSender<HostUpdate>,
+    /// Sessions whose `SessionChanged` is queued but not yet delivered.
+    /// `SessionChanged` says "re-read this session": a repeated rename is
+    /// idempotent, so per-session coalescing bounds the queue by the live
+    /// session count instead of the rename rate.
+    pub(crate) pending_changed:
+        std::sync::Arc<std::sync::Mutex<std::collections::HashSet<SessionId>>>,
 }
 
 impl HostState {
@@ -174,7 +196,18 @@ impl HostState {
         self.subscribers
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .retain(|sender| sender.send((*update).clone()).is_ok());
+            .retain(|subscriber| {
+                if let HostUpdate::SessionChanged { session } = update {
+                    let mut pending = subscriber
+                        .pending_changed
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if !pending.insert(*session) {
+                        return true;
+                    }
+                }
+                subscriber.sender.send((*update).clone()).is_ok()
+            });
     }
 }
 
