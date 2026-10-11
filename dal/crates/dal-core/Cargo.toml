@@ -1,0 +1,29 @@
+[package]
+name = "dal-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+repository.workspace = true
+description = "Domain values and state transitions for dal"
+
+[features]
+default = []
+schema = ["dep:schemars"]
+
+[dependencies]
+blake3.workspace = true
+schemars = { workspace = true, optional = true }
+serde.workspace = true
+jiff.workspace = true
+sonic-rs.workspace = true
+toml = { workspace = true, features = ["preserve_order"] }
+toml_edit.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

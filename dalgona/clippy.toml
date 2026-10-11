@@ -1,0 +1,21 @@
+allow-panic-in-tests = true
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+cognitive-complexity-threshold = 15
+type-complexity-threshold = 250
+too-many-arguments-threshold = 8
+
+disallowed-methods = [
+    "std::env::set_current_dir",
+    "std::env::current_dir",
+    "std::env::var",
+    "std::env::var_os",
+    "std::env::vars",
+    "std::io::stdin",
+    { path = "tokio::io::stdin", allow-invalid = true },
+    { path = "tokio::signal::ctrl_c", allow-invalid = true },
+    "std::process::exit",
+    "std::process::Command::new",
+    { path = "tokio::process::Command::new", allow-invalid = true },
+    "tokio::spawn",
+]

@@ -1,0 +1,19 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH dalgon-dev-journal-torn 1  "dalgon-dev-journal-torn " 
+.SH NAME
+dalgon\-dev\-journal\-torn \- Copy a journal with its tail cut mid\-record.
+.SH SYNOPSIS
+\fBdalgon dev journal torn\fR [\fB\-h\fR|\fB\-\-help\fR] <\fIIN\fR> <\fIOUT\fR> 
+.SH DESCRIPTION
+Copy a journal with its tail cut mid\-record.
+.SH OPTIONS
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+<\fIIN\fR>
+The journal to copy
+.TP
+<\fIOUT\fR>
+The torn copy to write

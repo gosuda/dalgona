@@ -1,0 +1,8 @@
+[workspace]
+resolver = "3"
+members = ["base", "left", "right", "top", "extra"]
+exclude = ["fake-dal"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"

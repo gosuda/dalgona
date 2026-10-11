@@ -1,0 +1,8 @@
+[package]
+name = "extra"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+left = { path = "../left" }
+fake-dal = { path = "../fake-dal" }

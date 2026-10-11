@@ -1,0 +1,66 @@
+disabled_batteries = []
+experimental_batteries = []
+search_symbols = true
+edit_style = "hashline"
+
+[agents]
+enabled = true
+
+[limits]
+agents = 64
+agents_per_session = 1024
+agent_depth = 1
+
+[guard]
+enabled = true
+
+[guard.policies]
+g4_enabled = true
+
+[plugin.history]
+enabled = true
+share = 0.4
+
+[plugin.orchestration.loop_guard]
+enabled = true
+
+[plugin.orchestration.sleep]
+enabled = true
+
+[plugin.orchestration.monitor]
+enabled = true
+coalesce_ms = 2000
+rate_limit_ms = 5000
+max_lines = 50
+max_chars = 4096
+wake_budget = 5
+
+[plugin.orchestration.inflight]
+enabled = true
+
+[plugin.orchestration.goal]
+enabled = true
+
+[plugin.orchestration.arbiter]
+enabled = true
+
+[plugin.orchestration.agents]
+enabled = true
+child_max_steps = 50
+child_max_minutes = 30
+max_runs = 16
+
+[plugin.plan]
+enabled = true
+
+[plugin.web]
+enabled = true
+provider = "brave"
+api_key_env = "BRAVE_API_KEY"
+timeout_secs = 30            # range 1..=300, one deadline per request
+max_redirects = 10           # range 0..=20
+max_body_bytes = 2097152     # absolute ceiling for one response body
+max_markdown_bytes = 131072  # ceiling for the converted markdown
+
+[tui]
+diagrams = false

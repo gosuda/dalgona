@@ -1,0 +1,60 @@
+[package]
+name = "dal-tools"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+repository.workspace = true
+description = "Read, search, and edit tools for dal"
+
+[features]
+default = []
+symbols = [
+    "dep:tree-sitter",
+    "dep:tree-sitter-language",
+    "dep:tree-sitter-rust",
+    "dep:tree-sitter-ocaml",
+    "dep:tree-sitter-python",
+    "dep:tree-sitter-javascript",
+    "dep:tree-sitter-typescript",
+    "dep:tree-sitter-go",
+    "dep:tree-sitter-c",
+    "dep:tree-sitter-cpp",
+]
+
+[dependencies]
+dal-agent = { path = "../dal-agent" }
+dal-core = { path = "../dal-core" }
+futures.workspace = true
+blake3.workspace = true
+globset.workspace = true
+grep-matcher = "=0.1.9"
+grep-regex = "=0.1.14"
+grep-searcher = "=0.1.17"
+ignore = "=0.4.33"
+regex.workspace = true
+regex-syntax = "=0.8.11"
+regex-automata.workspace = true
+serde.workspace = true
+similar.workspace = true
+sonic-rs.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs", "macros", "rt", "rt-multi-thread", "sync", "time"] }
+tokio-util = { workspace = true, features = ["rt"] }
+tree-sitter = { version = "=0.27.1", optional = true }
+tree-sitter-language = { version = "=0.1.9", optional = true }
+tree-sitter-rust = { version = "=0.24.2", optional = true }
+tree-sitter-ocaml = { version = "=0.26.0", optional = true }
+tree-sitter-python = { version = "=0.25.0", optional = true }
+tree-sitter-javascript = { version = "=0.25.0", optional = true }
+tree-sitter-typescript = { version = "=0.23.2", optional = true }
+tree-sitter-go = { version = "=0.25.0", optional = true }
+tree-sitter-c = { version = "=0.24.2", optional = true }
+tree-sitter-cpp = { version = "=0.23.4", optional = true }
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

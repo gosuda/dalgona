@@ -1,0 +1,82 @@
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+jobs:
+  smoke-install:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest, script: sh, mode: installer }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-24.04-arm, script: sh, mode: installer }
+          - { target: x86_64-apple-darwin, os: macos-15-intel, script: sh, mode: installer }
+          - { target: aarch64-apple-darwin, os: macos-latest, script: sh, mode: installer }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest, script: pwsh, mode: installer }
+          - { target: aarch64-pc-windows-msvc, os: windows-11-arm, script: pwsh, mode: installer }
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest, mode: cargo-install }
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest, mode: binstall }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Install dalgon (shell installer)
+        if: ${{ matrix.mode == 'installer' && matrix.script == 'sh' }}
+        run: curl --proto '=https' --tlsv1.2 -LsSf "https://github.com/gosuda/dalgona/releases/download/${GITHUB_REF_NAME}/dalgon-installer.sh" | sh
+      - name: Version check (shell)
+        if: ${{ matrix.mode == 'installer' && matrix.script == 'sh' }}
+        run: |
+          expected="dalgon ${GITHUB_REF_NAME#dalgon-v}"
+          for b in dalgon dal dl; do
+            command -v "$b"
+            "$b" --version | grep -Fx "$expected"
+          done
+      - name: Reinstall dalgon (shell idempotency)
+        if: ${{ matrix.target == 'x86_64-unknown-linux-gnu' && matrix.mode == 'installer' && matrix.script == 'sh' }}
+        run: |
+          before="$(dalgon --version)"
+          curl --proto '=https' --tlsv1.2 -LsSf "https://github.com/gosuda/dalgona/releases/download/${GITHUB_REF_NAME}/dalgon-installer.sh" | sh
+          after="$(dalgon --version)"
+          test "$before" = "$after"
+          expected="dalgon ${GITHUB_REF_NAME#dalgon-v}"
+          test "$after" = "$expected"
+          for b in dalgon dal dl; do
+            "$b" --version | grep -Fx "$expected"
+          done
+      - name: Install dalgon (PowerShell installer)
+        if: ${{ matrix.mode == 'installer' && matrix.script == 'pwsh' }}
+        shell: pwsh
+        run: irm "https://github.com/gosuda/dalgona/releases/download/$env:GITHUB_REF_NAME/dalgon-installer.ps1" | iex
+      - name: Version check (PowerShell)
+        if: ${{ matrix.mode == 'installer' && matrix.script == 'pwsh' }}
+        shell: pwsh
+        run: |
+          $expected = "dalgon " + $env:GITHUB_REF_NAME.Substring("dalgon-v".Length)
+          foreach ($b in "dalgon", "dal", "dl") {
+            $out = (& $b --version | Out-String).Trim()
+            if ($out -ne $expected) { throw "version mismatch for ${b}: got '$out'" }
+          }
+      - name: Install dalgon from crates.io
+        if: ${{ matrix.mode == 'cargo-install' }}
+        run: cargo install dalgon --version "${GITHUB_REF_NAME#dalgon-v}" --locked
+      - name: Version check (cargo install)
+        if: ${{ matrix.mode == 'cargo-install' }}
+        run: |
+          expected="dalgon ${GITHUB_REF_NAME#dalgon-v}"
+          for b in dalgon dal dl; do
+            "$HOME/.cargo/bin/$b" --version | grep -Fx "$expected"
+          done
+      - name: Install dalgon with cargo-binstall
+        if: ${{ matrix.mode == 'binstall' }}
+        run: |
+          cargo install cargo-binstall --version 1.23.0 --locked
+          cargo binstall --no-confirm --strategies crate-meta-data "dalgon@${GITHUB_REF_NAME#dalgon-v}" 2>&1 | tee binstall.log
+          grep -F "releases/download/${GITHUB_REF_NAME}/dalgon-" binstall.log
+      - name: Version check (binstall)
+        if: ${{ matrix.mode == 'binstall' }}
+        run: |
+          expected="dalgon ${GITHUB_REF_NAME#dalgon-v}"
+          for b in dalgon dal dl; do
+            "$HOME/.cargo/bin/$b" --version | grep -Fx "$expected"
+          done

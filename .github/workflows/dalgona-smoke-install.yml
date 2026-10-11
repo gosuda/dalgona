@@ -1,0 +1,121 @@
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+jobs:
+  smoke-install:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-24.04, script: sh, mode: installer }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-24.04-arm, script: sh, mode: installer }
+          - { target: x86_64-apple-darwin, os: macos-15-intel, script: sh, mode: installer }
+          - { target: aarch64-apple-darwin, os: macos-15, script: sh, mode: installer }
+          - { target: x86_64-pc-windows-msvc, os: windows-2022, script: pwsh, mode: installer }
+          - { target: aarch64-pc-windows-msvc, os: windows-11-arm, script: pwsh, mode: installer }
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-24.04, mode: cargo-install }
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-24.04, mode: binstall }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Install Dalgona (shell installer)
+        if: ${{ matrix.mode == 'installer' && matrix.script == 'sh' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 -LsSf "https://github.com/gosuda/dalgona/releases/download/${GITHUB_REF_NAME}/dalgona-installer.sh" | sh
+      - name: Version check (shell)
+        if: ${{ matrix.mode == 'installer' && matrix.script == 'sh' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected="dalgona ${GITHUB_REF_NAME#dalgona-v}"
+          output_dir="$(mktemp -d)"
+          trap 'rm -rf "$output_dir"' EXIT
+          for binary in dalgona dg; do
+            command -v "$binary"
+            "$binary" --version > "$output_dir/$binary"
+            printf '%s\n' "$expected" | cmp - "$output_dir/$binary"
+          done
+      - name: Reinstall Dalgona and verify idempotency
+        if: ${{ matrix.mode == 'installer' && matrix.target == 'x86_64-unknown-linux-gnu' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected="dalgona ${GITHUB_REF_NAME#dalgona-v}"
+          output_dir="$(mktemp -d)"
+          trap 'rm -rf "$output_dir"' EXIT
+          dalgona --version > "$output_dir/dalgona.before"
+          dg --version > "$output_dir/dg.before"
+          printf '%s\n' "$expected" | cmp - "$output_dir/dalgona.before"
+          printf '%s\n' "$expected" | cmp - "$output_dir/dg.before"
+          curl --proto '=https' --tlsv1.2 -LsSf "https://github.com/gosuda/dalgona/releases/download/${GITHUB_REF_NAME}/dalgona-installer.sh" | sh
+          dalgona --version > "$output_dir/dalgona.after"
+          dg --version > "$output_dir/dg.after"
+          cmp "$output_dir/dalgona.before" "$output_dir/dalgona.after"
+          cmp "$output_dir/dg.before" "$output_dir/dg.after"
+      - name: Install Dalgona (PowerShell installer)
+        if: ${{ matrix.mode == 'installer' && matrix.script == 'pwsh' }}
+        shell: pwsh
+        run: irm "https://github.com/gosuda/dalgona/releases/download/$env:GITHUB_REF_NAME/dalgona-installer.ps1" | iex
+      - name: Version check (PowerShell)
+        if: ${{ matrix.mode == 'installer' && matrix.script == 'pwsh' }}
+        shell: pwsh
+        run: |
+          $expected = "dalgona " + $env:GITHUB_REF_NAME.Substring("dalgona-v".Length)
+          foreach ($binary in "dalgona.exe", "dg.exe") {
+            $file = (Get-Command $binary -CommandType Application -ErrorAction Stop).Source
+            $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+            $startInfo.FileName = $file
+            [void]$startInfo.ArgumentList.Add("--version")
+            $startInfo.UseShellExecute = $false
+            $startInfo.RedirectStandardOutput = $true
+            $process = [System.Diagnostics.Process]::new()
+            $process.StartInfo = $startInfo
+            if (-not $process.Start()) { throw "could not start $binary" }
+            $out = $process.StandardOutput.ReadToEnd()
+            $process.WaitForExit()
+            if ($process.ExitCode -ne 0 -or $out -cne ($expected + "`n")) {
+              throw "version mismatch for ${binary}: got '$out'"
+            }
+            $process.Dispose()
+          }
+      - name: Install Dalgona from crates.io
+        if: ${{ matrix.mode == 'cargo-install' }}
+        shell: bash
+        run: cargo install dalgona --version "${GITHUB_REF_NAME#dalgona-v}" --locked
+      - name: Version check (cargo install)
+        if: ${{ matrix.mode == 'cargo-install' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected="dalgona ${GITHUB_REF_NAME#dalgona-v}"
+          output="$(mktemp)"
+          trap 'rm -f "$output"' EXIT
+          for binary in dalgona dg; do
+            "$HOME/.cargo/bin/$binary" --version > "$output"
+            printf '%s\n' "$expected" | cmp - "$output"
+          done
+      - name: Install Dalgona with cargo-binstall
+        if: ${{ matrix.mode == 'binstall' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo install cargo-binstall --version 1.23.0 --locked
+          cargo binstall --no-confirm --strategies crate-meta-data "dalgona@${GITHUB_REF_NAME#dalgona-v}" 2>&1 | tee binstall.log
+          grep -F "releases/download/${GITHUB_REF_NAME}/dalgona-" binstall.log
+      - name: Version check (binstall)
+        if: ${{ matrix.mode == 'binstall' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected="dalgona ${GITHUB_REF_NAME#dalgona-v}"
+          output="$(mktemp)"
+          trap 'rm -f "$output"' EXIT
+          for binary in dalgona dg; do
+            "$HOME/.cargo/bin/$binary" --version > "$output"
+            printf '%s\n' "$expected" | cmp - "$output"
+          done

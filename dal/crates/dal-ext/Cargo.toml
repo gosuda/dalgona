@@ -1,0 +1,51 @@
+[package]
+name = "dal-ext"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+repository.workspace = true
+description = "Built-in extension composition and rendering for dal"
+build = "build.rs"
+
+[dependencies]
+dal-agent = { path = "../dal-agent" }
+dal-core = { path = "../dal-core" }
+futures.workspace = true
+globset.workspace = true
+jiff.workspace = true
+png.workspace = true
+regex-automata.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+sonic-rs.workspace = true
+tracing.workspace = true
+unicode-width.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+tokio-util.workspace = true
+toml.workspace = true
+[dev-dependencies]
+dal-star = { path = "../dal-star" }
+dal-provider = { path = "../dal-provider" }
+proptest.workspace = true
+regex.workspace = true
+
+[[bin]]
+name = "docs-gen"
+path = "src/bin/docs-gen.rs"
+
+[[test]]
+name = "docs_truth"
+path = "tests/docs_truth.rs"
+
+[[test]]
+name = "ports"
+path = "tests/ports.rs"
+
+[lints]
+workspace = true
+
+[package.metadata.dist]
+dist = false
+
+

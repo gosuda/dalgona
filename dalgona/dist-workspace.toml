@@ -1,0 +1,36 @@
+[workspace]
+members = ["cargo:."]
+
+# Config for 'dist'
+[dist]
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.32.0"
+# CI backends to support
+ci = "github"
+# The installers to generate for each app
+installers = ["shell", "powershell"]
+# A prefix git tags must include for dist to care about them
+tag-namespace = "dalgona"
+# Target platforms to build apps for (Rust target-triple syntax)
+targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "aarch64-pc-windows-msvc", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+packages = ["dalgona"]
+# Whether to embed dependency information using cargo-auditable
+cargo-auditable = true
+# The single license file and product docs live at the repository root,
+# outside the package manifest dirs; dist resolves auto-included files
+# from the wrong base for them, so every static file is named here.
+auto-includes = false
+# Extra static files to include in each App (path relative to this Cargo.toml's dir)
+include = ["crates/dalgona/man", "../LICENSE.md", "README.md", "CHANGELOG.md"]
+# Publish jobs to run in CI
+publish-jobs = ["./dalgona-publish-crates"]
+# Post-announce jobs to run in CI
+post-announce-jobs = ["./dalgona-smoke-install"]
+# Path that installers should place binaries in
+install-path = "CARGO_HOME"
+# Whether to install an updater program
+install-updater = false
+
+[dist.github-custom-runners]
+aarch64-unknown-linux-gnu = "ubuntu-24.04-arm"
+aarch64-pc-windows-msvc = "windows-11-arm"

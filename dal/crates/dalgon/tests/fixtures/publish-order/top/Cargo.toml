@@ -1,0 +1,8 @@
+[package]
+name = "top"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+left = { path = "../left" }
+right = { path = "../right" }

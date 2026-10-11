@@ -1,0 +1,1 @@
+First inspect the contract. Then run the changed path and check the resulting state.

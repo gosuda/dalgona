@@ -1,0 +1,37 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH dalgon-rules-test 1  "dalgon-rules-test " 
+.SH NAME
+dalgon\-rules\-test \- Simulate a rule against one input.
+.SH SYNOPSIS
+\fBdalgon rules test\fR [\fB\-\-source\fR] [\fB\-\-tool\fR] [\fB\-\-path\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fITEXT\fR> 
+.SH DESCRIPTION
+Simulate a rule against one input.
+.SH OPTIONS
+.TP
+\fB\-\-source\fR \fI<SOURCE>\fR [default: text]
+Select the input stream to test.
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+text
+.IP \(bu 2
+thinking
+.IP \(bu 2
+tool
+.RE
+.TP
+\fB\-\-tool\fR \fI<TOOL>\fR
+Name the tool for a tool\-source test (default: patch).
+.TP
+\fB\-\-path\fR \fI<PATH>\fR
+Set the path context for a tool\-source test.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+<\fITEXT\fR>
+
