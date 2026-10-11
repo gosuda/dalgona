@@ -95,9 +95,12 @@ impl<'a> DeclaredLines<'a> {
 
     /// Folds one decoded record and returns the session it declares.
     ///
+    /// A borrow of the fold, not a clone: the per-record diff only reads
+    /// the projected fields before the next push.
+    ///
     /// # Errors
     /// `Replay` on a contradiction or unsupported version.
-    pub(super) fn push(&mut self, record: &Record) -> Result<Session, DevError> {
+    pub(super) fn push(&mut self, record: &Record) -> Result<&Session, DevError> {
         self.fold.push(record).map_err(|source| DevError::Replay {
             path: self.path.display().to_string(),
             source,
@@ -162,5 +165,142 @@ pub(super) fn fields(session: &Session) -> BTreeMap<String, String> {
         }
     }
     flush(&mut map, &mut name, &mut body);
-    map
+    // Debug order for hash collections is unstable across processes:
+    // sort every `{...}` group's items so equal state compares equal.
+    // List (`[...]`) order is meaningful and stays untouched.
+    map.into_iter()
+        .map(|(name, body)| (name, sort_brace_groups(&body)))
+        .collect()
+}
+
+/// Canonicalizes one field body: inside every `{...}` group the top-level
+/// items are sorted, recursively. Single-line groups are left verbatim so
+/// brace text inside string fields is not rewritten.
+fn sort_brace_groups(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..=open]);
+        let mut depth = 1_usize;
+        let mut close = None;
+        // Braces inside a quoted string tokenize nothing.
+        let mut quoted = false;
+        let mut escaped = false;
+        for (at, ch) in rest[open + 1..].char_indices() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            match ch {
+                '\\' if quoted => escaped = true,
+                '"' => quoted = !quoted,
+                '{' if !quoted => depth += 1,
+                '}' if !quoted => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(open + 1 + at);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(close) = close else {
+            out.push_str(&rest[open + 1..]);
+            return out;
+        };
+        let inner = &rest[open + 1..close];
+        if inner.contains('\n') {
+            let mut items: Vec<String> = split_items(inner)
+                .into_iter()
+                .map(|item| sort_brace_groups(item.trim()))
+                .filter(|item| !item.is_empty())
+                .collect();
+            items.sort_unstable();
+            out.push_str(&items.join(",\n    "));
+        } else {
+            out.push_str(inner);
+        }
+        out.push('}');
+        rest = &rest[close + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Splits a `{...}` group's contents at commas nested in no bracket.
+fn split_items(inner: &str) -> Vec<&str> {
+    let mut items = Vec::new();
+    let mut depth = 0_usize;
+    let mut start = 0;
+    // Quoted text is a single value: neither a comma nor a bracket inside a
+    // JSON string tokenizes, so `"x,y"` or `"a[b"` never distorts the split.
+    let mut quoted = false;
+    let mut escaped = false;
+    for (at, ch) in inner.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if quoted => escaped = true,
+            '"' => quoted = !quoted,
+            '(' | '[' | '{' if !quoted => depth += 1,
+            ')' | ']' | '}' if !quoted => depth = depth.saturating_sub(1),
+            ',' if depth == 0 && !quoted => {
+                items.push(&inner[start..at]);
+                start = at + 1;
+            }
+            _ => {}
+        }
+    }
+    items.push(&inner[start..]);
+    items
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sort_brace_groups;
+
+    /// Journal-diff output must be byte-deterministic: multi-line
+    /// `{...}` groups sort their items so equal sessions diff
+    /// identically regardless of fold insertion order. Sequences and
+    /// single-line groups keep their order.
+    #[test]
+    fn brace_groups_sort_their_items() {
+        assert_eq!(
+            sort_brace_groups("jobs = {\nb = 1,\na = 2\n}"),
+            "jobs = {a = 2,\n    b = 1}"
+        );
+        assert_eq!(sort_brace_groups("x = {b, a}"), "x = {b, a}");
+        assert_eq!(
+            sort_brace_groups("turns = [\nb,\na\n]"),
+            "turns = [\nb,\na\n]"
+        );
+        assert_eq!(
+            sort_brace_groups("x = {\nz = {\nb,\na\n},\na = 1\n}"),
+            "x = {a = 1,\n    z = {a,\n    b}}"
+        );
+    }
+
+    /// A comma inside a JSON string tokenizes no boundary: `{"a":"x,y","b":2}`
+    /// compares as two fields, not three. Reverting to the bracket-only
+    /// split misaligns equal sessions and reports false diffs.
+    #[test]
+    fn quoted_commas_keep_a_field_whole() {
+        assert_eq!(
+            sort_brace_groups("x = {\nb = 2,\na = \"x,y\"\n}"),
+            "x = {a = \"x,y\",\n    b = 2}"
+        );
+        // A quote-bearing bracket never opens a nested split either.
+        assert_eq!(
+            sort_brace_groups("x = {\nb = 2,\na = \"p[q\"\n}"),
+            "x = {a = \"p[q\",\n    b = 2}"
+        );
+        // An escaped quote inside the string stays inside it.
+        assert_eq!(
+            sort_brace_groups("x = {\nb = 2,\na = \"p,\\\"q\"\n}"),
+            "x = {a = \"p,\\\"q\",\n    b = 2}"
+        );
+    }
 }

@@ -255,10 +255,13 @@ impl DeclaredFold {
 
     /// The session the pushed records declare so far.
     ///
+    /// A borrow, not a snapshot: callers diff fields between pushes
+    /// without paying a session clone per record.
+    ///
     /// # Errors
     /// Same contract as [`Session::replay_declared`].
-    pub fn session(&mut self) -> Result<Session, ReplayError> {
+    pub fn session(&mut self) -> Result<&Session, ReplayError> {
         self.replay.declared_tail()?;
-        Ok(self.replay.session.clone())
+        Ok(&self.replay.session)
     }
 }

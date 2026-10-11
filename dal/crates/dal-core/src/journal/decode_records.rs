@@ -316,6 +316,13 @@ pub fn decode(line: &[u8]) -> Result<Decoded, DecodeError> {
     // follows it is trailing garbage, which a whole-line codec must reject.
     // Only the four JSON whitespace bytes may sit between `}` and the line
     // end — other Unicode whitespace is not legal JSON.
+    if object_tail == 0 {
+        // An empty object never ran the member scanner, so its closing
+        // brace is derived directly: the first `}` after the opening one.
+        if let Some(close) = text.find('}') {
+            object_tail = close;
+        }
+    }
     if text
         .get(object_tail..)
         .is_none_or(|tail| tail.trim_matches(|c| matches!(c, ' ' | '\t' | '\n' | '\r')) != "}")

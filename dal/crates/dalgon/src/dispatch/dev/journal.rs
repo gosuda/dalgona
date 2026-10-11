@@ -279,16 +279,35 @@ fn dump(dir: &Path, name: &str, out: &mut dyn Write) -> Result<ExitCode, DevErro
         });
     }
     let path: PathBuf = dir.join(name);
-    if !path.is_file() {
+    // `symlink_metadata` does not follow links: a sidecar that names a
+    // symlink resolves outside the session directory and is refused.
+    let meta = fs::symlink_metadata(&path).map_err(|_| DevError::NoSidecar {
+        path: dir.display().to_string(),
+        name: name.to_owned(),
+    })?;
+    if meta.file_type().is_symlink() || !meta.is_file() {
         return Err(DevError::NoSidecar {
             path: dir.display().to_string(),
             name: name.to_owned(),
         });
     }
-    let bytes = fs::read(&path).map_err(|source| DevError::Read {
-        path: path.display().to_string(),
-        source,
-    })?;
+    let bytes = match read_no_follow(&path) {
+        Ok(bytes) => bytes,
+        Err(source) => {
+            // A swapped symlink fails the no-follow open: report it like a
+            // link the metadata check caught, not an I/O failure.
+            if fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+                return Err(DevError::NoSidecar {
+                    path: dir.display().to_string(),
+                    name: name.to_owned(),
+                });
+            }
+            return Err(DevError::Read {
+                path: path.display().to_string(),
+                source,
+            });
+        }
+    };
     match String::from_utf8(bytes) {
         Ok(text) => {
             let _ = write!(out, "{text}");
@@ -305,4 +324,41 @@ fn dump(dir: &Path, name: &str, out: &mut dyn Write) -> Result<ExitCode, DevErro
         }
     }
     Ok(exit::code(exit::ExitKind::Success))
+}
+
+/// Reads a sidecar without following a final symlink: the metadata check
+/// above and this open must see the same object, so the open itself refuses
+/// a path swapped to a link between check and read (ELOOP).
+#[cfg(all(unix, not(target_os = "macos")))]
+fn read_no_follow(path: &Path) -> std::io::Result<Vec<u8>> {
+    use std::os::unix::fs::OpenOptionsExt;
+    const O_NOFOLLOW: i32 = 0x20000;
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW)
+        .open(path)?;
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut file, &mut bytes)?;
+    Ok(bytes)
+}
+
+/// See the unix variant: `O_NOFOLLOW` is 0x100 on macOS.
+#[cfg(target_os = "macos")]
+fn read_no_follow(path: &Path) -> std::io::Result<Vec<u8>> {
+    use std::os::unix::fs::OpenOptionsExt;
+    const O_NOFOLLOW: i32 = 0x100;
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW)
+        .open(path)?;
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut file, &mut bytes)?;
+    Ok(bytes)
+}
+
+/// Non-unix targets keep the metadata check: same-user symlink swaps are
+/// already privileged operations there.
+#[cfg(not(unix))]
+fn read_no_follow(path: &Path) -> std::io::Result<Vec<u8>> {
+    fs::read(path)
 }
