@@ -36,7 +36,10 @@ use transcript::{Transcript, assert_snapshot};
 
 #[test]
 fn pty_transcript_replays_to_the_committed_snapshot() -> Result<(), Box<dyn Error + Send + Sync>> {
-    let dir = TestDir::new()?;
+    // Root the workspace under /tmp: the platform temp root can spell long
+    // enough ($TMPDIR, /private/…) to push the `dalgon-gates-` marker past
+    // the workspace row's clipped field, which leaves the row unnormalized.
+    let dir = TestDir::new_in(std::path::Path::new("/tmp"))?;
     let mut command = dalgon_command(dir.path(), &["snapshot reply text"])?;
     let mut terminal = PtyProcess::spawn(&mut command, 80, 24)?;
     let mut record = Transcript::new();
@@ -73,12 +76,19 @@ fn pty_transcript_replays_to_the_committed_snapshot() -> Result<(), Box<dyn Erro
         .map(|row| {
             row.replace(temp_canonical.to_string_lossy().as_ref(), "/tmp")
                 .replace(temp.to_string_lossy().as_ref(), "/tmp")
+                // macOS canonicalizes the /tmp symlink to /private/tmp.
+                .replace("/private/tmp", "/tmp")
         })
-        .map(|row| match row.find("dalgon-gates-") {
+        // The workspace row clips the path at 24 cells, so match the
+        // clipped-capable marker prefix rather than the full dir name.
+        .map(|row| match row.find("dalgon-gate") {
             Some(at) => format!("{}<workspace>", &row[..at]),
             None => row,
         })
         .filter(|row| !row.trim().is_empty())
+        // Host notices depend on the runner environment — e.g. the fd soft
+        // limit lift fires only where the inherited ceiling is below target.
+        .filter(|row| !row.starts_with("[dal-agent]"))
         .collect();
     assert!(
         rows.iter().any(|row| row.contains("snapshot reply text")),
