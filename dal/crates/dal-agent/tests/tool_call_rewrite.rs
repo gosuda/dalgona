@@ -53,8 +53,9 @@ impl Tool for Stat {
         let parsed: PathArgs = sonic_rs::from_str(args.as_str())
             .map_err(|error| ArgError::message(format!("path is required: {error}.")))?;
         let path = Path::new(&parsed.path);
-        let escapes = path.components().any(|part| part == Component::ParentDir)
-            || (path.is_absolute() && !path.starts_with(ws.as_path()));
+        let escapes = path.components().any(|part| {
+            matches!(part, Component::ParentDir | Component::RootDir | Component::Prefix(_))
+        }) || (path.is_absolute() && !path.starts_with(ws.as_path()));
         if escapes {
             return Err(ArgError::message(format!(
                 "{} is outside the workspace.",
