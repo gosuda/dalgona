@@ -293,7 +293,7 @@ impl CommandHandler for PromptChild {
                     AgentsOp::Prompt {
                         id,
                         text: "Call report with your final result.".into(),
-                        interrupt: Some(Duration::from_millis(50)),
+                        interrupt: Some(Duration::from_secs(5)),
                         max_steps,
                     },
                 )
