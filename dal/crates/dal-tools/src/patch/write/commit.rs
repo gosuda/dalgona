@@ -505,7 +505,21 @@ mod tests {
         let workspace = &std::fs::canonicalize(directory.path()).expect("workspace");
         let source = workspace.join("source.txt");
         let created = workspace.join("created");
+        // The rename destination must fail after `created` installs. unix
+        // refuses a file target under a missing directory at Phase-B
+        // rename; Windows accepts that spelling, so on Windows the
+        // destination sits under a regular file and prepare refuses it
+        // as stale before anything is written.
+        #[cfg(unix)]
         let destination = workspace.join("other/");
+        #[cfg(windows)]
+        let destination = {
+            let blocker = workspace.join("blocked");
+            tokio::fs::write(&blocker, b"file\n")
+                .await
+                .expect("seed the file that blocks the destination parent");
+            blocker.join("dest")
+        };
 
         tokio::fs::write(&source, b"source\n")
             .await
@@ -543,7 +557,11 @@ mod tests {
                     after: Some(b"renamed\n".to_vec().into_boxed_slice()),
                     op: Operation::Rename,
                     renamed_to: Some(RenameTarget {
-                        path: PathBuf::from("other/"),
+                        path: if cfg!(unix) {
+                            PathBuf::from("other/")
+                        } else {
+                            PathBuf::from("blocked/dest")
+                        },
                         absolute_path: destination,
                     }),
                     hunks: Vec::new(),
@@ -556,7 +574,13 @@ mod tests {
             .await
             .expect_err("later rename install must fail");
 
-        assert_eq!(error.class, ErrorClass::Io);
+        // unix reaches Phase-B and reports the rename error as Io; Windows
+        // refuses the file-under-file destination at prepare as Stale.
+        if cfg!(unix) {
+            assert_eq!(error.class, ErrorClass::Io);
+        } else {
+            assert_eq!(error.class, ErrorClass::Stale);
+        }
         assert!(error.message.contains("Nothing was written"), "{error}");
         assert!(
             tokio::fs::metadata(created).await.is_err(),
