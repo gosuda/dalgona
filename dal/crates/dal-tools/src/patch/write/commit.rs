@@ -512,7 +512,7 @@ mod tests {
             .expect("seed rename source");
 
         let session = PatchSession {
-            workspace: workspace.to_path_buf(),
+            workspace: workspace.clone(),
             session: SessionId::new_v7(),
             generation: GenerationId::new(NonZeroU64::MIN),
             turn: TurnId::new(NonZeroU64::MIN),
