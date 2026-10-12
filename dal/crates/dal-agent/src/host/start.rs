@@ -1,5 +1,6 @@
 //! Host construction from an explicit product, config, and env snapshot.
 
+#[cfg(unix)]
 use std::io::IsTerminal as _;
 use std::sync::Arc;
 
