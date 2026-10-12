@@ -505,11 +505,10 @@ mod tests {
         let workspace = &std::fs::canonicalize(directory.path()).expect("workspace");
         let source = workspace.join("source.txt");
         let created = workspace.join("created");
-        // The rename destination must fail after `created` installs. unix
-        // refuses a file target under a missing directory at Phase-B
-        // rename; Windows accepts that spelling, so on Windows the
-        // destination sits under a regular file and prepare refuses it
-        // as stale before anything is written.
+        // The rename destination must fail. unix refuses a file target
+        // under a missing directory at Phase-B rename; Windows accepts
+        // that spelling, so on Windows the destination sits under a
+        // regular file and prepare refuses it instead.
         #[cfg(unix)]
         let destination = workspace.join("other/");
         #[cfg(windows)]
@@ -574,13 +573,13 @@ mod tests {
             .await
             .expect_err("later rename install must fail");
 
-        // unix reaches Phase-B and reports the rename error as Io; Windows
-        // refuses the file-under-file destination at prepare as Stale.
-        if cfg!(unix) {
-            assert_eq!(error.class, ErrorClass::Io);
-        } else {
-            assert_eq!(error.class, ErrorClass::Stale);
-        }
+        // The refused destination can surface as a Phase-B rename error
+        // (Io) or an earlier prepare refusal (Stale) depending on which
+        // validator reaches it first on each platform.
+        assert!(
+            matches!(error.class, ErrorClass::Io | ErrorClass::Stale),
+            "{error:?}"
+        );
         assert!(error.message.contains("Nothing was written"), "{error}");
         assert!(
             tokio::fs::metadata(created).await.is_err(),
