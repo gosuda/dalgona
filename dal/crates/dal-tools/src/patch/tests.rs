@@ -1413,7 +1413,12 @@ async fn stage_classify_create_delete_rename() {
     assert_eq!(staged.op, Operation::Rename);
     let dest = staged.renamed_to.as_ref().expect("rename destination");
     assert_eq!(dest.path, std::path::Path::new("b.txt"));
-    assert_eq!(dest.absolute_path, dir.path().join("b.txt"));
+    assert_eq!(
+        dest.absolute_path,
+        std::fs::canonicalize(dir.path())
+            .expect("workspace canonicalizes")
+            .join("b.txt")
+    );
     assert_eq!(&*staged.after.expect("after"), b"P\nb\n");
     // Two renames in one payload conflict.
     let error = stage_one(

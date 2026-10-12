@@ -502,7 +502,7 @@ mod tests {
     #[tokio::test]
     async fn restore_completed_removes_create_after_later_temp_install_failure() {
         let directory = tempfile::tempdir().expect("temporary directory");
-        let workspace = directory.path();
+        let workspace = &std::fs::canonicalize(directory.path()).expect("workspace");
         let source = workspace.join("source.txt");
         let created = workspace.join("created");
         let destination = workspace.join("other/");
