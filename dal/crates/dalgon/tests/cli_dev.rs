@@ -601,6 +601,39 @@ fn dev_run_rejects_a_second_answer_to_a_settled_request() -> Result<(), Box<dyn 
     Ok(())
 }
 
+/// An observed-but-unanswered request must not satisfy a second
+/// expectation of the same kind: the scenario waits for a fresh
+/// `RequestOpened` that never arrives and fails on its timeout instead
+/// of passing silently. Reverting the consumed marker lets the first
+/// opening answer both expectations.
+#[test]
+fn dev_run_expect_request_consumes_each_opening_once() -> Result<(), Box<dyn Error>> {
+    let fixture = CliFixture::new()?;
+    let scenario = write_scenario(
+        &fixture,
+        &[
+            r#"{"provider":{"script":[{"kind":"events","events":[{"type":"tool_calls_done","calls":[{"id":"call-1","name":"exec","args":{"kind":"parsed","value":{"command":"echo hi","timeout_seconds":60}}}]},{"type":"usage","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":5,"reasoning_tokens":null,"cache_write_tokens":0,"cost_usd":null}},{"type":"stop","reason":"tool_use"}]},{"kind":"events","events":[{"type":"text_delta","text":"done"},{"type":"tool_calls_done","calls":[]},{"type":"usage","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":5,"reasoning_tokens":null,"cache_write_tokens":0,"cost_usd":null}},{"type":"stop","reason":"end_turn"}]}]}}"#,
+            r#"{"set_approval":"ask"}"#,
+            r#"{"prompt":"run echo hi"}"#,
+            r#"{"expect":{"request":{"kind":"approval","timeout_ms":3000}}}"#,
+            r#"{"expect":{"request":{"kind":"approval","timeout_ms":500}}}"#,
+        ],
+    )?;
+    let output = fixture.output(&[
+        "dev",
+        "run",
+        "--consent",
+        scenario.to_str().expect("utf8 path"),
+    ])?;
+    assert!(!output.status.success(), "{}", stdout(&output));
+    let text = stderr(&output);
+    assert!(
+        text.contains("no `approval` request within 500ms"),
+        "{text}"
+    );
+    Ok(())
+}
+
 /// A write through a symlinked directory inside an adopted workspace
 /// must not escape: canonical containment resolves the link before the
 /// lexical join. Reverting to the string check writes `leak.txt`
@@ -651,5 +684,124 @@ fn dev_fold_reports_a_trailing_open_turn_as_running() -> Result<(), Box<dyn Erro
         last.contains("~phase"),
         "expected a Running phase, got: {text}"
     );
+    Ok(())
+}
+
+/// A credential-bearing provider key is a consent-gated write wherever
+/// it appears in the config TOML — including quoting and table forms a
+/// literal text scan misses. Reverting to text matching lets each write
+/// through without `--consent`.
+#[test]
+fn dev_run_gates_provider_config_keys_without_consent() -> Result<(), Box<dyn Error>> {
+    let fixture = CliFixture::new()?;
+    for (name, line) in [
+        (
+            "provider-key",
+            r#"{"config":"providers.test-api.api_key = \"abc\""}"#,
+        ),
+        (
+            "provider-table",
+            r#"{"config":"[providers.test-api]\nbase_url = \"http://x\""}"#,
+        ),
+        ("single-quoted-approval", r#"{"config":"approval = 'all'"}"#),
+    ] {
+        let scenario = write_scenario(&fixture, &[line])?;
+        let output = fixture.output(&["dev", "run", scenario.to_str().expect("utf8 path")])?;
+        assert!(!output.status.success(), "{name} passed without --consent");
+        let text = stderr(&output);
+        assert!(text.contains("--consent"), "{name}: {text}");
+    }
+    Ok(())
+}
+
+/// A built-in `run` command mutates the session like `cancel` or
+/// `export`: it is consent-gated even though it is not authorization.
+/// Reverting the guard submits the command without `--consent`.
+#[test]
+fn dev_run_gates_a_builtin_command_step_without_consent() -> Result<(), Box<dyn Error>> {
+    let fixture = CliFixture::new()?;
+    let scenario = write_scenario(&fixture, &[r#"{"run":"version"}"#])?;
+    let output = fixture.output(&["dev", "run", scenario.to_str().expect("utf8 path")])?;
+    assert!(!output.status.success());
+    let text = stderr(&output);
+    assert!(text.contains("--consent"), "{text}");
+    Ok(())
+}
+
+/// Observing a request keeps it in the open queue: a later `answer`
+/// step still finds and settles it. Reverting the dequeue-on-observe
+/// makes the `answer` step fail `no open request`.
+#[test]
+fn dev_run_observing_a_request_leaves_it_answerable() -> Result<(), Box<dyn Error>> {
+    let fixture = CliFixture::new()?;
+    let scenario = write_scenario(
+        &fixture,
+        &[
+            r#"{"provider":{"script":[{"kind":"events","events":[{"type":"tool_calls_done","calls":[{"id":"call-1","name":"exec","args":{"kind":"parsed","value":{"command":"echo hi","timeout_seconds":60}}}]},{"type":"usage","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":5,"reasoning_tokens":null,"cache_write_tokens":0,"cost_usd":null}},{"type":"stop","reason":"tool_use"}]},{"kind":"events","events":[{"type":"text_delta","text":"done"},{"type":"tool_calls_done","calls":[]},{"type":"usage","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":5,"reasoning_tokens":null,"cache_write_tokens":0,"cost_usd":null}},{"type":"stop","reason":"end_turn"}]}]}}"#,
+            r#"{"set_approval":"ask"}"#,
+            r#"{"prompt":"run echo hi"}"#,
+            r#"{"expect":{"request":{"kind":"approval"}}}"#,
+            r#"{"answer":"approve"}"#,
+            r#"{"expect":{"update":{"kind":"turn_ended","contains":"end_turn"}}}"#,
+        ],
+    )?;
+    let output = fixture.output(&[
+        "dev",
+        "run",
+        "--consent",
+        scenario.to_str().expect("utf8 path"),
+    ])?;
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("scenario passed"),
+        "{}",
+        stdout(&output)
+    );
+    Ok(())
+}
+
+/// Timeout arithmetic cannot wrap: `u64::MAX` milliseconds is past the
+/// scenario limit, so the step rejects it. Reverting the bound waits
+/// ~584 million years on Linux and overflows `Instant` arithmetic on
+/// Windows.
+#[test]
+fn dev_run_rejects_an_out_of_range_timeout() -> Result<(), Box<dyn Error>> {
+    let fixture = CliFixture::new()?;
+    let scenario = write_scenario(
+        &fixture,
+        &[
+            r#"{"provider":{"script":[{"kind":"events","events":[{"type":"tool_calls_done","calls":[]},{"type":"usage","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1,"reasoning_tokens":null,"cache_write_tokens":0,"cost_usd":null}},{"type":"stop","reason":"end_turn"}]}]}}"#,
+            r#"{"session":{"new":{"name":"tick"}}}"#,
+            r#"{"expect":{"update":{"kind":"turn_ended","timeout_ms":18446744073709551615}}}"#,
+        ],
+    )?;
+    let output = fixture.output(&["dev", "run", scenario.to_str().expect("utf8 path")])?;
+    assert!(!output.status.success());
+    let text = stderr(&output);
+    assert!(text.contains("scenario limit"), "{text}");
+    Ok(())
+}
+
+/// A sidecar must be a real file inside the session directory: a symlink
+/// is an escape, not content. Reverting `symlink_metadata` follows the
+/// link and dumps whatever it points at.
+#[cfg(unix)]
+#[test]
+fn dev_journal_sidecar_rejects_a_symlinked_file() -> Result<(), Box<dyn Error>> {
+    let fixture = CliFixture::new()?;
+    let session = fixture.data.join("session-symlink");
+    fs::create_dir_all(&session)?;
+    write_journal(&session, &sample_records(&fixture.data, None)?)?;
+    let outside = fixture.data.join("outside-state");
+    fs::write(&outside, "rev = 99\n")?;
+    std::os::unix::fs::symlink(&outside, session.join("state"))?;
+    let dump = fixture.output(&[
+        "dev",
+        "journal",
+        "sidecar",
+        session.to_str().expect("utf8 path"),
+        "state",
+    ])?;
+    assert!(!dump.status.success(), "followed the symlink");
     Ok(())
 }

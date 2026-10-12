@@ -831,7 +831,10 @@ fn answering_y_to_the_draft_question_quits() -> TestResult {
 
 #[test]
 fn pty_transcript_preserves_live_terminal_state() -> TestResult {
-    let dir = TestDir::new()?;
+    // Root the workspace under /tmp: the platform temp root can spell long
+    // enough ($TMPDIR, /private/…) to push the `dalgon-gates-` marker past
+    // the workspace row's clipped field, which leaves the row unnormalized.
+    let dir = TestDir::new_in(std::path::Path::new("/tmp"))?;
     let mut command = dalgon_command(dir.path(), &["recorded reply text"])?;
     let mut terminal = PtyProcess::spawn(&mut command, 80, 24)?;
     let mut record = Transcript::new();

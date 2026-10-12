@@ -30,7 +30,7 @@ pub(super) fn run(path: &Path) -> Result<ExitCode, DevError> {
     for (index, line) in lines.records.iter().enumerate() {
         let record = util::decode_line(path, line, index)?;
         let session = fold.push(&record)?;
-        let fields = util::fields(&session);
+        let fields = util::fields(session);
         let mut delta = String::new();
         for (name, value) in &fields {
             match prior.get(name) {

@@ -994,3 +994,13 @@ fn tool_result_kind_json_carries_elapsed_only_when_measured()
     assert_eq!(sonic_rs::from_str::<EntryKind>(&untimed)?, kind(None));
     Ok(())
 }
+
+/// An empty object has a tail too: `{}` is a complete record missing `v`,
+/// not trailing garbage. Reverting the derived tail reports
+/// `Invalid { trailing bytes }` instead of `MissingVersion`.
+#[test]
+fn decode_an_empty_object_is_missing_version_not_trailing_bytes() {
+    assert!(matches!(decode(b"{}"), Err(DecodeError::MissingVersion)));
+    // A truncated line still fails as malformed.
+    assert!(matches!(decode(b"{"), Err(DecodeError::Invalid { .. })));
+}
