@@ -54,7 +54,10 @@ impl Tool for Stat {
             .map_err(|error| ArgError::message(format!("path is required: {error}.")))?;
         let path = Path::new(&parsed.path);
         let escapes = path.components().any(|part| {
-            matches!(part, Component::ParentDir | Component::RootDir | Component::Prefix(_))
+            matches!(
+                part,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
         }) || (path.is_absolute() && !path.starts_with(ws.as_path()));
         if escapes {
             return Err(ArgError::message(format!(
