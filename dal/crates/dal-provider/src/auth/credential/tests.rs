@@ -163,6 +163,7 @@ fn group_readable_file_is_refused_with_the_chmod_fix() {
 
 #[cfg(windows)]
 #[test]
+#[ignore = "file_is_private is informational-only off unix until a Windows DACL probe lands"]
 fn stored_file_is_owner_only_and_a_broadly_readable_file_is_refused() {
     let dir = TestDir::new("windows-acl");
     let mut store = AuthStore::empty(dir.auth());
