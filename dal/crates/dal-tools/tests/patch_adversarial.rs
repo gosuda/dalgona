@@ -16,6 +16,7 @@ use dal_tools::patch::resolve::resolve_path;
 
 /// Creates a directory strictly outside `workspace`: a sibling under the same
 /// temp parent. A link from the workspace into it truly escapes.
+#[cfg(unix)]
 fn outside_dir(workspace: &tempfile::TempDir) -> tempfile::TempDir {
     let parent = workspace
         .path()
