@@ -1,7 +1,5 @@
 //! Host construction from an explicit product, config, and env snapshot.
 
-#[cfg(unix)]
-use std::io::IsTerminal as _;
 use std::sync::Arc;
 
 use dal_core::Config;
@@ -138,12 +136,6 @@ fn raise_fd_soft_limit() {
             break;
         }
         target /= 2;
-    }
-    let after = rustix::process::getrlimit(rustix::process::Resource::Nofile)
-        .current
-        .unwrap_or(soft);
-    if after != soft && std::io::stderr().is_terminal() {
-        eprintln!("[dal-agent] fd soft limit {soft} -> {after}");
     }
 }
 
