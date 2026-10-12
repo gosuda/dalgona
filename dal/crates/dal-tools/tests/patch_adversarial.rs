@@ -147,7 +147,13 @@ fn missing_target_under_an_inside_parent_is_accepted_for_creation() {
     let (display, canonical) = resolve_path(workspace.path(), Path::new("new/made.txt"))
         .expect("a not-yet-existing file under an inside parent plans");
     assert_eq!(display, std::path::PathBuf::from("new/made.txt"));
-    assert_eq!(canonical, workspace.path().join("new").join("made.txt"));
+    assert_eq!(
+        canonical,
+        std::fs::canonicalize(workspace.path())
+            .expect("workspace canonicalizes")
+            .join("new")
+            .join("made.txt")
+    );
 }
 
 #[test]
