@@ -14,7 +14,7 @@
 use std::{
     fs,
     io::{self, Write},
-    path::{Path, PathBuf},
+    path::Path,
     time::Instant,
 };
 
@@ -168,76 +168,6 @@ impl Transcript {
         }
         recorder
     }
-}
-
-/// Snapshots visible rows of a replayed transcript against
-/// `tests/snapshots/<gate>/<name>.snap`. With `DAL_SNAPSHOT_UPDATE=1` the file
-/// is (re)written; otherwise a drift writes `<name>.actual` and errors naming
-/// the first differing row.
-pub fn assert_snapshot(gate: &str, name: &str, rows: &[String]) -> io::Result<()> {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("snapshots")
-        .join(gate);
-    let expected = root.join(format!("{name}.snap"));
-    let normalized: Vec<String> = rows.iter().map(|row| row.trim_end().to_owned()).collect();
-    let rendered = normalized.join("\n") + "\n";
-
-    if std::env::var_os("DAL_SNAPSHOT_UPDATE").is_some() {
-        fs::create_dir_all(&root)?;
-        fs::write(&expected, &rendered)?;
-        return Ok(());
-    }
-
-    let blessed = fs::read_to_string(&expected).map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!(
-                "missing snapshot {} (run with DAL_SNAPSHOT_UPDATE=1 to bless): {error}",
-                expected.display()
-            ),
-        )
-    })?;
-    if blessed == rendered {
-        return Ok(());
-    }
-
-    let actual = root.join(format!("{name}.actual"));
-    fs::create_dir_all(&root)?;
-    fs::write(&actual, &rendered)?;
-
-    let blessed_rows: Vec<&str> = blessed.lines().collect();
-    let first_diff = blessed_rows
-        .iter()
-        .zip(normalized.iter())
-        .position(|(want, got)| want != got)
-        .map(|index| index + 1)
-        .map_or_else(
-            || {
-                let shared = blessed_rows.len().min(normalized.len());
-                if normalized.len() > shared {
-                    format!(
-                        "length: {} extra actual row(s) starting at row {}: {:?}",
-                        normalized.len() - shared,
-                        shared + 1,
-                        &normalized[shared..]
-                    )
-                } else {
-                    format!(
-                        "length: {} missing row(s) starting at row {}: expected {:?}",
-                        shared - normalized.len(),
-                        normalized.len() + 1,
-                        &blessed_rows[normalized.len()..]
-                    )
-                }
-            },
-            |line| format!("row {line}"),
-        );
-    Err(io::Error::other(format!(
-        "snapshot drift at {first_diff}: {} vs {} — bless with DAL_SNAPSHOT_UPDATE=1 if intended",
-        expected.display(),
-        actual.display(),
-    )))
 }
 
 fn hex(bytes: &[u8]) -> String {
