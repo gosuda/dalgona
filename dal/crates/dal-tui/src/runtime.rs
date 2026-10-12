@@ -770,11 +770,12 @@ type PumpItem = Result<TuiDelivery, TuiError>;
 /// the subscription, which keeps its own bounded queue and answers a lagging
 /// reader with a resync, so no delivery is dropped here and none piles up
 /// without limit. An error is queued like any delivery, so a full queue
-/// never hides a failure. `Drop` stops the worker within one poll tick and
+/// never hides a failure. `Drop` ends the worker's wait immediately and
 /// joins it, so neither shutdown nor resync leaks a thread.
 struct Pump<S: TuiSubscription> {
     deliveries: std::sync::mpsc::Receiver<PumpItem>,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    stop_signal: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     worker: Option<std::thread::JoinHandle<()>>,
     marker: std::marker::PhantomData<S>,
 }
@@ -808,6 +809,10 @@ impl<S: TuiSubscription> Pump<S> {
         use std::sync::atomic::Ordering;
         let (sender, deliveries) = std::sync::mpsc::sync_channel(PUMP_DEPTH);
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // A oneshot ends the wait the moment the pump drops. Polling the
+        // subscription under a tokio timeout instead would register a timer
+        // on a runtime that may already be shutting down and panic.
+        let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
         let worker = std::thread::Builder::new()
             .name("dal-tui-delivery-pump".to_owned())
             .spawn({
@@ -816,21 +821,21 @@ impl<S: TuiSubscription> Pump<S> {
                 move || {
                     while !stop_flag.load(Ordering::SeqCst) {
                         let tick = runtime.block_on(async {
-                            tokio::time::timeout(Duration::from_millis(50), subscription.next())
-                                .await
+                            tokio::select! {
+                                _ = &mut stop_rx => None,
+                                item = subscription.next() => Some(item),
+                            }
                         });
                         match tick {
-                            // Idle tick: poll again until asked to stop.
-                            Err(_) => {}
-                            // Closed or lagged latches `None`; later calls
-                            // return at once, so exit instead of spinning.
-                            Ok(Ok(None)) => break,
-                            Ok(Ok(Some(delivery))) => {
+                            // Stopped, or the stream closed/lagged and latches
+                            // `None` — later calls return at once either way.
+                            None | Some(Ok(None)) => break,
+                            Some(Ok(Some(delivery))) => {
                                 if !deliver(&sender, &stop_flag, Ok(delivery)) {
                                     break;
                                 }
                             }
-                            Ok(Err(error)) => {
+                            Some(Err(error)) => {
                                 deliver(&sender, &stop_flag, Err(error));
                                 break;
                             }
@@ -843,6 +848,7 @@ impl<S: TuiSubscription> Pump<S> {
         Self {
             deliveries,
             stop,
+            stop_signal: std::sync::Mutex::new(Some(stop_tx)),
             worker,
             marker: std::marker::PhantomData,
         }
@@ -858,6 +864,9 @@ impl<S: TuiSubscription> Drop for Pump<S> {
     fn drop(&mut self) {
         use std::sync::atomic::Ordering;
         self.stop.store(true, Ordering::SeqCst);
+        if let Some(signal) = self.stop_signal.lock().ok().and_then(|mut s| s.take()) {
+            let _ = signal.send(());
+        }
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
