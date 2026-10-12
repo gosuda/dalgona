@@ -598,12 +598,21 @@ async fn stale_lock_marker_is_taken_over_when_the_os_lock_is_free() {
         .await
         .expect("a stale marker never blocks a healthy takeover");
     assert!(report.torn.is_none(), "takeover is not journal damage");
+    // The held lock file is unreadable on Windows; POSIX advisory locks
+    // still allow reading the new owner while it is held.
+    #[cfg(unix)]
     assert_eq!(
         fs::read(&lock).expect("read the rewritten marker"),
         format!("{}\n", std::process::id()).as_bytes(),
         "the takeover rewrites the marker with the new owner's pid"
     );
     reopened.close().await.expect("session closes");
+    #[cfg(windows)]
+    assert_eq!(
+        fs::read(&lock).expect("read the rewritten marker"),
+        format!("{}\n", std::process::id()).as_bytes(),
+        "the takeover rewrites the marker with the new owner's pid"
+    );
 }
 
 #[tokio::test]
