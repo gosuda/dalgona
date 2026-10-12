@@ -14,7 +14,7 @@
 use std::{
     fs,
     io::{self, Write},
-    path::Path,
+    path::{Path, PathBuf},
     time::Instant,
 };
 
