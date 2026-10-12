@@ -233,7 +233,7 @@ fn streamed_reply_reads_as_one_paragraph_and_status_shows_usage() -> TestResult 
     let mut screen = Screen::start(dir.path(), &fixture, 120, 30)?;
     screen.send(b"say hello\r")?;
     screen.until(|text| text.contains("Second paragraph."))?;
-    screen.pump(300)?;
+    screen.until(|text| text.contains("in 1k out 340"))?;
     let text = screen.text();
     assert!(
         contains_line(&text, "Hello streamed world."),
