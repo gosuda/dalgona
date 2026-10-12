@@ -1,3 +1,7 @@
+#![cfg_attr(
+    not(unix),
+    expect(missing_docs, reason = "the whole crate is cfg'd out off unix")
+)]
 #![cfg(unix)]
 #![expect(
     clippy::disallowed_methods,
