@@ -246,16 +246,12 @@ fn streamed_reply_reads_as_one_paragraph_and_status_shows_usage() -> TestResult 
         "assistant rows keep the 2-cell left gutter\n{}",
         screen.dump()
     );
-    let rows = screen.visible();
-    let status = rows.last().expect("the screen has rows");
-    assert!(
-        status.contains("in 1k out 340"),
-        "status shows token usage, got {status:?}"
-    );
-    assert!(
-        status.contains("$0.012"),
-        "status shows cost, got {status:?}"
-    );
+    // The status row repaints in place and can read blank between frames;
+    // the last line of text() is the bottom visible row.
+    screen.until(|text| {
+        let status = text.lines().last().unwrap_or_default();
+        status.contains("in 1k out 340") && status.contains("$0.012")
+    })?;
     screen.quit()
 }
 
