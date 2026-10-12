@@ -283,7 +283,8 @@ pub(crate) fn confine(root: &Path, raw: &Path) -> Result<Confined, ConfineError>
 }
 
 /// Canonicalizes the deepest existing ancestor and re-appends the missing
-/// tail. Returns `None` when a component exists but cannot be resolved.
+/// tail. Returns `None` when a component exists but cannot be resolved, or
+/// when the tail would live under a non-directory ancestor.
 ///
 /// This resolves the path at the time of the call. It does not prevent
 /// concurrent directory replacement before a later filesystem operation.
@@ -294,6 +295,9 @@ pub fn canonicalize_existing_prefix(path: &Path) -> Option<PathBuf> {
     loop {
         match std::fs::canonicalize(current) {
             Ok(mut resolved) => {
+                if !tail.is_empty() && !resolved.is_dir() {
+                    return None;
+                }
                 resolved.extend(tail.iter().rev());
                 return Some(resolved);
             }
