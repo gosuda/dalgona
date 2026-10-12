@@ -8,7 +8,7 @@
 //! Fixture rules: an "outside" directory is always a sibling tempdir of the
 //! workspace (never a child), and every fixture fails loud at its setup
 //! boundary.
-#![expect(clippy::expect_used, reason = "integration tests fail loudly")]
+#![allow(clippy::expect_used, reason = "integration tests fail loudly")]
 
 use std::path::Path;
 
