@@ -10,9 +10,11 @@ mod platform {
     };
 
     use rustix::{
-        fs::{AtFlags, Mode, OFlags},
+        fs::{Mode, OFlags},
         io::Errno,
     };
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    use rustix::fs::AtFlags;
 
     pub(crate) struct RenameTemp {
         target: PathBuf,
@@ -131,8 +133,14 @@ mod platform {
                     AtFlags::empty(),
                 )
                 .map_err(io::Error::from)?;
-                rustix::fs::unlinkat(&self.parent, self.temp.as_os_str(), AtFlags::empty())
-                    .map_err(io::Error::from)
+                if let Err(error) =
+                    rustix::fs::unlinkat(&self.parent, self.temp.as_os_str(), AtFlags::empty())
+                {
+                    let _ =
+                        rustix::fs::unlinkat(&self.parent, self.name.as_os_str(), AtFlags::empty());
+                    return Err(io::Error::from(error));
+                }
+                Ok(())
             }
         }
 
@@ -256,7 +264,11 @@ mod platform {
         /// Creating a hard link is atomic and never replaces an existing name.
         pub(crate) fn publish(&self) -> io::Result<()> {
             fs::hard_link(&self.temp, &self.target)?;
-            fs::remove_file(&self.temp)
+            if let Err(error) = fs::remove_file(&self.temp) {
+                let _ = fs::remove_file(&self.target);
+                return Err(error);
+            }
+            Ok(())
         }
 
         pub(crate) fn cleanup(&self) {
