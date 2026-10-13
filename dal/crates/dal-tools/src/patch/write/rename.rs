@@ -116,6 +116,42 @@ impl PreparedRename {
         }
     }
 
+    /// Removes only the link installed by this call, preserving files that
+    /// replaced it while the operation was in progress.
+    pub(super) async fn rollback_published(&self) {
+        #[cfg(unix)]
+        {
+            use rustix::fs::AtFlags;
+            let expected = rustix::fs::statat(
+                &self.directory,
+                self.temp_name.as_os_str(),
+                AtFlags::SYMLINK_NOFOLLOW,
+            );
+            let current = rustix::fs::statat(
+                &self.directory,
+                self.target_name.as_os_str(),
+                AtFlags::SYMLINK_NOFOLLOW,
+            );
+            if let (Ok(expected), Ok(current)) = (expected, current) {
+                if expected.st_ino == current.st_ino && expected.st_dev == current.st_dev {
+                    let _ = rustix::fs::unlinkat(
+                        &self.directory,
+                        self.target_name.as_os_str(),
+                        AtFlags::empty(),
+                    );
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            if let Ok(relative) = self.target.strip_prefix(&self.workspace) {
+                if resolve_rename_destination(&self.workspace, relative).is_ok() {
+                    let _ = tokio::fs::remove_file(&self.target).await;
+                }
+            }
+        }
+    }
+
     pub(super) async fn cleanup(&self) {
         #[cfg(unix)]
         {
