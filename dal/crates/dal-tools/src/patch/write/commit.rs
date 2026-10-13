@@ -1,13 +1,56 @@
 //! Atomic commit: locks, temps, ordered operations, and truthful outcomes.
 
-use std::{path::PathBuf, sync::Arc};
+use std::{io, path::{Path, PathBuf}, sync::Arc};
 
 use super::super::ir::{
     Diff, DiffFile, EngineError, ErrorClass, FileChange, FindingSeverity, Output, Plan,
     StagedFileOwned,
 };
 
-use super::PatchSession;
+use super::{PatchSession, rename_destination, rename_temp::RenameTemp};
+
+/// Every staged file has exactly one publication owner.
+enum PendingTemp {
+    Ordinary { target: PathBuf, temp: PathBuf },
+    Rename(RenameTemp),
+}
+
+impl PendingTemp {
+    fn target(&self) -> &Path {
+        match self {
+            Self::Ordinary { target, .. } => target,
+            Self::Rename(rename) => rename.target(),
+        }
+    }
+
+    async fn publish(&self) -> io::Result<()> {
+        match self {
+            Self::Ordinary { target, temp } => tokio::fs::rename(temp, target).await,
+            Self::Rename(rename) => rename.publish(),
+        }
+    }
+
+    async fn cleanup(&self) {
+        match self {
+            Self::Ordinary { temp, .. } => {
+                let _ = tokio::fs::remove_file(temp).await;
+            }
+            Self::Rename(rename) => rename.cleanup(),
+        }
+    }
+
+    fn rollback_rename(&self) {
+        if let Self::Rename(rename) = self {
+            rename.rollback();
+        }
+    }
+
+    fn sync_rename_dir(&self) {
+        if let Self::Rename(rename) = self {
+            rename.sync_dir();
+        }
+    }
+}
 
 fn lock_table()
 -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>> {
@@ -41,7 +84,8 @@ async fn prepare_write_set(
         if file.op == super::super::ir::Operation::Rename
             && let Some(dest) = file.renamed_to.as_ref()
         {
-            lock_paths.push(session.workspace.join(dest));
+            let (_, canonical) = rename_destination(&session.workspace, dest)?;
+            lock_paths.push(canonical);
         }
     }
     lock_paths.sort_by(|left, right| {
@@ -97,13 +141,19 @@ pub(crate) async fn apply_files(
     let mut seen_dirs: HashSet<PathBuf> = HashSet::new();
     let _guards = prepare_write_set(session, plan).await?;
 
-    // Temps map target absolute path -> temp path. For renames the target
-    // is the destination; the source is moved to trash in Phase B.
-    let mut temps: Vec<(PathBuf, PathBuf)> = Vec::new();
-    // Phase A: exclusive temp creation with complete after bytes.
-    // Deletes stage no temp; renames stage the destination bytes.
+    // Every pending rename owns an opened destination directory until the
+    // call succeeds or rolls back. Publication never re-resolves its path.
+    let mut temps: Vec<PendingTemp> = Vec::new();
+    // Phase A: create all after-images before publishing any.
     for file in &plan.files {
-        stage_temp(session, file, &mut temps, &mut seen_dirs).await?;
+        match stage_temp(session, file, &mut seen_dirs).await {
+            Ok(Some(temp)) => temps.push(temp),
+            Ok(None) => {}
+            Err(error) => {
+                cleanup_temps(&temps).await;
+                return Err(error);
+            }
+        }
     }
     // Mark every write-set path dirty before the first phase-B rename.
     for file in &plan.files {
@@ -135,20 +185,27 @@ pub(crate) async fn apply_files(
         completed.push(file.absolute_path.clone());
         trash_paths.push((file.absolute_path.clone(), trash.clone()));
     }
-    for (target, temp) in &temps {
-        if let Err(error) = tokio::fs::rename(temp, target).await {
-            // Best-effort restore of already renamed targets from staged before bytes.
+    for (index, pending) in temps.iter().enumerate() {
+        if let Err(error) = pending.publish().await {
+            for prior in &temps[..index] {
+                prior.rollback_rename();
+            }
             restore_completed(plan, &completed).await;
             cleanup_temps(&temps).await;
+            let class = if error.kind() == io::ErrorKind::AlreadyExists {
+                ErrorClass::File
+            } else {
+                ErrorClass::Io
+            };
             return Err(EngineError::new(
-                ErrorClass::Io,
+                class,
                 format!(
                     "patch: cannot write {}: {error}. Nothing was written.",
-                    target.display()
+                    pending.target().display()
                 ),
             ));
         }
-        completed.push(target.clone());
+        completed.push(pending.target().to_path_buf());
     }
     // Rename sources move to trash after their destinations install.
     // Track every trash move so a later failure restores sources too.
@@ -178,11 +235,10 @@ pub(crate) async fn apply_files(
     for (_, trash) in &trash_paths {
         let _ = tokio::fs::remove_file(trash).await;
     }
-    // Best-effort leftover temp removal; Phase A/B already cleaned on error.
-    for (_, temp) in &temps {
-        // Temps that were renamed no longer exist; ignore missing.
-        let _ = tokio::fs::remove_file(temp).await;
+    for temp in &temps {
+        temp.sync_rename_dir();
     }
+    cleanup_temps(&temps).await;
     Ok(report_output(session, plan))
 }
 
@@ -197,75 +253,89 @@ fn trash_path(session: &PatchSession, source: &std::path::Path) -> PathBuf {
         ))
 }
 
-/// Phase A for one file: compute the write target, refuse to clobber a
-/// rename destination, and stage the after bytes into an exclusive temp.
+/// Stage an after-image. Renames are published through an opened destination
+/// directory, rather than by joining untrusted path bytes at commit time.
 async fn stage_temp(
     session: &PatchSession,
     file: &StagedFileOwned,
-    temps: &mut Vec<(PathBuf, PathBuf)>,
     seen_dirs: &mut std::collections::HashSet<PathBuf>,
-) -> Result<(), EngineError> {
+) -> Result<Option<PendingTemp>, EngineError> {
     if file.op == super::super::ir::Operation::Delete {
-        return Ok(());
+        return Ok(None);
     }
     let Some(after) = file.after.as_deref() else {
-        return Ok(());
+        return Ok(None);
     };
-    let target_abs = if file.op == super::super::ir::Operation::Rename {
-        match file.renamed_to.as_ref() {
-            Some(dest) => session.workspace.join(dest),
-            None => file.absolute_path.clone(),
-        }
+    let (pending, mut handle) = if file.op == super::super::ir::Operation::Rename {
+        let dest = file.renamed_to.as_deref().ok_or_else(|| {
+            EngineError::new(
+                ErrorClass::Resolve,
+                "patch: rename has no destination.".to_owned(),
+            )
+        })?;
+        let (relative, _) = rename_destination(&session.workspace, dest)?;
+        let (temp, handle) =
+            RenameTemp::create(&session.workspace, &relative).map_err(|error| {
+                EngineError::new(
+                    ErrorClass::File,
+                    format!(
+                        "patch: cannot rename {} to {}: {error}. Nothing was written.",
+                        file.path.display(),
+                        relative.display()
+                    ),
+                )
+            })?;
+        (PendingTemp::Rename(temp), tokio::fs::File::from_std(handle))
     } else {
-        file.absolute_path.clone()
-    };
-    // No-replace: rename destinations must be absent at prepare and commit.
-    if file.op == super::super::ir::Operation::Rename
-        && tokio::fs::metadata(&target_abs).await.is_ok()
-    {
-        cleanup_temps(temps).await;
-        let dest = file
-            .renamed_to
-            .as_ref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default();
-        return Err(EngineError::new(
-            ErrorClass::File,
-            format!(
-                "patch: cannot rename {} to {dest}: {dest} exists.",
-                file.path.display()
-            ),
+        let parent = file
+            .absolute_path
+            .parent()
+            .unwrap_or(session.workspace.as_path());
+        tokio::fs::create_dir_all(parent).await.map_err(|error| {
+            EngineError::new(
+                ErrorClass::Io,
+                format!(
+                    "patch: cannot write {}: {error}. Nothing was written.",
+                    file.path.display()
+                ),
+            )
+        })?;
+        let temp = parent.join(format!(
+            ".dalgon-patch-{}-{:032x}.tmp",
+            std::process::id(),
+            nonce_u128()
         ));
-    }
-    let parent = target_abs.parent().unwrap_or(session.workspace.as_path());
-    tokio::fs::create_dir_all(parent).await.map_err(|error| {
-        EngineError::new(
-            ErrorClass::Io,
-            format!(
-                "patch: cannot write {}: {error}. Nothing was written.",
-                file.path.display()
-            ),
-        )
-    })?;
-    let temp = parent.join(format!(
-        ".dalgon-patch-{}-{:032x}.tmp",
-        std::process::id(),
-        nonce_u128()
-    ));
-    let write = async {
-        use tokio::io::AsyncWriteExt as _;
-        let mut handle = tokio::fs::OpenOptions::new()
+        let handle = tokio::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&temp)
-            .await?;
+            .await
+            .map_err(|error| {
+                EngineError::new(
+                    ErrorClass::Io,
+                    format!(
+                        "patch: cannot write {}: {error}. Nothing was written.",
+                        file.path.display()
+                    ),
+                )
+            })?;
+        (
+            PendingTemp::Ordinary {
+                target: file.absolute_path.clone(),
+                temp,
+            },
+            handle,
+        )
+    };
+    use tokio::io::AsyncWriteExt as _;
+    let result = async {
         handle.write_all(after).await?;
         handle.sync_all().await
     }
     .await;
-    if let Err(error) = write {
-        let _ = tokio::fs::remove_file(&temp).await;
-        cleanup_temps(temps).await;
+    drop(handle);
+    if let Err(error) = result {
+        pending.cleanup().await;
         return Err(EngineError::new(
             ErrorClass::Io,
             format!(
@@ -274,11 +344,10 @@ async fn stage_temp(
             ),
         ));
     }
-    temps.push((target_abs.clone(), temp));
     if let Some(parent) = file.absolute_path.parent() {
         seen_dirs.insert(parent.to_path_buf());
     }
-    Ok(())
+    Ok(Some(pending))
 }
 
 /// Best-effort restore of completed targets from staged before bytes.
@@ -299,7 +368,7 @@ async fn trash_rename_source(
     plan: &Plan,
     file: &StagedFileOwned,
     completed: &[PathBuf],
-    temps: &[(PathBuf, PathBuf)],
+    temps: &[PendingTemp],
     trash_moves: &mut Vec<(PathBuf, PathBuf)>,
     trash_paths: &mut Vec<(PathBuf, PathBuf)>,
 ) -> Result<(), EngineError> {
@@ -321,6 +390,9 @@ async fn trash_rename_source(
         }
         for (src, trash) in trash_moves.iter().rev() {
             let _ = tokio::fs::rename(trash, src).await;
+        }
+        for temp in temps {
+            temp.rollback_rename();
         }
         cleanup_temps(temps).await;
         return Err(EngineError::new(
@@ -398,9 +470,9 @@ fn report_output(session: &PatchSession, plan: &Plan) -> Output {
     }
 }
 
-async fn cleanup_temps(temps: &[(PathBuf, PathBuf)]) {
-    for (_, temp) in temps {
-        let _ = tokio::fs::remove_file(temp).await;
+async fn cleanup_temps(temps: &[PendingTemp]) {
+    for temp in temps {
+        temp.cleanup().await;
     }
 }
 
@@ -426,7 +498,7 @@ fn count_lines(before: Option<&[u8]>, after: Option<&[u8]>) -> (u64, u64) {
     }
 }
 
-fn nonce_u128() -> u128 {
+pub(super) fn nonce_u128() -> u128 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0x9E37_79B9_7F4A_7C15);
     let first = COUNTER.fetch_add(0x9E37_79B9_7F4A_7C15, Ordering::Relaxed);
