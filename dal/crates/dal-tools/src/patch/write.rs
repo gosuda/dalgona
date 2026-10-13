@@ -128,7 +128,9 @@ pub async fn plan(
         ));
     }
     // No-op elimination: every file identical is an error.
-    if files.iter().all(|file| file.before == file.after) {
+    if files.iter().all(|file| {
+        file.op == super::ir::Operation::Update && file.before == file.after
+    }) {
         return Err(EngineError::new(
             ErrorClass::Resolve,
             "patch: the edits produce no change.".to_owned(),
