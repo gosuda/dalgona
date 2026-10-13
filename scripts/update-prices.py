@@ -29,6 +29,7 @@ NO_PRICED_MESSAGE: str = "update-prices: no priced models found"
 
 _DATE_PATTERN: re.Pattern[str] = re.compile("([0-9]{4}-[0-9]{2}-[0-9]{2})" + chr(10) + "?")
 _MAX_F64: float = sys.float_info.max
+_CONTEXT_TIER_PLUS_ONE = frozenset({32_001, 128_001, 200_001, 256_001, 272_001})
 
 JSONValue = Union[bool, int, float, Decimal, str, None, "list[JSONValue]", "dict[str, JSONValue]"]
 
@@ -38,13 +39,22 @@ class UpdatePricesError(Exception):
 
 
 @dataclass(frozen=True)
+class PriceTier:
+    size: int
+    input: float | None
+    cached_input: float | None
+    output: float | None
+    reasoning: float | None
+
+
+@dataclass(frozen=True)
 class PriceRow:
     model: str
     input: float | None
     cached_input: float | None
     output: float | None
     reasoning: float | None
-
+    tiers: tuple[PriceTier, ...]
 
 def _valid_number(value: JSONValue) -> bool:
     if isinstance(value, bool):
@@ -71,19 +81,89 @@ def parse_rate(value: JSONValue) -> float | None:
     return abs(float(value))
 
 
-def parse_cost(record: JSONValue) -> tuple[float | None, float | None, float | None, float | None]:
+def parse_tiers(cost: dict[str, JSONValue]) -> tuple[PriceTier, ...]:
+    raw_tiers = cost.get("tiers")
+    if raw_tiers is None:
+        return ()
+    if not isinstance(raw_tiers, list) or not raw_tiers:
+        raise UpdatePricesError(CATALOG_MESSAGE)
+    tiers: list[PriceTier] = []
+    previous_size = -1
+    allowed = {
+        "cache_read",
+        "cache_write",
+        "input",
+        "input_audio",
+        "output",
+        "reasoning",
+        "tier",
+    }
+    for raw_tier in raw_tiers:
+        if not isinstance(raw_tier, dict) or set(raw_tier) - allowed:
+            raise UpdatePricesError(CATALOG_MESSAGE)
+        descriptor = raw_tier.get("tier")
+        if (
+            not isinstance(descriptor, dict)
+            or set(descriptor) != {"type", "size"}
+            or descriptor.get("type") != "context"
+        ):
+            raise UpdatePricesError(CATALOG_MESSAGE)
+        size = descriptor.get("size")
+        if (
+            not isinstance(size, int)
+            or isinstance(size, bool)
+            or size < 0
+            or size > 18_446_744_073_709_551_615
+        ):
+            raise UpdatePricesError(CATALOG_MESSAGE)
+        # Normalize only the known models.dev boundary spellings that use
+        # `threshold + 1`; unrelated thresholds remain strict source data.
+        if size in _CONTEXT_TIER_PLUS_ONE:
+            size -= 1
+        if size <= previous_size:
+            raise UpdatePricesError(CATALOG_MESSAGE)
+        input_rate = parse_rate(raw_tier.get("input"))
+        cached_input_rate = parse_rate(raw_tier.get("cache_read"))
+        output_rate = parse_rate(raw_tier.get("output"))
+        reasoning_rate = parse_rate(raw_tier.get("reasoning"))
+        parse_rate(raw_tier.get("cache_write"))
+        parse_rate(raw_tier.get("input_audio"))
+        if all(rate is None for rate in (input_rate, cached_input_rate, output_rate, reasoning_rate)):
+            raise UpdatePricesError(CATALOG_MESSAGE)
+        tiers.append(
+            PriceTier(
+                size=size,
+                input=input_rate,
+                cached_input=cached_input_rate,
+                output=output_rate,
+                reasoning=reasoning_rate,
+            )
+        )
+        previous_size = size
+    return tuple(tiers)
+
+
+def parse_cost(
+    record: JSONValue,
+) -> tuple[
+    tuple[float | None, float | None, float | None, float | None],
+    tuple[PriceTier, ...],
+]:
     if not isinstance(record, dict):
         raise UpdatePricesError(CATALOG_MESSAGE)
     cost: JSONValue = record.get("cost")
     if cost is None:
-        return None, None, None, None
+        return (None, None, None, None), ()
     if not isinstance(cost, dict):
         raise UpdatePricesError(CATALOG_MESSAGE)
     return (
-        parse_rate(cost.get("input")),
-        parse_rate(cost.get("cache_read")),
-        parse_rate(cost.get("output")),
-        parse_rate(cost.get("reasoning")),
+        (
+            parse_rate(cost.get("input")),
+            parse_rate(cost.get("cache_read")),
+            parse_rate(cost.get("output")),
+            parse_rate(cost.get("reasoning")),
+        ),
+        parse_tiers(cost),
     )
 
 
@@ -104,7 +184,7 @@ def _provider_rows(
     for model, record in models.items():
         if not isinstance(record, dict):
             raise UpdatePricesError(CATALOG_MESSAGE)
-        rates = parse_cost(record)
+        rates, tiers = parse_cost(record)
         if "temperature" in record:
             temperature = record["temperature"]
             if not isinstance(temperature, bool):
@@ -120,7 +200,7 @@ def _provider_rows(
         if any(0xD800 <= ord(ch) <= 0xDFFF for ch in key) or key in seen:
             raise UpdatePricesError(CATALOG_MESSAGE)
         seen.add(key)
-        rows.append(PriceRow(key, *rates))
+        rows.append(PriceRow(key, *rates, tiers))
     return rows, temperature_rows
 
 
@@ -227,6 +307,36 @@ def render(
                 "    },",
             ]
         )
+    lines.extend(
+        [
+            "];",
+            '#[expect(clippy::unreadable_literal, reason = "generated tier rates preserve the snapshot\'s decimal values")]',
+            "pub(crate) const PRICE_TIER_ROWS: &[TierRow] = &[",
+        ]
+    )
+    for row in rows:
+        if not row.tiers:
+            continue
+        lines.extend(
+            [
+                "    TierRow {",
+                f"        model: {rust_string(row.model)},",
+                "        tiers: &[",
+            ]
+        )
+        for tier in row.tiers:
+            lines.extend(
+                [
+                    "            PriceTier {",
+                    f"                size: {tier.size:_},",
+                    f"                input: {render_rate(tier.input)},",
+                    f"                cached_input: {render_rate(tier.cached_input)},",
+                    f"                output: {render_rate(tier.output)},",
+                    f"                reasoning: {render_rate(tier.reasoning)},",
+                    "            },",
+                ]
+            )
+        lines.extend(["        ],", "    },"])
     lines.extend(["];", "pub(crate) const TEMPERATURE_ROWS: &[(&str, &str)] = &["])
     for provider, model in temperature_rows:
         lines.append(f"    ({rust_string(provider)}, {rust_string(model)}),")

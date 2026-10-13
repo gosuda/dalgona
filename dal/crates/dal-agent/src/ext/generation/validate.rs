@@ -150,6 +150,13 @@ impl ValidatedExtensions {
             std::collections::BTreeMap::new();
         for ext in &sorted {
             let (claimant, name) = claimant_of(ext)?;
+            if name.as_str() == crate::host::CHILD_POLICY_EXT && ext.origin() != Origin::Builtin {
+                return Err(RegistrationError::Conflict {
+                    kind: "extension",
+                    name: name.clone(),
+                    claimant: Claimant::Builtin(name),
+                });
+            }
             if let Some(previous) = claimed.insert(name.clone(), claimant) {
                 return Err(RegistrationError::Conflict {
                     kind: "extension",

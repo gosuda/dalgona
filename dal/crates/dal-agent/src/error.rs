@@ -13,14 +13,15 @@ use dal_core::{
     Answer, BlobId, ClientId, ErrorTriple, Expect, JobId, Question, RequestId, Service, SessionId,
     TurnId,
 };
-use dal_store::{BlobError, StoreError};
+use dal_store::{BlobError, MAX_SIDECAR_VALUE, StoreError};
 
 /// The number of wake-started turns in a row the core accepts before it
 /// refuses the next wake with [`DenyReason::WakeLimit`].
 const WAKE_LIMIT: u32 = 20;
 
-/// The most bytes one sidecar value may hold.
-const SIDECAR_VALUE_LIMIT: u64 = 1_048_576;
+/// The most bytes one sidecar value may hold. The read bound in
+/// [`dal_store`] enforces the same cap, so one constant governs both sides.
+pub(crate) const SIDECAR_VALUE_LIMIT: u64 = MAX_SIDECAR_VALUE;
 
 /// The bounded resource an admission wait was waiting for.
 #[non_exhaustive]
@@ -244,6 +245,11 @@ pub enum HostError {
     /// The store failed. The display text is the store text.
     #[error(transparent)]
     Store(StoreError),
+    /// A sign-in, sign-out, or credential read failed. The display text is
+    /// the provider text; [`dal_provider::ProviderError::fix`] names the next
+    /// action.
+    #[error(transparent)]
+    Provider(dal_provider::ProviderError),
 }
 
 impl HostError {
@@ -264,7 +270,7 @@ impl From<StoreError> for HostError {
     /// keeps every other store failure typed.
     fn from(error: StoreError) -> Self {
         match error {
-            StoreError::Locked { session, pid } => Self::SessionBusy { id: session, pid },
+            StoreError::Locked { session, pid, .. } => Self::SessionBusy { id: session, pid },
             error => Self::Store(error),
         }
     }
@@ -432,6 +438,25 @@ impl ServiceError {
             "another question is already open in this front end",
         )
     }
+
+    /// A grant denial for `service` that names the requesting `plugin`.
+    #[must_use]
+    pub(crate) fn service_not_granted(service: Service, plugin: &str) -> Self {
+        Self::Denied(DenyReason::ServiceNotGranted {
+            service,
+            plugin: plugin.into(),
+        })
+    }
+
+    /// Names `service` and `plugin` in a bare grant denial. Every other
+    /// error passes through unchanged.
+    #[must_use]
+    pub(crate) fn naming_grant(self, service: Service, plugin: &str) -> Self {
+        match self {
+            Self::Denied(DenyReason::NotGranted) => Self::service_not_granted(service, plugin),
+            error => error,
+        }
+    }
 }
 
 /// Renders a [`DenyReason`] from its owned data.
@@ -457,6 +482,10 @@ impl fmt::Display for DenyText<'_> {
             DenyReason::NotGranted => {
                 formatter.write_str("denied: the extension's services are not granted")
             }
+            DenyReason::ServiceNotGranted { service, plugin } => write!(
+                formatter,
+                "denied: plugin \"{plugin}\" has no grant for the \"{service}\" service; approve the plugin's grant request when it asks, then try again"
+            ),
             DenyReason::NoFrontEnd => formatter.write_str("denied: no front end can answer"),
             DenyReason::Unavailable { what } => write!(formatter, "denied: {what} is unavailable"),
             DenyReason::OutOfScope { what } => {
@@ -690,6 +719,18 @@ mod tests {
     }
 
     #[test]
+    fn ungranted_service_names_plugin_and_fix() {
+        let error = ServiceError::Denied(DenyReason::ServiceNotGranted {
+            service: Service::Turn,
+            plugin: "orchestration".into(),
+        });
+        assert_eq!(
+            error.to_string(),
+            "denied: plugin \"orchestration\" has no grant for the \"turn\" service; approve the plugin's grant request when it asks, then try again"
+        );
+    }
+
+    #[test]
     fn host_errors_render_product_text() {
         let id = SessionId::new_v7();
         assert_eq!(
@@ -708,6 +749,7 @@ mod tests {
         let locked = HostError::from(StoreError::Locked {
             session: id,
             pid: Some(7),
+            path: PathBuf::from("/s/lock"),
         });
         assert!(matches!(
             locked,

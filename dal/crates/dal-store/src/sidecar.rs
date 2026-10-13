@@ -1,6 +1,12 @@
 //! Checked, session-scoped access to private sidecar files.
 
-use std::{fs, io, path::PathBuf};
+use std::{
+    fs,
+    io::{self, Read},
+    path::PathBuf,
+};
+
+use dal_core::{Name, SidecarName};
 
 use crate::{
     error::StoreError,
@@ -8,15 +14,46 @@ use crate::{
     util::{self, FileMode},
 };
 
+/// Names the session layout owns; a sidecar of the same name would replace live session state.
+/// Compared ASCII case-insensitively because Windows and default macOS volumes fold case.
+const RESERVED: [&str; 7] = [
+    "journal.jsonl",
+    "lock",
+    "lock.owner",
+    "info.json",
+    "blobs",
+    "jobs",
+    "sidecar",
+];
+
+/// The most bytes one extension sidecar value may hold. Reads refuse larger
+/// files so an oversized sidecar cannot drive a large allocation.
+pub const MAX_SIDECAR_VALUE: u64 = 1_048_576;
+
 /// Reads and atomically writes private files within one file-backed session.
 #[derive(Debug)]
 pub struct Sidecar<'session> {
     paths: &'session SessionPaths,
 }
+/// Reads and atomically writes sidecars under one extension's private directory.
+#[derive(Debug)]
+pub struct ExtensionSidecar<'session> {
+    paths: &'session SessionPaths,
+    extension: Name,
+}
 
 impl<'session> Sidecar<'session> {
     pub(crate) fn new(paths: &'session SessionPaths) -> Self {
         Self { paths }
+    }
+
+    /// Returns a handle restricted to one extension's sidecar directory.
+    #[must_use]
+    pub fn for_extension(&self, extension: &Name) -> ExtensionSidecar<'_> {
+        ExtensionSidecar {
+            paths: self.paths,
+            extension: extension.clone(),
+        }
     }
 
     /// Atomically replaces the named sidecar with `bytes`, using mode 0600.
@@ -69,7 +106,91 @@ impl<'session> Sidecar<'session> {
                 reason: "sidecar name must be 1 to 64 ASCII alphanumeric, '.', '_', or '-' characters and must not start with '.'".into(),
             });
         }
+        if RESERVED
+            .iter()
+            .any(|reserved| reserved.eq_ignore_ascii_case(name))
+        {
+            return Err(StoreError::Invalid {
+                reason: format!("sidecar name {name:?} is reserved for the session's own files")
+                    .into(),
+            });
+        }
         Ok(self.paths.sidecar(name))
+    }
+}
+
+impl ExtensionSidecar<'_> {
+    /// Atomically replaces the named extension sidecar with `bytes`, using mode 0600.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Io`] when atomic publication fails.
+    pub fn write(&self, name: &SidecarName, bytes: &[u8]) -> Result<(), StoreError> {
+        let directory = self.directory();
+        util::create_private_dir_all(&directory)
+            .map_err(|source| util::io_err(&directory, source))?;
+        util::sync_dir(self.paths.directory())?;
+        util::sync_dir(&self.paths.sidecar_dir())?;
+        // The recursive create may add the session directory itself while a
+        // lazy journal has not landed yet, so its entry under the workspace
+        // directory needs a parent sync like `Sidecar::write`.
+        if let Some(parent) = self.paths.directory().parent() {
+            util::sync_dir(parent)?;
+        }
+        util::write_atomic(&self.path(name), bytes, FileMode::Mode0600)
+    }
+
+    /// Reads the named extension sidecar bytes without decoding its payload.
+    ///
+    /// The file's size is checked before its bytes are read, so an oversized
+    /// or adversarial sidecar cannot drive a large allocation.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::NotFound`] with the sidecar path when it is missing,
+    /// [`StoreError::SidecarTooLarge`] when the file exceeds
+    /// [`MAX_SIDECAR_VALUE`], or [`StoreError::Io`] for another read failure.
+    pub fn read(&self, name: &SidecarName) -> Result<Vec<u8>, StoreError> {
+        let path = self.path(name);
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                return Err(StoreError::NotFound { path });
+            }
+            Err(source) => return Err(util::io_err(&path, source)),
+        };
+        if !metadata.is_file() {
+            return Err(StoreError::Invalid {
+                reason: "sidecar value is not a regular file".into(),
+            });
+        }
+        if metadata.len() > MAX_SIDECAR_VALUE {
+            return Err(StoreError::SidecarTooLarge {
+                name: name.as_str().into(),
+                bytes: metadata.len(),
+            });
+        }
+        let file = fs::File::open(&path).map_err(|source| util::io_err(&path, source))?;
+        // One byte over the cap turns a value grown between the stat and the
+        // read into an error instead of a silently truncated value.
+        let mut value = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
+        file.take(MAX_SIDECAR_VALUE + 1)
+            .read_to_end(&mut value)
+            .map_err(|source| util::io_err(&path, source))?;
+        let read_bytes = u64::try_from(value.len()).unwrap_or(u64::MAX);
+        if read_bytes > MAX_SIDECAR_VALUE {
+            return Err(StoreError::SidecarTooLarge {
+                name: name.as_str().into(),
+                bytes: read_bytes,
+            });
+        }
+        Ok(value)
+    }
+
+    fn directory(&self) -> PathBuf {
+        self.paths.sidecar_dir().join(self.extension.as_str())
+    }
+
+    fn path(&self, name: &SidecarName) -> PathBuf {
+        self.directory().join(name.as_str())
     }
 }
 
@@ -172,6 +293,109 @@ mod tests {
     }
 
     #[test]
+    fn layout_owned_names_are_rejected_and_leave_the_session_unchanged() {
+        let (_root, paths) = sidecar();
+        let sidecar = Sidecar::new(&paths);
+        let extension = Name::parse("ext").expect("valid extension name");
+        let state = SidecarName::parse("state").expect("valid sidecar name");
+        sidecar
+            .for_extension(&extension)
+            .write(&state, b"extension state")
+            .expect("create the extension sidecar directory");
+        fs::write(paths.lock(), b"lock").expect("write lock file");
+        let before = listing(paths.directory());
+
+        for reserved in [
+            "journal.jsonl",
+            "lock",
+            "info.json",
+            "blobs",
+            "jobs",
+            "sidecar",
+        ] {
+            assert!(
+                matches!(
+                    sidecar.write(reserved, b"no"),
+                    Err(StoreError::Invalid { .. })
+                ),
+                "write of {reserved:?} must be rejected"
+            );
+            assert!(
+                matches!(sidecar.read(reserved), Err(StoreError::Invalid { .. })),
+                "read of {reserved:?} must be rejected"
+            );
+        }
+
+        assert_eq!(listing(paths.directory()), before);
+        assert_eq!(
+            fs::read(paths.lock()).expect("read lock file"),
+            b"lock",
+            "the lock file is untouched"
+        );
+        assert_eq!(
+            fs::read(paths.sidecar_dir().join("ext").join("state")).expect("read extension state"),
+            b"extension state"
+        );
+    }
+
+    #[test]
+    fn lock_owner_marker_and_case_variants_of_layout_names_are_rejected() {
+        let (_root, paths) = sidecar();
+        let sidecar = Sidecar::new(&paths);
+        fs::write(paths.sidecar("lock.owner"), b"4242\n").expect("write lock owner");
+        let before = listing(paths.directory());
+
+        for reserved in [
+            "journal.jsonl",
+            "lock",
+            "lock.owner",
+            "info.json",
+            "blobs",
+            "jobs",
+            "sidecar",
+        ] {
+            for name in [reserved.to_ascii_uppercase(), reserved.replace('o', "O")] {
+                assert!(
+                    matches!(sidecar.write(&name, b"no"), Err(StoreError::Invalid { .. })),
+                    "write of {name:?} must be rejected"
+                );
+                assert!(
+                    matches!(sidecar.read(&name), Err(StoreError::Invalid { .. })),
+                    "read of {name:?} must be rejected"
+                );
+            }
+        }
+        assert!(matches!(
+            sidecar.write("lock.owner", b"no"),
+            Err(StoreError::Invalid { .. })
+        ));
+
+        assert_eq!(listing(paths.directory()), before);
+        assert_eq!(
+            fs::read(paths.sidecar("lock.owner")).expect("read lock owner"),
+            b"4242\n",
+            "the owner marker is untouched"
+        );
+    }
+
+    fn listing(directory: &std::path::Path) -> Vec<(PathBuf, bool)> {
+        let mut entries = Vec::new();
+        let mut pending = vec![directory.to_path_buf()];
+        while let Some(current) = pending.pop() {
+            for entry in fs::read_dir(&current).expect("list session directory") {
+                let path = entry.expect("directory entry").path();
+                let is_dir = path.is_dir();
+                if is_dir {
+                    pending.push(path.clone());
+                }
+                entries.push((path, is_dir));
+            }
+        }
+        entries.sort();
+        entries
+    }
+
+    #[test]
     fn write_replaces_an_existing_sidecar() {
         let (_root, paths) = sidecar();
         let sidecar = Sidecar::new(&paths);
@@ -186,6 +410,49 @@ mod tests {
     }
 
     #[test]
+    fn extension_sidecars_are_scoped_away_from_session_state() {
+        let (_root, paths) = sidecar();
+        let root = Sidecar::new(&paths);
+        let first_name = Name::parse("first").expect("valid extension name");
+        let second_name = Name::parse("second").expect("valid extension name");
+        let shared = SidecarName::parse("shared").expect("valid sidecar name");
+        let state = SidecarName::parse("state").expect("valid sidecar name");
+        let first = root.for_extension(&first_name);
+        let second = root.for_extension(&second_name);
+
+        root.write("state", b"session state")
+            .expect("write session state");
+        first
+            .write(&shared, b"first value")
+            .expect("write first value");
+        second
+            .write(&shared, b"second value")
+            .expect("write second value");
+        first
+            .write(&state, b"extension state")
+            .expect("write extension state");
+
+        assert_eq!(
+            first.read(&shared).expect("read first value"),
+            b"first value"
+        );
+        assert_eq!(
+            second.read(&shared).expect("read second value"),
+            b"second value"
+        );
+        assert_eq!(
+            root.read("state").expect("read session state"),
+            b"session state"
+        );
+        assert_eq!(
+            fs::read(paths.sidecar_dir().join("first").join("state"))
+                .expect("read extension state path"),
+            b"extension state"
+        );
+        assert!(!paths.directory().join("sidecar").join("state").exists());
+    }
+
+    #[test]
     fn missing_read_returns_typed_not_found_with_sidecar_path() {
         let (_root, paths) = sidecar();
         let sidecar = Sidecar::new(&paths);
@@ -197,6 +464,51 @@ mod tests {
             error,
             StoreError::NotFound { path } if path == expected_path
         ));
+    }
+
+    #[test]
+    fn extension_read_refuses_a_value_over_the_sidecar_cap() {
+        let (_root, paths) = sidecar();
+        let extension = Name::parse("ext").expect("valid extension name");
+        let name = SidecarName::parse("big").expect("valid sidecar name");
+        let oversized = vec![0_u8; usize::try_from(MAX_SIDECAR_VALUE).expect("cap fits") + 1];
+
+        std::fs::create_dir_all(paths.sidecar_dir().join("ext"))
+            .expect("create extension sidecar directory");
+        std::fs::write(paths.sidecar_dir().join("ext").join("big"), &oversized)
+            .expect("write oversized sidecar");
+
+        let error = Sidecar::new(&paths)
+            .for_extension(&extension)
+            .read(&name)
+            .expect_err("oversized sidecar refused");
+        assert_eq!(
+            error.to_string(),
+            StoreError::SidecarTooLarge {
+                name: "big".into(),
+                bytes: u64::try_from(oversized.len()).expect("length fits"),
+            }
+            .to_string()
+        );
+    }
+
+    #[test]
+    fn extension_read_accepts_a_value_at_the_sidecar_cap() {
+        let (_root, paths) = sidecar();
+        let extension = Name::parse("ext").expect("valid extension name");
+        let name = SidecarName::parse("full").expect("valid sidecar name");
+        let value = vec![b'x'; usize::try_from(MAX_SIDECAR_VALUE).expect("cap fits")];
+
+        std::fs::create_dir_all(paths.sidecar_dir().join("ext"))
+            .expect("create extension sidecar directory");
+        std::fs::write(paths.sidecar_dir().join("ext").join("full"), &value)
+            .expect("write capped sidecar");
+
+        let read = Sidecar::new(&paths)
+            .for_extension(&extension)
+            .read(&name)
+            .expect("capped sidecar reads");
+        assert_eq!(read, value);
     }
 
     #[cfg(unix)]

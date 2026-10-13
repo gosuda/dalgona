@@ -263,8 +263,8 @@ fn linux_abi() -> u32 {
 #[cfg(target_os = "linux")]
 fn apply_landlock(roots: &[PathBuf]) -> Result<(), String> {
     use landlock::{
-        ABI, AccessFs, CompatLevel, Compatible, LandlockStatus, PathBeneath, PathFd, Ruleset,
-        RulesetAttr, RulesetCreatedAttr, RulesetStatus,
+        ABI, AccessFs, CompatLevel, Compatible, LandlockStatus, PathBeneath, PathFd, PathFdError,
+        Ruleset, RulesetAttr, RulesetCreatedAttr, RulesetStatus,
     };
 
     let access = AccessFs::from_write(ABI::V3);
@@ -275,7 +275,17 @@ fn apply_landlock(roots: &[PathBuf]) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
 
     for root in roots {
-        let fd = PathFd::new(root).map_err(|error| error.to_string())?;
+        // An automatic root (temp, cache) may have vanished since startup; skip only that
+        // expected race. Any other failure means the sandbox cannot be configured safely.
+        let fd = match PathFd::new(root) {
+            Ok(fd) => fd,
+            Err(PathFdError::OpenCall { source, .. })
+                if source.kind() == io::ErrorKind::NotFound =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error.to_string()),
+        };
         ruleset = ruleset
             .add_rule(PathBeneath::new(fd, access))
             .map_err(|error| error.to_string())?;
@@ -402,6 +412,13 @@ mod tests {
         result?;
         cleanup?;
         Ok(())
+    }
+
+    #[test]
+    fn landlock_propagates_non_not_found_root_errors() {
+        let invalid_root = PathBuf::from("sandbox\0root");
+        let result = apply_landlock(std::slice::from_ref(&invalid_root));
+        assert!(result.is_err(), "an unopenable root must fail the sandbox");
     }
 
     #[test]

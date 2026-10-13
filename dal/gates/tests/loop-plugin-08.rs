@@ -1,4 +1,8 @@
 #![expect(clippy::expect_used, reason = "SC test")]
+#![expect(
+    dead_code,
+    reason = "gate support exposes helpers shared across independent targets"
+)]
 //! Exercises Deferred promotion persistence across durable session resume.
 
 #[expect(

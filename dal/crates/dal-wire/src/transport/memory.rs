@@ -139,6 +139,11 @@ impl MemoryTransport {
 }
 
 impl MemoryPeer {
+    /// Splits the peer into its independent input and output halves.
+    #[cfg(test)]
+    pub(crate) fn into_parts(self) -> (mpsc::Sender<String>, mpsc::Receiver<String>) {
+        (self.incoming, self.outgoing)
+    }
     /// Sends one complete frame to the transport endpoint.
     ///
     /// # Errors

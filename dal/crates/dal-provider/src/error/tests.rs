@@ -522,6 +522,20 @@ fn infer_failure_separates_overflow_from_an_ordinary_bad_request() {
         "invalid request: maximum context length is 8192 tokens"
     );
 }
+#[test]
+fn http_413_is_classified_as_context_overflow() {
+    let failure = InferFailure::from(ProviderError::Status {
+        family: Family::Responses,
+        status: 413,
+        message: String::from("request body is too large"),
+    });
+    assert!(matches!(
+        failure,
+        InferFailure::Overflow { code, message }
+            if &*code == "request_too_large"
+                && &*message == "openai error 413: request body is too large"
+    ));
+}
 
 #[test]
 fn infer_failure_retries_only_transient_provider_failures() {

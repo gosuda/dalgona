@@ -26,8 +26,8 @@ use dal_agent::{
 use dal_core::{
     AgentsOp, AgentsReply, Answer, Command, CommandName, CommandSpec, Config, ConfigProduct,
     DenyReason, Expect, JobsOp, JobsReply, ModelInfo, Name, Origin, Output, Part, RawJson, Reply,
-    Service, ServiceSet, SidecarOp, ToolClass, ToolSpec, TurnOp, TurnOpReply, Visibility,
-    Workspace,
+    Service, ServiceSet, SidecarName, SidecarOp, ToolClass, ToolSpec, TurnOp, TurnOpReply,
+    Visibility, Workspace,
 };
 use support::{GateHarness, TestDir, scripted_session};
 
@@ -96,7 +96,7 @@ impl Probe {
                 )),
             },
             Self::Sidecar => {
-                let name = Name::parse("gate-slot").expect("static sidecar name");
+                let name = SidecarName::parse("gate-slot").expect("static sidecar name");
                 services
                     .sidecar(
                         caller,
@@ -424,7 +424,10 @@ async fn each_extension_service_requires_its_own_grant() -> Result<(), Box<dyn E
             declared_states.get(&probe).unwrap(),
         )
         .await?;
-        if result != Err(ServiceError::Denied(DenyReason::NotGranted)) {
+        if !matches!(
+            result,
+            Err(ServiceError::Denied(DenyReason::ServiceNotGranted { .. }))
+        ) {
             failures.push(format!("{} without approval: {result:?}", probe.label()));
         }
     }

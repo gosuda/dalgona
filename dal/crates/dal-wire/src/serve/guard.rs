@@ -21,23 +21,26 @@ pub(super) fn is_card(method: &str, path: &str) -> bool {
     method == "GET" && path == "/.well-known/agent-card.json"
 }
 
-/// Enforces the loopback Host header check.
+/// Enforces the loopback Host header check. The host name must be a
+/// loopback name; the port is unconstrained so port-forwards and local
+/// proxies can reach the listener, and the name check stays the
+/// DNS-rebinding defense since an attacker name can never satisfy it.
 pub(super) fn host_guard(
-    ctx: &Arc<ServeCtx>,
+    _ctx: &Arc<ServeCtx>,
     req: &Request<hyper::body::Incoming>,
 ) -> Result<(), Resp> {
-    let port = ctx.cfg.port;
     let host = req
         .headers()
         .get("host")
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
-    let allowed = [
-        format!("127.0.0.1:{port}"),
-        format!("localhost:{port}"),
-        format!("[::1]:{port}"),
-    ];
-    if allowed.iter().any(|name| name == host) {
+    let name = if host.starts_with('[') {
+        host.split(']').next().map(|name| format!("{name}]"))
+    } else {
+        host.split(':').next().map(str::to_owned)
+    };
+    let loopback = matches!(name.as_deref(), Some("127.0.0.1" | "localhost" | "[::1]"));
+    if loopback {
         Ok(())
     } else {
         Err(Resp::text(

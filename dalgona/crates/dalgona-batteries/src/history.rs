@@ -82,11 +82,25 @@ the task.
 The chain order is `remote`, then `history`, then `summary`. History reads the
 catalog image profile supplied for the resolved model; it never infers image
 support or billing from a model name. Without a profile it refuses with
-`history: the model does not read images.` When the profile is present but a
-journal source or atomic image commit service is unavailable, history refuses
-and the local text summary runs. This host currently lacks those source and
-commit services, so it commits no history PNG. No image is emitted without
-durable source text readable through `letter://`.
+`history: the model does not read images.` When the profile is present but the
+atomic image commit service is unavailable, history refuses with `history:
+this host cannot commit image parts.` and the local text summary runs. No
+image is emitted without durable source text readable through `letter://`.
+
+When history commits, the compaction carries image parts interleaved with
+their `letter://<id>` labels, one final index text, and one `letter` record
+per fresh image; each PNG is stored once under its digest. A later
+compaction that re-draws the same journal under the same grid reuses the
+stored letters: their PNG bytes, ids, and digests come back unchanged. A stored
+letter whose cell pitch differs or whose image exceeds the current grid is
+stale; it stays listed and resolvable, and its content is drawn again under
+a fresh id.
+
+Before rendering, history indexes prior compaction metadata without loading
+their PNG blobs. It fetches a blob only for a matching reusable span after
+acquiring the shared render budget; a missing or damaged blob falls back to
+redrawing exact source text. Skill captures and dream summaries are not
+counted as history images.
 
 ## Letters and ids
 
@@ -94,8 +108,8 @@ History record ids use `history/<ordinal>.<index>` for compaction images,
 `<name>`, `<name>.2`, `<name>.3` for skill captures, and `dream/<ordinal>` for
 consolidated summaries. This battery appends dream records and does not edit or
 delete existing records. Read a letter with `letter://<id>` or list letters
-with `letter://`. The host does not resolve `history/...` ids through
-`letter://` yet.
+with `letter://`; ids resolve on the current session path, so a branch may
+name different content under the same id.
 
 ## Auto-dream
 

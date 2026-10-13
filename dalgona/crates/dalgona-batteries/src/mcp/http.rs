@@ -8,7 +8,10 @@ pub(crate) mod protocol;
 use std::{
     net::IpAddr,
     path::PathBuf,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -26,7 +29,7 @@ use crate::mcp::{
     Budgets, McpError, STEPUP_MAX, TransportError,
     http::{
         auth as token_auth,
-        oauth::{Challenge, Discovery},
+        oauth::{Challenge, Discovery, NetworkPolicy, OAuthClient},
         protocol::{
             LEGACY_PROTOCOL_VERSION, PROTOCOL_VERSION, notification_body, outbound_headers,
             protocol_error, recognizes_modern_error, request_body, session_from,
@@ -38,6 +41,43 @@ use crate::mcp::{
 const RESPONSE_MAX: usize = 8 * 1024 * 1024;
 const ERROR_BODY_MAX: usize = 64 * 1024;
 const SESSION_ID_MAX: usize = 4096;
+
+struct TokenStore {
+    path: PathBuf,
+    issuer: String,
+    resource: String,
+    cache: Arc<Mutex<Option<token_auth::TokenFile>>>,
+}
+
+impl TokenStore {
+    /// Writes `record` to the token file, then mirrors it into the cache when
+    /// the cache is loaded; an unloaded cache reads the new file on demand.
+    async fn save(self, record: token_auth::TokenRecord) -> Result<(), McpError> {
+        let Self {
+            path,
+            issuer,
+            resource,
+            cache,
+        } = self;
+        let stored = record.clone();
+        let (file_issuer, file_resource) = (issuer.clone(), resource.clone());
+        tokio::task::spawn_blocking(move || {
+            token_auth::persist_token(&path, &file_issuer, &file_resource, stored)
+        })
+        .await
+        .map_err(|_| McpError::Auth {
+            cause: "token persistence failed".to_owned(),
+        })??;
+        if let Some(tokens) = cache.lock().await.as_mut() {
+            tokens
+                .tokens
+                .entry(issuer)
+                .or_default()
+                .insert(resource, record);
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, Debug)]
 struct CallDeadline {
@@ -102,6 +142,14 @@ impl AuthLedger {
             interactive_attempted: false,
         }
     }
+
+    /// Forgets the recovery bounds spent on an older credential.
+    fn forget_attempts(&mut self) {
+        self.attempts = 0;
+        self.stored_token_attempted = false;
+        self.refresh_attempted = false;
+        self.interactive_attempted = false;
+    }
 }
 
 /// One pass over a rejected response.
@@ -135,6 +183,7 @@ pub(crate) struct HttpTransport {
     key: Key,
     url: Url,
     client: Client,
+    oauth: OAuthClient,
     tokens_path: PathBuf,
     client_version: String,
     connect_timeout: Duration,
@@ -142,10 +191,11 @@ pub(crate) struct HttpTransport {
     call_max: Duration,
     stepup_timeout: Duration,
     shutdown_grace: Duration,
-    tokens: Mutex<Option<token_auth::TokenFile>>,
+    tokens: Arc<Mutex<Option<token_auth::TokenFile>>>,
     verified_issuer: Mutex<Option<String>>,
     session_id: Mutex<Option<String>>,
-    authorization: Mutex<()>,
+    authorization: Mutex<token_auth::AuthorizationState>,
+    refreshes: Arc<token_auth::RefreshCoordinator>,
 }
 
 impl HttpTransport {
@@ -156,8 +206,10 @@ impl HttpTransport {
         tokens_path: PathBuf,
         client_version: String,
         budgets: &Budgets,
+        refreshes: Arc<token_auth::RefreshCoordinator>,
     ) -> Result<Self, McpError> {
         validate_endpoint(&url)?;
+        let oauth_policy = NetworkPolicy::for_target(&url);
         let client = Client::builder()
             .connect_timeout(budgets.start)
             .redirect(Policy::none())
@@ -166,10 +218,25 @@ impl HttpTransport {
                 key: key.display(),
                 cause: "HTTP client creation failed".to_owned(),
             })?;
+        let oauth_client = Client::builder()
+            .connect_timeout(budgets.start)
+            .redirect(Policy::none())
+            .no_proxy()
+            .dns_resolver(oauth_policy.resolver())
+            .build()
+            .map_err(|_| McpError::Start {
+                key: key.display(),
+                cause: "OAuth HTTP client creation failed".to_owned(),
+            })?;
+        let oauth = OAuthClient {
+            client: oauth_client,
+            policy: oauth_policy,
+        };
         Ok(Self {
             key,
             url,
             client,
+            oauth,
             tokens_path,
             client_version,
             connect_timeout: budgets.start,
@@ -177,10 +244,11 @@ impl HttpTransport {
             call_max: budgets.call_max,
             stepup_timeout: budgets.stepup,
             shutdown_grace: budgets.shutdown_grace,
-            tokens: Mutex::new(None),
+            tokens: Arc::new(Mutex::new(None)),
             verified_issuer: Mutex::new(None),
             session_id: Mutex::new(None),
-            authorization: Mutex::new(()),
+            authorization: Mutex::new(token_auth::AuthorizationState::default()),
+            refreshes,
         })
     }
 
@@ -307,7 +375,12 @@ impl HttpTransport {
         }
     }
 
-    /// Runs the 401 ladder: fresh-token recheck, stored token, refresh, then interactive authorize.
+    /// Recovers from one 401: adopts a newer credential, refreshes, or asks
+    /// the user, within the bounds in `ledger`.
+    ///
+    /// A refresh that fails with an error leaves no latch, so a later 401
+    /// refreshes again. Only a refusal by the token endpoint or a declined
+    /// prompt blocks further refreshes or prompts.
     async fn unauthorized(
         &self,
         response: &Response,
@@ -315,20 +388,34 @@ impl HttpTransport {
         call: &CallCx<'_>,
         ids: &AtomicU64,
     ) -> Result<AuthStep, TransportError> {
-        if ledger.attempts >= 3 {
-            return Ok(AuthStep::Fail(TransportError::Mcp(McpError::HttpAuth {
-                code: StatusCode::UNAUTHORIZED.as_u16(),
-                n: ledger.attempts,
-            })));
-        }
         ledger.attempts += 1;
         let challenge = oauth::challenge(response.headers());
-        let _authorization = self.authorization.lock().await;
-        if self.bearer().await != ledger.used_token {
+        let mut authorization = self.authorization.lock().await;
+        let current = self.bearer().await;
+        if current != ledger.used_token {
+            if ledger.used_token.is_some() && current.is_some() {
+                ledger.forget_attempts();
+                *authorization = token_auth::AuthorizationState::default();
+            }
             ledger.request_id = ids.fetch_add(1, Ordering::Relaxed);
             return Ok(AuthStep::Retry {
                 reset_deadline: false,
             });
+        }
+        if authorization.token != current {
+            *authorization = token_auth::AuthorizationState {
+                token: current,
+                ..token_auth::AuthorizationState::default()
+            };
+        }
+        if ledger.attempts > 3 {
+            return Ok(AuthStep::Fail(TransportError::Mcp(McpError::HttpAuth {
+                code: StatusCode::UNAUTHORIZED.as_u16(),
+                n: ledger.attempts - 1,
+            })));
+        }
+        if authorization.cancelled {
+            return Ok(AuthStep::Fail(TransportError::Mcp(McpError::NoAskFrontEnd)));
         }
         let discovery = self.discover(&challenge, call.cancel).await?;
         self.set_issuer(&discovery.issuer).await;
@@ -344,26 +431,33 @@ impl HttpTransport {
                 reset_deadline: false,
             });
         }
+        if let Some(used) = ledger.used_token.as_deref()
+            && let Some(record) = existing.as_ref()
+            && !record.access_token.is_empty()
+            && record.access_token != used
+        {
+            ledger.forget_attempts();
+            *authorization = token_auth::AuthorizationState::default();
+            ledger.request_id = ids.fetch_add(1, Ordering::Relaxed);
+            return Ok(AuthStep::Retry {
+                reset_deadline: false,
+            });
+        }
         if !ledger.refresh_attempted
+            && !authorization.refresh_failed
             && let Some(record) = existing.as_ref()
             && record.refresh_token.is_some()
         {
             ledger.refresh_attempted = true;
-            if let Some(updated) = oauth::refresh(
-                &self.client,
-                &discovery,
-                record,
-                self.connect_timeout,
-                call.cancel,
-            )
-            .await?
-            {
-                self.persist(&discovery, updated).await?;
+            if let Some(updated) = self.refresh_token(&discovery, record, call.cancel).await? {
+                authorization.refresh_failed =
+                    ledger.used_token.as_deref() == Some(updated.access_token.as_str());
                 ledger.request_id = ids.fetch_add(1, Ordering::Relaxed);
                 return Ok(AuthStep::Retry {
                     reset_deadline: false,
                 });
             }
+            authorization.refresh_failed = true;
         }
         if ledger.interactive_attempted {
             return Ok(AuthStep::Fail(TransportError::Mcp(McpError::HttpAuth {
@@ -372,11 +466,16 @@ impl HttpTransport {
             })));
         }
         ledger.interactive_attempted = true;
-        ledger.refresh_attempted = true;
         let updated = self
             .authorize(&discovery, existing.as_ref(), None, call)
-            .await?;
+            .await
+            .inspect_err(|error| {
+                if matches!(error, TransportError::Mcp(McpError::NoAskFrontEnd)) {
+                    authorization.cancelled = true;
+                }
+            })?;
         self.persist(&discovery, updated).await?;
+        *authorization = token_auth::AuthorizationState::default();
         ledger.request_id = ids.fetch_add(1, Ordering::Relaxed);
         Ok(AuthStep::Retry {
             reset_deadline: true,
@@ -398,33 +497,65 @@ impl HttpTransport {
                 n: ledger.attempts,
             })));
         }
-        if ledger.step_ups >= STEPUP_MAX {
-            return Ok(AuthStep::Fail(TransportError::Mcp(McpError::StepUpLimit)));
-        }
-        ledger.step_ups += 1;
-        let _authorization = self.authorization.lock().await;
         if self.bearer().await != ledger.used_token && challenge.scope.is_none() {
             ledger.request_id = ids.fetch_add(1, Ordering::Relaxed);
             return Ok(AuthStep::Retry {
                 reset_deadline: false,
             });
         }
-        let discovery = self.discover(&challenge, call.cancel).await?;
-        self.set_issuer(&discovery.issuer).await;
-        let existing = self.record(&discovery.issuer, &discovery.resource).await?;
-        let updated = self
-            .authorize(
-                &discovery,
-                existing.as_ref(),
-                challenge.scope.as_deref(),
-                call,
-            )
+        self.recover_step_up(&challenge, &mut ledger.step_ups, call)
             .await?;
-        self.persist(&discovery, updated).await?;
         ledger.request_id = ids.fetch_add(1, Ordering::Relaxed);
         Ok(AuthStep::Retry {
             reset_deadline: true,
         })
+    }
+
+    /// Prompts one step-up authorization for the credential.
+    ///
+    /// The refresh coordinator's keyed state is shared by every transport of
+    /// the client, so concurrent step-ups prompt once, and a declined or
+    /// cancelled prompt answers later challenges without asking again until
+    /// a fresh token publishes.
+    async fn recover_step_up(
+        &self,
+        challenge: &oauth::Challenge,
+        step_ups: &mut u32,
+        call: &CallCx<'_>,
+    ) -> Result<(), TransportError> {
+        if *step_ups >= STEPUP_MAX {
+            return Err(TransportError::Mcp(McpError::StepUpLimit));
+        }
+        *step_ups += 1;
+        let discovery = self.discover(challenge, call.cancel).await?;
+        let key = token_auth::refresh_key(&discovery.issuer, &discovery.resource);
+        let to_mcp = |error: TransportError| match error {
+            TransportError::Mcp(error) => error,
+            TransportError::Cancelled => McpError::NoAskFrontEnd,
+        };
+        let result = self
+            .refreshes
+            .interactive_section(&key, async || {
+                let existing = self
+                    .record(&discovery.issuer, &discovery.resource)
+                    .await
+                    .map_err(to_mcp)?;
+                let updated = self
+                    .authorize(
+                        &discovery,
+                        existing.as_ref(),
+                        challenge.scope.as_deref(),
+                        call,
+                    )
+                    .await
+                    .map_err(to_mcp)?;
+                self.persist(&discovery, updated).await.map_err(to_mcp)
+            })
+            .await;
+        result.map_err(TransportError::Mcp)?;
+        let mut authorization = self.authorization.lock().await;
+        *authorization = token_auth::AuthorizationState::default();
+        Ok(())
     }
 
     /// Posts a JSON-RPC notification, including authentication retries.
@@ -435,7 +566,7 @@ impl HttpTransport {
     ) -> Result<(), TransportError> {
         let body = notification_body(call.method, call.version, &self.client_version)
             .map_err(TransportError::Mcp)?;
-        let deadline = CallDeadline::new(self.call_timeout, self.call_timeout);
+        let mut deadline = CallDeadline::new(self.call_timeout, self.call_timeout);
         let mut ledger = AuthLedger::new(0);
         loop {
             if call.cancel.is_cancelled() {
@@ -454,17 +585,24 @@ impl HttpTransport {
                 .await?;
             self.capture_session(&response).await?;
             let status = response.status();
-            if status == StatusCode::UNAUTHORIZED {
-                match self.unauthorized(&response, &mut ledger, call, ids).await? {
-                    AuthStep::Retry { .. } => continue,
-                    AuthStep::Fail(error) => return Err(error),
+            let step = match status {
+                StatusCode::UNAUTHORIZED => {
+                    Some(self.unauthorized(&response, &mut ledger, call, ids).await?)
                 }
-            }
-            if status == StatusCode::FORBIDDEN {
-                match self.forbidden(&response, &mut ledger, call, ids).await? {
-                    AuthStep::Retry { .. } => continue,
-                    AuthStep::Fail(error) => return Err(error),
+                StatusCode::FORBIDDEN => {
+                    Some(self.forbidden(&response, &mut ledger, call, ids).await?)
                 }
+                _ => None,
+            };
+            match step {
+                Some(AuthStep::Retry { reset_deadline }) => {
+                    if reset_deadline {
+                        deadline = CallDeadline::new(self.call_timeout, self.call_timeout);
+                    }
+                    continue;
+                }
+                Some(AuthStep::Fail(error)) => return Err(error),
+                None => {}
             }
             if status.is_success() || status == StatusCode::ACCEPTED {
                 return Ok(());
@@ -714,9 +852,9 @@ impl HttpTransport {
     async fn bearer(&self) -> Option<String> {
         let issuer = self.verified_issuer.lock().await.clone()?;
         let resource = token_auth::canonical_resource(&self.url);
-        let tokens = self.load_tokens().await;
-        token_auth::record_for(&tokens, &issuer, &resource)
-            .map(|record| record.access_token.clone())
+        self.lookup(&issuer, &resource)
+            .await
+            .map(|record| record.access_token)
             .filter(|token| !token.is_empty())
     }
 
@@ -737,40 +875,69 @@ impl HttpTransport {
         issuer: &str,
         resource: &str,
     ) -> Result<Option<token_auth::TokenRecord>, TransportError> {
+        Ok(self.lookup(issuer, resource).await)
+    }
+
+    /// The newest record for the credential: the coordinator's settled or
+    /// published record, which every transport shares, else the token file.
+    async fn lookup(&self, issuer: &str, resource: &str) -> Option<token_auth::TokenRecord> {
+        let key = token_auth::refresh_key(issuer, resource);
+        if let Some(record) = self.refreshes.current(&key).await {
+            return Some(record);
+        }
         let tokens = self.load_tokens().await;
-        Ok(token_auth::record_for(&tokens, issuer, resource).cloned())
+        token_auth::record_for(&tokens, issuer, resource).cloned()
     }
 
     async fn set_issuer(&self, issuer: &str) {
         *self.verified_issuer.lock().await = Some(issuer.to_owned());
     }
 
+    async fn refresh_token(
+        &self,
+        discovery: &Discovery,
+        record: &token_auth::TokenRecord,
+        cancel: &CancellationToken,
+    ) -> Result<Option<token_auth::TokenRecord>, TransportError> {
+        let store = self.store(discovery);
+        oauth::refresh(
+            &self.refreshes,
+            &self.oauth,
+            discovery,
+            record,
+            self.connect_timeout,
+            cancel,
+            move |record| store.save(record),
+        )
+        .await
+        .map_err(TransportError::Mcp)
+    }
+
+    /// The write that saves a record to the token file and this transport's
+    /// loaded cache, for the coordinator to run under its commit lock.
+    fn store(&self, discovery: &Discovery) -> TokenStore {
+        TokenStore {
+            path: self.tokens_path.clone(),
+            issuer: discovery.issuer.clone(),
+            resource: discovery.resource.clone(),
+            cache: Arc::clone(&self.tokens),
+        }
+    }
+
+    /// Persists an interactively authorized record and publishes it to the
+    /// refresh coordinator, so every transport still holding an older access
+    /// token adopts it instead of a stale cached refresh result.
     async fn persist(
         &self,
         discovery: &Discovery,
         record: token_auth::TokenRecord,
     ) -> Result<(), TransportError> {
-        let path = self.tokens_path.clone();
-        let issuer = discovery.issuer.clone();
-        let resource = discovery.resource.clone();
-        let stored = record.clone();
-        tokio::task::spawn_blocking(move || {
-            token_auth::persist_token(&path, &issuer, &resource, stored)
-        })
-        .await
-        .map_err(|_| {
-            TransportError::Mcp(McpError::Auth {
-                cause: "token persistence failed".to_owned(),
-            })
-        })?
-        .map_err(TransportError::Mcp)?;
-        let mut tokens = self.load_tokens().await;
-        tokens
-            .tokens
-            .entry(discovery.issuer.clone())
-            .or_default()
-            .insert(discovery.resource.clone(), record);
-        *self.tokens.lock().await = Some(tokens);
+        let key = token_auth::refresh_key(&discovery.issuer, &discovery.resource);
+        let store = self.store(discovery);
+        self.refreshes
+            .publish(&key, record, move |record| store.save(record))
+            .await
+            .map_err(TransportError::Mcp)?;
         self.set_issuer(&discovery.issuer).await;
         Ok(())
     }
@@ -781,7 +948,7 @@ impl HttpTransport {
         cancel: &CancellationToken,
     ) -> Result<Discovery, TransportError> {
         oauth::discover(
-            &self.client,
+            &self.oauth,
             &self.url,
             challenge,
             self.connect_timeout,
@@ -801,7 +968,7 @@ impl HttpTransport {
         tokio::time::timeout(
             self.stepup_timeout,
             oauth::authorize(
-                &self.client,
+                &self.oauth,
                 &oauth::AuthorizePlan {
                     target: &self.url,
                     discovery,

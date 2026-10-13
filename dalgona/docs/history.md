@@ -28,6 +28,12 @@ and the local text summary runs. This host currently lacks those source and
 commit services, so it commits no history PNG. No image is emitted without
 durable source text readable through `letter://`.
 
+During compaction, prior letter metadata is indexed without loading its PNG.
+The image blob is fetched only for a span that can be reused, after the shared
+render budget is acquired. Missing or damaged blobs are redrawn from the exact
+source text. Skill captures and dream summaries remain available to their own
+`letter://` resolvers but are not counted as history images.
+
 ## Letters and ids
 
 History record ids use `history/<ordinal>.<index>` for compaction images,

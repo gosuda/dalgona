@@ -19,7 +19,9 @@ use crate::error::{AbortedTurn, JournalError, OpenReport, TornTail};
 
 /// The largest one record may be, in bytes (D-08).
 pub(crate) const MAX_RECORD: u64 = 67_108_864;
+
 const SCAN_BUFFER: usize = 1_048_576;
+
 /// The backward read window for torn-tail repair (D-14).
 const READ_WINDOW: u64 = 65_536;
 
@@ -161,9 +163,9 @@ impl Journal {
             &mut stream_buffer,
             |offset, record| records.push((offset, record)),
         )?;
-        let boot_count = validator.boot_count;
         let header = header_of(&records)?;
-        let next_gen = boot_count
+        let next_gen = validator
+            .last_boot_gen
             .checked_add(1)
             .and_then(core::num::NonZeroU64::new)
             .ok_or_else(|| OpenFailure::Damaged {
@@ -621,6 +623,7 @@ pub(crate) struct Validator {
     grants: HashSet<JobId>,
     ended_grants: HashSet<JobId>,
     boot_count: u64,
+    last_boot_gen: u64,
 }
 
 /// Batch-local structural additions, committed only after durable append.
@@ -637,6 +640,7 @@ pub(crate) struct ValidationDelta {
     grants: HashSet<JobId>,
     ended_grants: HashSet<JobId>,
     boot_count: u64,
+    last_boot_gen: u64,
 }
 
 impl Validator {
@@ -654,6 +658,7 @@ impl Validator {
             grants: HashSet::new(),
             ended_grants: HashSet::new(),
             boot_count: 0,
+            last_boot_gen: 0,
         }
     }
 
@@ -681,6 +686,7 @@ impl Validator {
             grants: HashSet::new(),
             ended_grants: HashSet::new(),
             boot_count: self.boot_count,
+            last_boot_gen: self.last_boot_gen,
         }
     }
 
@@ -706,6 +712,7 @@ impl Validator {
         self.grants.extend(delta.grants);
         self.ended_grants.extend(delta.ended_grants);
         self.boot_count = delta.boot_count;
+        self.last_boot_gen = delta.last_boot_gen;
     }
 
     /// Applies one record to batch-local state.
@@ -815,11 +822,22 @@ impl Validator {
                     ));
                 }
             }
-            Record::Boot { .. } => {
+            Record::Boot { r#gen, .. } => {
                 let Some(count) = delta.boot_count.checked_add(1) else {
                     return Err(damaged(offset, "boot count is exhausted"));
                 };
+                if r#gen.get() <= delta.last_boot_gen {
+                    return Err(damaged(
+                        offset,
+                        format!(
+                            "boot generation {} does not follow generation {}",
+                            r#gen.get(),
+                            delta.last_boot_gen
+                        ),
+                    ));
+                }
                 delta.boot_count = count;
+                delta.last_boot_gen = r#gen.get();
             }
             _ => {}
         }
@@ -1418,6 +1436,7 @@ fn tool_result(
             error: true,
             parts: vec![dal_core::JournalPart::Text { text }],
             changes: Vec::new(),
+            elapsed_ms: None,
         },
     })
 }
@@ -1576,6 +1595,7 @@ mod tests {
                     added,
                     removed,
                 }],
+                elapsed_ms: None,
             },
         })
     }

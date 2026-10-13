@@ -33,6 +33,8 @@ pub const MRTR_MAX: u32 = 4;
 pub const STEPUP_MAX: u32 = 2;
 /// Maximum number of tools/list pages accepted from one server.
 pub const LIST_PAGE_MAX: usize = 50;
+/// Maximum amount of child stderr retained for crash diagnostics.
+pub const STDERR_RING: usize = 65_536;
 /// Default time-to-live for a tools/list response.
 pub const TOOL_CACHE_DEFAULT: Duration = Duration::from_secs(60);
 /// Maximum time-to-live accepted for a tools/list response.
@@ -41,6 +43,14 @@ pub const TOOL_CACHE_CAP: Duration = Duration::from_secs(3600);
 pub const RESULT_TEXT_CAP: usize = 524_288;
 /// Marker appended when an MCP result exceeds [`RESULT_TEXT_CAP`].
 pub const RESULT_TRUNCATED_MARKER: &str = "<mcp result truncated at 524288 bytes>";
+/// Formats one bounded stderr excerpt for an exit error.
+pub(crate) fn stderr_diagnostic(excerpt: &str) -> String {
+    if excerpt.is_empty() {
+        String::new()
+    } else {
+        format!("; stderr: {excerpt}")
+    }
+}
 
 /// Client identity and token location supplied by the Dalgona product builder.
 #[derive(Clone, Debug)]
@@ -76,12 +86,14 @@ pub enum McpError {
         cause: String,
     },
     /// A stdio server exited while a request was in flight.
-    #[error("mcp server {key} exited during the call with status {code}")]
+    #[error("mcp server {key} exited during the call with status {code}{diagnostic}")]
     Exited {
         /// The server that exited.
         key: String,
         /// Its exit status.
         code: i32,
+        /// The optional formatted stderr diagnostic suffix.
+        diagnostic: String,
     },
     /// A stdout protocol line was malformed and the server was treated as crashed.
     #[error("mcp server {key} wrote an invalid protocol line; treated as a crash")]

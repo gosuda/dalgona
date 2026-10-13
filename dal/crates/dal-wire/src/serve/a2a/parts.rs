@@ -130,6 +130,7 @@ pub(crate) fn question_text(question: &Question) -> String {
             tool,
             preview,
             grant,
+            ..
         } => {
             let clause = grant.as_ref().map_or_else(String::new, |grant| {
                 let roots = grant

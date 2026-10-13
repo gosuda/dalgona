@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
 //! Shared helpers for the gate test binaries.
+#![expect(
+    clippy::disallowed_methods,
+    reason = "gate support drives real binaries, scripts, and toolchain commands"
+)]
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 /// The gate-wide result type: any error fails the criterion.
@@ -93,24 +98,30 @@ pub fn battery_names(product: &dal_agent::Product) -> std::collections::BTreeSet
         .collect()
 }
 
-/// The compiled `dalgona` binary beside the test binary.
+/// The compiled `dalgona` binary: beside the test binary's profile directory,
+/// or under `CARGO_TARGET_DIR` when `build.build-dir` splits intermediate
+/// artifacts from final binaries.
 ///
 /// # Errors
 /// Returns an error when the binary is not built or the target directory is missing.
 pub fn dalgona_binary() -> TestResult<PathBuf> {
-    let suffix = std::env::consts::EXE_SUFFIX;
+    let file = format!("dalgona{}", std::env::consts::EXE_SUFFIX);
     let exe = std::env::current_exe()?;
-    let target_profile = exe
+    let profile = exe
         .parent()
         .and_then(Path::parent)
         .ok_or("the test binary has no target directory")?;
-    let path = target_profile.join(format!("dalgona{suffix}"));
-    if path.is_file() {
-        return Ok(path);
+    let mut candidates = vec![profile.join(&file)];
+    if let (Some(target), Some(name)) = (std::env::var_os("CARGO_TARGET_DIR"), profile.file_name())
+    {
+        candidates.push(Path::new(&target).join(name).join(&file));
+    }
+    if let Some(found) = candidates.iter().find(|path| path.is_file()) {
+        return Ok(found.clone());
     }
     Err(format!(
         "the Dalgona binary is missing at {}; run `cargo build -p dalgona --bin dalgona` before this gate",
-        path.display()
+        candidates[0].display()
     )
     .into())
 }
@@ -149,4 +160,256 @@ pub async fn start_dalgona_with_config(
         sandbox_helper: None,
     };
     Ok(dal_agent::Host::start(product, config, env).await?)
+}
+
+/// One scripted provider step that streams `text` and ends the turn.
+#[must_use]
+pub fn text_step(text: &str) -> String {
+    format!(
+        r#"{{"kind":"events","events":[{{"type":"text_delta","text":{}}},{{"type":"tool_calls_done","calls":[]}},{{"type":"usage","usage":{USAGE}}},{{"type":"stop","reason":"end_turn"}}]}}"#,
+        json_string(text)
+    )
+}
+
+/// One scripted provider step that calls a single tool with `args_json`.
+#[must_use]
+pub fn tool_step(id: &str, name: &str, args_json: &str) -> String {
+    format!(
+        r#"{{"kind":"events","events":[{{"type":"tool_call_started","id":{id},"name":{name}}},{{"type":"tool_calls_done","calls":[{{"id":{id},"name":{name},"args":{{"kind":"parsed","value":{args_json}}}}}]}},{{"type":"usage","usage":{USAGE}}},{{"type":"stop","reason":"tool_use"}}]}}"#,
+        id = json_string(id),
+        name = json_string(name),
+    )
+}
+
+const USAGE: &str = r#"{"input_tokens":12,"cached_input_tokens":0,"output_tokens":5,"reasoning_tokens":null,"cache_write_tokens":0,"cost_usd":null}"#;
+
+fn json_string(text: &str) -> String {
+    let mut quoted = String::with_capacity(text.len() + 2);
+    quoted.push('"');
+    for character in text.chars() {
+        match character {
+            '"' => quoted.push_str("\\\""),
+            '\\' => quoted.push_str("\\\\"),
+            '\n' => quoted.push_str("\\n"),
+            control if control.is_control() => {
+                let _ = write!(quoted, "\\u{:04x}", u32::from(control));
+            }
+            other => quoted.push(other),
+        }
+    }
+    quoted.push('"');
+    quoted
+}
+
+/// Runs `dalgona -p` against a scripted provider in a temporary data root and
+/// returns the session journal, one record per line.
+///
+/// `top_level_toml` is appended to `dal.toml` before the provider table, so it
+/// can hold top-level keys such as `disabled_batteries`.
+///
+/// # Errors
+/// Returns setup failures, a failed `dalgona -p` run, or a journal count other
+/// than one.
+pub fn run_scripted_print(
+    scratch: &Scratch,
+    top_level_toml: &str,
+    steps: &[String],
+    prompt: &str,
+) -> TestResult<String> {
+    let config_home = scratch.path().join("xdg-config");
+    let data_home = scratch.path().join("xdg-data");
+    std::fs::create_dir_all(config_home.join("dalgona"))?;
+    std::fs::create_dir_all(&data_home)?;
+    let fixture = scratch.path().join("scripted.jsonl");
+    std::fs::write(&fixture, steps.join("\n") + "\n")?;
+    std::fs::write(
+        config_home.join("dalgona/dal.toml"),
+        format!(
+            "model = \"openai-responses/gpt-6\"\n{top_level_toml}\n[providers.scripted]\nfixture = {:?}\n",
+            fixture.to_string_lossy()
+        ),
+    )?;
+    let output = run_command(
+        std::process::Command::new(dalgona_binary()?)
+            .args(["-p", "--json", "--approval", "all", prompt])
+            .current_dir(scratch.path())
+            .env_clear()
+            .env("HOME", scratch.path())
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("XDG_CONFIG_HOME", &config_home)
+            .env("XDG_DATA_HOME", &data_home),
+    )?;
+    if !output.status.success() {
+        return Err(format!(
+            "dalgona -p failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+    let mut journals = Vec::new();
+    collect_journals(&data_home.join("dalgona/sessions"), &mut journals)?;
+    match journals.as_slice() {
+        [journal] => Ok(std::fs::read_to_string(journal)?),
+        other => Err(format!("expected one session journal, found {}", other.len()).into()),
+    }
+}
+
+fn collect_journals(dir: &Path, found: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            collect_journals(&path, found)?;
+        } else if path.file_name().is_some_and(|name| name == "journal.jsonl") {
+            found.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// The journal records of one kind, in order.
+#[must_use]
+pub fn journal_records<'a>(journal: &'a str, kind: &str) -> Vec<&'a str> {
+    let marker = format!(r#""type":"{kind}""#);
+    journal
+        .lines()
+        .filter(|line| line.contains(&marker))
+        .collect()
+}
+
+/// The journal of the one session a [`fresh_dalgona_command`] run created.
+///
+/// # Errors
+/// Returns a read failure or a journal count other than one.
+pub fn session_journal(scratch: &Scratch) -> TestResult<String> {
+    let mut journals = Vec::new();
+    collect_journals(
+        &scratch.path().join("xdg-data/dalgona/sessions"),
+        &mut journals,
+    )?;
+    match journals.as_slice() {
+        [journal] => Ok(std::fs::read_to_string(journal)?),
+        other => Err(format!("expected one session journal, found {}", other.len()).into()),
+    }
+}
+
+/// A real `dalgona` running in a tmux pane on a fresh install, so a gate can
+/// read the screen a person sees and press keys. tmux is a prerequisite of
+/// the gate that uses it; its absence fails the gate with that name.
+#[cfg(unix)]
+pub struct Pane {
+    socket: String,
+    scratch: Scratch,
+}
+
+#[cfg(unix)]
+impl Pane {
+    /// Starts `dalgona --screen inline` in a 110 by 32 pane over a fresh
+    /// config, data root, and workspace, with a scripted provider and
+    /// approval mode `ask`.
+    ///
+    /// # Errors
+    /// Returns setup failures, a missing binary, or a missing tmux.
+    pub fn start(scratch: Scratch) -> TestResult<Self> {
+        let home = scratch.path().to_path_buf();
+        let config_home = home.join("xdg-config");
+        let data_home = home.join("xdg-data");
+        let workspace = home.join("work");
+        std::fs::create_dir_all(config_home.join("dalgona"))?;
+        std::fs::create_dir_all(&data_home)?;
+        std::fs::create_dir_all(&workspace)?;
+        let fixture = home.join("scripted.jsonl");
+        std::fs::write(&fixture, text_step("reply") + "\n")?;
+        std::fs::write(
+            config_home.join("dalgona/dal.toml"),
+            format!(
+                "model = \"openai-responses/gpt-6\"\napproval = \"ask\"\n[providers.scripted]\nfixture = {:?}\n",
+                fixture.to_string_lossy()
+            ),
+        )?;
+        let pane = Self {
+            socket: format!("dalgona-gate-{}", uuid::Uuid::now_v7()),
+            scratch,
+        };
+        let output = pane.tmux(&[
+            "new-session",
+            "-d",
+            "-s",
+            "s",
+            "-x",
+            "110",
+            "-y",
+            "32",
+            "-c",
+            &workspace.to_string_lossy(),
+            "env",
+            "-i",
+            &format!("HOME={}", home.display()),
+            &format!("XDG_CONFIG_HOME={}", config_home.display()),
+            &format!("XDG_DATA_HOME={}", data_home.display()),
+            "NO_COLOR=1",
+            "DAL_NO_MOTION=1",
+            "TERM=tmux-256color",
+            &format!("PATH={}", std::env::var("PATH").unwrap_or_default()),
+            &dalgona_binary()?.to_string_lossy(),
+            "--screen",
+            "inline",
+        ])?;
+        if !output.status.success() {
+            return Err(format!(
+                "tmux could not start the pane: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+            .into());
+        }
+        Ok(pane)
+    }
+
+    /// The scratch root of this run.
+    #[must_use]
+    pub fn scratch(&self) -> &Scratch {
+        &self.scratch
+    }
+
+    fn tmux(&self, args: &[&str]) -> TestResult<std::process::Output> {
+        let mut command = std::process::Command::new("tmux");
+        command.args(["-L", &self.socket]).args(args);
+        run_command(&mut command).map_err(|error| {
+            format!("this gate needs tmux on PATH, which failed to run: {error}").into()
+        })
+    }
+
+    /// The pane text, scrollback included, one row per line.
+    ///
+    /// # Errors
+    /// Returns tmux failures.
+    pub fn text(&self) -> TestResult<String> {
+        let output = self.tmux(&["capture-pane", "-p", "-J", "-S", "-", "-t", "s"])?;
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    /// Types `text` literally, with no key names.
+    ///
+    /// # Errors
+    /// Returns tmux failures.
+    pub fn type_text(&self, text: &str) -> TestResult<()> {
+        self.tmux(&["send-keys", "-t", "s", "-l", text])?;
+        Ok(())
+    }
+
+    /// Presses Enter.
+    ///
+    /// # Errors
+    /// Returns tmux failures.
+    pub fn enter(&self) -> TestResult<()> {
+        self.tmux(&["send-keys", "-t", "s", "Enter"])?;
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Pane {
+    fn drop(&mut self) {
+        let _ = self.tmux(&["kill-server"]);
+    }
 }

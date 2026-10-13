@@ -1,4 +1,8 @@
 #![expect(clippy::expect_used, reason = "SC test")]
+#![expect(
+    dead_code,
+    reason = "gate support exposes helpers shared across independent targets"
+)]
 
 //! Private tools and scope results stay inside the synthetic handler boundary.
 
@@ -19,7 +23,7 @@ use std::{
 };
 
 use dal_agent::{
-    Env, Product, SessionRef,
+    Env, Product, SessionRef, Subscription,
     ext::{
         ArgError, BoxFuture, EventStream, ExtensionBuilder, ModelCx, ModelError, ModelHandler,
         ModelRecord, PrivateTool, RawValue, ScopeValue, Tool, ToolCx, ToolOutcome, ToolOutput,
@@ -34,6 +38,38 @@ use dal_provider::{
     ProviderError, StopReason, StreamEvent as ProviderEvent, ToolArgs, ToolCall as ProviderToolCall,
 };
 use support::{TestDir, scripted_session};
+
+async fn collect_boundary_stream(
+    subscription: &mut Subscription,
+) -> Result<(String, Vec<(String, String, String)>), Box<dyn Error + Send + Sync>> {
+    let mut assistant_text = String::new();
+    let mut session_calls = Vec::new();
+    loop {
+        let Some(delivery) =
+            tokio::time::timeout(Duration::from_secs(10), subscription.next()).await?
+        else {
+            break;
+        };
+        let dal_agent::Delivery::Update(update) = delivery else {
+            continue;
+        };
+        match &update.kind {
+            UpdateKind::Delta {
+                channel: StreamChannel::Text,
+                text,
+                ..
+            } => assistant_text.push_str(text),
+            UpdateKind::ToolStarted { call, tool, args } => session_calls.push((
+                call.as_str().to_owned(),
+                tool.to_string(),
+                args.as_str().to_owned(),
+            )),
+            UpdateKind::TurnEnded { .. } => break,
+            _ => {}
+        }
+    }
+    Ok((assistant_text, session_calls))
+}
 
 struct BoundaryHandler {
     private: PrivateTool,
@@ -312,10 +348,6 @@ fn model_product(
     Ok((config, product))
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "SC private-tools scenario is one long script"
-)]
 #[tokio::test]
 async fn synthetic_private_tools_and_forward_have_one_boundary()
 -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -380,32 +412,7 @@ async fn synthetic_private_tools_and_forward_have_one_boundary()
         })
         .await?;
     assert!(matches!(prompt, Reply::Accepted { .. }));
-    let mut assistant_text = String::new();
-    let mut session_calls = Vec::new();
-    loop {
-        let Some(delivery) =
-            tokio::time::timeout(Duration::from_secs(10), subscription.next()).await?
-        else {
-            break;
-        };
-        let dal_agent::Delivery::Update(update) = delivery else {
-            continue;
-        };
-        match &update.kind {
-            UpdateKind::Delta {
-                channel: StreamChannel::Text,
-                text,
-                ..
-            } => assistant_text.push_str(text),
-            UpdateKind::ToolStarted { call, tool, args } => session_calls.push((
-                call.as_str().to_owned(),
-                tool.to_string(),
-                args.as_str().to_owned(),
-            )),
-            UpdateKind::TurnEnded { .. } => break,
-            _ => {}
-        }
-    }
+    let (assistant_text, mut session_calls) = collect_boundary_stream(&mut subscription).await?;
     assert_eq!(forward_child.calls.load(Ordering::SeqCst), 2);
     assert_eq!(private_calls.load(Ordering::SeqCst), 1);
     assert!(private_result_seen.load(Ordering::SeqCst));

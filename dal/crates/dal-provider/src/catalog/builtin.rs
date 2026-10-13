@@ -6,7 +6,10 @@
 use dal_core::ThinkingLevel;
 
 use super::{CatalogEntry, ImageProfile, Listing, ToolSupport};
-use crate::thinking::ThinkingSupport;
+use crate::{
+    provider::{OPENAI, OPENAI_CODEX},
+    thinking::ThinkingSupport,
+};
 
 /// Returns built-in model rows whose capabilities have a source-backed note.
 #[must_use]
@@ -114,7 +117,7 @@ pub fn built_in_entries() -> Vec<CatalogEntry> {
 // D-45's default 95% yields the 258,400 input window; no output cap is given.
 fn codex_reserve_entry(accepted: Vec<ThinkingLevel>) -> CatalogEntry {
     CatalogEntry {
-        provider: "openai-codex".into(),
+        provider: OPENAI_CODEX.id.into(),
         id: "gpt-reserve".into(),
         display: "Luna Reserve".into(),
         listing: Listing::Hidden,
@@ -146,7 +149,7 @@ fn openai_entry(
     tool_support: ToolSupport,
 ) -> CatalogEntry {
     CatalogEntry {
-        provider: "openai".into(),
+        provider: OPENAI.id.into(),
         id: id.into(),
         display: display.into(),
         listing: Listing::Listed,

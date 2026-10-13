@@ -102,6 +102,23 @@ fn xorshift(state: &mut u64) -> u64 {
     x
 }
 
+/// Builds the guard bands fixture used by the crossing tests.
+fn bands(
+    cognitive: u32,
+    cyclomatic: u32,
+    function_ploc: u32,
+    nesting: u32,
+    file_ploc: u32,
+) -> metrics::Bands {
+    metrics::Bands {
+        cognitive,
+        cyclomatic,
+        function_ploc,
+        nesting,
+        file_ploc,
+    }
+}
+
 #[test]
 fn placeholder_reject() {
     let rejection = checks::placeholder("...\n}").expect("placeholder rejects");
@@ -353,14 +370,16 @@ fn delta_only_band_crossing() {
         cog_sum: 10,
         cc_sum: 2,
     };
-    assert!(metrics::crossings("a.rs", Some(&pre), &post_ten, 15, 15, 50, 4, 500).is_empty());
+    assert!(
+        metrics::crossings("a.rs", Some(&pre), &post_ten, &bands(15, 15, 50, 4, 500)).is_empty()
+    );
     let post_big = super::FileMetrics {
         ploc: 10,
         functions: vec![function(17)],
         cog_sum: 17,
         cc_sum: 2,
     };
-    let crossings = metrics::crossings("a.rs", Some(&pre), &post_big, 15, 15, 50, 4, 500);
+    let crossings = metrics::crossings("a.rs", Some(&pre), &post_big, &bands(15, 15, 50, 4, 500));
     assert_eq!(crossings.len(), 1, "{crossings:?}");
     assert_eq!(crossings[0].line, "f f cognitive 9→17 (over 15)");
 }
@@ -867,10 +886,9 @@ fn ledger_arithmetic_property() {
     for _ in 0..1000 {
         let added = xorshift(&mut state) % 50;
         let deleted = xorshift(&mut state) % 50;
-        let files = usize::try_from(xorshift(&mut state) % 5).unwrap_or(0);
-        let new_files =
-            usize::try_from(xorshift(&mut state) % (u64::try_from(files).unwrap_or(0) + 1))
-                .unwrap_or(0);
+        let files = (xorshift(&mut state) % 5) as usize;
+        let new_files = xorshift(&mut state) % (u64::try_from(files).unwrap_or(u64::MAX) + 1);
+        let new_files = usize::try_from(new_files).unwrap_or(0);
         let line = report::ledger(added, deleted, files, new_files);
         let net = i128::from(added) - i128::from(deleted);
         assert!(
@@ -960,10 +978,12 @@ async fn metric_purity_bounds() {
     let mut state = 0x9E37_79B9_7F4A_7C15_u64;
     for _ in 0..200 {
         let mut body = String::from("fn f() {\n");
-        for _ in 0..=(xorshift(&mut state) % 3) {
+        for _ in 0..=xorshift(&mut state) % 3 {
             body.push_str(
-                fragments
-                    [usize::try_from(xorshift(&mut state) % fragments.len() as u64).unwrap_or(0)],
+                fragments[usize::try_from(
+                    xorshift(&mut state) % u64::try_from(fragments.len()).unwrap_or(0),
+                )
+                .unwrap_or(0)],
             );
         }
         body.push_str("}\n");

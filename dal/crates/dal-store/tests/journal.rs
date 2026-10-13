@@ -274,3 +274,191 @@ async fn shard_receipts_strictly_ordered() {
     }
     assert_eq!(total, 200, "all 200 batches land");
 }
+
+const RECORD_LIMIT: usize = 67_108_864;
+
+/// An assistant record whose encoded journal line, newline included, is exactly `line_len` bytes
+/// once appended after user entry 1.
+fn assistant_line_of(line_len: usize) -> Record {
+    let build = |text: String| {
+        Record::Assistant(Entry {
+            id: entry_id(2),
+            parent: Some(entry_id(1)),
+            at: "2026-09-28T10:15:30.123Z"
+                .parse()
+                .expect("fixed test timestamp parses"),
+            kind: EntryKind::Assistant {
+                api: dal_core::Family::Chat,
+                model: "test-model".into(),
+                content: vec![dal_core::Block::Text { text: text.into() }],
+                usage: dal_core::Usage {
+                    input_tokens: 0,
+                    cached_input_tokens: 0,
+                    output_tokens: 0,
+                    reasoning_tokens: None,
+                    cache_write_tokens: 0,
+                    cost_usd: None,
+                },
+                stop: dal_core::AssistantStop::Done,
+            },
+        })
+    };
+    let base = encode(&build(String::new()))
+        .expect("empty record encodes")
+        .len();
+    let record = build("a".repeat(line_len - base));
+    assert_eq!(
+        encode(&record).expect("sized record encodes").len(),
+        line_len,
+        "test record hits the requested line length"
+    );
+    record
+}
+
+fn with_id(record: Record, id: u64, parent: u64) -> Record {
+    match record {
+        Record::Assistant(mut entry) => {
+            entry.id = entry_id(id);
+            entry.parent = Some(entry_id(parent));
+            Record::Assistant(entry)
+        }
+        other => other,
+    }
+}
+
+#[tokio::test]
+async fn record_limit_holds_from_both_sides_across_append_and_replay() {
+    let (temp, store) = setup("journal-limit");
+    let data_root = temp.path().join("data");
+    let id = SessionId::new_v7();
+    let mut journal = store.create_session(id);
+    journal
+        .append(vec![user(1, "prefix")])
+        .await
+        .expect("prefix is durable");
+
+    journal
+        .append(vec![assistant_line_of(RECORD_LIMIT - 1)])
+        .await
+        .expect("a line of limit-1 bytes is accepted");
+    journal
+        .append(vec![with_id(assistant_line_of(RECORD_LIMIT), 3, 2)])
+        .await
+        .expect("a line of exactly the limit is accepted");
+    let before = journal.records().len();
+    let error = journal
+        .append(vec![with_id(assistant_line_of(RECORD_LIMIT + 1), 4, 3)])
+        .await
+        .expect_err("a line of limit+1 bytes is refused");
+    assert!(
+        matches!(&error, dal_store::StoreError::Invalid { reason }
+            if reason.contains("exceeds the 67108864-byte limit")),
+        "descriptive Invalid, got {error:?}"
+    );
+    assert_eq!(journal.records().len(), before, "refusal appends nothing");
+    journal.close().await.expect("session closes");
+
+    let (mut reopened, _) = store
+        .open_session(id)
+        .await
+        .expect("every accepted line replays");
+    let replayed = reopened
+        .records()
+        .iter()
+        .filter(|record| matches!(record, Record::Assistant(_)))
+        .count();
+    assert_eq!(replayed, 2, "both boundary lines survive replay");
+    reopened.close().await.expect("session closes");
+
+    let path = journal_path(&data_root, id);
+    let offset = fs::metadata(&path).expect("journal stat").len();
+    let over = with_id(assistant_line_of(RECORD_LIMIT + 1), 4, 3);
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .expect("open journal for staging");
+    std::io::Write::write_all(&mut file, &encode(&over).expect("over-limit line encodes"))
+        .expect("stage a limit+1 line");
+    drop(file);
+    let error = store
+        .open_session(id)
+        .await
+        .expect_err("replay refuses a limit+1 line");
+    match &error {
+        dal_store::StoreError::Journal(JournalError::TooLong { offset: at, .. }) => {
+            assert_eq!(*at, offset, "refusal names the start of the long line");
+        }
+        _ => panic!("expected TooLong, got {error:?}"),
+    }
+}
+
+#[tokio::test]
+async fn torn_tail_limit_holds_from_both_sides() {
+    let (temp, store) = setup("journal-tail-limit");
+    let data_root = temp.path().join("data");
+    let id = SessionId::new_v7();
+    let mut journal = store.create_session(id);
+    journal
+        .append(vec![user(1, "prefix")])
+        .await
+        .expect("prefix is durable");
+    journal.close().await.expect("session closes");
+    let path = journal_path(&data_root, id);
+    let prefix = fs::read(&path).expect("read prefix");
+
+    let mut staged = prefix.clone();
+    staged.extend(std::iter::repeat_n(b'x', RECORD_LIMIT - 1));
+    fs::write(&path, &staged).expect("stage a tail of limit-1 bytes");
+    let (mut repaired, report) = store
+        .open_session(id)
+        .await
+        .expect("a tail below the limit is quarantined");
+    let torn = report.torn.expect("torn tail reported");
+    assert_eq!(torn.bytes, u64::try_from(RECORD_LIMIT - 1).expect("fits"));
+    repaired.close().await.expect("session closes");
+
+    let mut staged = fs::read(&path).expect("read repaired journal");
+    staged.extend(std::iter::repeat_n(b'x', RECORD_LIMIT));
+    let tail_start = u64::try_from(staged.len() - RECORD_LIMIT).expect("fits");
+    fs::write(&path, &staged).expect("stage a tail of exactly the limit");
+    let error = store
+        .open_session(id)
+        .await
+        .expect_err("a tail at the limit is refused");
+    match &error {
+        dal_store::StoreError::Journal(JournalError::TooLong { offset, .. }) => {
+            assert_eq!(*offset, tail_start, "refusal names the tail start");
+        }
+        _ => panic!("expected TooLong, got {error:?}"),
+    }
+    assert_eq!(
+        fs::read(&path).expect("reread journal"),
+        staged,
+        "a refused open leaves the journal untouched"
+    );
+}
+
+#[tokio::test]
+async fn oversized_record_before_the_first_user_entry_is_refused_at_append() {
+    let (_temp, store) = setup("journal-lazy-limit");
+    let mut journal = store.create_session(SessionId::new_v7());
+    let huge = Record::Reminder(Entry {
+        id: entry_id(1),
+        parent: None,
+        at: timestamp(),
+        kind: EntryKind::Reminder {
+            text: "r".repeat(RECORD_LIMIT).into(),
+            source: "test".into(),
+        },
+    });
+    let refused = journal.append(vec![huge]).await;
+    assert!(
+        refused.is_err(),
+        "an over-limit record is refused when appended, not buffered: {refused:?}"
+    );
+    journal
+        .append(vec![user(2, "still usable")])
+        .await
+        .expect("the session is not poisoned by the refused record");
+    journal.close().await.expect("session closes");
+}

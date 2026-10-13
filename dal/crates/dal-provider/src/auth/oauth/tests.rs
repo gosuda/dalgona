@@ -245,6 +245,91 @@ fn endpoint_override_rejects_non_loopback_origins() {
     assert!(LoginEndpoints::loopback("http://example.com").is_err());
 }
 
+/// Occupies one loopback port to stand in for the preferred callback port.
+async fn held_loopback_port() -> (TcpListener, u16) {
+    let holder = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("loopback bind succeeds");
+    let port = holder.local_addr().expect("bound address").port();
+    (holder, port)
+}
+
+#[tokio::test]
+async fn an_occupied_preferred_port_falls_back_to_a_free_port() {
+    let (holder, taken) = held_loopback_port().await;
+    let bound = super::bind_callback_with_fallback(taken).await;
+    let Ok((listener, port)) = bound else {
+        panic!("an occupied preferred port must not force paste login: {bound:?}");
+    };
+    assert_ne!(port, taken);
+    drop(listener);
+    drop(holder);
+}
+
+#[tokio::test]
+async fn a_free_preferred_port_stays_preferred_and_a_strict_bind_refuses() {
+    let (holder, taken) = held_loopback_port().await;
+    assert!(
+        super::bind_callback(taken).await.is_err(),
+        "the registered fixed port must stay strict for providers that register it"
+    );
+    let (listener, port) = super::bind_callback(0).await.expect("ephemeral binds");
+    assert_ne!(port, 0);
+    drop(listener);
+    drop(holder);
+}
+
+#[tokio::test]
+async fn occupied_claude_callback_advertises_a_bound_port() {
+    let dir = TestDir::new();
+    let blocker = occupied_callback_port().await;
+    assert!(blocker.is_some());
+    let Some((blocker, port)) = blocker else {
+        return;
+    };
+    let endpoints = loopback_endpoints("http://127.0.0.1:1", 0, port);
+    assert!(endpoints.is_some());
+    let Some(endpoints) = endpoints else {
+        return;
+    };
+    let mut store = AuthStore::empty(dir.auth_path());
+    let flow = configured_flow("anthropic", &mut store, &dir, endpoints);
+    assert!(flow.is_ok());
+    let Some(mut flow) = flow.ok() else {
+        return;
+    };
+    let observed = Arc::new(Mutex::new(None));
+    let cancel = CancellationToken::new();
+    let cancel_on_open = cancel.clone();
+    let sink = Arc::clone(&observed);
+    let progress = move |event| {
+        if let LoginProgress::OpenUrl { url } = event {
+            if let Ok(mut slot) = sink.lock() {
+                *slot = callback_port(&url);
+            }
+            cancel_on_open.cancel();
+        }
+    };
+    let result = flow.run(&progress, &cancel).await;
+    assert!(matches!(result, Err(ProviderError::LoginCancelled)));
+    drop(flow);
+    drop(blocker);
+    let advertised = observed.lock().ok().and_then(|slot| *slot);
+    assert_ne!(
+        advertised,
+        Some(port),
+        "the authorize URL must advertise the port actually bound, not the occupied one"
+    );
+    if let Some(advertised) = advertised {
+        let rebound = TcpListener::bind(("127.0.0.1", advertised)).await;
+        assert!(
+            rebound.is_ok(),
+            "advertised port {advertised} was not bound"
+        );
+    }
+    assert!(!dir.auth_path().exists());
+}
+
 #[tokio::test]
 async fn callback_state_mismatch_is_typed() {
     let bound = super::bind_callback(0).await;
@@ -297,10 +382,8 @@ async fn pasted_state_mismatch_does_not_write_auth_file() {
     let paste = Arc::new(Mutex::new(sender));
     let paste_on_prompt = Arc::clone(&paste);
     let progress = move |event| {
-        if !matches!(event, LoginProgress::AskPaste { .. }) {
-            return;
-        }
-        if let Ok(mut sender) = paste_on_prompt.lock()
+        if let LoginProgress::OpenUrl { .. } = event
+            && let Ok(mut sender) = paste_on_prompt.lock()
             && let Some(sender) = sender.take()
         {
             let _sent = sender.send(String::from("code123#wrong-state"));
@@ -430,7 +513,7 @@ async fn token_endpoint_400_and_500_leave_auth_file_unchanged() {
         let paste = Arc::new(Mutex::new(sender));
         let paste_on_prompt = Arc::clone(&paste);
         let progress = move |event| {
-            if matches!(event, LoginProgress::AskPaste { .. })
+            if let LoginProgress::OpenUrl { .. } = event
                 && let Ok(mut sender) = paste_on_prompt.lock()
                 && let Some(sender) = sender.take()
             {
@@ -488,7 +571,7 @@ async fn successful_claude_exchange_stores_complete_oauth_entry() {
     let paste = Arc::new(Mutex::new(sender));
     let paste_on_prompt = Arc::clone(&paste);
     let progress = move |event| {
-        if matches!(event, LoginProgress::AskPaste { .. })
+        if let LoginProgress::OpenUrl { .. } = event
             && let Ok(mut sender) = paste_on_prompt.lock()
             && let Some(sender) = sender.take()
         {
@@ -646,7 +729,7 @@ async fn oauth_307_and_308_do_not_forward_codes_or_verifiers() {
         let paste_on_prompt = Arc::new(Mutex::new(sender));
         let paste = Arc::clone(&paste_on_prompt);
         let progress = move |event| {
-            if matches!(event, LoginProgress::AskPaste { .. })
+            if let LoginProgress::OpenUrl { .. } = event
                 && let Ok(mut sender) = paste.lock()
                 && let Some(sender) = sender.take()
             {
@@ -896,7 +979,11 @@ fn authorization_url_scopes_use_each_wire_encoding() {
     let Some(claude_base) = claude_base.ok() else {
         return;
     };
-    let claude = super::claude_authorize_url(
+    let claude = super::authorize_url(
+        Family::Anthropic,
+        &crate::find("anthropic")
+            .and_then(|def| def.oauth)
+            .expect("claude row"),
         &claude_base,
         "http://localhost:53692/callback",
         "challenge",
@@ -917,7 +1004,11 @@ fn authorization_url_scopes_use_each_wire_encoding() {
     let Some(codex_base) = codex_base.ok() else {
         return;
     };
-    let codex = super::codex_authorize_url(
+    let codex = super::authorize_url(
+        Family::Codex,
+        &crate::find("openai-codex")
+            .and_then(|def| def.oauth)
+            .expect("codex row"),
         &codex_base,
         "http://localhost:1455/auth/callback",
         "challenge",
@@ -931,6 +1022,42 @@ fn authorization_url_scopes_use_each_wire_encoding() {
     assert!(codex_query.contains(
             "scope=openid%20profile%20email%20offline_access%20api.connectors.read%20api.connectors.invoke"
         ));
+}
+
+#[test]
+fn authorization_urls_keep_each_vendor_parameter_order_and_encoding() {
+    let url = |id: &str, base: &str, redirect: &str| {
+        let family = crate::find(id).map(|def| def.family).expect("table row");
+        let oauth = crate::find(id)
+            .and_then(|def| def.oauth)
+            .expect("oauth row");
+        super::authorize_url(
+            family,
+            &oauth,
+            &Url::parse(base).expect("base"),
+            redirect,
+            "challenge",
+            "state",
+        )
+        .expect("authorize url")
+        .to_string()
+    };
+    assert_eq!(
+        url(
+            "anthropic",
+            "https://claude.ai/oauth/authorize",
+            "http://localhost:53692/callback"
+        ),
+        "https://claude.ai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code&redirect_uri=http%3A%2F%2Flocalhost%3A53692%2Fcallback&scope=org%3Acreate_api_key+user%3Aprofile+user%3Ainference+user%3Asessions%3Aclaude_code+user%3Amcp_servers+user%3Afile_upload&code_challenge=challenge&code_challenge_method=S256&state=state"
+    );
+    assert_eq!(
+        url(
+            "openai-codex",
+            "https://auth.openai.com/oauth/authorize",
+            "http://localhost:1455/auth/callback"
+        ),
+        "https://auth.openai.com/oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&scope=openid%20profile%20email%20offline_access%20api.connectors.read%20api.connectors.invoke&code_challenge=challenge&code_challenge_method=S256&state=state&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=dalgon"
+    );
 }
 
 #[test]

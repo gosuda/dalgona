@@ -25,9 +25,10 @@ pub(super) struct JudgeRow {
 }
 
 impl JudgeRow {
+    /// Builds the ledger row for one judge call attempt.
     #[expect(
         clippy::too_many_arguments,
-        reason = "one row carries every ledger column"
+        reason = "ledger row fields are fixed by the journal shape"
     )]
     pub(super) fn new(
         call: u64,

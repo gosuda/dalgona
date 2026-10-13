@@ -1,12 +1,18 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
 
-//! Strict history letter records.
+//! Strict history letter records and the journal input that feeds them.
 
-use dal_core::EntryId;
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use dal_agent::ext::CoveredEntry;
+use dal_core::{AssistantPart, BlobId, ContextItem, EntryId, Part};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::spans::Span;
+use super::pipeline::SourceReader;
+use super::spans::{CompactPiece, Role, SourceError, Span};
+
 /// A strict history letter record body.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields, rename_all = "snake_case")]
@@ -266,4 +272,216 @@ impl LetterRecord {
             Self::Skill { v, .. } | Self::Compaction { v, .. } | Self::Dream { v, .. } => *v,
         }
     }
+}
+
+/// The exact journal bytes behind the pieces of one compaction span.
+///
+/// Text and tool-call arguments are copied once from the covered entries.
+/// Reasoning text is never copied, because it is never drawn.
+#[derive(Debug, Default)]
+pub(crate) struct JournalSource {
+    parts: HashMap<(u64, u32), Box<[u8]>>,
+}
+
+impl SourceReader for JournalSource {
+    fn read(&self, span: Span) -> Result<Vec<u8>, SourceError> {
+        let Some(bytes) = self.parts.get(&(span.entry.get(), span.part)) else {
+            return Err(SourceError {
+                message: format!("part {} holds no text from the compacted span", span.part),
+            });
+        };
+        let end = u64::from(span.off) + u64::from(span.len);
+        let range = usize::try_from(span.off)
+            .ok()
+            .zip(usize::try_from(end).ok())
+            .and_then(|(start, end)| bytes.get(start..end));
+        range.map(<[u8]>::to_vec).ok_or_else(|| SourceError {
+            message: format!(
+                "bytes {} to {end} are outside the {} bytes of part {}",
+                span.off,
+                bytes.len(),
+                span.part
+            ),
+        })
+    }
+}
+
+/// Accumulates source pieces and their bytes in journal order.
+#[derive(Default)]
+struct PieceBuilder {
+    pieces: Vec<CompactPiece>,
+    source: JournalSource,
+}
+
+impl PieceBuilder {
+    /// Adds one whole text part and keeps its bytes.
+    fn text(&mut self, entry: EntryId, part: u32, role: Role, text: &str) -> Option<()> {
+        let length = u32::try_from(text.len()).ok()?;
+        self.source
+            .parts
+            .insert((entry.get(), part), Box::from(text.as_bytes()));
+        self.push(entry, part, role, length, None);
+        Some(())
+    }
+
+    /// Adds one reasoning part that keeps its place but none of its bytes.
+    fn reasoning(&mut self, entry: EntryId, part: u32, text: &str) -> Option<()> {
+        let length = u32::try_from(text.len()).ok()?;
+        self.push(entry, part, Role::Reasoning, length, None);
+        Some(())
+    }
+
+    /// Adds one image or stored blob that the history names but never reads.
+    ///
+    /// An empty part names no bytes and is left out.
+    fn picture(&mut self, entry: EntryId, part: u32, role: Role, mime: &str, length: u32) {
+        if length > 0 {
+            self.push(entry, part, role, length, Some((mime.into(), length)));
+        }
+    }
+
+    fn push(
+        &mut self,
+        entry: EntryId,
+        part: u32,
+        role: Role,
+        length: u32,
+        picture: Option<(Box<str>, u32)>,
+    ) {
+        self.pieces.push(CompactPiece {
+            entry,
+            part,
+            off: 0,
+            len: length,
+            total: length,
+            role,
+            picture,
+        });
+    }
+
+    /// Adds the parts of a user message or tool result under one role.
+    ///
+    /// Stored text is read from `blobs`; a stored text part that was not
+    /// prefetched stops the whole build.
+    fn content(
+        &mut self,
+        entry: EntryId,
+        role: &Role,
+        parts: &[Part],
+        blobs: &HashMap<(u64, u32), Arc<[u8]>>,
+    ) -> Option<()> {
+        for (index, part) in parts.iter().enumerate() {
+            let index = u32::try_from(index).ok()?;
+            match part {
+                Part::Text { text } => self.text(entry, index, role.clone(), text)?,
+                Part::Image { mime, bytes } => {
+                    let length = u32::try_from(bytes.len()).ok()?;
+                    self.picture(entry, index, role.clone(), mime, length);
+                }
+                Part::Blob { mime, bytes, .. } => {
+                    let length = u32::try_from(*bytes).ok()?;
+                    if mime.starts_with("text/") {
+                        let text = blobs.get(&(entry.get(), index))?;
+                        let text = std::str::from_utf8(text).ok()?;
+                        self.text(entry, index, role.clone(), text)?;
+                    } else {
+                        self.picture(entry, index, role.clone(), mime, length);
+                    }
+                }
+            }
+        }
+        Some(())
+    }
+
+    /// Adds the blocks of one assistant message: text, reasoning, and calls.
+    fn assistant(&mut self, entry: EntryId, parts: &[AssistantPart]) -> Option<()> {
+        for (index, part) in parts.iter().enumerate() {
+            let index = u32::try_from(index).ok()?;
+            match part {
+                AssistantPart::Text { text } => {
+                    self.text(entry, index, Role::Assistant, text)?;
+                }
+                AssistantPart::Thinking { text, .. } => self.reasoning(entry, index, text)?,
+                AssistantPart::ToolCall { name, args, .. } => {
+                    self.text(entry, index, Role::Call(name.clone()), args.as_str())?;
+                }
+            }
+        }
+        Some(())
+    }
+}
+
+/// Decodes the covered entries of one compaction span into source pieces.
+///
+/// Each piece carries its journal role: user text, assistant text, tool
+/// calls, tool output, failed tool output, notes, or reasoning. The part
+/// index of a piece is its position in the covered message, so spans name
+/// the same parts that `letter://` reads back from the journal. A reminder
+/// entry becomes one note piece over its text. Images and stored non-text
+/// blobs become picture pieces and are never read; stored text is read from
+/// `blobs`, which [`text_blobs`] names. The returned [`JournalSource`]
+/// serves the exact bytes of every text piece.
+///
+/// Returns `None` when a stored text part was not prefetched or a part is
+/// larger than a span can name (4 GiB).
+#[must_use]
+pub(crate) fn journal_input(
+    covered: &[CoveredEntry],
+    blobs: &HashMap<(u64, u32), Arc<[u8]>>,
+) -> Option<(Vec<CompactPiece>, JournalSource)> {
+    let mut builder = PieceBuilder::default();
+    for covered_entry in covered {
+        let entry = covered_entry.entry;
+        if let Some(note) = &covered_entry.note {
+            builder.text(entry, 0, Role::Note, note)?;
+            continue;
+        }
+        match &covered_entry.content {
+            ContextItem::User { parts } => builder.content(entry, &Role::User, parts, blobs)?,
+            ContextItem::Assistant { parts, .. } => builder.assistant(entry, parts)?,
+            ContextItem::ToolResult {
+                name,
+                is_error,
+                parts,
+                ..
+            } => {
+                let role = if *is_error {
+                    Role::FailedOutput(name.clone())
+                } else {
+                    Role::Output(name.clone())
+                };
+                builder.content(entry, &role, parts, blobs)?;
+            }
+        }
+    }
+    Some((builder.pieces, builder.source))
+}
+
+/// Names every stored text part of the covered span.
+///
+/// Each entry is the `(entry, part)` key of [`JournalSource`] and the blob
+/// id the host reads before it builds the journal input.
+#[must_use]
+pub(crate) fn text_blobs(covered: &[CoveredEntry]) -> Vec<((u64, u32), BlobId)> {
+    let mut out = Vec::new();
+    for covered_entry in covered {
+        if covered_entry.note.is_some() {
+            continue;
+        }
+        let parts = match &covered_entry.content {
+            ContextItem::User { parts } | ContextItem::ToolResult { parts, .. } => parts,
+            ContextItem::Assistant { .. } => continue,
+        };
+        for (index, part) in parts.iter().enumerate() {
+            let Part::Blob { blob_id, mime, .. } = part else {
+                continue;
+            };
+            if mime.starts_with("text/")
+                && let Ok(index) = u32::try_from(index)
+            {
+                out.push(((covered_entry.entry.get(), index), *blob_id));
+            }
+        }
+    }
+    out
 }

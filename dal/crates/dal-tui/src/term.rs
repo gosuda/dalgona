@@ -49,6 +49,15 @@ pub trait TermIo: Send {
     fn take_resize(&self) -> bool {
         false
     }
+    /// Asks the desktop to open `url` in a browser. The default declines, so
+    /// a terminal without a desktop edge only shows the URL.
+    ///
+    /// # Errors
+    /// Returns the error that kept the browser from starting.
+    fn open_url(&self, url: &str) -> io::Result<()> {
+        let _ = url;
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
 }
 
 /// Terminal modes captured for idempotent cleanup.
@@ -95,6 +104,12 @@ impl TermState {
     /// Records kitty keyboard mode.
     pub fn set_kitty(&mut self, enabled: bool) {
         self.kitty = enabled;
+    }
+
+    /// Reports whether kitty keyboard mode is active.
+    #[must_use]
+    pub const fn kitty(&self) -> bool {
+        self.kitty
     }
 
     /// Records grapheme-width terminal mode.
@@ -528,7 +543,6 @@ mod tests {
         state.set_fullscreen(true);
         state.set_sync_open(true);
         let expected = b"\x1b[?2026l\x1b[<u\x1b[<u\x1b[>4;0m\x1b[?2004l\x1b[?2027l\x1b[?25h\x1b[0m\x1b[r\x1b[?1049l";
-        assert_eq!(restore_bytes(&state), expected);
         assert_eq!(restore_bytes(&state), expected);
     }
 

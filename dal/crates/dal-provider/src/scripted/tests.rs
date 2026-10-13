@@ -483,6 +483,43 @@ fn early_drop_cancels_once_and_stop_is_delivered_once() {
     assert_eq!(script.aborted_streams(), 1);
 }
 
+#[test]
+fn replay_fail_with_status_and_family_is_an_http_status_failure() {
+    let script = Script::from_replay(
+        br#"{"kind":"fail","message":"body too large","status":413,"family":"openai_chat"}"#,
+    )
+    .expect("fail with status decodes");
+    match script.open() {
+        Err(ProviderError::Status {
+            family,
+            status,
+            message,
+        }) => {
+            assert_eq!(family, Family::Chat);
+            assert_eq!(status, 413);
+            assert_eq!(message, "body too large");
+        }
+        other => panic!("expected a status failure, got {:?}", other.err()),
+    }
+}
+
+#[test]
+fn replay_fail_status_and_family_must_come_together() {
+    for line in [
+        r#"{"kind":"fail","message":"x","status":413}"#,
+        r#"{"kind":"fail","message":"x","family":"openai_chat"}"#,
+        r#"{"kind":"usage","usage":{"input_tokens":1,"output_tokens":1},"status":413,"family":"openai_chat"}"#,
+    ] {
+        assert!(
+            matches!(
+                Script::from_replay(line.as_bytes()),
+                Err(ScriptError::ReplayFormat { line: 1, .. })
+            ),
+            "{line} must be rejected"
+        );
+    }
+}
+
 proptest::proptest! {
     /// The replay decoder must never panic on arbitrary input: every failure
     /// path surfaces a typed `ScriptError`, never a crash or silent misdecode.

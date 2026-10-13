@@ -41,8 +41,10 @@ fn sul_license_is_the_only_product_license() -> support::TestResult<()> {
     assert!(license.contains("metaphorics"));
     assert!(!root.join("dalgona/LICENSE").exists());
     assert!(!root.join("dalgona/NOTICE").exists());
+    let workspace = fs::read_to_string(root.join("dalgona/Cargo.toml"))?;
+    assert!(workspace.contains("license-file = \"../LICENSE.md\""));
+    assert!(!workspace.contains("license = \"Apache"));
     for manifest in [
-        root.join("dalgona/Cargo.toml"),
         root.join("dalgona/crates/dalgona/Cargo.toml"),
         root.join("dalgona/crates/dalgona-batteries/Cargo.toml"),
     ] {

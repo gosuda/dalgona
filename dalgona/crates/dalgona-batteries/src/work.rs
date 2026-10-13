@@ -319,7 +319,7 @@ impl StatusPoll for PlanStatus {
 fn status_snapshot(phase: plan::Phase, items: &[TodoItem]) -> StatusSnapshot {
     StatusSnapshot {
         quiet: status_quiet(phase),
-        text: status_json(phase, items).ok().map(String::into_boxed_str),
+        text: status_line(phase, items).map(String::into_boxed_str),
     }
 }
 
@@ -457,8 +457,8 @@ pub fn work(_config: PlanConfig) -> Result<Extension, RegistrationError> {
     .build()
 }
 
-const STATUS_LIMIT: usize = 4096;
-const STATUS_TRUNCATED: &str = "[...] status truncated";
+/// Upper bound of the one-line status text shown in the activity row.
+const STATUS_LINE_LIMIT: usize = 120;
 
 #[derive(serde::Serialize)]
 struct TerminalPayload {
@@ -466,27 +466,6 @@ struct TerminalPayload {
     open: usize,
     total: usize,
     first_titles: Vec<String>,
-}
-
-#[derive(serde::Serialize)]
-struct StatusPayload<'a> {
-    plan_mode: bool,
-    plan_state: &'static str,
-    todos: Vec<StatusTodo<'a>>,
-}
-
-#[derive(serde::Serialize)]
-struct StatusTodo<'a> {
-    subject: std::borrow::Cow<'a, str>,
-    state: &'static str,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum StatusError {
-    #[error(transparent)]
-    Serialize(#[from] sonic_rs::Error),
-    #[error("plan status cannot fit within 4096 bytes")]
-    TooLarge,
 }
 
 pub(crate) fn todo_terminal_json(items: &[TodoItem]) -> Result<String, sonic_rs::Error> {
@@ -503,63 +482,46 @@ pub(crate) fn status_quiet(phase: plan::Phase) -> bool {
     phase != plan::Phase::Awaiting
 }
 
-pub(crate) fn status_json(phase: plan::Phase, items: &[TodoItem]) -> Result<String, StatusError> {
-    let full = encode_status(phase, items, todo::MAX_SUBJECT_BYTES)?;
-    if full.len() <= STATUS_LIMIT {
-        return Ok(full);
+/// Renders the one-line activity text: plan phase, `done/total done`, and the
+/// first in-progress subject. `None` when there is nothing to report.
+pub(crate) fn status_line(phase: plan::Phase, items: &[TodoItem]) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    match phase {
+        plan::Phase::Off => {}
+        plan::Phase::Planning => parts.push("planning".to_owned()),
+        plan::Phase::Awaiting => parts.push("awaiting approval".to_owned()),
     }
-
-    let mut low = 0;
-    let mut high = todo::MAX_SUBJECT_BYTES;
-    let mut best = encode_status(phase, items, 0)?;
-    if best.len() > STATUS_LIMIT {
-        return Err(StatusError::TooLarge);
+    if !items.is_empty() {
+        let done = items
+            .iter()
+            .filter(|item| item.state == todo::TodoState::Done)
+            .count();
+        parts.push(format!("{done}/{} done", items.len()));
     }
-    while low + 1 < high {
-        let budget = low + (high - low) / 2;
-        let candidate = encode_status(phase, items, budget)?;
-        if candidate.len() <= STATUS_LIMIT {
-            low = budget;
-            best = candidate;
-        } else {
-            high = budget;
-        }
-    }
-    Ok(best)
-}
-
-fn encode_status(
-    phase: plan::Phase,
-    items: &[TodoItem],
-    subject_budget: usize,
-) -> Result<String, sonic_rs::Error> {
-    let todos = items
+    if let Some(active) = items
         .iter()
-        .map(|item| StatusTodo {
-            subject: status_subject(&item.subject, subject_budget),
-            state: item.state.as_str(),
-        })
-        .collect();
-    sonic_rs::to_string(&StatusPayload {
-        plan_mode: phase != plan::Phase::Off,
-        plan_state: phase.as_str(),
-        todos,
-    })
+        .find(|item| item.state == todo::TodoState::InProgress)
+    {
+        parts.push(line_subject(&active.subject));
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    let mut line = parts.join(" · ");
+    if line.len() > STATUS_LINE_LIMIT {
+        let mut end = STATUS_LINE_LIMIT - '…'.len_utf8();
+        while !line.is_char_boundary(end) {
+            end -= 1;
+        }
+        line.truncate(end);
+        line.push('…');
+    }
+    Some(line)
 }
 
-fn status_subject(subject: &str, budget: usize) -> std::borrow::Cow<'_, str> {
-    if subject.len() <= budget {
-        return std::borrow::Cow::Borrowed(subject);
-    }
-    let prefix_budget = budget.saturating_sub(STATUS_TRUNCATED.len());
-    let mut end = subject.len().min(prefix_budget);
-    while !subject.is_char_boundary(end) {
-        end -= 1;
-    }
-    let mut truncated = String::with_capacity(end + STATUS_TRUNCATED.len());
-    truncated.push_str(&subject[..end]);
-    truncated.push_str(STATUS_TRUNCATED);
-    std::borrow::Cow::Owned(truncated)
+/// Collapses whitespace so a subject cannot break the one-line contract.
+fn line_subject(subject: &str) -> String {
+    subject.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(test)]
@@ -573,19 +535,6 @@ mod tests {
         open: usize,
         total: usize,
         first_titles: Vec<String>,
-    }
-
-    #[derive(serde::Deserialize)]
-    struct StatusOutput {
-        plan_mode: bool,
-        plan_state: String,
-        todos: Vec<StatusTodoOutput>,
-    }
-
-    #[derive(serde::Deserialize)]
-    struct StatusTodoOutput {
-        subject: String,
-        state: String,
     }
 
     #[test]
@@ -671,103 +620,65 @@ mod tests {
         }
     }
 
-    #[test]
-    fn plan_status_json_stays_bounded_and_keeps_every_todo() {
-        let items = (0..todo::MAX_ITEMS)
-            .map(|_| TodoItem {
-                subject: format!("{}{}", "\"".repeat(50), "界".repeat(50)),
-                description: String::new(),
-                state: TodoState::Pending,
-            })
-            .collect::<Vec<_>>();
-        let original = items.clone();
-        let status = status_json(plan::Phase::Planning, &items);
-
-        assert!(status.is_ok());
-        if let Ok(status) = status {
-            assert!(status.len() <= STATUS_LIMIT);
-            let decoded = sonic_rs::from_str::<StatusOutput>(&status);
-            assert!(decoded.is_ok());
-            if let Ok(decoded) = decoded {
-                assert_eq!(decoded.todos.len(), todo::MAX_ITEMS);
-                assert!(
-                    decoded
-                        .todos
-                        .iter()
-                        .any(|item| item.subject.contains(STATUS_TRUNCATED))
-                );
-                assert!(decoded.plan_mode);
-                assert_eq!(decoded.plan_state, "planning");
-                assert!(decoded.todos.iter().all(|item| item.state == "pending"));
-            }
+    fn item(subject: &str, state: TodoState) -> TodoItem {
+        TodoItem {
+            subject: subject.to_owned(),
+            description: String::new(),
+            state,
         }
-        assert_eq!(items, original);
-        assert!(status_quiet(plan::Phase::Planning));
-        assert!(!status_quiet(plan::Phase::Awaiting));
     }
 
-    fn padded_items(padding: usize) -> Vec<TodoItem> {
-        let mut items = vec![
-            TodoItem {
-                subject: String::new(),
-                description: String::new(),
-                state: TodoState::Pending,
-            };
-            todo::MAX_ITEMS
+    #[test]
+    fn plan_status_text_is_one_human_line() {
+        let items = [
+            item("a", TodoState::Done),
+            item("b", TodoState::Done),
+            item("c", TodoState::Done),
+            item("writing tests", TodoState::InProgress),
+            item("e", TodoState::Pending),
         ];
-        let mut left = padding;
-        for item in &mut items {
-            let take = left.min(todo::MAX_SUBJECT_BYTES);
-            item.subject = "a".repeat(take);
-            left -= take;
-        }
-        items
-    }
+        let snapshot = status_snapshot(plan::Phase::Planning, &items);
+        let text = snapshot.text.as_deref().unwrap_or_default();
+        assert!(!text.contains(['{', '}', '"']));
+        assert_eq!(text, "planning · 3/5 done · writing tests");
+        assert!(snapshot.quiet);
 
-    #[test]
-    fn plan_status_truncation_boundary() -> Result<(), Box<dyn std::error::Error>> {
-        let base =
-            encode_status(plan::Phase::Off, &padded_items(0), todo::MAX_SUBJECT_BYTES)?.len();
-        let padding = STATUS_LIMIT - base;
-
-        let exact = status_json(plan::Phase::Off, &padded_items(padding))?;
-        assert_eq!(exact.len(), STATUS_LIMIT);
-        assert!(!exact.contains(STATUS_TRUNCATED));
-
-        let over = status_json(plan::Phase::Off, &padded_items(padding + 1))?;
-        assert!(over.len() <= STATUS_LIMIT);
-        let decoded = sonic_rs::from_str::<StatusOutput>(&over)?;
-        assert_eq!(decoded.todos.len(), todo::MAX_ITEMS);
-        assert!(
-            decoded
-                .todos
-                .iter()
-                .any(|item| item.subject.ends_with(STATUS_TRUNCATED))
+        let awaiting = status_snapshot(plan::Phase::Awaiting, &items[..1]);
+        assert_eq!(
+            awaiting.text.as_deref(),
+            Some("awaiting approval · 1/1 done")
         );
-        Ok(())
+        assert!(!awaiting.quiet);
+
+        assert_eq!(status_snapshot(plan::Phase::Off, &[]).text, None);
+        let off = status_snapshot(plan::Phase::Off, &items[3..4]);
+        assert_eq!(off.text.as_deref(), Some("0/1 done · writing tests"));
     }
 
     #[test]
-    fn plan_status_truncation_keeps_multibyte_subjects_whole() {
-        let items = (0..todo::MAX_ITEMS)
-            .map(|_| TodoItem {
-                subject: "界".repeat(66),
-                description: String::new(),
-                state: TodoState::Done,
-            })
+    fn plan_status_line_stays_bounded_and_keeps_counts() {
+        let long = format!("a{}\n{}", "界".repeat(100), "x".repeat(200));
+        let mut items = (0..todo::MAX_ITEMS - 1)
+            .map(|_| item("done", TodoState::Done))
             .collect::<Vec<_>>();
+        items.push(item(&long, TodoState::InProgress));
+        let snapshot = status_snapshot(plan::Phase::Awaiting, &items);
+        let text = snapshot.text.as_deref().unwrap_or_default();
+        assert!(text.len() <= STATUS_LINE_LIMIT);
+        assert!(!text.contains(['\n', '{', '}']));
+        assert!(text.starts_with("awaiting approval · 25/26 done · "));
+        assert!(text.ends_with('…'));
+    }
 
-        let status = status_json(plan::Phase::Planning, &items);
-
-        assert!(status.as_ref().is_ok_and(|text| text.len() <= STATUS_LIMIT));
-        let decoded = status
-            .and_then(|text| sonic_rs::from_str::<StatusOutput>(&text).map_err(StatusError::from));
-        assert!(decoded.is_ok_and(|output| {
-            output
-                .todos
-                .iter()
-                .all(|item| item.subject.ends_with(STATUS_TRUNCATED))
-        }));
+    #[test]
+    fn plan_status_line_cuts_on_a_char_boundary() {
+        let items = [item(
+            &format!("a{}", "界".repeat(100)),
+            TodoState::InProgress,
+        )];
+        let text = status_line(plan::Phase::Off, &items).unwrap_or_default();
+        assert!(text.len() <= STATUS_LINE_LIMIT);
+        assert!(text.ends_with("界…"));
     }
 
     #[tokio::test]
@@ -792,20 +703,12 @@ mod tests {
         let record_before = host.services.all_bodies(todo::TODO_KIND);
         assert_eq!(record_before.len(), 1);
 
-        let (quiet, status) = host.status()?;
+        let (quiet, status) = host.status();
         assert!(quiet);
-        assert!(status.len() <= STATUS_LIMIT);
-        let decoded = sonic_rs::from_str::<StatusOutput>(&status)?;
-        assert!(!decoded.plan_mode);
-        assert_eq!(decoded.plan_state, "off");
-        assert_eq!(decoded.todos.len(), todo::MAX_ITEMS);
-        assert!(
-            decoded
-                .todos
-                .iter()
-                .any(|item| item.subject.contains(STATUS_TRUNCATED))
-        );
-        assert!(decoded.todos.iter().all(|item| item.state == "pending"));
+        let status = status.unwrap_or_default();
+        assert_eq!(status, "0/26 done");
+        assert!(!status.contains(['{', '}', '"']));
+
         assert!(record_before[0].contains(&encoded_subject));
         assert_eq!(host.services.all_bodies(todo::TODO_KIND), record_before);
         Ok(())

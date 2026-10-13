@@ -3,6 +3,10 @@
     clippy::disallowed_methods,
     reason = "SC test writes private scripted fixtures"
 )]
+#![expect(
+    dead_code,
+    reason = "gate support exposes helpers shared across independent targets"
+)]
 
 //! Call grants stay bound to the approved argv, roots, and detached job.
 
@@ -33,8 +37,8 @@ use dal_agent::{
     },
 };
 use dal_core::{
-    Answer, CallGrant, Command, DenyReason, Expect, GrantSpec, ModelInfo, Name, Origin, Part,
-    Preview, RawJson, Reply, ToolClass, ToolSpec, Visibility, Workspace,
+    Answer, CallGrant, Command, DenyReason, Expect, GrantSpec, JobId, JobsOp, JobsReply, ModelInfo,
+    Name, Origin, Part, Preview, RawJson, Reply, ToolClass, ToolSpec, Visibility, Workspace,
 };
 use support::{GateHarness, TestDir, scripted_session};
 
@@ -78,7 +82,7 @@ struct GrantTool {
     executable: PathBuf,
     workspace: PathBuf,
     outside: PathBuf,
-    marker: PathBuf,
+    job: Mutex<Option<JobId>>,
     next: AtomicUsize,
     state: Arc<RunState>,
 }
@@ -111,6 +115,7 @@ impl GrantTool {
             cwd,
             timeout: None,
             env: Vec::new(),
+            stdout_prefix_limit: 0,
         }
     }
 
@@ -118,16 +123,29 @@ impl GrantTool {
         cx.authorize(Self::preview()).await
     }
 
-    async fn wait_for_marker(&self) -> Result<(), std::io::Error> {
-        tokio::time::timeout(Duration::from_secs(10), async {
-            while !self.marker.exists() {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .map_err(std::io::Error::other)?;
-        tokio::time::sleep(Duration::from_millis(750)).await;
-        Ok(())
+    async fn wait_for_job_end(&self, cx: &ToolCx<'_>) -> Result<(), String> {
+        let Some(id) = *self
+            .job
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        else {
+            return Err("no detached job was recorded".into());
+        };
+        let reply = cx
+            .services()
+            .jobs(
+                cx.caller(),
+                JobsOp::Wait {
+                    id,
+                    timeout: Some(Duration::from_secs(10)),
+                },
+            )
+            .await
+            .map_err(|error| format!("{error:?}"))?;
+        match reply {
+            JobsReply::Waited { id: ended, .. } if ended == id => Ok(()),
+            other => Err(format!("job wait returned {other:?}")),
+        }
     }
 }
 
@@ -194,6 +212,10 @@ impl GrantTool {
             }
         };
         let job = cx.detach(proc);
+        *self
+            .job
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(job);
         self.state.push(CallResult::Detached);
         tokio::time::sleep(Duration::from_millis(200)).await;
         ToolOutcome::Detached(job)
@@ -289,7 +311,7 @@ impl GrantTool {
         ) {
             Err(ToolError::Denied(reason @ DenyReason::OutOfScope { .. })) => {
                 self.state.push(CallResult::OutsideDenied(reason.clone()));
-                if let Err(error) = self.wait_for_marker().await {
+                if let Err(error) = self.wait_for_job_end(cx).await {
                     self.state.push(CallResult::Failed(format!(
                         "detached child did not finish: {error}"
                     )));
@@ -407,14 +429,18 @@ async fn start_session(
         executable,
         workspace: workspace.path().to_path_buf(),
         outside: data.path().join("outside"),
-        marker: marker.clone(),
+        job: Mutex::new(None),
         next: AtomicUsize::new(0),
         state: Arc::clone(&state),
     });
-    let extension = ExtensionBuilder::new("gate-call-grant", "0.1.0", dal_core::ServiceSet::EMPTY)?
-        .with_origin(Origin::User, None)
-        .tool(tool, Visibility::Model)
-        .build()?;
+    let extension = ExtensionBuilder::new(
+        "gate-call-grant",
+        "0.1.0",
+        dal_core::ServiceSet::from_names(["jobs"])?,
+    )?
+    .with_origin(Origin::User, None)
+    .tool(tool, Visibility::Model)
+    .build()?;
     let fixture = data.path().join("call-grant.jsonl");
     fs::write(
         &fixture,
@@ -520,6 +546,9 @@ async fn drive_tool_sequence(
                         Answer::Decline
                     };
                     harness.agent.answer(request.id, answer).await?;
+                }
+                dal_core::Question::Grant { .. } => {
+                    harness.agent.answer(request.id, Answer::Approve).await?;
                 }
                 _ => harness.agent.answer(request.id, Answer::Decline).await?,
             },

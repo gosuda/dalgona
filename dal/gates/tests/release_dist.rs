@@ -1,7 +1,3 @@
-#![expect(
-    clippy::disallowed_methods,
-    reason = "SC release gate runs cargo-dist and tar as real processes"
-)]
 //! Distribution layout gate: packaged binaries and manifest artifacts.
 use std::{
     collections::{BTreeMap, HashSet},
@@ -153,13 +149,18 @@ const MAN_PAGES: [&str; 84] = [
     "man/dalgon.1",
 ];
 
-fn dal_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .to_path_buf()
+fn repo_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
+fn dal_root() -> PathBuf {
+    repo_root().join("dal")
+}
+
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the dist gate probes the real cargo-dist binary"
+)]
 fn dist_ready() -> Result<bool, Box<dyn Error>> {
     let output = match Command::new("dist").arg("--version").output() {
         Ok(output) => output,
@@ -180,6 +181,10 @@ enum Plan {
     Skip,
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the dist gate shells out to the real cargo-dist binary"
+)]
 fn load_plan(workspace: &Path, what: &str) -> Result<Plan, Box<dyn Error>> {
     let output = Command::new("dist")
         .args(["plan", "--output-format=json"])
@@ -231,6 +236,10 @@ fn assert_manifest_artifacts(product: &str, manifest: &DistManifest) {
     );
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the dist gate reads the real cargo metadata"
+)]
 fn cargo_package(workspace: &Path, name: &str) -> Result<CargoPackage, Box<dyn Error>> {
     let output = Command::new("cargo")
         .args([
@@ -353,10 +362,7 @@ fn release_dist_plan_validity() -> Result<(), Box<dyn Error>> {
         eprintln!("skipped release_dist_plan_validity: cargo-dist 0.32.0 is not installed");
         return Ok(());
     }
-    let repo = dal_root()
-        .parent()
-        .ok_or_else(|| io::Error::other("dal workspace has no repository parent"))?
-        .to_path_buf();
+    let repo = repo_root();
     let dal = match load_plan(&dal_root(), "release_dist_plan_validity dalgon")? {
         Plan::Ready(manifest) => manifest,
         Plan::Skip => return Ok(()),
@@ -375,10 +381,7 @@ fn release_binstall_url_expansion() -> Result<(), Box<dyn Error>> {
         eprintln!("skipped release_binstall_url_expansion: cargo-dist 0.32.0 is not installed");
         return Ok(());
     }
-    let repo = dal_root()
-        .parent()
-        .ok_or_else(|| io::Error::other("dal workspace has no repository parent"))?
-        .to_path_buf();
+    let repo = repo_root();
     let dal = match load_plan(&dal_root(), "release_binstall_url_expansion dalgon")? {
         Plan::Ready(manifest) => manifest,
         Plan::Skip => return Ok(()),
@@ -420,6 +423,10 @@ fn release_binstall_url_expansion() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the dist gate shells out to the real cargo-dist binary"
+)]
 fn release_tag_version_mismatch() -> Result<(), Box<dyn Error>> {
     if !dist_ready()? {
         eprintln!("skipped release_tag_version_mismatch: cargo-dist 0.32.0 is not installed");
@@ -440,6 +447,10 @@ fn release_tag_version_mismatch() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the dist gate builds and unpacks a real release archive"
+)]
 fn release_archive_members_exact() -> Result<(), Box<dyn Error>> {
     if !dist_ready()? {
         eprintln!("skipped release_archive_members_exact: cargo-dist 0.32.0 is not installed");

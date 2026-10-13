@@ -104,7 +104,7 @@ pub(crate) async fn stream_attempt(
         };
     }
 
-    let (request, user_agent, secrets) =
+    let (request, user_agent, secrets, replay_prefix) =
         build_stream_request(&context, &credential).map_err(AttemptFailure::Provider)?;
     let response = tokio::select! {
         biased;
@@ -131,12 +131,19 @@ pub(crate) async fn stream_attempt(
         &context.provider,
         &context.model,
         matches!(&credential, Credential::OAuth(_)),
+        replay_prefix.as_deref(),
         secrets,
     )))
 }
 
-/// A built streaming request with its user agent and redaction secrets.
-type StreamRequestParts = (reqwest::RequestBuilder, Box<str>, Vec<Box<str>>);
+/// A built streaming request with its user agent, redaction secrets, and the
+/// replay binding that signed thinking blocks in its response must carry.
+type StreamRequestParts = (
+    reqwest::RequestBuilder,
+    Box<str>,
+    Vec<Box<str>>,
+    Option<Box<str>>,
+);
 
 pub(crate) fn build_stream_request(
     context: &StreamContext,
@@ -159,6 +166,7 @@ pub(crate) fn build_stream_request(
                 context.client.post(url).header(header, value).body(body),
                 user_agent,
                 secrets,
+                None,
             ))
         }
         Family::Responses => {
@@ -168,13 +176,18 @@ pub(crate) fn build_stream_request(
             if let Some((name, value)) = &wire.auth_header {
                 request = request.header(*name, value);
             }
-            Ok((request.body(wire.body), wire.user_agent.into(), secrets))
+            Ok((
+                request.body(wire.body),
+                wire.user_agent.into(),
+                secrets,
+                None,
+            ))
         }
         Family::Codex => Err(ProviderError::InvalidRequest {
             message: String::from("Codex requests use the dedicated HTTPS adapter"),
         }),
         Family::Anthropic => {
-            let wire = build_anthropic_wire(
+            let mut wire = build_anthropic_wire(
                 &context.request,
                 &context.entry,
                 context.auth,
@@ -189,7 +202,13 @@ pub(crate) fn build_stream_request(
                 .unwrap_or(context.user_agent.as_ref())
                 .to_owned()
                 .into_boxed_str();
-            Ok((wire.into_request(&context.client, url), user_agent, secrets))
+            let replay_prefix = std::mem::take(&mut wire.prefix);
+            Ok((
+                wire.into_request(&context.client, url),
+                user_agent,
+                secrets,
+                Some(replay_prefix),
+            ))
         }
     }
 }
@@ -288,17 +307,18 @@ pub(crate) async fn status_failure(
         () = cancel.cancelled() => return Ok(None),
         body = http::read_body(family, response) => body.map_err(AttemptFailure::Provider)?,
     };
-    let mut body = String::from_utf8_lossy(&body).into_owned();
-    for secret in credential_secrets(credential).iter().chain(extra_secrets) {
-        if !secret.is_empty() && body.contains(secret.as_ref()) {
-            body = body.replace(secret.as_ref(), "<redacted>");
-        }
-    }
+    let secrets: Vec<Box<str>> = credential_secrets(credential)
+        .into_iter()
+        .chain(extra_secrets.iter().cloned())
+        .collect();
+    let body = transport_mod::redact_text(String::from_utf8_lossy(&body).into_owned(), &secrets);
     let (code, message) = transport_mod::error_fields(&body);
+    // JSON escapes decode in `error_fields`, so a secret written as `\u002d`
+    // only matches after parsing.
     Ok(Some(AttemptFailure::Response {
         status,
-        code,
-        message,
+        code: code.map(|code| transport_mod::redact_text(code, &secrets)),
+        message: transport_mod::redact_text(message, &secrets),
         retry_after,
     }))
 }
@@ -562,13 +582,12 @@ pub(crate) fn credential_secrets(credential: &Credential) -> Vec<Box<str>> {
     match credential {
         Credential::ApiKey { key } => vec![key.expose().into()],
         Credential::OAuth(oauth) => {
-            let mut values = vec![
+            let mut values: Vec<Box<str>> = vec![
                 oauth.access_token.expose().into(),
                 oauth.refresh_token.expose().into(),
             ];
-            if let Some(id_token) = &oauth.id_token {
-                values.push(id_token.clone().into_boxed_str());
-            }
+            values.extend(oauth.id_token.as_deref().map(Box::<str>::from));
+            values.extend(oauth.chatgpt_account_id().map(Box::<str>::from));
             values
         }
         Credential::None => Vec::new(),

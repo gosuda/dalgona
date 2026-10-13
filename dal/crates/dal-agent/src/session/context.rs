@@ -8,9 +8,9 @@ use std::collections::HashSet;
 use std::sync::{Arc, LazyLock};
 
 use dal_core::{
-    AssistantPart, Block, CallId, Caps, ContextItem, EntryKind, EntryView, Family, JournalPart,
-    Mode, ModelId, ModelInfo, ModelRoute, ModelToolSpec, Name, Part, RawJson, ReplaySource,
-    ResolveError, ResolvedCall, ThinkingLevel, ToolClass, Visibility, Workspace,
+    AssistantPart, BEFORE_TURN_SOURCE, Block, CallId, Caps, ContextItem, EntryKind, EntryView,
+    Family, JournalPart, Mode, ModelId, ModelInfo, ModelRoute, ModelToolSpec, Name, Part, RawJson,
+    ReplaySource, ResolveError, ResolvedCall, ThinkingLevel, ToolClass, Visibility, Workspace,
 };
 use dal_provider::{CatalogEntry, clamp, levels_for};
 
@@ -113,6 +113,9 @@ pub(crate) fn tool_list(
     let mut specs: Vec<(bool, Arc<dal_core::ToolSpec>)> = Vec::new();
     for entry in generation.tools.entries() {
         let name = entry.name.clone();
+        if !turn_tools.permits(&name) {
+            continue;
+        }
         let visible = generation
             .tool_visibility(&name)
             .map(|declared| turn_tools.effective(&name, declared));
@@ -153,14 +156,12 @@ pub(crate) fn tool_list(
 }
 
 pub(crate) fn has_deferred_tools(generation: &Generation, turn_tools: &TurnTools) -> bool {
-    generation
-        .tools
-        .entries()
-        .iter()
-        .any(|entry| turn_tools.effective(&entry.name, entry.visibility) == Visibility::Deferred)
-        || turn_tools.entries().iter().any(|entry| {
-            turn_tools.effective(entry.tool.name(), entry.visibility) == Visibility::Deferred
-        })
+    generation.tools.entries().iter().any(|entry| {
+        turn_tools.permits(&entry.name)
+            && turn_tools.effective(&entry.name, entry.visibility) == Visibility::Deferred
+    }) || turn_tools.entries().iter().any(|entry| {
+        turn_tools.effective(entry.tool.name(), entry.visibility) == Visibility::Deferred
+    })
 }
 
 pub(crate) fn is_core_tool_search(
@@ -178,7 +179,7 @@ fn has_registered_tool_search(generation: &Generation, turn_tools: &TurnTools) -
         .tools
         .entries()
         .iter()
-        .any(|entry| entry.name.as_str() == TOOL_SEARCH_NAME)
+        .any(|entry| entry.name.as_str() == TOOL_SEARCH_NAME && turn_tools.permits(&entry.name))
         || turn_tools
             .entries()
             .iter()
@@ -193,7 +194,9 @@ fn deferred_tool_catalog(
 ) -> Vec<DeferredTool> {
     let mut deferred = Vec::new();
     for entry in generation.tools.entries() {
-        if turn_tools.effective(&entry.name, entry.visibility) != Visibility::Deferred {
+        if !turn_tools.permits(&entry.name)
+            || turn_tools.effective(&entry.name, entry.visibility) != Visibility::Deferred
+        {
             continue;
         }
         if let Some(spec) = generation.tool_spec(&entry.name, model, model_id) {
@@ -321,44 +324,8 @@ pub(crate) fn resolve_calls(
                 None => continue,
             },
         };
-        if is_core_tool_search(generation, turn_tools, &name) {
-            let result = tool_search_query(&call.args)
-                .map(|_| ToolClass::Read)
-                .map_err(ResolveError::InvalidArgs);
-            resolved.push(ResolvedCall {
-                call: call.call.clone(),
-                name,
-                promoted: false,
-                result,
-            });
-            continue;
-        }
-        let Some((tool, visibility)) = turn_tools.tool(generation, &name) else {
-            resolved.push(ResolvedCall {
-                call: call.call.clone(),
-                name,
-                promoted: false,
-                result: Err(ResolveError::Unknown),
-            });
-            continue;
-        };
-        let visibility = Some(visibility);
-        if matches!(visibility, Some(Visibility::EvalOnly))
-            && !matches!(mode, Mode::EvalFirst | Mode::EvalOnly)
-        {
-            resolved.push(ResolvedCall {
-                call: call.call.clone(),
-                name,
-                promoted: false,
-                result: Err(ResolveError::EvalOnly),
-            });
-            continue;
-        }
-        let promoted = matches!(visibility, Some(Visibility::Deferred));
-        let result = match tool.classify(&call.args, workspace) {
-            Ok(class) => Ok(class),
-            Err(error) => Err(ResolveError::InvalidArgs(error.to_string().into())),
-        };
+        let (promoted, result) =
+            resolve_named(generation, turn_tools, &name, &call.args, mode, workspace);
         resolved.push(ResolvedCall {
             call: call.call.clone(),
             name,
@@ -367,6 +334,42 @@ pub(crate) fn resolve_calls(
         });
     }
     resolved
+}
+
+/// Resolves one named call's arguments: tool lookup, mode gate, and the
+/// tool's own classification of those arguments.
+///
+/// Returns whether the call promotes a deferred tool and its class or the
+/// model-visible failure. Dispatch calls this again on the arguments a
+/// `tool_call` hook rewrote, so a rewrite meets the same checks the
+/// streamed arguments did.
+pub(crate) fn resolve_named(
+    generation: &Generation,
+    turn_tools: &TurnTools,
+    name: &Name,
+    args: &RawJson,
+    mode: Mode,
+    workspace: &Workspace,
+) -> (bool, Result<ToolClass, ResolveError>) {
+    if is_core_tool_search(generation, turn_tools, name) {
+        let result = tool_search_query(args)
+            .map(|_| ToolClass::Read)
+            .map_err(ResolveError::InvalidArgs);
+        return (false, result);
+    }
+    let Some((tool, visibility)) = turn_tools.tool(generation, name) else {
+        return (false, Err(ResolveError::Unknown));
+    };
+    if matches!(visibility, Visibility::EvalOnly)
+        && !matches!(mode, Mode::EvalFirst | Mode::EvalOnly)
+    {
+        return (false, Err(ResolveError::EvalOnly));
+    }
+    let promoted = matches!(visibility, Visibility::Deferred);
+    let result = tool
+        .classify(args, workspace)
+        .map_err(|error| ResolveError::InvalidArgs(error.to_string().into()));
+    (promoted, result)
 }
 
 /// Salvages a display name for provider-sent tool names outside the grammar.
@@ -394,12 +397,21 @@ fn sanitized_name(raw: &str) -> Option<Name> {
     };
     Name::parse(fallback).ok()
 }
+
 /// Builds provider context messages from leaf entries in order.
 ///
-/// Conversation entries map to their message shape; settings entries carry
-/// no conversation content and are skipped. Blob parts stay references;
+/// Conversation entries map to their message shape, and so does the text a
+/// `before_turn` hook added to a turn; settings entries and other reminders
+/// carry no conversation content and are skipped. Blob parts stay references;
 /// inline images decode from base64, and undecodable bytes skip the part.
+/// A journal that holds several results for one tool call yields only the
+/// first, because providers reject a second result for the same call.
 pub(crate) fn context_items(entries: &[EntryView]) -> Vec<ContextItem> {
+    collapse_duplicate_results(compacted_items(entries))
+}
+
+/// Maps the leaf entries, replacing the compacted prefix with its summary.
+fn compacted_items(entries: &[EntryView]) -> Vec<ContextItem> {
     let Some(compaction_index) = entries
         .iter()
         .rposition(|entry| matches!(&entry.kind, EntryKind::Compaction { .. }))
@@ -432,6 +444,36 @@ pub(crate) fn context_items(entries: &[EntryView]) -> Vec<ContextItem> {
             .filter_map(context_item),
     );
     out
+}
+
+/// Keeps the first tool result for each call of one model response.
+///
+/// Results answer the calls of the assistant message before them, so a call
+/// id is tracked from that message until the next one. A later response
+/// may reuse an id; its result is kept. The journal is not changed.
+fn collapse_duplicate_results(items: Vec<ContextItem>) -> Vec<ContextItem> {
+    let mut answered: HashSet<&CallId> = HashSet::new();
+    let keep: Vec<bool> = items
+        .iter()
+        .map(|item| match item {
+            ContextItem::Assistant { .. } => {
+                answered.clear();
+                true
+            }
+            ContextItem::ToolResult { call, .. } => answered.insert(call),
+            ContextItem::User { .. } => true,
+        })
+        .collect();
+    debug_assert_eq!(
+        items.len(),
+        keep.len(),
+        "one keep decision must exist for every context item"
+    );
+    items
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(item, keep)| keep.then_some(item))
+        .collect()
 }
 
 /// Maps one leaf entry to its provider message, when it carries content.
@@ -475,6 +517,11 @@ fn context_item(entry: &EntryView) -> Option<ContextItem> {
                 parts.iter().filter_map(content_part).collect()
             };
             (!parts.is_empty()).then_some(ContextItem::User { parts })
+        }
+        EntryKind::Reminder { source, text } if source.as_ref() == BEFORE_TURN_SOURCE => {
+            Some(ContextItem::User {
+                parts: vec![Part::Text { text: text.clone() }],
+            })
         }
         _ => None,
     }
@@ -605,6 +652,175 @@ mod tests {
                     }],
                 },
             ]
+        );
+    }
+
+    fn assistant_calling(id: u64, parent: Option<EntryId>, calls: &[&str]) -> EntryView {
+        entry(
+            id,
+            parent,
+            EntryKind::Assistant {
+                api: Family::Chat,
+                model: "model".into(),
+                content: calls
+                    .iter()
+                    .map(|call| Block::ToolCall {
+                        id: CallId::new(*call),
+                        name: "read".into(),
+                        input: RawJson::parse("{}").expect("valid JSON"),
+                    })
+                    .collect(),
+                usage: dal_core::Usage {
+                    input_tokens: 0,
+                    cached_input_tokens: 0,
+                    output_tokens: 0,
+                    reasoning_tokens: None,
+                    cache_write_tokens: 0,
+                    cost_usd: None,
+                },
+                stop: dal_core::AssistantStop::ToolUse,
+            },
+        )
+    }
+
+    fn result_for(id: u64, parent: Option<EntryId>, call: &str, text: &str) -> EntryView {
+        entry(
+            id,
+            parent,
+            EntryKind::ToolResult {
+                call: CallId::new(call),
+                name: "read".into(),
+                error: false,
+                parts: vec![JournalPart::Text { text: text.into() }],
+                changes: Vec::new(),
+                elapsed_ms: None,
+            },
+        )
+    }
+
+    fn result_calls(items: &[ContextItem]) -> Vec<(&str, String)> {
+        items
+            .iter()
+            .filter_map(|item| match item {
+                ContextItem::ToolResult { call, parts, .. } => Some((
+                    call.as_str(),
+                    parts
+                        .iter()
+                        .filter_map(|part| match part {
+                            Part::Text { text } => Some(text.as_ref()),
+                            _ => None,
+                        })
+                        .collect(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn text_item(item: &ContextItem) -> Option<&str> {
+        match item {
+            ContextItem::User { parts } => match parts.as_slice() {
+                [Part::Text { text }] => Some(text.as_ref()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn before_turn_reminder_is_user_context_after_its_user_entry() {
+        let user = entry(
+            1,
+            None,
+            EntryKind::User {
+                parts: vec![JournalPart::Text {
+                    text: "question".into(),
+                }],
+            },
+        );
+        let hook = entry(
+            2,
+            Some(user.id),
+            EntryKind::Reminder {
+                source: dal_core::BEFORE_TURN_SOURCE.into(),
+                text: "first\nsecond".into(),
+            },
+        );
+        let rule = entry(
+            3,
+            Some(hook.id),
+            EntryKind::Reminder {
+                source: "rule:gate".into(),
+                text: "not model context".into(),
+            },
+        );
+
+        let context = context_items(&[user, hook, rule]);
+
+        let texts: Vec<_> = context.iter().map(text_item).collect();
+        assert_eq!(texts, vec![Some("question"), Some("first\nsecond")]);
+    }
+
+    #[test]
+    fn duplicate_tool_results_collapse_to_the_first_per_call() {
+        let assistant = assistant_calling(1, None, &["call-a", "call-b"]);
+        let first = result_for(2, Some(assistant.id), "call-a", "original");
+        let second = result_for(3, Some(first.id), "call-b", "other");
+        let duplicate = result_for(4, Some(second.id), "call-a", "replayed");
+
+        let context = context_items(&[assistant, first, second, duplicate]);
+
+        assert_eq!(
+            result_calls(&context),
+            vec![
+                ("call-a", "original".to_owned()),
+                ("call-b", "other".to_owned())
+            ]
+        );
+    }
+
+    #[test]
+    fn a_call_id_reused_by_a_later_response_keeps_its_own_result() {
+        let first_call = assistant_calling(1, None, &["call-0"]);
+        let first_result = result_for(2, Some(first_call.id), "call-0", "round one");
+        let second_call = assistant_calling(3, Some(first_result.id), &["call-0"]);
+        let second_result = result_for(4, Some(second_call.id), "call-0", "round two");
+
+        let context = context_items(&[first_call, first_result, second_call, second_result]);
+
+        assert_eq!(
+            result_calls(&context),
+            vec![
+                ("call-0", "round one".to_owned()),
+                ("call-0", "round two".to_owned())
+            ]
+        );
+    }
+
+    #[test]
+    fn duplicate_tool_results_collapse_across_a_compaction_boundary() {
+        let assistant = assistant_calling(1, None, &["call-a"]);
+        let first = result_for(2, Some(assistant.id), "call-a", "original");
+        let compaction = entry(
+            3,
+            Some(first.id),
+            EntryKind::Compaction {
+                summary: Some("replacement".into()),
+                first_kept: Some(assistant.id),
+                tokens_before: 100,
+                replay: None,
+                usage: None,
+                parts: Vec::new(),
+                parts_tokens: 0,
+            },
+        );
+        let duplicate = result_for(4, Some(compaction.id), "call-a", "replayed");
+
+        let context = context_items(&[assistant, first, compaction, duplicate]);
+
+        assert_eq!(
+            result_calls(&context),
+            vec![("call-a", "original".to_owned())]
         );
     }
 

@@ -91,6 +91,7 @@ async fn chat_text_turn() {
         stream_max_retries: 0,
         providers: vec![ProviderEntry {
             id: "chat-test".into(),
+            def: None,
             family: Family::Chat,
             base_url: base.into_boxed_str(),
             transport: Transport::Https,

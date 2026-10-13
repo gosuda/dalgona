@@ -297,7 +297,7 @@ impl Store {
         blob::put(&dir, bytes)
     }
 
-    /// Deletes a session tree after obtaining its nonblocking session lock.
+    /// Deletes a session tree after obtaining its session lock.
     ///
     /// # Errors
     /// Returns [`StoreError::Locked`] without changing the tree when an actor owns the lock.
@@ -322,7 +322,9 @@ impl Store {
             Err(source) => return Err(util::io_err(&journal, source)),
         }
         fs::remove_dir_all(paths.directory())
-            .map_err(|source| util::io_err(paths.directory(), source))
+            .map_err(|source| util::io_err(paths.directory(), source))?;
+        // The removal is durable only when the parent directory entry also survives a crash.
+        util::sync_dir(paths.directory().parent().unwrap_or(Path::new(".")))
     }
     /// Forks `source` at a user entry, preserving ids on the copied parent path.
     ///
@@ -1021,6 +1023,7 @@ impl Journal {
 
         if matches!(&self.state, State::Lazy { .. }) {
             if !has_user_in_batch {
+                encode_records(&records)?;
                 let State::Lazy { blobs } = &mut self.state else {
                     unreachable!("lazy state was checked above");
                 };

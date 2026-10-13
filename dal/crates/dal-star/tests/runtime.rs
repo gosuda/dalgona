@@ -1,11 +1,14 @@
-//! Runtime adapter tests: tool calls, env reads, scopes, budgets, and eval.
+//! Runtime adapter behavior over the scripted test host: calls, updates,
+//! and shutdown ordering.
 
-#![expect(clippy::expect_used, reason = "SC test")]
-#![expect(clippy::panic, reason = "SC test")]
-
+#![expect(
+    clippy::expect_used,
+    clippy::panic,
+    reason = "integration tests use unwrap/expect/panic freely per repo test convention"
+)]
 #[path = "support/host.rs"]
-mod host;
-mod support;
+pub mod host;
+pub mod support;
 
 use std::sync::Arc;
 use std::time::Duration;

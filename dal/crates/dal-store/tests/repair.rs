@@ -86,6 +86,7 @@ fn tool_result(id: u64, call: &str, text: &str) -> Record {
             error: false,
             parts: vec![JournalPart::Text { text: text.into() }],
             changes: vec![],
+            elapsed_ms: None,
         },
     })
 }
@@ -840,4 +841,168 @@ async fn windows_runner_parity() {
         );
     }
     reopened.close().await.expect("session closes");
+}
+
+async fn staged_session(tag: &str) -> (TempDir, Store, SessionId, PathBuf, Vec<u8>) {
+    let (temp, store, _) = setup(tag);
+    let id = SessionId::new_v7();
+    let mut journal = store.create_session(id);
+    journal
+        .append(vec![user(1, "prefix")])
+        .await
+        .expect("prefix is durable");
+    journal.close().await.expect("session closes");
+    let path = journal_path(&temp.path().join("data"), id);
+    let prefix = fs::read(&path).expect("read durable prefix");
+    (temp, store, id, path, prefix)
+}
+
+fn damage_of(error: &StoreError) -> (u64, &str) {
+    match error {
+        StoreError::Damaged { offset, reason, .. } => (*offset, reason.as_ref()),
+        _ => panic!("expected Damaged, got {error:?}"),
+    }
+}
+
+#[tokio::test]
+async fn invalid_utf8_line_mid_stream_is_damaged_at_its_offset() {
+    let (_temp, store, id, path, prefix) = staged_session("repair-utf8").await;
+    let mut staged = prefix.clone();
+    staged.extend_from_slice(b"{\"v\":1,\"type\":\"user\",\"x\":\"\xff\xfe\"}\n");
+    staged.extend_from_slice(&encode(&user(2, "after")).expect("valid line encodes"));
+    fs::write(&path, &staged).expect("stage invalid UTF-8");
+    let error = store.open_session(id).await.expect_err("open refuses");
+    let (offset, reason) = damage_of(&error);
+    assert_eq!(offset, u64::try_from(prefix.len()).expect("fits"));
+    assert!(
+        reason.starts_with("invalid JSON"),
+        "decode reason: {reason}"
+    );
+    assert_eq!(fs::read(&path).expect("reread"), staged, "file unchanged");
+}
+
+#[tokio::test]
+async fn blank_line_mid_stream_is_damaged_not_skipped() {
+    let (_temp, store, id, path, prefix) = staged_session("repair-blank").await;
+    let mut staged = prefix.clone();
+    staged.push(b'\n');
+    staged.extend_from_slice(&encode(&user(2, "after")).expect("valid line encodes"));
+    fs::write(&path, &staged).expect("stage a blank line");
+    let error = store.open_session(id).await.expect_err("open refuses");
+    let (offset, reason) = damage_of(&error);
+    assert_eq!(offset, u64::try_from(prefix.len()).expect("fits"));
+    assert_eq!(reason, "empty record");
+    assert_eq!(fs::read(&path).expect("reread"), staged, "file unchanged");
+}
+
+#[tokio::test]
+async fn zero_filled_tail_is_quarantined_and_reported() {
+    let (_temp, store, id, path, prefix) = staged_session("repair-zero-fill").await;
+    let mut staged = prefix.clone();
+    staged.extend(std::iter::repeat_n(0_u8, 4096));
+    fs::write(&path, &staged).expect("stage a zero-filled tail");
+    let (mut journal, report) = store.open_session(id).await.expect("open repairs");
+    let torn = report.torn.expect("the zero fill is reported");
+    assert_eq!(torn.offset, u64::try_from(prefix.len()).expect("fits"));
+    assert_eq!(torn.bytes, 4096);
+    assert_eq!(
+        fs::read(&torn.kept_at).expect("side file"),
+        vec![0_u8; 4096],
+        "the quarantined bytes are kept"
+    );
+    journal.close().await.expect("session closes");
+}
+
+#[tokio::test]
+async fn record_missing_only_its_newline_is_quarantined_not_replayed() {
+    let (_temp, store, id, path, prefix) = staged_session("repair-no-newline").await;
+    let mut line = encode(&user(2, "unsynced")).expect("valid line encodes");
+    line.pop();
+    let mut staged = prefix.clone();
+    staged.extend_from_slice(&line);
+    fs::write(&path, &staged).expect("stage an unterminated record");
+    let (mut journal, report) = store.open_session(id).await.expect("open repairs");
+    let torn = report.torn.expect("the unterminated record is reported");
+    assert_eq!(torn.bytes, u64::try_from(line.len()).expect("fits"));
+    assert_eq!(fs::read(&torn.kept_at).expect("side file"), line);
+    assert!(
+        journal.records().iter().all(|record| !matches!(
+            record,
+            Record::User(entry) if entry.id == entry_id(2)
+        )),
+        "the unacknowledged record is not replayed"
+    );
+    journal.close().await.expect("session closes");
+}
+
+#[tokio::test]
+async fn header_cut_mid_record_is_refused_and_left_alone() {
+    let (_temp, store, id, path, prefix) = staged_session("repair-header-cut").await;
+    let cut = prefix
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .expect("header ends")
+        / 2;
+    fs::write(&path, &prefix[..cut]).expect("cut the header");
+    let error = store.open_session(id).await.expect_err("open refuses");
+    let text = error.to_string();
+    assert!(
+        text.contains(&path.display().to_string()),
+        "names the journal: {text}"
+    );
+    assert_eq!(
+        fs::read(&path).expect("reread"),
+        &prefix[..cut],
+        "file unchanged"
+    );
+}
+
+#[tokio::test]
+async fn repeated_boot_generation_is_damaged_not_accepted() {
+    let (_temp, store, id, path, prefix) = staged_session("repair-boot-gen").await;
+    let boot = prefix
+        .split_inclusive(|byte| *byte == b'\n')
+        .nth(1)
+        .expect("boot line")
+        .to_vec();
+    let mut staged = prefix.clone();
+    let duplicate_at = u64::try_from(staged.len()).expect("fits");
+    staged.extend_from_slice(&boot);
+    fs::write(&path, &staged).expect("stage a repeated boot generation");
+    let error = store
+        .open_session(id)
+        .await
+        .expect_err("a boot generation that does not increase is refused");
+    let (offset, reason) = damage_of(&error);
+    assert_eq!(offset, duplicate_at);
+    assert!(reason.contains("boot generation"), "reason: {reason}");
+    assert_eq!(fs::read(&path).expect("reread"), staged, "file unchanged");
+}
+
+#[tokio::test]
+async fn boot_generation_gap_reopens_with_the_next_higher_generation() {
+    let (_temp, store, id, path, prefix) = staged_session("repair-boot-gap").await;
+    let mut staged = prefix.clone();
+    staged.extend_from_slice(
+        &encode(&Record::Boot {
+            at: fixed_timestamp(),
+            r#gen: Gen::new(NonZeroU64::new(5).expect("nonzero gen")),
+            version: "0.1.0".into(),
+        })
+        .expect("boot encodes"),
+    );
+    fs::write(&path, &staged).expect("stage a generation gap");
+    let (mut journal, report) = store
+        .open_session(id)
+        .await
+        .expect("a gap between generations is not damage");
+    assert_eq!(
+        report.r#gen.get(),
+        6,
+        "open continues after the highest generation"
+    );
+    journal.close().await.expect("session closes");
+    let (mut again, report) = store.open_session(id).await.expect("reopens again");
+    assert_eq!(report.r#gen.get(), 7);
+    again.close().await.expect("session closes");
 }

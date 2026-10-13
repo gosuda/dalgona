@@ -12,6 +12,7 @@ fn idle() -> StatusData<'static> {
         path: Some("~/work/shop (main)"),
         tokens: Some("in 14k out 4k"),
         context: Some("ctx 47%"),
+        context_role: None,
         agents: Some("3 agents"),
         cost: Some("$0.42"),
     }
@@ -43,9 +44,7 @@ fn narrow_floors_report_exact_copy() {
 }
 
 #[test]
-fn no_color_text_grid_matches_colored_grid() {
-    let colored = render(idle(), 80, WidthMode::Narrow);
+fn rendered_status_has_no_ansi_sequences() {
     let plain = render(idle(), 80, WidthMode::Narrow);
-    assert_eq!(colored, plain);
     assert!(!plain.contains('\x1b'));
 }

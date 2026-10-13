@@ -8,11 +8,16 @@ on:
       - ".github/workflows/dalgon-release.yml"
       - ".github/workflows/dalgona-release.yml"
       - ".github/workflows/release-check.yml"
+permissions:
+  contents: read
 jobs:
   dist-plan:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          fetch-depth: 1
+          persist-credentials: false
       - run: cargo install cargo-dist --version 0.32.0 --locked
       - working-directory: dal
         run: dist plan
@@ -29,9 +34,12 @@ jobs:
         if: env.released == 'true'
         run: dist plan
   semver-gate:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          fetch-depth: 1
+          persist-credentials: false
       - run: cargo install cargo-semver-checks --version 0.50.0 --locked
       - run: bash scripts/semver-gate.sh dal
       - run: bash scripts/semver-gate.sh dalgona

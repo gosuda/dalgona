@@ -312,6 +312,7 @@ async fn fixture_kind(delay: Duration, durable: bool) -> Fixture {
             entry.workspace.clone(),
         )
     };
+    let resolutions = handle.resolutions();
     // The fixture's job table is the data-plane's own; the actor keeps the
     // session table internally.
     let jobs = Arc::new(tokio::sync::Mutex::new(crate::jobs::JobTable::new()));
@@ -368,7 +369,11 @@ async fn fixture_kind(delay: Duration, durable: bool) -> Fixture {
             overlay: Arc::new(crate::ext::overlay::Overlay::default()),
             history: Arc::from([]),
             sites: std::collections::HashMap::new(),
+            turn_cancel: Arc::new(|_: dal_core::TurnId| {
+                Some(tokio_util::sync::CancellationToken::new())
+            }),
             cancel: cancel.clone(),
+            resolutions,
             ask_timeout: Duration::from_secs(30),
             ephemeral,
             workspace: workspace.clone(),
@@ -1059,12 +1064,18 @@ async fn agents_start_cannot_escape_the_workspace_through_a_link() {
         &format!(r#"{{"prompt":"work","workspace":"{}"}}"#, link.display()),
     )
     .await;
-    let OpOutcome::Terminal(HostTerminal::Denied {
-        reason: DenyReason::OutOfScope { .. },
-    }) = outcome
-    else {
-        panic!("a link resolving outside the workspace is denied: {outcome:?}");
+    let OpOutcome::Ok { value, .. } = outcome else {
+        panic!("agents.start answers a typed reply: {outcome:?}");
     };
+    let OpValue::Json(raw) = value else {
+        panic!("agents.start answers raw JSON: {value:?}");
+    };
+    let reply = raw.as_str();
+    assert!(
+        reply.contains(r#""type":"refused""#)
+            && reply.contains(r#""type":"workspace_outside_root""#),
+        "a link resolving outside the workspace is refused with its reason: {reply}"
+    );
 }
 
 #[derive(serde::Deserialize)]

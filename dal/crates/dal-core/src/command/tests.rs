@@ -290,6 +290,7 @@ fn builtin_commands_round_trip_with_wire_fields() -> TestResult {
             format: ExportFormat::Jsonl,
         },
         Command::ReloadPlugins,
+        Command::CancelQueued { turn },
         Command::Run {
             name: "tree".into(),
             args: "".into(),
@@ -315,6 +316,10 @@ fn builtin_commands_round_trip_with_wire_fields() -> TestResult {
         })?,
         r#"{"type":"export","path":null,"format":"jsonl"}"#
     );
+    assert_eq!(
+        sonic_rs::to_string(&Command::CancelQueued { turn })?,
+        r#"{"type":"cancel_queued","turn":1}"#
+    );
     Ok(())
 }
 
@@ -328,7 +333,8 @@ fn planned_replies_round_trip_with_wire_tags() -> TestResult {
             turn,
             message_id: entry,
         },
-        Reply::Queued,
+        Reply::Queued { turn: None },
+        Reply::Queued { turn: Some(turn) },
         Reply::Done(Output::Nothing),
         Reply::Done(Output::Text("hi".into())),
         Reply::Done(Output::Markdown("# hi".into())),
@@ -351,6 +357,18 @@ fn planned_replies_round_trip_with_wire_tags() -> TestResult {
     assert_eq!(
         sonic_rs::to_string(&Reply::Done(Output::Nothing))?,
         r#"{"type":"done","output":{"type":"nothing"}}"#
+    );
+    assert_eq!(
+        sonic_rs::to_string(&Reply::Queued { turn: None })?,
+        r#"{"type":"queued"}"#
+    );
+    assert_eq!(
+        sonic_rs::to_string(&Reply::Queued { turn: Some(turn) })?,
+        r#"{"type":"queued","turn":1}"#
+    );
+    assert_eq!(
+        sonic_rs::from_str::<Reply>(r#"{"type":"queued"}"#)?,
+        Reply::Queued { turn: None }
     );
     Ok(())
 }

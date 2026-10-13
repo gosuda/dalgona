@@ -4,11 +4,22 @@
 //! This module owns the mode-0600 token file, per-resource binding, scope
 //! parsing, and the private SHA-256 used for PKCE S256.
 
-use std::{collections::BTreeMap, fmt, path::Path};
+use std::{
+    collections::BTreeMap,
+    fmt,
+    future::Future,
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU32, Ordering},
+    },
+};
 
 use dal_store::{FileMode, write_atomic};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
+use tokio::sync::{Mutex, Notify};
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::mcp::McpError;
 
@@ -44,6 +55,344 @@ pub(crate) struct TokenFile {
     pub(crate) tokens: BTreeMap<String, BTreeMap<String, TokenRecord>>,
 }
 
+#[derive(Default)]
+pub(crate) struct AuthorizationState {
+    pub(crate) cancelled: bool,
+    pub(crate) refresh_failed: bool,
+    /// The access token the flags above describe; a different bearer
+    /// means the credential changed and the flags no longer apply.
+    pub(crate) token: Option<String>,
+}
+
+/// Coalesces one token refresh per credential key.
+///
+/// A refresh task owns the network request until it completes. Callers may
+/// stop waiting, but a later caller still joins the same task and receives its
+/// result.
+pub(crate) struct RefreshCoordinator {
+    flights: Mutex<BTreeMap<String, Arc<RefreshSlot>>>,
+}
+
+struct RefreshSlot {
+    state: Mutex<RefreshSlotState>,
+    prompts: AtomicU32,
+    cancelled: AtomicBool,
+    commit: Mutex<()>,
+}
+impl RefreshSlot {
+    /// Publishes a finished flight unless an interactive record superseded it
+    /// while it ran.
+    ///
+    /// The publish stays optimistic: `commit` persists it right after `run`
+    /// returns, and rolls `last` back to `prev` when that write fails, so the
+    /// slot never reports a token that never reached disk.
+    async fn settle(&self, flight: &Arc<RefreshFlight>) {
+        let fresh = flight.fresh().await;
+        {
+            let mut state = self.state.lock().await;
+            if state
+                .flight
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, flight))
+            {
+                if let Some(fresh) = fresh
+                    && !state.superseded
+                {
+                    state.prev = state.last.replace(fresh);
+                    state.unpersisted = true;
+                }
+                state.flight = None;
+                state.task = None;
+                state.superseded = false;
+            }
+        }
+        // Wake waiters only after the slot settled, so callers that then read
+        // `current` observe the published winner instead of a stale flight.
+        flight.notify.notify_waiters();
+    }
+}
+
+#[derive(Default)]
+struct RefreshSlotState {
+    flight: Option<Arc<RefreshFlight>>,
+    task: Option<AbortOnDropHandle<()>>,
+    last: Option<TokenRecord>,
+    /// The record `settle` replaced when it published a flight's token
+    /// (`None` when the slot was empty, as on the first refresh).
+    /// `commit` restores it when persistence fails. Cleared by a successful
+    /// `commit` or by `publish`, which supersedes every in-flight result.
+    prev: Option<TokenRecord>,
+    /// Whether `last` came from `settle` and no write has confirmed it on
+    /// disk yet. Only while set may `commit` roll `last` back to `prev` on a
+    /// persistence failure.
+    unpersisted: bool,
+    /// Set when an interactive record replaced `last` while a flight was
+    /// still running, so the older flight cannot overwrite it.
+    superseded: bool,
+}
+
+struct PromptLease {
+    slot: Arc<RefreshSlot>,
+    released: bool,
+}
+
+impl PromptLease {
+    fn finish(mut self, outcome: &Result<impl Sized, McpError>) {
+        if matches!(outcome, Err(McpError::NoAskFrontEnd)) {
+            self.slot.cancelled.store(true, Ordering::SeqCst);
+        }
+        self.released = true;
+        self.slot.prompts.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl Drop for PromptLease {
+    fn drop(&mut self) {
+        if self.released {
+            return;
+        }
+        self.slot.prompts.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+struct RefreshFlight {
+    result: Mutex<Option<Result<Option<TokenRecord>, McpError>>>,
+    notify: Notify,
+}
+
+/// Names the refresh slot for one stored credential.
+///
+/// The key matches the token file: one record per issuer and resource.
+pub(crate) fn refresh_key(issuer: &str, resource: &str) -> String {
+    format!("{issuer}\u{1f}{resource}")
+}
+
+impl RefreshCoordinator {
+    pub(crate) fn new() -> Self {
+        Self {
+            flights: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    async fn slot(&self, key: &str) -> Arc<RefreshSlot> {
+        let mut flights = self.flights.lock().await;
+        flights
+            .entry(key.to_owned())
+            .or_insert_with(|| {
+                Arc::new(RefreshSlot {
+                    state: Mutex::new(RefreshSlotState::default()),
+                    prompts: AtomicU32::new(0),
+                    cancelled: AtomicBool::new(false),
+                    commit: Mutex::new(()),
+                })
+            })
+            .clone()
+    }
+
+    /// Persists and records a record obtained outside a refresh, such as an
+    /// interactive authorization, so every transport of the client adopts it
+    /// instead of a stale cached refresh result.
+    ///
+    /// The commit lock serializes this with `commit`, so a refresh result that
+    /// settled earlier can never land on disk after this record.
+    ///
+    /// # Errors
+    ///
+    /// Returns the persistence error unchanged; the slot keeps its previous
+    /// record then.
+    pub(crate) async fn publish<F, Fut>(
+        &self,
+        key: &str,
+        record: TokenRecord,
+        persist: F,
+    ) -> Result<(), McpError>
+    where
+        F: FnOnce(TokenRecord) -> Fut,
+        Fut: Future<Output = Result<(), McpError>>,
+    {
+        let slot = self.slot(key).await;
+        let _commit = slot.commit.lock().await;
+        persist(record.clone()).await?;
+        let mut state = slot.state.lock().await;
+        state.superseded = state.flight.is_some();
+        state.last = Some(record);
+        state.prev = None;
+        state.unpersisted = false;
+        slot.cancelled.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// Persists the settled refresh result, or the newer record that
+    /// superseded it, and returns the record that persisted.
+    ///
+    /// Holding the commit lock across the check and the write keeps disk
+    /// order equal to slot order: a record published afterwards persists
+    /// after this write, and one published before replaces `settled`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the persistence error unchanged, and restores the record
+    /// `settle` replaced: a token that never reached disk must not linger in
+    /// the slot for later lookups to adopt. `publish` clears that stashed
+    /// record, so an interactive record that landed afterwards is never
+    /// rolled back.
+    pub(crate) async fn commit<F, Fut>(
+        &self,
+        key: &str,
+        settled: TokenRecord,
+        persist: F,
+    ) -> Result<TokenRecord, McpError>
+    where
+        F: FnOnce(TokenRecord) -> Fut,
+        Fut: Future<Output = Result<(), McpError>>,
+    {
+        let slot = self.slot(key).await;
+        let _commit = slot.commit.lock().await;
+        let winner = slot.state.lock().await.last.clone().unwrap_or(settled);
+        if let Err(error) = persist(winner.clone()).await {
+            let mut state = slot.state.lock().await;
+            if state.unpersisted {
+                state.last = state.prev.take();
+                state.unpersisted = false;
+            }
+            return Err(error);
+        }
+        let mut state = slot.state.lock().await;
+        state.prev = None;
+        state.unpersisted = false;
+        Ok(winner)
+    }
+
+    /// The record the slot last settled or published.
+    ///
+    /// Read this only after `run` returned: waiters wake once the flight
+    /// settled, so the slot already holds the flight's token or the newer
+    /// record that superseded it.
+    pub(crate) async fn current(&self, key: &str) -> Option<TokenRecord> {
+        let slot = self.slot(key).await;
+        let state = slot.state.lock().await;
+        state.last.clone()
+    }
+
+    /// Runs one interactive authorization prompt for the credential.
+    ///
+    /// The in-flight counter serializes prompts across transports: a second
+    /// caller refuses without asking while one prompt runs, and a declined
+    /// or cancelled prompt latches until a fresh token publishes.
+    ///
+    /// # Errors
+    /// Returns [`McpError::NoAskFrontEnd`] when a prompt is already in
+    /// flight or was declined, and any prompt error unchanged.
+    pub(crate) async fn interactive_section<T, F, Fut>(
+        &self,
+        key: &str,
+        work: F,
+    ) -> Result<T, McpError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<T, McpError>> + Send,
+    {
+        let slot = self.slot(key).await;
+        {
+            let _state = slot.state.lock().await;
+            if slot.cancelled.load(Ordering::SeqCst) || slot.prompts.load(Ordering::SeqCst) > 0 {
+                return Err(McpError::NoAskFrontEnd);
+            }
+            slot.prompts.fetch_add(1, Ordering::SeqCst);
+        }
+        let lease = PromptLease {
+            slot,
+            released: false,
+        };
+        let outcome = work().await;
+        lease.finish(&outcome);
+        outcome
+    }
+
+    pub(crate) async fn run<F, Fut>(
+        &self,
+        key: &str,
+        held_access: &str,
+        operation: F,
+    ) -> Result<Option<TokenRecord>, McpError>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = Result<Option<TokenRecord>, McpError>> + Send + 'static,
+    {
+        let slot = self.slot(key).await;
+        let flight = {
+            let mut state = slot.state.lock().await;
+            if state.superseded
+                && state.flight.is_some()
+                && let Some(record) = state.last.as_ref()
+            {
+                return Ok(Some(record.clone()));
+            }
+            if state.flight.is_none()
+                && let Some(record) = state.last.as_ref()
+                && record.access_token != held_access
+            {
+                return Ok(Some(record.clone()));
+            }
+            if let Some(existing) = state.flight.as_ref() {
+                Arc::clone(existing)
+            } else {
+                let flight = Arc::new(RefreshFlight {
+                    result: Mutex::new(None),
+                    notify: Notify::new(),
+                });
+                state.flight = Some(Arc::clone(&flight));
+                state.superseded = false;
+                let weak_flight = Arc::downgrade(&flight);
+                let weak_slot = Arc::downgrade(&slot);
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "the credential slot owns and aborts the refresh task"
+                )]
+                let task = AbortOnDropHandle::new(tokio::spawn(async move {
+                    let result = operation().await;
+                    let (Some(flight), Some(slot)) = (weak_flight.upgrade(), weak_slot.upgrade())
+                    else {
+                        return;
+                    };
+                    flight.finish(result).await;
+                    slot.settle(&flight).await;
+                }));
+                state.task = Some(task);
+                flight
+            }
+        };
+        flight.wait().await
+    }
+}
+
+impl RefreshFlight {
+    async fn finish(&self, result: Result<Option<TokenRecord>, McpError>) {
+        *self.result.lock().await = Some(result);
+    }
+
+    async fn fresh(&self) -> Option<TokenRecord> {
+        match self.result.lock().await.as_ref() {
+            Some(Ok(Some(record))) => Some(record.clone()),
+            _ => None,
+        }
+    }
+
+    async fn wait(&self) -> Result<Option<TokenRecord>, McpError> {
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            let result = self.result.lock().await;
+            notified.as_mut().enable();
+            if let Some(result) = result.as_ref() {
+                return result.clone();
+            }
+            drop(result);
+            notified.await;
+        }
+    }
+}
+
 /// Reads the token file. A corrupt or unreadable file is ignored so the
 /// caller re-authorizes; the caller emits the one warning.
 pub(crate) fn read_tokens(path: &Path) -> TokenFile {
@@ -64,12 +413,46 @@ pub(crate) fn record_for<'a>(
 
 /// Persists one token record under its issuer and canonical resource with
 /// mode-0600 atomic replacement.
+///
+/// One process-wide lock plus one lock file span the read and the write: the
+/// file holds every credential key, so two keys persisting at once would
+/// otherwise drop each other's record. The static lock covers threads of this
+/// process; the lock file covers a second dalgona process sharing the data
+/// root, with the same OS file locks `dal-store` uses for its journal guard
+/// (`dal-store`'s guard itself stays crate-private and session-scoped, so it
+/// cannot guard a short token critical section). This runs under
+/// `spawn_blocking`, so blocking locks are correct here.
 pub(crate) fn persist_token(
     path: &Path,
     issuer: &str,
     resource: &str,
     record: TokenRecord,
 ) -> Result<(), McpError> {
+    static TOKEN_FILE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = match TOKEN_FILE.lock() {
+        Ok(guard) => guard,
+        Err(poison) => poison.into_inner(),
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| McpError::Auth {
+            cause: format!("could not create MCP token directory: {error}"),
+        })?;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file_lock = options
+        .open(path.with_extension("lock"))
+        .map_err(|error| McpError::Auth {
+            cause: format!("could not open MCP token lock: {error}"),
+        })?;
+    file_lock.lock().map_err(|error| McpError::Auth {
+        cause: format!("could not lock MCP tokens: {error}"),
+    })?;
     let mut file = read_tokens(path);
     file.tokens
         .entry(issuer.to_owned())
@@ -78,11 +461,6 @@ pub(crate) fn persist_token(
     let bytes = sonic_rs::to_string(&file).map_err(|error| McpError::Auth {
         cause: format!("could not encode MCP tokens: {error}"),
     })?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| McpError::Auth {
-            cause: format!("could not create MCP token directory: {error}"),
-        })?;
-    }
     write_atomic(path, bytes.as_bytes(), FileMode::Mode0600).map_err(|error| McpError::Auth {
         cause: format!("could not write MCP tokens: {error}"),
     })
@@ -419,6 +797,11 @@ mod tests {
                 & 0o777;
             assert_eq!(mode, 0o600);
         }
+        assert!(
+            path.with_extension("lock").exists(),
+            "the cross-process lock file is created beside the token file"
+        );
+        std::fs::remove_file(path.with_extension("lock")).expect("remove token lock");
         std::fs::remove_file(path).expect("remove token file");
     }
 
@@ -433,5 +816,271 @@ mod tests {
         let rendered = format!("{record:?}");
         assert!(!rendered.contains("sekret"));
         assert!(rendered.contains("client"));
+    }
+
+    #[tokio::test]
+    async fn interactive_section_releases_prompt_lease_when_dropped() {
+        use std::future::pending;
+
+        let coordinator = RefreshCoordinator::new();
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            coordinator
+                .interactive_section("key", || async { pending::<Result<(), McpError>>().await }),
+        )
+        .await;
+        tokio::task::yield_now().await;
+        let slot = coordinator.slot("key").await;
+        assert_eq!(slot.prompts.load(Ordering::SeqCst), 0);
+        let second = coordinator
+            .interactive_section("key", || async { Ok::<_, McpError>(()) })
+            .await;
+        assert!(second.is_ok());
+    }
+
+    #[tokio::test]
+    async fn run_adopts_a_published_record_while_a_superseded_flight_runs() {
+        use std::future::pending;
+
+        let coordinator = RefreshCoordinator::new();
+        // A caller holding an older token starts a refresh flight; the
+        // operation never finishes, so the flight stays in the slot. The
+        // future is dropped at the timeout while the flight task keeps the
+        // slot occupied.
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(200),
+                coordinator.run("key", "old-access", || async { pending().await }),
+            )
+            .await
+            .is_err(),
+            "the flight keeps running"
+        );
+        // An interactive login publishes while that flight is running.
+        let published = TokenRecord {
+            client_id: "client".to_owned(),
+            access_token: "new-access".to_owned(),
+            refresh_token: None,
+            scopes: Vec::new(),
+        };
+        coordinator
+            .publish("key", published, |_| async { Ok(()) })
+            .await
+            .expect("publish persists");
+        // A caller holding the published token itself must adopt it without
+        // waiting on the superseded flight started for the older token.
+        let adopted = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            coordinator.run("key", "new-access", || async { pending().await }),
+        )
+        .await
+        .expect("the second caller returns without waiting")
+        .expect("adoption succeeds");
+        assert_eq!(
+            adopted.map(|record| record.access_token),
+            Some("new-access".to_owned())
+        );
+    }
+
+    fn record(access: &str) -> TokenRecord {
+        TokenRecord {
+            client_id: "client".to_owned(),
+            access_token: access.to_owned(),
+            refresh_token: None,
+            scopes: Vec::new(),
+        }
+    }
+
+    fn logging(
+        log: &Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> impl FnOnce(TokenRecord) -> std::future::Ready<Result<(), McpError>> {
+        let log = Arc::clone(log);
+        move |record| {
+            log.lock().expect("persist log").push(record.access_token);
+            std::future::ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn commit_persists_the_published_record_instead_of_a_superseded_result() {
+        let coordinator = RefreshCoordinator::new();
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        coordinator
+            .publish("key", record("interactive"), logging(&log))
+            .await
+            .expect("publish persists");
+        let winner = coordinator
+            .commit("key", record("stale-refresh-result"), logging(&log))
+            .await
+            .expect("commit persists");
+        assert_eq!(winner.access_token, "interactive");
+        assert_eq!(
+            log.lock().expect("persist log").as_slice(),
+            ["interactive", "interactive"]
+        );
+    }
+
+    fn failing_persist() -> impl FnOnce(TokenRecord) -> std::future::Ready<Result<(), McpError>> {
+        |_| {
+            std::future::ready(Err(McpError::Auth {
+                cause: "disk full".to_owned(),
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_commit_on_first_refresh_leaves_no_record() {
+        let coordinator = RefreshCoordinator::new();
+        let settled = coordinator
+            .run("key", "old-access", || async {
+                Ok::<Option<TokenRecord>, McpError>(Some(record("fresh")))
+            })
+            .await
+            .expect("refresh succeeds")
+            .expect("a token settles");
+        assert_eq!(settled.access_token, "fresh");
+        // The settle published optimistically; persistence now fails, so the
+        // slot must not keep reporting the token that never reached disk.
+        assert!(
+            coordinator
+                .commit("key", record("fresh"), failing_persist())
+                .await
+                .is_err()
+        );
+        assert!(coordinator.current("key").await.is_none());
+        // A later caller holding the old token starts a new refresh instead
+        // of adopting the token that never reached disk.
+        let recovered = coordinator
+            .run("key", "old-access", || async {
+                Ok::<Option<TokenRecord>, McpError>(Some(record("fresh-again")))
+            })
+            .await
+            .expect("recovery refresh runs")
+            .expect("a token settles");
+        assert_eq!(recovered.access_token, "fresh-again");
+    }
+
+    #[tokio::test]
+    async fn failed_commit_restores_the_previous_record() {
+        let coordinator = RefreshCoordinator::new();
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        coordinator
+            .publish("key", record("old"), logging(&log))
+            .await
+            .expect("publish persists");
+        let settled = coordinator
+            .run("key", "old", || async {
+                Ok::<Option<TokenRecord>, McpError>(Some(record("fresh")))
+            })
+            .await
+            .expect("refresh succeeds")
+            .expect("a token settles");
+        assert_eq!(settled.access_token, "fresh");
+        assert!(
+            coordinator
+                .commit("key", record("fresh"), failing_persist())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            coordinator
+                .current("key")
+                .await
+                .map(|record| record.access_token),
+            Some("old".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_waits_for_an_in_progress_commit_so_the_newer_record_lands_last() {
+        let coordinator = RefreshCoordinator::new();
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel::<()>();
+        let (gate_tx, gate_rx) = tokio::sync::oneshot::channel::<()>();
+        let committing = coordinator.commit("key", record("refreshed"), {
+            let log = Arc::clone(&log);
+            async move |record: TokenRecord| {
+                entered_tx.send(()).expect("announce the write");
+                gate_rx.await.expect("release the write");
+                log.lock().expect("persist log").push(record.access_token);
+                Ok(())
+            }
+        });
+        let publishing = async {
+            entered_rx.await.expect("the commit began writing");
+            let publish = coordinator.publish("key", record("interactive"), logging(&log));
+            tokio::pin!(publish);
+            assert!(
+                tokio::time::timeout(std::time::Duration::ZERO, publish.as_mut())
+                    .await
+                    .is_err(),
+                "the newer record waits for the in-progress write"
+            );
+            gate_tx.send(()).expect("release the commit");
+            publish.await
+        };
+        let (committed, published) = tokio::join!(committing, publishing);
+        assert_eq!(committed.expect("commit").access_token, "refreshed");
+        published.expect("publish");
+        assert_eq!(
+            log.lock().expect("persist log").as_slice(),
+            ["refreshed", "interactive"]
+        );
+        assert_eq!(
+            coordinator
+                .current("key")
+                .await
+                .map(|record| record.access_token),
+            Some("interactive".to_owned())
+        );
+    }
+
+    #[test]
+    fn concurrent_persists_for_distinct_keys_keep_both_records() {
+        let dir =
+            std::env::temp_dir().join(format!("dalgona-tokens-race-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("tokens.json");
+        let barrier = std::sync::Barrier::new(8);
+        std::thread::scope(|scope| {
+            for worker in 0..8 {
+                let (path, barrier) = (&path, &barrier);
+                scope.spawn(move || {
+                    barrier.wait();
+                    for round in 0..50 {
+                        let (issuer, resource) = if (worker + round) % 2 == 0 {
+                            ("issuer-a", "resource-a")
+                        } else {
+                            ("issuer-b", "resource-b")
+                        };
+                        persist_token(
+                            path,
+                            issuer,
+                            resource,
+                            TokenRecord {
+                                client_id: "client".to_owned(),
+                                access_token: format!("{issuer}-{worker}-{round}"),
+                                refresh_token: None,
+                                scopes: Vec::new(),
+                            },
+                        )
+                        .expect("persist keeps both keys");
+                        // Writes only add keys, so a key present after one
+                        // locked write stays present through later writes; a
+                        // torn read-modify-write drops it here.
+                        let file = read_tokens(path);
+                        assert!(
+                            file.tokens
+                                .get(issuer)
+                                .and_then(|resources| resources.get(resource))
+                                .is_some(),
+                            "the written key survives concurrent persists"
+                        );
+                    }
+                });
+            }
+        });
+        let file = read_tokens(&path);
+        assert_eq!(file.tokens.len(), 2, "both issuers survive");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -6,7 +6,7 @@
 #![deny(missing_docs)]
 
 pub mod backend;
-pub mod composer;
+mod composer;
 pub mod copy;
 pub mod debug;
 pub mod diagram;
@@ -69,17 +69,26 @@ pub enum ColorMode {
     Never,
 }
 
+/// Terminal-multiplexer presence captured at the process edge.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MultiplexerFacts {
+    /// Whether `TMUX` was present at the process edge.
+    pub tmux: bool,
+    /// Whether `STY` was present at the process edge.
+    pub sty: bool,
+    /// Whether `ZELLIJ` was present at the process edge.
+    pub zellij: bool,
+}
+
 /// Environment facts captured once by the process edge.
 #[derive(Debug, Clone, Default)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "independent terminal environment flags; a bitset loses legibility"
-)]
 pub struct EnvFacts {
     /// Whether standard input was a terminal at the process edge.
     pub stdin_tty: bool,
     /// The `PATH` value captured at the process edge, preserving non-Unicode values.
     pub path: Option<OsString>,
+    /// The home directory captured at the process edge; paths under it show as `~`.
+    pub home: Option<String>,
     /// The `TERM` value, when present.
     pub term: Option<String>,
     /// The `TERM_PROGRAM` value, when present.
@@ -92,12 +101,8 @@ pub struct EnvFacts {
     pub wt_session: Option<String>,
     /// The Windows Terminal version, when known.
     pub wt_version: Option<String>,
-    /// Whether `TMUX` was present at the process edge.
-    pub tmux: bool,
-    /// Whether `STY` was present at the process edge.
-    pub sty: bool,
-    /// Whether `ZELLIJ` was present at the process edge.
-    pub zellij: bool,
+    /// Multiplexer presence captured at the process edge.
+    pub multiplexer: MultiplexerFacts,
     /// Locale-derived Unicode width mode.
     pub width_mode: WidthMode,
     /// Whether reduced motion was requested at the process edge.
@@ -115,6 +120,9 @@ pub struct TuiOptions {
     pub screen: Screen,
     /// The theme selection.
     pub theme_request: ThemeRequest,
+    /// The model reference the configuration names. The status line shows it
+    /// until the session records a model of its own.
+    pub default_model: Option<Box<str>>,
     /// Whether protocol-gated inline images are enabled.
     pub images: bool,
     /// Whether supported fenced diagrams are rendered in text surfaces.
@@ -238,6 +246,7 @@ where
 
 mod render;
 mod runtime;
+mod signin;
 
 /// Draws one settled session frame into a ratatui test terminal.
 ///
@@ -273,6 +282,7 @@ pub fn draw_frame(
     let mut dialog = dialog::DialogUi::default();
     dialog.resync(view.open.clone());
     let live = live::Live::default();
+    let viewport = screen::fullscreen::Viewport::following();
     let theme = theme::load(
         &opts.theme_request,
         opts.color,
@@ -284,12 +294,18 @@ pub fn draw_frame(
             view,
             screen,
             composer: "",
+            cursor: 0,
+            exit_draft: false,
+            branch: None,
             popup: &[],
             live: &live,
             dialog: &dialog,
             picker: None,
+            signin: None,
             transcript: &transcript,
+            viewport: &viewport,
             opts,
+            kitty_keyboard: false,
             theme: &theme,
             diagram_settings,
             diagram_cache: &diagram_cache,
@@ -311,10 +327,13 @@ pub fn draw_frame(
                         .spans
                         .iter()
                         .map(|span| {
-                            ratatui::text::Span::styled(
-                                &row.text[span.range.clone()],
-                                row_style(theme.color(span.role), span.role),
-                            )
+                            let style = row_style(theme.color(span.role), span.role);
+                            let style = if span.bold {
+                                style.add_modifier(ratatui::style::Modifier::BOLD)
+                            } else {
+                                style
+                            };
+                            ratatui::text::Span::styled(&row.text[span.range.clone()], style)
                         })
                         .collect::<Vec<_>>();
                     ratatui::widgets::Paragraph::new(ratatui::text::Line::from(spans))

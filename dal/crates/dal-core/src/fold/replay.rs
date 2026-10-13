@@ -324,7 +324,15 @@ impl Replay {
                 // them into the session so live/ended jobs inspect the
                 // written history, not just update records.
                 match kind {
-                    Some(kind) => self.session.job_started(job, kind),
+                    Some(kind) => {
+                        // Declared replay projects ledgers, not client
+                        // updates: the emitted job updates are scratch.
+                        let mut emit = Emit {
+                            records: Vec::new(),
+                            updates: Vec::new(),
+                        };
+                        self.session.job_started(job, kind, &mut emit);
+                    }
                     None => self.session.live_jobs.push((job, None)),
                 }
             }
@@ -337,7 +345,11 @@ impl Replay {
                     return Err(contradiction("job ended without a start"));
                 }
                 self.started_jobs.retain(|(started, _)| *started != job);
-                self.session.job_settled(job, job_outcome(event));
+                let mut emit = Emit {
+                    records: Vec::new(),
+                    updates: Vec::new(),
+                };
+                self.session.job_settled(job, job_outcome(event), &mut emit);
             }
         }
         Ok(())
@@ -427,7 +439,11 @@ impl Replay {
         // They stay in `ended_jobs` so the next turn's `jobs.finished`
         // reminder reports the loss once.
         for (job, _) in std::mem::take(&mut self.started_jobs) {
-            self.session.job_settled(job, JobOutcome::Lost);
+            let mut emit = Emit {
+                records: Vec::new(),
+                updates: Vec::new(),
+            };
+            self.session.job_settled(job, JobOutcome::Lost, &mut emit);
         }
         let mut session = self.session;
         session.restore_branch_state()?;
@@ -493,6 +509,7 @@ impl Replay {
                             text: TOOL_LOST.into(),
                         }],
                         changes: Vec::new(),
+                        elapsed_ms: None,
                     },
                 )
                 .map_err(|_| contradiction("entry id space exhausted during crash repair"))?;

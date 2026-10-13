@@ -2,7 +2,9 @@
 
 //! Batteries-included composition for the dalgona product.
 
+mod battery_names;
 mod docs;
+mod plugins;
 mod sections;
 
 use dal_agent::ext::Extension;
@@ -49,9 +51,10 @@ pub fn product() -> dalgon::ProductFactory {
 /// # Errors
 /// Returns a config or registration error from the shared dalgon builder.
 pub fn build(cx: &dalgon::BuildCx<'_>) -> Result<dal_agent::Product, dalgon::BuildError> {
-    cx.config.validate_battery_names(BATTERY_NAMES)?;
+    battery_names::validate(cx.config, BATTERY_NAMES)?;
     let sections = Sections::decode(cx.config)?;
     let mut parts = dalgon::parts(cx)?;
+    plugins::require_listed(cx, &parts.bundled)?;
     let batteries = compose(cx, sections, &mut parts)?;
     parts.batteries = batteries;
     let mut product = dalgon::assemble(cx, parts)?;
@@ -76,7 +79,7 @@ fn compose(
         history: history_config,
         judged: judged_config,
         mcp: mcp_settings,
-        orchestration: orchestration_config,
+        orchestration: mut orchestration_config,
         quality: quality_config,
         review: review_config,
         plan: plan_config,
@@ -103,6 +106,7 @@ fn compose(
         batteries.push(mcp::mcp(&client)?);
     }
     if selected(cx, "orchestration") {
+        orchestration_config.data_root = Some(cx.data_root.clone());
         batteries.push(orchestration::orchestration(orchestration_config)?);
     }
     if selected(cx, "quality") {

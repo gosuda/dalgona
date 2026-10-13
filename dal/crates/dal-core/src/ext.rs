@@ -31,15 +31,19 @@ pub use hooks::{HandleStatus, HookEvent, HookMismatch, HookOutcome, HookVerdict}
 pub use mcp::{
     McpBlock, McpBlockError, McpDeclaration, McpServerDecl, ServerShapeError, validate_block,
 };
-pub use names::{CommandName, MAPPED_TOOL_NAME_MAX, ModelId, Name, NameError, Origin, Visibility};
+pub use names::{
+    CommandName, MAPPED_TOOL_NAME_MAX, ModelId, Name, NameError, Origin, SidecarName,
+    SidecarNameError, Visibility,
+};
 pub use ops::{
     AgentInfo, AgentReport, AgentStart, AgentState, AgentsOp, AgentsOpError, ArtifactFile, JobsOp,
     Mail, MailMode, Receipt, SidecarOp, TurnOp,
 };
 pub use protocol::{
-    AgentsReply, ExitStatusKind, FetchMethod, FetchRequest, FetchResponse, JobCounts, JobEndEvent,
-    JobEnds, JobLine, JobLines, JobReport, JobStateView, JobStatus, JobsError, JobsReply,
-    McpRequest, McpResponse, RunOutput, RunRequest, RunRequestError, TurnOpReply, WakeError,
+    AgentRefusal, AgentsReply, ExitStatusKind, FetchMethod, FetchRequest, FetchResponse, JobCounts,
+    JobEndEvent, JobEnds, JobLine, JobLines, JobReport, JobStateView, JobStatus, JobsError,
+    JobsReply, McpRequest, McpResponse, RunOutput, RunRequest, RunRequestError, TurnOpReply,
+    WakeError,
 };
 pub use scope::{Budget, OnError, ScopeSpec, ScopeSpecError, ScopeUsage};
 pub use scopes::{

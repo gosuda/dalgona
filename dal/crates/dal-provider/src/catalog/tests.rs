@@ -11,11 +11,12 @@ use super::*;
 use super::{
     cache::{read_cache_async, write_cache_async},
     decode::{decode_anthropic_page, decode_codex_models, decode_openai_models},
-    prices::PRICE_ROWS,
+    prices::{PRICE_ROWS, PRICE_TIER_ROWS, TierRow, tier_rows_are_sorted_unique},
     resolve::capability_row,
 };
 use crate::{
     auth::credential::{OAuthCredential, SecretString},
+    error::ResolveError,
     provider::{AuthStyle, Transport},
     thinking::Effort,
 };
@@ -23,6 +24,7 @@ use crate::{
 fn provider(id: &str, family: Family, base_url: &str) -> ProviderEntry {
     ProviderEntry {
         id: id.into(),
+        def: crate::find(id),
         family,
         base_url: base_url.into(),
         transport: Transport::Https,
@@ -105,6 +107,127 @@ fn qualified_cache_miss_is_unknown_but_typed_source_accepts_new_ids() {
     let resolved = resolve(&typed, &[], "openai/some-new-id")
         .expect("provider without a list accepts typed ids");
     assert_eq!(resolved.entry.context_window, None);
+}
+
+#[test]
+fn route_resolution_retries_an_unlisted_id_under_its_family_provider() {
+    let route = ModelRoute::Api {
+        family: Family::Responses,
+        model: "gpt-6".into(),
+    };
+    let typed = Catalog::with_sources(
+        vec![(
+            provider("openai", Family::Responses, "https://api.openai.com/v1"),
+            CatalogSource::Typed,
+        )],
+        Vec::new(),
+    );
+    assert!(resolve(&typed, &[], "gpt-6").is_err(), "bare id is unknown");
+    let resolved = resolve_route(&typed, &[], &route).expect("family provider serves the id");
+    assert_eq!(resolved.provider.as_ref(), "openai");
+    assert_eq!(resolved.route, route);
+
+    let cached = Catalog::with_sources(
+        vec![(
+            provider("openai", Family::Responses, "https://api.openai.com/v1"),
+            CatalogSource::Cache,
+        )],
+        vec![row("openai", "known-model", Some(10_000))],
+    );
+    assert_eq!(
+        resolve_route(&cached, &[], &route).unwrap_err().to_string(),
+        "unknown model gpt-6",
+        "a listed catalog still rejects an id it does not list",
+    );
+}
+
+#[test]
+fn route_resolution_prefers_the_listed_bare_id() {
+    let catalog = Catalog::with_sources(
+        vec![
+            (
+                provider("openai", Family::Responses, "https://api.openai.com/v1"),
+                CatalogSource::Typed,
+            ),
+            (
+                provider("acme", Family::Chat, "https://acme.test/v1"),
+                CatalogSource::Live,
+            ),
+        ],
+        vec![row("acme", "gpt-6", Some(42))],
+    );
+    let route = ModelRoute::Api {
+        family: Family::Chat,
+        model: "gpt-6".into(),
+    };
+    let resolved = resolve_route(&catalog, &[], &route).expect("listed id resolves");
+    assert_eq!(resolved.provider.as_ref(), "acme");
+}
+
+#[test]
+fn route_resolution_disambiguates_a_shared_id_by_family() {
+    let catalog = Catalog::with_sources(
+        vec![
+            (
+                provider("acme", Family::Chat, "https://acme.test/v1"),
+                CatalogSource::Cache,
+            ),
+            (
+                provider("anthropic", Family::Anthropic, "https://api.anthropic.com"),
+                CatalogSource::Cache,
+            ),
+        ],
+        vec![
+            row("acme", "shared", Some(1)),
+            row("anthropic", "shared", Some(2)),
+        ],
+    );
+    assert!(matches!(
+        resolve(&catalog, &[], "shared"),
+        Err(ResolveError::AmbiguousModel { .. })
+    ));
+    for (family, owner) in [(Family::Chat, "acme"), (Family::Anthropic, "anthropic")] {
+        let route = ModelRoute::Api {
+            family,
+            model: "shared".into(),
+        };
+        let resolved = resolve_route(&catalog, &[], &route).expect("family picks the owner");
+        assert_eq!(resolved.provider.as_ref(), owner);
+        assert_eq!(resolved.route, route);
+    }
+}
+
+#[test]
+fn route_resolution_never_returns_another_familys_provider() {
+    let catalog = Catalog::with_sources(
+        vec![
+            (
+                provider("anthropic", Family::Anthropic, "https://api.anthropic.com"),
+                CatalogSource::Cache,
+            ),
+            (
+                provider("openai", Family::Responses, "https://api.openai.com/v1"),
+                CatalogSource::Typed,
+            ),
+        ],
+        vec![row("anthropic", "only-claude", Some(2))],
+    );
+    let route = ModelRoute::Api {
+        family: Family::Chat,
+        model: "only-claude".into(),
+    };
+    assert_eq!(
+        resolve_route(&catalog, &[], &route)
+            .unwrap_err()
+            .to_string(),
+        "unknown model only-claude",
+    );
+    let alias = [("pick".into(), "anthropic/only-claude".into())];
+    let aliased = ModelRoute::Api {
+        family: Family::Chat,
+        model: "pick".into(),
+    };
+    assert!(resolve_route(&catalog, &alias, &aliased).is_err());
 }
 
 #[test]
@@ -382,6 +505,69 @@ fn image_capability_without_known_billing_window_has_no_profile() {
 }
 
 #[test]
+fn live_decoders_replace_control_characters_in_ids_and_display_names() {
+    let chat = provider("openai", Family::Chat, "https://api.openai.com/v1");
+    let rows = decode_openai_models(
+        &chat,
+        r#"{"data":[{"id":"ok\u000eevil"}, {"id":"csi\u001b[2Jmodel\u0007tail"}, {"id":"osc\u001b]52;;c2VjcmV0\u0007model"}]}"#.as_bytes(),
+    )
+    .expect("OpenAI model rows decode");
+    assert_eq!(rows[0].id.as_ref(), "ok�evil");
+    assert_eq!(rows[1].id.as_ref(), "csi�[2Jmodel�tail");
+    assert_eq!(rows[2].id.as_ref(), "osc�]52;;c2VjcmV0�model");
+
+    let codex = provider(
+        "openai-codex",
+        Family::Codex,
+        "https://chatgpt.com/backend-api/codex",
+    );
+    let rows = decode_codex_models(
+        &codex,
+        r#"{"models":[{"slug":"plain","display_name":"N\u001b]52;;c2VjcmV0\u0007ame","visibility":"list"}]}"#
+            .as_bytes(),
+    )
+    .expect("Codex rows decode");
+    assert_eq!(rows[0].id.as_ref(), "plain");
+    assert_eq!(rows[0].display.as_ref(), "N�]52;;c2VjcmV0�ame");
+
+    let anthropic = provider("anthropic", Family::Anthropic, "https://api.anthropic.com");
+    let page = decode_anthropic_page(
+        &anthropic,
+        r#"{"data":[{"id":"cl\naude","display_name":"Cl\u007faude"}],"has_more":false,"last_id":"x"}"#.as_bytes(),
+    )
+    .expect("Anthropic page decodes");
+    assert_eq!(page.rows[0].id.as_ref(), "cl�aude");
+    assert_eq!(page.rows[0].display.as_ref(), "Cl�aude");
+
+    for row in rows.iter().chain(&page.rows) {
+        for value in [&row.id, &row.display] {
+            assert!(
+                value.chars().all(|character| !character.is_control()),
+                "{value}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn poisoned_cache_rows_are_sanitized_on_read() {
+    let directory = TestDir::new();
+    let cache_path = directory.path().join("models.json");
+    let mut poisoned = row("openai", "clean", Some(1000));
+    poisoned.id = "evil\nid\u{1b}]0;spoof\u{7}tail".into();
+    poisoned.display = "Nice\u{80}Name".into();
+    write_cache_async(cache_path.clone(), "openai".into(), vec![poisoned])
+        .await
+        .expect("write poisoned cache row");
+    let entries = read_cache_async(cache_path)
+        .await
+        .expect("poisoned cache still reads");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].id.as_ref(), "evil�id�]0;spoof�tail");
+    assert_eq!(entries[0].display.as_ref(), "Nice�Name");
+}
+
+#[test]
 fn anthropic_decoder_uses_exact_compiled_temperature_capability() {
     let provider = provider("anthropic", Family::Anthropic, "https://api.anthropic.com");
     let bytes = br#"{"data":[{"id":"claude-haiku-4-5"},{"id":"claude-sonnet-5"}],"has_more":false,"last_id":"claude-sonnet-5"}"#;
@@ -642,6 +828,212 @@ fn serve_anthropic_pages(
     })
 }
 
+fn serve_capturing_headers(
+    listener: TcpListener,
+    body: &'static str,
+) -> std::thread::JoinHandle<Vec<(String, String)>> {
+    std::thread::spawn(move || {
+        let mut stream = accept_loopback(&listener);
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("set capture socket read timeout");
+        let mut reader = BufReader::new(stream.try_clone().expect("clone capture socket"));
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("read request line");
+        let mut headers = Vec::new();
+        loop {
+            line.clear();
+            let bytes = reader.read_line(&mut line).expect("read request header");
+            if bytes == 0 || line == "\r\n" {
+                break;
+            }
+            let (name, value) = line.split_once(':').expect("header has a colon");
+            headers.push((name.to_ascii_lowercase(), value.trim().to_owned()));
+        }
+        drop(reader);
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream
+            .write_all(response.as_bytes())
+            .expect("write capture response");
+        headers
+    })
+}
+
+async fn fetch_headers(
+    id: &str,
+    family: Family,
+    path: &str,
+    auth: AuthStyle,
+    credential: &Credential,
+    body: &'static str,
+) -> Vec<(String, String)> {
+    let directory = TestDir::new();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind capture listener");
+    listener
+        .set_nonblocking(true)
+        .expect("make capture listener nonblocking");
+    let port = listener.local_addr().expect("read listener port").port();
+    let server = serve_capturing_headers(listener, body);
+    let mut provider = provider(id, family, &format!("http://127.0.0.1:{port}{path}"));
+    provider.auth = auth;
+    let client = reqwest::Client::new();
+    let fetch = ModelFetch {
+        client: &client,
+        provider: &provider,
+        credential,
+        cache_dir: directory.path(),
+        user_agent: "dalgon/test",
+        version: "test",
+    };
+    let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
+    assert_eq!(
+        fetched.source,
+        CatalogSource::Live,
+        "{:?}",
+        fetched.live_error
+    );
+    server.join().expect("capture the model-list request")
+}
+
+fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(candidate, _)| candidate == name)
+        .map(|(_, value)| value.as_str())
+}
+
+fn oauth(account_id: Option<&str>) -> Credential {
+    Credential::OAuth(OAuthCredential {
+        access_token: SecretString::from(String::from("access")),
+        refresh_token: SecretString::from(String::from("refresh")),
+        expires_at: None,
+        id_token: None,
+        account_id: account_id.map(String::from),
+    })
+}
+
+#[tokio::test]
+async fn claude_api_key_model_fetch_sends_x_api_key_and_version() {
+    let body = r#"{"data":[],"has_more":false}"#;
+    let api_key = Credential::ApiKey {
+        key: SecretString::from(String::from("test-key")),
+    };
+    let headers = fetch_headers(
+        "anthropic",
+        Family::Anthropic,
+        "",
+        AuthStyle::XApiKey,
+        &api_key,
+        body,
+    )
+    .await;
+    assert_eq!(header(&headers, "x-api-key"), Some("test-key"));
+    assert_eq!(header(&headers, "authorization"), None);
+    assert_eq!(header(&headers, "anthropic-version"), Some("2023-06-01"));
+    assert_eq!(header(&headers, "anthropic-beta"), None);
+    assert_eq!(header(&headers, "x-app"), None);
+}
+
+#[tokio::test]
+async fn claude_oauth_model_fetch_sends_bearer_beta_and_app_markers() {
+    let body = r#"{"data":[],"has_more":false}"#;
+    let headers = fetch_headers(
+        "anthropic",
+        Family::Anthropic,
+        "",
+        AuthStyle::XApiKey,
+        &oauth(None),
+        body,
+    )
+    .await;
+    assert_eq!(header(&headers, "x-api-key"), None);
+    assert_eq!(header(&headers, "authorization"), Some("Bearer access"));
+    assert_eq!(header(&headers, "anthropic-version"), Some("2023-06-01"));
+    assert_eq!(
+        header(&headers, "anthropic-beta"),
+        Some("claude-code-20250219,oauth-2025-04-20")
+    );
+    assert_eq!(header(&headers, "x-app"), Some("cli"));
+}
+
+#[tokio::test]
+async fn codex_model_fetch_sends_account_and_originator() {
+    let headers = fetch_headers(
+        "openai-codex",
+        Family::Codex,
+        "/backend-api/codex",
+        AuthStyle::Bearer,
+        &oauth(Some("account")),
+        r#"{"models":[]}"#,
+    )
+    .await;
+    assert_eq!(header(&headers, "authorization"), Some("Bearer access"));
+    assert_eq!(header(&headers, "chatgpt-account-id"), Some("account"));
+    assert_eq!(
+        header(&headers, "originator"),
+        Some(crate::auth::oauth::CODEX_ORIGINATOR)
+    );
+}
+
+#[tokio::test]
+async fn codex_model_fetch_with_an_api_key_is_refused_before_any_request() {
+    let directory = TestDir::new();
+    let port = closed_loopback_port();
+    let provider = provider(
+        "openai-codex",
+        Family::Codex,
+        &format!("http://127.0.0.1:{port}/backend-api/codex"),
+    );
+    let credential = Credential::ApiKey {
+        key: SecretString::from(String::from("test-key")),
+    };
+    let client = reqwest::Client::new();
+    let fetch = ModelFetch {
+        client: &client,
+        provider: &provider,
+        credential: &credential,
+        cache_dir: directory.path(),
+        user_agent: "dalgon/test",
+        version: "test",
+    };
+    let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
+    assert_eq!(fetched.source, CatalogSource::Typed);
+    assert!(matches!(
+        &fetched.live_error,
+        Some(ProviderError::NoCredentials { provider: id }) if id == "openai-codex"
+    ));
+}
+
+#[tokio::test]
+async fn codex_model_fetch_without_an_account_id_fails_before_any_request() {
+    let directory = TestDir::new();
+    let port = closed_loopback_port();
+    let provider = provider(
+        "openai-codex",
+        Family::Codex,
+        &format!("http://127.0.0.1:{port}/backend-api/codex"),
+    );
+    let credential = oauth(None);
+    let client = reqwest::Client::new();
+    let fetch = ModelFetch {
+        client: &client,
+        provider: &provider,
+        credential: &credential,
+        cache_dir: directory.path(),
+        user_agent: "dalgon/test",
+        version: "test",
+    };
+    let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
+    assert_eq!(fetched.source, CatalogSource::Typed);
+    assert!(matches!(
+        fetched.live_error,
+        Some(ProviderError::NoAccountId)
+    ));
+}
+
 fn accept_loopback(listener: &TcpListener) -> TcpStream {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -714,11 +1106,86 @@ fn exact_priced_model_and_missing_model_have_distinct_costs() {
     assert!(compiled_price("missing/model").is_none());
     assert!(compiled_price(&format!("{}-unlisted", row.model)).is_none());
 }
+#[test]
+fn compiled_price_selects_request_wide_context_tier() {
+    use dal_core::Usage;
+
+    let price = compiled_price("deepinfra/Qwen/Qwen3.7-Max").expect("tiered model resolves");
+    assert_eq!(price.tiers.len(), 2);
+    let at_boundary = Usage {
+        input_tokens: 32_000,
+        cached_input_tokens: 0,
+        output_tokens: 0,
+        reasoning_tokens: None,
+        cache_write_tokens: 0,
+        cost_usd: None,
+    };
+    assert_eq!(
+        at_boundary.cost_usd(None, Some(&price)),
+        Some(32_000.0 * 2.5 / 1_000_000.0)
+    );
+    let above_boundary = Usage {
+        input_tokens: 32_001,
+        ..at_boundary
+    };
+    assert_eq!(
+        above_boundary.cost_usd(None, Some(&price)),
+        Some(32_001.0 * 5.0 / 1_000_000.0)
+    );
+    let second_boundary = Usage {
+        input_tokens: 128_000,
+        ..at_boundary
+    };
+    assert_eq!(
+        second_boundary.cost_usd(None, Some(&price)),
+        Some(128_000.0 * 5.0 / 1_000_000.0)
+    );
+    let above_second_boundary = Usage {
+        input_tokens: 128_001,
+        ..at_boundary
+    };
+    assert_eq!(
+        above_second_boundary.cost_usd(None, Some(&price)),
+        Some(128_001.0 * 6.25 / 1_000_000.0)
+    );
+}
+
+#[test]
+fn tier_table_guard_rejects_unsorted_or_duplicate_models() {
+    let unsorted = [
+        TierRow {
+            model: "b",
+            tiers: &[],
+        },
+        TierRow {
+            model: "a",
+            tiers: &[],
+        },
+    ];
+    assert!(!tier_rows_are_sorted_unique(&unsorted));
+
+    let duplicate = [
+        TierRow {
+            model: "model",
+            tiers: &[],
+        },
+        TierRow {
+            model: "model",
+            tiers: &[],
+        },
+    ];
+    assert!(!tier_rows_are_sorted_unique(&duplicate));
+}
 
 #[test]
 fn generated_table_remains_sorted_for_binary_search() {
     assert!(
         PRICE_ROWS
+            .windows(2)
+            .all(|pair| pair[0].model < pair[1].model)
+    );
+    assert!(
+        PRICE_TIER_ROWS
             .windows(2)
             .all(|pair| pair[0].model < pair[1].model)
     );

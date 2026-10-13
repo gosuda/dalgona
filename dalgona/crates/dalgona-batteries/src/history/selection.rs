@@ -32,6 +32,25 @@ pub(crate) fn select_oldest_plus_newest(
     kept
 }
 
+/// Selects oldest-plus-newest candidates while their bytes fit one budget.
+///
+/// The byte total is charged in selection order: oldest first, then newest
+/// toward the middle. A candidate that would exceed the budget stops that
+/// direction, matching the other compaction caps.
+pub(crate) fn select_oldest_plus_newest_by_bytes(sizes: &[usize], budget: usize) -> Vec<usize> {
+    let mut used = 0_usize;
+    select_oldest_plus_newest(sizes.len(), |index| {
+        let Some(next) = used.checked_add(sizes[index]) else {
+            return false;
+        };
+        if next > budget {
+            return false;
+        }
+        used = next;
+        true
+    })
+}
+
 /// Formats the compaction index text.
 #[must_use]
 pub(crate) fn index_text(shown: usize, total: usize, hidden: &str) -> String {
@@ -49,6 +68,10 @@ pub(crate) fn index_text(shown: usize, total: usize, hidden: &str) -> String {
 pub(crate) enum LetterVisibility {
     /// The PNG is drawn in the compacted message.
     Drawn,
+    /// The source is shown as text because its glyph cannot be drawn.
+    ShownAsText,
+    /// The image is hidden by a compaction budget.
+    NotDrawn,
 }
 
 /// Returns the history index line for one letter.
@@ -59,9 +82,11 @@ pub(crate) fn history_index_line(
     last: u64,
     visibility: LetterVisibility,
 ) -> String {
-    let line = format!("letter://{id}  history image, entries {first}-{last}");
+    let mut line = format!("letter://{id}  history image, entries {first}-{last}");
     match visibility {
         LetterVisibility::Drawn => {}
+        LetterVisibility::ShownAsText => line.push_str(", shown as text"),
+        LetterVisibility::NotDrawn => line.push_str(", not drawn"),
     }
     line
 }

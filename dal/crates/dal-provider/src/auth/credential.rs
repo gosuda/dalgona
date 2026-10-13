@@ -4,9 +4,9 @@
 //! The library reads no environment variables: the binary calls
 //! [`EnvSnapshot::capture`] once and passes the value down. Secrets live in
 //! [`SecretString`], whose `Debug` output is redacted and which has no
-//! `Display`. `auth.json` holds exactly the members `openai`, `anthropic`, and
-//! `openai-codex`; unknown members anywhere are rejected. Reads refuse a
-//! symbolic link and, on POSIX, any group or other permission bit. Writes go
+//! `Display`. `auth.json` holds one member per table provider, keyed by its
+//! id; unknown members anywhere are rejected. Reads refuse a
+//! symbolic link and, on POSIX, a group or other permission bit. Writes go
 //! through the store part's atomic writer at mode 0600.
 //!
 //! JWT claims are read without checking the signature. The values they yield
@@ -24,15 +24,12 @@ use std::{
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use dal_store::{FileMode, write_atomic};
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned};
+use serde::{
+    Deserialize, Deserializer, Serialize, Serializer,
+    de::{self, DeserializeOwned, MapAccess, Visitor},
+};
 
-use crate::{ProviderEntry, ProviderError};
-
-const OPENAI: &str = "openai";
-const ANTHROPIC: &str = "anthropic";
-const OPENAI_CODEX: &str = "openai-codex";
-const OPENAI_KEY_ENV: &str = "OPENAI_API_KEY";
-const ANTHROPIC_KEY_ENV: &str = "ANTHROPIC_API_KEY";
+use crate::{Hook, PROVIDERS, ProviderDef, ProviderEntry, ProviderError, find};
 
 /// A secret text value: an API key, access token, refresh token, or ID token.
 ///
@@ -196,6 +193,31 @@ pub struct OAuthCredential {
     pub account_id: Option<String>,
 }
 
+impl OAuthCredential {
+    /// Whether the access token is inside the proactive refresh window at
+    /// `now` (Unix seconds). A credential without an expiry is refreshed
+    /// only after a 401, so it is never expiring.
+    #[must_use]
+    pub fn expiring(&self, now: i64) -> bool {
+        self.expires_at
+            .is_some_and(|at| at.saturating_sub(now) <= crate::auth::refresh::PROACTIVE_WINDOW_SECS)
+    }
+
+    /// The `ChatGPT` account id a Codex request sends: the stored id when it
+    /// is not blank, else the ID token's `chatgpt_account_id` claim.
+    #[must_use]
+    pub(crate) fn chatgpt_account_id(&self) -> Option<std::borrow::Cow<'_, str>> {
+        self.account_id
+            .as_deref()
+            .filter(|id| !id.trim().is_empty())
+            .map(std::borrow::Cow::Borrowed)
+            .or_else(|| {
+                let identity = codex_identity(self.id_token.as_deref()?)?;
+                Some(std::borrow::Cow::Owned(identity.account_id))
+            })
+    }
+}
+
 impl fmt::Debug for OAuthCredential {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OAuthCredential")
@@ -259,9 +281,9 @@ pub fn oauth_expires_at(now: i64, expires_in: Option<i64>, access_token: &str) -
 /// Picks the credential for `provider`: the `auth.json` entry, then the
 /// environment snapshot, then [`ProviderError::NoCredentials`].
 ///
-/// The environment variable is the provider's configured `key_env`; the
-/// built-in `openai` and `anthropic` providers fall back to
-/// `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`. An empty value counts as unset.
+/// The environment variable is the provider's configured `key_env`; a
+/// built-in provider with an API-key row falls back to the row's variables.
+/// An empty value counts as unset.
 ///
 /// # Errors
 /// Returns [`ProviderError::NoCredentials`] when neither source has a
@@ -274,15 +296,16 @@ pub fn resolve(
     if let Some(credential) = store.credential(&provider.id) {
         return Ok(credential);
     }
-    let key_env = provider.key_env.as_deref().or(match &*provider.id {
-        OPENAI => Some(OPENAI_KEY_ENV),
-        ANTHROPIC => Some(ANTHROPIC_KEY_ENV),
-        _ => None,
-    });
-    if let Some(key) = key_env
-        .and_then(|name| env.get(name))
-        .filter(|key| !key.is_empty())
-    {
+    let name_found = |name: &str| env.get(name).filter(|key| !key.is_empty());
+    let key = match (
+        provider.key_env.as_deref(),
+        provider.def.and_then(|def| def.key),
+    ) {
+        (Some(name), _) => name_found(name),
+        (None, Some(spec)) => spec.env.iter().find_map(|name| name_found(name)),
+        (None, None) => None,
+    };
+    if let Some(key) = key {
         return Ok(Credential::ApiKey {
             key: SecretString::from(key),
         });
@@ -305,7 +328,6 @@ impl AuthStore {
     /// Reads and strictly decodes `auth.json` at `path`.
     ///
     /// # Errors
-    /// [`ProviderError::AuthFileSymlink`] when `path` is a symbolic link (or
     /// is swapped while opening), [`ProviderError::AuthFilePerms`] when a
     /// group or other permission bit is set on POSIX, and
     /// [`ProviderError::AuthFileInvalid`] when the file cannot be read or is
@@ -334,7 +356,9 @@ impl AuthStore {
         if !opened.is_file() {
             return Err(invalid(&path, String::from("not a regular file")));
         }
-        if has_shared_bits(&opened) {
+        let private =
+            dal_store::file_is_private(&file).map_err(|error| invalid(&path, error.to_string()))?;
+        if !private {
             return Err(ProviderError::AuthFilePerms { path });
         }
         let mut bytes = Vec::new();
@@ -363,26 +387,13 @@ impl AuthStore {
     /// The stored credential for `provider`, when `auth.json` has one.
     #[must_use]
     pub fn credential(&self, provider: &str) -> Option<Credential> {
-        match provider {
-            OPENAI => self.file.openai.as_ref().map(|entry| match entry {
-                OpenAiEntry::ApiKey { key } => Credential::ApiKey { key: key.clone() },
-            }),
-            ANTHROPIC => self.file.anthropic.as_ref().map(|entry| match entry {
-                AnthropicEntry::ApiKey { key } => Credential::ApiKey { key: key.clone() },
-                AnthropicEntry::Oauth {
-                    access_token,
-                    refresh_token,
-                    expires_at,
-                } => Credential::OAuth(OAuthCredential {
-                    access_token: access_token.clone(),
-                    refresh_token: refresh_token.clone(),
-                    expires_at: *expires_at,
-                    id_token: None,
-                    account_id: None,
-                }),
-            }),
-            OPENAI_CODEX => self.file.openai_codex.as_ref().map(|entry| match entry {
-                CodexEntry::Oauth {
+        let def = find(provider)?;
+        self.file
+            .members
+            .get(&MemberKey::of(def))
+            .map(|stored| match stored {
+                Stored::ApiKey { key } => Credential::ApiKey { key: key.clone() },
+                Stored::Oauth {
                     access_token,
                     refresh_token,
                     expires_at,
@@ -392,115 +403,76 @@ impl AuthStore {
                     access_token: access_token.clone(),
                     refresh_token: refresh_token.clone(),
                     expires_at: *expires_at,
-                    id_token: Some(id_token.expose().to_owned()),
-                    account_id: Some(account_id.clone()),
+                    id_token: id_token.as_ref().map(|token| token.expose().to_owned()),
+                    account_id: account_id.clone(),
                 }),
-            }),
-            _ => None,
-        }
+            })
     }
 
     /// Returns stored credentials in stable provider order without exposing
     /// their contents.
     #[must_use]
     pub fn status(&self) -> Vec<AuthStatus> {
-        let mut statuses = Vec::with_capacity(3);
-        if self.file.openai.is_some() {
-            statuses.push(AuthStatus {
-                provider: Box::from(OPENAI),
-                kind: CredentialKind::ApiKey,
-            });
-        }
-        if let Some(entry) = &self.file.anthropic {
-            statuses.push(AuthStatus {
-                provider: Box::from(ANTHROPIC),
-                kind: match entry {
-                    AnthropicEntry::ApiKey { .. } => CredentialKind::ApiKey,
-                    AnthropicEntry::Oauth { .. } => CredentialKind::OAuth,
+        self.file
+            .members
+            .iter()
+            .map(|(key, stored)| AuthStatus {
+                provider: Box::from(key.id),
+                kind: match stored {
+                    Stored::ApiKey { .. } => CredentialKind::ApiKey,
+                    Stored::Oauth { .. } => CredentialKind::OAuth,
                 },
-            });
-        }
-        if self.file.openai_codex.is_some() {
-            statuses.push(AuthStatus {
-                provider: Box::from(OPENAI_CODEX),
-                kind: CredentialKind::OAuth,
-            });
-        }
-        statuses
+            })
+            .collect()
     }
 
     /// Replaces the in-memory entry for `provider`; [`AuthStore::store`]
     /// persists it.
     ///
     /// # Errors
-    /// Returns [`ProviderError::AuthWrite`] when `auth.json` has no member for
-    /// `provider` or the credential kind does not fit it: `openai` takes an
-    /// API key, `anthropic` an API key or an OAuth sign-in without ID token
-    /// or account id, and `openai-codex` an OAuth sign-in with both.
+    /// Returns [`ProviderError::AuthWrite`] when `provider` is not a table
+    /// provider or the credential kind does not fit its row: an API key needs
+    /// a key row, and an OAuth sign-in needs an OAuth row, carrying an ID
+    /// token and account id exactly when the row's hook binds an account.
     pub fn set(&mut self, provider: &str, credential: Credential) -> Result<(), ProviderError> {
-        match (provider, credential) {
-            (OPENAI, Credential::ApiKey { key }) => {
-                self.file.openai = Some(OpenAiEntry::ApiKey { key });
-            }
-            (ANTHROPIC, Credential::ApiKey { key }) => {
-                self.file.anthropic = Some(AnthropicEntry::ApiKey { key });
-            }
-            (
-                ANTHROPIC,
-                Credential::OAuth(OAuthCredential {
-                    access_token,
-                    refresh_token,
-                    expires_at,
-                    id_token: None,
-                    account_id: None,
-                }),
-            ) => {
-                self.file.anthropic = Some(AnthropicEntry::Oauth {
-                    access_token,
-                    refresh_token,
-                    expires_at,
-                });
-            }
-            (
-                OPENAI_CODEX,
-                Credential::OAuth(OAuthCredential {
-                    access_token,
-                    refresh_token,
-                    expires_at,
-                    id_token: Some(id_token),
-                    account_id: Some(account_id),
-                }),
-            ) => {
-                self.file.openai_codex = Some(CodexEntry::Oauth {
-                    access_token,
-                    refresh_token,
-                    expires_at,
-                    id_token: SecretString::from(id_token),
-                    account_id,
-                });
-            }
-            (OPENAI | ANTHROPIC | OPENAI_CODEX, _) => {
+        let Some(def) = find(provider) else {
+            return Err(ProviderError::AuthWrite {
+                reason: format!("auth.json has no member for {provider}"),
+            });
+        };
+        let stored = match credential {
+            Credential::ApiKey { key } => Stored::ApiKey { key },
+            Credential::OAuth(OAuthCredential {
+                access_token,
+                refresh_token,
+                expires_at,
+                id_token,
+                account_id,
+            }) => Stored::Oauth {
+                access_token,
+                refresh_token,
+                expires_at,
+                id_token: id_token.map(SecretString::from),
+                account_id,
+            },
+            Credential::None => {
                 return Err(ProviderError::AuthWrite {
                     reason: format!("{provider} does not take this credential kind"),
                 });
             }
-            _ => {
-                return Err(ProviderError::AuthWrite {
-                    reason: format!("auth.json has no member for {provider}"),
-                });
-            }
+        };
+        if !stored.fits(def) {
+            return Err(ProviderError::AuthWrite {
+                reason: format!("{provider} does not take this credential kind"),
+            });
         }
+        self.file.members.insert(MemberKey::of(def), stored);
         Ok(())
     }
 
     /// Drops the in-memory entry for `provider`; returns whether one existed.
     pub fn remove(&mut self, provider: &str) -> bool {
-        match provider {
-            OPENAI => self.file.openai.take().is_some(),
-            ANTHROPIC => self.file.anthropic.take().is_some(),
-            OPENAI_CODEX => self.file.openai_codex.take().is_some(),
-            _ => false,
-        }
+        find(provider).is_some_and(|def| self.file.members.remove(&MemberKey::of(def)).is_some())
     }
 
     /// Writes the store to its path atomically at mode 0600.
@@ -520,30 +492,90 @@ impl AuthStore {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+/// The decoded `auth.json`: one member per provider id, keyed by the table.
+///
+/// Members are written in the canonical order of [`MemberKey`], which is the
+/// order the file has always had, so a load followed by a store reproduces the
+/// bytes.
+#[derive(Clone, Debug, Default)]
 struct AuthFile {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    openai: Option<OpenAiEntry>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    anthropic: Option<AnthropicEntry>,
-    #[serde(
-        default,
-        rename = "openai-codex",
-        skip_serializing_if = "Option::is_none"
-    )]
-    openai_codex: Option<CodexEntry>,
+    members: BTreeMap<MemberKey, Stored>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum OpenAiEntry {
-    ApiKey { key: SecretString },
+/// The position of a provider's member in `auth.json`: providers without
+/// OAuth first, then OAuth providers, each by id.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct MemberKey {
+    oauth: bool,
+    id: &'static str,
 }
 
+impl MemberKey {
+    fn of(def: &ProviderDef) -> Self {
+        Self {
+            oauth: def.oauth.is_some(),
+            id: def.id,
+        }
+    }
+}
+
+impl Serialize for AuthFile {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_map(self.members.iter().map(|(key, stored)| (key.id, stored)))
+    }
+}
+
+impl<'de> Deserialize<'de> for AuthFile {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_map(AuthFileVisitor)
+    }
+}
+
+/// Decodes the member map strictly: a key must name a table provider, appear
+/// once, and hold a member that provider can hold.
+struct AuthFileVisitor;
+
+impl<'de> Visitor<'de> for AuthFileVisitor {
+    type Value = AuthFile;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("an auth.json object")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<AuthFile, A::Error> {
+        let mut file = AuthFile::default();
+        while let Some(key) = map.next_key::<Box<str>>()? {
+            let Some(def) = find(&key) else {
+                let ids: Vec<String> = PROVIDERS
+                    .iter()
+                    .map(|def| format!("`{}`", def.id))
+                    .collect();
+                return Err(de::Error::custom(format!(
+                    "unknown field `{key}`, expected one of {}",
+                    ids.join(", ")
+                )));
+            };
+            let member = MemberKey::of(def);
+            if file.members.contains_key(&member) {
+                return Err(de::Error::custom(format!("duplicate field `{}`", def.id)));
+            }
+            let stored = map.next_value::<Stored>()?;
+            if !stored.fits(def) {
+                return Err(de::Error::custom(format!(
+                    "{} does not take this credential kind",
+                    def.id
+                )));
+            }
+            file.members.insert(member, stored);
+        }
+        Ok(file)
+    }
+}
+
+/// What `auth.json` holds for one provider.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum AnthropicEntry {
+enum Stored {
     ApiKey {
         key: SecretString,
     },
@@ -552,20 +584,47 @@ enum AnthropicEntry {
         refresh_token: SecretString,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expires_at: Option<i64>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "present"
+        )]
+        id_token: Option<SecretString>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "present"
+        )]
+        account_id: Option<String>,
     },
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum CodexEntry {
-    Oauth {
-        access_token: SecretString,
-        refresh_token: SecretString,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        expires_at: Option<i64>,
-        id_token: SecretString,
-        account_id: String,
-    },
+impl Stored {
+    /// Whether `def` can hold this member: an API key needs a key row, and an
+    /// OAuth sign-in needs an OAuth row whose hook decides whether the grant
+    /// carries an ID token and account id (both or neither).
+    fn fits(&self, def: &ProviderDef) -> bool {
+        match self {
+            Self::ApiKey { .. } => def.key.is_some(),
+            Self::Oauth {
+                id_token,
+                account_id,
+                ..
+            } => def.oauth.is_some_and(|oauth| {
+                let account = oauth.hook == Hook::CodexAccount;
+                id_token.is_some() == account && account_id.is_some() == account
+            }),
+        }
+    }
+}
+
+/// Decodes a field that, when present, must not be `null`.
+fn present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 #[derive(Deserialize)]
@@ -648,18 +707,6 @@ fn same_file(link: &Metadata, opened: &Metadata) -> bool {
 fn same_file(link: &Metadata, opened: &Metadata) -> bool {
     let _ = (link, opened);
     true
-}
-
-#[cfg(unix)]
-fn has_shared_bits(metadata: &Metadata) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    metadata.permissions().mode() & 0o077 != 0
-}
-
-#[cfg(not(unix))]
-fn has_shared_bits(metadata: &Metadata) -> bool {
-    let _ = metadata;
-    false
 }
 
 #[cfg(test)]

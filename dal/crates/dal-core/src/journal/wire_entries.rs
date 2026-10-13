@@ -121,6 +121,8 @@ pub(super) struct ToolResultWire<'a> {
     pub(super) error: bool,
     pub(super) parts: JournalPartsWire<'a>,
     pub(super) changes: &'a [FileChange],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) elapsed_ms: Option<u64>,
 }
 
 #[derive(Serialize)]

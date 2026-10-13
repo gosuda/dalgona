@@ -258,13 +258,27 @@ fn parse_alt_utf8(bytes: &[u8]) -> EscapeParse {
 }
 
 fn parse_csi(bytes: &[u8]) -> EscapeParse {
-    let Some(final_index) = bytes[2..]
+    let remainder = &bytes[2..];
+    let control_index = remainder.iter().position(|byte| *byte < 0x20);
+    let final_index = remainder
         .iter()
-        .position(|byte| matches!(*byte, b'@'..=b'~'))
-        .map(|index| index + 2)
-    else {
+        .position(|byte| matches!(*byte, b'@'..=b'~'));
+    if let Some(index) = control_index
+        && final_index.is_none_or(|final_index| index < final_index)
+    {
+        if remainder[index] == 0x1b {
+            return EscapeParse::Consumed(index + 2);
+        }
+        let consumed = index + 3;
+        return sequence_control_key(remainder[index])
+            .map_or(EscapeParse::Consumed(consumed), |key| {
+                EscapeParse::Key(key, consumed)
+            });
+    }
+    let Some(final_index) = final_index.map(|index| index + 2) else {
         return EscapeParse::Partial;
     };
+
     let parameters = &bytes[2..final_index];
     if parameters.iter().any(|byte| {
         !matches!(
@@ -285,6 +299,13 @@ fn parse_csi(bytes: &[u8]) -> EscapeParse {
     EscapeParse::Key(Key::new(key_code, modifiers), final_index + 1)
 }
 
+fn sequence_control_key(byte: u8) -> Option<Key> {
+    if byte == 0x1b {
+        return Some(Key::new(KeyCode::Esc, KeyModifiers::NONE));
+    }
+    control_key(byte)
+}
+
 fn parse_csi_key(parameters: &[u8], final_byte: u8) -> Option<(Option<KeyCode>, Option<u16>)> {
     let parameter = std::str::from_utf8(parameters).ok()?;
     let mut values = parameter.split(';');
@@ -299,6 +320,7 @@ fn parse_csi_key(parameters: &[u8], final_byte: u8) -> Option<(Option<KeyCode>, 
         b'F' => Some(KeyCode::End),
         b'Z' => Some(KeyCode::BackTab),
         b'~' => match first.parse::<u8>().ok()? {
+            3 => Some(KeyCode::Delete),
             5 => Some(KeyCode::PageUp),
             6 => Some(KeyCode::PageDown),
             1 | 7 => Some(KeyCode::Home),

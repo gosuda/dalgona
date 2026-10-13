@@ -14,7 +14,6 @@ dal-agent.workspace = true
 ratatui = "=0.30.2"
 crossterm = "=0.29.0"
 ratatui-textarea = "=0.9.3"
-tui-markdown = "=0.3.10"
 opaline = { version = "=0.4.2", default-features = false, features = ["builtin-themes", "ratatui"] }
 ratatui-image = { version = "=11.1.0", default-features = false, features = ["crossterm"] }
 image = { version = "=0.25.10", default-features = false, features = ["png"] }

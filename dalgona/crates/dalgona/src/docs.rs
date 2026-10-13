@@ -2,6 +2,8 @@
 
 //! The `dalgona://` manual, registered through the shared docs door.
 
+use std::sync::Arc;
+
 use dal_agent::ext::{Extension, ExtensionBuilder};
 use dal_core::{Origin, RegistrationError, ServiceSet};
 use dalgona_batteries::{
@@ -49,7 +51,12 @@ pub(crate) fn extension() -> Result<Extension, RegistrationError> {
     for (path, text) in PAGES {
         builder = builder.doc(path, title(text), text);
     }
-    builder.build()
+    builder
+        .scheme(
+            crate::NAME,
+            Arc::new(dalgon::ManualScheme::new(crate::NAME)),
+        )
+        .build()
 }
 pub(crate) fn manuals() -> Vec<dalgon::ProductManual> {
     let mut manuals = dalgon::product::builtin_manuals();

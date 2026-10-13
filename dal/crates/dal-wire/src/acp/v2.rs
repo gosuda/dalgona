@@ -70,11 +70,14 @@ async fn new_session(
     id: &Id,
     params: &Value,
 ) -> Option<Message> {
-    let Some(cwd) = crate::rpc::opt_string(params, "cwd") else {
-        return Some(Message::Error {
-            id: id.clone(),
-            error: crate::rpc::invalid_params("session/new", "missing member `cwd`"),
-        });
+    let cwd = match crate::rpc::req_string("session/new", params, "cwd") {
+        Ok(cwd) => cwd,
+        Err(error) => {
+            return Some(Message::Error {
+                id: id.clone(),
+                error,
+            });
+        }
     };
     let (session, _) = match open_workspace(host, state, &cwd).await {
         Ok(opened) => opened,
@@ -239,9 +242,7 @@ fn prompt_echo(blocks: &Value) -> Value {
 
 /// Reads the `sessionId` member shared by session methods.
 fn session_param(params: &Value) -> Result<SessionId, ErrorObject> {
-    let text = crate::rpc::opt_string(params, "sessionId").ok_or_else(|| {
-        crate::rpc::invalid_params("session/prompt", "missing member `sessionId`")
-    })?;
+    let text = crate::rpc::req_string("session/prompt", params, "sessionId")?;
     SessionId::parse(&text)
         .map_err(|_| crate::rpc::invalid_params("session/prompt", "sessionId is not valid"))
 }

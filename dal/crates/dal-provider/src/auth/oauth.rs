@@ -1,4 +1,4 @@
-//! Host-driven OAuth login for Codex and Claude.
+//! Host-driven OAuth login for the table's OAuth providers.
 //!
 //! A flow owns PKCE and state, accepts either a loopback browser redirect or
 //! one explicit paste value, and makes the durable credential write its last
@@ -30,33 +30,19 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::{
-    AuthStore, AuthStyle, Credential, OAuthCredential, ProviderEntry, ProviderError, SecretString,
-    Transport,
+    AuthStore, AuthStyle, Completion, Credential, Hook, OAuthCredential, OAuthSpec, PROVIDERS,
+    ProviderDef, ProviderEntry, ProviderError, QueryValue, Redirect, SecretString, Transport,
     auth::credential::{codex_identity, oauth_expires_at},
+    find,
     http::{
         CONNECT_TIMEOUT, Exchange, LOGIN_WAIT, OAUTH_TIMEOUT, STREAM_IDLE_TIMEOUT, check_base_url,
         endpoint, read_body, send,
     },
 };
 
-/// `OpenAI`'s public Codex OAuth client id.
-pub(crate) const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
-/// Anthropic's public Claude Code OAuth client id.
-pub(crate) const CLAUDE_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
-/// `OpenAI`'s Codex OAuth token endpoint.
-pub(crate) const CODEX_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
-/// Anthropic's Claude OAuth token endpoint.
-pub(crate) const CLAUDE_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
 /// The login-flow originator sent to `OpenAI`'s authorization endpoint.
 pub(crate) const CODEX_ORIGINATOR: &str = "dalgon";
 
-const CODEX_AUTH_ORIGIN: &str = "https://auth.openai.com";
-const CODEX_API_BASE: &str = "https://chatgpt.com/backend-api/codex";
-const CLAUDE_AUTH_BASE: &str = "https://claude.ai/oauth";
-const CLAUDE_TOKEN_BASE: &str = "https://platform.claude.com/v1";
-const CODEX_DEVICE_REDIRECT: &str = "https://auth.openai.com/deviceauth/callback";
-const CODEX_CALLBACK_PATH: &str = "/auth/callback";
-const CLAUDE_CALLBACK_PATH: &str = "/callback";
 const CALLBACK_REQUEST_LIMIT: usize = 16 * 1024;
 const RESPONSE_HTML: &[u8] = b"<!doctype html><title>Sign-in complete</title><p>Sign-in complete. You can return to dalgon.</p>";
 const RESPONSE_BAD_REQUEST: &[u8] = b"<!doctype html><title>Sign-in failed</title><p>Sign-in failed. Return to dalgon and try again.</p>";
@@ -88,58 +74,111 @@ pub enum LoginProgress {
 /// Exact prompt text for a host that needs a user-pasted authorization result.
 pub const PASTE_HINT: &str = "Paste the redirect URL or the code shown in the browser.";
 
-/// OAuth endpoints for the built-in Codex and Claude flows.
+/// OAuth endpoints for the table's sign-in flows, one set per OAuth row.
 ///
-/// Production values are fixed to their pinned HTTPS origins. Integration tests
+/// Production values are the rows' pinned HTTPS URLs. Integration tests
 /// can use [`LoginEndpoints::loopback`] to direct every OAuth request to a
 /// literal loopback server; arbitrary HTTPS hosts are never admitted because
 /// the authorization code and verifier are sent to these endpoints.
 #[derive(Clone, Debug)]
 pub struct LoginEndpoints {
-    pub(crate) codex_authorize: Url,
-    pub(crate) codex_token: Url,
-    pub(crate) codex_device_usercode: Url,
-    pub(crate) codex_device_token: Url,
-    pub(crate) codex_device_page: Url,
-    pub(crate) codex_revoke: Url,
-    pub(crate) codex_models_base: Url,
-    pub(crate) claude_authorize: Url,
-    pub(crate) claude_token: Url,
-    codex_callback_port: u16,
-    claude_callback_port: u16,
+    rows: Vec<RowEndpoints>,
     loopback_override: bool,
 }
 
+/// The endpoints and callback port of one OAuth row.
+#[derive(Clone, Debug)]
+pub(crate) struct RowEndpoints {
+    pub(crate) def: &'static ProviderDef,
+    pub(crate) oauth: OAuthSpec,
+    pub(crate) authorize: Url,
+    pub(crate) token: Url,
+    pub(crate) device: Option<DeviceUrls>,
+    pub(crate) revoke: Option<Url>,
+    pub(crate) models_base: Option<Url>,
+    pub(crate) callback_port: u16,
+}
+
+/// The device-code endpoints of one OAuth row.
+#[derive(Clone, Debug)]
+pub(crate) struct DeviceUrls {
+    pub(crate) usercode: Url,
+    pub(crate) poll: Url,
+    pub(crate) page: Url,
+    pub(crate) redirect_uri: &'static str,
+}
+
+impl RowEndpoints {
+    /// Places every URL of the row with `locate`: production keeps the table's
+    /// URLs, the loopback seam moves them under one local server.
+    fn build(
+        def: &'static ProviderDef,
+        oauth: OAuthSpec,
+        callback_port: u16,
+        locate: &dyn Fn(&str) -> Result<Url, ProviderError>,
+    ) -> Result<Self, ProviderError> {
+        let device = oauth
+            .device
+            .map(|device| -> Result<DeviceUrls, ProviderError> {
+                Ok(DeviceUrls {
+                    usercode: locate(device.usercode_url)?,
+                    poll: locate(device.poll_url)?,
+                    page: locate(device.page_url)?,
+                    redirect_uri: device.redirect_uri,
+                })
+            })
+            .transpose()?;
+        Ok(Self {
+            def,
+            oauth,
+            authorize: locate(oauth.authorize_url)?,
+            token: locate(oauth.token_url)?,
+            device,
+            revoke: oauth.revoke_url.map(locate).transpose()?,
+            models_base: fetches_models(oauth.hook)
+                .then(|| locate(def.base_url))
+                .transpose()?,
+            callback_port,
+        })
+    }
+
+    fn validate(&self) -> Result<(), ProviderError> {
+        let family = self.def.family;
+        let oauth = &self.oauth;
+        validate_endpoint(family, &self.authorize, &host_of(oauth.authorize_url))?;
+        validate_endpoint(family, &self.token, &host_of(oauth.token_url))?;
+        if let (Some(urls), Some(device)) = (&self.device, oauth.device) {
+            validate_endpoint(family, &urls.usercode, &host_of(device.usercode_url))?;
+            validate_endpoint(family, &urls.poll, &host_of(device.poll_url))?;
+            validate_endpoint(family, &urls.page, &host_of(device.page_url))?;
+        }
+        if let (Some(url), Some(text)) = (&self.revoke, oauth.revoke_url) {
+            validate_endpoint(family, url, &host_of(text))?;
+        }
+        if let Some(url) = &self.models_base {
+            validate_endpoint(family, url, &host_of(self.def.base_url))?;
+        }
+        Ok(())
+    }
+}
+
 impl LoginEndpoints {
-    fn production() -> Result<Self, ProviderError> {
-        let codex_auth = Url::parse(CODEX_AUTH_ORIGIN)
-            .map_err(|error| endpoint_error(Family::Codex, error.to_string()))?;
-        let codex_api = Url::parse(CODEX_API_BASE)
-            .map_err(|error| endpoint_error(Family::Codex, error.to_string()))?;
-        let claude_auth = Url::parse(CLAUDE_AUTH_BASE)
-            .map_err(|error| endpoint_error(Family::Anthropic, error.to_string()))?;
-        let claude_token_base = Url::parse(CLAUDE_TOKEN_BASE)
-            .map_err(|error| endpoint_error(Family::Anthropic, error.to_string()))?;
+    pub(crate) fn production() -> Result<Self, ProviderError> {
+        let mut rows = Vec::new();
+        for def in PROVIDERS {
+            let Some(oauth) = def.oauth else { continue };
+            let locate = |text: &str| {
+                Url::parse(text).map_err(|error| endpoint_error(def.family, error.to_string()))
+            };
+            rows.push(RowEndpoints::build(
+                def,
+                oauth,
+                oauth.redirect.port,
+                &locate,
+            )?);
+        }
         let endpoints = Self {
-            codex_authorize: endpoint(Family::Codex, codex_auth.as_str(), "oauth/authorize")?,
-            codex_token: endpoint(Family::Codex, codex_auth.as_str(), "oauth/token")?,
-            codex_device_usercode: endpoint(
-                Family::Codex,
-                codex_auth.as_str(),
-                "api/accounts/deviceauth/usercode",
-            )?,
-            codex_device_token: endpoint(
-                Family::Codex,
-                codex_auth.as_str(),
-                "api/accounts/deviceauth/token",
-            )?,
-            codex_device_page: endpoint(Family::Codex, codex_auth.as_str(), "codex/device")?,
-            codex_revoke: endpoint(Family::Codex, codex_auth.as_str(), "oauth/revoke")?,
-            codex_models_base: codex_api,
-            claude_authorize: endpoint(Family::Anthropic, claude_auth.as_str(), "authorize")?,
-            claude_token: endpoint(Family::Anthropic, claude_token_base.as_str(), "oauth/token")?,
-            codex_callback_port: 1455,
-            claude_callback_port: 53692,
+            rows,
             loopback_override: false,
         };
         endpoints.validate()?;
@@ -155,94 +194,76 @@ impl LoginEndpoints {
     /// # Errors
     /// Returns a typed transport error if `base_url` is invalid or not loopback.
     pub fn loopback(base_url: &str) -> Result<Self, ProviderError> {
-        let base = Url::parse(base_url).map_err(|error| {
-            endpoint_error(Family::Codex, format!("loopback base is invalid: {error}"))
-        })?;
-        check_base_url(Family::Codex, base_url)?;
-        if !is_loopback(&base) {
-            return Err(endpoint_error(
-                Family::Codex,
-                "test OAuth endpoints must use a literal loopback host",
-            ));
+        let mut rows = Vec::new();
+        for def in PROVIDERS {
+            let Some(oauth) = def.oauth else { continue };
+            let base = Url::parse(base_url).map_err(|error| {
+                endpoint_error(def.family, format!("loopback base is invalid: {error}"))
+            })?;
+            check_base_url(def.family, base_url)?;
+            if !is_loopback(&base) {
+                return Err(endpoint_error(
+                    def.family,
+                    "test OAuth endpoints must use a literal loopback host",
+                ));
+            }
+            let prefix = loopback_prefix(oauth.hook);
+            let locate = |production: &str| {
+                let path = Url::parse(production)
+                    .map_err(|error| endpoint_error(def.family, error.to_string()))?
+                    .path()
+                    .trim_start_matches('/')
+                    .to_owned();
+                endpoint(def.family, base_url, &format!("{prefix}{path}"))
+            };
+            rows.push(RowEndpoints::build(def, oauth, 0, &locate)?);
         }
-        let codex_authorize = endpoint(Family::Codex, base.as_str(), "oauth/authorize")?;
-        let codex_token = endpoint(Family::Codex, base.as_str(), "oauth/token")?;
-        let codex_device_usercode = endpoint(
-            Family::Codex,
-            base.as_str(),
-            "api/accounts/deviceauth/usercode",
-        )?;
-        let codex_device_token = endpoint(
-            Family::Codex,
-            base.as_str(),
-            "api/accounts/deviceauth/token",
-        )?;
-        let codex_device_page = endpoint(Family::Codex, base.as_str(), "codex/device")?;
-        let codex_revoke = endpoint(Family::Codex, base.as_str(), "oauth/revoke")?;
-        let codex_models_base = endpoint(Family::Codex, base.as_str(), "backend-api/codex")?;
-        let claude_authorize =
-            endpoint(Family::Anthropic, base.as_str(), "claude/oauth/authorize")?;
-        let claude_token = endpoint(Family::Anthropic, base.as_str(), "claude/v1/oauth/token")?;
         Ok(Self {
-            codex_authorize,
-            codex_token,
-            codex_device_usercode,
-            codex_device_token,
-            codex_device_page,
-            codex_revoke,
-            codex_models_base,
-            claude_authorize,
-            claude_token,
-            codex_callback_port: 0,
-            claude_callback_port: 0,
+            rows,
             loopback_override: true,
         })
     }
 
-    /// Sets the loopback callback ports; zero asks the OS to choose a free port.
+    /// Sets the loopback callback ports, one for the Codex sign-in and one for
+    /// the Claude sign-in; zero asks the OS to choose a free port.
     #[must_use]
     pub fn with_callback_ports(mut self, codex: u16, claude: u16) -> Self {
-        self.codex_callback_port = codex;
-        self.claude_callback_port = claude;
+        for row in &mut self.rows {
+            row.callback_port = match row.oauth.hook {
+                Hook::CodexAccount => codex,
+                Hook::ClaudeCode => claude,
+            };
+        }
         self
     }
 
-    fn validate(&self) -> Result<(), ProviderError> {
-        validate_endpoint(Family::Codex, &self.codex_authorize, "auth.openai.com")?;
-        validate_endpoint(Family::Codex, &self.codex_token, "auth.openai.com")?;
-        validate_endpoint(
-            Family::Codex,
-            &self.codex_device_usercode,
-            "auth.openai.com",
-        )?;
-        validate_endpoint(Family::Codex, &self.codex_device_token, "auth.openai.com")?;
-        validate_endpoint(Family::Codex, &self.codex_device_page, "auth.openai.com")?;
-        validate_endpoint(Family::Codex, &self.codex_revoke, "auth.openai.com")?;
-        validate_endpoint(Family::Codex, &self.codex_models_base, "chatgpt.com")?;
-        validate_endpoint(Family::Anthropic, &self.claude_authorize, "claude.ai")?;
-        validate_endpoint(Family::Anthropic, &self.claude_token, "platform.claude.com")?;
-        Ok(())
+    pub(crate) fn row(&self, def: &ProviderDef) -> Option<&RowEndpoints> {
+        self.rows.iter().find(|row| row.def.id == def.id)
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), ProviderError> {
+        self.rows.iter().try_for_each(RowEndpoints::validate)
     }
 }
 
-/// A single Codex or Claude sign-in attempt.
+/// A single OAuth sign-in attempt.
 ///
 /// The store and cache paths are supplied by the host. The callback receives
-/// browser redirects on the bound loopback listener; Codex falls back to device
-/// polling when its port is busy. For Claude paste login, call
+/// browser redirects on the bound loopback listener; a callback-only row falls
+/// back to device polling when its port is busy. For a paste row, call
 /// [`LoginFlow::take_paste_sender`] before `run` and send one value from the
 /// host's input surface. Cancellation drops the flow's one-shot receiver; if
 /// the host took the sender, it is disconnected and the host should drop it.
 /// No background task survives cancellation.
 pub struct LoginFlow<'a> {
-    provider: LoginProvider,
+    def: &'static ProviderDef,
     store: &'a mut AuthStore,
     client: Client,
     oauth_client: Client,
     user_agent: String,
     cache_dir: PathBuf,
     endpoints: LoginEndpoints,
-    codex_provider: Option<ProviderEntry>,
+    models_provider: Option<ProviderEntry>,
     paste_sender: Option<oneshot::Sender<String>>,
     paste_receiver: Option<oneshot::Receiver<String>>,
     wait: Duration,
@@ -253,7 +274,7 @@ pub struct LoginFlow<'a> {
 impl fmt::Debug for LoginFlow<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LoginFlow")
-            .field("provider", &self.provider)
+            .field("provider", &self.def.id)
             .field("auth_path", &self.store.path())
             .field("cache_dir", &self.cache_dir)
             .field("started", &self.started)
@@ -262,7 +283,7 @@ impl fmt::Debug for LoginFlow<'_> {
 }
 
 impl<'a> LoginFlow<'a> {
-    /// Creates a flow for `openai-codex` or `anthropic`.
+    /// Creates a flow for a table provider that has an OAuth row.
     ///
     /// The supplied client is used only for the post-login catalog fetch.
     /// Credential-bearing OAuth calls use a private client with redirects
@@ -280,32 +301,29 @@ impl<'a> LoginFlow<'a> {
         user_agent: impl Into<String>,
         cache_dir: impl Into<PathBuf>,
     ) -> Result<Self, ProviderError> {
-        let provider = match provider {
-            "openai-codex" => LoginProvider::Codex,
-            "anthropic" => LoginProvider::Claude,
-            _ => {
-                return Err(ProviderError::AuthWrite {
-                    reason: format!("{provider} has no OAuth login flow"),
-                });
-            }
+        let Some((def, oauth)) = find(provider).and_then(|def| def.oauth.map(|oauth| (def, oauth)))
+        else {
+            return Err(ProviderError::AuthWrite {
+                reason: format!("{provider} has no OAuth login flow"),
+            });
         };
-        let oauth_client = build_oauth_client(provider.family())?;
-        let (paste_sender, paste_receiver) = match provider {
-            LoginProvider::Claude => {
+        let oauth_client = build_oauth_client(def.family)?;
+        let (paste_sender, paste_receiver) = match oauth.completion {
+            Completion::PasteCode => {
                 let (sender, receiver) = oneshot::channel();
                 (Some(sender), Some(receiver))
             }
-            LoginProvider::Codex => (None, None),
+            Completion::Callback => (None, None),
         };
         Ok(Self {
-            provider,
+            def,
             store,
             client,
             oauth_client,
             user_agent: user_agent.into(),
             cache_dir: cache_dir.into(),
             endpoints: LoginEndpoints::production()?,
-            codex_provider: None,
+            models_provider: None,
             paste_sender,
             paste_receiver,
             wait: LOGIN_WAIT,
@@ -314,7 +332,7 @@ impl<'a> LoginFlow<'a> {
         })
     }
 
-    /// Selects the Codex device-code flow without trying the browser callback.
+    /// Selects the device-code flow without trying the browser callback.
     #[must_use]
     pub fn with_device_auth(mut self) -> Self {
         self.device_auth = true;
@@ -336,26 +354,27 @@ impl<'a> LoginFlow<'a> {
         Ok(self)
     }
 
-    /// Uses the host's configured built-in Codex route for the post-login model fetch.
+    /// Uses the host's configured built-in route of this flow's provider for
+    /// the post-login model fetch.
     ///
     /// For a loopback endpoint override, the override's model API base takes
     /// precedence so replay tests do not contact the live service.
     ///
     /// # Errors
-    /// Returns [`ProviderError::AuthWrite`] when `provider` is not the built-in
-    /// `openai-codex` Codex route, or a typed URL error for an invalid base URL.
+    /// Returns [`ProviderError::AuthWrite`] when `provider` is not the flow's
+    /// built-in route, or a typed URL error for an invalid base URL.
     pub fn with_codex_provider(mut self, provider: ProviderEntry) -> Result<Self, ProviderError> {
-        if provider.id.as_ref() != "openai-codex" || provider.family != Family::Codex {
+        if provider.id.as_ref() != self.def.id || provider.family != self.def.family {
             return Err(ProviderError::AuthWrite {
-                reason: String::from("post-login model fetch requires the openai-codex route"),
+                reason: format!("post-login model fetch requires the {} route", self.def.id),
             });
         }
-        check_base_url(Family::Codex, &provider.base_url)?;
-        self.codex_provider = Some(provider);
+        check_base_url(self.def.family, &provider.base_url)?;
+        self.models_provider = Some(provider);
         Ok(self)
     }
 
-    /// Takes the sole input sender for Claude paste login.
+    /// Takes the sole input sender for paste login.
     ///
     /// The sender is available once. Sending one value completes the paste
     /// input. Dropping it closes the paste path; a bound browser callback can
@@ -372,7 +391,7 @@ impl<'a> LoginFlow<'a> {
     /// apply through callback/device authorization and token exchange; once a
     /// successful exchange is ready to commit, the durable write completes as
     /// one locked atomic transaction. After commit, cancellation only stops the
-    /// best-effort Codex model fetch and the committed credential is returned.
+    /// best-effort model fetch and the committed credential is returned.
     ///
     /// # Errors
     /// Returns a typed login, transport, token-exchange, ID-token, or auth-store
@@ -420,11 +439,15 @@ impl<'a> LoginFlow<'a> {
             drop(self.paste_receiver.take());
             return Err(error);
         }
-        if self.provider == LoginProvider::Codex {
+        let models_base = self
+            .endpoints
+            .row(self.def)
+            .and_then(|row| row.models_base.clone());
+        if let Some(models_base) = models_base {
             tokio::select! {
                 biased;
                 () = cancel.cancelled() => {},
-                () = self.fetch_codex_models_best_effort(&credential) => {},
+                () = self.fetch_models_best_effort(&models_base, &credential) => {},
             }
         }
         drop(self.paste_sender.take());
@@ -438,22 +461,30 @@ impl<'a> LoginFlow<'a> {
         cancel: &CancellationToken,
         deadline: Instant,
     ) -> Result<OAuthCredential, ProviderError> {
+        let Some(row) = self.endpoints.row(self.def).cloned() else {
+            return Err(ProviderError::AuthWrite {
+                reason: format!("{} has no OAuth endpoints", self.def.id),
+            });
+        };
         let verifier = new_pkce_verifier();
         let challenge = pkce_challenge(&verifier);
-        match self.provider {
-            LoginProvider::Codex => {
-                self.authorize_codex(progress, cancel, deadline, &verifier, &challenge)
+        match row.oauth.completion {
+            Completion::Callback => {
+                self.authorize_callback(&row, progress, cancel, deadline, &verifier, &challenge)
                     .await
             }
-            LoginProvider::Claude => {
-                self.authorize_claude(progress, cancel, &verifier, &challenge)
+            Completion::PasteCode => {
+                self.authorize_paste(&row, progress, cancel, &verifier, &challenge)
                     .await
             }
         }
     }
 
-    async fn authorize_codex(
+    /// The callback-only browser flow: a busy port falls back to the device
+    /// flow.
+    async fn authorize_callback(
         &self,
+        row: &RowEndpoints,
         progress: &(dyn Fn(LoginProgress) + Send + Sync),
         cancel: &CancellationToken,
         deadline: Instant,
@@ -461,16 +492,16 @@ impl<'a> LoginFlow<'a> {
         challenge: &str,
     ) -> Result<OAuthCredential, ProviderError> {
         if self.device_auth {
-            return self
-                .authorize_codex_device(progress, cancel, deadline)
-                .await;
+            return self.authorize_device(row, progress, cancel, deadline).await;
         }
-        let state = new_state();
-        let listener = bind_callback(self.endpoints.codex_callback_port).await;
+        let state = flow_state(row.oauth.hook, verifier);
+        let listener = bind_callback(row.callback_port).await;
         if let Ok((listener, port)) = listener {
-            let redirect = codex_redirect(port);
-            let url = codex_authorize_url(
-                &self.endpoints.codex_authorize,
+            let redirect = redirect_uri(row.oauth.redirect, port);
+            let url = authorize_url(
+                row.def.family,
+                &row.oauth,
+                &row.authorize,
                 &redirect,
                 challenge,
                 &state,
@@ -482,47 +513,66 @@ impl<'a> LoginFlow<'a> {
                 },
                 cancel,
             )?;
-            let code = callback_code(listener, CODEX_CALLBACK_PATH, &state, Family::Codex).await?;
+            let code =
+                callback_code(listener, row.oauth.redirect.path, &state, row.def.family).await?;
             report_progress(progress, LoginProgress::Exchanging, cancel)?;
             return self
-                .exchange_codex(&code, verifier, &redirect, &[&state, &code, verifier])
+                .exchange(row, &code, verifier, &redirect, &[&state, &code, verifier])
                 .await;
         }
-        self.authorize_codex_device(progress, cancel, deadline)
-            .await
+        self.authorize_device(row, progress, cancel, deadline).await
     }
 
-    async fn authorize_codex_device(
+    async fn authorize_device(
         &self,
+        row: &RowEndpoints,
         progress: &(dyn Fn(LoginProgress) + Send + Sync),
         cancel: &CancellationToken,
         deadline: Instant,
     ) -> Result<OAuthCredential, ProviderError> {
+        let Some(device) = &row.device else {
+            return Err(ProviderError::AuthWrite {
+                reason: format!("{} has no device sign-in", row.def.id),
+            });
+        };
         let http = OAuthHttp {
             client: &self.oauth_client,
             user_agent: &self.user_agent,
         };
-        let grant = super::device::run(&http, &self.endpoints, deadline, progress, cancel).await?;
+        let grant = super::device::run(
+            &http,
+            row.def.family,
+            row.oauth.client_id,
+            device,
+            deadline,
+            progress,
+            cancel,
+        )
+        .await?;
         report_progress(progress, LoginProgress::Exchanging, cancel)?;
-        self.exchange_codex(
+        self.exchange(
+            row,
             &grant.authorization_code,
             &grant.code_verifier,
-            CODEX_DEVICE_REDIRECT,
+            device.redirect_uri,
             &[&grant.authorization_code, &grant.code_verifier],
         )
         .await
     }
 
-    async fn authorize_claude(
+    /// The paste browser flow: the callback or a pasted value completes it.
+    async fn authorize_paste(
         &mut self,
+        row: &RowEndpoints,
         progress: &(dyn Fn(LoginProgress) + Send + Sync),
         cancel: &CancellationToken,
         verifier: &str,
         challenge: &str,
     ) -> Result<OAuthCredential, ProviderError> {
-        let listener = bind_callback(self.endpoints.claude_callback_port).await;
+        let state = flow_state(row.oauth.hook, verifier);
+        let listener = bind_callback_with_fallback(row.callback_port).await;
         let (listener, redirect) =
-            self.claude_listener_redirect(listener, challenge, verifier, progress, cancel)?;
+            Self::paste_listener_redirect(row, listener, challenge, &state, progress, cancel)?;
         report_progress(
             progress,
             LoginProgress::AskPaste {
@@ -533,48 +583,36 @@ impl<'a> LoginFlow<'a> {
         let receiver = self.paste_receiver.take();
         drop(self.paste_sender.take());
         let code = if let Some(listener) = listener {
-            self.claude_callback_code(listener, receiver, verifier, cancel)
-                .await?
+            Self::paste_callback_code(row, listener, receiver, &state, cancel).await?
         } else {
             let value = receive_paste(receiver, cancel).await?;
-            parse_pasted_code(&value, verifier)?
+            parse_pasted_code(&value, &state)?
         };
         report_progress(progress, LoginProgress::Exchanging, cancel)?;
-        self.exchange_claude(&code, verifier, &redirect, &[&code, verifier])
+        self.exchange(row, &code, verifier, &redirect, &[&code, &state])
             .await
     }
 
-    fn claude_listener_redirect(
-        &self,
+    fn paste_listener_redirect(
+        row: &RowEndpoints,
         listener: std::io::Result<(tokio::net::TcpListener, u16)>,
         challenge: &str,
-        verifier: &str,
+        state: &str,
         progress: &(dyn Fn(LoginProgress) + Send + Sync),
         cancel: &CancellationToken,
     ) -> Result<(Option<tokio::net::TcpListener>, String), ProviderError> {
-        if let Ok((listener, port)) = listener {
-            let redirect = claude_redirect(port);
-            let url = claude_authorize_url(
-                &self.endpoints.claude_authorize,
-                &redirect,
-                challenge,
-                verifier,
-            )?;
-            report_progress(
-                progress,
-                LoginProgress::OpenUrl {
-                    url: url.to_string(),
-                },
-                cancel,
-            )?;
-            return Ok((Some(listener), redirect));
-        }
-        let redirect = claude_redirect(self.endpoints.claude_callback_port);
-        let url = claude_authorize_url(
-            &self.endpoints.claude_authorize,
+        let (listener, port) = match listener {
+            Ok((listener, port)) => (Some(listener), port),
+            Err(_) => (None, row.callback_port),
+        };
+        let redirect = redirect_uri(row.oauth.redirect, port);
+        let url = authorize_url(
+            row.def.family,
+            &row.oauth,
+            &row.authorize,
             &redirect,
             challenge,
-            verifier,
+            state,
         )?;
         report_progress(
             progress,
@@ -583,31 +621,32 @@ impl<'a> LoginFlow<'a> {
             },
             cancel,
         )?;
-        Ok((None, redirect))
+        Ok((listener, redirect))
     }
 
-    async fn claude_callback_code(
-        &self,
+    async fn paste_callback_code(
+        row: &RowEndpoints,
         listener: tokio::net::TcpListener,
         receiver: Option<tokio::sync::oneshot::Receiver<String>>,
-        verifier: &str,
+        state: &str,
         cancel: &CancellationToken,
     ) -> Result<String, ProviderError> {
-        let callback = callback_code(listener, CLAUDE_CALLBACK_PATH, verifier, Family::Anthropic);
+        let callback = callback_code(listener, row.oauth.redirect.path, state, row.def.family);
         tokio::pin!(callback);
         tokio::select! {
             biased;
             result = &mut callback => result,
             pasted = receive_paste(receiver, cancel) => match pasted {
-                Ok(value) => parse_pasted_code(&value, verifier),
+                Ok(value) => parse_pasted_code(&value, state),
                 Err(error) if cancel.is_cancelled() => Err(error),
                 Err(_) => callback.await,
             }
         }
     }
 
-    async fn exchange_codex(
+    async fn exchange(
         &self,
+        row: &RowEndpoints,
         code: &str,
         verifier: &str,
         redirect: &str,
@@ -617,68 +656,55 @@ impl<'a> LoginFlow<'a> {
             client: &self.oauth_client,
             user_agent: &self.user_agent,
         };
-        let body = {
-            let mut form = url::form_urlencoded::Serializer::new(String::new());
-            form.append_pair("grant_type", "authorization_code")
-                .append_pair("client_id", CODEX_CLIENT_ID)
-                .append_pair("code", code)
-                .append_pair("code_verifier", verifier)
-                .append_pair("redirect_uri", redirect);
-            form.finish()
-        };
-        let response = post_form(&http, Family::Codex, &self.endpoints.codex_token, &body).await?;
-        let token = token_or_exchange_error::<CodexTokenResponse>(&response, secrets)?;
-        validate_token_pair(&token.access_token, &token.refresh_token)?;
-        let identity = codex_identity(&token.id_token).ok_or(ProviderError::NoAccountId)?;
-        Ok(OAuthCredential {
-            expires_at: oauth_expires_at(unix_now(), token.expires_in, &token.access_token),
-            access_token: SecretString::from(token.access_token),
-            refresh_token: SecretString::from(token.refresh_token),
-            id_token: Some(token.id_token),
-            account_id: Some(identity.account_id),
-        })
-    }
-
-    async fn exchange_claude(
-        &self,
-        code: &str,
-        verifier: &str,
-        redirect: &str,
-        secrets: &[&str],
-    ) -> Result<OAuthCredential, ProviderError> {
-        let http = OAuthHttp {
-            client: &self.oauth_client,
-            user_agent: &self.user_agent,
-        };
-        let request = ClaudeTokenRequest {
-            grant_type: "authorization_code",
-            client_id: CLAUDE_CLIENT_ID,
-            code,
-            state: verifier,
-            redirect_uri: redirect,
-            code_verifier: verifier,
-        };
-        let response = post_json(
-            &http,
-            Family::Anthropic,
-            &self.endpoints.claude_token,
-            &request,
-        )
-        .await?;
-        let token = token_or_exchange_error::<ClaudeTokenResponse>(&response, secrets)?;
-        validate_token_pair(&token.access_token, &token.refresh_token)?;
-        Ok(OAuthCredential {
-            expires_at: oauth_expires_at(unix_now(), token.expires_in, &token.access_token),
-            access_token: SecretString::from(token.access_token),
-            refresh_token: SecretString::from(token.refresh_token),
-            id_token: None,
-            account_id: None,
-        })
+        match row.oauth.hook {
+            Hook::CodexAccount => {
+                let body = {
+                    let mut form = url::form_urlencoded::Serializer::new(String::new());
+                    form.append_pair("grant_type", "authorization_code")
+                        .append_pair("client_id", row.oauth.client_id)
+                        .append_pair("code", code)
+                        .append_pair("code_verifier", verifier)
+                        .append_pair("redirect_uri", redirect);
+                    form.finish()
+                };
+                let response = post_form(&http, row.def.family, &row.token, &body).await?;
+                let token = token_or_exchange_error::<CodexTokenResponse>(&response, secrets)?;
+                validate_token_pair(&token.access_token, &token.refresh_token)?;
+                let identity = codex_identity(&token.id_token).ok_or(ProviderError::NoAccountId)?;
+                Ok(OAuthCredential {
+                    expires_at: oauth_expires_at(unix_now(), token.expires_in, &token.access_token),
+                    access_token: SecretString::from(token.access_token),
+                    refresh_token: SecretString::from(token.refresh_token),
+                    id_token: Some(token.id_token),
+                    account_id: Some(identity.account_id),
+                })
+            }
+            Hook::ClaudeCode => {
+                let request = ClaudeTokenRequest {
+                    grant_type: "authorization_code",
+                    client_id: row.oauth.client_id,
+                    code,
+                    state: verifier,
+                    redirect_uri: redirect,
+                    code_verifier: verifier,
+                };
+                let response = post_json(&http, row.def.family, &row.token, &request).await?;
+                let token = token_or_exchange_error::<ClaudeTokenResponse>(&response, secrets)?;
+                validate_token_pair(&token.access_token, &token.refresh_token)?;
+                Ok(OAuthCredential {
+                    expires_at: oauth_expires_at(unix_now(), token.expires_in, &token.access_token),
+                    access_token: SecretString::from(token.access_token),
+                    refresh_token: SecretString::from(token.refresh_token),
+                    id_token: None,
+                    account_id: None,
+                })
+            }
+        }
     }
 
     async fn persist(&mut self, credential: &Credential) -> Result<(), ProviderError> {
         let path = self.store.path().to_path_buf();
-        let provider = self.provider.id();
+        let provider = self.def.id;
         let credential = credential.clone();
         let lock = crate::auth::refresh::lock_auth_file(&path).await?;
         let updated = crate::auth::refresh::blocking(move || {
@@ -693,18 +719,19 @@ impl<'a> LoginFlow<'a> {
         Ok(())
     }
 
-    async fn fetch_codex_models_best_effort(&self, credential: &Credential) {
+    async fn fetch_models_best_effort(&self, models_base: &Url, credential: &Credential) {
         let default_entry = ProviderEntry {
-            id: Box::from("openai-codex"),
-            family: Family::Codex,
-            base_url: self.endpoints.codex_models_base.as_str().into(),
+            id: Box::from(self.def.id),
+            def: Some(self.def),
+            family: self.def.family,
+            base_url: models_base.as_str().into(),
             transport: Transport::Https,
             key_env: None,
             auth: AuthStyle::Bearer,
             max_concurrent_requests: 1,
         };
         let entry = self
-            .codex_provider
+            .models_provider
             .as_ref()
             .filter(|_| !self.endpoints.loopback_override)
             .unwrap_or(&default_entry);
@@ -719,28 +746,6 @@ impl<'a> LoginFlow<'a> {
         let _catalog = crate::catalog::load_models(&fetch, |duration| sleep(duration)).await;
     }
 }
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum LoginProvider {
-    Codex,
-    Claude,
-}
-
-impl LoginProvider {
-    const fn id(self) -> &'static str {
-        match self {
-            Self::Codex => "openai-codex",
-            Self::Claude => "anthropic",
-        }
-    }
-    const fn family(self) -> Family {
-        match self {
-            Self::Codex => Family::Codex,
-            Self::Claude => Family::Anthropic,
-        }
-    }
-}
-
 /// Stores one API key while holding the cross-process auth-file lock.
 ///
 /// # Errors
@@ -750,7 +755,26 @@ pub async fn store_api_key(
     provider: &str,
     key: String,
 ) -> Result<(), ProviderError> {
-    let path = path.into();
+    store_api_key_unless_cancelled(path.into(), provider, key, &CancellationToken::new()).await
+}
+
+/// Stores one API key unless `cancel` fires first.
+///
+/// The commit point is the cancellation check made while the auth-file lock is
+/// held, immediately before the atomic write. Cancellation seen before it
+/// returns [`ProviderError::LoginCancelled`] and leaves `auth.json` unchanged,
+/// including while the lock is still contended; cancellation after it finds the
+/// key durably stored and returns `Ok`.
+///
+/// # Errors
+/// Returns [`ProviderError::LoginCancelled`] when cancellation wins, and an
+/// auth-store or lock error when the key cannot be written.
+pub(crate) async fn store_api_key_unless_cancelled(
+    path: PathBuf,
+    provider: &str,
+    key: String,
+    cancel: &CancellationToken,
+) -> Result<(), ProviderError> {
     let parent = path
         .parent()
         .map(Path::to_path_buf)
@@ -774,9 +798,17 @@ pub async fn store_api_key(
     })
     .await?;
     let provider = provider.to_owned();
-    let lock = crate::auth::refresh::lock_auth_file(&path).await?;
+    let lock = tokio::select! {
+        biased;
+        () = cancel.cancelled() => return Err(ProviderError::LoginCancelled),
+        lock = crate::auth::refresh::lock_auth_file(&path) => lock?,
+    };
+    let cancel = cancel.clone();
     crate::auth::refresh::blocking(move || {
         let _lock = lock;
+        if cancel.is_cancelled() {
+            return Err(ProviderError::LoginCancelled);
+        }
         let mut store = AuthStore::load(&path)?;
         store.set(
             &provider,
@@ -789,14 +821,15 @@ pub async fn store_api_key(
     .await
 }
 
-/// Removes `provider`'s local credential, revoking Codex refresh tokens on a
-/// best-effort basis before the atomic local write.
+/// Removes `provider`'s local credential, revoking refresh tokens of providers
+/// that publish a revocation endpoint on a best-effort basis before the atomic
+/// local write.
 ///
 /// Repeated logout and a provider with no stored entry succeed without a remote
-/// request. Claude and API-key credentials are removed locally; Codex OAuth
-/// sends one revoke request to the pinned production endpoint. The revoke is
+/// request. API-key credentials and providers without a revocation endpoint are
+/// removed locally; an OAuth credential of a provider with one sends one revoke
+/// request to the pinned production endpoint. The revoke is
 /// best effort: a network/status failure never prevents local logout.
-///
 /// # Errors
 /// Returns an auth-store or lock error if the durable local removal fails.
 pub async fn logout(provider: &str, store: &mut AuthStore) -> Result<(), ProviderError> {
@@ -832,28 +865,36 @@ pub async fn logout_with(
         *store = latest;
         return Ok(());
     };
-    if let ("openai-codex", Credential::OAuth(oauth)) = (provider, &stored) {
+    let revoke = find(provider).and_then(|def| {
+        let oauth = def.oauth?;
+        let url = endpoints.row(def)?.revoke.as_ref()?;
+        Some((def, oauth, url))
+    });
+    if let (Some((def, oauth, url)), Credential::OAuth(token)) = (revoke, &stored) {
         endpoints.validate()?;
         let request = RevokeRequest {
-            token: oauth.refresh_token.expose(),
+            token: token.refresh_token.expose(),
             token_type_hint: "refresh_token",
-            client_id: CODEX_CLIENT_ID,
+            client_id: oauth.client_id,
         };
-        if let Ok(client) = build_oauth_client(Family::Codex) {
+        if let Ok(client) = build_oauth_client(def.family) {
             let http = OAuthHttp {
                 client: &client,
                 user_agent,
             };
-            match post_json(&http, Family::Codex, &endpoints.codex_revoke, &request).await {
+            match post_json(&http, def.family, url, &request).await {
                 Ok(response) if (200..300).contains(&response.status) => {}
                 Ok(response) => tracing::warn!(
+                    provider = def.id,
                     status = response.status,
-                    "Codex OAuth token revocation failed"
+                    "OAuth token revocation failed"
                 ),
-                Err(_) => tracing::warn!("Codex OAuth token revocation request failed"),
+                Err(_) => {
+                    tracing::warn!(provider = def.id, "OAuth token revocation request failed");
+                }
             }
         } else {
-            tracing::warn!("Codex OAuth token revocation client failed");
+            tracing::warn!(provider = def.id, "OAuth token revocation client failed");
         }
     }
     let updated = crate::auth::refresh::blocking(move || {
@@ -1093,60 +1134,62 @@ struct RevokeRequest<'a> {
     client_id: &'static str,
 }
 
-fn codex_authorize_url(
+fn authorize_url(
+    family: Family,
+    oauth: &OAuthSpec,
     endpoint_url: &Url,
     redirect_uri: &str,
     challenge: &str,
     state: &str,
 ) -> Result<Url, ProviderError> {
-    with_query(
-        endpoint_url,
-        &[
-            ("response_type", "code"),
-            ("client_id", CODEX_CLIENT_ID),
-            ("redirect_uri", redirect_uri),
-            (
-                "scope",
-                "openid profile email offline_access api.connectors.read api.connectors.invoke",
-            ),
-            ("code_challenge", challenge),
-            ("code_challenge_method", "S256"),
-            ("state", state),
-            ("id_token_add_organizations", "true"),
-            ("codex_cli_simplified_flow", "true"),
-            ("originator", CODEX_ORIGINATOR),
-        ],
-        Family::Codex,
-        QueryEncoding::Percent20,
-    )
+    let scope = oauth.scopes.join(" ");
+    let pairs: Vec<(&str, &str)> = oauth
+        .query
+        .iter()
+        .map(|(name, value)| {
+            let text = match value {
+                QueryValue::Text(text) => text,
+                QueryValue::ClientId => oauth.client_id,
+                QueryValue::RedirectUri => redirect_uri,
+                QueryValue::Scope => scope.as_str(),
+                QueryValue::Challenge => challenge,
+                QueryValue::State => state,
+            };
+            (*name, text)
+        })
+        .collect();
+    with_query(endpoint_url, &pairs, family, query_encoding(oauth.hook))
 }
 
-fn claude_authorize_url(
-    endpoint_url: &Url,
-    redirect_uri: &str,
-    challenge: &str,
-    state: &str,
-) -> Result<Url, ProviderError> {
-    with_query(
-        endpoint_url,
-        &[
-            ("code", "true"),
-            ("client_id", CLAUDE_CLIENT_ID),
-            ("response_type", "code"),
-            ("redirect_uri", redirect_uri),
-            (
-                "scope",
-                "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload",
-            ),
-            ("code_challenge", challenge),
-            ("code_challenge_method", "S256"),
-            ("state", state),
-        ],
-        Family::Anthropic,
-        QueryEncoding::Form,
-    )
+/// Whether sign-in is followed by a best-effort model-list fetch.
+fn fetches_models(hook: Hook) -> bool {
+    matches!(hook, Hook::CodexAccount)
 }
 
+/// The path prefix that keeps the rows apart on one loopback test server.
+const fn loopback_prefix(hook: Hook) -> &'static str {
+    match hook {
+        Hook::CodexAccount => "",
+        Hook::ClaudeCode => "claude/",
+    }
+}
+
+/// How the vendor's authorization endpoint reads a space in a query value.
+const fn query_encoding(hook: Hook) -> QueryEncoding {
+    match hook {
+        Hook::CodexAccount => QueryEncoding::Percent20,
+        Hook::ClaudeCode => QueryEncoding::Form,
+    }
+}
+
+/// The `state` of one attempt: Claude reuses the PKCE verifier, the others
+/// draw a fresh value.
+fn flow_state(hook: Hook, verifier: &str) -> String {
+    match hook {
+        Hook::ClaudeCode => verifier.to_owned(),
+        Hook::CodexAccount => new_state(),
+    }
+}
 #[derive(Clone, Copy)]
 enum QueryEncoding {
     Form,
@@ -1174,12 +1217,15 @@ fn with_query(
     Ok(result)
 }
 
-fn codex_redirect(port: u16) -> String {
-    format!("http://localhost:{port}{CODEX_CALLBACK_PATH}")
+fn redirect_uri(redirect: Redirect, port: u16) -> String {
+    format!("http://{}:{port}{}", redirect.host, redirect.path)
 }
 
-fn claude_redirect(port: u16) -> String {
-    format!("http://localhost:{port}{CLAUDE_CALLBACK_PATH}")
+fn host_of(url: &str) -> String {
+    Url::parse(url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .unwrap_or_default()
 }
 
 fn new_pkce_verifier() -> String {
@@ -1211,6 +1257,20 @@ pub(crate) fn unix_now() -> i64 {
 }
 
 async fn bind_callback(port: u16) -> std::io::Result<(TcpListener, u16)> {
+    bind_loopback(port).await
+}
+
+/// Binds the Claude callback listener: the preferred port when free, else
+/// any free loopback port. The provider accepts a loopback redirect on any
+/// port, so the authorize URL is built from the port actually bound.
+async fn bind_callback_with_fallback(port: u16) -> std::io::Result<(TcpListener, u16)> {
+    match bind_loopback(port).await {
+        Ok(bound) => Ok(bound),
+        Err(preferred_error) => bind_loopback(0).await.map_err(|_| preferred_error),
+    }
+}
+
+async fn bind_loopback(port: u16) -> std::io::Result<(TcpListener, u16)> {
     let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     let listener = TcpListener::bind(address).await?;
     let bound = listener.local_addr()?.port();

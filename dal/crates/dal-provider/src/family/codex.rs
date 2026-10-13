@@ -14,10 +14,7 @@ use futures::{Stream, StreamExt, stream};
 use sonic_rs::JsonValueTrait;
 
 use crate::{
-    auth::{
-        credential::{OAuthCredential, codex_identity},
-        oauth::CODEX_ORIGINATOR,
-    },
+    auth::{credential::OAuthCredential, oauth::CODEX_ORIGINATOR},
     error::ProviderError,
     family::responses,
     http::{self, Exchange},
@@ -82,24 +79,13 @@ pub(crate) fn build(input: &CodexRequest<'_>) -> Result<CodexWire, ProviderError
         });
     };
     let model = model.to_string().into_boxed_str();
-    let identity = input
-        .credential
-        .id_token
-        .as_deref()
-        .and_then(codex_identity);
-    let account_id = input
-        .credential
-        .account_id
-        .as_deref()
-        .filter(|account_id| !account_id.trim().is_empty())
-        .or_else(|| {
-            identity
-                .as_ref()
-                .map(|identity| identity.account_id.as_str())
-        })
-        .ok_or_else(|| ProviderError::InvalidRequest {
-            message: String::from("openai-codex credential has no ChatGPT account id"),
-        })?;
+    let account_id =
+        input
+            .credential
+            .chatgpt_account_id()
+            .ok_or_else(|| ProviderError::InvalidRequest {
+                message: String::from("openai-codex credential has no ChatGPT account id"),
+            })?;
 
     let session_id = input.session_id.to_string();
     let body = responses::request_body(input.request, input.thinking, input.reasoning_summaries)?;
@@ -107,7 +93,7 @@ pub(crate) fn build(input: &CodexRequest<'_>) -> Result<CodexWire, ProviderError
     bearer.push_str(input.credential.access_token.expose());
     let headers = vec![
         ("authorization", bearer),
-        ("chatgpt-account-id", account_id.to_owned()),
+        ("chatgpt-account-id", account_id.into_owned()),
         ("originator", String::from(CODEX_ORIGINATOR)),
         ("session-id", session_id.clone()),
         ("thread-id", session_id.clone()),
@@ -153,31 +139,44 @@ fn invalid_body() -> ProviderError {
     }
 }
 
-/// Borrows the bearer token from the generated request headers for redaction.
-pub(crate) fn access_token(wire: &CodexWire) -> &str {
+fn header<'a>(wire: &'a CodexWire, name: &str) -> &'a str {
     wire.headers
         .iter()
-        .find(|(name, _)| *name == "authorization")
-        .and_then(|(_, value)| value.strip_prefix("Bearer "))
+        .find(|(candidate, _)| *candidate == name)
+        .map_or("", |(_, value)| value.as_str())
+}
+
+/// Borrows the bearer token from the generated request headers for redaction.
+pub(crate) fn access_token(wire: &CodexWire) -> &str {
+    header(wire, "authorization")
+        .strip_prefix("Bearer ")
         .unwrap_or_default()
 }
 
-/// Replaces actual secret occurrences and borrows the unchanged case.
-pub(crate) fn redact<'a>(text: &'a str, token: &str) -> Cow<'a, str> {
-    if token.is_empty() || !text.contains(token) {
-        Cow::Borrowed(text)
-    } else {
-        Cow::Owned(text.replace(token, "<redacted>"))
-    }
+/// The request secrets a provider-controlled message must not echo: the
+/// bearer token and the `ChatGPT` account identifier.
+pub(crate) fn secrets(wire: &CodexWire) -> Vec<Box<str>> {
+    vec![
+        access_token(wire).into(),
+        header(wire, "chatgpt-account-id").into(),
+    ]
 }
 
-fn redact_provider_error(error: &mut ProviderError, token: &str) {
-    if token.is_empty() {
-        return;
+/// Replaces actual secret occurrences and borrows the unchanged case.
+pub(crate) fn redact<'a>(text: &'a str, secrets: &[Box<str>]) -> Cow<'a, str> {
+    let mut text = Cow::Borrowed(text);
+    for secret in secrets {
+        if !secret.is_empty() && text.contains(secret.as_ref()) {
+            text = Cow::Owned(text.replace(secret.as_ref(), "<redacted>"));
+        }
     }
+    text
+}
+
+pub(crate) fn redact_provider_error(error: &mut ProviderError, secrets: &[Box<str>]) {
     let redact_string = |value: &mut String| {
-        if value.contains(token) {
-            *value = value.replace(token, "<redacted>");
+        if let Cow::Owned(redacted) = redact(value, secrets) {
+            *value = redacted;
         }
     };
     match error {
@@ -228,7 +227,7 @@ async fn https_with_idle_timeout(
     wire: CodexWire,
     idle_timeout: Duration,
 ) -> Result<EventStream, AttemptFailure> {
-    let token = access_token(&wire).to_owned();
+    let secrets = secrets(&wire);
     let url = http::endpoint(Family::Codex, base_url, PATH)?;
     let mut request = client.post(url);
     for (name, value) in &wire.headers {
@@ -251,14 +250,15 @@ async fn https_with_idle_timeout(
             .map(String::from);
         let body = http::read_body(Family::Codex, response).await?;
         let body = String::from_utf8_lossy(&body);
-        let body = redact(&body, &token);
-        if let Some(error) = crate::usage::map_codex_error(status, body.as_ref(), &wire.model) {
+        let body = redact(&body, &secrets);
+        if let Some(mut error) = crate::usage::map_codex_error(status, body.as_ref(), &wire.model) {
+            redact_provider_error(&mut error, &secrets);
             return Err(AttemptFailure::Provider(error));
         }
         return Err(AttemptFailure::Response {
             status,
-            code: response_code(body.as_ref()),
-            message: response_message(body.as_ref()),
+            code: response_code(body.as_ref()).map(|code| redact(&code, &secrets).into_owned()),
+            message: redact(&response_message(body.as_ref()), &secrets).into_owned(),
             retry_after,
         });
     }
@@ -270,19 +270,19 @@ async fn https_with_idle_timeout(
         idle_timeout,
     );
     let events = sse::decode_stream(chunks);
-    let event_token = token;
+    let event_secrets = secrets;
     let decoded =
         responses::decode(events, Family::Codex, wire.model).map(move |event| match event {
-            Err(ProviderError::StreamCut) if *lock(&read_failed) => {
+            Err(_) if *lock(&read_failed) => {
                 let mut error = ProviderError::Transport {
                     family: Family::Codex,
                     reason: String::from("Codex response body read failed"),
                 };
-                redact_provider_error(&mut error, &event_token);
+                redact_provider_error(&mut error, &event_secrets);
                 Err(error)
             }
             Err(mut error) => {
-                redact_provider_error(&mut error, &event_token);
+                redact_provider_error(&mut error, &event_secrets);
                 Err(error)
             }
             Ok(event) => Ok(event),

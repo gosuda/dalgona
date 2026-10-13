@@ -503,9 +503,8 @@ impl CommandHost for DriverHost {
         let Some(catalog) = self.host.shared.cached_catalog() else {
             return Vec::new();
         };
-        let reference = crate::host::ops::request_reference(&route);
         let aliases: Vec<(Box<str>, Box<str>)> = Vec::new();
-        let Ok(resolved) = dal_provider::resolve(&catalog, &aliases, &reference) else {
+        let Ok(resolved) = dal_provider::resolve_route(&catalog, &aliases, &route) else {
             return Vec::new();
         };
         dal_provider::levels_for(&resolved.entry.thinking).into_vec()

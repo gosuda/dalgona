@@ -602,6 +602,7 @@ impl ObservedEvent for TurnEnd {
         Ok(value::Value::object([
             ("turn", text(self.turn)),
             ("stop", serialized(&self.stop)?),
+            ("overflowed", value::Value::Bool(self.overflowed)),
         ]))
     }
 }

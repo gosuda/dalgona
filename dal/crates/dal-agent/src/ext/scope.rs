@@ -99,6 +99,42 @@ fn service_error(error: ServiceError) -> ScopeError {
     }
 }
 
+/// Closes a member session whose wait failed, so no child outlives its
+/// failed handle. A close that fails too keeps both failures in the error.
+async fn close_after_failure(
+    services: &Arc<dyn Services>,
+    caller: &Caller,
+    id: SessionId,
+    wait_error: ServiceError,
+) -> ScopeError {
+    let failure = service_error(wait_error);
+    match services.agents(caller, AgentsOp::Cancel { id }).await {
+        Ok(AgentsReply::Cancelled { .. }) => failure,
+        Ok(_) => ScopeError::Failed(
+            format!("{failure}; closing child session {id} returned an unexpected reply. Retry cancelling that session.").into(),
+        ),
+        Err(close_error) => ScopeError::Failed(
+            format!("{failure}; closing child session {id} also failed: {close_error}. Retry cancelling that session.").into(),
+        ),
+    }
+}
+
+/// Closes the child a cancelled start may have created, so no member
+/// session outlives its cancelled handle. A start that never opened a
+/// child leaves nothing to close.
+async fn close_cancelled_start(
+    services: &Arc<dyn Services>,
+    caller: &Caller,
+    child: &Arc<Mutex<Option<SessionId>>>,
+    started: Result<AgentsReply, ServiceError>,
+) {
+    let Ok(AgentsReply::Started { id }) = started else {
+        return;
+    };
+    *locked(child) = Some(id);
+    let _ = services.agents(caller, AgentsOp::Cancel { id }).await;
+}
+
 impl Runtime {
     fn price(&self, route: &ModelRoute) -> Option<ModelPrice> {
         match &self.price {
@@ -117,17 +153,21 @@ impl Runtime {
         let caller = self.caller.clone();
         let lineage = self.lineage.clone().with_ledger(ledger);
         Box::pin(synthetic::enter(lineage, async move {
+            let run = async {
+                let stream = services
+                    .infer_stream(&caller, request)
+                    .await
+                    .map_err(service_error)?;
+                synthetic::collect(stream).await.map_err(|failure| {
+                    if failure == InferFailure::Cancelled {
+                        ScopeError::Cancelled
+                    } else {
+                        ScopeError::Infer(failure)
+                    }
+                })
+            };
             tokio::select! {
-                opened = services.infer_stream(&caller, request) => {
-                    let stream = opened.map_err(service_error)?;
-                    synthetic::collect(stream).await.map_err(|failure| {
-                        if failure == InferFailure::Cancelled {
-                            ScopeError::Cancelled
-                        } else {
-                            ScopeError::Infer(failure)
-                        }
-                    })
-                }
+                result = run => result,
                 () = cancel.cancelled() => Err(ScopeError::Cancelled),
             }
         }))
@@ -142,16 +182,26 @@ impl Runtime {
         let services = Arc::clone(&self.services);
         let caller = self.caller.clone();
         Box::pin(async move {
-            let started = tokio::select! {
-                reply = services.agents(&caller, AgentsOp::Start(start)) => {
-                    reply.map_err(service_error)?
+            // The start is drained even when the scope is cancelled: the
+            // backend may already have opened the child, and dropping the
+            // call would strand that half-created child. A child the
+            // cancelled start produced is closed, so no member outlives
+            // its cancelled handle.
+            let started = services.agents(&caller, AgentsOp::Start(start)).await;
+            if cancel.is_cancelled() {
+                close_cancelled_start(&services, &caller, &child, started).await;
+                return Err(ScopeError::Cancelled);
+            }
+            let id = match started.map_err(service_error)? {
+                AgentsReply::Started { id } => id,
+                AgentsReply::Refused { reason } => {
+                    return Err(ScopeError::Failed(reason.to_string().into()));
                 }
-                () = cancel.cancelled() => return Err(ScopeError::Cancelled),
-            };
-            let AgentsReply::Started { id } = started else {
-                return Err(ScopeError::Failed(
-                    "the member session did not start".into(),
-                ));
+                _ => {
+                    return Err(ScopeError::Failed(
+                        "the member session did not start".into(),
+                    ));
+                }
             };
             *locked(&child) = Some(id);
             let awaited = tokio::select! {
@@ -161,7 +211,10 @@ impl Runtime {
                     return Err(ScopeError::Cancelled);
                 }
             };
-            let mut awaited = awaited.map_err(service_error)?;
+            let mut awaited = match awaited {
+                Ok(reply) => reply,
+                Err(error) => return Err(close_after_failure(&services, &caller, id, error).await),
+            };
             loop {
                 match awaited {
                     AgentsReply::Await { report } => return Ok(report),
@@ -169,7 +222,12 @@ impl Runtime {
                     AgentsReply::Pending { id } => {
                         tokio::select! {
                             reply = services.agents(&caller, AgentsOp::Await { id, timeout: None }) => {
-                                awaited = reply.map_err(service_error)?;
+                                awaited = match reply {
+                                    Ok(reply) => reply,
+                                    Err(error) => {
+                                        return Err(close_after_failure(&services, &caller, id, error).await);
+                                    }
+                                };
                             }
                             () = cancel.cancelled() => {
                                 let _ = services.agents(&caller, AgentsOp::Cancel { id }).await;
@@ -441,6 +499,22 @@ struct Inner {
 
 impl Drop for Inner {
     fn drop(&mut self) {
+        let handles = std::mem::take(&mut locked(&self.shared.book).all);
+        for handle in handles {
+            let state = &handle.state;
+            let mut result = locked(&state.result);
+            if result.is_some() {
+                continue;
+            }
+            *result = Some(Err(ScopeError::Cancelled));
+            state.status.send_replace(HandleStatus::Cancelled);
+            drop(result);
+            state.cancel.cancel();
+            self.shared.progress.send_if_modified(|count| {
+                *count += 1;
+                true
+            });
+        }
         self.shared.ledger.cancel.cancel();
         self.tasks
             .get_mut()
@@ -742,8 +816,18 @@ async fn drive(shared: Arc<Shared>, handle: ScopeHandle, gate: oneshot::Receiver
             gate.try_recv().is_ok()
         }
     };
-    let outcome = if granted && !state.cancel.is_cancelled() {
-        state.status.send_replace(HandleStatus::Running);
+    let started = if granted {
+        let result = locked(&state.result);
+        if result.is_some() || state.cancel.is_cancelled() {
+            false
+        } else {
+            state.status.send_replace(HandleStatus::Running);
+            true
+        }
+    } else {
+        false
+    };
+    let outcome = if started {
         work(state.cancel.clone()).await
     } else {
         Err(ScopeError::Cancelled)
@@ -765,6 +849,10 @@ fn finish(
         }
         Err(_) => HandleStatus::Failed,
     };
+    let mut slot = locked(&state.result);
+    if slot.is_some() {
+        return;
+    }
     let result = match outcome {
         Ok((value, usage)) => {
             if let Some(usage) = usage {
@@ -775,8 +863,9 @@ fn finish(
         }
         Err(error) => Err(error),
     };
-    *locked(&state.result) = Some(result);
+    *slot = Some(result);
     state.status.send_replace(status);
+    drop(slot);
     if status == HandleStatus::Failed && shared.on_error == OnError::Cancel {
         shared.ledger.refuse(ScopeError::Cancelled);
     }
@@ -812,3 +901,6 @@ fn charge_of(usage: &Usage) -> ScopeUsage {
         cost_usd: usage.cost_usd,
     }
 }
+
+#[cfg(test)]
+mod tests;

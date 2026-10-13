@@ -5,6 +5,7 @@ unmaintained = "workspace"
 [licenses]
 version = 2
 allow = [
+    "0BSD",
     "Apache-2.0",
     "BSD-2-Clause",
     "BSD-3-Clause",
@@ -16,7 +17,6 @@ allow = [
     "Zlib",
     "LicenseRef-Sustainable-Use-1.0",
     "SUL-1.0",
-    "0BSD",
 ]
 [[licenses.clarify]]
 name = "dal-agent"

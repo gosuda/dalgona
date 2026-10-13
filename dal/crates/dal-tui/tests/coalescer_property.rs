@@ -1,7 +1,7 @@
 //! Coalescer property: lossless order, delta merge, shed accounting.
 
 use dal_core::{Gen, Seq, StreamChannel, TurnId, Update, UpdateKind};
-use dal_tui::frame::Coalescer;
+use dal_tui::frame::{Coalescer, QueueFull};
 use proptest::prelude::*;
 use std::num::NonZeroU64;
 
@@ -24,11 +24,15 @@ proptest! {
     fn coalescer_property(deltas in prop::collection::vec("a|b|cd", 1..20)) {
         let mut queue = Coalescer::default();
         for (index, text) in deltas.iter().enumerate() {
-            queue.push_update(update(index as u64 + 1, UpdateKind::Delta {
-                turn: turn(),
-                channel: StreamChannel::Text,
-                text: text.clone().into_boxed_str(),
-            }));
+            let next = update(
+                index as u64 + 1,
+                UpdateKind::Delta {
+                    turn: turn(),
+                    channel: StreamChannel::Text,
+                    text: text.clone().into_boxed_str(),
+                },
+            );
+            prop_assert!(queue.push_update(next).is_ok());
         }
         let drained = queue.take_updates();
         prop_assert_eq!(drained.len(), 1);
@@ -49,18 +53,26 @@ proptest! {
         let mut seq = 0u64;
         for _ in 0..lossless {
             seq += 1;
-            queue.push_update(update(seq, UpdateKind::Notice(dal_core::Notice {
-                turn: Some(turn()),
-                kind: "test.notice".into(),
-                text: "lossless".into(),
-            })));
+            let next = update(
+                seq,
+                UpdateKind::Notice(dal_core::Notice {
+                    turn: Some(turn()),
+                    kind: "test.notice".into(),
+                    text: "lossless".into(),
+                }),
+            );
+            prop_assert!(queue.push_update(next).is_ok());
         }
         for index in 0..replaceable {
             seq += 1;
-            queue.push_update(update(seq, UpdateKind::ToolProgress {
-                call: dal_core::CallId::new(format!("call-{index}")),
-                tail: format!("progress {index}").into_boxed_str(),
-            }));
+            let next = update(
+                seq,
+                UpdateKind::ToolProgress {
+                    call: dal_core::CallId::new(format!("call-{index}")),
+                    tail: format!("progress {index}").into_boxed_str(),
+                },
+            );
+            prop_assert!(queue.push_update(next).is_ok());
         }
         let shed = queue.take_shed_count();
         prop_assert_eq!(
@@ -77,4 +89,40 @@ proptest! {
             lossless
         );
     }
+}
+
+#[test]
+fn a_full_queue_of_lossless_updates_refuses_the_next_one_instead_of_shedding() {
+    let notice = |seq: u64| {
+        update(
+            seq,
+            UpdateKind::Notice(dal_core::Notice {
+                turn: Some(turn()),
+                kind: "test.notice".into(),
+                text: format!("transition {seq}").into_boxed_str(),
+            }),
+        )
+    };
+    let mut queue = Coalescer::default();
+    for seq in 1..=4_096 {
+        assert!(queue.push_update(notice(seq)).is_ok());
+    }
+    for seq in 4_097..=4_200 {
+        let refused = queue.push_update(notice(seq));
+        assert_eq!(refused, Err(QueueFull(Box::new(notice(seq)))));
+    }
+    assert_eq!(queue.take_shed_count(), 0);
+    let drained = queue.take_updates();
+    assert_eq!(drained.len(), 4_096);
+    assert!(
+        drained
+            .iter()
+            .zip(1..)
+            .all(|(item, seq)| item.seq.get() == seq),
+        "the oldest transitions are intact and in order"
+    );
+    assert!(
+        queue.push_update(notice(4_097)).is_ok(),
+        "draining reopens the queue"
+    );
 }

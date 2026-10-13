@@ -190,7 +190,7 @@ impl Provider {
         request_mod::ensure_request(http, request)?;
         if http.entry.family == Family::Codex && !matches!(&http.credential, Credential::OAuth(_)) {
             return Err(ProviderError::InvalidRequest {
-                message: String::from("openai-codex needs an OAuth credential"),
+                message: format!("{} needs an OAuth credential", http.entry.id),
             });
         }
         if let Some(blob_id) = request_mod::unresolved_blob(request) {
@@ -242,8 +242,7 @@ impl Provider {
         );
         let credential = transport_mod::refresh_expiring(
             &owner.refresher,
-            &http.entry.id,
-            http.entry.family,
+            &http.entry,
             &http.credential,
             cancel,
         )
@@ -284,7 +283,7 @@ impl Provider {
             Family::Codex => {
                 let Credential::OAuth(oauth) = &credential else {
                     return Err(ProviderError::InvalidRequest {
-                        message: String::from("openai-codex needs an OAuth credential"),
+                        message: format!("{} needs an OAuth credential", http.entry.id),
                     });
                 };
                 let wire =
@@ -377,9 +376,9 @@ impl Provider {
             async move { request_mod::stream_attempt(ctx, credential, attempt_cancel).await }
         };
         let refresher = Arc::clone(&owner.refresher);
-        let provider_id = http.entry.id.clone();
+        let (id, def) = (http.entry.id.clone(), http.entry.def);
         let refresh = move |held: OAuthCredential| {
-            transport_mod::refresh_credential(Arc::clone(&refresher), provider_id.clone(), held)
+            transport_mod::refresh_credential(Arc::clone(&refresher), id.clone(), def, held)
         };
         Ok(lifecycle::stream(plan, credential, attempt, refresh))
     }
@@ -411,8 +410,7 @@ impl Provider {
         let refresh_cancel = CancellationToken::new();
         let credential = transport_mod::refresh_expiring(
             &owner.refresher,
-            &http.entry.id,
-            http.entry.family,
+            &http.entry,
             &http.credential,
             &refresh_cancel,
         )
@@ -565,7 +563,7 @@ impl Provider {
         }
         if http.entry.family == Family::Codex && !matches!(&http.credential, Credential::OAuth(_)) {
             return Err(ProviderError::InvalidRequest {
-                message: String::from("openai-codex needs an OAuth credential"),
+                message: format!("{} needs an OAuth credential", http.entry.id),
             });
         }
         let owner = http
@@ -585,8 +583,7 @@ impl Provider {
         );
         let credential = transport_mod::refresh_expiring(
             &owner.refresher,
-            &http.entry.id,
-            http.entry.family,
+            &http.entry,
             &http.credential,
             cancel,
         )
@@ -630,9 +627,9 @@ impl Provider {
             async move { request_mod::compact_attempt(ctx, credential, attempt_cancel).await }
         };
         let refresher = Arc::clone(&owner.refresher);
-        let provider_id = http.entry.id.clone();
+        let (id, def) = (http.entry.id.clone(), http.entry.def);
         let refresh = move |held: OAuthCredential| {
-            transport_mod::refresh_credential(Arc::clone(&refresher), provider_id.clone(), held)
+            transport_mod::refresh_credential(Arc::clone(&refresher), id.clone(), def, held)
         };
         lifecycle::request(plan, credential, attempt, refresh)
             .await

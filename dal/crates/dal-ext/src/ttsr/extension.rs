@@ -13,7 +13,8 @@ use dal_core::{RegistrationError, ServiceSet};
 ///
 /// # Errors
 ///
-/// Returns the builder's registration error for an invalid identity.
+/// Fails with [`RegistrationError`] when the builder rejects the extension
+/// name.
 pub fn extension() -> Result<Extension, RegistrationError> {
     ExtensionBuilder::new("ttsr", "0.1.0", ServiceSet::EMPTY)?.build()
 }

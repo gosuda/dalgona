@@ -16,9 +16,10 @@ const STEP_FIELDS: [&str; 11] = [
     "system",
     "isolation",
 ];
-pub(crate) const FORBIDDEN_TOOLS: [&str; 6] = [
+pub(crate) const FORBIDDEN_TOOLS: [&str; 7] = [
     "agents",
     "report",
+    super::agents_tool::REPORT_TOOL_NAME,
     "create_goal",
     "update_goal",
     "get_goal",
@@ -136,7 +137,21 @@ pub(crate) mod render;
 pub(crate) mod saved;
 
 pub(crate) use decode::decode_steps;
-pub(crate) use saved::find_saved;
+pub(crate) use saved::{find_saved, saved_names};
+impl Workflow {
+    /// Counts the statically known child sessions planned by the workflow.
+    #[must_use]
+    pub(crate) fn planned(&self) -> usize {
+        self.steps
+            .iter()
+            .map(|step| match &step.items {
+                Items::Task => 1,
+                Items::Literal(items) => items.len(),
+                Items::From(_) => 0,
+            })
+            .sum()
+    }
+}
 
 #[cfg(test)]
 mod tests;

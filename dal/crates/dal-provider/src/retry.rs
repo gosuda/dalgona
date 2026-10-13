@@ -192,7 +192,12 @@ fn table(
 
     let Some(status) = status else {
         return match code {
-            Some("overloaded_error" | "server_is_overloaded") => Retry(ProviderError::Overloaded),
+            Some(
+                "overloaded_error"
+                | "server_is_overloaded"
+                | "server_busy"
+                | "servers are currently busy",
+            ) => Retry(ProviderError::Overloaded),
             Some("rate_limit_error" | "rate_limit_exceeded") => Retry(ProviderError::RateLimited {
                 message,
                 retry_after: None,

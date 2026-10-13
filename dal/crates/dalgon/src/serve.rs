@@ -75,11 +75,7 @@ pub enum ServeCommandError {
 /// # Errors
 /// Returns an I/O or wire-token error when the token cannot be written or
 /// either output stream fails.
-#[expect(
-    clippy::unused_async,
-    reason = "the async seam keeps the command surface uniform"
-)]
-pub async fn create_token(
+pub fn create_token(
     token_file: &Path,
     force: bool,
     stderr_is_tty: bool,
@@ -89,7 +85,7 @@ pub async fn create_token(
     if !force && token_file.try_exists()? {
         return write_failure(
             stderr,
-            crate::cli::texts::serve_token_already_exists(token_file),
+            &crate::cli::texts::serve_token_already_exists(token_file),
         );
     }
 
@@ -109,7 +105,7 @@ pub async fn create_token(
         Err(_error) if !force && token_file.try_exists()? => {
             return write_failure(
                 stderr,
-                crate::cli::texts::serve_token_already_exists(token_file),
+                &crate::cli::texts::serve_token_already_exists(token_file),
             );
         }
         Err(error) => return Err(ServeCommandError::Token(error)),
@@ -133,6 +129,20 @@ pub async fn create_token(
         )?;
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Resolved inputs for one serve run, ahead of its stream handles.
+pub struct ServeRun {
+    /// The started host serving the three protocol surfaces.
+    pub host: Host,
+    /// Parsed serve flags.
+    pub args: ServeArgs,
+    /// Layered serve configuration.
+    pub config: ServeConfig,
+    /// Product data root for the process-lock advertisement.
+    pub data_root: PathBuf,
+    /// Cooperative shutdown for the whole listener.
+    pub stop: CancellationToken,
 }
 
 /// Windows parity for the POSIX 0600 edge: the token file carries a
@@ -176,34 +186,37 @@ fn owner_only_acl(path: &Path) -> io::Result<()> {
 /// Returns a typed wire, store, or stream-I/O error. User-correctable startup
 /// refusals are written to `stderr` and return exit code 1.
 pub async fn run(
-    host: Host,
-    args: ServeArgs,
-    config: ServeConfig,
-    data_root: PathBuf,
-    stop: CancellationToken,
+    serve: ServeRun,
     stdout: &mut impl Write,
     stderr: &mut impl Write,
     _stderr_is_tty: bool,
     stdout_is_tty: bool,
 ) -> Result<ExitCode, ServeCommandError> {
+    let ServeRun {
+        host,
+        args,
+        config,
+        data_root,
+        stop,
+    } = serve;
     let bind = resolve_bind(&args, &config);
     let port = args.port.unwrap_or(config.port);
     let token_file = args.token_file.unwrap_or(config.token_file);
 
     if let Some(alias) = config.aliases.keys().find(|alias| is_mode_alias(alias)) {
-        return write_failure(stderr, crate::cli::texts::serve_alias_shadows_mode(alias));
+        return write_failure(stderr, &crate::cli::texts::serve_alias_shadows_mode(alias));
     }
     if !args.public {
         match all_resolved_addresses_are_loopback(&bind, port) {
             Ok(true) => {}
             Ok(false) => {
-                return write_failure(stderr, crate::cli::texts::serve_non_loopback_bind(&bind));
+                return write_failure(stderr, &crate::cli::texts::serve_non_loopback_bind(&bind));
             }
             Err(error) => {
                 let address = format!("{bind}:{port}");
                 return write_failure(
                     stderr,
-                    crate::cli::texts::serve_bind_failed(&address, &error.to_string()),
+                    &crate::cli::texts::serve_bind_failed(&address, &error.to_string()),
                 );
             }
         }
@@ -220,7 +233,7 @@ pub async fn run(
             TokenFileError::Invalid => crate::cli::texts::serve_public_token_invalid(&token_file),
             TokenFileError::Other(source) => return Err(ServeCommandError::Io(source)),
         };
-        return write_failure(stderr, diagnostic);
+        return write_failure(stderr, &diagnostic);
     }
 
     let options = RouterOptions {
@@ -237,7 +250,7 @@ pub async fn run(
     let handle = match dal_wire::serve_router(host, options, stop.clone()).await {
         Ok(handle) => handle,
         Err(error) => match crate::cli::texts::serve_router_refusal(&error) {
-            Some(lines) => return write_failure(stderr, lines),
+            Some(lines) => return write_failure(stderr, &lines),
             None => return Err(ServeCommandError::Serve(error)),
         },
     };
@@ -250,13 +263,17 @@ pub async fn run(
             let path = advertisement_path(&data_root, std::process::id());
             return write_failure(
                 stderr,
-                crate::cli::texts::serve_advertisement_failed(&path, &error.to_string()),
+                &crate::cli::texts::serve_advertisement_failed(&path, &error.to_string()),
             );
         }
     };
 
     if args.public {
-        writeln!(stderr, "{}", crate::cli::texts::SERVE_PUBLIC_WARNING)?;
+        writeln!(
+            stderr,
+            "{}",
+            crate::cli::texts::serve_public_warning(local_addr)
+        )?;
     }
     let url = format!("http://{local_addr}");
     let details = listen_details(args.public, &token_file, local_addr);
@@ -497,13 +514,9 @@ fn listen_details(public: bool, token_file: &Path, local_addr: SocketAddr) -> St
     format!("token required, token from {}", token_file.display())
 }
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "one failure renders its fixed two-line payload"
-)]
 fn write_failure(
     stderr: &mut impl Write,
-    lines: [String; 2],
+    lines: &[String; 2],
 ) -> Result<ExitCode, ServeCommandError> {
     writeln!(stderr, "{}", lines[0])?;
     writeln!(stderr, "{}", lines[1])?;
@@ -589,6 +602,38 @@ mod tests {
             ]
         );
     }
+    #[test]
+    fn public_warning_names_the_bound_address() {
+        let bound: SocketAddr = "0.0.0.0:7437".parse().unwrap();
+        assert_eq!(
+            crate::cli::texts::serve_public_warning(bound),
+            "dalgon: warning: --public serves 0.0.0.0:7437 over plain HTTP; the serve token crosses the network in plain text."
+        );
+    }
+
+    #[test]
+    fn public_token_rejects_empty_files_with_user_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let token_file = dir.path().join("serve.token");
+        fs::write(&token_file, b"").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&token_file, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        assert!(matches!(
+            validate_public_token(&token_file),
+            Err(TokenFileError::Empty)
+        ));
+        let lines = crate::cli::texts::serve_public_token_empty(&token_file);
+        assert_eq!(
+            lines,
+            [
+                format!("dalgon: serve.token is empty: {}", token_file.display()),
+                "Run dalgon serve token --force to write a new token.".to_owned(),
+            ]
+        );
+    }
 
     #[tokio::test]
     async fn token_command_keeps_stdout_and_tty_note_exact() {
@@ -597,9 +642,7 @@ mod tests {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
 
-        let created = create_token(&token_file, false, false, &mut stdout, &mut stderr)
-            .await
-            .unwrap();
+        let created = create_token(&token_file, false, false, &mut stdout, &mut stderr).unwrap();
         assert_eq!(created, ExitCode::SUCCESS);
         assert_eq!(stderr, [] as [u8; 0]);
         let token = String::from_utf8(stdout.clone()).unwrap();
@@ -623,9 +666,7 @@ mod tests {
         }
 
         stdout.clear();
-        let refused = create_token(&token_file, false, false, &mut stdout, &mut stderr)
-            .await
-            .unwrap();
+        let refused = create_token(&token_file, false, false, &mut stdout, &mut stderr).unwrap();
         assert_eq!(refused, ExitCode::FAILURE);
         assert_eq!(stdout, [] as [u8; 0]);
         assert_eq!(
@@ -638,9 +679,7 @@ mod tests {
         );
 
         stderr.clear();
-        let replaced = create_token(&token_file, true, true, &mut stdout, &mut stderr)
-            .await
-            .unwrap();
+        let replaced = create_token(&token_file, true, true, &mut stdout, &mut stderr).unwrap();
         assert_eq!(replaced, ExitCode::SUCCESS);
         let new_token = String::from_utf8(stdout.clone()).unwrap();
         assert_ne!(new_token, format!("{token}\n"));

@@ -102,6 +102,11 @@ pub struct SpawnOpts {
     pub timeout: Option<Duration>,
     /// Explicit child environment overrides, applied after the host snapshot.
     pub env: Vec<(OsString, OsString)>,
+    /// Bytes of stdout kept for the caller as a prefix; `0` keeps none.
+    ///
+    /// Output past the limit sets the overflow flag. A limit above 262145
+    /// bytes is refused.
+    pub stdout_prefix_limit: usize,
 }
 
 /// Captured process result and durable-output pointers.
@@ -403,6 +408,7 @@ pub(crate) fn spawn_process(
     // The durable witness lives under the session jobs directory (plan 3644),
     // never in the user project tree; the caller supplies the session dir.
     let log_path = jobs_dir.join(format!("{}.log", call.as_str()));
+    let stdout_prefix_limit = opts.stdout_prefix_limit;
     spawn_process_with_capture(
         argv,
         call,
@@ -416,7 +422,7 @@ pub(crate) fn spawn_process(
         process_permit,
         fd_permit,
         log_path,
-        0,
+        stdout_prefix_limit,
         None,
     )
 }

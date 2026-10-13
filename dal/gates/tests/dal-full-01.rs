@@ -1734,9 +1734,9 @@ fn replay_matches_model(
 
 fn assert_live_phase(session: &Session, expected: &PhaseModel) -> bool {
     match (expected, session.phase()) {
-        (PhaseModel::Idle, Phase::Idle) => true,
         (PhaseModel::Opening(expected), Phase::Opening { turn, .. })
         | (PhaseModel::Running(expected), Phase::Running { turn, .. }) => expected == turn,
+        (PhaseModel::Idle, Phase::Idle) => true,
         _ => false,
     }
 }

@@ -5,8 +5,6 @@ use std::ffi::{OsStr, OsString};
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
-use thiserror::Error;
-
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum EdgeError {
     #[error("home directory is unavailable")]
@@ -42,11 +40,9 @@ pub(crate) struct TerminalSnapshot {
     pub width: usize,
 }
 
-#[derive(Debug, Error)]
-#[cfg_attr(
-    not(windows),
-    expect(dead_code, reason = "the whoami variants construct only on windows")
-)]
+/// Typed failures of the Windows current-user SID probe.
+#[cfg(any(windows, test))]
+#[derive(Debug, thiserror::Error)]
 pub(crate) enum SidError {
     #[error("SystemRoot is not set to an absolute directory")]
     SystemRoot,
@@ -106,6 +102,49 @@ pub(crate) fn process_cwd() -> io::Result<PathBuf> {
     std::env::current_dir()
 }
 
+#[cfg(feature = "tui")]
+/// Asks the desktop to open `url` in the user's browser, without a shell.
+///
+/// Only `http` and `https` URLs are passed on. The opener runs detached with
+/// its streams closed; a thread reaps it so no zombie outlives the call.
+///
+/// # Errors
+/// Returns the refusal for any other scheme, or the spawn error when the
+/// platform opener is missing.
+pub(crate) fn open_browser(url: &str) -> io::Result<()> {
+    use std::process::Stdio;
+
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "only http and https URLs open in a browser",
+        ));
+    }
+    let (program, prefix): (&str, &[&str]) = if cfg!(target_os = "macos") {
+        ("open", &[])
+    } else if cfg!(windows) {
+        ("rundll32", &["url.dll,FileProtocolHandler"])
+    } else {
+        ("xdg-open", &[])
+    };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "R4 edge: the process edge launches the desktop opener"
+    )]
+    let mut command = std::process::Command::new(program);
+    let mut child = command
+        .args(prefix)
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    std::thread::spawn(move || {
+        let _status = child.wait();
+    });
+    Ok(())
+}
+
 /// Captures the current executable path for the `__sandbox` helper launch.
 ///
 /// Returns `None` when the path is unresolvable; the sandbox backend fails
@@ -133,6 +172,46 @@ pub(crate) fn terminal_snapshot() -> TerminalSnapshot {
         stderr_tty,
         width,
     }
+}
+
+/// The protocol streams of a stdio wire, held privately by this process.
+#[cfg(unix)]
+pub(crate) struct WireStreams {
+    pub(crate) reader: std::fs::File,
+    pub(crate) writer: std::fs::File,
+}
+
+/// Moves a stdio wire onto private descriptors and detaches the shared ones.
+///
+/// Copies standard input and output to close-on-exec descriptors, so child
+/// processes never inherit the protocol streams. Then points standard input
+/// at the null device and standard output at standard error, so stray writes
+/// from this process, its libraries, and its children land in the diagnostic
+/// stream instead of corrupting the protocol.
+///
+/// # Errors
+///
+/// Returns the operating-system error when standard input or output is
+/// closed or a descriptor cannot be duplicated.
+#[cfg(unix)]
+pub(crate) fn isolate_wire_streams() -> io::Result<WireStreams> {
+    use rustix::io::{Errno, fcntl_dupfd_cloexec};
+    use rustix::stdio::{dup2_stdin, dup2_stdout, stderr, stdin, stdout};
+
+    let reader = fcntl_dupfd_cloexec(stdin(), 3)?;
+    let writer = fcntl_dupfd_cloexec(stdout(), 3)?;
+    let null = std::fs::File::open("/dev/null")?;
+    dup2_stdin(&null)?;
+    match dup2_stdout(stderr()) {
+        Ok(()) => {}
+        // A closed diagnostic stream leaves nowhere to send stray output.
+        Err(Errno::BADF) => dup2_stdout(&null)?,
+        Err(error) => return Err(error.into()),
+    }
+    Ok(WireStreams {
+        reader: reader.into(),
+        writer: writer.into(),
+    })
 }
 
 /// Waits for one shutdown signal and returns its `128 + signo` exit code.
@@ -333,6 +412,8 @@ pub(crate) fn validate_workspace(path: PathBuf) -> Result<dal_core::Workspace, E
     }
 }
 
+/// Resolves the effective color choice for the interactive UI.
+#[cfg(feature = "tui")]
 pub(crate) fn resolve_color(
     requested: Option<crate::cli::ColorArg>,
     vars: &BTreeMap<OsString, OsString>,
@@ -356,44 +437,40 @@ pub(crate) fn resolve_color(
     }
 }
 
-#[cfg_attr(
-    not(windows),
-    expect(
-        clippy::unnecessary_wraps,
-        reason = "the windows twin reports real errors; the signature must match"
-    )
-)]
+/// Returns the current user's SID for naming the local RPC socket.
+///
+/// Windows probes `whoami.exe` and reports typed failures; every other
+/// platform has no SID and always yields `None`.
+#[cfg(windows)]
 pub(crate) fn current_user_sid(
     vars: &BTreeMap<OsString, OsString>,
 ) -> Result<Option<CurrentUserSid>, SidError> {
-    #[cfg(windows)]
-    {
-        let system_root = env_value(vars, "SystemRoot").map(PathBuf::from);
-        let Some(system_root) = system_root.filter(|path| path.is_absolute()) else {
-            return Err(SidError::SystemRoot);
-        };
-        let executable = system_root.join("System32").join("whoami.exe");
-        let output = run_whoami(&executable).map_err(SidError::Spawn)?;
-        if !output.status.success() {
-            return Err(SidError::Failed(output.status.code()));
-        }
-        let stdout = String::from_utf8(output.stdout)?;
-        let mut lines = stdout.lines();
-        let Some(line) = lines.next() else {
-            return Err(SidError::Csv);
-        };
-        if lines.next().is_some() {
-            return Err(SidError::Csv);
-        }
-        let fields = parse_csv_row(line)?;
-        let sid = fields.get(1).ok_or(SidError::Csv)?;
-        parse_sid(sid).map(Some)
+    let system_root = env_value(vars, "SystemRoot").map(PathBuf::from);
+    let Some(system_root) = system_root.filter(|path| path.is_absolute()) else {
+        return Err(SidError::SystemRoot);
+    };
+    let executable = system_root.join("System32").join("whoami.exe");
+    let output = run_whoami(&executable).map_err(SidError::Spawn)?;
+    if !output.status.success() {
+        return Err(SidError::Failed(output.status.code()));
     }
-    #[cfg(not(windows))]
-    {
-        let _ = vars;
-        Ok(None)
+    let stdout = String::from_utf8(output.stdout)?;
+    let mut lines = stdout.lines();
+    let Some(line) = lines.next() else {
+        return Err(SidError::Csv);
+    };
+    if lines.next().is_some() {
+        return Err(SidError::Csv);
     }
+    let fields = parse_csv_row(line)?;
+    let sid = fields.get(1).ok_or(SidError::Csv)?;
+    parse_sid(sid).map(Some)
+}
+
+#[cfg(not(windows))]
+pub(crate) fn current_user_sid(vars: &BTreeMap<OsString, OsString>) -> Option<CurrentUserSid> {
+    let _ = vars;
+    None
 }
 
 #[cfg(windows)]
@@ -405,10 +482,6 @@ fn run_whoami(executable: &Path) -> io::Result<std::process::Output> {
 }
 
 #[cfg(any(windows, test))]
-#[expect(
-    clippy::match_same_arms,
-    reason = "quoted and unquoted fields share the append step"
-)]
 fn parse_csv_row(row: &str) -> Result<Vec<String>, SidError> {
     let mut fields = Vec::with_capacity(2);
     let mut field = String::new();
@@ -425,7 +498,6 @@ fn parse_csv_row(row: &str) -> Result<Vec<String>, SidError> {
                 quoted = false;
                 closed_quote = true;
             }
-            (true, _, value) => field.push(value),
             (false, false, '"') if field.is_empty() => quoted = true,
             (false, false, ',') => {
                 fields.push(std::mem::take(&mut field));
@@ -434,7 +506,7 @@ fn parse_csv_row(row: &str) -> Result<Vec<String>, SidError> {
                 fields.push(std::mem::take(&mut field));
                 closed_quote = false;
             }
-            (false, false, value) => field.push(value),
+            (true, _, value) | (false, false, value) => field.push(value),
             (false, true, _) => return Err(SidError::Csv),
         }
     }
@@ -478,12 +550,12 @@ fn decimal_field(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        EdgeError, RootPaths, decimal_field, parse_csv_row, parse_sid, resolve_color,
-        resolve_roots, resolve_workspace_path,
+        EdgeError, RootPaths, SidError, decimal_field, parse_csv_row, parse_sid, resolve_roots,
+        resolve_workspace_path,
     };
-    use crate::cli::ColorArg;
     use std::collections::BTreeMap;
     use std::ffi::{OsStr, OsString};
+    use std::io;
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -584,8 +656,12 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "tui")]
     #[test]
     fn color_precedence_uses_environment_presence_not_values() {
+        use super::resolve_color;
+        use crate::cli::ColorArg;
+
         let vars = env(&[("NO_COLOR", ""), ("FORCE_COLOR", "0"), ("TERM", "xterm")]);
         assert_eq!(resolve_color(None, &vars, true), ColorArg::Never);
         let vars = env(&[("FORCE_COLOR", "0"), ("TERM", "xterm")]);
@@ -615,6 +691,34 @@ mod tests {
         assert!(parse_sid("S-1-5").is_err());
         assert!(parse_sid("S-1-5-x").is_err());
         assert!(!decimal_field(""));
+    }
+
+    #[test]
+    fn sid_probe_failures_render_their_operational_messages() {
+        assert_eq!(
+            SidError::SystemRoot.to_string(),
+            "SystemRoot is not set to an absolute directory"
+        );
+        assert_eq!(
+            SidError::Spawn(io::Error::other("access is denied")).to_string(),
+            "cannot start whoami.exe: access is denied"
+        );
+        assert_eq!(
+            SidError::Failed(None).to_string(),
+            "whoami.exe exited with status None"
+        );
+        assert_eq!(
+            SidError::Failed(Some(1)).to_string(),
+            "whoami.exe exited with status Some(1)"
+        );
+        assert_eq!(
+            SidError::Csv.to_string(),
+            "whoami.exe returned malformed CSV"
+        );
+        assert_eq!(
+            SidError::InvalidSid.to_string(),
+            "whoami.exe did not return a valid current-user SID"
+        );
     }
 
     #[test]
@@ -649,6 +753,69 @@ mod tests {
                 cache: base.join(".local/share/dal/cache"),
             }
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the process-boundary test owns its subprocess environment and streams"
+    )]
+    fn wire_streams_keep_protocol_private_across_child_exec() -> io::Result<()> {
+        use std::io::{Read, Write};
+        use std::os::fd::AsRawFd;
+        use std::process::{Command, Stdio};
+
+        const CHILD: &str = "DAL_TEST_WIRE_STREAMS_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let mut streams = super::isolate_wire_streams()?;
+            let mut request = String::new();
+            streams.reader.read_to_string(&mut request)?;
+            assert_eq!(request, "protocol request\n");
+            streams.writer.write_all(b"protocol reply\n")?;
+            std::io::stdout().write_all(b"parent diagnostic\n")?;
+            let mut input = [0_u8; 1];
+            assert_eq!(std::io::stdin().read(&mut input)?, 0);
+            for stream in [&streams.reader, &streams.writer] {
+                assert!(rustix::io::fcntl_getfd(stream)?.contains(rustix::io::FdFlags::CLOEXEC));
+            }
+            let status = Command::new("/bin/sh")
+                .args([
+                    "-c",
+                    "for fd in \"$@\"; do if (eval \": <&$fd\") 2>/dev/null; then exit 31; fi; done; printf 'child diagnostic\\n'",
+                    "wire-child",
+                ])
+                .arg(streams.reader.as_raw_fd().to_string())
+                .arg(streams.writer.as_raw_fd().to_string())
+                .status()?;
+            assert!(status.success(), "{status}");
+            return Ok(());
+        }
+
+        let mut child = Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "edge::tests::wire_streams_keep_protocol_private_across_child_exec",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        let mut input = child.stdin.take().expect("piped input");
+        input.write_all(b"protocol request\n")?;
+        drop(input);
+        let output = child.wait_with_output()?;
+        let protocol = String::from_utf8_lossy(&output.stdout);
+        let diagnostic = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{protocol}\n{diagnostic}");
+        assert!(protocol.contains("protocol reply\n"), "{protocol}");
+        assert!(!protocol.contains("diagnostic"), "{protocol}");
+        assert!(diagnostic.contains("parent diagnostic\n"), "{diagnostic}");
+        assert!(diagnostic.contains("child diagnostic\n"), "{diagnostic}");
+        Ok(())
     }
 
     #[test]

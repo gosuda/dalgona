@@ -9,7 +9,7 @@ use std::num::NonZeroU64;
 use std::sync::Arc;
 
 use dal_agent::error::ServiceError;
-use dal_core::ext::{JobsOp, JobsReply, Name, SidecarOp};
+use dal_core::ext::{JobsOp, JobsReply, Name, SidecarName, SidecarOp};
 use dal_core::{EntryId, ModelRoute, RawJson};
 use dal_ext::judge::{Gate, Judge, JudgeConfig, JudgeError, JudgeOpen};
 use jiff::{Timestamp, Unit};
@@ -300,7 +300,7 @@ impl Task {
 
     /// Atomically rewrites `dream.json` from live state.
     pub(super) async fn write_sidecar(&self) {
-        let Ok(name) = Name::parse(DREAM_SIDECAR_NAME) else {
+        let Ok(name) = SidecarName::parse(DREAM_SIDECAR_NAME) else {
             return;
         };
         let unreflected = u32::try_from(self.state.unreflected).unwrap_or(u32::MAX);

@@ -319,6 +319,10 @@ pub struct TurnEnd {
     pub turn: TurnId,
     /// Why the turn stopped.
     pub stop: Stop,
+    /// Whether the turn ended because the context window overflowed, by the
+    /// core's own classification of the provider reply.
+    #[serde(default)]
+    pub overflowed: bool,
 }
 
 /// A notification that a turn has settled.

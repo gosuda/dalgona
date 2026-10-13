@@ -23,16 +23,20 @@ pub use auth::credential::{
     AuthStatus, AuthStore, CodexIdentity, Credential, CredentialKind, EnvSnapshot, OAuthCredential,
     SecretString, codex_identity, oauth_expires_at, resolve as resolve_credential,
 };
+pub use auth::login::{
+    LoginIo, LoginSite, Method, PROGRESS_CAPACITY, StoredCredential, login, login_providers,
+    sign_out, stored_credentials,
+};
 pub use auth::oauth::{
     LoginEndpoints, LoginFlow, LoginProgress, PASTE_HINT, logout, logout_with, store_api_key,
 };
 pub use auth::refresh::{
-    OAuthProvider, PROACTIVE_WINDOW_SECS, RETRY_DELAY, RefreshReason, Refresher, TokenEndpoints,
+    PROACTIVE_WINDOW_SECS, RETRY_DELAY, RefreshReason, Refresher, TokenEndpoints,
 };
 pub use catalog::{
     Catalog, CatalogEntry, CatalogFetch, CatalogSource, ImageProfile, Listing, ModelFetch,
     ResolvedModel, ToolSupport, built_in_entries, compiled_price, compiled_temperature,
-    load_models, price_source, resolve,
+    load_models, price_source, resolve, resolve_route,
 };
 pub use compact::{CompactOutcome, CompactedHistory, items_for};
 pub use error::{LimitError, ProviderError, ResolveError, UsageCheckReason};
@@ -42,8 +46,9 @@ pub use http::{
     build_client, check_base_url, endpoint, read_body, send, user_agent,
 };
 pub use provider::{
-    AuthStyle, Http, Provider, ProviderConfig, ProviderConfigError, ProviderEntry,
-    ProviderIdentity, ProviderSet, ScriptedSelection, Transport,
+    AuthStyle, Completion, Device, Hook, Http, KeySpec, OAuthSpec, PROVIDERS, Provider,
+    ProviderConfig, ProviderConfigError, ProviderDef, ProviderEntry, ProviderIdentity, ProviderSet,
+    QueryValue, Redirect, ScriptedSelection, Shape, Transport, find,
 };
 pub use replay::{Capture, Chaos, ReplayError, chaos, encode_event, encode_step, record};
 pub use retry::{

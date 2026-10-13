@@ -40,6 +40,7 @@ pub(crate) fn server_request(
             tool,
             preview,
             grant,
+            ..
         } => {
             let mut reason = approval_title(tool, preview);
             if let Some(grant) = grant {

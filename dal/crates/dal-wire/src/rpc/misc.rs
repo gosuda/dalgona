@@ -1,8 +1,5 @@
 //! Non-session method handlers for version-1 RPC: blobs, commands, models,
-//! docs, host subscriptions, and auth.
-//!
-//! `auth/login` stores an API key through [`Host::login`]; browser and device
-//! logins and `auth/logout` have no host seam and return `-32601`.
+//! docs, and host subscriptions. Auth lives in `auth`.
 
 use std::sync::Arc;
 
@@ -12,7 +9,7 @@ use serde::Serialize;
 use sonic_rs::Value;
 use tokio::sync::Mutex;
 
-use super::{Conn, host_error, host_notifier, invalid_params, opt_string, to_value};
+use super::{Conn, host_error, host_notifier, invalid_params, opt_string, req_string, to_value};
 use crate::jsonrpc::{ErrorObject, Id, Message};
 use crate::transport::FrameWriter;
 
@@ -23,8 +20,7 @@ pub(crate) async fn blob_read(
     params: &Value,
 ) -> Result<Value, ErrorObject> {
     let id = super::session::session_param("blob/read", params)?;
-    let raw = opt_string(params, "blobId")
-        .ok_or_else(|| invalid_params("blob/read", "missing member `blobId`"))?;
+    let raw = req_string("blob/read", params, "blobId")?;
     let blob = dal_core::BlobId::parse(&raw)
         .map_err(|_| invalid_params("blob/read", "blobId is not valid"))?;
     let agent = super::session::agent_for(host, state, id).await?;
@@ -118,7 +114,7 @@ pub(crate) async fn models_list(host: &Host, params: &Value) -> Result<Value, Er
 }
 
 /// Splits one route into its wire id and provider label.
-fn route_identity(route: &ModelRoute) -> (String, String) {
+pub(super) fn route_identity(route: &ModelRoute) -> (String, String) {
     match route {
         ModelRoute::Synthetic { id } => {
             let provider = id.split('/').next().unwrap_or("").to_owned();
@@ -146,7 +142,7 @@ struct DocumentRow {
 
 /// Handles `docs/read`: reads one document, or lists known documents.
 pub(crate) fn docs_read(host: &Host, params: &Value) -> Result<Value, ErrorObject> {
-    match opt_string(params, "uri") {
+    match opt_string("docs/read", params, "uri")? {
         None => {
             let rows: Vec<DocumentRow> = host
                 .docs()
@@ -194,69 +190,4 @@ pub(crate) async fn host_unsubscribe(
         token.cancel();
     }
     Ok(sonic_rs::json!({}))
-}
-
-/// One `auth/status` provider row.
-#[derive(Serialize)]
-struct ProviderRow {
-    provider: String,
-    state: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    detail: Option<String>,
-}
-
-/// Handles `auth/status`: reports one row per catalog provider.
-pub(crate) async fn auth_status(host: &Host, params: &Value) -> Result<Value, ErrorObject> {
-    let _ = params;
-    let mut seen: Vec<String> = Vec::new();
-    let mut rows: Vec<ProviderRow> = Vec::new();
-    for info in host.models(None).await.map_err(host_error)? {
-        let (_, provider) = route_identity(&info.route);
-        if seen.contains(&provider) {
-            continue;
-        }
-        seen.push(provider.clone());
-        let state = if host.has_credential(&provider) {
-            "ready"
-        } else {
-            "not_configured"
-        };
-        rows.push(ProviderRow {
-            provider,
-            state: state.to_owned(),
-            detail: None,
-        });
-    }
-    rows.sort_by(|left, right| left.provider.as_bytes().cmp(right.provider.as_bytes()));
-    let providers = to_value(&rows)?;
-    Ok(sonic_rs::json!({"providers": providers}))
-}
-
-/// Handles `auth/login`: unavailable until the `Host::login` seam lands.
-pub(crate) async fn auth_login(host: &Host, params: &Value) -> Result<Value, ErrorObject> {
-    let provider = opt_string(params, "provider")
-        .ok_or_else(|| invalid_params("auth/login", "missing member `provider`"))?;
-    let method = opt_string(params, "method")
-        .ok_or_else(|| invalid_params("auth/login", "missing member `method`"))?;
-    if method != "api_key" {
-        return Err(ErrorObject {
-            code: -32601,
-            message: format!("login method \"{method}\" is unavailable over the wire"),
-            data: None,
-        });
-    }
-    let key = opt_string(params, "apiKey")
-        .filter(|key| !key.is_empty())
-        .ok_or_else(|| invalid_params("auth/login", r#"method "api_key" needs apiKey"#))?;
-    host.login(&provider, &key).await.map_err(host_error)?;
-    Ok(sonic_rs::json!({"state": "ready"}))
-}
-
-/// Handles `auth/logout`: unavailable until the `Host::login` seam lands.
-pub(crate) fn auth_logout() -> Result<Value, ErrorObject> {
-    Err(ErrorObject {
-        code: -32601,
-        message: "login unavailable".to_owned(),
-        data: None,
-    })
 }

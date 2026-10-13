@@ -203,3 +203,34 @@ async fn line_delimiter_is_rejected_before_writing() {
         .expect("read one line");
     assert_eq!(&line, b"valid\n");
 }
+
+#[tokio::test]
+async fn websocket_oversized_message_ends_without_a_close_frame() {
+    use futures::SinkExt;
+    use tokio_tungstenite::{
+        WebSocketStream,
+        tungstenite::{Message, protocol::Role},
+    };
+
+    use crate::transport::WebSocketTransport;
+
+    let (server_io, client_io) = tokio::io::duplex(64 * 1024);
+    let mut server = WebSocketTransport::server(server_io).await;
+    let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+    let oversized = Message::Binary(vec![0_u8; 16 * 1024 * 1024 + 1].into());
+
+    let send = async {
+        // The server stops reading at the size limit, so this send ends in a write error.
+        let _ = client.send(oversized).await;
+    };
+    let serve = async move {
+        assert_eq!(server.read_frame().await, Err(ReadFrameError::Closed));
+        server.close().await;
+    };
+    tokio::join!(send, serve);
+
+    match client.next().await {
+        None | Some(Err(_)) => {}
+        Some(Ok(frame)) => panic!("an oversized message must end without a reply, got {frame:?}"),
+    }
+}

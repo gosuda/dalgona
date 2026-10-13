@@ -18,6 +18,59 @@ use crate::{
     thinking::{Effort, ThinkingSupport},
 };
 
+/// Replaces terminal control and format characters in a provider-supplied
+/// catalog identifier with the replacement character, so a configured or
+/// compromised provider cannot smuggle newlines, bidi reordering, or escape
+/// sequences through model ids or display names into CLI output or the models
+/// cache.
+pub(crate) fn sanitize_identifier(value: &str) -> Box<str> {
+    if value
+        .chars()
+        .all(|character| !is_control_or_format(character))
+    {
+        return value.into();
+    }
+    value
+        .chars()
+        .map(|character| {
+            if is_control_or_format(character) {
+                char::REPLACEMENT_CHARACTER
+            } else {
+                character
+            }
+        })
+        .collect::<String>()
+        .into_boxed_str()
+}
+
+fn is_control_or_format(character: char) -> bool {
+    character.is_control()
+        || matches!(
+            u32::from(character),
+            0x00AD
+                | 0x0600..=0x0605
+                | 0x061C
+                | 0x06DD
+                | 0x070F
+                | 0x0890..=0x0891
+                | 0x08E2
+                | 0x180E
+                | 0x200B..=0x200F
+                | 0x202A..=0x202E
+                | 0x2060..=0x2064
+                | 0x2066..=0x206F
+                | 0xFEFF
+                | 0xFFF9..=0xFFFB
+                | 0x110BD
+                | 0x110CD
+                | 0x13430..=0x1343F
+                | 0x1BCA0..=0x1BCA3
+                | 0x1D173..=0x1D17A
+                | 0xE0001
+                | 0xE0020..=0xE007F
+        )
+}
+
 pub(crate) fn decode_openai_models(
     provider: &ProviderEntry,
     bytes: &[u8],
@@ -28,12 +81,13 @@ pub(crate) fn decode_openai_models(
         .data
         .into_iter()
         .map(|model| {
-            let base = capability_row(&builtins, provider, &model.id)
+            let id = sanitize_identifier(&model.id);
+            let base = capability_row(&builtins, provider, &id)
                 .cloned()
-                .unwrap_or_else(|| default_entry(provider, &model.id));
+                .unwrap_or_else(|| default_entry(provider, &id));
             let mut entry = CatalogEntry {
                 provider: provider.id.clone(),
-                id: model.id.clone().into_boxed_str(),
+                id,
                 display: base.display,
                 listing: Listing::Listed,
                 context_window: base.context_window,
@@ -88,11 +142,11 @@ pub(crate) fn decode_codex_models(
                 .transpose()?;
             Ok(CatalogEntry {
                 provider: provider.id.clone(),
-                id: model.slug.clone().into_boxed_str(),
+                id: sanitize_identifier(&model.slug),
                 display: model
                     .display_name
-                    .unwrap_or_else(|| model.slug.clone())
-                    .into_boxed_str(),
+                    .as_deref()
+                    .map_or_else(|| sanitize_identifier(&model.slug), sanitize_identifier),
                 listing: if model.visibility == "list" {
                     Listing::Listed
                 } else {
@@ -113,7 +167,10 @@ pub(crate) fn decode_codex_models(
                 supports_reasoning_summaries: model.supports_reasoning_summaries,
                 tool_support: ToolSupport::Any,
                 custom_grammar: false,
-                temperature_allowed: compiled_temperature(provider.id.as_ref(), &model.slug),
+                temperature_allowed: compiled_temperature(
+                    provider.id.as_ref(),
+                    &sanitize_identifier(&model.slug),
+                ),
                 display_supported: false,
             })
         })
@@ -142,11 +199,11 @@ pub(crate) fn decode_anthropic_page(
             });
             CatalogEntry {
                 provider: provider.id.clone(),
-                id: model.id.clone().into_boxed_str(),
+                id: sanitize_identifier(&model.id),
                 display: model
                     .display_name
-                    .unwrap_or_else(|| model.id.clone())
-                    .into_boxed_str(),
+                    .as_deref()
+                    .map_or_else(|| sanitize_identifier(&model.id), sanitize_identifier),
                 listing: Listing::Listed,
                 context_window: model.max_input_tokens,
                 max_output: model.max_tokens,
@@ -160,7 +217,10 @@ pub(crate) fn decode_anthropic_page(
                 supports_reasoning_summaries: false,
                 tool_support: ToolSupport::Any,
                 custom_grammar: false,
-                temperature_allowed: compiled_temperature(provider.id.as_ref(), &model.id),
+                temperature_allowed: compiled_temperature(
+                    provider.id.as_ref(),
+                    &sanitize_identifier(&model.id),
+                ),
                 display_supported: false,
             }
         })
@@ -362,5 +422,16 @@ impl CodexReasoningLevel {
             Self::String(effort) => Some(effort),
             Self::Object { effort } => effort.as_deref(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_identifier;
+
+    #[test]
+    fn sanitize_identifier_replaces_format_controls_without_losing_unicode_text() {
+        let sanitized = sanitize_identifier("café\u{202E}模型\u{2069}\u{FEFF}");
+        assert_eq!(sanitized.as_ref(), "café�模型��");
     }
 }

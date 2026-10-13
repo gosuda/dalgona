@@ -457,9 +457,8 @@ impl ScopeTable {
         }
         let scope = record.scope;
         let op = record.op.clone();
-        let price = record.price;
         let was_issued = record.state == TaskState::Issued;
-        let charge = scope_charge(&op, &o, price);
+        let charge = scope_charge(&op, &o, record.price.as_ref());
         let failed = !matches!(&o, OpOutcome::Ok { .. });
         if let Some(record) = self.tasks.get_mut(&t) {
             record.state = TaskState::Done;
@@ -720,7 +719,7 @@ fn model_request(req: &OpRequest) -> Option<ModelRequest> {
         .flatten()
 }
 
-fn scope_charge(op: &OpId, outcome: &OpOutcome, price: Option<ModelPrice>) -> Option<ScopeUsage> {
+fn scope_charge(op: &OpId, outcome: &OpOutcome, price: Option<&ModelPrice>) -> Option<ScopeUsage> {
     if !is_model_op(op) {
         return None;
     }
@@ -742,7 +741,7 @@ fn scope_charge(op: &OpId, outcome: &OpOutcome, price: Option<ModelPrice>) -> Op
             _ => None,
         })
         .map(|mut usage| {
-            usage.cost_usd = usage.cost_usd(price.as_ref(), None);
+            usage.cost_usd = usage.cost_usd(price, None);
             ScopeUsage {
                 requests: 1,
                 input_tokens: usage.input_tokens,

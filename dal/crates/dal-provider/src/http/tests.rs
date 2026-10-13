@@ -1,3 +1,8 @@
+#![expect(
+    clippy::disallowed_methods,
+    reason = "tests bind real listeners; the joined handle bounds each helper task's lifetime"
+)]
+
 use std::cell::Cell;
 
 use futures::executor::block_on;
@@ -142,28 +147,34 @@ fn endpoint_rejects_paths_that_escape_or_are_empty() {
 }
 
 #[test]
-fn redirects_follow_https_and_loopback_only_from_loopback() {
+fn redirects_stay_within_the_origin_and_never_reach_plaintext() {
     let remote = [url("https://api.openai.com/v1/responses")];
     let local = [url("http://127.0.0.1:4000/v1/responses")];
-    assert!(follow(&url("https://cdn.openai.com/x"), &remote).is_ok());
-    assert!(follow(&url("http://[::1]:4000/y"), &local).is_ok());
-    assert!(follow(&url("https://example.com/y"), &local).is_ok());
-    assert!(matches!(
-        follow(&url("http://example.com/x"), &remote),
-        Err(RefusedRedirect::PlainHttp { host }) if host == "example.com"
-    ));
-    assert!(matches!(
-        follow(&url("http://example.com/x"), &local),
-        Err(RefusedRedirect::PlainHttp { .. })
-    ));
-    assert!(matches!(
-        follow(&url("http://127.0.0.1:22/"), &remote),
-        Err(RefusedRedirect::Target { .. })
-    ));
-    assert!(matches!(
-        follow(&url("ftp://example.com/"), &remote),
-        Err(RefusedRedirect::Target { .. })
-    ));
+    assert!(follow(&url("https://api.openai.com/v2/responses"), &remote).is_ok());
+    assert!(follow(&url("http://127.0.0.1:4000/y"), &local).is_ok());
+    for (next, previous) in [
+        ("https://cdn.openai.com/x", &remote),
+        ("https://api.openai.com:8443/x", &remote),
+        ("https://example.com/y", &local),
+        ("http://[::1]:4000/y", &local),
+        ("http://127.0.0.1:22/", &remote),
+        ("http://127.0.0.1:4001/", &local),
+        ("ftp://example.com/", &remote),
+    ] {
+        assert!(
+            matches!(
+                follow(&url(next), previous),
+                Err(RefusedRedirect::Target { .. })
+            ),
+            "{next}"
+        );
+    }
+    for previous in [&remote, &local] {
+        assert!(matches!(
+            follow(&url("http://example.com/x"), previous),
+            Err(RefusedRedirect::PlainHttp { host }) if host == "example.com"
+        ));
+    }
 }
 
 #[test]
@@ -300,4 +311,131 @@ fn body_cap_admits_the_limit_and_refuses_one_byte_more() {
     let error = append_capped(&mut body, b"c").unwrap_err();
     assert!(matches!(error, ProviderError::Limit(LimitError::Body)));
     assert_eq!(body.len(), BODY_LIMIT);
+}
+
+fn streamed(chunks: Vec<Result<Vec<u8>, std::io::Error>>) -> reqwest::Response {
+    reqwest::Response::from(hyper::http::Response::new(reqwest::Body::wrap_stream(
+        futures::stream::iter(chunks),
+    )))
+}
+
+#[test]
+fn read_body_admits_the_limit_and_refuses_one_byte_more() {
+    const MIB: usize = 1 << 20;
+    let at_limit = streamed(
+        std::iter::repeat_with(|| Ok(vec![b'a'; MIB]))
+            .take(BODY_LIMIT / MIB)
+            .collect(),
+    );
+    assert_eq!(
+        block_on(read_body(Family::Chat, at_limit)).unwrap().len(),
+        BODY_LIMIT
+    );
+
+    let mut over: Vec<Result<Vec<u8>, std::io::Error>> =
+        std::iter::repeat_with(|| Ok(vec![b'a'; MIB]))
+            .take(BODY_LIMIT / MIB)
+            .collect();
+    over.push(Ok(vec![b'b']));
+    assert!(matches!(
+        block_on(read_body(Family::Chat, streamed(over))),
+        Err(ProviderError::Limit(LimitError::Body))
+    ));
+
+    let declared = reqwest::Response::from(hyper::http::Response::new(reqwest::Body::from(vec![
+            b'a';
+            BODY_LIMIT
+                + 1
+        ])));
+    assert!(matches!(
+        block_on(read_body(Family::Chat, declared)),
+        Err(ProviderError::Limit(LimitError::Body))
+    ));
+}
+
+#[test]
+fn a_body_cut_mid_read_is_a_transport_error_never_a_partial_ok() {
+    let cut = streamed(vec![
+        Ok(b"{\"error\":".to_vec()),
+        Err(std::io::Error::other("connection reset")),
+    ]);
+    transport_reason(block_on(read_body(Family::Chat, cut)).unwrap_err());
+}
+
+#[test]
+fn lazy_client_builds_on_first_use_and_clones_share_one_build() {
+    let lazy = LazyClient::default();
+    let clone = lazy.clone();
+    assert!(lazy.0.get().is_none());
+    let shared = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..8)
+            .map(|index| {
+                let client = if index % 2 == 0 { &lazy } else { &clone };
+                scope.spawn(move || client.get())
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    assert!(shared.iter().all(|client| std::ptr::eq(*client, shared[0])));
+    assert!(lazy.0.get().is_some());
+
+    let prebuilt = LazyClient::from(build_client());
+    assert!(prebuilt.0.get().is_some());
+}
+
+#[tokio::test]
+async fn a_cross_origin_redirect_never_carries_provider_credentials() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target_port = target.local_addr().unwrap().port();
+    let hop = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let hop_port = hop.local_addr().unwrap().port();
+    let leaked = tokio::spawn(async move {
+        let (mut socket, _) = target.accept().await.unwrap();
+        let mut buffer = vec![0; 8192];
+        let length = socket.read(&mut buffer).await.unwrap();
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        buffer.truncate(length);
+        String::from_utf8_lossy(&buffer).into_owned()
+    });
+    tokio::spawn(async move {
+        let (mut socket, _) = hop.accept().await.unwrap();
+        let mut buffer = vec![0; 8192];
+        let _ = socket.read(&mut buffer).await.unwrap();
+        let reply = format!(
+            "HTTP/1.1 307 Temporary Redirect\r\nlocation: http://127.0.0.1:{target_port}/leak\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+        );
+        socket.write_all(reply.as_bytes()).await.unwrap();
+    });
+
+    let request = build_client()
+        .post(format!("http://127.0.0.1:{hop_port}/v1/messages"))
+        .header("x-api-key", "sk-secret")
+        .header("chatgpt-account-id", "acct-secret")
+        .body("{}");
+    let error = send(
+        Family::Anthropic,
+        request,
+        "dalgon/0",
+        Exchange::Json {
+            total: Duration::from_secs(5),
+        },
+        tokio::time::sleep,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(error, ProviderError::Transport { .. }),
+        "{error:?}"
+    );
+    let seen = tokio::time::timeout(Duration::from_millis(300), leaked).await;
+    assert!(seen.is_err(), "the redirect target received {seen:?}");
 }

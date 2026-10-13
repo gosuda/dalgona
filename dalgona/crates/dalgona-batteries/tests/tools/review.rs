@@ -55,3 +55,43 @@ async fn unknown_arguments_are_rejected_before_git_runs() -> TestResult {
     assert_eq!(locked(&host.runs).len(), 1);
     Ok(())
 }
+
+fn seed_capped_session(host: &Arc<Host>, max_rounds: u8) -> TestResult {
+    let session = dal_core::SessionId::new_v7();
+    let mut records = locked(&host.records);
+    let bodies = records.entry("review".to_owned()).or_default();
+    for round in 1..=max_rounds {
+        bodies.push(dal_core::RawJson::parse(&format!(
+            r#"{{"session":"{session}","round":{round},"verdict":"findings","new_count":1,"findings":[{{"path":"src/lib.rs","line":7,"severity":"major","title":"Unchecked index","detail":"It can panic."}}]}}"#
+        ))?);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_call_after_the_round_cap_stops_and_reports_the_outstanding_findings() -> TestResult {
+    let host = Host::with_runs([
+        exited(0, "diff --git a/x b/x\n+changed\n", ""),
+        exited(0, " M x\n", ""),
+    ]);
+    seed_capped_session(&host, ReviewConfig::default().max_rounds)?;
+    let text = run_review(&host, "{}").await?;
+    assert!(text.contains("reached the cap of 3 rounds"), "{text}");
+    assert!(text.contains("src/lib.rs"), "{text}");
+    assert!(text.contains("Unchecked index"), "{text}");
+    assert_eq!(host.infer_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(locked(&host.runs).len(), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_restart_argument_without_the_command_stops_at_the_cap() -> TestResult {
+    let host = Host::with_runs([exited(0, "", ""), exited(0, "", "")]);
+    seed_capped_session(&host, ReviewConfig::default().max_rounds)?;
+    let text = run_review(&host, r#"{"restart":true}"#).await?;
+    assert!(text.contains("reached the cap of 3 rounds"), "{text}");
+    assert!(text.contains("src/lib.rs"), "{text}");
+    assert!(text.contains("Unchecked index"), "{text}");
+    assert_eq!(host.infer_calls.load(Ordering::SeqCst), 0);
+    Ok(())
+}

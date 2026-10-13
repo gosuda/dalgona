@@ -73,7 +73,8 @@ pub const JUDGE_ON_WITHOUT_CREDENTIALS: &str =
 ///
 /// # Errors
 ///
-/// Returns [`JudgeGateError`] when `judge = "on"` has no usable judge.
+/// Fails with [`JudgeGateError`] when `mode` is [`JudgeMode::On`] without a
+/// ready judge handle.
 pub fn gate_mode(
     mode: JudgeMode,
     judge_ready: bool,
@@ -81,11 +82,12 @@ pub fn gate_mode(
 ) -> Result<JudgeGate, JudgeGateError> {
     match (mode, judge_ready) {
         (JudgeMode::Off, _) => Ok(JudgeGate::Disabled { note: None }),
-        (JudgeMode::On | JudgeMode::Auto, true) => Ok(JudgeGate::Enabled),
+
         (JudgeMode::On, false) => Err(JudgeGateError),
         (JudgeMode::Auto, false) => Ok(JudgeGate::Disabled {
             note: Some(judge_auto_off_note(judged_count)),
         }),
+        (_, true) => Ok(JudgeGate::Enabled),
     }
 }
 

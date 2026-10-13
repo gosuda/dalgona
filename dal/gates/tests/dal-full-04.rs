@@ -1,7 +1,6 @@
-#![expect(clippy::unwrap_used, reason = "SC test")]
+//! Gate-full scenario 4: extension removal and headless surface probes.
 #![expect(clippy::expect_used, reason = "SC test")]
 
-//! Headless and TUI probes against the built product binaries.
 #[expect(
     dead_code,
     reason = "gate support helpers are shared across independent test targets"
@@ -81,6 +80,7 @@ fn tui_probe(agent: &Agent, session: SessionRef) -> Result<(), Box<dyn Error + S
         session,
         screen: Screen::Fullscreen,
         theme_request: ThemeRequest::Palette,
+        default_model: None,
         images: false,
         diagrams: false,
         motion: false,
@@ -183,7 +183,7 @@ async fn probe_without(extension_name: &str) -> Result<(), Box<dyn Error + Send 
         .extensions
         .iter()
         .find(|extension| extension.name() == "focus")
-        .unwrap();
+        .expect("focus plugin loaded");
     assert_eq!(focus.version(), "0.1.0");
     let present = product
         .extensions

@@ -301,3 +301,102 @@ async fn blob_io_failure_does_not_publish_record() {
         Ok(_) => panic!("later mutations return Broken"),
     }
 }
+
+#[tokio::test]
+async fn corrupted_blob_bytes_are_refused_not_returned() {
+    let (temp, store, _) = setup("blob-corrupt");
+    let id = SessionId::new_v7();
+    let mut journal = store.create_session(id);
+    let big = "g".repeat(16_384);
+    journal
+        .append(vec![text_record(1, &big)])
+        .await
+        .expect("blob append succeeds");
+    let digest = match &journal.records()[2] {
+        Record::User(entry) => match &entry.kind {
+            EntryKind::User { parts } => match &parts[..] {
+                [JournalPart::TextBlob { blob, .. }] => BlobId::parse(blob).expect("digest parses"),
+                _ => panic!("expected a blob part"),
+            },
+            _ => panic!("expected a user entry"),
+        },
+        _ => panic!("expected a user record"),
+    };
+    let path = session_dir(&temp.path().join("data"), id)
+        .join("blobs")
+        .join(digest.to_string());
+    assert_eq!(
+        journal.read_blob(digest).expect("intact blob reads"),
+        big.as_bytes()
+    );
+
+    fs::write(&path, "h".repeat(16_384)).expect("flip the blob bytes");
+    let flipped = journal
+        .read_blob(digest)
+        .expect_err("bytes that do not hash to the digest are refused");
+    assert!(
+        matches!(&flipped, BlobError::Io { source } if source.kind() == std::io::ErrorKind::InvalidData),
+        "descriptive InvalidData, got {flipped:?}"
+    );
+    assert!(
+        flipped.to_string().contains(&digest.to_string()),
+        "the message names the digest: {flipped}"
+    );
+
+    fs::write(&path, b"").expect("truncate the blob to zero bytes");
+    assert!(
+        store.read_blob(id, digest).is_err(),
+        "a zero-length blob is not the blob"
+    );
+    journal.close().await.expect("session closes");
+}
+
+#[tokio::test]
+async fn blob_write_to_a_session_that_never_existed_reports_gone() {
+    let (_temp, store, _) = setup("blob-no-session");
+    let error = store
+        .write_blob(SessionId::new_v7(), b"orphan")
+        .expect_err("no session directory exists");
+    assert!(matches!(error, BlobError::Gone), "got {error:?}");
+}
+
+#[tokio::test]
+async fn blob_limit_holds_from_both_sides() {
+    let (temp, store, _) = setup("blob-limit");
+    let id = SessionId::new_v7();
+    let mut journal = store.create_session(id);
+    journal
+        .append(vec![text_record(1, "prefix")])
+        .await
+        .expect("prefix append");
+
+    let at_limit = vec![b'L'; 67_108_864];
+    let digest = store
+        .write_blob(id, &at_limit)
+        .expect("a blob of exactly the limit is accepted");
+    assert_eq!(digest, BlobId::from_bytes(&at_limit));
+    assert_eq!(
+        store.read_blob(id, digest).expect("reads back").len(),
+        at_limit.len()
+    );
+    let below = vec![b'B'; 67_108_863];
+    store
+        .write_blob(id, &below)
+        .expect("a blob of limit-1 bytes is accepted");
+    let over = vec![b'O'; 67_108_865];
+    let error = store
+        .write_blob(id, &over)
+        .expect_err("a blob of limit+1 bytes is refused");
+    assert!(
+        matches!(error, BlobError::TooLarge { bytes: 67_108_865 }),
+        "got {error:?}"
+    );
+    assert!(
+        !session_dir(&temp.path().join("data"), id)
+            .join("blobs")
+            .join(BlobId::from_bytes(&over).to_string())
+            .exists(),
+        "a refused blob leaves no file"
+    );
+    journal.close().await.expect("session closes");
+}

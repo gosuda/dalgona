@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -27,9 +27,9 @@ pub(super) const MAGIC_POSTINGS: [u8; 4] = *b"DALP";
 const MAGIC_STAMPS: [u8; 4] = *b"DALS";
 
 pub(super) const HEADER_LEN: usize = 16;
-const POSTING_LEN: usize = 6;
+pub(super) const POSTING_LEN: usize = 6;
 const TABLE_ENTRY_LEN: usize = 16;
-const FOOTER_LEN: usize = 16;
+pub(super) const FOOTER_LEN: usize = 16;
 const STAMP_LEN: usize = 20;
 pub(super) const GRAM_LIMIT: u32 = 1 << 24;
 
@@ -312,26 +312,32 @@ impl Postings {
         }
         (running == count).then_some(postings)
     }
+}
 
+/// The checked state of one gram's posting list.
+pub(super) enum GramList {
+    /// The gram is unused: no file holds it.
+    Absent,
+    /// A valid posting list: `(start, len)` into the postings section.
+    List(usize, usize),
+}
+
+impl Postings {
     /// The ids of one used posting list, checked to ascend strictly and name a
     /// file of the path table; `None` marks the section corrupt.
-    #[expect(
-        clippy::option_option,
-        reason = "outer None marks corruption; inner None marks an unused list"
-    )]
-    pub(super) fn checked_list(&self, gram: u32, files: usize) -> Option<Option<(usize, usize)>> {
+    pub(super) fn checked_list(&self, gram: u32, files: usize) -> Option<GramList> {
         let Some((start, len)) = self.list(gram) else {
-            return Some(None);
+            return Some(GramList::Absent);
         };
         let mut previous = None;
         for at in start..start + len {
             let (file, _, _) = self.record(at)?;
             if (file as usize) >= files || previous.is_some_and(|p| p >= file) {
-                return Some(None);
+                return None;
             }
             previous = Some(file);
         }
-        Some(Some((start, len)))
+        Some(GramList::List(start, len))
     }
 
     pub(super) fn entry(&self, at: usize) -> Option<(u32, usize, usize)> {
@@ -576,8 +582,19 @@ fn section(bytes: &[u8], magic: [u8; 4], nonce: u64) -> Option<(Cursor<'_>, usiz
     (count <= cursor.0.len() / 8).then_some((cursor, count))
 }
 
+/// A stored path is confined when it names a location inside the workspace:
+/// relative, non-empty, and free of `..`. Anything else would join outside
+/// the root when a candidate is read, so the index holding it is corrupt.
+fn confined(path: &Path) -> bool {
+    !path.as_os_str().is_empty()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
+}
+
 /// Open a published index: header parse, validation, and load only. Any
-/// mismatch or read failure is an absent index.
+/// mismatch or read failure is an absent index, as is a stored path that
+/// escapes the workspace: the caller rebuilds from the walk instead.
 pub(super) fn open(dir: &Path, canonical: &Path) -> Option<Data> {
     let meta = fs::read(dir.join(META)).ok()?;
     let mut cursor = Cursor(&meta);
@@ -603,6 +620,14 @@ pub(super) fn open(dir: &Path, canonical: &Path) -> Option<Data> {
             Some((cursor.path()?, kind))
         })
         .collect::<Option<Vec<_>>>()?;
+
+    if files
+        .iter()
+        .chain(extra.iter().map(|(path, _)| path))
+        .any(|path| !confined(path))
+    {
+        return None;
+    }
 
     let bytes = fs::read(dir.join(STAMPS)).ok()?;
     let (mut cursor, count) = section(&bytes, MAGIC_STAMPS, nonce)?;

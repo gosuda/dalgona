@@ -478,15 +478,25 @@ pub(super) struct Crossing {
     pub delta_mass: f64,
 }
 
+/// Bands applied to metric checks; mirrors the core `[guard.bands]` table.
+pub(super) struct Bands {
+    /// Cognitive complexity band.
+    pub cognitive: u32,
+    /// Cyclomatic complexity band.
+    pub cyclomatic: u32,
+    /// Function physical-lines band.
+    pub function_ploc: u32,
+    /// Nesting depth band.
+    pub nesting: u32,
+    /// File physical-lines band.
+    pub file_ploc: u32,
+}
+
 pub(super) fn crossings(
     path: &str,
     pre: Option<&FileMetrics>,
     post: &FileMetrics,
-    cognitive_band: u32,
-    cyclomatic_band: u32,
-    function_ploc_band: u32,
-    nesting_band: u32,
-    file_ploc_band: u32,
+    bands: &Bands,
 ) -> Vec<Crossing> {
     let mut result = Vec::new();
     for function in &post.functions {
@@ -498,7 +508,7 @@ pub(super) fn crossings(
             Metric::Cognitive,
             function.cognitive,
             before.map(|f| f.cognitive),
-            cognitive_band,
+            bands.cognitive,
         );
         push_crossing(
             &mut result,
@@ -507,7 +517,7 @@ pub(super) fn crossings(
             Metric::Cyclomatic,
             function.cyclomatic,
             before.map(|f| f.cyclomatic),
-            cyclomatic_band,
+            bands.cyclomatic,
         );
         push_crossing(
             &mut result,
@@ -516,7 +526,7 @@ pub(super) fn crossings(
             Metric::Ploc,
             function.ploc,
             before.map(|f| f.ploc),
-            function_ploc_band,
+            bands.function_ploc,
         );
         push_crossing(
             &mut result,
@@ -525,14 +535,14 @@ pub(super) fn crossings(
             Metric::Nesting,
             function.nesting,
             before.map(|f| f.nesting),
-            nesting_band,
+            bands.nesting,
         );
     }
     let previous_ploc = pre.map(|file| file.ploc);
-    if post.ploc > file_ploc_band && previous_ploc.is_none_or(|before| post.ploc > before) {
+    if post.ploc > bands.file_ploc && previous_ploc.is_none_or(|before| post.ploc > before) {
         let before = previous_ploc.map_or(super::report::Before::New, super::report::Before::Value);
         result.push(Crossing {
-            line: super::report::file_band_line(path, before, post.ploc, file_ploc_band),
+            line: super::report::file_band_line(path, before, post.ploc, bands.file_ploc),
             delta_mass: 0.0,
         });
     }

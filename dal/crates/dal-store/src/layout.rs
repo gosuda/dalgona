@@ -63,6 +63,11 @@ impl SessionPaths {
     pub(crate) fn sidecar(&self, name: &str) -> PathBuf {
         self.directory.join(name)
     }
+
+    #[must_use]
+    pub(crate) fn sidecar_dir(&self) -> PathBuf {
+        self.directory.join("sidecar")
+    }
 }
 
 #[cfg(test)]

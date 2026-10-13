@@ -54254,6 +54254,7110 @@ pub(crate) const PRICE_ROWS: &[PriceRow] = &[
         reasoning: None,
     },
 ];
+#[expect(clippy::unreadable_literal, reason = "generated tier rates preserve the snapshot's decimal values")]
+pub(crate) const PRICE_TIER_ROWS: &[TierRow] = &[
+    TierRow {
+        model: "302ai/claude-opus-4-7",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(37.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "302ai/gpt-5.4",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(5.0),
+                cached_input: None,
+                output: Some(22.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "aihubmix/claude-opus-4-6",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(37.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "aihubmix/claude-opus-4-6-think",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(37.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "aihubmix/claude-opus-4-7",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(37.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "aihubmix/claude-opus-4-7-think",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(37.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "aihubmix/claude-sonnet-4-6",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(6.0),
+                cached_input: Some(0.6),
+                output: Some(22.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "aihubmix/claude-sonnet-4-6-think",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(6.0),
+                cached_input: Some(0.6),
+                output: Some(22.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "aihubmix/coding-xiaomi-mimo-v2.5",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(0.16),
+                cached_input: Some(0.032),
+                output: Some(0.8),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "aihubmix/coding-xiaomi-mimo-v2.5-pro",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(0.4),
+                cached_input: Some(0.08),
+                output: Some(1.2),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "aihubmix/doubao-seed-2-0-code-preview",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(0.72),
+                cached_input: Some(0.144656),
+                output: Some(3.62),
+                reasoning: None,
+            },
+            PriceTier {
+                size: 128_000,
+                input: Some(1.45),
+                cached_input: Some(0.28932),
+                output: Some(7.23),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "aihubmix/doubao-seed-2-0-lite-260428",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(0.13),
+                cached_input: Some(0.02536),
+                output: Some(0.76),
+                reasoning: None,
+            },
+            PriceTier {
+                size: 128_000,
+                input: Some(0.25),
+                cached_input: Some(0.05072),
+                output: Some(1.52),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "aihubmix/doubao-seed-2-0-mini-260428",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(0.06),
+                cached_input: Some(0.01128),
+                output: Some(0.56),
+                reasoning: None,
+            },
+            PriceTier {
+                size: 128_000,
+                input: Some(0.11),
+                cached_input: Some(0.02256),
+                output: Some(1.13),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "aihubmix/doubao-seed-2-0-pro",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(0.72),
+                cached_input: Some(0.144656),
+                output: Some(3.62),
+                reasoning: None,
+            },
+            PriceTier {
+                size: 128_000,
+                input: Some(1.45),
+                cached_input: Some(0.28932),
+                output: Some(7.23),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "aihubmix/gemini-2.5-pro",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.25),
+                output: Some(15.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "aihubmix/gemini-3-flash-preview",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(0.5),
+                cached_input: Some(0.05),
+                output: Some(3.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "aihubmix/gemini-3.1-pro-preview",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "aihubmix/gemini-3.1-pro-preview-customtools",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "aihubmix/gpt-5.4",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(5.0),
+                cached_input: Some(0.5),
+                output: Some(22.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "aihubmix/gpt-5.5",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(45.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "aihubmix/gpt-6-astra",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(20.0),
+                cached_input: Some(2.0),
+                output: Some(75.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "aihubmix/gpt-6-luna",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(0.2),
+                cached_input: Some(0.02),
+                output: Some(0.75),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "aihubmix/gpt-6-sol",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(15.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "aihubmix/grok-4.3",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.4),
+                output: Some(5.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "aihubmix/grok-4.7",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.4),
+                cached_input: Some(1.1),
+                output: Some(13.2),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "aihubmix/qwen3.6-flash",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(0.68),
+                cached_input: Some(0.0676),
+                output: Some(4.06),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "aihubmix/qwen3.6-max-preview",
+        tiers: &[
+            PriceTier {
+                size: 128_000,
+                input: Some(2.11),
+                cached_input: Some(0.2112),
+                output: Some(12.67),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "aihubmix/qwen3.6-plus",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(1.13),
+                cached_input: Some(0.1128),
+                output: Some(6.77),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "aihubmix/xiaomi-mimo-v2.5",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(0.88),
+                cached_input: Some(0.176),
+                output: Some(4.4),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "aihubmix/xiaomi-mimo-v2.5-pro",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(2.2),
+                cached_input: Some(0.44),
+                output: Some(6.6),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "alibaba-cn/glm-5",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(0.86),
+                cached_input: None,
+                output: Some(3.154),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "alibaba-cn/glm-5.1",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(1.1),
+                cached_input: None,
+                output: Some(3.851),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "alibaba-cn/qwen3-coder-30b-a3b-instruct",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(0.323),
+                cached_input: None,
+                output: Some(1.291),
+                reasoning: None,
+            },
+            PriceTier {
+                size: 128_000,
+                input: Some(0.538),
+                cached_input: None,
+                output: Some(2.151),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "alibaba-cn/qwen3-coder-480b-a35b-instruct",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(1.291),
+                cached_input: None,
+                output: Some(5.161),
+                reasoning: None,
+            },
+            PriceTier {
+                size: 128_000,
+                input: Some(2.151),
+                cached_input: None,
+                output: Some(8.602),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "alibaba-cn/qwen3-coder-plus",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(0.861),
+                cached_input: None,
+                output: Some(3.444),
+                reasoning: None,
+            },
+            PriceTier {
+                size: 128_000,
+                input: Some(1.435),
+                cached_input: None,
+                output: Some(5.74),
+                reasoning: None,
+            },
+            PriceTier {
+                size: 256_000,
+                input: Some(2.87),
+                cached_input: None,
+                output: Some(28.7),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "alibaba-cn/qwen3-max",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(0.574),
+                cached_input: None,
+                output: Some(2.294),
+                reasoning: Some(2.294),
+            },
+            PriceTier {
+                size: 128_000,
+                input: Some(1.004),
+                cached_input: None,
+                output: Some(4.014),
+                reasoning: Some(4.014),
+            },
+        ],
+    },
+    TierRow {
+        model: "alibaba-cn/qwen3.5-397b-a17b",
+        tiers: &[
+            PriceTier {
+                size: 128_000,
+                input: Some(0.43),
+                cached_input: None,
+                output: Some(2.58),
+                reasoning: Some(2.58),
+            },
+        ],
+    },
+    TierRow {
+        model: "alibaba-cn/qwen3.5-flash",
+        tiers: &[
+            PriceTier {
+                size: 128_000,
+                input: Some(0.115),
+                cached_input: None,
+                output: Some(1.147),
+                reasoning: Some(1.147),
+            },
+            PriceTier {
+                size: 256_000,
+                input: Some(0.172),
+                cached_input: None,
+                output: Some(1.72),
+                reasoning: Some(1.72),
+            },
+        ],
+    },
+    TierRow {
+        model: "alibaba-cn/qwen3.5-plus",
+        tiers: &[
+            PriceTier {
+                size: 128_000,
+                input: Some(0.287),
+                cached_input: None,
+                output: Some(1.72),
+                reasoning: Some(1.72),
+            },
+            PriceTier {
+                size: 256_000,
+                input: Some(0.573),
+                cached_input: None,
+                output: Some(3.44),
+                reasoning: Some(3.44),
+            },
+        ],
+    },
+    TierRow {
+        model: "alibaba-cn/qwen3.6-plus",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(2.0),
+                cached_input: Some(0.2),
+                output: Some(6.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "alibaba-cn/qwen3.7-flash",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(0.08887),
+                cached_input: Some(0.008887),
+                output: Some(0.35549),
+                reasoning: None,
+            },
+            PriceTier {
+                size: 256_000,
+                input: Some(0.17774),
+                cached_input: Some(0.017774),
+                output: Some(0.71098),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "alibaba-cn/qwen3.7-plus",
+        tiers: &[
+            PriceTier {
+                size: 128_000,
+                input: Some(2.0),
+                cached_input: Some(0.2),
+                output: Some(6.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "alibaba/qwen3-coder-30b-a3b-instruct",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(0.75),
+                cached_input: None,
+                output: Some(3.75),
+                reasoning: None,
+            },
+            PriceTier {
+                size: 128_000,
+                input: Some(1.2),
+                cached_input: None,
+                output: Some(6.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "alibaba/qwen3-coder-480b-a35b-instruct",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(2.7),
+                cached_input: None,
+                output: Some(13.5),
+                reasoning: None,
+            },
+            PriceTier {
+                size: 128_000,
+                input: Some(4.5),
+                cached_input: None,
+                output: Some(22.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "alibaba/qwen3.6-plus",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(2.0),
+                cached_input: Some(0.2),
+                output: Some(6.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "alibaba/qwen3.7-plus",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(2.0),
+                cached_input: Some(0.2),
+                output: Some(6.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "amazon-bedrock/global.openai.gpt-5.6-luna",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(0.4),
+                cached_input: Some(0.04),
+                output: Some(1.8),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "amazon-bedrock/global.openai.gpt-5.6-sol",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(8.0),
+                cached_input: Some(0.8),
+                output: Some(30.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "amazon-bedrock/global.openai.gpt-5.6-terra",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "amazon-bedrock/global.openai.gpt-6-astra",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(20.0),
+                cached_input: Some(2.0),
+                output: Some(75.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "amazon-bedrock/global.openai.gpt-6-luna",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(0.2),
+                cached_input: Some(0.02),
+                output: Some(0.75),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "amazon-bedrock/global.openai.gpt-6-sol",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(15.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "amazon-bedrock/in.openai.gpt-5.6-luna",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(0.44),
+                cached_input: Some(0.044),
+                output: Some(1.98),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "amazon-bedrock/in.openai.gpt-5.6-terra",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(4.4),
+                cached_input: Some(0.44),
+                output: Some(19.8),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "amazon-bedrock/openai.gpt-5.6-luna",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(0.44),
+                cached_input: Some(0.044),
+                output: Some(1.98),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "amazon-bedrock/openai.gpt-5.6-sol",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(8.8),
+                cached_input: Some(0.88),
+                output: Some(33.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "amazon-bedrock/openai.gpt-5.6-terra",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(4.4),
+                cached_input: Some(0.44),
+                output: Some(19.8),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "amazon-bedrock/openai.gpt-6-astra",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(22.0),
+                cached_input: Some(2.2),
+                output: Some(82.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "amazon-bedrock/openai.gpt-6-luna",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(0.22),
+                cached_input: Some(0.022),
+                output: Some(0.825),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "amazon-bedrock/openai.gpt-6-sol",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(4.4),
+                cached_input: Some(0.44),
+                output: Some(16.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "amazon-bedrock/us.openai.gpt-5.6-luna",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(0.44),
+                cached_input: Some(0.044),
+                output: Some(1.98),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "amazon-bedrock/us.openai.gpt-5.6-sol",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(8.8),
+                cached_input: Some(0.88),
+                output: Some(33.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "amazon-bedrock/us.openai.gpt-5.6-terra",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(4.4),
+                cached_input: Some(0.44),
+                output: Some(19.8),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "amazon-bedrock/us.openai.gpt-6-astra",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(22.0),
+                cached_input: Some(2.2),
+                output: Some(82.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "amazon-bedrock/us.openai.gpt-6-luna",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(0.22),
+                cached_input: Some(0.022),
+                output: Some(0.825),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "amazon-bedrock/us.openai.gpt-6-sol",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(4.4),
+                cached_input: Some(0.44),
+                output: Some(16.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "auriko/gemini-2.5-pro",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.25),
+                output: Some(15.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "auriko/gemini-3.1-pro-preview",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "auriko/grok-4.3",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.4),
+                output: Some(5.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "auriko/qwen-3.6-plus",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(2.0),
+                cached_input: Some(0.2),
+                output: Some(6.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "azure-cognitive-services/claude-opus-4-6",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(37.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "azure-cognitive-services/claude-opus-4-8",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(37.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "azure-cognitive-services/gpt-5.4",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(5.0),
+                cached_input: Some(0.5),
+                output: Some(22.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "azure-cognitive-services/gpt-5.4-pro",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(60.0),
+                cached_input: None,
+                output: Some(270.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "azure-cognitive-services/gpt-5.5",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(45.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "azure-cognitive-services/gpt-5.6-luna",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(2.0),
+                cached_input: Some(0.2),
+                output: Some(9.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "azure-cognitive-services/gpt-5.6-sol",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(45.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "azure-cognitive-services/gpt-5.6-terra",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(5.0),
+                cached_input: Some(0.5),
+                output: Some(22.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "azure/claude-opus-4-6",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(37.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "azure/claude-opus-4-8",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(37.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "azure/gpt-5.4",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(5.0),
+                cached_input: Some(0.5),
+                output: Some(22.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "azure/gpt-5.4-pro",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(60.0),
+                cached_input: None,
+                output: Some(270.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "azure/gpt-5.5",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(45.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "azure/gpt-5.6-luna",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(0.4),
+                cached_input: Some(0.04),
+                output: Some(1.8),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "azure/gpt-5.6-sol",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(45.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "azure/gpt-5.6-terra",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "azure/gpt-6-astra",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(20.0),
+                cached_input: Some(2.0),
+                output: Some(75.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "azure/gpt-6-luna",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(0.2),
+                cached_input: Some(0.02),
+                output: Some(0.75),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "azure/gpt-6-sol",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(15.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "cline-pass/cline-pass/qwen3.7-plus",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(1.2),
+                cached_input: Some(0.12),
+                output: Some(4.8),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "cloudflare-ai-gateway/openai/gpt-6-astra",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(20.0),
+                cached_input: Some(2.0),
+                output: Some(75.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "cloudflare-ai-gateway/openai/gpt-6-luna",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(0.2),
+                cached_input: Some(0.02),
+                output: Some(0.75),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "cloudflare-ai-gateway/openai/gpt-6-sol",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(15.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "cloudflare-ai-gateway/xai/grok-4.5",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.6),
+                output: Some(12.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "cloudflare-ai-gateway/xai/grok-4.6",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(1.0),
+                output: Some(12.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "cloudflare-ai-gateway/xai/grok-4.7",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(1.0),
+                output: Some(12.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "crof/mimo-v2.5-pro",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(2.0),
+                cached_input: Some(0.4),
+                output: Some(6.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "crossmodel/gemini/gemini-2.5-pro",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.25),
+                output: Some(15.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "crossmodel/gemini/gemini-3.1-pro-preview",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "crossmodel/minimax/minimax-m3",
+        tiers: &[
+            PriceTier {
+                size: 512_000,
+                input: Some(0.66),
+                cached_input: Some(0.132),
+                output: Some(2.63),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "crossmodel/openai/gpt-5.4",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(5.0),
+                cached_input: Some(0.5),
+                output: Some(22.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "crossmodel/openai/gpt-5.5",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(45.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "crossmodel/openai/gpt-5.5-pro",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(60.0),
+                cached_input: None,
+                output: Some(270.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "crossmodel/openai/gpt-5.6-luna",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(0.4),
+                cached_input: Some(0.04),
+                output: Some(1.8),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "crossmodel/openai/gpt-5.6-sol",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(8.0),
+                cached_input: Some(0.8),
+                output: Some(30.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "crossmodel/openai/gpt-5.6-terra",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "crossmodel/openai/gpt-6-astra",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(20.0),
+                cached_input: Some(2.0),
+                output: Some(75.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "crossmodel/openai/gpt-6-luna",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(0.2),
+                cached_input: Some(0.02),
+                output: Some(0.75),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "crossmodel/openai/gpt-6-sol",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(15.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "crossmodel/qwen/qwen3.6-flash",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(0.75),
+                cached_input: Some(0.075),
+                output: Some(4.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "crossmodel/qwen/qwen3.6-plus",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(1.25),
+                cached_input: Some(0.124),
+                output: Some(7.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "crossmodel/qwen/qwen3.7-flash",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(0.1),
+                cached_input: Some(0.02),
+                output: Some(0.37),
+                reasoning: None,
+            },
+            PriceTier {
+                size: 256_000,
+                input: Some(0.19),
+                cached_input: Some(0.04),
+                output: Some(0.74),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "crossmodel/qwen/qwen3.7-plus",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(0.96),
+                cached_input: Some(0.096),
+                output: Some(3.75),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "crossmodel/x-ai/grok-4.3",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.4),
+                output: Some(5.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "crossmodel/x-ai/grok-4.5",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.6),
+                output: Some(12.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "crossmodel/x-ai/grok-4.6",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(1.0),
+                output: Some(12.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "crossmodel/x-ai/grok-4.7",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(1.0),
+                output: Some(12.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "crossmodel/x-ai/grok-build-0.1",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.0),
+                cached_input: Some(0.4),
+                output: Some(4.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "crossmodel/z-ai/glm-4.7",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(0.62),
+                cached_input: Some(0.13),
+                output: Some(2.47),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "crossmodel/z-ai/glm-5",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(0.8),
+                cached_input: Some(0.2),
+                output: Some(3.4),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "crossmodel/z-ai/glm-5-turbo",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(1.1),
+                cached_input: Some(0.27),
+                output: Some(4.3),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "crossmodel/z-ai/glm-5.1",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(1.2),
+                cached_input: Some(0.3),
+                output: Some(4.4),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "databricks/databricks-gemini-2-5-pro",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.25),
+                output: Some(15.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "databricks/databricks-gemini-3-1-pro",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "databricks/databricks-gemini-3-pro",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "databricks/databricks-gpt-5-4",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(5.0),
+                cached_input: Some(0.5),
+                output: Some(22.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "databricks/databricks-gpt-5-5",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(45.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "databricks/databricks-gpt-5-6-luna",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(2.0),
+                cached_input: Some(0.2),
+                output: Some(9.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "databricks/databricks-gpt-5-6-sol",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(45.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "databricks/databricks-gpt-5-6-terra",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(5.0),
+                cached_input: Some(0.5),
+                output: Some(22.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "deepinfra/ByteDance/Seed-2.0-code",
+        tiers: &[
+            PriceTier {
+                size: 128_000,
+                input: Some(1.0),
+                cached_input: Some(0.2),
+                output: Some(6.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "deepinfra/ByteDance/Seed-2.0-mini",
+        tiers: &[
+            PriceTier {
+                size: 128_000,
+                input: Some(0.2),
+                cached_input: Some(0.2),
+                output: Some(0.8),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "deepinfra/ByteDance/Seed-2.0-pro",
+        tiers: &[
+            PriceTier {
+                size: 128_000,
+                input: Some(1.0),
+                cached_input: Some(0.2),
+                output: Some(6.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "deepinfra/Qwen/Qwen3-Max",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(2.4),
+                cached_input: Some(0.48),
+                output: Some(12.0),
+                reasoning: None,
+            },
+            PriceTier {
+                size: 128_000,
+                input: Some(3.0),
+                cached_input: Some(0.6),
+                output: Some(15.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "deepinfra/Qwen/Qwen3.7-Max",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(5.0),
+                cached_input: Some(1.0),
+                output: Some(15.0),
+                reasoning: None,
+            },
+            PriceTier {
+                size: 128_000,
+                input: Some(6.25),
+                cached_input: Some(1.25),
+                output: Some(18.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "digitalocean/anthropic-claude-4.5-sonnet",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(6.0),
+                cached_input: Some(0.6),
+                output: Some(22.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "digitalocean/anthropic-claude-4.6-sonnet",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(6.0),
+                cached_input: Some(0.6),
+                output: Some(22.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "digitalocean/anthropic-claude-opus-4.6",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(37.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "digitalocean/anthropic-claude-opus-5.5",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(8.0),
+                cached_input: Some(0.4),
+                output: Some(30.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "digitalocean/anthropic-claude-sonnet-4",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(6.0),
+                cached_input: Some(0.3),
+                output: Some(22.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "digitalocean/openai-gpt-5.4",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(5.0),
+                cached_input: Some(0.5),
+                output: Some(22.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "digitalocean/openai-gpt-5.4-pro",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(60.0),
+                cached_input: None,
+                output: Some(270.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "digitalocean/openai-gpt-5.5",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(45.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "digitalocean/openai-gpt-5.6-luna",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(0.4),
+                cached_input: Some(0.04),
+                output: Some(1.8),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "digitalocean/openai-gpt-5.6-sol",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(8.0),
+                cached_input: Some(0.8),
+                output: Some(30.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "digitalocean/openai-gpt-5.6-terra",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "digitalocean/openai-gpt-6-astra",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(20.0),
+                cached_input: Some(2.0),
+                output: Some(75.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "digitalocean/openai-gpt-6-luna",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(0.2),
+                cached_input: Some(0.02),
+                output: Some(0.75),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "digitalocean/openai-gpt-6-sol",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(15.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "edenai/google/gemini-3.1-pro-preview",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "edenai/google/gemini-3.1-pro-preview-customtools",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "edenai/google/gemini-pro-latest",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "edenai/openai/gpt-5.4",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(5.0),
+                cached_input: Some(0.5),
+                output: Some(22.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "edenai/openai/gpt-5.4-pro",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(60.0),
+                cached_input: None,
+                output: Some(270.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "edenai/openai/gpt-5.5",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(45.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "edenai/openai/gpt-5.5-pro",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(60.0),
+                cached_input: None,
+                output: Some(270.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "edenai/openai/gpt-5.6-luna",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(0.4),
+                cached_input: Some(0.04),
+                output: Some(1.8),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "edenai/openai/gpt-5.6-sol",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(8.0),
+                cached_input: Some(0.8),
+                output: Some(30.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "edenai/openai/gpt-5.6-terra",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "edenai/openai/gpt-6-astra",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(20.0),
+                cached_input: Some(2.0),
+                output: Some(75.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "edenai/openai/gpt-6-luna",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(0.2),
+                cached_input: Some(0.02),
+                output: Some(0.75),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "edenai/openai/gpt-6-sol",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(15.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "edenai/openai/gpt-latest",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(20.0),
+                cached_input: Some(2.0),
+                output: Some(75.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "edenai/openai/gpt-pro-latest",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(60.0),
+                cached_input: None,
+                output: Some(270.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "edenai/vertex/gemini-3.1-pro-preview",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "edenai/vertex/gemini-pro-latest",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "edenai/xai/grok-4.20-0309-non-reasoning",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.4),
+                output: Some(5.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "edenai/xai/grok-4.20-0309-reasoning",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.4),
+                output: Some(5.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "edenai/xai/grok-4.3",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.4),
+                output: Some(5.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "edenai/xai/grok-4.5",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.6),
+                output: Some(12.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "edenai/xai/grok-4.6",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(1.0),
+                output: Some(12.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "edenai/xai/grok-4.7",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(3.2),
+                cached_input: Some(0.8),
+                output: Some(9.6),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "edenai/xai/grok-build-0.1",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.0),
+                cached_input: Some(0.4),
+                output: Some(4.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "edenai/xai/grok-latest",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(3.2),
+                cached_input: Some(0.8),
+                output: Some(9.6),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "empiriolabs/fugu-ultra-v1-0",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(15.0),
+                cached_input: Some(3.0),
+                output: Some(67.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "empiriolabs/fugu-ultra-v1-1",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(45.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "empiriolabs/fugu-ultra-v2-0",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(45.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "empiriolabs/glm-5-1",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(1.1),
+                cached_input: Some(0.22),
+                output: Some(3.851),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "empiriolabs/minimax-m3",
+        tiers: &[
+            PriceTier {
+                size: 512_000,
+                input: Some(0.45),
+                cached_input: Some(0.09),
+                output: Some(1.8),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "empiriolabs/qwen3-5-122b-a10b",
+        tiers: &[
+            PriceTier {
+                size: 128_000,
+                input: Some(0.287),
+                cached_input: Some(0.287),
+                output: Some(2.294),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "empiriolabs/qwen3-5-27b",
+        tiers: &[
+            PriceTier {
+                size: 128_000,
+                input: Some(0.258),
+                cached_input: Some(0.258),
+                output: Some(2.064),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "empiriolabs/qwen3-5-35b-a3b",
+        tiers: &[
+            PriceTier {
+                size: 128_000,
+                input: Some(0.229),
+                cached_input: Some(0.229),
+                output: Some(1.835),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "empiriolabs/qwen3-5-397b-a17b",
+        tiers: &[
+            PriceTier {
+                size: 128_000,
+                input: Some(0.43),
+                cached_input: Some(0.43),
+                output: Some(2.58),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "empiriolabs/qwen3-5-plus",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(1.08),
+                cached_input: Some(1.08),
+                output: Some(6.62),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "empiriolabs/qwen3-6-flash",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(1.0),
+                cached_input: Some(1.0),
+                output: Some(4.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "empiriolabs/qwen3-6-max-preview",
+        tiers: &[
+            PriceTier {
+                size: 128_000,
+                input: Some(1.97),
+                cached_input: Some(1.97),
+                output: Some(11.82),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "empiriolabs/qwen3-6-plus",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(2.0),
+                cached_input: Some(2.0),
+                output: Some(6.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "empiriolabs/qwen3-7-flash",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(0.1),
+                cached_input: Some(0.02),
+                output: Some(0.4),
+                reasoning: None,
+            },
+            PriceTier {
+                size: 256_000,
+                input: Some(0.2),
+                cached_input: Some(0.04),
+                output: Some(0.8),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "empiriolabs/qwen3-7-plus",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(1.2),
+                cached_input: Some(1.2),
+                output: Some(4.8),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "empiriolabs/qwen3-max",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(2.16),
+                cached_input: Some(2.16),
+                output: Some(11.04),
+                reasoning: None,
+            },
+            PriceTier {
+                size: 128_000,
+                input: Some(2.7),
+                cached_input: Some(2.7),
+                output: Some(13.8),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "empiriolabs/seed-2-0-code",
+        tiers: &[
+            PriceTier {
+                size: 128_000,
+                input: Some(0.8),
+                cached_input: Some(0.8),
+                output: Some(4.8),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "empiriolabs/seed-2-0-lite",
+        tiers: &[
+            PriceTier {
+                size: 128_000,
+                input: Some(0.62),
+                cached_input: Some(0.62),
+                output: Some(5.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "empiriolabs/seed-2-0-mini",
+        tiers: &[
+            PriceTier {
+                size: 128_000,
+                input: Some(0.24),
+                cached_input: Some(0.24),
+                output: Some(1.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "empiriolabs/seed-2-0-pro",
+        tiers: &[
+            PriceTier {
+                size: 128_000,
+                input: Some(1.26),
+                cached_input: Some(1.26),
+                output: Some(7.58),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "github-copilot/gpt-5.4",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(5.0),
+                cached_input: Some(0.5),
+                output: Some(22.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "github-copilot/gpt-5.5",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(45.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "github-copilot/gpt-5.6-luna",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(0.4),
+                cached_input: Some(0.04),
+                output: Some(1.8),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "github-copilot/gpt-5.6-sol",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(8.0),
+                cached_input: Some(0.8),
+                output: Some(30.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "github-copilot/gpt-5.6-terra",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "github-copilot/gpt-6-astra",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(20.0),
+                cached_input: Some(2.0),
+                output: Some(75.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "github-copilot/gpt-6-luna",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(0.2),
+                cached_input: Some(0.02),
+                output: Some(0.75),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "github-copilot/gpt-6-sol",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(15.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "github-copilot/grok-4.5",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(1.0),
+                output: Some(12.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "github-copilot/grok-4.6",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(1.0),
+                output: Some(12.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "github-copilot/grok-4.7",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(1.0),
+                output: Some(12.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "gmicloud/MiniMaxAI/MiniMax-M3",
+        tiers: &[
+            PriceTier {
+                size: 512_000,
+                input: Some(1.2),
+                cached_input: Some(0.24),
+                output: Some(4.8),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "google-vertex-anthropic/claude-opus-4-6@default",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(37.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "google-vertex-anthropic/claude-opus-4-7@default",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(37.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "google-vertex-anthropic/claude-opus-4-8@default",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(37.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "google-vertex-anthropic/claude-sonnet-4-6@default",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(6.0),
+                cached_input: Some(0.6),
+                output: Some(22.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "google-vertex/claude-opus-4-6@default",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(37.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "google-vertex/claude-opus-4-7@default",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(37.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "google-vertex/claude-opus-4-8@default",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(37.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "google-vertex/claude-sonnet-4-6@default",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(6.0),
+                cached_input: Some(0.6),
+                output: Some(22.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "google-vertex/gemini-2.5-pro",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.25),
+                output: Some(15.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "google-vertex/gemini-3.1-pro-preview",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "google-vertex/gemini-3.1-pro-preview-customtools",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "google-vertex/xai/grok-4.20-non-reasoning",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.4),
+                output: Some(5.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "google-vertex/xai/grok-4.20-reasoning",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.4),
+                output: Some(5.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "google-vertex/xai/grok-4.3",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.4),
+                output: Some(5.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "google-vertex/xai/grok-4.6",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(1.0),
+                output: Some(12.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "google/deep-research-max-preview-04-2026",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "google/deep-research-preview-04-2026",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "google/gemini-2.5-computer-use-preview-10-2025",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: None,
+                output: Some(15.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "google/gemini-2.5-pro",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.25),
+                output: Some(15.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "google/gemini-3.1-pro-preview",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "google/gemini-3.1-pro-preview-customtools",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "hpc-ai/openai/gpt-5.5",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(45.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "impossibl/google/gemini-2.5-pro",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.25),
+                output: Some(15.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "impossibl/google/gemini-3.1-pro-preview",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "impossibl/openai/gpt-5.4",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(5.0),
+                cached_input: Some(0.5),
+                output: Some(22.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "impossibl/openai/gpt-5.4-pro",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(60.0),
+                cached_input: Some(3.0),
+                output: Some(270.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "impossibl/openai/gpt-5.5",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(45.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "impossibl/openai/gpt-5.5-pro",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(60.0),
+                cached_input: Some(3.0),
+                output: Some(270.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "impossibl/openai/gpt-5.6-luna",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(0.4),
+                cached_input: Some(0.04),
+                output: Some(1.8),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "impossibl/openai/gpt-5.6-sol",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(45.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "impossibl/openai/gpt-5.6-terra",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "impossibl/qwen/qwen3.6-flash",
+        tiers: &[
+            PriceTier {
+                size: 262_144,
+                input: Some(1.0),
+                cached_input: Some(0.2),
+                output: Some(4.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "impossibl/qwen/qwen3.7-plus",
+        tiers: &[
+            PriceTier {
+                size: 262_144,
+                input: Some(1.2),
+                cached_input: Some(0.24),
+                output: Some(4.8),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "kilo/xiaomi/mimo-v2.5",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(0.8),
+                cached_input: Some(0.16),
+                output: Some(4.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "kilo/xiaomi/mimo-v2.5-pro",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(2.0),
+                cached_input: Some(0.4),
+                output: Some(6.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "llmgateway-providers/alibaba/qwen3.6-plus",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(2.0),
+                cached_input: Some(0.2),
+                output: Some(6.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "llmgateway-providers/aws-bedrock/grok-4-3",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.4),
+                output: Some(5.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "llmgateway-providers/azure-ai-foundry/grok-4-3",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.4),
+                output: Some(5.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "llmgateway-providers/azure/gpt-5.5",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(45.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "llmgateway-providers/deepinfra/mimo-v2.5",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(0.8),
+                cached_input: Some(0.16),
+                output: Some(4.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "llmgateway-providers/deepinfra/mimo-v2.5-pro",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(2.0),
+                cached_input: Some(0.4),
+                output: Some(6.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "llmgateway-providers/google-ai-studio/gemini-2.5-pro",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.25),
+                output: Some(15.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "llmgateway-providers/google-ai-studio/gemini-3.1-pro-preview",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "llmgateway-providers/google-vertex/gemini-2.5-pro",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.25),
+                output: Some(15.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "llmgateway-providers/google-vertex/gemini-3.1-pro-preview",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "llmgateway-providers/novita/mimo-v2.5",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(0.8),
+                cached_input: Some(0.16),
+                output: Some(4.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "llmgateway-providers/novita/mimo-v2.5-pro",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(2.0),
+                cached_input: Some(0.4),
+                output: Some(6.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "llmgateway-providers/openai/gpt-5.5",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(45.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "llmgateway-providers/openai/gpt-5.5-pro",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(60.0),
+                cached_input: None,
+                output: Some(270.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "llmgateway-providers/quartz/gemini-3.1-pro-preview",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "llmgateway-providers/tencent/mimo-v2.5-pro",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(2.0),
+                cached_input: Some(0.4),
+                output: Some(6.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "llmgateway-providers/vertex-openai/grok-4-20-non-reasoning",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.4),
+                output: Some(5.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "llmgateway-providers/vertex-openai/grok-4-20-reasoning",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.4),
+                output: Some(5.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "llmgateway-providers/xai/grok-4-20-beta-0309-non-reasoning",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.4),
+                output: Some(5.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "llmgateway-providers/xai/grok-4-20-beta-0309-reasoning",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.4),
+                output: Some(5.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "llmgateway-providers/xai/grok-4-3",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.4),
+                output: Some(5.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "llmgateway-providers/xai/grok-build-0-1",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.0),
+                cached_input: Some(0.4),
+                output: Some(4.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "llmgateway-providers/xiaomi/mimo-v2.5",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(0.8),
+                cached_input: Some(0.16),
+                output: Some(4.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "llmgateway-providers/xiaomi/mimo-v2.5-pro",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(2.0),
+                cached_input: Some(0.4),
+                output: Some(6.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "llmgateway/gemini-2.5-pro",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.25),
+                output: Some(15.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "llmgateway/gemini-3.1-pro-preview",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "llmgateway/gpt-5.5",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(45.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "llmgateway/gpt-5.5-pro",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(60.0),
+                cached_input: None,
+                output: Some(270.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "llmgateway/grok-4-20-beta-0309-non-reasoning",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.4),
+                output: Some(5.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "llmgateway/grok-4-20-beta-0309-reasoning",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.4),
+                output: Some(5.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "llmgateway/grok-4-20-non-reasoning",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.4),
+                output: Some(5.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "llmgateway/grok-4-20-reasoning",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.4),
+                output: Some(5.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "llmgateway/grok-4-3",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.4),
+                output: Some(5.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "llmgateway/grok-build-0-1",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.0),
+                cached_input: Some(0.4),
+                output: Some(4.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "llmgateway/mimo-v2.5",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(0.8),
+                cached_input: Some(0.16),
+                output: Some(4.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "llmgateway/mimo-v2.5-pro",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(2.0),
+                cached_input: Some(0.4),
+                output: Some(6.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "llmgateway/qwen3.6-plus",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(2.0),
+                cached_input: Some(0.2),
+                output: Some(6.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "merge-gateway/google/gemini-2.5-pro",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.25),
+                output: Some(15.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "merge-gateway/google/gemini-3-pro-preview",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "merge-gateway/google/gemini-3.1-pro-preview",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "merge-gateway/google/gemini-3.1-pro-preview-customtools",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "merge-gateway/openai/gpt-5.4",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(5.0),
+                cached_input: Some(0.5),
+                output: Some(22.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "merge-gateway/openai/gpt-5.5",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(45.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "merge-gateway/xai/grok-4.20-0309-reasoning",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.4),
+                output: Some(5.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "merge-gateway/xai/grok-4.3",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.4),
+                output: Some(5.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "minimax-cn/MiniMax-M3",
+        tiers: &[
+            PriceTier {
+                size: 512_000,
+                input: Some(0.6),
+                cached_input: Some(0.12),
+                output: Some(2.4),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "minimax/MiniMax-M3",
+        tiers: &[
+            PriceTier {
+                size: 512_000,
+                input: Some(0.6),
+                cached_input: Some(0.12),
+                output: Some(2.4),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "nearai/google/gemini-2.5-pro",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.25),
+                output: Some(15.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "nearai/openai/gpt-5.4",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(5.0),
+                cached_input: Some(0.5),
+                output: Some(22.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "nearai/openai/gpt-5.5",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(45.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "neon/gemini-3-1-pro",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "neon/gpt-5-4",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(5.0),
+                cached_input: Some(0.5),
+                output: Some(22.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "neon/gpt-5-5",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(45.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "neon/gpt-5-5-pro",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(60.0),
+                cached_input: None,
+                output: Some(270.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "neon/gpt-5-6-luna",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(0.4),
+                cached_input: Some(0.04),
+                output: Some(1.8),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "neon/gpt-5-6-sol",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(45.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "neon/gpt-5-6-terra",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "neon/gpt-6-astra",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(20.0),
+                cached_input: Some(2.0),
+                output: Some(75.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "novita-ai/xiaomimimo/mimo-v2-pro",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(2.0),
+                cached_input: Some(0.4),
+                output: Some(6.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "novita-ai/xiaomimimo/mimo-v2.5-pro",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(0.522),
+                cached_input: Some(0.0043),
+                output: Some(1.044),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "oci/xai.grok-4.20-non-reasoning",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.4),
+                output: Some(5.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "oci/xai.grok-4.20-reasoning",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.4),
+                output: Some(5.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "oci/xai.grok-4.3",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.4),
+                output: Some(5.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "oci/xai.grok-4.6",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(1.0),
+                output: Some(12.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openai/gpt-5.4",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(5.0),
+                cached_input: Some(0.5),
+                output: Some(22.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openai/gpt-5.4-pro",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(60.0),
+                cached_input: None,
+                output: Some(270.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openai/gpt-5.5",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(45.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openai/gpt-5.5-pro",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(60.0),
+                cached_input: None,
+                output: Some(270.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openai/gpt-5.6",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(8.0),
+                cached_input: Some(0.8),
+                output: Some(30.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openai/gpt-5.6-luna",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(0.4),
+                cached_input: Some(0.04),
+                output: Some(1.8),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openai/gpt-5.6-sol",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(8.0),
+                cached_input: Some(0.8),
+                output: Some(30.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openai/gpt-5.6-terra",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openai/gpt-6-astra",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(20.0),
+                cached_input: Some(2.0),
+                output: Some(75.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openai/gpt-6-luna",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(0.2),
+                cached_input: Some(0.02),
+                output: Some(0.75),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openai/gpt-6-sol",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(15.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "opencode-go/gpt-5.6-luna",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(0.4),
+                cached_input: Some(0.04),
+                output: Some(1.8),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "opencode-go/gpt-6-luna",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(0.2),
+                cached_input: Some(0.02),
+                output: Some(0.75),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "opencode-go/grok-4.5",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.6),
+                output: Some(12.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "opencode-go/grok-4.6",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(1.0),
+                output: Some(12.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "opencode-go/grok-4.7",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(1.0),
+                output: Some(12.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "opencode-go/mimo-v2-pro",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(2.0),
+                cached_input: Some(0.4),
+                output: Some(6.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "opencode-go/minimax-m3",
+        tiers: &[
+            PriceTier {
+                size: 512_000,
+                input: Some(0.6),
+                cached_input: Some(0.12),
+                output: Some(2.4),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "opencode-go/qwen3.6-plus",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(2.0),
+                cached_input: Some(0.2),
+                output: Some(6.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "opencode-go/qwen3.7-plus",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(1.2),
+                cached_input: Some(0.12),
+                output: Some(4.8),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "opencode/claude-sonnet-4",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(6.0),
+                cached_input: Some(0.6),
+                output: Some(22.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "opencode/claude-sonnet-4-5",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(6.0),
+                cached_input: Some(0.6),
+                output: Some(22.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "opencode/gemini-3-pro",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "opencode/gemini-3.1-pro",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "opencode/gpt-5.4",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(5.0),
+                cached_input: Some(0.5),
+                output: Some(22.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "opencode/gpt-5.5",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(45.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "opencode/gpt-5.6-luna",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(0.4),
+                cached_input: Some(0.04),
+                output: Some(1.8),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "opencode/gpt-5.6-sol",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(8.0),
+                cached_input: Some(0.8),
+                output: Some(30.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "opencode/gpt-5.6-terra",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(5.0),
+                cached_input: Some(0.5),
+                output: Some(22.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "opencode/gpt-6-astra",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(20.0),
+                cached_input: Some(2.0),
+                output: Some(75.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "opencode/gpt-6-luna",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(0.2),
+                cached_input: Some(0.02),
+                output: Some(0.75),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "opencode/gpt-6-sol",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(15.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "opencode/grok-4.5",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.6),
+                output: Some(12.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "opencode/grok-4.6",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(1.0),
+                output: Some(12.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "opencode/grok-4.7",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.8),
+                cached_input: Some(0.7),
+                output: Some(8.4),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/anthropic/claude-opus-4.6",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(37.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/anthropic/claude-opus-4.7",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(37.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/anthropic/claude-sonnet-4",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(6.0),
+                cached_input: Some(0.6),
+                output: Some(22.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/anthropic/claude-sonnet-4.5",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(6.0),
+                cached_input: Some(0.6),
+                output: Some(22.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/anthropic/claude-sonnet-4.6",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(6.0),
+                cached_input: Some(0.6),
+                output: Some(22.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/bytedance-seed/seed-1.6",
+        tiers: &[
+            PriceTier {
+                size: 128_000,
+                input: Some(0.5),
+                cached_input: None,
+                output: Some(4.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/bytedance-seed/seed-1.6-flash",
+        tiers: &[
+            PriceTier {
+                size: 128_000,
+                input: Some(0.1),
+                cached_input: None,
+                output: Some(0.8),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/bytedance-seed/seed-2.0-code",
+        tiers: &[
+            PriceTier {
+                size: 128_000,
+                input: Some(1.0),
+                cached_input: None,
+                output: Some(6.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/bytedance-seed/seed-2.0-lite",
+        tiers: &[
+            PriceTier {
+                size: 128_000,
+                input: Some(0.5),
+                cached_input: None,
+                output: Some(4.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/bytedance-seed/seed-2.0-mini",
+        tiers: &[
+            PriceTier {
+                size: 128_000,
+                input: Some(0.2),
+                cached_input: None,
+                output: Some(0.8),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/google/gemini-2.5-pro",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.25),
+                output: Some(15.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/google/gemini-2.5-pro-preview",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.25),
+                output: Some(15.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/google/gemini-3.1-pro-preview",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/google/gemini-3.1-pro-preview-customtools",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/openai/gpt-5.4",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(5.0),
+                cached_input: Some(0.5),
+                output: Some(22.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/openai/gpt-5.4-pro",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(60.0),
+                cached_input: None,
+                output: Some(270.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/openai/gpt-5.5",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(45.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/openai/gpt-5.5-pro",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(60.0),
+                cached_input: None,
+                output: Some(270.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/openai/gpt-5.6-luna",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(0.4),
+                cached_input: Some(0.04),
+                output: Some(1.8),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/openai/gpt-5.6-luna-pro",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(0.4),
+                cached_input: Some(0.04),
+                output: Some(1.8),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/openai/gpt-5.6-sol",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(15.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/openai/gpt-5.6-sol-pro",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(15.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/openai/gpt-5.6-terra",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/openai/gpt-5.6-terra-pro",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/openai/gpt-6-astra",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(20.0),
+                cached_input: Some(2.0),
+                output: Some(75.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/openai/gpt-6-astra-pro",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(20.0),
+                cached_input: Some(2.0),
+                output: Some(75.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/openai/gpt-6-luna",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(0.2),
+                cached_input: Some(0.02),
+                output: Some(0.75),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/openai/gpt-6-luna-pro",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(0.2),
+                cached_input: Some(0.02),
+                output: Some(0.75),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/openai/gpt-6-sol",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(15.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/openai/gpt-6-sol-pro",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(15.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/qwen/qwen-plus",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(0.78),
+                cached_input: Some(0.156),
+                output: Some(2.34),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/qwen/qwen-plus-2025-07-28",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(0.78),
+                cached_input: None,
+                output: Some(2.34),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/qwen/qwen3-coder-flash",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(0.325),
+                cached_input: Some(0.065),
+                output: Some(1.625),
+                reasoning: None,
+            },
+            PriceTier {
+                size: 128_000,
+                input: Some(0.52),
+                cached_input: Some(0.104),
+                output: Some(2.6),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/qwen/qwen3-coder-plus",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(1.17),
+                cached_input: Some(0.234),
+                output: Some(5.85),
+                reasoning: None,
+            },
+            PriceTier {
+                size: 128_000,
+                input: Some(1.95),
+                cached_input: Some(0.39),
+                output: Some(9.75),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/qwen/qwen3-max",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(1.56),
+                cached_input: Some(0.312),
+                output: Some(7.8),
+                reasoning: None,
+            },
+            PriceTier {
+                size: 128_000,
+                input: Some(1.95),
+                cached_input: Some(0.39),
+                output: Some(9.75),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/qwen/qwen3-max-thinking",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(1.56),
+                cached_input: None,
+                output: Some(7.8),
+                reasoning: None,
+            },
+            PriceTier {
+                size: 128_000,
+                input: Some(1.95),
+                cached_input: None,
+                output: Some(9.75),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/qwen/qwen3.5-plus-02-15",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(0.325),
+                cached_input: None,
+                output: Some(1.95),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/qwen/qwen3.5-plus-20260420",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(0.375),
+                cached_input: None,
+                output: Some(2.25),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/qwen/qwen3.6-flash",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(0.75),
+                cached_input: None,
+                output: Some(3.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/qwen/qwen3.6-max-preview",
+        tiers: &[
+            PriceTier {
+                size: 128_000,
+                input: Some(1.58),
+                cached_input: None,
+                output: Some(9.48),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/qwen/qwen3.6-plus",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(1.3),
+                cached_input: None,
+                output: Some(3.9),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/qwen/qwen3.7-flash",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(0.1),
+                cached_input: Some(0.02),
+                output: Some(0.4),
+                reasoning: None,
+            },
+            PriceTier {
+                size: 256_000,
+                input: Some(0.2),
+                cached_input: Some(0.04),
+                output: Some(0.8),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/qwen/qwen3.7-plus",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(0.96),
+                cached_input: Some(0.192),
+                output: Some(3.84),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/sakana/fugu-ultra",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(45.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/sakana/fugu-ultra-v2",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(45.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/x-ai/grok-4.20",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.4),
+                output: Some(5.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/x-ai/grok-4.20-multi-agent",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.4),
+                output: Some(5.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/x-ai/grok-4.3",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.4),
+                output: Some(5.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/x-ai/grok-4.5",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.6),
+                output: Some(12.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/x-ai/grok-4.6",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(1.0),
+                output: Some(12.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/x-ai/grok-4.7",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(3.2),
+                cached_input: Some(0.8),
+                output: Some(9.6),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/x-ai/grok-build-0.1",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.0),
+                cached_input: Some(0.4),
+                output: Some(4.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/~google/gemini-pro-latest",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/~openai/gpt-astra-latest",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(20.0),
+                cached_input: Some(2.0),
+                output: Some(75.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/~openai/gpt-luna-latest",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(0.2),
+                cached_input: Some(0.02),
+                output: Some(0.75),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/~openai/gpt-sol-latest",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(15.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/~openai/gpt-terra-latest",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "openrouter/~x-ai/grok-latest",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(3.2),
+                cached_input: Some(0.8),
+                output: Some(9.6),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "opper/claude-sonnet-4-5",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(6.6),
+                cached_input: Some(0.66),
+                output: Some(24.75),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "opper/gemini-3.1-pro-preview",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "opper/gpt-5.4",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(5.0),
+                cached_input: Some(0.5),
+                output: Some(22.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "opper/gpt-5.4-pro",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(60.0),
+                cached_input: None,
+                output: Some(270.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "opper/gpt-5.5",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(45.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "opper/gpt-5.6-luna",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(0.4),
+                cached_input: Some(0.04),
+                output: Some(1.8),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "opper/gpt-5.6-sol",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(45.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "opper/gpt-5.6-terra",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "opper/gpt-6-astra",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(20.0),
+                cached_input: Some(2.0),
+                output: Some(75.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "opper/grok-4.6",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(1.0),
+                output: Some(12.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "opper/minimax-m3",
+        tiers: &[
+            PriceTier {
+                size: 524_288,
+                input: Some(1.2),
+                cached_input: Some(0.24),
+                output: Some(4.8),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "orcarouter/google/gemini-2.5-pro",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.25),
+                output: Some(15.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "orcarouter/google/gemini-3.1-pro-preview",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "orcarouter/google/gemini-3.1-pro-preview-customtools",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "orcarouter/grok/grok-4.3",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.4),
+                output: Some(5.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "orcarouter/openai/gpt-5.4",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(5.0),
+                cached_input: Some(0.5),
+                output: Some(22.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "orcarouter/openai/gpt-5.4-pro",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(60.0),
+                cached_input: None,
+                output: Some(270.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "orcarouter/openai/gpt-5.5",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(45.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "orcarouter/openai/gpt-5.5-pro",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(60.0),
+                cached_input: None,
+                output: Some(270.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "orcarouter/qwen/qwen3.6-plus",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(2.0),
+                cached_input: Some(0.2),
+                output: Some(6.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "perplexity-agent/google/gemini-2.5-pro",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.25),
+                output: Some(15.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "perplexity-agent/google/gemini-3-flash-preview",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(0.5),
+                cached_input: Some(0.05),
+                output: Some(3.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "perplexity-agent/google/gemini-3.1-pro-preview",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "perplexity-agent/xai/grok-4.6",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(1.0),
+                output: Some(12.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "qihang-ai/gemini-2.5-flash",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(0.09),
+                cached_input: None,
+                output: Some(0.71),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "qihang-ai/gemini-3-flash-preview",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(0.07),
+                cached_input: None,
+                output: Some(0.43),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "requesty/claude-sonnet-4-5",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(6.0),
+                cached_input: Some(0.6),
+                output: Some(22.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "requesty/claude-sonnet-4-5@eu",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(6.6),
+                cached_input: Some(0.6),
+                output: Some(24.75),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "requesty/claude-sonnet-4@eu",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(6.0),
+                cached_input: Some(0.6),
+                output: Some(22.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "requesty/fugu-ultra",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(45.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "requesty/gemini-2.5-pro@eu",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.62),
+                output: Some(15.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "requesty/gemini-3.1-pro-preview",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "requesty/gpt-5.4@eu",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(5.0),
+                cached_input: Some(0.5),
+                output: Some(22.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "requesty/gpt-5.5@eu",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(45.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "requesty/gpt-5.6-luna",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(0.4),
+                cached_input: Some(0.04),
+                output: Some(1.8),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "requesty/gpt-5.6-sol",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(8.0),
+                cached_input: Some(0.8),
+                output: Some(30.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "requesty/gpt-5.6-terra",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "requesty/gpt-6-astra",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(20.0),
+                cached_input: Some(2.0),
+                output: Some(75.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "requesty/gpt-6-luna",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(0.2),
+                cached_input: Some(0.02),
+                output: Some(0.75),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "requesty/gpt-6-luna@eu",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(0.24),
+                cached_input: Some(0.024),
+                output: Some(0.9),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "requesty/gpt-6-sol",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(15.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "requesty/gpt-6-sol@eu",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(4.8),
+                cached_input: Some(0.48),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "requesty/grok-4.2-beta",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(12.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "requesty/grok-4.3",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.4),
+                output: Some(5.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "requesty/grok-4.5",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(1.0),
+                output: Some(12.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "requesty/grok-4.6",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(1.0),
+                output: Some(12.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "sakana/fugu-ultra",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(45.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "sakana/fugu-ultra-20260615",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(45.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "sap-ai-core/gpt-5.6-luna",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(2.0),
+                cached_input: Some(0.2),
+                output: Some(9.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "sap-ai-core/gpt-5.6-sol",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(45.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "sap-ai-core/gpt-5.6-terra",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(5.0),
+                cached_input: Some(0.5),
+                output: Some(22.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "tempr/google/gemini-3.1-pro-preview",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "tempr/google/gemini-3.1-pro-preview-customtools",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "venice/gemini-3-1-pro-preview",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(5.0),
+                cached_input: Some(0.5),
+                output: Some(22.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "venice/grok-4-20",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.83),
+                cached_input: Some(0.45),
+                output: Some(5.67),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "venice/grok-4-20-multi-agent",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.83),
+                cached_input: Some(0.45),
+                output: Some(5.67),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "venice/grok-4-3",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.83),
+                cached_input: Some(0.45),
+                output: Some(5.67),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "venice/grok-4-5",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.53),
+                cached_input: Some(0.68),
+                output: Some(13.6),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "venice/grok-4-6",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.53),
+                cached_input: Some(1.13),
+                output: Some(13.6),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "venice/grok-4-7",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.53),
+                cached_input: Some(1.13),
+                output: Some(13.6),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "venice/grok-build-0-1",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.0),
+                cached_input: Some(0.4),
+                output: Some(4.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "venice/openai-gpt-54-pro",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(75.0),
+                cached_input: None,
+                output: Some(337.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "venice/openai-gpt-55",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(12.5),
+                cached_input: Some(1.25),
+                output: Some(56.25),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "venice/openai-gpt-56-luna",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(0.5),
+                cached_input: Some(0.05),
+                output: Some(2.25),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "venice/openai-gpt-56-luna-pro",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(0.5),
+                cached_input: Some(0.05),
+                output: Some(2.25),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "venice/openai-gpt-56-sol",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(37.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "venice/openai-gpt-56-sol-pro",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(37.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "venice/openai-gpt-56-terra",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(5.0),
+                cached_input: Some(0.5),
+                output: Some(22.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "venice/openai-gpt-56-terra-pro",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(5.0),
+                cached_input: Some(0.5),
+                output: Some(22.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "venice/openai-gpt-6-astra",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(20.0),
+                cached_input: Some(2.0),
+                output: Some(75.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "venice/openai-gpt-6-astra-pro",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(25.0),
+                cached_input: Some(2.5),
+                output: Some(93.75),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "venice/openai-gpt-6-luna",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(0.25),
+                cached_input: Some(0.025),
+                output: Some(0.9375),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "venice/openai-gpt-6-sol",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(5.0),
+                cached_input: Some(0.5),
+                output: Some(18.75),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "venice/qwen-3-6-plus",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(2.5),
+                cached_input: Some(0.0625),
+                output: Some(7.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "venice/qwen-3-7-plus",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(1.5),
+                cached_input: Some(0.15),
+                output: Some(6.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vercel/alibaba/qwen-3.6-max-preview",
+        tiers: &[
+            PriceTier {
+                size: 128_000,
+                input: Some(2.0),
+                cached_input: Some(0.2),
+                output: Some(12.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vercel/alibaba/qwen3-coder",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(2.7),
+                cached_input: Some(0.54),
+                output: Some(13.5),
+                reasoning: None,
+            },
+            PriceTier {
+                size: 128_000,
+                input: Some(4.5),
+                cached_input: Some(0.9),
+                output: Some(22.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vercel/alibaba/qwen3-coder-plus",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(1.8),
+                cached_input: Some(0.36),
+                output: Some(9.0),
+                reasoning: None,
+            },
+            PriceTier {
+                size: 128_000,
+                input: Some(3.0),
+                cached_input: Some(0.6),
+                output: Some(15.0),
+                reasoning: None,
+            },
+            PriceTier {
+                size: 256_000,
+                input: Some(6.0),
+                cached_input: Some(1.2),
+                output: Some(60.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vercel/alibaba/qwen3-max",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(2.4),
+                cached_input: Some(0.48),
+                output: Some(12.0),
+                reasoning: None,
+            },
+            PriceTier {
+                size: 128_000,
+                input: Some(3.0),
+                cached_input: Some(0.6),
+                output: Some(15.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vercel/alibaba/qwen3-max-preview",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(2.4),
+                cached_input: Some(0.48),
+                output: Some(12.0),
+                reasoning: None,
+            },
+            PriceTier {
+                size: 128_000,
+                input: Some(3.0),
+                cached_input: Some(0.6),
+                output: Some(15.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vercel/alibaba/qwen3-max-thinking",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(2.4),
+                cached_input: Some(0.48),
+                output: Some(12.0),
+                reasoning: None,
+            },
+            PriceTier {
+                size: 128_000,
+                input: Some(3.0),
+                cached_input: Some(0.6),
+                output: Some(15.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vercel/alibaba/qwen3.5-plus",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(0.5),
+                cached_input: Some(0.05),
+                output: Some(3.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vercel/alibaba/qwen3.6-plus",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(2.0),
+                cached_input: Some(0.2),
+                output: Some(6.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vercel/alibaba/qwen3.7-flash",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(0.1),
+                cached_input: Some(0.02),
+                output: Some(0.4),
+                reasoning: None,
+            },
+            PriceTier {
+                size: 256_000,
+                input: Some(0.2),
+                cached_input: Some(0.04),
+                output: Some(0.8),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vercel/alibaba/qwen3.7-plus",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(1.2),
+                cached_input: Some(0.24),
+                output: Some(4.8),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vercel/anthropic/claude-sonnet-4",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(6.0),
+                cached_input: Some(0.6),
+                output: Some(22.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vercel/anthropic/claude-sonnet-4.6",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(6.0),
+                cached_input: Some(0.6),
+                output: Some(22.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vercel/bytedance/seed-1.6",
+        tiers: &[
+            PriceTier {
+                size: 128_000,
+                input: Some(0.5),
+                cached_input: Some(0.05),
+                output: Some(4.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vercel/bytedance/seed-1.8",
+        tiers: &[
+            PriceTier {
+                size: 128_000,
+                input: Some(0.5),
+                cached_input: Some(0.05),
+                output: Some(4.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vercel/google/gemini-2.5-pro",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.25),
+                output: Some(15.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vercel/google/gemini-3.1-pro-preview",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vercel/openai/gpt-5.4",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(5.0),
+                cached_input: Some(0.5),
+                output: Some(22.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vercel/openai/gpt-5.4-pro",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(60.0),
+                cached_input: None,
+                output: Some(270.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vercel/openai/gpt-5.5",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(45.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vercel/openai/gpt-5.5-pro",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(60.0),
+                cached_input: None,
+                output: Some(270.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vercel/openai/gpt-5.6-luna",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(0.4),
+                cached_input: Some(0.04),
+                output: Some(1.8),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vercel/openai/gpt-5.6-luna-fast",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(0.8),
+                cached_input: Some(0.08),
+                output: Some(3.6),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vercel/openai/gpt-5.6-sol",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(8.0),
+                cached_input: Some(0.8),
+                output: Some(30.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vercel/openai/gpt-5.6-sol-fast",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(16.0),
+                cached_input: Some(1.6),
+                output: Some(60.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vercel/openai/gpt-5.6-terra",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vercel/openai/gpt-5.6-terra-fast",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(8.0),
+                cached_input: Some(0.8),
+                output: Some(36.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vercel/openai/gpt-6-astra",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(20.0),
+                cached_input: Some(2.0),
+                output: Some(75.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vercel/openai/gpt-6-astra-fast",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(40.0),
+                cached_input: Some(4.0),
+                output: Some(150.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vercel/openai/gpt-6-luna",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(0.2),
+                cached_input: Some(0.02),
+                output: Some(0.75),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vercel/openai/gpt-6-luna-fast",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(0.4),
+                cached_input: Some(0.04),
+                output: Some(1.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vercel/openai/gpt-6-sol",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(15.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vercel/openai/gpt-6-sol-fast",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(8.0),
+                cached_input: Some(0.8),
+                output: Some(30.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vercel/sakana/fugu-ultra",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(45.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vercel/sakana/fugu-ultra-v2",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(45.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vercel/spacexai/grok-4.20-multi-agent",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.4),
+                output: Some(5.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vercel/spacexai/grok-4.20-multi-agent-beta",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.4),
+                output: Some(5.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vercel/spacexai/grok-4.20-non-reasoning",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.4),
+                output: Some(5.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vercel/spacexai/grok-4.20-non-reasoning-beta",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.4),
+                output: Some(5.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vercel/spacexai/grok-4.20-reasoning",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.4),
+                output: Some(5.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vercel/spacexai/grok-4.20-reasoning-beta",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.4),
+                output: Some(5.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vercel/spacexai/grok-4.3",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.4),
+                output: Some(5.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vercel/spacexai/grok-4.5",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.6),
+                output: Some(12.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vercel/spacexai/grok-4.6",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(1.0),
+                output: Some(12.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vercel/spacexai/grok-4.7",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.4),
+                cached_input: Some(0.6),
+                output: Some(7.2),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vercel/spacexai/grok-build-0.1",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.0),
+                cached_input: Some(0.4),
+                output: Some(4.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vivgrid/gemini-3.1-pro-preview",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(18.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vivgrid/gpt-5.5",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(45.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vivgrid/gpt-6-astra",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(20.0),
+                cached_input: Some(2.0),
+                output: Some(75.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vivgrid/gpt-6-luna",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(0.2),
+                cached_input: Some(0.02),
+                output: Some(0.75),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "vivgrid/gpt-6-sol",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(15.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "volcengine/doubao-seed-1-6-251015",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(0.17812),
+                cached_input: Some(0.02375),
+                output: Some(2.37494),
+                reasoning: None,
+            },
+            PriceTier {
+                size: 128_000,
+                input: Some(0.35624),
+                cached_input: Some(0.02375),
+                output: Some(3.56241),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "volcengine/doubao-seed-1-6-flash-250828",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(0.04453),
+                cached_input: Some(0.00445),
+                output: Some(0.4453),
+                reasoning: None,
+            },
+            PriceTier {
+                size: 128_000,
+                input: Some(0.08906),
+                cached_input: Some(0.00445),
+                output: Some(0.8906),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "volcengine/doubao-seed-1-6-vision-250815",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(0.17812),
+                cached_input: Some(0.02375),
+                output: Some(2.37494),
+                reasoning: None,
+            },
+            PriceTier {
+                size: 128_000,
+                input: Some(0.35624),
+                cached_input: Some(0.02375),
+                output: Some(3.56241),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "volcengine/doubao-seed-1-8-251228",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(0.17812),
+                cached_input: Some(0.02375),
+                output: Some(2.37494),
+                reasoning: None,
+            },
+            PriceTier {
+                size: 128_000,
+                input: Some(0.35624),
+                cached_input: Some(0.02375),
+                output: Some(3.56241),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "volcengine/doubao-seed-2-0-code-preview-260215",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(0.71248),
+                cached_input: Some(0.1425),
+                output: Some(3.56241),
+                reasoning: None,
+            },
+            PriceTier {
+                size: 128_000,
+                input: Some(1.42496),
+                cached_input: Some(0.28499),
+                output: Some(7.12482),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "volcengine/doubao-seed-2-0-lite-260428",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(0.13359),
+                cached_input: Some(0.02672),
+                output: Some(0.80154),
+                reasoning: None,
+            },
+            PriceTier {
+                size: 128_000,
+                input: Some(0.26718),
+                cached_input: Some(0.05344),
+                output: Some(1.60308),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "volcengine/doubao-seed-2-0-mini-260428",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(0.05937),
+                cached_input: Some(0.01187),
+                output: Some(0.59374),
+                reasoning: None,
+            },
+            PriceTier {
+                size: 128_000,
+                input: Some(0.11875),
+                cached_input: Some(0.02375),
+                output: Some(1.18747),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "volcengine/doubao-seed-2-0-pro-260215",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(0.71248),
+                cached_input: Some(0.1425),
+                output: Some(3.56241),
+                reasoning: None,
+            },
+            PriceTier {
+                size: 128_000,
+                input: Some(1.42496),
+                cached_input: Some(0.28499),
+                output: Some(7.12482),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "volcengine/doubao-seed-character-260628",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(0.17812),
+                cached_input: Some(0.02375),
+                output: Some(0.8906),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "wafer.ai/MiniMax-M3",
+        tiers: &[
+            PriceTier {
+                size: 512_000,
+                input: Some(0.66),
+                cached_input: Some(0.13),
+                output: Some(2.64),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "xai/grok-4.20-0309-non-reasoning",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.4),
+                output: Some(5.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "xai/grok-4.20-0309-reasoning",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.4),
+                output: Some(5.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "xai/grok-4.20-multi-agent-0309",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.4),
+                output: Some(5.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "xai/grok-4.3",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.4),
+                output: Some(5.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "xai/grok-4.5",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(0.6),
+                output: Some(12.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "xai/grok-4.6",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(1.0),
+                output: Some(12.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "xai/grok-4.7",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(1.0),
+                output: Some(12.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "xai/grok-build-0.1",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.0),
+                cached_input: Some(0.4),
+                output: Some(4.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "zenmux/openai/gpt-5.5",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(45.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "zenmux/openai/gpt-5.5-pro",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(60.0),
+                cached_input: None,
+                output: Some(270.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "zenmux/openai/gpt-5.6-luna",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(2.0),
+                cached_input: Some(0.2),
+                output: Some(9.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "zenmux/openai/gpt-5.6-sol",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(10.0),
+                cached_input: Some(1.0),
+                output: Some(45.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "zenmux/openai/gpt-5.6-terra",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(5.0),
+                cached_input: Some(0.5),
+                output: Some(22.5),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "zenmux/openai/gpt-6-astra",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(20.0),
+                cached_input: Some(2.0),
+                output: Some(75.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "zenmux/openai/gpt-6-sol",
+        tiers: &[
+            PriceTier {
+                size: 272_000,
+                input: Some(4.0),
+                cached_input: Some(0.4),
+                output: Some(15.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "zenmux/qwen/qwen3.6-plus",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(2.0),
+                cached_input: Some(0.2),
+                output: Some(6.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "zenmux/qwen/qwen3.7-plus",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(1.2),
+                cached_input: Some(0.24),
+                output: Some(4.8),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "zenmux/x-ai/grok-4.2-fast",
+        tiers: &[
+            PriceTier {
+                size: 128_000,
+                input: Some(4.0),
+                cached_input: Some(0.2),
+                output: Some(12.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "zenmux/x-ai/grok-4.2-fast-non-reasoning",
+        tiers: &[
+            PriceTier {
+                size: 128_000,
+                input: Some(4.0),
+                cached_input: Some(0.2),
+                output: Some(12.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "zenmux/x-ai/grok-4.3",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(2.5),
+                cached_input: Some(0.4),
+                output: Some(5.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "zenmux/x-ai/grok-4.5",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(1.0),
+                output: Some(12.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "zenmux/x-ai/grok-4.6",
+        tiers: &[
+            PriceTier {
+                size: 200_000,
+                input: Some(4.0),
+                cached_input: Some(1.0),
+                output: Some(12.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "zenmux/xiaomi/mimo-v2-pro",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(2.0),
+                cached_input: Some(0.4),
+                output: Some(6.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "zenmux/xiaomi/mimo-v2.5",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(0.8),
+                cached_input: Some(0.16),
+                output: Some(4.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "zenmux/xiaomi/mimo-v2.5-pro",
+        tiers: &[
+            PriceTier {
+                size: 256_000,
+                input: Some(2.0),
+                cached_input: Some(0.4),
+                output: Some(6.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "zenmux/z-ai/glm-4.5",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(0.5823),
+                cached_input: Some(0.1165),
+                output: Some(2.3291),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "zenmux/z-ai/glm-4.5-air",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(0.1747),
+                cached_input: Some(0.0349),
+                output: Some(1.1645),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "zenmux/z-ai/glm-4.6",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(0.5823),
+                cached_input: Some(0.1165),
+                output: Some(2.3291),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "zenmux/z-ai/glm-4.6v",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(0.2911),
+                cached_input: Some(0.0582),
+                output: Some(0.8734),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "zenmux/z-ai/glm-4.6v-flash",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(0.0437),
+                cached_input: Some(0.0044),
+                output: Some(0.4367),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "zenmux/z-ai/glm-4.6v-flash-free",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(0.0),
+                cached_input: Some(0.0),
+                output: Some(0.0),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "zenmux/z-ai/glm-4.7",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(0.5823),
+                cached_input: Some(0.1165),
+                output: Some(2.3291),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "zenmux/z-ai/glm-5",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(0.87),
+                cached_input: Some(0.22),
+                output: Some(3.18),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "zenmux/z-ai/glm-5-turbo",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(1.02),
+                cached_input: Some(0.261),
+                output: Some(3.77),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "zenmux/z-ai/glm-5.1",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(1.1709),
+                cached_input: Some(0.2927),
+                output: Some(4.098),
+                reasoning: None,
+            },
+        ],
+    },
+    TierRow {
+        model: "zenmux/z-ai/glm-5v-turbo",
+        tiers: &[
+            PriceTier {
+                size: 32_000,
+                input: Some(1.0165),
+                cached_input: Some(0.2614),
+                output: Some(3.7754),
+                reasoning: None,
+            },
+        ],
+    },
+];
 pub(crate) const TEMPERATURE_ROWS: &[(&str, &str)] = &[
     ("302ai", "MiniMax-M1"),
     ("302ai", "MiniMax-M2"),

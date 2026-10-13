@@ -380,16 +380,32 @@ pub fn snapshot() -> DocsSnapshot {
     }
 }
 
-/// Scheme resolver serving the built-in `dal://` manual.
+/// Scheme resolver serving one extension's manual, such as `dal://` or
+/// `dalgona://`.
 ///
-/// Pages come from the generation's published doc records (registered by
-/// [`extension`]), not from a private table: the builder is the one
+/// Pages come from the generation's published doc records (registered through
+/// the builder's `doc`), not from a private table: the builder is the one
 /// registry. Records publish under the extension scheme, so lookups use the
-/// full `dal://` URI. Lookup and miss texts are shared with the snapshot
-/// path through [`lookup`] and [`read_miss_line`].
-struct DalScheme;
+/// full `<scheme>://` URI. Lookup and miss texts are shared with the snapshot
+/// path through [`lookup`] and [`read_miss_line`]. An extension that
+/// registers doc pages registers this resolver under its own name, so a model
+/// reads the pages with the `read` tool.
+#[derive(Clone, Debug)]
+pub struct ManualScheme {
+    scheme: String,
+}
 
-impl dal_agent::ext::SchemeResolver for DalScheme {
+impl ManualScheme {
+    /// Serves the doc pages published under `scheme`.
+    #[must_use]
+    pub fn new(scheme: &str) -> Self {
+        Self {
+            scheme: scheme.to_owned(),
+        }
+    }
+}
+
+impl dal_agent::ext::SchemeResolver for ManualScheme {
     fn read<'a>(
         &'a self,
         path: &'a str,
@@ -397,18 +413,19 @@ impl dal_agent::ext::SchemeResolver for DalScheme {
     ) -> dal_agent::ext::BoxFuture<'a, Result<dal_agent::ext::Doc, dal_agent::error::SchemeError>>
     {
         Box::pin(async move {
-            let uri = format!("dal://{path}");
+            let prefix = format!("{}://", self.scheme);
+            let uri = format!("{prefix}{path}");
             let mut pages: Vec<(String, String)> = Vec::new();
             for page in cx.docs() {
-                if let Some(record_path) = page.uri.strip_prefix("dal://") {
+                if let Some(record_path) = page.uri.strip_prefix(prefix.as_str()) {
                     pages.push((record_path.to_owned(), page.text.to_string()));
                 }
             }
             pages.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
             let snap = DocsSnapshot {
                 manuals: vec![Manual {
-                    scheme: "dal".to_owned(),
-                    plugin: "dal".to_owned(),
+                    scheme: self.scheme.clone(),
+                    plugin: self.scheme.clone(),
                     pages,
                 }],
             };
@@ -448,6 +465,6 @@ pub fn extension() -> Result<dal_agent::ext::Extension, dal_core::RegistrationEr
         builder = builder.doc(page, &page_title(text), text);
     }
     builder
-        .scheme("dal", std::sync::Arc::new(DalScheme))
+        .scheme("dal", std::sync::Arc::new(ManualScheme::new("dal")))
         .build()
 }

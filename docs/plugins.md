@@ -192,13 +192,15 @@ These are the operations. A handler may call only those in its `uses`.
 | `net` | `fetch` | make an HTTP request to an allowed destination |
 | `ask` | `confirm`, `select`, `text` | ask the user a question |
 | `state` | `read`, `write`, `delete` | keep data for this plugin and session |
-| `agents` | `start`, `wait`, `cancel`, `list` | run child sessions |
+| `agents` | `start`, `wait`, `prompt`, `cancel`, `list` | run child sessions and give one final grace prompt |
 | `jobs` | `start`, `wait`, `cancel`, `list`, `text` | run background jobs |
 | `turn` | `cancel`, `steer`, `wake`, `is_idle` | steer the running turn or start one |
 | `env` | `read` | read an allowed environment variable |
 | `mcp` | `call` | call an MCP tool when a client is present |
 
 Write the id as `group.operation`, for example `"state.write"`. Ids are exact: no wildcards, no duplicates, at most 64 per declaration. `tools.read` takes `path` as its positional argument, `tools.search` takes `pattern`, and `tools.exec` takes `command`. Every other argument is named. Call `ctx.describe("tools.exec")` to see the keywords of one operation.
+
+`agents.start` answers `refused` with a typed `reason` when policy or input stops a child: `max_depth` (`child sessions cannot start children here: agents.max_depth = <n>.`), `workspace_unresolved`, `workspace_outside_root`, or `model_unroutable`. Show the reason text to the user; a `cancelled` reply still means the child was cancelled.
 
 `uses` asks; it does not grant. Each effect still needs a live grant and passes the approval ladder, so `tools.patch` and `tools.exec` ask before they run. `ask` operations need to be in `uses` but need no grant. `turn.wake` refuses after 20 turns in a row that wake started with no user prompt. `models.forward` exists only for model handlers, so plugins cannot use it.
 

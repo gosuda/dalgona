@@ -3,6 +3,7 @@
 use std::path::{Component, Path, PathBuf};
 
 use super::ir::{Edit, EngineError, ErrorClass};
+use dal_agent::canonicalize_existing_prefix;
 
 /// Decoded text with BOM, EOL, and final-newline metadata.
 #[derive(Clone, Debug)]
@@ -146,11 +147,12 @@ pub fn resolve_path(workspace: &Path, raw: &Path) -> Result<(PathBuf, PathBuf), 
         }
     }
     let absolute = workspace.join(&normalized);
-    // Canonicalize the parent chain when it exists; never escape the workspace.
     let parent = absolute.parent().unwrap_or(workspace);
-    let canonical_parent = std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
     let canonical_workspace =
         std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
+    let Some(canonical_parent) = canonicalize_existing_prefix(parent) else {
+        return Err(outside_workspace(raw, workspace));
+    };
     if canonical_parent != canonical_workspace
         && !canonical_parent.starts_with(&canonical_workspace)
     {
@@ -166,6 +168,32 @@ pub fn resolve_path(workspace: &Path, raw: &Path) -> Result<(PathBuf, PathBuf), 
     }
     // Preserve in-workspace symlinks: write through the link itself.
     Ok((normalized.clone(), canonical_target))
+}
+
+/// Re-resolves a staged path and proves it still names the same contained
+/// canonical target.
+///
+/// # Errors
+///
+/// Returns the containment error when the path now resolves outside the
+/// workspace, and an [`ErrorClass::Stale`] error when it resolves elsewhere
+/// inside the workspace than it did at staging time.
+pub fn revalidate_path(
+    workspace: &Path,
+    display: &Path,
+    expected: &Path,
+) -> Result<(), EngineError> {
+    let (_, canonical) = resolve_path(workspace, display)?;
+    if canonical == expected {
+        return Ok(());
+    }
+    Err(EngineError::new(
+        ErrorClass::Stale,
+        format!(
+            "patch: {} resolves to a different file than when it was staged. Nothing was written. Try again.",
+            display_path(display)
+        ),
+    ))
 }
 
 /// Checks pairwise overlap for edits to one canonical path.

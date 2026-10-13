@@ -62,8 +62,19 @@ impl ControlCell {
         }
     }
 
-    /// Starts a turn, resetting its token and phase mirror.
+    /// Starts a turn, resetting its phase mirror. A turn already holding an
+    /// opening token keeps it: runs started by opening hooks stay bound to
+    /// the token `cancel` fires.
     pub(crate) fn begin_turn(&mut self, turn: TurnId) -> CancellationToken {
+        if let Some(opening) = self.opening.take_if(|opening| opening.turn == turn) {
+            let token = opening.token.clone();
+            self.running = Some(RunningTurn {
+                turn,
+                token: token.clone(),
+                phase: TurnPhase::Running,
+            });
+            return token;
+        }
         self.end_opening(turn);
         let token = CancellationToken::new();
         self.running = Some(RunningTurn {
@@ -98,16 +109,24 @@ impl ControlCell {
         })
     }
 
-    /// Clones the running turn's token when `turn` holds the session.
-    ///
-    /// The driver's per-turn state binds this token so `cancel` preempts a
-    /// live stream out-of-band — `Effect::Stop` only ever reaches the driver
-    /// after `infer` returns, so a queued effect can never interrupt it.
-    pub(crate) fn token(&self, turn: TurnId) -> Option<CancellationToken> {
-        self.running
+    /// Clones the live token for `turn` in either phase: opening hooks run
+    /// before the journal sees `TurnStart`, so an opening turn's token lives
+    /// in the opening slot, not the running one. A turn that already ended
+    /// (or never started) yields `None`: callers must fail closed rather
+    /// than fall back to an unrelated session lifetime.
+    pub(crate) fn token_for(&self, turn: TurnId) -> Option<CancellationToken> {
+        if let Some(token) = self
+            .running
             .as_ref()
             .filter(|running| running.turn == turn)
             .map(|running| running.token.clone())
+        {
+            return Some(token);
+        }
+        self.opening
+            .as_ref()
+            .filter(|opening| opening.turn == turn)
+            .map(|opening| opening.token.clone())
     }
 
     /// Ends the running turn when it is the one named.

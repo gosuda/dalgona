@@ -3,6 +3,7 @@
 pub(crate) mod actor;
 pub(crate) mod backend;
 pub(crate) mod commands;
+pub(crate) mod contain;
 pub(crate) mod context;
 pub(crate) mod control;
 pub(crate) mod dispatch;
@@ -11,6 +12,7 @@ pub(crate) mod projection;
 pub(crate) mod ring;
 pub(crate) mod rt;
 pub(crate) mod script;
+pub(crate) mod service_grants;
 #[cfg(test)]
 mod service_path_checks;
 pub(crate) mod shared;
@@ -18,18 +20,112 @@ pub(crate) mod status;
 pub(crate) mod subscriber;
 pub(crate) mod tasks;
 pub(crate) mod turn;
-use dal_core::ext::{Mail as ExtMail, Receipt};
+use std::collections::{HashSet, VecDeque};
+
+use dal_core::ext::{Mail as ExtMail, Receipt, SidecarName};
 use dal_core::{
     Answer, BlobId, ClientId, Command, EntryId, Name, Reply, RequestId, SessionId, TurnOp,
     TurnOpReply,
 };
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Notify, mpsc, oneshot};
 
 use self::subscriber::SubscriberShared;
 use crate::error::AgentError;
 
 /// Bounded command channel into one session actor.
 pub(crate) const COMMAND_CHANNEL: usize = 64;
+
+/// Detached resolutions are bounded by the armed approval slots (one ask
+/// slot plus one run slot per session), so [`PENDING_CAP`] has an order of
+/// magnitude of headroom; reaching it means a slot leaked its guard, and
+/// the push trips in debug while keeping the item, because drop-time
+/// terminal delivery never sheds.
+const PENDING_CAP: usize = 16;
+/// Settled ids gate slot reuse; ids of sessions that never re-ask would
+/// accumulate, so the set restarts past [`SETTLED_CAP`]. Eviction only
+/// fails a reuse check closed (`ask_busy`), never reopens a slot early.
+const SETTLED_CAP: usize = 4096;
+
+/// Drop-time resolutions that bypass the command mailbox.
+///
+/// The synchronous producer is an [`AskSlot`](crate::ext::services) drop,
+/// which cannot await the actor mailbox. Entries are keyed by [`RequestId`]:
+/// the broker resolves each id at most once, and the armed approval slots
+/// bound the armed guards, so `pending` holds at most a handful of items
+/// against its reserved capacity. [`mark_settled`](Self::mark_settled)
+/// records the ids the actor has journaled, letting the next ask reuse the
+/// slot only after the previous terminal record landed.
+#[derive(Default)]
+pub(crate) struct ResolutionInbox {
+    pending: std::sync::Mutex<VecDeque<(RequestId, actor::TurnWork)>>,
+    settled: std::sync::Mutex<HashSet<RequestId>>,
+    notify: Notify,
+}
+
+impl ResolutionInbox {
+    pub(crate) fn new() -> Self {
+        Self {
+            pending: std::sync::Mutex::new(VecDeque::with_capacity(PENDING_CAP)),
+            settled: std::sync::Mutex::new(HashSet::new()),
+            notify: Notify::new(),
+        }
+    }
+
+    /// Queues one detached resolution. The armed approval slots bound the
+    /// producers, so reaching [`PENDING_CAP`] means a slot leaked its
+    /// guard: trip in debug and keep the item, because drop-time terminal
+    /// delivery never sheds.
+    pub(crate) fn push(&self, id: RequestId, work: actor::TurnWork) {
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(slot) = pending.iter_mut().find(|(known, _)| *known == id) {
+            slot.1 = work;
+        } else {
+            debug_assert!(
+                pending.len() < PENDING_CAP,
+                "detached resolutions exceed the armed slots"
+            );
+            pending.push_back((id, work));
+        }
+        drop(pending);
+        self.notify.notify_one();
+    }
+
+    pub(crate) fn take(&self) -> Option<(RequestId, actor::TurnWork)> {
+        self.pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop_front()
+    }
+
+    pub(crate) fn mark_settled(&self, id: RequestId) {
+        self.pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|(known, _)| *known != id);
+        let mut settled = self
+            .settled
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if settled.len() >= SETTLED_CAP {
+            settled.clear();
+        }
+        settled.insert(id);
+    }
+
+    pub(crate) fn take_settled(&self, id: RequestId) -> bool {
+        self.settled
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&id)
+    }
+
+    pub(crate) async fn wait(&self) {
+        self.notify.notified().await;
+    }
+}
 
 /// One client operation routed to the session actor.
 pub(crate) enum ActorRequest {
@@ -144,19 +240,23 @@ pub(crate) struct StateReq {
 pub(crate) enum SidecarOp {
     /// Read one sidecar value.
     Read {
+        /// The extension that owns the sidecar.
+        ext: Name,
         /// The sidecar name.
-        name: Name,
+        name: SidecarName,
         /// The stored bytes, absent when never written.
-        reply: oneshot::Sender<Option<Vec<u8>>>,
+        reply: oneshot::Sender<Result<Option<Vec<u8>>, Box<str>>>,
     },
     /// Write one sidecar value.
     Write {
+        /// The extension that owns the sidecar.
+        ext: Name,
         /// The sidecar name.
-        name: Name,
+        name: SidecarName,
         /// The bytes to store.
         bytes: Vec<u8>,
-        /// Write acknowledgement.
-        reply: oneshot::Sender<()>,
+        /// Write acknowledgement or storage error.
+        reply: oneshot::Sender<Result<(), Box<str>>>,
     },
 }
 
@@ -206,12 +306,42 @@ pub(crate) type SubscriberPort = std::sync::Arc<SubscriberShared>;
 pub(crate) struct SessionHandle {
     session: SessionId,
     tx: mpsc::Sender<ActorRequest>,
+    control: std::sync::Arc<std::sync::Mutex<control::ControlCell>>,
+    resolutions: std::sync::Arc<ResolutionInbox>,
 }
 
 impl SessionHandle {
-    /// A port into the actor behind the bounded command channel.
-    pub(crate) fn new(session: SessionId, tx: mpsc::Sender<ActorRequest>) -> Self {
-        Self { session, tx }
+    /// A port into the actor behind the bounded command channel, sharing the
+    /// turn-control cell so a cancel fires before the actor drains the queue.
+    pub(crate) fn new(
+        session: SessionId,
+        tx: mpsc::Sender<ActorRequest>,
+        control: std::sync::Arc<std::sync::Mutex<control::ControlCell>>,
+        resolutions: std::sync::Arc<ResolutionInbox>,
+    ) -> Self {
+        Self {
+            session,
+            tx,
+            control,
+            resolutions,
+        }
+    }
+
+    /// Fires the running turn's token before the command queues; the in-flight
+    /// hook drive or stream observes the token instead of waiting for the
+    /// actor to drain the mailbox.
+    fn cancel_before_queue(&self, command: &Command) {
+        let Command::Cancel { scope } = command else {
+            return;
+        };
+        let dal_core::CancelScope::Turn(turn) = scope else {
+            return;
+        };
+        let _ = self
+            .control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .cancel(*turn);
     }
 
     /// The session this port addresses.
@@ -234,6 +364,7 @@ impl SessionHandle {
 
     /// Submits a command; full channels apply backpressure to the caller.
     pub(crate) async fn submit(&self, command: Command, by: ClientId) -> Result<Reply, AgentError> {
+        self.cancel_before_queue(&command);
         self.roundtrip(|reply| ActorRequest::Submit { command, by, reply })
             .await?
     }
@@ -305,6 +436,30 @@ impl SessionHandle {
             .map_err(|_| AgentError::SessionClosed { id: self.session })
     }
 
+    /// Reports one broker resolution without awaiting the actor. The inbox
+    /// is owned by the actor and preserves the resolution, keyed by request,
+    /// when the command mailbox is full. Causality holds: the matching
+    /// `Asked` was enqueued before this resolution could exist, so the actor
+    /// folds queued mailbox work before inbox work and never meets an
+    /// `Answered` whose question is still queued behind it.
+    pub(crate) fn work_detached(&self, work: actor::TurnWork) {
+        let actor::TurnWork::Answered { resolved } = &work else {
+            debug_assert!(
+                false,
+                "only broker resolutions may bypass the command mailbox"
+            );
+            let _ = self.tx.try_send(ActorRequest::Work { work });
+            return;
+        };
+        self.resolutions.push(resolved.request.id, work);
+    }
+
+    /// Borrows the actor-owned resolution inbox, so the host can hand the
+    /// same owner to the session services for settle-gated slot reuse.
+    pub(crate) fn resolutions(&self) -> std::sync::Arc<ResolutionInbox> {
+        std::sync::Arc::clone(&self.resolutions)
+    }
+
     /// Reads or writes one sidecar value.
     pub(crate) async fn sidecar(&self, op: SidecarOp) -> Result<(), AgentError> {
         self.tx
@@ -363,5 +518,64 @@ impl SessionHandle {
     ) -> Result<SessionId, AgentError> {
         self.roundtrip(|reply| ActorRequest::Branch { at, by, reply })
             .await?
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dal_core::{Owner, Question, Request};
+
+    fn withdrawn(id: RequestId) -> actor::TurnWork {
+        actor::TurnWork::Answered {
+            resolved: crate::broker::Resolved {
+                request: Request {
+                    id,
+                    turn: None,
+                    owner: Owner::Core,
+                    question: Question::Text {
+                        prompt: "proceed?".into(),
+                        placeholder: None,
+                    },
+                    timeout: std::time::Duration::from_secs(1),
+                    default: Answer::Cancel,
+                },
+                answer: Answer::Cancel,
+                by: ClientId::new("core"),
+                resolution: crate::broker::Resolution::Cancelled,
+                was_default: false,
+            },
+        }
+    }
+
+    /// A full command mailbox keeps every detached resolution, in order:
+    /// drop-time withdrawals never shed.
+    #[tokio::test]
+    async fn a_full_mailbox_keeps_every_detached_resolution() {
+        let (tx, _rx) = mpsc::channel(COMMAND_CHANNEL);
+        let inbox = std::sync::Arc::new(ResolutionInbox::new());
+        let handle = SessionHandle::new(
+            SessionId::new_v7(),
+            tx,
+            std::sync::Arc::new(std::sync::Mutex::new(control::ControlCell::new())),
+            std::sync::Arc::clone(&inbox),
+        );
+        for _ in 0..COMMAND_CHANNEL {
+            handle
+                .work(actor::TurnWork::TaskFailed {
+                    turn: None,
+                    message: "filler".into(),
+                })
+                .await
+                .expect("mailbox space");
+        }
+        let first = RequestId::new_v7();
+        let second = RequestId::new_v7();
+        handle.work_detached(withdrawn(first));
+        handle.work_detached(withdrawn(second));
+        let (kept_first, _) = inbox.take().expect("the first withdrawal is kept");
+        let (kept_second, _) = inbox.take().expect("the second withdrawal is kept");
+        assert_eq!(kept_first, first);
+        assert_eq!(kept_second, second);
+        assert!(inbox.take().is_none());
     }
 }

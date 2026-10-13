@@ -106,6 +106,7 @@ impl Admission {
 
 /// An fd charge; the permit returns its budget on drop.
 #[must_use = "an fd charge releases its budget on drop"]
+#[derive(Debug)]
 pub(crate) struct FdPermit {
     _permit: Option<OwnedSemaphorePermit>,
 }

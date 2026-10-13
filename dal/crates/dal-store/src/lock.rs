@@ -3,7 +3,7 @@
 use std::{
     collections::HashMap,
     fs::{self, File, TryLockError},
-    io::{Seek, SeekFrom, Write},
+    io::{self, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
     thread,
@@ -96,55 +96,95 @@ pub(crate) struct LockGuard {
 }
 
 impl LockGuard {
-    /// Opens and exclusively locks `path` without waiting.
+    /// Opens and exclusively locks `path`, retrying a contended lock briefly before giving up.
     ///
     /// # Errors
     /// Returns [`StoreError::Locked`] when another process owns the lock, with
     /// its pid when the lock file contains a parseable current pid. Returns
-    /// [`StoreError::Io`] when opening or updating the lock file fails.
+    /// [`StoreError::Io`] when opening or updating the lock file fails, or when
+    /// another process keeps replacing the lock file for the whole wait bound.
     pub(crate) fn acquire(path: &Path, session: SessionId) -> Result<Self, StoreError> {
-        let mut options = util::open_options();
-        options.read(true).write(true).create(true);
-        util::with_mode(&mut options, MODE_FILE);
-        let mut file = options
-            .open(path)
-            .map_err(|source| util::io_err(path, source))?;
+        Self::acquire_with(path, session, |_| {})
+    }
 
-        match file.try_lock() {
-            Ok(()) => {
-                file.set_len(0)
-                    .map_err(|source| util::io_err(path, source))?;
-                file.seek(SeekFrom::Start(0))
-                    .map_err(|source| util::io_err(path, source))?;
-                writeln!(file, "{}", std::process::id())
-                    .map_err(|source| util::io_err(path, source))?;
-                // The owner sidecar repeats the pid outside the locked file:
-                // `LockFileEx` makes the held file unreadable to every other
-                // handle on Windows, so a contended acquirer reads the pid
-                // from the sidecar that the lock never seals.
-                fs::write(
-                    owner_path(path),
-                    format!("{}\n", std::process::id()).as_bytes(),
-                )
-                .map_err(|source| util::io_err(path, source))?;
-                // Registered last, as transient: the sidecar precedes it
-                // so a contender reading our pid always finds the holder
-                // entry instead of taking a needless retry pass; a journal
-                // flips it to live only once it parks the guard.
-                let key = util::canonical_path(path);
-                register(&key);
-                Ok(Self {
-                    _file: file,
-                    path: path.to_path_buf(),
-                    key,
-                })
+    /// [`Self::acquire`] with `after_open` called after each open and before
+    /// the lock attempt, so a test can replace the lock file in that window.
+    fn acquire_with(
+        path: &Path,
+        session: SessionId,
+        mut after_open: impl FnMut(&Path),
+    ) -> Result<Self, StoreError> {
+        let deadline = Instant::now() + PID_WAIT;
+        let mut file = open_lock_file(path)?;
+        after_open(path);
+        loop {
+            match file.try_lock() {
+                Ok(()) => {}
+                Err(TryLockError::WouldBlock)
+                    if Instant::now() < deadline && !live_key(&util::canonical_path(path)) =>
+                {
+                    thread::sleep(poll_delay(session));
+                    continue;
+                }
+                Err(TryLockError::WouldBlock) => {
+                    let pid = read_pid_until(&owner_path(path))?;
+                    return Err(StoreError::Locked {
+                        session,
+                        pid,
+                        path: path.to_path_buf(),
+                    });
+                }
+                Err(TryLockError::Error(source)) => {
+                    return Err(util::io_err(path, source));
+                }
             }
-            Err(TryLockError::WouldBlock) => {
-                let pid = read_pid_until(&owner_path(path))?;
-                Err(StoreError::Locked { session, pid })
+            // A lock on a file that no longer sits at `path` excludes nobody:
+            // the next opener creates and locks a fresh file. Reopen and lock
+            // again, within the same wait bound.
+            if names_locked_file(&file, path).map_err(|source| util::io_err(path, source))? {
+                return Self::publish_owner(file, path);
             }
-            Err(TryLockError::Error(source)) => Err(util::io_err(path, source)),
+            if Instant::now() >= deadline {
+                return Err(util::io_err(
+                    path,
+                    io::Error::other(
+                        "the lock file was replaced while it was being locked; \
+                         open the session again",
+                    ),
+                ));
+            }
+            file = open_lock_file(path)?;
+            after_open(path);
         }
+    }
+
+    /// Writes this process's pid into the freshly locked `file` and its sidecar.
+    fn publish_owner(mut file: File, path: &Path) -> Result<Self, StoreError> {
+        file.set_len(0)
+            .map_err(|source| util::io_err(path, source))?;
+        file.seek(SeekFrom::Start(0))
+            .map_err(|source| util::io_err(path, source))?;
+        writeln!(file, "{}", std::process::id()).map_err(|source| util::io_err(path, source))?;
+        // The owner sidecar repeats the pid outside the locked file:
+        // `LockFileEx` makes the held file unreadable to every other
+        // handle on Windows, so a contended acquirer reads the pid
+        // from the sidecar that the lock never seals.
+        fs::write(
+            owner_path(path),
+            format!("{}\n", std::process::id()).as_bytes(),
+        )
+        .map_err(|source| util::io_err(path, source))?;
+        // Registered last, as transient: the sidecar precedes it so a
+        // contender reading our pid always finds the holder entry instead of
+        // taking a needless retry pass; a journal flips it to live only once
+        // it parks the guard.
+        let key = util::canonical_path(path);
+        register(&key);
+        Ok(Self {
+            _file: file,
+            path: path.to_path_buf(),
+            key,
+        })
     }
 
     /// Marks this held lock as owned by a live journal. Call when the
@@ -172,6 +212,38 @@ impl LockGuard {
     pub(crate) fn registry_key(&self) -> &Path {
         &self.key
     }
+}
+
+fn open_lock_file(path: &Path) -> Result<File, StoreError> {
+    let mut options = util::open_options();
+    options.read(true).write(true).create(true);
+    util::with_mode(&mut options, MODE_FILE);
+    options
+        .open(path)
+        .map_err(|source| util::io_err(path, source))
+}
+
+/// Whether `path` still names the file `file` holds open.
+///
+/// A missing path counts as replaced. The inode check is Unix-only; Windows
+/// keeps the replacement gap.
+#[cfg(unix)]
+fn names_locked_file(file: &File, path: &Path) -> io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+
+    let held = file.metadata()?;
+    let named = match fs::metadata(path) {
+        Ok(named) => named,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(source) => return Err(source),
+    };
+    Ok(held.dev() == named.dev() && held.ino() == named.ino())
+}
+
+#[cfg(not(unix))]
+#[expect(clippy::unnecessary_wraps, reason = "matches the Unix signature")]
+fn names_locked_file(_file: &File, _path: &Path) -> io::Result<bool> {
+    Ok(true)
 }
 
 /// Re-marks registry keys live when dropped while armed — a scopeguard
@@ -222,6 +294,13 @@ fn owner_path(path: &Path) -> std::path::PathBuf {
     text.into()
 }
 
+fn poll_delay(session: SessionId) -> Duration {
+    use std::hash::BuildHasher;
+    let hash = std::collections::hash_map::RandomState::new().hash_one(session);
+    let jitter = Duration::from_millis(hash % u64::from(PID_POLL.subsec_millis()));
+    PID_POLL.saturating_add(jitter)
+}
+
 fn read_pid_until(path: &Path) -> Result<Option<u32>, StoreError> {
     let deadline = Instant::now() + PID_WAIT;
     loop {
@@ -268,10 +347,10 @@ mod tests {
 
     static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
 
-    struct TestDir(PathBuf);
+    pub(super) struct TestDir(pub(super) PathBuf);
 
     impl TestDir {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             let path = std::env::temp_dir().join(format!(
                 "dal-store-lock-{}-{}",
                 std::process::id(),
@@ -321,13 +400,9 @@ mod tests {
             panic!("second acquisition must fail")
         };
 
-        assert_eq!(
-            error.to_string(),
-            format!("session {id} is open in process {}", std::process::id())
-        );
         assert!(matches!(
             &error,
-            StoreError::Locked { session, pid: Some(pid) }
+            StoreError::Locked { session, pid: Some(pid), .. }
                 if *session == id && *pid == std::process::id()
         ));
         // The lock file itself stays sealed to other handles while held on
@@ -356,11 +431,14 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            format!("session {id} is open in another process")
+            format!(
+                "session {id} is open in another process (lock {})",
+                path.display()
+            )
         );
         assert!(matches!(
             error,
-            StoreError::Locked { session, pid: None } if session == id
+            StoreError::Locked { session, pid: None, .. } if session == id
         ));
         assert_eq!(fs::read(owner).expect("read unchanged owner text"), before);
     }
@@ -505,5 +583,61 @@ mod tests {
         assert!(!super::live_in_process(&path));
         drop(guard);
         assert!(!super::live_in_process(&path));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod replaced_file_tests {
+    use std::{cell::Cell, fs, path::Path};
+
+    use dal_core::SessionId;
+
+    use super::{LockGuard, PID_WAIT, tests::TestDir};
+    use crate::error::StoreError;
+
+    fn replace(path: &Path) -> std::io::Result<()> {
+        fs::remove_file(path)?;
+        fs::write(path, b"")
+    }
+
+    #[test]
+    fn lock_file_replaced_before_locking_still_excludes_a_second_opener() {
+        let dir = TestDir::new();
+        let path = dir.0.join("lock");
+        let id = SessionId::new_v7();
+        let replaced = Cell::new(false);
+
+        let guard = LockGuard::acquire_with(&path, id, |at| {
+            if !replaced.replace(true) {
+                replace(at).expect("replace the lock file");
+            }
+        })
+        .expect("acquire after the file was replaced");
+
+        let second = LockGuard::acquire(&path, id);
+        assert!(
+            matches!(second, Err(StoreError::Locked { session, .. }) if session == id),
+            "the held lock must be on the file at the path, got {second:?}"
+        );
+        drop(guard);
+    }
+
+    #[test]
+    fn lock_file_replaced_after_deadline_is_not_retried() {
+        let dir = TestDir::new();
+        let path = dir.0.join("lock");
+        let attempts = Cell::new(0);
+
+        let result = LockGuard::acquire_with(&path, SessionId::new_v7(), |at| {
+            attempts.set(attempts.get() + 1);
+            assert_eq!(attempts.get(), 1, "an expired acquisition must not reopen");
+            std::thread::sleep(PID_WAIT);
+            replace(at).expect("replace the lock file");
+        });
+
+        assert!(
+            matches!(result, Err(StoreError::Io { .. })),
+            "replacement after the deadline must return an I/O error, got {result:?}"
+        );
     }
 }

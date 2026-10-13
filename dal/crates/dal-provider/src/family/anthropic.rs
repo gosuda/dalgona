@@ -5,8 +5,12 @@
 //! registration order, and two builds of the same input are equal byte for
 //! byte. Cache breakpoints sit on exactly three places: the last system block,
 //! the last tool, and the last typed content block of the last message.
-//! Tool arguments and replayed thinking blocks travel as raw JSON, never
-//! re-encoded. A Claude OAuth token also carries the fingerprint of
+//! Tool arguments travel as raw JSON, never re-encoded. Replayed thinking
+//! blocks travel as raw JSON too: a bound block is rebuilt without its
+//! `dal_prefix` member when its prefix matches; stale or unbound signed
+//! thinking blocks are dropped outside an in-progress tool-use turn, while
+//! the required continuation block and redacted thinking remain verbatim.
+//! A Claude OAuth token also carries the fingerprint of
 //! [`crate::claude_fingerprint`]; API keys and bearer keys never do.
 //!
 //! [`decode_stream`] turns the SSE events of one response into the neutral
@@ -26,6 +30,7 @@ use dal_core::{
 };
 use futures::{Stream, StreamExt, stream};
 use serde::{Deserialize, Serialize, Serializer, ser::SerializeMap};
+use sha2::{Digest, Sha256};
 use sonic_rs::{JsonValueTrait, LazyValue};
 
 use crate::{
@@ -131,6 +136,9 @@ pub(crate) struct AnthropicWire {
     pub(crate) user_agent: Option<String>,
     /// The JSON body.
     pub(crate) body: Vec<u8>,
+    /// The replay binding of signed thinking blocks: the digest of the system
+    /// blocks and tool list this body sends.
+    pub(crate) prefix: Box<str>,
 }
 
 impl AnthropicWire {
@@ -165,6 +173,7 @@ impl fmt::Debug for AnthropicWire {
             .field("headers", &headers)
             .field("user_agent", &self.user_agent)
             .field("body_len", &self.body.len())
+            .field("prefix", &self.prefix)
             .finish()
     }
 }
@@ -230,6 +239,9 @@ pub(crate) fn build(
         headers.push(("x-app", claude_fingerprint::X_APP.to_owned()));
     }
 
+    let system = system_blocks(&request.system, oauth);
+    let tools = tools(request, oauth);
+    let prefix = prefix_fingerprint(&system, &tools);
     let body = Body {
         model,
         max_tokens: match input.thinking {
@@ -237,9 +249,9 @@ pub(crate) fn build(
             _ => base_max_tokens(input.max_output),
         },
         stream: !input.summarize,
-        system: system_blocks(&request.system, oauth),
-        messages: messages(request, model, input.compaction, oauth)?,
-        tools: tools(request, oauth),
+        system,
+        messages: messages(request, model, input.compaction, oauth, &prefix)?,
+        tools,
         tool_choice: (!request.tools.is_empty()).then_some(ToolChoice::Auto),
         thinking: match input.thinking {
             AnthropicThinking::Omit => None,
@@ -266,6 +278,7 @@ pub(crate) fn build(
         headers,
         user_agent,
         body,
+        prefix,
     })
 }
 
@@ -356,6 +369,9 @@ struct Message<'a> {
 enum Block<'a> {
     Typed(Typed<'a>),
     Raw(&'a RawJson),
+    /// A signed thinking replay rebuilt without its dal prefix binding; the
+    /// thinking text and signature stay the bytes the provider produced.
+    Rebound(RawJson),
 }
 
 impl Serialize for Block<'_> {
@@ -363,6 +379,7 @@ impl Serialize for Block<'_> {
         match self {
             Self::Typed(block) => block.serialize(serializer),
             Self::Raw(raw) => raw.serialize(serializer),
+            Self::Rebound(raw) => raw.serialize(serializer),
         }
     }
 }
@@ -496,10 +513,28 @@ fn messages<'a>(
     model: &str,
     compaction: Option<&'a RawJson>,
     oauth: bool,
+    prefix: &str,
 ) -> Result<Vec<Message<'a>>, ProviderError> {
     let mut messages: Vec<Message<'a>> = Vec::new();
     let mut turn = ToolTurn::default();
-    for item in &*request.context {
+    // The trailing assistant items before final tool results are the active
+    // tool-use turn; Anthropic requires their thinking blocks for continuation.
+    let active_assistant_range = match request.context.last() {
+        Some(ContextItem::ToolResult { .. }) => {
+            let mut end = request.context.len();
+            while end > 0 && matches!(&request.context[end - 1], ContextItem::ToolResult { .. }) {
+                end -= 1;
+            }
+            let mut start = end;
+            while start > 0 && matches!(&request.context[start - 1], ContextItem::Assistant { .. })
+            {
+                start -= 1;
+            }
+            Some((start, end))
+        }
+        _ => None,
+    };
+    for (index, item) in request.context.iter().enumerate() {
         let (role, blocks) = match item {
             ContextItem::User { parts } => {
                 let blocks = user_blocks(parts)?;
@@ -510,8 +545,13 @@ fn messages<'a>(
             }
             ContextItem::Assistant { source, parts } => {
                 let continues = messages.last().is_some_and(|last| last.role == "assistant");
+                let in_progress_tool_turn = active_assistant_range
+                    .is_some_and(|(start, end)| start <= index && index < end);
                 turn.assistant(parts, continues)?;
-                ("assistant", assistant_blocks(parts, source, model, oauth))
+                (
+                    "assistant",
+                    assistant_blocks(parts, source, model, oauth, prefix, in_progress_tool_turn),
+                )
             }
             ContextItem::ToolResult {
                 call,
@@ -558,7 +598,7 @@ fn messages<'a>(
     if let Some(slot) = messages.last_mut().and_then(|last| {
         last.content.iter_mut().rev().find_map(|block| match block {
             Block::Typed(typed) => Some(typed.cache_slot()),
-            Block::Raw(_) => None,
+            Block::Raw(_) | Block::Rebound(_) => None,
         })
     }) {
         *slot = Some(CacheControl::Ephemeral);
@@ -663,6 +703,8 @@ fn assistant_blocks<'a>(
     source: &ReplaySource,
     model: &str,
     oauth: bool,
+    prefix: &str,
+    in_progress_tool_turn: bool,
 ) -> Vec<Block<'a>> {
     let replay_ok = source.family == Family::Anthropic && source.model.as_ref() == model;
     parts
@@ -673,10 +715,9 @@ fn assistant_blocks<'a>(
                 text,
                 cache_control: None,
             })),
-            AssistantPart::Thinking { replay, .. } if replay_ok => replay
-                .as_ref()
-                .filter(|raw| replayable(raw))
-                .map(Block::Raw),
+            AssistantPart::Thinking { replay, .. } if replay_ok => {
+                thinking_replay_block(replay.as_ref(), prefix, in_progress_tool_turn)
+            }
             AssistantPart::Thinking { .. } => None,
             AssistantPart::ToolCall { call, name, args } => Some(Block::Typed(Typed::ToolUse {
                 id: call.as_str(),
@@ -708,23 +749,119 @@ fn replayable(raw: &RawJson) -> bool {
     }
 }
 
+/// The request prefix a signed thinking block is bound to: a digest of the
+/// wire system blocks and wire tool list. A stored block whose binding
+/// differs from the current digest was produced under a different prefix
+/// and the API rejects its signature, so it must not be replayed.
+fn prefix_fingerprint(system: &[SystemBlock<'_>], tools: &[Tool<'_>]) -> Box<str> {
+    let mut digest = Sha256::new();
+    let mut field = |bytes: &[u8]| {
+        let length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        digest.update(length.to_le_bytes());
+        digest.update(bytes);
+    };
+    for block in system {
+        field(block.text.as_bytes());
+    }
+    for tool in tools {
+        field(tool.name.as_bytes());
+        field(tool.description.as_bytes());
+        field(tool.input_schema.as_str().as_bytes());
+    }
+    base64::engine::general_purpose::STANDARD
+        .encode(digest.finalize())
+        .into_boxed_str()
+}
+
+/// The prefix binding stored inside a signed thinking block, if any. Blocks
+/// recorded before the binding existed, and scripted payloads, store none.
+fn replay_bound_prefix(raw: &str) -> Option<String> {
+    sonic_rs::get_from_str(raw, [REPLAY_PREFIX_MEMBER])
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+}
+
+/// Redacted thinking carries opaque data instead of a signature, so it can
+/// remain verbatim when no prefix binding was recorded.
+fn is_redacted_thinking(raw: &RawJson) -> bool {
+    sonic_rs::get_from_str(raw.as_str(), ["type"]).is_ok_and(|value| {
+        value
+            .as_str()
+            .is_some_and(|kind| kind == "redacted_thinking")
+    })
+}
+
+/// The replayable payload of one stored thinking part: the block when the
+/// API still accepts it under the current request prefix.
+fn thinking_replay_block<'a>(
+    replay: Option<&'a RawJson>,
+    prefix: &str,
+    in_progress_tool_turn: bool,
+) -> Option<Block<'a>> {
+    let raw = replay?;
+    if !replayable(raw) {
+        return None;
+    }
+    replay_block(raw, prefix, in_progress_tool_turn)
+}
+
+/// Sends one stored thinking block when its prefix can be trusted. A bound
+/// block is rebuilt without the storage-only binding member. An unbound signed
+/// block is dropped unless it belongs to an in-progress tool-use turn, where
+/// Anthropic requires it for continuation; redacted thinking has no signature
+/// member and remains verbatim. `None` drops a block that cannot be sent.
+fn replay_block<'a>(
+    raw: &'a RawJson,
+    prefix: &str,
+    in_progress_tool_turn: bool,
+) -> Option<Block<'a>> {
+    match replay_bound_prefix(raw.as_str()) {
+        Some(stored) if stored == prefix => unbound_replay(raw).map(Block::Rebound),
+        None if is_redacted_thinking(raw) || in_progress_tool_turn => Some(Block::Raw(raw)),
+        _ => None,
+    }
+}
+
+/// Rebuilds a bound signed thinking block with only the members the API
+/// produced: the exact thinking text and signature.
+fn unbound_replay(raw: &RawJson) -> Option<RawJson> {
+    let member = |name: &str| {
+        sonic_rs::get_from_str(raw.as_str(), [name])
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+    };
+    let thinking = member("thinking")?;
+    let signature = member("signature")?;
+    let json = sonic_rs::to_string(&ThinkingReplay {
+        kind: "thinking",
+        thinking: &thinking,
+        signature: &signature,
+        prefix: None,
+    })
+    .ok()?;
+    RawJson::parse(&json).ok()
+}
+
 /// Decodes the SSE events of one Anthropic response into neutral events.
 ///
 /// `model` binds every [`ReplayPayload`]; `oauth` strips the Claude Code
-/// tool prefix from tool names. The stream yields the events of the 5.1
-/// grammar, then ends after `Stop` or after one error; input that ends
-/// before `message_stop` yields [`ProviderError::StreamCut`].
+/// tool prefix from tool names; `replay_prefix` is the producing request's
+/// prefix fingerprint, recorded inside every signed thinking replay for
+/// replay binding (`None` records nothing). The stream yields the events of
+/// the 5.1 grammar, then ends after `Stop` or after one error; input that
+/// ends before `message_stop` yields [`ProviderError::StreamCut`].
 pub(crate) fn decode_stream<S>(
     events: S,
     model: Box<str>,
     oauth: bool,
+    replay_prefix: Option<&str>,
 ) -> impl Stream<Item = Result<StreamEvent, ProviderError>> + Send + 'static
 where
     S: Stream<Item = Result<SseEvent, ProviderError>> + Send + 'static,
 {
     let state = Pump {
         events: Some(Box::pin(events)),
-        decoder: Decoder::new(model, oauth),
+        decoder: Decoder::new(model, oauth, replay_prefix.map(Box::<str>::from)),
         queue: VecDeque::new(),
     };
     stream::unfold(state, |mut pump| async move {
@@ -855,6 +992,10 @@ impl UsageState {
 struct Decoder {
     model: Box<str>,
     oauth: bool,
+    /// The prefix fingerprint of the request this stream answers; signed
+    /// thinking blocks record it for replay binding. `None` decodes without
+    /// a binding (scripted or synthetic streams).
+    prefix: Option<Box<str>>,
     usage: UsageState,
     stop: Option<StopReason>,
     open: BTreeMap<u64, OpenBlock>,
@@ -955,7 +1096,14 @@ struct ThinkingReplay<'a> {
     kind: &'static str,
     thinking: &'a str,
     signature: &'a str,
+    /// The request prefix the block was produced under, recorded for replay.
+    /// The member is dal storage only; it never reaches the API again.
+    #[serde(rename = "dal_prefix", skip_serializing_if = "Option::is_none")]
+    prefix: Option<&'a str>,
 }
+
+/// The member name [`ThinkingReplay::prefix`] is stored under.
+const REPLAY_PREFIX_MEMBER: &str = "dal_prefix";
 
 fn protocol(detail: impl Into<String>) -> ProviderError {
     ProviderError::Protocol {
@@ -1011,10 +1159,11 @@ fn stream_error(body: Option<ErrorBody>) -> ProviderError {
 }
 
 impl Decoder {
-    fn new(model: Box<str>, oauth: bool) -> Self {
+    fn new(model: Box<str>, oauth: bool, prefix: Option<Box<str>>) -> Self {
         Self {
             model,
             oauth,
+            prefix,
             usage: UsageState::default(),
             stop: None,
             open: BTreeMap::new(),
@@ -1254,6 +1403,7 @@ impl Decoder {
                     kind: "thinking",
                     thinking: &text,
                     signature: &signature,
+                    prefix: self.prefix.as_deref(),
                 };
                 let json = sonic_rs::to_string(&replay)
                     .map_err(|error| protocol(format!("thinking block did not encode: {error}")))?;

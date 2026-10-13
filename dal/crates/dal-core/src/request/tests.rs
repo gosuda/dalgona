@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use super::{Answer, AnswerValue, CallGrant, Choice, JobEnd, Owner, Preview, Question, Request};
-use crate::id::{JobId, RequestId, TurnId};
+use crate::id::{CallId, JobId, RequestId, TurnId};
 use crate::raw::RawJson;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -30,6 +30,7 @@ fn questions() -> [Question; 5] {
             tool: "exec".into(),
             preview: preview(),
             grant: Some(call_grant()),
+            call: Some(CallId::new("call-1")),
         },
         Question::Grant {
             ext: "web".into(),
@@ -169,6 +170,48 @@ fn owner_question_and_request_round_trip_every_shape() -> TestResult {
         let decoded = sonic_rs::from_slice::<Request>(&bytes)?;
         assert_eq!(decoded, request);
     }
+    Ok(())
+}
+
+#[test]
+fn approval_call_id_is_optional_on_the_wire() -> TestResult {
+    let without = Question::Approval {
+        tool: "exec".into(),
+        preview: preview(),
+        grant: None,
+        call: None,
+    };
+    let encoded = sonic_rs::to_string(&without)?;
+    assert!(
+        !encoded.contains("call"),
+        "absent call is omitted: {encoded}"
+    );
+    assert_eq!(sonic_rs::from_str::<Question>(&encoded)?, without);
+
+    let legacy = r#"{"type":"approval","tool":"exec","preview":{"title":"Patch","body":"","digest":null},"grant":null}"#;
+    assert_eq!(
+        sonic_rs::from_str::<Question>(legacy)?,
+        Question::Approval {
+            tool: "exec".into(),
+            preview: Preview {
+                title: "Patch".into(),
+                body: "".into(),
+                digest: None,
+            },
+            grant: None,
+            call: None,
+        }
+    );
+
+    let with = Question::Approval {
+        tool: "exec".into(),
+        preview: preview(),
+        grant: None,
+        call: Some(CallId::new("provider-call-7")),
+    };
+    let encoded = sonic_rs::to_string(&with)?;
+    assert!(encoded.contains(r#""call":"provider-call-7""#), "{encoded}");
+    assert_eq!(sonic_rs::from_str::<Question>(&encoded)?, with);
     Ok(())
 }
 

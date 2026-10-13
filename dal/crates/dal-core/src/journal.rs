@@ -51,7 +51,8 @@ pub use encode::encode;
 pub use entries::{Entry, InferredPurpose, JobEvent, JobKind, JobOutcome, Mail};
 pub use records::{DecodeError, Decoded, EncodeError, Record, ScannedHead, TreeKind};
 pub use types::{
-    AssistantStop, Block, EntryKind, Header, JournalPart, Product, Source, TurnEndStop, VERSION,
+    AssistantStop, BEFORE_TURN_SOURCE, Block, EntryKind, Header, JournalPart, Product, Source,
+    TurnEndStop, VERSION,
 };
 
 #[cfg(test)]

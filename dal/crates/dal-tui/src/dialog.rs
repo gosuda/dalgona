@@ -1,11 +1,12 @@
 //! One-dialog-at-a-time request queue with exactly-once answers.
 
 use std::collections::HashSet;
+use std::time::{Duration, Instant};
 
 use dal_core::{Answer, CallGrant, Question, RawJson, Request};
 
 use crate::diagram::{DiagramSettings, RenderCache};
-use crate::render::{RenderRow, text_rows};
+use crate::render::{Prose, RenderRow, prose_rows, text_rows};
 use crate::theme::Role;
 
 /// Pending requests in open order with sent-answer tracking.
@@ -206,6 +207,27 @@ fn value_bool(value: bool) -> Answer {
     RawJson::parse(if value { "true" } else { "false" }).map_or(Answer::Cancel, Answer::Value)
 }
 
+/// How long a freshly shown dialog ignores every key but Esc.
+///
+/// Browsers hold the same line for dialogs that grant something: Firefox delays
+/// its install and permission buttons by 1000 ms (`security.dialog_enable_delay`).
+/// Keys already on their way when a dialog opens arrive within the gap between
+/// two strokes of a typist, under 200 ms at 60 words a minute, so 500 ms swallows
+/// that type-ahead and still passes a user who reads the question and answers.
+pub const ARM_DELAY: Duration = Duration::from_millis(500);
+
+/// Whether a dialog accepts answer keys yet.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum Arming {
+    /// No frame has shown the current dialog.
+    #[default]
+    Fresh,
+    /// The dialog has been shown since this instant and still ignores answer keys.
+    Shown(Instant),
+    /// The hint row lists the answer keys and they act.
+    Armed,
+}
+
 /// Keyboard and rendering state for the request currently at the queue head.
 #[derive(Debug, Default)]
 pub struct DialogUi {
@@ -218,6 +240,7 @@ pub struct DialogUi {
     scroll: usize,
     empty_hint: bool,
     active_id: Option<String>,
+    arming: Arming,
 }
 
 impl DialogUi {
@@ -252,22 +275,53 @@ impl DialogUi {
         self.queue.keys_disabled
     }
 
+    /// Advances the arming clock; call once per frame just before painting.
+    ///
+    /// The first call after a dialog appears starts the delay, and the call that
+    /// finds [`ARM_DELAY`] elapsed arms it, so the frame painted right after
+    /// shows the answer keys. A key counts only when the frame that lists the
+    /// keys has already been painted.
+    pub fn tick(&mut self, now: Instant) {
+        match self.arming {
+            Arming::Fresh if self.is_open() => self.arming = Arming::Shown(now),
+            Arming::Shown(since) if now.saturating_duration_since(since) >= ARM_DELAY => {
+                self.arming = Arming::Armed;
+            }
+            _ => {}
+        }
+    }
+
+    /// True once the shown dialog accepts answer keys.
+    #[must_use]
+    pub fn armed(&self) -> bool {
+        self.arming == Arming::Armed
+    }
+
     /// Inserts pasted content only into a live free-text question.
     pub fn paste(&mut self, bytes: &[u8]) {
         let Some((request, _)) = self.queue.shown() else {
             return;
         };
-        if matches!(request.question, Question::Text { .. }) && !self.queue.keys_disabled() {
+        let live = self.armed() && !self.queue.keys_disabled();
+        if live && matches!(request.question, Question::Text { .. }) {
             self.input.push_str(&String::from_utf8_lossy(bytes));
             self.empty_hint = false;
         }
     }
 
     /// Maps a key into an answer; an answered request disables its keys until resolution.
+    ///
+    /// Until the dialog is armed only an unmodified Esc acts: it is the one answer
+    /// that grants nothing, so a key typed before the dialog was visible can never
+    /// consent. Every other key is dropped, not queued.
     pub fn key(&mut self, key: crate::keys::Key) -> Option<(dal_core::RequestId, Answer)> {
         use crossterm::event::{KeyCode, KeyModifiers};
         let (request, _) = self.queue.shown()?;
         if self.queue.keys_disabled() {
+            return None;
+        }
+        let escape = key.code == KeyCode::Esc && key.modifiers == KeyModifiers::NONE;
+        if !self.armed() && !escape {
             return None;
         }
         let id = request.id;
@@ -347,6 +401,15 @@ impl DialogUi {
                     self.expanded = !self.expanded;
                     None
                 }
+                KeyCode::PageDown => {
+                    self.expanded = true;
+                    self.scroll = self.scroll.saturating_add(1);
+                    None
+                }
+                KeyCode::PageUp => {
+                    self.scroll = self.scroll.saturating_sub(1);
+                    None
+                }
                 _ => None,
             },
             Question::Text { .. } => match key.code {
@@ -416,41 +479,60 @@ impl DialogUi {
             use std::fmt::Write as _;
             let _ = write!(title, " · {waiting} more waiting");
         }
-        let mut rows = vec![RenderRow::new(title, Role::Accent)];
-        let mut body = self.body(&request.question, width, mode, settings, cache);
+        let mut rows = prose_rows(&title, width, mode)
+            .into_iter()
+            .map(|mut row| {
+                row.role = Role::Accent;
+                row
+            })
+            .collect::<Vec<_>>();
+        rows.truncate(height.saturating_sub(2).max(1));
+        let (mut body, pinned) = self.body_parts(&request.question, width, mode, settings, cache);
         let actions = self.actions(&request.question);
-        let visible = height.saturating_sub(2).max(1);
-        let hidden = body.len().saturating_sub(visible);
+        let visible = height.saturating_sub(rows.len() + 1).max(1);
+        // Pinned rows (the choices of a selection) stay on screen; only the
+        // rows above them scroll.
+        let room = visible.saturating_sub(pinned.len()).max(1);
+        let hidden = body.len().saturating_sub(room);
+        let scroll = if self.expanded {
+            self.scroll.min(hidden)
+        } else {
+            self.scroll
+        };
         if hidden > 0 && !self.expanded {
-            let shown = visible.saturating_sub(1);
+            let shown = room.saturating_sub(1);
             body.truncate(shown);
             body.push(RenderRow::new(
                 format!("... {} more lines · pgdn", hidden + 1),
                 Role::Dim,
             ));
         }
-        rows.extend(body.into_iter().skip(self.scroll).take(visible));
+        rows.extend(body.into_iter().skip(scroll).take(room));
+        rows.extend(pinned);
         rows.push(RenderRow::new(actions, Role::Text));
         rows.into_iter()
             .map(|row| row.clipped(width, mode))
             .collect()
     }
 
-    fn body(
+    /// Splits the dialog body into scrollable rows and rows pinned below them.
+    fn body_parts(
         &self,
         question: &Question,
         width: usize,
         mode: crate::WidthMode,
         settings: DiagramSettings,
         cache: &RenderCache,
-    ) -> Vec<RenderRow> {
+    ) -> (Vec<RenderRow>, Vec<RenderRow>) {
+        let mut pinned = Vec::new();
+        let rows_of = |body: &str, prose| text_rows(body, width, mode, prose, settings, cache);
         let mut rows = match question {
             Question::Approval { preview, grant, .. } => {
                 let mut rows = Vec::new();
                 if let Some(grant) = grant {
                     rows.push(RenderRow::new(grant_clause(grant), Role::Text));
                 }
-                rows.extend(text_rows(&preview.body, width, mode, settings, cache));
+                rows.extend(rows_of(&preview.body, Prose::Verbatim));
                 rows
             }
             Question::Grant {
@@ -485,22 +567,24 @@ impl DialogUi {
                 preview,
                 ..
             } => {
-                let mut rows = preview
+                let rows = preview
                     .iter()
-                    .flat_map(|preview| text_rows(&preview.body, width, mode, settings, cache))
+                    .flat_map(|preview| rows_of(&preview.body, Prose::Markdown { full: width }))
                     .collect::<Vec<_>>();
-                rows.extend(options.iter().enumerate().map(|(index, option)| {
+                pinned.extend(options.iter().enumerate().map(|(index, option)| {
                     let checked =
                         self.checked.contains(&index) || (!*multi && index == self.focused);
-                    let marker = match (*multi, checked) {
-                        (true, true) => "[x]",
-                        (true, false) => "[ ]",
-                        (false, true) => "(*)",
-                        (false, false) => "( )",
-                    };
+                    // Rows: single-select (unchecked, checked), then multi-select likewise.
+                    let marker = ["( )", "(*)", "[ ]", "[x]"]
+                        [usize::from(*multi) * 2 + usize::from(checked)];
+                    let description = option
+                        .description
+                        .as_deref()
+                        .map(|text| format!(" - {}", crate::width::escape(text)))
+                        .unwrap_or_default();
                     RenderRow::new(
                         format!(
-                            "{} {marker} {}",
+                            "{} {marker} {}{description}",
                             if index == self.focused { ">" } else { " " },
                             option.label
                         ),
@@ -534,21 +618,31 @@ impl DialogUi {
                 Role::Warning,
             ));
         }
-        if rows.is_empty() {
+        if rows.is_empty() && pinned.is_empty() {
             rows.push(RenderRow::new(String::new(), Role::Text));
         }
-        rows
+        (rows, pinned)
     }
 
     fn actions(&self, question: &Question) -> String {
+        let approving = matches!(question, Question::Approval { .. } | Question::Grant { .. });
+        if approving && self.queue.keys_disabled() {
+            return "Waiting for the request to settle...".to_owned();
+        }
+        if !self.armed() {
+            let esc = if approving {
+                crate::copy::ids::APPROVAL_ESC_DENIES
+            } else {
+                "esc dismiss"
+            };
+            return format!("{esc} · {}", crate::copy::ids::DIALOG_ARMING);
+        }
         match question {
-            Question::Approval { .. } | Question::Grant { .. } => {
-                if self.queue.keys_disabled() {
-                    "Waiting for the request to settle...".to_owned()
-                } else {
-                    "y allow · a session · n deny · v view · esc denies".to_owned()
-                }
-            }
+            Question::Approval { .. } | Question::Grant { .. } => format!(
+                "{} · v view · {}",
+                crate::copy::ids::DIALOG_ACTIONS_SHORT,
+                crate::copy::ids::APPROVAL_ESC_DENIES
+            ),
             Question::Select { multi: true, .. } => crate::copy::ids::ASK_HINT_MULTI.to_owned(),
             Question::Select { .. } => crate::copy::ids::ASK_HINT_SINGLE.to_owned(),
             Question::Text { .. } => crate::copy::ids::ASK_HINT_TEXT.to_owned(),
@@ -572,6 +666,7 @@ impl DialogUi {
         self.expanded = false;
         self.scroll = 0;
         self.empty_hint = false;
+        self.arming = Arming::Fresh;
     }
 }
 
@@ -583,6 +678,59 @@ mod tests {
     use crate::diagram::{DiagramSettings, RenderCache};
     use crate::theme::Role;
     use dal_core::Answer;
+    use std::time::Instant;
+
+    fn arm(dialog: &mut super::DialogUi) {
+        let start = Instant::now();
+        dialog.tick(start);
+        dialog.tick(start + super::ARM_DELAY);
+        assert!(dialog.armed());
+    }
+
+    fn press(
+        dialog: &mut super::DialogUi,
+        code: crossterm::event::KeyCode,
+    ) -> Option<(dal_core::RequestId, Answer)> {
+        dialog.key(crate::keys::Key::new(
+            code,
+            crossterm::event::KeyModifiers::NONE,
+        ))
+    }
+
+    fn approval(id: dal_core::RequestId) -> dal_core::Request {
+        dal_core::Request {
+            id,
+            turn: None,
+            owner: dal_core::Owner::Core,
+            question: dal_core::Question::Approval {
+                tool: "exec".into(),
+                preview: dal_core::Preview {
+                    title: "command".into(),
+                    body: "echo hi".into(),
+                    digest: None,
+                },
+                grant: None,
+                call: None,
+            },
+            timeout: std::time::Duration::from_secs(30),
+            default: Answer::Decline,
+        }
+    }
+
+    fn hint(dialog: &super::DialogUi) -> String {
+        dialog
+            .rendered_rows(
+                80,
+                12,
+                crate::WidthMode::Narrow,
+                DiagramSettings::default(),
+                &RenderCache::default(),
+            )
+            .into_iter()
+            .last()
+            .map(|row| row.text)
+            .unwrap_or_default()
+    }
 
     #[test]
     fn approval_keys_map_once_and_lock_until_resolved() {
@@ -669,6 +817,7 @@ mod tests {
                     digest: None,
                 },
                 grant: None,
+                call: None,
             },
             timeout: Duration::from_secs(30),
             default: Answer::Decline,
@@ -702,6 +851,35 @@ mod tests {
         );
         assert_eq!(cache.renders(), 1);
     }
+    #[test]
+    fn fenced_question_titles_remain_plain_text_when_diagrams_are_enabled() {
+        use dal_core::{Owner, Question, Request, RequestId};
+        use std::time::Duration;
+
+        let mut dialog = super::DialogUi::default();
+        dialog.opened(Request {
+            id: RequestId::new_v7(),
+            turn: None,
+            owner: Owner::Core,
+            question: Question::Text {
+                prompt: "```mermaid\ngraph TD; A-->B\n```".into(),
+                placeholder: None,
+            },
+            timeout: Duration::from_secs(30),
+            default: Answer::Cancel,
+        });
+        let cache = RenderCache::default();
+        let rows = dialog.rendered_rows(
+            80,
+            20,
+            crate::WidthMode::Narrow,
+            DiagramSettings { enabled: true },
+            &cache,
+        );
+
+        assert!(rows.iter().any(|row| row.text.contains("graph TD; A-->B")));
+        assert_eq!(cache.renders(), 0);
+    }
 
     #[test]
     fn modified_letters_cannot_approve_an_approval() {
@@ -722,10 +900,12 @@ mod tests {
                     digest: None,
                 },
                 grant: None,
+                call: None,
             },
             timeout: std::time::Duration::from_secs(30),
             default: Answer::Decline,
         });
+        arm(&mut dialog);
         assert!(
             dialog
                 .key(crate::keys::Key::new(
@@ -751,5 +931,290 @@ mod tests {
                 ))
                 .is_none()
         );
+    }
+
+    #[test]
+    fn multiline_titles_stay_inside_the_height_budget() {
+        use dal_core::{Owner, Question, Request, RequestId};
+
+        let mut dialog = super::DialogUi::default();
+        dialog.opened(Request {
+            id: RequestId::new_v7(),
+            turn: None,
+            owner: Owner::Core,
+            question: Question::Text {
+                prompt: "one\ntwo\nthree\nfour\nfive\nsix".into(),
+                placeholder: None,
+            },
+            timeout: std::time::Duration::from_secs(30),
+            default: Answer::Cancel,
+        });
+        let render = |height| {
+            dialog.rendered_rows(
+                32,
+                height,
+                crate::WidthMode::Narrow,
+                DiagramSettings::default(),
+                &RenderCache::default(),
+            )
+        };
+        let actions = render(40).pop().expect("actions row").text;
+        let title_lines = ["one", "two", "three", "four", "five", "six"];
+        for height in 3usize..=10 {
+            let title_len = height.saturating_sub(2).min(title_lines.len()).max(1);
+            let rows = render(height);
+            assert_eq!(rows.len(), title_len + 2, "height {height}");
+            for (row, expected) in rows.iter().take(title_len).zip(title_lines) {
+                assert_eq!(row.text, expected, "height {height}");
+                assert!(
+                    !row.text.contains('\n'),
+                    "height {height}: embedded newline"
+                );
+            }
+            assert!(rows[title_len].text.starts_with("> "), "height {height}");
+            assert_eq!(rows.last().expect("actions row").text, actions);
+        }
+    }
+
+    #[test]
+    fn multiline_question_titles_keep_each_logical_line() {
+        use dal_core::{Owner, Question, Request, RequestId};
+
+        let mut dialog = super::DialogUi::default();
+        dialog.opened(Request {
+            id: RequestId::new_v7(),
+            turn: None,
+            owner: Owner::Core,
+            question: Question::Text {
+                prompt: "first line is long enough\nsecond line stays separate".into(),
+                placeholder: None,
+            },
+            timeout: std::time::Duration::from_secs(30),
+            default: Answer::Cancel,
+        });
+        let rows = dialog.rendered_rows(
+            32,
+            20,
+            crate::WidthMode::Narrow,
+            DiagramSettings::default(),
+            &RenderCache::default(),
+        );
+        assert_eq!(rows[0].text, "first line is long enough");
+        assert_eq!(rows[1].text, "second line stays separate");
+    }
+
+    fn select_with_preview() -> super::DialogUi {
+        use dal_core::{Choice, Owner, Preview, Question, Request, RequestId};
+
+        let mut dialog = super::DialogUi::default();
+        dialog.opened(Request {
+            id: RequestId::new_v7(),
+            turn: None,
+            owner: Owner::Core,
+            question: Question::Select {
+                prompt: "Database: Which database?".into(),
+                options: vec![
+                    Choice {
+                        label: "SQLite".into(),
+                        description: Some("Embedded, zero config".into()),
+                    },
+                    Choice {
+                        label: "Postgres".into(),
+                        description: None,
+                    },
+                ],
+                multi: false,
+                preview: Some(Preview {
+                    title: "schema".into(),
+                    body: "line one\nline two\nline three\nline four\nline five".into(),
+                    digest: None,
+                }),
+            },
+            timeout: std::time::Duration::from_secs(30),
+            default: Answer::Cancel,
+        });
+        dialog
+    }
+
+    fn select_rows(dialog: &super::DialogUi, height: usize) -> Vec<String> {
+        dialog
+            .rendered_rows(
+                60,
+                height,
+                crate::WidthMode::Narrow,
+                DiagramSettings::default(),
+                &RenderCache::default(),
+            )
+            .into_iter()
+            .map(|row| row.text)
+            .collect()
+    }
+
+    #[test]
+    fn a_long_preview_never_hides_the_choices_or_their_descriptions() {
+        let dialog = select_with_preview();
+        let rows = select_rows(&dialog, 7);
+        assert!(rows.len() <= 7, "{rows:?}");
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("SQLite - Embedded, zero config")),
+            "{rows:?}"
+        );
+        assert!(rows.iter().any(|row| row.contains("Postgres")), "{rows:?}");
+        assert!(
+            rows.iter().any(|row| row.contains("more lines")),
+            "the clipped preview names how to read the rest: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn page_down_reads_further_into_a_clipped_preview() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let mut dialog = select_with_preview();
+        arm(&mut dialog);
+        let before = select_rows(&dialog, 7);
+        assert!(
+            before.iter().any(|row| row.contains("line one")),
+            "{before:?}"
+        );
+        assert!(
+            !before.iter().any(|row| row.contains("line five")),
+            "{before:?}"
+        );
+        for _ in 0..5 {
+            assert!(
+                dialog
+                    .key(crate::keys::Key::new(KeyCode::PageDown, KeyModifiers::NONE))
+                    .is_none()
+            );
+        }
+        let after = select_rows(&dialog, 7);
+        assert!(
+            after.iter().any(|row| row.contains("line five")),
+            "{after:?}"
+        );
+        assert!(
+            after.iter().any(|row| row.contains("Postgres")),
+            "{after:?}"
+        );
+    }
+
+    #[test]
+    fn a_fresh_dialog_drops_every_key_but_esc_until_armed() {
+        use crossterm::event::KeyCode;
+
+        let id = dal_core::RequestId::new_v7();
+        let mut dialog = super::DialogUi::default();
+        dialog.opened(approval(id));
+        let start = Instant::now();
+        dialog.tick(start);
+        for code in [KeyCode::Char('y'), KeyCode::Char('a'), KeyCode::Char('n')] {
+            assert!(press(&mut dialog, code).is_none());
+        }
+        dialog.tick(start + super::ARM_DELAY.saturating_sub(std::time::Duration::from_millis(1)));
+        assert!(!dialog.armed());
+        assert!(press(&mut dialog, KeyCode::Char('y')).is_none());
+        dialog.tick(start + super::ARM_DELAY);
+        assert!(matches!(
+            press(&mut dialog, KeyCode::Char('y')),
+            Some((answered, Answer::Approve)) if answered == id
+        ));
+    }
+
+    #[test]
+    fn keys_dropped_before_arming_are_not_replayed() {
+        use crossterm::event::KeyCode;
+
+        let id = dal_core::RequestId::new_v7();
+        let mut dialog = super::DialogUi::default();
+        dialog.opened(approval(id));
+        let start = Instant::now();
+        dialog.tick(start);
+        assert!(press(&mut dialog, KeyCode::Char('a')).is_none());
+        dialog.tick(start + super::ARM_DELAY);
+        assert!(dialog.queue.shown().is_some());
+        assert!(!dialog.awaiting_resolution());
+        assert!(matches!(
+            press(&mut dialog, KeyCode::Char('n')),
+            Some((answered, Answer::Decline)) if answered == id
+        ));
+    }
+
+    #[test]
+    fn esc_answers_a_dialog_that_is_not_armed() {
+        use crossterm::event::KeyCode;
+
+        let id = dal_core::RequestId::new_v7();
+        let mut dialog = super::DialogUi::default();
+        dialog.opened(approval(id));
+        assert!(matches!(
+            press(&mut dialog, KeyCode::Esc),
+            Some((answered, Answer::Decline)) if answered == id
+        ));
+    }
+
+    #[test]
+    fn the_hint_lists_answer_keys_only_once_armed() {
+        let mut dialog = super::DialogUi::default();
+        dialog.opened(approval(dal_core::RequestId::new_v7()));
+        let start = Instant::now();
+        dialog.tick(start);
+        assert_eq!(hint(&dialog), "esc denies · answer keys ready in a moment");
+        dialog.tick(start + super::ARM_DELAY);
+        assert_eq!(
+            hint(&dialog),
+            "y allow · a session · n deny · v view · esc denies"
+        );
+    }
+
+    #[test]
+    fn each_queued_request_arms_on_its_own() {
+        use crossterm::event::KeyCode;
+
+        let first = dal_core::RequestId::new_v7();
+        let second = dal_core::RequestId::new_v7();
+        let mut dialog = super::DialogUi::default();
+        dialog.opened(approval(first));
+        dialog.opened(approval(second));
+        arm(&mut dialog);
+        assert!(press(&mut dialog, KeyCode::Char('y')).is_some());
+        dialog.resolved(&first.to_string());
+        assert!(!dialog.armed());
+        assert!(press(&mut dialog, KeyCode::Char('y')).is_none());
+        arm(&mut dialog);
+        assert!(matches!(
+            press(&mut dialog, KeyCode::Char('y')),
+            Some((answered, Answer::Approve)) if answered == second
+        ));
+    }
+
+    #[test]
+    fn a_text_question_ignores_paste_and_typing_until_armed() {
+        use crossterm::event::KeyCode;
+        use dal_core::{Owner, Question, Request, RequestId};
+
+        let id = RequestId::new_v7();
+        let mut dialog = super::DialogUi::default();
+        dialog.opened(Request {
+            id,
+            turn: None,
+            owner: Owner::Core,
+            question: Question::Text {
+                prompt: "Name?".into(),
+                placeholder: None,
+            },
+            timeout: std::time::Duration::from_secs(30),
+            default: Answer::Cancel,
+        });
+        dialog.paste(b"early");
+        assert!(press(&mut dialog, KeyCode::Char('x')).is_none());
+        arm(&mut dialog);
+        assert!(press(&mut dialog, KeyCode::Enter).is_none());
+        assert!(press(&mut dialog, KeyCode::Char('z')).is_none());
+        assert!(matches!(
+            press(&mut dialog, KeyCode::Enter),
+            Some((answered, Answer::Value(_))) if answered == id
+        ));
     }
 }

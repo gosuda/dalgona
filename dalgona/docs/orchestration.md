@@ -12,7 +12,7 @@ Child agents are admitted in FIFO order into a scope. A scope carries a budget o
 
 ## Wake and turns
 
-A turn started by a wake rather than a user prompt counts against a limit of 20 consecutive wake-started turns. The twenty-first wake is refused and the refusal is journaled; a user prompt resets the count.
+A turn started by a wake rather than a user prompt counts against a limit of 20 consecutive wake-started turns. The twenty-first wake is refused and the refusal is journaled; a user prompt resets the count. A wake is never repeated: when the host does not confirm the job reports a wake carried, the owner sees a delivery notice and only the acknowledgement is retried. Other delivery-poll failures are reported once per cause.
 
 ## Mailbox
 

@@ -80,7 +80,14 @@ impl Peer {
             .iter()
             .filter_map(|c| c.as_str())
             .collect();
-        assert_eq!(capabilities, crate::protocol::CAPABILITIES);
+        assert_eq!(
+            capabilities,
+            [
+                crate::protocol::CAPABILITIES.as_slice(),
+                &["approval", "ask"]
+            ]
+            .concat()
+        );
         let granted: Vec<Value> = crate::protocol::CAPABILITIES
             .iter()
             .map(|name| Value::from(*name))

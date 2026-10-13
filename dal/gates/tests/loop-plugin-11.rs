@@ -1,4 +1,6 @@
 //! The Starlark Fusion model runs its panels and preserves session calls.
+#![expect(clippy::expect_used, reason = "SC test")]
+#![expect(clippy::panic, reason = "SC test")]
 
 #[expect(
     dead_code,
@@ -8,16 +10,65 @@ mod support;
 
 use std::{error::Error, fs, path::PathBuf, time::Duration};
 
-use dal_agent::{Env, SessionRef};
+use dal_agent::{Env, SessionRef, Subscription};
 use dal_core::{
     Command, Config, ConfigProduct, Expect, Part, Reply, StreamChannel, UpdateKind, Workspace,
 };
-use support::{TestDir, scripted_session};
+use support::{GateHarness, TestDir, scripted_session};
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "SC fusion scenario is one long script"
-)]
+async fn run_fusion_turn(
+    harness: &GateHarness,
+    subscription: &mut Subscription,
+) -> Result<(String, Vec<(String, String, String)>), Box<dyn Error + Send + Sync>> {
+    let mut assistant_text = String::new();
+    let mut session_calls = Vec::new();
+    let mut grants = 0;
+    loop {
+        let delivery = tokio::time::timeout(Duration::from_secs(30), subscription.next())
+            .await
+            .expect("turn update arrives within 30s");
+        let Some(delivery) = delivery else {
+            panic!("subscription closed before the turn ended");
+        };
+        let dal_agent::Delivery::Update(update) = delivery else {
+            continue;
+        };
+        match &update.kind {
+            UpdateKind::Delta {
+                channel: StreamChannel::Text,
+                text,
+                ..
+            } => assistant_text.push_str(text),
+            UpdateKind::ToolStarted { call, tool, args } => session_calls.push((
+                call.as_str().to_owned(),
+                tool.to_string(),
+                args.as_str().to_owned(),
+            )),
+            UpdateKind::RequestOpened(request) => {
+                assert!(
+                    matches!(
+                        &request.question,
+                        dal_core::Question::Grant { ext, capabilities, .. }
+                            if ext.as_ref() == "fusion"
+                                && capabilities.iter().any(|c| c.as_ref() == "infer")
+                    ),
+                    "unexpected request: {:?}",
+                    request.question
+                );
+                grants += 1;
+                harness
+                    .agent
+                    .answer(request.id, dal_core::Answer::ApproveForSession)
+                    .await?;
+            }
+            UpdateKind::TurnEnded { .. } => break,
+            _ => {}
+        }
+    }
+    assert_eq!(grants, 1, "the fusion infer grant must open exactly once");
+    Ok((assistant_text, session_calls))
+}
+
 #[tokio::test]
 async fn scripted_fusion_model_runs_panel_and_forwards_session_call()
 -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -87,52 +138,7 @@ async fn scripted_fusion_model_runs_panel_and_forwards_session_call()
         })
         .await?;
     assert!(matches!(prompt, Reply::Accepted { .. }));
-    let mut assistant_text = String::new();
-    let mut session_calls = Vec::new();
-    let mut grants = 0;
-    loop {
-        let delivery = tokio::time::timeout(Duration::from_secs(30), subscription.next())
-            .await
-            .expect("turn update arrives within 30s");
-        let Some(delivery) = delivery else {
-            panic!("subscription closed before the turn ended");
-        };
-        let dal_agent::Delivery::Update(update) = delivery else {
-            continue;
-        };
-        match &update.kind {
-            UpdateKind::Delta {
-                channel: StreamChannel::Text,
-                text,
-                ..
-            } => assistant_text.push_str(text),
-            UpdateKind::ToolStarted { call, tool, args } => session_calls.push((
-                call.as_str().to_owned(),
-                tool.to_string(),
-                args.as_str().to_owned(),
-            )),
-            UpdateKind::RequestOpened(request) => {
-                assert!(
-                    matches!(
-                        &request.question,
-                        dal_core::Question::Grant { ext, capabilities, .. }
-                            if ext.as_ref() == "fusion"
-                                && capabilities.iter().any(|c| c.as_ref() == "infer")
-                    ),
-                    "unexpected request: {:?}",
-                    request.question
-                );
-                grants += 1;
-                harness
-                    .agent
-                    .answer(request.id, dal_core::Answer::ApproveForSession)
-                    .await?;
-            }
-            UpdateKind::TurnEnded { .. } => break,
-            _ => {}
-        }
-    }
-    assert_eq!(grants, 1, "the fusion infer grant must open exactly once");
+    let (assistant_text, mut session_calls) = run_fusion_turn(&harness, &mut subscription).await?;
     let view = harness
         .agent
         .view(dal_core::PageReq::default())

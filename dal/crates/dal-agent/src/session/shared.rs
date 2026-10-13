@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeSet, VecDeque};
 use std::num::NonZeroU64;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use dal_core::{
     ApprovalMode, EntryId, EntryView, Gen, Mode, Name, Seq, Session, ThinkingLevel, Update,
@@ -16,6 +16,7 @@ use dal_core::{
 
 use super::projection::{Projection, SnapshotArgs};
 use super::ring::{Replay, ReplayRing, RingCaps};
+use super::service_grants::ServiceGrants;
 use super::subscriber::{Subscriber, SubscriberShared};
 use crate::agent::Delivery;
 use crate::ext::ExtRecord;
@@ -32,6 +33,11 @@ pub(crate) struct Shared {
     inner: Mutex<SharedInner>,
     ext: Mutex<ExtSnap>,
     promoted: Mutex<Arc<BTreeSet<Name>>>,
+    allow_always: Mutex<Arc<BTreeSet<Name>>>,
+    tool_allowlist: OnceLock<Arc<BTreeSet<Name>>>,
+    /// The tool-round bound the next turn takes; the turn consumes it.
+    next_turn_step_cap: Mutex<Option<std::num::NonZeroU32>>,
+    service_grants: ServiceGrants,
 }
 
 struct SharedInner {
@@ -80,6 +86,10 @@ impl Shared {
                 rows: Arc::from([]),
             }),
             promoted: Mutex::new(Arc::new(BTreeSet::new())),
+            allow_always: Mutex::new(Arc::new(BTreeSet::new())),
+            tool_allowlist: OnceLock::new(),
+            next_turn_step_cap: Mutex::new(None),
+            service_grants: ServiceGrants::default(),
         }
     }
 
@@ -93,14 +103,68 @@ impl Shared {
         )
     }
 
-    /// Refreshes the fold-owned promotion set on every call, then republishes
-    /// current-leaf extension records when the fold's leaf or record count
-    /// moved since the last publication.
+    /// Returns the session-wide always-allowed tools, as of the last sync.
+    pub(crate) fn allow_always(&self) -> Arc<BTreeSet<Name>> {
+        Arc::clone(
+            &self
+                .allow_always
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+
+    /// Restricts the session to `names`; the first restriction stands and a
+    /// later call cannot widen it.
+    pub(crate) fn restrict_tools(&self, names: &[Name]) {
+        self.tool_allowlist
+            .get_or_init(|| Arc::new(names.iter().cloned().collect()));
+    }
+
+    /// Sets the tool-round bound the next turn takes, or clears it.
+    pub(crate) fn set_next_turn_step_cap(&self, cap: Option<std::num::NonZeroU32>) {
+        *self
+            .next_turn_step_cap
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = cap;
+    }
+
+    /// Takes the tool-round bound for the turn that is starting: a bound
+    /// applies to one turn and never to a later one.
+    pub(crate) fn take_next_turn_step_cap(&self) -> Option<std::num::NonZeroU32> {
+        self.next_turn_step_cap
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+
+    /// The tool names the session may use; `None` means no restriction.
+    pub(crate) fn tool_allowlist(&self) -> Option<Arc<BTreeSet<Name>>> {
+        self.tool_allowlist.get().map(Arc::clone)
+    }
+
+    /// The run grants approved calls lent their extensions in this session.
+    pub(crate) fn service_grants(&self) -> &ServiceGrants {
+        &self.service_grants
+    }
+
+    /// The approval mode the session runs under now.
+    pub(crate) fn approval(&self) -> ApprovalMode {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .projection
+            .approval()
+    }
+
+    /// Refreshes fold-owned promotion and always-allowed sets on every call,
+    /// then republishes current-leaf extension records when the fold's leaf
+    /// or record count moved since the last publication.
     ///
     /// The actor is the only caller; readers get immutable snapshots and
     /// never wait on the actor, so a hook awaiting the actor cannot block a
     /// record read. The memo guard below applies only to extension records.
     pub(crate) fn sync_ext(&self, fold: &Session) {
+        self.sync_allow_always(fold);
         self.sync_promoted(fold);
         let key = (fold.leaf_entry(), fold.ext_len());
         let mut snap = self
@@ -130,6 +194,16 @@ impl Shared {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if promoted.len() != fold.promoted().len() {
             *promoted = Arc::new(fold.promoted().clone());
+        }
+    }
+
+    fn sync_allow_always(&self, fold: &Session) {
+        let mut allow_always = self
+            .allow_always
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if allow_always.as_ref() != fold.allow_always() {
+            *allow_always = Arc::new(fold.allow_always().clone());
         }
     }
 
@@ -217,24 +291,34 @@ impl Shared {
         let view = inner.projection.snapshot(args);
         (view, entries)
     }
-    /// Reports whether a live answering subscriber watches this session.
-    /// Listen-only subscribers observe updates but cannot resolve approval
-    /// requests, so they never count here.
-    pub(crate) fn attached(&self) -> bool {
+    /// Reports whether a live approval-answering subscriber watches this
+    /// session. Listen-only subscribers observe updates but cannot resolve
+    /// approval requests, so they never count here.
+    pub(crate) fn attached_approval(&self) -> bool {
+        self.attached(Subscriber::answers_approval)
+    }
+
+    /// Reports whether a live ask-answering subscriber watches this session.
+    /// Listen-only subscribers observe updates but cannot answer extension
+    /// questions, so they never count here.
+    pub(crate) fn attached_ask(&self) -> bool {
+        self.attached(Subscriber::answers_ask)
+    }
+
+    fn attached(&self, answers: fn(&Arc<SubscriberShared>) -> bool) -> bool {
         self.inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .subscribers
             .iter()
-            .any(|slot| {
-                Subscriber::upgrade(slot).is_some_and(|shared| Subscriber::answers(&shared))
-            })
+            .any(|slot| Subscriber::upgrade(slot).is_some_and(|shared| answers(&shared)))
     }
 
     pub(crate) fn subscribe(
         self: &Arc<Self>,
         after: Option<(Gen, Seq)>,
-        answers: bool,
+        approval: bool,
+        ask: bool,
     ) -> Arc<SubscriberShared> {
         let mut inner = self
             .inner
@@ -263,7 +347,7 @@ impl Shared {
             position.r#gen,
             position.seq.unwrap_or(Seq::new(NonZeroU64::MIN)),
         );
-        let subscriber = Subscriber::with_backlog(backlog, current, answers);
+        let subscriber = Subscriber::with_backlog(backlog, current, approval, ask);
         let port = subscriber.port();
         inner.subscribers.push(subscriber.downgrade());
         port
@@ -309,5 +393,38 @@ impl Shared {
                 Subscriber::close(&shared);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sync_ext_publishes_fold_allow_always() {
+        let (fold, _) = Session::replay(
+            [dal_core::Record::AllowAlways {
+                at: jiff::Timestamp::UNIX_EPOCH,
+                tool: "run".into(),
+                by: dal_core::ClientId::new("tui"),
+            }],
+            jiff::Timestamp::UNIX_EPOCH,
+        )
+        .expect("allow-always record replays");
+        let shared = Shared::new(
+            false,
+            Gen::new(std::num::NonZeroU64::MIN),
+            ThinkingLevel::Medium,
+            ApprovalMode::Ask,
+            Mode::Normal,
+        );
+
+        shared.sync_ext(&fold);
+
+        assert!(
+            shared
+                .allow_always()
+                .contains(&Name::parse("run").expect("run name parses"))
+        );
     }
 }

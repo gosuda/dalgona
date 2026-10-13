@@ -6,6 +6,11 @@ use super::{
 /// The only journal format version this build reads and writes.
 pub const VERSION: u16 = 1;
 
+/// The [`EntryKind::Reminder`] source of the text `before_turn` hooks add to a
+/// turn. The session fold journals it and the model context reads it back as
+/// user text.
+pub const BEFORE_TURN_SOURCE: &str = "hook:before_turn";
+
 /// The product recorded in a session header.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -261,6 +266,11 @@ pub enum EntryKind {
         parts: Vec<JournalPart>,
         /// The file changes the call made.
         changes: Vec<FileChange>,
+        /// Milliseconds the tool ran, read from a monotonic clock around the
+        /// execution. Approval waits are not counted. `None` when the call
+        /// never ran or the journal predates the member.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        elapsed_ms: Option<u64>,
     },
     /// An injected rule or system reminder.
     Reminder {

@@ -2,11 +2,12 @@
 //! Review session records, round transitions, and finding identities.
 
 use std::collections::BTreeSet;
+use std::fmt::Write as _;
 
 use dal_core::SessionId;
 use serde::{Deserialize, Serialize};
 
-use super::reply::{ReviewerReply, Severity, Verdict};
+use super::reply::{ReviewerReply, Severity, Verdict, escape_report_text};
 use super::{MAX_STORED_DETAIL_BYTES, ReviewError, utf8_prefix};
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -25,7 +26,7 @@ pub(crate) struct ReviewRound {
 }
 
 impl ReviewRound {
-    fn new_session() -> Self {
+    pub(crate) fn new_session() -> Self {
         Self {
             session: SessionId::new_v7(),
             round: 1,
@@ -33,26 +34,66 @@ impl ReviewRound {
     }
 }
 
+/// What the caller asked for when it opens a review round.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RoundRequest {
+    /// Continue the open session; stop at the cap.
+    Continue,
+    /// Start a new session when none is open or the open one reached its cap.
+    Restart,
+}
+
+/// Picks the next round of the open review session.
+///
+/// A converged or clean session starts a new one. A session that used all its
+/// rounds without converging stops with the findings still open; only
+/// [`RoundRequest::Restart`] goes past that cap. A restart request never
+/// discards rounds that are still in progress.
 pub(crate) fn next_round(
     records: &[ReviewRecord],
     max_rounds: u8,
+    request: RoundRequest,
 ) -> Result<ReviewRound, ReviewError> {
     let Some(last) = records.last() else {
         return Ok(ReviewRound::new_session());
     };
-    if last.verdict == Verdict::Clean || last.new_count == 0 || last.round >= max_rounds {
+    if last.verdict == Verdict::Clean || last.new_count == 0 {
         return Ok(ReviewRound::new_session());
     }
-    let Some(round) = last.round.checked_add(1) else {
-        return Err(ReviewError::CapReached { rounds: max_rounds });
-    };
-    if round > max_rounds {
-        return Err(ReviewError::CapReached { rounds: max_rounds });
+    if last.round >= max_rounds {
+        return match request {
+            RoundRequest::Restart => Ok(ReviewRound::new_session()),
+            RoundRequest::Continue => Err(ReviewError::CapReached {
+                rounds: max_rounds,
+                outstanding: outstanding_findings(&last.findings),
+            }),
+        };
     }
     Ok(ReviewRound {
         session: last.session,
-        round,
+        round: last.round.saturating_add(1),
     })
+}
+
+/// Lists findings for the user: severity, location, and title, one per line.
+pub(crate) fn outstanding_findings(findings: &[StoredFinding]) -> Box<str> {
+    let mut listing = String::new();
+    for finding in findings {
+        if !listing.is_empty() {
+            listing.push('\n');
+        }
+        let _ = write!(
+            listing,
+            "- [{}] {}",
+            finding.severity.as_str(),
+            escape_report_text(&finding.path),
+        );
+        if let Some(line) = finding.line {
+            let _ = write!(listing, ":{line}");
+        }
+        let _ = write!(listing, " {}", escape_report_text(finding.title.trim()));
+    }
+    listing.into_boxed_str()
 }
 
 #[derive(Debug, Deserialize, Serialize)]

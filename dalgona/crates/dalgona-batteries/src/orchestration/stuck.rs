@@ -7,10 +7,15 @@
 //! Exact plan literals live once in this facade so docs truth reads them
 //! from one place.
 
+use dal_core::Timestamp;
+
 mod detect;
 mod guard;
 mod rewrite;
 mod sleep;
+
+#[cfg(test)]
+mod tests;
 
 /// Maximum tool-call records retained by the guard window.
 const RECORD_CAPACITY: usize = 64;
@@ -53,5 +58,25 @@ fn render_template(template: &str, values: &[(&str, &str)]) -> Box<str> {
     rendered.into_boxed_str()
 }
 
-#[cfg(test)]
-mod tests;
+/// Renders ` · silent <minutes>m` once a job has been quiet for over ten
+/// minutes. Returns `None` through exactly 600 seconds. Silence never
+/// changes job or controller state.
+///
+/// The plan lists this helper in both the guard and monitor modules; this is
+/// the single implementation, re-exported by the monitor module.
+pub(crate) fn silence_suffix(last_activity: Timestamp, now: Timestamp) -> Option<String> {
+    if now < last_activity {
+        return None;
+    }
+    let seconds = now.as_second().checked_sub(last_activity.as_second())?;
+    let elapsed = if now.subsec_nanosecond() < last_activity.subsec_nanosecond() {
+        seconds.checked_sub(1)?
+    } else {
+        seconds
+    };
+    if elapsed <= 600 {
+        return None;
+    }
+    let minutes = elapsed / 60;
+    Some(format!(" · silent {minutes}m"))
+}

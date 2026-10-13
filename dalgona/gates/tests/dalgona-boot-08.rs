@@ -59,7 +59,7 @@ impl CommandHandler for Handler {
         _args: &'a str,
         _cx: CommandCx<'a>,
     ) -> BoxFuture<'a, Result<Reply, ServiceError>> {
-        Box::pin(async { Ok(Reply::Queued) })
+        Box::pin(async { Ok(Reply::Queued { turn: None }) })
     }
 }
 

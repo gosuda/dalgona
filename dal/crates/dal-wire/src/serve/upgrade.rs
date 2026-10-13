@@ -103,8 +103,14 @@ pub(super) async fn ws_driver(
         tracing::debug!("websocket upgrade denied after handshake");
         return;
     }
-    if let Err(error) =
-        crate::transport::serve_websocket(ctx.host.clone(), upgraded, token, &allowed).await
+    if let Err(error) = crate::transport::serve_websocket(
+        ctx.host.clone(),
+        upgraded,
+        token,
+        &allowed,
+        ctx.shutdown.clone(),
+    )
+    .await
     {
         tracing::debug!(%error, "websocket connection ended");
     }

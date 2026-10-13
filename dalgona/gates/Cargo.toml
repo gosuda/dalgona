@@ -93,12 +93,20 @@ name = "dalgona-boot-11"
 path = "tests/dalgona-boot-11.rs"
 
 [[test]]
+name = "dalgona-boot-12"
+path = "tests/dalgona-boot-12.rs"
+
+[[test]]
 name = "dalgona-batteries-17"
 path = "tests/dalgona-batteries-17.rs"
 
 [[test]]
 name = "dalgona-batteries-18"
 path = "tests/dalgona-batteries-18.rs"
+
+[[test]]
+name = "dalgona-batteries-19"
+path = "tests/dalgona-batteries-19.rs"
 
 [[test]]
 name = "dalgona-batteries-01"
@@ -250,6 +258,10 @@ path = "tests/dalgona-orchestration-06.rs"
 [[test]]
 name = "dalgona-orchestration-07"
 path = "tests/dalgona-orchestration-07.rs"
+
+[[test]]
+name = "dalgona-orchestration-08"
+path = "tests/dalgona-orchestration-08.rs"
 
 
 [lints]

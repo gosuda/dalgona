@@ -156,6 +156,7 @@ fn assistant_pair(id: u64) -> Vec<Record> {
                 error: false,
                 parts: vec![JournalPart::Text { text: "ok".into() }],
                 changes: vec![],
+                elapsed_ms: None,
             },
         }),
     ]

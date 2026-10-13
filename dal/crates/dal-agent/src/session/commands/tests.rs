@@ -152,6 +152,7 @@ fn markdown_export_includes_assistant_reply() -> Result<(), Box<dyn std::error::
                     text: "done".into(),
                 }],
                 changes: Vec::new(),
+                elapsed_ms: None,
             },
         },
         EntryView {

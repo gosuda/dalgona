@@ -55,6 +55,7 @@ async fn tui_backend_snapshots_inline_and_fullscreen() -> Result<(), Box<dyn Err
         session,
         screen: Screen::Inline,
         theme_request: ThemeRequest::Palette,
+        default_model: None,
         images: false,
         diagrams: false,
         motion: false,

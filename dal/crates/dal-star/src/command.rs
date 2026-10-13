@@ -48,10 +48,14 @@ fn is_scalar(schema: &Schema) -> bool {
 fn scalar(token: &str, schema: &Schema, path: &str) -> Result<Value, CommandError> {
     match schema {
         Schema::Str { .. } | Schema::Enum(_) => Ok(Value::Str(token.into())),
-        Schema::Int { .. } => token
-            .parse::<i64>()
-            .map(Value::Int)
-            .map_err(|_| CommandError::usage(format!("`{token}` is not an integer for `{path}`"))),
+        Schema::Int { .. } => {
+            let number = token.parse::<i64>().map_err(|_| {
+                CommandError::usage(format!("`{token}` is not an integer for `{path}`"))
+            })?;
+            Value::integer(number).map_err(|error| {
+                CommandError::usage(format!("`{token}` is invalid for `{path}`: {error}"))
+            })
+        }
         Schema::Num { .. } => token
             .parse::<f64>()
             .map(Value::Num)

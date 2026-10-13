@@ -84,13 +84,6 @@ impl<'de> Deserialize<'de> for Span {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the landed compaction input has no journal roles; its source contract does"
-    )
-)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Role {
     User,

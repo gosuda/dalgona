@@ -22,6 +22,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::Broker;
+use crate::broker::Settled;
 use crate::error::ServiceError;
 
 use super::services::ServiceFuture;
@@ -192,10 +193,25 @@ pub struct GrantStore {
     inner: Mutex<Inner>,
     persist_lock: tokio::sync::Mutex<()>,
     request_update: Mutex<Option<UpdatePublisher>>,
+    request_open: Mutex<Option<RequestOpenPublisher>>,
+    answerer: Mutex<Option<AnswererProbe>>,
 }
 
 /// The update publisher a session installs on its grant store.
 pub type UpdatePublisher = Arc<dyn Fn(dal_core::UpdateKind) + Send + Sync>;
+
+/// The actor route a session installs on its grant store: it folds
+/// `Event::RequestOpened` for grant questions before they are published,
+/// so every settlement journals a record.
+pub(crate) type RequestOpenPublisher = Arc<
+    dyn Fn(dal_core::Request) -> crate::ext::BoxFuture<'static, Result<(), ServiceError>>
+        + Send
+        + Sync,
+>;
+
+/// The probe a session installs on its grant store to learn whether a
+/// front end that can answer extension questions is attached.
+pub(crate) type AnswererProbe = Arc<dyn Fn() -> bool + Send + Sync>;
 
 /// Typed grant administration failure.
 #[derive(Debug, thiserror::Error)]
@@ -239,6 +255,50 @@ impl GrantStore {
             .unwrap_or_else(PoisonError::into_inner) = Some(publisher);
     }
 
+    /// Installs the actor route for grant questions.
+    ///
+    /// The route folds `Event::RequestOpened` in the session actor before
+    /// the question is published, so every settlement journals a record.
+    pub(crate) fn set_request_open(&self, publisher: RequestOpenPublisher) {
+        *self
+            .request_open
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(publisher);
+    }
+
+    /// Installs the probe that reports whether a front end that can answer
+    /// extension questions is attached now. Without a probe every question
+    /// is assumed answerable and the ask timeout alone fails it closed.
+    pub(crate) fn set_answerer(&self, probe: AnswererProbe) {
+        *self.answerer.lock().unwrap_or_else(PoisonError::into_inner) = Some(probe);
+    }
+
+    fn answerer_attached(&self) -> bool {
+        let probe = self
+            .answerer
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .map(Arc::clone);
+        probe.is_none_or(|probe| probe())
+    }
+
+    /// Routes one opened grant question through the session actor before
+    /// it is published. A dead session skips the route: the question then
+    /// expires fail-closed with no answerer.
+    async fn open_request(&self, request: &dal_core::Request) -> Result<(), ServiceError> {
+        let publisher = self
+            .request_open
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .map(Arc::clone);
+        if let Some(publisher) = publisher {
+            publisher(request.clone()).await?;
+        }
+        Ok(())
+    }
+
     fn publish_request_update(&self, update: dal_core::UpdateKind) {
         let publisher = self
             .request_update
@@ -269,6 +329,8 @@ impl GrantStore {
             ask_timeout,
             broker,
             request_update: Mutex::new(None),
+            request_open: Mutex::new(None),
+            answerer: Mutex::new(None),
             persist_lock: tokio::sync::Mutex::new(()),
             inner: Mutex::new(Inner {
                 persistent: Vec::new(),
@@ -308,6 +370,18 @@ impl GrantStore {
             self.ensure_declared_mcp_inner(who, set, detail, cancel)
                 .await
         })
+    }
+
+    /// Denies one MCP reservation without prompting: headless runs,
+    /// cancellation, and the ask timeout all settle the same way.
+    async fn deny_mcp(&self, key: &McpGrantKey, reservation: &Arc<Notify>) -> GrantOutcome {
+        self.finalize_mcp(
+            key,
+            Err(ServiceError::Denied(DenyReason::NotGranted)),
+            None,
+            reservation,
+        )
+        .await
     }
 
     async fn ensure_declared_mcp_inner(
@@ -356,6 +430,9 @@ impl GrantStore {
             (GrantState::Absent, Some(notify)) => notify,
             _ => return Err(ServiceError::Cancelled),
         };
+        if !self.answerer_attached() {
+            return self.deny_mcp(&key, &notify).await;
+        }
         let capabilities = key
             .key
             .services
@@ -378,40 +455,24 @@ impl GrantStore {
             return Err(ServiceError::failed(None, "grant store has no broker"));
         };
         let (request, answer) = broker.open(owner, question, turn, deadline);
+        if let Err(error) = self.open_request(&request).await {
+            if let Ok(resolved) = broker.answer(request.id, Answer::Cancel, ClientId::new("core")) {
+                broker.cancel(&resolved);
+            }
+            return self.finalize_mcp(&key, Err(error), None, &notify).await;
+        }
         self.publish_request_update(dal_core::UpdateKind::RequestOpened(request.clone()));
         tokio::select! {
             biased;
-            () = cancel.cancelled() => {
-                self.finalize_mcp(
-                    &key,
-                    Err(ServiceError::Denied(DenyReason::NotGranted)),
-                    None,
-                    &notify,
-                )
-                .await
-            }
-            () = tokio::time::sleep(self.ask_timeout) => {
-                self.finalize_mcp(
-                    &key,
-                    Err(ServiceError::Denied(DenyReason::NotGranted)),
-                    None,
-                    &notify,
-                )
-                .await
-            }
+            () = cancel.cancelled() => self.deny_mcp(&key, &notify).await,
+            () = tokio::time::sleep(self.ask_timeout) => self.deny_mcp(&key, &notify).await,
             () = notify.notified() => self.take_mcp(&key),
-            (answer, by) = answer => {
+            Settled { answer, by, .. } = answer => {
                 let (outcome, mut row) = Self::decide(&key.key, &answer, by.clone());
                 if let Some(row) = &mut row {
                     row.mcp_set = Some(key.set.clone());
                 }
-                let result = self.finalize_mcp(&key, outcome, row, &notify).await;
-                self.publish_request_update(dal_core::UpdateKind::RequestResolved {
-                    id: request.id,
-                    answer,
-                    by,
-                });
-                result
+                self.finalize_mcp(&key, outcome, row, &notify).await
             }
         }
     }
@@ -466,13 +527,13 @@ impl GrantStore {
             (GrantState::Absent, Some(notify)) => notify,
             _ => return Err(ServiceError::Cancelled),
         };
-        // Only a grant question needs a live turn: callers without one
-        // (slash commands) may still ride a persisted or session grant
-        // but have no turn to hang a request on. A turnless caller that
-        // reached the absent arm still owns the reservation: finalize it
-        // so waiters resolve as denied instead of hanging on a notify
-        // that no answer will ever fire.
-        let Some(turn) = who.turn else {
+        // A question needs a front end that can answer it. With none
+        // attached (print mode, listen-only clients) nobody can approve, so
+        // the reservation resolves as denied now instead of holding the
+        // caller for the whole ask timeout. A caller without a turn (a slash
+        // command) asks like any other: its request just has no turn to end
+        // with, so only an answer, the deadline, or session cancel settles it.
+        if !self.answerer_attached() {
             return self
                 .finalize(
                     &key,
@@ -482,7 +543,7 @@ impl GrantStore {
                     &notify,
                 )
                 .await;
-        };
+        }
         let capabilities: Vec<Box<str>> = key.services.iter().map(|s| s.as_str().into()).collect();
         let origin = match who.origin {
             Origin::Bundled => "bundled",
@@ -504,7 +565,14 @@ impl GrantStore {
         let Some(broker) = self.broker.as_ref() else {
             return Err(ServiceError::failed(None, "grant store has no broker"));
         };
-        let (request, answer) = broker.open(owner, question, turn, deadline);
+        let (request, answer) = broker.open(owner, question, who.turn, deadline);
+        if let Err(error) = self.open_request(&request).await {
+            let outcome = Err(error);
+            if let Ok(resolved) = broker.answer(request.id, Answer::Cancel, ClientId::new("core")) {
+                broker.cancel(&resolved);
+            }
+            return self.finalize(&key, service, outcome, None, &notify).await;
+        }
         self.publish_request_update(dal_core::UpdateKind::RequestOpened(request.clone()));
         tokio::select! {
             biased;
@@ -515,15 +583,9 @@ impl GrantStore {
                 self.finalize(&key, service, Err(ServiceError::Denied(DenyReason::NotGranted)), None, &notify).await
             }
             () = notify.notified() => self.take(&key),
-            (answer, by) = answer => {
+            Settled { answer, by, .. } = answer => {
                 let (outcome, row) = GrantStore::decide(&key, &answer, by.clone());
-                let result = self.finalize(&key, service, outcome, row, &notify).await;
-                self.publish_request_update(dal_core::UpdateKind::RequestResolved {
-                    id: request.id,
-                    answer,
-                    by,
-                });
-                result
+                self.finalize(&key, service, outcome, row, &notify).await
             }
         }
     }

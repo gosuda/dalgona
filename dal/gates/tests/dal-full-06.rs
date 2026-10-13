@@ -1,5 +1,5 @@
+//! Gate-full scenario 6: scope scheduling, FIFO admission, and cancellation p99.
 #![expect(clippy::expect_used, reason = "SC test")]
-#![expect(missing_docs, reason = "SC test")]
 
 #[expect(
     dead_code,
@@ -323,8 +323,11 @@ fn scripted_fixture() -> String {
     fixture
 }
 
-#[expect(clippy::too_many_lines, reason = "SC gate is one long scope scenario")]
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the 500-member scenario is one deliberate end-to-end walkthrough"
+)]
 async fn scope_500_members_admits_fifo_and_stays_within_budget()
 -> Result<(), Box<dyn Error + Send + Sync>> {
     let data = TestDir::new()?;

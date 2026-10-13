@@ -3,6 +3,8 @@ on:
   push:
     paths:
       - "dal/**"
+      - "scripts/update-prices.py"
+      - "scripts/test_update_prices.py"
       - ".github/workflows/dal.yml"
       - "rust-toolchain.toml"
       - ".gitignore"
@@ -12,6 +14,8 @@ on:
   pull_request:
     paths:
       - "dal/**"
+      - "scripts/update-prices.py"
+      - "scripts/test_update_prices.py"
       - ".github/workflows/dal.yml"
       - "rust-toolchain.toml"
       - ".gitignore"
@@ -39,6 +43,16 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
       - run: cargo fmt --check --all
+
+  prices:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - run: python3 -B scripts/test_update_prices.py
+      - run: python3 -B scripts/update-prices.py --check
 
   gates:
     strategy:

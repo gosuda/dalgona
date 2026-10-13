@@ -14,7 +14,13 @@ pub(super) fn call_key(tool: &str, args: &Value) -> [u8; 16] {
     key
 }
 
-#[cfg(test)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "renders a strike key for reports; asserted by guard/tests.rs"
+    )
+)]
 pub(super) fn display_key(tool: &str, key: &[u8; 16]) -> String {
     format!(
         "{tool} {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
@@ -22,7 +28,13 @@ pub(super) fn display_key(tool: &str, key: &[u8; 16]) -> String {
     )
 }
 
-#[cfg(test)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "round-trip helper for canonical JSON; asserted by guard/tests.rs"
+    )
+)]
 pub(super) fn canonical(value: &Value) -> String {
     let mut output = String::new();
     write_canonical(value, &mut output);

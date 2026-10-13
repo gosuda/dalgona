@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use dal_agent::{Agent, Delivery, Env, Host, Product, SessionRef};
 use dal_core::{
-    Answer, ClientId, Config, ConfigProduct, Gen, Notice, Owner, Preview, Question, Request,
-    RequestId, Seq, SessionId, Stop, StreamChannel, TurnId, Update, UpdateKind, Workspace,
+    Answer, CallId, ClientId, Config, ConfigProduct, Gen, Notice, Owner, Preview, Question,
+    Request, RequestId, Seq, SessionId, Stop, StreamChannel, TurnId, Update, UpdateKind, Workspace,
 };
 use sonic_rs::{JsonValueTrait, Value};
 use tokio::sync::{Mutex, mpsc};
@@ -158,6 +158,7 @@ fn approval() -> Request {
                 digest: None,
             },
             grant: None,
+            call: None,
         },
         timeout: Duration::from_secs(60),
         default: Answer::Decline,
@@ -276,6 +277,65 @@ async fn cancel_withdraws_an_outstanding_permission_without_waiting_for_it() {
     };
     let (end, ()) = tokio::join!(prompt_pump(&ctx, source, &cancel), driver);
     assert!(matches!(end, PromptEnd::Stopped(Stop::EndTurn)));
+}
+
+/// Opens one approval, optionally gating `call`, and returns the permission
+/// request's `toolCallId` with the core request id.
+async fn permission_tool_call_id(version: AcpVersion, call: Option<&str>) -> (String, String) {
+    let mut fx = fixture().await;
+    let writer = fx.transport.writer();
+    let source = fx.source.take().expect("source");
+    let cancel = CancellationToken::new();
+    let (state, agent, session) = (Arc::clone(&fx.state), fx.agent.clone(), fx.session);
+    let ctx = PumpCtx {
+        state: &state,
+        writer: &writer,
+        agent: &agent,
+        session,
+        version,
+        prompt_turn: TURN,
+    };
+    let mut asked = approval();
+    if let Question::Approval { call: slot, .. } = &mut asked.question {
+        *slot = call.map(CallId::new);
+    }
+    let request_id = asked.id.to_string();
+    let driver = async {
+        fx.push(UpdateKind::RequestOpened(asked)).await;
+        let request = fx.frame().await;
+        assert_eq!(method(&request), "session/request_permission");
+        let params = &request["params"];
+        let tool_call = match version {
+            AcpVersion::V1 => &params["toolCall"],
+            AcpVersion::V2 => &params["subject"]["toolCall"],
+        };
+        let named = tool_call["toolCallId"]
+            .as_str()
+            .expect("toolCallId")
+            .to_owned();
+        cancel.cancel();
+        fx.frame().await;
+        fx.push(ended()).await;
+        named
+    };
+    let (_, named) = tokio::join!(prompt_pump(&ctx, source, &cancel), driver);
+    (named, request_id)
+}
+
+#[tokio::test]
+async fn permission_request_names_the_originating_call_on_both_versions() {
+    for version in [AcpVersion::V1, AcpVersion::V2] {
+        let (named, _) = permission_tool_call_id(version, Some("provider-call-7")).await;
+        assert_eq!(named, "provider-call-7");
+    }
+}
+
+#[tokio::test]
+async fn permission_request_without_a_call_names_the_request_id() {
+    for version in [AcpVersion::V1, AcpVersion::V2] {
+        let (named, request_id) = permission_tool_call_id(version, None).await;
+        assert_eq!(named, request_id);
+    }
 }
 
 #[tokio::test]

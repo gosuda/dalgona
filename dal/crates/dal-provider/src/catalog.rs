@@ -19,7 +19,7 @@ mod resolve;
 pub use builtin::built_in_entries;
 pub use fetch::load_models;
 pub use prices::{compiled_price, compiled_temperature, price_source};
-pub use resolve::resolve;
+pub use resolve::{resolve, resolve_route};
 
 /// One complete catalog-owned image budget for a model.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]

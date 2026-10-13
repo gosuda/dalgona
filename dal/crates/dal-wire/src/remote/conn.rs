@@ -430,6 +430,11 @@ async fn establish(
     let capabilities: Vec<Value> = crate::protocol::CAPABILITIES
         .iter()
         .map(|name| Value::from(*name))
+        // The remote connection serves terminal front ends, which declare
+        // both answerer roles. The names stay out of `CAPABILITIES`: the
+        // server ignores them for method gating and reads them only for
+        // answerer selection.
+        .chain(["approval", "ask"].map(Value::from))
         .collect();
     let params = sonic_rs::json!({
         "protocolVersion": 1,

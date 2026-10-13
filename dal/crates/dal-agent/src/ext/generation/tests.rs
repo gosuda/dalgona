@@ -15,7 +15,10 @@ use dal_core::{
 
 use super::super::scheme::{Doc, SchemeCx, SchemeResolver};
 use super::super::tool::{ArgError, RawValue, Tool, ToolCall, ToolCx, ToolOutcome};
-use super::super::{BoxFuture, ExtensionBuilder, Hook, HookCx, HookError};
+use super::super::{
+    BoxFuture, CompactError, CompactInput, Compaction, Compactor, ExtensionBuilder, Hook, HookCx,
+    HookError, Services,
+};
 use super::{Generation, ValidatedExtensions};
 use crate::error::SchemeError;
 
@@ -212,6 +215,26 @@ fn skill_mcp_requires_declaring_extension_to_inject_mcp() {
         ValidatedExtensions::validate(vec![extension], None).is_ok(),
         "declaring extension injects mcp"
     );
+}
+
+#[test]
+fn the_child_policy_extension_name_is_builtin_only() {
+    for origin in [Origin::Bundled, Origin::User] {
+        let plugin = ext("dal-agent", origin).build().expect("valid identity");
+        let err = ValidatedExtensions::validate(vec![plugin], None)
+            .expect_err("a non-builtin dal-agent extension is rejected");
+        assert!(matches!(
+            err,
+            RegistrationError::Conflict {
+                kind: "extension",
+                ..
+            }
+        ));
+    }
+    let builtin = ext("dal-agent", Origin::Builtin)
+        .build()
+        .expect("valid identity");
+    assert!(ValidatedExtensions::validate(vec![builtin], None).is_ok());
 }
 
 #[test]
@@ -611,6 +634,62 @@ fn generation_bars_user_manual_schemes_but_keeps_builtin_manuals() {
                 .docs()
                 .find(&format!("{scheme}://index"))
                 .is_some()
+        );
+    }
+}
+
+/// A compactor that always declines; only its place in the chain matters.
+struct DecliningCompactor;
+
+impl Compactor for DecliningCompactor {
+    fn compact<'a>(
+        &'a self,
+        _input: CompactInput<'a>,
+        _services: Arc<dyn Services>,
+    ) -> BoxFuture<'a, Result<Option<Compaction>, CompactError>> {
+        Box::pin(std::future::ready(Ok(None)))
+    }
+}
+
+#[test]
+fn compaction_chain_runs_every_primary_before_any_fallback() {
+    let builtin = ext("core", Origin::Builtin)
+        .compactor("remote", Arc::new(DecliningCompactor))
+        .fallback_compactor("summary", Arc::new(DecliningCompactor))
+        .build()
+        .expect("valid builtin extension");
+    let bundled = ext("battery", Origin::Bundled)
+        .compactor("images", Arc::new(DecliningCompactor))
+        .fallback_compactor("last-bundled", Arc::new(DecliningCompactor))
+        .build()
+        .expect("valid bundled extension");
+    let user = ext("plugin", Origin::User)
+        .compactor("custom", Arc::new(DecliningCompactor))
+        .build()
+        .expect("valid user extension");
+    assert!(builtin.is_fallback_compactor("summary"));
+    assert!(!builtin.is_fallback_compactor("remote"));
+
+    let generation = Generation::build(
+        ValidatedExtensions::validate(vec![user, bundled, builtin], None)
+            .expect("extensions validate"),
+    );
+
+    let chain: Vec<&str> = generation
+        .compactors
+        .entries()
+        .iter()
+        .map(|entry| entry.name.as_ref())
+        .collect();
+    assert_eq!(
+        chain,
+        ["remote", "images", "custom", "summary", "last-bundled"],
+        "primaries keep origin order, then fallbacks keep origin order"
+    );
+    for name in &chain {
+        assert!(
+            generation.compactor(name).is_some(),
+            "{name} resolves to its compactor after regrouping"
         );
     }
 }

@@ -3,12 +3,15 @@
 //!
 //! [`state`] owns monitor lifecycle and the `monitor` tool contract,
 //! [`delivery`] owns clock-injected batch delivery, and [`status`] owns
-//! inflight counts, the status payload, quiet polling, and `/abort`.
+//! inflight counts, the status line, quiet polling, and `/abort`.
 
+pub(crate) mod delivery;
 pub(crate) mod state;
 pub(crate) mod status;
 
-pub(crate) use status::{GoalPreview, InflightCounts};
-
 #[cfg(test)]
 mod tests;
+
+pub(crate) use status::InflightCounts;
+#[cfg(test)]
+pub(crate) use status::inflight_counts;

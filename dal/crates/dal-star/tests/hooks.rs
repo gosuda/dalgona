@@ -1,6 +1,6 @@
-//! Plugin lifecycle and hook-delivery tests against the real host.
+//! Scripted hook events run through the host agent loop and return verdicts.
 
-mod support;
+pub mod support;
 
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -251,5 +251,5 @@ async fn tool_call_block_verdict_preserves_its_reason() {
         .expect("hook call settles");
 
     assert!(outcome.is_error, "{outcome:?}");
-    assert_eq!(outcome.text.as_ref(), "x");
+    assert_eq!(outcome.text.as_ref(), "blocked by hookcase: x");
 }

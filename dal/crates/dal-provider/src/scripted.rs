@@ -160,6 +160,10 @@ struct ReplayStepWire {
     usage: Option<Usage>,
     #[serde(default)]
     outcome: Option<RawJson>,
+    #[serde(default)]
+    status: Option<u16>,
+    #[serde(default)]
+    family: Option<Family>,
 }
 
 #[derive(Deserialize)]
@@ -271,7 +275,13 @@ fn replay_error(line: usize, detail: &'static str) -> ScriptError {
 
 fn decode_replay_step(wire: ReplayStepWire, line: usize) -> Result<ScriptStep, ScriptError> {
     match wire.kind.as_str() {
-        "events" if wire.message.is_none() && wire.usage.is_none() && wire.outcome.is_none() => {
+        "events"
+            if wire.message.is_none()
+                && wire.usage.is_none()
+                && wire.outcome.is_none()
+                && wire.status.is_none()
+                && wire.family.is_none() =>
+        {
             let events = wire
                 .events
                 .ok_or_else(|| replay_error(line, "events is required"))?;
@@ -285,15 +295,35 @@ fn decode_replay_step(wire: ReplayStepWire, line: usize) -> Result<ScriptStep, S
             let message = wire
                 .message
                 .ok_or_else(|| replay_error(line, "message is required"))?;
-            Ok(ScriptStep::Fail(ProviderError::InvalidRequest { message }))
+            match (wire.status, wire.family) {
+                (None, None) => Ok(ScriptStep::Fail(ProviderError::InvalidRequest { message })),
+                (Some(status), Some(family)) => Ok(ScriptStep::Fail(ProviderError::Status {
+                    family,
+                    status,
+                    message,
+                })),
+                _ => Err(replay_error(line, "status and family go together")),
+            }
         }
-        "usage" if wire.events.is_none() && wire.message.is_none() && wire.outcome.is_none() => {
+        "usage"
+            if wire.events.is_none()
+                && wire.message.is_none()
+                && wire.outcome.is_none()
+                && wire.status.is_none()
+                && wire.family.is_none() =>
+        {
             let usage = wire
                 .usage
                 .ok_or_else(|| replay_error(line, "usage is required"))?;
             Ok(ScriptStep::Usage(usage))
         }
-        "compact" if wire.events.is_none() && wire.message.is_none() && wire.usage.is_none() => {
+        "compact"
+            if wire.events.is_none()
+                && wire.message.is_none()
+                && wire.usage.is_none()
+                && wire.status.is_none()
+                && wire.family.is_none() =>
+        {
             let outcome = wire
                 .outcome
                 .ok_or_else(|| replay_error(line, "outcome is required"))?
@@ -546,7 +576,10 @@ impl Script {
     ///
     /// Each line has one `kind`: `events`, `fail`, `usage`, or `compact`.
     /// Event records use `type` names in snake case; raw replay and tool-arg
-    /// values remain raw JSON. A `fail` record becomes an `InvalidRequest`.
+    /// values remain raw JSON. A `fail` record becomes an `InvalidRequest`,
+    /// or, when it also carries both `status` (an HTTP status code) and
+    /// `family` (the API family name), a [`ProviderError::Status`]; one of
+    /// the two alone is a format error.
     ///
     /// # Errors
     /// Returns [`ScriptError::ReplayFormat`] for invalid UTF-8 or any line

@@ -14,20 +14,20 @@ use dal_agent::ext::{
     ToolCx, ToolOutcome,
 };
 use dal_core::ext::{
-    BeforeTurn, McpDeclaration, McpRequest, McpResponse, SessionEnd, SessionStart, ToolCallEvent,
-    ToolCallVerdict, Visibility,
+    BeforeTurn, McpDeclaration, McpRequest, McpResponse, SessionEnd, SessionStart, StateError,
+    StateOp, StateRecord, ToolCallEvent, ToolCallVerdict, Visibility,
 };
 use dal_core::{
     AgentReport, AgentStart, AgentsOp, AgentsReply, Answer, CallId, EntryId, FetchRequest,
-    FetchResponse, Inference, JobsOp, JobsReply, ModelRequest, Name, Notice, Question, RawJson,
-    RunOutput, RunRequest, Service, SessionId, SidecarOp, Stop, ToolClass, TurnId, TurnOp,
+    FetchResponse, Inference, JobId, JobsOp, JobsReply, ModelRequest, Name, Notice, Question,
+    RawJson, RunOutput, RunRequest, Service, SessionId, SidecarOp, Stop, ToolClass, TurnId, TurnOp,
     TurnOpReply,
 };
 
-use unicode_segmentation::UnicodeSegmentation;
-
 use super::plan::{self, BatteryState, Host};
 use super::{PlanConfig, todo};
+
+use unicode_segmentation::UnicodeSegmentation;
 
 fn turn() -> TurnId {
     TurnId::new(NonZeroU64::MIN)
@@ -176,7 +176,7 @@ impl FakeServices {
         clippy::vec_box,
         reason = "records() must yield Vec<Box<RawValue>> per the Services contract"
     )]
-    fn leaf_bodies(&self, kind: &str) -> Vec<Box<RawJson>> {
+    pub(crate) fn leaf_bodies(&self, kind: &str) -> Vec<Box<RawJson>> {
         let ledger = locked(&self.ledger);
         let mut bodies = Vec::new();
         let mut cursor = ledger.leaf;
@@ -193,14 +193,6 @@ impl FakeServices {
 }
 
 impl Services for FakeServices {
-    fn state(
-        &self,
-        _who: &Caller,
-        _op: dal_core::StateOp,
-    ) -> ServiceFuture<'_, Result<dal_core::StateRecord, dal_core::StateError>> {
-        unavailable(&self.side_calls)
-    }
-
     fn fs_read(&self, _who: &Caller, _path: &str) -> ServiceFuture<'_, Option<Vec<u8>>> {
         unavailable(&self.side_calls)
     }
@@ -286,7 +278,14 @@ impl Services for FakeServices {
         }
     }
 
-    fn jobs(&self, _who: &Caller, _op: JobsOp) -> ServiceFuture<'_, JobsReply> {
+    fn jobs(&self, _who: &Caller, op: JobsOp) -> ServiceFuture<'_, JobsReply> {
+        if let JobsOp::Spawn { .. } = op {
+            return Box::pin(async {
+                Ok(JobsReply::Spawned {
+                    id: JobId::new_v7(),
+                })
+            });
+        }
         unavailable(&self.side_calls)
     }
 
@@ -319,6 +318,14 @@ impl Services for FakeServices {
     }
 
     fn blob_get(&self, _who: &Caller, _digest: [u8; 32]) -> ServiceFuture<'_, Option<Vec<u8>>> {
+        unavailable(&self.side_calls)
+    }
+
+    fn state(
+        &self,
+        _who: &Caller,
+        _op: StateOp,
+    ) -> ServiceFuture<'_, Result<StateRecord, StateError>> {
         unavailable(&self.side_calls)
     }
 
@@ -472,12 +479,11 @@ impl ScriptedWorkHost {
             .map(|doc| doc.text.into())
     }
 
-    pub(crate) fn status(&self) -> Result<(bool, String), Box<dyn StdError>> {
+    pub(crate) fn status(&self) -> (bool, Option<String>) {
         let bodies = self.services.leaf_bodies(todo::TODO_KIND);
         let items = todo::fold(bodies.as_slice());
         let snapshot = super::status_snapshot(self.state.phase(self.session), &items);
-        let text = snapshot.text.ok_or("status text is missing")?;
-        Ok((snapshot.quiet, text.into()))
+        (snapshot.quiet, snapshot.text.map(Into::into))
     }
 
     pub(crate) async fn guard(

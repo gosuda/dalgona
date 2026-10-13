@@ -25,6 +25,8 @@ pub(super) struct ToolResultEntryFields {
     pub(super) error: bool,
     pub(super) parts: Vec<JournalPart>,
     pub(super) changes: Vec<FileChange>,
+    #[serde(default)]
+    pub(super) elapsed_ms: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -121,6 +123,7 @@ impl<'de> Deserialize<'de> for EntryKind {
                     error: wire.error,
                     parts: wire.parts,
                     changes: wire.changes,
+                    elapsed_ms: wire.elapsed_ms,
                 })
             }
             "reminder" => {

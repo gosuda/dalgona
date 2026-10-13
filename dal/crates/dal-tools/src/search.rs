@@ -94,6 +94,25 @@ pub(crate) enum Mode {
     Symbol,
 }
 
+/// The workspace directory an indexed search narrows to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IndexScope<'a> {
+    /// The workspace root itself.
+    Root,
+    /// A directory inside the workspace, relative to the root.
+    Directory(&'a Path),
+}
+
+impl<'a> IndexScope<'a> {
+    /// The directory filter for the index: `None` searches the whole root.
+    pub(crate) fn directory(self) -> Option<&'a Path> {
+        match self {
+            Self::Root => None,
+            Self::Directory(rel) => Some(rel),
+        }
+    }
+}
+
 /// Decoded, bounds-checked search arguments.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SearchArgs {
@@ -205,14 +224,14 @@ impl Scope {
         }
     }
 
-    /// The index scope argument: `None` outside the workspace, `Some(None)` for the root.
-    #[expect(
-        clippy::option_option,
-        reason = "outer None means out of scope; inner None means the scope root"
-    )]
-    pub(crate) fn index_scope(&self) -> Option<Option<&Path>> {
+    /// The index scope argument: `None` outside the workspace.
+    pub(crate) fn index_scope(&self) -> Option<IndexScope<'_>> {
         let rel = self.ws_rel.as_deref()?;
-        Some((!rel.as_os_str().is_empty()).then_some(rel))
+        Some(if rel.as_os_str().is_empty() {
+            IndexScope::Root
+        } else {
+            IndexScope::Directory(rel)
+        })
     }
 
     /// The target for a path relative to this scope directory.
@@ -463,7 +482,7 @@ impl Search {
             let indexed = match scope.index_scope() {
                 Some(index_scope) => self
                     .index
-                    .find_entries(call.workspace, index_scope, &glob, wanted)
+                    .find_entries(call.workspace, index_scope.directory(), &glob, wanted)
                     .await
                     .ok()
                     .flatten(),

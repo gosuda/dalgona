@@ -52,7 +52,10 @@ fn tui_quit_cancels_running_turn() -> Result<(), Box<dyn Error + Send + Sync>> {
         Duration::from_secs(10),
     )?;
     terminal.write(b"run a long command\r")?;
-    terminal.wait_for(b"Allow this command?", Duration::from_secs(10))?;
+    terminal.wait_for(
+        dal_tui::copy::ids::DIALOG_ACTIONS_SHORT.as_bytes(),
+        Duration::from_secs(10),
+    )?;
     terminal.write(b"y")?;
     wait_for_file(&started, Duration::from_secs(5))?;
     terminal.wait_for(

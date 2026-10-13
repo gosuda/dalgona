@@ -12,6 +12,8 @@ use dal_core::{
 };
 use tokio::io::AsyncWriteExt as _;
 
+/// The assembled product a binary or harness serves through a [`Host`].
+pub use dal_agent::Product;
 /// Product configuration shared with the edge builder.
 pub use dal_core::Config;
 /// Typed product-configuration failures.
@@ -20,6 +22,8 @@ pub use dal_core::ConfigError;
 pub use dal_core::RegistrationError;
 /// One first-party documentation scheme and its pages.
 pub use dal_ext::docs::Manual as ProductManual;
+/// The scheme resolver that serves an extension's doc pages to the `read` tool.
+pub use dal_ext::docs::ManualScheme;
 
 /// Captured inputs supplied to a product constructor.
 #[derive(Debug)]
@@ -68,22 +72,31 @@ pub struct ProductFactory {
 
 /// The single Clap command tree shared by parsing, help, completion, and man pages.
 pub mod cli;
+
 /// Command dispatch over the built product.
 mod dispatch;
+
 /// Process-edge snapshots, lexical paths, and platform identity.
 mod edge;
+
 /// Exit-code mapping for command and signal outcomes.
 mod exit;
+
 /// Commands that inspect and persist configured plugin grants.
 pub mod plugin_cmd;
+
 /// Headless prompt streaming for text and JSON clients.
 mod print;
+
 /// The dal product identity and built-in extension composition.
 pub mod product;
+
 /// Offline commands for inspecting and testing stream rules.
 pub mod rules_cmd;
+
 /// The restricted `__sandbox` helper entry point.
 mod sandbox;
+
 /// Local HTTP, WebSocket, and Codex serving commands.
 pub mod serve;
 pub use product::{Parts, assemble, build, parts, product};
@@ -100,6 +113,8 @@ pub(crate) struct Startup {
     pub(crate) workspace_path: PathBuf,
     pub(crate) workspace: Workspace,
     pub(crate) config: Config,
+    /// The user `dal.toml` path; only the interactive UI persists to it.
+    #[cfg(feature = "tui")]
     pub(crate) config_path: PathBuf,
     pub(crate) data_root: PathBuf,
     pub(crate) binary: &'static str,
@@ -200,10 +215,10 @@ async fn run_command(
                 workspace_path,
                 workspace,
                 config,
-                config_path: _,
                 data_root,
                 binary: _,
                 helper,
+                ..
             } = startup;
             run_headless(
                 &cli,
@@ -244,8 +259,8 @@ async fn run_command(
         Some(cli::Commands::Dev(_)) => {
             unreachable!("the dev command dispatches before product assembly")
         }
-        Some(cli::Commands::Login(args)) => dispatch::login(args.clone(), startup).await,
-        Some(cli::Commands::Logout(args)) => dispatch::logout(args.clone(), startup).await,
+        Some(cli::Commands::Login(args)) => dispatch::login(args.clone(), startup, product).await,
+        Some(cli::Commands::Logout(args)) => dispatch::logout(args.clone(), startup, product).await,
         Some(cli::Commands::Models(args)) => dispatch::models(args.clone(), startup).await,
         Some(cli::Commands::Docs(_)) => two_lines(
             cli::texts::internal_error("edge", "the docs command was dispatched twice"),
@@ -661,6 +676,7 @@ fn assemble_startup(
         workspace_path,
         workspace,
         config,
+        #[cfg(feature = "tui")]
         config_path,
         data_root: roots.data,
         binary: factory.binary,

@@ -398,9 +398,9 @@ pub(crate) fn id8(id: &str) -> String {
     id.chars().take(8).collect()
 }
 
-pub(crate) fn comma_group(mut n: u64) -> String {
-    use std::fmt::Write as _;
+use std::fmt::Write as _;
 
+pub(crate) fn comma_group(mut n: u64) -> String {
     let mut groups = [0_u64; 7];
     let mut group_count = 0;
     while n >= 1_000 {
@@ -408,6 +408,7 @@ pub(crate) fn comma_group(mut n: u64) -> String {
         group_count += 1;
         n /= 1_000;
     }
+
     let mut result = String::with_capacity(26);
     let _ = write!(result, "{n}");
     for group in groups[..group_count].iter().rev() {
@@ -676,6 +677,10 @@ pub trait PluginReload: Send + Sync + 'static {
 /// # Errors
 ///
 /// Returns the builder's registration error for an invalid identity.
+///
+/// Takes the reload seam by value and clones it into each of the 25 command
+/// handlers; the public constructor signature is pinned by the external
+/// consumers (dalgon product, dal-wire tests).
 pub fn extension(
     reload: &std::sync::Arc<dyn PluginReload>,
 ) -> Result<dal_agent::ext::Extension, dal_core::RegistrationError> {
@@ -735,7 +740,8 @@ impl dal_agent::ext::CommandHandler for BuiltinHandler {
 ///
 /// # Errors
 ///
-/// Returns the handler's [`ErrorTriple`] when the command fails or is gated.
+/// Returns the rendered `ErrorTriple` for an unknown name or an arity
+/// failure, and each handler's own triple otherwise.
 pub async fn dispatch<'a>(
     name: &str,
     cx: dal_agent::ext::command::CommandCx<'a>,
@@ -827,11 +833,11 @@ pub fn complete_args(
                 detail: "thinking level".into(),
             })
             .collect(),
-        "login" | "logout" => ["anthropic", "openai", "openai-codex"]
+        "login" | "logout" => dal_agent::login::login_providers()
             .iter()
-            .map(|provider| dal_core::command::Completion {
-                value: (*provider).into(),
-                label: (*provider).into(),
+            .map(|def| dal_core::command::Completion {
+                value: def.id.into(),
+                label: def.id.into(),
                 detail: "provider".into(),
             })
             .collect(),

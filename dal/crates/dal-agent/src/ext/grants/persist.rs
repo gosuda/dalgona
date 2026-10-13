@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use dal_core::{ClientId, Name, Origin, Service, ServiceSet, Timestamp};
-use dal_store::{FileMode, write_atomic};
+use dal_store::{FileMode, create_private_dir_all, write_atomic};
 
 use super::{GrantRow, GrantStoreError};
 
@@ -183,6 +183,12 @@ pub(crate) fn persist(data_dir: &Path, rows: &[GrantRow]) -> Result<(), dal_stor
     for row in rows {
         text.push_str(&encode_row(row));
     }
+    // The data root is created by the first session write; a grant answered
+    // before any prompt must not depend on that having happened.
+    create_private_dir_all(data_dir).map_err(|source| dal_store::StoreError::Io {
+        path: data_dir.to_path_buf(),
+        source: Box::new(source),
+    })?;
     write_atomic(&grants_path(data_dir), text.as_bytes(), FileMode::Mode0600)
 }
 

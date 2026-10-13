@@ -228,6 +228,12 @@ pub enum ProviderError {
     NoAccountId,
     /// The sign-in was cancelled before completion.
     LoginCancelled,
+    /// The sign-in request itself is unusable: the provider does not offer
+    /// the method, or the API key is empty.
+    LoginInput {
+        /// Why the request cannot run.
+        reason: String,
+    },
     /// The account usage read failed.
     UsageCheck {
         /// Why the usage read failed.
@@ -442,6 +448,7 @@ impl fmt::Display for ProviderError {
                 f.write_str("sign-in failed: the ID token has no chatgpt_account_id.")
             }
             Self::LoginCancelled => f.write_str("sign-in cancelled."),
+            Self::LoginInput { reason } => write!(f, "sign-in failed: {reason}"),
             Self::UsageCheck { reason } => write!(f, "usage failed: {reason}"),
             Self::UnresolvedBlob { blob_id } => write!(
                 f,
@@ -478,10 +485,17 @@ impl From<ProviderError> for InferFailure {
 
         let message = error.to_string().into_boxed_str();
         let fix = error.fix().map(String::into_boxed_str);
-        // Exhaustive on purpose: a new variant must choose its class here.
         match error {
             E::ContextOverflow { code, .. } => Self::Overflow {
                 code: code.into_boxed_str(),
+                message,
+            },
+            E::Status {
+                family: _,
+                status: 413,
+                ..
+            } => Self::Overflow {
+                code: "request_too_large".into(),
                 message,
             },
             E::RateLimited { retry_after, .. } => Self::Retryable {
@@ -524,6 +538,7 @@ impl From<ProviderError> for InferFailure {
             | E::DeviceCode { .. }
             | E::NoAccountId
             | E::LoginCancelled
+            | E::LoginInput { .. }
             | E::UsageCheck { .. }
             | E::UnresolvedBlob { .. }
             | E::ToolNameCollision { .. }

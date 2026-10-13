@@ -1,5 +1,5 @@
+//! Gate-full scenario 8: mailbox FIFO cursor reads with full-or-gone receipts.
 #![expect(clippy::expect_used, reason = "SC test")]
-#![expect(missing_docs, reason = "SC test")]
 
 #[expect(
     dead_code,
@@ -501,11 +501,11 @@ const fn expected_receipt(mode: MailMode) -> Receipt {
     }
 }
 
+#[tokio::test]
 #[expect(
     clippy::too_many_lines,
-    reason = "SC mailbox scenario is one long script"
+    reason = "the fifo mailbox scenario covers cursor reads and both overflow paths in one walkthrough"
 )]
-#[tokio::test]
 async fn mailbox_is_fifo_cursor_read_and_reports_full_or_gone()
 -> Result<(), Box<dyn Error + Send + Sync>> {
     let data = TestDir::new()?;

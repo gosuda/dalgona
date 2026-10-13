@@ -24,9 +24,9 @@ impl Postings {
         let mut lists = Vec::with_capacity(literal.len().saturating_sub(2));
         for window in literal.windows(3) {
             match self.checked_list(pack(window[0], window[1], window[2]), files) {
-                Some(Some(list)) => lists.push(list),
+                Some(super::store::GramList::List(start, len)) => lists.push((start, len)),
                 // An absent gram proves no file holds the literal.
-                Some(None) => return Some(Vec::new()),
+                Some(super::store::GramList::Absent) => return Some(Vec::new()),
                 None => return None,
             }
         }

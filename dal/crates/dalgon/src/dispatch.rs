@@ -23,6 +23,7 @@ use crate::{Startup, host_exit, map_approval, two_lines};
 
 #[cfg(feature = "tui")]
 mod interactive;
+
 mod wires;
 
 #[cfg(feature = "tui")]
@@ -30,9 +31,13 @@ pub(crate) use interactive::interactive;
 
 pub(crate) use wires::{acp, app_server, rpc};
 mod dev;
+
 mod docs;
+
 mod login;
+
 mod logout;
+
 mod models;
 
 pub(crate) use dev::run as dev;
@@ -98,10 +103,10 @@ pub(crate) async fn serve(
         workspace_path,
         workspace: _,
         config,
-        config_path: _,
         data_root,
         binary: _,
         helper,
+        ..
     } = startup;
     let core_serve = config.serve();
     if let Some(cli::ServeSubcommand::Token(token)) = &args.command {
@@ -119,9 +124,7 @@ pub(crate) async fn serve(
             snapshot.stderr_tty,
             &mut out,
             &mut err,
-        )
-        .await
-        {
+        ) {
             Ok(code) => code,
             Err(error) => serve_error(error),
         };
@@ -170,11 +173,13 @@ pub(crate) async fn serve(
     match drive(
         &stop,
         serve::run(
-            host,
-            serve_args,
-            serve_config,
-            data_root,
-            stop.clone(),
+            serve::ServeRun {
+                host,
+                args: serve_args,
+                config: serve_config,
+                data_root,
+                stop: stop.clone(),
+            },
             &mut out,
             &mut err,
             snapshot.stderr_tty,

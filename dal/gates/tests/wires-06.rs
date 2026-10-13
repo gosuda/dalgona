@@ -1,9 +1,8 @@
+//! Wire server helpers: process drop and captured server lines.
 #![expect(
     clippy::disallowed_methods,
     reason = "SC test drives real app-server stdio"
 )]
-
-//! Wire server helpers: process drop and captured server lines.
 #[expect(
     dead_code,
     reason = "gate support helpers are shared across independent test targets"
@@ -60,50 +59,23 @@ fn read_response(lines: &ServerLines) -> Result<sonic_rs::Value, Box<dyn Error +
     }
 }
 
-#[test]
-#[expect(clippy::too_many_lines, reason = "SC codex smoke is one long script")]
-fn codex_app_server_smoke_uses_pinned_core_subset() -> Result<(), Box<dyn Error + Send + Sync>> {
-    let dir = TestDir::new()?;
-    let home = dir.path().join("home");
-    let workspace = dir.path().join("workspace");
-    let data_home = home.join(".local/share");
-    fs::create_dir_all(home.join(".config/dal"))?;
-    fs::create_dir_all(&workspace)?;
-    let replay = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../crates/dalgon/tests/fixtures/replay/loop-headless.jsonl");
-    fs::write(
-        home.join(".config/dal/dal.toml"),
-        format!(
-            "model = \"openai-responses/gpt-6\"\n[providers.scripted]\nfixture = {:?}\n",
-            replay.to_string_lossy()
-        ),
-    )?;
-    fs::write(workspace.join("test.txt"), "before\n")?;
-    let proc_fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../crates/dalgon/tests/fixtures/process/grandchild.sh");
-    fs::copy(proc_fixture, workspace.join("grandchild.sh"))?;
-    let binary = dalgon_binary("dalgon")?;
-    let fixture_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../crates/dalgon/tests/fixtures/codex-app-server");
+fn send_request(
+    stdin: &mut std::process::ChildStdin,
+    request: &sonic_rs::Value,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let payload = sonic_rs::to_string(request)?;
+    stdin.write_all(payload.as_bytes())?;
+    stdin.write_all(b"\n")?;
+    stdin.flush()?;
+    Ok(())
+}
 
-    let mut child = Command::new(binary)
-        .current_dir(&workspace)
-        .env_clear()
-        .envs(support::captured_shell_vars())
-        .env("HOME", &home)
-        .env("XDG_CONFIG_HOME", home.join(".config"))
-        .env("XDG_DATA_HOME", &data_home)
-        .env("NO_COLOR", "1")
-        .args(["app-server"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    let mut stdin = child.stdin.take().expect("stdin");
-    let stdout = child.stdout.take().expect("stdout");
-    let mut guard = ChildGuard(Some(child));
-    let lines = server_lines(stdout);
-
+fn drive_handshake(
+    stdin: &mut std::process::ChildStdin,
+    lines: &ServerLines,
+    fixture_root: &std::path::Path,
+    workspace: &std::path::Path,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut thread_id = String::new();
     for name in [
         "initialize.request.json",
@@ -126,29 +98,32 @@ fn codex_app_server_smoke_uses_pinned_core_subset() -> Result<(), Box<dyn Error 
                 params.insert("threadId", thread_id.as_str());
             }
         }
-        let payload = sonic_rs::to_string(&request)?;
-        stdin.write_all(payload.as_bytes())?;
-        stdin.write_all(b"\n")?;
-        stdin.flush()?;
+        send_request(stdin, &request)?;
         if name == "turn-start.request.json" {
             break;
         }
-        let response = read_response(&lines)?;
+        let response = read_response(lines)?;
         if name == "thread-start.request.json" {
-            thread_id = response
+            let id = response
                 .get("result")
                 .and_then(|result| result.get("thread"))
                 .and_then(|thread| thread.get("id"))
                 .and_then(sonic_rs::Value::as_str)
-                .expect("thread/start result names the thread")
-                .to_owned();
+                .ok_or_else(|| std::io::Error::other("thread/start result names no thread"))?;
+            id.clone_into(&mut thread_id);
         } else {
             stdin.write_all(br#"{"method":"initialized","params":{}}"#)?;
             stdin.write_all(b"\n")?;
             stdin.flush()?;
         }
     }
+    Ok(())
+}
 
+fn pump_until_turn_completed(
+    stdin: &mut std::process::ChildStdin,
+    lines: &ServerLines,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut saw_turn_completed = false;
     let mut answered_once = false;
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
@@ -189,6 +164,56 @@ fn codex_app_server_smoke_uses_pinned_core_subset() -> Result<(), Box<dyn Error 
     }
     assert!(answered_once, "must answer one approval/user-input request");
     assert!(saw_turn_completed, "must observe turn completed");
+    Ok(())
+}
+
+#[test]
+fn codex_app_server_smoke_uses_pinned_core_subset() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let dir = TestDir::new()?;
+    let home = dir.path().join("home");
+    let workspace = dir.path().join("workspace");
+    let data_home = home.join(".local/share");
+    fs::create_dir_all(home.join(".config/dal"))?;
+    fs::create_dir_all(&workspace)?;
+    let replay = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../crates/dalgon/tests/fixtures/replay/loop-headless.jsonl");
+    fs::write(
+        home.join(".config/dal/dal.toml"),
+        format!(
+            "model = \"openai/gpt-6-luna\"\n[providers.scripted]\nfixture = {:?}\n",
+            replay.to_string_lossy()
+        ),
+    )?;
+    fs::write(workspace.join("test.txt"), "before\n")?;
+    let proc_fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../crates/dalgon/tests/fixtures/process/grandchild.sh");
+    fs::copy(proc_fixture, workspace.join("grandchild.sh"))?;
+    let binary = dalgon_binary("dalgon")?;
+    let fixture_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../crates/dalgon/tests/fixtures/codex-app-server");
+
+    let mut child = Command::new(binary)
+        .current_dir(&workspace)
+        .env_clear()
+        .envs(support::captured_shell_vars())
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_DATA_HOME", &data_home)
+        .env("NO_COLOR", "1")
+        .env("OPENAI_API_KEY", "sk-test")
+        .args(["app-server"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut stdin = child.stdin.take().expect("stdin");
+    let stdout = child.stdout.take().expect("stdout");
+    let mut guard = ChildGuard(Some(child));
+    let lines = server_lines(stdout);
+
+    drive_handshake(&mut stdin, &lines, &fixture_root, &workspace)?;
+
+    pump_until_turn_completed(&mut stdin, &lines)?;
 
     stdin.write_all(br#"{"id":99,"method":"unknown/method","params":{}}"#)?;
     stdin.write_all(b"\n")?;

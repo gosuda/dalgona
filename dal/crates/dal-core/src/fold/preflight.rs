@@ -45,8 +45,11 @@ impl Session {
         }
     }
 
-    pub(super) fn entry_available(&self) -> Result<(), Rejection> {
+    /// Checks that `count` entry ids remain, so a transition that journals
+    /// several entries cannot fail after it has changed the phase.
+    pub(super) fn entries_available(&self, count: u64) -> Result<(), Rejection> {
         self.next_entry
+            .and_then(|next| next.get().checked_add(count.saturating_sub(1)))
             .map(|_| ())
             .ok_or_else(|| invalid("entry id space exhausted"))
     }
@@ -90,13 +93,21 @@ impl Session {
         outcome: &HookOutcome,
     ) -> Result<(), Rejection> {
         match outcome.event() {
-            HookEvent::BeforeTurn => match &self.phase {
-                Phase::Settling {
-                    follow_up: Some((next_turn, _)),
-                    ..
-                } if *next_turn == turn => self.entry_available(),
-                _ => Ok(()),
-            },
+            HookEvent::BeforeTurn => {
+                let reminder = u64::from(
+                    matches!(outcome.verdict(), HookVerdict::BeforeTurn(Some(text)) if !text.is_empty()),
+                );
+                match &self.phase {
+                    Phase::Settling {
+                        follow_up: Some((next_turn, _)),
+                        ..
+                    } if *next_turn == turn => self.entries_available(1 + reminder),
+                    Phase::Opening { turn: active, .. } if *active == turn && reminder == 1 => {
+                        self.entries_available(1)
+                    }
+                    _ => Ok(()),
+                }
+            }
             HookEvent::ToolCall if matches!(&self.phase, Phase::Running { turn: active, stage: TurnStage::Dispatching { .. }, .. } if *active == turn) => {
                 match outcome.verdict() {
                     HookVerdict::ToolCall(ToolCallVerdict::Block { .. })
@@ -146,7 +157,7 @@ impl Session {
                     .iter()
                     .any(|item| item.call == *call && item.started) =>
             {
-                self.entry_available()
+                self.entries_available(1)
             }
             Phase::Running { turn: active, .. } if *active == turn => {
                 Err(invalid("tool result was not pending"))

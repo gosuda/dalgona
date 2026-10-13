@@ -69,6 +69,7 @@ fn approval() -> Question {
             digest: None,
         },
         grant: None,
+        call: None,
     }
 }
 #[test]

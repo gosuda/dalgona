@@ -152,6 +152,13 @@ pub enum QueueClass {
     Lossless,
 }
 
+/// A lossless update the full update queue refused to drop an earlier one for.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueueFull(
+    /// The update that was not enqueued.
+    pub Box<Update>,
+);
+
 /// Bounded coalescer for updates and terminal input.
 #[derive(Debug)]
 pub struct Coalescer {
@@ -171,10 +178,15 @@ impl Default for Coalescer {
 }
 
 impl Coalescer {
-    /// Enqueues an update, merging adjacent text deltas and replacing progress by call id.
-    pub fn push_update(&mut self, update: Update) {
+    /// Enqueues an update, merging adjacent text deltas, replacing progress by call id, and shedding replaceable entries when the queue is full.
+    ///
+    /// # Errors
+    /// Returns [`QueueFull`] with the update when the queue holds 4096 lossless
+    /// events and `update` is lossless too; the queue is left unchanged so the
+    /// caller drains it or resynchronises instead of losing a transition.
+    pub fn push_update(&mut self, update: Update) -> Result<(), QueueFull> {
         if coalesce_update(&mut self.updates, &update) {
-            return;
+            return Ok(());
         }
         let incoming_class = classify(&update.kind);
         if self.updates.len() >= 4096 {
@@ -187,10 +199,13 @@ impl Coalescer {
                 self.shed = self.shed.saturating_add(1);
             } else if incoming_class == QueueClass::Replaceable {
                 self.shed = self.shed.saturating_add(1);
-                return;
+                return Ok(());
+            } else {
+                return Err(QueueFull(Box::new(update)));
             }
         }
         self.updates.push_back(update);
+        Ok(())
     }
 
     /// Enqueues an input event, dropping the oldest input at the queue cap.

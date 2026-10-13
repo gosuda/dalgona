@@ -2,14 +2,14 @@
 
 use dal_agent::error::ServiceError;
 use dal_agent::ext::{Caller, Services};
-use dal_core::{Name, SidecarOp, Timestamp};
+use dal_core::{SidecarName, SidecarOp, Timestamp};
 use serde::Deserialize;
 
 use super::super::ControllerMode;
 use super::super::monitor::status::InflightCounts;
 use super::ops::{
-    GoalCommand, GoalScope, TodoSummary, UpdateTarget, apply_goal_command, create_goal, get_goal,
-    parse_goal_command, update_goal,
+    GoalCommand, GoalScope, TodoSummary, UpdateTarget, apply_goal_command, clear_recovery_doc,
+    create_goal, get_goal, parse_goal_command, salvage_next_goal, update_goal,
 };
 use super::sidecar::{GoalError, GoalSidecar, controller_wire, decode_sidecar, encode_sidecar};
 
@@ -27,9 +27,28 @@ pub(crate) struct GoalStore {
     pub sidecar: Option<GoalSidecar>,
     pub saved: bool,
     pub error: Option<GoalError>,
+    /// The bytes that failed to decode, kept until the recovery clear
+    /// replaces the document.
+    pub damaged: Option<Box<[u8]>>,
 }
 
 impl GoalStore {
+    /// Whether the last load failed because the sidecar could not be
+    /// reached (a denied or unanswered grant, for one). Such a load is worth
+    /// repeating once the cause may be gone; a damaged file is not.
+    pub(crate) fn sidecar_unreachable(&self) -> bool {
+        matches!(self.error, Some(GoalError::StoreUnavailable { .. }))
+    }
+
+    /// Whether the last load failed because the service grant was refused.
+    /// Nothing else may ask for it again until the user acts.
+    pub(crate) fn grant_refused(&self) -> bool {
+        matches!(
+            self.error,
+            Some(GoalError::StoreUnavailable { refused: true, .. })
+        )
+    }
+
     pub(crate) fn empty(session: &str, mode: ControllerMode) -> Self {
         Self {
             sidecar: Some(GoalSidecar {
@@ -41,6 +60,7 @@ impl GoalStore {
             }),
             saved: false,
             error: None,
+            damaged: None,
         }
     }
 }
@@ -63,9 +83,10 @@ struct UpdateArgs {
 struct GetArgs {}
 
 pub(crate) async fn load(services: &dyn Services, caller: &Caller, session: &str) -> GoalStore {
-    let Ok(name) = Name::parse("goal.json") else {
+    let Ok(name) = SidecarName::parse("goal.json") else {
         return failed_store(GoalError::StoreUnavailable {
             message: "the goal sidecar name is invalid".into(),
+            refused: false,
         });
     };
     match services.sidecar(caller, SidecarOp::Read { name }).await {
@@ -83,15 +104,18 @@ pub(crate) async fn load(services: &dyn Services, caller: &Caller, session: &str
                 sidecar: Some(sidecar),
                 saved: true,
                 error: None,
+                damaged: None,
             },
             Err(error) => GoalStore {
                 sidecar: None,
                 saved: true,
                 error: Some(error),
+                damaged: Some(bytes.into_boxed_slice()),
             },
         },
         Err(error) => failed_store(GoalError::StoreUnavailable {
             message: error.to_string().into_boxed_str(),
+            refused: matches!(error, ServiceError::Denied(_) | ServiceError::Declined),
         }),
     }
 }
@@ -101,6 +125,7 @@ fn failed_store(error: GoalError) -> GoalStore {
         sidecar: None,
         saved: false,
         error: Some(error),
+        damaged: None,
     }
 }
 
@@ -164,8 +189,17 @@ pub(crate) async fn command(
     ctx: &GoalScope<'_>,
     services: &dyn Services,
     caller: &Caller,
+    mode: ControllerMode,
 ) -> Result<String, ServiceError> {
+    let action = parse_goal_command(args);
     if let Some(error) = store.error.as_ref() {
+        let recoverable = matches!(
+            error,
+            GoalError::Damaged { .. } | GoalError::BadVersion { .. }
+        );
+        if action == GoalCommand::Clear && recoverable && ctx.saved && ctx.depth == 0 {
+            return clear_damaged(store, ctx.session, mode, services, caller).await;
+        }
         return Err(goal_failure(error));
     }
     let Some(sidecar) = store.sidecar.as_mut() else {
@@ -174,7 +208,6 @@ pub(crate) async fn command(
             "goal: the goal sidecar is unavailable.",
         ));
     };
-    let action = parse_goal_command(args);
     let reply = apply_goal_command(sidecar, ctx, &action, Timestamp::now());
     if action != GoalCommand::Show {
         save(services, caller, sidecar).await?;
@@ -182,17 +215,71 @@ pub(crate) async fn command(
     Ok(reply)
 }
 
+/// Replaces a damaged or foreign-version document with the valid empty
+/// recovery document: the current in-memory controller mode, no goal, and
+/// the next id salvaged from the damaged bytes. Arms no continuation. The
+/// store works again once the write lands; every other failure keeps it
+/// fail-closed.
+async fn clear_damaged(
+    store: &mut GoalStore,
+    session: &str,
+    mode: ControllerMode,
+    services: &dyn Services,
+    caller: &Caller,
+) -> Result<String, ServiceError> {
+    let next = store
+        .damaged
+        .as_deref()
+        .and_then(salvage_next_goal)
+        .unwrap_or(1);
+    let name =
+        SidecarName::parse("goal.json").map_err(|_| ServiceError::sidecar_bad_name("goal.json"))?;
+    services
+        .sidecar(
+            caller,
+            SidecarOp::Write {
+                name,
+                bytes: clear_recovery_doc(session, mode, next),
+            },
+        )
+        .await
+        .map_err(|error| {
+            goal_failure(&GoalError::SaveFailed {
+                message: error.to_string().into(),
+            })
+        })?;
+    *store = GoalStore {
+        sidecar: Some(GoalSidecar {
+            v: 1,
+            session: session.into(),
+            controller: mode,
+            next_goal: next,
+            goal: None,
+        }),
+        saved: true,
+        error: None,
+        damaged: None,
+    };
+    Ok("No goal.".to_owned())
+}
+
 pub(crate) async fn save(
     services: &dyn Services,
     caller: &Caller,
     sidecar: &GoalSidecar,
 ) -> Result<(), ServiceError> {
-    let name = Name::parse("goal.json").map_err(|_| ServiceError::sidecar_bad_name("goal.json"))?;
+    let name =
+        SidecarName::parse("goal.json").map_err(|_| ServiceError::sidecar_bad_name("goal.json"))?;
     let bytes = encode_sidecar(sidecar).map_err(|error| goal_failure(&error))?;
     services
         .sidecar(caller, SidecarOp::Write { name, bytes })
         .await
-        .map(|_| ())
+        .map_err(|error| {
+            goal_failure(&GoalError::SaveFailed {
+                message: error.to_string().into(),
+            })
+        })?;
+    Ok(())
 }
 
 pub(crate) fn update_mode(store: &mut GoalStore, mode: ControllerMode) {
@@ -200,10 +287,6 @@ pub(crate) fn update_mode(store: &mut GoalStore, mode: ControllerMode) {
         return;
     };
     sidecar.controller = mode;
-}
-
-pub(crate) fn preview(store: &GoalStore) -> Option<super::super::monitor::status::GoalPreview> {
-    super::sidecar::goal_projection(store.sidecar.as_ref()?.goal.as_ref())
 }
 
 pub(crate) fn persisted_mode(store: &GoalStore) -> Option<&'static str> {

@@ -292,6 +292,7 @@ fn usd_budget_refuses_an_unpriced_model_and_admits_a_priced_one() {
             cached_input: 1.0,
             output: 1.0,
             reasoning: 1.0,
+            tiers: Box::default(),
         })
     });
     let mut priced = ScopeTable::new(Arc::new(AtomicUsize::new(0)), price);
@@ -556,6 +557,7 @@ fn usage_exhaustion_refuses_new_submissions() {
             cached_input: 1.0,
             output: 1.0,
             reasoning: 1.0,
+            tiers: Box::default(),
         })
     });
     let mut table = ScopeTable::new(Arc::new(AtomicUsize::new(0)), price);

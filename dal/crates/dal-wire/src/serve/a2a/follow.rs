@@ -82,7 +82,7 @@ async fn follow(ctx: Arc<ServeCtx>, agent: Agent, mut subscription: Subscription
 
 /// Resubscribes live after a resync while the turn still runs.
 fn resubscribe(agent: &Agent, key: TaskKey) -> Option<Subscription> {
-    let subscription = agent.subscribe(None).ok()?;
+    let subscription = agent.subscribe_listen(None).ok()?;
     let view = agent.view(PageReq::default()).ok()?;
     match view.turn {
         TurnState::Running { turn } | TurnState::Settling { turn } if turn == key.turn => {

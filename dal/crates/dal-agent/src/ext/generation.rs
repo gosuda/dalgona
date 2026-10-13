@@ -37,7 +37,9 @@ use super::{
 };
 
 pub mod catalog;
+
 mod tables;
+
 mod validate;
 
 use crate::ext::docs::{DocPage, DocTable};
@@ -145,6 +147,7 @@ impl Generation {
         let mut prompt_sections = Vec::new();
         let mut schemes = Vec::new();
         let mut compactors = Vec::new();
+        let mut fallback_compactors = Vec::new();
         let mut status_kinds = Vec::new();
         let mut mcp_client: Option<(usize, Arc<dyn McpClient>)> = None;
         let mut pages = Vec::new();
@@ -181,7 +184,12 @@ impl Generation {
                 });
             }
             for (record, (name, _)) in ext.compactors().iter().enumerate() {
-                compactors.push(NamedEntry {
+                let group = if ext.fallback_compactors.contains(&record) {
+                    &mut fallback_compactors
+                } else {
+                    &mut compactors
+                };
+                group.push(NamedEntry {
                     name: name.clone(),
                     ext: index,
                     record,
@@ -215,18 +223,14 @@ impl Generation {
             schemes: SchemeTable {
                 entries: schemes.into(),
             },
-            compactors: CompactorTable {
-                entries: compactors.into(),
-            },
+            compactors: CompactorTable::new(compactors, fallback_compactors),
             mcp_client,
             status_kinds: status_kinds.into(),
             docs: Arc::new(DocTable::publish(pages)),
             spec_cache: Mutex::new(HashMap::new()),
         }
     }
-}
 
-impl Generation {
     /// Resolves one tool to its record and visibility, unfiltered: dispatch
     /// needs Deferred tools for promotion-on-call and `EvalOnly` tools for
     /// exact model errors. The request assembler filters the model list

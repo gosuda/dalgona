@@ -912,6 +912,39 @@ async fn ledger_redaction_size() -> TestResult {
 }
 
 #[tokio::test]
+async fn ledger_model_names_the_judge_model_never_the_probe_reply() -> TestResult {
+    for (configured, expected) in [("", "test-session-model"), ("acme/judge-9", "acme/judge-9")] {
+        let services = Arc::new(FakeServices::new(
+            vec![ready_probe("reply text a provider happened to send")],
+            vec![FakeServices::scripted(r#"{"answers":[true]}"#)],
+        ));
+        let config = JudgeConfig {
+            model: Box::from(configured),
+            ..test_config()
+        };
+        let judge = open_judge(Arc::clone(&services), config, None).await;
+        assert!(
+            matches!(judge.state(), Gate::Ready { ref model_id } if &**model_id == expected),
+            "{:?}",
+            judge.state()
+        );
+        judge
+            .judge("ttsr", "shared", bool_question("go?"), None, None)
+            .await?;
+        let rows = services.rows();
+        assert_eq!(rows.len(), 1);
+        let row: sonic_rs::Value = sonic_rs::from_str(&rows[0].1)?;
+        assert_eq!(
+            row.get("model").and_then(sonic_rs::JsonValueTrait::as_str),
+            Some(expected),
+            "the ledger row names the model, not the reply: {}",
+            rows[0].1
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn judged_rule_end_to_end() -> TestResult {
     let services = Arc::new(FakeServices::new(
         vec![ready_probe("judge-model")],

@@ -55,16 +55,14 @@ pub(crate) struct ParsedApiError {
     pub(crate) message: Option<String>,
 }
 
-pub(crate) fn redact_stream_error(error: ProviderError, token: &str) -> ProviderError {
-    if token.is_empty() {
-        return error;
-    }
-    let redact = |message: String| {
-        if message.contains(token) {
-            message.replace(token, "<redacted>")
-        } else {
-            message
+pub(crate) fn redact_stream_error(error: ProviderError, secrets: &[Box<str>]) -> ProviderError {
+    let redact = |mut message: String| {
+        for secret in secrets {
+            if !secret.is_empty() && message.contains(secret.as_ref()) {
+                message = message.replace(secret.as_ref(), "<redacted>");
+            }
         }
+        message
     };
     match error {
         ProviderError::Status {

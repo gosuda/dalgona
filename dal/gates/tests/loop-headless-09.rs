@@ -33,10 +33,6 @@ impl StatusPoll for GateStatus {
     }
 }
 
-#[expect(
-    clippy::disallowed_methods,
-    reason = "SC test races the shutdown call outside the actor's task set"
-)]
 #[tokio::test]
 async fn headless_shutdown_waits_for_registered_status_quiet()
 -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -90,14 +86,14 @@ async fn headless_shutdown_waits_for_registered_status_quiet()
     assert!(matches!(reply, Reply::Accepted { .. }));
 
     let started = Instant::now();
-    let shutdown = tokio::spawn(harness.host.shutdown(Duration::from_secs(2)));
+    let mut shutdown = Box::pin(harness.host.shutdown(Duration::from_secs(2)));
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(
-        !shutdown.is_finished(),
+        futures::poll!(shutdown.as_mut()).is_pending(),
         "shutdown must wait while status is busy"
     );
     poll.quiet.store(true, Ordering::SeqCst);
-    let report = shutdown.await?;
+    let report = shutdown.await;
     assert_eq!(report.sessions_closed, 1);
     assert!(started.elapsed() >= Duration::from_millis(200));
     Ok(())

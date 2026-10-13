@@ -4,6 +4,8 @@ use dal_core::{Config, Family, ThinkingLevel};
 use serde::Deserialize;
 use thiserror::Error;
 
+use super::{PROVIDERS, ProviderDef, Shape};
+
 /// The transport used to reach a provider.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Transport {
@@ -46,6 +48,9 @@ pub struct ProviderConfig {
 pub struct ProviderEntry {
     /// The provider id used in model references.
     pub id: Box<str>,
+    /// The built-in table row this entry configures, resolved once when the
+    /// configuration is decoded; `None` for a named provider.
+    pub def: Option<&'static ProviderDef>,
     /// The API family this provider implements.
     pub family: Family,
     /// The provider endpoint base URL.
@@ -59,6 +64,16 @@ pub struct ProviderEntry {
     /// The maximum number of simultaneous requests for this provider.
     pub max_concurrent_requests: u32,
 }
+
+impl ProviderEntry {
+    /// The request-time header set: the table row's, else the family's.
+    #[must_use]
+    pub fn shape(&self) -> Shape {
+        self.def
+            .map_or_else(|| Shape::of_family(self.family), |def| def.shape)
+    }
+}
+
 /// The global replay-fixture override decoded from `[providers.scripted]`.
 ///
 /// When present, [`crate::provider::ProviderSet::provider`] serves one shared
@@ -154,9 +169,6 @@ impl ProviderConfig {
     }
 }
 
-const OPENAI_URL: &str = "https://api.openai.com/v1";
-const CODEX_URL: &str = "https://chatgpt.com/backend-api/codex";
-const ANTHROPIC_URL: &str = "https://api.anthropic.com";
 pub(super) const MAX_CONCURRENT_REQUESTS: u32 = 64;
 
 const MODEL_KEYS: &[&str] = &["default", "thinking", "aliases"];
@@ -291,42 +303,21 @@ fn decode_providers(
     value: Option<&toml::Value>,
 ) -> Result<(Vec<ProviderEntry>, Option<ScriptedSelection>), ProviderConfigError> {
     let table = optional_table(value, "providers")?;
-    let mut providers = Vec::with_capacity(3 + table.map_or(0, toml::map::Map::len));
+    let mut providers = Vec::with_capacity(PROVIDERS.len() + table.map_or(0, toml::map::Map::len));
     let scripted = table
         .and_then(|table| table.get("scripted"))
         .map(decode_scripted)
         .transpose()?;
-    providers.push(decode_builtin(
-        table.and_then(|table| table.get("openai")),
-        "openai",
-        Family::Responses,
-        OPENAI_URL,
-        Transport::Https,
-        AuthStyle::Bearer,
-    )?);
-    providers.push(decode_builtin(
-        table.and_then(|table| table.get("openai-codex")),
-        "openai-codex",
-        Family::Codex,
-        CODEX_URL,
-        Transport::Websocket,
-        AuthStyle::Bearer,
-    )?);
-    providers.push(decode_builtin(
-        table.and_then(|table| table.get("anthropic")),
-        "anthropic",
-        Family::Anthropic,
-        ANTHROPIC_URL,
-        Transport::Https,
-        AuthStyle::XApiKey,
-    )?);
+    for def in PROVIDERS {
+        providers.push(decode_builtin(
+            table.and_then(|table| table.get(def.id)),
+            def,
+        )?);
+    }
 
     if let Some(table) = table {
         for (name, value) in table {
-            if matches!(
-                name.as_str(),
-                "openai" | "openai-codex" | "anthropic" | "scripted"
-            ) {
+            if name == "scripted" || PROVIDERS.iter().any(|def| def.id == name) {
                 continue;
             }
             if name == "dal" {
@@ -367,12 +358,9 @@ fn decode_scripted(value: &toml::Value) -> Result<ScriptedSelection, ProviderCon
 
 fn decode_builtin(
     value: Option<&toml::Value>,
-    name: &'static str,
-    default_family: Family,
-    default_url: &'static str,
-    default_transport: Transport,
-    default_auth: AuthStyle,
+    def: &'static ProviderDef,
 ) -> Result<ProviderEntry, ProviderConfigError> {
+    let name = def.id;
     let path = format!("providers.{name}");
     let table = optional_table(value, &path)?;
     if let Some(table) = table {
@@ -380,8 +368,8 @@ fn decode_builtin(
     }
 
     let family = match string_field(table, "api", &path)? {
-        None => default_family,
-        Some(value) if name == "openai" => {
+        None => def.family,
+        Some(value) if def.family == Family::Responses => {
             let family = parse_api(name, value)?;
             if matches!(family, Family::Responses | Family::Chat) {
                 family
@@ -391,8 +379,7 @@ fn decode_builtin(
                 )));
             }
         }
-        Some("openai_codex") if name == "openai-codex" => default_family,
-        Some("anthropic") if name == "anthropic" => default_family,
+        Some(value) if value == api_name(def.family) => def.family,
         Some(_) => {
             return Err(invalid(format!(
                 "{path}.api conflicts with its fixed family"
@@ -401,14 +388,15 @@ fn decode_builtin(
     };
 
     let url = string_field(table, "base_url", &path)?
-        .unwrap_or(default_url)
+        .unwrap_or(def.base_url)
         .to_owned()
         .into_boxed_str();
     let transport = parse_transport(
         string_field(table, "transport", &path)?,
-        default_transport,
+        def.transport,
         name,
     )?;
+    let default_auth = def.key.map_or(AuthStyle::Bearer, |key| key.style);
     let auth = parse_auth(string_field(table, "auth", &path)?, default_auth, name)?;
     let key_env =
         string_field(table, "key_env", &path)?.map(|value| value.to_owned().into_boxed_str());
@@ -418,6 +406,7 @@ fn decode_builtin(
 
     Ok(ProviderEntry {
         id: name.into(),
+        def: Some(def),
         family,
         base_url: url,
         transport,
@@ -425,6 +414,16 @@ fn decode_builtin(
         auth,
         max_concurrent_requests,
     })
+}
+
+/// The `api` setting that names a family.
+const fn api_name(family: Family) -> &'static str {
+    match family {
+        Family::Chat => "openai_chat",
+        Family::Responses => "openai_responses",
+        Family::Codex => "openai_codex",
+        Family::Anthropic => "anthropic",
+    }
 }
 
 fn decode_named(name: &str, value: &toml::Value) -> Result<ProviderEntry, ProviderConfigError> {
@@ -474,6 +473,7 @@ fn decode_named(name: &str, value: &toml::Value) -> Result<ProviderEntry, Provid
 
     Ok(ProviderEntry {
         id: name.to_owned().into_boxed_str(),
+        def: None,
         family,
         base_url: base_url.to_owned().into_boxed_str(),
         transport,
@@ -552,10 +552,7 @@ fn validate_transport(
     family: Family,
     transport: Transport,
 ) -> Result<(), ProviderConfigError> {
-    if transport == Transport::Websocket
-        && family != Family::Responses
-        && !(name == "openai-codex" && family == Family::Codex)
-    {
+    if transport == Transport::Websocket && !matches!(family, Family::Responses | Family::Codex) {
         return Err(ProviderConfigError::TransportMismatch {
             name: name.to_owned().into_boxed_str(),
         });

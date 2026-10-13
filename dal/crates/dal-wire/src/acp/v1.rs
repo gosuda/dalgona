@@ -73,11 +73,14 @@ async fn new_session(
     id: &Id,
     params: &Value,
 ) -> Option<Message> {
-    let Some(cwd) = crate::rpc::opt_string(params, "cwd") else {
-        return Some(Message::Error {
-            id: id.clone(),
-            error: crate::rpc::invalid_params("session/new", "missing member `cwd`"),
-        });
+    let cwd = match crate::rpc::req_string("session/new", params, "cwd") {
+        Ok(cwd) => cwd,
+        Err(error) => {
+            return Some(Message::Error {
+                id: id.clone(),
+                error,
+            });
+        }
     };
     let (session, _) = match open_workspace(host, state, &cwd).await {
         Ok(opened) => opened,
@@ -242,8 +245,7 @@ async fn prompt(
 
 /// Reads the `sessionId` member shared by session methods.
 fn session_param(params: &Value, method: &str) -> Result<SessionId, ErrorObject> {
-    let text = crate::rpc::opt_string(params, "sessionId")
-        .ok_or_else(|| crate::rpc::invalid_params(method, "missing member `sessionId`"))?;
+    let text = crate::rpc::req_string(method, params, "sessionId")?;
     SessionId::parse(&text)
         .map_err(|_| crate::rpc::invalid_params(method, "sessionId is not valid"))
 }
@@ -254,10 +256,11 @@ pub(crate) async fn list_shared(
     params: &Value,
     limit: u32,
 ) -> Result<Value, ErrorObject> {
-    let filter = crate::rpc::opt_string(params, "cwd");
+    let filter = crate::rpc::opt_nullable_string("session/list", params, "cwd")?;
     let query = dal_core::ListQuery {
         limit: Some(limit),
-        cursor: crate::rpc::opt_string(params, "cursor").map(String::into_boxed_str),
+        cursor: crate::rpc::opt_nullable_string("session/list", params, "cursor")?
+            .map(String::into_boxed_str),
         search: None,
     };
     let page = host.sessions(query).map_err(crate::rpc::host_error)?;

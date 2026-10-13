@@ -557,3 +557,26 @@ fn the_full_path_runs_through_the_event_stream_guard() {
     assert_eq!(seen.len(), 4);
     assert!(matches!(seen.last(), Some(StreamEvent::Stop { .. })));
 }
+
+#[test]
+fn before_turn_text_follows_its_user_message_in_the_body() {
+    let request = request(
+        Vec::new(),
+        vec![
+            ContextItem::User {
+                parts: vec![text("question")],
+            },
+            ContextItem::User {
+                parts: vec![text("first\nsecond")],
+            },
+        ],
+    );
+    let body = body_text(&request, &plan(Some("high"), None));
+    assert!(
+        body.contains(concat!(
+            r#"{"role":"user","content":[{"type":"text","text":"question"}]},"#,
+            r#"{"role":"user","content":[{"type":"text","text":"first\nsecond"}]}"#,
+        )),
+        "{body}"
+    );
+}

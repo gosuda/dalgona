@@ -570,3 +570,70 @@ fn body_without_tools_keeps_empty_tool_members() -> TestResult {
     assert!(!body.contains("previous_response_id"));
     Ok(())
 }
+
+#[test]
+fn a_repeated_terminal_event_yields_one_stop_and_nothing_after() {
+    let mut events = turn();
+    let completed = events.last().unwrap().clone();
+    events.push(completed);
+    let refs: Vec<&str> = events.iter().map(String::as_str).collect();
+    let results = run(&refs);
+    let stops = results
+        .iter()
+        .filter(|result| matches!(result, Ok(StreamEvent::Stop { .. })))
+        .count();
+    assert_eq!(stops, 1);
+    assert!(matches!(results.last(), Some(Ok(StreamEvent::Stop { .. }))));
+}
+
+#[test]
+fn invalid_utf8_in_a_delta_is_replaced_not_fatal() {
+    let mut wire = b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"a".to_vec();
+    wire.extend_from_slice(&[0xFF, 0xFE]);
+    wire.extend_from_slice(b"b\"}\n\n");
+    let results: Vec<_> = block_on(
+        decode(
+            decode_stream(stream::iter(vec![wire])),
+            Family::Responses,
+            "gpt-5",
+        )
+        .collect(),
+    );
+    let Some(Ok(StreamEvent::TextDelta { text })) = results.first() else {
+        panic!("expected a text delta first, got {results:?}");
+    };
+    assert_eq!(text, "a\u{FFFD}\u{FFFD}b");
+    assert!(matches!(
+        results.last(),
+        Some(Err(ProviderError::StreamCut))
+    ));
+}
+
+#[test]
+fn before_turn_text_follows_its_user_message_in_the_body() -> TestResult {
+    let mut request = request()?;
+    request.context = Arc::from([
+        ContextItem::User {
+            parts: vec![Part::Text {
+                text: "question".into(),
+            }],
+        },
+        ContextItem::User {
+            parts: vec![Part::Text {
+                text: "first\nsecond".into(),
+            }],
+        },
+    ]);
+    let high = WireThinking::OpenAi {
+        effort: Some("high"),
+    };
+    let body = String::from_utf8(request_body(&request, high, true)?)?;
+    assert!(
+        body.contains(concat!(
+            r#"{"type":"message","role":"user","content":[{"type":"input_text","text":"question"}]},"#,
+            r#"{"type":"message","role":"user","content":[{"type":"input_text","text":"first\nsecond"}]}"#,
+        )),
+        "{body}"
+    );
+    Ok(())
+}

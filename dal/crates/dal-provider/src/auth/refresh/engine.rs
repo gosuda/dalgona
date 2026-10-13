@@ -1,24 +1,32 @@
 //! The serialized refresh engine: one refresher per `auth.json`.
 //!
-//! The commit is the last step; its cancellation check is the linearization
-//! point. All file I/O runs on the blocking pool through the sibling lock.
+//! The per-key flight slot owns one refresh task from the request through
+//! persistence. The task holds the auth file lock; the slot serializes
+//! callers. A caller can drop its wait before the task starts, but cannot
+//! interrupt a request that may have rotated the stored refresh token.
+//! [`Refresher::shutdown`] is the host's way to end the engine: it refuses new
+//! refreshes and waits for every task still in a slot.
 
 use std::{
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        LazyLock,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use serde::{Deserialize, Serialize};
 use sonic_rs::JsonValueTrait;
 use tokio::sync::Mutex;
-use tokio_util::sync::CancellationToken;
+use url::Url;
 
 use super::{
-    PERMANENT_CODES, PROACTIVE_WINDOW_SECS, RETRY_DELAY, blocking,
-    endpoints::{OAuthProvider, RefreshReason, TokenEndpoints},
+    PERMANENT_CODES, RETRY_DELAY, blocking,
+    endpoints::{RefreshReason, TokenEndpoints},
     lock_auth_file,
 };
 use crate::{
+    Hook, PROVIDERS, ProviderDef,
     auth::{
         credential::{
             AuthStore, Credential, OAuthCredential, SecretString, codex_identity, oauth_expires_at,
@@ -32,55 +40,81 @@ use crate::{
 /// Refreshes OAuth credentials stored in one `auth.json`, at most one refresh
 /// per credential key at a time across every refresher of that file.
 ///
-/// A host keeps one `Refresher` per `auth.json`; dropping it drops its
-/// mutexes. It holds no secret itself.
+/// A host keeps one `Refresher` per `auth.json` and calls
+/// [`Refresher::shutdown`] before dropping it, because a refresh task that
+/// outlives its owner would keep the auth-file lock and still commit. It holds
+/// no secret itself.
 #[derive(Debug)]
 pub struct Refresher {
-    client: reqwest::Client,
+    client: LazyLock<reqwest::Client, fn() -> reqwest::Client>,
     user_agent: Box<str>,
     auth_path: PathBuf,
     endpoints: TokenEndpoints,
-    anthropic: Arc<Mutex<()>>,
-    openai_codex: Arc<Mutex<()>>,
+    slots: Vec<(&'static str, RefreshSlot)>,
+    closed: AtomicBool,
+}
+
+#[derive(Debug)]
+struct RefreshSlot {
+    key: Mutex<()>,
+    in_flight: Mutex<Option<tokio::task::JoinHandle<Result<Credential, ProviderError>>>>,
+}
+
+impl RefreshSlot {
+    fn new() -> Self {
+        Self {
+            key: Mutex::new(()),
+            in_flight: Mutex::new(None),
+        }
+    }
+}
+
+/// Builds the redirect-free client one [`Refresher`] uses.
+///
+/// # Panics
+///
+/// Panics when reqwest cannot initialize its TLS backend, which only a broken
+/// build configuration causes.
+#[expect(
+    clippy::expect_used,
+    reason = "the builder fails only when the compiled TLS backend cannot initialize"
+)]
+fn refresh_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .referer(false)
+        .retry(reqwest::retry::never())
+        .build()
+        .expect("the reqwest TLS backend initializes")
 }
 
 impl Refresher {
     /// A refresher for the `auth.json` at `auth_path` that sends refresh
     /// requests with `user_agent` to `endpoints`.
     ///
-    /// It builds its own client, which follows no redirect: a refresh body
-    /// carries the refresh token, and reqwest resends a body on a 307 or 308
-    /// to whatever host the redirect names. A 3xx answer is a
+    /// Its client is built by the first refresh, not here, because building
+    /// one parses the platform trust roots. It follows no redirect: a refresh
+    /// body carries the refresh token, and reqwest resends a body on a 307 or
+    /// 308 to whatever host the redirect names. A 3xx answer is a
     /// [`ProviderError::Status`] instead.
-    ///
-    /// # Panics
-    ///
-    /// Panics when reqwest cannot initialize its TLS backend, which only a
-    /// broken build configuration causes.
     #[must_use]
-    #[expect(
-        clippy::expect_used,
-        reason = "the builder fails only when the compiled TLS backend cannot initialize"
-    )]
     pub fn new(
         user_agent: impl Into<Box<str>>,
         auth_path: impl Into<PathBuf>,
         endpoints: TokenEndpoints,
     ) -> Self {
-        let client = reqwest::Client::builder()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .redirect(reqwest::redirect::Policy::none())
-            .referer(false)
-            .retry(reqwest::retry::never())
-            .build()
-            .expect("the reqwest TLS backend initializes");
         Self {
-            client,
+            client: LazyLock::new(refresh_client),
             user_agent: user_agent.into(),
             auth_path: auth_path.into(),
             endpoints,
-            anthropic: Arc::new(Mutex::new(())),
-            openai_codex: Arc::new(Mutex::new(())),
+            closed: AtomicBool::new(false),
+            slots: PROVIDERS
+                .iter()
+                .filter(|def| def.oauth.is_some())
+                .map(|def| (def.id, RefreshSlot::new()))
+                .collect(),
         }
     }
 
@@ -103,11 +137,14 @@ impl Refresher {
     /// one atomic rename before returning them. A stored entry that is no
     /// longer an OAuth sign-in (an API key) is returned as is.
     ///
-    /// Cancelling the returned future before the commit check drops any
-    /// in-flight request, releases both locks, and leaves `auth.json`
-    /// unchanged, even when the token endpoint already answered. A commit
-    /// already past its check finishes its one atomic rename, then both
-    /// locks release.
+    /// Dropping the returned future while it waits for either lock abandons
+    /// that wait. The per-key slot keeps an in-flight task so a later caller
+    /// awaits the same refresh. That task sends the request and persists its
+    /// result before releasing the auth file lock, even if the first caller
+    /// drops its wait. A finished task's success is handed to the next
+    /// caller; its failure is dropped, so the next caller starts a fresh
+    /// refresh instead of receiving the old error. The HTTP exchange remains
+    /// bounded by [`OAUTH_TIMEOUT`].
     ///
     /// # Errors
     ///
@@ -127,79 +164,153 @@ impl Refresher {
     ///   HTTP layer, without retry.
     pub async fn refresh(
         &self,
-        provider: OAuthProvider,
+        provider: &'static ProviderDef,
         held: &OAuthCredential,
         reason: RefreshReason,
     ) -> Result<Credential, ProviderError> {
-        if reason == RefreshReason::Expiring && !expiring(held, unix_now()) {
+        if reason == RefreshReason::Expiring && !held.expiring(unix_now()) {
             return Ok(Credential::OAuth(held.clone()));
         }
-        let cancel = CancellationToken::new();
-        // Fires when this future is dropped, cancelling a commit not yet begun.
-        let _cancel_on_drop = cancel.clone().drop_guard();
-        let key = Arc::clone(self.key_mutex(provider)).lock_owned().await;
+        let (Some(oauth), Some(url), Some(slot)) = (
+            provider.oauth,
+            self.endpoints.url(provider),
+            self.slot(provider),
+        ) else {
+            return Err(ProviderError::SignInExpired {
+                provider: provider.id.to_owned(),
+            });
+        };
+        let client_id = oauth.client_id;
+        let key = slot.key.lock().await;
+        let mut in_flight = slot.in_flight.lock().await;
+        if in_flight
+            .as_ref()
+            .is_some_and(tokio::task::JoinHandle::is_finished)
+        {
+            match await_refresh(&mut in_flight).await {
+                Ok(credential) => {
+                    drop(key);
+                    return Ok(credential);
+                }
+                // The finished task's failure is stale: nobody received it.
+                // await_refresh cleared the slot, so this caller starts the
+                // fresh refresh below, still holding the per-key guard to
+                // keep the fresh attempt single-flight.
+                Err(_) => {
+                    tracing::debug!(
+                        provider = provider.id,
+                        "the joined refresh had already failed; starting a fresh one"
+                    );
+                }
+            }
+        }
+        if in_flight.is_some() {
+            drop(key);
+            return await_refresh(&mut in_flight).await;
+        }
+        if self.closed.load(Ordering::Acquire) {
+            return Err(ProviderError::Transport {
+                family: provider.family,
+                reason: String::from("credential refresh refused: the refresher is shut down"),
+            });
+        }
         let file = lock_auth_file(&self.auth_path).await?;
         let path = self.auth_path.clone();
         let mut store = blocking(move || AuthStore::load(path)).await?;
-        let stored = match store.credential(provider.id()) {
+        let stored = match store.credential(provider.id) {
             Some(Credential::OAuth(stored)) => stored,
             Some(other @ Credential::ApiKey { .. }) => return Ok(other),
             Some(Credential::None) | None => {
                 return Err(ProviderError::NoCredentials {
-                    provider: provider.id().to_owned(),
+                    provider: provider.id.to_owned(),
                 });
             }
         };
         if stored.access_token != held.access_token
-            || (reason == RefreshReason::Expiring && !expiring(&stored, unix_now()))
+            || (reason == RefreshReason::Expiring && !stored.expiring(unix_now()))
         {
             return Ok(Credential::OAuth(stored));
         }
-        let fresh = self.exchange(provider, &stored).await?;
-        let committed = Credential::OAuth(fresh.clone());
-        let id = provider.id();
-        blocking(move || {
-            // The guards live until the commit ends or is refused.
-            let _locks = (key, file);
-            commit(&cancel, &mut store, id, committed)
-        })
-        .await?;
-        tracing::debug!(provider = id, "stored refreshed OAuth tokens");
-        Ok(Credential::OAuth(fresh))
+        let client = (*self.client).clone();
+        let user_agent = self.user_agent.clone();
+        let url = url.clone();
+        let id = provider.id;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the refresh task is stored in the per-key slot and must persist a rotated token after caller cancellation"
+        )]
+        let task = tokio::spawn(async move {
+            let fresh =
+                Self::exchange(&client, &user_agent, &url, provider, client_id, &stored).await?;
+            let committed = Credential::OAuth(fresh.clone());
+            blocking(move || {
+                // The file lock lives until the request and commit both finish.
+                let _file = file;
+                commit(&mut store, id, committed)
+            })
+            .await?;
+            tracing::debug!(provider = id, "stored refreshed OAuth tokens");
+            Ok::<Credential, ProviderError>(Credential::OAuth(fresh))
+        });
+        *in_flight = Some(task);
+        drop(key);
+        await_refresh(&mut in_flight).await
     }
 
-    const fn key_mutex(&self, provider: OAuthProvider) -> &Arc<Mutex<()>> {
-        match provider {
-            OAuthProvider::Anthropic => &self.anthropic,
-            OAuthProvider::OpenAiCodex => &self.openai_codex,
+    /// Stops new refreshes and waits until every refresh task that is still
+    /// in a slot has persisted or failed, so none outlives the host.
+    ///
+    /// A [`Refresher::refresh`] that needs a new request after this call
+    /// starts fails with [`ProviderError::Transport`]; one that joins a task
+    /// already in flight still receives its result. The wait covers a task
+    /// whose callers all dropped their waits, and is safe to drop and call
+    /// again: the slot keeps the task until it is observed finished.
+    pub async fn shutdown(&self) {
+        self.closed.store(true, Ordering::Release);
+        for (_, slot) in &self.slots {
+            let mut in_flight = slot.in_flight.lock().await;
+            if let Some(task) = in_flight.as_mut() {
+                let _outcome = task.await;
+            }
+            *in_flight = None;
         }
+    }
+
+    fn slot(&self, provider: &ProviderDef) -> Option<&RefreshSlot> {
+        self.slots
+            .iter()
+            .find(|(id, _)| *id == provider.id)
+            .map(|(_, slot)| slot)
     }
 }
 impl Refresher {
     /// Sends the refresh request, retrying once after [`RETRY_DELAY`] on a
     /// transient failure.
     async fn exchange(
-        &self,
-        provider: OAuthProvider,
+        client: &reqwest::Client,
+        user_agent: &str,
+        url: &Url,
+        provider: &ProviderDef,
+        client_id: &'static str,
         stored: &OAuthCredential,
     ) -> Result<OAuthCredential, ProviderError> {
         let body = sonic_rs::to_vec(&RefreshBody {
             grant_type: "refresh_token",
-            client_id: provider.client_id(),
+            client_id,
             refresh_token: stored.refresh_token.expose(),
         })
         .map_err(|_| ProviderError::Transport {
-            family: provider.family(),
+            family: provider.family,
             reason: String::from("could not encode the token refresh request"),
         })?;
         let mut retried = false;
         loop {
-            match self.attempt(provider, stored, body.clone()).await {
+            match Self::attempt(client, user_agent, url, provider, stored, body.clone()).await {
                 Ok(fresh) => return Ok(fresh),
                 Err(Failure::Transient(_)) if !retried => {
                     retried = true;
                     tracing::debug!(
-                        provider = provider.id(),
+                        provider = provider.id,
                         "token refresh failed transiently; retrying once"
                     );
                     tokio::time::sleep(RETRY_DELAY).await;
@@ -211,28 +322,21 @@ impl Refresher {
 
     /// One refresh request and the classification of its outcome.
     async fn attempt(
-        &self,
-        provider: OAuthProvider,
+        client: &reqwest::Client,
+        user_agent: &str,
+        url: &Url,
+        provider: &ProviderDef,
         stored: &OAuthCredential,
         body: Vec<u8>,
     ) -> Result<OAuthCredential, Failure> {
-        let family = provider.family();
-        let request = self
-            .client
-            .post(self.endpoints.url(provider).clone())
-            .body(body);
+        let family = provider.family;
+        let request = client.post(url.clone()).body(body);
         let exchange = Exchange::Json {
             total: OAUTH_TIMEOUT,
         };
-        let response = send(
-            family,
-            request,
-            &self.user_agent,
-            exchange,
-            tokio::time::sleep,
-        )
-        .await
-        .map_err(Failure::from_http)?;
+        let response = send(family, request, user_agent, exchange, tokio::time::sleep)
+            .await
+            .map_err(Failure::from_http)?;
         let status = response.status();
         let bytes = read_body(family, response)
             .await
@@ -245,20 +349,28 @@ impl Refresher {
     }
 }
 
-/// Writes `credential` for `id` unless `cancel` has fired. The check is the
-/// commit's linearization point: after a cancellation nothing is written;
-/// past the check the atomic rename of [`AuthStore::store`] runs to its end.
-pub(crate) fn commit(
-    cancel: &CancellationToken,
-    store: &mut AuthStore,
-    id: &str,
-    credential: Credential,
-) -> Result<(), ProviderError> {
-    if cancel.is_cancelled() {
-        return Err(ProviderError::AuthWrite {
-            reason: String::from("the refresh was cancelled before the commit"),
-        });
-    }
+async fn await_refresh(
+    in_flight: &mut Option<tokio::task::JoinHandle<Result<Credential, ProviderError>>>,
+) -> Result<Credential, ProviderError> {
+    let result = {
+        let Some(task) = in_flight.as_mut() else {
+            return Err(ProviderError::AuthWrite {
+                reason: String::from("the refresh task is missing"),
+            });
+        };
+        match task.await {
+            Ok(result) => result,
+            Err(error) => Err(ProviderError::AuthWrite {
+                reason: format!("the OAuth refresh task failed: {error}"),
+            }),
+        }
+    };
+    *in_flight = None;
+    result
+}
+
+/// Writes `credential` for `id` and atomically stores the updated auth file.
+fn commit(store: &mut AuthStore, id: &str, credential: Credential) -> Result<(), ProviderError> {
     store.set(id, credential)?;
     store.store()
 }
@@ -298,25 +410,17 @@ struct TokenResponse {
     id_token: Option<SecretString>,
 }
 
-/// Whether `credential` is inside the proactive window at `now`; a credential
-/// without expiry refreshes only after a 401.
-fn expiring(credential: &OAuthCredential, now: i64) -> bool {
-    credential
-        .expires_at
-        .is_some_and(|at| at.saturating_sub(now) <= PROACTIVE_WINDOW_SECS)
-}
-
 /// The new credential from a successful token response. A response without
 /// a refresh token or ID token keeps the stored one; the Codex account id
 /// follows the ID token when it names one.
 pub(crate) fn fresh_credential(
-    provider: OAuthProvider,
+    provider: &ProviderDef,
     stored: &OAuthCredential,
     body: &[u8],
     now: i64,
 ) -> Result<OAuthCredential, ProviderError> {
     let invalid = |detail: &str| ProviderError::Transport {
-        family: provider.family(),
+        family: provider.family,
         reason: format!("the token endpoint answered with an invalid body: {detail}"),
     };
     // The parser message may quote the body, which holds tokens: drop it.
@@ -330,20 +434,22 @@ pub(crate) fn fresh_credential(
         .refresh_token
         .filter(|token| !token.expose().is_empty())
         .unwrap_or_else(|| stored.refresh_token.clone());
-    let (id_token, account_id) = match provider {
-        OAuthProvider::Anthropic => (None, None),
-        OAuthProvider::OpenAiCodex => {
-            let id_token = tokens
-                .id_token
-                .map(|token| token.expose().to_owned())
-                .or_else(|| stored.id_token.clone());
-            let account_id = id_token
-                .as_deref()
-                .and_then(codex_identity)
-                .map(|identity| identity.account_id)
-                .or_else(|| stored.account_id.clone());
-            (id_token, account_id)
-        }
+    let (id_token, account_id) = if provider
+        .oauth
+        .is_some_and(|oauth| oauth.hook == Hook::CodexAccount)
+    {
+        let id_token = tokens
+            .id_token
+            .map(|token| token.expose().to_owned())
+            .or_else(|| stored.id_token.clone());
+        let account_id = id_token
+            .as_deref()
+            .and_then(codex_identity)
+            .map(|identity| identity.account_id)
+            .or_else(|| stored.account_id.clone());
+        (id_token, account_id)
+    } else {
+        (None, None)
     };
     Ok(OAuthCredential {
         access_token: tokens.access_token,
@@ -356,7 +462,7 @@ pub(crate) fn fresh_credential(
 
 /// Classifies a non-success token response.
 fn rejection(
-    provider: OAuthProvider,
+    provider: &ProviderDef,
     status: u16,
     body: &[u8],
     stored: &OAuthCredential,
@@ -370,11 +476,11 @@ fn rejection(
     });
     if (400..500).contains(&status) && permanent {
         return Failure::Final(ProviderError::SignInExpired {
-            provider: provider.id().to_owned(),
+            provider: provider.id.to_owned(),
         });
     }
     let error = ProviderError::Status {
-        family: provider.family(),
+        family: provider.family,
         status,
         message: redact(&error_message(value.as_ref(), body), stored),
     };

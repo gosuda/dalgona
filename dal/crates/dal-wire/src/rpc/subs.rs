@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use dal_agent::{Delivery, Host, HostSubscription, HostUpdate, Subscription};
 use dal_core::{Gen, Seq, SessionId, Update, UpdateKind};
-use sonic_rs::Value;
+use sonic_rs::{JsonValueMutTrait as _, Value};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
@@ -287,6 +287,23 @@ fn host_update_body(host: &Host, update: &HostUpdate) -> Option<Value> {
             "sessionId": child.to_string(),
             "parentId": parent.to_string(),
         })),
+        HostUpdate::LoginFinished {
+            login,
+            provider,
+            ready,
+            detail,
+        } => {
+            let mut body = sonic_rs::json!({
+                "type": "login_finished",
+                "loginId": login.get(),
+                "provider": provider.as_ref(),
+                "state": if *ready { "ready" } else { "failed" },
+            });
+            if let (Some(detail), Some(object)) = (detail, body.as_object_mut()) {
+                object.insert("detail", Value::from(detail.as_ref()));
+            }
+            Some(body)
+        }
     }
 }
 

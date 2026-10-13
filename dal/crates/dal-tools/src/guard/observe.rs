@@ -271,11 +271,13 @@ fn record_file(
         path,
         pre_metrics.as_ref(),
         &post_metrics,
-        ctx.cfg.cognitive_band,
-        ctx.cfg.cyclomatic_band,
-        ctx.cfg.function_ploc_band,
-        ctx.cfg.nesting_band,
-        ctx.cfg.file_ploc_band,
+        &metrics::Bands {
+            cognitive: ctx.cfg.cognitive_band,
+            cyclomatic: ctx.cfg.cyclomatic_band,
+            function_ploc: ctx.cfg.function_ploc_band,
+            nesting: ctx.cfg.nesting_band,
+            file_ploc: ctx.cfg.file_ploc_band,
+        },
     );
     if *ctx.displayed < 20 {
         ctx.out.push(EditFinding {

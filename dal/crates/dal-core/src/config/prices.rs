@@ -69,6 +69,103 @@ pub(super) fn is_rule_name(text: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'.' | b'_' | b'-'))
 }
 
+fn parse_tiers(
+    key: &str,
+    value: toml::Value,
+) -> Result<Box<[crate::model::PriceTier]>, ConfigError> {
+    let items = match value {
+        toml::Value::Array(items) if !items.is_empty() => items,
+        other => {
+            return Err(invalid_value(
+                key,
+                value_text(&other),
+                "a non-empty array of context price tiers",
+            ));
+        }
+    };
+    let mut tiers = Vec::with_capacity(items.len());
+    let mut previous_size = None;
+    for item in items {
+        let table = match item {
+            toml::Value::Table(table) => table,
+            other => {
+                return Err(invalid_value(
+                    key,
+                    value_text(&other),
+                    "each tier must be a table",
+                ));
+            }
+        };
+        for field in table.keys() {
+            if !matches!(
+                field.as_str(),
+                "size" | "input" | "cached_input" | "output" | "reasoning"
+            ) {
+                return Err(unknown_key(
+                    &format!("{key}.{field}"),
+                    ConfigProduct::Dalgon,
+                    None,
+                ));
+            }
+        }
+        let size = match table.get("size") {
+            Some(toml::Value::Integer(size)) if *size >= 0 => {
+                u64::try_from(*size).map_err(|_| {
+                    invalid_value(key, size.to_string(), "a non-negative context token count")
+                })?
+            }
+            Some(other) => {
+                return Err(invalid_value(
+                    key,
+                    value_text(other),
+                    "a non-negative context token count",
+                ));
+            }
+            None => {
+                return Err(invalid_value(
+                    key,
+                    value_text(&toml::Value::Table(table.clone())),
+                    "every tier needs a size",
+                ));
+            }
+        };
+        if previous_size.is_some_and(|previous| size <= previous) {
+            return Err(invalid_value(
+                key,
+                size.to_string(),
+                "strictly increasing context tier sizes",
+            ));
+        }
+        let parse_optional = |field: &str| {
+            table
+                .get(field)
+                .cloned()
+                .map(|value| parse_rate(&format!("{key}.{field}"), value))
+                .transpose()
+        };
+        let input = parse_optional("input")?;
+        let cached_input = parse_optional("cached_input")?;
+        let output = parse_optional("output")?;
+        let reasoning = parse_optional("reasoning")?;
+        if input.is_none() && cached_input.is_none() && output.is_none() && reasoning.is_none() {
+            return Err(invalid_value(
+                key,
+                size.to_string(),
+                "each tier needs at least one rate",
+            ));
+        }
+        tiers.push(crate::model::PriceTier {
+            size,
+            input,
+            cached_input,
+            output,
+            reasoning,
+        });
+        previous_size = Some(size);
+    }
+    Ok(tiers.into_boxed_slice())
+}
+
 pub(super) fn parse_prices(
     product: ConfigProduct,
     value: toml::Value,
@@ -133,6 +230,9 @@ pub(super) fn parse_prices(
         }
         if let Some(value) = text.reasoning {
             partial.reasoning = Some(parse_rate(&format!("prices.{model_id}.reasoning"), value)?);
+        }
+        if let Some(value) = text.tiers {
+            partial.tiers = Some(parse_tiers(&format!("prices.{model_id}.tiers"), value)?);
         }
         parsed.insert(model_id.into_boxed_str(), partial);
     }
