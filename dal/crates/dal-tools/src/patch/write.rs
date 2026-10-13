@@ -118,6 +118,26 @@ pub async fn plan(
         );
         files.push(staged);
     }
+    // Destination paths are writes too: aliases and duplicate destinations
+    // cannot be authorized as independent operations.
+    let mut targets = std::collections::HashSet::with_capacity(files.len() * 2);
+    for file in &files {
+        targets.insert(file.absolute_path.clone());
+    }
+    for file in &files {
+        if let Some(dest) = file.renamed_to.as_deref() {
+            let (_, absolute) = resolve_path(&session.workspace, dest)?;
+            if !targets.insert(absolute) {
+                return Err(EngineError::new(
+                    ErrorClass::Resolve,
+                    format!(
+                        "patch: rename destination {} overlaps another change.",
+                        dest.display()
+                    ),
+                ));
+            }
+        }
+    }
     let staged_mib = staged_bytes.div_ceil(1 << 20);
     if staged_bytes > 64 << 20 {
         return Err(EngineError::new(
