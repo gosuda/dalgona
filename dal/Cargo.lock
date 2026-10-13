@@ -1012,6 +1012,7 @@ dependencies = [
  "regex",
  "regex-automata",
  "regex-syntax",
+ "rustix 1.1.5",
  "serde",
  "similar 3.2.0",
  "sonic-rs",
@@ -1029,6 +1030,7 @@ dependencies = [
  "tree-sitter-python",
  "tree-sitter-rust",
  "tree-sitter-typescript",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
