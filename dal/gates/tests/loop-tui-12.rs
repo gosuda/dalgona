@@ -876,4 +876,3 @@ fn pty_transcript_preserves_live_terminal_state() -> TestResult {
     assert!(status.success(), "dalgon exited with {status}");
     Ok(())
 }
-// weave: run 'weave explain dal/gates/tests/loop-tui-12.rs' for per-hunk detail, 'weave check' to verify your resolution

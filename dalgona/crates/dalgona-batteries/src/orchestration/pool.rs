@@ -207,7 +207,7 @@ pub(crate) struct ChildEnd {
 }
 
 /// One settled task plus the late-report note. The note travels with the
-/// verdict; the Change-8 record writer attaches it to the task outcome.
+/// verdict; the runtime settle path attaches it to the task outcome.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Settled {
     pub state: TaskState,

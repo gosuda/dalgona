@@ -224,7 +224,7 @@ impl Arbiter {
     }
 
     /// Counts how many leading monitor batches fit in the remaining budget
-    /// after `used` bytes. The Change-8 wake uses the same count to requeue
+    /// after `used` bytes. The wake uses the same count to requeue
     /// the batches an injection leaves out, so no batch is lost to the cut.
     pub(crate) fn fit_monitor(batches: &[String], used: usize, max_bytes: usize) -> usize {
         let mut taken = 0;

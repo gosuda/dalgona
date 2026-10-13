@@ -449,4 +449,3 @@ fn transport(family: Family, reason: String) -> ProviderError {
 
 #[cfg(test)]
 mod tests;
-// weave: run 'weave explain dal/crates/dal-provider/src/http.rs' for per-hunk detail, 'weave check' to verify your resolution

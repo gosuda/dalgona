@@ -68,4 +68,3 @@ pub(crate) fn start_child(
 pub(crate) fn child_id(id: &str) -> Result<SessionId, AgentInputError> {
     SessionId::parse(id).map_err(|_| AgentInputError::UnknownChild(id.into()))
 }
-// weave: run 'weave explain dal/crates/dal-ext/src/subagent/child.rs' for per-hunk detail, 'weave check' to verify your resolution

@@ -215,4 +215,3 @@ fn has_row_number(bytes: &[u8]) -> bool {
     }
     false
 }
-// weave: run 'weave explain dal/gates/tests/dal-full-09.rs' for per-hunk detail, 'weave check' to verify your resolution

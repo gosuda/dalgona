@@ -1073,4 +1073,3 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests;
-// weave: run 'weave explain dal/crates/dal-provider/src/ws.rs' for per-hunk detail, 'weave check' to verify your resolution

@@ -365,4 +365,3 @@ fn slot_for(
 
 #[cfg(test)]
 mod tests;
-// weave: run 'weave explain dal/crates/dal-agent/src/broker.rs' for per-hunk detail, 'weave check' to verify your resolution
