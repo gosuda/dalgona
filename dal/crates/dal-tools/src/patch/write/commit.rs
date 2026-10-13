@@ -1,6 +1,10 @@
 //! Atomic commit: locks, temps, ordered operations, and truthful outcomes.
 
-use std::{io, path::{Path, PathBuf}, sync::Arc};
+use std::{
+    io,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use super::super::ir::{
     Diff, DiffFile, EngineError, ErrorClass, FileChange, FindingSeverity, Output, Plan,
