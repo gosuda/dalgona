@@ -78,12 +78,14 @@ mod platform {
                     | OFlags::EXCL
                     | OFlags::NOFOLLOW
                     | OFlags::CLOEXEC;
-                match rustix::fs::openat(
-                    &parent,
-                    temp.as_os_str(),
-                    flags,
-                    Mode::RUSR | Mode::WUSR,
-                ) {
+                // Match the existing patch writer's default mode (0666 & umask).
+                let mode = Mode::RUSR
+                    | Mode::WUSR
+                    | Mode::RGRP
+                    | Mode::WGRP
+                    | Mode::ROTH
+                    | Mode::WOTH;
+                match rustix::fs::openat(&parent, temp.as_os_str(), flags, mode) {
                     Ok(handle) => {
                         return Ok((
                             Self {
