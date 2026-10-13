@@ -393,15 +393,14 @@ fn parse_selector(path: &str) -> Result<Selection, ReadError> {
 /// Reads one filesystem path and renders the result.
 fn read_path(root: &Path, path: &Path, lines: &Lines) -> Result<Reading, ReadError> {
     let shown = path.to_string_lossy();
-    let target = workspace_path::resolve(root, path)
-        .map_err(|error| match error {
-            ScopeError::OutsideWorkspace => ReadError::OutsideWorkspace,
-            ScopeError::Io(error) => io_error(&shown, error),
-        })?
-        .absolute;
-    let metadata = fs::metadata(&target).map_err(|error| io_error(&shown, error))?;
+    let scoped = workspace_path::resolve(root, path).map_err(|error| match error {
+        ScopeError::OutsideWorkspace => ReadError::OutsideWorkspace,
+        ScopeError::Io(error) => io_error(&shown, error),
+    })?;
+    let opened = workspace_path::open(&scoped).map_err(|error| io_error(&shown, error))?;
+    let metadata = opened.metadata().map_err(|error| io_error(&shown, error))?;
     if metadata.is_dir() {
-        let text = read_directory(&target, &shown)?;
+        let text = read_directory(&opened, &scoped.absolute, &shown)?;
         return Ok(Reading {
             parts: vec![Part::Text { text: text.into() }],
             shown: None,
@@ -412,7 +411,7 @@ fn read_path(root: &Path, path: &Path, lines: &Lines) -> Result<Reading, ReadErr
         return Err(ReadError::NotFileOrDirectory(shown.into()));
     }
     let tag_path = display_path(root, &root.join(path), &shown);
-    match read_file(&target, &shown, lines, footer_reserve(&tag_path))? {
+    match read_open_file(opened, &shown, lines, footer_reserve(&tag_path))? {
         FileContent::Image { kind, bytes } => Ok(Reading {
             parts: vec![
                 Part::Text {
@@ -438,10 +437,8 @@ fn read_path(root: &Path, path: &Path, lines: &Lines) -> Result<Reading, ReadErr
             let shown = if intervals.is_empty() {
                 None
             } else {
-                let canonical =
-                    fs::canonicalize(&target).map_err(|error| io_error(&shown, error))?;
                 Some(Shown {
-                    canonical: canonical.to_string_lossy().into_owned(),
+                    canonical: scoped.absolute.to_string_lossy().into_owned(),
                     digest: digest32(&bytes),
                     intervals,
                 })
@@ -490,13 +487,40 @@ fn display_path(root: &Path, target: &Path, shown: &str) -> String {
 
 /// Lists a directory: directories first with a trailing `/`, each group
 /// sorted bytewise, at most [`MAX_DIR_ENTRIES`] entries.
-fn read_directory(path: &Path, shown: &str) -> Result<String, ReadError> {
-    let mut entries = Vec::new();
-    for entry in fs::read_dir(path).map_err(|error| io_error(shown, error))? {
-        let entry = entry.map_err(|error| io_error(shown, error))?;
-        let is_dir = fs::symlink_metadata(entry.path()).is_ok_and(|metadata| metadata.is_dir());
-        entries.push((!is_dir, entry.file_name()));
-    }
+fn read_directory(opened: &File, path: &Path, shown: &str) -> Result<String, ReadError> {
+    #[cfg(unix)]
+    let mut entries = {
+        use std::{ffi::OsStr, os::unix::ffi::OsStrExt as _};
+
+        let _ = path;
+        let mut entries = Vec::new();
+        let stream =
+            rustix::fs::Dir::read_from(opened).map_err(|error| io_error(shown, error.into()))?;
+        for entry in stream {
+            let entry = entry.map_err(|error| io_error(shown, error.into()))?;
+            let name = entry.file_name().to_bytes();
+            if name == b"." || name == b".." {
+                continue;
+            }
+            entries.push((
+                !entry.file_type().is_dir(),
+                OsStr::from_bytes(name).to_os_string(),
+            ));
+        }
+        entries
+    };
+    #[cfg(not(unix))]
+    let mut entries = {
+        let _ = opened;
+        let mut entries = Vec::new();
+        for entry in fs::read_dir(path).map_err(|error| io_error(shown, error))? {
+            let entry = entry.map_err(|error| io_error(shown, error))?;
+            let is_dir =
+                fs::symlink_metadata(entry.path()).is_ok_and(|metadata| metadata.is_dir());
+            entries.push((!is_dir, entry.file_name()));
+        }
+        entries
+    };
     entries
         .sort_unstable_by(|a, b| (a.0, a.1.as_encoded_bytes()).cmp(&(b.0, b.1.as_encoded_bytes())));
     let mut lines: Vec<String> = entries
@@ -527,14 +551,24 @@ fn footer_reserve(tag_path: &str) -> usize {
 /// Reads a regular file: an image by signature, a binary refusal, or a
 /// numbered text window. Line totals come from a first counting pass; the
 /// window decodes the whole second-pass byte sequence lossily at once.
+#[cfg(test)]
 fn read_file(
     path: &Path,
     shown: &str,
     lines: &Lines,
     reserve: usize,
 ) -> Result<FileContent, ReadError> {
+    let file = File::open(path).map_err(|error| io_error(shown, error))?;
+    read_open_file(file, shown, lines, reserve)
+}
+
+fn read_open_file(
+    mut file: File,
+    shown: &str,
+    lines: &Lines,
+    reserve: usize,
+) -> Result<FileContent, ReadError> {
     let fail = |error| io_error(shown, error);
-    let mut file = File::open(path).map_err(fail)?;
     let size = file.metadata().map_err(fail)?.len();
     let mut prefix = [0_u8; PROBE_BYTES];
     let probed = fill(&mut file, &mut prefix).map_err(fail)?;
