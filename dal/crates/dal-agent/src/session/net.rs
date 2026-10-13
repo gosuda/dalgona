@@ -251,28 +251,32 @@ mod tests {
             .await
             .expect("bind test server");
         let local = listener.local_addr().expect("bound port");
-        let server = tokio::spawn(async move {
+        let server = async move {
             let (mut connection, _) = listener.accept().await.expect("one connection");
-            let mut request = [0_u8; 1024];
-            connection.read(&mut request).await.expect("read request");
+            assert_eq!(
+                connection.read_u8().await.expect("first HTTP request byte"),
+                b'G'
+            );
             connection
                 .write_all(
                     b"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:1/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                 )
                 .await
                 .expect("write redirect");
-        });
+        };
 
         // This helper tests the transport in isolation: public-IP admission is
         // covered above. The reserved .invalid domain cannot resolve normally.
         let client = single_hop_client("rebinding.invalid", &[local])
             .expect("client with pinned test address");
-        let response = client
-            .get(format!("http://rebinding.invalid:{}/", local.port()))
-            .send()
-            .await
-            .expect("pinned single-hop response");
-        assert_eq!(response.status(), reqwest::StatusCode::FOUND);
-        server.await.expect("test server exited");
+        let fetch = async {
+            let response = client
+                .get(format!("http://rebinding.invalid:{}/", local.port()))
+                .send()
+                .await
+                .expect("pinned single-hop response");
+            assert_eq!(response.status(), reqwest::StatusCode::FOUND);
+        };
+        tokio::join!(server, fetch);
     }
 }
