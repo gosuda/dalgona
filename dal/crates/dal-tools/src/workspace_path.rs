@@ -17,7 +17,8 @@ pub(crate) struct WorkspacePath {
 pub(crate) fn resolve(workspace: &Path, path: &Path) -> io::Result<Option<WorkspacePath>> {
     let root = fs::canonicalize(workspace)?;
     let relative = if path.is_absolute() {
-        let Ok(relative) = path.strip_prefix(&root) else {
+        let Ok(relative) = path.strip_prefix(&root).or_else(|_| path.strip_prefix(workspace))
+        else {
             return Ok(None);
         };
         relative

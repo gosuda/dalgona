@@ -28,9 +28,10 @@ use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _};
 use self::image::{ImageKind, MAX_IMAGE_BYTES};
 use self::window::{ReadWindow, Source, render, source_rows, window};
 use crate::{
-    Seen, digest32, workspace_path,
+    Seen, digest32,
     evidence::{Binding, capture},
     patch::snapshot::SnapshotStore,
+    workspace_path,
 };
 
 const READ_SCHEMA: &str = r#"{"type":"object","properties":{"path":{"type":"string","description":"File, directory, or page to read. Relative paths start at the workspace root. A suffix :<a>-<b>[,<c>[-<d>]] selects lines."},"offset":{"type":"integer","minimum":1,"description":"First line to show, 1-indexed. Default 1."},"limit":{"type":"integer","minimum":1,"maximum":2000,"description":"Maximum number of lines to show. Default 1000."}},"required":["path"],"additionalProperties":false}"#;
@@ -486,7 +487,7 @@ fn read_directory(path: &Path, shown: &str) -> Result<String, ReadError> {
     let mut entries = Vec::new();
     for entry in fs::read_dir(path).map_err(|error| io_error(shown, error))? {
         let entry = entry.map_err(|error| io_error(shown, error))?;
-        let is_dir = fs::metadata(entry.path()).is_ok_and(|metadata| metadata.is_dir());
+        let is_dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
         entries.push((!is_dir, entry.file_name()));
     }
     entries
@@ -920,6 +921,11 @@ mod tests {
         }
 
         let inside = read(&workspace, &args("inside.txt")).await.unwrap();
+        assert!(text(&inside).contains("INSIDE"));
+        let absolute = workspace.join("inside.txt");
+        let inside = read(&workspace, &args(&absolute.to_string_lossy()))
+            .await
+            .unwrap();
         assert!(text(&inside).contains("INSIDE"));
     }
 

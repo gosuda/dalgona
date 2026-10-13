@@ -26,8 +26,8 @@ use dal_core::{
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _};
 
 use crate::evidence::Binding;
-use crate::workspace_path;
 use crate::patch::snapshot::SnapshotStore;
+use crate::workspace_path;
 use crate::{Rerank, RerankCall, RerankCandidate, Seen};
 use find::{ContentClass, Entry, FindGlob, FindResult};
 use grep::SeenRow;
@@ -855,6 +855,15 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert!(inside.contains("inside.txt"));
+        let absolute = workspace.join("inside.txt");
+        let args = sonic_rs::to_string(&sonic_rs::json!({
+            "mode": "grep",
+            "pattern": "INSIDE",
+            "path": absolute
+        }))
+        .unwrap();
+        let inside = run(&search, &workspace, &args).await.unwrap();
+        assert!(inside.contains("INSIDE"));
     }
 
     #[test]
