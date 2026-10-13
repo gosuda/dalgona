@@ -1,0 +1,176 @@
+name: dalgona
+on:
+  push:
+    paths:
+      - "dalgona/**"
+      - ".github/workflows/dalgona.yml"
+      - "rust-toolchain.toml"
+      - ".gitignore"
+      - "LICENSE.md"
+      - "AGENTS.md"
+      - "README.md"
+  pull_request:
+    paths:
+      - "dalgona/**"
+      - ".github/workflows/dalgona.yml"
+      - "rust-toolchain.toml"
+      - ".gitignore"
+      - "LICENSE.md"
+      - "AGENTS.md"
+      - "README.md"
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dal-released:
+    runs-on: ubuntu-24.04
+    outputs:
+      ready: ${{ steps.probe.outputs.ready }}
+    steps:
+      - id: probe
+        shell: bash
+        run: |
+          if curl -fsSL "https://index.crates.io/da/l-/dal-agent" | grep -q '"vers":"0.1.0"'; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::dal-* 0.1.0 is not on crates.io yet; dalgona jobs are do-not-execute until dal publishes"
+          fi
+
+  fmt:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: dalgona
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - run: cargo fmt --check --all
+
+  gates:
+    needs: dal-released
+    if: needs.dal-released.outputs.ready == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: macos-15-intel, target: x86_64-apple-darwin }
+          - { os: macos-15, target: aarch64-apple-darwin }
+          - { os: windows-2022, target: x86_64-pc-windows-msvc }
+          - { os: windows-11-arm, target: aarch64-pc-windows-msvc }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: dalgona
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - run: cargo clippy --all-targets --all-features --locked -- -D warnings
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo check --locked --no-default-features --workspace
+      - run: cargo test --all-features --locked
+
+  msrv:
+    needs: dal-released
+    if: needs.dal-released.outputs.ready == 'true'
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: dalgona
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - run: rustup toolchain install 1.90.0 --profile minimal
+      # Deps may declare a higher rust_version than their code needs
+      # (mermaid-text 0.57 declares 1.92 but compiles on 1.90); the MSRV
+      # gate measures compilation, not metadata.
+      - run: cargo +1.90.0 check --workspace --all-features --locked --ignore-rust-version
+
+  deny:
+    runs-on: ubuntu-24.04
+    needs: dal-released
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check released dal dependencies
+        shell: bash
+        working-directory: dalgona
+        run: |
+          set -euo pipefail
+          test ! -e .cargo/config.toml
+          if git -C .. grep -n -E 'path[[:space:]]*=[[:space:]]*"[^"]*/dal/' -- 'dalgona/**/Cargo.toml'; then
+            echo "dalgona manifests must not point into dal/" >&2
+            exit 1
+          fi
+          if git -C .. grep -n -E '^\[patch' -- 'dalgona/**/Cargo.toml'; then
+            echo "dalgona manifests must not contain a patch section" >&2
+            exit 1
+          fi
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          import subprocess
+          import tomllib
+
+          def fail(message):
+              raise SystemExit(message)
+
+          def check_dependencies(table, manifest):
+              for name, value in table.items():
+                  if name != "dal" and not name.startswith("dal-"):
+                      continue
+                  spec = value if isinstance(value, str) else value.get("version")
+                  if not isinstance(spec, str) or not spec.startswith("="):
+                      fail(f"{manifest}: {name} must use an exact = version")
+                  if isinstance(value, dict) and "path" in value:
+                      fail(f"{manifest}: {name} must not use a path dependency")
+
+          for manifest in Path(".").rglob("Cargo.toml"):
+              data = tomllib.loads(manifest.read_text())
+              if "patch" in data:
+                  fail(f"{manifest}: patch sections are forbidden")
+              for key in ("dependencies", "dev-dependencies", "build-dependencies"):
+                  check_dependencies(data.get(key, {}), manifest)
+              for target in data.get("target", {}).values():
+                  for key in ("dependencies", "dev-dependencies", "build-dependencies"):
+                      check_dependencies(target.get(key, {}), manifest)
+              check_dependencies(data.get("workspace", {}).get("dependencies", {}), manifest)
+          PY
+      - name: Check resolution is free of path-sourced dal crates
+        if: needs.dal-released.outputs.ready == 'true'
+        shell: bash
+        working-directory: dalgona
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import re
+          import subprocess
+
+          tree = subprocess.run(
+              ["cargo", "tree", "--workspace", "--prefix", "none"],
+              check=True, text=True, capture_output=True,
+          ).stdout
+          for line in tree.splitlines():
+              if re.search(r"\bdal(?:-[^\s]+)? v[^\s]+ \([^)]*/dal/", line):
+                  raise SystemExit(f"path-sourced dal crate is forbidden: {line}")
+          PY
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        if: needs.dal-released.outputs.ready == 'true'
+        with:
+          tool: cargo-deny@0.20.2
+      - run: cargo deny --locked check
+        if: needs.dal-released.outputs.ready == 'true'
+        working-directory: dalgona

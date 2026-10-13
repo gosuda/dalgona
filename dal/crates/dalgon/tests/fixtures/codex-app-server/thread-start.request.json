@@ -1,0 +1,1 @@
+{"id":2,"method":"thread/start","params":{"cwd":"/tmp/dal-gates","approvalPolicy":"never","sandbox":"workspace-write","personality":"none"}}

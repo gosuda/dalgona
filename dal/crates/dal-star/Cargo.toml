@@ -1,0 +1,32 @@
+[package]
+name = "dal-star"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+repository.workspace = true
+description = "Starlark extension adapter for dal"
+
+[dependencies]
+allocative.workspace = true
+dal-agent = { path = "../dal-agent" }
+dal-core = { path = "../dal-core" }
+dal-provider.workspace = true
+futures.workspace = true
+regex.workspace = true
+serde.workspace = true
+sonic-rs.workspace = true
+starlark = "=0.14.2"
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+dal-agent = { path = "../dal-agent", features = ["test-support"] }
+proptest.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,25 @@
+{
+  "source_commit": "5c8fc15cc",
+  "requests": [
+    "initialize",
+    "initialized",
+    "thread/start",
+    "thread/resume",
+    "thread/list",
+    "turn/start",
+    "turn/interrupt"
+  ],
+  "notifications": [
+    "thread/started",
+    "turn/started",
+    "item/started",
+    "item/agentMessage/delta",
+    "item/completed",
+    "turn/completed"
+  ],
+  "server_requests": [
+    "item/commandExecution/requestApproval",
+    "item/fileChange/requestApproval",
+    "item/tool/requestUserInput"
+  ]
+}

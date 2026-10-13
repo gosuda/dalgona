@@ -1,0 +1,7 @@
+> snapshot prompt
+snapshot reply text
+No model selected yet. dal needs a model before it can answer.
+Pick an API to sign in to:
+> Ask dal to change code. / for commands.
+enter send · ctrl+j newline · esc interrupt · f1 help
+/tmp/<workspace>

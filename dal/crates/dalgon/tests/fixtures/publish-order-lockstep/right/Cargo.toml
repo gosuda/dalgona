@@ -1,0 +1,7 @@
+[package]
+name = "right"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+base = { path = "../base" }

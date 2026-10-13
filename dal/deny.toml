@@ -1,0 +1,101 @@
+[advisories]
+version = 2
+unmaintained = "workspace"
+
+[licenses]
+version = 2
+allow = [
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Zlib",
+    "LicenseRef-Sustainable-Use-1.0",
+    "SUL-1.0",
+    "0BSD",
+]
+[[licenses.clarify]]
+name = "dal-agent"
+version = "*"
+expression = "LicenseRef-Sustainable-Use-1.0"
+license-files = [{ path = "../../../LICENSE.md", hash = 0xcede84f7 }]
+
+[[licenses.clarify]]
+name = "dal-core"
+version = "*"
+expression = "LicenseRef-Sustainable-Use-1.0"
+license-files = [{ path = "../../../LICENSE.md", hash = 0xcede84f7 }]
+
+[[licenses.clarify]]
+name = "dal-ext"
+version = "*"
+expression = "LicenseRef-Sustainable-Use-1.0"
+license-files = [{ path = "../../../LICENSE.md", hash = 0xcede84f7 }]
+
+[[licenses.clarify]]
+name = "dal-provider"
+version = "*"
+expression = "LicenseRef-Sustainable-Use-1.0"
+license-files = [{ path = "../../../LICENSE.md", hash = 0xcede84f7 }]
+
+[[licenses.clarify]]
+name = "dal-star"
+version = "*"
+expression = "LicenseRef-Sustainable-Use-1.0"
+license-files = [{ path = "../../../LICENSE.md", hash = 0xcede84f7 }]
+
+[[licenses.clarify]]
+name = "dal-store"
+version = "*"
+expression = "LicenseRef-Sustainable-Use-1.0"
+license-files = [{ path = "../../../LICENSE.md", hash = 0xcede84f7 }]
+
+[[licenses.clarify]]
+name = "dal-tools"
+version = "*"
+expression = "LicenseRef-Sustainable-Use-1.0"
+license-files = [{ path = "../../../LICENSE.md", hash = 0xcede84f7 }]
+
+[[licenses.clarify]]
+name = "dal-tui"
+version = "*"
+expression = "LicenseRef-Sustainable-Use-1.0"
+license-files = [{ path = "../../../LICENSE.md", hash = 0xcede84f7 }]
+
+[[licenses.clarify]]
+name = "dal-wire"
+version = "*"
+expression = "LicenseRef-Sustainable-Use-1.0"
+license-files = [{ path = "../../../LICENSE.md", hash = 0xcede84f7 }]
+
+[[licenses.clarify]]
+name = "dalgon"
+version = "*"
+expression = "LicenseRef-Sustainable-Use-1.0"
+license-files = [{ path = "../../../LICENSE.md", hash = 0xcede84f7 }]
+
+[[licenses.clarify]]
+name = "dalgona"
+version = "*"
+expression = "LicenseRef-Sustainable-Use-1.0"
+license-files = [{ path = "../../../LICENSE.md", hash = 0xcede84f7 }]
+
+[[licenses.clarify]]
+name = "dalgona-batteries"
+version = "*"
+expression = "LicenseRef-Sustainable-Use-1.0"
+license-files = [{ path = "../../../LICENSE.md", hash = 0xcede84f7 }]
+
+[[licenses.clarify]]
+name = "gates"
+version = "*"
+expression = "LicenseRef-Sustainable-Use-1.0"
+license-files = [{ path = "../../LICENSE.md", hash = 0xcede84f7 }]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

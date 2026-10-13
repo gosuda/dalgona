@@ -1,0 +1,22 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH dalgon-dev-help-journal 1  "dalgon-dev-help-journal " 
+.SH NAME
+dalgon\-dev\-help\-journal \- Replay, diff, and edit session journals.
+.SH SYNOPSIS
+\fBdalgon dev help journal\fR [\fIsubcommands\fR]
+.SH DESCRIPTION
+Replay, diff, and edit session journals.
+.SH SUBCOMMANDS
+.TP
+dalgon\-dev\-help\-journal\-replay(1)
+Fold a journal and print the recovered state.
+.TP
+dalgon\-dev\-help\-journal\-diff(1)
+Print the folded fields that differ between two journals.
+.TP
+dalgon\-dev\-help\-journal\-torn(1)
+Copy a journal with its tail cut mid\-record.
+.TP
+dalgon\-dev\-help\-journal\-sidecar(1)
+List or dump the sidecar files in a session directory.

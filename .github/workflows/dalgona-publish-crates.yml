@@ -1,0 +1,34 @@
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+    secrets:
+      CARGO_REGISTRY_TOKEN:
+        required: true
+
+jobs:
+  publish-crates:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Rehearse each package in dependency order
+        shell: bash
+        run: |
+          set -euo pipefail
+          order="$(bash scripts/publish-crates.sh --dry-run dalgona)"
+          test -n "$order"
+          while IFS= read -r line; do
+            package="${line#cargo publish -p }"
+            test "$package" != "$line"
+            test -n "$package"
+            (cd dalgona && cargo publish --dry-run --locked --all-features -p "$package")
+          done <<< "$order"
+      - name: Publish after the Dal release
+        run: bash scripts/publish-crates.sh --check-registry-deps dalgona
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

@@ -1,0 +1,43 @@
+[package]
+name = "dal-wire"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+repository.workspace = true
+description = "Transport adapters for dal's public host contract"
+
+[dependencies]
+base64.workspace = true
+bytes.workspace = true
+blake3.workspace = true
+dal-agent = { path = "../dal-agent", version = "=0.1.0" }
+dal-core = { path = "../dal-core", version = "=0.1.0", features = ["schema"] }
+dal-provider = { path = "../dal-provider", version = "=0.1.0" }
+dal-store = { path = "../dal-store", version = "=0.1.0" }
+futures.workspace = true
+hyper = { workspace = true, features = ["server", "http1"] }
+hyper-util = { workspace = true, features = ["server", "tokio", "http1"] }
+schemars.workspace = true
+serde.workspace = true
+sonic-rs.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["net", "io-util", "sync", "time", "rt", "macros"] }
+tokio-tungstenite.workspace = true
+tokio-util = { workspace = true, features = ["rt"] }
+tracing.workspace = true
+url.workspace = true
+uuid = { workspace = true, features = ["v4"] }
+
+[target.'cfg(windows)'.dependencies]
+interprocess = { version = "=2.4.4", features = ["tokio"] }
+windows-sys.workspace = true
+
+[dev-dependencies]
+dal-ext = { path = "../dal-ext" }
+proptest.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

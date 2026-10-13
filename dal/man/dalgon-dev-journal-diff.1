@@ -1,0 +1,19 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH dalgon-dev-journal-diff 1  "dalgon-dev-journal-diff " 
+.SH NAME
+dalgon\-dev\-journal\-diff \- Print the folded fields that differ between two journals.
+.SH SYNOPSIS
+\fBdalgon dev journal diff\fR [\fB\-h\fR|\fB\-\-help\fR] <\fIBEFORE\fR> <\fIAFTER\fR> 
+.SH DESCRIPTION
+Print the folded fields that differ between two journals.
+.SH OPTIONS
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+<\fIBEFORE\fR>
+The journal whose folded fields print as removed
+.TP
+<\fIAFTER\fR>
+The journal whose folded fields print as added

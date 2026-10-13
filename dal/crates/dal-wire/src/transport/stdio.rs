@@ -1,0 +1,23 @@
+use tokio::io::{AsyncRead, AsyncWrite};
+
+use super::{FrameWriter, LineTransport};
+
+/// A newline-delimited protocol transport over caller-supplied standard streams.
+pub struct StdioTransport(pub(crate) LineTransport);
+
+impl StdioTransport {
+    /// Builds a standard-stream transport without reading process-global handles.
+    pub fn new<R, W>(reader: R, writer: W) -> Self
+    where
+        R: AsyncRead + Send + Unpin + 'static,
+        W: AsyncWrite + Send + Unpin + 'static,
+    {
+        Self(LineTransport::new(reader, writer))
+    }
+
+    /// Returns a writer handle that serializes replies from concurrent handlers.
+    #[must_use]
+    pub fn writer(&self) -> FrameWriter {
+        self.0.writer()
+    }
+}

@@ -1,0 +1,35 @@
+[package]
+name = "dalgona"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["tui"]
+tui = ["dalgon/tui"]
+
+[dependencies]
+dal-agent = "=0.1.0"
+dal-core = "=0.1.0"
+dal-tools = "=0.1.0"
+dalgon = { version = "=0.1.0", default-features = false }
+dalgona-batteries = { version = "=0.1.0", path = "../dalgona-batteries" }
+thiserror = "=2.0.21"
+toml.workspace = true
+[dev-dependencies]
+clap = { version = "=4.6.7", features = ["derive", "string"] }
+clap_mangen = "=0.3.3"
+regex = "=1.13.1"
+
+[[bin]]
+name = "dalgona"
+path = "src/bin/dalgona.rs"
+
+[[bin]]
+name = "dg"
+path = "src/bin/dg.rs"
