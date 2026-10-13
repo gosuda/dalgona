@@ -99,4 +99,6 @@ Read `dal://` for dal and `dalgona://` for dalgona; `dalgon docs` prints pages.
 
 ## License
 
-dal and dalgona are distributed under the Sustainable Use License with licensor `metaphorics`; the text is in `LICENSE.md` at the repository root. This repository also includes Starlark translations of examples from pi (https://github.com/earendil-works/pi), Copyright (c) 2025 Mario Zechner, used under the MIT License; the license text is in `docs/examples.md` and on the `examples` page of this manual.
+dal and dalgona are distributed under the Sustainable Use License with licensor `metaphorics`; the text is in `LICENSE.md` at the repository root.
+
+This repository also includes Starlark translations of examples from pi (https://github.com/earendil-works/pi), Copyright (c) 2025 Mario Zechner, used under the MIT License; the license text is in `docs/examples.md` and on the `examples` page of this manual.
