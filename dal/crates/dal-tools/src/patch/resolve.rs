@@ -168,6 +168,55 @@ pub fn resolve_path(workspace: &Path, raw: &Path) -> Result<(PathBuf, PathBuf), 
     Ok((normalized.clone(), canonical_target))
 }
 
+/// Validates a rename target before its bytes can be staged or approved.
+///
+/// Rename destinations have no parent traversal and no symlinked directory
+/// components. Publication also uses an opened directory on Unix so a
+/// subsequent filesystem change cannot redirect the validated destination.
+///
+/// # Errors
+/// Returns an error for a path outside the workspace, a symlinked parent,
+/// or an inaccessible parent.
+pub fn resolve_rename_destination(workspace: &Path, raw: &Path) -> Result<PathBuf, EngineError> {
+    if raw.as_os_str().is_empty()
+        || raw
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(outside_workspace(raw, workspace));
+    }
+    let (relative, _) = resolve_path(workspace, raw)?;
+    let mut parent = workspace.to_path_buf();
+    if let Some(parts) = relative.parent() {
+        for component in parts.components() {
+            let Component::Normal(part) = component else {
+                return Err(outside_workspace(raw, workspace));
+            };
+            parent.push(part);
+            match std::fs::symlink_metadata(&parent) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(outside_workspace(raw, workspace));
+                }
+                Ok(metadata) if !metadata.is_dir() => {
+                    return Err(EngineError::new(
+                        ErrorClass::File,
+                        format!("patch: {} is not a directory.", parent.display()),
+                    ));
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(EngineError::new(
+                        ErrorClass::Io,
+                        format!("patch: cannot inspect {}: {error}.", parent.display()),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(relative)
+}
+
 /// Checks pairwise overlap for edits to one canonical path.
 ///
 /// # Errors
