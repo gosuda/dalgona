@@ -74,9 +74,9 @@ No MCP client in dal (dalgona ships one; a plugin can reach HTTP services with t
 ## Install
 
 ```sh
-cargo install dal
+cargo install dalgon
 cargo install dalgona
-cargo binstall dal
+cargo binstall dalgon
 cargo binstall dalgona
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/gosuda/dalgona/releases/download/dalgon-v0.1.0/dalgon-installer.sh | sh
 ```
