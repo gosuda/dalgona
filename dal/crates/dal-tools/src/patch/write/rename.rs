@@ -32,9 +32,6 @@ impl PreparedRename {
     ) -> Result<Self, EngineError> {
         let relative = resolve_rename_destination(&session.workspace, dest)?;
         let target = session.workspace.join(&relative);
-        let target_name = relative.file_name().ok_or_else(|| {
-            EngineError::new(ErrorClass::Resolve, "patch: invalid rename destination.")
-        })?;
         let temp_name = OsString::from(format!(
             ".dalgon-patch-{}-{:032x}.tmp",
             std::process::id(),
@@ -48,6 +45,9 @@ impl PreparedRename {
         #[cfg(unix)]
         {
             use rustix::fs::{AtFlags, Mode, OFlags};
+            let target_name = relative.file_name().ok_or_else(|| {
+                EngineError::new(ErrorClass::Resolve, "patch: invalid rename destination.")
+            })?;
             let directory = open_parent(&session.workspace, &relative)
                 .map_err(|error| write_error(dest, error))?;
             match rustix::fs::statat(&directory, target_name, AtFlags::SYMLINK_NOFOLLOW) {
@@ -59,7 +59,7 @@ impl PreparedRename {
                 &directory,
                 temp_name.as_os_str(),
                 OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                Mode::from_raw_mode(0o600),
+                Mode::from_raw_mode(0o666),
             )
             .map_err(|error| write_error(dest, io::Error::from(error)))?;
             let mut file = tokio::fs::File::from_std(std::fs::File::from(handle));
@@ -132,22 +132,23 @@ impl PreparedRename {
                 self.target_name.as_os_str(),
                 AtFlags::SYMLINK_NOFOLLOW,
             );
-            if let (Ok(expected), Ok(current)) = (expected, current) {
-                if expected.st_ino == current.st_ino && expected.st_dev == current.st_dev {
-                    let _ = rustix::fs::unlinkat(
-                        &self.directory,
-                        self.target_name.as_os_str(),
-                        AtFlags::empty(),
-                    );
-                }
+            if let (Ok(expected), Ok(current)) = (expected, current)
+                && expected.st_ino == current.st_ino
+                && expected.st_dev == current.st_dev
+            {
+                let _ = rustix::fs::unlinkat(
+                    &self.directory,
+                    self.target_name.as_os_str(),
+                    AtFlags::empty(),
+                );
             }
         }
         #[cfg(not(unix))]
         {
-            if let Ok(relative) = self.target.strip_prefix(&self.workspace) {
-                if resolve_rename_destination(&self.workspace, relative).is_ok() {
-                    let _ = tokio::fs::remove_file(&self.target).await;
-                }
+            if let Ok(relative) = self.target.strip_prefix(&self.workspace)
+                && resolve_rename_destination(&self.workspace, relative).is_ok()
+            {
+                let _ = tokio::fs::remove_file(&self.target).await;
             }
         }
     }
