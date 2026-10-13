@@ -11,9 +11,8 @@ use std::sync::Arc;
 use dal_core::ext::Mail as ExtMail;
 use dal_core::{
     AgentInfo, AgentReport, AgentState, AgentsOp, AgentsReply, BlobId, EntryId, FetchRequest,
-    FetchResponse, Inference, JobsOp, JobsReply, MailMode, ModelRequest, Name,
-    Notice, Part, Service, SessionId, StateError, StateOp, StateRecord, TurnOp, TurnOpReply,
-    Workspace,
+    FetchResponse, Inference, JobsOp, JobsReply, MailMode, ModelRequest, Name, Notice, Part,
+    Service, SessionId, StateError, StateOp, StateRecord, TurnOp, TurnOpReply, Workspace,
 };
 use dal_provider::EventStream;
 use tokio::sync::oneshot;
