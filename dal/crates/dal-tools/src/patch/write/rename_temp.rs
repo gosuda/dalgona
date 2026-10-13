@@ -10,11 +10,9 @@ mod platform {
     };
 
     use rustix::{
-        fs::{Mode, OFlags},
+        fs::{AtFlags, Mode, OFlags},
         io::Errno,
     };
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    use rustix::fs::AtFlags;
 
     pub(crate) struct RenameTemp {
         target: PathBuf,
@@ -41,7 +39,9 @@ mod platform {
             }
             let name = relative
                 .file_name()
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "empty rename destination"))?
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "empty rename destination")
+                })?
                 .to_os_string();
             let dir_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
             let mut parent =
@@ -187,9 +187,7 @@ mod platform {
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
             .open(path)?;
         let metadata = handle.metadata()?;
-        if !metadata.is_dir()
-            || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-        {
+        if !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "rename parent must be a directory without reparse points",
@@ -285,7 +283,11 @@ mod platform {
 
 #[cfg(not(any(unix, windows)))]
 mod platform {
-    use std::{fs::File, io, path::{Path, PathBuf}};
+    use std::{
+        fs::File,
+        io,
+        path::{Path, PathBuf},
+    };
 
     pub(crate) struct RenameTemp {
         target: PathBuf,
@@ -308,7 +310,10 @@ mod platform {
         }
 
         pub(crate) fn publish(&self) -> io::Result<()> {
-            Err(io::Error::new(io::ErrorKind::Unsupported, "secure rename is unsupported"))
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "secure rename is unsupported",
+            ))
         }
 
         pub(crate) fn cleanup(&self) {}
@@ -350,7 +355,9 @@ mod tests {
         let outside = tempfile::tempdir().expect("outside");
         std::os::unix::fs::symlink(outside.path(), workspace.path().join("link"))
             .expect("symlink");
-        assert!(RenameTemp::create(workspace.path(), Path::new("link/target.txt")).is_err());
+        assert!(
+            RenameTemp::create(workspace.path(), Path::new("link/target.txt")).is_err()
+        );
         assert!(!outside.path().join("target.txt").exists());
     }
 }
