@@ -28,6 +28,7 @@ use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _};
 use crate::evidence::Binding;
 use crate::patch::snapshot::SnapshotStore;
 use crate::{Rerank, RerankCall, RerankCandidate, Seen};
+use crate::workspace_path::{self, ScopeError};
 use find::{ContentClass, Entry, FindGlob, FindResult};
 use grep::SeenRow;
 use index::Index;
@@ -260,24 +261,19 @@ pub(crate) async fn resolve_scope(
     let Some(raw) = path.filter(|raw| !raw.is_empty()) else {
         return Ok(Scope::workspace(workspace));
     };
-    let abs = if Path::new(raw).is_absolute() {
-        PathBuf::from(raw)
-    } else {
-        workspace.join(raw)
-    };
-    let meta = tokio::fs::metadata(&abs)
+    let resolved =
+        workspace_path::resolve(workspace, Path::new(raw)).map_err(|error| match error {
+            ScopeError::OutsideWorkspace => {
+                SearchError::msg("search: path is outside the workspace")
+            }
+            ScopeError::Io(_) => SearchError::msg(format!("search: {raw} does not exist")),
+        })?;
+    let meta = tokio::fs::metadata(&resolved.absolute)
         .await
         .map_err(|_| SearchError::msg(format!("search: {raw} does not exist")))?;
-    let ws_rel = match (
-        tokio::fs::canonicalize(workspace).await,
-        tokio::fs::canonicalize(&abs).await,
-    ) {
-        (Ok(root), Ok(full)) => full.strip_prefix(&root).ok().map(Path::to_path_buf),
-        _ => None,
-    };
     Ok(Scope {
-        abs,
-        ws_rel,
+        abs: resolved.absolute,
+        ws_rel: Some(resolved.relative),
         is_file: meta.is_file(),
     })
 }
@@ -780,6 +776,56 @@ pub(crate) mod tests {
             std::fs::create_dir_all(parent).unwrap();
         }
         std::fs::write(path, bytes).unwrap();
+    }
+
+    #[tokio::test]
+    async fn search_denies_external_scopes_for_find_and_grep() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        write(dir.path(), "private.txt", b"never expose this");
+        write(&workspace, "public.txt", b"public");
+
+        for (mode, pattern) in [("find", "*.txt"), ("grep", "never expose")] {
+            for path in ["../private.txt", "nested/../../private.txt"] {
+                let args = sonic_rs::to_string(&sonic_rs::json!({
+                    "mode": mode, "pattern": pattern, "path": path
+                }))
+                .unwrap();
+                assert_eq!(
+                    run(&engine(false, None), &workspace, &args).await,
+                    Err("search: path is outside the workspace".to_owned())
+                );
+            }
+            let absolute = dir.path().join("private.txt");
+            let args = sonic_rs::to_string(&sonic_rs::json!({
+                "mode": mode, "pattern": pattern, "path": absolute.to_string_lossy()
+            }))
+            .unwrap();
+            assert_eq!(
+                run(&engine(false, None), &workspace, &args).await,
+                Err("search: path is outside the workspace".to_owned())
+            );
+        }
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(dir.path(), workspace.join("escape")).unwrap();
+            let args = r#"{"mode":"grep","pattern":"never expose","path":"escape/private.txt"}"#;
+            assert_eq!(
+                run(&engine(false, None), &workspace, args).await,
+                Err("search: path is outside the workspace".to_owned())
+            );
+        }
+
+        #[cfg(feature = "symbols")]
+        {
+            let args = r#"{"mode":"symbol","pattern":"*","path":"../private.txt"}"#;
+            assert_eq!(
+                run(&engine(true, None), &workspace, args).await,
+                Err("search: path is outside the workspace".to_owned())
+            );
+        }
     }
 
     #[tokio::test]
