@@ -1,11 +1,13 @@
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::time::Duration;
 
+use crate::serve::{CONN_CAP, HEADER_TIMEOUT};
 #[cfg(unix)]
 use sonic_rs::JsonValueTrait;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use super::support::{HttpReply, host_header, http, parse_reply, rig, router_options, with_serve};
+use super::support::{HttpReply, host_header, http, parse_reply, read_reply, rig, router_options, with_serve};
 use crate::error::ServeError;
 #[cfg(unix)]
 use crate::token::TokenError;
@@ -51,6 +53,75 @@ async fn route_404_405() {
         )
         .await;
         assert_eq!(a2a.status, 404, "{a2a:?}");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn keepalive_does_not_retain_a_connection_slot() {
+    let rig = rig(&[]).await;
+    with_serve(&rig, router_options(&rig), async |addr| {
+        let mut peer = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        let request = format!("GET /v1/nope HTTP/1.1\r\n{}\r\n\r\n", host_header(addr));
+        peer.write_all(request.as_bytes()).await.expect("request");
+        let reply = read_reply(&mut peer).await;
+        assert_eq!(reply.status, 404);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn silent_and_trickling_headers_expire() {
+    let rig = rig(&[]).await;
+    with_serve(&rig, router_options(&rig), async |addr| {
+        let mut silent = tokio::net::TcpStream::connect(addr).await.expect("silent peer");
+        let mut slow = tokio::net::TcpStream::connect(addr).await.expect("slow peer");
+        slow.write_all(b"GET /v1/models HTTP/1.1\r\nx-slow: ")
+            .await
+            .expect("partial header");
+        tokio::task::yield_now().await;
+        tokio::time::pause();
+        for _ in 0..2 {
+            tokio::time::advance(Duration::from_secs(2)).await;
+            slow.write_all(b"x").await.expect("trickled header");
+        }
+        tokio::time::advance(HEADER_TIMEOUT).await;
+        for peer in [&mut silent, &mut slow] {
+            let mut response = Vec::new();
+            tokio::time::timeout(Duration::from_secs(1), peer.read_to_end(&mut response))
+                .await
+                .expect("header timeout must close the socket")
+                .expect("socket read");
+        }
+        tokio::time::resume();
+    })
+    .await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn authenticated_request_survives_full_silent_socket_saturation() {
+    let rig = rig(&[]).await;
+    let token = crate::token::create(&rig.data().join("serve.token"), false)
+        .expect("token created");
+    let mut options = router_options(&rig);
+    options.public = true;
+    with_serve(&rig, options, |addr| async move {
+        let mut silent = Vec::with_capacity(CONN_CAP);
+        for _ in 0..CONN_CAP {
+            silent.push(tokio::net::TcpStream::connect(addr).await.expect("connect"));
+        }
+        let request = format!(
+            "GET /v1/models HTTP/1.1\r\n{}\r\nauthorization: Bearer {token}",
+            host_header(addr)
+        );
+        let reply = tokio::time::timeout(
+            super::support::WAIT,
+            http(addr, &request, ""),
+        )
+        .await
+        .expect("valid request must not starve behind silent peers");
+        assert_eq!(reply.status, 200, "{reply:?}");
     })
     .await;
 }
