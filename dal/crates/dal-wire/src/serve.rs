@@ -129,8 +129,8 @@ pub(crate) type Driver = futures::future::BoxFuture<'static, ()>;
 
 /// An incomplete HTTP connection that can be evicted for a new peer.
 struct PendingConn {
-    /// Set after the first complete request or when the connection ends.
-    complete: Arc<AtomicBool>,
+    /// Set after admission by the guards, or when the connection ends.
+    admitted: Arc<AtomicBool>,
     /// Cancels an incomplete connection without disturbing active requests.
     cancel: CancellationToken,
 }
@@ -164,10 +164,10 @@ pub(crate) fn listen(
                 _ = conns.next(), if !conns.is_empty() => {}
                 _ = drivers.next(), if !drivers.is_empty() => {}
                 Some(driver) = driver_rx.recv() => drivers.push(driver),
-                accepted = listener.accept() => {
+                accepted = listener.accept(), if conns.len() < CONN_CAP || !pending.is_empty() => {
                     match accepted {
                         Ok((stream, _)) => {
-                            pending.retain(|entry| !entry.complete.load(Ordering::Acquire));
+                            pending.retain(|entry| !entry.admitted.load(Ordering::Acquire));
                             if pending.len() >= PREAUTH_CAP || conns.len() >= CONN_CAP {
                                 let Some(oldest) = pending.pop_front() else {
                                     // Only active requests occupy the listener: do not evict them.
@@ -175,22 +175,22 @@ pub(crate) fn listen(
                                 };
                                 oldest.cancel.cancel();
                                 // Reclaim the evicted slot before admitting its replacement.
-                                while !oldest.complete.load(Ordering::Acquire) {
+                                while !oldest.admitted.load(Ordering::Acquire) {
                                     assert!(
                                         conns.next().await.is_some(),
                                         "evicted connection must remain in the connection set"
                                     );
                                 }
                             }
-                            let complete = Arc::new(AtomicBool::new(false));
+                            let admitted = Arc::new(AtomicBool::new(false));
                             let cancel = CancellationToken::new();
                             pending.push_back(PendingConn {
-                                complete: Arc::clone(&complete),
+                                admitted: Arc::clone(&admitted),
                                 cancel: cancel.clone(),
                             });
                             let ctx = Arc::clone(&ctx);
                             conns.push(Box::pin(async move {
-                                serve_conn(ctx, stream, complete, cancel).await;
+                                serve_conn(ctx, stream, admitted, cancel).await;
                             }));
                         }
                         Err(error) => {
@@ -249,16 +249,16 @@ fn libc_enfile() -> i32 {
 async fn serve_conn(
     ctx: Arc<ServeCtx>,
     stream: tokio::net::TcpStream,
-    complete: Arc<AtomicBool>,
+    admitted: Arc<AtomicBool>,
     cancel: CancellationToken,
 ) {
     let io = hyper_util::rt::TokioIo::new(stream);
     let shutdown = ctx.shutdown.clone();
-    let request_seen = Arc::clone(&complete);
+    let request_admitted = Arc::clone(&admitted);
     let service = hyper::service::service_fn(move |req: Request<hyper::body::Incoming>| {
-        request_seen.store(true, Ordering::Release);
         let ctx = Arc::clone(&ctx);
-        async move { Ok::<_, hyper::Error>(handle_request(ctx, req).await) }
+        let request_admitted = Arc::clone(&request_admitted);
+        async move { Ok::<_, hyper::Error>(handle_request(ctx, req, &request_admitted).await) }
     });
     let conn = hyper::server::conn::http1::Builder::new()
         .timer(hyper_util::rt::TokioTimer::new())
@@ -276,7 +276,7 @@ async fn serve_conn(
             Some(conn.await)
         }
     };
-    complete.store(true, Ordering::Release);
+    admitted.store(true, Ordering::Release);
     if let Some(Err(error)) = result {
         tracing::debug!(%error, "connection ended");
     }
@@ -286,6 +286,7 @@ async fn serve_conn(
 async fn handle_request(
     ctx: Arc<ServeCtx>,
     req: Request<hyper::body::Incoming>,
+    admitted: &AtomicBool,
 ) -> Response<ServeBody> {
     let method = req.method().to_string();
     let path = req.uri().path().to_owned();
@@ -298,20 +299,22 @@ async fn handle_request(
     if req.headers().contains_key("origin") && !is_upgrade(&req) {
         return into_response(Resp::text(403, "browser requests are not allowed"));
     }
-    if !ctx.cfg.public
-        && let Err(resp) = host_guard(&ctx, &req)
-    {
-        return into_response(resp);
+    if !ctx.cfg.public {
+        if let Err(resp) = host_guard(&ctx, &req) {
+            return into_response(resp);
+        }
+        admitted.store(true, Ordering::Release);
     }
-    if ctx.cfg.public
-        && !is_card(&method, &path)
-        && !upgrade_route
-        && let Err(resp) = auth_guard(&ctx, &req)
-    {
-        return into_response(resp);
+    if ctx.cfg.public && !is_card(&method, &path) && !upgrade_route {
+        if let Err(resp) = auth_guard(&ctx, &req) {
+            return into_response(resp);
+        }
+        admitted.store(true, Ordering::Release);
     }
     if upgrade_route {
-        return upgrade_response(ctx, req, route).await;
+        let response = upgrade_response(ctx, req, route).await;
+        admitted.store(true, Ordering::Release);
+        return response;
     }
     if requires_json(&route)
         && let Err(resp) = content_guard(&req, &route)
