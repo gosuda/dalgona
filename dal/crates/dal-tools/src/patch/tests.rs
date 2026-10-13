@@ -77,6 +77,155 @@ fn test_session(workspace: &std::path::Path, symbols: bool) -> PatchSession {
     }
 }
 
+fn rename_patch(destination: &str) -> String {
+    format!(
+        "*** Begin Patch\n*** Update File: a.txt\n*** Move to: {destination}\n@@\n-old\n+changed\n*** End Patch"
+    )
+}
+
+#[tokio::test]
+async fn rename_destinations_reject_parent_traversal_and_absolute_paths() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let outside = tempfile::tempdir().expect("outside");
+    tokio::fs::write(workspace.path().join("a.txt"), b"old\n")
+        .await
+        .expect("seed source");
+    let session = test_session(workspace.path(), false);
+    let destinations = [
+        "../escape.txt".to_owned(),
+        "nested/../escape.txt".to_owned(),
+        ".".to_owned(),
+        outside.path().join("escape.txt").display().to_string(),
+    ];
+    for destination in destinations {
+        let error = plan(
+            &session,
+            DialectId::ApplyPatch,
+            &rename_patch(&destination),
+        )
+        .await
+        .expect_err("rename must stay within the workspace");
+        assert_eq!(
+            error.class,
+            super::ir::ErrorClass::File,
+            "{destination}: {}",
+            error.message
+        );
+    }
+    assert!(!outside.path().join("escape.txt").exists());
+    assert_eq!(
+        tokio::fs::read(workspace.path().join("a.txt"))
+            .await
+            .expect("source"),
+        b"old\n"
+    );
+}
+
+#[tokio::test]
+async fn rename_into_new_workspace_directory_commits() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let source = workspace.path().join("a.txt");
+    tokio::fs::write(&source, b"old\n").await.expect("seed source");
+    let session = test_session(workspace.path(), false);
+    let staged = plan(
+        &session,
+        DialectId::ApplyPatch,
+        &rename_patch("nested/destination.txt"),
+    )
+    .await
+    .expect("valid rename stages");
+    assert_eq!(
+        staged.files[0].renamed_to.as_deref(),
+        Some(std::path::Path::new("nested/destination.txt"))
+    );
+    let output = commit(&session, staged, &[]).await;
+    assert!(output.error_class.is_none(), "{}", output.text);
+    assert_eq!(
+        tokio::fs::read(workspace.path().join("nested/destination.txt"))
+            .await
+            .expect("destination"),
+        b"changed\n"
+    );
+    assert!(!source.exists());
+}
+
+#[tokio::test]
+async fn rename_destination_created_after_approval_is_not_replaced() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let source = workspace.path().join("a.txt");
+    let destination = workspace.path().join("destination.txt");
+    tokio::fs::write(&source, b"old\n").await.expect("seed source");
+    let session = test_session(workspace.path(), false);
+    let staged = plan(
+        &session,
+        DialectId::ApplyPatch,
+        &rename_patch("destination.txt"),
+    )
+    .await
+    .expect("stage before race");
+    tokio::fs::write(&destination, b"competitor\n")
+        .await
+        .expect("create racing destination");
+    let output = commit(&session, staged, &[]).await;
+    assert!(output.error_class.is_some(), "{}", output.text);
+    assert_eq!(
+        tokio::fs::read(&destination).await.expect("destination"),
+        b"competitor\n"
+    );
+    assert_eq!(tokio::fs::read(&source).await.expect("source"), b"old\n");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn rename_destination_symlink_parent_cannot_escape() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let outside = tempfile::tempdir().expect("outside");
+    let source = workspace.path().join("a.txt");
+    tokio::fs::write(&source, b"old\n").await.expect("seed source");
+    std::os::unix::fs::symlink(outside.path(), workspace.path().join("link"))
+        .expect("create parent symlink");
+    let session = test_session(workspace.path(), false);
+
+    // The missing descendant defeats canonicalizing just the immediate parent.
+    // Publication must independently refuse to follow the parent symlink.
+    let staged = plan(
+        &session,
+        DialectId::ApplyPatch,
+        &rename_patch("link/new/destination.txt"),
+    )
+    .await
+    .expect("nonexistent parent can pass lexical planning");
+    let output = commit(&session, staged, &[]).await;
+    assert!(output.error_class.is_some(), "{}", output.text);
+    assert!(!outside.path().join("new/destination.txt").exists());
+    assert_eq!(tokio::fs::read(&source).await.expect("source"), b"old\n");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn rename_parent_swapped_after_approval_is_rejected() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let outside = tempfile::tempdir().expect("outside");
+    let source = workspace.path().join("a.txt");
+    let parent = workspace.path().join("parent");
+    tokio::fs::write(&source, b"old\n").await.expect("seed source");
+    tokio::fs::create_dir(&parent).await.expect("seed parent");
+    let session = test_session(workspace.path(), false);
+    let staged = plan(
+        &session,
+        DialectId::ApplyPatch,
+        &rename_patch("parent/destination.txt"),
+    )
+    .await
+    .expect("stage before swap");
+    tokio::fs::remove_dir(&parent).await.expect("remove parent");
+    std::os::unix::fs::symlink(outside.path(), &parent).expect("swap parent");
+    let output = commit(&session, staged, &[]).await;
+    assert!(output.error_class.is_some(), "{}", output.text);
+    assert!(!outside.path().join("destination.txt").exists());
+    assert_eq!(tokio::fs::read(&source).await.expect("source"), b"old\n");
+}
+
 #[test]
 fn style_pick_table() {
     let config = parse_edit_style(&EditStyleInput::Table(vec![
