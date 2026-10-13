@@ -158,3 +158,59 @@ fn destination_exists(dest: &Path) -> EngineError {
 fn write_error(dest: &Path, error: io::Error) -> EngineError {
     EngineError::new(ErrorClass::Io, format!("patch: cannot write {}: {error}. Nothing was written.", dest.display()))
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn publish_never_replaces_a_racing_destination() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let relative = Path::new("nested/target.txt");
+        let directory = open_parent(workspace.path(), relative).expect("pin parent");
+        let temp = workspace.path().join("nested/staged.tmp");
+        let target = workspace.path().join(relative);
+        std::fs::write(&temp, b"staged").expect("stage");
+        std::fs::write(&target, b"winner").expect("competing writer");
+        let rename = PreparedRename {
+            target: target.clone(),
+            temp,
+            directory,
+            temp_name: OsString::from("staged.tmp"),
+            target_name: OsString::from("target.txt"),
+        };
+        let error = rename.publish().await.expect_err("cannot replace");
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&target).expect("target"), b"winner");
+        rename.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn publish_does_not_follow_parent_swapped_after_staging() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        let outside = tempfile::tempdir().expect("outside");
+        let relative = Path::new("nested/target.txt");
+        let directory = open_parent(workspace.path(), relative).expect("pin parent");
+        let temp = workspace.path().join("nested/staged.tmp");
+        std::fs::write(&temp, b"staged").expect("stage");
+        std::fs::rename(workspace.path().join("nested"), workspace.path().join("parked"))
+            .expect("move original parent");
+        symlink(outside.path(), workspace.path().join("nested")).expect("swap symlink");
+        let rename = PreparedRename {
+            target: workspace.path().join(relative),
+            temp,
+            directory,
+            temp_name: OsString::from("staged.tmp"),
+            target_name: OsString::from("target.txt"),
+        };
+        rename.publish().await.expect("pinned publication");
+        assert_eq!(
+            std::fs::read(workspace.path().join("parked/target.txt")).expect("pinned target"),
+            b"staged"
+        );
+        assert!(!outside.path().join("target.txt").exists());
+        rename.cleanup().await;
+    }
+}
