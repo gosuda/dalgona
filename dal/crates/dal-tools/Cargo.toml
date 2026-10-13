@@ -40,7 +40,7 @@ serde.workspace = true
 similar.workspace = true
 sonic-rs.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["fs", "macros", "rt", "rt-multi-thread", "sync", "time"] }
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt", "rt-multi-thread", "sync", "time"] }
 tokio-util = { workspace = true, features = ["rt"] }
 tree-sitter = { version = "=0.27.1", optional = true }
 tree-sitter-language = { version = "=0.1.9", optional = true }
