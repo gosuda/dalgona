@@ -29,7 +29,7 @@ fn public_ip(ip: IpAddr) -> bool {
                 || (a == 169 && b == 254)
                 || (a == 172 && (16..=31).contains(&b))
                 || (a == 192
-                    && (b == 168 || (b == 0 && matches!(c, 0 | 2)) || (b == 88 && c == 99)))
+                    && (b == 168 || (b == 0) || (b == 88 && c == 99)))
                 || (a == 198 && ((18..=19).contains(&b) || (b == 51 && c == 100)))
                 || (a == 203 && b == 0 && c == 113))
         }
@@ -38,6 +38,8 @@ fn public_ip(ip: IpAddr) -> bool {
             address.to_ipv4_mapped().is_none()
                 && (first & 0xe000) == 0x2000
                 && first != 0x2002 // 6to4 can tunnel to internal IPv4 addresses.
+                && first != 0x3ffe // The former 6bone range is not public.
+                && first != 0x3fff // Documentation addresses are not public.
                 && !(first == 0x2001 && (second <= 0x01ff || second == 0x0db8))
         }
     }
@@ -172,6 +174,7 @@ mod tests {
     use tokio::net::TcpListener;
 
     use super::{check_addresses, client, public_destination, public_ip};
+    use dal_core::{FetchMethod, FetchRequest};
 
     type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
@@ -185,6 +188,8 @@ mod tests {
             "169.254.169.254",
             "172.31.4.2",
             "192.0.0.1",
+            "192.0.0.9",
+            "192.0.0.170",
             "192.0.2.1",
             "192.88.99.1",
             "192.168.1.2",
@@ -202,6 +207,8 @@ mod tests {
             "2001:db8::1",
             "2001::1",
             "2002::1",
+            "3ffe::1",
+            "3fff::1",
             "64:ff9b::7f00:1",
         ] {
             let address: IpAddr = text.parse()?;
@@ -254,6 +261,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_network_backend_rejects_internal_urls() -> TestResult {
+        for raw in [
+            "http://127.0.0.1/",
+            "https://169.254.169.254/latest/meta-data/",
+            "https://[::1]/",
+            "http://localhost/",
+        ] {
+            let response = super::fetch(FetchRequest {
+                method: FetchMethod::Get,
+                url: raw.into(),
+                headers: Vec::new(),
+                body: Vec::new(),
+            })
+            .await;
+            assert!(response.is_err(), "network backend accepted {raw}");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn the_client_returns_redirects_without_following_them() -> TestResult {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let port = listener.local_addr()?.port();
@@ -274,6 +301,14 @@ mod tests {
             .send()
             .await?;
         assert_eq!(response.status(), reqwest::StatusCode::FOUND);
+        let location = response
+            .headers()
+            .get("location")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        assert_eq!(location, "http://127.0.0.1:1/");
+        let target = reqwest::Url::parse(location)?;
+        assert!(public_destination(&target).await.is_err());
         server.await??;
         Ok(())
     }
