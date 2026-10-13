@@ -163,7 +163,7 @@ pub(crate) async fn apply_files(
             tokio::fs::rename(temp, target).await
         };
         if let Err(error) = result {
-            restore_completed(plan, &completed).await;
+            rollback_completed(plan, &completed, &renames).await;
             cleanup_temps(&temps, &renames).await;
             let class = if rename.is_some() && error.kind() == std::io::ErrorKind::AlreadyExists {
                 ErrorClass::File
@@ -283,6 +283,20 @@ async fn stage_temp(
 }
 
 /// Best-effort restore of completed targets from staged before bytes.
+async fn rollback_completed(
+    plan: &Plan,
+    completed: &[PathBuf],
+    renames: &[PreparedRename],
+) {
+    for rename in renames {
+        if completed.contains(&rename.target) {
+            rename.rollback_published().await;
+        }
+    }
+    restore_completed(plan, completed).await;
+}
+
+
 async fn restore_completed(plan: &Plan, completed: &[PathBuf]) {
     for file in &plan.files {
         if completed.contains(&file.absolute_path)
@@ -312,15 +326,7 @@ async fn trash_rename_source(
     }
     if let Err(error) = tokio::fs::rename(&file.absolute_path, &trash).await {
         // Restore installed temps and earlier trash moves best-effort.
-        for file in &plan.files {
-            if completed.contains(&file.absolute_path) {
-                if let Some(before) = file.before.as_deref() {
-                    let _ = tokio::fs::write(&file.absolute_path, before).await;
-                } else {
-                    let _ = tokio::fs::remove_file(&file.absolute_path).await;
-                }
-            }
-        }
+        rollback_completed(plan, completed, renames).await;
         for (src, trash) in trash_moves.iter().rev() {
             let _ = tokio::fs::rename(trash, src).await;
         }
