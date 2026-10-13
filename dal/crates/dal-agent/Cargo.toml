@@ -21,6 +21,7 @@ serde.workspace = true
 sonic-rs.workspace = true
 thiserror.workspace = true
 reqwest.workspace = true
+url.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
 tokio-util = { workspace = true, features = ["rt"] }
 
