@@ -238,32 +238,7 @@ async fn stage_temp(
     let Some(after) = file.after.as_deref() else {
         return Ok(());
     };
-    let target_abs = if file.op == super::super::ir::Operation::Rename {
-        match file.renamed_to.as_ref() {
-            Some(dest) => session.workspace.join(dest),
-            None => file.absolute_path.clone(),
-        }
-    } else {
-        file.absolute_path.clone()
-    };
-    // No-replace: rename destinations must be absent at prepare and commit.
-    if file.op == super::super::ir::Operation::Rename
-        && tokio::fs::metadata(&target_abs).await.is_ok()
-    {
-        cleanup_temps(temps).await;
-        let dest = file
-            .renamed_to
-            .as_ref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default();
-        return Err(EngineError::new(
-            ErrorClass::File,
-            format!(
-                "patch: cannot rename {} to {dest}: {dest} exists.",
-                file.path.display()
-            ),
-        ));
-    }
+    let target_abs = file.absolute_path.clone();
     let parent = target_abs.parent().unwrap_or(session.workspace.as_path());
     tokio::fs::create_dir_all(parent).await.map_err(|error| {
         EngineError::new(
@@ -292,7 +267,6 @@ async fn stage_temp(
     .await;
     if let Err(error) = write {
         let _ = tokio::fs::remove_file(&temp).await;
-        cleanup_temps(temps).await;
         return Err(EngineError::new(
             ErrorClass::Io,
             format!(
@@ -327,6 +301,7 @@ async fn trash_rename_source(
     file: &StagedFileOwned,
     completed: &[PathBuf],
     temps: &[(PathBuf, PathBuf)],
+    renames: &[PreparedRename],
     trash_moves: &mut Vec<(PathBuf, PathBuf)>,
     trash_paths: &mut Vec<(PathBuf, PathBuf)>,
 ) -> Result<(), EngineError> {
@@ -349,7 +324,7 @@ async fn trash_rename_source(
         for (src, trash) in trash_moves.iter().rev() {
             let _ = tokio::fs::rename(trash, src).await;
         }
-        cleanup_temps(temps).await;
+        cleanup_temps(temps, renames).await;
         return Err(EngineError::new(
             ErrorClass::Io,
             format!(
@@ -425,9 +400,13 @@ fn report_output(session: &PatchSession, plan: &Plan) -> Output {
     }
 }
 
-async fn cleanup_temps(temps: &[(PathBuf, PathBuf)]) {
-    for (_, temp) in temps {
-        let _ = tokio::fs::remove_file(temp).await;
+async fn cleanup_temps(temps: &[(PathBuf, PathBuf)], renames: &[PreparedRename]) {
+    for (target, temp) in temps {
+        if let Some(rename) = renames.iter().find(|rename| rename.target == *target) {
+            rename.cleanup().await;
+        } else {
+            let _ = tokio::fs::remove_file(temp).await;
+        }
     }
 }
 
@@ -453,7 +432,7 @@ fn count_lines(before: Option<&[u8]>, after: Option<&[u8]>) -> (u64, u64) {
     }
 }
 
-fn nonce_u128() -> u128 {
+pub(super) fn nonce_u128() -> u128 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0x9E37_79B9_7F4A_7C15);
     let first = COUNTER.fetch_add(0x9E37_79B9_7F4A_7C15, Ordering::Relaxed);
