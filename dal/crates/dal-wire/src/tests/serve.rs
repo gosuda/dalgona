@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use crate::serve::{CONN_CAP, HEADER_TIMEOUT};
+use crate::serve::HEADER_TIMEOUT;
+#[cfg(unix)]
+use crate::serve::CONN_CAP;
 #[cfg(unix)]
 use sonic_rs::JsonValueTrait;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
