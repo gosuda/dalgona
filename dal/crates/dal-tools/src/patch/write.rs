@@ -2,7 +2,7 @@
 
 use std::{
     collections::HashMap,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::Arc,
 };
 
@@ -76,7 +76,11 @@ pub async fn plan(
     // Group by canonical path in ascending byte order.
     let mut groups: HashMap<PathBuf, Vec<Edit>> = HashMap::new();
     let mut canonical_of: HashMap<PathBuf, PathBuf> = HashMap::new();
-    for edit in edits {
+    for mut edit in edits {
+        if let Edit::Rename { to, .. } = &mut edit {
+            let (relative, _) = rename_destination(&session.workspace, to)?;
+            *to = relative;
+        }
         let raw = edit_path(&edit);
         let (display, canonical) = resolve_path(&session.workspace, raw)?;
         canonical_of.entry(display.clone()).or_insert(canonical);
@@ -283,6 +287,34 @@ async fn cached_parse(
     }
 }
 
+/// Resolve and normalize the exact rename destination before approval.
+/// A relative path may not include parent components, even when they cancel.
+pub(crate) fn rename_destination(
+    workspace: &Path,
+    raw: &Path,
+) -> Result<(PathBuf, PathBuf), EngineError> {
+    if raw
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(EngineError::new(
+            ErrorClass::File,
+            format!(
+                "patch: rename destination {} contains parent traversal.",
+                raw.display()
+            ),
+        ));
+    }
+    let (relative, canonical) = resolve_path(workspace, raw)?;
+    if relative.file_name().is_none() {
+        return Err(EngineError::new(
+            ErrorClass::File,
+            "patch: rename destination must name a file.".to_owned(),
+        ));
+    }
+    Ok((relative, canonical))
+}
+
 fn edit_path(edit: &Edit) -> &Path {
     match edit {
         Edit::Change { path, .. } | Edit::Create { path, .. } | Edit::Delete { path, .. } => path,
@@ -293,3 +325,5 @@ fn edit_path(edit: &Edit) -> &Path {
 pub mod commit;
 
 pub mod stage;
+
+mod rename_temp;
