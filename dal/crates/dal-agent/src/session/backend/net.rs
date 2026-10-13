@@ -29,9 +29,7 @@ fn public_ip(ip: IpAddr) -> bool {
                 || (a == 169 && b == 254)
                 || (a == 172 && (16..=31).contains(&b))
                 || (a == 192
-                    && (b == 168
-                        || (b == 0 && matches!(c, 0 | 2))
-                        || (b == 88 && c == 99)))
+                    && (b == 168 || (b == 0 && matches!(c, 0 | 2)) || (b == 88 && c == 99)))
                 || (a == 198 && ((18..=19).contains(&b) || (b == 51 && c == 100)))
                 || (a == 203 && b == 0 && c == 113))
         }
@@ -63,7 +61,9 @@ async fn public_destination(
     {
         return Err(rejected(INVALID_URL));
     }
-    let port = url.port_or_known_default().ok_or_else(|| rejected(INVALID_URL))?;
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| rejected(INVALID_URL))?;
     match url.host().ok_or_else(|| rejected(INVALID_URL))? {
         Host::Ipv4(address) => {
             check_addresses(&[SocketAddr::new(IpAddr::V4(address), port)])?;
@@ -207,7 +207,12 @@ mod tests {
             let address: IpAddr = text.parse()?;
             assert!(!public_ip(address), "accepted non-public address {text}");
         }
-        for text in ["1.1.1.1", "8.8.8.8", "2606:4700:4700::1111", "2001:4860::8888"] {
+        for text in [
+            "1.1.1.1",
+            "8.8.8.8",
+            "2606:4700:4700::1111",
+            "2001:4860::8888",
+        ] {
             let address: IpAddr = text.parse()?;
             assert!(public_ip(address), "refused public address {text}");
         }
