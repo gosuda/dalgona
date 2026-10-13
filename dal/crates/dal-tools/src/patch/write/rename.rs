@@ -1,6 +1,8 @@
 //! Workspace-confined, no-replace publication of patch rename destinations.
 
-use std::{ffi::OsString, io, path::{Component, Path, PathBuf}};
+use std::{ffi::OsString, io, path::{Path, PathBuf}};
+#[cfg(unix)]
+use std::path::Component;
 use tokio::io::AsyncWriteExt as _;
 
 use super::{PatchSession, commit::nonce_u128};
