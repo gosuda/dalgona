@@ -20,6 +20,7 @@ pub mod parse;
 pub mod patch;
 pub mod read;
 pub mod search;
+mod workspace_path;
 
 #[cfg(feature = "symbols")]
 pub use guard::{

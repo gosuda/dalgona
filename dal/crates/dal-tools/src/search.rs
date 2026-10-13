@@ -26,6 +26,7 @@ use dal_core::{
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _};
 
 use crate::evidence::Binding;
+use crate::workspace_path;
 use crate::patch::snapshot::SnapshotStore;
 use crate::{Rerank, RerankCall, RerankCandidate, Seen};
 use find::{ContentClass, Entry, FindGlob, FindResult};
@@ -196,15 +197,6 @@ pub(crate) struct Scope {
 }
 
 impl Scope {
-    /// The whole workspace.
-    pub(crate) fn workspace(workspace: &Path) -> Self {
-        Self {
-            abs: workspace.to_path_buf(),
-            ws_rel: Some(PathBuf::new()),
-            is_file: false,
-        }
-    }
-
     /// The index scope argument: `None` outside the workspace, `Some(None)` for the root.
     #[expect(
         clippy::option_option,
@@ -257,27 +249,20 @@ pub(crate) async fn resolve_scope(
     workspace: &Path,
     path: Option<&str>,
 ) -> Result<Scope, SearchError> {
-    let Some(raw) = path.filter(|raw| !raw.is_empty()) else {
-        return Ok(Scope::workspace(workspace));
-    };
-    let abs = if Path::new(raw).is_absolute() {
-        PathBuf::from(raw)
-    } else {
-        workspace.join(raw)
-    };
-    let meta = tokio::fs::metadata(&abs)
+    let raw = path.filter(|raw| !raw.is_empty()).unwrap_or(".");
+    let workspace = workspace.to_path_buf();
+    let request = PathBuf::from(raw);
+    let scoped = tokio::task::spawn_blocking(move || workspace_path::resolve(&workspace, &request))
+        .await
+        .map_err(|error| SearchError::msg(format!("search: {error}")))?
+        .map_err(|_| SearchError::msg(format!("search: {raw} does not exist")))?
+        .ok_or_else(|| SearchError::msg(format!("search: {raw} is outside the workspace")))?;
+    let meta = tokio::fs::metadata(&scoped.abs)
         .await
         .map_err(|_| SearchError::msg(format!("search: {raw} does not exist")))?;
-    let ws_rel = match (
-        tokio::fs::canonicalize(workspace).await,
-        tokio::fs::canonicalize(&abs).await,
-    ) {
-        (Ok(root), Ok(full)) => full.strip_prefix(&root).ok().map(Path::to_path_buf),
-        _ => None,
-    };
     Ok(Scope {
-        abs,
-        ws_rel,
+        abs: scoped.abs,
+        ws_rel: Some(scoped.ws_rel),
         is_file: meta.is_file(),
     })
 }
@@ -817,6 +802,59 @@ pub(crate) mod tests {
                 "{raw}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn search_rejects_outside_workspace_scopes() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        write(&outside, "secret.txt", b"SECRET");
+        write(&workspace, "inside.txt", b"INSIDE");
+
+        let search = engine(false, None);
+        let paths = [
+            "../outside/secret.txt".to_owned(),
+            outside.join("secret.txt").to_string_lossy().into_owned(),
+        ];
+        for mode in ["find", "grep"] {
+            let pattern = if mode == "find" { "*.txt" } else { "SECRET" };
+            for path in &paths {
+                let args = sonic_rs::to_string(
+                    &sonic_rs::json!({ "mode": mode, "pattern": pattern, "path": path }),
+                )
+                .unwrap();
+                assert_eq!(
+                    run(&search, &workspace, &args).await,
+                    Err(format!("search: {path} is outside the workspace"))
+                );
+            }
+        }
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&outside, workspace.join("escape")).unwrap();
+            for mode in ["find", "grep"] {
+                let pattern = if mode == "find" { "*.txt" } else { "SECRET" };
+                let args = sonic_rs::to_string(&sonic_rs::json!({
+                    "mode": mode,
+                    "pattern": pattern,
+                    "path": "escape/secret.txt"
+                }))
+                .unwrap();
+                assert_eq!(
+                    run(&search, &workspace, &args).await,
+                    Err("search: escape/secret.txt is outside the workspace".to_owned())
+                );
+            }
+        }
+
+        let inside = run(&search, &workspace, r#"{"mode":"grep","pattern":"INSIDE"}"#)
+            .await
+            .unwrap();
+        assert!(inside.contains("inside.txt"));
     }
 
     #[test]
