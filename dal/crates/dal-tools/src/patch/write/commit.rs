@@ -7,7 +7,7 @@ use super::super::ir::{
     StagedFileOwned,
 };
 
-use super::PatchSession;
+use super::{PatchSession, rename::PreparedRename};
 
 fn lock_table()
 -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>> {
@@ -38,10 +38,14 @@ async fn prepare_write_set(
     let mut lock_paths: Vec<PathBuf> = Vec::with_capacity(ordered.len() * 2);
     for file in &ordered {
         lock_paths.push(file.absolute_path.clone());
-        if file.op == super::super::ir::Operation::Rename
-            && let Some(dest) = file.renamed_to.as_ref()
-        {
-            lock_paths.push(session.workspace.join(dest));
+        if file.op == super::super::ir::Operation::Rename {
+            let dest = file.renamed_to.as_deref().ok_or_else(|| {
+                EngineError::new(ErrorClass::Resolve, "patch: rename has no destination.")
+            })?;
+            let relative =
+                super::super::resolve::resolve_rename_destination(&session.workspace, dest)?;
+            let (_, canonical) = super::super::resolve::resolve_path(&session.workspace, &relative)?;
+            lock_paths.push(canonical);
         }
     }
     lock_paths.sort_by(|left, right| {
@@ -100,10 +104,26 @@ pub(crate) async fn apply_files(
     // Temps map target absolute path -> temp path. For renames the target
     // is the destination; the source is moved to trash in Phase B.
     let mut temps: Vec<(PathBuf, PathBuf)> = Vec::new();
-    // Phase A: exclusive temp creation with complete after bytes.
-    // Deletes stage no temp; renames stage the destination bytes.
+    let mut renames: Vec<PreparedRename> = Vec::new();
+    // Phase A stages all bytes. Rename temps retain an opened directory for publication.
     for file in &plan.files {
-        stage_temp(session, file, &mut temps, &mut seen_dirs).await?;
+        let staged = if file.op == super::super::ir::Operation::Rename {
+            match (file.renamed_to.as_deref(), file.after.as_deref()) {
+                (Some(dest), Some(after)) => {
+                    PreparedRename::stage(session, dest, after).await.map(|rename| {
+                        temps.push((rename.target.clone(), rename.temp.clone()));
+                        renames.push(rename);
+                    })
+                }
+                _ => Err(EngineError::new(ErrorClass::Resolve, "patch: incomplete rename plan.")),
+            }
+        } else {
+            stage_temp(session, file, &mut temps, &mut seen_dirs).await
+        };
+        if let Err(error) = staged {
+            cleanup_temps(&temps, &renames).await;
+            return Err(error);
+        }
     }
     // Mark every write-set path dirty before the first phase-B rename.
     for file in &plan.files {
@@ -123,7 +143,7 @@ pub(crate) async fn apply_files(
         }
         let trash = trash_path(session, &file.absolute_path);
         if let Err(error) = tokio::fs::rename(&file.absolute_path, &trash).await {
-            cleanup_temps(&temps).await;
+            cleanup_temps(&temps, &renames).await;
             return Err(EngineError::new(
                 ErrorClass::Io,
                 format!(
@@ -136,12 +156,22 @@ pub(crate) async fn apply_files(
         trash_paths.push((file.absolute_path.clone(), trash.clone()));
     }
     for (target, temp) in &temps {
-        if let Err(error) = tokio::fs::rename(temp, target).await {
-            // Best-effort restore of already renamed targets from staged before bytes.
+        let rename = renames.iter().find(|rename| rename.target == *target);
+        let result = if let Some(rename) = rename {
+            rename.publish().await
+        } else {
+            tokio::fs::rename(temp, target).await
+        };
+        if let Err(error) = result {
             restore_completed(plan, &completed).await;
-            cleanup_temps(&temps).await;
+            cleanup_temps(&temps, &renames).await;
+            let class = if rename.is_some() && error.kind() == std::io::ErrorKind::AlreadyExists {
+                ErrorClass::File
+            } else {
+                ErrorClass::Io
+            };
             return Err(EngineError::new(
-                ErrorClass::Io,
+                class,
                 format!(
                     "patch: cannot write {}: {error}. Nothing was written.",
                     target.display()
@@ -163,6 +193,7 @@ pub(crate) async fn apply_files(
             file,
             &completed,
             &temps,
+            &renames,
             &mut trash_moves,
             &mut trash_paths,
         )
@@ -178,11 +209,7 @@ pub(crate) async fn apply_files(
     for (_, trash) in &trash_paths {
         let _ = tokio::fs::remove_file(trash).await;
     }
-    // Best-effort leftover temp removal; Phase A/B already cleaned on error.
-    for (_, temp) in &temps {
-        // Temps that were renamed no longer exist; ignore missing.
-        let _ = tokio::fs::remove_file(temp).await;
-    }
+    cleanup_temps(&temps, &renames).await;
     Ok(report_output(session, plan))
 }
 
