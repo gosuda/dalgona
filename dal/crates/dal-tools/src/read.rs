@@ -5,12 +5,15 @@ mod image;
 mod window;
 
 use std::{
-    fs::{self, File},
+    fs::File,
     future::Future,
     io::{self, Read, Seek, SeekFrom},
     path::{Component, Path, PathBuf},
     sync::Arc,
 };
+
+#[cfg(not(unix))]
+use std::fs;
 
 use dal_agent::{
     ToolError,
