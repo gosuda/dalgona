@@ -2369,3 +2369,27 @@ async fn rename_rejects_parent_replaced_by_symlink_after_planning() {
         b"source\n"
     );
 }
+
+#[tokio::test]
+async fn rename_rejects_duplicate_destination_write_sets() {
+    let dir = tempfile::tempdir().expect("workspace");
+    for name in ["first.txt", "second.txt"] {
+        tokio::fs::write(dir.path().join(name), b"source\n")
+            .await
+            .expect("seed source");
+    }
+    let session = test_session(dir.path(), false);
+    let duplicated = r#"{"changes":[{"path":"first.txt","rename":"target.txt"},{"path":"second.txt","rename":"target.txt"}]}"#;
+    let error = plan(&session, DialectId::Replace, duplicated)
+        .await
+        .expect_err("duplicate destination must be rejected");
+    assert_eq!(error.class, super::ir::ErrorClass::Resolve);
+    assert!(error.message.contains("overlaps another change"));
+    assert!(!dir.path().join("target.txt").exists());
+
+    let overlapping_create = r#"{"changes":[{"path":"first.txt","rename":"target.txt"},{"path":"target.txt","create":"new"}]}"#;
+    let error = plan(&session, DialectId::Replace, overlapping_create)
+        .await
+        .expect_err("rename and create cannot share a destination");
+    assert_eq!(error.class, super::ir::ErrorClass::Resolve);
+}
