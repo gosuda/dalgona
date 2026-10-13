@@ -13,7 +13,7 @@ use super::{
         Diff, Edit, EngineError, ErrorClass, FindingSeverity, Output, Plan, StagedBatch,
         StagedFile, StagedFileOwned,
     },
-    resolve::{check_overlap, resolve_path},
+    resolve::{check_overlap, resolve_path, resolve_rename_destination},
     snapshot::SnapshotStore,
     styles,
 };
@@ -76,7 +76,10 @@ pub async fn plan(
     // Group by canonical path in ascending byte order.
     let mut groups: HashMap<PathBuf, Vec<Edit>> = HashMap::new();
     let mut canonical_of: HashMap<PathBuf, PathBuf> = HashMap::new();
-    for edit in edits {
+    for mut edit in edits {
+        if let Edit::Rename { to, .. } = &mut edit {
+            *to = resolve_rename_destination(&session.workspace, to)?;
+        }
         let raw = edit_path(&edit);
         let (display, canonical) = resolve_path(&session.workspace, raw)?;
         canonical_of.entry(display.clone()).or_insert(canonical);
@@ -291,5 +294,7 @@ fn edit_path(edit: &Edit) -> &Path {
 }
 
 pub mod commit;
+
+mod rename;
 
 pub mod stage;
