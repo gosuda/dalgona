@@ -1,17 +1,20 @@
 //! HTTP/1.1 serve listener: lifecycle, guards, and route dispatch.
 //!
 //! Hyper serves HTTP/1.1 only on a Tokio `TcpListener` with a 256-connection
-//! cap. The pipeline is route, browser guard, authentication, content type,
+//! cap and a separate, evictable 32-slot pre-header budget. HTTP keep-alive
+//! is disabled so an idle socket cannot retain a slot. The pipeline is route,
+//! browser guard, authentication, content type,
 //! bounded body, then the route handler. OpenAI routes run through the
 //! router, A2A routes through `a2a`, and `/v1/ws` plus `/codex/ws` upgrade
 //! to WebSockets. Loopback binds need no token; public binds require the
 //! BLAKE3-checked serve token. Stopping ceases accepts, cancels handler
 //! turns, and drains connections within two seconds.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::router::{DigestTable, RouterOptions};
@@ -63,7 +66,11 @@ impl ServeHandle {
 }
 
 /// Maximum concurrent HTTP connections.
-const CONN_CAP: usize = 256;
+pub(crate) const CONN_CAP: usize = 256;
+/// Maximum sockets still reading their first request headers.
+const PREAUTH_CAP: usize = 32;
+/// Absolute deadline for a complete HTTP request header.
+pub(crate) const HEADER_TIMEOUT: Duration = Duration::from_secs(5);
 /// Maximum request header buffer size in bytes.
 const HEADER_LIMIT: usize = 1_048_576;
 /// Stop drain grace.
@@ -119,6 +126,15 @@ impl ServeCtx {
 
 /// One live stream or upgrade future owned by the accept loop.
 pub(crate) type Driver = futures::future::BoxFuture<'static, ()>;
+
+/// An incomplete HTTP connection that can be evicted for a new peer.
+struct PendingConn {
+    /// Set after the first complete request or when the connection ends.
+    complete: Arc<AtomicBool>,
+    /// Cancels an incomplete connection without disturbing active requests.
+    cancel: CancellationToken,
+}
+
 /// Binds the accept loop for one listener and returns its handle.
 pub(crate) fn listen(
     host: Host,
@@ -140,16 +156,41 @@ pub(crate) fn listen(
     let done = async move {
         let mut conns: FuturesUnordered<Driver> = FuturesUnordered::new();
         let mut drivers: FuturesUnordered<Driver> = FuturesUnordered::new();
+        let mut pending = VecDeque::<PendingConn>::new();
         loop {
             tokio::select! {
                 biased;
                 () = stop.cancelled() => break,
-                accepted = listener.accept(), if conns.len() < CONN_CAP => {
+                _ = conns.next(), if !conns.is_empty() => {}
+                _ = drivers.next(), if !drivers.is_empty() => {}
+                Some(driver) = driver_rx.recv() => drivers.push(driver),
+                accepted = listener.accept() => {
                     match accepted {
                         Ok((stream, _)) => {
+                            pending.retain(|entry| !entry.complete.load(Ordering::Acquire));
+                            if pending.len() >= PREAUTH_CAP || conns.len() >= CONN_CAP {
+                                let Some(oldest) = pending.pop_front() else {
+                                    // Only active requests occupy the listener: do not evict them.
+                                    continue;
+                                };
+                                oldest.cancel.cancel();
+                                // Reclaim the evicted slot before admitting its replacement.
+                                while !oldest.complete.load(Ordering::Acquire) {
+                                    assert!(
+                                        conns.next().await.is_some(),
+                                        "evicted connection must remain in the connection set"
+                                    );
+                                }
+                            }
+                            let complete = Arc::new(AtomicBool::new(false));
+                            let cancel = CancellationToken::new();
+                            pending.push_back(PendingConn {
+                                complete: Arc::clone(&complete),
+                                cancel: cancel.clone(),
+                            });
                             let ctx = Arc::clone(&ctx);
                             conns.push(Box::pin(async move {
-                                serve_conn(ctx, stream).await;
+                                serve_conn(ctx, stream, complete, cancel).await;
                             }));
                         }
                         Err(error) => {
@@ -163,9 +204,6 @@ pub(crate) fn listen(
                         }
                     }
                 }
-                _ = conns.next(), if !conns.is_empty() => {}
-                _ = drivers.next(), if !drivers.is_empty() => {}
-                Some(driver) = driver_rx.recv() => drivers.push(driver),
             }
         }
         shutdown.cancel();
@@ -208,26 +246,38 @@ fn libc_enfile() -> i32 {
 }
 
 /// Serves one HTTP/1.1 connection to completion.
-async fn serve_conn(ctx: Arc<ServeCtx>, stream: tokio::net::TcpStream) {
+async fn serve_conn(
+    ctx: Arc<ServeCtx>,
+    stream: tokio::net::TcpStream,
+    complete: Arc<AtomicBool>,
+    cancel: CancellationToken,
+) {
     let io = hyper_util::rt::TokioIo::new(stream);
     let shutdown = ctx.shutdown.clone();
+    let request_seen = Arc::clone(&complete);
     let service = hyper::service::service_fn(move |req: Request<hyper::body::Incoming>| {
+        request_seen.store(true, Ordering::Release);
         let ctx = Arc::clone(&ctx);
         async move { Ok::<_, hyper::Error>(handle_request(ctx, req).await) }
     });
     let conn = hyper::server::conn::http1::Builder::new()
+        .timer(hyper_util::rt::TokioTimer::new())
+        .header_read_timeout(HEADER_TIMEOUT)
+        .keep_alive(false)
         .max_buf_size(HEADER_LIMIT)
         .serve_connection(io, service)
         .with_upgrades();
     let mut conn = std::pin::pin!(conn);
     let result = tokio::select! {
-        result = conn.as_mut() => result,
+        result = conn.as_mut() => Some(result),
+        () = cancel.cancelled() => None,
         () = shutdown.cancelled() => {
             conn.as_mut().graceful_shutdown();
-            conn.await
+            Some(conn.await)
         }
     };
-    if let Err(error) = result {
+    complete.store(true, Ordering::Release);
+    if let Some(Err(error)) = result {
         tracing::debug!(%error, "connection ended");
     }
 }
