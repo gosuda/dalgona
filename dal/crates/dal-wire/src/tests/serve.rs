@@ -7,7 +7,9 @@ use crate::serve::{CONN_CAP, HEADER_TIMEOUT};
 use sonic_rs::JsonValueTrait;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use super::support::{HttpReply, host_header, http, parse_reply, read_reply, rig, router_options, with_serve};
+use super::support::{
+    HttpReply, host_header, http, parse_reply, read_reply, rig, router_options, with_serve,
+};
 use crate::error::ServeError;
 #[cfg(unix)]
 use crate::token::TokenError;
