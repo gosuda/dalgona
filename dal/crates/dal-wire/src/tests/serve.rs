@@ -128,6 +128,41 @@ async fn authenticated_request_survives_full_silent_socket_saturation() {
     .await;
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn authenticated_request_survives_unauthenticated_body_stalls() {
+    let rig = rig(&[]).await;
+    let token = crate::token::create(&rig.data().join("serve.token"), false)
+        .expect("token created");
+    let mut options = router_options(&rig);
+    options.public = true;
+    options.a2a = true;
+    with_serve(&rig, options, |addr| async move {
+        let incomplete = format!(
+            "GET /.well-known/agent-card.json HTTP/1.1\r\n{}\r\ncontent-length: 1024\r\n\r\nx",
+            host_header(addr)
+        );
+        let mut stalled = Vec::with_capacity(CONN_CAP);
+        for _ in 0..CONN_CAP {
+            let mut peer = tokio::net::TcpStream::connect(addr).await.expect("connect");
+            let _ = peer.write_all(incomplete.as_bytes()).await;
+            stalled.push(peer);
+        }
+        let request = format!(
+            "GET /v1/models HTTP/1.1\r\n{}\r\nauthorization: Bearer {token}",
+            host_header(addr)
+        );
+        let reply = tokio::time::timeout(
+            super::support::WAIT,
+            http(addr, &request, ""),
+        )
+        .await
+        .expect("authenticated request must not starve behind incomplete bodies");
+        assert_eq!(reply.status, 200, "{reply:?}");
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn http_guard_limits() {
     let rig = rig(&[]).await;
