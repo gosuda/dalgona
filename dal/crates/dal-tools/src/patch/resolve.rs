@@ -168,6 +168,22 @@ pub fn resolve_path(workspace: &Path, raw: &Path) -> Result<(PathBuf, PathBuf), 
     Ok((normalized.clone(), canonical_target))
 }
 
+// On Windows, junctions and mount points are reparse points but need not
+// report themselves as symbolic links through std::fs::FileType.
+fn is_redirecting_parent(metadata: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+        metadata.file_type().is_symlink()
+            || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
+    }
+}
+
 /// Validates a rename target before its bytes can be staged or approved.
 ///
 /// Rename destinations have no parent traversal and no symlinked directory
@@ -194,7 +210,7 @@ pub fn resolve_rename_destination(workspace: &Path, raw: &Path) -> Result<PathBu
             };
             parent.push(part);
             match std::fs::symlink_metadata(&parent) {
-                Ok(metadata) if metadata.file_type().is_symlink() => {
+                Ok(metadata) if is_redirecting_parent(&metadata) => {
                     return Err(outside_workspace(raw, workspace));
                 }
                 Ok(metadata) if !metadata.is_dir() => {
