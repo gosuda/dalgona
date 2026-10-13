@@ -1,0 +1,11 @@
+event: message_start
+data: {"type":"message_start","message":{"id":"msg_usage","usage":{"input_tokens":25,"output_tokens":1}}}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":null},"usage":{"output_tokens":15}}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":891}}
+
+event: message_stop
+data: {"type":"message_stop"}

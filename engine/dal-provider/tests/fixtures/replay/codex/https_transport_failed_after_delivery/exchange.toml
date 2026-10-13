@@ -1,0 +1,14 @@
+[[exchange]]
+kind = "http"
+
+[exchange.request]
+method = "POST"
+path = "/responses"
+body = "request_body.json"
+headers = { "authorization" = "<redacted>", "chatgpt-account-id" = "<redacted>", "originator" = "dalgon", "session-id" = "0193f5a1-4d2c-7a1b-9c3d-5e6f7a8b9c0d", "thread-id" = "0193f5a1-4d2c-7a1b-9c3d-5e6f7a8b9c0d", "x-client-request-id" = "0193f5a1-4d2c-7a1b-9c3d-5e6f7a8b9c0d", "accept" = "text/event-stream", "user-agent" = "dalgon/test (linux test; x86_64)", "content-type" = "application/json" }
+
+[exchange.response]
+status = 200
+body = "response.sse"
+close_after = 125
+headers = { "content-type" = "text/event-stream" }

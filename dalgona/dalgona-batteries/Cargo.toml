@@ -1,0 +1,65 @@
+[package]
+name = "dalgona-batteries"
+version = "0.1.0"
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+base64 = "=0.23.1"
+blake3.workspace = true
+dal-agent.workspace = true
+dal-core.workspace = true
+dal-ext.workspace = true
+dal-star.workspace = true
+dal-store.workspace = true
+dal-tools = { workspace = true, features = ["symbols"] }
+htmd = "=0.5.5"
+jiff = { version = "=0.2.38", features = ["serde"] }
+png = "=0.18.1"
+process-wrap = { version = "=10.0.1", features = ["tokio1", "process-group", "job-object", "kill-on-drop"] }
+regex-automata = "=0.4.18"
+reqwest = { version = "=0.13.5", features = ["rustls", "json", "stream"] }
+schemars = "=1.2.3"
+serde = { version = "=1.0.229", features = ["derive", "rc"] }
+sonic-rs = "=0.5.10"
+starlark = "=0.14.2"
+thiserror = "=2.0.21"
+toml.workspace = true
+tokio = { version = "=1.53.2", features = ["macros", "process", "rt", "rt-multi-thread", "sync", "time", "io-util", "net"] }
+tokio-util = { version = "=0.7.20", default-features = false, features = ["rt"] }
+unicode-width = "=0.2.2"
+uuid = { version = "=1.28.0", features = ["v4"] }
+
+[dev-dependencies]
+dal-store = { workspace = true, features = ["test-support"] }
+http-body-util = "=0.1.5"
+hyper = { version = "=1.12.0", features = ["full"] }
+hyper-util = { version = "=0.1.21", features = ["full"] }
+proptest = "=1.12.0"
+shuttle = "=0.9.6"
+tokio = { version = "=1.53.2", features = ["test-util"] }
+unicode-segmentation = "=1.13.3"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unused_lifetimes = "warn"
+unreachable_pub = "warn"
+
+[lints.clippy]
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "warn", priority = -1 }
+complexity = { level = "warn", priority = -1 }
+perf = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "warn"
+panic = "warn"
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+exit = "deny"
+disallowed_methods = "deny"

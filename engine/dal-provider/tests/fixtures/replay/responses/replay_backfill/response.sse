@@ -1,0 +1,6 @@
+data: {"type":"response.output_item.done","item":{"id":"rs_9","type":"reasoning","summary":[]}}
+
+data: {"type":"response.output_text.delta","delta":"hi"}
+
+data: {"type":"response.completed","response":{"output":[{"id":"rs_9","type":"reasoning","summary":[],"encrypted_content":"full"}],"usage":null}}
+

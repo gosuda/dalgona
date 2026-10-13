@@ -1,10 +1,7 @@
 ---
-description: Test discipline for every change that touches a test in this repo.
+description: Test discipline for Rust source, tests, and benchmarks.
 globs:
-  - "**/tests/**/*.rs"
-  - "**/test/**/*.rs"
-  - "**/test_support/**/*.rs"
-  - "**/benches/**/*.rs"
+  - "**/*.rs"
 ---
 # Test discipline
 

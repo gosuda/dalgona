@@ -93,7 +93,7 @@ If the purpose of the extension is in the not-port table, do not port it.
 | `interactive-shell` | needs user takeover of the terminal; `tools.exec` waits for the child to exit and captures its streams; `ask` is one modal question | none today; the door can widen |
 | `status-line` | needs a persistent status or footer surface; plugin UI is data, and the only widget is `ask` | none today; the door can widen |
 | `pi.on("user_bash")` swap | no hook can hand over execution | run the program as a tool through `ctx.tools.exec` |
-| `pi.registerProvider` | providers are dal core; a plugin cannot declare `models` in this release | config aliases |
+| `pi.registerProvider` | providers are dal core | config aliases |
 | `ctx.ui.custom`, widgets, status, editor | plugin UI is data | the ask surface |
 | `pi.events` bus | a handler cannot call another plugin's tool | one plugin, or a file that both read |
 | project `.pi/extensions` | plugins come from the data root only | install into the data root |
@@ -110,7 +110,7 @@ On Windows the data root follows the `install` page.
 
 ## Start from the nearest example
 
-A tool with state, `todo`; child sessions, `subagent`; questions to the user, `ask`; an MCP call, `mcp`; a hook, `permission-gate`; skills only, `skill-pack`; the smallest shape, `hello`. The page `dal://examples/<name>` holds every file; from a source checkout, `cp -r examples/plugins/<name>/. "$d/"`. Then set `name` and rename the tools and commands.
+A tool with state, `todo`; child sessions, `subagent`; questions to the user, `ask`; an MCP call, `mcp`; a hook, `permission-gate`; skills only, `skill-pack`; the smallest shape, `hello`. The page `dal://examples/<name>` holds every file; from the repository root of a source checkout, run `cp -r examples/plugins/<name>/. "$d/"`. Then set `name` and rename the tools and commands.
 
 ## Translate
 

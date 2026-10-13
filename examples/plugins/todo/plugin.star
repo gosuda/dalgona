@@ -25,7 +25,7 @@ def todo(ctx, args):
     if action == "add":
         text = args.text
         if not text:
-            return "todo: text is required for add"
+            return dal.err("todo", "text is required for add")
         items, revision = todo_load(ctx)
         new_id = 1
         for item in items:
@@ -37,7 +37,7 @@ def todo(ctx, args):
     if action == "toggle":
         target = args.id
         if not target:
-            return "todo: id is required for toggle"
+            return dal.err("todo", "id is required for toggle")
         items, revision = todo_load(ctx)
         for item in items:
             if item["id"] == target:
@@ -46,7 +46,7 @@ def todo(ctx, args):
                 if item["done"]:
                     return "Todo #" + str(target) + " completed"
                 return "Todo #" + str(target) + " uncompleted"
-        return "Todo #" + str(target) + " uncompleted"
+        return dal.err("todo", "#" + str(target) + " not found")
     if action == "clear":
         items, revision = todo_load(ctx)
         count = len(items)

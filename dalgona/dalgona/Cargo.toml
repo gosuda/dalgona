@@ -1,0 +1,66 @@
+[package]
+name = "dalgona"
+version = "0.1.0"
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/dalgona-v{ version }/{ name }-{ target }.tar.xz"
+pkg-fmt = "txz"
+bin-dir = "{ name }-{ target }/{ bin }"
+
+[package.metadata.binstall.overrides.'cfg(windows)']
+pkg-url = "{ repo }/releases/download/dalgona-v{ version }/{ name }-{ target }.zip"
+pkg-fmt = "zip"
+bin-dir = "{ bin }{ binary-ext }"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unused_lifetimes = "warn"
+unreachable_pub = "warn"
+
+[lints.clippy]
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "warn", priority = -1 }
+complexity = { level = "warn", priority = -1 }
+perf = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "warn"
+panic = "warn"
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+exit = "deny"
+disallowed_methods = "deny"
+
+[features]
+default = ["tui"]
+tui = ["dalgon/tui"]
+
+[dependencies]
+dal-agent.workspace = true
+dal-core.workspace = true
+dal-tools.workspace = true
+dalgon.workspace = true
+dalgona-batteries = { version = "=0.1.0", path = "../dalgona-batteries" }
+thiserror = "=2.0.21"
+tokio = { workspace = true, features = ["rt-multi-thread", "signal", "time"] }
+toml.workspace = true
+[dev-dependencies]
+clap = { version = "=4.6.7", features = ["derive", "string"] }
+clap_mangen = "=0.3.3"
+dal-ext.workspace = true
+regex = "=1.13.1"
+
+[[bin]]
+name = "dalgona"
+path = "src/bin/dalgona.rs"
+
+[[bin]]
+name = "dg"
+path = "src/bin/dg.rs"
+
+[package.metadata.dist]
+include = ["../README.md", "../../LICENSE.md", "../CHANGELOG.md", "man"]

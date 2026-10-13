@@ -17,9 +17,9 @@ from typing import NoReturn, Union
 PRICE_SOURCE: str = "models.dev"
 PRICE_SOURCE_URL: str = "https://models.dev/api.json"
 
-SNAPSHOT_PATH: Path = Path("dal/prices/models.dev.json")
-FETCHED_AT_PATH: Path = Path("dal/prices/fetched-at.txt")
-GENERATED_PATH: Path = Path("dal/crates/dal-provider/src/prices_generated.rs")
+SNAPSHOT_PATH: Path = Path("prices/models.dev.json")
+FETCHED_AT_PATH: Path = Path("prices/fetched-at.txt")
+GENERATED_PATH: Path = Path("engine/dal-provider/src/prices_generated.rs")
 
 USAGE: str = "usage: scripts/update-prices.py [--check]"
 STALE_MESSAGE: str = "update-prices: generated price table is stale; run python3 scripts/update-prices.py"
@@ -43,6 +43,7 @@ class PriceTier:
     size: int
     input: float | None
     cached_input: float | None
+    cache_write: float | None
     output: float | None
     reasoning: float | None
 
@@ -124,17 +125,27 @@ def parse_tiers(cost: dict[str, JSONValue]) -> tuple[PriceTier, ...]:
             raise UpdatePricesError(CATALOG_MESSAGE)
         input_rate = parse_rate(raw_tier.get("input"))
         cached_input_rate = parse_rate(raw_tier.get("cache_read"))
+        cache_write_rate = parse_rate(raw_tier.get("cache_write"))
         output_rate = parse_rate(raw_tier.get("output"))
         reasoning_rate = parse_rate(raw_tier.get("reasoning"))
-        parse_rate(raw_tier.get("cache_write"))
         parse_rate(raw_tier.get("input_audio"))
-        if all(rate is None for rate in (input_rate, cached_input_rate, output_rate, reasoning_rate)):
+        if all(
+            rate is None
+            for rate in (
+                input_rate,
+                cached_input_rate,
+                cache_write_rate,
+                output_rate,
+                reasoning_rate,
+            )
+        ):
             raise UpdatePricesError(CATALOG_MESSAGE)
         tiers.append(
             PriceTier(
                 size=size,
                 input=input_rate,
                 cached_input=cached_input_rate,
+                cache_write=cache_write_rate,
                 output=output_rate,
                 reasoning=reasoning_rate,
             )
@@ -331,6 +342,7 @@ def render(
                     f"                size: {tier.size:_},",
                     f"                input: {render_rate(tier.input)},",
                     f"                cached_input: {render_rate(tier.cached_input)},",
+                    f"                cache_write: {render_rate(tier.cache_write)},",
                     f"                output: {render_rate(tier.output)},",
                     f"                reasoning: {render_rate(tier.reasoning)},",
                     "            },",

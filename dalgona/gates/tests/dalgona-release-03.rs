@@ -4,7 +4,7 @@
     clippy::disallowed_methods,
     reason = "gate runs the real product binaries"
 )]
-use gates::support;
+use dalgona_gates::support;
 
 use std::process::Command;
 
@@ -14,8 +14,8 @@ fn dalgona_binary_package_publishes_last() -> support::TestResult<()> {
     let output = support::run_command(
         Command::new("bash")
             .arg(root.join("scripts/publish-crates.sh"))
-            .args(["--dry-run"])
-            .arg(root.join("dalgona"))
+            .args(["--product", "dalgona", "--dry-run"])
+            .arg(&root)
             .current_dir(&root),
     )?;
     assert!(

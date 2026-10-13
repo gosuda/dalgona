@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Implement the standalone release scripts using Cargo metadata.
 
-Runs on the stock macOS interpreter: every annotation stays deferred and
-the single TOML read goes through a small fail-closed reader instead of
-``tomllib`` so Python 3.9 works.
+The selected product and package versions come exclusively from ``cargo
+metadata`` so compound workspaces and standalone fixtures share one contract.
 """
 
 from __future__ import annotations
@@ -17,11 +16,18 @@ from dataclasses import dataclass
 from pathlib import Path
 
 PUBLISH_USAGE = (
-    "usage: scripts/publish-crates.sh [--dry-run] [--check-registry-deps] "
-    "[--check-dep-only <name> <req>] <workspace-root>"
+    "usage: scripts/publish-crates.sh [--product dal|dalgona] [--dry-run] "
+    "[--check-registry-deps] [--check-dep-only <name> <req>] <workspace-root>"
 )
-SEMVER_USAGE = "usage: scripts/semver-gate.sh [--baseline-root <dir>] <workspace-root>"
+SEMVER_USAGE = "usage: scripts/semver-gate.sh [--product dal|dalgona] [--baseline-root <dir>] <workspace-root>"
 CRATES_IO_SOURCE = "registry+https://github.com/rust-lang/crates.io-index"
+PRODUCTS = frozenset({"dal", "dalgona"})
+SEMVER_VERSION = re.compile(
+    r"((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
+    r"(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
+    r"(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?)"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+)
 
 
 
@@ -113,134 +119,6 @@ def metadata_value(value: object) -> Metadata:
     return Metadata(tuple(members), tuple(dependencies))
 
 
-_TOML_TABLE = re.compile(r"^\[\s*(.*?)\s*\]\s*(?:#.*)?$")
-_TOML_ASSIGNMENT = re.compile(r"^([^=\s][^=]*?)\s*=\s*(.*)$")
-_TOML_KEY_SEGMENT = re.compile(
-    r'\s*(?:([A-Za-z0-9_-]+)|"((?:[^"\\]|\\.)*)"|\'([^\']*)\')'
-)
-_TOML_STRING_VALUE = re.compile(
-    r'^\s*("(?:[^"\\]|\\.)*"|\'[^\']*\')\s*(?:#.*)?$'
-)
-_TOML_INLINE_VERSION = re.compile(
-    r'(?:^|[{,])\s*version\s*=\s*("(?:[^"\\]|\\.)*"|\'[^\']*\')'
-)
-
-
-def _toml_key_path(raw: str) -> list[str] | None:
-    parts: list[str] = []
-    pos = 0
-    while True:
-        match = _TOML_KEY_SEGMENT.match(raw, pos)
-        if match is None:
-            return None
-        parts.append(next(group for group in match.groups() if group is not None))
-        pos = match.end()
-        while pos < len(raw) and raw[pos] in " \t":
-            pos += 1
-        if pos == len(raw):
-            return parts
-        if raw[pos] != ".":
-            return None
-        pos += 1
-
-
-def _toml_string(raw: str) -> str | None:
-    if raw.startswith("'"):
-        return raw[1:-1]
-    try:
-        decoded = json.loads(raw)
-    except json.JSONDecodeError:
-        return None
-    return decoded if isinstance(decoded, str) else None
-
-
-def _toml_multiline_open(value: str) -> str | None:
-    """Return the delimiter when `value` opens an unterminated multiline string.
-
-    TOML multiline basic (``\"\"\"``) and literal (``'''``) strings span
-    lines, and their contents may resemble headers or assignments. Scanning
-    must skip to the closing delimiter instead of reading string contents
-    as TOML.
-    """
-    pos = 0
-    while pos < len(value):
-        if value.startswith(('"""', "'''"), pos):
-            delimiter = value[pos : pos + 3]
-            close = value.find(delimiter, pos + 3)
-            if close < 0:
-                return delimiter
-            pos = close + 3
-            continue
-        char = value[pos]
-        if char == "#":
-            return None
-        if char == '"':
-            pos += 1
-            while pos < len(value) and value[pos] != '"':
-                pos += 2 if value[pos] == "\\" else 1
-            pos += 1
-            continue
-        if char == "'":
-            pos += 1
-            while pos < len(value) and value[pos] != "'":
-                pos += 1
-            pos += 1
-            continue
-        pos += 1
-    return None
-
-
-def workspace_package_version(root: Path) -> str | None:
-    """Return the root manifest's ``[workspace.package]`` version, or None.
-
-    Covers the TOML forms a workspace manifest uses: section headers,
-    quoted and dotted keys, inline tables, basic and literal strings,
-    and trailing comments. Lines inside multiline basic and literal
-    strings are skipped. Anything outside that subset reads as absent,
-    so an unrecognized manifest fails the lockstep check instead of
-    passing silently.
-    """
-    try:
-        text = (root / "Cargo.toml").read_text(encoding="utf-8")
-    except OSError:
-        return None
-    section: list[str] = []
-    multiline: str | None = None
-    for line in (raw.strip() for raw in text.splitlines()):
-        if multiline is not None:
-            if multiline in line:
-                multiline = None
-            continue
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("[["):
-            section = []
-            continue
-        if line.startswith("["):
-            header = _TOML_TABLE.match(line)
-            parsed = _toml_key_path(header.group(1)) if header else None
-            section = parsed if parsed is not None else []
-            continue
-        assignment = _TOML_ASSIGNMENT.match(line)
-        if assignment is None:
-            continue
-        delimiter = _toml_multiline_open(assignment.group(2))
-        if delimiter is not None:
-            multiline = delimiter
-            continue
-        key = _toml_key_path(assignment.group(1))
-        if key is None:
-            continue
-        path = section + key
-        if path == ["workspace", "package"]:
-            match = _TOML_INLINE_VERSION.search(assignment.group(2))
-            if match is None:
-                continue
-            return _toml_string(match.group(1))
-        if path == ["workspace", "package", "version"]:
-            match = _TOML_STRING_VALUE.match(assignment.group(2))
-            return _toml_string(match.group(1)) if match else None
-    return None
 
 
 def error(message: str, code: int) -> int:
@@ -335,6 +213,81 @@ def run_metadata(root: Path, metadata_error: str) -> tuple[Metadata | None, int 
         return None, error(metadata_error, 2)
 
 
+def member_product(root: Path, member: Member) -> str:
+    try:
+        relative = member.manifest_path.resolve().relative_to(root.resolve())
+    except ValueError as exc:
+        raise ValueError(f"workspace member {member.name} is outside {root}") from exc
+    return "dalgona" if relative.parts and relative.parts[0] == "dalgona" else "dal"
+
+
+def select_product(
+    metadata: Metadata,
+    root: Path,
+    product: str | None,
+) -> tuple[Metadata, dict[str, str]]:
+    products_by_name = {member.name: member_product(root, member) for member in metadata.members}
+    products = set(products_by_name.values())
+    if product is not None and product not in PRODUCTS:
+        raise ValueError("product must be dal or dalgona")
+    if product is None and len(products) > 1:
+        raise ValueError("compound workspace requires --product dal|dalgona")
+    selected = (
+        metadata.members
+        if product is None
+        else tuple(member for member in metadata.members if products_by_name[member.name] == product)
+    )
+    if product is not None and not selected:
+        raise ValueError(f"no {product} package found in workspace")
+    selected_names = {member.name for member in selected}
+    dependencies = tuple(
+        dependency for dependency in metadata.dependencies if dependency.package in selected_names
+    )
+    return Metadata(tuple(selected), dependencies), products_by_name
+
+
+def selected_registry_dependencies(
+    metadata: Metadata,
+    products_by_name: dict[str, str],
+    product: str | None,
+    package_directories_by_name: dict[str, Path],
+    directory_names: dict[Path, str],
+) -> tuple[list[Dependency], str | None]:
+    """Return selected product's cross-product registry prerequisites.
+
+    A local path to a dal package is intentionally retained as a registry
+    prerequisite when publishing Dalgona: Cargo uses the path for the local
+    workspace, while a packaged Dalgona manifest requires the released crate.
+    """
+    prerequisites: list[Dependency] = []
+    for dependency in metadata.dependencies:
+        target = dependency_target(dependency, package_directories_by_name, directory_names)
+        if dependency.path is not None and target is None:
+            return [], (
+                f"workspace member {dependency.package} depends on {dependency.name} by path, "
+                "but the target is not a workspace member"
+            )
+        target_product = products_by_name.get(target or dependency.name)
+        if product is None or target_product is None or target_product == product:
+            continue
+        if product == "dalgona" and target_product == "dal":
+            if re.fullmatch(
+                r"=[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?",
+                dependency.requirement or "",
+            ) is None:
+                return [], (
+                    f"workspace member {dependency.package} requires an exact version of "
+                    f"{dependency.name}; pin a complete version with '=major.minor.patch'"
+                )
+            prerequisites.append(dependency)
+            continue
+        return [], (
+            f"workspace member {dependency.package} crosses the product boundary through "
+            f"{dependency.name}; only dalgona -> dal is supported"
+        )
+    return prerequisites, None
+
+
 def package_directories(members: tuple[Member, ...]) -> dict[Path, str]:
     return {member.manifest_path.parent.resolve(): member.name for member in members}
 
@@ -401,6 +354,13 @@ def satisfies_requirement(version: str, requirement: str) -> bool:
     exact = requirement.startswith("=")
     if exact:
         requirement = requirement[1:]
+        required_version = SEMVER_VERSION.fullmatch(requirement)
+        if required_version is not None:
+            published_version = SEMVER_VERSION.fullmatch(version)
+            return (
+                published_version is not None
+                and published_version.group(1) == required_version.group(1)
+            )
     req = re.fullmatch(r"0\.([0-9]+)(?:\.([0-9]+))?", requirement)
     candidate = re.fullmatch(r"([0-9]+)\.([0-9]+)\.([0-9]+)", version)
     if req is None or candidate is None:
@@ -446,16 +406,22 @@ def publish_order(members: tuple[Member, ...], dependencies: tuple[Dependency, .
 
 def publish_args(
     arguments: list[str],
-) -> tuple[bool, bool, str | None, str | None, str] | None:
+) -> tuple[bool, bool, str | None, str | None, str | None, str] | None:
     dry_run = False
     check_registry_deps = False
     dep_name: str | None = None
     dep_req: str | None = None
+    product: str | None = None
     root: str | None = None
     index = 0
     while index < len(arguments):
         argument = arguments[index]
-        if argument == "--dry-run":
+        if argument == "--product":
+            if product is not None or index + 1 >= len(arguments) or arguments[index + 1] not in PRODUCTS:
+                return None
+            product = arguments[index + 1]
+            index += 2
+        elif argument == "--dry-run":
             dry_run = True
             index += 1
         elif argument == "--check-registry-deps":
@@ -475,14 +441,14 @@ def publish_args(
             return None
     if root is None:
         return None
-    return dry_run, check_registry_deps, dep_name, dep_req, root
+    return dry_run, check_registry_deps, dep_name, dep_req, product, root
 
 
 def publish_main(arguments: list[str]) -> int:
     parsed = publish_args(arguments)
     if parsed is None:
         return usage_error(PUBLISH_USAGE)
-    dry_run, check_registry_deps, dep_name, dep_req, root_arg = parsed
+    dry_run, check_registry_deps, dep_name, dep_req, product, root_arg = parsed
     root, status = parse_root(root_arg)
     if status is not None or root is None:
         return status or 64
@@ -491,43 +457,36 @@ def publish_main(arguments: list[str]) -> int:
             return usage_error(PUBLISH_USAGE)
         return check_dep_only(dep_name, dep_req)
 
-    metadata, status = run_metadata(root, "the cargo metadata shape is invalid for the publish order")
-    if status is not None or metadata is None:
+    all_metadata, status = run_metadata(root, "the cargo metadata shape is invalid for the publish order")
+    if status is not None or all_metadata is None:
         return status or 2
+    try:
+        metadata, products_by_name = select_product(all_metadata, root, product)
+    except ValueError as exc:
+        return error(str(exc), 2)
     publishable = [member.name for member in metadata.members if member.publishable]
     if not publishable:
         return error(f"no publishable member found in {root_arg}", 4)
-    workspace_version = workspace_package_version(root)
-    if not workspace_version:
+    versions = {member.version for member in metadata.members}
+    if len(versions) != 1:
         return error(
-            f"workspace root {root_arg} has no [workspace.package] version; lockstep is broken",
+            f"selected {product or 'workspace'} packages do not share a release version; lockstep is broken",
             2,
         )
-    for member in metadata.members:
-        if member.version != workspace_version:
-            return error(
-                f"workspace member {member.name} does not inherit the workspace version; lockstep is broken",
-                2,
-            )
 
-    directories_by_name = {member.name: member.manifest_path.parent.resolve() for member in metadata.members}
-    names_by_directory = package_directories(metadata.members)
-    workspace_names = {member.name for member in metadata.members}
+    directories_by_name = {member.name: member.manifest_path.parent.resolve() for member in all_metadata.members}
+    names_by_directory = package_directories(all_metadata.members)
+    registry_dependencies: list[Dependency] = []
     if check_registry_deps:
-        for dependency in metadata.dependencies:
-            target = dependency_target(dependency, directories_by_name, names_by_directory)
-            if dependency.path is not None and target is None:
-                return error(
-                    f"workspace member {dependency.package} depends on {dependency.name} by path; "
-                    "dalgona builds only against published dal-* crates",
-                    2,
-                )
-            if dependency.name not in workspace_names and dependency.name.startswith(("dal-", "dalgon")) and dependency.source != CRATES_IO_SOURCE:
-                return error(
-                    f"workspace member {dependency.package} depends on {dependency.name} outside crates.io; "
-                    "dalgona builds only against published dal-* crates",
-                    2,
-                )
+        registry_dependencies, registry_error = selected_registry_dependencies(
+            metadata,
+            products_by_name,
+            product,
+            directories_by_name,
+            names_by_directory,
+        )
+        if registry_error is not None:
+            return error(registry_error, 2)
 
     order = publish_order(metadata.members, metadata.dependencies)
     if order is None:
@@ -537,9 +496,13 @@ def publish_main(arguments: list[str]) -> int:
         status = require_curl()
         if status is not None:
             return status
-        for dependency in metadata.dependencies:
-            if dependency.name in workspace_names or not dependency.name.startswith(("dal-", "dalgon")) or dependency.source != CRATES_IO_SOURCE:
-                continue
+        for dependency in registry_dependencies:
+            if dependency.source is not None and dependency.source != CRATES_IO_SOURCE:
+                return error(
+                    f"workspace member {dependency.package} depends on {dependency.name} outside crates.io; "
+                    "dalgona builds only against published dal-* crates",
+                    2,
+                )
             requirement = dependency.requirement or ""
             versions = index_versions(sparse_index(dependency.name))
             if not any(satisfies_requirement(version, requirement) for version in versions):
@@ -563,13 +526,19 @@ def publish_main(arguments: list[str]) -> int:
     return 0
 
 
-def semver_args(arguments: list[str]) -> tuple[str | None, str] | None:
+def semver_args(arguments: list[str]) -> tuple[str | None, str | None, str] | None:
     baseline: str | None = None
+    product: str | None = None
     root: str | None = None
     index = 0
     while index < len(arguments):
         argument = arguments[index]
-        if argument == "--baseline-root":
+        if argument == "--product":
+            if product is not None or index + 1 >= len(arguments) or arguments[index + 1] not in PRODUCTS:
+                return None
+            product = arguments[index + 1]
+            index += 2
+        elif argument == "--baseline-root":
             if baseline is not None or index + 1 >= len(arguments):
                 return None
             baseline = arguments[index + 1]
@@ -583,14 +552,14 @@ def semver_args(arguments: list[str]) -> tuple[str | None, str] | None:
             return None
     if root is None:
         return None
-    return baseline, root
+    return baseline, product, root
 
 
 def semver_main(arguments: list[str]) -> int:
     parsed = semver_args(arguments)
     if parsed is None:
         return usage_error(SEMVER_USAGE)
-    baseline_arg, root_arg = parsed
+    baseline_arg, product, root_arg = parsed
     curl_status = require_curl()
     if curl_status is not None:
         return curl_status
@@ -598,9 +567,15 @@ def semver_main(arguments: list[str]) -> int:
     if status is not None or root is None:
         return status or 64
     baseline = Path(baseline_arg).absolute() if baseline_arg is not None else None
-    metadata, status = run_metadata(root, "the cargo metadata shape is invalid for the checked members")
-    if status is not None or metadata is None:
+    all_metadata, status = run_metadata(root, "the cargo metadata shape is invalid for the checked members")
+    if status is not None or all_metadata is None:
         return status or 2
+    try:
+        metadata, _ = select_product(all_metadata, root, product)
+    except ValueError as exc:
+        return error(str(exc), 2)
+    if not metadata.members:
+        return error("no workspace package found in workspace", 2)
     for member in metadata.members:
         if not member.publishable:
             continue

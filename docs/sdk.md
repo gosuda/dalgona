@@ -1,46 +1,30 @@
 # Embed dal in a Rust program
 
-Link the library; `Config::default` and `Config::defaults`; register extensions; the five `Agent` operations, plus `ext_status`, `poll_status`, and `is_quiet` for extension status kinds (`Host::is_quiet` covers every open session); the `SessionRef` variants including ephemeral; the stability rule; the example `examples/sdk/main.rs` in full.
+Use `dal-agent` and `dal-core` through their public Rust APIs. The repository has one Cargo workspace and one `Cargo.lock`.
 
-File-backed extensions use the session sidecar service for small private
-values. Sidecar names are lowercase file names of up to 64 bytes; they may
-contain letters, digits, `.`, `_`, and `-`, but cannot start with punctuation,
-be exactly `.` or `..`, or include a path separator. Sidecar files stay inside
-the owning extension's session directory and writes are atomic.
+## Run the embedding example
 
-```rust
-//! The smallest dal embedder: start a host, open one ephemeral session, print the answer.
-use dal_agent::{ClientId, Env, Host, Product, SessionRef};
-use dal_core::Workspace;
-use dal_core::{Command, Config, Expect, Part};
-use std::collections::BTreeMap;
-use std::time::Duration;
+From the repository root, run:
 
-#[tokio::main(flavor = "multi_thread")]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cwd = std::env::current_dir()?;
-    let workspace = Workspace::new(cwd.clone())?;
-    let product = Product {
-        name: "dal",
-        data_root: cwd.clone(),
-        defaults: "",
-        extensions: Vec::new(),
-        bundled: Vec::new(),
-    };
-    let env = Env { vars: BTreeMap::new(), cwd };
-    let host = Host::start(product, Config::default(), env).await?;
-    let agent = host
-        .open(SessionRef::Ephemeral { workspace }, ClientId::new("sdk-example"))
-        .await?;
-    agent
-        .submit(Command::Prompt {
-            expect: Expect::Idle,
-            content: vec![Part::Text { text: "Reply with exactly one word: hello.".into() }],
-        })
-        .await?;
-    let mut subscription = agent.subscribe(None)?;
-    while subscription.next().await.is_some() {}
-    let _report = host.shutdown(Duration::from_secs(5)).await;
-    Ok(())
-}
+```sh
+cargo run -p dalgon --example sdk
 ```
+
+The example uses a local replay fixture and needs no provider credentials. It prints `hello from scripted SDK` and shuts down the host. Read the complete implementation in [`cli/dalgon/examples/sdk/main.rs`](../cli/dalgon/examples/sdk/main.rs).
+
+## Own the session lifecycle
+
+Load configuration with `Config::load(ConfigProduct::Dalgon, data_root, product_defaults_toml, user_toml)`. The loader takes TOML text; it does not read files or the environment. Capture those inputs at your process boundary.
+
+Build a `Product` with its data root and extensions, and pass it with the configuration and captured `Env` to `Host::start`. Open a session with `Host::open`; use `SessionRef::Ephemeral` when the session must not be saved. `Host::close` closes one session by id, closing descendant child sessions before their parent.
+
+Subscribe before submitting a prompt. Handle a rejected submission, a closed subscription, and a resync request. Read text updates until `UpdateKind::TurnEnded`; do not wait for the subscription to close before calling `Host::shutdown`. `Host::shutdown` takes a timeout grace duration and returns a report with the closed session count. The runnable example shows each of these outcomes.
+
+## Store extension state
+
+In saved sessions, file-backed extensions use the session sidecar service for
+small private values. Sidecars are unavailable in ephemeral sessions, including
+the example above. Names must contain 1 to 64 bytes of lowercase ASCII letters,
+digits, `.`, `_`, or `-`, and must start with a letter or digit. Sidecar files
+stay inside the owning extension's session directory, and writes are atomic.
+

@@ -30,4 +30,16 @@ Built-in commands, in registry order. Plugin commands appear after these with th
 | /quit |  | quit dalgon |
 | /mode | <normal\|eval-first\|eval-only> | set the harness mode |
 
-`/share`, `/bug`, and `/trust` never upload; `/share` writes a file you send yourself. A conflicting command name is an error naming both claimants; the numeric-suffix form `/review:1` is rejected. Completion ranks exact prefixes first, then substrings.
+`/share`, `/bug`, and `/trust` never upload. `/share` directs you to `/export`, which writes a file you can send yourself. A conflicting command name is an error `command "<name>" is already registered by plugin "<first>"; plugin "<second>" cannot register it`; the numeric-suffix form `/review:1` is rejected. Completion matches name prefixes and orders them by name.
+
+## Remote sign-in
+
+Esc cancels a remote API-key sign-in only before you submit the key. After submission, wait for the server’s result. If it succeeds, use `/logout` to remove the stored credential.
+
+## Skills
+
+A skill is not a slash command, and `/` completion never lists `skill:` entries. Run one with `/skill:<name> [text]`, which sends `text` with it, or with a `$` token in any prompt.
+
+- `/skill <name>` runs the skill when the name is exact. Any other text lists the skills whose name contains it and runs nothing: `/skill find-` prints every candidate and starts no turn.
+- In the composer, a token that starts with `$` opens a skills-only completion list with the same match and order as `/`. Tab puts the first match in place of that token.
+- A prompt that holds the whole token `$<name>`, `$<plugin>:<name>`, or `/skill:<name>` runs that skill, and a prompt may name several. The body of each named skill joins the turn once, after your message, in order of first mention. Any other token stays text.

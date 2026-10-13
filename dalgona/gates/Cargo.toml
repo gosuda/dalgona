@@ -1,8 +1,7 @@
 [package]
-name = "gates"
-version.workspace = true
+name = "dalgona-gates"
+version = "0.1.0"
 edition.workspace = true
-rust-version.workspace = true
 license-file.workspace = true
 repository.workspace = true
 description = "Unpublished success-criterion tests for Dalgona."
@@ -13,19 +12,26 @@ autobenches = false
 autotests = false
 
 [dependencies]
-dalgon = "=0.1.0"
-dalgona = { path = "../crates/dalgona" }
-dal-agent = "=0.1.0"
-dal-core = "=0.1.0"
-uuid = { version = "=1.27.0", features = ["v7"] }
+dalgon = { workspace = true, features = ["tui"] }
+dalgona = { path = "../dalgona" }
+dal-agent.workspace = true
+dal-core.workspace = true
+uuid = { version = "=1.28.0", features = ["v7"] }
 
 [dev-dependencies]
-dalgona-batteries = { path = "../crates/dalgona-batteries" }
-dal-provider = "=0.1.0"
-dal-tui = "=0.1.0"
-dal-wire = "=0.1.0"
+dalgona-batteries = { path = "../dalgona-batteries" }
+dal-provider.workspace = true
+dal-tui.workspace = true
+dal-wire.workspace = true
+futures.workspace = true
 tokio = { version = "=1.53.2", features = ["macros", "net", "process", "rt-multi-thread", "sync", "time"] }
-proptest = "=1.11.0"
+proptest = "=1.12.0"
+sonic-rs.workspace = true
+toml.workspace = true
+
+[[test]]
+name = "dalgona-workspace-graph"
+path = "tests/dalgona-workspace-graph.rs"
 
 
 [[test]]
@@ -264,5 +270,34 @@ name = "dalgona-orchestration-08"
 path = "tests/dalgona-orchestration-08.rs"
 
 
-[lints]
-workspace = true
+[[test]]
+name = "dalgona-orchestration-09"
+path = "tests/dalgona-orchestration-09.rs"
+
+[[test]]
+name = "dalgona-orchestration-10"
+path = "tests/dalgona-orchestration-10.rs"
+
+[[test]]
+name = "dalgona-ttsr-runtime"
+path = "tests/dalgona-ttsr-runtime.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unused_lifetimes = "warn"
+unreachable_pub = "warn"
+
+[lints.clippy]
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "warn", priority = -1 }
+complexity = { level = "warn", priority = -1 }
+perf = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "warn"
+panic = "warn"
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+exit = "deny"
+disallowed_methods = "deny"

@@ -1,0 +1,36 @@
+[package]
+name = "dal-agent"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+description = "Session ownership and execution for dal"
+
+[dependencies]
+dal-core.workspace = true
+dal-store.workspace = true
+dal-provider.workspace = true
+base64.workspace = true
+blake3.workspace = true
+futures.workspace = true
+jiff.workspace = true
+process-wrap.workspace = true
+rustix = { workspace = true, features = ["fs"] }
+serde.workspace = true
+sonic-rs.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+reqwest.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+tokio-util = { workspace = true, features = ["rt"] }
+
+[features]
+test-support = []
+
+[dev-dependencies]
+dal-store = { workspace = true, features = ["test-support"] }
+proptest.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+tempfile.workspace = true
+[lints]
+workspace = true

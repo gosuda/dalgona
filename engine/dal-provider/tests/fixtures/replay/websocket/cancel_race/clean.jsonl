@@ -1,0 +1,3 @@
+{"from":"client","text":"{\"type\":\"response.create\",\"model\":\"gpt-6-luna\",\"instructions\":\"You are terse.\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"Hi\"}]}],\"tools\":[],\"tool_choice\":\"auto\",\"parallel_tool_calls\":true,\"reasoning\":{\"effort\":\"none\"},\"store\":false,\"include\":[\"reasoning.encrypted_content\"],\"prompt_cache_key\":\"0196a3b1-2c4d-7e5f-9a6b-7c8d9e0f1a2b\"}"}
+{"from":"server","text":"{\"type\":\"response.output_text.delta\",\"sequence_number\":1,\"delta\":\"x\"}"}
+{"from":"server","text":"{\"type\":\"response.completed\",\"sequence_number\":2,\"response\":{\"output\":[],\"usage\":null}}"}

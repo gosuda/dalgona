@@ -12,6 +12,7 @@ rules user,model batteries 150
 ttsr/rules user,model batteries 200
 skills user,model batteries 150
 search user,model batteries 150
+eval user,model batteries 150
 web user,model batteries 150
 plan user,model batteries 150
 todo user,model batteries 150
@@ -19,3 +20,6 @@ work user,model batteries 150
 ask user,model batteries 200
 mcp user,model batteries 150
 review user,model batteries 150
+agents user,model batteries 300
+workflows user,model batteries 300
+goal user,model batteries 300

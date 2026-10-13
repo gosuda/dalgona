@@ -1,0 +1,4 @@
+data: {"type":"response.output_item.added","item":{"id":"fc_1","type":"function_call","call_id":"call_9","name":"write","arguments":""}}
+
+data: {"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[],"usage":null}}
+

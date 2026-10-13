@@ -4,7 +4,7 @@
     clippy::disallowed_methods,
     reason = "gate runs the real product binaries"
 )]
-use gates::support;
+use dalgona_gates::support;
 
 use std::{
     io::Write,
@@ -15,8 +15,14 @@ fn check_presence(response: &str) -> support::TestResult<std::process::Output> {
     let root = support::repo_root();
     let mut child = Command::new("bash")
         .arg(root.join("scripts/publish-crates.sh"))
-        .args(["--check-dep-only", "dal-journal", "0.1"])
-        .arg(root.join("dalgona"))
+        .args([
+            "--product",
+            "dalgona",
+            "--check-dep-only",
+            "dal-journal",
+            "0.1",
+        ])
+        .arg(&root)
         .current_dir(&root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

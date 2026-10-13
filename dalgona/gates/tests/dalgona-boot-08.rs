@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
 //! dalgona success-criterion gate tests.
 
-use gates::support;
+use dalgona_gates::support;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -98,7 +98,8 @@ async fn plan_command_clash_is_a_load_error_naming_both_owners() -> support::Tes
         }
         Err(error) => error.to_string(),
     };
-    assert!(error.contains("plan"), "{error}");
-    assert!(error.contains("work"), "{error}");
+    assert!(error.contains("plugin \"work\""), "{error}");
+    assert!(error.contains("plugin \"plan\""), "{error}");
+    assert!(error.contains("cannot register it"), "{error}");
     Ok(())
 }

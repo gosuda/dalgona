@@ -1,0 +1,3 @@
+data: {"type":"response.output_text.delta","sequence_number":1,"delta":"Nothing to keep."}
+
+data: {"type":"response.completed","sequence_number":2,"response":{"id":"resp-codex-3","status":"completed","output":[]}}

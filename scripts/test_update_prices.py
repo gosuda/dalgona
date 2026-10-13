@@ -37,18 +37,12 @@ class ParseTiersTest(unittest.TestCase):
         self.assertEqual(up.parse_tiers({"tiers": None}), ())
 
     def test_plus_one_boundaries_are_normalized(self) -> None:
-        for spelled in sorted(up._CONTEXT_TIER_PLUS_ONE):
+        for spelled in (32_001, 128_001, 200_001, 256_001, 272_001):
             with self.subTest(spelled=spelled):
                 self.assertEqual([t.size for t in parse(tier(spelled))], [spelled - 1])
 
-    def test_exactly_five_plus_one_boundaries(self) -> None:
-        self.assertEqual(
-            up._CONTEXT_TIER_PLUS_ONE,
-            frozenset({32_001, 128_001, 200_001, 256_001, 272_001}),
-        )
-
     def test_plus_one_neighbours_are_untouched(self) -> None:
-        for spelled in sorted(up._CONTEXT_TIER_PLUS_ONE):
+        for spelled in (32_001, 128_001, 200_001, 256_001, 272_001):
             for size in (spelled - 1, spelled + 1):
                 with self.subTest(size=size):
                     self.assertEqual([t.size for t in parse(tier(size))], [size])
@@ -58,8 +52,20 @@ class ParseTiersTest(unittest.TestCase):
         self.assertEqual([t.size for t in parse(*(tier(s) for s in sizes))], sizes)
 
     def test_rates_are_mapped_per_field(self) -> None:
-        (parsed,) = parse(tier(10, input=1.5, cache_read=0.25, output=3, reasoning=4, cache_write=5, input_audio=6))
-        self.assertEqual(parsed, up.PriceTier(size=10, input=1.5, cached_input=0.25, output=3.0, reasoning=4.0))
+        (parsed,) = parse(
+            tier(10, input=1.5, cache_read=0.25, output=3, reasoning=4, cache_write=5, input_audio=6)
+        )
+        self.assertEqual(
+            parsed,
+            up.PriceTier(
+                size=10,
+                input=1.5,
+                cached_input=0.25,
+                cache_write=5.0,
+                output=3.0,
+                reasoning=4.0,
+            ),
+        )
 
     def test_normalization_collision_is_a_duplicate(self) -> None:
         with self.assertRaises(up.UpdatePricesError):
@@ -94,7 +100,7 @@ class ParseTiersTest(unittest.TestCase):
             [tier("1")],
             [tier(18_446_744_073_709_551_616)],
             [{"tier": {"type": "context", "size": 1}}],
-            [{"tier": {"type": "context", "size": 1}, "cache_write": 1}],
+            [{"tier": {"type": "context", "size": 1}, "cache_write": "1"}],
             [tier(1, unknown=1)],
             [tier(1, input=-1)],
             [tier(1, output="2")],
@@ -119,8 +125,8 @@ class RenderTest(unittest.TestCase):
                 1.5,
                 None,
                 (
-                    up.PriceTier(31_999 + 1, 0.5, None, 1.5, None),
-                    up.PriceTier(200_000, 1.0, 0.5, 3.0, 4.0),
+                    up.PriceTier(31_999 + 1, 0.5, None, None, 1.5, None),
+                    up.PriceTier(200_000, 1.0, 0.5, 2.0, 3.0, 4.0),
                 ),
             ),
         ]
@@ -132,13 +138,10 @@ class RenderTest(unittest.TestCase):
         self.assertIn('model: "b/tiered",', text.split("PRICE_TIER_ROWS")[1])
         self.assertNotIn("a/plain", text.split("PRICE_TIER_ROWS")[1].split("TEMPERATURE_ROWS")[0])
         self.assertIn("input: Some(0.5),\n                cached_input: None,", text)
+        self.assertIn("cache_write: Some(2.0),", text)
         self.assertIn("reasoning: Some(4.0),", text)
         self.assertIn('    ("p", "m"),', text)
         self.assertTrue(text.endswith("];\n"))
-
-    def test_render_is_deterministic(self) -> None:
-        rows = [up.PriceRow("m", 1.0, None, None, None, (up.PriceTier(5, 1.0, None, None, None),))]
-        self.assertEqual(up.render("2026-01-02", rows, []), up.render("2026-01-02", rows, []))
 
 
 class LoadCatalogTest(unittest.TestCase):

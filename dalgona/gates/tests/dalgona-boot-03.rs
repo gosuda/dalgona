@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
 //! dalgona success-criterion gate tests.
-use gates::support;
+use dalgona_gates::support;
 
 #[test]
 fn disabled_mcp_removes_its_records_and_nothing_else() -> support::TestResult<()> {

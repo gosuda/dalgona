@@ -53,7 +53,7 @@ You can type while dal works. A steer reaches the model at the next safe point. 
 
 ## Built for large runs
 
-One session can run more than 500 subagents or more than 200 shell commands at once and still answer your keys. The gate measures it: RSS under 256 MiB, open files under 2048, keypress echo P99 under 24 ms, against a scripted model. These are test gates, not promises about your machine.
+The stress gate exercises 501 child sessions and 201 shell jobs with scripted models. On the idle-machine timing lane (`DAL_TIMING_BUDGETS`), it requires RSS below 256 MiB, fewer than 4096 open handles, and cancellation P99 below 250 ms. These are gate limits, not promises about your machine.
 
 ## Text in every language
 
@@ -65,10 +65,10 @@ dal documents itself at `dal://`; dalgona adds `dalgona://`; the model reads pag
 
 ## dalgona
 
-dalgona is dal with batteries, and every built-in battery is enabled by default through dal's same public extension door. The built-in batteries are orchestration, history, quality, judged, web, work, MCP, review, ask, skills, and ttsr-rules. By default, Dalgona enables symbol search, AST edit, the `hashline` edit style, and the complexity guard; it also provides plan and todo, rich ask, web search and fetch, an MCP client, and a review loop. It keeps its own configuration, data, and sessions. Dalgona builds only against released dal crates. dal and dalgona are distributed under the Sustainable Use License; the licensor is `metaphorics`.
+dalgona is dal with batteries, and every built-in battery is enabled by default through dal's same public extension door. The built-in batteries are orchestration, history, quality, judged, web, work, MCP, review, ask, skills, and ttsr-rules. By default, dalgona enables symbol search, AST edit, the `hashline` edit style, and the complexity guard; it also provides plan and todo, rich ask, web search and fetch, an MCP client, and a review loop. It keeps its own configuration, data, and sessions. This repository uses one root Cargo workspace and one root `Cargo.lock` to resolve dalgona's dal dependencies locally; releases publish dal and dalgona separately. dal and dalgona are distributed under the Sustainable Use License; the licensor is `metaphorics`.
 
 ## What we did not build
 
-No MCP client in dal (dalgona ships one; a plugin can reach HTTP services with the `net.fetch` operation). No plugins from the workspace. No sandbox by default and no network restriction. No plan or todo in dal (dalgona ships both). No subagents in dal by default (the `agents` operations are one door away). No LSP, ever, in either product (search plus AST edit is the surface). No upload (`/share` writes a file). No self-rebuild (`/reload` reloads plugins). Nothing but Starlark in `eval`. No second store (the journal is the only store). No browser front end in the binary.
+No MCP client in dal (dalgona ships one; a plugin can reach HTTP services with the `net.fetch` operation). No plugins from the workspace. No sandbox by default and no network restriction. No plan or todo in dal (dalgona ships both). No subagents in dal by default (the `agents` operations are one door away). No LSP, ever, in either product (search plus AST edit is the surface). No upload (`/export` writes a file you can share yourself). No self-rebuild (`/reload` reloads plugins). Nothing but Starlark in `eval`. No second store (the journal is the only store). No browser front end in the binary.
 
 <!-- grounding (maintainers, not shipped) -->

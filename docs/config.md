@@ -1,6 +1,8 @@
 # Settings in dal.toml
 
-The file is `dal.toml` under `$XDG_CONFIG_HOME/dal/` (default `~/.config/dal/dal.toml`); data lives under `$XDG_DATA_HOME/dal/`. Layering: code defaults, then product defaults, then user `dal.toml`, then CLI flags. A later layer replaces an earlier value by key path. Dalgona reads `dal.toml` under `$XDG_CONFIG_HOME/dalgona/` with data under `$XDG_DATA_HOME/dalgona/`.
+The file is `dal.toml` under `$XDG_CONFIG_HOME/dal/` (default `~/.config/dal/dal.toml`); data lives under `$XDG_DATA_HOME/dal/`. Layering: code defaults, then product defaults, then user `dal.toml`, then CLI flags. A later layer replaces an earlier value by key path. `dalgona` reads `dal.toml` under `$XDG_CONFIG_HOME/dalgona/` with data under `$XDG_DATA_HOME/dalgona/`.
+
+The table shows dal's built-in defaults before product TOML, user settings, and CLI overrides. The meaning column identifies dalgona's different defaults. `none` means omit the key, not the TOML string `"none"`; an omitted table still uses the field defaults listed below. Replace `<data-root>` with your product's data directory.
 
 | key | type | default | meaning |
 |---|---|---|---|
@@ -14,16 +16,16 @@ The file is `dal.toml` under `$XDG_CONFIG_HOME/dal/` (default `~/.config/dal/dal
 | `images` | bool | `false` | the `images` setting |
 | `motion` | bool | `true` | the `motion` setting |
 | `compact_ratio` | number | `0.85` | the `compact_ratio` setting |
-| `edit_style` | string | `anchor` | the `edit_style` setting |
-| `guard` | table | `none` | the `guard` setting |
-| `search_symbols` | bool | `false` | the `search_symbols` setting |
-| `judge` | table | `none` | the `judge` setting |
+| `edit_style` | string | `anchor` | the patch format; dalgona defaults to `hashline` |
+| `guard` | table | `{ enabled = false }` | guard settings; dalgona defaults to `enabled = true`; see [Guard](guard.md) |
+| `search_symbols` | bool | `false` | whether search includes symbols; dalgona defaults to `true` |
+| `judge` | table | `none` | shared judge settings, including `gate`; readiness checks do not generate a response; see [Judged rules](rules.md#judged-rules) |
 | `plugins` | list | `[]` | the `plugins` setting |
 | `aliases` | table | `none` | the `aliases` setting |
-| `serve` | table | `none` | the `serve` setting |
+| `serve` | table | `none` | local control endpoint settings; field defaults apply when omitted |
 | `serve.bind` | string | `127.0.0.1` | the `serve.bind` setting |
 | `serve.port` | number | `7437` | the `serve.port` setting |
-| `serve.token_file` | path | `none` | the `serve.token_file` setting |
+| `serve.token_file` | path | `"<data-root>/serve.token"` | the authentication token file |
 | `serve.approval` | string | `ask` | the `serve.approval` setting |
 | `serve.origins` | list | `[]` | the `serve.origins` setting |
 | `prices` | table | `none` | the `prices` setting |
@@ -31,14 +33,14 @@ The file is `dal.toml` under `$XDG_CONFIG_HOME/dal/` (default `~/.config/dal/dal
 | `prices.<model-id>.cached_input` | number | `none` | the `prices.<model-id>.cached_input` setting |
 | `prices.<model-id>.output` | number | `none` | the `prices.<model-id>.output` setting |
 | `prices.<model-id>.reasoning` | number | `none` | the `prices.<model-id>.reasoning` setting |
-| `rules` | table | `none` | the `rules` setting |
-| `rules.watch` | string | `none` | the `rules.watch` setting |
-| `rules.interrupt` | string | `none` | the `rules.interrupt` setting |
-| `rules.repeat` | number | `none` | the `rules.repeat` setting |
-| `rules.repeat_gap` | string | `none` | the `rules.repeat_gap` setting |
-| `rules.max_retries` | number | `none` | the `rules.max_retries` setting |
+| `rules` | table | `none` | rule matching and retry settings; field defaults apply when omitted |
+| `rules.watch` | bool | `true` | whether to watch stream rules |
+| `rules.interrupt` | string | `always` | interrupt mode when a rule does not set its own |
+| `rules.repeat` | string | `once` | repeat mode when a rule does not set its own |
+| `rules.repeat_gap` | number | `10` | turn gap for `after-gap` repeats |
+| `rules.max_retries` | number | `3` | maximum rule interrupts per turn |
 | `rules.disabled` | list | `[]` | the `rules.disabled` setting |
-| `rules.judge` | string | `auto` | the `rules.judge` setting |
+| `rules.judge` | string | `auto` | `off` excludes judged rules; `auto` includes them only when the judge is ready; `on` requires readiness at session startup; separate from `judge.gate`; see [Judged rules](rules.md#judged-rules) |
 | `sandbox_writable` | list | `[]` | the `sandbox_writable` setting |
 | `agents` | table | `none` | the `agents` setting |
 | `limits` | table | `none` | the `limits` setting |
@@ -46,6 +48,7 @@ The file is `dal.toml` under `$XDG_CONFIG_HOME/dal/` (default `~/.config/dal/dal
 | `retry` | table | `none` | the `retry` setting |
 | `providers` | table | `none` | the `providers` setting |
 | `ask` | table | `none` | the `ask` setting |
+| `ask.timeout` | string | `"30m"` | how long one raised question stays open; clamped into `1m` to `120m` at load, with one startup notice naming the key, the value, and the clamp |
 | `compact` | table | `none` | the `compact` setting |
 | `rule_sets` | table | `none` | the `rule_sets` setting |
 | `plugin` | table | `none` | the `plugin` setting |

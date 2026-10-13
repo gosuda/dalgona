@@ -1,0 +1,42 @@
+[workspace]
+members = ["cargo:."]
+
+# Config for 'dist'
+[dist]
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.32.0"
+# CI backends to support
+ci = "github"
+github-build-setup = "../rust-stable.yml"
+# The installers to generate for each app.
+installers = ["shell", "powershell"]
+# The workspace has independent dal and Dalgona release tags. CI passes an
+# explicit singular tag (dalgon-vX.Y.Z or dalgona-vX.Y.Z) to select one app.
+# No single tag namespace can represent both product families.
+targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "aarch64-pc-windows-msvc", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+packages = ["dalgon", "dalgona"]
+# Build each application independently so product features do not unify.
+precise-builds = true
+# PR plans are disabled; product versions and tag families are independent.
+pr-run-mode = "skip"
+# Whether to embed dependency information using cargo-auditable.
+cargo-auditable = true
+# Each app declares its package-local manual and product documentation; the
+# sole root license is included by the package metadata.
+auto-includes = false
+# Publish and post-announce jobs remain product-specific.
+publish-jobs = ["./dal-publish-crates", "./dalgona-publish-crates"]
+post-announce-jobs = ["./dal-smoke-install", "./dalgona-smoke-install"]
+# Path that installers should place binaries in.
+install-path = "CARGO_HOME"
+# Whether to install an updater program.
+install-updater = false
+
+[dist.github-custom-runners]
+aarch64-unknown-linux-gnu = "ubuntu-24.04-arm"
+aarch64-pc-windows-msvc = "windows-11-arm"
+
+[dist.github-action-commits]
+"actions/checkout" = "3d3c42e5aac5ba805825da76410c181273ba90b1"
+"actions/upload-artifact" = "cf430e030ddbb5b0abf93d22962f4752f3646cd9"
+"actions/download-artifact" = "9000827ccba6bdab643e8b6fd33ac0654aef8333"

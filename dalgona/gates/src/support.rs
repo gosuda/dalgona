@@ -247,8 +247,16 @@ pub fn run_scripted_print(
         )
         .into());
     }
+    read_one_journal(&data_home.join("dalgona/sessions"))
+}
+
+/// Reads the one `journal.jsonl` under `dir`.
+///
+/// # Errors
+/// Returns a collection failure or a journal count other than one.
+fn read_one_journal(dir: &Path) -> TestResult<String> {
     let mut journals = Vec::new();
-    collect_journals(&data_home.join("dalgona/sessions"), &mut journals)?;
+    collect_journals(dir, &mut journals)?;
     match journals.as_slice() {
         [journal] => Ok(std::fs::read_to_string(journal)?),
         other => Err(format!("expected one session journal, found {}", other.len()).into()),
@@ -277,20 +285,13 @@ pub fn journal_records<'a>(journal: &'a str, kind: &str) -> Vec<&'a str> {
         .collect()
 }
 
-/// The journal of the one session a [`fresh_dalgona_command`] run created.
+/// The journal of the one session a [`Pane::start`] run created under the
+/// scratch XDG data root.
 ///
 /// # Errors
 /// Returns a read failure or a journal count other than one.
 pub fn session_journal(scratch: &Scratch) -> TestResult<String> {
-    let mut journals = Vec::new();
-    collect_journals(
-        &scratch.path().join("xdg-data/dalgona/sessions"),
-        &mut journals,
-    )?;
-    match journals.as_slice() {
-        [journal] => Ok(std::fs::read_to_string(journal)?),
-        other => Err(format!("expected one session journal, found {}", other.len()).into()),
-    }
+    read_one_journal(&scratch.path().join("xdg-data/dalgona/sessions"))
 }
 
 /// A real `dalgona` running in a tmux pane on a fresh install, so a gate can
@@ -311,6 +312,24 @@ impl Pane {
     /// # Errors
     /// Returns setup failures, a missing binary, or a missing tmux.
     pub fn start(scratch: Scratch) -> TestResult<Self> {
+        Self::start_with(scratch, "")
+    }
+
+    /// Like [`Pane::start`], with `top_level` config lines placed before the
+    /// provider table, for a gate that isolates one battery's behavior.
+    ///
+    /// # Errors
+    /// Returns setup failures, a missing binary, or a missing tmux.
+    pub fn start_with(scratch: Scratch, top_level: &str) -> TestResult<Self> {
+        let config = format!("model = \"openai-responses/gpt-6\"\napproval = \"ask\"\n{top_level}");
+        Self::start_scripted(scratch, &config, &[text_step("reply")])
+    }
+
+    /// Starts the pane with the supplied config and provider responses.
+    ///
+    /// # Errors
+    /// Returns setup failures, a missing binary, or a missing tmux.
+    pub fn start_scripted(scratch: Scratch, config: &str, steps: &[String]) -> TestResult<Self> {
         let home = scratch.path().to_path_buf();
         let config_home = home.join("xdg-config");
         let data_home = home.join("xdg-data");
@@ -319,11 +338,11 @@ impl Pane {
         std::fs::create_dir_all(&data_home)?;
         std::fs::create_dir_all(&workspace)?;
         let fixture = home.join("scripted.jsonl");
-        std::fs::write(&fixture, text_step("reply") + "\n")?;
+        std::fs::write(&fixture, steps.join("\n") + "\n")?;
         std::fs::write(
             config_home.join("dalgona/dal.toml"),
             format!(
-                "model = \"openai-responses/gpt-6\"\napproval = \"ask\"\n[providers.scripted]\nfixture = {:?}\n",
+                "{config}[providers.scripted]\nfixture = {:?}\n",
                 fixture.to_string_lossy()
             ),
         )?;

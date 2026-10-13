@@ -1,0 +1,16 @@
+# Synthetic replay fixture for an Anthropic remote compaction request and
+# returned compaction block. The request body is compared byte for byte and the
+# response is decoded through the public Provider::compact path.
+[[exchange]]
+kind = "http"
+
+[exchange.request]
+method = "POST"
+path = "/v1/messages"
+headers = { "content-type" = "application/json", "accept" = "application/json", "anthropic-version" = "2023-06-01", "anthropic-beta" = "compact-2026-09-04", "x-api-key" = "<redacted>" }
+body = "compact-request.json"
+
+[exchange.response]
+status = 200
+headers = { "content-type" = "application/json" }
+body = "compact-response.json"

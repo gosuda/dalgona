@@ -1,0 +1,5 @@
+data: {"type":"response.reasoning_summary_text.delta","sequence_number":1,"delta":"Checking the plan."}
+
+data: {"type":"response.output_text.delta","sequence_number":2,"delta":"Hello"}
+
+data: {"type":"response.completed","sequence_number":3,"response":{"id":"resp-codex-1","status":"completed","output":[],"usage":{"input_tokens":19,"input_tokens_details":{"cached_tokens":4},"output_tokens":13,"output_tokens_details":{"reasoning_tokens":3}}}}
