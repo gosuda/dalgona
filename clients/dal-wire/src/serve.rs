@@ -33,8 +33,8 @@ mod http;
 mod upgrade;
 
 use guard::{auth_guard, content_guard, get_body_guard, host_guard, is_upgrade, requires_json};
-pub(crate) use http::{Resp, RespBody, ServeBody};
 use http::{BODY_BUDGET, into_response, read_body};
+pub(crate) use http::{Resp, RespBody, ServeBody};
 use upgrade::upgrade_response;
 
 /// A bound serve listener: its address plus its draining wait.
