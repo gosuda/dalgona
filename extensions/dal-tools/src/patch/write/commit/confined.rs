@@ -18,9 +18,7 @@ use rustix::{
     io::Errno,
 };
 
-use super::{
-    nonce_u128, report_output, trash_path, write_target, PatchSession,
-};
+use super::{PatchSession, nonce_u128, report_output, trash_path, write_target};
 use crate::patch::ir::{EngineError, ErrorClass, Operation, Output, Plan, StagedFileOwned};
 
 const DIRECTORY_FLAGS: OFlags =
@@ -167,7 +165,10 @@ struct Temp<'a> {
 enum Undo<'a> {
     RestoreBytes(&'a Path, &'a [u8]),
     RemoveInstalled(&'a Path),
-    RestoreMoved { source: &'a Path, backup: PathBuf },
+    RestoreMoved {
+        source: &'a Path,
+        backup: PathBuf,
+    },
 }
 
 impl Undo<'_> {
