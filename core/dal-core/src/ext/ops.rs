@@ -148,6 +148,13 @@ pub enum Receipt {
 pub enum AgentsOp {
     /// Starts a child agent session.
     Start(AgentStart),
+    /// Starts a child agent whose first turn has a tool-round limit.
+    StartBounded {
+        /// The child-session start request.
+        start: AgentStart,
+        /// Maximum tool rounds for the first turn.
+        max_steps: std::num::NonZeroU32,
+    },
     /// Starts one prompt turn on an idle child and optionally interrupts it
     /// after the supplied grace duration.
     Prompt {

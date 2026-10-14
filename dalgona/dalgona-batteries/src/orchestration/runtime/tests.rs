@@ -43,6 +43,7 @@ struct Script {
     notices: Vec<Notice>,
     jobs: Vec<(JobStatus, Option<JobId>, String)>,
     starts: Vec<(SessionId, AgentStart)>,
+    initial_step_limits: Vec<Option<std::num::NonZeroU32>>,
     report_status: Option<&'static str>,
     hold: Option<CancellationToken>,
     run_outputs: VecDeque<Result<RunOutput, &'static str>>,
@@ -460,7 +461,8 @@ impl Services for Host {
                     Ok(AgentsReply::Cancelled { id })
                 }
             }
-            AgentsOp::Start(_) if script.refuse_start.is_some() => {
+            AgentsOp::Start(_) | AgentsOp::StartBounded { .. }
+                if script.refuse_start.is_some() => {
                 let reason = script.refuse_start.clone();
                 drop(script);
                 return Box::pin(async move {
@@ -472,6 +474,15 @@ impl Services for Host {
             AgentsOp::Start(start) => {
                 let id = script.started.unwrap_or_else(SessionId::new_v7);
                 script.starts.push((id, start.clone()));
+                script.initial_step_limits.push(None);
+                drop(script);
+                self.changed.notify_waiters();
+                return self.start_child(start, id);
+            }
+            AgentsOp::StartBounded { start, max_steps } => {
+                let id = script.started.unwrap_or_else(SessionId::new_v7);
+                script.starts.push((id, start.clone()));
+                script.initial_step_limits.push(Some(max_steps));
                 drop(script);
                 self.changed.notify_waiters();
                 return self.start_child(start, id);
@@ -857,6 +868,14 @@ impl Fixture {
     }
 
     async fn tool(&self, args: &str) -> Result<String, ServiceError> {
+        self.tool_with_cancel(args, CancellationToken::new()).await
+    }
+
+    async fn tool_with_cancel(
+        &self,
+        args: &str,
+        cancel: CancellationToken,
+    ) -> Result<String, ServiceError> {
         self.runtime
             .tool(
                 self.session,
@@ -865,7 +884,7 @@ impl Fixture {
                 "agents",
                 RawJson::parse(args)
                     .map_err(|error| ServiceError::failed(None, error.to_string()))?,
-                CancellationToken::new(),
+                cancel,
             )
             .await
     }
@@ -1595,6 +1614,81 @@ async fn blocked_reports_remain_blocked_and_unresolved_item_sources_skip() -> Te
         "{report}"
     );
     assert!(report.contains("need access"), "{report}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn initial_child_turn_obeys_configured_round_limit() -> TestResult {
+    for limit in [1, crate::orchestration::admission::CHILD_MAX_STEPS_MAX] {
+        let mut config = parse_config(None)?;
+        config.agents.child_max_steps = limit;
+        let fixture = Fixture::open_config(config).await?;
+        run_one_step(&fixture).await?;
+        let script = fixture.script();
+        assert_eq!(script.starts.len(), 1);
+        assert_eq!(
+            script.initial_step_limits[0],
+            std::num::NonZeroU32::new(limit)
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancelled_call_does_not_start_a_workflow() -> TestResult {
+    let fixture = Fixture::open().await?;
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let result = fixture
+        .tool_with_cancel(
+            r#"{"action":"run","steps":[{"name":"task","prompt":"inspect","tools":["read"],"isolation":"shared"}]}"#,
+            cancel,
+        )
+        .await;
+    assert!(matches!(result, Err(ServiceError::Cancelled)), "{result:?}");
+    assert!(
+        fixture.script().jobs.is_empty(),
+        "no job should have started"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancelling_original_call_cascades_to_active_children() -> TestResult {
+    let fixture = Fixture::open().await?;
+    fixture.script().hold = Some(CancellationToken::new());
+    let cancel = CancellationToken::new();
+    let reply = fixture
+        .tool_with_cancel(
+            r#"{"action":"run","steps":[{"name":"task","prompt":"inspect","tools":["read"],"isolation":"shared"}]}"#,
+            cancel.clone(),
+        )
+        .await?;
+    assert!(reply.starts_with("started run "), "{reply}");
+    wait_for_starts(&fixture, 1).await?;
+    cancel.cancel();
+    let report = fixture.ended_run().await?;
+    assert!(report.contains("cancelled"), "{report}");
+    assert_eq!(fixture.host.cancels().len(), 1, "the child was cancelled");
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn workflow_wall_budget_cancels_stalled_children() -> TestResult {
+    let mut config = parse_config(None)?;
+    config.agents.child_max_minutes = 1;
+    let fixture = Fixture::open_config(config).await?;
+    fixture.script().hold = Some(CancellationToken::new());
+    fixture
+        .tool(
+            r#"{"action":"run","steps":[{"name":"task","prompt":"inspect","tools":["read"],"isolation":"shared"}]}"#,
+        )
+        .await?;
+    wait_for_starts(&fixture, 1).await?;
+    tokio::time::advance(std::time::Duration::from_secs(61)).await;
+    let report = fixture.ended_run().await?;
+    assert!(report.contains("cancelled"), "{report}");
+    assert_eq!(fixture.host.cancels().len(), 1);
     Ok(())
 }
 

@@ -100,6 +100,7 @@ enum Message {
         call: CallId,
         name: Box<str>,
         args: RawJson,
+        cancel: CancellationToken,
         reply: oneshot::Sender<Result<String, ServiceError>>,
     },
     ToolResult(ToolResultEvent, oneshot::Sender<()>),
@@ -338,6 +339,7 @@ impl Runtime {
             call,
             name: name.into(),
             args,
+            cancel: cancel.clone(),
             reply,
         };
         let deadline = TokioInstant::now() + std::time::Duration::from_secs(600);
@@ -561,20 +563,36 @@ impl SessionState {
                 call,
                 name,
                 args,
+                cancel,
                 reply,
-            } => match self.tool(caller, call, &name, &args).await {
-                ToolReply::Done(result) => {
-                    self.publish_status();
-                    let _ = reply.send(result);
+            } => {
+                let outcome = if cancel.is_cancelled() {
+                    ToolReply::Done(Err(ServiceError::Cancelled))
+                } else {
+                    self.tool(caller, call, &name, &args, &cancel).await
+                };
+                match outcome {
+                    ToolReply::Done(result) => {
+                        self.publish_status();
+                        let _ = reply.send(if cancel.is_cancelled() {
+                            Err(ServiceError::Cancelled)
+                        } else {
+                            result
+                        });
+                    }
+                    ToolReply::Wait(plan) => {
+                        while self.waits.try_join_next().is_some() {}
+                        self.waits.spawn(async move {
+                            let result = tokio::select! {
+                                () = cancel.cancelled() => Err(ServiceError::Cancelled),
+                                result = wait_for_jobs(plan) => result,
+                            };
+                            let _ = reply.send(result);
+                        });
+                        self.publish_status();
+                    }
                 }
-                ToolReply::Wait(plan) => {
-                    while self.waits.try_join_next().is_some() {}
-                    self.waits.spawn(async move {
-                        let _ = reply.send(wait_for_jobs(plan).await);
-                    });
-                    self.publish_status();
-                }
-            },
+            }
             Message::ToolResult(event, reply) => {
                 self.open_asks.remove(&event.call);
                 self.publish_status();
@@ -1501,10 +1519,11 @@ impl SessionState {
         call: CallId,
         name: &str,
         args: &RawJson,
+        cancel: &CancellationToken,
     ) -> ToolReply {
         self.delivery_refused = false;
         if name == "agents" {
-            return self.agents_tool(caller, call, args).await;
+            return self.agents_tool(caller, call, args, cancel).await;
         }
         ToolReply::Done(match name {
             "create_goal" | "update_goal" | "get_goal" => self.goal_tool(name, args.as_str()).await,
@@ -2052,7 +2071,13 @@ impl SessionState {
         goal.updated_at = now;
     }
 
-    async fn agents_tool(&mut self, caller: Caller, call: CallId, args: &RawJson) -> ToolReply {
+    async fn agents_tool(
+        &mut self,
+        caller: Caller,
+        call: CallId,
+        args: &RawJson,
+        cancel: &CancellationToken,
+    ) -> ToolReply {
         if self.parent.is_some() {
             return ToolReply::Done(Err(ServiceError::failed(
                 None,
@@ -2087,7 +2112,7 @@ impl SessionState {
                 workflow,
                 input,
             } => {
-                self.run_workflow(&caller, call, &label, workflow, input)
+                self.run_workflow(&caller, call, &label, workflow, input, cancel)
                     .await
             }
         })
@@ -2270,7 +2295,11 @@ impl SessionState {
         label: &str,
         workflow: super::workflow::Workflow,
         input: Option<String>,
+        cancel: &CancellationToken,
     ) -> Result<String, ServiceError> {
+        if cancel.is_cancelled() {
+            return Err(ServiceError::Cancelled);
+        }
         if !self.config.agents.enabled {
             return Err(ServiceError::failed(
                 None,
@@ -2303,7 +2332,11 @@ impl SessionState {
             .map_err(|error| error.to_string())
         })
         .map_err(|error| ServiceError::failed(None, error.to_string()))?;
-        let base = self.worktree_base(caller, &workflow).await?;
+        let base = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(ServiceError::Cancelled),
+            base = self.worktree_base(caller, &workflow) => base?,
+        };
         let run = self
             .spawn_job(caller, RUN_JOB_NAME, label)
             .await
@@ -2320,7 +2353,7 @@ impl SessionState {
             })
             .collect::<Vec<_>>();
         let (control, control_receiver) = mpsc::channel(16);
-        let cancel = CancellationToken::new();
+        let cancel = cancel.child_token();
         let coordinator = Coordinator {
             services: Arc::clone(&self.services),
             caller: caller.clone(),
@@ -3089,12 +3122,17 @@ impl Coordinator {
     ) -> Result<Vec<StepOutcome>, String> {
         let mut book = StepBook::new(workflow.steps.len());
         let mut failure = None;
+        let deadline = TokioInstant::now()
+            + Duration::from_secs(u64::from(self.child_max_minutes) * 60);
         loop {
             self.admit_steps(workflow, &mut book);
             if book.ended.iter().all(|done| *done) {
                 break;
             }
             tokio::select! {
+                () = tokio::time::sleep_until(deadline), if !self.cancel.is_cancelled() => {
+                    self.cancel.cancel();
+                }
                 Some(control) = control.recv() => {
                     self.on_control(control);
                 }
@@ -3302,7 +3340,11 @@ impl Coordinator {
         let spec = ScopeSpec {
             limit: u16::from(step.workers),
             on_error: OnError::Settle,
-            budget: Budget::default(),
+            budget: Budget {
+                requests: Some(u64::try_from(items.len()).map_err(|error| error.to_string())?),
+                wall: Some(Duration::from_secs(u64::from(self.child_max_minutes) * 60)),
+                ..Budget::default()
+            },
         };
         let scope = Scope::over(
             Arc::clone(&self.services),
@@ -3398,7 +3440,13 @@ impl Coordinator {
         };
         let handle = self
             .child_start(step, item, reports, index, &label, dir.as_deref())
-            .and_then(|start| scope.agent(start).map_err(|error| error.to_string()));
+            .and_then(|start| {
+                let max_steps = std::num::NonZeroU32::new(self.child_max_steps)
+                    .ok_or_else(|| "child_max_steps must be positive".to_owned())?;
+                scope
+                    .agent_bounded(start, max_steps)
+                    .map_err(|error| error.to_string())
+            });
         let handle = match handle {
             Ok(handle) => handle,
             Err(reason) => {
@@ -3827,7 +3875,7 @@ impl Coordinator {
                         &self.caller,
                         AgentsOp::Await {
                             id: child,
-                            timeout: None,
+                            timeout: Some(Duration::from_secs_f64(GRACE_SECONDS + 5.0)),
                         },
                     )
                     .await;

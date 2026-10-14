@@ -181,6 +181,7 @@ impl Runtime {
         start: AgentStart,
         child: Arc<Mutex<Option<SessionId>>>,
         cancel: CancellationToken,
+        max_steps: Option<std::num::NonZeroU32>,
     ) -> BoxFuture<'static, Result<AgentReport, ScopeError>> {
         let services = Arc::clone(&self.services);
         let caller = self.caller.clone();
@@ -197,7 +198,11 @@ impl Runtime {
             let child = Arc::clone(&child);
             let cancel = cancel.clone();
             self.cleanup.spawn(async move {
-                let started = services.agents(&caller, AgentsOp::Start(start)).await;
+                let operation = match max_steps {
+                    Some(max_steps) => AgentsOp::StartBounded { start, max_steps },
+                    None => AgentsOp::Start(start),
+                };
+                let started = services.agents(&caller, operation).await;
                 if let Ok(AgentsReply::Started { id }) = &started {
                     *locked(&child) = Some(*id);
                 }
@@ -674,6 +679,26 @@ impl Scope {
     /// Returns the scope's refusal when it is exhausted or cancelled; a
     /// denied or failed start surfaces through the handle's result.
     pub fn agent(&self, request: AgentStart) -> Result<ScopeHandle, ScopeError> {
+        self.agent_with_steps(request, None)
+    }
+
+    /// Starts one member session with a maximum number of tool rounds on its first turn.
+    ///
+    /// # Errors
+    /// Returns the same scope admission errors as [`Self::agent`].
+    pub fn agent_bounded(
+        &self,
+        request: AgentStart,
+        max_steps: std::num::NonZeroU32,
+    ) -> Result<ScopeHandle, ScopeError> {
+        self.agent_with_steps(request, Some(max_steps))
+    }
+
+    fn agent_with_steps(
+        &self,
+        request: AgentStart,
+        max_steps: Option<std::num::NonZeroU32>,
+    ) -> Result<ScopeHandle, ScopeError> {
         let shared = &self.inner.shared;
         if shared.ledger.requires_usd() {
             let model = request
@@ -694,7 +719,7 @@ impl Scope {
         let slot = Arc::clone(&child);
         let work: Work = Box::new(move |cancel| {
             Box::pin(async move {
-                let report = rt.agent(request, slot, cancel).await?;
+                let report = rt.agent(request, slot, cancel, max_steps).await?;
                 Ok((ScopeValue::Agent(report), None))
             })
         });
