@@ -1160,7 +1160,7 @@ fn row_active(row: &GrantRow) -> bool {
 
 fn grant_scope_text(key: &GrantKey) -> String {
     format!(
-        "Code identity: {}\\nWorkspace: {}\\nPersistent approval expires after 90 days.",
+        "Code identity: {}\nWorkspace: {}\nPersistent approval expires after 90 days.",
         key.digest,
         key.workspace.display()
     )
