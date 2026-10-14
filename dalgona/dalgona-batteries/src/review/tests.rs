@@ -35,7 +35,7 @@ enum Provider {
     /// The route has no usable credentials.
     NoCredentials,
     /// The route is ready and the request streams these events.
-    Replies(Vec<dal_core::StreamEvent>),
+    Replies(Vec<dal_provider::StreamEvent>),
     /// The route is ready and the request fails with this text.
     Fails(String),
     /// The route is ready and the request never answers.
@@ -260,15 +260,26 @@ impl dal_agent::ext::Services for FakeReviewServices {
     fn infer(
         &self,
         _who: &dal_agent::ext::Caller,
-        req: dal_core::ModelRequest,
+        _req: dal_core::ModelRequest,
     ) -> dal_agent::ext::services::ServiceFuture<'_, dal_core::Inference> {
+        unavailable()
+    }
+
+    fn infer_stream(
+        &self,
+        _who: &dal_agent::ext::Caller,
+        req: dal_core::ModelRequest,
+    ) -> dal_agent::ext::services::ServiceFuture<'_, dal_agent::ext::EventStream> {
         locked(&self.requests).push(req);
         match &*locked(&self.provider) {
             Provider::Replies(events) => {
-                let inference = dal_core::Inference {
-                    events: events.clone(),
-                };
-                Box::pin(async move { Ok(inference) })
+                let events = events.clone();
+                Box::pin(async move {
+                    Ok(dal_agent::ext::EventStream::new(
+                        futures::stream::iter(events.into_iter().map(Ok)),
+                        || {},
+                    ))
+                })
             }
             Provider::Fails(text) => {
                 let text = text.clone();
@@ -277,14 +288,6 @@ impl dal_agent::ext::Services for FakeReviewServices {
             Provider::Hangs => Box::pin(std::future::pending()),
             Provider::Unavailable | Provider::NoCredentials => unavailable(),
         }
-    }
-
-    fn infer_stream(
-        &self,
-        _who: &dal_agent::ext::Caller,
-        _req: dal_core::ModelRequest,
-    ) -> dal_agent::ext::services::ServiceFuture<'_, dal_agent::ext::EventStream> {
-        unavailable()
     }
 
     fn call_tool(
@@ -1020,22 +1023,26 @@ fn a_cap_marks_the_cut_inside_the_cap_and_leaves_fitting_text_whole() {
 
 const CLEAN_REPLY: &str = r#"{"verdict":"clean","findings":[],"summary":"ok"}"#;
 
-fn text_events(text: &str, usage: Option<(u64, u64)>) -> Vec<dal_core::StreamEvent> {
-    let mut events = vec![dal_core::StreamEvent::Delta {
-        channel: dal_core::StreamChannel::Text,
+fn text_events(text: &str, usage: Option<(u64, u64)>) -> Vec<dal_provider::StreamEvent> {
+    let mut events = vec![dal_provider::StreamEvent::TextDelta {
         text: text.into(),
     }];
+    events.push(dal_provider::StreamEvent::ToolCallsDone { calls: Vec::new() });
     if let Some((input_tokens, output_tokens)) = usage {
-        events.push(dal_core::StreamEvent::Usage(dal_core::Usage {
-            input_tokens,
-            cached_input_tokens: 0,
-            output_tokens,
-            reasoning_tokens: None,
-            cache_write_tokens: 0,
-            cost_usd: None,
-        }));
+        events.push(dal_provider::StreamEvent::Usage {
+            usage: dal_core::Usage {
+                input_tokens,
+                cached_input_tokens: 0,
+                output_tokens,
+                reasoning_tokens: None,
+                cache_write_tokens: 0,
+                cost_usd: None,
+            },
+        });
     }
-    events.push(dal_core::StreamEvent::Stop(dal_core::Stop::EndTurn));
+    events.push(dal_provider::StreamEvent::Stop {
+        reason: dal_provider::StopReason::EndTurn,
+    });
     events
 }
 
@@ -1316,6 +1323,118 @@ async fn the_record_keeps_a_marked_prefix_while_the_report_keeps_the_whole_detai
     assert_eq!(record.findings[0].detail.len(), MAX_STORED_DETAIL_BYTES);
     assert!(record.findings[0].detail.ends_with(TRUNCATION_MARKER));
     Ok(())
+}
+
+#[tokio::test]
+async fn reviewer_stream_accepts_exact_byte_and_event_limits() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let on_cancel = Arc::clone(&cancelled);
+    let events = [
+        Ok(dal_provider::StreamEvent::TextDelta {
+            text: "hello".into(),
+        }),
+        Ok(dal_provider::StreamEvent::TextDelta {
+            text: "world".into(),
+        }),
+        Ok(dal_provider::StreamEvent::Stop {
+            reason: dal_provider::StopReason::EndTurn,
+        }),
+    ];
+    let stream = dal_agent::ext::EventStream::new(
+        futures::stream::iter(events),
+        move || on_cancel.store(true, Ordering::SeqCst),
+    );
+    let result = super::Completion::from_stream(stream, 10, 3).await;
+    assert!(matches!(result, Ok(super::Completion { text, usage: None }) if text == "helloworld"));
+    assert!(!cancelled.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn reviewer_stream_cancels_as_soon_as_total_utf8_bytes_exceed_limit() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let emitted = Arc::new(AtomicUsize::new(0));
+    let producer = Arc::clone(&emitted);
+    let on_cancel = Arc::clone(&cancelled);
+    let stream = dal_agent::ext::EventStream::new(
+        futures::stream::repeat_with(move || {
+            producer.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, dal_provider::ProviderError>(dal_provider::StreamEvent::TextDelta {
+                text: "é".into(),
+            })
+        }),
+        move || on_cancel.store(true, Ordering::SeqCst),
+    );
+    assert!(super::Completion::from_stream(stream, 4, 10).await.is_err());
+    assert_eq!(emitted.load(Ordering::SeqCst), 3);
+    assert!(cancelled.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn reviewer_stream_cancels_after_event_cap_even_without_text() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let emitted = Arc::new(AtomicUsize::new(0));
+    let producer = Arc::clone(&emitted);
+    let on_cancel = Arc::clone(&cancelled);
+    let stream = dal_agent::ext::EventStream::new(
+        futures::stream::repeat_with(move || {
+            producer.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, dal_provider::ProviderError>(dal_provider::StreamEvent::ReasoningDelta {
+                text: String::new(),
+            })
+        }),
+        move || on_cancel.store(true, Ordering::SeqCst),
+    );
+    assert!(super::Completion::from_stream(stream, 1024, 5).await.is_err());
+    assert_eq!(emitted.load(Ordering::SeqCst), 6);
+    assert!(cancelled.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn oversized_reviewer_reply_does_not_append_a_record() {
+    let cfg = named_route_config();
+    let status = Arc::new(ReviewStatus::new(cfg.max_rounds));
+    let fake = Arc::new(FakeReviewServices::default());
+    *locked(&fake.provider) = Provider::Replies(vec![
+        dal_provider::StreamEvent::TextDelta {
+            text: "x".repeat(super::MAX_REVIEW_REPLY_BYTES),
+        },
+        dal_provider::StreamEvent::TextDelta { text: "y".into() },
+        dal_provider::StreamEvent::Stop {
+            reason: dal_provider::StopReason::EndTurn,
+        },
+    ]);
+    let cx = staged_cx(&fake);
+
+    let text = round(&cfg, &status, &cx, None).await;
+
+    assert_eq!(
+        text,
+        format!(
+            "reviewer call failed: reviewer response exceeds {} text bytes",
+            super::MAX_REVIEW_REPLY_BYTES
+        )
+    );
+    assert!(locked(&fake.appended).is_empty());
+}
+
+#[tokio::test]
+async fn malformed_reviewer_reply_does_not_append_a_record() {
+    let cfg = named_route_config();
+    let status = Arc::new(ReviewStatus::new(cfg.max_rounds));
+    let fake = Arc::new(FakeReviewServices::default());
+    *locked(&fake.provider) = Provider::Replies(text_events("not json", None));
+    let cx = staged_cx(&fake);
+
+    let text = round(&cfg, &status, &cx, None).await;
+
+    assert!(text.starts_with("reviewer reply did not parse at round 1:"));
+    assert!(locked(&fake.appended).is_empty());
 }
 
 /// The one test that drives the real git executable.

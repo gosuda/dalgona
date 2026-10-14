@@ -446,13 +446,97 @@ pub(crate) fn price_of(shared: &HostShared, route: &ModelRoute) -> Option<ModelP
     )
 }
 
-pub(crate) async fn collect(mut stream: EventStream) -> Result<Inference, InferFailure> {
+/// Limits the total decoded provider content retained by non-streaming callers.
+const MAX_INFERENCE_CONTENT_BYTES: usize = 16 << 20;
+/// Counts even provider events that normalize to no core event.
+const MAX_INFERENCE_STREAM_EVENTS: usize = 65_536;
+
+fn provider_event_bytes(event: &ProviderEvent) -> usize {
+    match event {
+        ProviderEvent::TextDelta { text } | ProviderEvent::ReasoningDelta { text } => text.len(),
+        ProviderEvent::ToolCallStarted { id, name } => id.len().saturating_add(name.len()),
+        ProviderEvent::ToolArgsDelta { id, fragment } => id.len().saturating_add(fragment.len()),
+        ProviderEvent::Replay { payload } => payload
+            .model
+            .len()
+            .saturating_add(payload.item.as_str().len()),
+        ProviderEvent::ToolCallsDone { calls } => calls.iter().fold(0usize, |total, call| {
+            let args = match &call.args {
+                ToolArgs::Parsed(raw) => raw.as_str().len(),
+                ToolArgs::Invalid { message } => message.len(),
+                ToolArgs::Truncated => 0,
+            };
+            total
+                .saturating_add(call.id.len())
+                .saturating_add(call.name.len())
+                .saturating_add(args)
+        }),
+        ProviderEvent::Stop {
+            reason: dal_provider::StopReason::Other(reason),
+        } => reason.len(),
+        ProviderEvent::Usage { .. } | ProviderEvent::Stop { .. } => 0,
+        // Fail closed until new provider variants have explicit byte accounting.
+        _ => usize::MAX,
+    }
+}
+
+fn collection_limit(max_events: usize, max_bytes: usize) -> InferFailure {
+    InferFailure::Fatal {
+        message: format!(
+            "inference output exceeded the collection cap of {max_events} events or {max_bytes} bytes"
+        )
+        .into(),
+        fix: Some("Use streaming inference or request less output.".into()),
+    }
+}
+
+/// Collects a provider stream with aggregate byte and event budgets.
+///
+/// Checks happen before conversion and insertion; dropping the stream on
+/// overflow invokes its cancellation hook. Both the source and normalized
+/// event counts are bounded, including no-output provider events.
+pub(crate) async fn collect(stream: EventStream) -> Result<Inference, InferFailure> {
+    collect_with_limits(
+        stream,
+        MAX_INFERENCE_STREAM_EVENTS,
+        MAX_INFERENCE_CONTENT_BYTES,
+    )
+    .await
+}
+
+async fn collect_with_limits(
+    mut stream: EventStream,
+    max_events: usize,
+    max_bytes: usize,
+) -> Result<Inference, InferFailure> {
     let mut converter = StreamConverter::new();
     let mut events = Vec::new();
+    let mut source_events = 0usize;
+    let mut source_bytes = 0usize;
     while let Some(item) = stream.next().await {
-        events.extend(converter.convert(item.map_err(InferFailure::from)?));
+        let item = item.map_err(InferFailure::from)?;
+        let bytes = provider_event_bytes(&item);
+        if source_events == max_events || bytes > max_bytes.saturating_sub(source_bytes) {
+            return Err(collection_limit(max_events, max_bytes));
+        }
+        if let ProviderEvent::ToolCallsDone { calls } = &item
+            && calls.len() > max_events.saturating_sub(events.len())
+        {
+            return Err(collection_limit(max_events, max_bytes));
+        }
+        source_events += 1;
+        source_bytes += bytes;
+        let converted = converter.convert(item);
+        if converted.len() > max_events.saturating_sub(events.len()) {
+            return Err(collection_limit(max_events, max_bytes));
+        }
+        events.extend(converted);
     }
-    events.extend(converter.flush());
+    let flushed = converter.flush();
+    if flushed.len() > max_events.saturating_sub(events.len()) {
+        return Err(collection_limit(max_events, max_bytes));
+    }
+    events.extend(flushed);
     Ok(Inference { events })
 }
 
@@ -855,5 +939,122 @@ fn family_of(route: &ModelRoute) -> dal_core::Family {
     match route {
         ModelRoute::Api { family, .. } => *family,
         ModelRoute::Synthetic { .. } | ModelRoute::Harness { .. } => dal_core::Family::Chat,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use dal_provider::{EventStream, ProviderError, StopReason, StreamEvent as ProviderEvent};
+    use futures::stream;
+
+    use super::{InferFailure, Inference, collect_with_limits};
+
+    #[tokio::test]
+    async fn collector_accepts_exact_event_and_content_limits() {
+        let items = [
+            Ok(ProviderEvent::TextDelta { text: "ab".into() }),
+            Ok(ProviderEvent::TextDelta { text: "cde".into() }),
+            Ok(ProviderEvent::Stop {
+                reason: StopReason::EndTurn,
+            }),
+        ];
+        let stream = EventStream::new(stream::iter(items), || {});
+        let result = collect_with_limits(stream, 3, 5).await;
+
+        assert!(matches!(result, Ok(Inference { events }) if events.len() == 3));
+    }
+
+    #[tokio::test]
+    async fn collector_cancels_many_small_events_at_the_total_byte_limit() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let emitted = Arc::new(AtomicUsize::new(0));
+        let producer = Arc::clone(&emitted);
+        let on_cancel = Arc::clone(&cancelled);
+        let stream = EventStream::new(
+            stream::repeat_with(move || {
+                producer.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, ProviderError>(ProviderEvent::TextDelta { text: "a".into() })
+            }),
+            move || on_cancel.store(true, Ordering::SeqCst),
+        );
+
+        let result = collect_with_limits(stream, 32, 8).await;
+
+        assert!(matches!(result, Err(InferFailure::Fatal { .. })));
+        assert_eq!(emitted.load(Ordering::SeqCst), 9);
+        assert!(cancelled.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn collector_counts_zero_byte_provider_events() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let emitted = Arc::new(AtomicUsize::new(0));
+        let producer = Arc::clone(&emitted);
+        let on_cancel = Arc::clone(&cancelled);
+        let stream = EventStream::new(
+            stream::repeat_with(move || {
+                producer.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, ProviderError>(ProviderEvent::ReasoningDelta {
+                    text: String::new(),
+                })
+            }),
+            move || on_cancel.store(true, Ordering::SeqCst),
+        );
+
+        let result = collect_with_limits(stream, 4, 10).await;
+
+        assert!(matches!(result, Err(InferFailure::Fatal { .. })));
+        assert_eq!(emitted.load(Ordering::SeqCst), 5);
+        assert!(cancelled.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn collector_charges_tool_arguments_before_conversion() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let on_cancel = Arc::clone(&cancelled);
+        let items = [
+            Ok(ProviderEvent::ToolCallStarted {
+                id: "a".into(),
+                name: "call".into(),
+            }),
+            Ok(ProviderEvent::ToolArgsDelta {
+                id: "a".into(),
+                fragment: b"x".to_vec(),
+            }),
+        ];
+        let stream = EventStream::new(
+            stream::iter(items),
+            move || on_cancel.store(true, Ordering::SeqCst),
+        );
+
+        let result = collect_with_limits(stream, 8, 5).await;
+
+        assert!(matches!(result, Err(InferFailure::Fatal { .. })));
+        assert!(cancelled.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn collector_rejects_a_single_event_with_too_many_tool_calls() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let on_cancel = Arc::clone(&cancelled);
+        let call = dal_provider::ToolCall {
+            id: "a".into(),
+            name: "tool".into(),
+            args: dal_provider::ToolArgs::Parsed(dal_core::RawJson::null()),
+        };
+        let stream = EventStream::new(
+            stream::iter([Ok(ProviderEvent::ToolCallsDone {
+                calls: vec![call.clone(), call.clone(), call],
+            })]),
+            move || on_cancel.store(true, Ordering::SeqCst),
+        );
+
+        let result = collect_with_limits(stream, 2, 100).await;
+
+        assert!(matches!(result, Err(InferFailure::Fatal { .. })));
+        assert!(cancelled.load(Ordering::SeqCst));
     }
 }
