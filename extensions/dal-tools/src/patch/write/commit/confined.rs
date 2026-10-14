@@ -8,7 +8,7 @@ use std::{
     collections::HashSet,
     ffi::{OsStr, OsString},
     fs::File,
-    io::{self, Read, Write},
+    io::{self, Write},
     os::{fd::OwnedFd, unix::ffi::OsStrExt as _},
     path::{Component, Path, PathBuf},
 };
@@ -410,16 +410,17 @@ mod tests {
         std::fs::create_dir(&sub).expect("initial parent");
         let target = sub.join("target.txt");
         let (dir, _) = root.parent(&target, false).expect("open parent");
+        let staged = StagedFileOwned {
+            path: PathBuf::from("sub/target.txt"),
+            absolute_path: target.clone(),
+            before: None,
+            after: Some(b"inside\n".to_vec().into_boxed_slice()),
+            op: Operation::Create,
+            renamed_to: None,
+            hunks: Vec::new(),
+        };
         let temp = Temp {
-            file: &StagedFileOwned {
-                path: PathBuf::from("sub/target.txt"),
-                absolute_path: target.clone(),
-                before: None,
-                after: Some(b"inside\n".to_vec().into_boxed_slice()),
-                op: Operation::Create,
-                renamed_to: None,
-                hunks: Vec::new(),
-            },
+            file: &staged,
             dir,
             name: OsString::from("temp.txt"),
         };
