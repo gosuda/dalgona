@@ -11,7 +11,7 @@ use tempfile::{PathPersistError, TempPath};
 
 use crate::{
     error::BlobError,
-    util::{self, MODE_FILE},
+    util,
 };
 
 /// Bytes at or above this length leave the journal and become a blob.
@@ -111,10 +111,7 @@ fn check_blob_size(length: usize) -> Result<(), BlobError> {
 fn create_temp(dir: &Path) -> Result<(PathBuf, File), BlobError> {
     loop {
         let tmp = dir.join(format!(".tmp-{}", util::random_hex()));
-        let mut options = util::open_options();
-        options.write(true).create_new(true);
-        util::with_mode(&mut options, MODE_FILE);
-        match options.open(&tmp) {
+        match crate::private::create_new(&tmp, util::FileMode::Mode0600) {
             Ok(file) => return Ok((tmp, file)),
             Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {}
             Err(source) => return Err(io_blob(source)),
@@ -134,7 +131,7 @@ fn existing_blob(path: &Path) -> Result<bool, BlobError> {
             "published blob is not a regular file",
         )));
     }
-    match File::open(path) {
+    match crate::private::open_private_file(path) {
         Ok(_) => Ok(true),
         Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(source) => Err(io_blob(source)),
@@ -234,10 +231,7 @@ pub(crate) fn finish_staged(
             }
         }
         StagedPublish::Pending { temp, dest, dir } => {
-            let mut options = util::open_options();
-            options.write(true);
-            options
-                .open(&temp)
+            crate::private::open_private_file_read_write(&temp)
                 .and_then(|file| file.sync_all())
                 .map_err(io_blob)?;
             persist_temp(temp, &dest)?;
@@ -290,7 +284,7 @@ fn sync_dir(dir: &Path) -> Result<(), BlobError> {
 /// Returns [`BlobError::Gone`], [`BlobError::NotFound`], or [`BlobError::Io`].
 pub(crate) fn read(session_dir: &Path, id: &BlobId) -> Result<Vec<u8>, BlobError> {
     let path = session_dir.join("blobs").join(id.to_string());
-    match fs::read(&path) {
+    match crate::private::open_private_file(&path).and_then(fs::read_to_end) {
         Ok(bytes) if BlobId::from_bytes(&bytes) == *id => Ok(bytes),
         Ok(_) => Err(io_blob(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -323,8 +317,8 @@ pub(crate) fn share(
     for id in ids {
         let source = from.join(id.to_string());
         let dest = to.join(id.to_string());
-        let mut source_file =
-            File::open(&source).map_err(|error| missing_source(from, &id, error))?;
+        let mut source_file = crate::private::open_private_file(&source)
+            .map_err(|error| missing_source(from, &id, error))?;
         let metadata = source_file.metadata().map_err(io_blob)?;
         if !metadata.is_file() {
             return Err(io_blob(io::Error::new(
