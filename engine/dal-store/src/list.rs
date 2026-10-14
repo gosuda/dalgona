@@ -947,7 +947,7 @@ mod tests {
     }
 
     fn set_mtime(path: &Path, millis: u64) {
-        let file = File::options()
+        let file = fs::File::options()
             .write(true)
             .open(path)
             .expect("open journal to set mtime");
