@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use sonic_rs::JsonValueTrait;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
@@ -201,4 +202,133 @@ async fn a_full_request_count_still_accepts_cancellation() {
     };
     let (outcome, ()) = tokio::join!(server, client);
     outcome.expect("saturated connection ends after handling cancellation");
+}
+
+#[tokio::test]
+async fn a_full_request_count_still_accepts_cleanup_requests() {
+    let rig = rig(&[]).await;
+    let global = Arc::new(Semaphore::new(8 * 1024 * 1024));
+    let (transport, peer) = MemoryTransport::pair(MAX_IN_FLIGHT + 4);
+    let server = serve_rpc_with_budget(
+        rig.host.clone(),
+        transport,
+        CancellationToken::new(),
+        Arc::clone(&global),
+        8 * 1024 * 1024,
+    );
+    let client = async {
+        let mut rpc = Rpc::new(peer);
+        initialize(&mut rpc).await;
+        for id in 1..=MAX_IN_FLIGHT {
+            result(
+                &rpc.call(
+                    i64::try_from(id).expect("request id fits"),
+                    "host/subscribe",
+                    sonic_rs::json!({}),
+                )
+                .await,
+            );
+        }
+
+        // A cleanup request overtakes the full handler set instead of being
+        // dropped, and the connection stays usable afterwards.
+        result(
+            &rpc.call(1000, "host/unsubscribe", sonic_rs::json!({}))
+                .await,
+        );
+        result(&rpc.call(1001, "commands/list", sonic_rs::json!({})).await);
+    };
+    let (outcome, ()) = tokio::join!(server, client);
+    outcome.expect("saturated connection stays usable for cleanup");
+}
+
+#[tokio::test]
+async fn queued_requests_dispatch_in_order_once_a_slot_opens() {
+    let rig = rig(&[]).await;
+    let global = Arc::new(Semaphore::new(8 * 1024 * 1024));
+    let (transport, peer) = MemoryTransport::pair(MAX_IN_FLIGHT + 4);
+    let server = serve_rpc_with_budget(
+        rig.host.clone(),
+        transport,
+        CancellationToken::new(),
+        Arc::clone(&global),
+        8 * 1024 * 1024,
+    );
+    let client = async {
+        let mut rpc = Rpc::new(peer);
+        initialize(&mut rpc).await;
+        for id in 1..=MAX_IN_FLIGHT {
+            result(
+                &rpc.call(
+                    i64::try_from(id).expect("request id fits"),
+                    "host/subscribe",
+                    sonic_rs::json!({}),
+                )
+                .await,
+            );
+        }
+
+        // Ordinary requests behind a full handler set queue rather than kill
+        // the connection; a freed slot dispatches them in wire order.
+        rpc.send(1000, "commands/list", sonic_rs::json!({})).await;
+        rpc.send(1001, "commands/list", sonic_rs::json!({})).await;
+        rpc.notify("$/cancel_request", sonic_rs::json!({"requestId": 1}))
+            .await;
+        assert_eq!(
+            rpc.reply(1).await["error"]["code"].as_i64(),
+            Some(-32800),
+            "the cancelled subscription reports its cancellation"
+        );
+        result(&rpc.reply(1000).await);
+        result(&rpc.reply(1001).await);
+    };
+    let (outcome, ()) = tokio::join!(server, client);
+    outcome.expect("queued requests dispatch in order");
+}
+
+#[tokio::test]
+async fn byte_saturation_still_accepts_cleanup_through_the_control_lane() {
+    const GLOBAL: usize = 4 * 1024 * 1024;
+    let rig = rig(&[]).await;
+    let global = Arc::new(Semaphore::new(GLOBAL));
+    let params = sonic_rs::json!({"padding": "x".repeat(140_000)});
+    let frame = sonic_rs::to_string(&sonic_rs::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "host/subscribe",
+        "params": params,
+    }))
+    .expect("frame json");
+    let charge = usize::try_from(frame_charge(&frame).expect("frame charge")).expect("usize");
+    // Exactly two retained subscriptions fit; the slack below the minimum
+    // charge leaves no room for any further ordinary frame.
+    let connection = 2 * charge + 8 * 1024;
+    let (transport, peer) = MemoryTransport::pair(8);
+    let server = serve_rpc_with_budget(
+        rig.host.clone(),
+        transport,
+        CancellationToken::new(),
+        Arc::clone(&global),
+        connection,
+    );
+    let client = async {
+        let mut rpc = Rpc::new(peer);
+        initialize(&mut rpc).await;
+        result(&rpc.call(1, "host/subscribe", params.clone()).await);
+        result(&rpc.call(2, "host/subscribe", params).await);
+
+        // The byte budget cannot charge a new frame, but the bounded cleanup
+        // request still runs through the control lane and frees a handler.
+        result(&rpc.call(3, "host/unsubscribe", sonic_rs::json!({})).await);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while global.available_permits() < GLOBAL - charge {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("unsubscribe frees its handler's charge");
+        result(&rpc.call(4, "commands/list", sonic_rs::json!({})).await);
+    };
+    let (outcome, ()) = tokio::join!(server, client);
+    outcome.expect("control lane keeps cleanup working");
 }
