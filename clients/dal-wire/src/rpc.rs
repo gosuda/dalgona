@@ -395,6 +395,7 @@ async fn on_frame(
     stop: &CancellationToken,
     draining: bool,
     drain_replies: &mut usize,
+    budget: FrameBudget,
     line: &str,
 ) -> Option<Pending> {
     if draining && *drain_replies >= MAX_DRAIN_REPLIES {
@@ -461,6 +462,7 @@ async fn on_frame(
                         generation,
                         method,
                         params,
+                        _budget: budget,
                         cancel: child,
                     })
                     .await;
@@ -500,6 +502,8 @@ struct RequestArgs {
     method: String,
     /// The method params for dispatch.
     params: Value,
+    /// Holds the admission permits until this exact handler finishes.
+    _budget: FrameBudget,
     /// The per-request cancel token.
     cancel: CancellationToken,
 }
@@ -513,6 +517,7 @@ async fn handle_request(args: RequestArgs) {
         generation,
         method,
         params,
+        _budget,
         cancel,
     } = args;
     let reply = tokio::select! {
