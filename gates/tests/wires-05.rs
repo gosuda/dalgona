@@ -208,7 +208,7 @@ async fn idle_public_connections_cannot_exhaust_authenticated_service()
     fs::create_dir_all(&workspace)?;
     fs::write(
         home.join(".config/dal/dal.toml"),
-        "model = \\"openai-responses/gpt-6\\"\\n",
+        "model = \"openai-responses/gpt-6\"\n",
     )?;
 
     let binary = dalgon_binary()?;
@@ -242,7 +242,7 @@ async fn idle_public_connections_cannot_exhaust_authenticated_service()
         )
         .await??;
         if index == 0 {
-            peer.write_all(b"GET /v1/models HTTP/1.1\\r\\nHost: localhost")
+            peer.write_all(b"GET /v1/models HTTP/1.1\r\nHost: localhost")
                 .await?;
         }
         peers.push(peer);
