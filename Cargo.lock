@@ -1015,6 +1015,7 @@ dependencies = [
  "dal-agent",
  "dal-core",
  "dal-provider",
+ "dal-tools",
  "futures",
  "proptest",
  "regex",

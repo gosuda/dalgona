@@ -110,7 +110,7 @@ On Windows the data root follows the `install` page.
 
 ## Start from the nearest example
 
-A tool with state, `todo`; child sessions, `subagent`; questions to the user, `ask`; an MCP call, `mcp`; a hook, `permission-gate`; skills only, `skill-pack`; the smallest shape, `hello`; an HTTP fetch, `fetch`; turn steering, `steer`; review rules, `review-rules`. The page `dal://examples/<name>` holds every file; from the repository root of a source checkout, run `cp -r examples/plugins/<name>/. "$d/"`. Then set `name` and rename the tools and commands.
+A tool with state, `todo`; child sessions, `subagent`; questions to the user, `ask`; an MCP call, `mcp`; a hook, `permission-gate`; skills only, `skill-pack`; the smallest shape, `hello`; an HTTP fetch, `fetch`; turn steering, `steer`; review rules, `review-rules`; file search and read, `locate`; session hooks with state, `session-log`; one environment variable, `env-read`. The page `dal://examples/<name>` holds every file; from the repository root of a source checkout, run `cp -r examples/plugins/<name>/. "$d/"`. Then set `name` and rename the tools and commands.
 
 ## Translate
 

@@ -24,6 +24,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 dal-agent = { path = "../../engine/dal-agent", features = ["test-support"] }
+dal-tools.workspace = true
 proptest.workspace = true
 tempfile.workspace = true
 

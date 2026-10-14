@@ -148,6 +148,9 @@ fn ports_load_and_run() {
         "fetch",
         "steer",
         "review-rules",
+        "locate",
+        "session-log",
+        "env-read",
     ] {
         #[cfg(unix)]
         std::os::unix::fs::symlink(source.join(port), plugins.join(port)).unwrap();
@@ -172,6 +175,9 @@ fn ports_load_and_run() {
         "fetch",
         "steer",
         "review-rules",
+        "locate",
+        "session-log",
+        "env-read",
     ] {
         assert!(names.contains(&port), "port {port} loaded: {names:?}");
     }
@@ -211,6 +217,9 @@ fn ports_load_and_run() {
         "fetch",
         "steer",
         "review-rules",
+        "locate",
+        "session-log",
+        "env-read",
     ] {
         assert!(
             module.contains(&format!("\"examples/{port}\"")),

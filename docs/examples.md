@@ -17,6 +17,9 @@ Ports of pi extensions as dal Starlark plugins, plus original dal plugins with n
 | fetch | original to dal | HTTP fetch through `net.fetch`, with `dal.err` failures |
 | steer | original to dal | steering or waking the turn through `turn.steer` and `turn.wake` |
 | review-rules | original to dal | stream and always-apply rules through `dal.rule` |
+| locate | original to dal | file search and read through `tools.search` and `tools.read` |
+| session-log | original to dal | `session_start` and `turn_end` hooks with state |
+| env-read | original to dal | one allowed variable through `env.read` and plugin settings |
 
 ## pi's license
 
