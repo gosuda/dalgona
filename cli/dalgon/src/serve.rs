@@ -598,7 +598,36 @@ mod tests {
         .unwrap();
         assert_eq!(outcome, Some(ExitCode::FAILURE));
         let diagnostic = String::from_utf8(stderr).unwrap();
-        assert!(diagnostic.contains("tokens over plaintext HTTP"), "{diagnostic}");
+        assert!(
+            diagnostic.contains("tokens over plaintext HTTP"),
+            "{diagnostic}"
+        );
+        assert!(diagnostic.contains("HTTPS/WSS"), "{diagnostic}");
+    }
+
+    #[test]
+    fn public_non_loopback_bind_is_refused_with_a_valid_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let token_file = write_private_token(
+            &dir,
+            b"dal_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n",
+        );
+        let mut stderr = Vec::new();
+        let outcome = refuse_unsafe_serve_start(
+            &BTreeMap::new(),
+            true,
+            "0.0.0.0",
+            7437,
+            &token_file,
+            &mut stderr,
+        )
+        .unwrap();
+        assert_eq!(outcome, Some(ExitCode::FAILURE));
+        let diagnostic = String::from_utf8(stderr).unwrap();
+        assert!(
+            diagnostic.contains("tokens over plaintext HTTP"),
+            "{diagnostic}"
+        );
         assert!(diagnostic.contains("HTTPS/WSS"), "{diagnostic}");
     }
 
