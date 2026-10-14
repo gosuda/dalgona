@@ -547,25 +547,18 @@ mod tests {
     use super::apply_files;
 
     #[tokio::test]
-    async fn restore_completed_removes_create_after_later_temp_install_failure() {
+    async fn rejected_rename_parent_cleans_up_earlier_staged_files() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let workspace = std::fs::canonicalize(directory.path()).expect("workspace");
         let source = workspace.join("source.txt");
         let created = workspace.join("created");
-        // The rename destination must fail. unix refuses a file target
-        // under a missing directory at Phase-B rename; Windows accepts
-        // that spelling, so on Windows the destination sits under a
-        // regular file and prepare refuses it instead.
-        #[cfg(unix)]
-        let destination = workspace.join("other/");
-        #[cfg(windows)]
-        let destination = {
-            let blocker = workspace.join("blocked");
-            tokio::fs::write(&blocker, b"file\n")
-                .await
-                .expect("seed the file that blocks the destination parent");
-            blocker.join("dest")
-        };
+        // A file cannot serve as the parent of the rename destination.
+        // Staging this rename fails after staging the earlier create.
+        let blocker = workspace.join("blocked");
+        tokio::fs::write(&blocker, b"file\n")
+            .await
+            .expect("seed the file that blocks the destination parent");
+        let destination = blocker.join("dest");
 
         tokio::fs::write(&source, b"source\n")
             .await
@@ -603,11 +596,7 @@ mod tests {
                     after: Some(b"renamed\n".to_vec().into_boxed_slice()),
                     op: Operation::Rename,
                     renamed_to: Some(RenameTarget {
-                        path: if cfg!(unix) {
-                            PathBuf::from("other/")
-                        } else {
-                            PathBuf::from("blocked/dest")
-                        },
+                        path: PathBuf::from("blocked/dest"),
                         absolute_path: destination,
                     }),
                     hunks: Vec::new(),
@@ -620,9 +609,7 @@ mod tests {
             .await
             .expect_err("later rename install must fail");
 
-        // The refused destination can surface as a Phase-B rename error
-        // (Io) or an earlier prepare refusal (Stale) depending on which
-        // validator reaches it first on each platform.
+        // Refusal happens before publication and must clean up every temp.
         assert!(
             matches!(error.class, ErrorClass::Io | ErrorClass::Stale),
             "{error:?}"
