@@ -2159,13 +2159,12 @@ async fn dynamic_pools_refuse_before_starting_more_children_than_the_session_bud
         "{report}"
     );
     assert!(fixture.script().starts.len() <= 1024);
-    assert!(
-        fixture
-            .script()
-            .starts
-            .iter()
-            .all(|(_, child)| !child.name.starts_with("dynamic"))
-    );
+    assert!(fixture.script().starts.iter().all(|(_, child)| {
+        !child
+            .name
+            .as_deref()
+            .is_some_and(|name| name.starts_with("dynamic"))
+    }));
     Ok(())
 }
 
@@ -3282,7 +3281,11 @@ async fn a_task_cancelled_while_queued_for_a_worker_never_starts() -> TestResult
     .await
     .map_err(|_| "the queued task job never appeared")?;
     assert!(
-        fixture.script().starts[0].1.name.contains("one"),
+        fixture.script().starts[0]
+            .1
+            .name
+            .as_deref()
+            .is_some_and(|name| name.contains("one")),
         "task jobs spawn in item order"
     );
     // Let the owner file both task registrations before the cancel lands.

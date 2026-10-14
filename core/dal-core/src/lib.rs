@@ -11,6 +11,7 @@ mod journal;
 mod model;
 mod raw;
 mod request;
+pub mod terminal;
 mod tokens;
 mod update;
 mod view;
