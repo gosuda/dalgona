@@ -281,6 +281,7 @@ pub(crate) async fn resolve_scope(
     let root = workspace.to_path_buf();
     let requested = PathBuf::from(raw);
     let resolved = tokio::task::spawn_blocking(move || {
+        // Canonicalization performs blocking filesystem I/O.
         crate::workspace_path::resolve(&root, &requested)
     })
     .await
@@ -849,19 +850,21 @@ pub(crate) mod tests {
         write(&workspace, "safe.txt", b"SAFE_MARKER\n");
         write(&outside, "secret.txt", b"SECRET_MARKER\n");
 
-        let mut escaped = vec![
+        let escaped = vec![
             "../outside".to_owned(),
             outside.to_string_lossy().into_owned(),
             "sub/../safe.txt".to_owned(),
         ];
         #[cfg(unix)]
-        {
+        let escaped = {
             use std::os::unix::fs::symlink;
 
             symlink(&outside, workspace.join("linked-dir")).unwrap();
             symlink(outside.join("secret.txt"), workspace.join("linked-file")).unwrap();
-            escaped.extend(["linked-dir".to_owned(), "linked-file".to_owned()]);
-        }
+            let mut all = escaped;
+            all.extend(["linked-dir".to_owned(), "linked-file".to_owned()]);
+            all
+        };
 
         let search = engine(false, None);
         for (mode, pattern) in [("find", "*.txt"), ("grep", "MARKER")] {
