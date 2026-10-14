@@ -362,12 +362,23 @@ pub(crate) fn platform_cache(vars: &BTreeMap<OsString, OsString>, home: &Path) -
     }
 }
 
-/// Renders the Seatbelt profile with exactly the four plan forms in order,
-/// one escaped root rule per canonical root.
+/// Every macOS tool child inherits this restriction, including unsandboxed
+/// commands. It prevents a descendant from leaving the owned process group.
+#[cfg(target_os = "macos")]
+const PROCESS_GROUP_GUARD: &str = "(deny syscall-unix (syscall-number SYS_setsid SYS_setpgid))\n";
+
+/// The process lifetime policy for macOS commands with filesystem sandboxing off.
+#[cfg(target_os = "macos")]
+fn group_guard_profile() -> String {
+    format!("(version 1)\n(allow default)\n{PROCESS_GROUP_GUARD}")
+}
+
+/// Renders the macOS filesystem sandbox on top of the mandatory group guard.
 #[cfg(target_os = "macos")]
 pub(crate) fn seatbelt_profile(roots: &[PathBuf]) -> String {
     use std::fmt::Write as _;
-    let mut profile = String::from("(version 1)\n(allow default)\n(deny file-write*)\n");
+    let mut profile = group_guard_profile();
+    profile.push_str("(deny file-write*)\n");
     for root in roots {
         let _ = writeln!(
             profile,
@@ -398,24 +409,133 @@ fn seatbelt_write_error(path: &Path, source: &std::io::Error) -> ToolError {
     )))
 }
 
-/// Writes a unique mode-0600 Seatbelt profile for one child; the caller
-/// keeps the path until that child exits and removes it on every exit path.
+/// Writes a unique mode-0600 Seatbelt profile for one child.
 #[cfg(target_os = "macos")]
-pub(crate) fn write_seatbelt_profile(job: &JobId, roots: &[PathBuf]) -> Result<PathBuf, ToolError> {
+fn write_profile(job: &JobId, contents: &str) -> Result<PathBuf, ToolError> {
     use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt as _;
 
     let path = std::env::temp_dir().join(format!("dalgon-seatbelt-{job}.sb"));
     let mut file = std::fs::OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .mode(0o600)
         .open(&path)
         .map_err(|source| seatbelt_write_error(&path, &source))?;
-    file.write_all(seatbelt_profile(roots).as_bytes())
-        .map_err(|source| seatbelt_write_error(&path, &source))?;
+    file.write_all(contents.as_bytes()).map_err(|source| {
+        drop(file);
+        let _ = std::fs::remove_file(&path);
+        seatbelt_write_error(&path, &source)
+    })?;
     Ok(path)
+}
+
+/// Writes the group guard together with the filesystem sandbox rules.
+#[cfg(target_os = "macos")]
+pub(crate) fn write_seatbelt_profile(job: &JobId, roots: &[PathBuf]) -> Result<PathBuf, ToolError> {
+    write_profile(job, &seatbelt_profile(roots))
+}
+
+/// The `PATH` the launched child will see: the last override wins over the
+/// host snapshot, matching the `env_clear` then `envs` order in the spawn
+/// door. `None` means the child environment carries no `PATH` at all.
+#[cfg(target_os = "macos")]
+pub(crate) fn launch_path_env(
+    snapshot: &[(OsString, OsString)],
+    overrides: &[(OsString, OsString)],
+) -> Option<OsString> {
+    overrides
+        .iter()
+        .rev()
+        .chain(snapshot.iter().rev())
+        .find(|(key, _)| key.as_os_str() == OsStr::new("PATH"))
+        .map(|(_, value)| value.clone())
+}
+
+/// Reports whether `candidate` is exec-able as it stands: a regular file
+/// with at least one execute bit, like `execvp`. A path that exists but
+/// cannot exec reports `EACCES`; a lookup failure reports the filesystem
+/// error.
+#[cfg(target_os = "macos")]
+fn spawnable(candidate: &Path) -> Result<(), std::io::Error> {
+    use std::os::unix::fs::PermissionsExt as _;
+    match std::fs::metadata(candidate) {
+        Ok(meta) if meta.is_file() && meta.permissions().mode() & 0o111 != 0 => Ok(()),
+        Ok(_) => Err(std::io::Error::from_raw_os_error(13)), // EACCES
+        Err(source) => Err(source),
+    }
+}
+
+/// Resolves `target` the way the child's `execvp` would: a path resolves
+/// against the child `cwd`, a bare name searches the child `PATH`, and a
+/// name with no `PATH` falls back to the system default. A missing or
+/// non-executable target fails with the typed `Spawn` error; without this
+/// check the `sandbox-exec` trampoline would report it as an exit status
+/// instead of a launch failure. The resolved path is what the trampoline
+/// runs, so the check and the exec cannot diverge.
+#[cfg(target_os = "macos")]
+pub(crate) fn resolve_spawn_target(
+    target: &OsString,
+    cwd: &Path,
+    path_env: Option<&OsStr>,
+) -> Result<OsString, ToolError> {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let spawn_error = |source: std::io::Error| ToolError::Spawn {
+        path: PathBuf::from(target),
+        source,
+    };
+    if target.is_empty() {
+        return Err(spawn_error(std::io::Error::from_raw_os_error(2))); // ENOENT
+    }
+    if target.as_bytes().contains(&b'/') {
+        let candidate = cwd.join(Path::new(target));
+        spawnable(&candidate).map_err(spawn_error)?;
+        return Ok(candidate.into_os_string());
+    }
+    let path = path_env.unwrap_or(OsStr::new("/usr/bin:/bin:/usr/sbin:/sbin"));
+    let mut denied = false;
+    for dir in path.as_bytes().split(|byte| *byte == b':') {
+        // An empty PATH element means the working directory.
+        let candidate = cwd.join(Path::new(OsStr::from_bytes(dir))).join(target);
+        match spawnable(&candidate) {
+            Ok(()) => return Ok(candidate.into_os_string()),
+            Err(source) => denied |= source.kind() == std::io::ErrorKind::PermissionDenied,
+        }
+    }
+    Err(spawn_error(if denied {
+        std::io::Error::from_raw_os_error(13) // EACCES
+    } else {
+        std::io::Error::from_raw_os_error(2) // ENOENT
+    }))
+}
+
+/// Runs the target under the given inherited Seatbelt profile.
+#[cfg(target_os = "macos")]
+fn seatbelt_argv(
+    target: &OsString,
+    target_args: &[OsString],
+    profile: PathBuf,
+) -> (OsString, Vec<OsString>, Option<PathBuf>) {
+    let mut args = vec![
+        OsString::from("-f"),
+        profile.as_os_str().to_owned(),
+        OsString::from("--"),
+        target.clone(),
+    ];
+    args.extend(target_args.iter().cloned());
+    (OsString::from("/usr/bin/sandbox-exec"), args, Some(profile))
+}
+
+/// Applies process-group isolation even when the filesystem sandbox is off.
+#[cfg(target_os = "macos")]
+pub(crate) fn direct_argv(
+    target: &OsString,
+    target_args: &[OsString],
+    job: &JobId,
+) -> Result<(OsString, Vec<OsString>, Option<PathBuf>), ToolError> {
+    let profile = write_profile(job, &group_guard_profile())?;
+    Ok(seatbelt_argv(target, target_args, profile))
 }
 
 /// Builds the sandboxed argv for one platform; macOS returns the profile
@@ -431,14 +551,7 @@ pub(crate) fn sandbox_argv(
     {
         let _ = helper;
         let profile = write_seatbelt_profile(job, roots)?;
-        let mut args = vec![
-            OsString::from("-f"),
-            profile.as_os_str().to_owned(),
-            OsString::from("--"),
-            target.clone(),
-        ];
-        args.extend(target_args.iter().cloned());
-        Ok((OsString::from("/usr/bin/sandbox-exec"), args, Some(profile)))
+        Ok(seatbelt_argv(target, target_args, profile))
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -645,14 +758,23 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn seatbelt_profile_uses_exact_forms_with_escaped_roots() {
+    fn group_guard_profile_denies_detachment_without_limiting_files() {
+        assert_eq!(
+            group_guard_profile(),
+            "(version 1)\n(allow default)\n(deny syscall-unix (syscall-number SYS_setsid SYS_setpgid))\n"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn seatbelt_profile_keeps_group_guard_and_escaped_roots() {
         let profile = seatbelt_profile(&[
             PathBuf::from("/work/project"),
             PathBuf::from("/tmp/we\"ird\\path"),
         ]);
         assert_eq!(
             profile,
-            "(version 1)\n(allow default)\n(deny file-write*)\n(allow file-write* (subpath \"/work/project\"))\n(allow file-write* (subpath \"/tmp/we\\\"ird\\\\path\"))\n",
+            "(version 1)\n(allow default)\n(deny syscall-unix (syscall-number SYS_setsid SYS_setpgid))\n(deny file-write*)\n(allow file-write* (subpath \"/work/project\"))\n(allow file-write* (subpath \"/tmp/we\\\"ird\\\\path\"))\n",
         );
     }
 

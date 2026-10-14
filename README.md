@@ -28,7 +28,7 @@ The system prompt is built from parts you control (`AGENTS.md` files, `SYSTEM.md
 
 ## Tools and approval
 
-Normal mode gives the model `read`, `search`, `patch`, and `exec`; eval-first adds `eval`; eval-only leaves only `eval` visible. A call you deny outside `eval` is denied inside it, and `eval` is not a sandbox. `patch` speaks several edit styles, one setting picks the style, and the style follows the model. By default dal asks before every `patch` and every `exec`. `--approval ask|edits|all` carries the ladder. When no person can answer, dal denies and says why. An optional sandbox, off by default, guards the home directory.
+Normal mode gives the model `read`, `search`, `patch`, and `exec`; eval-first adds `eval`; eval-only leaves only `eval` visible. A call you deny outside `eval` is denied inside it, and `eval` is not a sandbox. `patch` speaks several edit styles, one setting picks the style, and the style follows the model. By default dal asks before every `patch` and every `exec`. `--approval ask|edits|all` carries the ladder. When no person can answer, dal denies and says why. An optional filesystem sandbox, off by default, guards the home directory. On macOS, a process-group Seatbelt guard applies to every command even with `sandbox = "off"`; descendants cannot create new sessions or process groups, so cancellation can stop the whole command tree.
 
 ## Steer or follow up
 
