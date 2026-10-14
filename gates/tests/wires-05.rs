@@ -178,8 +178,8 @@ async fn websocket_auth_never_logs_token_values() -> Result<(), Box<dyn Error + 
     );
     let serve_text = std::fs::read_to_string(&serve_log)?;
     assert!(
-        serve_text.contains("plain HTTP"),
-        "serve stderr must carry the public warning, got: {serve_text:.400}"
+        serve_text.contains("HTTPS/WSS") && serve_text.contains("reverse proxy"),
+        "serve stderr must carry the public proxy notice, got: {serve_text:.400}"
     );
     assert!(
         !logged.contains(sentinel),
