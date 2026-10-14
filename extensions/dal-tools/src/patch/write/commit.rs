@@ -10,6 +10,9 @@ use super::super::ir::{
 use super::super::resolve::revalidate_path;
 use super::{PatchSession, ensure_regular_target, non_regular_target};
 
+#[cfg(unix)]
+mod confined;
+
 fn lock_table()
 -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>> {
     static TABLE: std::sync::OnceLock<
@@ -98,6 +101,7 @@ async fn prepare_write_set(
     Ok(guards)
 }
 
+#[cfg(not(unix))]
 pub(crate) async fn apply_files(
     session: &PatchSession,
     plan: &Plan,
@@ -150,6 +154,15 @@ pub(crate) async fn apply_files(
     Ok(report_output(session, plan))
 }
 
+#[cfg(unix)]
+pub(crate) async fn apply_files(
+    session: &PatchSession,
+    plan: &Plan,
+) -> Result<Output, EngineError> {
+    let _guards = prepare_write_set(session, plan).await?;
+    confined::apply_files(session, plan)
+}
+
 fn write_target(file: &StagedFileOwned) -> &std::path::Path {
     file.renamed_to
         .as_ref()
@@ -172,6 +185,7 @@ fn trash_path(session: &PatchSession, source: &std::path::Path) -> PathBuf {
 
 /// Phase A for one file: compute the write target, refuse to clobber a
 /// rename destination, and stage the after bytes into an exclusive temp.
+#[cfg(not(unix))]
 async fn stage_temp<'a>(
     session: &PatchSession,
     file: &'a StagedFileOwned,
@@ -261,6 +275,7 @@ async fn stage_temp<'a>(
     Ok(())
 }
 
+#[cfg(not(unix))]
 enum Undo<'a> {
     RestoreBytes(&'a std::path::Path, &'a [u8]),
     RemoveInstalled(&'a std::path::Path),
@@ -270,6 +285,7 @@ enum Undo<'a> {
     },
 }
 
+#[cfg(not(unix))]
 impl Undo<'_> {
     async fn restore(&self) -> std::io::Result<()> {
         match self {
@@ -283,6 +299,7 @@ impl Undo<'_> {
     }
 }
 
+#[cfg(not(unix))]
 async fn rollback_error(
     path: &std::path::Path,
     error: std::io::Error,
@@ -322,6 +339,7 @@ async fn rollback_error(
     EngineError::new(ErrorClass::Io, message)
 }
 
+#[cfg(not(unix))]
 async fn trash_source<'a>(
     session: &PatchSession,
     file: &'a StagedFileOwned,
@@ -401,6 +419,7 @@ fn report_output(session: &PatchSession, plan: &Plan) -> Output {
     }
 }
 
+#[cfg(not(unix))]
 async fn cleanup_temps(temps: &[(&StagedFileOwned, PathBuf)]) {
     for (_, temp) in temps {
         let _ = tokio::fs::remove_file(temp).await;
