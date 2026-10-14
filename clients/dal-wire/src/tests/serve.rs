@@ -173,25 +173,25 @@ async fn idle_keep_alive_connection_expires() {
 }
 
 #[tokio::test]
-async fn full_listener_recovers_after_incomplete_headers_expire() {
+async fn idle_sockets_expire_and_free_all_listener_slots() {
     let rig = rig(&[]).await;
     with_serve(&rig, router_options(&rig), async |addr| {
         let mut stalled = Vec::new();
         for _ in 0..crate::serve::CONN_CAP {
-            let mut stream = tokio::net::TcpStream::connect(addr)
+            let stream = tokio::net::TcpStream::connect(addr)
                 .await
-                .expect("connect stalled client");
-            stream
-                .write_all(b"GET /v1/models HTTP/1.1\r\nhost:")
-                .await
-                .expect("send incomplete headers");
+                .expect("connect idle client");
             stalled.push(stream);
         }
         tokio::task::yield_now().await;
         tokio::time::pause();
         tokio::time::advance(crate::serve::HEADER_TIMEOUT + Duration::from_secs(1)).await;
         for stream in &mut stalled {
-            read_until_closed(stream).await;
+            let response = read_until_closed(stream).await;
+            assert!(
+                !response.starts_with(b"HTTP/1.1 200"),
+                "idle sockets must not reach a route"
+            );
         }
         tokio::time::resume();
         assert_eq!(get(addr, "/v1/models").await.status, 200);
@@ -233,7 +233,11 @@ async fn public_listener_sheds_per_ip_excess_and_recovers() {
         tokio::time::pause();
         tokio::time::advance(crate::serve::HEADER_TIMEOUT + Duration::from_secs(1)).await;
         for stream in &mut stalled {
-            read_until_closed(stream).await;
+            let response = read_until_closed(stream).await;
+            assert!(
+                !response.starts_with(b"HTTP/1.1 200"),
+                "idle sockets must not reach a route"
+            );
         }
         tokio::time::resume();
 
