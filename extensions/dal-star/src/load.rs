@@ -633,6 +633,6 @@ mod source_identity_tests {
         files.insert(PathBuf::from("assets/skill.md"), b"changed asset".to_vec());
         assert_ne!(source_digest(&files, None), original);
         files.remove(&PathBuf::from("assets/skill.md"));
-        assert_ne!(source_digest(&files, Some("{\\\"target\\\":1}")), original);
+        assert_ne!(source_digest(&files, Some(r#"{"target":1}"#)), original);
     }
 }
