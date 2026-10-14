@@ -22,7 +22,7 @@ use dal_core::ApprovalMode;
 use futures::{StreamExt, stream::FuturesUnordered};
 use hyper::{Request, Response};
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::error::WireError;
@@ -64,6 +64,12 @@ impl ServeHandle {
 
 /// Maximum concurrent HTTP connections.
 const CONN_CAP: usize = 256;
+/// Maximum connections that have not passed their first request guard.
+const PREAUTH_CAP: usize = 32;
+/// Maximum time to receive one complete set of HTTP request headers.
+const HEADER_TIMEOUT: Duration = Duration::from_secs(5);
+/// Maximum lifetime of a connection before its first successful guard.
+const PREAUTH_TIMEOUT: Duration = Duration::from_secs(10);
 /// Maximum request header buffer size in bytes.
 const HEADER_LIMIT: usize = 1_048_576;
 /// Stop drain grace.
@@ -119,6 +125,37 @@ impl ServeCtx {
 
 /// One live stream or upgrade future owned by the accept loop.
 pub(crate) type Driver = futures::future::BoxFuture<'static, ()>;
+
+/// Holds a scarce pre-authentication slot until the first request is accepted.
+struct PreauthGuard {
+    permit: Mutex<Option<OwnedSemaphorePermit>>,
+    admitted: CancellationToken,
+}
+
+impl PreauthGuard {
+    fn new(permit: OwnedSemaphorePermit) -> Self {
+        Self {
+            permit: Mutex::new(Some(permit)),
+            admitted: CancellationToken::new(),
+        }
+    }
+
+    async fn admit(&self) {
+        drop(self.permit.lock().await.take());
+        self.admitted.cancel();
+    }
+}
+
+/// Configures the same bounded HTTP/1 driver for every accepted socket.
+fn http1_builder() -> hyper::server::conn::http1::Builder {
+    let mut builder = hyper::server::conn::http1::Builder::new();
+    builder
+        .max_buf_size(HEADER_LIMIT)
+        .timer(hyper_util::rt::TokioTimer::new())
+        .header_read_timeout(HEADER_TIMEOUT);
+    builder
+}
+
 /// Binds the accept loop for one listener and returns its handle.
 pub(crate) fn listen(
     host: Host,
@@ -128,6 +165,7 @@ pub(crate) fn listen(
     stop: CancellationToken,
 ) -> ServeHandle {
     let (driver_tx, mut driver_rx) = mpsc::channel::<Driver>(CONN_CAP);
+    let preauth_slots = Arc::new(Semaphore::new(PREAUTH_CAP));
     let ctx = Arc::new(ServeCtx {
         host,
         cfg,
@@ -144,13 +182,18 @@ pub(crate) fn listen(
             tokio::select! {
                 biased;
                 () = stop.cancelled() => break,
+                _ = conns.next(), if !conns.is_empty() => {}
+                _ = drivers.next(), if !drivers.is_empty() => {}
+                Some(driver) = driver_rx.recv() => drivers.push(driver),
                 accepted = listener.accept(), if conns.len() < CONN_CAP => {
                     match accepted {
                         Ok((stream, _)) => {
-                            let ctx = Arc::clone(&ctx);
-                            conns.push(Box::pin(async move {
-                                serve_conn(ctx, stream).await;
-                            }));
+                            if let Ok(permit) = Arc::clone(&preauth_slots).try_acquire_owned() {
+                                let ctx = Arc::clone(&ctx);
+                                conns.push(Box::pin(async move {
+                                    serve_conn(ctx, stream, permit).await;
+                                }));
+                            }
                         }
                         Err(error) => {
                             if is_capacity_error(&error) {
@@ -163,9 +206,6 @@ pub(crate) fn listen(
                         }
                     }
                 }
-                _ = conns.next(), if !conns.is_empty() => {}
-                _ = drivers.next(), if !drivers.is_empty() => {}
-                Some(driver) = driver_rx.recv() => drivers.push(driver),
             }
         }
         shutdown.cancel();
@@ -208,23 +248,37 @@ fn libc_enfile() -> i32 {
 }
 
 /// Serves one HTTP/1.1 connection to completion.
-async fn serve_conn(ctx: Arc<ServeCtx>, stream: tokio::net::TcpStream) {
+async fn serve_conn(
+    ctx: Arc<ServeCtx>,
+    stream: tokio::net::TcpStream,
+    permit: OwnedSemaphorePermit,
+) {
+    let preauth = Arc::new(PreauthGuard::new(permit));
     let io = hyper_util::rt::TokioIo::new(stream);
     let shutdown = ctx.shutdown.clone();
+    let service_preauth = Arc::clone(&preauth);
     let service = hyper::service::service_fn(move |req: Request<hyper::body::Incoming>| {
         let ctx = Arc::clone(&ctx);
-        async move { Ok::<_, hyper::Error>(handle_request(ctx, req).await) }
+        let preauth = Arc::clone(&service_preauth);
+        async move { Ok::<_, hyper::Error>(handle_request(ctx, req, preauth).await) }
     });
-    let conn = hyper::server::conn::http1::Builder::new()
-        .max_buf_size(HEADER_LIMIT)
-        .serve_connection(io, service)
-        .with_upgrades();
+    let conn = http1_builder().serve_connection(io, service).with_upgrades();
     let mut conn = std::pin::pin!(conn);
-    let result = tokio::select! {
-        result = conn.as_mut() => result,
-        () = shutdown.cancelled() => {
-            conn.as_mut().graceful_shutdown();
-            conn.await
+    let deadline = tokio::time::sleep(PREAUTH_TIMEOUT);
+    let mut deadline = std::pin::pin!(deadline);
+    let mut admitted = false;
+    let result = loop {
+        tokio::select! {
+            result = conn.as_mut() => break result,
+            () = shutdown.cancelled() => {
+                conn.as_mut().graceful_shutdown();
+                break conn.await;
+            }
+            () = preauth.admitted.cancelled(), if !admitted => admitted = true,
+            () = &mut deadline, if !admitted => {
+                tracing::debug!("pre-authentication connection expired");
+                return;
+            }
         }
     };
     if let Err(error) = result {
@@ -236,6 +290,7 @@ async fn serve_conn(ctx: Arc<ServeCtx>, stream: tokio::net::TcpStream) {
 async fn handle_request(
     ctx: Arc<ServeCtx>,
     req: Request<hyper::body::Incoming>,
+    preauth: Arc<PreauthGuard>,
 ) -> Response<ServeBody> {
     let method = req.method().to_string();
     let path = req.uri().path().to_owned();
@@ -261,12 +316,16 @@ async fn handle_request(
         return into_response(resp);
     }
     if upgrade_route {
-        return upgrade_response(ctx, req, route).await;
+        return upgrade_response(ctx, req, route, preauth).await;
     }
     if requires_json(&route)
         && let Err(resp) = content_guard(&req, &route)
     {
         return into_response(resp);
+    }
+    // The public agent card has no token requirement; keep it in the pre-auth budget.
+    if !ctx.cfg.public || !is_card(&method, &path) {
+        preauth.admit().await;
     }
     let version = req
         .headers()
@@ -374,5 +433,89 @@ pub(crate) fn router_options(cfg: &ListenerCfg) -> RouterOptions {
         origins: cfg.origins.clone(),
         aliases: cfg.aliases.clone(),
         workspace: cfg.workspace.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use hyper::Response;
+    use hyper::service::service_fn;
+    use hyper_util::rt::TokioIo;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::Semaphore;
+    use tokio::task::JoinHandle;
+
+    use super::{HEADER_TIMEOUT, PreauthGuard, ServeBody, http1_builder};
+
+    async fn test_connection() -> (TcpStream, JoinHandle<Result<(), hyper::Error>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local address");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let service = service_fn(|_req| async {
+                Ok::<_, hyper::Error>(Response::new(ServeBody::Full(Some(
+                    bytes::Bytes::from_static(b"ok"),
+                ))))
+            });
+            http1_builder()
+                .serve_connection(TokioIo::new(stream), service)
+                .with_upgrades()
+                .await
+        });
+        let client = TcpStream::connect(addr).await.expect("connect");
+        (client, server)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn silent_http_peer_expires_before_authentication() {
+        let (_peer, server) = test_connection().await;
+        tokio::time::timeout(HEADER_TIMEOUT + std::time::Duration::from_secs(1), server)
+            .await
+            .expect("silent peer must be evicted")
+            .expect("connection driver must finish");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn slowloris_headers_expire_without_progress_reset() {
+        let (mut peer, server) = test_connection().await;
+        peer.write_all(b"GET / HTTP/1.1\r\nHost: incomplete")
+            .await
+            .expect("write partial request");
+        tokio::time::timeout(HEADER_TIMEOUT + std::time::Duration::from_secs(1), server)
+            .await
+            .expect("partial header must be evicted")
+            .expect("connection driver must finish");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_keepalive_peer_expires_after_response() {
+        let (mut peer, server) = test_connection().await;
+        peer.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .expect("write complete request");
+        let mut response = [0u8; 512];
+        let size = peer.read(&mut response).await.expect("read response");
+        assert!(
+            response[..size].starts_with(b"HTTP/1.1 200"),
+            "server must respond before idle timeout"
+        );
+        tokio::time::timeout(HEADER_TIMEOUT + std::time::Duration::from_secs(1), server)
+            .await
+            .expect("idle keepalive must be evicted")
+            .expect("connection driver must finish");
+    }
+
+    #[tokio::test]
+    async fn authenticating_releases_the_preauth_budget() {
+        let slots = Arc::new(Semaphore::new(1));
+        let permit = Arc::clone(&slots).try_acquire_owned().expect("available slot");
+        let guard = PreauthGuard::new(permit);
+        assert!(slots.try_acquire().is_err(), "unauthenticated peer holds the slot");
+        guard.admit().await;
+        assert!(guard.admitted.is_cancelled(), "admission lifts the deadline");
+        assert!(slots.try_acquire().is_ok(), "authenticated peer releases the slot");
     }
 }
