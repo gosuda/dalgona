@@ -84,12 +84,23 @@ impl Subscriber {
 
     /// Whether this subscriber may answer approval requests.
     pub(crate) fn answers_approval(slot: &Arc<SubscriberShared>) -> bool {
-        slot.approval
+        slot.approval && Self::deliverable(slot)
     }
 
     /// Whether this subscriber may answer extension questions.
     pub(crate) fn answers_ask(slot: &Arc<SubscriberShared>) -> bool {
-        slot.ask
+        slot.ask && Self::deliverable(slot)
+    }
+
+    /// Whether `offer` would still accept a delivery for `slot`. A lagged or
+    /// closed queue never takes a new request, so a role flag on such a
+    /// subscriber must not count it as an attached answerer.
+    fn deliverable(slot: &Arc<SubscriberShared>) -> bool {
+        let queue = slot
+            .queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        !(queue.lagged || queue.closed)
     }
 
     /// Offers one published update; shed or dropped offers return false.
@@ -198,4 +209,49 @@ fn shed(queue: &mut QueueState, current: (Gen, Seq)) {
         queue.pending_resync = Some(current);
     }
     queue.lagged = true;
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroU64;
+
+    use super::*;
+
+    fn cursor() -> (Gen, Seq) {
+        (Gen::new(NonZeroU64::MIN), Seq::new(NonZeroU64::MIN))
+    }
+
+    fn update() -> Arc<Update> {
+        let (r#gen, seq) = cursor();
+        Arc::new(Update {
+            r#gen,
+            seq,
+            kind: UpdateKind::Unknown,
+        })
+    }
+
+    #[test]
+    fn a_lagged_subscriber_answers_nothing() {
+        let subscriber = Subscriber::with_backlog(VecDeque::new(), cursor(), true, true);
+        let slot = subscriber.port();
+        assert!(Subscriber::answers_approval(&slot));
+        assert!(Subscriber::answers_ask(&slot));
+        let update = update();
+        for _ in 0..=QUEUE_CAP {
+            if !Subscriber::offer(&slot, Arc::clone(&update), cursor()) {
+                break;
+            }
+        }
+        assert!(!Subscriber::answers_approval(&slot));
+        assert!(!Subscriber::answers_ask(&slot));
+    }
+
+    #[test]
+    fn a_closed_subscriber_answers_nothing() {
+        let subscriber = Subscriber::with_backlog(VecDeque::new(), cursor(), true, true);
+        let slot = subscriber.port();
+        Subscriber::close(&slot);
+        assert!(!Subscriber::answers_approval(&slot));
+        assert!(!Subscriber::answers_ask(&slot));
+    }
 }
