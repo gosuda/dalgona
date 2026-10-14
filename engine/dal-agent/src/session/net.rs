@@ -435,7 +435,12 @@ mod tests {
 
         let mut method = reqwest::Method::POST;
         let mut body = b"secret".to_vec();
-        super::redirect_method(reqwest::StatusCode::TEMPORARY_REDIRECT, &mut method, &mut body, &mut headers);
+        super::redirect_method(
+            reqwest::StatusCode::TEMPORARY_REDIRECT,
+            &mut method,
+            &mut body,
+            &mut headers,
+        );
         assert_eq!(method, reqwest::Method::POST);
         assert_eq!(body.as_slice(), b"secret");
     }
