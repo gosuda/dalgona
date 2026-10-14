@@ -40,7 +40,7 @@ fn public_ip(ip: IpAddr) -> bool {
                     | (100, 64..=127, _)
                     | (169, 254, _)
                     | (172, 16..=31, _)
-                    | (192, 0, 0 | 2)
+                    | (192, 0, _)
                     | (192, 88, 99)
                     | (192, 168, _)
                     | (198, 18 | 19, _)
@@ -54,7 +54,8 @@ fn public_ip(ip: IpAddr) -> bool {
                 && !(segments[0] == 0x2001
                     && (segments[1] <= 0x01ff || segments[1] == 0x0db8))
                 && segments[0] != 0x2002
-                && !(segments[0] == 0x3fff && segments[1] <= 0x0fff)
+                && segments[0] != 0x3ffe
+                && segments[0] != 0x3fff
         }
     }
 }
@@ -141,12 +142,17 @@ fn redirect_method(
     status: reqwest::StatusCode,
     method: &mut reqwest::Method,
     body: &mut Vec<u8>,
+    headers: &mut Vec<(Box<str>, Box<str>)>,
 ) {
     if (status == reqwest::StatusCode::SEE_OTHER && *method != reqwest::Method::HEAD)
         || (matches!(status.as_u16(), 301 | 302) && *method == reqwest::Method::POST)
     {
         *method = reqwest::Method::GET;
         body.clear();
+        headers.retain(|(name, _)| {
+            !name.eq_ignore_ascii_case("content-length")
+                && !name.eq_ignore_ascii_case("content-type")
+        });
     }
 }
 
@@ -165,6 +171,7 @@ pub(super) async fn send(req: FetchRequest) -> Result<FetchResponse, ServiceErro
         _ => reqwest::Method::GET,
     };
     let mut body = req.body;
+    let mut headers = req.headers;
     let mut redirects = 0;
     loop {
         let (host, addresses) = admitted_target(&url).await?;
@@ -172,7 +179,7 @@ pub(super) async fn send(req: FetchRequest) -> Result<FetchResponse, ServiceErro
         let mut outgoing = client
             .request(method.clone(), url.clone())
             .body(body.clone());
-        for (name, value) in &req.headers {
+        for (name, value) in &headers {
             if let (Ok(name), Ok(value)) = (
                 reqwest::header::HeaderName::from_bytes(name.as_bytes()),
                 reqwest::header::HeaderValue::from_str(value.as_ref()),
@@ -201,7 +208,7 @@ pub(super) async fn send(req: FetchRequest) -> Result<FetchResponse, ServiceErro
             if redirects == MAX_REDIRECTS {
                 return Err(denied("too many network redirects"));
             }
-            redirect_method(response.status(), &mut method, &mut body);
+            redirect_method(response.status(), &mut method, &mut body, &mut headers);
             redirects += 1;
             url = next;
             continue;
@@ -248,6 +255,7 @@ mod tests {
             "172.16.0.1",
             "172.31.255.255",
             "192.0.0.1",
+            "192.0.0.170",
             "192.0.2.1",
             "192.88.99.1",
             "192.168.1.1",
@@ -274,6 +282,7 @@ mod tests {
             "2001::1",
             "2001:db8::1",
             "2002:c0a8:101::1",
+            "3ffe::1",
             "3fff::1",
         ] {
             assert!(!public_ip(addr(raw)), "{raw} must be denied");
@@ -384,13 +393,19 @@ mod tests {
     fn method_rewrites_clear_post_bodies_but_preserve_temporary_redirects() {
         let mut method = reqwest::Method::POST;
         let mut body = b"secret".to_vec();
-        super::redirect_method(reqwest::StatusCode::FOUND, &mut method, &mut body);
+        let mut headers = vec![
+            ("Content-Length".into(), "6".into()),
+            ("Content-Type".into(), "text/plain".into()),
+            ("X-Request-ID".into(), "example".into()),
+        ];
+        super::redirect_method(reqwest::StatusCode::FOUND, &mut method, &mut body, &mut headers);
         assert_eq!(method, reqwest::Method::GET);
         assert!(body.is_empty());
+        assert_eq!(headers, vec![("X-Request-ID".into(), "example".into())]);
 
         let mut method = reqwest::Method::POST;
         let mut body = b"secret".to_vec();
-        super::redirect_method(reqwest::StatusCode::TEMPORARY_REDIRECT, &mut method, &mut body);
+        super::redirect_method(reqwest::StatusCode::TEMPORARY_REDIRECT, &mut method, &mut body, &mut headers);
         assert_eq!(method, reqwest::Method::POST);
         assert_eq!(body.as_slice(), b"secret");
     }
