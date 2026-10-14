@@ -837,7 +837,6 @@ pub(crate) mod tests {
         }
     }
 
-
     #[tokio::test]
     async fn search_refuses_paths_outside_workspace() {
         let parent = tempfile::tempdir().unwrap();

@@ -1040,7 +1040,6 @@ mod tests {
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
-
     #[tokio::test]
     async fn read_refuses_paths_outside_workspace() {
         let parent = tempfile::tempdir().unwrap();
