@@ -335,3 +335,5 @@ fn edit_path(edit: &Edit) -> &Path {
 pub mod commit;
 
 pub mod stage;
+
+mod secure_fs;
