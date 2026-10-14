@@ -131,6 +131,13 @@ pub(crate) struct OAuthClient {
     pub(crate) policy: NetworkPolicy,
 }
 
+/// Caller and frontend that grant outbound OAuth origins.
+#[derive(Clone, Copy)]
+struct Consent<'a> {
+    services: &'a dyn Services,
+    who: &'a Caller,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct GuardedResolver {
     target_class: AddressClass,
@@ -274,13 +281,13 @@ pub(crate) async fn discover(
 ) -> Result<Discovery, McpError> {
     let resource = auth::canonical_resource(target);
     let mut policy = oauth.policy.clone();
+    let consent = Consent { services, who };
     let resource_metadata = fetch_resource_metadata(
         &oauth.client,
         target,
         challenge.resource_metadata.as_deref(),
         &mut policy,
-        services,
-        who,
+        consent,
         timeout,
         cancel,
     )
@@ -299,8 +306,7 @@ pub(crate) async fn discover(
         &issuer,
         &issuer_url,
         &mut policy,
-        services,
-        who,
+        consent,
         timeout,
         cancel,
     )
@@ -344,10 +350,10 @@ pub(crate) async fn discover(
         .get("authorization_response_iss_parameter_supported")
         .and_then(JsonValueTrait::as_bool)
         .unwrap_or(false);
-    approve_origin(&mut policy, &authorization_endpoint, services, who, cancel).await?;
-    approve_origin(&mut policy, &token_endpoint, services, who, cancel).await?;
+    approve_origin(&mut policy, &authorization_endpoint, consent, cancel).await?;
+    approve_origin(&mut policy, &token_endpoint, consent, cancel).await?;
     if let Some(endpoint) = registration_endpoint.as_ref() {
-        approve_origin(&mut policy, endpoint, services, who, cancel).await?;
+        approve_origin(&mut policy, endpoint, consent, cancel).await?;
     }
     Ok(Discovery {
         issuer,
@@ -574,14 +580,13 @@ where
 }
 
 async fn confirm_request(
-    services: &dyn Services,
-    who: &Caller,
+    consent: Consent<'_>,
     text: String,
     cancel: &CancellationToken,
 ) -> Result<(), McpError> {
     let answer = tokio::select! {
         () = cancel.cancelled() => return Err(McpError::NoAskFrontEnd),
-        answer = services.ask(who, Question::Confirm {
+        answer = consent.services.ask(consent.who, Question::Confirm {
             text: text.into_boxed_str(),
         }) => answer,
     };
@@ -616,8 +621,7 @@ async fn registered_or_stored_client_id(
     let registered = match plan.discovery.registration_endpoint.as_ref() {
         Some(endpoint) => {
             confirm_request(
-                services,
-                who,
+                Consent { services, who },
                 format!(
                     "Register an OAuth client for the MCP server at {} with {}? This sends a client registration POST before browser authorization.",
                     plan.target.origin().ascii_serialization(),
@@ -679,14 +683,13 @@ async fn fetch_resource_metadata(
     target: &Url,
     explicit: Option<&str>,
     policy: &mut NetworkPolicy,
-    services: &dyn Services,
-    who: &Caller,
+    consent: Consent<'_>,
     timeout: Duration,
     cancel: &CancellationToken,
 ) -> Result<Value, McpError> {
     let candidates = resource_metadata_urls(target, explicit)?;
     for candidate in candidates {
-        approve_origin(policy, &candidate, services, who, cancel).await?;
+        approve_origin(policy, &candidate, consent, cancel).await?;
         let value = fetch_json(client, policy, &candidate, timeout, cancel).await?;
         if let Some(value) = value {
             return Ok(value);
@@ -719,8 +722,7 @@ async fn fetch_authorization_metadata(
     issuer: &str,
     issuer_url: &Url,
     policy: &mut NetworkPolicy,
-    services: &dyn Services,
-    who: &Caller,
+    consent: Consent<'_>,
     timeout: Duration,
     cancel: &CancellationToken,
 ) -> Result<Value, McpError> {
@@ -737,7 +739,7 @@ async fn fetch_authorization_metadata(
     );
     for candidate in [inserted, oidc] {
         let candidate = parse_endpoint(&candidate)?;
-        approve_origin(policy, &candidate, services, who, cancel).await?;
+        approve_origin(policy, &candidate, consent, cancel).await?;
         let value = fetch_json(client, policy, &candidate, timeout, cancel).await?;
         if let Some(value) = value {
             return Ok(value);
@@ -749,8 +751,7 @@ async fn fetch_authorization_metadata(
 async fn approve_origin(
     policy: &mut NetworkPolicy,
     url: &Url,
-    services: &dyn Services,
-    who: &Caller,
+    consent: Consent<'_>,
     cancel: &CancellationToken,
 ) -> Result<(), McpError> {
     policy.check_address(url)?;
@@ -758,8 +759,7 @@ async fn approve_origin(
         return Ok(());
     }
     confirm_request(
-        services,
-        who,
+        consent,
         format!(
             "The MCP server requests OAuth access to {}. Approve network requests to this exact origin?",
             url.origin().ascii_serialization(),
