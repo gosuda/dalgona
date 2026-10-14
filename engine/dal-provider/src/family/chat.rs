@@ -36,6 +36,7 @@ use crate::{
     retry::{RequestState, RetryDecision, classify},
     sse::SseEvent,
     stream::{StopReason, StreamEvent, ToolArgs, ToolCall},
+    stream_budget::StreamBudget,
     thinking::{ThinkingPlan, WireThinking},
     tool_names::{WIRE_NAME_MAX, wire_name},
 };
@@ -503,6 +504,7 @@ struct OpenCall {
 pub(crate) struct ChatDecoder {
     provider: Box<str>,
     model: Box<str>,
+    budget: StreamBudget,
     /// Open calls by delta index; iteration order is index order.
     calls: BTreeMap<u32, OpenCall>,
     /// The last non-null usage.
@@ -522,6 +524,7 @@ impl ChatDecoder {
         Self {
             provider: provider.into(),
             model: model.into(),
+            budget: StreamBudget::default(),
             calls: BTreeMap::new(),
             usage: None,
             stop: None,
@@ -553,7 +556,10 @@ impl ChatDecoder {
             return Ok(Progress::Ended);
         }
         let start = out.len();
-        let result = self.step(data, out);
+        let result = self
+            .budget
+            .admit_event(data.len())
+            .and_then(|()| self.step(data, out));
         self.emitted |= out.len() > start;
         if !matches!(result, Ok(Progress::Open)) {
             self.ended = true;
@@ -627,6 +633,7 @@ impl ChatDecoder {
             let call = match self.calls.entry(tool.index) {
                 Entry::Occupied(open) => open.into_mut(),
                 Entry::Vacant(slot) => {
+                    self.budget.admit_item()?;
                     let name = function.as_mut().and_then(|function| function.name.take());
                     slot.insert(open_call(tool.index, tool.id, name, out)?)
                 }
