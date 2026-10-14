@@ -97,7 +97,7 @@ pub(crate) fn parse_rows(text: &str) -> Result<Vec<GrantRow>, GrantStoreError> {
                 .collect::<Result<Vec<_>, _>>()?;
         } else if matches!(
             k.trim(),
-            "ext" | "origin" | "by" | "approved_at" | "mcp_set"
+            "ext" | "origin" | "by" | "approved_at" | "mcp_set" | "digest" | "workspace"
         ) {
             let unquoted = unquote(v.trim()).ok_or_else(|| GrantStoreError::Malformed {
                 detail: format!("line {no}: value must be quoted").into(),
@@ -146,6 +146,8 @@ fn build_row(
         ext,
         origin,
         services,
+        digest: fields.get("digest").cloned().unwrap_or_default(),
+        workspace: fields.get("workspace").map(PathBuf::from).unwrap_or_default(),
         mcp_set: fields.get("mcp_set").cloned(),
         by,
         approved_at,
