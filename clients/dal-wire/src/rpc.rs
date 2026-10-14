@@ -8,14 +8,14 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use dal_agent::login::LoginId;
 use dal_agent::{Agent, Host};
 use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 use crate::error::WireError;
@@ -36,7 +36,74 @@ pub(crate) use fail::{
 pub(crate) use subs::{host_notifier, send_resync, session_pump};
 
 /// Maximum in-flight requests before the reader pauses.
-pub(crate) const MAX_IN_FLIGHT: usize = 256;
+pub(crate) const MAX_IN_FLIGHT: usize = 64;
+
+/// In-flight request memory budget for one connection (64 MiB).
+const CONNECTION_BYTES: usize = 64 * 1024 * 1024;
+
+/// In-flight request memory budget shared by every RPC connection (256 MiB).
+const PROCESS_BYTES: usize = 256 * 1024 * 1024;
+
+/// Account for the raw frame and its retained parsed representation.
+const FRAME_BYTE_WEIGHT: usize = 2;
+
+/// Estimated heap cost of a JSON container entry, including spare capacity.
+const JSON_ENTRY_BYTES: usize = 64;
+
+/// All RPC transports share this budget, including local sockets and WebSockets.
+static PROCESS_BUDGET: LazyLock<Arc<Semaphore>> =
+    LazyLock::new(|| Arc::new(Semaphore::new(PROCESS_BYTES)));
+
+/// Charges a frame before parsing, using its size and JSON structure.
+///
+/// The structural charge accounts for dense arrays/objects whose decoded
+/// representation can be much larger than the wire bytes. Quotes and escaped
+/// quotes are tracked so punctuation inside strings is not counted as entries.
+pub(crate) fn frame_charge(frame: &str) -> Option<u32> {
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut entries = 0_usize;
+    for byte in frame.bytes() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+        } else if byte == b'"' {
+            in_string = true;
+        } else if matches!(byte, b'{' | b'[' | b':' | b',') {
+            entries = entries.checked_add(1)?;
+        }
+    }
+    let raw = frame.len().checked_mul(FRAME_BYTE_WEIGHT)?;
+    let decoded = entries.checked_mul(JSON_ENTRY_BYTES)?;
+    u32::try_from(raw.checked_add(decoded)?.max(1)).ok()
+}
+
+/// Owned admission permits remain held until the handler future finishes.
+pub(crate) struct FrameBudget {
+    _connection: OwnedSemaphorePermit,
+    _process: OwnedSemaphorePermit,
+}
+
+/// Atomically charges one frame against both limits, without queueing frames
+/// that cannot be admitted. A rejected frame is dropped before JSON decoding.
+pub(crate) fn reserve_frame(
+    frame: &str,
+    connection: &Arc<Semaphore>,
+    process: &Arc<Semaphore>,
+) -> Option<FrameBudget> {
+    let charge = frame_charge(frame)?;
+    let connection = Arc::clone(connection).try_acquire_many_owned(charge).ok()?;
+    let process = Arc::clone(process).try_acquire_many_owned(charge).ok()?;
+    Some(FrameBudget {
+        _connection: connection,
+        _process: process,
+    })
+}
 
 /// Maximum rejection frames queued after a connection starts draining.
 pub(crate) const MAX_DRAIN_REPLIES: usize = 64;
