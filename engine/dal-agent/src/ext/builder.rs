@@ -808,3 +808,27 @@ impl std::fmt::Debug for Extension {
             .finish_non_exhaustive()
     }
 }
+
+#[cfg(test)]
+mod grant_identity_tests {
+    use super::ExtensionBuilder;
+    use std::num::NonZeroU32;
+
+    #[test]
+    fn code_version_and_state_declaration_change_approval_identity() {
+        let build = |source: &str, version: &str, state: u32| {
+            ExtensionBuilder::new("focus", version, dal_core::ServiceSet::EMPTY)
+                .expect("extension")
+                .with_origin(dal_core::Origin::User, None)
+                .with_source_digest(source.into())
+                .with_state_version(NonZeroU32::new(state).expect("nonzero"))
+                .build()
+                .expect("registered")
+        };
+        let original = build("a", "1.0.0", 1);
+        assert_eq!(original.grant_digest(), build("a", "1.0.0", 1).grant_digest());
+        assert_ne!(original.grant_digest(), build("b", "1.0.0", 1).grant_digest());
+        assert_ne!(original.grant_digest(), build("a", "1.0.1", 1).grant_digest());
+        assert_ne!(original.grant_digest(), build("a", "1.0.0", 2).grant_digest());
+    }
+}
