@@ -497,26 +497,28 @@ impl ExecTool {
                 )));
             }
         };
-        let Some(preview) = ExecApproval::new(
+        let execution = ExecApproval::new(
             validated.command.clone(),
             validated.cwd.clone(),
             shell.program.clone(),
-        )
-        .preview() else {
-            return ToolOutcome::Err(ToolError::message(ExecError::ApprovalPathEncoding.to_string()));
+        );
+        let Some(preview) = execution.preview() else {
+            return ToolOutcome::Err(ToolError::message(
+                ExecError::ApprovalPathEncoding.to_string(),
+            ));
         };
         let approved = match cx.authorize(preview).await {
             Ok(approved) => approved,
             Err(reason) => return ToolOutcome::Err(ToolError::Denied(reason)),
         };
         let spawn_argv = [
-            OsString::from(shell.program.as_os_str()),
+            OsString::from(execution.shell.as_os_str()),
             OsString::from("-c"),
-            OsString::from(&validated.command),
+            OsString::from(execution.command.as_ref()),
         ];
         let thread_id = cx.session().to_string();
         let opts = SpawnOpts {
-            cwd: validated.cwd.clone(),
+            cwd: execution.cwd.clone(),
             timeout: validated.timeout,
             env: shell::provenance_environment(&thread_id, call.id.as_str()),
             stdout_prefix_limit: 0,
@@ -526,7 +528,7 @@ impl ExecTool {
             Err(ToolError::Spawn { source, .. }) => {
                 return ToolOutcome::Err(ToolError::message(format!(
                     "exec: cannot start {}: {source}",
-                    shell.program.display()
+                    execution.shell.display()
                 )));
             }
             Err(error) => return ToolOutcome::Err(error),
