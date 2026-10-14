@@ -22,7 +22,7 @@ use dal_core::ApprovalMode;
 use futures::{StreamExt, stream::FuturesUnordered};
 use hyper::{Request, Response};
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::error::WireError;
@@ -32,9 +32,9 @@ mod guard;
 mod http;
 mod upgrade;
 
-use guard::{auth_guard, content_guard, host_guard, is_card, is_upgrade, requires_json};
+use guard::{auth_guard, content_guard, host_guard, is_upgrade, requires_json};
 pub(crate) use http::{Resp, RespBody, ServeBody};
-use http::{into_response, read_body};
+use http::{BufferedBody, into_response, read_body};
 use upgrade::upgrade_response;
 
 /// A bound serve listener: its address plus its draining wait.
@@ -65,7 +65,7 @@ impl ServeHandle {
 /// Maximum concurrent HTTP connections.
 const CONN_CAP: usize = 256;
 /// Maximum request header buffer size in bytes.
-const HEADER_LIMIT: usize = 1_048_576;
+const HEADER_LIMIT: usize = 16_384;
 /// Stop drain grace.
 const STOP_GRACE: Duration = Duration::from_secs(2);
 
@@ -98,6 +98,8 @@ pub(crate) struct ServeCtx {
     pub host: Host,
     /// The listener configuration.
     pub cfg: ListenerCfg,
+    /// Shared reservation budget for in-flight HTTP request bodies.
+    pub body_budget: Arc<Semaphore>,
     /// The history-digest continuation table.
     pub digests: Arc<Mutex<DigestTable>>,
     /// The A2A context and task tables.
@@ -131,6 +133,7 @@ pub(crate) fn listen(
     let ctx = Arc::new(ServeCtx {
         host,
         cfg,
+        body_budget: Arc::new(Semaphore::new(http::BODY_BUDGET_PERMITS)),
         digests: Arc::new(Mutex::new(DigestTable::new(4096))),
         a2a: Arc::new(Mutex::new(a2a::A2aState::new())),
         drivers: driver_tx,
@@ -254,7 +257,7 @@ async fn handle_request(
         return into_response(resp);
     }
     if ctx.cfg.public
-        && !is_card(&method, &path)
+        && !matches!(route, super::router::ServeRoute::A2aCard)
         && !upgrade_route
         && let Err(resp) = auth_guard(&ctx, &req)
     {
@@ -267,6 +270,17 @@ async fn handle_request(
         && let Err(resp) = content_guard(&req, &route)
     {
         return into_response(resp);
+    }
+    // None of the GET routes consumes a request body. Reject framed bodies
+    // from headers alone, including chunked requests that never finish.
+    if req.method() == hyper::Method::GET
+        && (req.headers().contains_key(hyper::header::TRANSFER_ENCODING)
+            || req
+                .headers()
+                .get(hyper::header::CONTENT_LENGTH)
+                .is_some_and(|value| value.as_bytes() != b"0"))
+    {
+        return into_response(Resp::text(400, "GET request bodies are not allowed"));
     }
     let version = req
         .headers()
@@ -284,9 +298,27 @@ async fn handle_request(
         .get("x-dal-session")
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
-    let body = match read_body(req).await {
-        Ok(body) => body,
-        Err(resp) => return into_response(resp),
+    // Unknown and bodyless routes never enter the body reader.
+    let reads_body = matches!(
+        route,
+        super::router::ServeRoute::Chat
+            | super::router::ServeRoute::Responses
+            | super::router::ServeRoute::Messages
+            | super::router::ServeRoute::A2aJsonRpc
+            | super::router::ServeRoute::A2aRest(
+                super::router::A2aRestKind::Send
+                    | super::router::A2aRestKind::Stream
+                    | super::router::A2aRestKind::CancelTask,
+                _
+            )
+    );
+    let body = if reads_body {
+        match read_body(req, &ctx.body_budget).await {
+            Ok(body) => body,
+            Err(resp) => return into_response(resp),
+        }
+    } else {
+        BufferedBody::empty()
     };
     let request = RouteRequest {
         session: session.as_deref(),
@@ -295,7 +327,7 @@ async fn handle_request(
         host: host_header.as_deref(),
         anthropic,
     };
-    dispatch(ctx, &request, route, body).await
+    dispatch(ctx, &request, route, &body.bytes).await
 }
 
 /// The request header facts a route handler needs after the body is read.
@@ -312,7 +344,7 @@ async fn dispatch(
     ctx: Arc<ServeCtx>,
     request: &RouteRequest<'_>,
     route: super::router::ServeRoute,
-    body: Bytes,
+    body: &Bytes,
 ) -> Response<ServeBody> {
     let RouteRequest {
         session,
@@ -329,17 +361,17 @@ async fn dispatch(
             super::router::handlers::anthropic_models(&ctx).await
         }
         super::router::ServeRoute::Models => super::router::handlers::models(&ctx).await,
-        super::router::ServeRoute::Chat => super::router::handlers::chat(&ctx, &body, http()).await,
+        super::router::ServeRoute::Chat => super::router::handlers::chat(&ctx, body, http()).await,
         super::router::ServeRoute::Responses => {
-            super::router::handlers::responses(&ctx, &body, http()).await
+            super::router::handlers::responses(&ctx, body, http()).await
         }
         super::router::ServeRoute::Messages => {
-            super::router::handlers::messages(&ctx, &body, http()).await
+            super::router::handlers::messages(&ctx, body, http()).await
         }
         super::router::ServeRoute::A2aCard => a2a::card(&ctx, host),
-        super::router::ServeRoute::A2aJsonRpc => a2a::json_rpc(&ctx, &body, query, version).await,
+        super::router::ServeRoute::A2aJsonRpc => a2a::json_rpc(&ctx, body, query, version).await,
         super::router::ServeRoute::A2aRest(kind, id) => {
-            a2a::rest(&ctx, kind, id, &body, query, version).await
+            a2a::rest(&ctx, kind, id, body, query, version).await
         }
         super::router::ServeRoute::WebSocket | super::router::ServeRoute::CodexWs => {
             Resp::text(426, "upgrade required")

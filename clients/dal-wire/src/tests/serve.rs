@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 
 use sonic_rs::JsonValueTrait;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 
 use super::support::{
     HttpReply, ask_probe_extension, host_header, http, parse_reply, result_text, rig,
@@ -222,6 +222,67 @@ async fn token_file_auth_cases() {
             "",
         )
         .await;
+        assert_eq!(card.status, 200, "{card:?}");
+    })
+    .await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn public_card_path_requires_auth_when_a2a_is_disabled() {
+    let rig = rig(&[]).await;
+    let token = crate::token::create(&rig.data().join("serve.token"), false)
+        .expect("create serve token");
+    let mut options = router_options(&rig);
+    options.public = true;
+    with_serve(&rig, options, async |addr| {
+        let base = format!(
+            "GET /.well-known/agent-card.json HTTP/1.1\r\n{}",
+            host_header(addr)
+        );
+        let unauthenticated = http(addr, &base, "").await;
+        assert_eq!(unauthenticated.status, 401, "{unauthenticated:?}");
+        let authenticated = http(
+            addr,
+            &format!("{base}\r\nauthorization: Bearer {token}"),
+            "",
+        )
+        .await;
+        assert_eq!(authenticated.status, 404, "{authenticated:?}");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn get_routes_reject_body_headers_before_reading() {
+    let rig = rig(&[]).await;
+    let mut options = router_options(&rig);
+    options.a2a = true;
+    with_serve(&rig, options, async |addr| {
+        for (path, body_framing) in [
+            ("/.well-known/agent-card.json", "content-length: 33554432"),
+            ("/v1/models", "content-length: 1"),
+            ("/a2a/v1/tasks/a-task", "content-length: 1"),
+            ("/.well-known/agent-card.json", "transfer-encoding: chunked"),
+        ] {
+            let mut stream = tokio::net::TcpStream::connect(addr)
+                .await
+                .expect("connect");
+            let head = format!(
+                "GET {path} HTTP/1.1\r\n{}\r\n{body_framing}\r\nconnection: close\r\n\r\n",
+                host_header(addr)
+            );
+            stream.write_all(head.as_bytes()).await.expect("send headers");
+            // Never send the declared body: the response must arrive first.
+            let mut reader = tokio::io::BufReader::new(stream);
+            let mut status = String::new();
+            tokio::time::timeout(super::support::WAIT, reader.read_line(&mut status))
+                .await
+                .expect("early response")
+                .expect("read status");
+            assert!(status.starts_with("HTTP/1.1 400 "), "{status:?}");
+        }
+        let card = get(addr, "/.well-known/agent-card.json").await;
         assert_eq!(card.status, 200, "{card:?}");
     })
     .await;
