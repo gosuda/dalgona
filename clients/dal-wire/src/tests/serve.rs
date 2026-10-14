@@ -288,6 +288,51 @@ async fn get_routes_reject_body_headers_before_reading() {
     .await;
 }
 
+/// Incomplete uploads keep their allocation permits until dispatch ends.
+/// A second upload cannot grow past the listener-wide memory ceiling.
+#[tokio::test]
+async fn concurrent_http_bodies_share_a_memory_ceiling() {
+    let rig = rig(&[]).await;
+    with_serve(&rig, router_options(&rig), async |addr| {
+        let head = format!(
+            "{CHAT}\r\n{}\r\ncontent-type: application/json\r\ncontent-length: 33554432\r\nconnection: close\r\n\r\n",
+            host_header(addr)
+        );
+        let chunk = vec![b'x'; 1024 * 1024];
+        let mut first = tokio::net::TcpStream::connect(addr).await.expect("first upload");
+        first.write_all(head.as_bytes()).await.expect("first headers");
+        for _ in 0..20 {
+            first.write_all(&chunk).await.expect("first body");
+        }
+
+        let mut second = tokio::net::TcpStream::connect(addr).await.expect("second upload");
+        let (reader, mut writer) = second.split();
+        let mut reader = tokio::io::BufReader::new(reader);
+        let mut status = String::new();
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            tokio::join!(
+                async {
+                    writer.write_all(head.as_bytes()).await.expect("second headers");
+                    for _ in 0..20 {
+                        if writer.write_all(&chunk).await.is_err() {
+                            break;
+                        }
+                    }
+                    let _ = writer.shutdown().await;
+                },
+                async {
+                    reader.read_line(&mut status).await.expect("second status");
+                }
+            );
+        })
+        .await
+        .expect("budget rejects the second upload");
+        assert!(status.starts_with("HTTP/1.1 503 "), "{status:?}");
+        drop(first);
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn bind_refusals() {
     let rig = rig(&[]).await;
