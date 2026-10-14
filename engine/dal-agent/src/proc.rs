@@ -1,6 +1,6 @@
 use std::{
     collections::VecDeque,
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fs, io,
     path::{Path, PathBuf},
     process::Stdio,
@@ -423,10 +423,15 @@ pub(crate) fn spawn_process(
     let stdout_prefix_limit = opts.stdout_prefix_limit;
     let log_path = jobs_dir.join(format!("{}.log", call.as_str()));
     let job = JobId::new_v7();
-    let (program, command_args, launcher_profile) = launcher_argv(argv, &job, launcher)?;
     let cwd = opts.cwd;
     let timeout = opts.timeout;
     let env_overrides = opts.env;
+    #[cfg(target_os = "macos")]
+    let path_env = sandbox::launch_path_env(env_snapshot, &env_overrides);
+    #[cfg(not(target_os = "macos"))]
+    let path_env: Option<OsString> = None;
+    let (program, command_args, launcher_profile) =
+        launcher_argv(argv, &job, launcher, &cwd, path_env.as_deref())?;
     let mut command = CommandWrap::with_new(&program, |process| {
         process.args(&command_args);
         process.current_dir(&cwd);
@@ -515,9 +520,19 @@ fn launcher_argv(
     argv: &[OsString],
     job: &JobId,
     launcher: &Launcher,
+    cwd: &Path,
+    path_env: Option<&OsStr>,
 ) -> Result<(OsString, Vec<OsString>, Option<PathBuf>), ToolError> {
     let target = argv[0].clone();
     let target_args = &argv[1..];
+    // Every macOS launch goes through the `sandbox-exec` trampoline, which
+    // would hide the target's spawn failure behind its own exit status.
+    // Resolve the program as the child's execvp would, so a missing or
+    // non-executable target keeps the typed `Spawn` launch contract.
+    #[cfg(target_os = "macos")]
+    let target = sandbox::resolve_spawn_target(&target, cwd, path_env)?;
+    #[cfg(not(target_os = "macos"))]
+    let _ = (cwd, path_env);
     match launcher {
         Launcher::Direct => {
             #[cfg(target_os = "macos")]

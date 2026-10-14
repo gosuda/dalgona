@@ -844,6 +844,111 @@ fn macos_spawn_attribute_process_group_probe() {
 
 #[cfg(target_os = "macos")]
 #[tokio::test]
+async fn macos_unstartable_commands_fail_at_the_typed_spawn_door() {
+    let temp = tempfile::tempdir().expect("temp workspace");
+    let not_executable = temp.path().join("dalgon-not-executable");
+    std::fs::write(&not_executable, "plain text").expect("write probe file");
+    let cases: [(&str, Vec<OsString>, std::io::ErrorKind); 3] = [
+        (
+            "missing-name",
+            vec![OsString::from("dalgon-command-that-does-not-exist")],
+            std::io::ErrorKind::NotFound,
+        ),
+        (
+            "missing-path",
+            vec![OsString::from("/nonexistent/dalgon-tool")],
+            std::io::ErrorKind::NotFound,
+        ),
+        (
+            "not-executable",
+            vec![not_executable.into_os_string()],
+            std::io::ErrorKind::PermissionDenied,
+        ),
+    ];
+    for (name, argv, kind) in cases {
+        for (mode, launcher) in [
+            ("direct", Launcher::Direct),
+            (
+                "sandbox",
+                Launcher::Sandbox {
+                    helper: None,
+                    roots: vec![temp.path().to_path_buf()].into_boxed_slice(),
+                },
+            ),
+        ] {
+            let call = CallId::new(format!("test-macos-{mode}-{name}"));
+            let digest = Some([5_u8; 32]);
+            let approved = approved_for(&call, digest, vec![temp.path().to_path_buf()]);
+            let opts = SpawnOpts {
+                cwd: temp.path().to_path_buf(),
+                timeout: None,
+                env: Vec::new(),
+                stdout_prefix_limit: 0,
+            };
+            let result = spawn_process(
+                &argv,
+                call,
+                opts,
+                &approved,
+                digest,
+                &temp.path().join("jobs"),
+                &[],
+                &launcher,
+                test_permit().await,
+                None,
+            );
+            let Err(ToolError::Spawn { source, .. }) = result else {
+                panic!("{mode} launch of {name} must fail at spawn, got {result:?}");
+            };
+            assert_eq!(source.kind(), kind, "{mode} launch of {name}");
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn macos_bare_names_resolve_against_the_child_path() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let temp = tempfile::tempdir().expect("temp workspace");
+    let bin = temp.path().join("bin");
+    std::fs::create_dir(&bin).expect("bin dir");
+    let tool = bin.join("dalgon-path-probe");
+    std::fs::write(&tool, "#!/bin/sh\nprintf 'path-probe-ok'\n").expect("write probe tool");
+    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod probe tool");
+    let call = CallId::new("test-macos-bare-path");
+    let digest = Some([5_u8; 32]);
+    let approved = approved_for(&call, digest, vec![temp.path().to_path_buf()]);
+    let opts = SpawnOpts {
+        cwd: temp.path().to_path_buf(),
+        timeout: None,
+        env: vec![(OsString::from("PATH"), bin.as_os_str().to_owned())],
+        stdout_prefix_limit: 0,
+    };
+    let mut proc = spawn_process(
+        &[OsString::from("dalgon-path-probe")],
+        call,
+        opts,
+        &approved,
+        digest,
+        &temp.path().join("jobs"),
+        &[],
+        &Launcher::Direct,
+        test_permit().await,
+        None,
+    )
+    .expect("a bare name resolves on the child PATH");
+    let result = proc
+        .wait(&CancellationToken::new())
+        .await
+        .expect("wait probe");
+    assert_eq!(result.status, ProcStatus::Exited { code: 0 });
+    assert_eq!(result.preview.as_ref(), b"path-probe-ok");
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
 async fn macos_rejects_process_group_escape_through_spawn_attributes() {
     let temp = tempfile::tempdir().expect("temp workspace");
     let executable = std::env::current_exe().expect("test executable");
@@ -859,7 +964,10 @@ async fn macos_rejects_process_group_escape_through_spawn_attributes() {
     let opts = SpawnOpts {
         cwd: temp.path().to_path_buf(),
         timeout: Some(Duration::from_secs(5)),
-        env: vec![(OsString::from("DAL_GROUP_ESCAPE_PROBE"), OsString::from("1"))],
+        env: vec![(
+            OsString::from("DAL_GROUP_ESCAPE_PROBE"),
+            OsString::from("1"),
+        )],
         stdout_prefix_limit: 0,
     };
     let mut proc = spawn_process(

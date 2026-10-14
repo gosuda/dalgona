@@ -436,6 +436,80 @@ pub(crate) fn write_seatbelt_profile(job: &JobId, roots: &[PathBuf]) -> Result<P
     write_profile(job, &seatbelt_profile(roots))
 }
 
+/// The `PATH` the launched child will see: the last override wins over the
+/// host snapshot, matching the `env_clear` then `envs` order in the spawn
+/// door. `None` means the child environment carries no `PATH` at all.
+#[cfg(target_os = "macos")]
+pub(crate) fn launch_path_env(
+    snapshot: &[(OsString, OsString)],
+    overrides: &[(OsString, OsString)],
+) -> Option<OsString> {
+    overrides
+        .iter()
+        .rev()
+        .chain(snapshot.iter().rev())
+        .find(|(key, _)| key.as_os_str() == OsStr::new("PATH"))
+        .map(|(_, value)| value.clone())
+}
+
+/// Reports whether `candidate` is exec-able as it stands: a regular file
+/// with at least one execute bit, like `execvp`. A path that exists but
+/// cannot exec reports `EACCES`; a lookup failure reports the filesystem
+/// error.
+#[cfg(target_os = "macos")]
+fn spawnable(candidate: &Path) -> Result<(), std::io::Error> {
+    use std::os::unix::fs::PermissionsExt as _;
+    match std::fs::metadata(candidate) {
+        Ok(meta) if meta.is_file() && meta.permissions().mode() & 0o111 != 0 => Ok(()),
+        Ok(_) => Err(std::io::Error::from_raw_os_error(13)), // EACCES
+        Err(source) => Err(source),
+    }
+}
+
+/// Resolves `target` the way the child's `execvp` would: a path resolves
+/// against the child `cwd`, a bare name searches the child `PATH`, and a
+/// name with no `PATH` falls back to the system default. A missing or
+/// non-executable target fails with the typed `Spawn` error; without this
+/// check the `sandbox-exec` trampoline would report it as an exit status
+/// instead of a launch failure. The resolved path is what the trampoline
+/// runs, so the check and the exec cannot diverge.
+#[cfg(target_os = "macos")]
+pub(crate) fn resolve_spawn_target(
+    target: &OsString,
+    cwd: &Path,
+    path_env: Option<&OsStr>,
+) -> Result<OsString, ToolError> {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let spawn_error = |source: std::io::Error| ToolError::Spawn {
+        path: PathBuf::from(target),
+        source,
+    };
+    if target.is_empty() {
+        return Err(spawn_error(std::io::Error::from_raw_os_error(2))); // ENOENT
+    }
+    if target.as_bytes().contains(&b'/') {
+        let candidate = cwd.join(Path::new(target));
+        spawnable(&candidate).map_err(spawn_error)?;
+        return Ok(candidate.into_os_string());
+    }
+    let path = path_env.unwrap_or(OsStr::new("/usr/bin:/bin:/usr/sbin:/sbin"));
+    let mut denied = false;
+    for dir in path.as_bytes().split(|byte| *byte == b':') {
+        // An empty PATH element means the working directory.
+        let candidate = cwd.join(Path::new(OsStr::from_bytes(dir))).join(target);
+        match spawnable(&candidate) {
+            Ok(()) => return Ok(candidate.into_os_string()),
+            Err(source) => denied |= source.kind() == std::io::ErrorKind::PermissionDenied,
+        }
+    }
+    Err(spawn_error(if denied {
+        std::io::Error::from_raw_os_error(13) // EACCES
+    } else {
+        std::io::Error::from_raw_os_error(2) // ENOENT
+    }))
+}
+
 /// Runs the target under the given inherited Seatbelt profile.
 #[cfg(target_os = "macos")]
 fn seatbelt_argv(
