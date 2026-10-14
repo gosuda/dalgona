@@ -12,7 +12,7 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 fn exec_preview_binds_command_cwd_and_shell() -> TestResult {
     let workspace = std::env::current_dir()?;
     let execution = ExecPreview {
-        command: "rm -rf ./output\\n echo \\"done\\"".into(),
+        command: "rm -rf ./output && echo done".into(),
         cwd: workspace.join("project"),
         shell: workspace.join("bin/bash"),
     };
