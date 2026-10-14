@@ -7,7 +7,7 @@ use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 use super::super::support::{Rpc, initialize, result, rig};
-use crate::rpc::{frame_charge, reserve_frame, serve_rpc_with_budget};
+use crate::rpc::{MAX_IN_FLIGHT, frame_charge, reserve_frame, serve_rpc_with_budget};
 use crate::transport::MemoryTransport;
 
 #[test]
@@ -165,4 +165,38 @@ async fn distinct_connections_share_budget_until_the_handler_completes() {
     let (left_outcome, right_outcome, ()) = tokio::join!(left_server, right_server, client);
     left_outcome.expect("first connection ends cleanly");
     right_outcome.expect("over-budget connection ends cleanly");
+}
+
+#[tokio::test]
+async fn a_full_request_count_still_accepts_cancellation() {
+    let rig = rig(&[]).await;
+    let global = Arc::new(Semaphore::new(8 * 1024 * 1024));
+    let (transport, peer) = MemoryTransport::pair(MAX_IN_FLIGHT + 4);
+    let server = serve_rpc_with_budget(
+        rig.host.clone(),
+        transport,
+        CancellationToken::new(),
+        Arc::clone(&global),
+        8 * 1024 * 1024,
+    );
+    let client = async {
+        let mut rpc = Rpc::new(peer);
+        initialize(&mut rpc).await;
+        for id in 1..=MAX_IN_FLIGHT {
+            result(
+                &rpc.call(
+                    i64::try_from(id).expect("request id fits"),
+                    "host/subscribe",
+                    sonic_rs::json!({}),
+                )
+                .await,
+            );
+        }
+
+        rpc.notify("$/cancel_request", sonic_rs::json!({"requestId": 1}))
+            .await;
+        result(&rpc.call(1000, "commands/list", sonic_rs::json!({})).await);
+    };
+    let (outcome, ()) = tokio::join!(server, client);
+    outcome.expect("saturated connection ends after handling cancellation");
 }
