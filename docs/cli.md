@@ -23,7 +23,7 @@ Serve the JSON-RPC protocol over stdio or a local socket.
 
 ## dal serve
 
-Start the model router and agent-to-agent endpoint. Listens on your machine only unless `--public` is given with a token.
+Start the model router and agent-to-agent endpoint. Binds to loopback only; `--public` requires a token for proxied access.
 
 ## dal plugin
 
