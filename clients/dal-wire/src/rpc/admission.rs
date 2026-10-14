@@ -8,7 +8,7 @@
 
 use std::sync::{Arc, LazyLock};
 
-use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{AcquireError, Notify, OwnedSemaphorePermit, Semaphore};
 
 use crate::transport::MAX_FRAME_BYTES;
 
@@ -25,11 +25,14 @@ const _: () = assert!(FRAME_RESERVATION as usize == MAX_FRAME_BYTES * BYTE_WEIGH
 
 static PROCESS_BUDGET: LazyLock<Arc<Semaphore>> =
     LazyLock::new(|| Arc::new(Semaphore::new(PROCESS_LIMIT)));
+static PROCESS_PRESSURE: LazyLock<Arc<Notify>> =
+    LazyLock::new(|| Arc::new(Notify::new()));
 
 /// Shared process credit and private per-connection credit.
 pub(super) struct Admission {
     process: Arc<Semaphore>,
     connection: Arc<Semaphore>,
+    pressure: Arc<Notify>,
 }
 
 impl Admission {
@@ -37,6 +40,7 @@ impl Admission {
         Self {
             process: Arc::clone(&PROCESS_BUDGET),
             connection: Arc::new(Semaphore::new(CONNECTION_LIMIT)),
+            pressure: Arc::clone(&PROCESS_PRESSURE),
         }
     }
 
@@ -45,13 +49,27 @@ impl Admission {
         let connection = Arc::clone(&self.connection)
             .acquire_many_owned(FRAME_RESERVATION)
             .await?;
-        let process = Arc::clone(&self.process)
-            .acquire_many_owned(FRAME_RESERVATION)
-            .await?;
+        let process = match Arc::clone(&self.process).try_acquire_many_owned(FRAME_RESERVATION) {
+            Ok(credit) => credit,
+            Err(_) => {
+                // A reader holding credit without a complete frame can prevent
+                // an unrelated peer from making progress. Ask one reader to
+                // close and release its speculative reservation.
+                self.pressure.notify_one();
+                Arc::clone(&self.process)
+                    .acquire_many_owned(FRAME_RESERVATION)
+                    .await?
+            }
+        };
         Ok(FrameCredit {
             connection,
             process,
         })
+    }
+
+    /// Signals that another connection needs a speculative read reservation.
+    pub(super) async fn contended(&self) {
+        self.pressure.notified().await;
     }
 }
 
@@ -85,6 +103,7 @@ mod tests {
         Admission {
             process: Arc::clone(process),
             connection: Arc::new(Semaphore::new(connection_limit)),
+            pressure: Arc::new(Notify::new()),
         }
     }
 
@@ -148,6 +167,27 @@ mod tests {
         );
         drop(held);
         let resumed = second.reserve().await.expect("second peer resumes");
+        drop(resumed);
+        assert_eq!(process.available_permits(), FRAME_RESERVATION as usize);
+    }
+
+    #[tokio::test]
+    async fn waiting_peer_preempts_one_speculative_reader() {
+        let process = Arc::new(Semaphore::new(FRAME_RESERVATION as usize));
+        let first = isolated(&process, CONNECTION_LIMIT);
+        let mut second = isolated(&process, CONNECTION_LIMIT);
+        second.pressure = Arc::clone(&first.pressure);
+        let held = first.reserve().await.expect("first reader");
+        let pressure = first.contended();
+        let waiting = second.reserve();
+        tokio::pin!(pressure, waiting);
+        tokio::select! {
+            biased;
+            () = &mut pressure => {}
+            _ = &mut waiting => panic!("the waiting peer bypassed admission"),
+        }
+        drop(held);
+        let resumed = waiting.await.expect("credit reclaimed");
         drop(resumed);
         assert_eq!(process.available_permits(), FRAME_RESERVATION as usize);
     }
