@@ -507,9 +507,10 @@ fn write_side_file(
     ) {
         Ok(file) => Ok(file),
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            let file = crate::private::open_private_file_read_write(kept_at)?;
-            file.set_len(0)?;
-            Ok(file)
+            crate::private::open_private_file_read_write(kept_at).and_then(|file| {
+                file.set_len(0)?;
+                Ok(file)
+            })
         }
         Err(error) => Err(error),
     }
