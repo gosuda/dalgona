@@ -70,7 +70,6 @@ async fn prepare_write_set(
     Ok(guards)
 }
 
-
 #[derive(Clone)]
 struct LocatedPath {
     // The directory handle, rather than an absolute path, carries write authority.
@@ -782,6 +781,10 @@ mod tests {
             false,
         )
         .expect("pinned source");
+        std::fs::rename(&parent, workspace.path().join("moved")).expect("swap directory");
+        std::os::unix::fs::symlink(outside.path(), &parent)
+            .expect("point workspace parent outside");
+
         let temp = installed.sibling(".dalgon-patch-test.tmp".into());
         let mut options = cap_std::fs::OpenOptions::new();
         options.write(true).create_new(true);
@@ -794,9 +797,6 @@ mod tests {
         file.sync_all().expect("sync bytes");
         drop(file);
 
-        std::fs::rename(&parent, workspace.path().join("moved")).expect("swap directory");
-        std::os::unix::fs::symlink(outside.path(), &parent)
-            .expect("point workspace parent outside");
 
         temp.rename_to(&installed).expect("install under pinned parent");
         assert_eq!(
