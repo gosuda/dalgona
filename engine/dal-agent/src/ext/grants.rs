@@ -1159,10 +1159,12 @@ fn mcp_row_matches(row: &GrantRow, key: &McpGrantKey) -> bool {
 
 /// Durable approvals expire after 90 days even when code and root do not change.
 fn row_active(row: &GrantRow) -> bool {
-    row.approved_at
-        .as_second()
-        .checked_add(90 * 24 * 60 * 60)
-        .is_some_and(|expiry| Timestamp::now().as_second() < expiry)
+    let now = Timestamp::now().as_second();
+    let approved = row.approved_at.as_second();
+    approved <= now
+        && approved
+            .checked_add(90 * 24 * 60 * 60)
+            .is_some_and(|expiry| now < expiry)
 }
 
 fn grant_scope_text(key: &GrantKey) -> String {
