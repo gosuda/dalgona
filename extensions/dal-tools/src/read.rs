@@ -1045,9 +1045,23 @@ mod tests {
         let secret = outside.path().join("secret.txt");
         fs::write(&secret, b"outside contents").unwrap();
 
+        // Headless approval automatically admits read-class tools. The
+        // filesystem boundary must still reject paths outside the workspace.
+        let headless = dal_core::Policy {
+            mode: dal_core::ApprovalMode::Ask,
+            answerer_attached: false,
+            allow_always: std::collections::BTreeSet::new(),
+        };
+        assert_eq!(
+            headless.decide(&Name::parse("read").unwrap(), &ToolClass::Read),
+            dal_core::Decision::Allow
+        );
+
         let inside_absolute = args(&workspace.path().join("allowed.txt").to_string_lossy());
-        assert!(text(&read(workspace.path(), &inside_absolute).await.unwrap())
-            .contains("workspace contents"));
+        assert!(
+            text(&read(workspace.path(), &inside_absolute).await.unwrap())
+                .contains("workspace contents")
+        );
 
         for path in [
             secret.to_string_lossy().into_owned(),
