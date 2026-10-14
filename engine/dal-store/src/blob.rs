@@ -2,7 +2,7 @@
 
 use std::{
     fs::{self, File},
-    io,
+    io::{self, Read},
     path::{Path, PathBuf},
 };
 
@@ -284,7 +284,11 @@ fn sync_dir(dir: &Path) -> Result<(), BlobError> {
 /// Returns [`BlobError::Gone`], [`BlobError::NotFound`], or [`BlobError::Io`].
 pub(crate) fn read(session_dir: &Path, id: &BlobId) -> Result<Vec<u8>, BlobError> {
     let path = session_dir.join("blobs").join(id.to_string());
-    match crate::private::open_private_file(&path).and_then(fs::read_to_end) {
+    match crate::private::open_private_file(&path).and_then(|mut file| {
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    }) {
         Ok(bytes) if BlobId::from_bytes(&bytes) == *id => Ok(bytes),
         Ok(_) => Err(io_blob(io::Error::new(
             io::ErrorKind::InvalidData,
