@@ -728,9 +728,8 @@ impl SessionScriptHost {
                     .await?
             } else {
                 let stream = runtime
-                    .forward(request, &private_tools)
-                    .await
-                    .map_err(|error| ServiceError::failed(None, error.to_string()))?;
+                    .script_forward(&caller, request, &private_tools, runtime_cancel)
+                    .await?;
                 crate::ext::synthetic::collect(stream)
                     .await
                     .map_err(|error| ServiceError::failed(None, error.to_string()))?
