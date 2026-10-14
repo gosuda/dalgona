@@ -484,9 +484,13 @@ mod tests {
         peer.write_all(b"GET / HTTP/1.1\r\nHost: incomplete")
             .await
             .expect("write partial request");
-        tokio::time::timeout(HEADER_TIMEOUT + std::time::Duration::from_secs(1), server)
+        for _ in 0..3 {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            peer.write_all(b"x").await.expect("write trickled header");
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(3), server)
             .await
-            .expect("partial header must be evicted")
+            .expect("trickled headers must not extend the deadline")
             .expect("connection driver must finish");
     }
 
