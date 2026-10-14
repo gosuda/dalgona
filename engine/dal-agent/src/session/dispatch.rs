@@ -497,15 +497,19 @@ fn tool_caller(ctx: &DispatchCtx, ready: &ReadyCall, invocation: Invocation) -> 
                 std::num::NonZeroU32::MIN,
             )
         });
-    Caller::new(
+    let caller = Caller::new(
         ext,
         origin,
         inject,
         state_version,
         CallerKind::Tool,
         Some(ctx.turn),
-    )
-    .with_invocation(invocation)
+    );
+    let caller = match owner {
+        Some(extension) => caller.with_extension(extension),
+        None => caller,
+    };
+    caller.with_invocation(invocation)
 }
 
 /// Runs one tool call and turns a panic into a visible tool error.
