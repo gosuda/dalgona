@@ -669,6 +669,8 @@ mod unauthorized_recovery {
                 &oauth,
                 &self.url,
                 &Challenge::default(),
+                self.services.as_ref(),
+                &self.who,
                 Duration::from_secs(5),
                 &CancellationToken::new(),
             )
