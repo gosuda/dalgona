@@ -28,7 +28,6 @@ async fn get(addr: SocketAddr, path: &str) -> HttpReply {
     .await
 }
 
-
 /// A refused or expired socket may close normally or send a TCP reset.
 async fn read_closed(stream: &mut tokio::net::TcpStream) {
     let mut bytes = Vec::new();
