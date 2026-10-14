@@ -6,8 +6,11 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
+
+use tokio::sync::oneshot;
+use tokio::task::JoinSet;
 
 use dal_agent::{Agent, Delivery, Env, Host, SessionRef, Subscription};
 use dal_core::{
@@ -108,6 +111,10 @@ pub(crate) fn load_config(inputs: &ArmInputs<'_>) -> Result<Config, ExecError> {
 pub(crate) struct ArmHost {
     host: Host,
     probe: Arc<Probe>,
+    /// The run tasks this host owns. `Executor::run` hands each session
+    /// lifecycle to the set, so a dropped run future still closes its
+    /// session instead of leaking it until host shutdown.
+    runs: Mutex<JoinSet<()>>,
 }
 
 impl ArmHost {
@@ -135,33 +142,41 @@ impl ArmHost {
             sandbox_helper: None,
         };
         let host = Host::start(product, config, env).await.map_err(arm_error)?;
-        Ok(Arc::new(Self { host, probe }))
+        Ok(Arc::new(Self {
+            host,
+            probe,
+            runs: Mutex::new(JoinSet::new()),
+        }))
     }
 
     /// Closes every session the host still holds.
     pub(crate) async fn shutdown(&self) {
+        self.runs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .abort_all();
         self.host.clone().shutdown(SHUTDOWN_GRACE).await;
     }
 
     async fn run_session(
-        &self,
+        host: &Host,
+        probe: &Probe,
         request: RunRequest<'_>,
         cancel: CancellationToken,
     ) -> Result<Outcome, ExecError> {
         let workspace = Workspace::new(request.workspace.to_path_buf()).map_err(session_error)?;
-        let agent = self
-            .host
+        let agent = host
             .open(SessionRef::Ephemeral { workspace }, ClientId::new(CLIENT))
             .await
             .map_err(session_error)?;
         let session = agent.session();
-        let outcome = self.drive(&agent, session, &request, &cancel).await;
-        let _ = self.host.close(session).await;
+        let outcome = Self::drive(probe, &agent, session, &request, &cancel).await;
+        let _ = host.close(session).await;
         outcome
     }
 
     async fn drive(
-        &self,
+        probe: &Probe,
         agent: &Agent,
         session: SessionId,
         request: &RunRequest<'_>,
@@ -169,12 +184,12 @@ impl ArmHost {
     ) -> Result<Outcome, ExecError> {
         let judge = match request.judge {
             None => None,
-            Some(_) => match self.probe.judge(session).await {
+            Some(_) => match probe.judge(session).await {
                 JudgeAccess::Skip(skip) => return Ok(Outcome::JudgeSkipped(skip)),
                 JudgeAccess::Ready(judge) => Some(judge),
             },
         };
-        self.probe.allow_tools(session, request.tools);
+        probe.allow_tools(session, request.tools);
         let mut subscription = agent.subscribe_listen(None).map_err(session_error)?;
         let started = Instant::now();
         let reply = agent
@@ -213,9 +228,45 @@ impl ArmHost {
     }
 }
 
+/// A run request owned so the host's run task can outlive a dropped
+/// executor future.
+struct OwnedRunRequest {
+    prompt: String,
+    workspace: PathBuf,
+    tools: Option<Vec<String>>,
+    judge: Option<String>,
+}
+
+impl OwnedRunRequest {
+    fn borrow(&self) -> RunRequest<'_> {
+        RunRequest {
+            prompt: &self.prompt,
+            workspace: self.workspace.as_path(),
+            tools: self.tools.as_deref(),
+            judge: self.judge.as_deref(),
+        }
+    }
+}
+
 impl Executor for ArmHost {
     fn run<'a>(&'a self, request: RunRequest<'a>, cancel: CancellationToken) -> ExecFuture<'a> {
-        Box::pin(self.run_session(request, cancel))
+        let request = OwnedRunRequest {
+            prompt: request.prompt.to_owned(),
+            workspace: request.workspace.to_path_buf(),
+            tools: request.tools.map(<[String]>::to_vec),
+            judge: request.judge.map(Into::into),
+        };
+        let host = self.host.clone();
+        let probe = Arc::clone(&self.probe);
+        let (done, finished) = oneshot::channel();
+        self.runs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .spawn(async move {
+                let outcome = Self::run_session(&host, &probe, request.borrow(), cancel).await;
+                let _ = done.send(outcome);
+            });
+        Box::pin(async move { finished.await.unwrap_or(Err(ExecError::Interrupted)) })
     }
 }
 
