@@ -221,6 +221,12 @@ impl Journal {
             &mut stream_buffer,
             |offset, record| records.push((offset, record)),
         )?;
+        if rollback.is_some() && complete_end != scan_end {
+            return Err(OpenFailure::Damaged {
+                offset: scan_end,
+                reason: "the rollback marker does not point to a record boundary".into(),
+            });
+        }
         let header = header_of(&records)?;
         let next_gen = validator
             .last_boot_gen
@@ -591,14 +597,6 @@ fn write_side_file(
     Ok(())
 }
 
-/// Windows has no directory-sync door; the `Result` is load-bearing on POSIX.
-#[cfg_attr(
-    windows,
-    expect(
-        clippy::unnecessary_wraps,
-        reason = "directory sync fails only on POSIX"
-    )
-)]
 fn rollback_marker(path: &Path) -> PathBuf {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(".rollback");
@@ -608,28 +606,36 @@ fn rollback_marker(path: &Path) -> PathBuf {
 /// Durably records where a failed batch began: `<offset>\n`.
 fn write_rollback_marker(path: &Path, offset: u64) -> Result<(), JournalError> {
     let marker = rollback_marker(path);
-    let mut file = File::create(&marker).map_err(|source| jio("rollback", &marker, source))?;
+    let mut file = crate::private::create_new(&marker, crate::util::FileMode::Mode0600)
+        .map_err(|source| jio("rollback", &marker, source))?;
+    // An interrupted write leaves a marker that refuses reopen, never an
+    // absent marker that could let complete lines of the failed batch replay.
+    sync_parent_directory(&marker, "rollback")?;
     file.write_all(format!("{offset}\n").as_bytes())
         .and_then(|()| file.sync_all())
-        .map_err(|source| jio("rollback", &marker, source))?;
-    sync_parent_directory(&marker, "rollback")
+        .map_err(|source| jio("rollback", &marker, source))
 }
 
-/// Reads the rollback marker. A marker without its final newline never
-/// finished writing, so it records nothing and the open ignores it.
+/// Reads at most one decimal u64 and its newline. An unreadable or malformed
+/// marker must never allow the failed batch to replay.
 fn read_rollback_marker(path: &Path) -> Result<Option<u64>, OpenFailure> {
     let marker = rollback_marker(path);
-    let bytes = match fs::read(&marker) {
-        Ok(bytes) => bytes,
+    let file = match File::open(&marker) {
+        Ok(file) => file,
         Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(source) => return Err(OpenFailure::Journal(jio("rollback", &marker, source))),
     };
-    let Some(digits) = bytes.strip_suffix(b"\n") else {
-        remove_rollback_marker(path).map_err(OpenFailure::Journal)?;
-        return Ok(None);
-    };
-    core::str::from_utf8(digits)
-        .ok()
+    // A marker that exists but is unreadable or malformed fails closed: it
+    // marks a failed batch, so discarding it would replay committed-looking
+    // lines that the writer meant to roll back.
+    let mut bytes = Vec::new();
+    file.take(22)
+        .read_to_end(&mut bytes)
+        .map_err(|source| OpenFailure::Journal(jio("rollback", &marker, source)))?;
+    bytes
+        .strip_suffix(b"\n")
+        .filter(|digits| !digits.is_empty() && digits.iter().all(u8::is_ascii_digit))
+        .and_then(|digits| core::str::from_utf8(digits).ok())
         .and_then(|digits| digits.parse::<u64>().ok())
         .map(Some)
         .ok_or_else(|| OpenFailure::Damaged {
@@ -647,6 +653,14 @@ fn remove_rollback_marker(path: &Path) -> Result<(), JournalError> {
     }
 }
 
+/// Windows has no directory-sync door; the `Result` is load-bearing on POSIX.
+#[cfg_attr(
+    windows,
+    expect(
+        clippy::unnecessary_wraps,
+        reason = "directory sync fails only on POSIX"
+    )
+)]
 fn sync_parent_directory(path: &Path, operation: &'static str) -> Result<(), JournalError> {
     #[cfg(windows)]
     {
@@ -1992,23 +2006,65 @@ mod tests {
         assert_eq!(fs::read(&path).expect("read journal"), committed);
     }
 
+    #[cfg(unix)]
     #[test]
-    fn unfinished_rollback_marker_is_ignored_and_removed() {
+    fn rollback_markers_are_private_and_never_follow_existing_paths() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
         let directory = TestDirectory::new();
         let (path, committed) = journal_with_uncommitted_line(&directory);
-        fs::write(rollback_marker(&path), committed.len().to_string())
-            .expect("write unfinished marker");
-
-        let opened = Journal::open(&path, &Faults::default()).expect("reopen journal");
+        write_rollback_marker(&path, u64::try_from(committed.len()).expect("offset"))
+            .expect("write marker");
+        let marker = rollback_marker(&path);
         assert_eq!(
-            opened.records.len(),
-            4,
-            "a marker that never finished records nothing"
+            fs::metadata(&marker).expect("marker").permissions().mode() & 0o777,
+            0o600
         );
-        assert!(
-            !rollback_marker(&path).exists(),
-            "the unfinished marker is removed"
-        );
+        fs::remove_file(&marker).expect("remove marker");
+        let victim = directory.0.join("untouched");
+        fs::write(&victim, b"preserve").expect("write target");
+        symlink(&victim, &marker).expect("link marker");
+        assert!(write_rollback_marker(&path, 1).is_err());
+        assert_eq!(fs::read(&victim).expect("read target"), b"preserve");
+    }
+
+    #[test]
+    fn malformed_rollback_markers_refuse_open_without_changing_evidence() {
+        for bytes in [
+            b"".as_slice(),
+            b"123",
+            b"+123\n",
+            b"bad\n",
+            b"18446744073709551616\n",
+            b"123456789012345678901234567890\n",
+        ] {
+            let directory = TestDirectory::new();
+            let (path, _) = journal_with_uncommitted_line(&directory);
+            let original = fs::read(&path).expect("read journal");
+            fs::write(rollback_marker(&path), bytes).expect("write malformed marker");
+            assert!(matches!(
+                Journal::open(&path, &Faults::default()),
+                Err(OpenFailure::Damaged { .. })
+            ));
+            assert_eq!(fs::read(&path).expect("read journal"), original);
+            assert_eq!(
+                fs::read(rollback_marker(&path)).expect("read marker"),
+                bytes
+            );
+        }
+    }
+
+    #[test]
+    fn rollback_marker_between_records_refuses_open_without_truncating() {
+        let directory = TestDirectory::new();
+        let (path, committed) = journal_with_uncommitted_line(&directory);
+        let original = fs::read(&path).expect("read journal");
+        let offset = committed.len() - 1;
+        fs::write(rollback_marker(&path), format!("{offset}\n")).expect("write marker");
+        assert!(matches!(
+            Journal::open(&path, &Faults::default()),
+            Err(OpenFailure::Damaged { .. })
+        ));
+        assert_eq!(fs::read(&path).expect("read journal"), original);
     }
 
     #[test]
