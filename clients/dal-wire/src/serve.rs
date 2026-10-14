@@ -249,23 +249,19 @@ async fn handle_request(
         super::router::ServeRoute::WebSocket | super::router::ServeRoute::CodexWs
     );
     if req.headers().contains_key("origin") && !is_upgrade(&req) {
-        return drain_response(
-            &mut req,
-            Resp::text(403, "browser requests are not allowed"),
-        )
-        .await;
+        return into_response(Resp::text(403, "browser requests are not allowed"));
     }
     if !ctx.cfg.public
         && let Err(resp) = host_guard(&ctx, &req)
     {
-        return drain_response(&mut req, resp).await;
+        return into_response(resp);
     }
     if ctx.cfg.public
         && !matches!(route, super::router::ServeRoute::A2aCard)
         && !upgrade_route
         && let Err(resp) = auth_guard(&ctx, &req)
     {
-        return drain_response(&mut req, resp).await;
+        return into_response(resp);
     }
     if upgrade_route {
         return upgrade_response(ctx, req, route).await;
@@ -273,7 +269,7 @@ async fn handle_request(
     if requires_json(&route)
         && let Err(resp) = content_guard(&req, &route)
     {
-        return drain_response(&mut req, resp).await;
+        return into_response(resp);
     }
     // None of the GET routes consumes a request body. Reject framed bodies
     // from headers alone, including chunked requests that never finish.
@@ -284,11 +280,7 @@ async fn handle_request(
                 .get(hyper::header::CONTENT_LENGTH)
                 .is_some_and(|value| value.as_bytes().iter().any(|byte| *byte != b'0')))
     {
-        return drain_response(
-            &mut req,
-            Resp::text(400, "GET request bodies are not allowed"),
-        )
-        .await;
+        return into_response(Resp::text(400, "GET request bodies are not allowed"));
     }
     let version = req
         .headers()
@@ -306,8 +298,10 @@ async fn handle_request(
         .get("x-dal-session")
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
-    // Unknown and bodyless routes never enter the budgeted body reader,
-    // but a declared body is still drained before the response goes out.
+    // Unknown and bodyless routes never enter the budgeted body reader.
+    // Rejections above answer at once so an unauthorized request cannot
+    // hold a slot, but a dispatched response still drains a declared body
+    // first so the closing socket cannot reset it away.
     let reads_body = matches!(
         route,
         super::router::ServeRoute::Chat
@@ -338,20 +332,6 @@ async fn handle_request(
         anthropic,
     };
     dispatch(ctx, &request, route, &body.bytes).await
-}
-
-/// Sends one response after draining a body the request left unread.
-///
-/// A final answer written while declared body bytes are still inbound can
-/// be lost with the response itself: closing the socket resets it on
-/// BSD-family systems before the client reads the answer. The bounded
-/// drain keeps the incomplete-upload policy the reader uses on rejects.
-async fn drain_response(
-    req: &mut Request<hyper::body::Incoming>,
-    resp: Resp,
-) -> Response<ServeBody> {
-    drain_body(req.body_mut()).await;
-    into_response(resp)
 }
 
 /// The request header facts a route handler needs after the body is read.
