@@ -24,6 +24,7 @@ use std::{
 };
 
 use sonic_rs::JsonValueTrait;
+use tokio::io::AsyncReadExt;
 use support::{TestDir, dalgon_binary};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
@@ -193,5 +194,79 @@ async fn websocket_auth_never_logs_token_values() -> Result<(), Box<dyn Error + 
         !logged.contains("Bearer"),
         "logs must never contain header values"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn silent_sockets_do_not_exhaust_authenticated_admission()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let dir = TestDir::new()?;
+    let home = dir.path().join("home");
+    let workspace = dir.path().join("workspace");
+    let data_home = home.join(".local/share");
+    fs::create_dir_all(home.join(".config/dal"))?;
+    fs::create_dir_all(&workspace)?;
+    fs::write(
+        home.join(".config/dal/dal.toml"),
+        "model = \"openai-responses/gpt-6\"\n",
+    )?;
+    let binary = dalgon_binary()?;
+    let created = Command::new(binary)
+        .current_dir(&workspace)
+        .env_clear()
+        .envs(support::captured_shell_vars())
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_DATA_HOME", &data_home)
+        .args(["serve", "token"])
+        .output()?;
+    assert!(created.status.success(), "serve token creation must succeed");
+    let token = String::from_utf8(created.stdout)?.trim().to_owned();
+
+    let serve = spawn_serve(binary, &workspace, &home, &data_home).await?;
+    let address: std::net::SocketAddr = serve
+        .websocket_url
+        .strip_prefix("ws://")
+        .and_then(|url| url.split('/').next())
+        .ok_or_else(|| io::Error::other("serve WebSocket URL has no authority"))?
+        .parse()?;
+
+    // An attacker without a token can hold sockets without sending headers.
+    // New authenticated connections must still get a chance to finish.
+    let mut peers = Vec::with_capacity(256);
+    for _ in 0..256 {
+        peers.push(tokio::net::TcpStream::connect(address).await?);
+    }
+    let mut valid = tokio::time::timeout(
+        Duration::from_secs(5),
+        dal_wire::WebSocketTransport::connect_with_auth(&serve.websocket_url, &token),
+    )
+    .await??;
+    valid
+        .write_frame(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#)
+        .await?;
+    let reply = tokio::time::timeout(Duration::from_secs(5), valid.read_frame()).await??;
+    let reply: sonic_rs::Value = sonic_rs::from_str(&reply)?;
+    assert_eq!(reply.get("id").and_then(sonic_rs::Value::as_u64), Some(1));
+    assert!(reply.get("result").is_some(), "authenticated RPC is served");
+
+    tokio::time::timeout(Duration::from_secs(12), async {
+        for mut peer in peers {
+            let mut discarded = Vec::new();
+            match peer.read_to_end(&mut discarded).await {
+                Ok(_) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
+                    ) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok::<(), io::Error>(())
+    })
+    .await??;
+    drop(valid);
+    drop(serve);
     Ok(())
 }
