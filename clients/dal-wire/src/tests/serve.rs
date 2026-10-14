@@ -1,11 +1,12 @@
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use sonic_rs::JsonValueTrait;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::support::{
-    HttpReply, ask_probe_extension, host_header, http, parse_reply, result_text, rig,
+    HttpReply, WAIT, ask_probe_extension, host_header, http, parse_reply, result_text, rig,
     rig_with_extensions, router_options, text_step, tool_step, with_serve,
 };
 use crate::error::ServeError;
@@ -344,4 +345,92 @@ async fn an_a2a_session_defaults_an_extension_question_at_once() {
         );
     })
     .await;
+}
+
+#[tokio::test]
+async fn upgraded_connections_hold_a_shared_slot_until_the_driver_exits() {
+    let rig = rig(&[]).await;
+    let options = router_options(&rig);
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("bind listener");
+    let addr = listener.local_addr().expect("bound address");
+    let cfg = crate::serve::ListenerCfg {
+        bind: addr.ip(),
+        port: addr.port(),
+        public: false,
+        token: None,
+        a2a: options.a2a,
+        origins: options.origins,
+        approval: options.approval,
+        aliases: options.aliases,
+        workspace: options.workspace,
+    };
+    let stop = tokio_util::sync::CancellationToken::new();
+    let handle = crate::serve::listen_with_cap(
+        rig.host.clone(),
+        cfg,
+        listener,
+        addr,
+        stop.clone(),
+        2,
+    );
+
+    let clients = async {
+        let ws_url = format!("ws://{addr}/v1/ws");
+        let codex_url = format!("ws://{addr}/codex/ws");
+        let (ws, _) = tokio::time::timeout(
+            WAIT,
+            tokio_tungstenite::connect_async(ws_url.as_str()),
+        )
+        .await
+        .expect("first upgrade completes")
+        .expect("first upgrade succeeds");
+        let (codex, _) = tokio::time::timeout(
+            WAIT,
+            tokio_tungstenite::connect_async(codex_url.as_str()),
+        )
+        .await
+        .expect("second upgrade completes")
+        .expect("second upgrade succeeds");
+
+        let excess = tokio::time::timeout(
+            Duration::from_millis(200),
+            tokio_tungstenite::connect_async(ws_url.as_str()),
+        )
+        .await;
+        assert!(
+            excess.is_err(),
+            "a third upgrade must not complete while both drivers remain live"
+        );
+
+        drop(ws);
+        let (replacement, _) = tokio::time::timeout(
+            WAIT,
+            tokio_tungstenite::connect_async(ws_url.as_str()),
+        )
+        .await
+        .expect("freed slot admits a new upgrade")
+        .expect("replacement upgrade succeeds");
+
+        let blocked_http = tokio::time::timeout(
+            Duration::from_millis(200),
+            get(addr, "/v1/models"),
+        )
+        .await;
+        assert!(
+            blocked_http.is_err(),
+            "upgraded drivers must consume the HTTP connection budget"
+        );
+
+        drop(codex);
+        let response = tokio::time::timeout(WAIT, get(addr, "/v1/models"))
+            .await
+            .expect("HTTP connection admitted after upgrade closes");
+        assert_eq!(response.status, 200, "{response:?}");
+        drop(replacement);
+        stop.cancel();
+    };
+    let (result, ()) = tokio::join!(handle.wait(), clients);
+    result.expect("listener stops cleanly");
 }

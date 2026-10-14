@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use hyper::{Request, Response, StatusCode};
+use tokio::sync::OwnedSemaphorePermit;
 
 use super::guard::ws_upgrade_denial;
 use super::{Driver, Resp, ServeBody, ServeCtx, into_response};
@@ -14,6 +15,7 @@ pub(super) async fn upgrade_response(
     ctx: Arc<ServeCtx>,
     req: Request<hyper::body::Incoming>,
     route: crate::router::ServeRoute,
+    permit: Arc<OwnedSemaphorePermit>,
 ) -> Response<ServeBody> {
     let header = |name: &str| {
         req.headers()
@@ -69,7 +71,11 @@ pub(super) async fn upgrade_response(
             offered,
         )),
     };
-    ctx.drive(driver).await;
+    ctx.drive(Box::pin(async move {
+        driver.await;
+        drop(permit);
+    }))
+    .await;
     let mut builder = Response::builder()
         .status(StatusCode::SWITCHING_PROTOCOLS)
         .header("upgrade", "websocket")
