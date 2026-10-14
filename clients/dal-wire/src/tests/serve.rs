@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use sonic_rs::JsonValueTrait;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -342,6 +343,45 @@ async fn an_a2a_session_defaults_an_extension_question_at_once() {
             result_text(&rig, context, "probe_ask", false).await,
             "default"
         );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn websocket_upgrades_hold_connection_slots_until_disconnect() {
+    let rig = rig(&[]).await;
+    with_serve(&rig, router_options(&rig), async |addr| {
+        let ws = format!("ws://{addr}/v1/ws");
+        let codex = format!("ws://{addr}/codex/ws");
+        let mut clients = Vec::new();
+        for index in 0..crate::serve::CONN_CAP {
+            let url = if index % 2 == 0 { &ws } else { &codex };
+            let (client, response) = tokio::time::timeout(
+                Duration::from_secs(10),
+                tokio_tungstenite::connect_async(url.as_str()),
+            )
+            .await
+            .expect("WebSocket upgrade completed in time")
+            .expect("WebSocket upgrade succeeded");
+            assert_eq!(response.status(), 101);
+            clients.push(client);
+        }
+
+        let mut extra = Box::pin(tokio_tungstenite::connect_async(ws.as_str()));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut extra)
+                .await
+                .is_err(),
+            "the connection cap allowed an extra WebSocket upgrade"
+        );
+
+        drop(clients.pop());
+        let (client, response) = tokio::time::timeout(Duration::from_secs(10), extra)
+            .await
+            .expect("a freed connection slot admits the waiting upgrade")
+            .expect("the waiting WebSocket upgrade succeeded");
+        assert_eq!(response.status(), 101);
+        drop(client);
     })
     .await;
 }

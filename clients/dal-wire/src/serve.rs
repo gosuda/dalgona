@@ -1,7 +1,7 @@
 //! HTTP/1.1 serve listener: lifecycle, guards, and route dispatch.
 //!
 //! Hyper serves HTTP/1.1 only on a Tokio `TcpListener` with a 256-connection
-//! cap. The pipeline is route, browser guard, authentication, content type,
+//! lifetime cap shared by HTTP connections, streams, and WebSockets. The pipeline is route, browser guard, authentication, content type,
 //! bounded body, then the route handler. OpenAI routes run through the
 //! router, A2A routes through `a2a`, and `/v1/ws` plus `/codex/ws` upgrade
 //! to WebSockets. Loopback binds need no token; public binds require the
@@ -10,6 +10,7 @@
 
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
+use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,7 +23,7 @@ use dal_core::ApprovalMode;
 use futures::{StreamExt, stream::FuturesUnordered};
 use hyper::{Request, Response};
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::error::WireError;
@@ -62,8 +63,8 @@ impl ServeHandle {
     }
 }
 
-/// Maximum concurrent HTTP connections.
-const CONN_CAP: usize = 256;
+/// Maximum concurrent connections, including upgraded and streaming drivers.
+pub(crate) const CONN_CAP: usize = 256;
 /// Maximum request header buffer size in bytes.
 const HEADER_LIMIT: usize = 1_048_576;
 /// Stop drain grace.
@@ -92,8 +93,8 @@ pub(crate) struct ListenerCfg {
     pub workspace: PathBuf,
 }
 
-/// Shared listener state for one bound socket.
-pub(crate) struct ServeCtx {
+/// State shared by all connections on one listener.
+pub(crate) struct ServeShared {
     /// The serving host.
     pub host: Host,
     /// The listener configuration.
@@ -108,10 +109,29 @@ pub(crate) struct ServeCtx {
     pub shutdown: CancellationToken,
 }
 
+/// One accepted connection and the permit retained by all its drivers.
+pub(crate) struct ServeCtx {
+    shared: Arc<ServeShared>,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl Deref for ServeCtx {
+    type Target = ServeShared;
+
+    fn deref(&self) -> &Self::Target {
+        &self.shared
+    }
+}
+
 impl ServeCtx {
-    /// Hands one live stream or upgrade driver to the accept loop, which polls it.
-    pub(crate) async fn drive(&self, driver: Driver) {
-        if self.drivers.send(driver).await.is_err() {
+    /// Hands one driver to the accept loop while retaining its connection permit.
+    pub(crate) async fn drive(self: &Arc<Self>, driver: Driver) {
+        let ctx = Arc::clone(self);
+        let guarded: Driver = Box::pin(async move {
+            let _ctx = ctx;
+            driver.await;
+        });
+        if self.drivers.send(guarded).await.is_err() {
             tracing::debug!("listener stopped before a driver started");
         }
     }
@@ -128,7 +148,7 @@ pub(crate) fn listen(
     stop: CancellationToken,
 ) -> ServeHandle {
     let (driver_tx, mut driver_rx) = mpsc::channel::<Driver>(CONN_CAP);
-    let ctx = Arc::new(ServeCtx {
+    let shared = Arc::new(ServeShared {
         host,
         cfg,
         digests: Arc::new(Mutex::new(DigestTable::new(4096))),
@@ -136,7 +156,8 @@ pub(crate) fn listen(
         drivers: driver_tx,
         shutdown: stop.child_token(),
     });
-    let shutdown = ctx.shutdown.clone();
+    let shutdown = shared.shutdown.clone();
+    let permits = Arc::new(Semaphore::new(CONN_CAP));
     let done = async move {
         let mut conns: FuturesUnordered<Driver> = FuturesUnordered::new();
         let mut drivers: FuturesUnordered<Driver> = FuturesUnordered::new();
@@ -144,10 +165,16 @@ pub(crate) fn listen(
             tokio::select! {
                 biased;
                 () = stop.cancelled() => break,
-                accepted = listener.accept(), if conns.len() < CONN_CAP => {
+                accepted = listener.accept(), if permits.available_permits() > 0 => {
                     match accepted {
                         Ok((stream, _)) => {
-                            let ctx = Arc::clone(&ctx);
+                            let permit = Arc::clone(&permits)
+                                .try_acquire_owned()
+                                .expect("available listener permit");
+                            let ctx = Arc::new(ServeCtx {
+                                shared: Arc::clone(&shared),
+                                _permit: permit,
+                            });
                             conns.push(Box::pin(async move {
                                 serve_conn(ctx, stream).await;
                             }));
@@ -169,7 +196,7 @@ pub(crate) fn listen(
             }
         }
         shutdown.cancel();
-        drop(ctx);
+        drop(shared);
         let _ = tokio::time::timeout(STOP_GRACE, async {
             loop {
                 tokio::select! {

@@ -234,3 +234,18 @@ async fn websocket_oversized_message_ends_without_a_close_frame() {
         Some(Ok(frame)) => panic!("an oversized message must end without a reply, got {frame:?}"),
     }
 }
+
+#[tokio::test(start_paused = true)]
+async fn an_idle_server_websocket_expires() {
+    let (server_io, _peer) = tokio::io::duplex(64);
+    let mut server = crate::transport::WebSocketTransport::server(server_io).await;
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(301),
+        server.read_frame(),
+    )
+    .await;
+    assert!(
+        matches!(result, Ok(Err(ReadFrameError::Closed))),
+        "a silent server WebSocket must close within the idle deadline: {result:?}"
+    );
+}
