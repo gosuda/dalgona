@@ -140,9 +140,7 @@ async fn prompt(host: &Host, data: &tempfile::TempDir) -> (Stop, String, Vec<Str
     prompt_with_answer(host, data, Answer::ApproveForSession).await
 }
 
-#[tokio::test]
-async fn scripted_model_forwards_through_its_invocation_context() {
-    let run = r#"return ctx.models.forward(
+const FORWARD_REQUEST: &str = r#"return ctx.models.forward(
     purpose = request.purpose,
     model = {"kind": "api", "family": "openai_chat", "model": "gpt-6-luna"},
     system = request.system,
@@ -151,7 +149,10 @@ async fn scripted_model_forwards_through_its_invocation_context() {
     params = request.params,
     cache_key = request.cache_key,
 )"#;
-    let (data, host) = host_for(run).await;
+
+#[tokio::test]
+async fn scripted_model_forwards_through_its_invocation_context() {
+    let (data, host) = host_for(FORWARD_REQUEST).await;
     let (stop, view, seen) = prompt(&host, &data).await;
     assert_eq!(stop, Stop::EndTurn, "{seen:?} {view}");
     assert!(
@@ -163,7 +164,7 @@ async fn scripted_model_forwards_through_its_invocation_context() {
 
 #[tokio::test]
 async fn scripted_forward_declined_infer_grant_never_reaches_the_provider() {
-    let (data, host) = host_for(FORWARD_THEN).await;
+    let (data, host) = host_for(FORWARD_REQUEST).await;
     let (stop, view, seen) = prompt_with_answer(&host, &data, Answer::Decline).await;
     assert_eq!(stop, Stop::Failed, "{seen:?} {view}");
     assert!(
