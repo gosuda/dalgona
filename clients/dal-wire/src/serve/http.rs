@@ -4,11 +4,16 @@ use bytes::Bytes;
 use hyper::body::{Body, Frame};
 use hyper::{Request, Response, StatusCode};
 use sonic_rs::Value;
+use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 
 /// Maximum request body size in bytes.
 pub(super) const BODY_LIMIT: usize = 33_554_432;
+
+/// Maximum total reserved request-body storage per listener, including
+/// growth slack for the single contiguous buffer in each request.
+pub(super) const BODY_BUDGET: usize = 134_217_728;
 
 /// Request body timeout.
 pub(super) const BODY_TIMEOUT: Duration = Duration::from_secs(60);
@@ -81,10 +86,17 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const DRAIN_LIMIT: usize = BODY_LIMIT;
 
 /// Reads one bounded request body with its timeout.
-pub(super) async fn read_body(req: Request<hyper::body::Incoming>) -> Result<Bytes, Resp> {
+///
+/// The returned permit holds the listener-wide allocation reservation until
+/// the route finishes using the body. Cancellation drops it automatically.
+pub(super) async fn read_body(
+    req: Request<hyper::body::Incoming>,
+    budget: Arc<Semaphore>,
+) -> Result<(Bytes, Option<OwnedSemaphorePermit>), Resp> {
     let (_parts, mut body) = req.into_parts();
     let mut collected = 0usize;
-    let mut chunks = Vec::new();
+    let mut out = Vec::new();
+    let mut reservation = None;
     let read = async {
         while let Some(frame) =
             futures::future::poll_fn(|cx| std::pin::Pin::new(&mut body).poll_frame(cx)).await
@@ -94,31 +106,58 @@ pub(super) async fn read_body(req: Request<hyper::body::Incoming>) -> Result<Byt
                 return Err(Resp::text(400, "request body is not valid"));
             };
             if let Some(data) = frame.data_ref() {
-                collected += data.len();
-                if collected > BODY_LIMIT {
+                if data.len() > BODY_LIMIT - collected {
                     drain_body(&mut body).await;
                     return Err(Resp::text(
                         413,
                         &format!("request body exceeds {BODY_LIMIT} bytes"),
                     ));
                 }
-                chunks.push(data.clone());
+                reserve_body_chunk(&budget, &mut reservation, data.len())?;
+                collected += data.len();
+                out.extend_from_slice(data);
             }
         }
-        Ok(chunks)
+        Ok(())
     };
-    let chunks: Vec<Bytes> = match tokio::time::timeout(BODY_TIMEOUT, read).await {
-        Ok(Ok(chunks)) => chunks,
-        Ok(Err(resp)) => return Err(resp),
-        Err(_) => {
-            return Err(Resp::text(408, "request body was not received within 60 s"));
-        }
-    };
-    let mut out = Vec::with_capacity(collected);
-    for chunk in chunks {
-        out.extend_from_slice(&chunk);
+    match tokio::time::timeout(BODY_TIMEOUT, read).await {
+        Ok(Ok(())) => Ok((Bytes::from(out), reservation)),
+        Ok(Err(resp)) => Err(resp),
+        Err(_) => Err(Resp::text(408, "request body was not received within 60 s")),
     }
-    Ok(Bytes::from(out))
+}
+
+/// Charges twice the retained bytes for Vec growth and in-flight frame data.
+/// Reserving before copying prevents concurrent requests from exceeding the
+/// shared budget; a rejected request releases its existing reservation.
+fn reserve_body_chunk(
+    budget: &Arc<Semaphore>,
+    reservation: &mut Option<OwnedSemaphorePermit>,
+    bytes: usize,
+) -> Result<(), Resp> {
+    if bytes == 0 {
+        return Ok(());
+    }
+    let Some(amount) = bytes.checked_mul(2).and_then(|n| u32::try_from(n).ok()) else {
+        return Err(Resp::text(
+            413,
+            &format!("request body exceeds {BODY_LIMIT} bytes"),
+        ));
+    };
+    let permit = Arc::clone(budget)
+        .try_acquire_many_owned(amount)
+        .map_err(|_| {
+            let mut resp = Resp::text(503, "request body memory budget is exhausted");
+            resp.headers
+                .push(("connection".to_owned(), "close".to_owned()));
+            resp
+        })?;
+    if let Some(held) = reservation.as_mut() {
+        held.merge(permit);
+    } else {
+        *reservation = Some(permit);
+    }
+    Ok(())
 }
 
 /// Empties a rejected request body so the socket closes with no unread
@@ -191,5 +230,42 @@ impl Body for ServeBody {
                 std::task::Poll::Pending => std::task::Poll::Pending,
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::oneshot;
+
+    #[tokio::test]
+    async fn shared_budget_caps_concurrent_body_storage() {
+        let budget = Arc::new(Semaphore::new(16));
+        let first_budget = Arc::clone(&budget);
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+
+        let first = tokio::spawn(async move {
+            let mut held = None;
+            reserve_body_chunk(&first_budget, &mut held, 6).expect("first reservation");
+            ready_tx.send(()).expect("signal reservation");
+            release_rx.await.expect("release first reservation");
+        });
+        ready_rx.await.expect("first request reserved");
+
+        let mut second = None;
+        let denied = reserve_body_chunk(&budget, &mut second, 3)
+            .err()
+            .expect("aggregate budget exceeded");
+        assert_eq!(denied.status, 503);
+        assert!(second.is_none());
+        reserve_body_chunk(&budget, &mut second, 2).expect("remaining budget");
+        assert_eq!(budget.available_permits(), 0);
+
+        drop(second);
+        assert_eq!(budget.available_permits(), 4);
+        release_tx.send(()).expect("release request");
+        first.await.expect("first request complete");
+        assert_eq!(budget.available_permits(), 16);
     }
 }

@@ -57,6 +57,40 @@ async fn route_404_405() {
     .await;
 }
 
+/// A discovery GET must answer without reading a declared body, even
+/// when the client never sends the bytes promised by its framing headers.
+#[tokio::test]
+async fn card_rejects_bodies_without_buffering() {
+    let rig = rig(&[]).await;
+    let mut options = router_options(&rig);
+    options.a2a = true;
+    with_serve(&rig, options, async |addr| {
+        let empty = get(addr, "/.well-known/agent-card.json").await;
+        assert_eq!(empty.status, 200, "{empty:?}");
+
+        for header in ["content-length: 33554432", "transfer-encoding: chunked"] {
+            let mut stream = tokio::net::TcpStream::connect(addr)
+                .await
+                .expect("connect to discovery endpoint");
+            let head = format!(
+                "GET /.well-known/agent-card.json HTTP/1.1\r\n{}\r\nconnection: close\r\n{header}\r\n\r\n",
+                host_header(addr)
+            );
+            stream.write_all(head.as_bytes()).await.expect("send only headers");
+            let mut reply = Vec::new();
+            tokio::time::timeout(super::support::WAIT, stream.read_to_end(&mut reply))
+                .await
+                .expect("card rejects without reading the body")
+                .expect("read rejection");
+            let rejected = parse_reply(&reply);
+            assert_eq!(rejected.status, 400, "{rejected:?}");
+            assert_eq!(rejected.body, "agent card requests must not include a body");
+            assert_eq!(rejected.header("connection"), Some("close"));
+        }
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn http_guard_limits() {
     let rig = rig(&[]).await;
@@ -223,6 +257,13 @@ async fn token_file_auth_cases() {
         )
         .await;
         assert_eq!(card.status, 200, "{card:?}");
+    })
+    .await;
+    let mut without_a2a = public();
+    without_a2a.a2a = false;
+    with_serve(&rig, without_a2a, async |addr| {
+        let card = get(addr, "/.well-known/agent-card.json").await;
+        assert_eq!(card.status, 401, "{card:?}");
     })
     .await;
 }

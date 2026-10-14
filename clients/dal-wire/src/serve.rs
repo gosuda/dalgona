@@ -20,9 +20,10 @@ use bytes::Bytes;
 use dal_agent::Host;
 use dal_core::ApprovalMode;
 use futures::{StreamExt, stream::FuturesUnordered};
+use hyper::body::Body;
 use hyper::{Request, Response};
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::error::WireError;
@@ -32,7 +33,7 @@ mod guard;
 mod http;
 mod upgrade;
 
-use guard::{auth_guard, content_guard, host_guard, is_card, is_upgrade, requires_json};
+use guard::{auth_guard, content_guard, host_guard, is_upgrade, requires_json};
 pub(crate) use http::{Resp, RespBody, ServeBody};
 use http::{into_response, read_body};
 use upgrade::upgrade_response;
@@ -102,6 +103,8 @@ pub(crate) struct ServeCtx {
     pub digests: Arc<Mutex<DigestTable>>,
     /// The A2A context and task tables.
     pub a2a: Arc<Mutex<a2a::A2aState>>,
+    /// Shared request-body allocation budget for this listener.
+    pub body_budget: Arc<Semaphore>,
     /// Live stream drivers polled by the accept loop (no spawned tasks).
     pub drivers: mpsc::Sender<Driver>,
     /// Fires when handlers must cancel their turns.
@@ -133,6 +136,7 @@ pub(crate) fn listen(
         cfg,
         digests: Arc::new(Mutex::new(DigestTable::new(4096))),
         a2a: Arc::new(Mutex::new(a2a::A2aState::new())),
+        body_budget: Arc::new(Semaphore::new(http::BODY_BUDGET)),
         drivers: driver_tx,
         shutdown: stop.child_token(),
     });
@@ -254,7 +258,7 @@ async fn handle_request(
         return into_response(resp);
     }
     if ctx.cfg.public
-        && !is_card(&method, &path)
+        && !matches!(&route, super::router::ServeRoute::A2aCard)
         && !upgrade_route
         && let Err(resp) = auth_guard(&ctx, &req)
     {
@@ -284,16 +288,25 @@ async fn handle_request(
         .get("x-dal-session")
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
-    let body = match read_body(req).await {
-        Ok(body) => body,
-        Err(resp) => return into_response(resp),
-    };
     let request = RouteRequest {
         session: session.as_deref(),
         query: &query,
         version: version.as_deref(),
         host: host_header.as_deref(),
         anthropic,
+    };
+    if matches!(&route, super::router::ServeRoute::A2aCard) {
+        if !req.body().is_end_stream() {
+            let mut resp = Resp::text(400, "agent card requests must not include a body");
+            resp.headers
+                .push(("connection".to_owned(), "close".to_owned()));
+            return into_response(resp);
+        }
+        return dispatch(ctx, &request, route, Bytes::new()).await;
+    }
+    let (body, _body_permit) = match read_body(req, Arc::clone(&ctx.body_budget)).await {
+        Ok(body) => body,
+        Err(resp) => return into_response(resp),
     };
     dispatch(ctx, &request, route, body).await
 }
