@@ -1,4 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
+                        scope: Some(dal_agent::GrantScope::for_workspace(
+                            extension.source_digest().expect("bundled code digest"),
+                            &dal_core::Workspace::new(workspace.to_path_buf())?,
+                        )),
 //! dalgona success-criterion scale gate: a 500-item pool runs
 //! through the real host, every item reports done, and the process holds
 //! its resource contract (RSS under 256 MiB, open fds under 2048).
@@ -236,7 +240,7 @@ fn stress_500_pool_items_finish_within_the_process_contract() -> support::TestRe
         .build()?;
     runtime.block_on(async move {
         let started = Instant::now();
-        grant_bundled_extensions(&data, &user).await?;
+        grant_bundled_extensions(&data, &workspace, &user).await?;
         let product = support::build_product(data.clone(), Some(&user))?;
         let mut product = product;
         product.extensions.push(pool_extension()?);
@@ -330,7 +334,7 @@ fn drained_lifecycle(subscription: &mut dal_agent::HostSubscription) -> (usize, 
 
 /// Grants every bundled extension the services it declares, as a person
 /// would on first use, so no grant question interrupts the run.
-async fn grant_bundled_extensions(data: &Path, user: &str) -> support::TestResult<()> {
+async fn grant_bundled_extensions(data: &Path, workspace: &Path, user: &str) -> support::TestResult<()> {
     let product = support::build_product(data.to_path_buf(), Some(user))?;
     for extension in &product.extensions {
         let services = extension.inject().capabilities();
