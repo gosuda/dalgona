@@ -66,6 +66,13 @@ pub enum TokenError {
         /// The file mode observed on disk.
         mode: u32,
     },
+    /// A Windows token file grants access beyond the current user and privileged accounts.
+    #[cfg(windows)]
+    #[error("token file has an unsafe Windows ACL: {path} must be owner-only and protected")]
+    InsecureAcl {
+        /// The rejected token file.
+        path: PathBuf,
+    },
     /// The token path is a symbolic link.
     #[error("token file must not be a symbolic link: {path}")]
     Symlink {
@@ -315,7 +322,11 @@ fn open_token_file(path: &Path) -> Result<File, TokenError> {
             path: path.to_owned(),
         });
     }
-    let file = File::open(path).map_err(|source| {
+    #[cfg(windows)]
+    let file = win::open_for_read(path);
+    #[cfg(not(windows))]
+    let file = File::open(path);
+    let file = file.map_err(|source| {
         if source.kind() == io::ErrorKind::NotFound {
             TokenError::Missing {
                 path: path.to_owned(),
@@ -331,12 +342,37 @@ fn open_token_file(path: &Path) -> Result<File, TokenError> {
         path: path.to_owned(),
         source,
     })?;
-    if !same_file(&link, &opened) || !opened.is_file() {
+    if !opened.is_file() {
+        return Err(TokenError::NotRegularFile {
+            path: path.to_owned(),
+        });
+    }
+    #[cfg(unix)]
+    if !same_file(&link, &opened) {
         return Err(TokenError::Symlink {
             path: path.to_owned(),
         });
     }
+    #[cfg(windows)]
+    if !win::same_file(path, &file).map_err(|source| TokenError::Io {
+        path: path.to_owned(),
+        source,
+    })? {
+        return Err(TokenError::Symlink {
+            path: path.to_owned(),
+        });
+    }
+    #[cfg(unix)]
     check_connect_file_mode(path, &opened)?;
+    #[cfg(windows)]
+    if !win::owner_only(&file).map_err(|source| TokenError::Io {
+        path: path.to_owned(),
+        source,
+    })? {
+        return Err(TokenError::InsecureAcl {
+            path: path.to_owned(),
+        });
+    }
     Ok(file)
 }
 
@@ -345,11 +381,6 @@ fn same_file(link: &fs::Metadata, opened: &fs::Metadata) -> bool {
     use std::os::unix::fs::MetadataExt;
 
     link.dev() == opened.dev() && link.ino() == opened.ino()
-}
-
-#[cfg(not(unix))]
-fn same_file(_link: &fs::Metadata, _opened: &fs::Metadata) -> bool {
-    true
 }
 
 #[cfg(unix)]
@@ -369,15 +400,6 @@ fn check_connect_file_mode(path: &Path, metadata: &fs::Metadata) -> Result<(), T
             mode,
         });
     }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "unix checks the mode bits; other platforms accept the file unchanged"
-)]
-fn check_connect_file_mode(_path: &Path, _metadata: &fs::Metadata) -> Result<(), TokenError> {
     Ok(())
 }
 
@@ -431,28 +453,42 @@ fn open_exclusive(path: &Path) -> io::Result<File> {
 )]
 mod win {
     use std::{
+        ffi::c_void,
         fs::File,
         io,
-        os::windows::{ffi::OsStrExt, io::FromRawHandle},
+        os::windows::{
+            ffi::OsStrExt,
+            io::{AsRawHandle, FromRawHandle},
+        },
         path::Path,
         ptr,
     };
 
     use windows_sys::Win32::{
-        Foundation::{CloseHandle, FALSE, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, LocalFree},
+        Foundation::{
+            CloseHandle, FALSE, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+            LocalFree,
+        },
         Security::{
+            ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_SIZE_INFORMATION, AclSizeInformation,
             Authorization::{
                 ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+                GetSecurityInfo, SE_FILE_OBJECT,
             },
-            GetTokenInformation, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, TOKEN_QUERY,
-            TOKEN_USER, TokenUser,
+            DACL_SECURITY_INFORMATION, GetAce, GetAclInformation, GetSecurityDescriptorControl,
+            GetTokenInformation, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+            SE_DACL_PROTECTED, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
         },
         Storage::FileSystem::{
-            CREATE_NEW, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_DELETE, FILE_SHARE_READ,
-            FILE_SHARE_WRITE,
+            BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateFileW, FILE_ATTRIBUTE_NORMAL,
+            FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
+            FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle, OPEN_EXISTING,
         },
         System::Threading::{GetCurrentProcess, OpenProcessToken},
     };
+
+    // Win32 ACCESS_ALLOWED_ACE_TYPE is a byte in ACE_HEADER.
+    const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
 
     fn wide(text: &str) -> Vec<u16> {
         text.encode_utf16().chain(std::iter::once(0)).collect()
@@ -491,17 +527,158 @@ mod win {
                 .User
                 .Sid
         };
+        sid_text(sid)
+    }
+
+    /// The Win32 API allocates SID text and security descriptors with LocalAlloc.
+    /// Keep the allocation alive while its borrowed SID and ACE pointers are used.
+    struct LocalAllocation(*mut c_void);
+
+    impl Drop for LocalAllocation {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe { LocalFree(self.0) };
+            }
+        }
+    }
+
+    fn sid_text(sid: PSID) -> io::Result<String> {
         let mut text = ptr::null_mut();
         if unsafe { ConvertSidToStringSidW(sid, &raw mut text) } == FALSE {
             return Err(io::Error::last_os_error());
         }
+        let _allocation = LocalAllocation(text.cast());
         let mut len = 0usize;
         while unsafe { *text.add(len) } != 0 {
             len += 1;
         }
-        let out = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(text, len) });
-        unsafe { LocalFree(text.cast()) };
-        Ok(out)
+        Ok(String::from_utf16_lossy(unsafe {
+            std::slice::from_raw_parts(text, len)
+        }))
+    }
+
+    /// Opens the token itself rather than following a replaced reparse point.
+    /// The returned handle is also the handle checked for ACLs and read for the token.
+    pub(super) fn open_for_read(path: &Path) -> io::Result<File> {
+        let path_name = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<u16>>();
+        let raw = unsafe {
+            CreateFileW(
+                path_name.as_ptr(),
+                GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_OPEN_REPARSE_POINT,
+                ptr::null_mut(),
+            )
+        };
+        if raw == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(unsafe { File::from_raw_handle(raw) })
+    }
+
+    /// Compares two independent non-following opens by stable file identity.
+    /// A rename or reparse substitution between opens fails closed.
+    pub(super) fn same_file(path: &Path, opened: &File) -> io::Result<bool> {
+        let current = open_for_read(path)?;
+        let current_info = file_information(&current)?;
+        let opened_info = file_information(opened)?;
+        Ok(current_info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT == 0
+            && opened_info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT == 0
+            && current_info.dwVolumeSerialNumber == opened_info.dwVolumeSerialNumber
+            && current_info.nFileIndexHigh == opened_info.nFileIndexHigh
+            && current_info.nFileIndexLow == opened_info.nFileIndexLow)
+    }
+
+    fn file_information(file: &File) -> io::Result<BY_HANDLE_FILE_INFORMATION> {
+        let mut info = BY_HANDLE_FILE_INFORMATION::default();
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &raw mut info) } == FALSE {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(info)
+    }
+
+    /// A token is safe only when its owner is the current user and its
+    /// protected DACL grants access exclusively to that user, SYSTEM, or
+    /// Administrators. Unknown and inherited ACEs fail closed.
+    pub(super) fn owner_only(file: &File) -> io::Result<bool> {
+        let mut owner: PSID = ptr::null_mut();
+        let mut dacl: *mut ACL = ptr::null_mut();
+        let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+        let result = unsafe {
+            GetSecurityInfo(
+                file.as_raw_handle(),
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                &raw mut owner,
+                ptr::null_mut(),
+                &raw mut dacl,
+                ptr::null_mut(),
+                &raw mut descriptor,
+            )
+        };
+        let _allocation = LocalAllocation(descriptor.cast());
+        if result != 0 {
+            return Err(io::Error::from_raw_os_error(result as i32));
+        }
+        if owner.is_null() || dacl.is_null() || descriptor.is_null() {
+            return Ok(false);
+        }
+        let mut control = 0;
+        let mut revision = 0;
+        if unsafe {
+            GetSecurityDescriptorControl(descriptor, &raw mut control, &raw mut revision)
+        } == FALSE
+        {
+            return Err(io::Error::last_os_error());
+        }
+        if control & SE_DACL_PROTECTED == 0 {
+            return Ok(false);
+        }
+        let user = user_sid()?;
+        if sid_text(owner)? != user {
+            return Ok(false);
+        }
+        let mut info = ACL_SIZE_INFORMATION::default();
+        if unsafe {
+            GetAclInformation(
+                dacl,
+                (&raw mut info).cast(),
+                u32::try_from(size_of::<ACL_SIZE_INFORMATION>()).unwrap_or(u32::MAX),
+                AclSizeInformation,
+            )
+        } == FALSE
+        {
+            return Err(io::Error::last_os_error());
+        }
+
+        let mut has_user_grant = false;
+        for index in 0..info.AceCount {
+            let mut raw_ace: *mut c_void = ptr::null_mut();
+            if unsafe { GetAce(dacl, index, &raw mut raw_ace) } == FALSE {
+                return Err(io::Error::last_os_error());
+            }
+            if raw_ace.is_null() {
+                return Ok(false);
+            }
+            let header = unsafe { &*raw_ace.cast::<ACE_HEADER>() };
+            if header.AceType != ACCESS_ALLOWED_ACE_TYPE || header.AceFlags != 0 {
+                return Ok(false);
+            }
+            let ace = unsafe { &*raw_ace.cast::<ACCESS_ALLOWED_ACE>() };
+            let principal = sid_text((&raw const ace.SidStart).cast_mut().cast())?;
+            if principal == user {
+                has_user_grant = true;
+            } else if principal != "S-1-5-18" && principal != "S-1-5-32-544" {
+                return Ok(false);
+            }
+        }
+        Ok(has_user_grant)
     }
 
     /// Creates `path` with `CREATE_NEW` semantics and the protected DACL
@@ -539,9 +716,11 @@ mod win {
     /// attributes and must outlive the open call that receives them.
     /// `P` marks the DACL protected so inherited ACEs cannot widen the
     /// grant; SY and BA are the SDDL aliases for SYSTEM and Administrators.
-    fn create_security_attributes() -> io::Result<(SECURITY_ATTRIBUTES, PSECURITY_DESCRIPTOR)> {
+    fn create_security_attributes() -> io::Result<(SECURITY_ATTRIBUTES, LocalAllocation)> {
         let owner_sid = user_sid()?;
-        let sddl = wide(&format!("D:P(A;;FA;;;{owner_sid})(A;;FA;;;SY)(A;;FA;;;BA)"));
+        let sddl = wide(&format!(
+            "O:{owner_sid}D:P(A;;FA;;;{owner_sid})(A;;FA;;;SY)(A;;FA;;;BA)"
+        ));
         let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
         if unsafe {
             ConvertStringSecurityDescriptorToSecurityDescriptorW(
@@ -560,7 +739,7 @@ mod win {
                 lpSecurityDescriptor: descriptor,
                 bInheritHandle: FALSE,
             },
-            descriptor,
+            LocalAllocation(descriptor.cast()),
         ))
     }
 }
@@ -601,5 +780,61 @@ fn sync_parent(path: &Path) -> Result<(), TokenError> {
                 path: parent.to_owned(),
                 source,
             })
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use std::{fs, process::Command};
+
+    use super::{TokenError, create, load, read_connect_token, win};
+
+    fn icacls(path: &std::path::Path, args: &[&str]) {
+        let output = Command::new("icacls")
+            .arg(path)
+            .args(args)
+            .output()
+            .expect("run icacls");
+        assert!(
+            output.status.success(),
+            "icacls failed: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn load_and_client_read_reject_acl_drift() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("serve.token");
+        let token = create(&path, false).expect("create protected token");
+        assert!(load(&path).expect("load protected token").matches(&token));
+        assert_eq!(read_connect_token(&path).expect("read protected token"), token);
+
+        icacls(&path, &["/grant", "*S-1-1-0:R"]);
+        assert!(matches!(load(&path), Err(TokenError::InsecureAcl { .. })));
+        assert!(matches!(read_connect_token(&path), Err(TokenError::InsecureAcl { .. })));
+    }
+
+    #[test]
+    fn load_rejects_unprotected_acl() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("serve.token");
+        create(&path, false).expect("create protected token");
+        icacls(&path, &["/inheritance:e"]);
+        assert!(matches!(load(&path), Err(TokenError::InsecureAcl { .. })));
+    }
+
+    #[test]
+    fn path_replacement_changes_file_identity() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("serve.token");
+        create(&path, false).expect("create original token");
+        let original = win::open_for_read(&path).expect("open original");
+        assert!(win::same_file(&path, &original).expect("same file"));
+
+        fs::rename(&path, dir.path().join("old.token")).expect("rename token");
+        create(&path, false).expect("create replacement");
+        assert!(!win::same_file(&path, &original).expect("different file"));
     }
 }

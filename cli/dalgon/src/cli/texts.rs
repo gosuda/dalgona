@@ -181,6 +181,17 @@ pub(crate) fn serve_public_token_unsafe(path: &Path, mode: &str) -> [String; 2] 
     ]
 }
 
+#[cfg(windows)]
+pub(crate) fn serve_public_token_unsafe_acl(path: &Path) -> [String; 2] {
+    [
+        format!(
+            "dalgon: serve.token has an unsafe Windows ACL: {}",
+            path.display()
+        ),
+        "Restrict access to your user, SYSTEM, and Administrators with inheritance disabled, or run dalgon serve token --force.".into(),
+    ]
+}
+
 pub(crate) fn serve_public_token_empty(path: &Path) -> [String; 2] {
     [
         format!("dalgon: serve.token is empty: {}", path.display()),

@@ -215,6 +215,10 @@ fn refuse_unsafe_serve_start(
             TokenFileError::UnsafeMode(mode) => {
                 crate::cli::texts::serve_public_token_unsafe(token_file, &format!("{mode:o}"))
             }
+            #[cfg(windows)]
+            TokenFileError::UnsafeAcl => {
+                crate::cli::texts::serve_public_token_unsafe_acl(token_file)
+            }
             TokenFileError::Empty => crate::cli::texts::serve_public_token_empty(token_file),
             TokenFileError::Invalid => crate::cli::texts::serve_public_token_invalid(token_file),
             TokenFileError::Other(source) => return Err(ServeCommandError::Io(source)),
@@ -368,6 +372,8 @@ impl Drop for ServingLease {
 enum TokenFileError {
     Missing,
     UnsafeMode(u32),
+    #[cfg(windows)]
+    UnsafeAcl,
     Empty,
     Invalid,
     Other(io::Error),
@@ -397,6 +403,8 @@ fn validate_public_token(path: &Path) -> Result<(), TokenFileError> {
         dal_wire::token::TokenError::OpenToOtherUsers { mode, .. } => {
             TokenFileError::UnsafeMode(mode)
         }
+        #[cfg(windows)]
+        dal_wire::token::TokenError::InsecureAcl { .. } => TokenFileError::UnsafeAcl,
         dal_wire::token::TokenError::Empty { .. } => TokenFileError::Empty,
         dal_wire::token::TokenError::Invalid { .. } => TokenFileError::Invalid,
         error => TokenFileError::Other(io::Error::other(error)),
