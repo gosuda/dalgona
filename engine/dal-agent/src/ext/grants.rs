@@ -72,7 +72,10 @@ impl GrantKey {
     /// An unverified code identity or non-UTF-8/relative root has no grant.
     #[must_use]
     pub fn for_extension(extension: &super::Extension, workspace: &Path) -> Option<Self> {
-        if !workspace.is_absolute() || workspace.to_str().is_none() {
+        if !matches!(extension.origin(), Origin::User | Origin::Bundled)
+            || !workspace.is_absolute()
+            || workspace.to_str().is_none()
+        {
             return None;
         }
         Some(Self {
@@ -1067,6 +1070,7 @@ impl GrantStore {
         // An empty set grants nothing yet writes a row no later load
         // accepts; reject it here so one bad call cannot brick the file.
         if key.services.is_empty()
+            || !matches!(key.origin, Origin::User | Origin::Bundled)
             || key.digest.len() != 64
             || !key.digest.bytes().all(|byte| byte.is_ascii_hexdigit())
             || !key.workspace.is_absolute()
