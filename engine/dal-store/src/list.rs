@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     error::StoreError,
     layout::SessionPaths,
+    private,
     util::{self, FileMode},
 };
 
@@ -644,7 +645,9 @@ fn read_cache(
     workspace: &Workspace,
     journal_bytes: u64,
 ) -> Option<InfoFile> {
-    let bytes = fs::read(path).ok()?;
+    let mut file = private::open_private_file(path).ok()?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
     let info: InfoFile = sonic_rs::from_slice(&bytes).ok()?;
     let expected_workspace = workspace.as_path().display().to_string();
     (info.v == CACHE_VERSION
@@ -751,7 +754,7 @@ fn user_preview(path: &Path, parts: &[JournalPart]) -> String {
                     break;
                 };
                 let blob_path = session_dir.join("blobs").join(blob_id.to_string());
-                let Ok(file) = File::open(blob_path) else {
+                let Ok(file) = private::open_private_file(&blob_path) else {
                     break;
                 };
                 let remaining = MAX_PREVIEW_BYTES.saturating_sub(preview.len());

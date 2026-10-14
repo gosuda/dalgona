@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use dal_core::{ClientId, Name, Origin, Service, ServiceSet, Timestamp};
-use dal_store::{FileMode, create_private_dir_all, write_atomic};
+use dal_store::{FileMode, create_private_dir_all, open_private_file, write_atomic};
 
 use super::{GrantRow, GrantStoreError};
 
@@ -18,7 +18,12 @@ pub(crate) fn grants_path(data_dir: &Path) -> PathBuf {
 }
 
 pub(crate) fn load(data_dir: &Path) -> Result<Vec<GrantRow>, GrantStoreError> {
-    let bytes = match std::fs::read(grants_path(data_dir)) {
+    let bytes = match open_private_file(&grants_path(data_dir)).and_then(|mut file| {
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    }) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(GrantStoreError::Read(e)),

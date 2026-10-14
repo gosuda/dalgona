@@ -15,7 +15,7 @@ use std::{
     },
 };
 
-use dal_store::{FileMode, write_atomic};
+use dal_store::{FileMode, open_or_create_private_file, open_private_file, write_atomic};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, Notify};
@@ -383,7 +383,14 @@ impl RefreshFlight {
 /// Reads the token file. A corrupt or unreadable file is ignored so the
 /// caller re-authorizes; the caller emits the one warning.
 pub(crate) fn read_tokens(path: &Path) -> TokenFile {
-    std::fs::read(path)
+    use std::io::Read;
+
+    open_private_file(path)
+        .and_then(|mut file| {
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)?;
+            Ok(bytes)
+        })
         .ok()
         .and_then(|bytes| sonic_rs::from_slice::<TokenFile>(&bytes).ok())
         .unwrap_or_default()
@@ -425,15 +432,7 @@ pub(crate) fn persist_token(
             cause: format!("could not create MCP token directory: {error}"),
         })?;
     }
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true).write(true).create(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let file_lock = options
-        .open(path.with_extension("lock"))
+    let file_lock = open_or_create_private_file(&path.with_extension("lock"))
         .map_err(|error| McpError::Auth {
             cause: format!("could not open MCP token lock: {error}"),
         })?;
