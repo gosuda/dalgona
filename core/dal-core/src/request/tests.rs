@@ -2,11 +2,48 @@ use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use super::{Answer, AnswerValue, CallGrant, Choice, JobEnd, Owner, Preview, Question, Request};
+use super::{
+    Answer, AnswerValue, CallGrant, Choice, ExecPreview, JobEnd, Owner, Preview, Question, Request,
+};
 use crate::id::{CallId, JobId, RequestId, TurnId};
 use crate::raw::RawJson;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+#[test]
+fn exec_preview_binds_command_cwd_and_shell() -> TestResult {
+    let workspace = std::env::current_dir()?;
+    let execution = ExecPreview {
+        command: "rm -rf ./output && echo done".into(),
+        cwd: workspace.join("project"),
+        shell: workspace.join("bin/bash"),
+    };
+    let approved = execution.to_preview()?;
+    assert_eq!(ExecPreview::from_preview(&approved), Some(execution.clone()));
+    assert!(approved.body.contains("project"));
+
+    let mut moved = execution.clone();
+    moved.cwd = workspace.join("other-project");
+    let moved_preview = moved.to_preview()?;
+    assert_ne!(approved.digest, moved_preview.digest, "cwd changes must invalidate approval");
+
+    let mut different_command = execution.clone();
+    different_command.command = "rm -rf ./other-output".into();
+    assert_ne!(approved.digest, different_command.to_preview()?.digest);
+
+    let mut different_shell = execution.clone();
+    different_shell.shell = workspace.join("bin/sh");
+    assert_ne!(approved.digest, different_shell.to_preview()?.digest);
+
+    let mut forged = approved.clone();
+    forged.body = moved_preview.body;
+    assert!(ExecPreview::from_preview(&forged).is_none());
+
+    let mut missing_digest = approved;
+    missing_digest.digest = None;
+    assert!(ExecPreview::from_preview(&missing_digest).is_none());
+    Ok(())
+}
 
 fn preview() -> Preview {
     Preview {

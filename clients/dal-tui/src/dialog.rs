@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use dal_core::{Answer, CallGrant, Question, RawJson, Request};
+use dal_core::{Answer, CallGrant, ExecPreview, Question, RawJson, Request};
 
 use crate::diagram::{DiagramSettings, RenderCache};
 use crate::render::{Prose, RenderRow, prose_rows, text_rows};
@@ -719,7 +719,19 @@ impl DialogUi {
                 if let Some(grant) = grant {
                     rows.push(RenderRow::new(grant_clause(grant), Role::Text));
                 }
-                rows.extend(rows_of(&preview.body, Prose::Verbatim));
+                if let Some(exec) = ExecPreview::from_preview(preview) {
+                    rows.push(RenderRow::new(
+                        format!("cwd: {}", exec.cwd.display()),
+                        Role::Text,
+                    ));
+                    rows.push(RenderRow::new(
+                        format!("shell: {}", exec.shell.display()),
+                        Role::Text,
+                    ));
+                    rows.extend(rows_of(&exec.command, Prose::Verbatim));
+                } else {
+                    rows.extend(rows_of(&preview.body, Prose::Verbatim));
+                }
                 rows
             }
             Question::Grant {
@@ -984,6 +996,47 @@ mod tests {
             rows.iter()
                 .any(|row| row.contains("search: https://mcp.example/search"))
         );
+    }
+
+    #[test]
+    fn exec_dialog_shows_the_effective_directory_shell_and_command() {
+        use dal_core::{Answer, ExecPreview, Owner, Question, Request, RequestId};
+
+        let workspace = std::env::current_dir().expect("read workspace");
+        let cwd = workspace.join("project");
+        let shell = workspace.join("bin/bash");
+        let mut dialog = super::DialogUi::default();
+        dialog.opened(Request {
+            id: RequestId::new_v7(),
+            turn: None,
+            owner: Owner::Core,
+            question: Question::Approval {
+                tool: "exec".into(),
+                preview: ExecPreview {
+                    command: "echo approved".into(),
+                    cwd: cwd.clone(),
+                    shell: shell.clone(),
+                }
+                .to_preview()
+                .expect("serialize execution context"),
+                grant: None,
+                call: None,
+            },
+            timeout: std::time::Duration::from_secs(30),
+            default: Answer::Decline,
+        });
+        let rows = dialog.rows(400, 30, crate::WidthMode::Narrow);
+        assert!(
+            rows.iter()
+                .any(|row| row.contains(&format!("cwd: {}", cwd.display()))),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.contains(&format!("shell: {}", shell.display()))),
+            "{rows:?}"
+        );
+        assert!(rows.iter().any(|row| row.contains("echo approved")), "{rows:?}");
     }
 
     #[test]

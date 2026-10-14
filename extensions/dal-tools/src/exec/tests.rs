@@ -109,6 +109,51 @@ fn validate_keeps_cwd_inside_the_canonical_workspace() {
 }
 
 #[test]
+fn exec_approval_uses_the_canonical_working_directory() {
+    let root = tempfile::tempdir().expect("create a workspace");
+    std::fs::create_dir(root.path().join("subdir")).expect("create subdirectory");
+    let shell_path = root.path().join("bin/bash");
+    let shell = super::shell::ResolvedShell {
+        program: shell_path.clone(),
+    };
+    for (requested, expected) in [
+        (None, root.path().to_path_buf()),
+        (Some("subdir/../subdir"), root.path().join("subdir")),
+    ] {
+        let validated = super::validate(
+            ExecArgs {
+                command: "pwd".into(),
+                cwd: requested.map(str::to_owned),
+                timeout_seconds: None,
+                foreground_s: None,
+            },
+            root.path(),
+        )
+        .expect("validate cwd");
+        let preview = super::execution_plan(&validated, &shell)
+            .to_preview()
+            .expect("encode exec context");
+        let execution = dal_core::ExecPreview::from_preview(&preview).expect("parse exec preview");
+        assert_eq!(execution.cwd, std::fs::canonicalize(expected).unwrap());
+        assert_eq!(execution.shell, shell_path);
+        assert_eq!(execution.command.as_ref(), "pwd");
+    }
+
+    let lexical_root = root.path().join("subdir/..");
+    let validated = super::validate(
+        ExecArgs {
+            command: "pwd".into(),
+            cwd: None,
+            timeout_seconds: None,
+            foreground_s: None,
+        },
+        &lexical_root,
+    )
+    .expect("validate lexical workspace root");
+    assert_eq!(validated.cwd, std::fs::canonicalize(root.path()).unwrap());
+}
+
+#[test]
 fn validate_rejects_absolute_and_escaping_cwds() {
     let parent = tempfile::tempdir().expect("create a temporary parent");
     let root = parent.path().join("workspace");

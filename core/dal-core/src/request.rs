@@ -13,7 +13,7 @@
 //! content buffering, so a value payload keeps its exact interior bytes,
 //! member order, and number spelling.
 
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 
 use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
@@ -31,6 +31,53 @@ pub struct Preview {
     pub body: Box<str>,
     /// The digest of the previewed content, when supplied.
     pub digest: Option<[u8; 32]>,
+}
+
+/// One command's execution context, serialized into an exec approval preview.
+///
+/// The preview body carries all effect-defining inputs as JSON. Even clients
+/// that do not understand this type still show the command, cwd, and shell.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct ExecPreview {
+    /// The exact argument passed to the shell with `-c`.
+    pub command: Box<str>,
+    /// The validated working directory passed to the spawned process.
+    pub cwd: PathBuf,
+    /// The resolved executable used to run the command.
+    pub shell: PathBuf,
+}
+
+impl ExecPreview {
+    /// Builds one digest-bound approval preview from the execution context.
+    ///
+    /// # Errors
+    ///
+    /// Returns a serialization error when a path cannot be represented in JSON.
+    pub fn to_preview(&self) -> Result<Preview, sonic_rs::Error> {
+        let body = sonic_rs::to_string(self)?;
+        Ok(Preview {
+            title: "exec".into(),
+            digest: Some(*blake3::hash(body.as_bytes()).as_bytes()),
+            body: body.into(),
+        })
+    }
+
+    /// Decodes only an intact, digest-bound exec approval preview.
+    #[must_use]
+    pub fn from_preview(preview: &Preview) -> Option<Self> {
+        if preview.title.as_ref() != "exec"
+            || preview.digest != Some(*blake3::hash(preview.body.as_bytes()).as_bytes())
+        {
+            return None;
+        }
+        let execution: Self = sonic_rs::from_str(&preview.body).ok()?;
+        if execution.command.trim().is_empty() || !execution.cwd.is_absolute() {
+            return None;
+        }
+        Some(execution)
+    }
 }
 
 /// One choice offered by a selection question.

@@ -20,7 +20,8 @@ use dal_agent::{
     ext::{ArgError, BoxFuture, RawValue, Tool, ToolCall, ToolCx, ToolOutcome, ToolOutput},
 };
 use dal_core::{
-    CallId, ModelInfo, Name, Preview, RawJson, RegistrationError, ToolClass, ToolSpec, Workspace,
+    CallId, ExecPreview, ModelInfo, Name, RawJson, RegistrationError, ToolClass, ToolSpec,
+    Workspace,
 };
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _};
 
@@ -213,18 +214,17 @@ pub(crate) fn validate(args: ExecArgs, root: &Path) -> Result<ValidatedCall, Exe
     let timeout_seconds = args.timeout_seconds.map(timeout_secs).transpose()?;
     let timeout = timeout_seconds.map(Duration::from_secs);
     let foreground = args.foreground_s.map(foreground_window).transpose()?;
+    let canonical_root = std::fs::canonicalize(root).map_err(|_| ExecError::CwdNotRelative)?;
     let cwd = match args.cwd.as_deref() {
-        None | Some("") => root.to_path_buf(),
+        None | Some("") => canonical_root.clone(),
         Some(path) => {
             let relative = Path::new(path);
             if relative.is_absolute() {
                 return Err(ExecError::CwdNotRelative);
             }
-            let joined = root.join(relative);
+            let joined = canonical_root.join(relative);
             let canonical = std::fs::canonicalize(&joined)
                 .map_err(|_| ExecError::CwdMissing(path.to_owned()))?;
-            let canonical_root =
-                std::fs::canonicalize(root).map_err(|_| ExecError::CwdNotRelative)?;
             if !canonical.starts_with(&canonical_root) {
                 return Err(ExecError::CwdNotRelative);
             }
@@ -450,6 +450,15 @@ pub(crate) const EXEC_SCHEMA: &str = "{\"type\":\"object\",\"properties\":{\"com
 /// `On timeout, cancel, or exit, dalgon stops the job object of the command and every process in it.`
 pub(crate) const EXEC_DESCRIPTION: &str = "Run one shell command and return its output. The command runs with <shell> -c; stdin is closed. The environment adds NO_COLOR=1, TERM=dumb, PAGER=cat, and DAL_NESTED=1. Output shows the last 4096 bytes, and a line names the file that holds the full output. timeout_seconds bounds the run in seconds; without it the command runs until it exits or the turn is cancelled. foreground_s sets how many seconds the call waits before the command continues as a background job; without it the call waits for the exec.foreground_seconds setting. On timeout or cancel, dalgon sends SIGTERM to the process group of the command and SIGKILL 2 seconds later. When the command exits, dalgon stops processes that it left running in its process group. A non-zero exit code makes the result an error. exec is not a sandbox. A read-only command joins parallel reads; other commands run one at a time and ask for approval as configured.";
 
+/// One immutable source of truth for the preview and the process parameters.
+fn execution_plan(call: &ValidatedCall, shell: &shell::ResolvedShell) -> ExecPreview {
+    ExecPreview {
+        command: call.command.clone().into(),
+        cwd: call.cwd.clone(),
+        shell: shell.program.clone(),
+    }
+}
+
 pub(crate) struct ExecTool {
     cfg: ExecConfig,
     name: Name,
@@ -495,23 +504,29 @@ impl ExecTool {
                 )));
             }
         };
-        let preview = Preview {
-            title: "exec".into(),
-            body: validated.command.clone().into(),
-            digest: None,
+        // The same immutable execution context supplies the approval and the
+        // process door. Its digest covers the exact command, cwd, and shell.
+        let execution = execution_plan(&validated, &shell);
+        let preview = match execution.to_preview() {
+            Ok(preview) => preview,
+            Err(error) => {
+                return ToolOutcome::Err(ToolError::message(format!(
+                    "exec: cannot encode approval preview: {error}"
+                )));
+            }
         };
         let approved = match cx.authorize(preview).await {
             Ok(approved) => approved,
             Err(reason) => return ToolOutcome::Err(ToolError::Denied(reason)),
         };
         let spawn_argv = [
-            OsString::from(shell.program.as_os_str()),
+            OsString::from(execution.shell.as_os_str()),
             OsString::from("-c"),
-            OsString::from(&validated.command),
+            OsString::from(&*execution.command),
         ];
         let thread_id = cx.session().to_string();
         let opts = SpawnOpts {
-            cwd: validated.cwd.clone(),
+            cwd: execution.cwd.clone(),
             timeout: validated.timeout,
             env: shell::provenance_environment(&thread_id, call.id.as_str()),
             stdout_prefix_limit: 0,
