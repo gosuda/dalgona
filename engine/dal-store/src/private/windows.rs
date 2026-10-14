@@ -76,7 +76,7 @@ impl Descriptor {
 
     fn attributes(&self) -> SECURITY_ATTRIBUTES {
         SECURITY_ATTRIBUTES {
-            nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>()).expect("small ABI struct"),
+            nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>()).unwrap_or(u32::MAX),
             lpSecurityDescriptor: self.0,
             bInheritHandle: FALSE,
         }
