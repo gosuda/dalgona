@@ -172,7 +172,7 @@ fn file_is_private_impl(_file: &File) -> io::Result<bool> {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     use super::*;
 
     #[cfg(windows)]
