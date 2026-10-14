@@ -37,7 +37,24 @@ const UNSUPPORTED: [&str; 8] = [
 ];
 
 /// Serves `GET /.well-known/agent-card.json`.
+///
+/// A token-required listener must never advertise a bearer endpoint over
+/// plaintext: when the proxy declares an `X-Forwarded-Proto` first hop other
+/// than `https`, the card is refused until the proxy terminates TLS.
 pub(crate) fn card(ctx: &Arc<ServeCtx>, host: Option<&str>, proto: Option<&str>) -> Resp {
+    if ctx.cfg.public
+        && let Some(declared) = forwarded_proto(proto)
+        && !declared.eq_ignore_ascii_case("https")
+    {
+        return Resp::text(
+            503,
+            &format!(
+                "the agent card is unavailable: the reverse proxy declared X-Forwarded-Proto \
+                 {declared:?}, which would advertise a bearer endpoint over plaintext; \
+                 terminate TLS at the proxy and forward X-Forwarded-Proto: https"
+            ),
+        );
+    }
     let base = card_base(host, proto, ctx.cfg.bind, ctx.cfg.port);
     let mut document = sonic_rs::json!({
         "name": "dal",
@@ -87,9 +104,7 @@ pub(crate) fn card_base(
     bind: std::net::IpAddr,
     port: u16,
 ) -> String {
-    let first = proto
-        .and_then(|value| value.split(',').next())
-        .map(str::trim);
+    let first = forwarded_proto(proto);
     let proxied = first.is_some_and(|proto| {
         proto.eq_ignore_ascii_case("https") || proto.eq_ignore_ascii_case("http")
     });
@@ -103,6 +118,13 @@ pub(crate) fn card_base(
         Some(host) => format!("{scheme}://{host}:{port}"),
         None => format!("{scheme}://{}", std::net::SocketAddr::new(bind, port)),
     }
+}
+
+/// Returns the first-hop scheme a same-host proxy declares, else None.
+fn forwarded_proto(proto: Option<&str>) -> Option<&str> {
+    proto
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
 }
 
 /// Returns true when a Host header value already names its port.

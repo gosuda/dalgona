@@ -259,11 +259,18 @@ async fn token_file_auth_cases() {
             "",
         )
         .await;
-        assert_eq!(
-            proxied_http.json()["supportedInterfaces"][0]["url"].as_str(),
-            Some("http://agent.example/a2a"),
+        assert_eq!(proxied_http.status, 503, "{proxied_http:?}");
+        assert!(
+            proxied_http.body.contains("X-Forwarded-Proto \"http\""),
             "{proxied_http:?}"
         );
+        let proxied_other = http(
+            addr,
+            "GET /.well-known/agent-card.json HTTP/1.1\r\nhost: agent.example\r\nx-forwarded-proto: gopher",
+            "",
+        )
+        .await;
+        assert_eq!(proxied_other.status, 503, "{proxied_other:?}");
     })
     .await;
 }
