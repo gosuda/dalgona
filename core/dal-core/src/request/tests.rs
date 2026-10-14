@@ -2,7 +2,9 @@ use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use super::{Answer, AnswerValue, CallGrant, Choice, ExecApproval, JobEnd, Owner, Preview, Question, Request};
+use super::{
+    Answer, AnswerValue, CallGrant, Choice, ExecApproval, JobEnd, Owner, Preview, Question, Request,
+};
 use crate::id::{CallId, JobId, RequestId, TurnId};
 use crate::raw::RawJson;
 
@@ -341,7 +343,9 @@ fn exec_approval_round_trip_binds_every_execution_parameter() -> TestResult {
         PathBuf::from("/workspace/sub\nShell: fake"),
         PathBuf::from("/usr/bin/bash"),
     );
-    let preview = execution.preview().ok_or("approval paths must be displayable")?;
+    let preview = execution
+        .preview()
+        .ok_or("approval paths must be displayable")?;
     assert!(
         preview
             .body
@@ -349,11 +353,17 @@ fn exec_approval_round_trip_binds_every_execution_parameter() -> TestResult {
     );
     assert!(preview.body.contains(r#"Shell: "/usr/bin/bash""#));
     assert!(preview.body.ends_with("Command:\nprintf 'one\nCommand: two'"));
-    assert_eq!(ExecApproval::from_preview(&preview), Some(execution.clone()));
+    assert_eq!(
+        ExecApproval::from_preview(&preview),
+        Some(execution.clone())
+    );
 
     let serialized = sonic_rs::to_string(&preview)?;
     let round_trip = sonic_rs::from_str::<Preview>(&serialized)?;
-    assert_eq!(ExecApproval::from_preview(&round_trip), Some(execution.clone()));
+    assert_eq!(
+        ExecApproval::from_preview(&round_trip),
+        Some(execution.clone())
+    );
 
     for changed in [
         ExecApproval::new(
