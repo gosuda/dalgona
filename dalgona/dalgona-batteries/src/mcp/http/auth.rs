@@ -8,7 +8,7 @@ use std::{
     collections::BTreeMap,
     fmt,
     future::Future,
-    io::Read,
+    io::{self, Read},
     path::Path,
     sync::{
         Arc,
@@ -16,7 +16,9 @@ use std::{
     },
 };
 
-use dal_store::{FileMode, create_private_dir_all, open_private_file, open_private_lock, write_atomic};
+use dal_store::{
+    FileMode, create_private_dir_all, open_private_file, open_private_lock, write_atomic,
+};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, Notify};
@@ -384,15 +386,28 @@ impl RefreshFlight {
 /// Reads the token file. A corrupt or unreadable file is ignored so the
 /// caller re-authorizes; the caller emits the one warning.
 pub(crate) fn read_tokens(path: &Path) -> TokenFile {
-    open_private_file(path)
-        .and_then(|mut file| {
-            let mut bytes = Vec::new();
-            file.read_to_end(&mut bytes)?;
-            Ok(bytes)
-        })
-        .ok()
-        .and_then(|bytes| sonic_rs::from_slice::<TokenFile>(&bytes).ok())
-        .unwrap_or_default()
+    read_tokens_strict(path).unwrap_or_default()
+}
+
+/// Reads the token file for a locked write. Only a missing or empty file
+/// starts an empty document; an open, read, or decode failure on an existing
+/// file propagates so a write transaction never treats an unreadable store as
+/// empty and drops the credentials it holds.
+fn read_tokens_strict(path: &Path) -> io::Result<TokenFile> {
+    let mut file = match open_private_file(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(TokenFile::default());
+        }
+        Err(error) => return Err(error),
+    };
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    if bytes.is_empty() {
+        return Ok(TokenFile::default());
+    }
+    sonic_rs::from_slice::<TokenFile>(&bytes)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
 /// Returns the record stored under this exact issuer and canonical resource.
@@ -431,14 +446,16 @@ pub(crate) fn persist_token(
             cause: format!("could not create MCP token directory: {error}"),
         })?;
     }
-    let file_lock = open_private_lock(&path.with_extension("lock"))
-        .map_err(|error| McpError::Auth {
+    let file_lock =
+        open_private_lock(&path.with_extension("lock")).map_err(|error| McpError::Auth {
             cause: format!("could not open MCP token lock: {error}"),
         })?;
     file_lock.lock().map_err(|error| McpError::Auth {
         cause: format!("could not lock MCP tokens: {error}"),
     })?;
-    let mut file = read_tokens(path);
+    let mut file = read_tokens_strict(path).map_err(|error| McpError::Auth {
+        cause: format!("could not read MCP tokens: {error}"),
+    })?;
     file.tokens
         .entry(issuer.to_owned())
         .or_default()
@@ -785,6 +802,45 @@ mod tests {
         assert!(
             path.with_extension("lock").exists(),
             "the cross-process lock file is created beside the token file"
+        );
+        std::fs::remove_file(path.with_extension("lock")).expect("remove token lock");
+        std::fs::remove_file(path).expect("remove token file");
+    }
+
+    #[test]
+    fn persist_refuses_a_token_file_it_cannot_read_back() {
+        let path =
+            std::env::temp_dir().join(format!("dalgona-mcp-tokens-{}.json", uuid::Uuid::new_v4()));
+        let record = TokenRecord {
+            client_id: "client".to_owned(),
+            access_token: "access".to_owned(),
+            refresh_token: Some("refresh".to_owned()),
+            scopes: vec!["read".to_owned()],
+        };
+        persist_token(
+            &path,
+            "https://issuer.example",
+            "https://server.example/mcp",
+            record.clone(),
+        )
+        .expect("persist first token");
+        // A token file that fails to decode must stop the write transaction:
+        // treating it as an empty store would drop every stored credential.
+        std::fs::write(&path, b"not a token file").expect("corrupt token file");
+        assert!(read_tokens(&path).tokens.is_empty());
+        assert!(
+            persist_token(
+                &path,
+                "https://other.example",
+                "https://server.example/mcp",
+                record,
+            )
+            .is_err(),
+            "a persist must fail rather than erase the stored credentials"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("read token file"),
+            b"not a token file"
         );
         std::fs::remove_file(path.with_extension("lock")).expect("remove token lock");
         std::fs::remove_file(path).expect("remove token file");
