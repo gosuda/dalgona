@@ -827,8 +827,13 @@ pub(crate) mod tests {
         write(&outside, "secret.rs", b"fn private() {}\n");
 
         let search = engine(true, None);
+        let modes: &[&str] = if cfg!(feature = "symbols") {
+            &["find", "grep", "symbol"]
+        } else {
+            &["find", "grep"]
+        };
         for path in ["../outside".to_owned(), outside.to_string_lossy().into_owned()] {
-            for mode in ["find", "grep"] {
+            for &mode in modes {
                 let raw = sonic_rs::to_string(&sonic_rs::json!({
                     "mode": mode,
                     "pattern": "private",
@@ -842,7 +847,7 @@ pub(crate) mod tests {
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink(&outside, workspace.join("escape")).unwrap();
-            for mode in ["find", "grep"] {
+            for &mode in modes {
                 let raw = format!(r#"{{"mode":"{mode}","pattern":"private","path":"escape"}}"#);
                 let error = run(&search, &workspace, &raw).await.unwrap_err();
                 assert_eq!(error, "search: escape is outside the workspace");

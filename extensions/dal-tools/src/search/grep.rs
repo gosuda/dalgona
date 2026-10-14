@@ -553,7 +553,9 @@ fn scan(
         total: 0,
     };
     for target in files {
-        let Ok(bytes) = crate::scoped::read_limited(workspace, &target.abs, find::MAX_INDEXABLE_BYTES) else {
+        let Ok(bytes) =
+            crate::scoped::read_limited(workspace, &target.abs, find::MAX_INDEXABLE_BYTES)
+        else {
             continue;
         };
         let fits = u64::try_from(bytes.len()).is_ok_and(|len| len <= find::MAX_INDEXABLE_BYTES);

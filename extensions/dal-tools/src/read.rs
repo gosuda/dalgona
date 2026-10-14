@@ -497,7 +497,12 @@ fn display_path(root: &Path, target: &Path, shown: &str) -> String {
 
 /// Lists a directory: directories first with a trailing `/`, each group
 /// sorted bytewise, at most [`MAX_DIR_ENTRIES`] entries.
-fn read_directory(root: &Path, path: &Path, shown: &str, opened: File) -> Result<String, ReadError> {
+fn read_directory(
+    root: &Path,
+    path: &Path,
+    shown: &str,
+    opened: File,
+) -> Result<String, ReadError> {
     let mut entries = Vec::new();
     #[cfg(unix)]
     {
@@ -692,7 +697,8 @@ mod tests {
 
     fn text_window(path: &Path, shown: &str, offset: u64, limit: u64) -> ReadWindow {
         let lines = Lines::From { offset, limit };
-        let window = match read_file(File::open(path).unwrap(), shown, &lines, footer_reserve(shown)).unwrap() {
+        let file = File::open(path).unwrap();
+        let window = match read_file(file, shown, &lines, footer_reserve(shown)).unwrap() {
             FileContent::Text(window) => Some(window),
             FileContent::Image { .. } => None,
         };
