@@ -97,7 +97,7 @@ pub(crate) fn workspace_key(path: &Path) -> String {
     format!("{cleaned}-{}", &hex[..12])
 }
 
- /// Creates private directories (0700 on Unix; protected DACLs on Windows).
+/// Creates private directories (0700 on Unix; protected DACLs on Windows).
 ///
 /// On Windows, an existing target must already have the required protected DACL.
 /// Existing ancestors are not modified.
