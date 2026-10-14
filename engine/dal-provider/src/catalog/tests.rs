@@ -16,7 +16,7 @@ use super::{
 };
 use crate::{
     auth::credential::{OAuthCredential, SecretString},
-    error::ResolveError,
+    error::{LimitError, ResolveError},
     provider::{AuthStyle, Transport},
     thinking::Effort,
 };
@@ -646,6 +646,49 @@ async fn anthropic_fetch_paginates_and_atomically_caches_rows() {
         ["claude-one", "claude-two"]
     );
 }
+#[tokio::test]
+async fn anthropic_catalog_deadline_covers_the_entire_refresh() {
+    let directory = TestDir::new();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind stalled catalog listener");
+    let port = listener.local_addr().expect("read listener port").port();
+    let mut provider = provider(
+        "anthropic",
+        Family::Anthropic,
+        &format!("http://127.0.0.1:{port}"),
+    );
+    provider.auth = AuthStyle::XApiKey;
+    let credential = Credential::ApiKey {
+        key: SecretString::from(String::from("test-key")),
+    };
+    let client = reqwest::Client::new();
+    let fetch = ModelFetch {
+        client: &client,
+        provider: &provider,
+        credential: &credential,
+        cache_dir: directory.path(),
+        user_agent: "dalgon/test",
+        version: "test",
+    };
+
+    // The injected aggregate timer fires while per-request timers never do.
+    let fetched = tokio::time::timeout(
+        Duration::from_secs(2),
+        load_models(&fetch, |duration| async move {
+            if duration != Duration::from_secs(120) {
+                std::future::pending::<()>().await;
+            }
+        }),
+    )
+    .await
+    .expect("the aggregate deadline finishes the refresh");
+    assert_eq!(fetched.source, CatalogSource::Typed);
+    assert!(matches!(
+        fetched.live_error,
+        Some(ProviderError::Limit(LimitError::CatalogTimeout))
+    ));
+    drop(listener);
+}
+
 #[tokio::test]
 async fn failed_live_fetch_uses_atomic_cache_then_typed_default_has_unknown_window() {
     let directory = TestDir::new();

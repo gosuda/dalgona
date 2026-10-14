@@ -17,6 +17,16 @@ pub enum LimitError {
     WsMessage,
     /// One non-streaming response body grew past 16 MiB.
     Body,
+    /// One Anthropic model catalog refresh requested more than 32 pages.
+    CatalogPages,
+    /// One Anthropic model catalog refresh decoded more than 10,000 rows.
+    CatalogRows,
+    /// One Anthropic model catalog refresh read more than 32 MiB of JSON.
+    CatalogBytes,
+    /// One Anthropic model catalog refresh retained over 64 KiB of cursors.
+    CatalogCursorBytes,
+    /// One Anthropic model catalog refresh exceeded its 120 s deadline.
+    CatalogTimeout,
 }
 
 impl fmt::Display for LimitError {
@@ -26,6 +36,13 @@ impl fmt::Display for LimitError {
             Self::SseEvent => f.write_str("SSE event exceeds 8 MiB."),
             Self::WsMessage => f.write_str("WebSocket message exceeds 16 MiB."),
             Self::Body => f.write_str("response body exceeds 16 MiB."),
+            Self::CatalogPages => f.write_str("Anthropic model catalog exceeds 32 pages."),
+            Self::CatalogRows => f.write_str("Anthropic model catalog exceeds 10,000 rows."),
+            Self::CatalogBytes => f.write_str("Anthropic model catalog exceeds 32 MiB of JSON."),
+            Self::CatalogCursorBytes => {
+                f.write_str("Anthropic model catalog exceeds 64 KiB of cursors.")
+            }
+            Self::CatalogTimeout => f.write_str("Anthropic model catalog exceeds 120 s."),
         }
     }
 }
