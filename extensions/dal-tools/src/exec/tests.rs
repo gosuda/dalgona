@@ -123,12 +123,19 @@ fn exec_approval_uses_the_canonical_per_call_directory() {
     )
     .expect("validate relative directory");
     let shell = PathBuf::from("/bin/bash");
-    let preview = ExecApproval::new(validated.command.clone(), validated.cwd.clone(), shell.clone())
-        .preview()
-        .expect("encode exec preview");
+    let preview = ExecApproval::new(
+        validated.command.clone(),
+        validated.cwd.clone(),
+        shell.clone(),
+    )
+    .preview()
+    .expect("encode exec preview");
     let shown = ExecApproval::from_preview(&preview).expect("decode approved execution");
     assert_eq!(shown.command.as_ref(), "pwd");
-    assert_eq!(shown.cwd, std::fs::canonicalize(root.path().join("nested")).unwrap());
+    assert_eq!(
+        shown.cwd,
+        std::fs::canonicalize(root.path().join("nested")).unwrap()
+    );
     assert_eq!(shown.cwd, validated.cwd);
     assert_eq!(shown.shell, shell);
     assert!(!preview.body.contains("nested/../nested"));
