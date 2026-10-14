@@ -1384,6 +1384,41 @@ mod tests {
 
 
     #[tokio::test]
+    async fn unrelated_loopback_registration_port_is_rejected_before_send() {
+        let mcp = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("MCP service");
+        let unrelated = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("unrelated service");
+        let mcp_address = mcp.local_addr().expect("MCP address");
+        let unrelated_address = unrelated.local_addr().expect("unrelated address");
+        let target = Url::parse(&format!("http://{mcp_address}/mcp")).expect("MCP target");
+        let endpoint =
+            Url::parse(&format!("http://{unrelated_address}/register")).expect("registration URL");
+        let policy = NetworkPolicy::for_target(&target);
+        let client = Client::builder().no_proxy().build().expect("OAuth client");
+        let cancel = CancellationToken::new();
+
+        let rejected = register_client(
+            &client,
+            &policy,
+            &endpoint,
+            "http://127.0.0.1:12345/callback",
+            "test",
+            &cancel,
+        )
+        .await;
+        assert!(matches!(rejected, Err(McpError::Auth { .. })));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), unrelated.accept())
+                .await
+                .is_err(),
+            "unapproved registration origin must receive no POST"
+        );
+    }
+
+    #[tokio::test]
     async fn cross_origin_resource_metadata_requires_approval_before_get() {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
