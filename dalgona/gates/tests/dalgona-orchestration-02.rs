@@ -61,7 +61,11 @@ fn run_report_is_delivered_exactly_once() -> support::TestResult<()> {
 
 /// Grants every bundled extension the services it declares, as a person
 /// would on first use, so no grant question interrupts the run.
-async fn grant_bundled_extensions(data: &Path, workspace: &Path, user: &str) -> support::TestResult<()> {
+async fn grant_bundled_extensions(
+    data: &Path,
+    workspace: &Path,
+    user: &str,
+) -> support::TestResult<()> {
     let product = support::build_product(data.to_path_buf(), Some(user))?;
     for extension in &product.extensions {
         let services = extension.inject().capabilities();
