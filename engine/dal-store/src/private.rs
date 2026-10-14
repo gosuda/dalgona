@@ -57,9 +57,7 @@ pub fn open_private_file(path: &Path) -> io::Result<File> {
     }
     #[cfg(not(windows))]
     {
-        let file = File::open(path)?;
-        require_private(&file)?;
-        Ok(file)
+        File::open(path)
     }
 }
 
@@ -74,9 +72,7 @@ pub fn open_private_file_read_write(path: &Path) -> io::Result<File> {
     }
     #[cfg(not(windows))]
     {
-        let file = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
-        require_private(&file)?;
-        Ok(file)
+        std::fs::OpenOptions::new().read(true).write(true).open(path)
     }
 }
 
@@ -98,12 +94,11 @@ pub fn open_private_lock(path: &Path) -> io::Result<File> {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let file = options.open(path)?;
-        require_private(&file)?;
-        Ok(file)
+        options.open(path)
     }
 }
 
+#[cfg(windows)]
 pub(crate) fn require_private(file: &File) -> io::Result<()> {
     if file.metadata()?.is_file() && file_is_private(file)? {
         Ok(())
