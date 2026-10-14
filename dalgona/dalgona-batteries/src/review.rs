@@ -1,0 +1,780 @@
+// SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
+//! The review battery: one reviewer round over the session's git changes.
+
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
+
+pub mod config;
+pub mod git;
+pub mod reply;
+pub mod rounds;
+
+#[cfg(test)]
+mod tests;
+
+pub use config::{ReviewConfig, ReviewConfigError};
+
+use crate::text::byte_prefix;
+use dal_agent::ext::{
+    ArgError, BoxFuture, Extension, ExtensionBuilder, HookCx, HookError, ObserveHook, RawValue,
+    SessionCx, SessionInstalls, SessionSetup, StatusCx, StatusSnapshot, ToolCall, ToolCx,
+    ToolOutcome, ToolOutput,
+};
+use dal_core::{
+    CommandName, CommandSpec, Name, RawJson, RegistrationError, ServiceSet, SessionEnd, SessionId,
+    ToolClass, ToolSpec, Workspace,
+};
+
+const REVIEW_COMMAND_ARGS_HINT: &str = "[focus]";
+const REVIEW_COMMAND_SUMMARY: &str = "Review the current changes.";
+
+pub(crate) const REVIEW_SYSTEM: &str = "You are a code reviewer. You review the diff of one coding session. You report defects only: bugs, broken behavior, security problems, and missed requirements. You do not report style preferences. You answer with one JSON object and no other text.";
+pub(crate) const MAX_DIFF_BYTES: usize = 262_144;
+pub(crate) const MAX_FINDINGS: usize = 50;
+pub(crate) const DIFF_TRUNCATION_MARKER: &str = "\n[... diff truncated at 262144 bytes ...]";
+pub(crate) const FOCUS_TRUNCATION_MARKER: &str = "[... focus truncated]";
+pub(crate) const MAX_ERROR_BYTES: usize = 200;
+pub(crate) const MAX_STORED_DETAIL_BYTES: usize = 500;
+pub(crate) const REVIEW_REPLY_FORMAT: &str = "One JSON object: {\"verdict\":\"clean\"|\"findings\",\"summary\":\"...\",\"findings\":[{\"path\":\"...\",\"line\":null,\"severity\":\"critical\"|\"major\"|\"minor\",\"title\":\"...\",\"detail\":\"...\"}]}";
+pub(crate) const GIT_STDOUT_PREFIX_LIMIT: u32 = 262_145;
+/// The one deadline for the reviewer's route probe and its single request.
+pub(crate) const REVIEWER_DEADLINE: Duration = Duration::from_secs(120);
+/// Ends text that a cap cut short. It counts toward the cap.
+pub(crate) const TRUNCATION_MARKER: &str = " [truncated]";
+pub(crate) const MAX_FOCUS_BYTES: usize = 500;
+
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub(crate) enum ReviewError {
+    #[error("review needs a git repository: {stderr}")]
+    NoGit { stderr: Box<str> },
+    #[error("reviewer call failed: {cause}")]
+    Provider { cause: Box<str> },
+    #[error("reviewer reply did not parse at round {round}: {reason}")]
+    Parse { round: u8, reason: Box<str> },
+    #[error("reviewer returned {count} findings; the cap is 50; resolve the reported ones first")]
+    TooManyFindings { count: usize },
+    #[error(
+        "review session reached the cap of {rounds} rounds with these findings still open:\n{outstanding}\nStop and tell the user. The user must run /review first; /review grants one restart. Only then call review with restart set to true."
+    )]
+    CapReached { rounds: u8, outstanding: Box<str> },
+    #[error("workspace status exceeds {limit} bytes; commit or stash unrelated changes")]
+    StatusTooLarge { limit: usize },
+}
+
+/// Cuts `value` to at most `max_bytes` bytes. A cut ends with
+/// [`TRUNCATION_MARKER`], which counts toward the cap, so no reader takes the
+/// prefix for the whole text.
+pub(crate) fn cap_with_marker(value: &str, max_bytes: usize) -> std::borrow::Cow<'_, str> {
+    if value.len() <= max_bytes {
+        return std::borrow::Cow::Borrowed(value);
+    }
+    let keep = max_bytes.saturating_sub(TRUNCATION_MARKER.len());
+    std::borrow::Cow::Owned(format!("{}{TRUNCATION_MARKER}", byte_prefix(value, keep)))
+}
+
+/// The text of the `dalgona://review` manual page.
+pub const REVIEW_DOC: &str = concat!(
+    "# review\n\n",
+    "The review battery reviews one session's changes with one reviewer\n",
+    "completion per round. It reads only `git status --short` and\n",
+    "`git diff` against the configured base inside the session workspace;\n",
+    "it never writes or runs project code.\n\n",
+    "Call the `review` tool with an optional `focus`, or run `/review [focus]`\n",
+    "to hand the focus to the model as the next prompt. The workspace must be\n",
+    "a Git repository. With no changes, review reports `No changes to review.`\n",
+    "without calling the reviewer.\n\n",
+    "`git status --short` must fit within 262,144 bytes. Review refuses larger\n",
+    "status output and asks you to commit or stash unrelated changes; it does\n",
+    "not truncate status. A diff larger than 262,144 bytes is truncated, and\n",
+    "review proceeds with the prefix and a truncation notice. More than 50\n",
+    "reviewer findings fail the round; resolve the reported findings first.\n\n",
+    "Each round appends one durable review record. A round converges when the\n",
+    "verdict is clean or no finding is new; otherwise the report lists every\n",
+    "finding marked new or repeat and asks for the new findings. After\n",
+    "`max_rounds` (1 to 10, default 3) non-converged rounds the review session\n",
+    "reaches its cap and stops. The review then reports the findings still open\n",
+    "and asks the user what to do. The model never starts a new session on\n",
+    "its own. The user must run `/review` before the model calls `review`\n",
+    "with `restart` set to true; `/review` grants one restart. The\n",
+    "`/review` command asks the model to call `review` with `restart` set to\n",
+    "true.\n",
+    "`restart` only takes effect at the cap; mid-session it continues the open\n",
+    "rounds. The next review call consumes the restart grant regardless of its\n",
+    "arguments. The reviewer model is `reviewer_model` (empty selects the\n",
+    "session model); the diff base is `diff_base` (empty selects `HEAD`).\n\n",
+    "Each round probes the reviewer route's credentials, then sends one\n",
+    "request under a 120 second deadline. A route without usable credentials,\n",
+    "a provider error, and a missed deadline each fail the round with\n",
+    "`reviewer call failed: <cause>`; none appends a record. Cancelling the\n",
+    "call appends no record and leaves the session open. When the provider\n",
+    "reports token usage, the round also posts one `review` notice with the\n",
+    "input and output counts.\n\n",
+    "Cut text ends with a marker. A stored finding `detail` is cut to 500\n",
+    "bytes and an error cause to 200 bytes, each ending with ` [truncated]`.\n",
+    "A `focus` over 500 bytes is cut to 500 bytes and ends with\n",
+    "`[... focus truncated]`.\n",
+);
+
+struct ReviewTool {
+    cfg: ReviewConfig,
+    status: Arc<ReviewStatus>,
+    name: Name,
+    spec: Arc<ToolSpec>,
+}
+
+impl ReviewTool {
+    fn new(cfg: ReviewConfig, status: Arc<ReviewStatus>) -> Result<Self, RegistrationError> {
+        let name = Name::parse("review")?;
+        let parameters = RawJson::parse(concat!(
+            r#"{"type":"object","properties":{"focus":{"type":"string","#,
+            r#""description":"What the reviewer should look at first."},"#,
+            r#""restart":{"type":"boolean","#,
+            r#""description":"Use true only after the user runs /review; /review grants one restart before you call review with restart set to true."}},"#,
+            r#""additionalProperties":false}"#,
+        ))
+        .map_err(|_| RegistrationError::InvalidParameters)?;
+        if !dal_core::valid_tool_parameters(&parameters) {
+            return Err(RegistrationError::InvalidParameters);
+        }
+        let spec = Arc::new(ToolSpec {
+            name: name.clone(),
+            description: "Review the current changes with one reviewer round.".into(),
+            parameters,
+            grammar: None,
+        });
+        Ok(Self {
+            cfg,
+            status,
+            name,
+            spec,
+        })
+    }
+}
+
+impl dal_agent::ext::Tool for ReviewTool {
+    fn name(&self) -> &Name {
+        &self.name
+    }
+
+    fn spec(&self, _model: &dal_core::ModelInfo) -> Arc<ToolSpec> {
+        Arc::clone(&self.spec)
+    }
+
+    fn classify(&self, _args: &RawValue, _workspace: &Workspace) -> Result<ToolClass, ArgError> {
+        Ok(ToolClass::Read)
+    }
+
+    fn run<'a>(&'a self, call: ToolCall, cx: ToolCx<'a>) -> BoxFuture<'a, ToolOutcome> {
+        Box::pin(async move {
+            let args = match sonic_rs::from_str::<ReviewArgs>(call.args.as_str()) {
+                Ok(args) => args,
+                Err(error) => {
+                    return ToolOutcome::Err(dal_agent::ToolError::message(format!(
+                        "review: invalid input: {error}."
+                    )));
+                }
+            };
+            review_round(
+                &self.cfg,
+                &self.status,
+                &cx,
+                args.focus.as_deref(),
+                args.request(),
+            )
+            .await
+        })
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReviewArgs {
+    focus: Option<String>,
+    #[serde(default)]
+    restart: bool,
+}
+
+impl ReviewArgs {
+    fn request(&self) -> rounds::RoundRequest {
+        if self.restart {
+            rounds::RoundRequest::Restart
+        } else {
+            rounds::RoundRequest::Continue
+        }
+    }
+}
+
+struct ReviewStatus {
+    max_rounds: u8,
+    running: Mutex<HashMap<SessionId, Vec<u8>>>,
+    restart_authorized: Mutex<HashSet<SessionId>>,
+    /// Each open session's model route: the reviewer route when `reviewer_model` is empty.
+    session_routes: Mutex<HashMap<SessionId, dal_core::ModelRoute>>,
+    /// The orchestration view whose live work refuses a round, if composed.
+    view: Option<crate::orchestration::View>,
+}
+
+impl ReviewStatus {
+    #[must_use]
+    fn new(max_rounds: u8) -> Self {
+        Self {
+            max_rounds,
+            running: Mutex::new(HashMap::new()),
+            restart_authorized: Mutex::new(HashSet::new()),
+            session_routes: Mutex::new(HashMap::new()),
+            view: None,
+        }
+    }
+
+    fn with_view(max_rounds: u8, view: crate::orchestration::View) -> Self {
+        Self {
+            view: Some(view),
+            ..Self::new(max_rounds)
+        }
+    }
+
+    /// Records, or clears, the model route of `session`.
+    fn set_session_route(&self, session: SessionId, route: Option<dal_core::ModelRoute>) {
+        let mut routes = self
+            .session_routes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        match route {
+            Some(route) => routes.insert(session, route),
+            None => routes.remove(&session),
+        };
+    }
+
+    fn session_route(&self, session: SessionId) -> Option<dal_core::ModelRoute> {
+        self.session_routes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&session)
+            .cloned()
+    }
+
+    /// Records one restart authorization for `session`, granted by the
+    /// `/review` command.
+    fn authorize_restart(&self, session: SessionId) {
+        self.restart_authorized
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(session);
+    }
+
+    /// Consumes the one restart authorization for `session`, if present.
+    ///
+    /// The next review call consumes the grant whatever it asks, so a
+    /// stale grant cannot restart a later session.
+    #[must_use]
+    fn take_restart_authorization(&self, session: SessionId) -> bool {
+        self.restart_authorized
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&session)
+    }
+
+    /// Drops an unused restart authorization and the route when the owning
+    /// session closes.
+    fn session_end(&self, session: SessionId) {
+        self.restart_authorized
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&session);
+        self.set_session_route(session, None);
+    }
+
+    fn lock(&self) -> MutexGuard<'_, HashMap<SessionId, Vec<u8>>> {
+        self.running.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn running(self: &Arc<Self>, session: SessionId, round: u8) -> RunningGuard {
+        self.lock().entry(session).or_default().push(round);
+        RunningGuard {
+            status: Arc::clone(self),
+            session,
+            round,
+        }
+    }
+
+    fn payload(&self, session: SessionId) -> Option<String> {
+        #[derive(serde::Serialize)]
+        struct Payload {
+            state: &'static str,
+            round: u8,
+            max_rounds: u8,
+        }
+        let round = *self.lock().get(&session)?.last()?;
+        sonic_rs::to_string(&Payload {
+            state: "running",
+            round,
+            max_rounds: self.max_rounds,
+        })
+        .ok()
+    }
+}
+
+struct SessionEndHook {
+    status: Arc<ReviewStatus>,
+}
+
+impl ObserveHook<SessionEnd> for SessionEndHook {
+    fn call(&self, input: SessionEnd, _cx: HookCx) -> BoxFuture<'static, Result<(), HookError>> {
+        self.status.session_end(input.session);
+        Box::pin(async { Ok(()) })
+    }
+}
+
+/// Captures the session's model route at session setup, like the judge does:
+/// the reviewer uses it when `reviewer_model` is empty.
+struct SessionRoute {
+    status: Arc<ReviewStatus>,
+}
+
+impl SessionSetup for SessionRoute {
+    fn open(&self, cx: SessionCx) -> BoxFuture<'static, Result<SessionInstalls, HookError>> {
+        self.status.set_session_route(cx.session, cx.model);
+        Box::pin(async { Ok(SessionInstalls::default()) })
+    }
+}
+
+#[must_use]
+struct RunningGuard {
+    status: Arc<ReviewStatus>,
+    session: SessionId,
+    round: u8,
+}
+
+impl Drop for RunningGuard {
+    fn drop(&mut self) {
+        let mut running = self.status.lock();
+        let remove = if let Some(rounds) = running.get_mut(&self.session) {
+            if let Some(index) = rounds.iter().rposition(|round| *round == self.round) {
+                rounds.remove(index);
+            }
+            rounds.is_empty()
+        } else {
+            false
+        };
+        if remove {
+            running.remove(&self.session);
+        }
+    }
+}
+
+impl dal_agent::ext::StatusPoll for ReviewStatus {
+    fn snapshot(&self, cx: &StatusCx) -> StatusSnapshot {
+        StatusSnapshot {
+            quiet: true,
+            text: self.payload(cx.session).map(String::into_boxed_str),
+        }
+    }
+}
+
+struct ReviewCommand {
+    status: Arc<ReviewStatus>,
+}
+
+impl dal_agent::ext::CommandHandler for ReviewCommand {
+    fn run<'a>(
+        &'a self,
+        args: &'a str,
+        cx: dal_agent::ext::CommandCx<'a>,
+    ) -> dal_agent::ext::BoxFuture<'a, Result<dal_core::Reply, dal_agent::error::ServiceError>>
+    {
+        Box::pin(async move {
+            self.status.authorize_restart(cx.session());
+            let prompt = reply::command_prompt(args.trim());
+            let content = vec![dal_core::Part::Text {
+                text: prompt.into(),
+            }];
+            cx.submit_wait(dal_core::Command::Prompt {
+                expect: dal_core::Expect::Idle,
+                content,
+            })
+            .await
+            .map_err(|error| dal_agent::error::ServiceError::failed(None, error.to_string()))?;
+            Ok(dal_core::Reply::Done(dal_core::Output::Nothing))
+        })
+    }
+}
+
+async fn review_round(
+    cfg: &ReviewConfig,
+    status: &Arc<ReviewStatus>,
+    cx: &ToolCx<'_>,
+    focus: Option<&str>,
+    request: rounds::RoundRequest,
+) -> ToolOutcome {
+    let services = cx.services();
+    let caller = cx.caller().clone();
+    let focus = focus.map(reply::cap_focus);
+    let live = status.view.as_ref().and_then(|view| {
+        view.inflight(cx.session())
+            .and_then(|counts| counts.work_summary())
+    });
+    if let Some(work) = live {
+        return ToolOutcome::Err(dal_agent::ToolError::message(format!(
+            "review: orchestration work is still live in this session ({work}). Wait for it to end or cancel it, then call review again."
+        )));
+    }
+    // One /review grants one restart. Consume it before mapping the
+    // request, whatever this call asks, so a stale grant cannot ride a
+    // later self-initiated restart.
+    let authorized = status.take_restart_authorization(cx.session());
+    let request = match (request, authorized) {
+        (rounds::RoundRequest::Restart, true) => rounds::RoundRequest::Restart,
+        _ => rounds::RoundRequest::Continue,
+    };
+    let raw_records = match services.records(&caller, "review").await {
+        Ok(records) => records,
+        Err(error) => return service_outcome(error),
+    };
+    let records: Vec<rounds::ReviewRecord> = raw_records
+        .iter()
+        .filter_map(|record| sonic_rs::from_str(record.as_str()).ok())
+        .collect();
+    let work_round = match rounds::next_round(&records, cfg.max_rounds, request) {
+        Ok(work_round) => work_round,
+        Err(error) => return ToolOutcome::Err(dal_agent::ToolError::message(error.to_string())),
+    };
+    let _running = status.running(cx.session(), work_round.round);
+    let workspace = cx.workspace();
+    let diff_request = git::git_run_request(workspace, git::diff_argv(&cfg.diff_base));
+    let diff = match git_capture(&services, &caller, diff_request).await {
+        Ok(diff) => diff,
+        Err(outcome) => return *outcome,
+    };
+    let status_request = git::git_run_request(workspace, git::status_argv());
+    let git_status = match git_capture(&services, &caller, status_request).await {
+        Ok(git_status) => git_status,
+        Err(outcome) => return *outcome,
+    };
+    if git::status_exceeds_limit(git_status.text.as_bytes(), git_status.overflowed) {
+        return ToolOutcome::Err(dal_agent::ToolError::message(
+            ReviewError::StatusTooLarge {
+                limit: MAX_DIFF_BYTES,
+            }
+            .to_string(),
+        ));
+    }
+    let (diff_text, diff_truncated) = git::cap_diff(&diff.text, diff.overflowed);
+    if diff_text.is_empty() && git_status.text.trim().is_empty() {
+        return ToolOutcome::Ok(Box::new(ToolOutput::from_text("No changes to review.")));
+    }
+    let earlier = rounds::earlier_identities(&records, work_round.session);
+    let content = reply::review_content(
+        &diff_text,
+        git_status.text.trim_end(),
+        focus.as_deref(),
+        &rounds::prior_findings(&records, work_round.session),
+    );
+    let reviewer_reply = match ask_reviewer(cfg, status, cx, work_round.round, content).await {
+        Ok(reviewer_reply) => reviewer_reply,
+        Err(outcome) => return *outcome,
+    };
+    let new = match rounds::new_count(&reviewer_reply, &earlier) {
+        Ok(new) => new,
+        Err(error) => return ToolOutcome::Err(dal_agent::ToolError::message(error.to_string())),
+    };
+    let record = rounds::ReviewRecord {
+        session: work_round.session,
+        round: work_round.round,
+        verdict: reviewer_reply.verdict,
+        new_count: new,
+        findings: rounds::stored_findings(&reviewer_reply),
+    };
+    let record_body = match record_body(&record) {
+        Ok(record_body) => record_body,
+        Err(outcome) => return *outcome,
+    };
+    if let Err(error) = services
+        .append_record(&caller, "review", Box::new(record_body))
+        .await
+    {
+        return service_outcome(error);
+    }
+    match reply::settle_reply(
+        work_round.round,
+        cfg.max_rounds,
+        &reviewer_reply,
+        &earlier,
+        new,
+        diff_truncated,
+    ) {
+        Ok(text) => ToolOutcome::Ok(Box::new(ToolOutput::from_text(text))),
+        Err(error) => ToolOutcome::Err(dal_agent::ToolError::message(error.to_string())),
+    }
+}
+
+fn record_body(record: &rounds::ReviewRecord) -> Result<RawJson, Box<ToolOutcome>> {
+    let unserializable = || {
+        Box::new(ToolOutcome::Err(dal_agent::ToolError::message(
+            "review: the record did not serialize.".to_owned(),
+        )))
+    };
+    let body = sonic_rs::to_string(record).map_err(|_| unserializable())?;
+    RawJson::parse(&body).map_err(|_| unserializable())
+}
+
+struct GitCapture {
+    text: String,
+    overflowed: bool,
+}
+
+async fn git_capture(
+    services: &Arc<dyn dal_agent::ext::Services>,
+    caller: &dal_agent::ext::Caller,
+    request: dal_core::RunRequest,
+) -> Result<GitCapture, Box<ToolOutcome>> {
+    let output = match services.run(caller, request).await {
+        Ok(output) => output,
+        Err(error) => return Err(Box::new(service_outcome(error))),
+    };
+    let failed = !matches!(output.status, dal_core::ExitStatusKind::Exited(0));
+    if failed {
+        let stderr = String::from_utf8_lossy(&output.stderr_tail).into_owned();
+        return Err(Box::new(ToolOutcome::Err(dal_agent::ToolError::message(
+            ReviewError::NoGit {
+                stderr: reply::cap_error(&stderr),
+            }
+            .to_string(),
+        ))));
+    }
+    Ok(GitCapture {
+        overflowed: output.stdout_prefix_overflowed,
+        text: String::from_utf8_lossy(&output.stdout_prefix).into_owned(),
+    })
+}
+
+/// The reviewer's reply body and the token usage its provider reported.
+struct Completion {
+    text: String,
+    usage: Option<dal_core::Usage>,
+}
+
+impl Completion {
+    /// Concatenates the text deltas in order. The last usage measurement wins;
+    /// a stream without one leaves the usage unknown, never invented.
+    fn from_inference(inference: dal_core::Inference) -> Self {
+        let mut text = String::new();
+        let mut usage = None;
+        for event in inference.events {
+            match event {
+                dal_core::StreamEvent::Delta {
+                    channel: dal_core::StreamChannel::Text,
+                    text: delta,
+                } => text.push_str(&delta),
+                dal_core::StreamEvent::Usage(measured) => usage = Some(measured),
+                _ => {}
+            }
+        }
+        Self { text, usage }
+    }
+}
+
+/// The reviewer route: `reviewer_model` when set, else the session's route.
+fn reviewer_route(
+    cfg: &ReviewConfig,
+    session_route: Option<dal_core::ModelRoute>,
+) -> Option<dal_core::ModelRoute> {
+    if cfg.reviewer_model.is_empty() {
+        return session_route;
+    }
+    Some(dal_core::ModelRoute::from_id(&cfg.reviewer_model))
+}
+
+/// Probes the route's credentials and sends one request, all under `deadline`.
+///
+/// A provider failure and a missed deadline both fail the round as
+/// `Provider`; a cancelled call is `Interrupted` and appends nothing.
+async fn reviewer_completion(
+    services: &Arc<dyn dal_agent::ext::Services>,
+    caller: &dal_agent::ext::Caller,
+    cancel: &tokio_util::sync::CancellationToken,
+    route: dal_core::ModelRoute,
+    content: String,
+    deadline: Duration,
+) -> Result<Completion, Box<ToolOutcome>> {
+    let request = probe_and_infer(services, caller, route, content);
+    tokio::select! {
+        biased;
+        () = cancel.cancelled() => Err(Box::new(ToolOutcome::Interrupted)),
+        timed = tokio::time::timeout(deadline, request) => timed.unwrap_or_else(|_elapsed| {
+            Err(Box::new(provider_failure(&format!("timed out after {}s", deadline.as_secs()))))
+        }),
+    }
+}
+
+async fn probe_and_infer(
+    services: &Arc<dyn dal_agent::ext::Services>,
+    caller: &dal_agent::ext::Caller,
+    route: dal_core::ModelRoute,
+    content: String,
+) -> Result<Completion, Box<ToolOutcome>> {
+    let ready = match services.model_ready(caller, route.clone()).await {
+        Ok(Some(ready)) => ready,
+        Ok(None) => {
+            return Err(Box::new(provider_failure(&format!(
+                "model \"{}\" has no usable credentials or is unknown",
+                route.id()
+            ))));
+        }
+        Err(error) => return Err(Box::new(provider_outcome(error))),
+    };
+    let request = dal_core::ModelRequest {
+        purpose: dal_core::Purpose::Judge,
+        model: ready,
+        system: Arc::from(REVIEW_SYSTEM),
+        tools: Arc::from(Vec::<dal_core::ModelToolSpec>::new()),
+        context: Arc::from(vec![dal_core::ContextItem::User {
+            parts: vec![dal_core::Part::Text {
+                text: content.into(),
+            }],
+        }]),
+        params: dal_core::RequestParams::default(),
+        cache_key: None,
+    };
+    services
+        .infer(caller, request)
+        .await
+        .map(Completion::from_inference)
+        .map_err(|error| Box::new(provider_outcome(error)))
+}
+
+fn usage_notice(
+    turn: Option<dal_core::TurnId>,
+    round: u8,
+    usage: &dal_core::Usage,
+) -> dal_core::Notice {
+    dal_core::Notice {
+        turn,
+        kind: "review".into(),
+        text: format!(
+            "review round {round}: the reviewer used {} input and {} output tokens",
+            usage.input_tokens, usage.output_tokens
+        )
+        .into(),
+    }
+}
+
+/// Asks the reviewer once and decodes its reply, posting the usage it reports.
+async fn ask_reviewer(
+    cfg: &ReviewConfig,
+    status: &ReviewStatus,
+    cx: &ToolCx<'_>,
+    round: u8,
+    content: String,
+) -> Result<reply::ReviewerReply, Box<ToolOutcome>> {
+    let Some(route) = reviewer_route(cfg, status.session_route(cx.session())) else {
+        return Err(Box::new(provider_failure(
+            "no session model is selected; set reviewer_model",
+        )));
+    };
+    let services = cx.services();
+    let caller = cx.caller();
+    let completion = reviewer_completion(
+        &services,
+        caller,
+        cx.cancel(),
+        route,
+        content,
+        REVIEWER_DEADLINE,
+    )
+    .await?;
+    if let Some(usage) = &completion.usage {
+        services.notify(caller, usage_notice(cx.turn(), round, usage));
+    }
+    reply::parse_reply(&completion.text, round)
+        .and_then(reply::enforce_findings_cap)
+        .map_err(|error| {
+            Box::new(ToolOutcome::Err(dal_agent::ToolError::message(
+                error.to_string(),
+            )))
+        })
+}
+
+fn provider_failure(cause: &str) -> ToolOutcome {
+    ToolOutcome::Err(dal_agent::ToolError::message(
+        ReviewError::Provider {
+            cause: reply::cap_error(cause),
+        }
+        .to_string(),
+    ))
+}
+
+fn provider_outcome(error: dal_agent::error::ServiceError) -> ToolOutcome {
+    match error {
+        dal_agent::error::ServiceError::Denied(_) | dal_agent::error::ServiceError::Cancelled => {
+            service_outcome(error)
+        }
+        error => provider_failure(&error.to_string()),
+    }
+}
+
+fn service_outcome(error: dal_agent::error::ServiceError) -> ToolOutcome {
+    match error {
+        dal_agent::error::ServiceError::Denied(reason) => {
+            ToolOutcome::Err(dal_agent::ToolError::Denied(reason))
+        }
+        dal_agent::error::ServiceError::Cancelled => ToolOutcome::Interrupted,
+        error => ToolOutcome::Err(dal_agent::ToolError::Failed(Box::new(error))),
+    }
+}
+
+/// Builds the review extension: the model tool, the `/review` command, and
+/// the one `review` status kind. Registration performs no I/O.
+///
+/// # Errors
+///
+/// Returns [`RegistrationError`] when the fixed identity or declarations
+/// are rejected.
+pub fn review(cfg: ReviewConfig) -> Result<Extension, RegistrationError> {
+    review_with_view(cfg, None)
+}
+
+/// Builds the review extension with the orchestration view whose live work
+/// refuses a round: a round asked while jobs, monitors, a goal timer, or a
+/// loop-guard recovery is live fails before the reviewer is called.
+///
+/// # Errors
+///
+/// Returns [`RegistrationError`] when the fixed identity or declarations
+/// are rejected.
+pub fn review_with_view(
+    cfg: ReviewConfig,
+    view: Option<crate::orchestration::View>,
+) -> Result<Extension, RegistrationError> {
+    let status = Arc::new(match view {
+        Some(view) => ReviewStatus::with_view(cfg.max_rounds, view),
+        None => ReviewStatus::new(cfg.max_rounds),
+    });
+    let tool = ReviewTool::new(cfg, Arc::clone(&status))?;
+    ExtensionBuilder::new(
+        "review",
+        env!("CARGO_PKG_VERSION"),
+        ServiceSet::from_names(["run", "infer"])?,
+    )?
+    .with_origin(dal_core::Origin::Bundled, None)
+    .on_session_end_lossless(SessionEndHook {
+        status: Arc::clone(&status),
+    })
+    .session_setup(SessionRoute {
+        status: Arc::clone(&status),
+    })
+    .tool(Arc::new(tool), dal_core::Visibility::Model)
+    .command(
+        CommandSpec {
+            name: CommandName::parse("review")?,
+            summary: REVIEW_COMMAND_SUMMARY.into(),
+            args_hint: Some(REVIEW_COMMAND_ARGS_HINT.into()),
+        },
+        Arc::new(ReviewCommand {
+            status: Arc::clone(&status),
+        }),
+    )
+    .status_kind("review", status)
+    .build()
+}

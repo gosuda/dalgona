@@ -1,0 +1,1126 @@
+// SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
+
+//! The history image pipeline: source pieces, drawing, budgets, and parts.
+//!
+//! [`Engine::run`] turns one covered span into a [`Drawn`] value and hands it
+//! to a [`Commit`] sink. Every declined contract surfaces as a [`Decline`]
+//! whose display text is the exact refusal notice, so the chain can fall
+//! through to the text summary.
+
+use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
+use std::sync::Arc;
+use std::time::Duration;
+
+pub(crate) use dal_agent::ext::ImageProfile;
+use dal_agent::ext::{BoxFuture, CompactError, Compaction, CoveredEntry};
+use dal_core::{EntryId, SessionId};
+use dal_ext::Font;
+use thiserror::Error;
+use tokio::sync::Semaphore;
+use tokio::time::{Instant, timeout_at};
+use tokio_util::sync::CancellationToken;
+
+use super::WHOLE_CHAIN_TIMEOUT_S;
+use super::draw::{DrawError, Grid, draw, paginate};
+use super::records::{LetterRecord, RecordError};
+use super::selection::{
+    LetterVisibility, entry_id, history_index_line, index_text, select_oldest_plus_newest,
+    select_oldest_plus_newest_by_bytes,
+};
+use super::spans::{CompactPiece, HistoryError, Item, SourceError, Span, items};
+use super::{CARRIED_PREFIX, HISTORY_HEADER, PNG_BYTE_BUDGET, RENDER_TIMEOUT_MS, SAVINGS_FACTOR};
+
+/// Minimum completed user turns in the covered span for a drawable history.
+const MIN_DRAWABLE_USER_TURNS: usize = 2;
+
+/// Most hidden-letter groups named in the index text.
+const MAX_HIDDEN_GROUPS: usize = 20;
+
+/// A refused contract: the display text is the exact refusal notice.
+#[derive(Debug, Error)]
+pub(crate) enum Decline {
+    /// The model has no complete catalog image profile.
+    #[error("history: the model does not read images.")]
+    NoImageProfile,
+    /// The covered span holds nothing drawable.
+    #[error("history: no new history to draw.")]
+    NothingToDraw,
+    /// The model context window is unknown, so no share can be computed.
+    #[error("history: the model context window is unknown.")]
+    UnknownWindow,
+    /// The images would not cost fewer tokens than the text they replace.
+    #[error("history: the images would cost {cost} tokens for {text} tokens of text.")]
+    Unprofitable {
+        /// Token bill of the images that survived earlier caps.
+        cost: u64,
+        /// Measured text tokens of the replaced span.
+        text: u64,
+    },
+    /// The image share leaves no room for the first image.
+    #[error(
+        "history: no room for history images: {stay} of {window} tokens stay after compaction."
+    )]
+    NoTokenRoom {
+        /// Tokens that stay in the request after compaction.
+        stay: u64,
+        /// The model context window.
+        window: u64,
+    },
+    /// The request already carries the catalog maximum of images.
+    #[error(
+        "history: no room for history images: the request already carries {carried} of {max} images."
+    )]
+    NoSlot {
+        /// Images already elsewhere in the request.
+        carried: usize,
+        /// Catalog maximum images per request.
+        max: usize,
+    },
+    /// The PNG byte budget cannot fit the first image.
+    #[error("history: the images need {need} bytes; the limit is {limit}.")]
+    PngBudget {
+        /// Encoded bytes of the first candidate image.
+        need: usize,
+        /// The byte budget left for drawn images.
+        limit: usize,
+    },
+    /// Drawing exceeded the per-render timeout.
+    #[error("history: drawing history images timed out after {millis} ms.")]
+    RenderTimeout {
+        /// The exceeded limit in milliseconds.
+        millis: u128,
+    },
+    /// The whole chain exceeded its deadline.
+    #[error("history: compaction timed out after {secs} s; falling back to text summary.")]
+    ChainTimeout {
+        /// The exceeded limit in seconds.
+        secs: u64,
+    },
+    /// The host has no journal source for this covered span.
+    #[error("history: the journal source is unavailable.")]
+    SourceUnavailable,
+    /// A journal source could not be read.
+    #[error("history: {0}")]
+    Source(#[from] HistoryError),
+    /// A page failed to encode.
+    #[error("history: {0}")]
+    Draw(#[from] DrawError),
+    /// A letter record failed structural validation.
+    #[error("history: {0}")]
+    Record(#[from] RecordError),
+    /// The bundled font did not parse.
+    #[error("history: the font could not be loaded.")]
+    Font,
+    /// The render worker did not finish.
+    #[error("history: the render worker failed.")]
+    Worker,
+    /// The process-wide render gate closed.
+    #[error("history: the render gate closed.")]
+    GateClosed,
+    /// The drawn parts disagree with their letters.
+    #[error("history: the drawn images are inconsistent.")]
+    Inconsistent,
+    /// The host cannot commit image parts.
+    #[error("history: this host cannot commit image parts.")]
+    CannotCommit,
+}
+
+impl From<Decline> for CompactError {
+    fn from(decline: Decline) -> Self {
+        Self::fail(decline.to_string())
+    }
+}
+
+/// Numbers the compaction part measured for one covered span.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Budget {
+    /// Model context window when known.
+    pub(crate) window_tokens: Option<u64>,
+    /// Total projected tokens of the branch.
+    pub(crate) total_tokens: u64,
+    /// Images already elsewhere in the request.
+    pub(crate) images_elsewhere: usize,
+    /// Bytes those images already occupy in the request.
+    pub(crate) image_bytes_elsewhere: usize,
+    /// Fraction of the window billable to images.
+    pub(crate) share: f64,
+}
+/// Stores and loads PNG blobs used by the history image pipeline.
+pub(crate) trait BlobStore: Send + Sync + 'static {
+    /// Returns the digest of the stored bytes.
+    fn put(&self, png: Vec<u8>) -> BoxFuture<'_, Result<[u8; 32], CompactError>>;
+
+    /// Loads one blob by its content digest.
+    fn get(&self, digest: [u8; 32]) -> BoxFuture<'_, Result<Option<Vec<u8>>, CompactError>>;
+}
+
+/// Reads source bytes for one exact journal span.
+pub(crate) trait SourceReader: Send + Sync + 'static {
+    /// Reads bytes from the journal span.
+    ///
+    /// # Errors
+    /// Returns the source failure when the journal range is unavailable.
+    fn read(&self, span: Span) -> Result<Vec<u8>, SourceError>;
+}
+
+/// One stored letter of an earlier compaction on the current path.
+#[derive(Clone, Debug)]
+pub(crate) struct KnownLetter {
+    /// The stored `letter` record.
+    pub(crate) record: LetterRecord,
+    /// The stored PNG bytes, when a caller has already loaded them.
+    pub(crate) png: Option<Vec<u8>>,
+}
+
+/// One frozen compaction request.
+pub(crate) struct Request {
+    session: SessionId,
+    span: (EntryId, EntryId),
+    ordinal: u32,
+    budget: Budget,
+    carried: Option<Box<str>>,
+    user_turns: usize,
+    text_tokens: u64,
+    pieces: Arc<[CompactPiece]>,
+    source: Arc<dyn SourceReader>,
+    known: Arc<[KnownLetter]>,
+    blobs: Option<Arc<dyn BlobStore>>,
+}
+
+impl Request {
+    /// Builds a request from the selected journal pieces.
+    #[must_use]
+    pub(crate) fn new(
+        session: SessionId,
+        covered: &[CoveredEntry],
+        span: (EntryId, EntryId),
+        ordinal: u32,
+        budget: Budget,
+        pieces: Vec<CompactPiece>,
+        source: Arc<dyn SourceReader>,
+    ) -> Self {
+        Self {
+            session,
+            span,
+            ordinal,
+            budget,
+            carried: None,
+            user_turns: covered
+                .iter()
+                .filter(|entry| entry.starts_user_turn)
+                .count(),
+            text_tokens: covered.iter().fold(0_u64, |sum, entry| {
+                sum.saturating_add(entry.estimated_tokens)
+            }),
+            pieces: pieces.into(),
+            source,
+            known: Arc::from(Vec::new()),
+            blobs: None,
+        }
+    }
+
+    /// Returns the request with the stored letters of earlier compactions.
+    #[must_use]
+    pub(crate) fn with_known(mut self, known: Vec<KnownLetter>) -> Self {
+        self.known = known.into();
+        self
+    }
+
+    /// Returns the request with its lazy PNG blob source.
+    #[must_use]
+    pub(crate) fn with_blob_store(mut self, blobs: Arc<dyn BlobStore>) -> Self {
+        self.blobs = Some(blobs);
+        self
+    }
+
+    /// Returns the request with an earlier summary carried in front of the images.
+    #[must_use]
+    pub(crate) fn with_carried(mut self, carried: Box<str>) -> Self {
+        self.carried = Some(carried);
+        self
+    }
+
+    /// Returns the journal source of this request.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn source(&self) -> Arc<dyn SourceReader> {
+        Arc::clone(&self.source)
+    }
+}
+
+/// One ordered part of the compacted message.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Slot {
+    /// A text part.
+    Text(Box<str>),
+    /// The PNG of the letter at this index in [`Drawn::letters`].
+    Image(usize),
+}
+
+/// One drawn letter: its PNG bytes and the record that names its source.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct DrawnLetter {
+    /// Encoded 1-bit PNG.
+    pub(crate) png: Vec<u8>,
+    /// The `letter` record to commit with the compaction.
+    pub(crate) record: LetterRecord,
+    /// True when this letter reuses a stored record instead of appending a
+    /// new one.
+    pub(crate) reused: bool,
+}
+
+/// The `letter://` index line of one candidate letter.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct IndexLine {
+    /// Letter id, `history/<ordinal>.<index>`.
+    pub(crate) id: Box<str>,
+    /// How the compacted message shows the letter.
+    pub(crate) visibility: LetterVisibility,
+    /// The index line to publish for the letter.
+    pub(crate) text: Box<str>,
+}
+
+/// The committed shape of one history compaction.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Drawn {
+    /// Parts in message order.
+    pub(crate) slots: Vec<Slot>,
+    /// Letters whose images appear in `slots`.
+    pub(crate) letters: Vec<DrawnLetter>,
+    /// The index line of every candidate letter, drawn or not, in path order.
+    pub(crate) index: Vec<IndexLine>,
+    /// Image bill plus the text estimate of all text parts.
+    pub(crate) parts_tokens: u64,
+}
+
+impl Drawn {
+    fn verify(&self) -> Result<(), Decline> {
+        let mut used = vec![false; self.letters.len()];
+        let mut text_bytes = 0_usize;
+        for slot in &self.slots {
+            match slot {
+                Slot::Text(text) => text_bytes = text_bytes.saturating_add(text.len()),
+                Slot::Image(index) => match used.get_mut(*index) {
+                    Some(seen) if !*seen => *seen = true,
+                    _ => return Err(Decline::Inconsistent),
+                },
+            }
+        }
+        if used.iter().any(|seen| !seen) {
+            return Err(Decline::Inconsistent);
+        }
+        let bill = u64::try_from(text_bytes.div_ceil(4)).map_err(|_| Decline::Inconsistent)?;
+        if bill > self.parts_tokens {
+            return Err(Decline::Inconsistent);
+        }
+        let drawn: Vec<&IndexLine> = self
+            .index
+            .iter()
+            .filter(|line| line.visibility == LetterVisibility::Drawn)
+            .collect();
+        if drawn.len() != self.letters.len() {
+            return Err(Decline::Inconsistent);
+        }
+        self.letters.iter().try_for_each(|letter| {
+            let line = drawn
+                .iter()
+                .find(|line| line.id.as_ref() == letter.record.id())
+                .ok_or(Decline::Inconsistent)?;
+            letter.verify(line)
+        })
+    }
+}
+
+impl DrawnLetter {
+    fn verify(&self, line: &IndexLine) -> Result<(), Decline> {
+        let LetterRecord::Compaction {
+            png_blob,
+            png_bytes,
+            ..
+        } = &self.record
+        else {
+            return Err(Decline::Inconsistent);
+        };
+        let digest = blake3::hash(&self.png).to_hex();
+        let same_size = usize::try_from(*png_bytes).is_ok_and(|size| size == self.png.len());
+        let (first, last) = entry_range(self.record.spans());
+        let id = self.record.id();
+        let expected_index = history_index_line(id, first, last, LetterVisibility::Drawn);
+        if digest.as_str() != png_blob
+            || !same_size
+            || self.record.spans().is_empty()
+            || line.id.as_ref() != id
+            || line.text.as_ref() != expected_index
+        {
+            return Err(Decline::Inconsistent);
+        }
+        Ok(())
+    }
+}
+
+/// Receives one finished history compaction and commits it durably.
+pub(crate) trait Commit: Send + Sync + 'static {
+    /// Stores the PNG blobs, commits the letter records with the compaction,
+    /// and returns the compaction, or refuses.
+    fn commit(
+        &self,
+        span: (EntryId, EntryId),
+        drawn: Drawn,
+    ) -> BoxFuture<'_, Result<Option<Compaction>, CompactError>>;
+}
+
+/// Wall-clock and size limits of one compaction.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Limits {
+    /// Per-render timeout.
+    pub(crate) render: Duration,
+    /// Whole-chain deadline.
+    pub(crate) chain: Duration,
+    /// Total encoded PNG bytes allowed.
+    pub(crate) png_bytes: usize,
+    /// Fraction of the replaced text tokens the image bill may reach.
+    pub(crate) savings: f64,
+}
+
+impl Limits {
+    /// The standard compaction limits.
+    #[must_use]
+    pub(crate) fn standard() -> Self {
+        Self {
+            render: Duration::from_millis(RENDER_TIMEOUT_MS),
+            chain: Duration::from_secs(WHOLE_CHAIN_TIMEOUT_S),
+            png_bytes: PNG_BYTE_BUDGET,
+            savings: SAVINGS_FACTOR,
+        }
+    }
+}
+
+struct Candidate {
+    items: Vec<Item>,
+    spans: Vec<Span>,
+    rows_used: u16,
+    drawable: bool,
+    png: Option<Vec<u8>>,
+    reused: Option<LetterRecord>,
+}
+
+/// Runs the image pipeline under the process-wide render gate.
+pub(crate) struct Engine {
+    font: Arc<Font>,
+    permits: Arc<Semaphore>,
+    limits: Limits,
+}
+
+impl Engine {
+    /// Builds an engine over a shared font and render gate.
+    #[must_use]
+    pub(crate) fn new(font: Arc<Font>, permits: Arc<Semaphore>, limits: Limits) -> Self {
+        Self {
+            font,
+            permits,
+            limits,
+        }
+    }
+
+    /// Draws and commits one history compaction.
+    ///
+    /// The run owns one stop token held by a drop guard, so any drop of the
+    /// run future cancels it and the render worker exits at its next
+    /// checkpoint. The chain deadline is threaded to every await, and every
+    /// worker is joined before a timeout is reported, so a timed-out draw
+    /// never keeps the process-wide render gate after this returns.
+    ///
+    /// # Errors
+    /// Returns the exact refusal text of the first unmet contract, the chain
+    /// deadline, or the sink's own failure.
+    pub(crate) async fn run(
+        &self,
+        request: Request,
+        profile: ImageProfile,
+        sink: Arc<dyn Commit>,
+    ) -> Result<Option<Compaction>, CompactError> {
+        let deadline = Instant::now() + self.limits.chain;
+        let stop = CancellationToken::new();
+        let _stop_on_drop = stop.clone().drop_guard();
+        self.draw_and_commit(request, profile, sink, &stop, deadline)
+            .await
+    }
+
+    async fn draw_and_commit(
+        &self,
+        request: Request,
+        profile: ImageProfile,
+        sink: Arc<dyn Commit>,
+        stop: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<Option<Compaction>, CompactError> {
+        let secs = self.limits.chain.as_secs();
+        let permit = Arc::new(
+            timeout_at(deadline, Arc::clone(&self.permits).acquire_owned())
+                .await
+                .map_err(|_| Decline::ChainTimeout { secs })?
+                .map_err(|_| Decline::GateClosed)?,
+        );
+        if request.user_turns < MIN_DRAWABLE_USER_TURNS || request.pieces.is_empty() {
+            return Err(Decline::NothingToDraw.into());
+        }
+        let window = request.budget.window_tokens.ok_or(Decline::UnknownWindow)?;
+        let mut candidates = self
+            .render(&request, &profile, &permit, stop, deadline)
+            .await?;
+        let pool = drawable(&candidates);
+        if pool.is_empty() {
+            return Err(Decline::NothingToDraw.into());
+        }
+        let selected = self.select(&request, &profile, window, &candidates, &pool)?;
+        timeout_at(
+            deadline,
+            self.load_selected(&request, &mut candidates, &selected),
+        )
+        .await
+        .map_err(|_| Decline::ChainTimeout { secs })??;
+        candidates = self
+            .render_missing(candidates, &profile, Arc::clone(&permit), stop, deadline)
+            .await?;
+        let unmatched = unmatched_known(&request, &candidates);
+        let drawn = assemble(&request, &profile, &mut candidates, &selected, &unmatched)?;
+        drawn.verify()?;
+        timeout_at(deadline, sink.commit(request.span, drawn))
+            .await
+            .map_err(|_| Decline::ChainTimeout { secs })?
+    }
+
+    /// Waits for one render worker, then reports. Whichever deadline fires
+    /// first (the chain deadline or the render limit), the elapsed arm
+    /// cancels the worker and then joins its actual `JoinHandle` so the
+    /// permit and buffers are released before the timeout is reported. A
+    /// worker that finishes first wins the biased select and its result is
+    /// returned unchanged — its own `Decline`s included; a worker panic
+    /// resolves the handle to `Err` and maps to [`Decline::Worker`].
+    async fn join_worker(
+        &self,
+        mut worker: tokio::task::JoinHandle<Result<Vec<Candidate>, Decline>>,
+        stop: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<Vec<Candidate>, Decline> {
+        let render_deadline = Instant::now() + self.limits.render;
+        tokio::select! {
+            biased;
+            finished = &mut worker => return finished.map_err(|_| Decline::Worker)?,
+            () = tokio::time::sleep_until(deadline.min(render_deadline)) => {
+                stop.cancel();
+            }
+        }
+        match worker.await {
+            Err(_) => Err(Decline::Worker),
+            Ok(_) => Err(if deadline <= render_deadline {
+                Decline::ChainTimeout {
+                    secs: self.limits.chain.as_secs(),
+                }
+            } else {
+                Decline::RenderTimeout {
+                    millis: self.limits.render.as_millis(),
+                }
+            }),
+        }
+    }
+
+    /// Fetches stored PNGs for the selected reusable candidates only; an
+    /// unselected reused page keeps its record for the index without a fetch.
+    async fn load_selected(
+        &self,
+        request: &Request,
+        candidates: &mut [Candidate],
+        selected: &[usize],
+    ) -> Result<(), CompactError> {
+        let Some(blobs) = request.blobs.as_ref() else {
+            for candidate in candidates.iter_mut() {
+                if candidate.png.is_none() {
+                    candidate.reused = None;
+                }
+            }
+            return Ok(());
+        };
+        for &index in selected {
+            let candidate = &mut candidates[index];
+            let Some(record) = candidate.reused.take() else {
+                continue;
+            };
+            if candidate.png.is_some() {
+                candidate.reused = Some(record);
+                continue;
+            }
+            if let Some(png) = read_png(blobs, &record).await? {
+                candidate.png = Some(png);
+                candidate.reused = Some(record);
+            }
+        }
+        Ok(())
+    }
+
+    async fn render(
+        &self,
+        request: &Request,
+        profile: &ImageProfile,
+        permit: &Arc<tokio::sync::OwnedSemaphorePermit>,
+        stop: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<Vec<Candidate>, Decline> {
+        let font = Arc::clone(&self.font);
+        let source = Arc::clone(&request.source);
+        let pieces = Arc::clone(&request.pieces);
+        let known = Arc::clone(&request.known);
+        let profile = *profile;
+        let permit = Arc::clone(permit);
+        let worker_stop = stop.clone();
+        let worker = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            render_pages(
+                &font,
+                &profile,
+                &pieces,
+                source.as_ref(),
+                &known,
+                &worker_stop,
+            )
+        });
+        self.join_worker(worker, stop, deadline).await
+    }
+
+    async fn render_missing(
+        &self,
+        candidates: Vec<Candidate>,
+        profile: &ImageProfile,
+        permit: Arc<tokio::sync::OwnedSemaphorePermit>,
+        stop: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<Vec<Candidate>, Decline> {
+        let font = Arc::clone(&self.font);
+        let profile = *profile;
+        let worker_stop = stop.clone();
+        let worker = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            draw_missing(&font, &profile, candidates, &worker_stop)
+        });
+        self.join_worker(worker, stop, deadline).await
+    }
+
+    fn select(
+        &self,
+        request: &Request,
+        profile: &ImageProfile,
+        window: u64,
+        candidates: &[Candidate],
+        pool: &[usize],
+    ) -> Result<Vec<usize>, Decline> {
+        let tokens = profile.image_tokens;
+        let share_cap = scaled(request.budget.share, window);
+        let mut used = 0_u64;
+        let pool = keep(pool, |_| take(&mut used, tokens, share_cap));
+        if pool.is_empty() {
+            return Err(Decline::NoTokenRoom {
+                stay: request
+                    .budget
+                    .total_tokens
+                    .saturating_sub(request.text_tokens),
+                window,
+            });
+        }
+        let free = profile
+            .max_images
+            .saturating_sub(request.budget.images_elsewhere);
+        let mut count = 0_usize;
+        let pool = keep(&pool, |_| {
+            count += 1;
+            count <= free
+        });
+        if pool.is_empty() {
+            return Err(Decline::NoSlot {
+                carried: request.budget.images_elsewhere,
+                max: profile.max_images,
+            });
+        }
+        let first = png_len(&candidates[pool[0]]);
+        let sizes: Vec<usize> = pool
+            .iter()
+            .map(|index| png_len(&candidates[*index]))
+            .collect();
+        let png_budget = self
+            .limits
+            .png_bytes
+            .saturating_sub(request.budget.image_bytes_elsewhere);
+        let kept = select_oldest_plus_newest_by_bytes(&sizes, png_budget);
+        let pool = kept.into_iter().map(|slot| pool[slot]).collect::<Vec<_>>();
+        if pool.is_empty() {
+            return Err(Decline::PngBudget {
+                need: first,
+                limit: png_budget,
+            });
+        }
+        let saving_cap = scaled(self.limits.savings, request.text_tokens);
+        let mut bill = 0_u64;
+        let selected = keep(&pool, |_| take(&mut bill, tokens, saving_cap));
+        if selected.is_empty() {
+            let count = u64::try_from(pool.len()).unwrap_or(u64::MAX);
+            return Err(Decline::Unprofitable {
+                cost: tokens.saturating_mul(count),
+                text: request.text_tokens,
+            });
+        }
+        Ok(selected)
+    }
+}
+
+fn take(used: &mut u64, tokens: u64, cap: u64) -> bool {
+    let next = used.saturating_add(tokens);
+    let fits = next <= cap;
+    if fits {
+        *used = next;
+    }
+    fits
+}
+
+fn profile_grid(profile: &ImageProfile) -> Grid {
+    Grid {
+        cols: profile.cols,
+        rows: profile.rows,
+        cell_w: profile.cell_w,
+        cell_h: profile.cell_h,
+    }
+}
+
+fn profile_width(profile: &ImageProfile) -> u32 {
+    u32::from(profile.cols) * u32::from(profile.cell_w)
+}
+
+fn profile_height(profile: &ImageProfile) -> u32 {
+    u32::from(profile.rows) * u32::from(profile.cell_h)
+}
+
+fn png_len(candidate: &Candidate) -> usize {
+    if let Some(png) = &candidate.png {
+        return png.len();
+    }
+    match &candidate.reused {
+        Some(LetterRecord::Compaction { png_bytes, .. }) => {
+            usize::try_from(*png_bytes).unwrap_or(0)
+        }
+        _ => 0,
+    }
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss,
+    reason = "the product of a finite non-negative factor and a token count is floored into u64"
+)]
+fn scaled(factor: f64, tokens: u64) -> u64 {
+    let value = (factor * tokens as f64).floor();
+    if value.is_finite() && value >= 0.0 {
+        value as u64
+    } else {
+        0
+    }
+}
+
+fn keep(pool: &[usize], mut fits: impl FnMut(usize) -> bool) -> Vec<usize> {
+    select_oldest_plus_newest(pool.len(), |slot| fits(pool[slot]))
+        .into_iter()
+        .map(|slot| pool[slot])
+        .collect()
+}
+
+fn drawable(candidates: &[Candidate]) -> Vec<usize> {
+    candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, candidate)| {
+            candidate.png.is_some() || (candidate.drawable && candidate.reused.is_some())
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// Stored compaction letters that no candidate reused stay listed as not drawn.
+/// Their records remain on the branch; none is deleted. Skill captures and
+/// dream summaries never enter the image reuse or hidden-image counts.
+fn unmatched_known(request: &Request, candidates: &[Candidate]) -> Vec<LetterRecord> {
+    let reused: HashSet<&str> = candidates
+        .iter()
+        .filter_map(|candidate| candidate.reused.as_ref())
+        .map(LetterRecord::id)
+        .collect();
+    request
+        .known
+        .iter()
+        .filter(|known| matches!(known.record, LetterRecord::Compaction { .. }))
+        .filter(|known| !reused.contains(known.record.id()))
+        .map(|known| known.record.clone())
+        .collect()
+}
+
+/// Returns true when a stored letter cannot be shown on the current grid:
+/// its cell pitch differs, or its image exceeds the grid.
+pub(crate) fn stale(record: &LetterRecord, profile: &ImageProfile) -> bool {
+    let LetterRecord::Compaction {
+        cell,
+        width,
+        height,
+        ..
+    } = record
+    else {
+        return true;
+    };
+    *cell != [profile.cell_w, profile.cell_h]
+        || *width > profile_width(profile)
+        || *height > profile_height(profile)
+}
+
+fn render_pages(
+    font: &Font,
+    profile: &ImageProfile,
+    pieces: &[CompactPiece],
+    source: &dyn SourceReader,
+    known: &[KnownLetter],
+    stop: &CancellationToken,
+) -> Result<Vec<Candidate>, Decline> {
+    if stop.is_cancelled() {
+        return Err(Decline::Worker);
+    }
+    let grid = profile_grid(profile);
+    let glyphs = font.glyphs().map_err(|_| Decline::Font)?;
+    let built = items(pieces, |span| {
+        if stop.is_cancelled() {
+            return Err(SourceError {
+                message: "history render was cancelled".to_string(),
+            });
+        }
+        source.read(span)
+    })?;
+    let mut known_index = HashMap::with_capacity(known.len());
+    for (index, known) in known.iter().enumerate() {
+        if matches!(known.record, LetterRecord::Compaction { .. }) {
+            known_index
+                .entry(span_key(known.record.spans()))
+                .or_insert(index);
+        }
+    }
+    let mut out = Vec::new();
+    for page in paginate(glyphs, grid, &built) {
+        if stop.is_cancelled() {
+            return Err(Decline::Worker);
+        }
+        let spans = page_spans(&page.items);
+        if spans.is_empty() {
+            continue;
+        }
+        let reused = known_index
+            .get(&span_key(&spans))
+            .and_then(|index| known.get(*index))
+            .filter(|known| !stale(&known.record, profile));
+        let png = if let Some(known) = reused {
+            known.png.clone()
+        } else if page.drawable {
+            Some(draw(glyphs, grid, &page)?)
+        } else {
+            None
+        };
+        out.push(Candidate {
+            items: page.items,
+            spans,
+            rows_used: page.rows_used,
+            drawable: page.drawable,
+            png,
+            reused: reused.map(|known| known.record.clone()),
+        });
+    }
+    Ok(out)
+}
+
+fn draw_missing(
+    font: &Font,
+    profile: &ImageProfile,
+    mut candidates: Vec<Candidate>,
+    stop: &CancellationToken,
+) -> Result<Vec<Candidate>, Decline> {
+    let grid = profile_grid(profile);
+    let glyphs = font.glyphs().map_err(|_| Decline::Font)?;
+    for candidate in &mut candidates {
+        if stop.is_cancelled() {
+            return Err(Decline::Worker);
+        }
+        // Reused pages keep their stored PNG or, when not selected, stay
+        // hidden; only fresh drawable pages render here.
+        if candidate.png.is_some() || !candidate.drawable || candidate.reused.is_some() {
+            continue;
+        }
+        let items = std::mem::take(&mut candidate.items);
+        let page = super::draw::Page {
+            items,
+            rows_used: candidate.rows_used,
+            drawable: candidate.drawable,
+        };
+        candidate.png = Some(draw(glyphs, grid, &page)?);
+        candidate.items = page.items;
+    }
+    Ok(candidates)
+}
+
+fn span_key(spans: &[Span]) -> Vec<(u64, u32, u32, u32)> {
+    spans
+        .iter()
+        .map(|span| (span.entry.get(), span.part, span.off, span.len))
+        .collect()
+}
+
+async fn read_png(
+    blobs: &Arc<dyn BlobStore>,
+    record: &LetterRecord,
+) -> Result<Option<Vec<u8>>, CompactError> {
+    let LetterRecord::Compaction { png_blob, .. } = record else {
+        return Ok(None);
+    };
+    let Ok(digest) = blake3::Hash::from_hex(png_blob.as_str()) else {
+        return Ok(None);
+    };
+    let Some(png) = blobs.get(*digest.as_bytes()).await? else {
+        return Ok(None);
+    };
+    Ok((blake3::hash(&png).to_hex().as_str() == png_blob.as_str()).then_some(png))
+}
+
+fn page_spans(items: &[Item]) -> Vec<Span> {
+    items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Text { span, .. } | Item::Picture { span, .. } => Some(*span),
+            Item::Mark(_) => None,
+        })
+        .collect()
+}
+
+fn entry_range(spans: &[Span]) -> (u64, u64) {
+    let entries = spans.iter().map(|span| span.entry.get());
+    let first = entries.clone().min().unwrap_or(0);
+    (first, entries.max().unwrap_or(0))
+}
+
+fn assemble(
+    request: &Request,
+    profile: &ImageProfile,
+    candidates: &mut [Candidate],
+    selected: &[usize],
+    unmatched: &[LetterRecord],
+) -> Result<Drawn, Decline> {
+    let next_value = request
+        .span
+        .1
+        .get()
+        .checked_add(1)
+        .ok_or(Decline::Inconsistent)?;
+    let next = entry_id(next_value).ok_or(Decline::Inconsistent)?;
+    let mut slots = vec![Slot::Text(Box::from(HISTORY_HEADER))];
+    if let Some(carried) = &request.carried {
+        slots.push(Slot::Text(format!("{CARRIED_PREFIX}{carried}").into()));
+    }
+    let mut letters = Vec::new();
+    let mut index: Vec<IndexLine> = Vec::with_capacity(candidates.len());
+    let mut hidden = Vec::new();
+    let mut shown_as_text = 0_usize;
+    let mut fresh = 0_usize;
+    let total = candidates.len() + unmatched.len();
+    for (position, candidate) in candidates.iter_mut().enumerate() {
+        let id = if let Some(record) = &candidate.reused {
+            record.id().to_string()
+        } else {
+            fresh += 1;
+            format!("history/{}.{}", request.ordinal, fresh)
+        };
+        let visibility =
+            if candidate.png.is_none() && (!candidate.drawable || candidate.reused.is_none()) {
+                LetterVisibility::ShownAsText
+            } else if selected.contains(&position) {
+                LetterVisibility::Drawn
+            } else {
+                LetterVisibility::NotDrawn
+            };
+        let (first, last) = entry_range(&candidate.spans);
+        index.push(IndexLine {
+            id: Box::from(id.as_str()),
+            visibility,
+            text: history_index_line(&id, first, last, visibility).into(),
+        });
+        match visibility {
+            LetterVisibility::Drawn => {
+                slots.push(Slot::Text(format!("letter://{id}").into()));
+                slots.push(Slot::Image(letters.len()));
+                letters.push(letter(profile, candidate, &id, next)?);
+            }
+            LetterVisibility::ShownAsText => {
+                shown_as_text += 1;
+                let text = letter_text(&id, request.session, &candidate.items);
+                let lead = format!(
+                    "letter://{id} is shown as text because it holds characters that the font cannot draw:\n{text}"
+                );
+                slots.push(Slot::Text(lead.into()));
+            }
+            LetterVisibility::NotDrawn => hidden.push((Box::from(id.as_str()), (first, last))),
+        }
+    }
+    for record in unmatched {
+        let (first, last) = entry_range(record.spans());
+        let id = record.id();
+        index.push(IndexLine {
+            id: Box::from(id),
+            visibility: LetterVisibility::NotDrawn,
+            text: history_index_line(id, first, last, LetterVisibility::NotDrawn).into(),
+        });
+        hidden.push((Box::from(id), (first, last)));
+    }
+    index.sort_by_key(|line| letter_id_parts(&line.id));
+    hidden.sort_by_key(|(id, _)| letter_id_parts(id));
+    let shown = letters.len() + shown_as_text;
+    slots.push(Slot::Text(
+        index_text(shown, total, &hidden_ranges(&hidden)).into(),
+    ));
+    let text_bytes: usize = slots
+        .iter()
+        .map(|slot| match slot {
+            Slot::Text(text) => text.len(),
+            Slot::Image(_) => 0,
+        })
+        .sum();
+    let text_tokens = u64::try_from(text_bytes.div_ceil(4)).map_err(|_| Decline::Inconsistent)?;
+    let images = u64::try_from(letters.len()).map_err(|_| Decline::Inconsistent)?;
+    Ok(Drawn {
+        slots,
+        letters,
+        index,
+        parts_tokens: images
+            .saturating_mul(profile.image_tokens)
+            .saturating_add(text_tokens),
+    })
+}
+
+fn letter(
+    profile: &ImageProfile,
+    candidate: &mut Candidate,
+    id: &str,
+    next: EntryId,
+) -> Result<DrawnLetter, Decline> {
+    let png = candidate.png.take().ok_or(Decline::Inconsistent)?;
+    if let Some(record) = candidate.reused.clone() {
+        LetterRecord::check(&record, next)?;
+        return Ok(DrawnLetter {
+            png,
+            record,
+            reused: true,
+        });
+    }
+    let record = LetterRecord::Compaction {
+        v: 1,
+        id: id.to_string(),
+        png_blob: blake3::hash(&png).to_hex().to_string(),
+        png_bytes: u32::try_from(png.len()).map_err(|_| Decline::Inconsistent)?,
+        width: profile_width(profile),
+        height: profile_height(profile),
+        cell: [profile.cell_w, profile.cell_h],
+        spans: candidate.spans.clone(),
+        letters: Vec::new(),
+    };
+    LetterRecord::check(&record, next)?;
+
+    Ok(DrawnLetter {
+        png,
+        record,
+        reused: false,
+    })
+}
+
+fn hidden_ranges(hidden: &[(Box<str>, (u64, u64))]) -> String {
+    let mut groups: Vec<(u32, u32, u32, u64, u64)> = Vec::new();
+    for (id, (first, last)) in hidden {
+        let Some((ordinal, index)) = letter_id_parts(id) else {
+            continue;
+        };
+        match groups.last_mut() {
+            Some(group) if group.0 == ordinal && group.2 + 1 == index => {
+                group.2 = index;
+                group.3 = group.3.min(*first);
+                group.4 = group.4.max(*last);
+            }
+            _ => groups.push((ordinal, index, index, *first, *last)),
+        }
+    }
+    let named: Vec<String> = groups
+        .iter()
+        .take(MAX_HIDDEN_GROUPS)
+        .map(|&(ordinal, from, to, first, last)| {
+            if from == to {
+                format!("letter://history/{ordinal}.{from} (entries {first}-{last})")
+            } else {
+                format!(
+                    "letter://history/{ordinal}.{from} to letter://history/{ordinal}.{to} (entries {first}-{last})"
+                )
+            }
+        })
+        .collect();
+    let mut text = named.join(", ");
+    if groups.len() > MAX_HIDDEN_GROUPS {
+        let _ = write!(
+            text,
+            "; and {} more ranges",
+            groups.len() - MAX_HIDDEN_GROUPS
+        );
+    }
+    text
+}
+
+/// Splits a `history/<ordinal>.<index>` id into its numbers.
+fn letter_id_parts(id: &str) -> Option<(u32, u32)> {
+    let (ordinal, index) = id.strip_prefix("history/")?.split_once('.')?;
+    Some((ordinal.parse().ok()?, index.parse().ok()?))
+}
+
+/// Renders the exact per-letter source text of one letter from its items.
+#[must_use]
+pub(crate) fn letter_text(id: &str, session: SessionId, items: &[Item]) -> String {
+    let pieces: Vec<String> = items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Text {
+                span,
+                role,
+                total,
+                text,
+            } => {
+                let end = u64::from(span.off) + u64::from(span.len);
+                let mut block = format!(
+                    "=== entry {}, {}, part {}, bytes {}-{end} of {total}\n{text}",
+                    span.entry.get(),
+                    role.words(),
+                    span.part,
+                    span.off,
+                );
+                if !block.ends_with('\n') {
+                    block.push('\n');
+                }
+                Some(block)
+            }
+            Item::Picture { span, mime, bytes } => Some(format!(
+                "=== entry {}, image, part {}, {mime}, {bytes} bytes, not shown\n",
+                span.entry.get(),
+                span.part,
+            )),
+            Item::Mark(_) => None,
+        })
+        .collect();
+    let noun = if pieces.len() == 1 { "piece" } else { "pieces" };
+    format!(
+        "letter://{id} holds {} {noun} of the journal of session {session}. Each piece starts with a line that begins with \"=== entry\". The exact text of the piece follows that line, and a line break ends a piece whose text does not end with one. \"bytes a-b\" means from byte a up to, but not including, byte b.\n{}",
+        pieces.len(),
+        pieces.concat()
+    )
+}

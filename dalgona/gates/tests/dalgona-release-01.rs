@@ -5,12 +5,12 @@
     reason = "gate runs the real product binaries"
 )]
 
-use gates::support;
+use dalgona_gates::support;
 use std::process::Command;
 
 #[test]
 fn dalgona_dist_plan_lists_the_six_target_archives() -> support::TestResult<()> {
-    let root = support::repo_root().join("dalgona");
+    let root = support::repo_root();
     let output = support::run_command(Command::new("dist").arg("plan").current_dir(&root))?;
     assert!(
         output.status.success(),

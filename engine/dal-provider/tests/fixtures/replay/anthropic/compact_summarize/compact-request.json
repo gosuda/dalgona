@@ -1,0 +1,1 @@
+{"model":"claude-test-1","max_tokens":4096,"stream":false,"messages":[{"role":"user","content":[{"type":"text","text":"Summarize this.","cache_control":{"type":"ephemeral"}}]}],"thinking":{"type":"disabled"},"compaction":{"type":"summarize"}}

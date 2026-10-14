@@ -1,7 +1,7 @@
 # dalgona engineering contract
 
-Maintain this workspace as the opinionated product built on dal. Apply the repository
-contract first, then use this file for Dalgona-specific composition and batteries.
+Maintain dalgona as the opinionated product built on dal in the root workspace. Apply
+the repository contract first, then use this file for product composition and batteries.
 
 ## Composition
 
@@ -29,7 +29,7 @@ contract first, then use this file for Dalgona-specific composition and batterie
 ## Configuration and defaults
 
 - Apply configuration in this order: dal code defaults, embedded Dalgona defaults,
-  user `config.toml`, then in-memory CLI flags. Let a later layer replace an earlier
+  user `dal.toml`, then in-memory CLI flags. Let a later layer replace an earlier
   value by key path.
 - Replace `plugins`, `disabled_batteries`, and `experimental_batteries` as whole values.
   Merging these lists creates entries that the user did not select.
@@ -177,7 +177,7 @@ contract first, then use this file for Dalgona-specific composition and batterie
 
 - Test each battery through its public extension surface with the scripted provider,
   temporary data roots, in-memory clients, local HTTP servers, and real journal folds.
-  Do not use a path dependency or private planning file in a gate.
+  Use the root workspace dependency graph. Do not read private planning files in a gate.
 - Test cross-battery behavior at the Dalgona gates. Include cancellation, restart,
   disabled batteries, strict config, grant denial, budget limits, quiet waits, remote
   clients, and deterministic replay.

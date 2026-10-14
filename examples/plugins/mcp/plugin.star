@@ -13,7 +13,12 @@ def mcp_list(ctx, args):
         info = servers.get(server, {})
         if not info:
             return ""
-        return server + "  " + info.get("url", "")
+        response = ctx.mcp.call(server = server, tool = "", arguments = {})
+        if getattr(response, "isError", False):
+            return dal.err("mcp_error", response.text)
+        if not response.text:
+            return server + "  " + info.get("url", "")
+        return server + "  " + info.get("url", "") + "\n" + response.text
     lines = []
     for name in sorted(servers.keys()):
         lines.append(name + "  " + servers[name].get("url", ""))
@@ -22,11 +27,14 @@ def mcp_list(ctx, args):
 def mcp_call(ctx, args):
     arguments = json.decode(args.arguments_json)
     response = ctx.mcp.call(server = args.server, tool = args.tool, arguments = arguments)
+    if getattr(response, "isError", False):
+        return dal.err("mcp_error", response.text)
     return response.text
 
 mcp_list_tool = dal.tool(
     description = "List configured MCP servers.",
     input = dal.schema(server = dal.string(default = "")),
+    uses = ["mcp.call"],
     run = mcp_list,
 )
 

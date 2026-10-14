@@ -5,7 +5,7 @@
     reason = "gate runs the real product binaries"
 )]
 
-use gates::support;
+use dalgona_gates::support;
 use std::{fs, process::Command};
 
 #[test]

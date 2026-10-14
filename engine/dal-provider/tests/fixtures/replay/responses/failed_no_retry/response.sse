@@ -1,0 +1,4 @@
+data: {"type":"response.output_text.delta","delta":"par"}
+
+data: {"type":"response.failed","response":{"status":"failed","error":{"code":"server_error","message":"boom"}}}
+

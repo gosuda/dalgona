@@ -1,0 +1,4 @@
+data: {"id":"chatcmpl-snapshot","object":"chat.completion.chunk","created":1694268190,"model":"gpt-6-astra","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":null}
+
+data: [DONE]
+

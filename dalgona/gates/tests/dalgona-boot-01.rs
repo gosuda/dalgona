@@ -1,47 +1,23 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
 //! dalgona success-criterion gate tests.
 
-use dal_core::{Config, ConfigProduct, Origin};
-use gates::support;
+use dal_core::Origin;
+use dalgona_gates::support;
 use std::{collections::BTreeSet, time::Duration};
 
 #[test]
 fn product_registers_all_eleven_batteries() -> support::TestResult<()> {
-    const BATTERIES: [&str; 11] = [
-        "ask",
-        "history",
-        "judged",
-        "mcp",
-        "orchestration",
-        "quality",
-        "review",
-        "skills",
-        "ttsr-rules",
-        "web",
-        "work",
-    ];
     let scratch = support::Scratch::new("dalgona-battery-set")?;
     let data_root = scratch.path().to_path_buf();
-    let factory = dalgona::product();
-    let config = Config::load(ConfigProduct::Dalgona, &data_root, factory.defaults, None)?;
-    let cx = dalgon::BuildCx {
-        data_root: data_root.clone(),
-        config: &config,
-    };
-    let product = dalgona::build(&cx)?;
-    let battery_names: BTreeSet<_> = product
-        .extensions
-        .iter()
-        .map(dal_agent::ext::Extension::name)
-        .filter(|name| BATTERIES.contains(name))
-        .collect();
-    assert_eq!(battery_names, BTreeSet::from(BATTERIES));
+    let product = support::build_product(data_root.clone(), None)?;
+    let battery_names = support::battery_names(&product);
+    assert_eq!(battery_names, BTreeSet::from(support::BATTERIES));
     assert!(
         product.bundled.is_empty(),
         "no Starlark source ships in the product"
     );
     for extension in &product.extensions {
-        if BATTERIES.contains(&extension.name()) {
+        if support::BATTERIES.contains(&extension.name()) {
             assert_eq!(extension.origin(), Origin::Bundled, "{}", extension.name());
         }
         if extension.name() == "dalgona" {
@@ -56,7 +32,7 @@ fn product_registers_all_eleven_batteries() -> support::TestResult<()> {
         let host = support::start_dalgona(data_root).await?;
         let page = host.doc("dalgona://batteries")?;
         let view = format!("{page:?}");
-        for name in BATTERIES {
+        for name in support::BATTERIES {
             assert!(view.contains(name), "battery inventory omits {name}");
         }
         let report = host.shutdown(Duration::from_secs(2)).await;

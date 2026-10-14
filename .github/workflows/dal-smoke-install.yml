@@ -6,7 +6,21 @@ on:
         type: string
 
 jobs:
+  release-available:
+    if: fromJson(inputs.plan).releases[0].app_name == 'dalgon' && fromJson(inputs.plan).releases[1] == null
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check exact dalgon package and release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#dalgon-v}"
+          test "$GITHUB_REF_NAME" = "dalgon-v$version"
+          curl -fsSL "https://index.crates.io/da/lg/dalgon" | grep -F "\"vers\":\"$version\""
+          curl -fsSL -o /dev/null "https://github.com/gosuda/dalgona/releases/download/${GITHUB_REF_NAME}/dalgon-installer.sh"
   smoke-install:
+    needs: release-available
+    if: fromJson(inputs.plan).releases[0].app_name == 'dalgon' && fromJson(inputs.plan).releases[1] == null
     strategy:
       fail-fast: false
       matrix:
@@ -21,6 +35,9 @@ jobs:
           - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest, mode: binstall }
     runs-on: ${{ matrix.os }}
     steps:
+      - name: Update Rust
+        if: ${{ matrix.mode == 'cargo-install' || matrix.mode == 'binstall' }}
+        run: rustup update stable --no-self-update
       - name: Install dalgon (shell installer)
         if: ${{ matrix.mode == 'installer' && matrix.script == 'sh' }}
         run: curl --proto '=https' --tlsv1.2 -LsSf "https://github.com/gosuda/dalgona/releases/download/${GITHUB_REF_NAME}/dalgon-installer.sh" | sh
@@ -67,10 +84,13 @@ jobs:
           for b in dalgon dal dl; do
             "$HOME/.cargo/bin/$b" --version | grep -Fx "$expected"
           done
+      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2
+        if: ${{ matrix.mode == 'binstall' }}
+        with:
+          tool: cargo-binstall@latest
       - name: Install dalgon with cargo-binstall
         if: ${{ matrix.mode == 'binstall' }}
         run: |
-          cargo install cargo-binstall --version 1.23.0 --locked
           cargo binstall --no-confirm --strategies crate-meta-data "dalgon@${GITHUB_REF_NAME#dalgon-v}" 2>&1 | tee binstall.log
           grep -F "releases/download/${GITHUB_REF_NAME}/dalgon-" binstall.log
       - name: Version check (binstall)

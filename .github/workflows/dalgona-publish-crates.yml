@@ -10,25 +10,27 @@ on:
 
 jobs:
   publish-crates:
+    if: fromJson(inputs.plan).releases[0].app_name == 'dalgona' && fromJson(inputs.plan).releases[1] == null
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 1
           persist-credentials: false
+      - run: rustup update stable --no-self-update
       - name: Rehearse each package in dependency order
         shell: bash
         run: |
           set -euo pipefail
-          order="$(bash scripts/publish-crates.sh --dry-run dalgona)"
+          order="$(bash scripts/publish-crates.sh --product dalgona --dry-run .)"
           test -n "$order"
           while IFS= read -r line; do
             package="${line#cargo publish -p }"
             test "$package" != "$line"
             test -n "$package"
-            (cd dalgona && cargo publish --dry-run --locked --all-features -p "$package")
+            cargo publish --dry-run --locked --all-features -p "$package"
           done <<< "$order"
       - name: Publish after the Dal release
-        run: bash scripts/publish-crates.sh --check-registry-deps dalgona
+        run: bash scripts/publish-crates.sh --product dalgona --check-registry-deps .
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

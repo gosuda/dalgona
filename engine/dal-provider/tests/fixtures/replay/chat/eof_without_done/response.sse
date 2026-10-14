@@ -1,0 +1,6 @@
+data: {"id":"chatcmpl-eof","object":"chat.completion.chunk","created":1694268190,"model":"gpt-6-astra","system_fingerprint":"fp_44709d6fcb","choices":[{"index":0,"delta":{"role":"assistant","content":""},"logprobs":null,"finish_reason":null}],"obfuscation":"e1","usage":null}
+
+data: {"id":"chatcmpl-eof","object":"chat.completion.chunk","created":1694268190,"model":"gpt-6-astra","system_fingerprint":"fp_44709d6fcb","choices":[{"index":0,"delta":{"content":"Hello"},"logprobs":null,"finish_reason":null}],"obfuscation":"e2","usage":null}
+
+data: {"id":"chatcmpl-eof","object":"chat.completion.chunk","created":1694268190,"model":"gpt-6-astra","system_fingerprint":"fp_44709d6fcb","choices":[{"index":0,"delta":{},"logprobs":null,"finish_reason":"stop"}],"obfuscation":"","usage":null}
+

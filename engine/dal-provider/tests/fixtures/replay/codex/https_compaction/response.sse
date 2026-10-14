@@ -1,0 +1,3 @@
+data: {"type":"response.output_item.done","sequence_number":1,"item":{"type":"compaction","id":"comp-1","summary":"Prior work recap."}}
+
+data: {"type":"response.completed","sequence_number":2,"response":{"id":"resp-codex-2","status":"completed","output":[]}}

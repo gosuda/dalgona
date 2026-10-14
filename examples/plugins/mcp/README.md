@@ -4,10 +4,15 @@
 the shape of pi-mcp-adapter
 
 ## What it shows
-Plugin settings and one operation. `mcp_list` prints the servers named in the `servers_json` setting, one `name  url` line each. `mcp_call` takes a `server`, a `tool`, and `arguments_json` holding a JSON object, calls the tool with `mcp.call`, and returns the response text. Only `mcp_call` declares an operation.
+Plugin settings and the `mcp.call` operation. Both tools declare `uses = ["mcp.call"]`:
+
+- `mcp_list`: prints the servers named in the `servers_json` setting, formatted as `name  url` lines.
+- `mcp_call`: takes `server`, `tool`, and `arguments_json` (holding a JSON object string, default `{}`). It decodes the arguments, calls the remote tool with `mcp.call`, and returns the response text.
+
+If an MCP response reports an error (`isError = true`), both tools return a failed tool outcome under the `mcp_error` error code with the remote message.
 
 ## What differs from pi
-This plugin starts no MCP server and holds no connection. `mcp_list` reads only the setting. `mcp_call` reaches whatever MCP client the host has; dalgona ships one, and dal does not, so there the call is unavailable. stdio servers need dalgona's `mcp` battery or an external bridge program.
+This plugin starts no MCP server and holds no direct connection. `mcp_list` reads configured servers from the setting. Pure dal does not bundle an MCP client backend, so calls fail closed as unavailable unless a client implementation is composed into the host; dalgona provides an MCP battery. stdio servers require an external bridge or battery.
 
 ## Install
 Copy to the dal plugins data root and add `mcp` to `plugins`.

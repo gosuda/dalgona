@@ -1,19 +1,25 @@
-# Example plugins ported from pi
+# Example plugins for dal
 
-Ports of pi extensions as dal Starlark plugins. Each port keeps its behavior; pi-specific UI becomes data.
+Ports of pi extensions as dal Starlark plugins, plus original dal plugins with no pi counterpart. Each port keeps its behavior; pi-specific UI becomes data.
 
 | port | pi origin | what it shows |
 |---|---|---|
 | hello | pi `examples/extensions/hello.ts` | the smallest shape |
 | todo | pi `todo.ts` | a tool with state |
-| subagent | pi `subagent/index.ts` | child sessions |
+| subagent | pi `subagent/index.ts` | bounded child sessions |
 | ask | pi `questionnaire.ts` | questions to the user |
 | mcp | the shape of pi-mcp-adapter | MCP calls through `mcp.call` and plugin settings |
 | permission-gate | pi `permission-gate.ts` | a `tool_call` hook and settings |
 | plan-mode | the shape of pi-plan-mode | a command that toggles saved state |
-| git-checkpoint | pi `git-checkpoint.ts` | checkpoints through `tools.exec` |
-| handoff | pi `handoff.ts` | child session notes |
+| git-checkpoint | pi `git-checkpoint.ts` | listing and restoring checkpoints through `tools.exec` |
+| handoff | pi `handoff.ts` | child session notes saved to state |
 | skill-pack | pi `dynamic-resources` | skills only |
+| fetch | original to dal | HTTP fetch through `net.fetch`, with `dal.err` failures |
+| steer | original to dal | steering or waking the turn through `turn.steer` and `turn.wake` |
+| review-rules | original to dal | stream and always-apply rules through `dal.rule` |
+| locate | original to dal | file search and read through `tools.search` and `tools.read` |
+| session-log | original to dal | `session_start` and `turn_end` hooks with state |
+| env-read | original to dal | one allowed variable through `env.read` and plugin settings |
 
 ## pi's license
 

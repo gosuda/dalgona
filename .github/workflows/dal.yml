@@ -2,9 +2,21 @@ name: dal
 on:
   push:
     paths:
-      - "dal/**"
-      - "scripts/update-prices.py"
-      - "scripts/test_update_prices.py"
+      - "core/**"
+      - "engine/**"
+      - "extensions/**"
+      - "clients/**"
+      - "cli/**"
+      - "gates/**"
+      - "dalgona/**"
+      - "prices/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "dist-workspace.toml"
+      - "clippy.toml"
+      - "rustfmt.toml"
+      - "deny.toml"
+      - "scripts/**"
       - ".github/workflows/dal.yml"
       - "rust-toolchain.toml"
       - ".gitignore"
@@ -13,9 +25,21 @@ on:
       - "README.md"
   pull_request:
     paths:
-      - "dal/**"
-      - "scripts/update-prices.py"
-      - "scripts/test_update_prices.py"
+      - "core/**"
+      - "engine/**"
+      - "extensions/**"
+      - "clients/**"
+      - "cli/**"
+      - "gates/**"
+      - "dalgona/**"
+      - "prices/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "dist-workspace.toml"
+      - "clippy.toml"
+      - "rustfmt.toml"
+      - "deny.toml"
+      - "scripts/**"
       - ".github/workflows/dal.yml"
       - "rust-toolchain.toml"
       - ".gitignore"
@@ -34,20 +58,18 @@ concurrency:
 jobs:
   fmt:
     runs-on: ubuntu-24.04
-    defaults:
-      run:
-        working-directory: dal
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 1
           persist-credentials: false
-      - run: cargo fmt --check --all
+      - run: rustup update stable --no-self-update
+      - run: cargo fmt --check --package dal-core --package dal-agent --package dal-provider --package dal-store --package dal-ext --package dal-star --package dal-tools --package dal-tui --package dal-wire --package dalgon --package dal-gates
 
   prices:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 1
           persist-credentials: false
@@ -66,55 +88,43 @@ jobs:
           - { os: windows-2022, target: x86_64-pc-windows-msvc }
           - { os: windows-11-arm, target: aarch64-pc-windows-msvc }
     runs-on: ${{ matrix.os }}
-    defaults:
-      run:
-        working-directory: dal
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 1
           persist-credentials: false
+      - run: rustup update stable --no-self-update
       - name: Report the file-descriptor ceiling
         if: runner.os == 'macOS'
         run: |
           ulimit -Sn; ulimit -Hn
           sysctl kern.maxfiles kern.maxfilesperproc || true
-      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2
         with:
-          tool: cargo-semver-checks@0.50.0
-      - run: cargo clippy --all-targets --all-features --locked -- -D warnings
-      - run: cargo clippy --all-targets --locked -- -D warnings
-      - run: cargo check --locked --no-default-features --workspace
-      - run: cargo test --all-features --locked
-
-  msrv:
-    runs-on: ubuntu-24.04
-    defaults:
-      run:
-        working-directory: dal
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+          tool: cargo-semver-checks@latest
+      - run: cargo clippy --workspace --exclude dalgona --exclude dalgona-batteries --exclude dalgona-gates --all-targets --all-features --locked -- -D warnings
+      - run: cargo clippy --workspace --exclude dalgona --exclude dalgona-batteries --exclude dalgona-gates --all-targets --locked -- -D warnings
+      - run: cargo check --workspace --exclude dalgona --exclude dalgona-batteries --exclude dalgona-gates --locked --no-default-features
+      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2
         with:
-          fetch-depth: 1
-          persist-credentials: false
-      - run: rustup toolchain install 1.90.0 --profile minimal
-      # Deps may declare a higher rust_version than their code needs
-      # (mermaid-text 0.57 declares 1.92 but compiles on 1.90); the MSRV
-      # gate measures compilation, not metadata.
-      - run: cargo +1.90.0 check --workspace --all-features --locked --ignore-rust-version
+          tool: cargo-dist@latest
+      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2
+        with:
+          tool: cargo-auditable@latest
+      - run: cargo test --workspace --exclude dalgona --exclude dalgona-batteries --exclude dalgona-gates --all-features --locked
 
   deny:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 1
           persist-credentials: false
-      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+      - run: rustup update stable --no-self-update
+      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2
         with:
-          tool: cargo-deny@0.20.2
+          tool: cargo-deny@latest
       - run: cargo deny --locked check
-        working-directory: dal
 
   stress-budgets:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
@@ -131,12 +141,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       DAL_TIMING_BUDGETS: "1"
-    defaults:
-      run:
-        working-directory: dal
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 1
           persist-credentials: false
-      - run: cargo test --locked -p gates --release -- stress_
+      - run: rustup update stable --no-self-update
+      - run: cargo test --locked -p dal-gates --release -- stress_

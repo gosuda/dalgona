@@ -9,11 +9,10 @@
 
 use std::time::{Duration, Instant};
 
-use gates::support::{self, Pane};
+use dalgona_gates::support::{self, Pane};
 
 const TITLE: &str = "Allow orchestration to use";
 const ANSWERED: &str = "answered \"Allow orchestration";
-const READY: &str = "Ask dal to change code.";
 const WAIT: Duration = Duration::from_secs(60);
 /// How often the screen and disk are re-read.
 const POLL: Duration = Duration::from_millis(100);
@@ -52,13 +51,9 @@ impl Run {
     fn start() -> support::TestResult<Self> {
         let scratch = support::Scratch::new("orchestration-grant-question")?;
         let run = Self {
-            pane: Pane::start(scratch)?,
+            pane: Pane::start_with(scratch, "disabled_batteries = [\"history\"]\n")?,
         };
-        // The session-start goal load can ask for the grant before the
-        // composer first paints, so an open question also means interactive.
-        run.until("startup", |text| {
-            text.contains(READY) || question_open(text)
-        })?;
+        run.until("startup grant question", question_open)?;
         Ok(run)
     }
 
@@ -228,80 +223,33 @@ fn a_declined_grant_question_fails_closed_and_stores_nothing() -> support::TestR
     );
     Ok(())
 }
-
 #[test]
 fn keys_typed_as_the_grant_question_opens_answer_nothing() -> support::TestResult<()> {
-    // The burst below must reach the app while the dialog is still locked.
-    // Two load races lose that window: the dialog can arm before the burst
-    // lands, and the session-start load can ask before the burst is even
-    // staged. Either restarts on a fresh install. A dialog that answers
-    // before ever showing locked keys fails every attempt.
-    for _ in 0..3 {
-        if locked_typeahead_is_dropped()? {
-            return Ok(());
-        }
-    }
-    Err("the type-ahead burst never landed while locked in three installs; rerun the gate".into())
-}
-
-/// Types `a` — the session-approval key — at the grant question while it is
-/// still locked, and reports whether every key was dropped.
-///
-/// Returns `Ok(false)` when the burst reached the app after arming and
-/// answered it, or when the session-start load asked first; answering after
-/// the answer keys list is correct behavior either way. Only one burst is
-/// ever in flight, so a slow runner delays the burst instead of typing
-/// through the armed dialog.
-fn locked_typeahead_is_dropped() -> support::TestResult<bool> {
-    let run = Run::start()?;
-    if question_open(&run.pane.text()?) {
-        // A dialog is already open, so the goal command cannot be staged:
-        // typed keys would land in the dialog, and answering it now would
-        // consume the scenario this install can ask about.
-        return Ok(false);
-    }
-    run.pane.type_text("/goal write the parser")?;
-    run.pane.enter()?;
-    // This question is ours, or the session-start load's when it swallowed
-    // our Enter; either way nothing has been answered yet. The burst goes
-    // out only against the screen that still shows locked keys.
-    let opened = run.until("opened", question_open)?;
-    if !question_unarmed(&opened) {
-        return Ok(false);
-    }
+    let mut run = Run::start()?;
+    let opened = run.pane.text()?;
+    assert!(
+        question_unarmed(&opened),
+        "the fixture must observe the first dialog before arming: {opened}",
+    );
     run.pane.type_text("aaa")?;
-    let deadline = Instant::now() + WAIT;
-    loop {
-        let text = run.pane.text()?;
-        if text.matches(ANSWERED).count() > 0 || grants_file(&run).exists() {
-            return Ok(false);
-        }
-        if question_armed(&text) {
-            break;
-        }
-        if Instant::now() > deadline {
-            return Err(format!("the grant question never armed:\n{text}").into());
-        }
-        std::thread::sleep(POLL);
-    }
+    let armed = run.until("armed", question_armed)?;
+    assert!(
+        !armed.contains(ANSWERED),
+        "type-ahead answered the dialog: {armed}"
+    );
     assert!(!grants_file(&run).exists(), "type-ahead stored a grant");
-
-    // Keys arrive in order, so this `y` is processed after the burst: a
-    // burst that answered first journals `approve_for_session`, while ours
-    // journals `approve`. Either way the answer is attributed with no timing.
     run.pane.type_text("y")?;
     run.until("closed", |text| !question_open(text))?;
-    if burst_answered_first(&run)? {
-        return Ok(false);
-    }
-
-    // An Enter swallowed by the session-start load's dialog leaves the goal
-    // command in the composer; an empty submit is a no-op otherwise.
-    run.pane.enter()?;
-    run.until("goal-active", |text| text.contains("goal g1: active"))?;
+    run.submit("/goal write the parser", "y", |text| {
+        text.contains("goal g1: active")
+    })?;
+    assert!(
+        !burst_answered_first(&run)?,
+        "type-ahead granted the session"
+    );
     let stored = std::fs::read_to_string(grants_file(&run))?;
     assert!(stored.contains("ext = \"orchestration\""), "{stored}");
-    Ok(true)
+    Ok(())
 }
 
 fn grants_file(run: &Run) -> std::path::PathBuf {

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
 //! dalgona success-criterion gate tests.
-use gates::support;
+use dalgona_gates::support;
 
 use dal_core::{Config, ConfigProduct};
 use std::{io, path::PathBuf};

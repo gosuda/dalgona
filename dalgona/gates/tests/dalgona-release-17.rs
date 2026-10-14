@@ -4,12 +4,12 @@
     clippy::disallowed_methods,
     reason = "gate runs the real product binaries"
 )]
-use gates::support;
+use dalgona_gates::support;
 
 use std::process::Command;
 
 fn version(binary: &str) -> support::TestResult<String> {
-    let workspace = support::repo_root().join("dalgona");
+    let workspace = support::repo_root();
     let output = support::run_command(
         Command::new("cargo")
             .args([

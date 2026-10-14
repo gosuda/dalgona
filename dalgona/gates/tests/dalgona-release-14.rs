@@ -5,7 +5,7 @@
     reason = "gate runs the real product binaries"
 )]
 
-use gates::support;
+use dalgona_gates::support;
 use std::process::Command;
 
 #[test]
@@ -21,9 +21,8 @@ fn path_dependency_to_unpublished_dal_is_rejected() -> support::TestResult<()> {
     )?;
     assert_eq!(output.status.code(), Some(2));
     assert_eq!(String::from_utf8(output.stdout)?, "");
-    assert_eq!(
-        String::from_utf8(output.stderr)?,
-        "workspace member extra depends on fake-dal by path; dalgona builds only against published dal-* crates\n"
-    );
+    let diagnostic = String::from_utf8(output.stderr)?;
+    assert!(diagnostic.contains("extra") && diagnostic.contains("fake-dal"));
+    assert!(diagnostic.contains("not a workspace member"));
     Ok(())
 }

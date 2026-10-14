@@ -22,17 +22,37 @@ the task.
 The chain order is `remote`, then `history`, then `summary`. History reads the
 catalog image profile supplied for the resolved model; it never infers image
 support or billing from a model name. Without a profile it refuses with
-`history: the model does not read images.` When the profile is present but a
-journal source or atomic image commit service is unavailable, history refuses
-and the local text summary runs. This host currently lacks those source and
-commit services, so it commits no history PNG. No image is emitted without
-durable source text readable through `letter://`.
+`history: the model does not read images.` When the profile is present but the
+atomic image commit service is unavailable, history refuses with `history:
+this host cannot commit image parts.` and the local text summary runs. No
+image is emitted without durable source text readable through `letter://`.
 
-During compaction, prior letter metadata is indexed without loading its PNG.
-The image blob is fetched only for a span that can be reused, after the shared
-render budget is acquired. Missing or damaged blobs are redrawn from the exact
-source text. Skill captures and dream summaries remain available to their own
-`letter://` resolvers but are not counted as history images.
+History needs at least two user turns in the covered span. Consecutive user
+entries belong to one open turn. A smaller span refuses with
+`history: no new history to draw.` and passes to the next compactor.
+
+History also refuses when the source text is unavailable, the context window
+is unknown, the images do not save enough tokens, or the token, image-count,
+or PNG-byte budget is exceeded. The refusal names the limit.
+A missing stored text blob reports `history: the journal source is unavailable.`;
+a filesystem error reports the underlying service error instead.
+Drawing and chain timeouts stop the image attempt. The next registered
+compactor can then provide a text summary.
+
+When history commits, the compaction carries image parts interleaved with
+their `letter://<id>` labels, one final index text, and one `letter` record
+per fresh image; each PNG is stored once under its digest. A later
+compaction that re-draws the same journal under the same grid reuses the
+stored letters: their PNG bytes, ids, and digests come back unchanged. A stored
+letter whose cell pitch differs or whose image exceeds the current grid is
+stale; it stays listed and resolvable, and its content is drawn again under
+a fresh id.
+
+Before rendering, history indexes prior compaction metadata without loading
+their PNG blobs. It fetches a blob only for a matching reusable span after
+acquiring the shared render budget; a missing or damaged blob falls back to
+redrawing exact source text. Skill captures and dream summaries are not
+counted as history images.
 
 ## Letters and ids
 
@@ -40,8 +60,8 @@ History record ids use `history/<ordinal>.<index>` for compaction images,
 `<name>`, `<name>.2`, `<name>.3` for skill captures, and `dream/<ordinal>` for
 consolidated summaries. This battery appends dream records and does not edit or
 delete existing records. Read a letter with `letter://<id>` or list letters
-with `letter://`. The host does not resolve `history/...` ids through
-`letter://` yet.
+with `letter://`; ids resolve on the current session path, so a branch may
+name different content under the same id.
 
 ## Auto-dream
 

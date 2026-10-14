@@ -1,23 +1,24 @@
 # Install dal and dalgona
 
-Binaries: `dal`, `dal`, `dl`, `dalgona`, `dg`. The command is `dal`; `dal` and `dl` mean the same.
+Binaries: `dalgon` (primary, with `dal` and `dl` as aliases) and `dalgona` (with `dg` as alias).
 
-Channels:
+Build from source. No tagged release exists, so the registry and installer channels have nothing to fetch yet.
 
 ```sh
-cargo install dal
-cargo install dalgona
-cargo binstall dal
-cargo binstall dalgona
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/gosuda/dalgona/releases/download/dalgon-v0.1.0/dalgon-installer.sh | sh
+git clone https://github.com/gosuda/dalgona
+cd dalgona
+rustup update stable --no-self-update
+cargo build --release -p dalgon
+cargo build --release -p dalgona
 ```
 
-```powershell
-powershell -c "irm https://github.com/gosuda/dalgona/releases/download/dalgon-v0.1.0/dalgon-installer.ps1 | iex"
-```
+The binaries land in `target/release/`. When the first `dalgon-v*` and `dalgona-v*` tags land, the registry and installer channels serve the same binaries.
 
-Dalgona substitutes tag `dalgona-v0.1.0` and installer name `dalgona-installer`.
+Source builds use the latest stable Rust toolchain. Run
+`rustup update stable --no-self-update` before building. The repository uses one
+root Cargo workspace and one `Cargo.lock`; it does not declare a minimum
+supported Rust version.
 
-Platforms: Linux, macOS, Windows on x86_64 and aarch64. `cargo install` from source needs a C toolchain because the symbols grammars compile through `cc`; `cargo binstall` and the dist installers use prebuilt release binaries. If another package already installed `dal`, `dl`, or `dalgon`, Cargo refuses to overwrite without `--force`; use `cargo install dalgon --bin dalgon` for only the long name or `cargo install dalgon --force` to replace all three. Dist installers install all three real binaries to one PATH directory; `$CARGO_HOME` unset falls back to `$HOME/.cargo/bin`. Windows binaries are unsigned in v0 and may trigger SmartScreen; verify the release checksum before running them.
+Platforms: Linux, macOS, Windows on x86_64 and aarch64. Building from source needs a C toolchain because the symbols grammars compile through `cc`; prebuilt release binaries arrive with the first tagged release. If another package already installed `dal`, `dl`, or `dalgon`, Cargo refuses to overwrite without `--force`. Windows binaries are unsigned in v0 and may trigger SmartScreen; verify the release checksum before running them.
 
-Config and data roots per OS follow the CLI page. Plugins need no toolchain.
+Config and data roots per OS follow [Settings in dal.toml](config.md). Plugins need no toolchain.

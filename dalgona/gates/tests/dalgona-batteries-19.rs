@@ -8,7 +8,7 @@ use dal_core::{
     Command, EntryKind, Expect, JournalPart, PageReq, Part, Stop, UpdateKind, Workspace,
 };
 
-use gates::support::{self, TestResult};
+use dalgona_gates::support::{self, TestResult};
 const WAIT: Duration = Duration::from_secs(30);
 
 /// One scripted turn. All strings used here are fixed, JSON-safe fixture text.

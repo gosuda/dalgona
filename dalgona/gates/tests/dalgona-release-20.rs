@@ -4,14 +4,13 @@
     clippy::disallowed_methods,
     reason = "gate runs the real product binaries"
 )]
-use gates::support;
+use dalgona_gates::support;
 
 use std::{collections::BTreeMap, fs, process::Command};
 
 #[test]
 fn dalgona_man_pages_match_the_cli_tree() -> support::TestResult<()> {
-    let root = support::repo_root();
-    let workspace = root.join("dalgona");
+    let workspace = support::repo_root();
     let scratch = support::Scratch::new("dalgona-man-pages")?;
     let output_dir = scratch.path().join("rendered");
     let render = support::run_command(
@@ -23,7 +22,7 @@ fn dalgona_man_pages_match_the_cli_tree() -> support::TestResult<()> {
                 "dalgona",
                 "--release",
                 "--example",
-                "render-man",
+                "render-dalgona-man",
                 "--",
             ])
             .arg(&output_dir)
@@ -34,7 +33,7 @@ fn dalgona_man_pages_match_the_cli_tree() -> support::TestResult<()> {
         "{}",
         String::from_utf8_lossy(&render.stderr)
     );
-    let expected_dir = workspace.join("crates/dalgona/man");
+    let expected_dir = workspace.join("dalgona/dalgona/man");
     let mut expected = BTreeMap::new();
     for entry in fs::read_dir(&expected_dir)? {
         let path = entry?.path();

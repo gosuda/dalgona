@@ -1,0 +1,6 @@
+data: {"id":"chatcmpl-badargs","object":"chat.completion.chunk","created":1694268190,"model":"gpt-6-astra","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"f","arguments":"{\"a\":"}}]},"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-badargs","object":"chat.completion.chunk","created":1694268190,"model":"gpt-6-astra","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":null}
+
+data: [DONE]
+

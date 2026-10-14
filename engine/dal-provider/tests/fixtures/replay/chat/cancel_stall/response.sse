@@ -1,0 +1,2 @@
+data: {"id":"chatcmpl-cancel","object":"chat.completion.chunk","created":1694268190,"model":"gpt-6-astra","choices":[{"index":0,"delta":{"content":"Partial"},"finish_reason":null}],"usage":null}
+

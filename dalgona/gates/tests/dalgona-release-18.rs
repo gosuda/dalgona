@@ -4,7 +4,7 @@
     clippy::disallowed_methods,
     reason = "gate runs the real product binaries"
 )]
-use gates::support;
+use dalgona_gates::support;
 
 use std::{fs, path::Path};
 
@@ -33,20 +33,24 @@ fn sul_license_is_the_only_product_license() -> support::TestResult<()> {
     rust_sources(&root.join("dalgona"), &mut sources)?;
     assert_ne!(sources.len(), 0);
     for source in sources {
-        let text = fs::read_to_string(source)?;
-        assert!(text.starts_with("// SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0\n"));
+        let text = fs::read_to_string(&source)?;
+        assert!(
+            text.starts_with("// SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0\n"),
+            "{} lacks the Sustainable Use License header on its first line",
+            source.display()
+        );
     }
     let license = fs::read_to_string(root.join("LICENSE.md"))?;
     assert!(license.contains("Sustainable Use License"));
     assert!(license.contains("metaphorics"));
     assert!(!root.join("dalgona/LICENSE").exists());
     assert!(!root.join("dalgona/NOTICE").exists());
-    let workspace = fs::read_to_string(root.join("dalgona/Cargo.toml"))?;
-    assert!(workspace.contains("license-file = \"../LICENSE.md\""));
+    let workspace = fs::read_to_string(root.join("Cargo.toml"))?;
+    assert!(workspace.contains("license-file = \"LICENSE.md\""));
     assert!(!workspace.contains("license = \"Apache"));
     for manifest in [
-        root.join("dalgona/crates/dalgona/Cargo.toml"),
-        root.join("dalgona/crates/dalgona-batteries/Cargo.toml"),
+        root.join("dalgona/dalgona/Cargo.toml"),
+        root.join("dalgona/dalgona-batteries/Cargo.toml"),
     ] {
         let contents = fs::read_to_string(manifest)?;
         assert!(contents.contains("license-file.workspace = true"));
@@ -55,7 +59,7 @@ fn sul_license_is_the_only_product_license() -> support::TestResult<()> {
     let deny = support::run_command(
         std::process::Command::new("cargo")
             .args(["deny", "--locked", "check"])
-            .current_dir(root.join("dalgona")),
+            .current_dir(root),
     )?;
     assert!(
         deny.status.success(),

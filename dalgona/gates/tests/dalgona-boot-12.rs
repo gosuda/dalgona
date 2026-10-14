@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
 //! This gate verifies that the model reads the Dalgona manual through the read tool.
-use gates::support;
+use dalgona_gates::support;
 
 #[test]
 fn the_model_reads_the_dalgona_manual_through_the_read_tool() -> support::TestResult<()> {
