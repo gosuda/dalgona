@@ -639,3 +639,25 @@ fn before_turn_text_follows_its_user_message_in_the_body() -> TestResult {
     );
     Ok(())
 }
+
+#[test]
+fn cumulative_websocket_and_sse_arguments_share_the_event_budget() {
+    let mut decoder = Decoder::new(Family::Responses, "model");
+    let start = r#"{"type":"response.output_item.added","item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"run"}}"#;
+    let delta = r#"{"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"x"}"#;
+    let mut out = Vec::new();
+    assert!(decoder.feed(start, &mut out).is_ok());
+    out.clear();
+    for _ in 1..crate::stream_budget::STREAM_EVENTS_LIMIT {
+        assert!(decoder.feed(delta, &mut out).is_ok());
+        out.clear();
+    }
+    assert!(matches!(
+        decoder.feed(delta, &mut out),
+        Err(ProviderError::Limit(crate::error::LimitError::StreamEvents))
+    ));
+    assert_eq!(
+        decoder.calls[0].deltas.len(),
+        crate::stream_budget::STREAM_EVENTS_LIMIT - 1
+    );
+}
