@@ -1324,13 +1324,15 @@ impl crate::ext::McpClient for RecordingMcp {
 }
 
 fn declared_plugin(url: &str) -> Extension {
-    plugin_with(
-        "focus",
-        vec![skill_declaring(
+    ExtensionBuilder::new("focus", "1.0.0", ServiceSet::from_names(["mcp"]).unwrap())
+        .unwrap()
+        .with_origin(Origin::User, None)
+        .skill(skill_declaring(
             "docs",
             Some(block_of("files", http_decl(url))),
-        )],
-    )
+        ))
+        .build()
+        .unwrap()
 }
 
 #[tokio::test]
