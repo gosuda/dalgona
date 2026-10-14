@@ -2,9 +2,9 @@ use super::{
     ExecArgs, ExecEvent, ExecJob, ExecOutcome, ExecState, ExecTool, ExecTransition, ValidatedCall,
 };
 use dal_agent::{ProcResult, ProcStatus, ToolError, ext::ToolOutcome};
-use dal_core::{CallId, JobOutcome};
+use dal_core::{CallId, ExecApproval, JobOutcome};
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -106,6 +106,44 @@ fn validate_keeps_cwd_inside_the_canonical_workspace() {
     );
     assert_eq!(validated.timeout, Some(Duration::from_secs(1)));
     assert_eq!(validated.timeout_seconds, Some(1));
+}
+
+#[test]
+fn exec_approval_uses_the_canonical_per_call_directory() {
+    let root = tempfile::tempdir().expect("create workspace");
+    std::fs::create_dir_all(root.path().join("nested")).expect("create nested directory");
+    let validated = super::validate(
+        ExecArgs {
+            command: "pwd".into(),
+            cwd: Some("nested/../nested".into()),
+            timeout_seconds: None,
+            foreground_s: None,
+        },
+        root.path(),
+    )
+    .expect("validate relative directory");
+    let shell = PathBuf::from("/bin/bash");
+    let preview = ExecApproval::new(validated.command.clone(), validated.cwd.clone(), shell.clone())
+        .preview()
+        .expect("encode exec preview");
+    let shown = ExecApproval::from_preview(&preview).expect("decode approved execution");
+    assert_eq!(shown.command.as_ref(), "pwd");
+    assert_eq!(shown.cwd, std::fs::canonicalize(root.path().join("nested")).unwrap());
+    assert_eq!(shown.cwd, validated.cwd);
+    assert_eq!(shown.shell, shell);
+    assert!(!preview.body.contains("nested/../nested"));
+
+    let default = super::validate(
+        ExecArgs {
+            command: "pwd".into(),
+            cwd: None,
+            timeout_seconds: None,
+            foreground_s: None,
+        },
+        root.path(),
+    )
+    .expect("validate default directory");
+    assert_eq!(default.cwd, std::fs::canonicalize(root.path()).unwrap());
 }
 
 #[test]
