@@ -331,6 +331,7 @@ async fn run_headless(
         json: cli.json,
         output_last_message: cli.output_last_message.clone(),
         prompt: parts,
+        stdout_is_tty: snapshot.stdout_tty,
         stderr_is_tty: snapshot.stderr_tty,
         headless_approval,
         stop: stop.clone(),

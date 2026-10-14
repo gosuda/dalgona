@@ -149,6 +149,7 @@ pub(crate) struct PrintOptions {
     pub json: bool,
     pub output_last_message: Option<PathBuf>,
     pub prompt: Vec<dal_core::Part>,
+    pub stdout_is_tty: bool,
     pub stderr_is_tty: bool,
     /// Approval mode `ask` with no terminal: the run emits the once-per-run
     /// headless notice before the first denial note.
@@ -260,11 +261,12 @@ pub(crate) async fn run_print(
     stderr: &mut (impl AsyncWrite + Unpin),
 ) -> Result<PrintOutcome, PrintError> {
     let json = opts.json;
+    let stderr_is_tty = opts.stderr_is_tty;
     match run_print_inner(agent, opts, stdout, stderr).await {
         Ok(outcome) => Ok(outcome),
         Err(error) => {
             if !error.is_broken_pipe() {
-                write_failure(&error, json, stdout, stderr).await?;
+                write_failure(&error, json, stderr_is_tty, stdout, stderr).await?;
             }
             Err(error)
         }
@@ -338,38 +340,26 @@ async fn run_print_inner(
             } => {
                 assistant.push_str(text);
                 if !opts.json {
-                    stdout
-                        .write_all(text.as_bytes())
-                        .await
-                        .map_err(PrintError::Io)?;
+                    write_untrusted(stdout, text, opts.stdout_is_tty).await?;
                 }
             }
             UpdateKind::ToolStarted { tool, .. } if opts.stderr_is_tty && !opts.json => {
                 let progress = format!("Running {tool}.\n");
-                stderr
-                    .write_all(progress.as_bytes())
-                    .await
-                    .map_err(PrintError::Io)?;
+                write_untrusted(stderr, &progress, opts.stderr_is_tty).await?;
             }
             UpdateKind::ToolSettled { outcome, .. } if !opts.json => {
                 let Some((tool, rung)) = parse_headless_denial(&outcome.text) else {
                     continue;
                 };
                 let note = dal_texts::approval_denied_note(tool, rung.as_str());
-                stderr
-                    .write_all(note.as_bytes())
-                    .await
-                    .map_err(PrintError::Io)?;
+                write_untrusted(stderr, &note, opts.stderr_is_tty).await?;
                 stderr.write_all(b"\n").await.map_err(PrintError::Io)?;
                 denial_count += 1;
             }
             UpdateKind::Notice(notice) => {
                 last_notice = Some(notice.text.clone());
                 if !opts.json {
-                    stderr
-                        .write_all(notice.text.as_bytes())
-                        .await
-                        .map_err(PrintError::Io)?;
+                    write_untrusted(stderr, &notice.text, opts.stderr_is_tty).await?;
                     stderr.write_all(b"\n").await.map_err(PrintError::Io)?;
                 }
             }
@@ -506,9 +496,27 @@ async fn await_quiet(
     }
 }
 
+/// Writes untrusted text without letting terminal controls reach an interactive sink.
+async fn write_untrusted(
+    output: &mut (impl AsyncWrite + Unpin),
+    text: &str,
+    is_tty: bool,
+) -> Result<(), PrintError> {
+    let rendered = if is_tty {
+        dal_core::terminal::escape_multiline(text)
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    };
+    output
+        .write_all(rendered.as_bytes())
+        .await
+        .map_err(PrintError::Io)
+}
+
 async fn write_failure(
     error: &PrintError,
     json: bool,
+    stderr_is_tty: bool,
     stdout: &mut (impl AsyncWrite + Unpin),
     stderr: &mut (impl AsyncWrite + Unpin),
 ) -> Result<(), PrintError> {
@@ -522,15 +530,9 @@ async fn write_failure(
         stdout.flush().await.map_err(PrintError::Io)?;
         return Ok(());
     }
-    stderr
-        .write_all(what.as_bytes())
-        .await
-        .map_err(PrintError::Io)?;
+    write_untrusted(stderr, &what, stderr_is_tty).await?;
     stderr.write_all(b"\n").await.map_err(PrintError::Io)?;
-    stderr
-        .write_all(hint.as_bytes())
-        .await
-        .map_err(PrintError::Io)?;
+    write_untrusted(stderr, &hint, stderr_is_tty).await?;
     stderr.write_all(b"\n").await.map_err(PrintError::Io)?;
     Ok(())
 }
@@ -574,14 +576,17 @@ mod tests {
         }
     }
 
-    async fn session(switch: &Arc<Switch>) -> (tempfile::TempDir, Host, Agent) {
+    async fn session(
+        switch: &Arc<Switch>,
+        fixture_contents: &str,
+    ) -> (tempfile::TempDir, Host, Agent) {
         let tmp = tempfile::tempdir().expect("tempdir");
         let data = tmp.path().join("data");
         let workspace_dir = tmp.path().join("w");
         std::fs::create_dir_all(&data).expect("data dir");
         std::fs::create_dir_all(&workspace_dir).expect("workspace dir");
         let fixture = data.join("script.jsonl");
-        std::fs::write(&fixture, FIXTURE).expect("fixture");
+        std::fs::write(&fixture, fixture_contents).expect("fixture");
         let user = format!(
             "model = \"openai/gpt-6-luna\"\n\n[providers.scripted]\nfixture = \"{}\"\n",
             fixture.to_string_lossy().replace('\\', "\\\\")
@@ -623,6 +628,7 @@ mod tests {
             json,
             output_last_message: None,
             prompt: vec![Part::Text { text: "hi".into() }],
+            stdout_is_tty: false,
             stderr_is_tty: false,
             stop: stop.clone(),
             quiet_wait,
@@ -633,7 +639,7 @@ mod tests {
     #[tokio::test]
     async fn json_waits_for_quiet_after_the_turn_then_writes_one_line() {
         let switch = Arc::new(Switch(Mutex::new(false)));
-        let (_tmp, host, agent) = session(&switch).await;
+        let (_tmp, host, agent) = session(&switch, FIXTURE).await;
         let stop = CancellationToken::new();
         let release = Arc::clone(&switch);
         #[expect(
@@ -662,7 +668,7 @@ mod tests {
     #[tokio::test]
     async fn json_never_quiet_waits_for_the_stop_signal() {
         let switch = Arc::new(Switch(Mutex::new(false)));
-        let (_tmp, host, agent) = session(&switch).await;
+        let (_tmp, host, agent) = session(&switch, FIXTURE).await;
         let stop = CancellationToken::new();
         let cancel = stop.clone();
         #[expect(
@@ -689,7 +695,7 @@ mod tests {
     #[tokio::test]
     async fn text_run_exits_after_quiet_wait_with_status_not_quiet() {
         let switch = Arc::new(Switch(Mutex::new(false)));
-        let (_tmp, host, agent) = session(&switch).await;
+        let (_tmp, host, agent) = session(&switch, FIXTURE).await;
         let stop = CancellationToken::new();
         let started = Instant::now();
         let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
@@ -714,7 +720,7 @@ mod tests {
     #[tokio::test]
     async fn quiet_session_returns_well_under_its_wait() {
         let switch = Arc::new(Switch(Mutex::new(true)));
-        let (_tmp, host, agent) = session(&switch).await;
+        let (_tmp, host, agent) = session(&switch, FIXTURE).await;
         let stop = CancellationToken::new();
         let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
         let started = Instant::now();
@@ -735,5 +741,52 @@ mod tests {
             "already-quiet session must not sleep its 1s wait: {elapsed:?}"
         );
         host.shutdown(Duration::from_secs(1)).await;
+    }
+
+    #[tokio::test]
+    async fn tty_diagnostics_escape_untrusted_terminal_controls() {
+        let error = PrintError::TurnFailed("failed\u{1b}]0;spoof\u{7}".into());
+        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        super::write_failure(&error, false, true, &mut stdout, &mut stderr)
+            .await
+            .expect("diagnostics");
+        assert!(stdout.is_empty());
+        assert_eq!(
+            String::from_utf8(stderr).expect("utf8"),
+            "failed\\u{1b}]0;spoof\\a\nCheck the provider response and try the prompt again.\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn tty_print_escapes_controls_and_redirected_output_is_raw() {
+        let fixture = FIXTURE.replace(
+            "\"Hello\"",
+            r#""Hello\u001b]52;c;AAAA\u0007\u001b[2J\r\u007f\u009b[1m\u202e\u2066\nbye""#,
+        );
+        let raw = "Hello\u{1b}]52;c;AAAA\u{7}\u{1b}[2J\r\u{7f}\u{9b}[1m\u{202e}\u{2066}\nbye";
+        let escaped =
+            "Hello\\u{1b}]52;c;AAAA\\a\\u{1b}[2J\\r\\u{7f}\\u{9b}[1m\\u{202e}\\u{2066}\nbye";
+
+        for stdout_is_tty in [false, true] {
+            let switch = Arc::new(Switch(Mutex::new(true)));
+            let (tmp, host, agent) = session(&switch, &fixture).await;
+            let stop = CancellationToken::new();
+            let output_file = tmp.path().join("last-message.txt");
+            let mut opts = options(false, None, &stop);
+            opts.stdout_is_tty = stdout_is_tty;
+            opts.output_last_message = Some(output_file.clone());
+            let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+
+            let outcome = run_print(agent, opts, &mut stdout, &mut stderr)
+                .await
+                .expect("run");
+            assert_eq!(outcome, PrintOutcome::Completed);
+            let expected = format!("{}\n", if stdout_is_tty { escaped } else { raw });
+            assert_eq!(stdout.as_slice(), expected.as_bytes(), "stdout_is_tty={stdout_is_tty}");
+            let last_message = std::fs::read(output_file).expect("last assistant message");
+            assert_eq!(last_message.as_slice(), raw.as_bytes());
+            assert!(stderr.is_empty());
+            host.shutdown(Duration::from_secs(1)).await;
+        }
     }
 }
