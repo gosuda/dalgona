@@ -1418,7 +1418,7 @@ mod tests {
             &cancel,
         )
         .await;
-        assert!(matches!(rejected, Err(McpError::NoAskFrontEnd)));
+        assert!(matches!(rejected, Err(McpError::Auth { .. })));
         assert_eq!(services.asked_count(), 1);
         assert!(
             tokio::time::timeout(Duration::from_millis(50), listener.accept())
@@ -1467,7 +1467,7 @@ mod tests {
             &cancel,
         )
         .await;
-        assert!(matches!(rejected, Err(McpError::NoAskFrontEnd)));
+        assert!(matches!(rejected, Err(McpError::Auth { .. })));
         assert_eq!(services.asked_count(), 1);
         assert!(
             tokio::time::timeout(Duration::from_millis(50), listener.accept())
