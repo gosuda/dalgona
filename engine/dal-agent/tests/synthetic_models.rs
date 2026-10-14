@@ -198,7 +198,6 @@ impl Handler {
         };
         let scope = cx.scope(spec).expect("scope opens");
         let start = AgentStart {
-            max_steps: None,
             call: CallId::new("call"),
             name: "member".into(),
             prompt: "work".into(),

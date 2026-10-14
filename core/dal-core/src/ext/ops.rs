@@ -14,9 +14,6 @@ pub struct AgentStart {
     pub name: Box<str>,
     /// The prompt for the child session.
     pub prompt: Box<str>,
-    /// Maximum tool rounds for the initial child turn; absent leaves it unbounded.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_steps: Option<std::num::NonZeroU32>,
     /// An optional model identifier.
     pub model: Option<Box<str>>,
     /// An optional role name.
@@ -149,6 +146,13 @@ pub enum Receipt {
 pub enum AgentsOp {
     /// Starts a child agent session.
     Start(AgentStart),
+    /// Starts a child agent whose first turn has a tool-round limit.
+    StartBounded {
+        /// The child-session start request.
+        start: AgentStart,
+        /// Maximum tool rounds for the first turn.
+        max_steps: std::num::NonZeroU32,
+    },
     /// Starts one prompt turn on an idle child and optionally interrupts it
     /// after the supplied grace duration.
     Prompt {

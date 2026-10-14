@@ -236,7 +236,6 @@ impl ModelHandler for ChildLoadModel {
             };
             for index in 0..CHILD_SESSIONS {
                 let child = AgentStart {
-                    max_steps: None,
                     call: CallId::new(format!("child-call-{index}")),
                     name: format!("member-{index}").into(),
                     prompt: format!("report from member {index}").into(),
@@ -395,7 +394,6 @@ impl ModelHandler for ShuttleRootModel {
                 return Err(ModelError::PrivateRounds);
             };
             let child = AgentStart {
-                max_steps: None,
                 call: CallId::new("shuttle-child-call"),
                 name: "shuttle-child".into(),
                 prompt: "hold a member turn while mail arrives".into(),

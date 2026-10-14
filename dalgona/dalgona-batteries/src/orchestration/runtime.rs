@@ -2319,7 +2319,6 @@ impl SessionState {
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|error| error.to_string())?;
             dal_core::AgentStart {
-                max_steps: std::num::NonZeroU32::new(self.config.agents.child_max_steps),
                 call: call.clone(),
                 name: step.name.clone().into(),
                 prompt: step.prompt.clone().into(),
@@ -3441,7 +3440,13 @@ impl Coordinator {
         };
         let handle = self
             .child_start(step, item, reports, index, &label, dir.as_deref())
-            .and_then(|start| scope.agent(start).map_err(|error| error.to_string()));
+            .and_then(|start| {
+                let max_steps = std::num::NonZeroU32::new(self.child_max_steps)
+                    .ok_or_else(|| "child_max_steps must be positive".to_owned())?;
+                scope
+                    .agent_bounded(start, max_steps)
+                    .map_err(|error| error.to_string())
+            });
         let handle = match handle {
             Ok(handle) => handle,
             Err(reason) => {
@@ -3643,7 +3648,6 @@ impl Coordinator {
             .transpose()
             .map_err(|error| error.to_string())?;
         Ok(dal_core::AgentStart {
-            max_steps: std::num::NonZeroU32::new(self.child_max_steps),
             call: CallId::new(format!("{}-{}-{index}", self.call, step.name)),
             name: label.to_owned().into_boxed_str(),
             prompt: preamble.into_boxed_str(),

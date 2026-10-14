@@ -212,7 +212,6 @@ impl CommandHandler for Spawn {
                 format!("member-{}", self.next_name.fetch_add(1, Ordering::SeqCst)).into()
             });
             let start = AgentStart {
-                max_steps: None,
                 call: CallId::new("spawn-call"),
                 name,
                 prompt: "work".into(),

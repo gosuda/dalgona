@@ -1074,7 +1074,10 @@ impl Backend {
 
     async fn agents_op(&self, op: AgentsOp) -> Result<AgentsReply, ServiceError> {
         match op {
-            AgentsOp::Start(start) => self.agent_start(start).await,
+            AgentsOp::Start(start) => self.agent_start(start, None).await,
+            AgentsOp::StartBounded { start, max_steps } => {
+                self.agent_start(start, Some(max_steps)).await
+            },
             AgentsOp::Prompt {
                 id,
                 text,
@@ -1153,7 +1156,11 @@ impl Backend {
         Workspace::new(child_root).map_err(|_| AgentRefusal::WorkspaceUnresolved)
     }
 
-    async fn agent_start(&self, start: dal_core::AgentStart) -> Result<AgentsReply, ServiceError> {
+    async fn agent_start(
+        &self,
+        start: dal_core::AgentStart,
+        max_steps: Option<std::num::NonZeroU32>,
+    ) -> Result<AgentsReply, ServiceError> {
         if let Some(max_depth) = self.depth_refusal() {
             return Ok(refused(AgentRefusal::MaxDepth { max_depth }));
         }
@@ -1248,7 +1255,7 @@ impl Backend {
             return Err(child_start_error(error));
         }
         // Apply the initial turn cap before the child can accept its first prompt.
-        child.inner.shared.set_next_turn_step_cap(start.max_steps);
+        child.inner.shared.set_next_turn_step_cap(max_steps);
         if let Err(error) = child
             .submit(dal_core::Command::Prompt {
                 expect: dal_core::Expect::Idle,
@@ -1942,7 +1949,6 @@ mod tests {
     fn start_in(workspace: Option<Workspace>, model: Option<&str>) -> dal_core::AgentStart {
         max_steps: None,
         dal_core::AgentStart {
-            max_steps: None,
             call: CallId::new("refused-start"),
             name: "member".into(),
             prompt: "work".into(),

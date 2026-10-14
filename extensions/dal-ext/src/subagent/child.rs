@@ -49,7 +49,6 @@ pub(crate) fn start_child(
     workspace: Option<String>,
 ) -> Result<AgentsOp, AgentInputError> {
     let start = AgentStart {
-        max_steps: None,
         call,
         name: name.into(),
         prompt: prompt.into_boxed_str(),

@@ -268,7 +268,6 @@ fn request() -> ModelRequest {
 
 fn start() -> AgentStart {
     AgentStart {
-        max_steps: None,
         call: CallId::new("member"),
         name: "member".into(),
         prompt: "work".into(),

@@ -43,6 +43,7 @@ struct Script {
     notices: Vec<Notice>,
     jobs: Vec<(JobStatus, Option<JobId>, String)>,
     starts: Vec<(SessionId, AgentStart)>,
+    initial_step_limits: Vec<Option<std::num::NonZeroU32>>,
     report_status: Option<&'static str>,
     hold: Option<CancellationToken>,
     run_outputs: VecDeque<Result<RunOutput, &'static str>>,
@@ -460,7 +461,8 @@ impl Services for Host {
                     Ok(AgentsReply::Cancelled { id })
                 }
             }
-            AgentsOp::Start(_) if script.refuse_start.is_some() => {
+            AgentsOp::Start(_) | AgentsOp::StartBounded { .. }
+                if script.refuse_start.is_some() => {
                 let reason = script.refuse_start.clone();
                 drop(script);
                 return Box::pin(async move {
@@ -472,6 +474,15 @@ impl Services for Host {
             AgentsOp::Start(start) => {
                 let id = script.started.unwrap_or_else(SessionId::new_v7);
                 script.starts.push((id, start.clone()));
+                script.initial_step_limits.push(None);
+                drop(script);
+                self.changed.notify_waiters();
+                return self.start_child(start, id);
+            }
+            AgentsOp::StartBounded { start, max_steps } => {
+                let id = script.started.unwrap_or_else(SessionId::new_v7);
+                script.starts.push((id, start.clone()));
+                script.initial_step_limits.push(Some(max_steps));
                 drop(script);
                 self.changed.notify_waiters();
                 return self.start_child(start, id);
@@ -1615,7 +1626,10 @@ async fn initial_child_turn_obeys_configured_round_limit() -> TestResult {
         run_one_step(&fixture).await?;
         let script = fixture.script();
         assert_eq!(script.starts.len(), 1);
-        assert_eq!(script.starts[0].1.max_steps, std::num::NonZeroU32::new(limit));
+        assert_eq!(
+            script.initial_step_limits[0],
+            std::num::NonZeroU32::new(limit)
+        );
     }
     Ok(())
 }
