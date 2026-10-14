@@ -2,6 +2,7 @@
 
 use std::ffi::OsStr;
 use std::io::{Read as _, Write as _};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
@@ -13,12 +14,17 @@ const BUDGET: Duration = Duration::from_secs(2);
 const OUTPUT_CAP: usize = 4 * 1_024 * 1_024;
 
 /// Renders via the kind's CLI tool or returns the exact fallback reason.
+///
+/// Setting `stop` kills the renderer's process tree within one poll
+/// interval, so the owner of the render can shut down without waiting out
+/// the budget.
 #[must_use]
 pub fn render(
     kind: DiagramKind,
     source: &[u8],
     path: Option<&OsStr>,
     fonts: &FontSnapshot,
+    stop: &AtomicBool,
 ) -> DiagramOutcome {
     let tool = kind.tool();
     if tool.is_empty() {
@@ -27,12 +33,13 @@ pub fn render(
     if which(tool, path).is_none() {
         return fallback(format!("{tool} is not installed"));
     }
-    match run_child(tool, source, path) {
+    match run_child(tool, source, path, stop) {
         ChildOutcome::Svg(svg) => super::raster::render_svg(&svg, kind, fonts),
         ChildOutcome::Missing => fallback(format!("{tool} is not installed")),
         ChildOutcome::Invalid => fallback(format!("invalid {}", kind.label())),
         ChildOutcome::TimedOut => fallback("timed out".to_owned()),
         ChildOutcome::TooLarge => fallback("too large".to_owned()),
+        ChildOutcome::Stopped => fallback("cancelled".to_owned()),
     }
 }
 
@@ -60,9 +67,10 @@ enum ChildOutcome {
     Invalid,
     TimedOut,
     TooLarge,
+    Stopped,
 }
 
-fn run_child(tool: &str, source: &[u8], path: Option<&OsStr>) -> ChildOutcome {
+fn run_child(tool: &str, source: &[u8], path: Option<&OsStr>, stop: &AtomicBool) -> ChildOutcome {
     let Ok(tmp) = tempfile::tempdir() else {
         return ChildOutcome::Invalid;
     };
@@ -114,7 +122,7 @@ fn run_child(tool: &str, source: &[u8], path: Option<&OsStr>) -> ChildOutcome {
                 .map(|_| output);
             let _ = send.send(PipeResult::Output(result));
         });
-        let outcome = collect_output(child.inner_mut(), &receive, deadline);
+        let outcome = collect_output(child.inner_mut(), &receive, deadline, stop);
         let _ = child.start_kill();
         if child.wait().is_err() {
             return ChildOutcome::Invalid;
@@ -132,10 +140,14 @@ fn collect_output(
     leader: &mut dyn ChildWrapper,
     receive: &Receiver<PipeResult>,
     deadline: Instant,
+    stop: &AtomicBool,
 ) -> ChildOutcome {
     let mut input_done = false;
     let mut output = None;
     loop {
+        if stop.load(Ordering::Acquire) {
+            return ChildOutcome::Stopped;
+        }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return ChildOutcome::TimedOut;
@@ -171,6 +183,8 @@ fn collect_output(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicBool;
+
     use super::render;
     use crate::diagram::{DiagramKind, DiagramOutcome, FontSnapshot};
 
@@ -181,6 +195,7 @@ mod tests {
             b"a -> b",
             Some(std::ffi::OsStr::new("")),
             &FontSnapshot::default(),
+            &AtomicBool::new(false),
         );
         assert!(matches!(
             &outcome,
@@ -200,7 +215,41 @@ mod process_tests {
     use std::os::unix::fs::PermissionsExt as _;
     use std::time::{Duration, Instant};
 
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use super::{ChildOutcome, OUTPUT_CAP, run_child};
+
+    fn run(root: &tempfile::TempDir) -> ChildOutcome {
+        run_child(
+            "d2",
+            b"a -> b",
+            Some(root.path().as_os_str()),
+            &AtomicBool::new(false),
+        )
+    }
+
+    #[test]
+    fn a_stop_kills_a_running_renderer_before_its_budget() -> Result<(), Box<dyn Error>> {
+        let root = renderer("/bin/sleep 8 &\nprintf '%s' \"$!\" > \"${0}.pid\"\nwait")?;
+        let stop = AtomicBool::new(false);
+        let started = Instant::now();
+        let outcome = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(200));
+                stop.store(true, Ordering::Release);
+            });
+            run_child("d2", b"a -> b", Some(root.path().as_os_str()), &stop)
+        });
+        let elapsed = started.elapsed();
+        assert!(
+            matches!(outcome, ChildOutcome::Stopped),
+            "renderer returned {outcome:?} after {elapsed:?}",
+        );
+        assert!(elapsed < Duration::from_secs(1), "elapsed: {elapsed:?}");
+        #[cfg(target_os = "linux")]
+        assert_descendant_stopped(root.path())?;
+        Ok(())
+    }
 
     fn renderer(body: &str) -> Result<tempfile::TempDir, Box<dyn Error>> {
         let root = tempfile::tempdir()?;
@@ -216,7 +265,7 @@ mod process_tests {
             let root = renderer(&format!(
                 "/bin/dd if=/dev/zero bs={size} count=1 2>/dev/null"
             ))?;
-            let outcome = run_child("d2", b"a -> b", Some(root.path().as_os_str()));
+            let outcome = run(&root);
             match outcome {
                 ChildOutcome::Svg(bytes) if size == OUTPUT_CAP => {
                     assert_eq!(bytes.len(), OUTPUT_CAP);
@@ -235,7 +284,7 @@ mod process_tests {
             OUTPUT_CAP + 1
         ))?;
         let started = Instant::now();
-        let outcome = run_child("d2", b"a -> b", Some(root.path().as_os_str()));
+        let outcome = run(&root);
         let elapsed = started.elapsed();
         assert!(
             matches!(outcome, ChildOutcome::TooLarge),
@@ -252,7 +301,7 @@ mod process_tests {
                 "/bin/sleep 8 &\nprintf '%s' \"$!\" > \"${{0}}.pid\"\n{parent_exit}"
             ))?;
             let started = Instant::now();
-            let outcome = run_child("d2", b"a -> b", Some(root.path().as_os_str()));
+            let outcome = run(&root);
             assert!(matches!(outcome, ChildOutcome::TimedOut));
             assert!(started.elapsed() < Duration::from_secs(7));
             #[cfg(target_os = "linux")]
@@ -267,7 +316,7 @@ mod process_tests {
             "/bin/sleep 8 >/dev/null &\nprintf '%s' \"$!\" > \"${0}.pid\"\nprintf '<svg/>'",
         )?;
         let started = Instant::now();
-        let outcome = run_child("d2", b"a -> b", Some(root.path().as_os_str()));
+        let outcome = run(&root);
         assert!(matches!(outcome, ChildOutcome::Svg(bytes) if bytes == b"<svg/>"));
         assert!(started.elapsed() < Duration::from_secs(7));
         #[cfg(target_os = "linux")]

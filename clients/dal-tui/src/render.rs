@@ -947,17 +947,7 @@ fn escape_linked(text: &str, links: Vec<RenderLink>) -> (String, Vec<RenderLink>
     let mut offsets = vec![0; text.len() + 1];
     for (index, character) in text.char_indices() {
         offsets[index] = escaped.len();
-        match character {
-            '\t' => escaped.push_str("\\t"),
-            '\n' => escaped.push_str("\\n"),
-            '\r' => escaped.push_str("\\r"),
-            '\u{7}' => escaped.push_str("\\a"),
-            character if character.is_control() || crate::width::is_bidi_control(character) => {
-                use std::fmt::Write as _;
-                let _ = write!(escaped, "\\u{{{:x}}}", u32::from(character));
-            }
-            character => escaped.push(character),
-        }
+        dal_core::terminal::push_escaped(&mut escaped, character);
     }
     offsets[text.len()] = escaped.len();
     let links = links

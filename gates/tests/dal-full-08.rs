@@ -377,7 +377,7 @@ async fn start_member(
             caller,
             AgentsOp::Start(AgentStart {
                 call: CallId::new(name),
-                name: name.into(),
+                name: Some(name.into()),
                 prompt: prompt.into(),
                 model: None,
                 role: None,

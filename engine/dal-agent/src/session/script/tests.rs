@@ -47,6 +47,16 @@ impl ModelCxRuntime for DenyInferRuntime {
         Box::pin(async { Err(crate::error::ServiceError::Denied(DenyReason::NotInjected)) })
     }
 
+    fn script_forward<'a>(
+        &'a self,
+        _who: &'a Caller,
+        _request: ModelRequest,
+        _private: &'a [PrivateTool],
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> BoxFuture<'a, Result<EventStream, crate::error::ServiceError>> {
+        Box::pin(async { Err(crate::error::ServiceError::Denied(DenyReason::NotInjected)) })
+    }
+
     fn forward<'a>(
         &'a self,
         _request: ModelRequest,
@@ -97,7 +107,7 @@ struct ModelEntryHandler;
 
 impl crate::ext::ModelHandler for ModelEntryHandler {
     fn uses(&self) -> OpSet {
-        OpSet::parse(["models.infer"]).expect("model uses")
+        OpSet::parse(["models.infer", "models.forward"]).expect("model uses")
     }
 
     fn run<'a>(
@@ -529,8 +539,8 @@ async fn model_export_begins_with_its_declared_uses() {
         "the model export declares models.infer"
     );
     assert!(
-        !inv.allows(&OpId::Native(NativeOp::ModelsForward)),
-        "the model export does not declare models.forward"
+        inv.allows(&OpId::Native(NativeOp::ModelsForward)),
+        "the model export declares models.forward"
     );
 }
 
@@ -578,6 +588,35 @@ async fn models_infer_preserves_typed_service_denial() {
             })
         ),
         "the typed service denial survives the op bridge: {outcome:?}"
+    );
+}
+
+#[tokio::test]
+async fn models_forward_preserves_typed_service_denial() {
+    let fx = fixture(Duration::ZERO).await;
+    let host = captured(&fx, &["models.infer", "models.forward"]);
+    let inv = host
+        .begin(
+            Parent::Root,
+            Entry::Export {
+                id: model_export(),
+                phase: Phase::Model,
+            },
+        )
+        .expect("model entry begins");
+    let mut script = host.attach(None).expect("script context attaches");
+    script.model_runtime = Some(Arc::new(DenyInferRuntime));
+    let req = OpRequest::new(OpId::Native(NativeOp::ModelsForward), model_request_args())
+        .with_model_context(&script);
+    let outcome = host.call(&inv, req).await;
+    assert!(
+        matches!(
+            outcome,
+            OpOutcome::Terminal(HostTerminal::Denied {
+                reason: DenyReason::NotInjected
+            })
+        ),
+        "forward must use the caller-bound runtime gate: {outcome:?}"
     );
 }
 
@@ -861,13 +900,10 @@ async fn a_failed_sidecar_write_rolls_the_map_back() {
     )
     .await;
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).expect("restore");
-    let OpOutcome::Terminal(HostTerminal::Denied { reason, .. }) = failed else {
-        panic!("a failed durable write denies the op: {failed:?}");
+    let OpOutcome::Failed { failure, .. } = failed else {
+        panic!("a failed durable write fails the op: {failed:?}");
     };
-    let DenyReason::Unavailable { what } = reason else {
-        panic!("the sidecar is the unavailable piece: {reason:?}");
-    };
-    assert_eq!(what.as_ref(), "state");
+    assert_eq!(failure.code, FailureCode::Unavailable, "{failure:?}");
     // The rolled-back op never minted a revision or wrote a value: the same
     // `expected` still commits, and no phantom record appears.
     let commit = call_op(
@@ -949,13 +985,12 @@ async fn state_ops_fail_closed_on_an_ephemeral_session() {
         r#"{"key":"counter"}"#,
     )
     .await;
-    let OpOutcome::Terminal(HostTerminal::Denied { reason, .. }) = outcome else {
+    // The catchable `unavailable` code lets `ctx.try_call` degrade.
+    let OpOutcome::Failed { failure, .. } = outcome else {
         panic!("an ephemeral session keeps the typed outcome: {outcome:?}");
     };
-    let DenyReason::Unavailable { what } = reason else {
-        panic!("the state store is the unavailable piece: {reason:?}");
-    };
-    assert_eq!(what.as_ref(), "state");
+    assert_eq!(failure.code, FailureCode::Unavailable, "{failure:?}");
+    assert_eq!(&*failure.message, "state is unavailable in this session");
 }
 
 #[tokio::test]

@@ -9,7 +9,7 @@
 //! store lock is released.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -50,9 +50,9 @@ impl Grant {
     }
 }
 
-/// Canonical grant identity: extension, origin, and capability set, never
-/// including `ask`. Equal service sets coalesce; a changed declaration is
-/// a new key.
+/// Immutable approval identity. Code includes the host-hashed source snapshot,
+/// declared version, and exact operation manifest. Workspace is session-scoped;
+/// changed code, declaration, or root cannot reuse prior authority.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GrantKey {
     /// The owning extension name.
@@ -61,9 +61,32 @@ pub struct GrantKey {
     pub origin: Origin,
     /// The exact granted capability set.
     pub services: ServiceSet,
+    /// Host-computed code, version, and declared-operation fingerprint.
+    pub digest: Box<str>,
+    /// Exact absolute workspace path covered by the approval.
+    pub workspace: PathBuf,
 }
 
 impl GrantKey {
+    /// Constructs the authorization identity of a loaded extension at a root.
+    /// An unverified code identity or non-UTF-8/relative root has no grant.
+    #[must_use]
+    pub fn for_extension(extension: &super::Extension, workspace: &Path) -> Option<Self> {
+        if !matches!(extension.origin(), Origin::User | Origin::Bundled)
+            || !workspace.is_absolute()
+            || workspace.to_str().is_none()
+        {
+            return None;
+        }
+        Some(Self {
+            extension: extension.name().parse().ok()?,
+            origin: extension.origin(),
+            services: extension.inject().capabilities(),
+            digest: extension.grant_digest()?.into(),
+            workspace: workspace.to_path_buf(),
+        })
+    }
+
     /// Reports whether this key grants `service`.
     #[must_use]
     pub fn allows(&self, service: Service) -> bool {
@@ -77,6 +100,8 @@ impl Ord for GrantKey {
             .cmp(&other.extension)
             .then_with(|| origin_rank(self.origin).cmp(&origin_rank(other.origin)))
             .then_with(|| self.services.cmp(&other.services))
+            .then_with(|| self.digest.cmp(&other.digest))
+            .then_with(|| self.workspace.cmp(&other.workspace))
     }
 }
 
@@ -118,6 +143,8 @@ pub(crate) struct GrantRow {
     pub ext: Name,
     pub origin: Origin,
     pub services: ServiceSet,
+    pub digest: Box<str>,
+    pub workspace: PathBuf,
     pub mcp_set: Option<Box<str>>,
     pub by: ClientId,
     pub approved_at: Timestamp,
@@ -144,6 +171,8 @@ impl PersistentGrant {
                 extension: row.ext,
                 origin: row.origin,
                 services: row.services,
+                digest: row.digest,
+                workspace: row.workspace,
             },
             mcp_set: row.mcp_set,
             by: row.by,
@@ -187,6 +216,7 @@ struct McpGrantKey {
 /// `serve` process observes CLI changes on its next capability check.
 pub struct GrantStore {
     data_dir: PathBuf,
+    workspace: PathBuf,
     ask_timeout: Duration,
     broker: Option<Arc<Broker>>,
     inner: Mutex<Inner>,
@@ -239,7 +269,7 @@ impl GrantStore {
     /// operation writes when the file cannot be loaded.
     #[must_use]
     pub fn new(data_root: PathBuf) -> Self {
-        Self::empty(data_root, ADMIN_ASK_TIMEOUT, None)
+        Self::empty(data_root.clone(), data_root, ADMIN_ASK_TIMEOUT, None)
     }
 
     /// Installs the session's status publisher for client-facing requests.
@@ -317,14 +347,33 @@ impl GrantStore {
         broker: Arc<Broker>,
     ) -> Result<Self, GrantStoreError> {
         let persistent = load(&data_dir)?;
-        let store = Self::empty(data_dir, ask_timeout, Some(broker));
+        let store = Self::empty(data_dir.clone(), data_dir, ask_timeout, Some(broker));
         store.lock().persistent = persistent;
         Ok(store)
     }
 
-    fn empty(data_dir: PathBuf, ask_timeout: Duration, broker: Option<Arc<Broker>>) -> Self {
+    /// Opens a session's grant store with the exact session workspace scope.
+    pub(crate) fn with_runtime_scoped(
+        data_dir: PathBuf,
+        workspace: PathBuf,
+        ask_timeout: Duration,
+        broker: Arc<Broker>,
+    ) -> Result<Self, GrantStoreError> {
+        let persistent = load(&data_dir)?;
+        let store = Self::empty(data_dir, workspace, ask_timeout, Some(broker));
+        store.lock().persistent = persistent;
+        Ok(store)
+    }
+
+    fn empty(
+        data_dir: PathBuf,
+        workspace: PathBuf,
+        ask_timeout: Duration,
+        broker: Option<Arc<Broker>>,
+    ) -> Self {
         Self {
             data_dir,
+            workspace,
             ask_timeout,
             broker,
             request_update: Mutex::new(None),
@@ -383,6 +432,26 @@ impl GrantStore {
         .await
     }
 
+    /// Only the host's captured caller identity may authorize an extension.
+    fn key_for(&self, who: &Caller) -> Result<GrantKey, ServiceError> {
+        let digest = who.grant_digest.clone().unwrap_or_default();
+        if who.origin != Origin::Builtin
+            && (digest.len() != 64
+                || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+                || !self.workspace.is_absolute()
+                || self.workspace.to_str().is_none())
+        {
+            return Err(ServiceError::Denied(DenyReason::NotGranted));
+        }
+        Ok(GrantKey {
+            extension: who.ext.clone(),
+            origin: who.origin,
+            services: who.inject.capabilities(),
+            digest,
+            workspace: self.workspace.clone(),
+        })
+    }
+
     async fn ensure_declared_mcp_inner(
         &self,
         who: &Caller,
@@ -390,11 +459,7 @@ impl GrantStore {
         detail: Box<str>,
         cancel: &CancellationToken,
     ) -> GrantOutcome {
-        let base = GrantKey {
-            extension: who.ext.clone(),
-            origin: who.origin,
-            services: who.inject.capabilities(),
-        };
+        let base = self.key_for(who)?;
         if who.origin == Origin::Builtin {
             return Ok(Grant {
                 key: base,
@@ -440,7 +505,7 @@ impl GrantStore {
             ext: who.ext.as_str().into(),
             origin: origin.into(),
             capabilities,
-            detail: Some(detail),
+            detail: Some(format!("{detail}\n{}", grant_scope_text(&key.key)).into()),
         };
         let owner = dal_core::Owner::Extension {
             name: who.ext.as_str().into(),
@@ -482,11 +547,7 @@ impl GrantStore {
         if !who.inject.contains(service) {
             return Err(ServiceError::Denied(DenyReason::NotInjected));
         }
-        let key = GrantKey {
-            extension: who.ext.clone(),
-            origin: who.origin,
-            services: who.inject.capabilities(),
-        };
+        let key = self.key_for(who)?;
         if who.origin == Origin::Builtin {
             return Ok(Grant {
                 key,
@@ -551,7 +612,7 @@ impl GrantStore {
             ext: who.ext.as_str().into(),
             origin: origin.into(),
             capabilities,
-            detail: None,
+            detail: Some(grant_scope_text(&key).into()),
         };
         let owner = dal_core::Owner::Extension {
             name: who.ext.as_str().into(),
@@ -684,7 +745,7 @@ impl GrantStore {
         if inner
             .persistent
             .iter()
-            .any(|row| row.mcp_set.is_none() && row_key(row) == *key)
+            .any(|row| row.mcp_set.is_none() && row_active(row) && row_key(row) == *key)
         {
             return (GrantState::GrantedPersistent, None);
         }
@@ -738,7 +799,7 @@ impl GrantStore {
         if inner
             .persistent
             .iter()
-            .any(|row| row.mcp_set.is_none() && row_key(row) == *key)
+            .any(|row| row.mcp_set.is_none() && row_active(row) && row_key(row) == *key)
         {
             Self::release(&mut inner, key);
             return Some(Ok(Grant {
@@ -792,6 +853,8 @@ impl GrantStore {
                     ext: key.extension.clone(),
                     origin: key.origin,
                     services: key.services,
+                    digest: key.digest.clone(),
+                    workspace: key.workspace.clone(),
                     mcp_set: None,
                     by,
                     approved_at: Timestamp::now(),
@@ -993,7 +1056,7 @@ impl GrantStore {
         self.lock().persistent.clone_from(&rows);
         Ok(rows
             .iter()
-            .any(|row| row.mcp_set.is_none() && row_key(row) == *key))
+            .any(|row| row.mcp_set.is_none() && row_active(row) && row_key(row) == *key))
     }
 
     /// Persists exactly `key`, attributed to `by` at `at`. Returns `false`
@@ -1011,7 +1074,13 @@ impl GrantStore {
     ) -> Result<bool, GrantStoreError> {
         // An empty set grants nothing yet writes a row no later load
         // accepts; reject it here so one bad call cannot brick the file.
-        if key.services.is_empty() {
+        if key.services.is_empty()
+            || !matches!(key.origin, Origin::User | Origin::Bundled)
+            || key.digest.len() != 64
+            || !key.digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || !key.workspace.is_absolute()
+            || key.workspace.to_str().is_none()
+        {
             return Err(GrantStoreError::Malformed {
                 detail: "grant needs at least one service".into(),
             });
@@ -1020,7 +1089,7 @@ impl GrantStore {
         let mut rows = load(&self.data_dir)?;
         if rows
             .iter()
-            .any(|row| row.mcp_set.is_none() && row_key(row) == key)
+            .any(|row| row.mcp_set.is_none() && row_active(row) && row_key(row) == key)
         {
             self.lock().persistent = rows;
             return Ok(false);
@@ -1029,6 +1098,8 @@ impl GrantStore {
             ext: key.extension.clone(),
             origin: key.origin,
             services: key.services,
+            digest: key.digest.clone(),
+            workspace: key.workspace.clone(),
             mcp_set: None,
             by,
             approved_at: at,
@@ -1081,7 +1152,27 @@ impl GrantStore {
 }
 
 fn mcp_row_matches(row: &GrantRow, key: &McpGrantKey) -> bool {
-    row.mcp_set.as_deref() == Some(key.set.as_ref()) && row_key(row) == key.key
+    row_active(row)
+        && row.mcp_set.as_deref() == Some(key.set.as_ref())
+        && row_key(row) == key.key
+}
+
+/// Durable approvals expire after 90 days even when code and root do not change.
+fn row_active(row: &GrantRow) -> bool {
+    let now = Timestamp::now().as_second();
+    let approved = row.approved_at.as_second();
+    approved <= now
+        && approved
+            .checked_add(90 * 24 * 60 * 60)
+            .is_some_and(|expiry| now < expiry)
+}
+
+fn grant_scope_text(key: &GrantKey) -> String {
+    format!(
+        "Code identity: {}\nWorkspace: {}\nPersistent approval expires after 90 days.",
+        key.digest,
+        key.workspace.display()
+    )
 }
 
 fn row_key(row: &GrantRow) -> GrantKey {
@@ -1089,6 +1180,8 @@ fn row_key(row: &GrantRow) -> GrantKey {
         extension: row.ext.clone(),
         origin: row.origin,
         services: row.services,
+        digest: row.digest.clone(),
+        workspace: row.workspace.clone(),
     }
 }
 

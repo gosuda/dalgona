@@ -10,8 +10,10 @@ use super::{
 pub struct AgentStart {
     /// The provider call that requested this child.
     pub call: CallId,
-    /// The child session's display name.
-    pub name: Box<str>,
+    /// The child session's display name. An unnamed child claims no name in
+    /// its workspace, so one caller can start any number of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<Box<str>>,
     /// The prompt for the child session.
     pub prompt: Box<str>,
     /// An optional model identifier.

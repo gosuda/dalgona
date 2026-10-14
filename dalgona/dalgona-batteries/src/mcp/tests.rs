@@ -6,6 +6,8 @@ use std::{collections::BTreeMap, fs, path::PathBuf, sync::Arc, time::Duration};
 #[cfg(unix)]
 use std::path::Path;
 
+#[cfg(unix)]
+use crate::mcp::STDERR_RING;
 use crate::mcp::{
     Budgets, LIST_PAGE_MAX, McpConfig,
     client::{Client, McpCommand, SessionEndHook, SessionStartHook},
@@ -18,10 +20,12 @@ use dal_agent::{
     Agent, Delivery, Env, Host, Product, SessionRef,
     ext::{BoxFuture, ExtensionBuilder, HookCx, HookError, ObserveHook},
 };
+#[cfg(unix)]
+use dal_core::ext::McpLaunch;
 use dal_core::{
     Answer, ClientId, Command, Config, ConfigProduct, Expect, JournalPart, Output, PageReq, Part,
     Question, Reply, ServiceSet, SessionId, UpdateKind, Workspace,
-    ext::{McpBlock, McpEndpoint, McpLaunch, McpServerDecl, Name, SkillRecord},
+    ext::{McpBlock, McpEndpoint, McpServerDecl, Name, SkillRecord},
 };
 #[cfg(unix)]
 use dal_core::{McpRequest, ModelInfo, RawJson, ToolClass, ToolSpec, Visibility};
@@ -1210,7 +1214,8 @@ async fn denied_https_declaration_never_connects_to_its_listener() {
 
 #[test]
 fn oauth_token_file_is_private_and_bound_to_issuer_resource() {
-    let path = temp_path("oauth-tokens.json");
+    let directory = temp_path("oauth-tokens");
+    let path = directory.join("tokens.json");
     token_auth::persist_token(
         &path,
         "https://issuer.example",
@@ -1259,7 +1264,7 @@ fn oauth_token_file_is_private_and_bound_to_issuer_resource() {
             & 0o777;
         assert_eq!(mode, 0o600);
     }
-    fs::remove_file(path).expect("remove OAuth fixture");
+    fs::remove_dir_all(directory).expect("remove OAuth fixture");
 }
 
 /// The skill declares MCP servers while its extension injects only `env`:

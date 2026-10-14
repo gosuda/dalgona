@@ -230,6 +230,7 @@ fn plugin_error(name: &str, error: plugin_cmd::PluginCommandError) -> ExitCode {
 /// Runs `dalgon plugin grant|revoke|list` over the loaded declarations.
 pub(crate) async fn plugin(args: cli::PluginArgs, startup: Startup, product: Product) -> ExitCode {
     let data_root = startup.data_root.clone();
+    let workspace = startup.workspace_path.clone();
     let plugins: Vec<ConfiguredPlugin> = product
         .extensions
         .iter()
@@ -256,6 +257,7 @@ pub(crate) async fn plugin(args: cli::PluginArgs, startup: Startup, product: Pro
                 PluginCommand::Grant { name: parsed },
                 &plugins,
                 &grants,
+                &workspace,
                 by,
                 &mut out,
             )
@@ -274,6 +276,7 @@ pub(crate) async fn plugin(args: cli::PluginArgs, startup: Startup, product: Pro
                 PluginCommand::Revoke { name: parsed },
                 &plugins,
                 &grants,
+                &workspace,
                 by,
                 &mut out,
             )
@@ -284,7 +287,16 @@ pub(crate) async fn plugin(args: cli::PluginArgs, startup: Startup, product: Pro
             }
         }
         cli::PluginSubcommand::List => {
-            match plugin_cmd::run(PluginCommand::List, &plugins, &grants, by, &mut out).await {
+            match plugin_cmd::run(
+                PluginCommand::List,
+                &plugins,
+                &grants,
+                &workspace,
+                by,
+                &mut out,
+            )
+            .await
+            {
                 Ok(code) => code,
                 Err(error) => plugin_error("", error),
             }
