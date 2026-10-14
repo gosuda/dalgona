@@ -20,9 +20,10 @@ use windows_sys::Win32::{
         Authorization::{
             ConvertSecurityDescriptorToStringSecurityDescriptorW, ConvertSidToStringSidW,
             ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo,
+            SE_FILE_OBJECT,
         },
         DACL_SECURITY_INFORMATION, GetTokenInformation, OWNER_SECURITY_INFORMATION,
-        PSECURITY_DESCRIPTOR, PSID, SE_FILE_OBJECT, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
+        PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
         TokenUser,
     },
     Storage::FileSystem::{
