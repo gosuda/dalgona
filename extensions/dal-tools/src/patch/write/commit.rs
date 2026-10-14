@@ -8,7 +8,7 @@ use super::super::ir::{
 };
 
 use super::super::resolve::revalidate_path;
-use super::{PatchSession, ensure_regular_target, non_regular_target};
+use super::{PatchSession, non_regular_target, secure_fs::SecureFs};
 
 fn lock_table()
 -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>> {
@@ -25,7 +25,7 @@ fn lock_table()
 async fn prepare_write_set(
     session: &PatchSession,
     plan: &Plan,
-) -> Result<Vec<tokio::sync::OwnedMutexGuard<()>>, EngineError> {
+) -> Result<(Vec<tokio::sync::OwnedMutexGuard<()>>, SecureFs), EngineError> {
     let mut ordered: Vec<&StagedFileOwned> = plan.files.iter().collect();
     ordered.sort_by(|left, right| {
         left.absolute_path
@@ -62,6 +62,12 @@ async fn prepare_write_set(
         };
         guards.push(guard.lock_owned().await);
     }
+    let mut fs = SecureFs::new(&session.workspace).map_err(|error| {
+        EngineError::new(
+            ErrorClass::Io,
+            format!("patch: cannot open workspace: {error}. Nothing was written."),
+        )
+    })?;
     for file in &ordered {
         revalidate_path(&session.workspace, &file.path, &file.absolute_path)?;
         if let Some(dest) = file.renamed_to.as_ref() {
@@ -69,12 +75,9 @@ async fn prepare_write_set(
         }
     }
     for file in &ordered {
+        let current = checked_read(&mut fs, &file.absolute_path, &file.path)?;
         if let Some(expected) = file.before.as_deref() {
-            ensure_regular_target(&file.absolute_path, &file.path).await?;
-            let current = tokio::fs::read(&file.absolute_path)
-                .await
-                .unwrap_or_default();
-            if current != expected {
+            if current.as_deref().unwrap_or_default() != expected {
                 drop(guards);
                 return Err(EngineError::new(
                     ErrorClass::Stale,
@@ -84,10 +87,7 @@ async fn prepare_write_set(
                     ),
                 ));
             }
-        } else if let Ok(metadata) = tokio::fs::metadata(&file.absolute_path).await {
-            if !metadata.is_file() {
-                return Err(non_regular_target(&file.path));
-            }
+        } else if current.is_some() {
             drop(guards);
             return Err(EngineError::new(
                 ErrorClass::File,
@@ -95,7 +95,27 @@ async fn prepare_write_set(
             ));
         }
     }
-    Ok(guards)
+    Ok((guards, fs))
+}
+
+fn checked_read(
+    fs: &mut SecureFs,
+    path: &std::path::Path,
+    display: &std::path::Path,
+) -> Result<Option<Vec<u8>>, EngineError> {
+    fs.read_optional(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::InvalidData {
+            non_regular_target(display)
+        } else {
+            EngineError::new(
+                ErrorClass::Io,
+                format!(
+                    "patch: cannot read {}: {error}. Nothing was written.",
+                    display.display()
+                ),
+            )
+        }
+    })
 }
 
 pub(crate) async fn apply_files(
@@ -103,10 +123,10 @@ pub(crate) async fn apply_files(
     plan: &Plan,
 ) -> Result<Output, EngineError> {
     let mut seen_dirs = std::collections::HashSet::new();
-    let _guards = prepare_write_set(session, plan).await?;
+    let (_guards, mut fs) = prepare_write_set(session, plan).await?;
     let mut temps = Vec::new();
     for file in &plan.files {
-        stage_temp(session, file, &mut temps, &mut seen_dirs).await?;
+        stage_temp(&mut fs, session, file, &mut temps, &mut seen_dirs)?;
     }
     for file in &plan.files {
         session.index.dirty(&session.workspace, &file.path);
@@ -117,13 +137,13 @@ pub(crate) async fn apply_files(
     let mut undo = Vec::new();
     for file in &plan.files {
         if file.op == super::super::ir::Operation::Delete {
-            trash_source(session, file, &temps, &mut undo).await?;
+            trash_source(&mut fs, session, file, &temps, &mut undo)?;
         }
     }
     for (file, temp) in &temps {
         let target = write_target(file);
-        if let Err(error) = tokio::fs::rename(temp, target).await {
-            return Err(rollback_error(target, error, &temps, &undo).await);
+        if let Err(error) = fs.move_file(temp, target) {
+            return Err(rollback_error(&mut fs, target, error, &temps, &undo));
         }
         undo.push(match (file.op, file.before.as_deref()) {
             (super::super::ir::Operation::Rename, _) | (_, None) => Undo::RemoveInstalled(target),
@@ -132,21 +152,19 @@ pub(crate) async fn apply_files(
     }
     for file in &plan.files {
         if file.op == super::super::ir::Operation::Rename {
-            trash_source(session, file, &temps, &mut undo).await?;
+            trash_source(&mut fs, session, file, &temps, &mut undo)?;
         }
     }
     #[cfg(unix)]
     for dir in seen_dirs {
-        if let Ok(handle) = std::fs::File::open(&dir) {
-            let _ = handle.sync_all();
-        }
+        fs.sync_parent(&dir);
     }
     for action in undo {
         if let Undo::RestoreMoved { backup, .. } = action {
-            let _ = tokio::fs::remove_file(backup).await;
+            let _ = fs.remove_file(&backup);
         }
     }
-    cleanup_temps(&temps).await;
+    cleanup_temps(&mut fs, &temps);
     Ok(report_output(session, plan))
 }
 
@@ -172,7 +190,8 @@ fn trash_path(session: &PatchSession, source: &std::path::Path) -> PathBuf {
 
 /// Phase A for one file: compute the write target, refuse to clobber a
 /// rename destination, and stage the after bytes into an exclusive temp.
-async fn stage_temp<'a>(
+fn stage_temp<'a>(
+    fs: &mut SecureFs,
     session: &PatchSession,
     file: &'a StagedFileOwned,
     temps: &mut Vec<(&'a StagedFileOwned, PathBuf)>,
@@ -190,57 +209,40 @@ async fn stage_temp<'a>(
         return Ok(());
     };
     let target_abs = write_target(file);
-    // No-replace: rename destinations must be absent at prepare and commit.
-    if file.op == super::super::ir::Operation::Rename
-        && let Ok(metadata) = tokio::fs::metadata(target_abs).await
-    {
-        cleanup_temps(temps).await;
+    if file.op == super::super::ir::Operation::Rename {
         let dest = file
             .renamed_to
             .as_ref()
             .map_or(file.path.as_path(), |dest| dest.path.as_path());
-        if !metadata.is_file() {
-            return Err(non_regular_target(dest));
+        match checked_read(fs, target_abs, dest) {
+            Ok(Some(_)) => {
+                cleanup_temps(fs, temps);
+                return Err(EngineError::new(
+                    ErrorClass::File,
+                    format!(
+                        "patch: cannot rename {} to {}: {} exists.",
+                        file.path.display(),
+                        dest.display(),
+                        dest.display()
+                    ),
+                ));
+            }
+            Ok(None) => {}
+            Err(error) => {
+                cleanup_temps(fs, temps);
+                return Err(error);
+            }
         }
-        return Err(EngineError::new(
-            ErrorClass::File,
-            format!(
-                "patch: cannot rename {} to {}: {} exists.",
-                file.path.display(),
-                dest.display(),
-                dest.display()
-            ),
-        ));
     }
     let parent = target_abs.parent().unwrap_or(session.workspace.as_path());
-    tokio::fs::create_dir_all(parent).await.map_err(|error| {
-        EngineError::new(
-            ErrorClass::Io,
-            format!(
-                "patch: cannot write {}: {error}. Nothing was written.",
-                file.path.display()
-            ),
-        )
-    })?;
     let temp = parent.join(format!(
         ".dalgon-patch-{}-{:032x}.tmp",
         std::process::id(),
         nonce_u128()
     ));
-    let write = async {
-        use tokio::io::AsyncWriteExt as _;
-        let mut handle = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp)
-            .await?;
-        handle.write_all(after).await?;
-        handle.sync_all().await
-    }
-    .await;
-    if let Err(error) = write {
-        let _ = tokio::fs::remove_file(&temp).await;
-        cleanup_temps(temps).await;
+    if let Err(error) = fs.write_new(&temp, after) {
+        let _ = fs.remove_file(&temp);
+        cleanup_temps(fs, temps);
         return Err(EngineError::new(
             ErrorClass::Io,
             format!(
@@ -271,19 +273,32 @@ enum Undo<'a> {
 }
 
 impl Undo<'_> {
-    async fn restore(&self) -> std::io::Result<()> {
+    fn restore(&self, fs: &mut SecureFs) -> std::io::Result<()> {
         match self {
-            Self::RestoreBytes(path, before) => tokio::fs::write(path, before).await,
-            Self::RemoveInstalled(path) => match tokio::fs::remove_file(path).await {
+            Self::RestoreBytes(path, before) => {
+                let temp = path.with_file_name(format!(
+                    ".dalgon-rollback-{}-{:032x}.tmp",
+                    std::process::id(),
+                    nonce_u128()
+                ));
+                fs.write_new(&temp, before)?;
+                let result = fs.move_file(&temp, path);
+                if result.is_err() {
+                    let _ = fs.remove_file(&temp);
+                }
+                result
+            }
+            Self::RemoveInstalled(path) => match fs.remove_file(path) {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
                 result => result,
             },
-            Self::RestoreMoved { source, backup } => tokio::fs::rename(backup, source).await,
+            Self::RestoreMoved { source, backup } => fs.move_file(backup, source),
         }
     }
 }
 
-async fn rollback_error(
+fn rollback_error(
+    fs: &mut SecureFs,
     path: &std::path::Path,
     error: std::io::Error,
     temps: &[(&StagedFileOwned, PathBuf)],
@@ -293,11 +308,11 @@ async fn rollback_error(
 
     let mut failures = Vec::new();
     for action in undo.iter().rev() {
-        if let Err(error) = action.restore().await {
+        if let Err(error) = action.restore(fs) {
             failures.push((action, error));
         }
     }
-    cleanup_temps(temps).await;
+    cleanup_temps(fs, temps);
     let mut message = format!("patch: cannot write {}: {error}.", path.display());
     if failures.is_empty() {
         message.push_str(" Nothing was written.");
@@ -322,15 +337,16 @@ async fn rollback_error(
     EngineError::new(ErrorClass::Io, message)
 }
 
-async fn trash_source<'a>(
+fn trash_source<'a>(
+    fs: &mut SecureFs,
     session: &PatchSession,
     file: &'a StagedFileOwned,
     temps: &[(&StagedFileOwned, PathBuf)],
     undo: &mut Vec<Undo<'a>>,
 ) -> Result<(), EngineError> {
     let backup = trash_path(session, &file.absolute_path);
-    if let Err(error) = tokio::fs::rename(&file.absolute_path, &backup).await {
-        return Err(rollback_error(&file.path, error, temps, undo).await);
+    if let Err(error) = fs.move_file(&file.absolute_path, &backup) {
+        return Err(rollback_error(fs, &file.path, error, temps, undo));
     }
     undo.push(Undo::RestoreMoved {
         source: &file.absolute_path,
@@ -401,9 +417,9 @@ fn report_output(session: &PatchSession, plan: &Plan) -> Output {
     }
 }
 
-async fn cleanup_temps(temps: &[(&StagedFileOwned, PathBuf)]) {
+fn cleanup_temps(fs: &mut SecureFs, temps: &[(&StagedFileOwned, PathBuf)]) {
     for (_, temp) in temps {
-        let _ = tokio::fs::remove_file(temp).await;
+        let _ = fs.remove_file(temp);
     }
 }
 
@@ -618,8 +634,8 @@ mod tests {
                 backup: backup.clone(),
             },
         ];
-        let error = super::trash_source(&session, &file, &[], &mut undo)
-            .await
+        let mut fs = super::SecureFs::new(&workspace).expect("secure filesystem");
+        let error = super::trash_source(&mut fs, &session, &file, &[], &mut undo)
             .expect_err("source cannot move inside itself");
         assert_eq!(error.class, ErrorClass::Io);
         assert!(error.message.contains("failed-source"), "{error}");
