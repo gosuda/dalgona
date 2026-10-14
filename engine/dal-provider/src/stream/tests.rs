@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use futures::{channel::mpsc, executor::block_on, stream};
+use sonic_rs::JsonValueTrait;
 
 use super::*;
 
@@ -224,6 +225,35 @@ fn argument_fragments_reassemble_byte_for_byte() {
 #[test]
 fn invalid_argument_bytes_are_reported_not_repaired() {
     for bytes in [&b""[..], b"{\"a\":", b"{} {}", b"\"\xff\""] {
+        assert!(
+            matches!(ToolArgs::from_bytes(bytes), ToolArgs::Invalid { .. }),
+            "{bytes:?} must be invalid"
+        );
+    }
+}
+
+#[test]
+fn sloppy_argument_bytes_recover_into_canonical_json() {
+    // Providers emit sloppy JSON; a recoverable payload is canonicalized,
+    // not dropped as invalid.
+    let bytes = br#"{// comment
+        'cmd': 'ls', "flag": True,}"#;
+    match ToolArgs::from_bytes(bytes) {
+        ToolArgs::Parsed(raw) => {
+            // Canonical re-serialization reorders object members; the
+            // recovered values are what matters.
+            let value = raw.decode_as::<sonic_rs::Value>().unwrap();
+            assert_eq!(value["cmd"].as_str(), Some("ls"));
+            assert_eq!(value["flag"].as_bool(), Some(true));
+        }
+        other => panic!("expected recovered arguments, got {other:?}"),
+    }
+}
+
+#[test]
+fn unrecoverable_arguments_still_report_invalid() {
+    // A missing separator changes meaning; tolerance never guesses.
+    for bytes in [&b"{\"a\" 1}"[..], b"{a:1,,,b:2", b"{a:0xzz}"] {
         assert!(
             matches!(ToolArgs::from_bytes(bytes), ToolArgs::Invalid { .. }),
             "{bytes:?} must be invalid"

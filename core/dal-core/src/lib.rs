@@ -8,6 +8,7 @@ pub mod ext;
 mod fold;
 mod id;
 mod journal;
+pub mod mend;
 mod model;
 mod raw;
 mod request;
