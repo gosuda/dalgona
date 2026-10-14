@@ -4,8 +4,10 @@
 use std::fmt::Write as _;
 use std::io;
 use std::{
+    collections::BTreeSet,
     future::Future,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    sync::{Arc, RwLock},
     time::Duration,
 };
 
@@ -42,9 +44,10 @@ enum AddressClass {
     Other,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct NetworkPolicy {
     target_class: AddressClass,
+    approved_origins: Arc<RwLock<BTreeSet<String>>>,
 }
 
 impl NetworkPolicy {
@@ -65,15 +68,19 @@ impl NetworkPolicy {
                     .map(|_| AddressClass::Loopback)
             })
             .unwrap_or(AddressClass::Global);
-        Self { target_class }
+        let approved_origins = BTreeSet::from([target.origin().ascii_serialization()]);
+        Self {
+            target_class,
+            approved_origins: Arc::new(RwLock::new(approved_origins)),
+        }
     }
 
-    fn allows(self, address: IpAddr) -> bool {
+    fn allows(&self, address: IpAddr) -> bool {
         let class = classify_address(address);
         class == AddressClass::Global || class == self.target_class
     }
 
-    pub(crate) fn check_url(self, url: &Url) -> Result<(), McpError> {
+    fn check_address(&self, url: &Url) -> Result<(), McpError> {
         let Some(host) = url.host_str() else {
             return Err(auth_error("OAuth endpoint has no host"));
         };
@@ -97,8 +104,58 @@ impl NetworkPolicy {
         Ok(())
     }
 
-    pub(crate) fn resolver(self) -> GuardedResolver {
-        GuardedResolver { policy: self }
+    fn is_approved(&self, url: &Url) -> Result<bool, McpError> {
+        let origins = self
+            .approved_origins
+            .read()
+            .map_err(|_| auth_error("OAuth origin policy is unavailable"))?;
+        Ok(origins.contains(&url.origin().ascii_serialization()))
+    }
+
+    pub(crate) fn check_url(&self, url: &Url) -> Result<(), McpError> {
+        self.check_address(url)?;
+        if !self.is_approved(url)? {
+            return Err(auth_error("OAuth endpoint origin has not been approved"));
+        }
+        Ok(())
+    }
+
+    async fn approve_url(
+        &self,
+        target: &Url,
+        endpoint: &Url,
+        services: &dyn Services,
+        who: &Caller,
+        cancel: &CancellationToken,
+    ) -> Result<(), McpError> {
+        self.check_address(endpoint)?;
+        if self.is_approved(endpoint)? {
+            return Ok(());
+        }
+        let origin = endpoint.origin().ascii_serialization();
+        let question = Question::Confirm {
+            text: format!(
+                "Allow OAuth for the MCP server at {} to contact {origin}? Approval applies to this scheme, host, and port only.",
+                target.origin().ascii_serialization()
+            )
+            .into_boxed_str(),
+        };
+        let answer = tokio::select! {
+            () = cancel.cancelled() => return Err(McpError::NoAskFrontEnd),
+            answer = services.ask(who, question) => answer,
+        };
+        confirm_answer(answer)?;
+        self.approved_origins
+            .write()
+            .map_err(|_| auth_error("OAuth origin policy is unavailable"))?
+            .insert(origin);
+        Ok(())
+    }
+
+    pub(crate) fn resolver(&self) -> GuardedResolver {
+        GuardedResolver {
+            policy: self.clone(),
+        }
     }
 }
 
@@ -108,14 +165,14 @@ pub(crate) struct OAuthClient {
     pub(crate) policy: NetworkPolicy,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct GuardedResolver {
     policy: NetworkPolicy,
 }
 
 impl Resolve for GuardedResolver {
     fn resolve(&self, name: Name) -> Resolving {
-        let policy = self.policy;
+        let policy = self.policy.clone();
         let host = name.as_str().to_owned();
         Box::pin(async move {
             let addresses = tokio::net::lookup_host((host.as_str(), 0))
@@ -235,6 +292,8 @@ pub(crate) async fn discover(
     oauth: &OAuthClient,
     target: &Url,
     challenge: &Challenge,
+    services: &dyn Services,
+    who: &Caller,
     timeout: Duration,
     cancel: &CancellationToken,
 ) -> Result<Discovery, McpError> {
@@ -244,6 +303,8 @@ pub(crate) async fn discover(
         target,
         challenge.resource_metadata.as_deref(),
         &oauth.policy,
+        services,
+        who,
         timeout,
         cancel,
     )
@@ -259,9 +320,12 @@ pub(crate) async fn discover(
     let issuer_url = parse_issuer(&issuer)?;
     let auth_metadata = fetch_authorization_metadata(
         &oauth.client,
+        target,
         &issuer,
         &issuer_url,
         &oauth.policy,
+        services,
+        who,
         timeout,
         cancel,
     )
@@ -289,6 +353,19 @@ pub(crate) async fn discover(
         .and_then(JsonValueTrait::as_str)
         .map(parse_endpoint)
         .transpose()?;
+    for endpoint in [
+        Some(&authorization_endpoint),
+        Some(&token_endpoint),
+        registration_endpoint.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        oauth
+            .policy
+            .approve_url(target, endpoint, services, who, cancel)
+            .await?;
+    }
     let scopes = resource_metadata
         .get("scopes_supported")
         .or_else(|| auth_metadata.get("scopes_supported"))
@@ -337,7 +414,7 @@ where
     }
     let key = auth::refresh_key(&discovery.issuer, &discovery.resource);
     let client = oauth.client.clone();
-    let policy = oauth.policy;
+    let policy = oauth.policy.clone();
     let discovery = discovery.clone();
     let record = record.clone();
     let refresh_token = refresh_token.to_owned();
@@ -542,8 +619,8 @@ fn confirm_answer(
         Err(_) => Err(auth_error("OAuth authorization prompt failed")),
     }
 }
-/// Resolves the OAuth client identifier: dynamic registration, a stored
-/// record, or a user prompt, in that order.
+/// Resolves an existing client identifier before attempting registration.
+/// Registration requires affirmative consent before sending its POST.
 async fn registered_or_stored_client_id(
     client: &Client,
     policy: &NetworkPolicy,
@@ -553,27 +630,39 @@ async fn registered_or_stored_client_id(
     who: &Caller,
     cancel: &CancellationToken,
 ) -> Result<String, McpError> {
-    let registered = match plan.discovery.registration_endpoint.as_ref() {
-        Some(endpoint) => {
-            register_client(
-                client,
-                policy,
-                endpoint,
-                redirect_uri,
-                plan.client_version,
-                cancel,
-            )
-            .await?
-        }
-        None => None,
-    };
-    match registered {
-        Some(client_id) => Ok(client_id),
-        None => match plan.existing {
-            Some(record) if !record.client_id.is_empty() => Ok(record.client_id.clone()),
-            _ => ask_client_id(services, who, cancel).await,
-        },
+    if let Some(record) = plan.existing
+        && !record.client_id.is_empty()
+    {
+        return Ok(record.client_id.clone());
     }
+
+    if let Some(endpoint) = plan.discovery.registration_endpoint.as_ref() {
+        let question = Question::Confirm {
+            text: format!(
+                "Allow OAuth client registration for the MCP server at {}? This sends a POST request to {endpoint} before opening the authorization page.",
+                plan.target.origin().ascii_serialization()
+            )
+            .into_boxed_str(),
+        };
+        let answer = tokio::select! {
+            () = cancel.cancelled() => return Err(McpError::NoAskFrontEnd),
+            answer = services.ask(who, question) => answer,
+        };
+        confirm_answer(answer)?;
+        if let Some(client_id) = register_client(
+            client,
+            policy,
+            endpoint,
+            redirect_uri,
+            plan.client_version,
+            cancel,
+        )
+        .await?
+        {
+            return Ok(client_id);
+        }
+    }
+    ask_client_id(services, who, cancel).await
 }
 
 /// Builds the authorization endpoint URL with PKCE and resource parameters.
@@ -608,11 +697,16 @@ async fn fetch_resource_metadata(
     target: &Url,
     explicit: Option<&str>,
     policy: &NetworkPolicy,
+    services: &dyn Services,
+    who: &Caller,
     timeout: Duration,
     cancel: &CancellationToken,
 ) -> Result<Value, McpError> {
     let candidates = resource_metadata_urls(target, explicit)?;
     for candidate in candidates {
+        policy
+            .approve_url(target, &candidate, services, who, cancel)
+            .await?;
         let value = fetch_json(client, policy, &candidate, timeout, cancel).await?;
         if let Some(value) = value {
             return Ok(value);
@@ -642,9 +736,12 @@ fn resource_metadata_urls(target: &Url, explicit: Option<&str>) -> Result<Vec<Ur
 
 async fn fetch_authorization_metadata(
     client: &Client,
+    target: &Url,
     issuer: &str,
     issuer_url: &Url,
     policy: &NetworkPolicy,
+    services: &dyn Services,
+    who: &Caller,
     timeout: Duration,
     cancel: &CancellationToken,
 ) -> Result<Value, McpError> {
@@ -661,6 +758,9 @@ async fn fetch_authorization_metadata(
     );
     for candidate in [inserted, oidc] {
         let candidate = parse_endpoint(&candidate)?;
+        policy
+            .approve_url(target, &candidate, services, who, cancel)
+            .await?;
         let value = fetch_json(client, policy, &candidate, timeout, cancel).await?;
         if let Some(value) = value {
             return Ok(value);
