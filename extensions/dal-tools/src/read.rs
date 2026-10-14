@@ -68,6 +68,8 @@ enum ReadError {
     EmptyPath,
     #[error("read: path contains a NUL byte")]
     NulPath,
+    #[error("read: {0} is outside the workspace")]
+    OutsideWorkspace(Box<str>),
     #[error("read: offset must be at least 1")]
     Offset,
     #[error("read: limit must be between 1 and 2000")]
@@ -390,8 +392,16 @@ fn parse_selector(path: &str) -> Result<Selection, ReadError> {
 
 /// Reads one filesystem path and renders the result.
 fn read_path(root: &Path, path: &Path, lines: &Lines) -> Result<Reading, ReadError> {
-    let target = root.join(path);
     let shown = path.to_string_lossy();
+    let target = match crate::workspace_path::resolve(root, path) {
+        Ok(resolved) => resolved.absolute,
+        Err(crate::workspace_path::WorkspacePathError::Outside) => {
+            return Err(ReadError::OutsideWorkspace(shown.into()));
+        }
+        Err(crate::workspace_path::WorkspacePathError::Io(error)) => {
+            return Err(io_error(&shown, error));
+        }
+    };
     let metadata = fs::metadata(&target).map_err(|error| io_error(&shown, error))?;
     if metadata.is_dir() {
         let text = read_directory(&target, &shown)?;
@@ -404,7 +414,7 @@ fn read_path(root: &Path, path: &Path, lines: &Lines) -> Result<Reading, ReadErr
     if !metadata.is_file() {
         return Err(ReadError::NotFileOrDirectory(shown.into()));
     }
-    let tag_path = display_path(root, &target, &shown);
+    let tag_path = display_path(root, &root.join(path), &shown);
     match read_file(&target, &shown, lines, footer_reserve(&tag_path))? {
         FileContent::Image { kind, bytes } => Ok(Reading {
             parts: vec![
@@ -1030,6 +1040,50 @@ mod tests {
         }
         assert_eq!(fs::read(dir.path().join("a.txt")).unwrap(), b"one\ntwo\n");
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn read_rejects_workspace_escapes() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        let outside = dir.path().join("outside");
+        fs::create_dir_all(workspace.join("sub")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(workspace.join("safe.txt"), b"inside\n").unwrap();
+        fs::write(outside.join("secret.txt"), b"outside\n").unwrap();
+
+        let inside = workspace.join("safe.txt");
+        let reading = read(&workspace, &args(&inside.to_string_lossy()))
+            .await
+            .unwrap();
+        assert!(text(&reading).contains("inside"));
+
+        for path in [
+            "../outside/secret.txt".to_owned(),
+            outside.join("secret.txt").to_string_lossy().into_owned(),
+            "sub/../safe.txt".to_owned(),
+        ] {
+            let error = read(&workspace, &args(&path)).await.unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!("read: {path} is outside the workspace")
+            );
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            symlink(&outside, workspace.join("linked-dir")).unwrap();
+            symlink(outside.join("secret.txt"), workspace.join("linked-file")).unwrap();
+            for path in ["linked-dir/secret.txt", "linked-file"] {
+                let error = read(&workspace, &args(path)).await.unwrap_err();
+                assert_eq!(
+                    error.to_string(),
+                    format!("read: {path} is outside the workspace")
+                );
+            }
+        }
     }
 
     #[tokio::test]

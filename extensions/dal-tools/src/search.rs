@@ -278,24 +278,27 @@ pub(crate) async fn resolve_scope(
     let Some(raw) = path.filter(|raw| !raw.is_empty()) else {
         return Ok(Scope::workspace(workspace));
     };
-    let abs = if Path::new(raw).is_absolute() {
-        PathBuf::from(raw)
-    } else {
-        workspace.join(raw)
-    };
-    let meta = tokio::fs::metadata(&abs)
+    let root = workspace.to_path_buf();
+    let requested = PathBuf::from(raw);
+    let resolved = tokio::task::spawn_blocking(move || {
+        crate::workspace_path::resolve(&root, &requested)
+    })
+    .await
+    .map_err(|error| SearchError::msg(format!("search: path resolution failed: {error}")))?
+    .map_err(|error| match error {
+        crate::workspace_path::WorkspacePathError::Outside => {
+            SearchError::msg(format!("search: {raw} is outside the workspace"))
+        }
+        crate::workspace_path::WorkspacePathError::Io(_) => {
+            SearchError::msg(format!("search: {raw} does not exist"))
+        }
+    })?;
+    let meta = tokio::fs::metadata(&resolved.absolute)
         .await
         .map_err(|_| SearchError::msg(format!("search: {raw} does not exist")))?;
-    let ws_rel = match (
-        tokio::fs::canonicalize(workspace).await,
-        tokio::fs::canonicalize(&abs).await,
-    ) {
-        (Ok(root), Ok(full)) => full.strip_prefix(&root).ok().map(Path::to_path_buf),
-        _ => None,
-    };
     Ok(Scope {
-        abs,
-        ws_rel,
+        abs: resolved.absolute,
+        ws_rel: Some(resolved.relative),
         is_file: meta.is_file(),
     })
 }
@@ -835,6 +838,53 @@ pub(crate) mod tests {
                 "{raw}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn search_rejects_workspace_escapes() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        let outside = dir.path().join("outside");
+        write(&workspace, "sub/nested.txt", b"nested\n");
+        write(&workspace, "safe.txt", b"SAFE_MARKER\n");
+        write(&outside, "secret.txt", b"SECRET_MARKER\n");
+
+        let mut escaped = vec![
+            "../outside".to_owned(),
+            outside.to_string_lossy().into_owned(),
+            "sub/../safe.txt".to_owned(),
+        ];
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            symlink(&outside, workspace.join("linked-dir")).unwrap();
+            symlink(outside.join("secret.txt"), workspace.join("linked-file")).unwrap();
+            escaped.extend(["linked-dir".to_owned(), "linked-file".to_owned()]);
+        }
+
+        let search = engine(false, None);
+        for (mode, pattern) in [("find", "*.txt"), ("grep", "MARKER")] {
+            for path in &escaped {
+                let raw = sonic_rs::to_string(&sonic_rs::json!({
+                    "mode": mode,
+                    "pattern": pattern,
+                    "path": path,
+                }))
+                .unwrap();
+                let error = run(&search, &workspace, &raw).await.unwrap_err();
+                assert_eq!(error, format!("search: {path} is outside the workspace"));
+            }
+        }
+
+        let inside = workspace.join("safe.txt").to_string_lossy().into_owned();
+        let raw = sonic_rs::to_string(&sonic_rs::json!({
+            "mode": "grep",
+            "pattern": "SAFE_MARKER",
+            "path": inside,
+        }))
+        .unwrap();
+        assert!(run(&search, &workspace, &raw).await.unwrap().contains("SAFE_MARKER"));
     }
 
     #[test]
