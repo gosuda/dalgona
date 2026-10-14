@@ -566,29 +566,9 @@ impl SessionState {
                 cancel,
                 reply,
             } => {
-                if cancel.is_cancelled() {
-                    let _ = reply.send(Err(ServiceError::Cancelled));
-                } else {
-                    match self.tool(caller, call, &name, &args, &cancel).await {
-                        ToolReply::Done(result) => {
-                            self.publish_status();
-                            let _ = reply.send(result);
-                        }
-                        ToolReply::Wait(plan) => {
-                            while self.waits.try_join_next().is_some() {}
-                            self.waits.spawn(async move {
-                                let result = tokio::select! {
-                                    biased;
-                                    () = cancel.cancelled() => Err(ServiceError::Cancelled),
-                                    result = wait_for_jobs(plan) => result,
-                                };
-                                let _ = reply.send(result);
-                            });
-                            self.publish_status();
-                        }
-                    }
-                }
-            },
+                self.handle_tool(caller, call, name, args, cancel, reply)
+                    .await;
+            }
             Message::ToolResult(event, reply) => {
                 self.open_asks.remove(&event.call);
                 self.publish_status();
@@ -649,6 +629,42 @@ impl SessionState {
             }
         }
         false
+    }
+
+    /// Dispatches one tool call: an already-cancelled call is refused, a
+    /// finished reply publishes status, and a wait plan parks on the
+    /// caller's token so a turn stop ends only the wait, never the owner.
+    async fn handle_tool(
+        &mut self,
+        caller: Caller,
+        call: CallId,
+        name: Box<str>,
+        args: RawJson,
+        cancel: CancellationToken,
+        reply: oneshot::Sender<Result<String, ServiceError>>,
+    ) {
+        if cancel.is_cancelled() {
+            let _ = reply.send(Err(ServiceError::Cancelled));
+            return;
+        }
+        match self.tool(caller, call, &name, &args, &cancel).await {
+            ToolReply::Done(result) => {
+                self.publish_status();
+                let _ = reply.send(result);
+            }
+            ToolReply::Wait(plan) => {
+                while self.waits.try_join_next().is_some() {}
+                self.waits.spawn(async move {
+                    let result = tokio::select! {
+                        biased;
+                        () = cancel.cancelled() => Err(ServiceError::Cancelled),
+                        result = wait_for_jobs(plan) => result,
+                    };
+                    let _ = reply.send(result);
+                });
+                self.publish_status();
+            }
+        }
     }
 
     async fn tick(&mut self) {
@@ -2302,33 +2318,7 @@ impl SessionState {
                 super::agents_tool::SUBAGENTS_OFF,
             ));
         }
-        let limits = super::admission::Limits {
-            max_runs: self.config.agents.max_runs as usize,
-            agents_per_session: super::admission::AGENTS_PER_SESSION,
-            session_used: self.children_started,
-        };
-        let planned = super::admission::admit(&workflow, self.runs.len(), &limits, |step| {
-            let tools = step
-                .tools
-                .iter()
-                .map(|name| Name::parse(name))
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|error| error.to_string())?;
-            dal_core::AgentStart {
-                call: call.clone(),
-                name: step.name.clone().into(),
-                prompt: step.prompt.clone().into(),
-                model: step.model.clone().map(String::into_boxed_str),
-                role: step.role.clone().map(String::into_boxed_str),
-                system: step.system.clone().map(String::into_boxed_str),
-                tools: Some(tools.into_boxed_slice()),
-                max_steps: std::num::NonZeroU32::new(self.config.agents.child_max_steps),
-                workspace: None,
-            }
-            .validate()
-            .map_err(|error| error.to_string())
-        })
-        .map_err(|error| ServiceError::failed(None, error.to_string()))?;
+        let planned = self.admit_workflow(&call, &workflow)?;
         let base = tokio::select! {
             biased;
             () = caller_cancel.cancelled() => return Err(ServiceError::Cancelled),
@@ -2395,6 +2385,43 @@ impl SessionState {
             planned,
             &items_from,
         ))
+    }
+
+    /// Plans admission for one workflow: the per-step `AgentStart` carries
+    /// the configured child step cap so it is installed before the first
+    /// child prompt.
+    fn admit_workflow(
+        &self,
+        call: &CallId,
+        workflow: &super::workflow::Workflow,
+    ) -> Result<usize, ServiceError> {
+        let limits = super::admission::Limits {
+            max_runs: self.config.agents.max_runs as usize,
+            agents_per_session: super::admission::AGENTS_PER_SESSION,
+            session_used: self.children_started,
+        };
+        super::admission::admit(workflow, self.runs.len(), &limits, |step| {
+            let tools = step
+                .tools
+                .iter()
+                .map(|name| Name::parse(name))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?;
+            dal_core::AgentStart {
+                call: call.clone(),
+                name: step.name.clone().into(),
+                prompt: step.prompt.clone().into(),
+                model: step.model.clone().map(String::into_boxed_str),
+                role: step.role.clone().map(String::into_boxed_str),
+                system: step.system.clone().map(String::into_boxed_str),
+                tools: Some(tools.into_boxed_slice()),
+                max_steps: std::num::NonZeroU32::new(self.config.agents.child_max_steps),
+                workspace: None,
+            }
+            .validate()
+            .map_err(|error| error.to_string())
+        })
+        .map_err(|error| ServiceError::failed(None, error.to_string()))
     }
 
     /// Spawns one job row the orchestration extension owns and settles.
@@ -3108,8 +3135,8 @@ impl Coordinator {
         control: mpsc::Receiver<RunControl>,
     ) {
         let started = Instant::now();
-        let deadline = TokioInstant::now()
-            + Duration::from_secs(u64::from(self.child_max_minutes) * 60);
+        let deadline =
+            TokioInstant::now() + Duration::from_secs(u64::from(self.child_max_minutes) * 60);
         let steps = self.run_steps(&workflow, control);
         tokio::pin!(steps);
         let outcome = tokio::select! {

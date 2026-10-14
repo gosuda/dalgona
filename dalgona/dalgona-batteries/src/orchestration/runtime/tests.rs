@@ -1604,7 +1604,10 @@ async fn cancelled_owner_message_does_not_start_a_run() -> TestResult {
     let cancel = CancellationToken::new();
     cancel.cancel();
     let (reply, response) = tokio::sync::oneshot::channel();
-    let sender = fixture.runtime.sender(fixture.session).ok_or("missing owner")?;
+    let sender = fixture
+        .runtime
+        .sender(fixture.session)
+        .ok_or("missing owner")?;
     sender
         .send(Message::Tool {
             caller: fixture.caller(),
