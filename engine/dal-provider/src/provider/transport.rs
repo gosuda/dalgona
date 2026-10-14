@@ -20,6 +20,7 @@ use crate::{
     family,
     provider::{ProviderDef, ProviderEntry},
     stream::{EventStream, StreamEvent},
+    stream_budget::{self, STREAM_TOTAL_TIMEOUT},
 };
 
 #[derive(Default, Deserialize)]
@@ -122,7 +123,13 @@ pub(crate) fn decode_response(
             redact_provider_error(failure.unwrap_or(error), &secrets)
         })
     });
-    EventStream::new(safe_errors, || {})
+    EventStream::new(
+        stream_budget::timeboxed(
+            safe_errors,
+            tokio::time::Instant::now() + STREAM_TOTAL_TIMEOUT,
+        ),
+        || {},
+    )
 }
 
 pub(crate) fn redact_provider_error(error: ProviderError, secrets: &[Box<str>]) -> ProviderError {
@@ -271,6 +278,10 @@ pub(crate) fn hold_permit(stream: EventStream, permit: OwnedSemaphorePermit) -> 
                 Some(Ok(event @ StreamEvent::Stop { .. })) => {
                     drop(permit.take());
                     Some((Ok(event), (stream, permit)))
+                }
+                Some(Err(error)) => {
+                    drop(permit.take());
+                    Some((Err(error), (stream, permit)))
                 }
                 Some(item) => Some((item, (stream, permit))),
                 None => None,
