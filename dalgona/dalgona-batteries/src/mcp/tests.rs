@@ -1202,7 +1202,8 @@ async fn denied_https_declaration_never_connects_to_its_listener() {
 
 #[test]
 fn oauth_token_file_is_private_and_bound_to_issuer_resource() {
-    let path = temp_path("oauth-tokens.json");
+    let directory = temp_path("oauth-tokens");
+    let path = directory.join("tokens.json");
     token_auth::persist_token(
         &path,
         "https://issuer.example",
@@ -1251,7 +1252,7 @@ fn oauth_token_file_is_private_and_bound_to_issuer_resource() {
             & 0o777;
         assert_eq!(mode, 0o600);
     }
-    fs::remove_file(path).expect("remove OAuth fixture");
+    fs::remove_dir_all(directory).expect("remove OAuth fixture");
 }
 
 /// The skill declares MCP servers while its extension injects only `env`:
