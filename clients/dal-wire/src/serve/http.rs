@@ -4,11 +4,43 @@ use bytes::Bytes;
 use hyper::body::{Body, Frame};
 use hyper::{Request, Response, StatusCode};
 use sonic_rs::Value;
+use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 
 /// Maximum request body size in bytes.
 pub(super) const BODY_LIMIT: usize = 33_554_432;
+
+/// Maximum reserved request-body bytes across one listener (64 MiB).
+const BODY_IN_FLIGHT_LIMIT: usize = BODY_LIMIT * 2;
+
+/// The listener-wide budget for bytes retained by HTTP body readers.
+pub(super) struct BodyBudget {
+    bytes: Arc<Semaphore>,
+}
+
+impl BodyBudget {
+    pub(super) fn new() -> Self {
+        Self {
+            bytes: Arc::new(Semaphore::new(BODY_IN_FLIGHT_LIMIT)),
+        }
+    }
+
+    /// Reserves bytes before retaining an incoming frame; rejects contention.
+    fn reserve(&self, size: usize) -> Result<OwnedSemaphorePermit, Resp> {
+        let size = u32::try_from(size)
+            .map_err(|_| Resp::text(413, "request body frame exceeds limit"))?;
+        Arc::clone(&self.bytes)
+            .try_acquire_many_owned(size)
+            .map_err(|_| Resp::text(503, "listener request body memory budget exhausted"))
+    }
+}
+
+/// Request bytes with their memory reservation held through dispatch.
+pub(super) struct BufferedBody {
+    pub(super) bytes: Bytes,
+    _permit: Option<OwnedSemaphorePermit>,
+}
 
 /// Request body timeout.
 pub(super) const BODY_TIMEOUT: Duration = Duration::from_secs(60);
@@ -81,9 +113,13 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const DRAIN_LIMIT: usize = BODY_LIMIT;
 
 /// Reads one bounded request body with its timeout.
-pub(super) async fn read_body(req: Request<hyper::body::Incoming>) -> Result<Bytes, Resp> {
+pub(super) async fn read_body(
+    req: Request<hyper::body::Incoming>,
+    budget: &BodyBudget,
+) -> Result<BufferedBody, Resp> {
     let (_parts, mut body) = req.into_parts();
     let mut collected = 0usize;
+    let mut reserved: Option<OwnedSemaphorePermit> = None;
     let mut chunks = Vec::new();
     let read = async {
         while let Some(frame) =
@@ -94,13 +130,28 @@ pub(super) async fn read_body(req: Request<hyper::body::Incoming>) -> Result<Byt
                 return Err(Resp::text(400, "request body is not valid"));
             };
             if let Some(data) = frame.data_ref() {
-                collected += data.len();
+                collected = collected.saturating_add(data.len());
                 if collected > BODY_LIMIT {
                     drain_body(&mut body).await;
                     return Err(Resp::text(
                         413,
                         &format!("request body exceeds {BODY_LIMIT} bytes"),
                     ));
+                }
+                if data.is_empty() {
+                    continue;
+                }
+                let permit = match budget.reserve(data.len()) {
+                    Ok(permit) => permit,
+                    Err(resp) => {
+                        drain_body(&mut body).await;
+                        return Err(resp);
+                    }
+                };
+                if let Some(existing) = reserved.as_mut() {
+                    existing.merge(permit);
+                } else {
+                    reserved = Some(permit);
                 }
                 chunks.push(data.clone());
             }
@@ -118,7 +169,10 @@ pub(super) async fn read_body(req: Request<hyper::body::Incoming>) -> Result<Byt
     for chunk in chunks {
         out.extend_from_slice(&chunk);
     }
-    Ok(Bytes::from(out))
+    Ok(BufferedBody {
+        bytes: Bytes::from(out),
+        _permit: reserved,
+    })
 }
 
 /// Empties a rejected request body so the socket closes with no unread
@@ -191,5 +245,27 @@ impl Body for ServeBody {
                 std::task::Poll::Pending => std::task::Poll::Pending,
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BODY_IN_FLIGHT_LIMIT, BODY_LIMIT, BodyBudget};
+
+    #[test]
+    fn in_flight_body_budget_is_shared_and_released() {
+        let budget = BodyBudget::new();
+        let mut first = budget.reserve(BODY_LIMIT / 2).expect("first half");
+        first.merge(budget.reserve(BODY_LIMIT / 2).expect("second half"));
+        let second = budget.reserve(BODY_LIMIT).expect("second request");
+
+        assert_eq!(budget.bytes.available_permits(), 0);
+        assert!(budget.reserve(1).is_err(), "a third request must be rejected");
+
+        drop(first);
+        let reused = budget.reserve(BODY_LIMIT).expect("released bytes are reusable");
+        drop(second);
+        drop(reused);
+        assert_eq!(budget.bytes.available_permits(), BODY_IN_FLIGHT_LIMIT);
     }
 }
