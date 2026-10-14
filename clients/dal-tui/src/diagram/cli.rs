@@ -282,7 +282,14 @@ mod process_tests {
         let deadline = Instant::now() + Duration::from_secs(1);
         loop {
             match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                // A gone descendant can answer ESRCH instead of ENOENT on a
+                // racy reaper; both mean it stopped.
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::NotFound
+                        || error.raw_os_error() == Some(rustix::io::Errno::SRCH.raw_os_error()) =>
+                {
+                    return Ok(());
+                }
                 Ok(stat)
                     if stat
                         .rsplit_once(')')
