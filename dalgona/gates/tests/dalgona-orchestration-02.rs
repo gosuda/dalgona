@@ -1,4 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
+                        scope: Some(dal_agent::GrantScope::for_workspace(
+                            extension.source_digest().expect("bundled code digest"),
+                            &dal_core::Workspace::new(workspace.to_path_buf())?,
+                        )),
 //! dalgona success-criterion gate: a run report is delivered exactly once
 //! through the real host. One `agents` run whose child reports `done` is
 //! delivered as one message that names the run, the journal records one wake
@@ -61,7 +65,7 @@ fn run_report_is_delivered_exactly_once() -> support::TestResult<()> {
 
 /// Grants every bundled extension the services it declares, as a person
 /// would on first use, so no grant question interrupts the run.
-async fn grant_bundled_extensions(data: &Path, user: &str) -> support::TestResult<()> {
+async fn grant_bundled_extensions(data: &Path, workspace: &Path, user: &str) -> support::TestResult<()> {
     let product = support::build_product(data.to_path_buf(), Some(user))?;
     for extension in &product.extensions {
         let services = extension.inject().capabilities();
@@ -90,7 +94,7 @@ async fn deliver_the_run_report(
     workspace: PathBuf,
     user: &str,
 ) -> support::TestResult<()> {
-    grant_bundled_extensions(data, user).await?;
+    grant_bundled_extensions(data, &workspace, user).await?;
     let host = support::start_dalgona_with_config(data.to_path_buf(), Some(user)).await?;
     let agent = host
         .open(
