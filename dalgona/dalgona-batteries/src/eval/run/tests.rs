@@ -63,6 +63,7 @@ enum Behavior {
     Done(Outcome),
     Fail(ExecError),
     Hang,
+    Stuck,
     /// Writes files into the workspace, then returns the outcome.
     Edit(Vec<(&'static str, &'static str)>, Outcome),
 }
@@ -99,7 +100,7 @@ impl<F: Fn(usize, &RunRequest<'_>) -> Behavior + Send + Sync + 'static> Executor
         self.workspaces
             .lock()
             .unwrap()
-            .push(request.workspace.to_path_buf());
+            .push(request.workspace.path().to_path_buf());
         let behavior = (self.behave)(call, &request);
         Box::pin(async move {
             match behavior {
@@ -107,14 +108,14 @@ impl<F: Fn(usize, &RunRequest<'_>) -> Behavior + Send + Sync + 'static> Executor
                 Behavior::Fail(error) => Err(error),
                 Behavior::Hang => {
                     cancel.cancelled().await;
-                    // A slow session close: longer than any fixed grace.
-                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                     self.wound_down.fetch_add(1, Ordering::SeqCst);
                     Err(ExecError::Interrupted)
                 }
+                Behavior::Stuck => std::future::pending().await,
                 Behavior::Edit(files, outcome) => {
                     for (path, text) in files {
-                        let file = request.workspace.join(path);
+                        let file = request.workspace.path().join(path);
                         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
                         std::fs::write(file, text).unwrap();
                     }
@@ -184,7 +185,7 @@ async fn one_run_line_per_run_and_a_half_pass_rate_when_one_of_two_fails() {
 async fn the_workspace_is_seeded_with_the_case_files_before_the_run() {
     let smoke = pack(SMOKE);
     let (arm, _) = Fake::arm(ArmName::Defaults, |_, request| {
-        let seeded = std::fs::read_to_string(request.workspace.join("scripts/run.sh"));
+        let seeded = std::fs::read_to_string(request.workspace.path().join("scripts/run.sh"));
         assert_eq!(seeded.unwrap(), "set -e\necho ok\n");
         Behavior::Done(Outcome::Ran(output()))
     });
@@ -348,6 +349,95 @@ async fn a_hung_case_times_out_after_300_s_and_the_run_continues() {
         "the timed-out executor must finish its session wind-down"
     );
     assert!(!report.interrupted);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_executor_that_ignores_cancellation_cannot_block_later_cases() {
+    let (arm, fake) = Fake::arm(ArmName::Defaults, |call, _| {
+        if call == 0 {
+            Behavior::Stuck
+        } else {
+            Behavior::Done(Outcome::Ran(output()))
+        }
+    });
+    let pack = pack(TWO_CASES);
+    let options = options();
+    let cancel = CancellationToken::new();
+    let arms = [arm];
+    let (report, lines) = tokio::time::timeout(
+        super::CASE_TIMEOUT + super::CLEANUP_GRACE + std::time::Duration::from_secs(1),
+        run_with(&pack, &options, &arms, &cancel),
+    )
+    .await
+    .expect("a stuck executor must not defeat the deadline");
+    assert_eq!(lines[0].status, Status::Failed);
+    assert_eq!(lines[1].status, Status::Passed);
+    assert_eq!(fake.calls.load(Ordering::SeqCst), 2);
+    assert!(!report.interrupted);
+}
+
+#[tokio::test]
+async fn the_workspace_lives_until_its_last_owner_finishes() {
+    let workspace = super::RunWorkspace::create(vec![("note".into(), "keep me".into())])
+        .await
+        .expect("create workspace");
+    let path = workspace.path().to_path_buf();
+    let cleanup_owner = workspace.clone();
+    drop(workspace);
+    assert_eq!(
+        std::fs::read_to_string(path.join("note")).expect("executor still owns its workspace"),
+        "keep me"
+    );
+    drop(cleanup_owner);
+    assert!(!path.exists(), "the final owner removes the workspace");
+}
+
+#[tokio::test(start_paused = true)]
+async fn slow_owned_cleanup_retains_the_workspace_past_the_timeout_report() {
+    struct Slow {
+        tasks: Mutex<tokio::task::JoinSet<()>>,
+    }
+    impl Executor for Slow {
+        fn run<'a>(&'a self, request: RunRequest<'a>, cancel: CancellationToken) -> ExecFuture<'a> {
+            let (done, finished) = tokio::sync::oneshot::channel();
+            self.tasks.lock().unwrap().spawn(async move {
+                cancel.cancelled().await;
+                tokio::time::sleep(super::CLEANUP_GRACE * 2).await;
+                assert!(
+                    request.workspace.path().is_dir(),
+                    "cleanup must retain the workspace after the runner moves on"
+                );
+                drop(request.workspace);
+                let _ = done.send(());
+            });
+            Box::pin(async move {
+                let _ = finished.await;
+                Err(ExecError::Interrupted)
+            })
+        }
+    }
+    let slow = Slow {
+        tasks: Mutex::new(tokio::task::JoinSet::new()),
+    };
+    let workspace = super::RunWorkspace::create(Vec::new()).await.unwrap();
+    let path = workspace.path().to_path_buf();
+    let result = super::timed(
+        &slow,
+        RunRequest {
+            prompt: "p",
+            workspace: workspace.clone(),
+            tools: None,
+            judge: None,
+        },
+        &CancellationToken::new(),
+    )
+    .await;
+    assert!(matches!(result, Err(super::Ended::TimedOut)));
+    drop(workspace);
+    assert!(path.is_dir(), "the executor still owns cleanup");
+    let mut tasks = std::mem::take(&mut *slow.tasks.lock().unwrap());
+    tasks.join_next().await.unwrap().unwrap();
+    assert!(!path.exists(), "cleanup released the final workspace lease");
 }
 
 #[tokio::test]

@@ -22,7 +22,7 @@ use dalgona_batteries::eval::CancellationToken;
 use dalgona_batteries::eval::pack::{Exit, ToolCall, Usage};
 use dalgona_batteries::eval::probe::{JudgeAccess, Probe, Transcript};
 use dalgona_batteries::eval::run::{
-    ExecError, ExecFuture, Executor, JudgeResult, Outcome, RunOutput, RunRequest,
+    ExecError, ExecFuture, Executor, JudgeResult, Outcome, RunOutput, RunRequest, RunWorkspace,
 };
 
 /// The client id the runner opens its sessions as.
@@ -152,11 +152,10 @@ impl ArmHost {
 
     /// Closes every session the host still holds.
     pub(crate) async fn shutdown(&self) {
-        self.runs
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .abort_all();
         self.host.clone().shutdown(SHUTDOWN_GRACE).await;
+        let mut runs =
+            std::mem::take(&mut *self.runs.lock().unwrap_or_else(PoisonError::into_inner));
+        runs.shutdown().await;
     }
 
     async fn run_session(
@@ -165,7 +164,8 @@ impl ArmHost {
         request: RunRequest<'_>,
         cancel: CancellationToken,
     ) -> Result<Outcome, ExecError> {
-        let workspace = Workspace::new(request.workspace.to_path_buf()).map_err(session_error)?;
+        let workspace =
+            Workspace::new(request.workspace.path().to_path_buf()).map_err(session_error)?;
         let agent = host
             .open(SessionRef::Ephemeral { workspace }, ClientId::new(CLIENT))
             .await
@@ -233,7 +233,7 @@ impl ArmHost {
 /// executor future.
 struct OwnedRunRequest {
     prompt: String,
-    workspace: PathBuf,
+    workspace: RunWorkspace,
     tools: Option<Vec<String>>,
     judge: Option<String>,
 }
@@ -242,7 +242,7 @@ impl OwnedRunRequest {
     fn borrow(&self) -> RunRequest<'_> {
         RunRequest {
             prompt: &self.prompt,
-            workspace: self.workspace.as_path(),
+            workspace: self.workspace.clone(),
             tools: self.tools.as_deref(),
             judge: self.judge.as_deref(),
         }
@@ -253,20 +253,19 @@ impl Executor for ArmHost {
     fn run<'a>(&'a self, request: RunRequest<'a>, cancel: CancellationToken) -> ExecFuture<'a> {
         let request = OwnedRunRequest {
             prompt: request.prompt.to_owned(),
-            workspace: request.workspace.to_path_buf(),
+            workspace: request.workspace,
             tools: request.tools.map(<[String]>::to_vec),
             judge: request.judge.map(Into::into),
         };
         let host = self.host.clone();
         let probe = Arc::clone(&self.probe);
         let (done, finished) = oneshot::channel();
-        self.runs
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .spawn(async move {
-                let outcome = Self::run_session(&host, &probe, request.borrow(), cancel).await;
-                let _ = done.send(outcome);
-            });
+        let mut runs = self.runs.lock().unwrap_or_else(PoisonError::into_inner);
+        while runs.try_join_next().is_some() {}
+        runs.spawn(async move {
+            let outcome = Self::run_session(&host, &probe, request.borrow(), cancel).await;
+            let _ = done.send(outcome);
+        });
         Box::pin(async move { finished.await.unwrap_or(Err(ExecError::Interrupted)) })
     }
 }

@@ -61,7 +61,8 @@ removes the directory. Edits to the case workspace proceed. Every other call
 that needs approval, such as `exec`, is refused: a run has no controller to
 answer it.
 The wall clock of a run is 300 s; a run that exceeds it fails with
-`case <id> timed out after 300 s` and the run continues.
+`case <id> timed out after 300 s`. After at most 5 s for cancellation, the
+run continues. The executor retains the case workspace until cleanup ends.
 
 The model is `--model <id>`, or the `model` of your `dal.toml`. The runner
 reads the same configuration as `dalgona`: the product defaults layered with
