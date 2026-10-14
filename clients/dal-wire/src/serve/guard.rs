@@ -16,11 +16,6 @@ pub(super) fn is_upgrade(req: &Request<hyper::body::Incoming>) -> bool {
         .is_some_and(|value| value.eq_ignore_ascii_case("websocket"))
 }
 
-/// Returns true for the unauthenticated agent card route.
-pub(super) fn is_card(method: &str, path: &str) -> bool {
-    method == "GET" && path == "/.well-known/agent-card.json"
-}
-
 /// Enforces the loopback Host header check. The host name must be a
 /// loopback name; the port is unconstrained so port-forwards and local
 /// proxies can reach the listener, and the name check stays the
