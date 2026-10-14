@@ -813,3 +813,76 @@ async fn macos_failed_detachment_cannot_hold_capture_pipes_open() {
         assert_eq!(result.status, expected, "{name} final status");
     }
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "this isolated test probe deliberately spawns a child outside the guarded process door"
+)]
+fn macos_spawn_attribute_process_group_probe() {
+    use std::os::unix::process::CommandExt as _;
+
+    if std::env::var_os("DAL_GROUP_ESCAPE_PROBE").is_none() {
+        return;
+    }
+    // A process can request a new group as a posix_spawn attribute, without
+    // calling setpgid in its own userspace. That route must also be denied.
+    let mut spawned = std::process::Command::new("/bin/sleep")
+        .arg("1")
+        .process_group(0)
+        .spawn();
+    if let Ok(child) = &mut spawned {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    assert!(
+        spawned.is_err(),
+        "posix_spawn process-group attributes escaped the inherited policy"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn macos_rejects_process_group_escape_through_spawn_attributes() {
+    let temp = tempfile::tempdir().expect("temp workspace");
+    let executable = std::env::current_exe().expect("test executable");
+    let argv = [
+        executable.into_os_string(),
+        OsString::from("--exact"),
+        OsString::from("proc::tests::macos_spawn_attribute_process_group_probe"),
+        OsString::from("--nocapture"),
+    ];
+    let call = CallId::new("test-macos-spawn-attributes");
+    let digest = Some([5_u8; 32]);
+    let approved = approved_for(&call, digest, vec![temp.path().to_path_buf()]);
+    let opts = SpawnOpts {
+        cwd: temp.path().to_path_buf(),
+        timeout: Some(Duration::from_secs(5)),
+        env: vec![(OsString::from("DAL_GROUP_ESCAPE_PROBE"), OsString::from("1"))],
+        stdout_prefix_limit: 0,
+    };
+    let mut proc = spawn_process(
+        &argv,
+        call,
+        opts,
+        &approved,
+        digest,
+        &temp.path().join("jobs"),
+        &[],
+        &Launcher::Direct,
+        test_permit().await,
+        None,
+    )
+    .expect("spawn guarded Rust test executable");
+    let result = proc
+        .wait(&CancellationToken::new())
+        .await
+        .expect("wait for group attribute probe");
+    assert_eq!(
+        result.status,
+        ProcStatus::Exited { code: 0 },
+        "process-group spawn attribute probe: {}",
+        String::from_utf8_lossy(&result.preview),
+    );
+}
