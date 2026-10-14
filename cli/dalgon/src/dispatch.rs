@@ -287,7 +287,16 @@ pub(crate) async fn plugin(args: cli::PluginArgs, startup: Startup, product: Pro
             }
         }
         cli::PluginSubcommand::List => {
-            match plugin_cmd::run(PluginCommand::List, &plugins, &grants, &workspace, by, &mut out).await {
+            match plugin_cmd::run(
+                PluginCommand::List,
+                &plugins,
+                &grants,
+                &workspace,
+                by,
+                &mut out,
+            )
+            .await
+            {
                 Ok(code) => code,
                 Err(error) => plugin_error("", error),
             }
