@@ -22,7 +22,7 @@ use dal_core::ApprovalMode;
 use futures::{StreamExt, stream::FuturesUnordered};
 use hyper::{Request, Response};
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::error::WireError;
@@ -146,6 +146,7 @@ pub(crate) fn listen_bounded(
     cap: usize,
 ) -> ServeHandle {
     assert!(cap > 0, "connection cap must be nonzero");
+    let capacity = Arc::new(Semaphore::new(cap));
     let (driver_tx, mut driver_rx) = mpsc::channel::<Driver>(cap);
     let ctx = Arc::new(ServeCtx {
         host,
@@ -159,19 +160,28 @@ pub(crate) fn listen_bounded(
     let done = async move {
         let mut conns: FuturesUnordered<Driver> = FuturesUnordered::new();
         let mut drivers: FuturesUnordered<Driver> = FuturesUnordered::new();
-        // HTTP connections stay in `conns` until they finish. Upgraded
-        // streams transfer through `driver_rx` into `drivers`. A handoff
-        // can briefly be counted twice, which only makes the cap stricter.
+        // Each accepted TCP connection owns one permit. Upgrades share it
+        // with their driver, so the HTTP-to-WebSocket handoff cannot free
+        // capacity until both connection futures have finished.
         loop {
             tokio::select! {
                 biased;
                 () = stop.cancelled() => break,
-                accepted = listener.accept(), if conns.len() + driver_rx.len() + drivers.len() < cap => {
+                accepted = async {
+                    let permit = Arc::clone(&capacity)
+                        .acquire_owned()
+                        .await
+                        .map_err(std::io::Error::other)?;
+                    listener
+                        .accept()
+                        .await
+                        .map(|(stream, _)| (stream, Arc::new(permit)))
+                } => {
                     match accepted {
-                        Ok((stream, _)) => {
+                        Ok((stream, permit)) => {
                             let ctx = Arc::clone(&ctx);
                             conns.push(Box::pin(async move {
-                                serve_conn(ctx, stream).await;
+                                serve_conn(ctx, stream, permit).await;
                             }));
                         }
                         Err(error) => {
@@ -230,12 +240,17 @@ fn libc_enfile() -> i32 {
 }
 
 /// Serves one HTTP/1.1 connection to completion.
-async fn serve_conn(ctx: Arc<ServeCtx>, stream: tokio::net::TcpStream) {
+async fn serve_conn(
+    ctx: Arc<ServeCtx>,
+    stream: tokio::net::TcpStream,
+    permit: Arc<OwnedSemaphorePermit>,
+) {
     let io = hyper_util::rt::TokioIo::new(stream);
     let shutdown = ctx.shutdown.clone();
     let service = hyper::service::service_fn(move |req: Request<hyper::body::Incoming>| {
         let ctx = Arc::clone(&ctx);
-        async move { Ok::<_, hyper::Error>(handle_request(ctx, req).await) }
+        let permit = Arc::clone(&permit);
+        async move { Ok::<_, hyper::Error>(handle_request(ctx, permit, req).await) }
     });
     let conn = hyper::server::conn::http1::Builder::new()
         .max_buf_size(HEADER_LIMIT)
@@ -257,6 +272,7 @@ async fn serve_conn(ctx: Arc<ServeCtx>, stream: tokio::net::TcpStream) {
 /// Handles one HTTP request through guards to its route handler.
 async fn handle_request(
     ctx: Arc<ServeCtx>,
+    permit: Arc<OwnedSemaphorePermit>,
     req: Request<hyper::body::Incoming>,
 ) -> Response<ServeBody> {
     let method = req.method().to_string();
@@ -283,7 +299,7 @@ async fn handle_request(
         return into_response(resp);
     }
     if upgrade_route {
-        return upgrade_response(ctx, req, route).await;
+        return upgrade_response(ctx, permit, req, route).await;
     }
     if requires_json(&route)
         && let Err(resp) = content_guard(&req, &route)
