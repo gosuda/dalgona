@@ -1247,6 +1247,8 @@ impl Backend {
             let _ = host.close(child_id).await;
             return Err(child_start_error(error));
         }
+        // Apply the initial turn cap before the child can accept its first prompt.
+        child.inner.shared.set_next_turn_step_cap(start.max_steps);
         if let Err(error) = child
             .submit(dal_core::Command::Prompt {
                 expect: dal_core::Expect::Idle,
@@ -1256,6 +1258,7 @@ impl Backend {
             })
             .await
         {
+            child.inner.shared.set_next_turn_step_cap(None);
             let _ = host.close(child_id).await;
             return Err(child_start_error(error));
         }
@@ -1937,7 +1940,9 @@ mod tests {
     }
 
     fn start_in(workspace: Option<Workspace>, model: Option<&str>) -> dal_core::AgentStart {
+        max_steps: None,
         dal_core::AgentStart {
+            max_steps: None,
             call: CallId::new("refused-start"),
             name: "member".into(),
             prompt: "work".into(),

@@ -14,6 +14,9 @@ pub struct AgentStart {
     pub name: Box<str>,
     /// The prompt for the child session.
     pub prompt: Box<str>,
+    /// Maximum tool rounds for the initial child turn; absent leaves it unbounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_steps: Option<std::num::NonZeroU32>,
     /// An optional model identifier.
     pub model: Option<Box<str>>,
     /// An optional role name.

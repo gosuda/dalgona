@@ -168,6 +168,7 @@ pub(super) async fn call(
                 return Err(CallError::Args("agents.start does not accept tools".into()));
             }
             let start = AgentStart {
+                max_steps: None,
                 call: call.clone(),
                 name: args.name.unwrap_or_else(|| who.ext().as_str().into()),
                 prompt: args.prompt,

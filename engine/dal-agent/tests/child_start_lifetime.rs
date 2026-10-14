@@ -44,6 +44,7 @@ fn end_block() -> String {
 
 fn start_args() -> AgentStart {
     AgentStart {
+        max_steps: None,
         call: CallId::new("c-start-lifetime"),
         name: "starting_child".into(),
         prompt: "work".into(),

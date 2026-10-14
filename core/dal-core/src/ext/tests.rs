@@ -194,6 +194,7 @@ fn mapped_names_deserialize_in_hook_scope_and_child_tool_values() -> TestResult 
     )?;
     assert_eq!(scope.named_tools[0].as_str(), "deploy.web-x.list");
     let child = AgentStart {
+        max_steps: None,
         call,
         name: "child".into(),
         prompt: "run mapped tool".into(),
@@ -385,6 +386,7 @@ fn rule_declaration_keeps_bad_pattern_until_set_build() -> TestResult {
 #[test]
 fn agent_start_validates_before_effects() -> TestResult {
     let invalid_start = AgentStart {
+        max_steps: None,
         call: CallId::new("parent-call"),
         name: "reviewer".into(),
         prompt: "child prompt".into(),
@@ -400,6 +402,7 @@ fn agent_start_validates_before_effects() -> TestResult {
         .ok_or("role and system accepted")?;
     assert_eq!(error.to_string(), "role and system cannot both be set");
     let valid_start = AgentStart {
+        max_steps: None,
         role: None,
         ..invalid_start
     };

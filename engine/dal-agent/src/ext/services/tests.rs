@@ -1428,6 +1428,7 @@ async fn scope_over_uses_the_supplied_service_caller() {
     .expect("scope opens");
     let handle = scope
         .agent(dal_core::AgentStart {
+            max_steps: None,
             call: CallId::new("member"),
             name: "member".into(),
             prompt: "work".into(),
