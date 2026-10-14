@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use hyper::{Request, Response, StatusCode};
+use tokio::sync::OwnedSemaphorePermit;
 
 use super::guard::ws_upgrade_denial;
 use super::{Driver, Resp, ServeBody, ServeCtx, into_response};
@@ -12,6 +13,7 @@ use crate::token::SecretToken;
 /// protocol in a stream task owned by the accept loop.
 pub(super) async fn upgrade_response(
     ctx: Arc<ServeCtx>,
+    permit: Arc<OwnedSemaphorePermit>,
     req: Request<hyper::body::Incoming>,
     route: crate::router::ServeRoute,
 ) -> Response<ServeBody> {
@@ -59,6 +61,7 @@ pub(super) async fn upgrade_response(
             allowed,
             headers,
             offered,
+            permit,
         )),
         _ => Box::pin(codex_driver(
             Arc::clone(&ctx),
@@ -67,6 +70,7 @@ pub(super) async fn upgrade_response(
             allowed,
             headers,
             offered,
+            permit,
         )),
     };
     ctx.drive(driver).await;
@@ -91,6 +95,7 @@ pub(super) async fn ws_driver(
     allowed: Vec<hyper::header::HeaderValue>,
     headers: hyper::header::HeaderMap,
     offered: Vec<String>,
+    permit: Arc<OwnedSemaphorePermit>,
 ) {
     let upgraded = match on_upgrade.await {
         Ok(upgraded) => upgraded,
@@ -114,6 +119,7 @@ pub(super) async fn ws_driver(
     {
         tracing::debug!(%error, "websocket connection ended");
     }
+    drop(permit);
 }
 
 /// Drives one `/codex/ws` connection after its upgrade completes.
@@ -124,6 +130,7 @@ pub(super) async fn codex_driver(
     allowed: Vec<hyper::header::HeaderValue>,
     headers: hyper::header::HeaderMap,
     offered: Vec<String>,
+    permit: Arc<OwnedSemaphorePermit>,
 ) {
     let upgraded = match on_upgrade.await {
         Ok(upgraded) => upgraded,
@@ -142,4 +149,5 @@ pub(super) async fn codex_driver(
     if let Err(error) = crate::codex::serve_codex(ctx.host.clone(), transport).await {
         tracing::debug!(%error, "codex connection ended");
     }
+    drop(permit);
 }
