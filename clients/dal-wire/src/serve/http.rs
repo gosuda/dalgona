@@ -92,7 +92,8 @@ const DRAIN_LIMIT: usize = BODY_LIMIT;
 
 /// Reserves the bytes of one frame before copying them into the body buffer.
 fn reserve_bytes(budget: &Arc<Semaphore>, size: usize) -> Result<OwnedSemaphorePermit, Resp> {
-    let permits = u32::try_from(size).expect("frame fits within BODY_LIMIT");
+    let permits = u32::try_from(size)
+        .map_err(|_| Resp::text(413, "request body exceeds per-request limit"))?;
     Arc::clone(budget)
         .try_acquire_many_owned(permits)
         .map_err(|_| Resp::text(503, "serve request body budget exhausted"))
