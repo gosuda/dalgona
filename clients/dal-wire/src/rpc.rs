@@ -50,6 +50,12 @@ const FRAME_BYTE_WEIGHT: usize = 2;
 /// Estimated heap cost of a JSON container entry, including spare capacity.
 const JSON_ENTRY_BYTES: usize = 64;
 
+/// Minimum charge for the retained handler state of even a tiny request.
+const MIN_FRAME_CHARGE: usize = 16 * 1024;
+
+/// Maximum small cancellation notification decoded without budget on overload.
+const CONTROL_FRAME_BYTES: usize = 4096;
+
 /// All RPC transports share this budget, including local sockets and WebSockets.
 static PROCESS_BUDGET: LazyLock<Arc<Semaphore>> =
     LazyLock::new(|| Arc::new(Semaphore::new(PROCESS_BYTES)));
@@ -80,7 +86,7 @@ pub(crate) fn frame_charge(frame: &str) -> Option<u32> {
     }
     let raw = frame.len().checked_mul(FRAME_BYTE_WEIGHT)?;
     let decoded = entries.checked_mul(JSON_ENTRY_BYTES)?;
-    u32::try_from(raw.checked_add(decoded)?.max(1)).ok()
+    u32::try_from(raw.checked_add(decoded)?.max(MIN_FRAME_CHARGE)).ok()
 }
 
 /// Owned admission permits remain held until the handler future finishes.
@@ -319,11 +325,7 @@ pub(crate) async fn serve_rpc_with_budget(
                 }
             }
             _ = pending.next(), if !pending.is_empty() => {}
-            frame = transport.read_frame(),
-                if pending.len() < MAX_IN_FLIGHT
-                    && connection_budget.available_permits() > 0
-                    && process_budget.available_permits() > 0 =>
-            {
+            frame = transport.read_frame() => {
                 let ended = matches!(
                     frame,
                     Err(ReadFrameError::EndOfInput
@@ -331,11 +333,24 @@ pub(crate) async fn serve_rpc_with_budget(
                         | ReadFrameError::FrameTooLarge(_))
                 );
                 if let Ok(line) = frame {
+                    if pending.len() >= MAX_IN_FLIGHT
+                        || connection_budget.available_permits() == 0
+                        || process_budget.available_permits() == 0
+                    {
+                        if cancel_under_pressure(&state, &line).await {
+                            continue;
+                        }
+                        tracing::warn!("RPC in-flight request limit exhausted");
+                        break;
+                    }
                     let Some(budget) =
                         reserve_frame(&line, &connection_budget, &process_budget)
                     else {
-                        // Drop a frame that exceeds either limit before decoding.
-                        // Closing the connection also releases its pending work.
+                        // Only bounded cancel notifications may bypass admission,
+                        // so a saturated peer can still release its own work.
+                        if cancel_under_pressure(&state, &line).await {
+                            continue;
+                        }
                         tracing::warn!("RPC in-flight request byte budget exhausted");
                         break;
                     };
@@ -377,6 +392,23 @@ pub(crate) async fn serve_rpc_with_budget(
     }
     transport.close().await;
     Ok(())
+}
+
+/// Parses only small cancellation notifications when admission is full.
+///
+/// Without this exception, a connection full of long-lived subscriptions
+/// could not cancel its own handlers or notice an underlying stream close.
+async fn cancel_under_pressure(state: &Arc<Mutex<Conn>>, line: &str) -> bool {
+    if line.len() > CONTROL_FRAME_BYTES {
+        return false;
+    }
+    if let Ok(Message::Notification { method, params }) = decode_jsonrpc(line)
+        && method == "$/cancel_request"
+    {
+        cancel_request(state, &params).await;
+        return true;
+    }
+    false
 }
 
 /// Answers one request with an error and starts no handler.
