@@ -422,8 +422,11 @@ fn write_profile(job: &JobId, contents: &str) -> Result<PathBuf, ToolError> {
         .mode(0o600)
         .open(&path)
         .map_err(|source| seatbelt_write_error(&path, &source))?;
-    file.write_all(contents.as_bytes())
-        .map_err(|source| seatbelt_write_error(&path, &source))?;
+    file.write_all(contents.as_bytes()).map_err(|source| {
+        drop(file);
+        let _ = std::fs::remove_file(&path);
+        seatbelt_write_error(&path, &source)
+    })?;
     Ok(path)
 }
 
