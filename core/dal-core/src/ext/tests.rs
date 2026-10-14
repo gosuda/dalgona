@@ -211,7 +211,10 @@ fn mapped_names_deserialize_in_hook_scope_and_child_tool_values() -> TestResult 
     capped.max_steps = std::num::NonZeroU32::new(1);
     let capped_wire = sonic_rs::to_string(&capped)?;
     let decoded_capped: AgentStart = sonic_rs::from_str(&capped_wire)?;
-    assert_eq!(decoded_capped.max_steps.map(std::num::NonZeroU32::get), Some(1));
+    assert_eq!(
+        decoded_capped.max_steps.map(std::num::NonZeroU32::get),
+        Some(1)
+    );
     assert_eq!(
         decoded_child
             .tools

@@ -1598,7 +1598,6 @@ async fn blocked_reports_remain_blocked_and_unresolved_item_sources_skip() -> Te
     Ok(())
 }
 
-
 #[tokio::test]
 async fn cancelled_owner_message_does_not_start_a_run() -> TestResult {
     let fixture = Fixture::open().await?;
@@ -1658,9 +1657,12 @@ async fn child_step_limit_is_sent_to_the_first_turn_at_boundaries() -> TestResul
         config.agents.child_max_steps = rounds;
         let fixture = Fixture::open_config(config).await?;
         run_one_step(&fixture).await?;
-        let starts = &fixture.script().starts;
-        assert_eq!(starts.len(), 1);
-        assert_eq!(starts[0].1.max_steps.map(std::num::NonZeroU32::get), Some(rounds));
+        let script = fixture.script();
+        assert_eq!(script.starts.len(), 1);
+        assert_eq!(
+            script.starts[0].1.max_steps.map(std::num::NonZeroU32::get),
+            Some(rounds)
+        );
     }
     Ok(())
 }
@@ -1671,9 +1673,11 @@ async fn workflow_wall_budget_stops_an_unresponsive_child() -> TestResult {
     config.agents.child_max_minutes = 1;
     let fixture = Fixture::open_config(config).await?;
     fixture.script().hold = Some(CancellationToken::new());
-    fixture.tool(
-        r#"{"action":"run","steps":[{"name":"task","prompt":"inspect","tools":["read"],"isolation":"shared"}]}"#,
-    ).await?;
+    fixture
+        .tool(
+            r#"{"action":"run","steps":[{"name":"task","prompt":"inspect","tools":["read"],"isolation":"shared"}]}"#,
+        )
+        .await?;
     wait_for_starts(&fixture, 1).await?;
     let child = fixture.script().starts[0].0;
     tokio::time::advance(std::time::Duration::from_secs(61)).await;
