@@ -108,6 +108,44 @@ async fn http_guard_limits() {
         .await;
         assert_eq!(plain.status, 415);
         assert_eq!(plain.body, "Content-Type must be application/json");
+        let framed = headers_only(
+            addr,
+            &format!(
+                "GET /v1/models HTTP/1.1\r\n{}\r\ncontent-length: 33554432",
+                host_header(addr)
+            ),
+        )
+        .await;
+        assert_eq!(framed.status, 400, "{framed:?}");
+        assert_eq!(framed.body, "GET requests must not have a body");
+        let chunked = headers_only(
+            addr,
+            &format!(
+                "GET /v1/models HTTP/1.1\r\n{}\r\ntransfer-encoding: chunked",
+                host_header(addr)
+            ),
+        )
+        .await;
+        assert_eq!(chunked.status, 400, "{chunked:?}");
+        let padded = headers_only(
+            addr,
+            &format!(
+                "GET /v1/models HTTP/1.1\r\n{}\r\ncontent-length: 00",
+                host_header(addr)
+            ),
+        )
+        .await;
+        assert_eq!(padded.status, 200, "{padded:?}");
+        let nonzero = headers_only(
+            addr,
+            &format!(
+                "GET /v1/models HTTP/1.1\r\n{}\r\ncontent-length: 05",
+                host_header(addr)
+            ),
+        )
+        .await;
+        assert_eq!(nonzero.status, 400, "{nonzero:?}");
+        assert_eq!(nonzero.body, "GET requests must not have a body");
         let large = oversized(addr).await;
         assert_eq!(large.status, 413);
         assert_eq!(large.body, "request body exceeds 33554432 bytes");
@@ -238,25 +276,6 @@ async fn token_file_auth_cases() {
         )
         .await;
         assert_eq!(card.status, 200, "{card:?}");
-        let body = headers_only(
-            addr,
-            &format!(
-                "GET /.well-known/agent-card.json HTTP/1.1\r\n{}\r\ncontent-length: 33554432",
-                host_header(addr)
-            ),
-        )
-        .await;
-        assert_eq!(body.status, 400, "{body:?}");
-        assert_eq!(body.body, "GET requests must not have a body");
-        let chunked = headers_only(
-            addr,
-            &format!(
-                "GET /.well-known/agent-card.json HTTP/1.1\r\n{}\r\ntransfer-encoding: chunked",
-                host_header(addr)
-            ),
-        )
-        .await;
-        assert_eq!(chunked.status, 400, "{chunked:?}");
     })
     .await;
 
@@ -276,6 +295,36 @@ async fn token_file_auth_cases() {
         )
         .await;
         assert_eq!(authorized.status, 404, "{authorized:?}");
+    })
+    .await;
+}
+
+/// The agent card is reachable without a bearer token, so its GET framing
+/// guard is exercised on the public route before auth runs.
+#[cfg(unix)]
+#[tokio::test]
+async fn public_agent_card_get_body_guard() {
+    let rig = rig(&[]).await;
+    let path = rig.data().join("serve.token");
+    crate::token::create(&path, false).expect("token created");
+    let mut options = router_options(&rig);
+    options.public = true;
+    options.a2a = true;
+    with_serve(&rig, options, async |addr| {
+        let card = |extra: &str| {
+            format!(
+                "GET /.well-known/agent-card.json HTTP/1.1\r\n{}\r\n{extra}",
+                host_header(addr)
+            )
+        };
+        let padded = headers_only(addr, &card("content-length: 00")).await;
+        assert_eq!(padded.status, 200, "{padded:?}");
+        let nonzero = headers_only(addr, &card("content-length: 05")).await;
+        assert_eq!(nonzero.status, 400, "{nonzero:?}");
+        assert_eq!(nonzero.body, "GET requests must not have a body");
+        let chunked = headers_only(addr, &card("transfer-encoding: chunked")).await;
+        assert_eq!(chunked.status, 400, "{chunked:?}");
+        assert_eq!(chunked.body, "GET requests must not have a body");
     })
     .await;
 }

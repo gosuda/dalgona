@@ -17,15 +17,19 @@ pub(super) fn is_upgrade(req: &Request<hyper::body::Incoming>) -> bool {
 }
 
 /// Rejects framed GET bodies without polling the incoming stream.
-/// HTTP/1.1 can only frame a request body through these headers.
+/// HTTP/1.1 can only frame a request body through these headers. A
+/// Content-Length is a decimal length: only a positive or unparseable
+/// value declares a body, so zero-padded lengths like `00` still pass.
 pub(super) fn get_body_guard(req: &Request<hyper::body::Incoming>) -> Result<(), Resp> {
     if req.method() == hyper::Method::GET
         && (req.headers().contains_key(TRANSFER_ENCODING)
-            || req
-                .headers()
-                .get_all(CONTENT_LENGTH)
-                .iter()
-                .any(|value| value.as_bytes() != b"0"))
+            || req.headers().get_all(CONTENT_LENGTH).iter().any(|value| {
+                value
+                    .to_str()
+                    .ok()
+                    .and_then(|digits| digits.parse::<u64>().ok())
+                    != Some(0)
+            }))
     {
         return Err(Resp::text(400, "GET requests must not have a body"));
     }
