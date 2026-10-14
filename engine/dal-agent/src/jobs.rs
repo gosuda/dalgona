@@ -195,7 +195,7 @@ impl JobTable {
         delivered: &HashSet<JobId>,
     ) -> Result<Self, LedgerError> {
         let (ledger, recovered) = Ledger::open(dir.clone(), delivered).await?;
-        let job_log = |id: &JobId| dir.join(format!("{id:?}.log"));
+        let job_log = |id: &JobId| dir.join(format!("{id}.log"));
         let mut table = Self {
             ledger,
             held: recovered.held,
