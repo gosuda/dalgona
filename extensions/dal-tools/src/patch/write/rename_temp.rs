@@ -14,9 +14,80 @@ mod platform {
         io::Errno,
     };
 
+    /// Base flags for directory descriptors. Where `O_PATH` exists, a walk
+    /// needs only search permission, so a parent granting write and execute
+    /// without read still accepts a staged rename, as the pathname writer did.
+    /// `O_PATH` descriptors accept every `*at` operation used here but not
+    /// `fsync`, so a separate readable descriptor is requested for syncing.
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "emscripten",
+        target_os = "freebsd",
+        target_os = "fuchsia",
+        target_os = "redox"
+    ))]
+    fn dir_flags() -> OFlags {
+        OFlags::PATH | OFlags::DIRECTORY
+    }
+
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "emscripten",
+        target_os = "freebsd",
+        target_os = "fuchsia",
+        target_os = "redox"
+    )))]
+    fn dir_flags() -> OFlags {
+        OFlags::RDONLY | OFlags::DIRECTORY
+    }
+
+    /// The workspace root is the approved boundary itself: a linked root
+    /// resolves to the directory it names. No-follow checks apply below it.
+    fn root_flags() -> OFlags {
+        dir_flags() | OFlags::CLOEXEC
+    }
+
+    fn walk_flags() -> OFlags {
+        dir_flags() | OFlags::NOFOLLOW | OFlags::CLOEXEC
+    }
+
+    fn walk_segments(
+        mut dir: OwnedFd,
+        relative_parent: &Path,
+        create_missing: bool,
+    ) -> io::Result<OwnedFd> {
+        for component in relative_parent.components() {
+            let Component::Normal(segment) = component else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "invalid rename parent",
+                ));
+            };
+            dir = match rustix::fs::openat(&dir, segment, walk_flags(), Mode::empty()) {
+                Ok(opened) => opened,
+                Err(Errno::NOENT) if create_missing => {
+                    let mode = Mode::RWXU | Mode::RGRP | Mode::XGRP | Mode::ROTH | Mode::XOTH;
+                    match rustix::fs::mkdirat(&dir, segment, mode) {
+                        Ok(()) | Err(Errno::EXIST) => {}
+                        Err(error) => return Err(io::Error::from(error)),
+                    }
+                    rustix::fs::openat(&dir, segment, walk_flags(), Mode::empty())
+                        .map_err(io::Error::from)?
+                }
+                Err(error) => return Err(io::Error::from(error)),
+            };
+        }
+        Ok(dir)
+    }
+
     pub(crate) struct RenameTemp {
         target: PathBuf,
+        relative: PathBuf,
+        workspace: OwnedFd,
         parent: OwnedFd,
+        sync_parent: Option<OwnedFd>,
         name: OsString,
         temp: OsString,
     }
@@ -43,30 +114,11 @@ mod platform {
                     io::Error::new(io::ErrorKind::InvalidInput, "empty rename destination")
                 })?
                 .to_os_string();
-            let dir_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-            let mut parent =
-                rustix::fs::open(workspace, dir_flags, Mode::empty()).map_err(io::Error::from)?;
-            for component in relative.parent().into_iter().flat_map(Path::components) {
-                let Component::Normal(segment) = component else {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "invalid rename parent",
-                    ));
-                };
-                parent = match rustix::fs::openat(&parent, segment, dir_flags, Mode::empty()) {
-                    Ok(opened) => opened,
-                    Err(Errno::NOENT) => {
-                        let mode = Mode::RWXU | Mode::RGRP | Mode::XGRP | Mode::ROTH | Mode::XOTH;
-                        match rustix::fs::mkdirat(&parent, segment, mode) {
-                            Ok(()) | Err(Errno::EXIST) => {}
-                            Err(error) => return Err(io::Error::from(error)),
-                        }
-                        rustix::fs::openat(&parent, segment, dir_flags, Mode::empty())
-                            .map_err(io::Error::from)?
-                    }
-                    Err(error) => return Err(io::Error::from(error)),
-                };
-            }
+            let workspace_fd = rustix::fs::open(workspace, root_flags(), Mode::empty())
+                .map_err(io::Error::from)?;
+            let root = rustix::fs::openat(&workspace_fd, ".", walk_flags(), Mode::empty())
+                .map_err(io::Error::from)?;
+            let parent = walk_segments(root, relative.parent().unwrap_or(Path::new("")), true)?;
             match rustix::fs::statat(&parent, name.as_os_str(), AtFlags::SYMLINK_NOFOLLOW) {
                 Ok(_) => {
                     return Err(io::Error::new(
@@ -77,6 +129,7 @@ mod platform {
                 Err(Errno::NOENT) => {}
                 Err(error) => return Err(io::Error::from(error)),
             }
+            let mut staged = None;
             for _ in 0..16 {
                 let temp = OsString::from(format!(
                     ".dalgon-patch-{}-{:032x}.tmp",
@@ -93,23 +146,39 @@ mod platform {
                     Mode::RUSR | Mode::WUSR | Mode::RGRP | Mode::WGRP | Mode::ROTH | Mode::WOTH;
                 match rustix::fs::openat(&parent, temp.as_os_str(), flags, mode) {
                     Ok(handle) => {
-                        return Ok((
-                            Self {
-                                target: workspace.join(relative),
-                                parent,
-                                name,
-                                temp,
-                            },
-                            handle.into(),
-                        ));
+                        staged = Some((temp, handle));
+                        break;
                     }
                     Err(Errno::EXIST) => {}
                     Err(error) => return Err(io::Error::from(error)),
                 }
             }
-            Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "unable to allocate a unique rename temporary file",
+            let Some((temp, handle)) = staged else {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "unable to allocate a unique rename temporary file",
+                ));
+            };
+            // `fsync` needs a readable descriptor; a search-only parent syncs
+            // nothing it cannot expose and publication stays unsynced there.
+            let sync_parent = rustix::fs::openat(
+                &parent,
+                ".",
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .ok();
+            Ok((
+                Self {
+                    target: workspace.join(relative),
+                    relative: relative.to_path_buf(),
+                    workspace: workspace_fd,
+                    parent,
+                    sync_parent,
+                    name,
+                    temp,
+                },
+                handle.into(),
             ))
         }
 
@@ -117,15 +186,34 @@ mod platform {
             &self.target
         }
 
+        /// Re-resolve the destination parent beneath the workspace and prove
+        /// it is still the staged directory, so a moved, removed, or swapped
+        /// parent cannot redirect publication outside the approved root.
+        fn verified_parent(&self) -> io::Result<OwnedFd> {
+            let root = rustix::fs::openat(&self.workspace, ".", walk_flags(), Mode::empty())
+                .map_err(io::Error::from)?;
+            let dir = walk_segments(root, self.relative.parent().unwrap_or(Path::new("")), false)?;
+            let staged = rustix::fs::fstat(&self.parent).map_err(io::Error::from)?;
+            let current = rustix::fs::fstat(&dir).map_err(io::Error::from)?;
+            if staged.st_dev != current.st_dev || staged.st_ino != current.st_ino {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "rename destination parent moved or was replaced",
+                ));
+            }
+            Ok(dir)
+        }
+
         /// The parent descriptor prevents symlink substitution after staging.
         /// Publication is atomic and refuses even dangling symlink destinations.
         pub(crate) fn publish(&self) -> io::Result<()> {
+            let dir = self.verified_parent()?;
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             {
                 rustix::fs::renameat_with(
-                    &self.parent,
+                    &dir,
                     self.temp.as_os_str(),
-                    &self.parent,
+                    &dir,
                     self.name.as_os_str(),
                     rustix::fs::RenameFlags::NOREPLACE,
                 )
@@ -134,18 +222,17 @@ mod platform {
             #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             {
                 rustix::fs::linkat(
-                    &self.parent,
+                    &dir,
                     self.temp.as_os_str(),
-                    &self.parent,
+                    &dir,
                     self.name.as_os_str(),
                     AtFlags::empty(),
                 )
                 .map_err(io::Error::from)?;
                 if let Err(error) =
-                    rustix::fs::unlinkat(&self.parent, self.temp.as_os_str(), AtFlags::empty())
+                    rustix::fs::unlinkat(&dir, self.temp.as_os_str(), AtFlags::empty())
                 {
-                    let _ =
-                        rustix::fs::unlinkat(&self.parent, self.name.as_os_str(), AtFlags::empty());
+                    let _ = rustix::fs::unlinkat(&dir, self.name.as_os_str(), AtFlags::empty());
                     return Err(io::Error::from(error));
                 }
                 Ok(())
@@ -164,7 +251,9 @@ mod platform {
         }
 
         pub(crate) fn sync_dir(&self) {
-            let _ = rustix::fs::fsync(&self.parent);
+            if let Some(dir) = &self.sync_parent {
+                let _ = rustix::fs::fsync(dir);
+            }
         }
     }
 }
@@ -185,15 +274,18 @@ mod platform {
 
     /// Holding all directory handles without FILE_SHARE_DELETE prevents a
     /// parent from being replaced between validation and publication.
+    /// The handles pin directories only; access mode 0 requests no data
+    /// access, so a parent the caller can write but not read still opens.
     pub(crate) struct RenameTemp {
         target: PathBuf,
+        resolved_target: PathBuf,
         temp: PathBuf,
         _directories: Vec<File>,
     }
 
     fn open_directory(path: &Path) -> io::Result<File> {
         let handle = OpenOptions::new()
-            .read(true)
+            .access_mode(0)
             .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
             .open(path)?;
@@ -218,7 +310,12 @@ mod platform {
                     "rename destination must be workspace-relative",
                 ));
             }
-            let mut parent = workspace.to_path_buf();
+            let name = relative.file_name().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "empty rename destination")
+            })?;
+            // The workspace root is the approved boundary: resolve a linked
+            // root once so a retargeted link cannot redirect the paths below.
+            let mut parent = workspace.canonicalize()?;
             let mut directories = vec![open_directory(&parent)?];
             for component in relative.parent().into_iter().flat_map(Path::components) {
                 let Component::Normal(segment) = component else {
@@ -235,8 +332,8 @@ mod platform {
                 }
                 directories.push(open_directory(&parent)?);
             }
-            let target = workspace.join(relative);
-            match fs::symlink_metadata(&target) {
+            let resolved_target = parent.join(name);
+            match fs::symlink_metadata(&resolved_target) {
                 Ok(_) => {
                     return Err(io::Error::new(
                         io::ErrorKind::AlreadyExists,
@@ -246,6 +343,7 @@ mod platform {
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error),
             }
+            let mut staged = None;
             for _ in 0..16 {
                 let temp = parent.join(format!(
                     ".dalgon-patch-{}-{:032x}.tmp",
@@ -254,22 +352,27 @@ mod platform {
                 ));
                 match OpenOptions::new().write(true).create_new(true).open(&temp) {
                     Ok(handle) => {
-                        return Ok((
-                            Self {
-                                target,
-                                temp,
-                                _directories: directories,
-                            },
-                            handle,
-                        ));
+                        staged = Some((temp, handle));
+                        break;
                     }
                     Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
                     Err(error) => return Err(error),
                 }
             }
-            Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "unable to allocate a unique rename temporary file",
+            let Some((temp, handle)) = staged else {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "unable to allocate a unique rename temporary file",
+                ));
+            };
+            Ok((
+                Self {
+                    target: workspace.join(relative),
+                    resolved_target,
+                    temp,
+                    _directories: directories,
+                },
+                handle,
             ))
         }
 
@@ -279,9 +382,9 @@ mod platform {
 
         /// Creating a hard link is atomic and never replaces an existing name.
         pub(crate) fn publish(&self) -> io::Result<()> {
-            fs::hard_link(&self.temp, &self.target)?;
+            fs::hard_link(&self.temp, &self.resolved_target)?;
             if let Err(error) = fs::remove_file(&self.temp) {
-                let _ = fs::remove_file(&self.target);
+                let _ = fs::remove_file(&self.resolved_target);
                 return Err(error);
             }
             Ok(())
@@ -292,7 +395,7 @@ mod platform {
         }
 
         pub(crate) fn rollback(&self) -> io::Result<()> {
-            match fs::remove_file(&self.target) {
+            match fs::remove_file(&self.resolved_target) {
                 Ok(()) => Ok(()),
                 Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
                 Err(error) => Err(error),
@@ -394,12 +497,124 @@ mod tests {
         std::fs::rename(&original_parent, workspace.join("moved_sub"))
             .expect("move opened directory");
         std::os::unix::fs::symlink(&outside, &original_parent).expect("replace with symlink");
-        pending.publish().expect("publish via anchored directory");
+        // The approved path no longer names the staged directory, so
+        // publication must refuse rather than follow the planted link or
+        // write beneath the moved inode.
+        pending
+            .publish()
+            .expect_err("publication must refuse a swapped parent");
+        assert!(!outside.join("result.txt").exists());
+        pending.cleanup();
         assert_eq!(
-            std::fs::read(workspace.join("moved_sub/result.txt")).expect("read original parent"),
+            std::fs::read_dir(workspace.join("moved_sub"))
+                .expect("read moved parent")
+                .count(),
+            0
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parent_moved_outside_workspace_refuses_publication() {
+        let root = tempfile::tempdir().expect("test root");
+        let workspace = root.path().join("workspace");
+        let outside = root.path().join("outside");
+        std::fs::create_dir(&workspace).expect("workspace");
+        std::fs::create_dir(&outside).expect("outside");
+        let original_parent = workspace.join("sub");
+        std::fs::create_dir(&original_parent).expect("destination parent");
+        let (pending, mut temp) =
+            RenameTemp::create(&workspace, Path::new("sub/result.txt")).expect("staged rename");
+        temp.write_all(b"inside").expect("write");
+        temp.sync_all().expect("sync");
+        drop(temp);
+
+        std::fs::rename(&original_parent, outside.join("sub")).expect("move outside workspace");
+        let error = pending
+            .publish()
+            .expect_err("publication must refuse a parent outside the workspace");
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert!(!outside.join("sub/result.txt").exists());
+        pending.cleanup();
+        assert_eq!(
+            std::fs::read_dir(outside.join("sub"))
+                .expect("read moved parent")
+                .count(),
+            0
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_workspace_root_is_resolved_once() {
+        let root = tempfile::tempdir().expect("test root");
+        let real = root.path().join("real");
+        std::fs::create_dir(&real).expect("real workspace");
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("link workspace root");
+        let (pending, mut temp) = RenameTemp::create(&link, Path::new("nested/result.txt"))
+            .expect("a linked workspace root must stage");
+        temp.write_all(b"inside").expect("write");
+        temp.sync_all().expect("sync");
+        drop(temp);
+        pending.publish().expect("publish beneath resolved root");
+        assert_eq!(
+            std::fs::read(real.join("nested/result.txt")).expect("read"),
             b"inside"
         );
-        assert!(!outside.join("result.txt").exists());
+        pending.cleanup();
+    }
+
+    #[cfg(all(unix, target_os = "linux"))]
+    #[test]
+    fn search_only_parent_accepts_rename() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let workspace = tempfile::tempdir().expect("workspace");
+        let parent = workspace.path().join("private");
+        std::fs::create_dir(&parent).expect("parent");
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o300))
+            .expect("write-and-search-only parent");
+        let (pending, mut temp) =
+            RenameTemp::create(workspace.path(), Path::new("private/result.txt"))
+                .expect("a write-and-search-only parent must stage");
+        temp.write_all(b"inside").expect("write");
+        temp.sync_all().expect("sync");
+        drop(temp);
+        pending.publish().expect("publish into search-only parent");
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755))
+            .expect("restore permissions");
+        assert_eq!(
+            std::fs::read(parent.join("result.txt")).expect("read"),
+            b"inside"
+        );
+        pending.cleanup();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn linked_workspace_root_is_resolved_once() {
+        let root = tempfile::tempdir().expect("test root");
+        let real = root.path().join("real");
+        std::fs::create_dir(&real).expect("real workspace");
+        let link = root.path().join("link");
+        // A junction links directories without requiring elevated privileges.
+        let status = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(&link)
+            .arg(&real)
+            .status()
+            .expect("mklink junction");
+        assert!(status.success());
+        let (pending, mut temp) = RenameTemp::create(&link, Path::new("nested/result.txt"))
+            .expect("a linked workspace root must stage");
+        temp.write_all(b"inside").expect("write");
+        temp.sync_all().expect("sync");
+        drop(temp);
+        pending.publish().expect("publish beneath resolved root");
+        assert_eq!(
+            std::fs::read(real.join("nested/result.txt")).expect("read"),
+            b"inside"
+        );
         pending.cleanup();
     }
 
