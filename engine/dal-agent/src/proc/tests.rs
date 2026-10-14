@@ -134,7 +134,7 @@ async fn provider_call_ids_cannot_select_log_paths() {
 #[tokio::test]
 async fn proc_spawns_captures_output_and_reports_bounded_env() {
     let temp = tempfile::tempdir().expect("temp workspace");
-     let mut proc = spawn_approved(
+    let mut proc = spawn_approved(
         &temp,
         "test-call-lifetime",
         &shell_argv("printf 'a\\nb\\nc\\n'; printf \"NO_COLOR=$NO_COLOR TERM=$TERM PAGER=$PAGER DAL_NESTED=$DAL_NESTED\"; read line || true"),
