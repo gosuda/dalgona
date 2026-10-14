@@ -355,7 +355,6 @@ fn source_digest(files: &BTreeMap<PathBuf, Vec<u8>>, config: Option<&str>) -> Bo
     hasher.finalize().to_hex().to_string().into_boxed_str()
 }
 
-
 /// Rejects an entry module that binds `plugin` more than once.
 ///
 /// Starlark lets a module rebind a global, so the last binding would win
