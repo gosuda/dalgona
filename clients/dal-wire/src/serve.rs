@@ -514,7 +514,6 @@ pub(crate) fn router_options(cfg: &ListenerCfg) -> RouterOptions {
     }
 }
 
-
 #[cfg(test)]
 mod admission_tests {
     use super::{CONN_CAP, ConnectionBudget, SOURCE_CONN_CAP};
