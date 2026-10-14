@@ -265,6 +265,14 @@ pub async fn serve_rpc_draining(
                 }
             }
             _ = pending.next(), if !pending.is_empty() => {}
+            () = admission.contended(), if reading.is_some() => {
+                // Reading a partial frame is not cancellation-safe on every
+                // transport. Close this connection rather than resume from
+                // an unknown boundary after surrendering its reservation.
+                reading = None;
+                tracing::debug!("RPC speculative reader yielding under process contention");
+                break;
+            }
             credit = admission.reserve(), if reading.is_none() && pending.len() < MAX_IN_FLIGHT => {
                 match credit {
                     Ok(credit) => reading = Some(credit),
