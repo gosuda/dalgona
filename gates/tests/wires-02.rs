@@ -133,17 +133,32 @@ if (@($allowed | Where-Object { $_ -notin $privileged }).Count -ne 0) { exit 12 
             .arg(&token)
             .args(["/grant", "*S-1-1-0:R"])
             .output()?;
-        assert!(grant.status.success(), "{}", String::from_utf8_lossy(&grant.stderr));
+        assert!(
+            grant.status.success(),
+            "{}",
+            String::from_utf8_lossy(&grant.stderr)
+        );
         let exposed = Command::new(binary)
             .current_dir(&workspace)
             .env_clear()
             .envs(support::captured_shell_vars())
             .env("HOME", &home)
             .env("XDG_DATA_HOME", &data_home)
-            .args(["serve", "--bind", "0.0.0.0", "--port", "0", "--public", "--token-file"])
+            .args([
+                "serve",
+                "--bind",
+                "0.0.0.0",
+                "--port",
+                "0",
+                "--public",
+                "--token-file",
+            ])
             .arg(&token)
             .output()?;
-        assert!(!exposed.status.success(), "public serve accepted a broadly readable token");
+        assert!(
+            !exposed.status.success(),
+            "public serve accepted a broadly readable token"
+        );
         assert!(
             String::from_utf8_lossy(&exposed.stderr).contains("unsafe Windows ACL"),
             "{}",

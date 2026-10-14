@@ -466,22 +466,24 @@ mod win {
             LocalFree,
         },
         Security::{
-            ACCESS_ALLOWED_ACE, ACCESS_ALLOWED_ACE_TYPE, ACE_HEADER, ACL,
-            ACL_SIZE_INFORMATION, AclSizeInformation, DACL_SECURITY_INFORMATION,
-            GetAce, GetAclInformation, GetSecurityDescriptorControl, GetTokenInformation,
-            OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED,
-            SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
+            ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_SIZE_INFORMATION, AclSizeInformation,
             Authorization::{
                 ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
                 GetSecurityInfo, SE_FILE_OBJECT,
             },
+            DACL_SECURITY_INFORMATION, GetAce, GetAclInformation, GetSecurityDescriptorControl,
+            GetTokenInformation, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+            SE_DACL_PROTECTED, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
         },
         Storage::FileSystem::{
             BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateFileW, FILE_ATTRIBUTE_NORMAL,
             FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
             FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle, OPEN_EXISTING,
         },
-        System::Threading::{GetCurrentProcess, OpenProcessToken},
+        System::{
+            SystemServices::ACCESS_ALLOWED_ACE_TYPE,
+            Threading::{GetCurrentProcess, OpenProcessToken},
+        },
     };
 
     fn wide(text: &str) -> Vec<u16> {
@@ -773,7 +775,10 @@ fn sync_parent(path: &Path) -> Result<(), TokenError> {
 
 #[cfg(all(test, windows))]
 mod windows_tests {
-    use std::{fs::{self, File}, process::Command};
+    use std::{
+        fs::{self, File},
+        process::Command,
+    };
 
     use super::{TokenError, create, load, read_connect_token, win};
 
