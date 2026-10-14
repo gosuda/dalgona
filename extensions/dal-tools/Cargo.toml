@@ -26,6 +26,7 @@ dal-agent.workspace = true
 dal-core.workspace = true
 futures.workspace = true
 blake3.workspace = true
+cap-std = "=4.0.3"
 globset.workspace = true
 grep-matcher = "=0.1.9"
 grep-regex = "=0.1.14"
