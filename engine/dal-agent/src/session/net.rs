@@ -7,7 +7,6 @@
 use std::net::{IpAddr, SocketAddr};
 
 use dal_core::{FetchMethod, FetchRequest, FetchResponse, RedirectPolicy, Service};
-use url::Host;
 
 use crate::error::ServiceError;
 
@@ -71,14 +70,19 @@ fn checked_addresses(addresses: Vec<SocketAddr>) -> Result<Vec<SocketAddr>, Serv
 
 async fn admitted_target(url: &reqwest::Url) -> Result<(String, Vec<SocketAddr>), ServiceError> {
     let (host, port) = target(url)?;
-    let addresses = match url.host() {
-        Some(Host::Ipv4(ip)) => vec![SocketAddr::new(IpAddr::V4(ip), port)],
-        Some(Host::Ipv6(ip)) => vec![SocketAddr::new(IpAddr::V6(ip), port)],
-        Some(Host::Domain(name)) => tokio::net::lookup_host((name, port))
+    // URL parsing has already canonicalized numeric and obfuscated IPv4
+    // spellings. IPv6 URL host strings may retain surrounding brackets.
+    let bare = host
+        .strip_prefix('[')
+        .and_then(|name| name.strip_suffix(']'))
+        .unwrap_or(host);
+    let addresses = if let Ok(ip) = bare.parse::<IpAddr>() {
+        vec![SocketAddr::new(ip, port)]
+    } else {
+        tokio::net::lookup_host((host, port))
             .await
             .map_err(|error| denied(format!("network DNS lookup failed: {error}")))?
-            .collect(),
-        None => return Err(denied("network URL needs a host")),
+            .collect()
     };
     Ok((host.to_owned(), checked_addresses(addresses)?))
 }
@@ -138,8 +142,8 @@ fn redirect_method(
     method: &mut reqwest::Method,
     body: &mut Vec<u8>,
 ) {
-    if status == reqwest::StatusCode::SEE_OTHER && *method != reqwest::Method::HEAD
-        || matches!(status.as_u16(), 301 | 302) && *method == reqwest::Method::POST
+    if (status == reqwest::StatusCode::SEE_OTHER && *method != reqwest::Method::HEAD)
+        || (matches!(status.as_u16(), 301 | 302) && *method == reqwest::Method::POST)
     {
         *method = reqwest::Method::GET;
         body.clear();
@@ -171,7 +175,7 @@ pub(super) async fn send(req: FetchRequest) -> Result<FetchResponse, ServiceErro
         for (name, value) in &req.headers {
             if let (Ok(name), Ok(value)) = (
                 reqwest::header::HeaderName::from_bytes(name.as_bytes()),
-                reqwest::header::HeaderValue::from_str(value),
+                reqwest::header::HeaderValue::from_str(value.as_ref()),
             ) {
                 // The checked URL, not a caller-provided header, owns authority.
                 if name != reqwest::header::HOST {
@@ -302,7 +306,7 @@ mod tests {
             assert!(target(&url).is_err(), "{raw} must be denied");
         }
         let url = reqwest::Url::parse("http://2130706433/").expect("numeric loopback");
-        assert!(matches!(url.host(), Some(url::Host::Ipv4(_))));
+        assert!(url.host_str().is_some_and(|host| host.parse::<std::net::Ipv4Addr>().is_ok()));
         assert!(!public_ip(addr(url.host_str().expect("literal host"))));
     }
 
@@ -388,7 +392,7 @@ mod tests {
         let mut body = b"secret".to_vec();
         super::redirect_method(reqwest::StatusCode::TEMPORARY_REDIRECT, &mut method, &mut body);
         assert_eq!(method, reqwest::Method::POST);
-        assert_eq!(body, b"secret");
+        assert_eq!(body.as_slice(), b"secret");
     }
 
 }
