@@ -55,9 +55,17 @@ pub fn open_private_file(path: &Path) -> io::Result<File> {
     {
         windows::open(path, false)
     }
-    #[cfg(not(windows))]
+    #[cfg(unix)]
     {
         File::open(path)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "private file reads are unsupported on this platform",
+        ))
     }
 }
 
@@ -70,9 +78,17 @@ pub fn open_private_file_read_write(path: &Path) -> io::Result<File> {
     {
         windows::open(path, true)
     }
-    #[cfg(not(windows))]
+    #[cfg(unix)]
     {
         std::fs::OpenOptions::new().read(true).write(true).open(path)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "private file reads are unsupported on this platform",
+        ))
     }
 }
 
@@ -85,16 +101,21 @@ pub fn open_private_lock(path: &Path) -> io::Result<File> {
     {
         windows::open_lock(path)
     }
-    #[cfg(not(windows))]
+    #[cfg(unix)]
     {
         let mut options = std::fs::OpenOptions::new();
         options.read(true).write(true).create(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
         options.open(path)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "private lock files are unsupported on this platform",
+        ))
     }
 }
 
