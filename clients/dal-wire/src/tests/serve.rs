@@ -225,6 +225,32 @@ async fn token_file_auth_cases() {
         assert_eq!(card.status, 200, "{card:?}");
     })
     .await;
+    // With A2A off the well-known path is not mounted: the anonymous card
+    // exemption must not apply, so the token guard still runs first and the
+    // router answers its own 404 instead of a card for dead endpoints.
+    let mut no_a2a = public();
+    no_a2a.a2a = false;
+    with_serve(&rig, no_a2a, async |addr| {
+        let card = format!(
+            "GET /.well-known/agent-card.json HTTP/1.1\r\nhost: 127.0.0.1:{}",
+            addr.port()
+        );
+        let anonymous = http(addr, &card, "").await;
+        assert_eq!(anonymous.status, 401, "{anonymous:?}");
+        assert_eq!(
+            anonymous.json()["error"]["code"].as_str(),
+            Some("missing_token")
+        );
+        let bearer = http(
+            addr,
+            &format!("{card}\r\nauthorization: Bearer {token}"),
+            "",
+        )
+        .await;
+        assert_eq!(bearer.status, 404, "{bearer:?}");
+        assert_eq!(bearer.body, "no route for GET /.well-known/agent-card.json");
+    })
+    .await;
 }
 
 #[tokio::test]

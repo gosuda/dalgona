@@ -32,7 +32,7 @@ mod guard;
 mod http;
 mod upgrade;
 
-use guard::{auth_guard, content_guard, host_guard, is_card, is_upgrade, requires_json};
+use guard::{auth_guard, content_guard, host_guard, is_upgrade, requires_json};
 pub(crate) use http::{Resp, RespBody, ServeBody};
 use http::{into_response, read_body};
 use upgrade::upgrade_response;
@@ -312,6 +312,9 @@ async fn handle_request(
         route,
         super::router::ServeRoute::WebSocket | super::router::ServeRoute::CodexWs
     );
+    // The unauthenticated card exists only when the router mounted it:
+    // with A2A off, the same path is an ordinary guarded 404.
+    let card_route = matches!(route, super::router::ServeRoute::A2aCard);
     if req.headers().contains_key("origin") && !is_upgrade(&req) {
         return close_untrusted(into_response(Resp::text(
             403,
@@ -324,7 +327,7 @@ async fn handle_request(
         return close_untrusted(into_response(resp));
     }
     if ctx.cfg.public
-        && !is_card(&method, &path)
+        && !card_route
         && !upgrade_route
         && let Err(resp) = auth_guard(&ctx, &req)
     {
@@ -338,7 +341,7 @@ async fn handle_request(
         }
         return close_untrusted(response);
     }
-    if ctx.cfg.public && is_card(&method, &path) {
+    if ctx.cfg.public && card_route {
         // The public card needs no token. Do not let its body or keep-alive
         // occupy an unauthenticated slot after the response.
         let host = req
