@@ -999,6 +999,47 @@ mod tests {
     }
 
     #[test]
+    fn exec_dialog_shows_the_effective_directory_shell_and_command() {
+        use dal_core::{Answer, ExecPreview, Owner, Question, Request, RequestId};
+
+        let workspace = std::env::current_dir().expect("read workspace");
+        let cwd = workspace.join("project");
+        let shell = workspace.join("bin/bash");
+        let mut dialog = super::DialogUi::default();
+        dialog.opened(Request {
+            id: RequestId::new_v7(),
+            turn: None,
+            owner: Owner::Core,
+            question: Question::Approval {
+                tool: "exec".into(),
+                preview: ExecPreview {
+                    command: "echo approved".into(),
+                    cwd: cwd.clone(),
+                    shell: shell.clone(),
+                }
+                .to_preview()
+                .expect("serialize execution context"),
+                grant: None,
+                call: None,
+            },
+            timeout: std::time::Duration::from_secs(30),
+            default: Answer::Decline,
+        });
+        let rows = dialog.rows(400, 30, crate::WidthMode::Narrow);
+        assert!(
+            rows.iter()
+                .any(|row| row.contains(&format!("cwd: {}", cwd.display()))),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.contains(&format!("shell: {}", shell.display()))),
+            "{rows:?}"
+        );
+        assert!(rows.iter().any(|row| row.contains("echo approved")), "{rows:?}");
+    }
+
+    #[test]
     fn diagram_approval_preview_renders_art_only_when_enabled() {
         use dal_core::{Answer, Owner, Preview, Question, Request, RequestId};
         use std::time::Duration;
