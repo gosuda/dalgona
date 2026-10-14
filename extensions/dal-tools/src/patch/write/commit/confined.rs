@@ -92,7 +92,7 @@ impl Root {
         }
     }
 
-    fn create_temp(&self, dir: &OwnedFd, name: &OsStr, bytes: &[u8]) -> io::Result<()> {
+    fn create_temp(dir: &OwnedFd, name: &OsStr, bytes: &[u8]) -> io::Result<()> {
         let handle = fs::openat(
             dir,
             name,
@@ -314,7 +314,7 @@ pub(super) fn apply_files(session: &PatchSession, plan: &Plan) -> Result<Output,
             std::process::id(),
             nonce_u128()
         ));
-        if let Err(error) = root.create_temp(&dir, &name, after) {
+        if let Err(error) = Root::create_temp(&dir, &name, after) {
             cleanup_temps(&temps);
             return Err(cannot_write(target, error));
         }
@@ -370,6 +370,7 @@ pub(super) fn apply_files(session: &PatchSession, plan: &Plan) -> Result<Output,
 }
 
 #[cfg(test)]
+#[expect(clippy::expect_used, reason = "security regression fixtures fail loudly")]
 mod tests {
     use super::*;
 
@@ -379,7 +380,7 @@ mod tests {
         let root = Root::open(workspace.path()).expect("open workspace");
         let path = root.canonical.join("a/b/file.txt");
         let (dir, name) = root.parent(&path, true).expect("nested directories");
-        root.create_temp(&dir, &name, b"inside\n")
+        Root::create_temp(&dir, &name, b"inside\n")
             .expect("create file through parent handle");
         assert_eq!(std::fs::read(path).expect("inside file"), b"inside\n");
     }
@@ -425,7 +426,7 @@ mod tests {
             dir,
             name: OsString::from("temp.txt"),
         };
-        root.create_temp(&temp.dir, &temp.name, b"inside\n")
+        Root::create_temp(&temp.dir, &temp.name, b"inside\n")
             .expect("stage temp");
 
         std::fs::rename(&sub, root.canonical.join("old-sub")).expect("move staged directory");
