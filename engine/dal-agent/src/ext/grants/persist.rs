@@ -173,8 +173,10 @@ pub(crate) fn encode_row(row: &GrantRow) -> String {
         .map(|digest| format!("mcp_set = \"{}\"\n", escape(digest)))
         .unwrap_or_default();
     format!(
-        "[[grant]]\next = \"{}\"\norigin = \"{origin}\"\nservices = [{services}]\n{mcp_set}by = \"{}\"\napproved_at = \"{}\"\n",
+        "[[grant]]\next = \"{}\"\norigin = \"{origin}\"\nservices = [{services}]\ndigest = \"{}\"\nworkspace = \"{}\"\n{mcp_set}by = \"{}\"\napproved_at = \"{}\"\n",
         escape(row.ext.as_str()),
+        escape(&row.digest),
+        escape(row.workspace.to_str().unwrap_or("")),
         escape(row.by.as_str()),
         row.approved_at,
     )
