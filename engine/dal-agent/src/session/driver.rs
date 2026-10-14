@@ -1497,7 +1497,8 @@ impl Driver {
                 owner.state_version(),
                 CallerKind::Handler,
                 turn,
-            );
+            )
+            .with_extension(owner);
             let input = crate::ext::compact::CompactInput {
                 caller: &caller,
                 model: route.clone(),
@@ -1737,7 +1738,8 @@ fn render_section(
         owner.state_version(),
         CallerKind::Handler,
         Some(turn),
-    );
+    )
+    .with_extension(owner);
     let cx = SectionCx {
         state: state.as_deref(),
         services: Arc::clone(&deps.services),
