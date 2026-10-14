@@ -93,6 +93,7 @@ pub struct Caller {
     origin: Origin,
     inject: ServiceSet,
     state_version: NonZeroU32,
+    grant_digest: Option<Box<str>>,
     kind: CallerKind,
     turn: Option<TurnId>,
     invocation: Option<CallInvocation>,
@@ -128,10 +129,25 @@ impl Caller {
             origin,
             inject,
             state_version,
+            grant_digest: None,
             kind,
             turn,
             invocation: None,
         }
+    }
+
+    /// Capture the admitted extension's immutable code identity when minting
+    /// the caller, so an in-flight call cannot borrow a later generation's grant.
+    #[must_use]
+    pub(crate) fn with_extension(mut self, extension: &Extension) -> Self {
+        self.grant_digest = extension.grant_digest().map(Into::into);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_digest(mut self) -> Self {
+        self.grant_digest = Some("a".repeat(64).into_boxed_str());
+        self
     }
 
     /// Names the dispatched tool call this caller was minted for.
