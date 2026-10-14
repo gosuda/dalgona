@@ -219,6 +219,7 @@ impl CommandHandler for Spawn {
                 role: None,
                 system: None,
                 tools,
+                max_steps: None,
                 workspace: None,
             };
             let services = cx.services();

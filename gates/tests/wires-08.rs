@@ -56,6 +56,7 @@ impl ModelHandler for Fusion {
                 role: None,
                 system: None,
                 tools: None,
+                max_steps: None,
                 workspace: None,
             };
             let member = scope.agent(start).expect("member handle admitted");

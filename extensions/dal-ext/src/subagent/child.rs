@@ -56,6 +56,7 @@ pub(crate) fn start_child(
         role: role.map(String::into_boxed_str),
         system: system.map(String::into_boxed_str),
         tools: Some(child_tool_names(tools)?),
+        max_steps: None,
         workspace: child_workspace(workspace)?,
     };
     start

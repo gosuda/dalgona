@@ -201,10 +201,17 @@ fn mapped_names_deserialize_in_hook_scope_and_child_tool_values() -> TestResult 
         role: None,
         system: None,
         tools: Some(vec![mapped].into()),
+        max_steps: None,
         workspace: None,
     };
     let child_wire = sonic_rs::to_string(&child)?;
     let decoded_child: AgentStart = sonic_rs::from_str(&child_wire)?;
+    assert_eq!(decoded_child.max_steps, None);
+    let mut capped = decoded_child.clone();
+    capped.max_steps = std::num::NonZeroU32::new(1);
+    let capped_wire = sonic_rs::to_string(&capped)?;
+    let decoded_capped: AgentStart = sonic_rs::from_str(&capped_wire)?;
+    assert_eq!(decoded_capped.max_steps.map(std::num::NonZeroU32::get), Some(1));
     assert_eq!(
         decoded_child
             .tools
@@ -392,6 +399,7 @@ fn agent_start_validates_before_effects() -> TestResult {
         role: Some("reviewer".into()),
         system: Some("custom system".into()),
         tools: None,
+        max_steps: None,
         workspace: None,
     };
     let error = invalid_start

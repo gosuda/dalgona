@@ -205,6 +205,7 @@ impl Handler {
             role: None,
             system: None,
             tools: None,
+            max_steps: None,
             workspace: None,
         };
         let handle = scope.agent(start).expect("agent handle admitted");

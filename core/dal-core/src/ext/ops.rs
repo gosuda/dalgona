@@ -28,6 +28,9 @@ pub struct AgentStart {
     pub tools: Option<Box<[Name]>>,
     /// An optional child workspace.
     pub workspace: Option<Workspace>,
+    /// Maximum tool rounds in the child's first turn; absent uses the host limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_steps: Option<std::num::NonZeroU32>,
 }
 
 impl AgentStart {

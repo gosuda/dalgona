@@ -242,6 +242,7 @@ fn start_args(child_name: &'static str, child_model: &'static str) -> AgentStart
         role: None,
         system: None,
         tools: None,
+        max_steps: None,
         workspace: None,
     }
 }

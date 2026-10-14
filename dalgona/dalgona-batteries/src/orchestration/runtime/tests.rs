@@ -22,7 +22,7 @@ use dal_core::{
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
-use super::Runtime;
+use super::{Message, Runtime};
 use crate::orchestration::parse_config;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -1595,6 +1595,91 @@ async fn blocked_reports_remain_blocked_and_unresolved_item_sources_skip() -> Te
         "{report}"
     );
     assert!(report.contains("need access"), "{report}");
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn cancelled_owner_message_does_not_start_a_run() -> TestResult {
+    let fixture = Fixture::open().await?;
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let (reply, response) = tokio::sync::oneshot::channel();
+    let sender = fixture.runtime.sender(fixture.session).ok_or("missing owner")?;
+    sender
+        .send(Message::Tool {
+            caller: fixture.caller(),
+            call: CallId::new("cancelled-run"),
+            name: "agents".into(),
+            args: RawJson::parse(
+                r#"{"action":"run","steps":[{"name":"task","prompt":"inspect","tools":["read"],"isolation":"shared"}]}"#,
+            )?,
+            cancel,
+            reply,
+        })
+        .await?;
+    assert!(matches!(response.await?, Err(ServiceError::Cancelled)));
+    assert!(fixture.script().jobs.is_empty());
+    assert!(fixture.script().starts.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn caller_cancellation_stops_a_running_workflow_child() -> TestResult {
+    let fixture = Fixture::open().await?;
+    fixture.script().hold = Some(CancellationToken::new());
+    let cancel = CancellationToken::new();
+    fixture
+        .runtime
+        .tool(
+            fixture.session,
+            fixture.caller(),
+            CallId::new("cancel-after-start"),
+            "agents",
+            RawJson::parse(
+                r#"{"action":"run","steps":[{"name":"task","prompt":"inspect","tools":["read"],"isolation":"shared"}]}"#,
+            )?,
+            cancel.clone(),
+        )
+        .await?;
+    wait_for_starts(&fixture, 1).await?;
+    let child = fixture.script().starts[0].0;
+    cancel.cancel();
+    let report = fixture.ended_run().await?;
+    assert!(report.contains("cancelled"), "{report}");
+    assert!(fixture.host.cancels().contains(&child));
+    Ok(())
+}
+
+#[tokio::test]
+async fn child_step_limit_is_sent_to_the_first_turn_at_boundaries() -> TestResult {
+    for rounds in [1, crate::orchestration::admission::CHILD_MAX_STEPS_MAX] {
+        let mut config = parse_config(None)?;
+        config.agents.child_max_steps = rounds;
+        let fixture = Fixture::open_config(config).await?;
+        run_one_step(&fixture).await?;
+        let starts = &fixture.script().starts;
+        assert_eq!(starts.len(), 1);
+        assert_eq!(starts[0].1.max_steps.map(std::num::NonZeroU32::get), Some(rounds));
+    }
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn workflow_wall_budget_stops_an_unresponsive_child() -> TestResult {
+    let mut config = parse_config(None)?;
+    config.agents.child_max_minutes = 1;
+    let fixture = Fixture::open_config(config).await?;
+    fixture.script().hold = Some(CancellationToken::new());
+    fixture.tool(
+        r#"{"action":"run","steps":[{"name":"task","prompt":"inspect","tools":["read"],"isolation":"shared"}]}"#,
+    ).await?;
+    wait_for_starts(&fixture, 1).await?;
+    let child = fixture.script().starts[0].0;
+    tokio::time::advance(std::time::Duration::from_secs(61)).await;
+    let report = fixture.ended_run().await?;
+    assert!(report.contains("cancelled"), "{report}");
+    assert!(fixture.host.cancels().contains(&child));
     Ok(())
 }
 

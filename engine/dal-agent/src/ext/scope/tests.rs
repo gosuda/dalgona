@@ -275,6 +275,7 @@ fn start() -> AgentStart {
         role: None,
         system: None,
         tools: None,
+        max_steps: None,
         workspace: None,
     }
 }
