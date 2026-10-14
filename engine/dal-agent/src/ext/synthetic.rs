@@ -446,13 +446,97 @@ pub(crate) fn price_of(shared: &HostShared, route: &ModelRoute) -> Option<ModelP
     )
 }
 
-pub(crate) async fn collect(mut stream: EventStream) -> Result<Inference, InferFailure> {
+/// Limits the total decoded provider content retained by non-streaming callers.
+const MAX_INFERENCE_CONTENT_BYTES: usize = 16 << 20;
+/// Counts even provider events that normalize to no core event.
+const MAX_INFERENCE_STREAM_EVENTS: usize = 65_536;
+
+fn provider_event_bytes(event: &ProviderEvent) -> usize {
+    match event {
+        ProviderEvent::TextDelta { text } | ProviderEvent::ReasoningDelta { text } => text.len(),
+        ProviderEvent::ToolCallStarted { id, name } => id.len().saturating_add(name.len()),
+        ProviderEvent::ToolArgsDelta { id, fragment } => id.len().saturating_add(fragment.len()),
+        ProviderEvent::Replay { payload } => payload
+            .model
+            .len()
+            .saturating_add(payload.item.as_str().len()),
+        ProviderEvent::ToolCallsDone { calls } => calls.iter().fold(0usize, |total, call| {
+            let args = match &call.args {
+                ToolArgs::Parsed(raw) => raw.as_str().len(),
+                ToolArgs::Invalid { message } => message.len(),
+                ToolArgs::Truncated => 0,
+            };
+            total
+                .saturating_add(call.id.len())
+                .saturating_add(call.name.len())
+                .saturating_add(args)
+        }),
+        ProviderEvent::Stop {
+            reason: dal_provider::StopReason::Other(reason),
+        } => reason.len(),
+        ProviderEvent::Usage { .. } | ProviderEvent::Stop { .. } => 0,
+        // Non-exhaustive provider variants must be reviewed when added.
+        _ => 0,
+    }
+}
+
+fn collection_limit(max_events: usize, max_bytes: usize) -> InferFailure {
+    InferFailure::Fatal {
+        message: format!(
+            "inference output exceeded the collection cap of {max_events} events or {max_bytes} bytes"
+        )
+        .into(),
+        fix: Some("Use streaming inference or request less output.".into()),
+    }
+}
+
+/// Collects a provider stream with aggregate byte and event budgets.
+///
+/// Checks happen before conversion and insertion; dropping the stream on
+/// overflow invokes its cancellation hook. Both the source and normalized
+/// event counts are bounded, including no-output provider events.
+pub(crate) async fn collect(stream: EventStream) -> Result<Inference, InferFailure> {
+    collect_with_limits(
+        stream,
+        MAX_INFERENCE_STREAM_EVENTS,
+        MAX_INFERENCE_CONTENT_BYTES,
+    )
+    .await
+}
+
+async fn collect_with_limits(
+    mut stream: EventStream,
+    max_events: usize,
+    max_bytes: usize,
+) -> Result<Inference, InferFailure> {
     let mut converter = StreamConverter::new();
     let mut events = Vec::new();
+    let mut source_events = 0usize;
+    let mut source_bytes = 0usize;
     while let Some(item) = stream.next().await {
-        events.extend(converter.convert(item.map_err(InferFailure::from)?));
+        let item = item.map_err(InferFailure::from)?;
+        let bytes = provider_event_bytes(&item);
+        if source_events == max_events || bytes > max_bytes.saturating_sub(source_bytes) {
+            return Err(collection_limit(max_events, max_bytes));
+        }
+        if let ProviderEvent::ToolCallsDone { calls } = &item
+            && calls.len() > max_events.saturating_sub(events.len())
+        {
+            return Err(collection_limit(max_events, max_bytes));
+        }
+        source_events += 1;
+        source_bytes += bytes;
+        let converted = converter.convert(item);
+        if converted.len() > max_events.saturating_sub(events.len()) {
+            return Err(collection_limit(max_events, max_bytes));
+        }
+        events.extend(converted);
     }
-    events.extend(converter.flush());
+    let flushed = converter.flush();
+    if flushed.len() > max_events.saturating_sub(events.len()) {
+        return Err(collection_limit(max_events, max_bytes));
+    }
+    events.extend(flushed);
     Ok(Inference { events })
 }
 
