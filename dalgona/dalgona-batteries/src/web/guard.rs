@@ -1,17 +1,12 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
-//! The connect-time address gate for `web_fetch`.
+//! A preflight destination check for web_fetch.
 //!
-//! The host `net` service resolves and connects on its own, so a name checked
-//! in one lookup and fetched through another could change its answer in
-//! between (DNS rebinding). The gate therefore resolves a hostname exactly
-//! once, classifies every address of the answer, and hands the request the
-//! validated address: an `http` hop connects to that IP with the original
-//! `Host` header, so no second lookup exists to flip. An `https` hop keeps the
-//! hostname, because the TLS name check must see it; there the certificate
-//! binds the connection to the checked name.
+//! This gives the web tool useful errors before asking the host Net service
+//! to fetch a URL. The host independently resolves and checks the destination
+//! again and pins the approved address to the actual socket connection. The
+//! host check is authoritative: a name can change after this preflight lookup.
 //!
-//! Loopback, link-local, RFC 1918, unique-local, and unspecified ranges
-//! refuse, as do the other non-global blocks listed in [`AddressClass`].
+//! Loopback, link-local, private and otherwise non-public addresses are refused.
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
