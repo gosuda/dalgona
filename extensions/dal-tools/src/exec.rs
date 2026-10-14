@@ -20,7 +20,8 @@ use dal_agent::{
     ext::{ArgError, BoxFuture, RawValue, Tool, ToolCall, ToolCx, ToolOutcome, ToolOutput},
 };
 use dal_core::{
-    CallId, ModelInfo, Name, Preview, RawJson, RegistrationError, ToolClass, ToolSpec, Workspace,
+    CallId, ExecPreview, ModelInfo, Name, RawJson, RegistrationError, ToolClass, ToolSpec,
+    Workspace,
 };
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _};
 
@@ -495,23 +496,33 @@ impl ExecTool {
                 )));
             }
         };
-        let preview = Preview {
-            title: "exec".into(),
-            body: validated.command.clone().into(),
-            digest: None,
+        // The same immutable execution context supplies the approval and the
+        // process door. Its digest covers the exact command, cwd, and shell.
+        let execution = ExecPreview {
+            command: validated.command.clone().into(),
+            cwd: validated.cwd.clone(),
+            shell: shell.program.clone(),
+        };
+        let preview = match execution.to_preview() {
+            Ok(preview) => preview,
+            Err(error) => {
+                return ToolOutcome::Err(ToolError::message(format!(
+                    "exec: cannot encode approval preview: {error}"
+                )));
+            }
         };
         let approved = match cx.authorize(preview).await {
             Ok(approved) => approved,
             Err(reason) => return ToolOutcome::Err(ToolError::Denied(reason)),
         };
         let spawn_argv = [
-            OsString::from(shell.program.as_os_str()),
+            OsString::from(execution.shell.as_os_str()),
             OsString::from("-c"),
-            OsString::from(&validated.command),
+            OsString::from(execution.command.as_ref()),
         ];
         let thread_id = cx.session().to_string();
         let opts = SpawnOpts {
-            cwd: validated.cwd.clone(),
+            cwd: execution.cwd.clone(),
             timeout: validated.timeout,
             env: shell::provenance_environment(&thread_id, call.id.as_str()),
             stdout_prefix_limit: 0,
