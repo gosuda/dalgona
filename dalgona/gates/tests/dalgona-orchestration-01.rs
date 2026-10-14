@@ -28,7 +28,10 @@ fn close_ends_the_battery_within_5s_and_holds_the_last_mode() -> support::TestRe
             }
             dal_agent::ext::grants::GrantStore::new(scratch.path().to_path_buf())
                 .grant(
-                    dal_agent::ext::grants::GrantKey::for_extension(extension, &scratch.path().join("ws"))
+                    dal_agent::ext::grants::GrantKey::for_extension(
+                        extension,
+                        &scratch.path().join("ws"),
+                    )
                         .expect("registered extension has a code identity"),
                     dal_core::ClientId::new("shutdown-gate"),
                     dal_core::Timestamp::now(),
