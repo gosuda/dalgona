@@ -343,6 +343,7 @@ fn source_digest(files: &BTreeMap<PathBuf, Vec<u8>>, config: Option<&str>) -> Bo
         hasher.update(&(bytes.len() as u64).to_le_bytes());
         hasher.update(bytes);
     }
+    hasher.update(b"config-v1");
     // Host-resolved configuration can change a plugin's behavior without
     // changing its installed source files.
     if let Some(config) = config {
