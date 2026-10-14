@@ -8,10 +8,10 @@
 //! BLAKE3-checked serve token. Stopping ceases accepts, cancels handler
 //! turns, and drains connections within two seconds.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use crate::router::{DigestTable, RouterOptions};
@@ -22,7 +22,7 @@ use dal_core::ApprovalMode;
 use futures::{StreamExt, stream::FuturesUnordered};
 use hyper::{Request, Response};
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc};
+use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::error::WireError;
@@ -64,7 +64,7 @@ impl ServeHandle {
 
 /// Maximum concurrent HTTP connections.
 const CONN_CAP: usize = 256;
-/// Maximum connections waiting to pass their first request guards.
+/// Maximum retained connections waiting to pass their first request guards.
 const PRE_AUTH_CAP: usize = 32;
 /// Absolute deadline for each HTTP request header, including idle keep-alive.
 const HEADER_TIMEOUT: Duration = Duration::from_secs(5);
@@ -121,6 +121,34 @@ impl ServeCtx {
     }
 }
 
+/// One unverified connection, which can be evicted to admit a new peer.
+struct PendingConnection {
+    cancel: CancellationToken,
+}
+
+/// Single-owner admission queue. Validated connections leave this queue
+/// through their weak reference without reducing the normal connection cap.
+#[derive(Default)]
+struct PreAuthBudget {
+    slots: VecDeque<Weak<PendingConnection>>,
+}
+
+impl PreAuthBudget {
+    fn admit(&mut self) -> Arc<PendingConnection> {
+        self.slots.retain(|slot| slot.strong_count() > 0);
+        if self.slots.len() >= PRE_AUTH_CAP
+            && let Some(oldest) = self.slots.pop_front().and_then(|slot| slot.upgrade())
+        {
+            oldest.cancel.cancel();
+        }
+        let pending = Arc::new(PendingConnection {
+            cancel: CancellationToken::new(),
+        });
+        self.slots.push_back(Arc::downgrade(&pending));
+        pending
+    }
+}
+
 /// One live stream or upgrade future owned by the accept loop.
 pub(crate) type Driver = futures::future::BoxFuture<'static, ()>;
 /// Binds the accept loop for one listener and returns its handle.
@@ -141,7 +169,7 @@ pub(crate) fn listen(
         shutdown: stop.child_token(),
     });
     let shutdown = ctx.shutdown.clone();
-    let pre_auth = Arc::new(Semaphore::new(PRE_AUTH_CAP));
+    let mut pre_auth = PreAuthBudget::default();
     let done = async move {
         let mut conns: FuturesUnordered<Driver> = FuturesUnordered::new();
         let mut drivers: FuturesUnordered<Driver> = FuturesUnordered::new();
@@ -149,16 +177,17 @@ pub(crate) fn listen(
             tokio::select! {
                 biased;
                 () = stop.cancelled() => break,
+                // Prioritize reaping cancelled or completed drivers over new accepts.
+                _ = conns.next(), if !conns.is_empty() => {}
+                _ = drivers.next(), if !drivers.is_empty() => {}
+                Some(driver) = driver_rx.recv() => drivers.push(driver),
                 accepted = listener.accept(), if conns.len() < CONN_CAP => {
                     match accepted {
                         Ok((stream, _)) => {
-                            let Ok(permit) = Arc::clone(&pre_auth).try_acquire_owned() else {
-                                tracing::debug!("pre-auth connection capacity exhausted");
-                                continue;
-                            };
+                            let pending = pre_auth.admit();
                             let ctx = Arc::clone(&ctx);
                             conns.push(Box::pin(async move {
-                                serve_conn(ctx, stream, permit).await;
+                                serve_conn(ctx, stream, pending).await;
                             }));
                         }
                         Err(error) => {
@@ -172,9 +201,6 @@ pub(crate) fn listen(
                         }
                     }
                 }
-                _ = conns.next(), if !conns.is_empty() => {}
-                _ = drivers.next(), if !drivers.is_empty() => {}
-                Some(driver) = driver_rx.recv() => drivers.push(driver),
             }
         }
         shutdown.cancel();
@@ -230,13 +256,14 @@ fn http1_builder() -> hyper::server::conn::http1::Builder {
 async fn serve_conn(
     ctx: Arc<ServeCtx>,
     stream: tokio::net::TcpStream,
-    permit: OwnedSemaphorePermit,
+    pending: Arc<PendingConnection>,
 ) {
     let io = hyper_util::rt::TokioIo::new(stream);
     let shutdown = ctx.shutdown.clone();
-    // A validated request releases the small pre-auth budget. The Hyper
-    // connection remains under CONN_CAP, even for long-running responses.
-    let pre_auth = Arc::new(Mutex::new(Some(permit)));
+    let evict = pending.cancel.clone();
+    // A validated request drops the last strong reference in the pending
+    // queue. Its HTTP connection can still run under the normal cap.
+    let pre_auth = Arc::new(Mutex::new(Some(pending)));
     let service = hyper::service::service_fn(move |req: Request<hyper::body::Incoming>| {
         let ctx = Arc::clone(&ctx);
         let pre_auth = Arc::clone(&pre_auth);
@@ -246,6 +273,10 @@ async fn serve_conn(
     let mut conn = std::pin::pin!(conn);
     let result = tokio::select! {
         result = conn.as_mut() => result,
+        () = evict.cancelled() => {
+            tracing::debug!("evicted unverified HTTP connection");
+            return;
+        }
         () = shutdown.cancelled() => {
             conn.as_mut().graceful_shutdown();
             conn.await
@@ -269,7 +300,7 @@ fn close_untrusted(mut response: Response<ServeBody>) -> Response<ServeBody> {
 async fn handle_request(
     ctx: Arc<ServeCtx>,
     req: Request<hyper::body::Incoming>,
-    pre_auth: &Mutex<Option<OwnedSemaphorePermit>>,
+    pre_auth: &Mutex<Option<Arc<PendingConnection>>>,
 ) -> Response<ServeBody> {
     let method = req.method().to_string();
     let path = req.uri().path().to_owned();
@@ -430,14 +461,13 @@ pub(crate) fn router_options(cfg: &ListenerCfg) -> RouterOptions {
 
 #[cfg(test)]
 mod timeout_tests {
-    use super::{HEADER_TIMEOUT, PRE_AUTH_CAP, ServeBody, http1_builder};
-    use std::{error::Error, io, sync::Arc, time::Duration};
+    use super::{HEADER_TIMEOUT, PRE_AUTH_CAP, PreAuthBudget, ServeBody, http1_builder};
+    use std::{error::Error, io, time::Duration};
 
     use hyper::{Request, Response};
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::{TcpListener, TcpStream},
-        sync::Semaphore,
         task::JoinHandle,
         time::Instant,
     };
@@ -510,19 +540,31 @@ mod timeout_tests {
     }
 
     #[tokio::test]
-    async fn pre_auth_budget_is_reusable_after_validation() -> TestResult {
-        let budget = Arc::new(Semaphore::new(PRE_AUTH_CAP));
-        let mut waiting = Vec::with_capacity(PRE_AUTH_CAP);
-        for _ in 0..PRE_AUTH_CAP {
-            waiting.push(Arc::clone(&budget).try_acquire_owned()?);
+    async fn pre_auth_admission_evicts_the_oldest_unverified_peer() -> TestResult {
+        let mut budget = PreAuthBudget::default();
+        let first = budget.admit();
+        let mut waiting = Vec::with_capacity(PRE_AUTH_CAP - 1);
+        for _ in 1..PRE_AUTH_CAP {
+            waiting.push(budget.admit());
         }
+        let fresh = budget.admit();
         assert!(
-            Arc::clone(&budget).try_acquire_owned().is_err(),
-            "pending sockets must not consume the authenticated capacity"
+            first.cancel.is_cancelled(),
+            "new peers must evict old unverified sockets at capacity"
         );
-        let accepted = tokio::sync::Mutex::new(waiting.pop());
-        accepted.lock().await.take();
-        let _post_auth_socket = Arc::clone(&budget).try_acquire_owned()?;
+        assert!(!fresh.cancel.is_cancelled());
+        assert_eq!(budget.slots.len(), PRE_AUTH_CAP);
+
+        let validated = tokio::sync::Mutex::new(waiting.pop());
+        validated.lock().await.take();
+        let next = budget.admit();
+        assert!(!next.cancel.is_cancelled());
+        assert!(!fresh.cancel.is_cancelled());
+        assert_eq!(
+            budget.slots.len(),
+            PRE_AUTH_CAP,
+            "validated connections must free pre-auth capacity"
+        );
         Ok(())
     }
 }
