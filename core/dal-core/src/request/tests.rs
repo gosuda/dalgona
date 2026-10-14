@@ -2,7 +2,9 @@ use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use super::{Answer, AnswerValue, CallGrant, Choice, ExecPreview, JobEnd, Owner, Preview, Question, Request};
+use super::{
+    Answer, AnswerValue, CallGrant, Choice, ExecPreview, JobEnd, Owner, Preview, Question, Request,
+};
 use crate::id::{CallId, JobId, RequestId, TurnId};
 use crate::raw::RawJson;
 
