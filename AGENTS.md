@@ -131,7 +131,12 @@ directory rule may narrow a shared rule. It must not weaken it.
   composition edge that owns OS process launches, and no published safe wrapper exposes
   AppContainer profiles, DACL editing, or job objects, so the Windows-only module carries
   one `#[expect(unsafe_code, reason = "...")]` and its call sites use plain `unsafe`
-  blocks inside that module.
+  blocks inside that module. A third exception is `dal-store`'s `#[cfg(windows)]`
+  private-file module in `private/windows.rs`: it is the durable-state edge that owns
+  credential and session file security, and no published safe wrapper exposes
+  security-descriptor composition, owner and DACL inspection, or DACL editing, so the
+  module carries one `#[expect(unsafe_code, reason = "...")]` and its call sites use
+  plain `unsafe` blocks inside it.
 - Use immutable values, pure folds, and explicit effect records for domain decisions.
   Put I/O at named adapters. Then replay and tests can drive the same logic.
 - Give each mutable subsystem one owner task or one exclusive handle. Use bounded queues,

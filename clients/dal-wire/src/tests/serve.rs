@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 
 use sonic_rs::JsonValueTrait;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 
 use super::support::{
     HttpReply, ask_probe_extension, host_header, http, parse_reply, result_text, rig,
@@ -223,6 +223,173 @@ async fn token_file_auth_cases() {
         )
         .await;
         assert_eq!(card.status, 200, "{card:?}");
+    })
+    .await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn public_card_path_requires_auth_when_a2a_is_disabled() {
+    let rig = rig(&[]).await;
+    let token =
+        crate::token::create(&rig.data().join("serve.token"), false).expect("create serve token");
+    let mut options = router_options(&rig);
+    options.public = true;
+    with_serve(&rig, options, async |addr| {
+        let base = format!(
+            "GET /.well-known/agent-card.json HTTP/1.1\r\n{}",
+            host_header(addr)
+        );
+        let unauthenticated = http(addr, &base, "").await;
+        assert_eq!(unauthenticated.status, 401, "{unauthenticated:?}");
+        let authenticated = http(
+            addr,
+            &format!("{base}\r\nauthorization: Bearer {token}"),
+            "",
+        )
+        .await;
+        assert_eq!(authenticated.status, 404, "{authenticated:?}");
+    })
+    .await;
+}
+
+/// A GET declaring only an empty body — every decimal zero spelling —
+/// is not a framed body and keeps its route.
+#[tokio::test]
+async fn get_routes_accept_all_zero_content_length() {
+    let rig = rig(&[]).await;
+    with_serve(&rig, router_options(&rig), async |addr| {
+        for (declared, expect) in [("0", 200), ("00", 200), ("000", 200), ("01", 400)] {
+            let mut stream = tokio::net::TcpStream::connect(addr)
+                .await
+                .expect("connect");
+            let head = format!(
+                "GET /v1/models HTTP/1.1\r\n{}\r\ncontent-length: {declared}\r\nconnection: close\r\n\r\n",
+                host_header(addr)
+            );
+            stream.write_all(head.as_bytes()).await.expect("request");
+            let mut bytes = Vec::new();
+            stream.read_to_end(&mut bytes).await.expect("reply");
+            assert_eq!(parse_reply(&bytes).status, expect, "{declared}");
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn get_routes_reject_body_headers_before_reading() {
+    let rig = rig(&[]).await;
+    let mut options = router_options(&rig);
+    options.a2a = true;
+    with_serve(&rig, options, async |addr| {
+        for (path, body_framing) in [
+            ("/.well-known/agent-card.json", "content-length: 33554432"),
+            ("/v1/models", "content-length: 1"),
+            ("/a2a/v1/tasks/a-task", "content-length: 1"),
+            ("/.well-known/agent-card.json", "transfer-encoding: chunked"),
+        ] {
+            let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+            let head = format!(
+                "GET {path} HTTP/1.1\r\n{}\r\n{body_framing}\r\nconnection: close\r\n\r\n",
+                host_header(addr)
+            );
+            stream
+                .write_all(head.as_bytes())
+                .await
+                .expect("send headers");
+            // Never send the declared body: the response must arrive first.
+            let mut reader = tokio::io::BufReader::new(stream);
+            let mut status = String::new();
+            tokio::time::timeout(super::support::WAIT, reader.read_line(&mut status))
+                .await
+                .expect("early response")
+                .expect("read status");
+            assert!(status.starts_with("HTTP/1.1 400 "), "{status:?}");
+        }
+        let card = get(addr, "/.well-known/agent-card.json").await;
+        assert_eq!(card.status, 200, "{card:?}");
+    })
+    .await;
+}
+
+/// A route that skips the budgeted body reader still drains a declared
+/// body before its response goes out on a closing connection.
+#[tokio::test]
+async fn bodyless_route_drains_declared_body() {
+    let rig = rig(&[]).await;
+    with_serve(&rig, router_options(&rig), async |addr| {
+        let stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        let head = format!(
+            "POST /missing HTTP/1.1\r\n{}\r\ncontent-length: 100\r\nconnection: close\r\n\r\n",
+            host_header(addr)
+        );
+        let (reader, mut writer) = stream.into_split();
+        writer.write_all(head.as_bytes()).await.expect("headers");
+        writer.write_all(&[b'x'; 50]).await.expect("first half");
+        let mut reader = tokio::io::BufReader::new(reader);
+        let mut status = String::new();
+        // The 404 must wait for the rest of the declared body: answering
+        // early lets the closing socket reset before the client reads it.
+        let early = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            reader.read_line(&mut status),
+        )
+        .await;
+        assert!(
+            early.is_err(),
+            "404 arrived before the body drained: {status:?}"
+        );
+        writer.write_all(&[b'x'; 50]).await.expect("second half");
+        tokio::time::timeout(super::support::WAIT, reader.read_line(&mut status))
+            .await
+            .expect("404 after the drain")
+            .expect("status line");
+        assert!(status.starts_with("HTTP/1.1 404 "), "{status:?}");
+    })
+    .await;
+}
+
+/// Incomplete uploads keep their allocation permits until dispatch ends.
+/// A second upload cannot grow past the listener-wide memory ceiling.
+#[tokio::test]
+async fn concurrent_http_bodies_share_a_memory_ceiling() {
+    let rig = rig(&[]).await;
+    with_serve(&rig, router_options(&rig), async |addr| {
+        let head = format!(
+            "{CHAT}\r\n{}\r\ncontent-type: application/json\r\ncontent-length: 33554432\r\nconnection: close\r\n\r\n",
+            host_header(addr)
+        );
+        let chunk = vec![b'x'; 1024 * 1024];
+        let mut first = tokio::net::TcpStream::connect(addr).await.expect("first upload");
+        first.write_all(head.as_bytes()).await.expect("first headers");
+        for _ in 0..20 {
+            first.write_all(&chunk).await.expect("first body");
+        }
+
+        let mut second = tokio::net::TcpStream::connect(addr).await.expect("second upload");
+        let (reader, mut writer) = second.split();
+        let mut reader = tokio::io::BufReader::new(reader);
+        let mut status = String::new();
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            tokio::join!(
+                async {
+                    writer.write_all(head.as_bytes()).await.expect("second headers");
+                    for _ in 0..20 {
+                        if writer.write_all(&chunk).await.is_err() {
+                            break;
+                        }
+                    }
+                    let _ = writer.shutdown().await;
+                },
+                async {
+                    reader.read_line(&mut status).await.expect("second status");
+                }
+            );
+        })
+        .await
+        .expect("budget rejects the second upload");
+        assert!(status.starts_with("HTTP/1.1 503 "), "{status:?}");
+        drop(first);
     })
     .await;
 }

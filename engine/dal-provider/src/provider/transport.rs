@@ -272,6 +272,10 @@ pub(crate) fn hold_permit(stream: EventStream, permit: OwnedSemaphorePermit) -> 
                     drop(permit.take());
                     Some((Ok(event), (stream, permit)))
                 }
+                Some(Err(error)) => {
+                    drop(permit.take());
+                    Some((Err(error), (stream, permit)))
+                }
                 Some(item) => Some((item, (stream, permit))),
                 None => None,
             }

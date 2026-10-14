@@ -312,7 +312,7 @@ impl WsSessions {
             cancel,
             turn: Some(turn),
         };
-        Box::pin(self.drive(drive, reusable)).await
+        self.drive(drive, reusable).await
     }
 
     fn text_frame(wire: WsWire<'_>, family: Family) -> Result<String, ProviderError> {

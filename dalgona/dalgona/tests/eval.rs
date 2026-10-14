@@ -15,8 +15,13 @@
 
 use std::fs;
 use std::path::PathBuf;
-use std::process::{Child, Command, Output, Stdio};
+#[cfg(unix)]
+use std::process::Child;
+#[cfg(unix)]
+use std::process::Stdio;
+use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
 const MODEL: &str = "openai-responses/gpt-6";
@@ -414,8 +419,10 @@ fn no_model_anywhere_is_a_usage_error() {
 }
 
 /// Kills the child when the gate fails before it reaps it.
+#[cfg(unix)]
 struct Reap(Child);
 
+#[cfg(unix)]
 impl Drop for Reap {
     fn drop(&mut self) {
         let _ = self.0.kill();
@@ -423,6 +430,7 @@ impl Drop for Reap {
     }
 }
 
+#[cfg(unix)]
 fn wait_for(what: &str, ready: impl Fn() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(60);
     while !ready() {
