@@ -414,6 +414,15 @@ pub(crate) trait ModelCxRuntime: Send + Sync + 'static {
         request: ModelRequest,
         private: &'a [PrivateTool],
     ) -> BoxFuture<'a, Result<EventStream, ModelError>>;
+    /// The script-only entry point requires the host-minted caller so that
+    /// forwarding cannot skip the extension's Infer capability grant.
+    fn script_forward<'a>(
+        &'a self,
+        who: &'a Caller,
+        request: ModelRequest,
+        private: &'a [PrivateTool],
+        cancel: CancellationToken,
+    ) -> BoxFuture<'a, Result<EventStream, crate::error::ServiceError>>;
 }
 
 /// Model-context failures.

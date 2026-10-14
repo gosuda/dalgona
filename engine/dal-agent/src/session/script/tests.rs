@@ -47,6 +47,16 @@ impl ModelCxRuntime for DenyInferRuntime {
         Box::pin(async { Err(crate::error::ServiceError::Denied(DenyReason::NotInjected)) })
     }
 
+    fn script_forward<'a>(
+        &'a self,
+        _who: &'a Caller,
+        _request: ModelRequest,
+        _private: &'a [PrivateTool],
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> BoxFuture<'a, Result<EventStream, crate::error::ServiceError>> {
+        Box::pin(async { Err(crate::error::ServiceError::Denied(DenyReason::NotInjected)) })
+    }
+
     fn forward<'a>(
         &'a self,
         _request: ModelRequest,
@@ -97,7 +107,7 @@ struct ModelEntryHandler;
 
 impl crate::ext::ModelHandler for ModelEntryHandler {
     fn uses(&self) -> OpSet {
-        OpSet::parse(["models.infer"]).expect("model uses")
+        OpSet::parse(["models.infer", "models.forward"]).expect("model uses")
     }
 
     fn run<'a>(
@@ -529,8 +539,8 @@ async fn model_export_begins_with_its_declared_uses() {
         "the model export declares models.infer"
     );
     assert!(
-        !inv.allows(&OpId::Native(NativeOp::ModelsForward)),
-        "the model export does not declare models.forward"
+        inv.allows(&OpId::Native(NativeOp::ModelsForward)),
+        "the model export declares models.forward"
     );
 }
 
@@ -578,6 +588,35 @@ async fn models_infer_preserves_typed_service_denial() {
             })
         ),
         "the typed service denial survives the op bridge: {outcome:?}"
+    );
+}
+
+#[tokio::test]
+async fn models_forward_preserves_typed_service_denial() {
+    let fx = fixture(Duration::ZERO).await;
+    let host = captured(&fx, &["models.infer", "models.forward"]);
+    let inv = host
+        .begin(
+            Parent::Root,
+            Entry::Export {
+                id: model_export(),
+                phase: Phase::Model,
+            },
+        )
+        .expect("model entry begins");
+    let mut script = host.attach(None).expect("script context attaches");
+    script.model_runtime = Some(Arc::new(DenyInferRuntime));
+    let req = OpRequest::new(OpId::Native(NativeOp::ModelsForward), model_request_args())
+        .with_model_context(&script);
+    let outcome = host.call(&inv, req).await;
+    assert!(
+        matches!(
+            outcome,
+            OpOutcome::Terminal(HostTerminal::Denied {
+                reason: DenyReason::NotInjected
+            })
+        ),
+        "forward must use the caller-bound runtime gate: {outcome:?}"
     );
 }
 
