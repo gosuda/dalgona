@@ -412,7 +412,7 @@ fn read_path(root: &Path, path: &Path, lines: &Lines) -> Result<Reading, ReadErr
     if !metadata.is_file() {
         return Err(ReadError::NotFileOrDirectory(shown.into()));
     }
-    let tag_path = display_path(root, &target, &shown);
+    let tag_path = display_path(root, &root.join(path), &shown);
     match read_file(opened, &shown, lines, footer_reserve(&tag_path))? {
         FileContent::Image { kind, bytes } => Ok(Reading {
             parts: vec![
