@@ -37,6 +37,7 @@ pub(crate) type TestResult = Result<(), Box<dyn StdError>>;
 
 pub(crate) enum Scripted {
     Label(&'static str),
+    Answer(Answer),
     Dismissed,
     Held,
 }
@@ -226,6 +227,7 @@ impl Services for FakeServices {
                         .map_err(|error| ServiceError::failed(None, error.to_string()))?;
                     Ok(Some(Answer::Value(value)))
                 }
+                Some(Scripted::Answer(answer)) => Ok(Some(answer)),
                 Some(Scripted::Dismissed) | None => Ok(None),
                 Some(Scripted::Held) => {
                     self.cancel.notified().await;

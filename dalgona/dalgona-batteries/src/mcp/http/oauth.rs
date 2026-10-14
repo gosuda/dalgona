@@ -250,6 +250,34 @@ pub(crate) struct Discovery {
     policy: NetworkPolicy,
 }
 
+impl Discovery {
+    /// Grants the token endpoint's origin for this flow's refresh or code
+    /// exchange when the user approves; `Ok(false)` means the user declined
+    /// and the caller must not use the endpoint.
+    pub(crate) async fn approve_token_endpoint(
+        &mut self,
+        services: &dyn Services,
+        who: &Caller,
+        cancel: &CancellationToken,
+    ) -> Result<bool, McpError> {
+        self.policy.check_address(&self.token_endpoint)?;
+        if self.policy.is_approved(&self.token_endpoint) {
+            return Ok(true);
+        }
+        if optional_confirm(
+            Consent { services, who },
+            origin_prompt(&self.token_endpoint),
+            cancel,
+        )
+        .await?
+        {
+            self.policy.approve_origin(&self.token_endpoint);
+            return Ok(true);
+        }
+        Ok(false)
+    }
+}
+
 pub(crate) fn challenge(headers: &HeaderMap) -> Challenge {
     let mut parsed = Challenge::default();
     for value in headers.get_all(reqwest::header::WWW_AUTHENTICATE) {
@@ -350,11 +378,6 @@ pub(crate) async fn discover(
         .get("authorization_response_iss_parameter_supported")
         .and_then(JsonValueTrait::as_bool)
         .unwrap_or(false);
-    approve_origin(&mut policy, &authorization_endpoint, consent, cancel).await?;
-    approve_origin(&mut policy, &token_endpoint, consent, cancel).await?;
-    if let Some(endpoint) = registration_endpoint.as_ref() {
-        approve_origin(&mut policy, endpoint, consent, cancel).await?;
-    }
     Ok(Discovery {
         issuer,
         resource,
@@ -484,13 +507,14 @@ pub(crate) async fn authorize(
         .local_addr()
         .map_err(|_| auth_error("could not read OAuth loopback address"))?;
     let redirect_uri = format!("http://127.0.0.1:{}/callback", address.port());
+    let consent = Consent { services, who };
+    let mut policy = discovery.policy.clone();
     let client_id = registered_or_stored_client_id(
         &oauth.client,
-        &discovery.policy,
+        &mut policy,
         plan,
         &redirect_uri,
-        services,
-        who,
+        consent,
         cancel,
     )
     .await?;
@@ -526,6 +550,7 @@ pub(crate) async fn authorize(
         },
     );
     let callback_result = await_consent(callback, prompt, cancel).await?;
+    approve_origin(&mut policy, &discovery.token_endpoint, consent, cancel).await?;
     let params = [
         ("grant_type", "authorization_code"),
         ("code", callback_result.code.as_str()),
@@ -536,7 +561,7 @@ pub(crate) async fn authorize(
     ];
     let response = post_form(
         &oauth.client,
-        &discovery.policy,
+        &policy,
         &discovery.token_endpoint,
         &params,
         Duration::from_secs(15),
@@ -579,20 +604,6 @@ where
     }
 }
 
-async fn confirm_request(
-    consent: Consent<'_>,
-    text: String,
-    cancel: &CancellationToken,
-) -> Result<(), McpError> {
-    let answer = tokio::select! {
-        () = cancel.cancelled() => return Err(McpError::NoAskFrontEnd),
-        answer = consent.services.ask(consent.who, Question::Confirm {
-            text: text.into_boxed_str(),
-        }) => answer,
-    };
-    confirm_answer(answer)
-}
-
 fn confirm_answer(
     answer: Result<Option<Answer>, dal_agent::error::ServiceError>,
 ) -> Result<(), McpError> {
@@ -607,21 +618,42 @@ fn confirm_answer(
         Err(_) => Err(auth_error("OAuth authorization prompt failed")),
     }
 }
+
+/// Asks one Confirm question: `Ok(true)` proceeds, `Ok(false)` declines the
+/// named action without failing the flow; every other refusal errors.
+async fn optional_confirm(
+    consent: Consent<'_>,
+    text: String,
+    cancel: &CancellationToken,
+) -> Result<bool, McpError> {
+    let answer = tokio::select! {
+        () = cancel.cancelled() => return Err(McpError::NoAskFrontEnd),
+        answer = consent.services.ask(consent.who, Question::Confirm {
+            text: text.into_boxed_str(),
+        }) => answer,
+    };
+    match answer {
+        Ok(Some(Answer::Decline)) => Ok(false),
+        other => confirm_answer(other).map(|()| true),
+    }
+}
 /// Resolves the OAuth client identifier: dynamic registration, a stored
 /// record, or a user prompt, in that order.
 async fn registered_or_stored_client_id(
     client: &Client,
-    policy: &NetworkPolicy,
+    policy: &mut NetworkPolicy,
     plan: &AuthorizePlan<'_>,
     redirect_uri: &str,
-    services: &dyn Services,
-    who: &Caller,
+    consent: Consent<'_>,
     cancel: &CancellationToken,
 ) -> Result<String, McpError> {
     let registered = match plan.discovery.registration_endpoint.as_ref() {
         Some(endpoint) => {
-            confirm_request(
-                Consent { services, who },
+            policy.check_address(endpoint)?;
+            // A declined registration sends nothing: the stored client ID
+            // or a manual entry still resolves the client.
+            if optional_confirm(
+                consent,
                 format!(
                     "Register an OAuth client for the MCP server at {} with {}? This sends a client registration POST before browser authorization.",
                     plan.target.origin().ascii_serialization(),
@@ -629,16 +661,21 @@ async fn registered_or_stored_client_id(
                 ),
                 cancel,
             )
-            .await?;
-            register_client(
-                client,
-                policy,
-                endpoint,
-                redirect_uri,
-                plan.client_version,
-                cancel,
-            )
             .await?
+            {
+                policy.approve_origin(endpoint);
+                register_client(
+                    client,
+                    policy,
+                    endpoint,
+                    redirect_uri,
+                    plan.client_version,
+                    cancel,
+                )
+                .await?
+            } else {
+                None
+            }
         }
         None => None,
     };
@@ -646,7 +683,7 @@ async fn registered_or_stored_client_id(
         Some(client_id) => Ok(client_id),
         None => match plan.existing {
             Some(record) if !record.client_id.is_empty() => Ok(record.client_id.clone()),
-            _ => ask_client_id(services, who, cancel).await,
+            _ => ask_client_id(consent.services, consent.who, cancel).await,
         },
     }
 }
@@ -748,6 +785,13 @@ async fn fetch_authorization_metadata(
     Err(auth_error("authorization-server metadata is unavailable"))
 }
 
+fn origin_prompt(url: &Url) -> String {
+    format!(
+        "The MCP server requests OAuth access to {}. Approve network requests to this exact origin?",
+        url.origin().ascii_serialization(),
+    )
+}
+
 async fn approve_origin(
     policy: &mut NetworkPolicy,
     url: &Url,
@@ -758,15 +802,9 @@ async fn approve_origin(
     if policy.is_approved(url) {
         return Ok(());
     }
-    confirm_request(
-        consent,
-        format!(
-            "The MCP server requests OAuth access to {}. Approve network requests to this exact origin?",
-            url.origin().ascii_serialization(),
-        ),
-        cancel,
-    )
-    .await?;
+    if !optional_confirm(consent, origin_prompt(url), cancel).await? {
+        return Err(McpError::NoAskFrontEnd);
+    }
     policy.approve_origin(url);
     Ok(())
 }
@@ -1209,6 +1247,7 @@ fn auth_error(cause: &str) -> McpError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::work::support::Scripted;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -1220,12 +1259,9 @@ mod tests {
 
     fn consent_context() -> (Arc<crate::work::support::FakeServices>, Caller) {
         let services = Arc::new(crate::work::support::FakeServices::default());
-        let who = dal_agent::ext::HookCx::for_test(
-            services.clone(),
-            dal_core::SessionId::new_v7(),
-            None,
-        )
-        .caller;
+        let who =
+            dal_agent::ext::HookCx::for_test(services.clone(), dal_core::SessionId::new_v7(), None)
+                .caller;
         (services, who)
     }
 
@@ -1619,9 +1655,8 @@ mod tests {
         );
         let private = Url::parse("https://10.0.0.7/.well-known").expect("private URL");
         assert!(public.check_url(&private).is_err());
-        let private_policy = NetworkPolicy::for_target(
-            &Url::parse("https://10.0.0.6/mcp").expect("private target"),
-        );
+        let private_policy =
+            NetworkPolicy::for_target(&Url::parse("https://10.0.0.6/mcp").expect("private target"));
         assert!(private_policy.check_url(&private).is_err());
 
         // A grant is scoped to this origin, not to its entire address class.
@@ -1703,6 +1738,7 @@ mod tests {
             ..Challenge::default()
         };
         let (services, who) = consent_context();
+        services.script([Scripted::Answer(Answer::Decline)]);
         let result = discover(
             &oauth,
             &target,
@@ -1724,21 +1760,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn approved_challenge_metadata_is_fetched_across_origins() {
+        let (target, target_listener) = discovery_fixture().await;
+        let (foreign, foreign_listener) = discovery_fixture().await;
+        let policy = NetworkPolicy::for_target(&target);
+        let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .dns_resolver(policy.resolver())
+            .build()
+            .expect("discovery client");
+        let oauth = OAuthClient { client, policy };
+        let issuer = format!("{}/issuer", foreign.origin().ascii_serialization());
+        let challenge = Challenge {
+            resource_metadata: Some(format!(
+                "{}/metadata",
+                foreign.origin().ascii_serialization()
+            )),
+            ..Challenge::default()
+        };
+        let resource_metadata = format!(
+            "{{\"resource\":\"{}\",\"authorization_servers\":[\"{issuer}\"]}}",
+            auth::canonical_resource(&target)
+        );
+        let authorization_metadata = format!(
+            "{{\"issuer\":\"{issuer}\",\"authorization_endpoint\":\"{issuer}/authorize\",\"token_endpoint\":\"{issuer}/token\",\"code_challenge_methods_supported\":[\"S256\"]}}"
+        );
+        let foreign_server = metadata_server(
+            foreign_listener,
+            vec![resource_metadata, authorization_metadata],
+        );
+        let (services, who) = consent_context();
+        services.script([Scripted::Answer(Answer::Approve)]);
+        let cancel = CancellationToken::new();
+        let (result, _, paths) = tokio::join!(
+            discover(
+                &oauth,
+                &target,
+                &challenge,
+                services.as_ref(),
+                &who,
+                Duration::from_secs(3),
+                &cancel,
+            ),
+            async {
+                tokio::time::timeout(Duration::from_millis(50), target_listener.accept())
+                    .await
+                    .ok()
+            },
+            foreign_server,
+        );
+        let discovered = result.expect("approved discovery");
+        assert_eq!(discovered.issuer, issuer);
+        assert_eq!(services.asked_count(), 1, "one cross-origin approval");
+        assert!(paths[0].starts_with("GET /metadata"));
+        assert!(paths[1].contains("/.well-known/oauth-authorization-server/issuer"));
+    }
+
+    fn stored_record(client_id: &str) -> TokenRecord {
+        TokenRecord {
+            client_id: client_id.to_owned(),
+            access_token: "old-access".to_owned(),
+            refresh_token: Some("old-refresh".to_owned()),
+            scopes: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
     async fn client_registration_requires_affirmative_consent_before_post() {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("registration listener");
         let address = listener.local_addr().expect("registration address");
+        let endpoint =
+            Url::parse(&format!("http://{address}/register")).expect("registration endpoint");
         let target = Url::parse(&format!("http://{address}/mcp")).expect("MCP target");
-        let endpoint = Url::parse(&format!("http://{address}/register"))
-            .expect("registration endpoint");
         let discovery = Discovery {
             issuer: format!("http://{address}/issuer"),
             resource: auth::canonical_resource(&target),
             authorization_endpoint: Url::parse(&format!("http://{address}/authorize"))
                 .expect("authorization endpoint"),
-            token_endpoint: Url::parse(&format!("http://{address}/token"))
-                .expect("token endpoint"),
+            token_endpoint: Url::parse(&format!("http://{address}/token")).expect("token endpoint"),
             registration_endpoint: Some(endpoint),
             scopes: Vec::new(),
             require_issuer_parameter: false,
@@ -1757,13 +1859,17 @@ mod tests {
             client_version: "test",
         };
         let (services, who) = consent_context();
+        services.script([Scripted::Answer(Answer::Cancel)]);
+        let mut policy = discovery.policy.clone();
         let result = registered_or_stored_client_id(
             &client,
-            &discovery.policy,
+            &mut policy,
             &plan,
             "http://127.0.0.1:12345/callback",
-            services.as_ref(),
-            &who,
+            Consent {
+                services: services.as_ref(),
+                who: &who,
+            },
             &CancellationToken::new(),
         )
         .await;
@@ -1775,6 +1881,301 @@ mod tests {
                 .is_err(),
             "registration must not POST without consent",
         );
+    }
+
+    #[tokio::test]
+    async fn declined_registration_uses_the_stored_client_id() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("registration listener");
+        let address = listener.local_addr().expect("registration address");
+        let endpoint =
+            Url::parse(&format!("http://{address}/register")).expect("registration endpoint");
+        let target = Url::parse(&format!("http://{address}/mcp")).expect("MCP target");
+        let discovery = Discovery {
+            issuer: format!("http://{address}/issuer"),
+            resource: auth::canonical_resource(&target),
+            authorization_endpoint: Url::parse(&format!("http://{address}/authorize"))
+                .expect("authorization endpoint"),
+            token_endpoint: Url::parse(&format!("http://{address}/token")).expect("token endpoint"),
+            registration_endpoint: Some(endpoint),
+            scopes: Vec::new(),
+            require_issuer_parameter: false,
+            policy: NetworkPolicy::for_target(&target),
+        };
+        let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .build()
+            .expect("registration client");
+        let existing = stored_record("desktop-app");
+        let plan = AuthorizePlan {
+            target: &target,
+            discovery: &discovery,
+            existing: Some(&existing),
+            requested_scope: None,
+            client_version: "test",
+        };
+        let (services, who) = consent_context();
+        services.script([Scripted::Answer(Answer::Decline)]);
+        let mut policy = discovery.policy.clone();
+        let client_id = registered_or_stored_client_id(
+            &client,
+            &mut policy,
+            &plan,
+            "http://127.0.0.1:12345/callback",
+            Consent {
+                services: services.as_ref(),
+                who: &who,
+            },
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("the stored client ID survives a declined registration");
+        assert_eq!(client_id, "desktop-app");
+        assert_eq!(services.asked_count(), 1);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), listener.accept())
+                .await
+                .is_err(),
+            "a declined registration must not POST",
+        );
+    }
+
+    #[tokio::test]
+    async fn declined_registration_without_a_stored_id_asks_for_one() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("registration listener");
+        let address = listener.local_addr().expect("registration address");
+        let endpoint =
+            Url::parse(&format!("http://{address}/register")).expect("registration endpoint");
+        let target = Url::parse(&format!("http://{address}/mcp")).expect("MCP target");
+        let discovery = Discovery {
+            issuer: format!("http://{address}/issuer"),
+            resource: auth::canonical_resource(&target),
+            authorization_endpoint: Url::parse(&format!("http://{address}/authorize"))
+                .expect("authorization endpoint"),
+            token_endpoint: Url::parse(&format!("http://{address}/token")).expect("token endpoint"),
+            registration_endpoint: Some(endpoint),
+            scopes: Vec::new(),
+            require_issuer_parameter: false,
+            policy: NetworkPolicy::for_target(&target),
+        };
+        let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .build()
+            .expect("registration client");
+        let plan = AuthorizePlan {
+            target: &target,
+            discovery: &discovery,
+            existing: None,
+            requested_scope: None,
+            client_version: "test",
+        };
+        let (services, who) = consent_context();
+        services.script([
+            Scripted::Answer(Answer::Decline),
+            Scripted::Label("manual-client"),
+        ]);
+        let mut policy = discovery.policy.clone();
+        let client_id = registered_or_stored_client_id(
+            &client,
+            &mut policy,
+            &plan,
+            "http://127.0.0.1:12345/callback",
+            Consent {
+                services: services.as_ref(),
+                who: &who,
+            },
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("manual entry resolves the client ID");
+        assert_eq!(client_id, "manual-client");
+        assert_eq!(services.asked_count(), 2);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), listener.accept())
+                .await
+                .is_err(),
+            "a declined registration must not POST",
+        );
+    }
+
+    #[tokio::test]
+    async fn approved_registration_posts_to_the_foreign_origin() {
+        let (target, _target_listener) = discovery_fixture().await;
+        let (foreign, foreign_listener) = discovery_fixture().await;
+        let foreign_origin = foreign.origin().ascii_serialization();
+        let endpoint =
+            Url::parse(&format!("{foreign_origin}/register")).expect("registration endpoint");
+        let issuer = format!("{foreign_origin}/issuer");
+        let discovery = Discovery {
+            issuer: issuer.clone(),
+            resource: auth::canonical_resource(&target),
+            authorization_endpoint: Url::parse(&format!("{issuer}/authorize"))
+                .expect("authorization endpoint"),
+            token_endpoint: Url::parse(&format!("{issuer}/token")).expect("token endpoint"),
+            registration_endpoint: Some(endpoint),
+            scopes: Vec::new(),
+            require_issuer_parameter: false,
+            policy: NetworkPolicy::for_target(&target),
+        };
+        let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .build()
+            .expect("registration client");
+        let plan = AuthorizePlan {
+            target: &target,
+            discovery: &discovery,
+            existing: None,
+            requested_scope: None,
+            client_version: "test",
+        };
+        let (services, who) = consent_context();
+        services.script([Scripted::Answer(Answer::Approve)]);
+        let mut policy = discovery.policy.clone();
+        let cancel = CancellationToken::new();
+        let (result, paths) = tokio::join!(
+            registered_or_stored_client_id(
+                &client,
+                &mut policy,
+                &plan,
+                "http://127.0.0.1:12345/callback",
+                Consent {
+                    services: services.as_ref(),
+                    who: &who,
+                },
+                &cancel,
+            ),
+            metadata_server(
+                foreign_listener,
+                vec!["{\"client_id\":\"registered-client\"}".to_owned()],
+            ),
+        );
+        let client_id = result.expect("approved registration registers");
+        assert_eq!(client_id, "registered-client");
+        assert_eq!(services.asked_count(), 1);
+        assert!(paths[0].starts_with("POST /register"));
+    }
+
+    #[tokio::test]
+    async fn declined_token_endpoint_grant_skips_the_refresh_post() {
+        let (target, _target_listener) = discovery_fixture().await;
+        let (foreign, foreign_listener) = discovery_fixture().await;
+        let foreign_origin = foreign.origin().ascii_serialization();
+        let token_endpoint =
+            Url::parse(&format!("{foreign_origin}/token")).expect("token endpoint");
+        let mut discovery = Discovery {
+            issuer: format!("{foreign_origin}/issuer"),
+            resource: auth::canonical_resource(&target),
+            authorization_endpoint: Url::parse(&format!("{foreign_origin}/authorize"))
+                .expect("authorization endpoint"),
+            token_endpoint: token_endpoint.clone(),
+            registration_endpoint: None,
+            scopes: Vec::new(),
+            require_issuer_parameter: false,
+            policy: NetworkPolicy::for_target(&target),
+        };
+        let (services, who) = consent_context();
+        services.script([Scripted::Answer(Answer::Decline)]);
+        let cancel = CancellationToken::new();
+        let granted = discovery
+            .approve_token_endpoint(services.as_ref(), &who, &cancel)
+            .await
+            .expect("grant answer");
+        assert!(!granted, "a declined grant does not approve the origin");
+        assert_eq!(services.asked_count(), 1);
+
+        // The send boundary still refuses the endpoint without its grant.
+        let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .build()
+            .expect("refresh client");
+        let oauth = OAuthClient {
+            client,
+            policy: NetworkPolicy::for_target(&target),
+        };
+        let coordinator = auth::RefreshCoordinator::new();
+        let refreshed = refresh(
+            &coordinator,
+            &oauth,
+            &discovery,
+            &stored_record("client"),
+            Duration::from_secs(1),
+            &cancel,
+            |_| async { Ok::<(), McpError>(()) },
+        )
+        .await;
+        assert!(refreshed.is_err(), "refresh must not run without a grant");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), foreign_listener.accept())
+                .await
+                .is_err(),
+            "a declined token endpoint must not receive a request",
+        );
+    }
+
+    #[tokio::test]
+    async fn approved_token_endpoint_grant_allows_the_refresh_post() {
+        let (target, _target_listener) = discovery_fixture().await;
+        let (foreign, foreign_listener) = discovery_fixture().await;
+        let foreign_origin = foreign.origin().ascii_serialization();
+        let token_endpoint =
+            Url::parse(&format!("{foreign_origin}/token")).expect("token endpoint");
+        let mut discovery = Discovery {
+            issuer: format!("{foreign_origin}/issuer"),
+            resource: auth::canonical_resource(&target),
+            authorization_endpoint: Url::parse(&format!("{foreign_origin}/authorize"))
+                .expect("authorization endpoint"),
+            token_endpoint: token_endpoint.clone(),
+            registration_endpoint: None,
+            scopes: Vec::new(),
+            require_issuer_parameter: false,
+            policy: NetworkPolicy::for_target(&target),
+        };
+        let (services, who) = consent_context();
+        services.script([Scripted::Answer(Answer::Approve)]);
+        let cancel = CancellationToken::new();
+        let granted = discovery
+            .approve_token_endpoint(services.as_ref(), &who, &cancel)
+            .await
+            .expect("grant answer");
+        assert!(granted);
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .build()
+            .expect("refresh client");
+        let oauth = OAuthClient {
+            client,
+            policy: NetworkPolicy::for_target(&target),
+        };
+        let coordinator = auth::RefreshCoordinator::new();
+        let record = stored_record("client");
+        let (result, ()) = tokio::join!(
+            refresh(
+                &coordinator,
+                &oauth,
+                &discovery,
+                &record,
+                Duration::from_secs(3),
+                &cancel,
+                |_| async { Ok::<(), McpError>(()) },
+            ),
+            token_server(foreign_listener, 1, Arc::clone(&count)),
+        );
+        let refreshed = result
+            .expect("approved refresh responds")
+            .expect("a token refreshes");
+        assert_eq!(refreshed.access_token, "new-access");
+        assert_eq!(count.load(Ordering::Relaxed), 1);
+        assert_eq!(services.asked_count(), 1);
     }
 
     #[tokio::test]

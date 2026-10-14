@@ -46,9 +46,17 @@ promoted at a turn boundary under `<skill>.<server>.<tool>` names. Calls
 run on the exec-class approval ladder; HTTP servers authenticate through
 OAuth with issuer and resource binding. OAuth discovery and token requests
 use public resolved addresses unless the configured MCP endpoint is
-explicitly local, and HTTP redirects are not followed. The authorization
-callback does not authorize an exchange by itself; an affirmative prompt and
-the validated callback are both required. The client speaks the tools-only
+explicitly local, and HTTP redirects are not followed. Each OAuth request
+to an origin other than the configured endpoint asks for an exact-origin
+approval immediately before the operation that needs it: metadata fetches
+during discovery, the token endpoint before a refresh or code exchange,
+and the registration endpoint before a dynamic client-registration POST.
+A declined approval skips only the operation it named; a declined
+registration falls back to the stored client ID or a manual entry. The
+browser authorization URL is opened by the user, not fetched by the
+client, so it asks for no network grant. The authorization callback does
+not authorize an exchange by itself; an affirmative prompt and the
+validated callback are both required. The client speaks the tools-only
 protocol subset; there is no HTTP+SSE-only transport.
 
 Limits: discovery 5 s, start 10 s, list 15 s, call 60 s (600 s with

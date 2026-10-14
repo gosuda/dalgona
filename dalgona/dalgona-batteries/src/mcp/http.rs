@@ -417,7 +417,7 @@ impl HttpTransport {
         if authorization.cancelled {
             return Ok(AuthStep::Fail(TransportError::Mcp(McpError::NoAskFrontEnd)));
         }
-        let discovery = self.discover(&challenge, call).await?;
+        let mut discovery = self.discover(&challenge, call).await?;
         self.set_issuer(&discovery.issuer).await;
         let existing = self.record(&discovery.issuer, &discovery.resource).await?;
         if ledger.used_token.is_none()
@@ -449,7 +449,14 @@ impl HttpTransport {
             && record.refresh_token.is_some()
         {
             ledger.refresh_attempted = true;
-            if let Some(updated) = self.refresh_token(&discovery, record, call.cancel).await? {
+            // A declined grant skips only the refresh; interactive
+            // authorization asks for the endpoint again before its exchange.
+            if discovery
+                .approve_token_endpoint(call.services, call.who, call.cancel)
+                .await
+                .map_err(TransportError::Mcp)?
+                && let Some(updated) = self.refresh_token(&discovery, record, call.cancel).await?
+            {
                 authorization.refresh_failed =
                     ledger.used_token.as_deref() == Some(updated.access_token.as_str());
                 ledger.request_id = ids.fetch_add(1, Ordering::Relaxed);
