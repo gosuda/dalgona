@@ -43,6 +43,10 @@ pub(crate) const REVIEWER_DEADLINE: Duration = Duration::from_secs(120);
 /// Ends text that a cap cut short. It counts toward the cap.
 pub(crate) const TRUNCATION_MARKER: &str = " [truncated]";
 pub(crate) const MAX_FOCUS_BYTES: usize = 500;
+/// A JSON reply containing 50 maximum-length findings fits within this cap.
+pub(crate) const MAX_REVIEW_REPLY_BYTES: usize = 262_144;
+/// Also bound streams that emit empty or non-text events indefinitely.
+pub(crate) const MAX_REVIEW_STREAM_EVENTS: usize = 8_192;
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -89,7 +93,9 @@ pub const REVIEW_DOC: &str = concat!(
     "status output and asks you to commit or stash unrelated changes; it does\n",
     "not truncate status. A diff larger than 262,144 bytes is truncated, and\n",
     "review proceeds with the prefix and a truncation notice. More than 50\n",
-    "reviewer findings fail the round; resolve the reported findings first.\n\n",
+    "reviewer findings fail the round; resolve the reported findings first.\n",
+    "Reviewer streams are limited to 262,144 text bytes and 8,192 events;\n",
+    "exceeding either limit cancels the request and appends no record.\n\n",
     "Each round appends one durable review record. A round converges when the\n",
     "verdict is clean or no finding is new; otherwise the report lists every\n",
     "finding marked new or repeat and asks for the new findings. After\n",
@@ -556,22 +562,38 @@ struct Completion {
 }
 
 impl Completion {
-    /// Concatenates the text deltas in order. The last usage measurement wins;
-    /// a stream without one leaves the usage unknown, never invented.
-    fn from_inference(inference: dal_core::Inference) -> Self {
+    /// Accumulates only bounded reply text. Dropping the stream on a limit
+    /// violation cancels the provider before it can send further deltas.
+    async fn from_stream(
+        mut stream: dal_agent::ext::EventStream,
+        max_bytes: usize,
+        max_events: usize,
+    ) -> Result<Self, Box<ToolOutcome>> {
         let mut text = String::new();
         let mut usage = None;
-        for event in inference.events {
+        let mut events = 0;
+        while let Some(item) = stream.next().await {
+            let event = item.map_err(|error| Box::new(provider_failure(&error.to_string())))?;
+            if events == max_events {
+                return Err(Box::new(provider_failure(&format!(
+                    "reviewer response exceeds {max_events} stream events"
+                ))));
+            }
+            events += 1;
             match event {
-                dal_core::StreamEvent::Delta {
-                    channel: dal_core::StreamChannel::Text,
-                    text: delta,
-                } => text.push_str(&delta),
-                dal_core::StreamEvent::Usage(measured) => usage = Some(measured),
+                dal_provider::StreamEvent::TextDelta { text: delta } => {
+                    if delta.len() > max_bytes.saturating_sub(text.len()) {
+                        return Err(Box::new(provider_failure(&format!(
+                            "reviewer response exceeds {max_bytes} text bytes"
+                        ))));
+                    }
+                    text.push_str(&delta);
+                }
+                dal_provider::StreamEvent::Usage { usage: measured } => usage = Some(measured),
                 _ => {}
             }
         }
-        Self { text, usage }
+        Ok(Self { text, usage })
     }
 }
 
@@ -637,11 +659,11 @@ async fn probe_and_infer(
         params: dal_core::RequestParams::default(),
         cache_key: None,
     };
-    services
-        .infer(caller, request)
+    let stream = services
+        .infer_stream(caller, request)
         .await
-        .map(Completion::from_inference)
-        .map_err(|error| Box::new(provider_outcome(error)))
+        .map_err(|error| Box::new(provider_outcome(error)))?;
+    Completion::from_stream(stream, MAX_REVIEW_REPLY_BYTES, MAX_REVIEW_STREAM_EVENTS).await
 }
 
 fn usage_notice(
