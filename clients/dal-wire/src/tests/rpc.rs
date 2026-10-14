@@ -125,6 +125,27 @@ async fn initialize_refusals() {
 }
 
 #[tokio::test]
+async fn near_limit_initialize_releases_request_credit_for_follow_up() {
+    let rig = rig(&[]).await;
+    let client = async |mut rpc: Rpc| {
+        let padding = "x".repeat(crate::transport::MAX_FRAME_BYTES - 256);
+        let initialized = rpc
+            .call(
+                1,
+                "initialize",
+                sonic_rs::json!({"protocolVersion": 1, "padding": padding}),
+            )
+            .await;
+        assert_eq!(result(&initialized)["protocolVersion"].as_i64(), Some(1));
+        let schema = rpc.call(2, "protocol/schema", sonic_rs::json!({})).await;
+        result(&schema);
+    };
+    tokio::time::timeout(Duration::from_secs(30), with_rpc(&rig, client))
+        .await
+        .expect("a near-limit request and its successor both finish");
+}
+
+#[tokio::test]
 async fn capability_gate_errors() {
     let rig = rig(&[]).await;
     let ws = rig.ws();

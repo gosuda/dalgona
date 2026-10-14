@@ -23,11 +23,14 @@ use crate::jsonrpc::{ErrorObject, Id, Message, decode_jsonrpc, encode_jsonrpc};
 use crate::protocol::{capability_error, mint_client_id, negotiate_capabilities};
 use crate::transport::{FrameWriter, ReadFrameError, Transport};
 
+mod admission;
 mod auth;
 mod fail;
 mod misc;
 pub(crate) mod session;
 pub(crate) mod subs;
+
+use admission::{Admission, FrameCredit};
 
 pub(crate) use fail::{
     agent_error, decode_params, hint_value, host_error, id_key, invalid_params,
@@ -36,7 +39,7 @@ pub(crate) use fail::{
 pub(crate) use subs::{host_notifier, send_resync, session_pump};
 
 /// Maximum in-flight requests before the reader pauses.
-pub(crate) const MAX_IN_FLIGHT: usize = 256;
+pub(crate) const MAX_IN_FLIGHT: usize = 64;
 
 /// Maximum rejection frames queued after a connection starts draining.
 pub(crate) const MAX_DRAIN_REPLIES: usize = 64;
@@ -192,6 +195,8 @@ pub async fn serve_rpc_draining(
     let state = Arc::new(Mutex::new(Conn::new(mint_client_id("rpc"))));
     let stop = CancellationToken::new();
     let mut pending: FuturesUnordered<Pending> = FuturesUnordered::new();
+    let admission = Admission::new();
+    let mut reading: Option<FrameCredit> = None;
     let mut drain_replies = 0;
 
     'serve: loop {
@@ -202,15 +207,20 @@ pub async fn serve_rpc_draining(
             () = drain.cancelled(), if draining_until.is_none() => {
                 draining_until = Some(tokio::time::Instant::now() + DRAIN_GRACE);
             }
-            frame = transport.read_frame(), if pending.len() < MAX_IN_FLIGHT => {
+            frame = transport.read_frame(), if reading.is_some() && pending.len() < MAX_IN_FLIGHT => {
+                let mut credit = reading.take().expect("a read has reserved credit");
                 let ended = matches!(
                     frame,
                     Err(ReadFrameError::EndOfInput
                         | ReadFrameError::Closed
                         | ReadFrameError::FrameTooLarge(_))
                 );
-                if let Ok(line) = frame
-                    && let Some(task) = on_frame(
+                if let Ok(line) = frame {
+                    if line.len() > crate::transport::MAX_FRAME_BYTES {
+                        break;
+                    }
+                    credit.charge(line.len());
+                    if let Some(task) = on_frame(
                         &host,
                         Arc::clone(&state),
                         &writer,
@@ -218,10 +228,12 @@ pub async fn serve_rpc_draining(
                         draining_until.is_some(),
                         &mut drain_replies,
                         &line,
+                        credit,
                     )
                     .await
-                {
-                    pending.push(task);
+                    {
+                        pending.push(task);
+                    }
                 }
                 if ended {
                     break;
@@ -253,6 +265,23 @@ pub async fn serve_rpc_draining(
                 }
             }
             _ = pending.next(), if !pending.is_empty() => {}
+            () = admission.contended(), if reading.is_some() => {
+                // Reading a partial frame is not cancellation-safe on every
+                // transport. Close this connection rather than resume from
+                // an unknown boundary after surrendering its reservation.
+                reading = None;
+                tracing::debug!("RPC speculative reader yielding under process contention");
+                break;
+            }
+            credit = admission.reserve(), if reading.is_none() && pending.len() < MAX_IN_FLIGHT => {
+                match credit {
+                    Ok(credit) => reading = Some(credit),
+                    Err(error) => {
+                        tracing::error!(%error, "RPC admission budget closed");
+                        break;
+                    }
+                }
+            }
         }
     }
 
@@ -291,6 +320,7 @@ async fn on_frame(
     draining: bool,
     drain_replies: &mut usize,
     line: &str,
+    credit: FrameCredit,
 ) -> Option<Pending> {
     if draining && *drain_replies >= MAX_DRAIN_REPLIES {
         return None;
@@ -347,6 +377,7 @@ async fn on_frame(
             let writer = writer.clone();
             Some(
                 async move {
+                    let _credit = credit;
                     handle_request(RequestArgs {
                         host,
                         state,
