@@ -21,8 +21,8 @@ use dal_agent::Host;
 use dal_core::ApprovalMode;
 use futures::{StreamExt, stream::FuturesUnordered};
 use hyper::{Request, Response};
-use tokio::net::TcpListener;
-use tokio::sync::{Mutex, mpsc};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::error::WireError;
@@ -62,7 +62,7 @@ impl ServeHandle {
     }
 }
 
-/// Maximum concurrent HTTP connections.
+/// Maximum concurrent HTTP and upgraded WebSocket connections.
 const CONN_CAP: usize = 256;
 /// Maximum request header buffer size in bytes.
 const HEADER_LIMIT: usize = 1_048_576;
@@ -127,7 +127,21 @@ pub(crate) fn listen(
     local_addr: SocketAddr,
     stop: CancellationToken,
 ) -> ServeHandle {
-    let (driver_tx, mut driver_rx) = mpsc::channel::<Driver>(CONN_CAP);
+    listen_with_cap(host, cfg, listener, local_addr, stop, CONN_CAP)
+}
+
+/// Starts one listener with a fixed budget for HTTP and upgraded connections.
+pub(crate) fn listen_with_cap(
+    host: Host,
+    cfg: ListenerCfg,
+    listener: TcpListener,
+    local_addr: SocketAddr,
+    stop: CancellationToken,
+    cap: usize,
+) -> ServeHandle {
+    assert!(cap > 0, "connection budget must be positive");
+    let budget = Arc::new(Semaphore::new(cap));
+    let (driver_tx, mut driver_rx) = mpsc::channel::<Driver>(cap);
     let ctx = Arc::new(ServeCtx {
         host,
         cfg,
@@ -144,12 +158,12 @@ pub(crate) fn listen(
             tokio::select! {
                 biased;
                 () = stop.cancelled() => break,
-                accepted = listener.accept(), if conns.len() < CONN_CAP => {
+                accepted = accept_bounded(&listener, Arc::clone(&budget)) => {
                     match accepted {
-                        Ok((stream, _)) => {
+                        Ok((stream, permit)) => {
                             let ctx = Arc::clone(&ctx);
                             conns.push(Box::pin(async move {
-                                serve_conn(ctx, stream).await;
+                                serve_conn(ctx, stream, permit).await;
                             }));
                         }
                         Err(error) => {
@@ -189,6 +203,18 @@ pub(crate) fn listen(
     }
 }
 
+/// Reserves capacity before accepting so a completed upgrade retains its slot.
+///
+/// Cancelling this future releases the reservation, including while accept waits.
+async fn accept_bounded(
+    listener: &TcpListener,
+    budget: Arc<Semaphore>,
+) -> std::io::Result<(TcpStream, OwnedSemaphorePermit)> {
+    let permit = budget.acquire_owned().await.map_err(std::io::Error::other)?;
+    let (stream, _) = listener.accept().await?;
+    Ok((stream, permit))
+}
+
 /// Returns true for EMFILE/ENFILE accept failures.
 fn is_capacity_error(error: &std::io::Error) -> bool {
     matches!(
@@ -208,12 +234,14 @@ fn libc_enfile() -> i32 {
 }
 
 /// Serves one HTTP/1.1 connection to completion.
-async fn serve_conn(ctx: Arc<ServeCtx>, stream: tokio::net::TcpStream) {
+async fn serve_conn(ctx: Arc<ServeCtx>, stream: TcpStream, permit: OwnedSemaphorePermit) {
+    let permit = Arc::new(permit);
     let io = hyper_util::rt::TokioIo::new(stream);
     let shutdown = ctx.shutdown.clone();
     let service = hyper::service::service_fn(move |req: Request<hyper::body::Incoming>| {
         let ctx = Arc::clone(&ctx);
-        async move { Ok::<_, hyper::Error>(handle_request(ctx, req).await) }
+        let permit = Arc::clone(&permit);
+        async move { Ok::<_, hyper::Error>(handle_request(ctx, req, permit).await) }
     });
     let conn = hyper::server::conn::http1::Builder::new()
         .max_buf_size(HEADER_LIMIT)
@@ -236,6 +264,7 @@ async fn serve_conn(ctx: Arc<ServeCtx>, stream: tokio::net::TcpStream) {
 async fn handle_request(
     ctx: Arc<ServeCtx>,
     req: Request<hyper::body::Incoming>,
+    permit: Arc<OwnedSemaphorePermit>,
 ) -> Response<ServeBody> {
     let method = req.method().to_string();
     let path = req.uri().path().to_owned();
@@ -261,7 +290,7 @@ async fn handle_request(
         return into_response(resp);
     }
     if upgrade_route {
-        return upgrade_response(ctx, req, route).await;
+        return upgrade_response(ctx, req, route, permit).await;
     }
     if requires_json(&route)
         && let Err(resp) = content_guard(&req, &route)
