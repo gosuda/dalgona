@@ -405,6 +405,7 @@ fn assemble(ask_timeout: Duration, ephemeral: bool) -> Fixture {
     let grants = Arc::new(
         GrantStore::with_runtime(
             temp.path().to_path_buf(),
+            Workspace::new(temp.path().to_path_buf()).unwrap(),
             Duration::from_secs(120),
             Arc::clone(&broker),
         )
