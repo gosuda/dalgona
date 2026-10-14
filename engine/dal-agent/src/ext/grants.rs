@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use dal_core::{
-    Answer, ClientId, DenyReason, Name, Origin, Question, Service, ServiceSet, Timestamp,
+    Answer, ClientId, DenyReason, Name, Origin, Question, Service, ServiceSet, Timestamp, Workspace,
 };
 use tokio::sync::Notify;
 use tokio::time::Instant;
@@ -50,9 +50,43 @@ impl Grant {
     }
 }
 
-/// Canonical grant identity: extension, origin, and capability set, never
-/// including `ask`. Equal service sets coalesce; a changed declaration is
-/// a new key.
+/// A bound approval. Both digests are host computed: `source` covers the
+/// admitted code, version, declarations, and config; `workspace` covers the
+/// exact absolute workspace path and operating system.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct GrantScope {
+    /// Digest of the admitted plugin generation, not its mutable file path.
+    pub source: Box<str>,
+    /// Digest of the workspace's original absolute path spelling.
+    pub workspace: Box<str>,
+}
+
+impl GrantScope {
+    /// Binds a loader-computed source digest to one workspace.
+    #[must_use]
+    pub fn for_workspace(source: &str, workspace: &Workspace) -> Self {
+        let mut hash = blake3::Hasher::new();
+        hash.update(b"dal-plugin-workspace-v1");
+        hash.update(std::env::consts::OS.as_bytes());
+        hash.update(workspace.as_path().as_os_str().as_encoded_bytes());
+        Self {
+            source: source.into(),
+            workspace: hash.finalize().to_hex().to_string().into_boxed_str(),
+        }
+    }
+
+    fn valid(&self) -> bool {
+        [&self.source, &self.workspace].into_iter().all(|digest| {
+            digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+    }
+}
+
+/// Canonical grant identity. A persisted user or bundled grant must carry
+/// a source-and-workspace scope; old unscoped rows are never authoritative.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GrantKey {
     /// The owning extension name.
@@ -61,6 +95,8 @@ pub struct GrantKey {
     pub origin: Origin,
     /// The exact granted capability set.
     pub services: ServiceSet,
+    /// The exact loaded code and workspace, or None for legacy records/builtins.
+    pub scope: Option<GrantScope>,
 }
 
 impl GrantKey {
@@ -77,6 +113,7 @@ impl Ord for GrantKey {
             .cmp(&other.extension)
             .then_with(|| origin_rank(self.origin).cmp(&origin_rank(other.origin)))
             .then_with(|| self.services.cmp(&other.services))
+            .then_with(|| self.scope.cmp(&other.scope))
     }
 }
 
@@ -118,6 +155,7 @@ pub(crate) struct GrantRow {
     pub ext: Name,
     pub origin: Origin,
     pub services: ServiceSet,
+    pub scope: Option<GrantScope>,
     pub mcp_set: Option<Box<str>>,
     pub by: ClientId,
     pub approved_at: Timestamp,
@@ -144,6 +182,7 @@ impl PersistentGrant {
                 extension: row.ext,
                 origin: row.origin,
                 services: row.services,
+                scope: row.scope,
             },
             mcp_set: row.mcp_set,
             by: row.by,
@@ -187,6 +226,7 @@ struct McpGrantKey {
 /// `serve` process observes CLI changes on its next capability check.
 pub struct GrantStore {
     data_dir: PathBuf,
+    workspace: Option<Workspace>,
     ask_timeout: Duration,
     broker: Option<Arc<Broker>>,
     inner: Mutex<Inner>,
@@ -239,7 +279,7 @@ impl GrantStore {
     /// operation writes when the file cannot be loaded.
     #[must_use]
     pub fn new(data_root: PathBuf) -> Self {
-        Self::empty(data_root, ADMIN_ASK_TIMEOUT, None)
+        Self::empty(data_root, ADMIN_ASK_TIMEOUT, None, None)
     }
 
     /// Installs the session's status publisher for client-facing requests.
@@ -313,18 +353,25 @@ impl GrantStore {
     /// Opens the session-gated store, failing fast on a malformed file.
     pub(crate) fn with_runtime(
         data_dir: PathBuf,
+        workspace: Workspace,
         ask_timeout: Duration,
         broker: Arc<Broker>,
     ) -> Result<Self, GrantStoreError> {
         let persistent = load(&data_dir)?;
-        let store = Self::empty(data_dir, ask_timeout, Some(broker));
+        let store = Self::empty(data_dir, ask_timeout, Some(broker), Some(workspace));
         store.lock().persistent = persistent;
         Ok(store)
     }
 
-    fn empty(data_dir: PathBuf, ask_timeout: Duration, broker: Option<Arc<Broker>>) -> Self {
+    fn empty(
+        data_dir: PathBuf,
+        ask_timeout: Duration,
+        broker: Option<Arc<Broker>>,
+        workspace: Option<Workspace>,
+    ) -> Self {
         Self {
             data_dir,
+            workspace,
             ask_timeout,
             broker,
             request_update: Mutex::new(None),
@@ -346,6 +393,33 @@ impl GrantStore {
         self.inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Builds authority only from a captured caller and the host's workspace.
+    /// A plugin registered without an admitted source snapshot fails closed.
+    fn key_for(&self, who: &Caller) -> Result<GrantKey, ServiceError> {
+        let scope = match who.origin {
+            Origin::Builtin => None,
+            Origin::Bundled | Origin::User => {
+                let (Some(source), Some(workspace)) =
+                    (who.source_digest.as_deref(), self.workspace.as_ref())
+                else {
+                    return Err(ServiceError::Denied(DenyReason::NotGranted));
+                };
+                let scope = GrantScope::for_workspace(source, workspace);
+                if !scope.valid() {
+                    return Err(ServiceError::Denied(DenyReason::NotGranted));
+                }
+                Some(scope)
+            }
+            _ => return Err(ServiceError::Denied(DenyReason::NotGranted)),
+        };
+        Ok(GrantKey {
+            extension: who.ext.clone(),
+            origin: who.origin,
+            services: who.inject.capabilities(),
+            scope,
+        })
     }
 
     pub(crate) fn ensure<'a>(
@@ -390,11 +464,7 @@ impl GrantStore {
         detail: Box<str>,
         cancel: &CancellationToken,
     ) -> GrantOutcome {
-        let base = GrantKey {
-            extension: who.ext.clone(),
-            origin: who.origin,
-            services: who.inject.capabilities(),
-        };
+        let base = self.key_for(who)?;
         if who.origin == Origin::Builtin {
             return Ok(Grant {
                 key: base,
@@ -407,6 +477,15 @@ impl GrantStore {
         self.refresh_persistent()
             .map_err(|error| ServiceError::failed(None, error.to_string()))?;
         let key = McpGrantKey { key: base, set };
+        let detail: Box<str> = match &self.workspace {
+            Some(workspace) => format!(
+                "{detail}\nPlugin source: {}\nWorkspace: {}",
+                key.key.scope.as_ref().map_or("", |scope| scope.source.as_ref()),
+                workspace.as_path().display(),
+            )
+            .into(),
+            None => detail,
+        };
         let notify = match self.mcp_slot(&key) {
             (GrantState::GrantedPersistent, _) => {
                 return Ok(Grant {
@@ -482,11 +561,7 @@ impl GrantStore {
         if !who.inject.contains(service) {
             return Err(ServiceError::Denied(DenyReason::NotInjected));
         }
-        let key = GrantKey {
-            extension: who.ext.clone(),
-            origin: who.origin,
-            services: who.inject.capabilities(),
-        };
+        let key = self.key_for(who)?;
         if who.origin == Origin::Builtin {
             return Ok(Grant {
                 key,
@@ -551,7 +626,16 @@ impl GrantStore {
             ext: who.ext.as_str().into(),
             origin: origin.into(),
             capabilities,
-            detail: None,
+            detail: self.workspace.as_ref().and_then(|workspace| {
+                key.scope.as_ref().map(|scope| {
+                    format!(
+                        "Plugin source: {}\nWorkspace: {}",
+                        scope.source,
+                        workspace.as_path().display(),
+                    )
+                    .into()
+                })
+            }),
         };
         let owner = dal_core::Owner::Extension {
             name: who.ext.as_str().into(),
@@ -792,6 +876,7 @@ impl GrantStore {
                     ext: key.extension.clone(),
                     origin: key.origin,
                     services: key.services,
+                    scope: key.scope.clone(),
                     mcp_set: None,
                     by,
                     approved_at: Timestamp::now(),
@@ -1011,7 +1096,7 @@ impl GrantStore {
     ) -> Result<bool, GrantStoreError> {
         // An empty set grants nothing yet writes a row no later load
         // accepts; reject it here so one bad call cannot brick the file.
-        if key.services.is_empty() {
+        if key.services.is_empty() || key.scope.as_ref().is_none_or(|scope| !scope.valid()) {
             return Err(GrantStoreError::Malformed {
                 detail: "grant needs at least one service".into(),
             });
@@ -1029,6 +1114,7 @@ impl GrantStore {
             ext: key.extension.clone(),
             origin: key.origin,
             services: key.services,
+            scope: key.scope.clone(),
             mcp_set: None,
             by,
             approved_at: at,
@@ -1089,6 +1175,7 @@ fn row_key(row: &GrantRow) -> GrantKey {
         extension: row.ext.clone(),
         origin: row.origin,
         services: row.services,
+        scope: row.scope.clone(),
     }
 }
 
