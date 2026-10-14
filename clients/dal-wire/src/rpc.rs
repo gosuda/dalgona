@@ -251,9 +251,33 @@ pub async fn serve_rpc(host: Host, transport: Transport) -> Result<(), WireError
 /// Returns [`WireError`] when the transport fails or a reply cannot be framed.
 pub async fn serve_rpc_draining(
     host: Host,
-    mut transport: Transport,
+    transport: Transport,
     drain: CancellationToken,
 ) -> Result<(), WireError> {
+    serve_rpc_with_budget(
+        host,
+        transport,
+        drain,
+        Arc::clone(&PROCESS_BUDGET),
+        CONNECTION_BYTES,
+    )
+    .await
+}
+
+/// Serves one RPC connection with explicit resource limits. Tests inject a
+/// smaller shared budget to exercise admission without allocating large frames.
+///
+/// # Errors
+///
+/// Returns WireError when the transport fails or a reply cannot be framed.
+pub(crate) async fn serve_rpc_with_budget(
+    host: Host,
+    mut transport: Transport,
+    drain: CancellationToken,
+    process_budget: Arc<Semaphore>,
+    connection_bytes: usize,
+) -> Result<(), WireError> {
+    let connection_budget = Arc::new(Semaphore::new(connection_bytes));
     let mut draining_until: Option<tokio::time::Instant> = None;
     let writer = transport.writer();
     let state = Arc::new(Mutex::new(Conn::new(mint_client_id("rpc"))));
@@ -268,31 +292,6 @@ pub async fn serve_rpc_draining(
                 if draining_until.is_some() => break,
             () = drain.cancelled(), if draining_until.is_none() => {
                 draining_until = Some(tokio::time::Instant::now() + DRAIN_GRACE);
-            }
-            frame = transport.read_frame(), if pending.len() < MAX_IN_FLIGHT => {
-                let ended = matches!(
-                    frame,
-                    Err(ReadFrameError::EndOfInput
-                        | ReadFrameError::Closed
-                        | ReadFrameError::FrameTooLarge(_))
-                );
-                if let Ok(line) = frame
-                    && let Some(task) = on_frame(
-                        &host,
-                        Arc::clone(&state),
-                        &writer,
-                        &stop,
-                        draining_until.is_some(),
-                        &mut drain_replies,
-                        &line,
-                    )
-                    .await
-                {
-                    pending.push(task);
-                }
-                if ended {
-                    break;
-                }
             }
             frame = writer.next_queued_frame() => {
                 if let Some(text) = frame {
@@ -320,6 +319,45 @@ pub async fn serve_rpc_draining(
                 }
             }
             _ = pending.next(), if !pending.is_empty() => {}
+            frame = transport.read_frame(),
+                if pending.len() < MAX_IN_FLIGHT
+                    && connection_budget.available_permits() > 0
+                    && process_budget.available_permits() > 0 =>
+            {
+                let ended = matches!(
+                    frame,
+                    Err(ReadFrameError::EndOfInput
+                        | ReadFrameError::Closed
+                        | ReadFrameError::FrameTooLarge(_))
+                );
+                if let Ok(line) = frame {
+                    let Some(budget) =
+                        reserve_frame(&line, &connection_budget, &process_budget)
+                    else {
+                        // Drop a frame that exceeds either limit before decoding.
+                        // Closing the connection also releases its pending work.
+                        tracing::warn!("RPC in-flight request byte budget exhausted");
+                        break;
+                    };
+                    if let Some(task) = on_frame(
+                        &host,
+                        Arc::clone(&state),
+                        &writer,
+                        &stop,
+                        draining_until.is_some(),
+                        &mut drain_replies,
+                        budget,
+                        &line,
+                    )
+                    .await
+                    {
+                        pending.push(task);
+                    }
+                }
+                if ended {
+                    break;
+                }
+            }
         }
     }
 
