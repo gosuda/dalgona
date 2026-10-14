@@ -70,6 +70,7 @@ enum Behavior {
 struct Fake<F> {
     behave: F,
     calls: AtomicUsize,
+    wound_down: AtomicUsize,
     workspaces: Mutex<Vec<PathBuf>>,
 }
 
@@ -78,6 +79,7 @@ impl<F: Fn(usize, &RunRequest<'_>) -> Behavior + Send + Sync + 'static> Fake<F> 
         let fake = Arc::new(Self {
             behave,
             calls: AtomicUsize::new(0),
+            wound_down: AtomicUsize::new(0),
             workspaces: Mutex::new(Vec::new()),
         });
         let executor: Arc<dyn Executor> = fake.clone();
@@ -92,7 +94,7 @@ impl<F: Fn(usize, &RunRequest<'_>) -> Behavior + Send + Sync + 'static> Fake<F> 
 }
 
 impl<F: Fn(usize, &RunRequest<'_>) -> Behavior + Send + Sync + 'static> Executor for Fake<F> {
-    fn run<'a>(&'a self, request: RunRequest<'a>, _cancel: CancellationToken) -> ExecFuture<'a> {
+    fn run<'a>(&'a self, request: RunRequest<'a>, cancel: CancellationToken) -> ExecFuture<'a> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         self.workspaces
             .lock()
@@ -103,7 +105,13 @@ impl<F: Fn(usize, &RunRequest<'_>) -> Behavior + Send + Sync + 'static> Executor
             match behavior {
                 Behavior::Done(outcome) => Ok(outcome),
                 Behavior::Fail(error) => Err(error),
-                Behavior::Hang => std::future::pending().await,
+                Behavior::Hang => {
+                    cancel.cancelled().await;
+                    // A slow session close: longer than any fixed grace.
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    self.wound_down.fetch_add(1, Ordering::SeqCst);
+                    Err(ExecError::Interrupted)
+                }
                 Behavior::Edit(files, outcome) => {
                     for (path, text) in files {
                         let file = request.workspace.join(path);
@@ -312,7 +320,7 @@ async fn a_failed_arm_fails_only_its_runs() {
 
 #[tokio::test(start_paused = true)]
 async fn a_hung_case_times_out_after_300_s_and_the_run_continues() {
-    let (arm, _) = Fake::arm(ArmName::Defaults, |call, _| {
+    let (arm, fake) = Fake::arm(ArmName::Defaults, |call, _| {
         if call == 0 {
             Behavior::Hang
         } else {
@@ -334,6 +342,11 @@ async fn a_hung_case_times_out_after_300_s_and_the_run_continues() {
     );
     assert_eq!(lines[1].status, Status::Passed);
     assert!(started.elapsed() >= super::CASE_TIMEOUT);
+    assert_eq!(
+        fake.wound_down.load(Ordering::SeqCst),
+        1,
+        "the timed-out executor must finish its session wind-down"
+    );
     assert!(!report.interrupted);
 }
 

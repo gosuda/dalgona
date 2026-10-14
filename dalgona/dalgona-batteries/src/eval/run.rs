@@ -22,10 +22,6 @@ use super::report::{
 /// The wall-clock limit of one run of one case.
 pub const CASE_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// How long a cancelled executor may wind its session down before the runner
-/// stops waiting for it.
-const GRACE: Duration = Duration::from_secs(5);
-
 /// The skip reason of a run that an interrupt cut short.
 pub const INTERRUPTED: &str = "skipped: interrupted";
 
@@ -109,7 +105,9 @@ pub enum ExecError {
 pub trait Executor: Send + Sync {
     /// Runs one prompt in one ephemeral session and winds the session down.
     ///
-    /// The executor must stop and return when `cancel` fires.
+    /// The executor must stop and return when `cancel` fires. The runner
+    /// always polls the future to completion, so cleanup written after the
+    /// cancelled work, such as closing the session, always runs.
     fn run<'a>(&'a self, request: RunRequest<'a>, cancel: CancellationToken) -> ExecFuture<'a>;
 }
 
@@ -259,8 +257,9 @@ async fn timed(
         outcome = &mut future => outcome.map_err(Ended::Executor),
         () = tokio::time::sleep(CASE_TIMEOUT) => {
             run_cancel.cancel();
-            // The executor gets a short grace to wind its session down.
-            let _ = tokio::time::timeout(GRACE, &mut future).await;
+            // The executor owns its session's wind-down, so the run waits for
+            // it instead of dropping the future mid-cleanup.
+            let _ = future.await;
             Err(Ended::TimedOut)
         }
     }
