@@ -62,7 +62,7 @@ pub(crate) fn open(workspace: &Path, requested: &Path) -> Result<File, Error> {
             let Component::Normal(name) = component else {
                 return Err(Error::Outside);
             };
-            let mut flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+            let mut flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK;
             if components.peek().is_some() {
                 flags |= OFlags::DIRECTORY;
             }
