@@ -1008,3 +1008,41 @@ fn judge_text(site: &Site, local: &str, judge: Value<'_>) -> Result<Option<Box<s
         .into(),
     })
 }
+
+#[cfg(test)]
+mod digest_tests {
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    use super::approval_digest;
+
+    #[test]
+    fn admitted_source_version_and_configuration_are_part_of_approval_identity() {
+        let mut source = BTreeMap::from([
+            (PathBuf::from("plugin.star"), b"old plugin code".to_vec()),
+            (PathBuf::from("lib/module.star"), b"imported code".to_vec()),
+        ]);
+        let original = approval_digest(&source, "1.0.0", Some(r#"{"flag":true}"#));
+        assert_eq!(
+            original,
+            approval_digest(&source, "1.0.0", Some(r#"{"flag":true}"#))
+        );
+
+        source.insert(PathBuf::from("plugin.star"), b"new plugin code".to_vec());
+        assert_ne!(
+            original,
+            approval_digest(&source, "1.0.0", Some(r#"{"flag":true}"#))
+        );
+        source.insert(PathBuf::from("plugin.star"), b"old plugin code".to_vec());
+
+        assert_ne!(original, approval_digest(&source, "1.0.1", Some(r#"{"flag":true}"#)));
+        assert_ne!(original, approval_digest(&source, "1.0.0", Some(r#"{"flag":false}"#)));
+        assert_ne!(original, approval_digest(&source, "1.0.0", None));
+
+        source.insert(PathBuf::from("lib/module.star"), b"modified import".to_vec());
+        assert_ne!(
+            original,
+            approval_digest(&source, "1.0.0", Some(r#"{"flag":true}"#))
+        );
+    }
+}
