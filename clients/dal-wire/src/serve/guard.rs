@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use hyper::Request;
-use hyper::header::{HeaderMap, HeaderValue};
+use hyper::header::{CONTENT_LENGTH, HeaderMap, HeaderValue, TRANSFER_ENCODING};
 
 use super::{Resp, ServeCtx};
 use crate::token::SecretToken;
@@ -16,9 +16,24 @@ pub(super) fn is_upgrade(req: &Request<hyper::body::Incoming>) -> bool {
         .is_some_and(|value| value.eq_ignore_ascii_case("websocket"))
 }
 
-/// Returns true for the unauthenticated agent card route.
-pub(super) fn is_card(method: &str, path: &str) -> bool {
-    method == "GET" && path == "/.well-known/agent-card.json"
+/// Rejects framed GET bodies without polling the incoming stream.
+/// HTTP/1.1 can only frame a request body through these headers. A
+/// Content-Length is a decimal length: only a positive or unparseable
+/// value declares a body, so zero-padded lengths like `00` still pass.
+pub(super) fn get_body_guard(req: &Request<hyper::body::Incoming>) -> Result<(), Resp> {
+    if req.method() == hyper::Method::GET
+        && (req.headers().contains_key(TRANSFER_ENCODING)
+            || req.headers().get_all(CONTENT_LENGTH).iter().any(|value| {
+                value
+                    .to_str()
+                    .ok()
+                    .and_then(|digits| digits.parse::<u64>().ok())
+                    != Some(0)
+            }))
+    {
+        return Err(Resp::text(400, "GET requests must not have a body"));
+    }
+    Ok(())
 }
 
 /// Enforces the loopback Host header check. The host name must be a

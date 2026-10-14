@@ -22,7 +22,7 @@ use dal_core::ApprovalMode;
 use futures::{StreamExt, stream::FuturesUnordered};
 use hyper::{Request, Response};
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::error::WireError;
@@ -32,9 +32,9 @@ mod guard;
 mod http;
 mod upgrade;
 
-use guard::{auth_guard, content_guard, host_guard, is_card, is_upgrade, requires_json};
+use guard::{auth_guard, content_guard, get_body_guard, host_guard, is_upgrade, requires_json};
+use http::{BODY_BUDGET, into_response, read_body};
 pub(crate) use http::{Resp, RespBody, ServeBody};
-use http::{into_response, read_body};
 use upgrade::upgrade_response;
 
 /// A bound serve listener: its address plus its draining wait.
@@ -65,7 +65,7 @@ impl ServeHandle {
 /// Maximum concurrent HTTP connections.
 const CONN_CAP: usize = 256;
 /// Maximum request header buffer size in bytes.
-const HEADER_LIMIT: usize = 1_048_576;
+const HEADER_LIMIT: usize = 32 * 1024;
 /// Stop drain grace.
 const STOP_GRACE: Duration = Duration::from_secs(2);
 
@@ -102,6 +102,8 @@ pub(crate) struct ServeCtx {
     pub digests: Arc<Mutex<DigestTable>>,
     /// The A2A context and task tables.
     pub a2a: Arc<Mutex<a2a::A2aState>>,
+    /// Listener-wide budget for request bodies, held through dispatch.
+    pub body_budget: Arc<Semaphore>,
     /// Live stream drivers polled by the accept loop (no spawned tasks).
     pub drivers: mpsc::Sender<Driver>,
     /// Fires when handlers must cancel their turns.
@@ -133,6 +135,7 @@ pub(crate) fn listen(
         cfg,
         digests: Arc::new(Mutex::new(DigestTable::new(4096))),
         a2a: Arc::new(Mutex::new(a2a::A2aState::new())),
+        body_budget: Arc::new(Semaphore::new(BODY_BUDGET)),
         drivers: driver_tx,
         shutdown: stop.child_token(),
     });
@@ -254,14 +257,21 @@ async fn handle_request(
         return into_response(resp);
     }
     if ctx.cfg.public
-        && !is_card(&method, &path)
-        && !upgrade_route
+        && !matches!(
+            route,
+            super::router::ServeRoute::A2aCard
+                | super::router::ServeRoute::WebSocket
+                | super::router::ServeRoute::CodexWs
+        )
         && let Err(resp) = auth_guard(&ctx, &req)
     {
         return into_response(resp);
     }
     if upgrade_route {
         return upgrade_response(ctx, req, route).await;
+    }
+    if let Err(resp) = get_body_guard(&req) {
+        return into_response(resp);
     }
     if requires_json(&route)
         && let Err(resp) = content_guard(&req, &route)
@@ -284,10 +294,6 @@ async fn handle_request(
         .get("x-dal-session")
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
-    let body = match read_body(req).await {
-        Ok(body) => body,
-        Err(resp) => return into_response(resp),
-    };
     let request = RouteRequest {
         session: session.as_deref(),
         query: &query,
@@ -295,7 +301,21 @@ async fn handle_request(
         host: host_header.as_deref(),
         anthropic,
     };
-    dispatch(ctx, &request, route, body).await
+    // GET and error routes have no request payload: never poll their bodies.
+    if req.method() == hyper::Method::GET
+        || matches!(
+            route,
+            super::router::ServeRoute::NotFound { .. }
+                | super::router::ServeRoute::MethodNotAllowed { .. }
+        )
+    {
+        return dispatch(ctx, &request, route, &Bytes::new()).await;
+    }
+    let body = match read_body(req, &ctx.body_budget).await {
+        Ok(body) => body,
+        Err(resp) => return into_response(resp),
+    };
+    dispatch(ctx, &request, route, &body.bytes).await
 }
 
 /// The request header facts a route handler needs after the body is read.
@@ -312,7 +332,7 @@ async fn dispatch(
     ctx: Arc<ServeCtx>,
     request: &RouteRequest<'_>,
     route: super::router::ServeRoute,
-    body: Bytes,
+    body: &Bytes,
 ) -> Response<ServeBody> {
     let RouteRequest {
         session,
@@ -329,17 +349,17 @@ async fn dispatch(
             super::router::handlers::anthropic_models(&ctx).await
         }
         super::router::ServeRoute::Models => super::router::handlers::models(&ctx).await,
-        super::router::ServeRoute::Chat => super::router::handlers::chat(&ctx, &body, http()).await,
+        super::router::ServeRoute::Chat => super::router::handlers::chat(&ctx, body, http()).await,
         super::router::ServeRoute::Responses => {
-            super::router::handlers::responses(&ctx, &body, http()).await
+            super::router::handlers::responses(&ctx, body, http()).await
         }
         super::router::ServeRoute::Messages => {
-            super::router::handlers::messages(&ctx, &body, http()).await
+            super::router::handlers::messages(&ctx, body, http()).await
         }
         super::router::ServeRoute::A2aCard => a2a::card(&ctx, host),
-        super::router::ServeRoute::A2aJsonRpc => a2a::json_rpc(&ctx, &body, query, version).await,
+        super::router::ServeRoute::A2aJsonRpc => a2a::json_rpc(&ctx, body, query, version).await,
         super::router::ServeRoute::A2aRest(kind, id) => {
-            a2a::rest(&ctx, kind, id, &body, query, version).await
+            a2a::rest(&ctx, kind, id, body, query, version).await
         }
         super::router::ServeRoute::WebSocket | super::router::ServeRoute::CodexWs => {
             Resp::text(426, "upgrade required")

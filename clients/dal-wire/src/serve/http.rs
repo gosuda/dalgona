@@ -4,11 +4,21 @@ use bytes::Bytes;
 use hyper::body::{Body, Frame};
 use hyper::{Request, Response, StatusCode};
 use sonic_rs::Value;
+use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 
 /// Maximum request body size in bytes.
 pub(super) const BODY_LIMIT: usize = 33_554_432;
+
+/// Maximum total retained body bytes across a listener.
+pub(super) const BODY_BUDGET: usize = 64 * 1024 * 1024;
+
+/// A buffered body retains its byte reservation until dispatch finishes.
+pub(super) struct BufferedBody {
+    pub bytes: Bytes,
+    _permit: Option<OwnedSemaphorePermit>,
+}
 
 /// Request body timeout.
 pub(super) const BODY_TIMEOUT: Duration = Duration::from_secs(60);
@@ -80,45 +90,88 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 /// writing after this point and the close resets instead — best effort.
 const DRAIN_LIMIT: usize = BODY_LIMIT;
 
-/// Reads one bounded request body with its timeout.
-pub(super) async fn read_body(req: Request<hyper::body::Incoming>) -> Result<Bytes, Resp> {
+/// Reserves the bytes of one frame before copying them into the body buffer.
+fn reserve_bytes(budget: &Arc<Semaphore>, size: usize) -> Result<OwnedSemaphorePermit, Resp> {
+    let permits = u32::try_from(size)
+        .map_err(|_| Resp::text(413, "request body exceeds per-request limit"))?;
+    Arc::clone(budget)
+        .try_acquire_many_owned(permits)
+        .map_err(|_| Resp::text(503, "serve request body budget exhausted"))
+}
+
+/// Reads one bounded request body into a single buffer with its timeout.
+///
+/// `BODY_TIMEOUT` bounds only the read. Every rejection releases the buffered
+/// bytes and their byte permits, then drains the rest of the body under the
+/// drain's own bounded deadline — outside the read deadline, so a decision
+/// reached just before it keeps its response instead of collapsing into 408.
+/// That path is the single [`reject_body`] funnel: an early return must not
+/// skip it.
+pub(super) async fn read_body(
+    req: Request<hyper::body::Incoming>,
+    budget: &Arc<Semaphore>,
+) -> Result<BufferedBody, Resp> {
     let (_parts, mut body) = req.into_parts();
-    let mut collected = 0usize;
-    let mut chunks = Vec::new();
     let read = async {
+        let mut out = Vec::new();
+        let mut held: Option<OwnedSemaphorePermit> = None;
         while let Some(frame) =
             futures::future::poll_fn(|cx| std::pin::Pin::new(&mut body).poll_frame(cx)).await
         {
             let Ok(frame) = frame else {
-                drain_body(&mut body).await;
-                return Err(Resp::text(400, "request body is not valid"));
+                return Err((out, held, Resp::text(400, "request body is not valid")));
             };
             if let Some(data) = frame.data_ref() {
-                collected += data.len();
-                if collected > BODY_LIMIT {
-                    drain_body(&mut body).await;
-                    return Err(Resp::text(
-                        413,
-                        &format!("request body exceeds {BODY_LIMIT} bytes"),
-                    ));
+                if data.len() > BODY_LIMIT - out.len() {
+                    let resp = Resp::text(413, &format!("request body exceeds {BODY_LIMIT} bytes"));
+                    return Err((out, held, resp));
                 }
-                chunks.push(data.clone());
+                if data.is_empty() {
+                    continue;
+                }
+                let permit = match reserve_bytes(budget, data.len()) {
+                    Ok(permit) => permit,
+                    Err(resp) => return Err((out, held, resp)),
+                };
+                if out.try_reserve(data.len()).is_err() {
+                    let resp = Resp::text(503, "request body allocation failed");
+                    return Err((out, held, resp));
+                }
+                out.extend_from_slice(data);
+                if let Some(previous) = &mut held {
+                    previous.merge(permit);
+                } else {
+                    held = Some(permit);
+                }
             }
         }
-        Ok(chunks)
+        Ok(BufferedBody {
+            bytes: Bytes::from(out),
+            _permit: held,
+        })
     };
-    let chunks: Vec<Bytes> = match tokio::time::timeout(BODY_TIMEOUT, read).await {
-        Ok(Ok(chunks)) => chunks,
-        Ok(Err(resp)) => return Err(resp),
+    match tokio::time::timeout(BODY_TIMEOUT, read).await {
+        Ok(Ok(buffered)) => Ok(buffered),
+        Ok(Err((out, held, resp))) => Err(reject_body(out, held, &mut body, resp).await),
         Err(_) => {
-            return Err(Resp::text(408, "request body was not received within 60 s"));
+            drain_body(&mut body).await;
+            Err(Resp::text(408, "request body was not received within 60 s"))
         }
-    };
-    let mut out = Vec::with_capacity(collected);
-    for chunk in chunks {
-        out.extend_from_slice(&chunk);
     }
-    Ok(Bytes::from(out))
+}
+
+/// Releases a rejected body's buffered bytes and byte permits before the
+/// bounded drain, so the budget is not held while the peer finishes sending.
+async fn reject_body(
+    out: Vec<u8>,
+    held: Option<OwnedSemaphorePermit>,
+    body: &mut hyper::body::Incoming,
+    resp: Resp,
+) -> Resp {
+    drop(out);
+    drop(held);
+    drain_body(body).await;
+    resp
 }
 
 /// Empties a rejected request body so the socket closes with no unread
@@ -191,5 +244,241 @@ impl Body for ServeBody {
                 std::task::Poll::Pending => std::task::Poll::Pending,
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::Future;
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::sync::{Barrier, Semaphore};
+
+    use super::{BODY_BUDGET, BufferedBody, Resp, into_response, read_body, reserve_bytes};
+
+    /// How long a test waits for a write or a reply on loopback.
+    const WAIT: Duration = Duration::from_secs(30);
+
+    /// Binds a loopback HTTP/1.1 listener that runs `read_body` for each
+    /// request on the shared `budget` and answers with `finish` on success.
+    /// Returns the accept-loop future and the bound address so each test
+    /// drives the server concurrently with its client, the same way
+    /// `with_serve` drives the real listener: real sockets, real `Incoming`
+    /// bodies, no mock.
+    async fn serve_read<F>(
+        budget: &Arc<Semaphore>,
+        finish: F,
+    ) -> (impl Future<Output = ()>, SocketAddr)
+    where
+        F: Fn(BufferedBody) -> Resp + Clone + Send + 'static,
+    {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("loopback listener");
+        let addr = listener.local_addr().expect("listener address");
+        let budget = Arc::clone(budget);
+        let server = async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let io = hyper_util::rt::TokioIo::new(stream);
+                let budget = Arc::clone(&budget);
+                let finish = finish.clone();
+                let service = hyper::service::service_fn(move |req| {
+                    let budget = Arc::clone(&budget);
+                    let finish = finish.clone();
+                    async move {
+                        let resp = match read_body(req, &budget).await {
+                            Ok(body) => finish(body),
+                            Err(resp) => resp,
+                        };
+                        Ok::<_, hyper::Error>(into_response(resp))
+                    }
+                });
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(io, service)
+                    .await;
+            }
+        };
+        (server, addr)
+    }
+
+    /// Writes `head` then `body` on a fresh connection and reads the reply
+    /// to EOF.
+    async fn exchange(addr: SocketAddr, head: &str, body: &[u8]) -> String {
+        let mut client = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        client.write_all(head.as_bytes()).await.expect("head write");
+        client.write_all(body).await.expect("body write");
+        let mut bytes = Vec::new();
+        client.read_to_end(&mut bytes).await.expect("response read");
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    #[tokio::test]
+    async fn a_buffered_body_holds_its_admission_until_dropped() {
+        let budget = Arc::new(Semaphore::new(BODY_BUDGET));
+        let seen = Arc::clone(&budget);
+        let (server, addr) = serve_read(&budget, move |body| {
+            // The byte admission lives as long as the buffered body: the
+            // budget refills only when the buffer drops at dispatch end.
+            assert_eq!(seen.available_permits(), BODY_BUDGET - body.bytes.len());
+            drop(body);
+            assert_eq!(seen.available_permits(), BODY_BUDGET);
+            Resp::text(200, "read")
+        })
+        .await;
+        let text = tokio::select! {
+            () = server => panic!("server stopped early"),
+            text = exchange(
+                addr,
+                "POST /x HTTP/1.1\r\nhost: 127.0.0.1\r\nconnection: close\r\ncontent-length: 4096\r\n\r\n",
+                &[b'x'; 4096],
+            ) => text,
+        };
+        assert!(text.starts_with("HTTP/1.1 200"), "{text}");
+    }
+
+    /// A mid-body admission failure must still drain the rest of the body:
+    /// closing the socket with unread input resets it and the client loses
+    /// the 503 entirely. The whole declared body must land and the response
+    /// must still arrive.
+    #[tokio::test]
+    async fn a_budget_rejection_drains_so_the_response_arrives() {
+        const TOTAL: usize = 16 * 1024 * 1024;
+        let budget = Arc::new(Semaphore::new(BODY_BUDGET));
+        // A concurrent holder leaves only ~100 KiB free: some early frame
+        // admits, then admission fails while the client is still sending.
+        let blocker = Arc::clone(&budget)
+            .try_acquire_many_owned(u32::try_from(BODY_BUDGET - 100_000).expect("fits u32"))
+            .expect("budget blocker");
+        let (server, addr) = serve_read(&budget, |_| Resp::text(200, "read")).await;
+        let text = tokio::select! {
+            () = server => panic!("server stopped early"),
+            text = tokio::time::timeout(WAIT, async {
+                exchange(
+                    addr,
+                    &format!("POST /x HTTP/1.1\r\nhost: 127.0.0.1\r\nconnection: close\r\ncontent-length: {TOTAL}\r\n\r\n"),
+                    &vec![b'x'; TOTAL],
+                )
+                .await
+            }) => text.expect("exchange completes in time"),
+        };
+        assert!(text.starts_with("HTTP/1.1 503"), "{text}");
+        assert!(
+            text.contains("serve request body budget exhausted"),
+            "{text}"
+        );
+        // The rejected request released the admission it held.
+        assert_eq!(budget.available_permits(), 100_000);
+        drop(blocker);
+        assert_eq!(budget.available_permits(), BODY_BUDGET);
+    }
+
+    /// Admission failure just before the read deadline keeps its 503: the
+    /// drain runs outside `BODY_TIMEOUT`, so the deadline cannot cancel the
+    /// rejection into a 408.
+    #[tokio::test]
+    async fn a_late_budget_rejection_keeps_its_response() {
+        let budget = Arc::new(Semaphore::new(BODY_BUDGET));
+        let blocker = Arc::clone(&budget)
+            .try_acquire_many_owned(u32::try_from(BODY_BUDGET - 100_000).expect("fits u32"))
+            .expect("budget blocker");
+        let (server, addr) = serve_read(&budget, |_| Resp::text(200, "read")).await;
+        tokio::time::pause();
+        let text = tokio::select! {
+            () = server => panic!("server stopped early"),
+            text = async {
+                let mut client = tokio::net::TcpStream::connect(addr).await.expect("connect");
+                client
+                    .write_all(
+                        "POST /x HTTP/1.1\r\nhost: 127.0.0.1\r\nconnection: close\r\ncontent-length: 400000\r\n\r\n"
+                            .as_bytes(),
+                    )
+                    .await
+                    .expect("head write");
+                client.write_all(&[b'x'; 64]).await.expect("first frame");
+                // The budget fails on a frame that lands one second before
+                // the 60 s read deadline.
+                tokio::time::sleep(Duration::from_secs(59)).await;
+                client
+                    .write_all(&vec![b'x'; 200_000])
+                    .await
+                    .expect("late frame");
+                let mut bytes = Vec::new();
+                client
+                    .read_to_end(&mut bytes)
+                    .await
+                    .expect("503 response read");
+                String::from_utf8_lossy(&bytes).into_owned()
+            } => text,
+        };
+        tokio::time::resume();
+        assert!(text.starts_with("HTTP/1.1 503"), "{text}");
+        // The rejected request released the admission it held.
+        assert_eq!(budget.available_permits(), 100_000);
+        drop(blocker);
+        assert_eq!(budget.available_permits(), BODY_BUDGET);
+    }
+
+    /// A body abandoned by its client releases its admission when the read
+    /// times out.
+    #[tokio::test]
+    async fn a_stalled_body_releases_its_admission_on_timeout() {
+        let budget = Arc::new(Semaphore::new(BODY_BUDGET));
+        let (server, addr) = serve_read(&budget, |_| Resp::text(200, "read")).await;
+        let mut client = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        client
+            .write_all(
+                "POST /x HTTP/1.1\r\nhost: 127.0.0.1\r\nconnection: close\r\ncontent-length: 4096\r\n\r\n"
+                    .as_bytes(),
+            )
+            .await
+            .expect("request write");
+        client.write_all(&[b'x'; 64]).await.expect("partial body");
+        let mut bytes = Vec::new();
+        tokio::time::pause();
+        tokio::select! {
+            () = server => panic!("server stopped early"),
+            read = client.read_to_end(&mut bytes) => read.expect("408 response read"),
+        };
+        tokio::time::resume();
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        assert!(text.starts_with("HTTP/1.1 408"), "{text}");
+        assert_eq!(budget.available_permits(), BODY_BUDGET);
+    }
+
+    #[tokio::test]
+    async fn concurrent_body_admission_has_a_fixed_aggregate_ceiling() {
+        const CLIENTS: usize = 256;
+        const PER_REQUEST: usize = 1024;
+        const BUDGET: usize = 32 * PER_REQUEST;
+        let budget = Arc::new(Semaphore::new(BUDGET));
+        let start = Arc::new(Barrier::new(CLIENTS + 1));
+        let finish = Arc::new(Barrier::new(CLIENTS + 1));
+        let clients = (0..CLIENTS).map(|_| {
+            let budget = Arc::clone(&budget);
+            let start = Arc::clone(&start);
+            let finish = Arc::clone(&finish);
+            async move {
+                start.wait().await;
+                let held = reserve_bytes(&budget, PER_REQUEST).ok();
+                finish.wait().await;
+                held
+            }
+        });
+        let run = futures::future::join_all(clients);
+        let arms = async {
+            start.wait().await;
+            finish.wait().await;
+        };
+        let (admitted, ()) = tokio::join!(run, arms);
+        assert_eq!(
+            admitted.iter().filter(|permit| permit.is_some()).count(),
+            32
+        );
+        assert_eq!(budget.available_permits(), 0);
+        drop(admitted);
+        assert_eq!(budget.available_permits(), BUDGET);
     }
 }
