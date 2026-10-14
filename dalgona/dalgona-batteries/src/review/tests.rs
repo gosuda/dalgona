@@ -1283,6 +1283,26 @@ async fn a_provider_failure_returns_the_provider_form_with_a_marked_cause()
     Ok(())
 }
 
+#[tokio::test]
+async fn oversized_provider_reply_fails_the_round_without_appending() {
+    let cfg = named_route_config();
+    let status = Arc::new(ReviewStatus::new(cfg.max_rounds));
+    let fake = Arc::new(FakeReviewServices::default());
+    let oversized = "x".repeat(MAX_REVIEW_REPLY_BYTES + 1);
+    *locked(&fake.provider) = Provider::Replies(text_events(&oversized, None));
+    let cx = staged_cx(&fake);
+
+    let message = round(&cfg, &status, &cx, None).await;
+
+    assert_eq!(
+        message,
+        format!("reviewer call failed: reviewer reply exceeds {MAX_REVIEW_REPLY_BYTES} bytes")
+    );
+    assert!(locked(&fake.appended).is_empty());
+    assert!(locked(&fake.notices).is_empty());
+    assert!(status.payload(cx.session()).is_none());
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_missed_deadline_names_the_timeout_and_appends_nothing()
 -> Result<(), Box<dyn std::error::Error>> {
