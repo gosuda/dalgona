@@ -9,10 +9,10 @@ use tokio::{
     time::timeout,
 };
 
-use super::{CODEX_ORIGINATOR, CodexRequest, build, https, https_with_deadline, websocket_frame};
+use super::{CODEX_ORIGINATOR, CodexRequest, build, https, https_with_idle_timeout, websocket_frame};
 use crate::{
     auth::credential::{OAuthCredential, SecretString},
-    error::{LimitError, ProviderError},
+    error::ProviderError,
     lifecycle::AttemptFailure,
     stream::StreamEvent,
     thinking::WireThinking,
@@ -315,12 +315,11 @@ async fn codex_https_idle_timeout_is_stream_cut() -> Result<(), Box<dyn Error>> 
             tokio::time::sleep(Duration::from_millis(100)).await;
             Ok::<(), std::io::Error>(())
         });
-    let mut events = https_with_deadline(
+    let mut events = https_with_idle_timeout(
         &reqwest::Client::new(),
         &base,
         wire(true),
         Duration::from_millis(20),
-        tokio::time::Instant::now() + Duration::from_secs(60),
     )
     .await
     .expect("Codex HTTPS stream opens");
@@ -328,40 +327,6 @@ async fn codex_https_idle_timeout_is_stream_cut() -> Result<(), Box<dyn Error>> 
         timeout(Duration::from_secs(1), events.next()).await?,
         Some(Err(ProviderError::StreamCut))
     ));
-    server.join_next().await.expect("server completes")??;
-    Ok(())
-}
-
-#[tokio::test]
-async fn codex_https_stream_ends_at_the_total_deadline() -> Result<(), Box<dyn Error>> {
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let base = format!("http://{}", listener.local_addr()?);
-    let mut server = tokio::task::JoinSet::new();
-    server.spawn(async move {
-        let (mut socket, _) = listener.accept().await?;
-        read_request(&mut socket).await?;
-        socket
-            .write_all(
-                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 128\r\nConnection: keep-alive\r\n\r\n",
-            )
-            .await?;
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        Ok::<(), std::io::Error>(())
-    });
-    let mut events = https_with_deadline(
-        &reqwest::Client::new(),
-        &base,
-        wire(true),
-        Duration::from_secs(5),
-        tokio::time::Instant::now(),
-    )
-    .await
-    .expect("Codex HTTPS stream opens");
-    assert!(matches!(
-        timeout(Duration::from_secs(1), events.next()).await?,
-        Some(Err(ProviderError::Limit(LimitError::StreamDuration)))
-    ));
-    assert!(events.next().await.is_none());
     server.join_next().await.expect("server completes")??;
     Ok(())
 }
@@ -381,12 +346,11 @@ async fn codex_https_body_cut_mid_frame_is_transport_not_protocol() -> Result<()
             .await?;
         Ok::<(), std::io::Error>(())
     });
-    let mut events = https_with_deadline(
+    let mut events = https_with_idle_timeout(
         &reqwest::Client::new(),
         &base,
         wire(true),
         Duration::from_secs(5),
-        tokio::time::Instant::now() + Duration::from_secs(60),
     )
     .await
     .expect("Codex HTTPS stream opens");

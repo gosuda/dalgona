@@ -21,7 +21,6 @@ use crate::{
     lifecycle::AttemptFailure,
     sse,
     stream::EventStream,
-    stream_budget::{self, STREAM_TOTAL_TIMEOUT},
     thinking::WireThinking,
 };
 
@@ -212,31 +211,21 @@ pub(crate) fn redact_provider_error(error: &mut ProviderError, secrets: &[Box<st
 /// Sends and decodes one Codex HTTPS streaming request.
 ///
 /// Non-success status bodies are read through the shared size-limited reader.
-/// The decoded stream ends at `STREAM_TOTAL_TIMEOUT` from the reply's start,
-/// even while chunks keep arriving; a stalled read ends sooner at the idle
-/// timeout. Dropping the returned `EventStream` drops the response body and
-/// cancels the HTTP transfer.
+/// A stalled read ends after the idle timeout. Dropping the returned
+/// `EventStream` drops the response body and cancels the HTTP transfer.
 pub(crate) async fn https(
     client: &reqwest::Client,
     base_url: &str,
     wire: CodexWire,
 ) -> Result<EventStream, AttemptFailure> {
-    https_with_deadline(
-        client,
-        base_url,
-        wire,
-        http::STREAM_IDLE_TIMEOUT,
-        tokio::time::Instant::now() + STREAM_TOTAL_TIMEOUT,
-    )
-    .await
+    https_with_idle_timeout(client, base_url, wire, http::STREAM_IDLE_TIMEOUT).await
 }
 
-async fn https_with_deadline(
+async fn https_with_idle_timeout(
     client: &reqwest::Client,
     base_url: &str,
     wire: CodexWire,
     idle_timeout: Duration,
-    deadline: tokio::time::Instant,
 ) -> Result<EventStream, AttemptFailure> {
     let secrets = secrets(&wire);
     let url = http::endpoint(Family::Codex, base_url, PATH)?;
@@ -298,10 +287,7 @@ async fn https_with_deadline(
             }
             Ok(event) => Ok(event),
         });
-    Ok(EventStream::new(
-        stream_budget::timeboxed(decoded, deadline),
-        || {},
-    ))
+    Ok(EventStream::new(decoded, || {}))
 }
 
 fn response_message(body: &str) -> String {
