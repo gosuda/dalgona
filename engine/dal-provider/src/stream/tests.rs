@@ -230,3 +230,50 @@ fn invalid_argument_bytes_are_reported_not_repaired() {
         );
     }
 }
+
+#[test]
+fn stream_budget_enforces_exact_byte_and_event_boundaries() {
+    let mut budget = StreamBudget::new(3, 5);
+    assert!(budget.accept(&text("ab")).is_ok());
+    assert!(budget.accept(&text("cde")).is_ok());
+    assert!(budget.accept(&stop()).is_ok());
+    assert!(matches!(
+        budget.accept(&stop()),
+        Err(StreamBudgetError::Events { limit: 3 })
+    ));
+
+    let mut budget = StreamBudget::new(3, 5);
+    assert!(budget.accept(&text("abcd")).is_ok());
+    assert!(matches!(
+        budget.accept(&text("ef")),
+        Err(StreamBudgetError::Bytes { limit: 5 })
+    ));
+    assert!(budget.accept(&text("e")).is_ok(), "rejection must not consume budget");
+    assert!(budget.accept(&stop()).is_ok());
+}
+
+#[test]
+fn stream_budget_counts_complete_tool_calls_and_non_text_bytes() {
+    let call = ToolCall {
+        id: "id".into(),
+        name: "run".into(),
+        args: ToolArgs::Truncated,
+    };
+    let mut budget = StreamBudget::new(2, 100);
+    assert!(matches!(
+        budget.accept(&StreamEvent::ToolCallsDone {
+            calls: vec![call; 3],
+        }),
+        Err(StreamBudgetError::Events { limit: 2 })
+    ));
+
+    let mut budget = StreamBudget::new(10, 5);
+    assert!(matches!(
+        budget.accept(&StreamEvent::ToolArgsDelta {
+            id: "id".into(),
+            fragment: b"1234".to_vec(),
+        }),
+        Err(StreamBudgetError::Bytes { limit: 5 })
+    ));
+    assert!(budget.accept(&text("12345")).is_ok());
+}
