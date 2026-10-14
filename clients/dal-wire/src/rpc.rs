@@ -6,16 +6,16 @@
 //! login waiters all live in this task. Replies and notifications share the
 //! transport's [`FrameWriter`], which serializes every frame.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use dal_agent::login::LoginId;
 use dal_agent::{Agent, Host};
 use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 use crate::error::WireError;
@@ -35,8 +35,150 @@ pub(crate) use fail::{
 };
 pub(crate) use subs::{host_notifier, send_resync, session_pump};
 
-/// Maximum in-flight requests before the reader pauses.
-pub(crate) const MAX_IN_FLIGHT: usize = 256;
+/// Maximum concurrent request handlers before ordinary requests queue.
+pub(crate) const MAX_IN_FLIGHT: usize = 64;
+
+/// Maximum ordinary requests held in the deferred queue behind a full
+/// handler set. Each entry already holds its byte permits, so the queue is
+/// bounded twice: once by this count and once by the byte budgets.
+const MAX_DEFERRED: usize = MAX_IN_FLIGHT;
+
+/// Extra handler slots reserved for cleanup requests on a saturated
+/// connection. A cleanup request must never wait behind the handlers it
+/// exists to release.
+const MAX_CONTROL_IN_FLIGHT: usize = 8;
+
+/// In-flight request memory budget for one connection (64 MiB).
+const CONNECTION_BYTES: usize = 64 * 1024 * 1024;
+
+/// In-flight request memory budget shared by every RPC connection (256 MiB).
+const PROCESS_BYTES: usize = 256 * 1024 * 1024;
+
+/// Account for the raw frame and its retained parsed representation.
+const FRAME_BYTE_WEIGHT: usize = 2;
+
+/// Estimated heap cost of a JSON container entry, including spare capacity.
+const JSON_ENTRY_BYTES: usize = 64;
+
+/// Minimum charge for the retained handler state of even a tiny request.
+const MIN_FRAME_CHARGE: usize = 16 * 1024;
+
+/// Maximum small cancellation notification decoded without budget on overload.
+const CONTROL_FRAME_BYTES: usize = 4096;
+
+/// Byte budget for cleanup traffic on one connection (1 MiB). Only bounded
+/// release-path requests draw from it while the main budget is exhausted.
+const CONTROL_CONNECTION_BYTES: usize = 1024 * 1024;
+
+/// Byte budget shared by cleanup traffic on every RPC connection (8 MiB).
+const CONTROL_PROCESS_BYTES: usize = 8 * 1024 * 1024;
+
+/// Request methods that release connection-held work. They may overtake
+/// queued ordinary frames and draw the cleanup budget when saturated, so a
+/// peer can always shrink its own footprint.
+const CONTROL_METHODS: &[&str] = &[
+    "auth/cancel",
+    "host/unsubscribe",
+    "session/answer",
+    "session/close",
+    "session/unsubscribe",
+];
+
+/// All RPC transports share this budget, including local sockets and `WebSockets`.
+static PROCESS_BUDGET: LazyLock<Arc<Semaphore>> =
+    LazyLock::new(|| Arc::new(Semaphore::new(PROCESS_BYTES)));
+
+/// All RPC transports share this cleanup budget as well.
+static CONTROL_PROCESS_BUDGET: LazyLock<Arc<Semaphore>> =
+    LazyLock::new(|| Arc::new(Semaphore::new(CONTROL_PROCESS_BYTES)));
+
+/// Charges a frame before parsing, using its size and JSON structure.
+///
+/// The structural charge accounts for dense arrays/objects whose decoded
+/// representation can be much larger than the wire bytes. Quotes and escaped
+/// quotes are tracked so punctuation inside strings is not counted as entries.
+pub(crate) fn frame_charge(frame: &str) -> Option<u32> {
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut entries = 0_usize;
+    for byte in frame.bytes() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+        } else if byte == b'"' {
+            in_string = true;
+        } else if matches!(byte, b'{' | b'[' | b':' | b',') {
+            entries = entries.checked_add(1)?;
+        }
+    }
+    let raw = frame.len().checked_mul(FRAME_BYTE_WEIGHT)?;
+    let decoded = entries.checked_mul(JSON_ENTRY_BYTES)?;
+    u32::try_from(raw.checked_add(decoded)?.max(MIN_FRAME_CHARGE)).ok()
+}
+
+/// Owned admission permits remain held until the handler future finishes.
+pub(crate) struct FrameBudget {
+    _connection: OwnedSemaphorePermit,
+    _process: OwnedSemaphorePermit,
+}
+
+/// Atomically charges one frame against both limits, without queueing frames
+/// that cannot be admitted. A rejected frame is dropped before JSON decoding.
+pub(crate) fn reserve_frame(
+    frame: &str,
+    connection: &Arc<Semaphore>,
+    process: &Arc<Semaphore>,
+) -> Option<FrameBudget> {
+    let charge = frame_charge(frame)?;
+    let connection = Arc::clone(connection).try_acquire_many_owned(charge).ok()?;
+    let process = Arc::clone(process).try_acquire_many_owned(charge).ok()?;
+    Some(FrameBudget {
+        _connection: connection,
+        _process: process,
+    })
+}
+
+/// One bounded frame's fate while admission is saturated.
+enum ControlClass {
+    /// A `$/cancel_request` notification to run inline.
+    Cancel(Value),
+    /// A cleanup request that draws the cleanup budget and dispatches.
+    Cleanup,
+    /// A small notification or stray reply that can be dropped in place.
+    Drop,
+    /// Anything else: the connection cannot retain it within the bound.
+    Reject,
+}
+
+/// Classifies a frame for the saturated paths. Only small cancellation
+/// notifications and cleanup requests survive a full byte budget, and only
+/// cleanup requests overtake a full handler set. Frames larger than
+/// [`CONTROL_FRAME_BYTES`] are never cleanup work.
+fn control_class(line: &str) -> ControlClass {
+    if line.len() > CONTROL_FRAME_BYTES {
+        return ControlClass::Reject;
+    }
+    let Ok(message) = decode_jsonrpc(line) else {
+        return ControlClass::Reject;
+    };
+    match message {
+        Message::Notification { method, params } if method == "$/cancel_request" => {
+            ControlClass::Cancel(params)
+        }
+        Message::Notification { .. } | Message::Result { .. } | Message::Error { .. } => {
+            ControlClass::Drop
+        }
+        Message::Request { method, .. } if CONTROL_METHODS.contains(&method.as_str()) => {
+            ControlClass::Cleanup
+        }
+        _ => ControlClass::Reject,
+    }
+}
 
 /// Maximum rejection frames queued after a connection starts draining.
 pub(crate) const MAX_DRAIN_REPLIES: usize = 64;
@@ -166,9 +308,12 @@ impl Conn {
 /// Serves version-1 dal RPC on one transport until it ends.
 ///
 /// Malformed frames answer one null-id error and leave the connection usable.
-/// Client `Result`/`Error` frames are logged and dropped. On disconnect the
-/// connection drops its subscriptions and session holds without cancelling
-/// any turn, then drains in-flight handlers for at most one second.
+/// Client `Result`/`Error` frames are logged and dropped. Requests beyond the
+/// handler cap queue in wire order up to `MAX_DEFERRED`; bounded cleanup
+/// requests and `$/cancel_request` are always served so a saturated peer can
+/// shrink its own footprint. On disconnect the connection drops its
+/// subscriptions and session holds without cancelling any turn, then drains
+/// in-flight handlers for at most one second.
 ///
 /// # Errors
 ///
@@ -184,25 +329,217 @@ pub async fn serve_rpc(host: Host, transport: Transport) -> Result<(), WireError
 /// Returns [`WireError`] when the transport fails or a reply cannot be framed.
 pub async fn serve_rpc_draining(
     host: Host,
-    mut transport: Transport,
+    transport: Transport,
     drain: CancellationToken,
 ) -> Result<(), WireError> {
-    let mut draining_until: Option<tokio::time::Instant> = None;
-    let writer = transport.writer();
-    let state = Arc::new(Mutex::new(Conn::new(mint_client_id("rpc"))));
-    let stop = CancellationToken::new();
-    let mut pending: FuturesUnordered<Pending> = FuturesUnordered::new();
-    let mut drain_replies = 0;
+    serve_rpc_with_budget(
+        host,
+        transport,
+        drain,
+        Arc::clone(&PROCESS_BUDGET),
+        CONNECTION_BYTES,
+    )
+    .await
+}
+
+/// Whether a serve-loop step keeps serving or closes the connection.
+enum ServeFlow {
+    Continue,
+    Stop,
+}
+
+/// Mutable per-connection state of [`serve_rpc_with_budget`].
+struct ServeState {
+    host: Host,
+    drain: CancellationToken,
+    stop: CancellationToken,
+    writer: FrameWriter,
+    state: Arc<Mutex<Conn>>,
+    connection_budget: Arc<Semaphore>,
+    control_budget: Arc<Semaphore>,
+    process_budget: Arc<Semaphore>,
+    pending: FuturesUnordered<Pending>,
+    deferred: VecDeque<Pending>,
+    draining_until: Option<tokio::time::Instant>,
+    drain_replies: usize,
+}
+
+impl ServeState {
+    /// Moves deferred requests into free handler slots in wire order.
+    fn dispatch_deferred(&mut self) {
+        while self.pending.len() < MAX_IN_FLIGHT {
+            let Some(task) = self.deferred.pop_front() else {
+                break;
+            };
+            self.pending.push(task);
+        }
+    }
+
+    /// Writes one queued frame while a backpressured peer drains it, still
+    /// polling drain cancellation and its deadline.
+    async fn write_queued_frame(&mut self, text: &str) -> ServeFlow {
+        let write = self.writer.write_frame(text);
+        tokio::pin!(write);
+        loop {
+            tokio::select! {
+                biased;
+                () = tokio::time::sleep_until(
+                    self.draining_until.unwrap_or_else(tokio::time::Instant::now),
+                ), if self.draining_until.is_some() => return ServeFlow::Stop,
+                () = self.drain.cancelled(), if self.draining_until.is_none() => {
+                    self.draining_until = Some(tokio::time::Instant::now() + DRAIN_GRACE);
+                }
+                result = &mut write => {
+                    if let Err(error) = result {
+                        tracing::debug!(%error, "frame write failed");
+                    }
+                    return ServeFlow::Continue;
+                }
+            }
+        }
+    }
+
+    /// Admits one inbound frame under the byte budgets. Returns `false` when
+    /// admission was refused and the connection must close.
+    async fn admit_frame(&mut self, line: &str) -> bool {
+        let Some(budget) = reserve_frame(line, &self.connection_budget, &self.process_budget)
+        else {
+            return self.admit_control_frame(line).await;
+        };
+        let Some(task) = on_frame(
+            &self.host,
+            Arc::clone(&self.state),
+            &self.writer,
+            &self.stop,
+            self.draining_until.is_some(),
+            &mut self.drain_replies,
+            budget,
+            line,
+        )
+        .await
+        else {
+            return true;
+        };
+        if self.pending.len() < MAX_IN_FLIGHT {
+            self.pending.push(task);
+            return true;
+        }
+        match control_class(line) {
+            // A cleanup request must not queue behind the handlers it exists
+            // to release; it dispatches into a reserved slot.
+            ControlClass::Cleanup if self.pending.len() < MAX_IN_FLIGHT + MAX_CONTROL_IN_FLIGHT => {
+                self.pending.push(task);
+                true
+            }
+            ControlClass::Cleanup => {
+                tracing::warn!("RPC cleanup handler slots exhausted");
+                false
+            }
+            _ if self.deferred.len() < MAX_DEFERRED => {
+                self.deferred.push_back(task);
+                true
+            }
+            _ => {
+                tracing::warn!("RPC deferred request limit exhausted");
+                false
+            }
+        }
+    }
+
+    /// Admits a frame while the request byte budget is exhausted: only
+    /// bounded release-path traffic still runs, charged to the cleanup
+    /// budget. Returns `false` when the connection must close.
+    async fn admit_control_frame(&mut self, line: &str) -> bool {
+        match control_class(line) {
+            ControlClass::Cancel(params) => {
+                cancel_request(&self.state, &params).await;
+                true
+            }
+            ControlClass::Drop => true,
+            ControlClass::Cleanup => {
+                if self.pending.len() >= MAX_IN_FLIGHT + MAX_CONTROL_IN_FLIGHT {
+                    tracing::warn!("RPC cleanup handler slots exhausted");
+                    return false;
+                }
+                let Some(budget) =
+                    reserve_frame(line, &self.control_budget, &CONTROL_PROCESS_BUDGET)
+                else {
+                    tracing::warn!("RPC cleanup byte budget exhausted");
+                    return false;
+                };
+                if let Some(task) = on_frame(
+                    &self.host,
+                    Arc::clone(&self.state),
+                    &self.writer,
+                    &self.stop,
+                    self.draining_until.is_some(),
+                    &mut self.drain_replies,
+                    budget,
+                    line,
+                )
+                .await
+                {
+                    self.pending.push(task);
+                }
+                true
+            }
+            ControlClass::Reject => {
+                tracing::warn!("RPC in-flight request byte budget exhausted");
+                false
+            }
+        }
+    }
+}
+
+/// Serves one RPC connection with explicit resource limits. Tests inject a
+/// smaller shared budget to exercise admission without allocating large frames.
+///
+/// # Errors
+///
+/// Returns `WireError` when the transport fails or a reply cannot be framed.
+pub(crate) async fn serve_rpc_with_budget(
+    host: Host,
+    mut transport: Transport,
+    drain: CancellationToken,
+    process_budget: Arc<Semaphore>,
+    connection_bytes: usize,
+) -> Result<(), WireError> {
+    let mut serve = ServeState {
+        host,
+        drain,
+        stop: CancellationToken::new(),
+        writer: transport.writer(),
+        state: Arc::new(Mutex::new(Conn::new(mint_client_id("rpc")))),
+        connection_budget: Arc::new(Semaphore::new(connection_bytes)),
+        control_budget: Arc::new(Semaphore::new(CONTROL_CONNECTION_BYTES)),
+        process_budget,
+        pending: FuturesUnordered::new(),
+        deferred: VecDeque::new(),
+        draining_until: None,
+        drain_replies: 0,
+    };
 
     'serve: loop {
+        // Admitted requests waiting on a handler slot dispatch in wire order
+        // before the reader pulls another frame.
+        serve.dispatch_deferred();
         tokio::select! {
             biased;
-            () = tokio::time::sleep_until(draining_until.unwrap_or_else(tokio::time::Instant::now)),
-                if draining_until.is_some() => break,
-            () = drain.cancelled(), if draining_until.is_none() => {
-                draining_until = Some(tokio::time::Instant::now() + DRAIN_GRACE);
+            () = tokio::time::sleep_until(
+                serve.draining_until.unwrap_or_else(tokio::time::Instant::now),
+            ), if serve.draining_until.is_some() => break,
+            () = serve.drain.cancelled(), if serve.draining_until.is_none() => {
+                serve.draining_until = Some(tokio::time::Instant::now() + DRAIN_GRACE);
             }
-            frame = transport.read_frame(), if pending.len() < MAX_IN_FLIGHT => {
+            frame = serve.writer.next_queued_frame() => {
+                if let Some(text) = frame
+                    && let ServeFlow::Stop = serve.write_queued_frame(&text).await
+                {
+                    break 'serve;
+                }
+            }
+            _ = serve.pending.next(), if !serve.pending.is_empty() => {}
+            frame = transport.read_frame() => {
                 let ended = matches!(
                     frame,
                     Err(ReadFrameError::EndOfInput
@@ -210,64 +547,31 @@ pub async fn serve_rpc_draining(
                         | ReadFrameError::FrameTooLarge(_))
                 );
                 if let Ok(line) = frame
-                    && let Some(task) = on_frame(
-                        &host,
-                        Arc::clone(&state),
-                        &writer,
-                        &stop,
-                        draining_until.is_some(),
-                        &mut drain_replies,
-                        &line,
-                    )
-                    .await
+                    && !serve.admit_frame(&line).await
                 {
-                    pending.push(task);
+                    break;
                 }
                 if ended {
                     break;
                 }
             }
-            frame = writer.next_queued_frame() => {
-                if let Some(text) = frame {
-                    // Keep drain cancellation and its deadline polled while a
-                    // backpressured peer is still receiving a queued frame.
-                    let write = writer.write_frame(&text);
-                    tokio::pin!(write);
-                    loop {
-                        tokio::select! {
-                            biased;
-                            () = tokio::time::sleep_until(
-                                draining_until.unwrap_or_else(tokio::time::Instant::now),
-                            ), if draining_until.is_some() => break 'serve,
-                            () = drain.cancelled(), if draining_until.is_none() => {
-                                draining_until = Some(tokio::time::Instant::now() + DRAIN_GRACE);
-                            }
-                            result = &mut write => {
-                                if let Err(error) = result {
-                                    tracing::debug!(%error, "frame write failed");
-                                }
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            _ = pending.next(), if !pending.is_empty() => {}
         }
     }
 
-    cancel_logins(&state).await;
-    if !pending.is_empty() {
-        let grace = draining_until.map_or(DRAIN_GRACE, |until| {
+    cancel_logins(&serve.state).await;
+    if !serve.pending.is_empty() {
+        let grace = serve.draining_until.map_or(DRAIN_GRACE, |until| {
             until.saturating_duration_since(tokio::time::Instant::now())
         });
-        let _ =
-            tokio::time::timeout(grace, async { while pending.next().await.is_some() {} }).await;
+        let _ = tokio::time::timeout(grace, async {
+            while serve.pending.next().await.is_some() {}
+        })
+        .await;
     }
-    cancel_all(&state).await;
-    if draining_until.is_none() {
-        while let Some(text) = writer.take_queued_frame() {
-            let _ = writer.write_frame(&text).await;
+    cancel_all(&serve.state).await;
+    if serve.draining_until.is_none() {
+        while let Some(text) = serve.writer.take_queued_frame() {
+            let _ = serve.writer.write_frame(&text).await;
         }
     }
     transport.close().await;
@@ -290,6 +594,7 @@ async fn on_frame(
     stop: &CancellationToken,
     draining: bool,
     drain_replies: &mut usize,
+    budget: FrameBudget,
     line: &str,
 ) -> Option<Pending> {
     if draining && *drain_replies >= MAX_DRAIN_REPLIES {
@@ -356,6 +661,7 @@ async fn on_frame(
                         generation,
                         method,
                         params,
+                        _budget: budget,
                         cancel: child,
                     })
                     .await;
@@ -395,6 +701,8 @@ struct RequestArgs {
     method: String,
     /// The method params for dispatch.
     params: Value,
+    /// Holds the admission permits until this exact handler finishes.
+    _budget: FrameBudget,
     /// The per-request cancel token.
     cancel: CancellationToken,
 }
@@ -408,8 +716,14 @@ async fn handle_request(args: RequestArgs) {
         generation,
         method,
         params,
+        _budget,
         cancel,
     } = args;
+    // Let the read loop deliver the frame that followed this request on the
+    // wire before dispatch completes: an immediate `$/cancel_request` or a
+    // cleanup notification for an earlier handler still lands in order even
+    // though handler polling outranks new reads.
+    tokio::task::yield_now().await;
     let reply = tokio::select! {
         biased;
         () = cancel.cancelled() => {

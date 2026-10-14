@@ -9,6 +9,7 @@ use super::support::{
 use crate::serve_rpc;
 use crate::transport::MemoryTransport;
 
+mod admission;
 mod auth;
 mod capabilities;
 mod drain;
