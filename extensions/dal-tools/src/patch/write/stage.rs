@@ -7,7 +7,7 @@ use super::super::{
         Action, DiffHunk, DiffLine, DiffLineKind, Edit, EngineError, ErrorClass, Guard, Locator,
         Operation, RenameTarget, StagedFileOwned,
     },
-    resolve::{decode, line_count, resolve_path},
+    resolve::{decode, line_count},
 };
 
 use super::{PatchSession, ensure_regular_target, non_regular_target};
@@ -209,7 +209,7 @@ async fn classify_edits(
                         "patch: overlapping rename in one file.".to_owned(),
                     ));
                 }
-                let (dest_display, dest_canonical) = resolve_path(&session.workspace, &to)?;
+                let destination = super::resolve_rename_destination(&session.workspace, &to)?;
                 if let Some(reference) = reference {
                     prove_reference(
                         session,
@@ -222,10 +222,7 @@ async fn classify_edits(
                     )
                     .await?;
                 }
-                rename_to = Some(RenameTarget {
-                    path: dest_display,
-                    absolute_path: dest_canonical,
-                });
+                rename_to = Some(destination);
             }
             Edit::Create { path, body, .. } => {
                 if let Ok(metadata) = tokio::fs::metadata(canonical).await {
