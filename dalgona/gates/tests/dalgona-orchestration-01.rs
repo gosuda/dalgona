@@ -23,7 +23,7 @@ fn close_ends_the_battery_within_5s_and_holds_the_last_mode() -> support::TestRe
         )?;
         for extension in &product.extensions {
             let services = extension.inject().capabilities();
-            if services.is_empty() {
+            if services.is_empty() || extension.origin() == dal_core::Origin::Builtin {
                 continue;
             }
             dal_agent::ext::grants::GrantStore::new(scratch.path().to_path_buf())
