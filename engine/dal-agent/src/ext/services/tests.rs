@@ -970,17 +970,38 @@ async fn scripted_forward_requires_the_callers_exact_infer_grant() {
     );
     let expanded_services = caller("focus", &["infer", "net"], Some(turn()));
     for changed in [&different_origin, &expanded_services] {
-        assert!(matches!(
-            fx.services
-                .authorize_script_infer(changed, cancel.clone())
-                .await,
-            Err(ServiceError::Denied(DenyReason::ServiceNotGranted {
-                service: Service::Infer,
-                ..
-            }))
-        ), "an origin or service-set change must invalidate grant reuse");
+        assert!(
+            matches!(
+                fx.services
+                    .authorize_script_infer(changed, cancel.clone())
+                    .await,
+                Err(ServiceError::Denied(DenyReason::ServiceNotGranted {
+                    service: Service::Infer,
+                    ..
+                }))
+            ),
+            "an origin or service-set change must invalidate grant reuse"
+        );
     }
     assert_eq!(open_count(&fx.broker), 0, "changed identities remain denied");
+
+    // A session grant is scoped to its session's store, not just its plugin.
+    let second_session = fixture(Duration::from_secs(30));
+    second_session
+        .backend
+        .headless
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(matches!(
+        second_session
+            .services
+            .authorize_script_infer(&authorized, CancellationToken::new())
+            .await,
+        Err(ServiceError::Denied(DenyReason::ServiceNotGranted {
+            service: Service::Infer,
+            ..
+        }))
+    ));
+    assert_eq!(open_count(&second_session.broker), 0);
 }
 
 fn run_request(argv: &[&str], cwd: PathBuf) -> dal_core::RunRequest {
