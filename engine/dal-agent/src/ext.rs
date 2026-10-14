@@ -93,6 +93,7 @@ pub struct Caller {
     origin: Origin,
     inject: ServiceSet,
     state_version: NonZeroU32,
+    grant_digest: Option<Box<str>>,
     kind: CallerKind,
     turn: Option<TurnId>,
     invocation: Option<CallInvocation>,
@@ -128,10 +129,33 @@ impl Caller {
             origin,
             inject,
             state_version,
+            grant_digest: None,
             kind,
             turn,
             invocation: None,
         }
+    }
+
+    /// Capture the admitted extension's immutable code identity when minting
+    /// the caller, so an in-flight call cannot borrow a later generation's grant.
+    #[must_use]
+    pub(crate) fn with_extension(mut self, extension: &Extension) -> Self {
+        self.grant_digest = extension.grant_digest().map(Into::into);
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn with_optional_extension(self, extension: Option<&Extension>) -> Self {
+        match extension {
+            Some(extension) => self.with_extension(extension),
+            None => self,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_digest(mut self) -> Self {
+        self.grant_digest = Some("a".repeat(64).into_boxed_str());
+        self
     }
 
     /// Names the dispatched tool call this caller was minted for.
@@ -390,6 +414,15 @@ pub(crate) trait ModelCxRuntime: Send + Sync + 'static {
         request: ModelRequest,
         private: &'a [PrivateTool],
     ) -> BoxFuture<'a, Result<EventStream, ModelError>>;
+    /// The script-only entry point requires the host-minted caller so that
+    /// forwarding cannot skip the extension's Infer capability grant.
+    fn script_forward<'a>(
+        &'a self,
+        who: &'a Caller,
+        request: ModelRequest,
+        private: &'a [PrivateTool],
+        cancel: CancellationToken,
+    ) -> BoxFuture<'a, Result<EventStream, crate::error::ServiceError>>;
 }
 
 /// Model-context failures.

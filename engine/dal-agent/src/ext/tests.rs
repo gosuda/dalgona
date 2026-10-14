@@ -101,6 +101,16 @@ impl ModelCxRuntime for ScriptModelCx {
         Box::pin(async { Err(crate::error::ServiceError::Denied(DenyReason::NotInjected)) })
     }
 
+    fn script_forward<'a>(
+        &'a self,
+        _who: &'a Caller,
+        _request: ModelRequest,
+        _private: &'a [super::PrivateTool],
+        _cancel: CancellationToken,
+    ) -> BoxFuture<'a, Result<EventStream, crate::error::ServiceError>> {
+        Box::pin(async { Err(crate::error::ServiceError::Denied(DenyReason::NotInjected)) })
+    }
+
     fn forward<'a>(
         &'a self,
         _request: ModelRequest,

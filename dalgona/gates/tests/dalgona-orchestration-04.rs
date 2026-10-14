@@ -40,16 +40,13 @@ fn goal_sidecar_is_durable_and_private_across_reopen() -> support::TestResult<()
         let product = support::build_product(data.clone(), Some(&user))?;
         for extension in &product.extensions {
             let services = extension.inject().capabilities();
-            if services.is_empty() {
+            if services.is_empty() || extension.origin() == dal_core::Origin::Builtin {
                 continue;
             }
             dal_agent::ext::grants::GrantStore::new(data.clone())
                 .grant(
-                    dal_agent::ext::grants::GrantKey {
-                        extension: dal_core::Name::parse(extension.name())?,
-                        origin: dal_core::Origin::Bundled,
-                        services,
-                    },
+                    dal_agent::ext::grants::GrantKey::for_extension(extension, &workspace)
+                        .expect("registered extension has a code identity"),
                     dal_core::ClientId::new("goal-gate"),
                     dal_core::Timestamp::now(),
                 )

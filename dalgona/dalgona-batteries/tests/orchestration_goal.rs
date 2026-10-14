@@ -73,11 +73,8 @@ async fn fixture_with(
     let built = orchestration(orchestration_config)?;
     GrantStore::new(data.clone())
         .grant(
-            GrantKey {
-                extension: Name::parse("orchestration")?,
-                origin: Origin::Bundled,
-                services: built.extension.inject().capabilities(),
-            },
+            GrantKey::for_extension(&built.extension, &workspace)
+                .expect("orchestration has a code identity"),
             ClientId::new("goal-test"),
             Timestamp::now(),
         )

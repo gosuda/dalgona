@@ -32,11 +32,12 @@ use crate::{
     Seen, digest32,
     evidence::{Binding, capture},
     patch::snapshot::SnapshotStore,
+    workspace_path::{self, ResolveError},
 };
 
-const READ_SCHEMA: &str = r#"{"type":"object","properties":{"path":{"type":"string","description":"File, directory, or page to read. Relative paths start at the workspace root. A suffix :<a>-<b>[,<c>[-<d>]] selects lines."},"offset":{"type":"integer","minimum":1,"description":"First line to show, 1-indexed. Default 1."},"limit":{"type":"integer","minimum":1,"maximum":2000,"description":"Maximum number of lines to show. Default 1000."}},"required":["path"],"additionalProperties":false}"#;
+const READ_SCHEMA: &str = r#"{"type":"object","properties":{"path":{"type":"string","description":"Workspace-relative file or directory, or documentation page. Absolute paths and '..' are refused. A suffix :<a>-<b>[,<c>[-<d>]] selects lines."},"offset":{"type":"integer","minimum":1,"description":"First line to show, 1-indexed. Default 1."},"limit":{"type":"integer","minimum":1,"maximum":2000,"description":"Maximum number of lines to show. Default 1000."}},"required":["path"],"additionalProperties":false}"#;
 
-const READ_DESCRIPTION: &str = "Read a file, a directory, or a documentation page. A text file shows numbered lines: each line starts with its number and a tab; do not copy the number into patch text. Output stops at limit lines (default 1000, maximum 2000) or 50 KiB, whichever comes first, and the last line gives the offset to continue. Text files larger than 16 MiB are refused; use search to locate content in bigger files. A complete read of a text file ends with [<path>#<tag>]; copy that tag when a patch asks for the file tag. An image (PNG, JPEG, GIF, WebP, at most 5 MiB) returns as an image. A directory lists its entries. Paths may be relative to the workspace root or absolute. Pages: letter://<id> is the source text of an image letter; dal:// is the dal manual; rule://<name> is a rule. Read <scheme>:// alone for its index.";
+const READ_DESCRIPTION: &str = "Read a file, a directory, or a documentation page. A text file shows numbered lines: each line starts with its number and a tab; do not copy the number into patch text. Output stops at limit lines (default 1000, maximum 2000) or 50 KiB, whichever comes first, and the last line gives the offset to continue. Text files larger than 16 MiB are refused; use search to locate content in bigger files. A complete read of a text file ends with [<path>#<tag>]; copy that tag when a patch asks for the file tag. An image (PNG, JPEG, GIF, WebP, at most 5 MiB) returns as an image. A directory lists its entries. Filesystem paths must be relative to the workspace root; absolute paths, parent traversal, and symlinks outside the workspace are refused. Pages: letter://<id> is the source text of an image letter; dal:// is the dal manual; rule://<name> is a rule. Read <scheme>:// alone for its index.";
 
 const DEFAULT_OFFSET: u64 = 1;
 const DEFAULT_LIMIT: u64 = 1000;
@@ -68,6 +69,8 @@ enum ReadError {
     EmptyPath,
     #[error("read: path contains a NUL byte")]
     NulPath,
+    #[error("read: path must stay within the workspace")]
+    OutsideWorkspace,
     #[error("read: offset must be at least 1")]
     Offset,
     #[error("read: limit must be between 1 and 2000")]
@@ -390,8 +393,13 @@ fn parse_selector(path: &str) -> Result<Selection, ReadError> {
 
 /// Reads one filesystem path and renders the result.
 fn read_path(root: &Path, path: &Path, lines: &Lines) -> Result<Reading, ReadError> {
-    let target = root.join(path);
     let shown = path.to_string_lossy();
+    let target = workspace_path::resolve(root, path)
+        .map_err(|error| match error {
+            ResolveError::OutsideWorkspace => ReadError::OutsideWorkspace,
+            ResolveError::Io(error) => io_error(&shown, error),
+        })?
+        .absolute;
     let metadata = fs::metadata(&target).map_err(|error| io_error(&shown, error))?;
     if metadata.is_dir() {
         let text = read_directory(&target, &shown)?;
@@ -404,7 +412,7 @@ fn read_path(root: &Path, path: &Path, lines: &Lines) -> Result<Reading, ReadErr
     if !metadata.is_file() {
         return Err(ReadError::NotFileOrDirectory(shown.into()));
     }
-    let tag_path = display_path(root, &target, &shown);
+    let tag_path = display_path(root, &root.join(path), &shown);
     match read_file(&target, &shown, lines, footer_reserve(&tag_path))? {
         FileContent::Image { kind, bytes } => Ok(Reading {
             parts: vec![
@@ -1030,6 +1038,52 @@ mod tests {
         }
         assert_eq!(fs::read(dir.path().join("a.txt")).unwrap(), b"one\ntwo\n");
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn read_refuses_paths_outside_workspace() {
+        let parent = tempfile::tempdir().unwrap();
+        let workspace = parent.path().join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        fs::write(workspace.join("inside.txt"), "inside marker\n").unwrap();
+        fs::write(parent.path().join("secret.txt"), "secret marker\n").unwrap();
+
+        for path in [
+            workspace.join("inside.txt").to_string_lossy().into_owned(),
+            parent.path().join("secret.txt").to_string_lossy().into_owned(),
+            "../secret.txt".to_owned(),
+            "nested/../inside.txt".to_owned(),
+            "../secret.txt:1".to_owned(),
+        ] {
+            let error = read(&workspace, &args(&path)).await.unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "read: path must stay within the workspace",
+                "path: {path}"
+            );
+        }
+
+        let inside = read(&workspace, &args("inside.txt")).await.unwrap();
+        assert!(text(&inside).contains("inside marker"));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            symlink(parent.path().join("secret.txt"), workspace.join("outside-file")).unwrap();
+            symlink(parent.path(), workspace.join("outside-dir")).unwrap();
+            symlink(workspace.join("inside.txt"), workspace.join("inside-link")).unwrap();
+            for path in ["outside-file", "outside-dir"] {
+                let error = read(&workspace, &args(path)).await.unwrap_err();
+                assert_eq!(
+                    error.to_string(),
+                    "read: path must stay within the workspace",
+                    "path: {path}"
+                );
+            }
+            let linked = read(&workspace, &args("inside-link")).await.unwrap();
+            assert!(text(&linked).contains("inside marker"));
+        }
     }
 
     #[tokio::test]
