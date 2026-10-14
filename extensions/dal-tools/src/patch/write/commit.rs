@@ -527,6 +527,7 @@ fn count_lines(before: Option<&[u8]>, after: Option<&[u8]>) -> (u64, u64) {
     }
 }
 
+/// Generates the suffix of a unique patch temporary name.
 pub(super) fn nonce_u128() -> u128 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0x9E37_79B9_7F4A_7C15);
@@ -554,19 +555,22 @@ mod tests {
     use super::super::PatchSession;
     use super::apply_files;
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn failed_rename_staging_removes_preceding_create_temp() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let workspace = std::fs::canonicalize(directory.path()).expect("workspace");
         let source = workspace.join("source.txt");
         let created = workspace.join("created");
-        // The second rename stage must fail because its parent is a file.
-        // The earlier create must not survive a failed staging phase.
-        let blocker = workspace.join("blocked");
-        tokio::fs::write(&blocker, b"file\n")
+        // The in-workspace symlink resolves safely at prepare time, but
+        // pinned publication forbids following it. Earlier temps must be removed.
+        let real_parent = workspace.join("real");
+        tokio::fs::create_dir(&real_parent)
             .await
-            .expect("seed the file that blocks the destination parent");
-        let destination = blocker.join("dest");
+            .expect("seed real destination directory");
+        std::os::unix::fs::symlink(&real_parent, workspace.join("alias"))
+            .expect("create in-workspace alias");
+        let destination = real_parent.join("dest");
 
         tokio::fs::write(&source, b"source\n")
             .await
@@ -604,7 +608,7 @@ mod tests {
                     after: Some(b"renamed\n".to_vec().into_boxed_slice()),
                     op: Operation::Rename,
                     renamed_to: Some(RenameTarget {
-                        path: PathBuf::from("blocked/dest"),
+                        path: PathBuf::from("alias/dest"),
                         absolute_path: destination,
                     }),
                     hunks: Vec::new(),
@@ -617,13 +621,7 @@ mod tests {
             .await
             .expect_err("later rename install must fail");
 
-        // The refused destination can surface as a Phase-B rename error
-        // (Io) or an earlier prepare refusal (Stale) depending on which
-        // validator reaches it first on each platform.
-        assert!(
-            matches!(error.class, ErrorClass::Io | ErrorClass::Stale),
-            "{error:?}"
-        );
+        assert_eq!(error.class, ErrorClass::Io);
         assert!(error.message.contains("Nothing was written"), "{error}");
         assert!(
             tokio::fs::metadata(created).await.is_err(),
