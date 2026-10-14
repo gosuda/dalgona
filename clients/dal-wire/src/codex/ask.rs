@@ -8,7 +8,9 @@
 
 use std::path::Path;
 
-use dal_core::{Answer, CallGrant, Choice, ExecApproval, Preview, Question, RawJson, Request, TurnId};
+use dal_core::{
+    Answer, CallGrant, Choice, ExecApproval, Preview, Question, RawJson, Request, TurnId,
+};
 use sonic_rs::{JsonContainerTrait, JsonValueMutTrait, JsonValueTrait, Value};
 
 use super::items::now_ms;
