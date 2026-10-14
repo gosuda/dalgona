@@ -14,6 +14,7 @@ blake3.workspace = true
 dal-agent.workspace = true
 dal-core.workspace = true
 dal-ext.workspace = true
+dal-provider.workspace = true
 dal-star.workspace = true
 dal-store.workspace = true
 dal-tools = { workspace = true, features = ["symbols"] }
@@ -36,6 +37,7 @@ uuid = { version = "=1.28.0", features = ["v4"] }
 
 [dev-dependencies]
 dal-store = { workspace = true, features = ["test-support"] }
+futures.workspace = true
 http-body-util = "=0.1.5"
 hyper = { version = "=1.12.0", features = ["full"] }
 hyper-util = { version = "=0.1.21", features = ["full"] }
