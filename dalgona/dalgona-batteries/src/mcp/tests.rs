@@ -529,6 +529,7 @@ async fn declared_stdio_tools_run_progress_and_session_end_cancels_child() {
             .any(|notice| notice.contains("working")),
         "progress notices reach the host"
     );
+    #[cfg(target_os = "linux")]
     let pid = fs::read_to_string(&pid_file)
         .expect("stdio child wrote its process id")
         .parse::<u32>()

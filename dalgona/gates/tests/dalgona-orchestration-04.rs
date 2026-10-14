@@ -5,6 +5,7 @@
 use dalgona_gates::support;
 
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -87,8 +88,11 @@ fn goal_sidecar_is_durable_and_private_across_reopen() -> support::TestResult<()
             Some(1),
             "the sidecar version must be 1"
         );
-        let mode = fs::metadata(&goal_file)?.permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "the sidecar must be mode 0600, found {mode:o}");
+        #[cfg(unix)]
+        {
+            let mode = fs::metadata(&goal_file)?.permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "the sidecar must be mode 0600, found {mode:o}");
+        }
 
         host.close(session).await?;
         let reopened = host
