@@ -133,6 +133,10 @@ pub(crate) fn listen(
 /// Binds a listener with one connection budget across HTTP and stream drivers.
 ///
 /// `cap` must be nonzero.
+///
+/// # Panics
+///
+/// Panics if `cap` is zero.
 pub(crate) fn listen_bounded(
     host: Host,
     cfg: ListenerCfg,
