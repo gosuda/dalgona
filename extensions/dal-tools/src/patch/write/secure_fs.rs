@@ -85,20 +85,30 @@ impl SecureFs {
         Err(invalid_path())
     }
 
-    pub(super) fn read_optional(&mut self, path: &Path) -> io::Result<Option<Vec<u8>>> {
+    fn open_optional(&mut self, path: &Path) -> io::Result<Option<File>> {
         let (parent, name) = match self.parent(path, false) {
             Ok(value) => value,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error),
         };
-        let mut file = match open_regular(&parent, path, &name) {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error),
+        match open_regular(&parent, path, &name) {
+            Ok(file) => Ok(Some(file)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(super) fn read_optional(&mut self, path: &Path) -> io::Result<Option<Vec<u8>>> {
+        let Some(mut file) = self.open_optional(path)? else {
+            return Ok(None);
         };
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
         Ok(Some(bytes))
+    }
+
+    pub(super) fn exists_regular(&mut self, path: &Path) -> io::Result<bool> {
+        self.open_optional(path).map(|file| file.is_some())
     }
 
     /// Atomically reserves the temporary name under the pinned parent, then
@@ -125,6 +135,7 @@ impl SecureFs {
         remove_entry(&parent, path, &name)
     }
 
+    #[cfg(unix)]
     pub(super) fn sync_parent(&self, path: &Path) {
         if let Some(handle) = self.directories.get(path) {
             let _ = handle.sync_all();
