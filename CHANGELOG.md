@@ -1,6 +1,12 @@
 # Changelog
 
 ## Unreleased
+- Return the catchable `unavailable` code from `state.*` in an ephemeral
+  session, so `ctx.try_call` can degrade instead of failing the handler.
+- Start an unnamed child when `agents.start` gets no `name`. One plugin can
+  now run concurrent children and start a child again in the same workspace.
+- Discard every line of a batch whose partial write could not be rolled back.
+  The journal records the batch start, and the next open quarantines it.
 - Report mailbox delivery only after its journal write succeeds. Failed
   writes return a service error and leave the live steer queue unchanged.
   Full queues refuse messages without writing them to the journal.

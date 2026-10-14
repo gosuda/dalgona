@@ -1,90 +1,25 @@
 //! Real-host boundary proof for the git-checkpoint example plugin.
 //!
-//! The fixture patch tool writes through the host tool loop and reports its
-//! changed path. The checked-in plugin must then create one real Git stash
-//! through the approved process service and restore it through its command.
+//! The checked-in plugin lists and applies real Git stashes through the
+//! approved process service; it never creates one.
 
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
-use std::sync::Arc;
 use std::time::Duration;
 
-use dal_agent::ext::{
-    BoxFuture, ExtensionBuilder, RawValue, Tool, ToolCall, ToolCx, ToolOutcome, ToolOutput,
-};
 use dal_agent::{Agent, Delivery, Env, Host, Product, SessionRef};
 use dal_core::{
-    ClientId, Command, Config, ConfigProduct, Expect, Part, Reply, ToolClass, ToolSpec, UpdateKind,
-    Visibility, Workspace,
+    Answer, ClientId, Command, Config, ConfigProduct, Expect, PageReq, Part, Reply,
+    ToolOutcomeView, UpdateKind, Workspace,
 };
 use dal_star::{LoadRoots, PluginSystem, PluginsConfig, load};
 
-const PLUGIN_SOURCE: &str = include_str!("../../../examples/plugins/git-checkpoint/plugin.star");
+const TOOL: &str = "git-checkpoint__checkpoint";
 const USAGE: &str = "{\"type\":\"usage\",\"usage\":{\"input_tokens\":1,\"cached_input_tokens\":0,\"output_tokens\":1,\"reasoning_tokens\":null,\"cache_write_tokens\":0,\"cost_usd\":null}}";
-
-struct FixturePatch {
-    name: dal_core::Name,
-    spec: Arc<ToolSpec>,
-}
-
-impl Tool for FixturePatch {
-    fn name(&self) -> &dal_core::Name {
-        &self.name
-    }
-
-    fn spec(&self, _model: &dal_core::ModelInfo) -> Arc<ToolSpec> {
-        Arc::clone(&self.spec)
-    }
-
-    fn classify(
-        &self,
-        _args: &RawValue,
-        _workspace: &Workspace,
-    ) -> Result<ToolClass, dal_agent::ext::ArgError> {
-        Ok(ToolClass::Patch)
-    }
-
-    fn run<'a>(&'a self, _call: ToolCall, cx: ToolCx<'a>) -> BoxFuture<'a, ToolOutcome> {
-        Box::pin(async move {
-            let path = cx.workspace().as_path().join("tracked.txt");
-            if let Err(error) = std::fs::write(&path, "changed\n") {
-                return ToolOutcome::Err(dal_agent::ToolError::message(error.to_string()));
-            }
-            ToolOutcome::Ok(Box::new(ToolOutput {
-                parts: vec![Part::Text {
-                    text: "patched tracked.txt".into(),
-                }],
-                files_changed: vec![path],
-                data: None,
-            }))
-        })
-    }
-}
-
-fn fixture_patch() -> Result<dal_agent::ext::Extension, Box<dyn Error + Send + Sync>> {
-    let name = dal_core::Name::parse("patch")?;
-    let spec = Arc::new(ToolSpec {
-        name: name.clone(),
-        description: "Change the tracked fixture file.".into(),
-        parameters: dal_core::RawJson::parse(r#"{"type":"object","properties":{}}"#)?,
-        grammar: None,
-    });
-    Ok(
-        ExtensionBuilder::new("fixture-patch", "0.1.0", dal_core::ServiceSet::EMPTY)?
-            .tool(Arc::new(FixturePatch { name, spec }), Visibility::Model)
-            .build()?,
-    )
-}
-
-fn patch_replay() -> String {
-    format!(
-        "{{\"kind\":\"events\",\"events\":[{{\"type\":\"tool_call_started\",\"id\":\"patch-call\",\"name\":\"patch\"}},{{\"type\":\"tool_calls_done\",\"calls\":[{{\"id\":\"patch-call\",\"name\":\"patch\",\"args\":{{\"kind\":\"parsed\",\"value\":{{}}}}}}]}},{USAGE},{{\"type\":\"stop\",\"reason\":\"tool_use\"}}]}}\n{{\"kind\":\"events\",\"events\":[{{\"type\":\"text_delta\",\"text\":\"finished\"}},{{\"type\":\"tool_calls_done\",\"calls\":[]}}, {USAGE},{{\"type\":\"stop\",\"reason\":\"end_turn\"}}]}}\n"
-    )
-}
-
+const PLUGIN_SOURCE: &str = include_str!("../../../examples/plugins/git-checkpoint/plugin.star");
 #[expect(
     clippy::disallowed_methods,
     reason = "the fixture repository is driven by the real git binary"
@@ -134,11 +69,11 @@ async fn open_host()
     };
     let plugin_config = PluginsConfig::default();
     let generation = load(&roots, &plugin_config)?;
-    let mut extensions = vec![fixture_patch()?];
+    let mut extensions = vec![dal_tools::extension(dal_tools::ToolsConfig::default())?];
     extensions.extend(PluginSystem::new(generation, roots, plugin_config).extensions()?);
 
     let fixture = data.join("git-checkpoint-scripted.jsonl");
-    std::fs::write(&fixture, patch_replay())?;
+    std::fs::write(&fixture, checkpoint_replay())?;
     let user = format!(
         "approval = \"all\"\nmodel = \"openai/gpt-6\"\n[providers.scripted]\nfixture = {:?}\n",
         fixture.to_string_lossy()
@@ -176,64 +111,104 @@ async fn open_host()
     Ok((root, host, agent, workspace))
 }
 
-async fn run_patch_turn(agent: &Agent) -> Result<(), Box<dyn Error + Send + Sync>> {
+/// One scripted model step that calls the checkpoint tool; `id` is plain ASCII.
+fn tool_step(id: &str, args: &str) -> String {
+    let id = format!("\"{id}\"");
+    format!(
+        "{{\"kind\":\"events\",\"events\":[{{\"type\":\"tool_call_started\",\"id\":{id},\"name\":\"{TOOL}\"}},{{\"type\":\"tool_calls_done\",\"calls\":[{{\"id\":{id},\"name\":\"{TOOL}\",\"args\":{{\"kind\":\"parsed\",\"value\":{args}}}}}]}},{USAGE},{{\"type\":\"stop\",\"reason\":\"tool_use\"}}]}}\n"
+    )
+}
+
+/// One scripted model step that ends the turn; `text` is plain ASCII.
+fn text_step(text: &str) -> String {
+    let text = format!("\"{text}\"");
+    format!(
+        "{{\"kind\":\"events\",\"events\":[{{\"type\":\"text_delta\",\"text\":{text}}},{{\"type\":\"tool_calls_done\",\"calls\":[]}},{USAGE},{{\"type\":\"stop\",\"reason\":\"end_turn\"}}]}}\n"
+    )
+}
+
+fn checkpoint_replay() -> String {
+    [
+        tool_step("empty-list", r#"{"action":"list"}"#),
+        text_step("listed nothing"),
+        tool_step("list", r#"{"action":"list"}"#),
+        text_step("listed"),
+        tool_step("restore", r#"{"action":"restore","n":0}"#),
+        text_step("restored"),
+    ]
+    .concat()
+}
+
+/// Runs one turn whose scripted model calls the checkpoint tool, approves
+/// each `git` run as the user, and returns the tool's settled outcome.
+async fn checkpoint_turn(agent: &Agent) -> Result<ToolOutcomeView, Box<dyn Error + Send + Sync>> {
     let mut updates = agent.subscribe(None)?;
     let reply = agent
         .submit(Command::Prompt {
             expect: Expect::Idle,
             content: vec![Part::Text {
-                text: "Apply the patch.".into(),
+                text: "Use the checkpoint tool.".into(),
             }],
         })
         .await?;
     if !matches!(reply, Reply::Accepted { .. }) {
         return Err(std::io::Error::other(format!("prompt was not accepted: {reply:?}")).into());
     }
+    let mut settled = None;
     loop {
         let delivery = tokio::time::timeout(Duration::from_secs(30), updates.next()).await?;
         let Some(Delivery::Update(update)) = delivery else {
             return Err(std::io::Error::other("the update stream closed before turn end").into());
         };
-        if matches!(update.kind, UpdateKind::TurnEnded { .. }) {
-            return Ok(());
+        match &update.kind {
+            UpdateKind::RequestOpened(request)
+                if agent
+                    .view(PageReq::default())?
+                    .open
+                    .iter()
+                    .any(|open| open.id == request.id) =>
+            {
+                agent.answer(request.id, Answer::Approve).await?;
+            }
+            UpdateKind::ToolSettled { outcome, .. } => settled = Some(outcome.clone()),
+            UpdateKind::TurnEnded { .. } => break,
+            _ => {}
         }
     }
+    settled.ok_or_else(|| std::io::Error::other("the checkpoint tool never settled").into())
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn git_checkpoint_uses_real_host_stash_and_restores_it()
--> Result<(), Box<dyn Error + Send + Sync>> {
+async fn git_checkpoint_lists_and_restores_a_real_stash() -> Result<(), Box<dyn Error + Send + Sync>>
+{
     let (_root, host, agent, workspace) = open_host().await?;
-    run_patch_turn(&agent).await?;
+    let empty = checkpoint_turn(&agent).await?;
+    assert!(!empty.is_error, "{empty:?}");
+    assert_eq!(&*empty.text, "no checkpoints");
 
-    let stashes = git(&workspace, &["stash", "list"])?;
-    let entries = stashes.lines().collect::<Vec<_>>();
+    std::fs::write(workspace.join("tracked.txt"), "changed\n")?;
+    git(
+        &workspace,
+        &["stash", "push", "-q", "-m", "before the review"],
+    )?;
     assert_eq!(
-        entries.len(),
-        1,
-        "one patch/turn state must create exactly one checkpoint: {entries:?}"
+        std::fs::read_to_string(workspace.join("tracked.txt"))?,
+        "before\n"
     );
+    let listed = checkpoint_turn(&agent).await?;
     assert!(
-        entries[0].contains("dalgon: turn "),
-        "checkpoint message must identify its turn: {entries:?}"
+        !listed.is_error
+            && listed.text.contains("stash@{0}")
+            && listed.text.contains("before the review"),
+        "list must print the real stash: {listed:?}"
     );
 
-    git(&workspace, &["checkout", "--", "tracked.txt"])?;
-    let reply = agent
-        .submit(Command::Run {
-            name: "git-checkpoint:checkpoint".into(),
-            args: "restore 0".into(),
-            expected: Some(Expect::Idle),
-        })
-        .await?;
-    assert!(
-        matches!(reply, Reply::Done(_)),
-        "restore command failed: {reply:?}"
-    );
+    let restored = checkpoint_turn(&agent).await?;
+    assert!(!restored.is_error, "{restored:?}");
     assert_eq!(
         std::fs::read_to_string(workspace.join("tracked.txt"))?,
         "changed\n",
-        "restore must apply the recorded checkpoint"
+        "restore must apply the selected stash"
     );
 
     host.shutdown(Duration::from_secs(2)).await;

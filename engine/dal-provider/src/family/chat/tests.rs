@@ -583,3 +583,22 @@ fn before_turn_text_follows_its_user_message_in_the_body() {
         "{body}"
     );
 }
+
+#[test]
+fn cumulative_tool_arguments_stop_at_the_stream_event_budget() {
+    let mut decoder = ChatDecoder::new("untrusted", "model");
+    let data = r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call","function":{"name":"run","arguments":"x"}}]}}]}"#;
+    let mut out = Vec::new();
+    for _ in 0..crate::stream_budget::STREAM_EVENTS_LIMIT {
+        assert!(decoder.feed(data, &mut out).is_ok());
+        out.clear();
+    }
+    assert!(matches!(
+        decoder.feed(data, &mut out),
+        Err(ProviderError::Limit(crate::error::LimitError::StreamEvents))
+    ));
+    assert_eq!(
+        decoder.calls.get(&0).map(|call| call.args.len()),
+        Some(crate::stream_budget::STREAM_EVENTS_LIMIT)
+    );
+}

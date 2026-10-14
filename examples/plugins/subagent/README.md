@@ -13,7 +13,7 @@ Single-task execution:
 4. Returns the report text. If the host refuses to start the child (for example, when maximum child depth is reached), the tool returns `subagent: child refused: <reason>`.
 
 Multi-task batches:
-The handler attempts to start children in batches of up to 4 concurrent sessions before awaiting them. However, `start_child` supplies no explicit session name, so every child inherits the default plugin name (`subagent`). Because session names must be unique within a workspace, starting a second concurrent child is rejected by the host with a duplicate name error. The tool cleans up earlier started children in the batch with `agents.cancel` and returns the start error.
+The handler starts children in batches of up to 4 concurrent sessions, then awaits each one. `start_child` gives no session name, so the children are unnamed and concurrent starts do not conflict. If a start fails, the tool cancels the children it already started in that batch with `agents.cancel` and returns the start error.
 
 ## What differs from pi
 The child receives only prompt text; its progress is not streamed back. A tool cannot call another plugin's tool, so delegation uses a child session. Cancelling a parent turn during `agents.wait` closes the awaited child and its descendants. Before the wait begins, cancel started children explicitly rather than relying on turn cancellation. Closing the parent session closes its descendant sessions.

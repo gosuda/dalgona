@@ -4,7 +4,7 @@ def checkpoint(ctx, args):
     if args.action == "restore":
         return ctx.tools.exec(command = "git stash apply stash@{" + str(args.n) + "}")
     result = ctx.tools.exec(command = "git stash list")
-    if not result:
+    if "stash@{" not in result:
         return "no checkpoints"
     return result
 
@@ -21,6 +21,7 @@ checkpoint_tool = dal.tool(
 plugin = dal.plugin(
     name = "git-checkpoint",
     version = "0.1.0",
+    tools = {"checkpoint": checkpoint_tool},
     commands = {
         "checkpoint": dal.command(
             tool = checkpoint_tool,

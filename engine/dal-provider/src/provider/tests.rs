@@ -1219,3 +1219,25 @@ async fn credential_failures_redact_an_account_id_taken_from_the_id_token() {
     ));
     assert!(!format!("{failure:?}").contains("acct-claim-9d2e"));
 }
+
+#[tokio::test]
+async fn stream_limit_releases_the_provider_admission_permit() -> TestResult {
+    let gate = Arc::new(tokio::sync::Semaphore::new(1));
+    let permit = Arc::clone(&gate).acquire_owned().await?;
+    let source = EventStream::new(
+        futures::stream::iter([Err(ProviderError::Limit(
+            crate::error::LimitError::StreamEvents,
+        ))]),
+        || {},
+    );
+    let mut held = super::transport::hold_permit(source, permit);
+    assert_eq!(gate.available_permits(), 0);
+    assert!(matches!(
+        held.next().await,
+        Some(Err(ProviderError::Limit(
+            crate::error::LimitError::StreamEvents
+        )))
+    ));
+    assert_eq!(gate.available_permits(), 1);
+    Ok(())
+}
