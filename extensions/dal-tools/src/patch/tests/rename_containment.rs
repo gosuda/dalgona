@@ -236,3 +236,79 @@ async fn destination_directory_swapped_for_a_link_after_planning_is_refused_at_c
         );
     }
 }
+
+
+#[cfg(unix)]
+#[tokio::test]
+async fn create_below_escaping_symlink_with_missing_ancestors_is_refused() {
+    let fixture = fixture();
+    std::os::unix::fs::symlink(&fixture.outside, fixture.workspace.join("link"))
+        .expect("outside directory link");
+    let before = outside_state(fixture.root.path());
+
+    for destination in [
+        "link/new.txt",
+        "link/missing/new.txt",
+        "link/missing/deeper/new.txt",
+    ] {
+        let quoted = sonic_rs::to_string(destination).expect("quote create path");
+        let input = format!(r#"{{"changes":[{{"path":{quoted},"create":"new\n"}}]}}"#);
+        let error = plan(&fixture.session, DialectId::Replace, &input)
+            .await
+            .expect_err("a missing suffix must not hide a symlink escape");
+        assert!(
+            error.message.contains("outside the workspace"),
+            "{destination}: {error}"
+        );
+        assert_eq!(
+            outside_state(fixture.root.path()),
+            before,
+            "{destination}: outside files changed"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn create_parent_swapped_for_outside_link_after_planning_is_refused() {
+    let fixture = fixture();
+    let input = r#"{"changes":[{"path":"sub/missing/new.txt","create":"new\n"}]}"#;
+    let staged = plan(&fixture.session, DialectId::Replace, input)
+        .await
+        .expect("missing in-workspace ancestors are allowed");
+
+    std::os::unix::fs::symlink(&fixture.outside, fixture.workspace.join("sub"))
+        .expect("replace missing parent with outside link");
+    let before = outside_state(fixture.root.path());
+    let output = commit(&fixture.session, staged, &[]).await;
+
+    assert!(output.error_class.is_some(), "{output:?}");
+    assert!(output.text.contains("outside the workspace"), "{output:?}");
+    assert_eq!(outside_state(fixture.root.path()), before);
+    assert!(!fixture.outside.join("missing").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn create_below_inside_symlink_with_missing_ancestors_succeeds() {
+    let fixture = fixture();
+    let real = fixture.workspace.join("real");
+    std::fs::create_dir(&real).expect("real directory");
+    std::os::unix::fs::symlink(&real, fixture.workspace.join("alias"))
+        .expect("in-workspace directory link");
+    let input = r#"{"changes":[{"path":"alias/missing/new.txt","create":"new\n"}]}"#;
+    let staged = plan(&fixture.session, DialectId::Replace, input)
+        .await
+        .expect("an in-workspace alias remains authorized");
+    let output = commit(&fixture.session, staged, &[]).await;
+
+    assert!(output.error_class.is_none(), "{output:?}");
+    assert_eq!(
+        std::fs::read(real.join("missing/new.txt")).expect("created inside target"),
+        b"new\n"
+    );
+    assert_eq!(
+        std::fs::read(fixture.workspace.join("a.txt")).expect("source unchanged"),
+        b"alpha\n"
+    );
+}
