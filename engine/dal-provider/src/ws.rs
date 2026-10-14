@@ -20,7 +20,7 @@ use sonic_rs::JsonValueTrait;
 use tokio::{
     net::TcpStream,
     sync::{Mutex as AsyncMutex, OwnedMutexGuard},
-    time::{sleep, timeout},
+    time::{Instant as TokioInstant, sleep, timeout, timeout_at},
 };
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async_with_config,
@@ -198,6 +198,7 @@ struct Source {
     family: Family,
     model: Box<str>,
     born: Instant,
+    deadline: TokioInstant,
     clock: Clock,
     cancel: CancellationToken,
     finished: bool,
@@ -234,6 +235,7 @@ struct TurnDrive<'a> {
     notices: &'a NoticeSink,
     cancel: &'a CancellationToken,
     turn: Option<OwnedMutexGuard<()>>,
+    deadline: TokioInstant,
 }
 
 impl WsSessions {
@@ -293,6 +295,7 @@ impl WsSessions {
         let url = websocket_url(base_url, family)?;
         let frame = Self::text_frame(wire, family)?;
         let reusable = self.take_reusable(&session, model);
+        let deadline = TokioInstant::now() + crate::stream_budget::STREAM_TOTAL_TIMEOUT;
         let drive = TurnDrive {
             session,
             url,
@@ -311,8 +314,11 @@ impl WsSessions {
             notices,
             cancel,
             turn: Some(turn),
+            deadline,
         };
-        Box::pin(self.drive(drive, reusable)).await
+        timeout_at(deadline, self.drive(drive, reusable))
+            .await
+            .unwrap_or(Err(ProviderError::Limit(LimitError::StreamDuration)))
     }
 
     fn text_frame(wire: WsWire<'_>, family: Family) -> Result<String, ProviderError> {
@@ -410,6 +416,7 @@ impl WsSessions {
             family: drive.state.family,
             model: drive.state.model.into(),
             born,
+            deadline: drive.deadline,
             clock: Arc::clone(&self.clock),
             cancel: drive.cancel.clone(),
             finished: false,
@@ -417,8 +424,11 @@ impl WsSessions {
             turn: drive.turn.take(),
         };
         let session_on_cancel = Arc::clone(&drive.session);
-        let events = stream::unfold(source, |mut source| async move {
-            source.next().await.map(|item| (item, source))
+        let events = stream::unfold(Some(source), |source| async move {
+            let mut source = source?;
+            let item = source.next().await?;
+            let next = if item.is_err() { None } else { Some(source) };
+            Some((item, next))
         });
         WsTurn::Stream(EventStream::new(events, move || {
             lock(&session_on_cancel.state).idle = None;
@@ -557,6 +567,9 @@ impl Source {
             return None;
         }
         loop {
+            if TokioInstant::now() >= self.deadline {
+                return Some(Err(ProviderError::Limit(LimitError::StreamDuration)));
+            }
             if let Some(event) = self.ready.pop_front() {
                 if matches!(&event, Ok(StreamEvent::Stop { .. })) {
                     self.finished = true;
@@ -575,8 +588,14 @@ impl Source {
                         close_socket(socket).await;
                         return Some(Err(cancelled(self.family)));
                     }
-                    next = timeout(STREAM_IDLE_TIMEOUT, socket.next()) => match next {
+                    next = timeout_at(
+                        self.deadline.min(TokioInstant::now() + STREAM_IDLE_TIMEOUT),
+                        socket.next(),
+                    ) => match next {
                         Ok(next) => next,
+                        Err(_) if TokioInstant::now() >= self.deadline => {
+                            return Some(Err(ProviderError::Limit(LimitError::StreamDuration)));
+                        }
                         Err(_) => return Some(Err(ProviderError::StreamCut)),
                     },
                 }

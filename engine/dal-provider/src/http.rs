@@ -16,6 +16,8 @@
 //! - Totals ([`NON_STREAM_TOTAL_TIMEOUT`], [`COMPACT_TIMEOUT`],
 //!   [`USAGE_TIMEOUT`], [`OAUTH_TIMEOUT`]): the per-request deadline of
 //!   [`Exchange::Json`], covering connect through the last body byte.
+//! - The provider stream's total 15-minute deadline belongs to the SSE and
+//!   WebSocket decoders, not this client's idle timer.
 //! - [`LOGIN_WAIT`]: the sign-in flow's own wait for a callback; no request
 //!   here enforces it.
 
@@ -70,8 +72,8 @@ const MAX_REDIRECTS: usize = 10;
 /// total deadline.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Exchange {
-    /// An SSE response: `accept: text/event-stream` and no total deadline; the
-    /// stream is bounded by [`STREAM_IDLE_TIMEOUT`] between reads.
+    /// An SSE response: `accept: text/event-stream`. The client enforces
+    /// [`STREAM_IDLE_TIMEOUT`] between reads; the decoder owns the total deadline.
     Stream,
     /// One JSON response: `accept: application/json`, bounded end to end by
     /// `total`, one of the total timeout constants of this module.

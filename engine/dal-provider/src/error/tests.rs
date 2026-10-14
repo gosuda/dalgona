@@ -695,3 +695,17 @@ fn resolve_error_texts_and_fixes() {
     assert_eq!(no_default.to_string(), "no default model is configured");
     assert_eq!(no_default.fix(), None);
 }
+
+#[test]
+fn provider_stream_limits_have_stable_typed_error_texts() {
+    for (limit, expected) in [
+        (LimitError::StreamBytes, "provider stream exceeds 32 MiB of event data."),
+        (LimitError::StreamEvents, "provider stream exceeds 65,536 events."),
+        (LimitError::StreamItems, "provider stream exceeds 4,096 retained items."),
+        (LimitError::StreamDuration, "provider stream exceeds 15 minutes."),
+    ] {
+        let error = ProviderError::Limit(limit);
+        assert_eq!(error.to_string(), expected);
+        assert!(!error.retryable_by_loop());
+    }
+}

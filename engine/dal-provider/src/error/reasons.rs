@@ -17,6 +17,14 @@ pub enum LimitError {
     WsMessage,
     /// One non-streaming response body grew past 16 MiB.
     Body,
+    /// One provider turn sent more than 32 MiB of event payloads.
+    StreamBytes,
+    /// One provider turn sent more than 65,536 events.
+    StreamEvents,
+    /// One provider turn opened more than 4,096 retained items.
+    StreamItems,
+    /// One provider turn stayed active for more than 15 minutes.
+    StreamDuration,
 }
 
 impl fmt::Display for LimitError {
@@ -26,6 +34,10 @@ impl fmt::Display for LimitError {
             Self::SseEvent => f.write_str("SSE event exceeds 8 MiB."),
             Self::WsMessage => f.write_str("WebSocket message exceeds 16 MiB."),
             Self::Body => f.write_str("response body exceeds 16 MiB."),
+            Self::StreamBytes => f.write_str("provider stream exceeds 32 MiB of event data."),
+            Self::StreamEvents => f.write_str("provider stream exceeds 65,536 events."),
+            Self::StreamItems => f.write_str("provider stream exceeds 4,096 retained items."),
+            Self::StreamDuration => f.write_str("provider stream exceeds 15 minutes."),
         }
     }
 }

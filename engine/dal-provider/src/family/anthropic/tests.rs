@@ -1687,3 +1687,86 @@ fn only_first_party_models_from_four_five_take_native_search() {
     assert!(!supports_tool_search("openrouter", "claude-opus-5-5"));
     assert!(!supports_tool_search("", "claude-opus-5-5"));
 }
+
+#[test]
+fn cumulative_anthropic_arguments_stop_before_the_next_append() {
+    let start =
+        r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_0","name":"f","input":{}}}"#;
+    let delta =
+        r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"abc"}}"#;
+    let mut decoder = Decoder::new("model".into(), false, None);
+    decoder.budget = StreamBudget::with_limits(start.len() + delta.len() * 3, 100, 2);
+
+    decoder.feed(start).unwrap();
+    for _ in 0..3 {
+        decoder.feed(delta).unwrap();
+    }
+    assert_eq!(decoder.calls.get(&0).unwrap().args.as_slice(), b"abcabcabc");
+    assert!(matches!(
+        decoder.feed(delta),
+        Err(ProviderError::Limit(crate::LimitError::StreamBytes))
+    ));
+    assert_eq!(decoder.calls.get(&0).unwrap().args.as_slice(), b"abcabcabc");
+}
+
+#[test]
+fn anthropic_content_blocks_and_replays_obey_the_item_budget() {
+    let start =
+        r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}"#;
+    let second = start.replace(r#""index":0"#, r#""index":1"#);
+    let mut decoder = Decoder::new("model".into(), false, None);
+    decoder.budget = StreamBudget::with_limits(4096, 100, 1);
+    decoder.feed(start).unwrap();
+    assert!(matches!(
+        decoder.feed(&second),
+        Err(ProviderError::Limit(crate::LimitError::StreamItems))
+    ));
+    assert_eq!(decoder.open.len(), 1);
+}
+
+#[test]
+fn anthropic_thinking_and_search_fragments_share_the_cumulative_budget() {
+    let thinking =
+        r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}"#;
+    let thinking_delta =
+        r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hi"}}"#;
+    let mut decoder = Decoder::new("model".into(), false, None);
+    decoder.budget = StreamBudget::with_limits(
+        thinking.len() + thinking_delta.len() * 2,
+        100,
+        10,
+    );
+    decoder.feed(thinking).unwrap();
+    decoder.feed(thinking_delta).unwrap();
+    decoder.feed(thinking_delta).unwrap();
+    assert!(matches!(
+        decoder.feed(thinking_delta),
+        Err(ProviderError::Limit(crate::LimitError::StreamBytes))
+    ));
+    assert!(matches!(
+        decoder.open.get(&0),
+        Some(OpenBlock::Thinking { text, .. }) if text == "hihi"
+    ));
+
+    let search =
+        r#"{"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srv_1","name":"tool_search_tool_bm25","input":{}}}"#;
+    let search_delta =
+        r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"ab"}}"#;
+    let mut decoder = Decoder::new("model".into(), false, None);
+    decoder.budget = StreamBudget::with_limits(
+        search.len() + search_delta.len() * 2,
+        100,
+        10,
+    );
+    decoder.feed(search).unwrap();
+    decoder.feed(search_delta).unwrap();
+    decoder.feed(search_delta).unwrap();
+    assert!(matches!(
+        decoder.feed(search_delta),
+        Err(ProviderError::Limit(crate::LimitError::StreamBytes))
+    ));
+    assert!(matches!(
+        decoder.open.get(&0),
+        Some(OpenBlock::Search { input, .. }) if input.as_slice() == b"abab"
+    ));
+}

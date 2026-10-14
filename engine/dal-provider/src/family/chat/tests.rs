@@ -583,3 +583,41 @@ fn before_turn_text_follows_its_user_message_in_the_body() {
         "{body}"
     );
 }
+
+#[test]
+fn cumulative_chat_fragments_stop_before_the_next_append() {
+    let event = r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"f","arguments":"{}"}}]}}]}"#;
+    let mut decoder = ChatDecoder::new("openai", "model");
+    decoder.budget = StreamBudget::with_limits(event.len() * 3, 100, 2);
+    let mut out = Vec::new();
+    for _ in 0..3 {
+        assert_eq!(decoder.feed(event, &mut out).unwrap(), Progress::Open);
+        out.clear();
+    }
+    assert_eq!(decoder.calls.get(&0).unwrap().args.as_slice(), b"{}{}{}");
+    assert!(matches!(
+        decoder.feed(event, &mut out),
+        Err(ProviderError::Limit(crate::LimitError::StreamBytes))
+    ));
+    assert_eq!(decoder.calls.get(&0).unwrap().args.as_slice(), b"{}{}{}");
+    assert_eq!(decoder.feed("[DONE]", &mut out).unwrap(), Progress::Ended);
+}
+
+#[test]
+fn chat_provider_indexes_cannot_open_unbounded_calls() {
+    let first = r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"f","arguments":"{}"}}]}}]}"#;
+    let second = first.replace(
+        r#""index":0,"id":"call_1""#,
+        r#""index":1,"id":"call_2""#,
+    );
+    let mut decoder = ChatDecoder::new("openai", "model");
+    decoder.budget = StreamBudget::with_limits(4096, 100, 1);
+    let mut out = Vec::new();
+
+    decoder.feed(first, &mut out).unwrap();
+    assert!(matches!(
+        decoder.feed(&second, &mut out),
+        Err(ProviderError::Limit(crate::LimitError::StreamItems))
+    ));
+    assert_eq!(decoder.calls.len(), 1);
+}
