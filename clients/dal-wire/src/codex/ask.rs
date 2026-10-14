@@ -8,7 +8,7 @@
 
 use std::path::Path;
 
-use dal_core::{Answer, CallGrant, Choice, Preview, Question, RawJson, Request, TurnId};
+use dal_core::{Answer, CallGrant, Choice, ExecApproval, Preview, Question, RawJson, Request, TurnId};
 use sonic_rs::{JsonContainerTrait, JsonValueMutTrait, JsonValueTrait, Value};
 
 use super::items::now_ms;
@@ -47,9 +47,15 @@ pub(crate) fn server_request(
                 reason.push_str(&grant_clause(grant));
             }
             object.insert("startedAtMs", now_ms());
-            object.insert("reason", reason.as_str());
-            if tool.as_ref() == "patch" {
+            let method = if tool.as_ref() == "patch" {
                 "item/fileChange/requestApproval"
+            } else if tool.as_ref() == "exec" {
+                let execution = ExecApproval::from_preview(preview)?;
+                reason.push_str("\nShell: ");
+                reason.push_str(execution.shell.to_str()?);
+                object.insert("command", execution.command.as_ref());
+                object.insert("cwd", execution.cwd.to_str()?);
+                "item/commandExecution/requestApproval"
             } else {
                 let command = if preview.body.is_empty() {
                     tool.as_ref()
@@ -59,7 +65,9 @@ pub(crate) fn server_request(
                 object.insert("command", command);
                 object.insert("cwd", cwd.as_str());
                 "item/commandExecution/requestApproval"
-            }
+            };
+            object.insert("reason", reason.as_str());
+            method
         }
         Question::Grant {
             ext,
