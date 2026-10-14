@@ -829,9 +829,7 @@ async fn overlong_anthropic_catalog_releases_its_admission_permit() -> TestResul
         .map(|page| Reply {
             status: 200,
             content_type: "application/json",
-            body: format!(
-                r#"{{"data":[],"has_more":true,"last_id":"cursor-{page}"}}"#
-            ),
+            body: format!(r#"{{"data":[],"has_more":true,"last_id":"cursor-{page}"}}"#),
         })
         .collect();
     let (base, mut server_task) = server("", replies).await?;

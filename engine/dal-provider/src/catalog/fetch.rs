@@ -171,7 +171,12 @@ where
 
     loop {
         // Refuse the next request before issuing it if the page budget is spent.
-        charge_catalog_budget(&mut pages, 1, ANTHROPIC_CATALOG_MAX_PAGES, LimitError::CatalogPages)?;
+        charge_catalog_budget(
+            &mut pages,
+            1,
+            ANTHROPIC_CATALOG_MAX_PAGES,
+            LimitError::CatalogPages,
+        )?;
         let mut url = base_url.clone();
         {
             let mut query = url.query_pairs_mut();
