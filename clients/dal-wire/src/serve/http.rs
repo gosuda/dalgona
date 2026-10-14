@@ -38,6 +38,7 @@ impl BufferedBody {
 }
 
 /// One HTTP response with its headers and body.
+#[derive(Debug)]
 pub(crate) struct Resp {
     /// The HTTP status.
     pub status: u16,
@@ -48,6 +49,7 @@ pub(crate) struct Resp {
 }
 
 /// One HTTP response body.
+#[derive(Debug)]
 pub(crate) enum RespBody {
     /// A complete body.
     Full(Bytes),
@@ -172,7 +174,10 @@ pub(super) async fn read_body(
     match tokio::time::timeout(BODY_TIMEOUT, read).await {
         Ok(Ok(())) => {}
         Ok(Err(resp)) => return Err(resp),
-        Err(_) => return Err(Resp::text(408, "request body was not received within 60 s")),
+        Err(_) => {
+            drain_body(&mut incoming).await;
+            return Err(Resp::text(408, "request body was not received within 60 s"));
+        }
     }
     Ok(BufferedBody {
         bytes: Bytes::from(buffer),
@@ -180,10 +185,12 @@ pub(super) async fn read_body(
     })
 }
 
-/// Empties a rejected request body so the socket closes with no unread
+/// Empties an unread request body so the socket closes with no pending
 /// input: closing mid-stream resets the connection on BSD-family systems
-/// and the client loses the rejection response entirely.
-async fn drain_body(body: &mut hyper::body::Incoming) {
+/// and the client loses the response entirely. The drain never allocates,
+/// so it stays outside the shared allocation budget; an upload that never
+/// finishes waits out the drain timeout and the response still goes out.
+pub(super) async fn drain_body(body: &mut hyper::body::Incoming) {
     let mut remaining = DRAIN_LIMIT;
     let drain = async {
         while remaining > 0 {

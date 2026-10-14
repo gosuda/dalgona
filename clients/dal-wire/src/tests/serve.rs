@@ -231,8 +231,8 @@ async fn token_file_auth_cases() {
 #[tokio::test]
 async fn public_card_path_requires_auth_when_a2a_is_disabled() {
     let rig = rig(&[]).await;
-    let token = crate::token::create(&rig.data().join("serve.token"), false)
-        .expect("create serve token");
+    let token =
+        crate::token::create(&rig.data().join("serve.token"), false).expect("create serve token");
     let mut options = router_options(&rig);
     options.public = true;
     with_serve(&rig, options, async |addr| {
@@ -265,14 +265,15 @@ async fn get_routes_reject_body_headers_before_reading() {
             ("/a2a/v1/tasks/a-task", "content-length: 1"),
             ("/.well-known/agent-card.json", "transfer-encoding: chunked"),
         ] {
-            let mut stream = tokio::net::TcpStream::connect(addr)
-                .await
-                .expect("connect");
+            let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
             let head = format!(
                 "GET {path} HTTP/1.1\r\n{}\r\n{body_framing}\r\nconnection: close\r\n\r\n",
                 host_header(addr)
             );
-            stream.write_all(head.as_bytes()).await.expect("send headers");
+            stream
+                .write_all(head.as_bytes())
+                .await
+                .expect("send headers");
             // Never send the declared body: the response must arrive first.
             let mut reader = tokio::io::BufReader::new(stream);
             let mut status = String::new();
@@ -284,6 +285,43 @@ async fn get_routes_reject_body_headers_before_reading() {
         }
         let card = get(addr, "/.well-known/agent-card.json").await;
         assert_eq!(card.status, 200, "{card:?}");
+    })
+    .await;
+}
+
+/// A route that skips the budgeted body reader still drains a declared
+/// body before its response goes out on a closing connection.
+#[tokio::test]
+async fn bodyless_route_drains_declared_body() {
+    let rig = rig(&[]).await;
+    with_serve(&rig, router_options(&rig), async |addr| {
+        let stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        let head = format!(
+            "POST /missing HTTP/1.1\r\n{}\r\ncontent-length: 100\r\nconnection: close\r\n\r\n",
+            host_header(addr)
+        );
+        let (reader, mut writer) = stream.into_split();
+        writer.write_all(head.as_bytes()).await.expect("headers");
+        writer.write_all(&[b'x'; 50]).await.expect("first half");
+        let mut reader = tokio::io::BufReader::new(reader);
+        let mut status = String::new();
+        // The 404 must wait for the rest of the declared body: answering
+        // early lets the closing socket reset before the client reads it.
+        let early = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            reader.read_line(&mut status),
+        )
+        .await;
+        assert!(
+            early.is_err(),
+            "404 arrived before the body drained: {status:?}"
+        );
+        writer.write_all(&[b'x'; 50]).await.expect("second half");
+        tokio::time::timeout(super::support::WAIT, reader.read_line(&mut status))
+            .await
+            .expect("404 after the drain")
+            .expect("status line");
+        assert!(status.starts_with("HTTP/1.1 404 "), "{status:?}");
     })
     .await;
 }

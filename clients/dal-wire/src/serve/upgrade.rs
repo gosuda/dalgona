@@ -5,29 +5,31 @@ use std::sync::Arc;
 use hyper::{Request, Response, StatusCode};
 
 use super::guard::ws_upgrade_denial;
-use super::{Driver, Resp, ServeBody, ServeCtx, into_response};
+use super::{Driver, Resp, ServeBody, ServeCtx, drain_response};
 use crate::token::SecretToken;
+
+/// Returns one request header's string value.
+fn header_value(req: &Request<hyper::body::Incoming>, name: &str) -> Option<String> {
+    req.headers()
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+}
 
 /// Serves a WebSocket upgrade: validates, answers 101, and drives the
 /// protocol in a stream task owned by the accept loop.
 pub(super) async fn upgrade_response(
     ctx: Arc<ServeCtx>,
-    req: Request<hyper::body::Incoming>,
+    mut req: Request<hyper::body::Incoming>,
     route: crate::router::ServeRoute,
 ) -> Response<ServeBody> {
-    let header = |name: &str| {
-        req.headers()
-            .get(name)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned)
-    };
-    if !header("upgrade").is_some_and(|value| value.eq_ignore_ascii_case("websocket")) {
-        return into_response(Resp::text(426, "upgrade required"));
+    if !header_value(&req, "upgrade").is_some_and(|value| value.eq_ignore_ascii_case("websocket")) {
+        return drain_response(&mut req, Resp::text(426, "upgrade required")).await;
     }
-    let Some(key) = header("sec-websocket-key") else {
-        return into_response(Resp::text(400, "missing Sec-WebSocket-Key"));
+    let Some(key) = header_value(&req, "sec-websocket-key") else {
+        return drain_response(&mut req, Resp::text(400, "missing Sec-WebSocket-Key")).await;
     };
-    let protocols = header("sec-websocket-protocol").unwrap_or_default();
+    let protocols = header_value(&req, "sec-websocket-protocol").unwrap_or_default();
     let offered: Vec<String> = protocols
         .split(',')
         .map(|protocol| protocol.trim().to_owned())
@@ -41,7 +43,7 @@ pub(super) async fn upgrade_response(
     if let Some(denial) =
         ws_upgrade_denial(ctx.cfg.token.as_ref(), &allowed, req.headers(), &offered)
     {
-        return into_response(denial);
+        return drain_response(&mut req, denial).await;
     }
     let subprotocol = offered
         .iter()
