@@ -105,8 +105,6 @@ pub enum StreamBudgetError {
         /// The maximum number of bytes.
         limit: usize,
     },
-    /// An event has no known size accounting rule.
-    UnsupportedEvent,
 }
 
 impl fmt::Display for StreamBudgetError {
@@ -114,7 +112,6 @@ impl fmt::Display for StreamBudgetError {
         match self {
             Self::Events { limit } => write!(f, "provider stream exceeds {limit} events"),
             Self::Bytes { limit } => write!(f, "provider stream exceeds {limit} bytes"),
-            Self::UnsupportedEvent => f.write_str("unsupported provider stream event"),
         }
     }
 }
@@ -154,7 +151,7 @@ impl StreamBudget {
     ///
     /// # Errors
     ///
-    /// Returns the exceeded limit or an unsupported event variant.
+    /// Returns the exceeded limit.
     pub fn accept(&mut self, event: &StreamEvent) -> Result<(), StreamBudgetError> {
         let count = match event {
             StreamEvent::ToolCallsDone { calls } => calls.len().max(1),
@@ -196,9 +193,6 @@ impl StreamBudget {
                 | StopReason::Refusal
                 | StopReason::Paused => 0,
             },
-            // New event types are untrusted until their payload sizes are
-            // accounted for explicitly.
-            _ => return Err(StreamBudgetError::UnsupportedEvent),
         };
         if bytes > self.max_bytes.saturating_sub(self.bytes) {
             return Err(StreamBudgetError::Bytes {
