@@ -1,6 +1,6 @@
 //! Commands that inspect and persist configured plugin grants.
 
-use std::{io::Write, process::ExitCode};
+use std::{io::Write, path::Path, process::ExitCode};
 
 use dal_agent::ext::Extension;
 use dal_agent::{GrantKey, GrantStore, GrantStoreError};
@@ -44,6 +44,8 @@ pub struct ConfiguredPlugin {
     pub origin: Origin,
     /// The services declared by the plugin, with `ask` removed.
     pub capabilities: ServiceSet,
+    /// Host-computed code, version, and exact operation identity.
+    pub digest: Box<str>,
 }
 
 impl ConfiguredPlugin {
@@ -58,6 +60,7 @@ impl ConfiguredPlugin {
                 name: extension.name().parse().ok()?,
                 origin: extension.origin(),
                 capabilities: extension.inject().capabilities(),
+                digest: extension.grant_digest().unwrap_or_default().into(),
             }),
             _ => None,
         }
@@ -67,7 +70,7 @@ impl ConfiguredPlugin {
     ///
     /// # Errors
     /// Returns the backing store's typed error when the grant cannot be read.
-    pub async fn status(&self, grants: &GrantStore) -> Result<GrantStatus, GrantStoreError> {
+    pub async fn status(&self, grants: &GrantStore, workspace: &Path) -> Result<GrantStatus, GrantStoreError> {
         if self.capabilities.is_empty() {
             return Ok(GrantStatus::NotRequired);
         }
@@ -75,6 +78,8 @@ impl ConfiguredPlugin {
             extension: self.name.clone(),
             origin: self.origin,
             services: self.capabilities,
+            digest: self.digest.clone(),
+            workspace: workspace.to_path_buf(),
         };
         grants.contains(&key).await.map(|granted| {
             if granted {
@@ -112,6 +117,7 @@ pub async fn run(
     command: PluginCommand,
     plugins: &[ConfiguredPlugin],
     grants: &GrantStore,
+    workspace: &Path,
     by: ClientId,
     stdout: &mut impl Write,
 ) -> Result<ExitCode, PluginCommandError> {
@@ -119,9 +125,9 @@ pub async fn run(
     plugins.sort_by(|left, right| left.name.as_str().cmp(right.name.as_str()));
 
     match command {
-        PluginCommand::Grant { name } => grant_plugin(&name, &plugins, grants, by, stdout).await,
+        PluginCommand::Grant { name } => grant_plugin(&name, &plugins, grants, workspace, by, stdout).await,
         PluginCommand::Revoke { name } => revoke_plugin(&name, grants, stdout).await,
-        PluginCommand::List => list_plugins(&plugins, grants, stdout).await,
+        PluginCommand::List => list_plugins(&plugins, grants, workspace, stdout).await,
     }
 }
 
@@ -130,6 +136,7 @@ async fn grant_plugin(
     name: &Name,
     plugins: &[&ConfiguredPlugin],
     grants: &GrantStore,
+    workspace: &Path,
     by: ClientId,
     stdout: &mut impl Write,
 ) -> Result<ExitCode, PluginCommandError> {
@@ -158,6 +165,8 @@ async fn grant_plugin(
         extension: plugin.name.clone(),
         origin: plugin.origin,
         services: plugin.capabilities,
+        digest: plugin.digest.clone(),
+        workspace: workspace.to_path_buf(),
     };
     let inserted = grants.grant(key, by, jiff::Timestamp::now()).await?;
     let services = display_services(plugin.capabilities);
@@ -205,6 +214,7 @@ async fn revoke_plugin(
 async fn list_plugins(
     plugins: &[&ConfiguredPlugin],
     grants: &GrantStore,
+    workspace: &Path,
     stdout: &mut impl Write,
 ) -> Result<ExitCode, PluginCommandError> {
     if plugins.is_empty() {
@@ -212,7 +222,7 @@ async fn list_plugins(
         return Ok(ExitCode::SUCCESS);
     }
     for plugin in plugins {
-        let status = plugin.status(grants).await?;
+        let status = plugin.status(grants, workspace).await?;
         let services = if plugin.capabilities.is_empty() {
             "none".to_owned()
         } else {
@@ -267,6 +277,7 @@ mod tests {
             name: name.parse::<Name>().unwrap(),
             origin,
             capabilities: ServiceSet::from_names(services.iter().copied()).unwrap(),
+            digest: "a".repeat(64).into_boxed_str(),
         }
     }
 
@@ -282,6 +293,7 @@ mod tests {
             },
             &plugins,
             &grants,
+            dir.path(),
             ClientId::new("test"),
             &mut stdout,
         )
@@ -295,6 +307,7 @@ mod tests {
             PluginCommand::List,
             &changed,
             &grants,
+            dir.path(),
             ClientId::new("test"),
             &mut stdout,
         )
@@ -316,6 +329,7 @@ mod tests {
             },
             &plugins,
             &grants,
+            dir.path(),
             ClientId::new("test"),
             &mut stdout,
         )
@@ -327,6 +341,8 @@ mod tests {
                     extension: "focus".parse::<Name>().unwrap(),
                     origin: Origin::User,
                     services: ServiceSet::from_names(["net"]).unwrap(),
+                    digest: "a".repeat(64).into_boxed_str(),
+                    workspace: dir.path().to_path_buf(),
                 },
                 ClientId::new("test"),
                 jiff::Timestamp::now(),
@@ -340,6 +356,7 @@ mod tests {
             },
             &plugins,
             &grants,
+            dir.path(),
             ClientId::new("test"),
             &mut stdout,
         )
@@ -357,6 +374,7 @@ mod tests {
             },
             &plugins,
             &grants,
+            dir.path(),
             ClientId::new("test"),
             &mut stdout,
         )
@@ -379,6 +397,7 @@ mod tests {
             PluginCommand::List,
             &plugins,
             &grants,
+            dir.path(),
             ClientId::new("test"),
             &mut stdout,
         )
@@ -393,6 +412,7 @@ mod tests {
             PluginCommand::List,
             &[],
             &grants,
+            dir.path(),
             ClientId::new("test"),
             &mut stdout,
         )
