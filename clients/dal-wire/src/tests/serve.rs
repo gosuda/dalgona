@@ -154,11 +154,8 @@ async fn idle_keep_alive_connection_expires() {
             .expect("connect keep-alive client");
         stream
             .write_all(
-                format!(
-                    "GET /v1/models HTTP/1.1\r\n{}\r\n\r\n",
-                    host_header(addr)
-                )
-                .as_bytes(),
+                format!("GET /v1/models HTTP/1.1\r\n{}\r\n\r\n", host_header(addr))
+                    .as_bytes(),
             )
             .await
             .expect("send complete request");
