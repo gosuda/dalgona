@@ -12,7 +12,8 @@ use dal_core::{CallId, GenerationId, SessionId, TurnId};
 use super::ir::StagedFileOwned;
 use super::{
     ir::{
-        Diff, Edit, EngineError, ErrorClass, FindingSeverity, Output, Plan, RenameTarget, StagedBatch, StagedFile,
+        Diff, Edit, EngineError, ErrorClass, FindingSeverity, Output, Plan, RenameTarget,
+        StagedBatch, StagedFile,
     },
     resolve::{check_overlap, resolve_path},
     snapshot::SnapshotStore,
