@@ -3,6 +3,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use sonic_rs::JsonValueTrait;
+use tokio_tungstenite::tungstenite::http::StatusCode;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::support::{
@@ -363,7 +364,7 @@ async fn websocket_upgrades_hold_connection_slots_until_disconnect() {
             .await
             .expect("WebSocket upgrade completed in time")
             .expect("WebSocket upgrade succeeded");
-            assert_eq!(response.status(), 101);
+            assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
             clients.push(client);
         }
 
@@ -380,7 +381,7 @@ async fn websocket_upgrades_hold_connection_slots_until_disconnect() {
             .await
             .expect("a freed connection slot admits the waiting upgrade")
             .expect("the waiting WebSocket upgrade succeeded");
-        assert_eq!(response.status(), 101);
+        assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
         drop(client);
     })
     .await;

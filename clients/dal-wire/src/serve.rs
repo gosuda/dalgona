@@ -168,9 +168,10 @@ pub(crate) fn listen(
                 accepted = listener.accept(), if permits.available_permits() > 0 => {
                     match accepted {
                         Ok((stream, _)) => {
-                            let permit = Arc::clone(&permits)
-                                .try_acquire_owned()
-                                .expect("available listener permit");
+                            let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
+                                tracing::error!("listener connection permit unexpectedly unavailable");
+                                continue;
+                            };
                             let ctx = Arc::new(ServeCtx {
                                 shared: Arc::clone(&shared),
                                 _permit: permit,
