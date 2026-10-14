@@ -20,7 +20,7 @@ use sonic_rs::JsonValueTrait;
 use tokio::{
     net::TcpStream,
     sync::{Mutex as AsyncMutex, OwnedMutexGuard},
-    time::{sleep, timeout},
+    time::{sleep, timeout, timeout_at},
 };
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async_with_config,
@@ -170,6 +170,7 @@ pub(crate) struct WsSessions {
     sessions: Mutex<SessionTable>,
     clock: Clock,
     sleeper: Sleeper,
+    stream_timeout: Duration,
 }
 
 struct Session {
@@ -235,6 +236,9 @@ struct TurnDrive<'a> {
     notices: &'a NoticeSink,
     cancel: &'a CancellationToken,
     turn: Option<OwnedMutexGuard<()>>,
+    /// The one absolute deadline the turn's connection, retries, first frame,
+    /// and event stream all share.
+    deadline: tokio::time::Instant,
 }
 
 impl WsSessions {
@@ -245,6 +249,7 @@ impl WsSessions {
             sessions: Mutex::new(HashMap::new()),
             clock: Arc::new(Instant::now),
             sleeper: Arc::new(|duration| Box::pin(sleep(duration))),
+            stream_timeout: STREAM_TOTAL_TIMEOUT,
         }
     }
 
@@ -254,7 +259,14 @@ impl WsSessions {
             sessions: Mutex::new(HashMap::new()),
             clock,
             sleeper,
+            stream_timeout: STREAM_TOTAL_TIMEOUT,
         }
+    }
+
+    #[cfg(test)]
+    fn with_stream_timeout(mut self, stream_timeout: Duration) -> Self {
+        self.stream_timeout = stream_timeout;
+        self
     }
 
     /// Opens a WebSocket turn or selects HTTPS after the configured WS retry
@@ -283,6 +295,7 @@ impl WsSessions {
                 message: format!("{family:?} WebSocket session does not match its request"),
             });
         }
+        let deadline = tokio::time::Instant::now() + self.stream_timeout;
         let session = self.session(provider, session_id);
         let turn = tokio::select! {
             () = cancel.cancelled() => return Err(cancelled(family)),
@@ -312,8 +325,12 @@ impl WsSessions {
             notices,
             cancel,
             turn: Some(turn),
+            deadline,
         };
-        Box::pin(self.drive(drive, reusable)).await
+        match timeout_at(deadline, Box::pin(self.drive(drive, reusable))).await {
+            Ok(turn) => turn,
+            Err(_) => Err(ProviderError::Limit(LimitError::StreamDuration)),
+        }
     }
 
     fn text_frame(wire: WsWire<'_>, family: Family) -> Result<String, ProviderError> {
@@ -375,8 +392,8 @@ impl WsSessions {
                 }
                 continue;
             }
-            let pending = match timeout(
-                STREAM_TOTAL_TIMEOUT,
+            let pending = match timeout_at(
+                drive.deadline,
                 first_frame(&mut socket, drive.wire, drive.cancel),
             )
             .await
@@ -431,10 +448,7 @@ impl WsSessions {
             source.next().await.map(|item| (item, source))
         });
         WsTurn::Stream(EventStream::new(
-            stream_budget::timeboxed(
-                events,
-                tokio::time::Instant::now() + STREAM_TOTAL_TIMEOUT,
-            ),
+            stream_budget::timeboxed(events, drive.deadline),
             move || {
                 lock(&session_on_cancel.state).idle = None;
             },

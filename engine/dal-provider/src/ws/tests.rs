@@ -1141,3 +1141,79 @@ async fn websocket_rejects_a_message_above_the_shared_limit() -> Result<(), Box<
     servers.abort_all();
     Ok(())
 }
+
+#[tokio::test]
+async fn websocket_turn_deadline_covers_connection_setup() -> Result<(), Box<dyn Error>> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let base = format!("http://{}/backend-api/codex", listener.local_addr()?);
+    let mut servers = tokio::task::JoinSet::new();
+    servers.spawn(async move {
+        let (tcp, _) = listener.accept().await.expect("client connects");
+        // The handshake never completes: the socket is held open without a
+        // reply, so only the shared turn deadline can end the attempt.
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        drop(tcp);
+    });
+    let sessions =
+        fast_sessions(Arc::new(AtomicU64::new(0))).with_stream_timeout(Duration::from_millis(50));
+    let (notice, _) = notices();
+    let wire = wire("gpt-6-luna");
+    let cancel = CancellationToken::new();
+    let result = timeout(
+        Duration::from_secs(2),
+        sessions.open(ws_request(
+            "openai-codex",
+            wire.session_id,
+            &base,
+            WsWire::Codex(&wire),
+            &notice,
+            &cancel,
+        )),
+    )
+    .await?;
+
+    assert!(matches!(
+        result,
+        Err(ProviderError::Limit(LimitError::StreamDuration))
+    ));
+    servers.abort_all();
+    Ok(())
+}
+
+#[tokio::test]
+async fn websocket_stream_ends_at_the_shared_turn_deadline() -> Result<(), Box<dyn Error>> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let base = format!("http://{}/backend-api/codex", listener.local_addr()?);
+    let mut servers = tokio::task::JoinSet::new();
+    servers.spawn(async move {
+        let (tcp, _) = listener.accept().await.expect("client connects");
+        let mut socket = accept_async(tcp).await.expect("handshake succeeds");
+        let _ = socket.next().await;
+        socket
+            .send(Message::Text(TEXT_DELTA.into()))
+            .await
+            .expect("first frame reaches client");
+        // The rest of the reply never arrives; the turn deadline fires long
+        // before this sleep ends.
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    });
+    let sessions =
+        fast_sessions(Arc::new(AtomicU64::new(0))).with_stream_timeout(Duration::from_millis(200));
+    let (notice, _) = notices();
+    let wire = wire("gpt-6-luna");
+    let mut stream = open_stream(&sessions, &base, &wire, &notice).await;
+
+    let mut saw_duration_limit = false;
+    while let Some(item) = stream.next().await {
+        if matches!(item, Err(ProviderError::Limit(LimitError::StreamDuration))) {
+            saw_duration_limit = true;
+            break;
+        }
+    }
+    assert!(
+        saw_duration_limit,
+        "the stream must end at the turn deadline"
+    );
+    servers.abort_all();
+    Ok(())
+}
