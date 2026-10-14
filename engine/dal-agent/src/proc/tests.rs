@@ -213,70 +213,142 @@ async fn proc_wait_sweeps_grandchild_holding_pipe_before_capture_join() {
     assert_eq!(result.status, ProcStatus::Exited { code: 0 });
 }
 
-// macOS uses a mandatory lifetime-only Seatbelt policy even when the
-// filesystem sandbox is off. Forking remains allowed, but a forked process
-// must not be able to escape the group owned by the host.
+// The escape probe must reach setsid(), setpgid(), and posix_spawn's
+// POSIX_SPAWN_SETPGROUP attribute through their literal syscall surfaces;
+// neither Rust nor the workspace offers them without unsafe. The probe is
+// compiled at test time by the system cc that building this crate already
+// requires on macOS.
 #[cfg(target_os = "macos")]
-#[tokio::test]
-async fn macos_forked_process_cannot_escape_with_setsid_or_setpgid() {
-    let temp = tempfile::tempdir().expect("temp workspace");
-    for (name, syscall) in [
-        ("setsid", "os.setsid()"),
-        ("setpgid", "os.setpgid(0, 0)"),
-    ] {
-        let script = format!(
-            "import os, sys\npid = os.fork()\nif pid == 0:\n    try:\n        {syscall}\n    except OSError:\n        os._exit(0)\n    os._exit(61)\n_, status = os.waitpid(pid, 0)\nsys.exit(os.waitstatus_to_exitcode(status))\n"
-        );
-        let argv = [
-            OsString::from("/usr/bin/python3"),
-            OsString::from("-c"),
-            OsString::from(script),
-        ];
-        let mut proc = spawn_approved(&temp, &format!("test-macos-{name}"), &argv, None, 0)
-            .await
-            .expect("spawn test child");
-        let result = tokio::time::timeout(
-            Duration::from_secs(10),
-            proc.wait(&CancellationToken::new()),
-        )
-        .await
-        .expect("blocked process escape settles capture")
-        .expect("wait test child");
-        assert_eq!(
-            result.status,
-            ProcStatus::Exited { code: 0 },
-            "{name} must be denied while fork stays permitted"
-        );
-    }
-}
+const MACOS_ESCAPE_PROBE_C: &str = r#"
+#include <signal.h>
+#include <spawn.h>
+#include <string.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
 
-// A spawn attribute can change the process group without an explicit
-// setpgid() call in the initiating program. Reject that bypass as well.
+extern char **environ;
+
+// Exit 0 when the sandbox denied the escape, 6x when it went through.
+int main(int argc, char **argv) {
+    if (argc < 2) {
+        return 64;
+    }
+    if (strcmp(argv[1], "setsid") == 0 || strcmp(argv[1], "setpgid") == 0) {
+        pid_t pid = fork();
+        if (pid < 0) {
+            return 65;
+        }
+        if (pid == 0) {
+            int escaped = strcmp(argv[1], "setsid") == 0
+                ? setsid() != (pid_t)-1
+                : setpgid(0, 0) == 0;
+            _exit(escaped ? 61 : 0);
+        }
+        int status = 0;
+        if (waitpid(pid, &status, 0) < 0) {
+            return 65;
+        }
+        return WIFEXITED(status) ? WEXITSTATUS(status) : 65;
+    }
+    if (strcmp(argv[1], "spawnpgroup") == 0) {
+        posix_spawnattr_t attr;
+        pid_t pid = 0;
+        char *child_argv[] = { "sleep", "30", 0 };
+        int rc;
+        if (posix_spawnattr_init(&attr) != 0) {
+            return 65;
+        }
+        posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP);
+        posix_spawnattr_setpgroup(&attr, 0);
+        rc = posix_spawn(&pid, "/bin/sleep", 0, &attr, child_argv, environ);
+        posix_spawnattr_destroy(&attr);
+        if (rc != 0) {
+            return 0;
+        }
+        for (int poll = 0; poll < 20; poll++) {
+            int status = 0;
+            struct timespec delay = { 0, 100 * 1000 * 1000 };
+            if (waitpid(pid, &status, WNOHANG) == pid) {
+                return WIFEXITED(status) && WEXITSTATUS(status) == 127 ? 0 : 63;
+            }
+            nanosleep(&delay, 0);
+        }
+        kill(pid, SIGKILL);
+        waitpid(pid, 0, 0);
+        return 63;
+    }
+    return 64;
+}
+"#;
+
+/// Compiles the escape probe with the system compiler through the checked
+/// spawn door; the compile itself runs under the lifetime policy on macOS.
 #[cfg(target_os = "macos")]
-#[tokio::test]
-async fn macos_posix_spawn_cannot_create_an_unowned_process_group() {
-    let temp = tempfile::tempdir().expect("temp workspace");
-    let script = "import os, sys\ntry:\n    pid = os.posix_spawn('/bin/sleep', ['sleep', '30'], os.environ, setpgroup=0)\nexcept OSError:\n    sys.exit(0)\nos.kill(pid, 9)\nos.waitpid(pid, 0)\nsys.exit(62)\n";
-    let argv = [
-        OsString::from("/usr/bin/python3"),
-        OsString::from("-c"),
-        OsString::from(script),
-    ];
-    let mut proc = spawn_approved(&temp, "test-macos-spawn-pgroup", &argv, None, 0)
-        .await
-        .expect("spawn test child");
-    let result = tokio::time::timeout(
-        Duration::from_secs(10),
-        proc.wait(&CancellationToken::new()),
+async fn compile_escape_probe(temp: &tempfile::TempDir) -> PathBuf {
+    let source = temp.path().join("escape-probe.c");
+    let binary = temp.path().join("escape-probe");
+    std::fs::write(&source, MACOS_ESCAPE_PROBE_C).expect("write probe source");
+    let mut proc = spawn_approved(
+        temp,
+        "test-macos-probe-cc",
+        &[
+            OsString::from("/usr/bin/cc"),
+            OsString::from("-o"),
+            binary.as_os_str().to_owned(),
+            source.as_os_str().to_owned(),
+        ],
+        Some(Duration::from_secs(60)),
+        4_096,
     )
     .await
-    .expect("spawn-group escape test settles")
-    .expect("wait test child");
+    .expect("spawn cc for the escape probe");
+    let result = proc
+        .wait(&CancellationToken::new())
+        .await
+        .expect("wait for the probe compile");
     assert_eq!(
         result.status,
         ProcStatus::Exited { code: 0 },
-        "posix_spawn setpgroup must not bypass the mandatory lifetime policy"
+        "cc could not build the escape probe: {}",
+        String::from_utf8_lossy(&result.preview)
     );
+    binary
+}
+
+// macOS keeps a mandatory lifetime-only Seatbelt policy even when the
+// filesystem sandbox is off: a descendant must not leave the group the
+// host owns, whether it calls setsid() or setpgid() after a fork or asks
+// posix_spawn for a new group through its spawn attributes.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn macos_descendants_cannot_escape_the_owned_process_group() {
+    let temp = tempfile::tempdir().expect("temp workspace");
+    let probe = compile_escape_probe(&temp).await;
+    for mode in ["setsid", "setpgid", "spawnpgroup"] {
+        let mut proc = spawn_approved(
+            &temp,
+            &format!("test-macos-escape-{mode}"),
+            &[probe.as_os_str().to_owned(), OsString::from(mode)],
+            None,
+            0,
+        )
+        .await
+        .expect("spawn the escape probe");
+        let result = tokio::time::timeout(
+            Duration::from_secs(15),
+            proc.wait(&CancellationToken::new()),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{mode} probe did not settle"))
+        .expect("wait for the escape probe");
+        assert_eq!(
+            result.status,
+            ProcStatus::Exited { code: 0 },
+            "{mode} escape must be denied by the mandatory lifetime policy"
+        );
+    }
 }
 
 fn approved_for(call: &CallId, digest: Option<[u8; 32]>, roots: Vec<PathBuf>) -> Approved {
