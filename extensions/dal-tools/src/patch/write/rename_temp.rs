@@ -357,6 +357,59 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn rename_publication_remains_in_the_opened_directory_after_parent_swap() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let outside = tempfile::tempdir().expect("outside");
+        let destination = Path::new("nested/target.txt");
+        let (pending, mut temp) =
+            RenameTemp::create(workspace.path(), destination).expect("stage rename");
+        temp.write_all(b"edited").expect("write staged bytes");
+        temp.sync_all().expect("sync staged bytes");
+        drop(temp);
+
+        std::fs::rename(
+            workspace.path().join("nested"),
+            workspace.path().join("moved"),
+        )
+        .expect("move opened directory");
+        std::os::unix::fs::symlink(outside.path(), workspace.path().join("nested"))
+            .expect("replace old directory name with symlink");
+
+        pending.publish().expect("publish relative to opened parent");
+        assert_eq!(
+            std::fs::read(workspace.path().join("moved/target.txt")).expect("pinned target"),
+            b"edited"
+        );
+        assert!(!outside.path().join("target.txt").exists());
+        pending.rollback().expect("remove by pinned parent");
+        assert!(!workspace.path().join("moved/target.txt").exists());
+        assert!(!outside.path().join("target.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rename_publication_refuses_a_dangling_symlink_destination() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let outside = tempfile::tempdir().expect("outside");
+        let destination = Path::new("nested/target.txt");
+        let (pending, mut temp) =
+            RenameTemp::create(workspace.path(), destination).expect("stage rename");
+        temp.write_all(b"edited").expect("write staged bytes");
+        drop(temp);
+
+        let target = workspace.path().join(destination);
+        std::os::unix::fs::symlink(outside.path().join("missing.txt"), &target)
+            .expect("race a dangling link into the destination");
+        pending
+            .publish()
+            .expect_err("even a dangling symlink reserves the destination");
+        assert!(std::fs::symlink_metadata(&target).is_ok());
+        assert!(!outside.path().join("missing.txt").exists());
+        pending.cleanup();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn rename_parent_symlink_is_not_followed() {
         let workspace = tempfile::tempdir().expect("workspace");
         let outside = tempfile::tempdir().expect("outside");
