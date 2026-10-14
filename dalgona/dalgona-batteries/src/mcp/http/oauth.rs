@@ -1216,6 +1216,17 @@ mod tests {
         net::TcpListener,
     };
 
+    use crate::work::support::FakeServices;
+
+    fn test_caller(services: &Arc<FakeServices>) -> Caller {
+        dal_agent::ext::HookCx::for_test(
+            Arc::clone(services) as Arc<dyn Services>,
+            dal_core::SessionId::new_v7(),
+            None,
+        )
+        .caller
+    }
+
     /// Serves exactly `expected` token requests, then returns.
     async fn token_server(listener: TcpListener, expected: usize, count: Arc<AtomicUsize>) {
         for _ in 0..expected {
@@ -1309,8 +1320,18 @@ mod tests {
             policy: NetworkPolicy::for_target(&target),
         };
         let cancel = CancellationToken::new();
+        let services = Arc::new(FakeServices::default());
+        let who = test_caller(&services);
         let (result, paths) = tokio::join!(
-            discover(&oauth, &target, &challenge, Duration::from_secs(3), &cancel,),
+            discover(
+                &oauth,
+                &target,
+                &challenge,
+                services.as_ref(),
+                &who,
+                Duration::from_secs(3),
+                &cancel,
+            ),
             server,
         );
         assert!(matches!(result, Err(McpError::IssuerMismatch)));
@@ -1340,8 +1361,18 @@ mod tests {
             policy: NetworkPolicy::for_target(&target),
         };
         let cancel = CancellationToken::new();
+        let services = Arc::new(FakeServices::default());
+        let who = test_caller(&services);
         let (result, _) = tokio::join!(
-            discover(&oauth, &target, &challenge, Duration::from_secs(3), &cancel,),
+            discover(
+                &oauth,
+                &target,
+                &challenge,
+                services.as_ref(),
+                &who,
+                Duration::from_secs(3),
+                &cancel,
+            ),
             server,
         );
         let discovered = result.expect("bound metadata");
@@ -1349,6 +1380,125 @@ mod tests {
         assert_eq!(discovered.resource, auth::canonical_resource(&target));
         assert!(discovered.require_issuer_parameter);
         assert_eq!(discovered.scopes, vec!["files:read"]);
+    }
+
+
+    #[tokio::test]
+    async fn cross_origin_resource_metadata_requires_approval_before_get() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("unrelated local service");
+        let address = listener.local_addr().expect("unrelated address");
+        let target = Url::parse("http://127.0.0.1:9000/mcp").expect("MCP target");
+        let challenge = Challenge {
+            resource_metadata: Some(format!("http://{address}/metadata")),
+            ..Challenge::default()
+        };
+        let policy = NetworkPolicy::for_target(&target);
+        let oauth = OAuthClient {
+            client: Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .dns_resolver(policy.resolver())
+                .build()
+                .expect("OAuth client"),
+            policy,
+        };
+        let services = Arc::new(FakeServices::default());
+        let who = test_caller(&services);
+        let cancel = CancellationToken::new();
+
+        let rejected = discover(
+            &oauth,
+            &target,
+            &challenge,
+            services.as_ref(),
+            &who,
+            Duration::from_secs(3),
+            &cancel,
+        )
+        .await;
+        assert!(matches!(rejected, Err(McpError::NoAskFrontEnd)));
+        assert_eq!(services.asked_count(), 1);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), listener.accept())
+                .await
+                .is_err(),
+            "declined metadata origin must receive no request"
+        );
+    }
+
+    #[tokio::test]
+    async fn denied_registration_never_sends_a_post() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("registration service");
+        let address = listener.local_addr().expect("registration address");
+        let target = Url::parse(&format!("http://{address}/mcp")).expect("MCP target");
+        let registration_endpoint = target.join("/register").expect("registration URL");
+        let discovery = Discovery {
+            issuer: format!("http://{address}/issuer"),
+            resource: auth::canonical_resource(&target),
+            authorization_endpoint: target.join("/authorize").expect("authorization URL"),
+            token_endpoint: target.join("/token").expect("token URL"),
+            registration_endpoint: Some(registration_endpoint),
+            scopes: Vec::new(),
+            require_issuer_parameter: false,
+        };
+        let plan = AuthorizePlan {
+            target: &target,
+            discovery: &discovery,
+            existing: None,
+            requested_scope: None,
+            client_version: "test",
+        };
+        let services = Arc::new(FakeServices::default());
+        let who = test_caller(&services);
+        let cancel = CancellationToken::new();
+        let client = Client::builder().no_proxy().build().expect("OAuth client");
+
+        let rejected = registered_or_stored_client_id(
+            &client,
+            &NetworkPolicy::for_target(&target),
+            &plan,
+            "http://127.0.0.1:12345/callback",
+            services.as_ref(),
+            &who,
+            &cancel,
+        )
+        .await;
+        assert!(matches!(rejected, Err(McpError::NoAskFrontEnd)));
+        assert_eq!(services.asked_count(), 1);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), listener.accept())
+                .await
+                .is_err(),
+            "registration must not POST before affirmative consent"
+        );
+    }
+
+    #[test]
+    fn granting_one_origin_does_not_authorize_other_ports_or_hosts() {
+        let target = Url::parse("http://127.0.0.1:9000/mcp").expect("MCP target");
+        let policy = NetworkPolicy::for_target(&target);
+        let approved = Url::parse("http://127.0.0.1:9001/metadata").expect("approved URL");
+        policy
+            .approved_origins
+            .write()
+            .expect("origin policy")
+            .insert(approved.origin().ascii_serialization());
+
+        assert!(policy.check_url(&approved).is_ok());
+        assert!(
+            policy
+                .check_url(&Url::parse("http://127.0.0.1:9002/token").expect("different port"))
+                .is_err()
+        );
+        assert!(
+            policy
+                .check_url(&Url::parse("http://127.0.0.2:9001/token").expect("different host"))
+                .is_err()
+        );
     }
 
     #[test]
@@ -1564,8 +1714,15 @@ mod tests {
             &Url::parse("http://127.0.0.1:9000/mcp").expect("local target"),
         );
         let loopback = Url::parse("http://127.0.0.1:9001/.well-known").expect("loopback URL");
+        let same_origin = Url::parse("http://127.0.0.1:9000/.well-known").expect("same origin");
         assert!(public.check_url(&loopback).is_err());
-        assert!(local.check_url(&loopback).is_ok());
+        assert!(local.check_url(&loopback).is_err());
+        assert!(local.check_url(&same_origin).is_ok());
+        assert!(
+            local
+                .check_url(&Url::parse("http://127.0.0.2:9000/meta").expect("different host"))
+                .is_err()
+        );
         let private = Url::parse("https://10.0.0.7/.well-known").expect("private URL");
         assert!(public.check_url(&private).is_err());
         let local_v6 =
