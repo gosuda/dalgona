@@ -160,7 +160,7 @@ async fn one_run_line_per_run_and_a_half_pass_rate_when_one_of_two_fails() {
     assert_eq!(lines[0].status, Status::Passed);
     assert_eq!(lines[1].status, Status::Failed);
     assert_eq!(lines[1].reason.as_deref(), Some("the check returned false"));
-    assert_eq!(report.cases[0].pass_rate, 0.5);
+    assert!((report.cases[0].pass_rate - 0.5).abs() < f64::EPSILON);
     assert_eq!(report.cases[0].repeats, 2);
     // Each run got its own workspace, seeded and then removed.
     let spaces = fake.workspaces.lock().unwrap().clone();

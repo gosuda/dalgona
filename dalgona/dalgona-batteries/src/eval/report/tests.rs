@@ -111,7 +111,7 @@ fn a_missing_cost_is_null_and_a_skipped_run_never_counts_as_failed() {
         (row.passed, row.failed, row.skipped, row.repeats),
         (1, 0, 1, 2)
     );
-    assert_eq!(row.pass_rate, 0.5);
+    assert!((row.pass_rate - 0.5).abs() < f64::EPSILON);
     assert_eq!(row.cost_usd_mean, None);
     assert_eq!(row.tokens_in_mean, Some(10.0));
     assert!(report.to_json().unwrap().ends_with("\"interrupted\":true}"));
