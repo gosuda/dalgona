@@ -61,20 +61,21 @@ fn run_report_is_delivered_exactly_once() -> support::TestResult<()> {
 
 /// Grants every bundled extension the services it declares, as a person
 /// would on first use, so no grant question interrupts the run.
-async fn grant_bundled_extensions(data: &Path, user: &str) -> support::TestResult<()> {
+async fn grant_bundled_extensions(
+    data: &Path,
+    workspace: &Path,
+    user: &str,
+) -> support::TestResult<()> {
     let product = support::build_product(data.to_path_buf(), Some(user))?;
     for extension in &product.extensions {
         let services = extension.inject().capabilities();
-        if services.is_empty() {
+        if services.is_empty() || extension.origin() == dal_core::Origin::Builtin {
             continue;
         }
         dal_agent::ext::grants::GrantStore::new(data.to_path_buf())
             .grant(
-                dal_agent::ext::grants::GrantKey {
-                    extension: dal_core::Name::parse(extension.name())?,
-                    origin: dal_core::Origin::Bundled,
-                    services,
-                },
+                dal_agent::ext::grants::GrantKey::for_extension(extension, workspace)
+                        .expect("registered extension has a code identity"),
                 dal_core::ClientId::new("once-gate"),
                 dal_core::Timestamp::now(),
             )
@@ -90,7 +91,7 @@ async fn deliver_the_run_report(
     workspace: PathBuf,
     user: &str,
 ) -> support::TestResult<()> {
-    grant_bundled_extensions(data, user).await?;
+    grant_bundled_extensions(data, &workspace, user).await?;
     let host = support::start_dalgona_with_config(data.to_path_buf(), Some(user)).await?;
     let agent = host
         .open(
