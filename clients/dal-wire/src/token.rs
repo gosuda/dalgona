@@ -484,11 +484,11 @@ mod win {
             FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
             FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle, OPEN_EXISTING,
         },
-        System::{
-            SystemServices::ACCESS_ALLOWED_ACE_TYPE,
-            Threading::{GetCurrentProcess, OpenProcessToken},
-        },
+        System::Threading::{GetCurrentProcess, OpenProcessToken},
     };
+
+    // Win32 ACCESS_ALLOWED_ACE_TYPE is a byte in ACE_HEADER.
+    const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
 
     fn wide(text: &str) -> Vec<u16> {
         text.encode_utf16().chain(std::iter::once(0)).collect()
