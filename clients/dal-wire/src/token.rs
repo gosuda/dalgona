@@ -322,7 +322,11 @@ fn open_token_file(path: &Path) -> Result<File, TokenError> {
             path: path.to_owned(),
         });
     }
-    let file = File::open(path).map_err(|source| {
+    #[cfg(windows)]
+    let file = win::open_for_read(path);
+    #[cfg(not(windows))]
+    let file = File::open(path);
+    let file = file.map_err(|source| {
         if source.kind() == io::ErrorKind::NotFound {
             TokenError::Missing {
                 path: path.to_owned(),
@@ -553,9 +557,9 @@ mod win {
         }))
     }
 
-    /// Compares the opened file to a second, non-following open of the path.
-    /// Reparse points and replacements cannot substitute a different token.
-    pub(super) fn same_file(path: &Path, opened: &File) -> io::Result<bool> {
+    /// Opens the token itself rather than following a replaced reparse point.
+    /// The returned handle is also the handle checked for ACLs and read for the token.
+    pub(super) fn open_for_read(path: &Path) -> io::Result<File> {
         let path_name = path
             .as_os_str()
             .encode_wide()
@@ -575,7 +579,13 @@ mod win {
         if raw == INVALID_HANDLE_VALUE {
             return Err(io::Error::last_os_error());
         }
-        let current = unsafe { File::from_raw_handle(raw) };
+        Ok(unsafe { File::from_raw_handle(raw) })
+    }
+
+    /// Compares two independent non-following opens by stable file identity.
+    /// A rename or reparse substitution between opens fails closed.
+    pub(super) fn same_file(path: &Path, opened: &File) -> io::Result<bool> {
+        let current = open_for_read(path)?;
         let current_info = file_information(&current)?;
         let opened_info = file_information(opened)?;
         Ok(current_info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT == 0
@@ -823,7 +833,7 @@ mod windows_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("serve.token");
         create(&path, false).expect("create original token");
-        let original = File::open(&path).expect("open original");
+        let original = win::open_for_read(&path).expect("open original");
         assert!(win::same_file(&path, &original).expect("same file"));
 
         fs::rename(&path, dir.path().join("old.token")).expect("rename token");
