@@ -356,7 +356,7 @@ async fn websocket_upgrades_hold_connection_slots_until_disconnect() {
         let codex = format!("ws://{addr}/codex/ws");
         let mut clients = Vec::new();
         for index in 0..crate::serve::CONN_CAP {
-            let url = if index % 2 == 0 { &ws } else { &codex };
+            let url = if index.is_multiple_of(2) { &ws } else { &codex };
             let (client, response) = tokio::time::timeout(
                 Duration::from_secs(10),
                 tokio_tungstenite::connect_async(url.as_str()),
