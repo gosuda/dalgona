@@ -467,6 +467,7 @@ fn caller(ext: &str, inject: &[&str], turn: Option<TurnId>) -> Caller {
         CallerKind::Handler,
         turn,
     )
+    .with_test_digest()
 }
 
 fn turn() -> TurnId {
