@@ -861,13 +861,10 @@ async fn a_failed_sidecar_write_rolls_the_map_back() {
     )
     .await;
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).expect("restore");
-    let OpOutcome::Terminal(HostTerminal::Denied { reason, .. }) = failed else {
-        panic!("a failed durable write denies the op: {failed:?}");
+    let OpOutcome::Failed { failure, .. } = failed else {
+        panic!("a failed durable write fails the op: {failed:?}");
     };
-    let DenyReason::Unavailable { what } = reason else {
-        panic!("the sidecar is the unavailable piece: {reason:?}");
-    };
-    assert_eq!(what.as_ref(), "state");
+    assert_eq!(failure.code, FailureCode::Unavailable, "{failure:?}");
     // The rolled-back op never minted a revision or wrote a value: the same
     // `expected` still commits, and no phantom record appears.
     let commit = call_op(
@@ -949,13 +946,12 @@ async fn state_ops_fail_closed_on_an_ephemeral_session() {
         r#"{"key":"counter"}"#,
     )
     .await;
-    let OpOutcome::Terminal(HostTerminal::Denied { reason, .. }) = outcome else {
+    // The catchable `unavailable` code lets `ctx.try_call` degrade.
+    let OpOutcome::Failed { failure, .. } = outcome else {
         panic!("an ephemeral session keeps the typed outcome: {outcome:?}");
     };
-    let DenyReason::Unavailable { what } = reason else {
-        panic!("the state store is the unavailable piece: {reason:?}");
-    };
-    assert_eq!(what.as_ref(), "state");
+    assert_eq!(failure.code, FailureCode::Unavailable, "{failure:?}");
+    assert_eq!(&*failure.message, "state is unavailable in this session");
 }
 
 #[tokio::test]

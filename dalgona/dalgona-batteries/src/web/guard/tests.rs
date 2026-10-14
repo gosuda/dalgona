@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
 
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -280,8 +280,8 @@ fn dns_query(host: &str) -> Vec<u8> {
     message
 }
 
-/// Answers a query with one A record for `address`.
-fn dns_reply(query: &[u8], address: Ipv4Addr) -> Vec<u8> {
+/// Answers a query with one A or AAAA record for `address`.
+fn dns_reply(query: &[u8], address: IpAddr) -> Vec<u8> {
     let mut end = 12;
     while query[end] != 0 {
         end += usize::from(query[end]) + 1;
@@ -289,8 +289,13 @@ fn dns_reply(query: &[u8], address: Ipv4Addr) -> Vec<u8> {
     let question_end = end + 5;
     let mut reply = vec![query[0], query[1], 0x81, 0x80, 0, 1, 0, 1, 0, 0, 0, 0];
     reply.extend_from_slice(&query[12..question_end]);
-    reply.extend_from_slice(&[0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 0, 0, 4]);
-    reply.extend_from_slice(&address.octets());
+    let (kind, rdata) = match address {
+        IpAddr::V4(address) => (1, address.octets().to_vec()),
+        IpAddr::V6(address) => (28, address.octets().to_vec()),
+    };
+    let length = u8::try_from(rdata.len()).expect("short rdata");
+    reply.extend_from_slice(&[0xc0, 0x0c, 0, kind, 0, 1, 0, 0, 0, 0, 0, length]);
+    reply.extend_from_slice(&rdata);
     reply
 }
 
@@ -303,19 +308,29 @@ impl Lookup for UdpLookup {
     fn lookup<'a>(&'a self, host: &'a str) -> LookupFuture<'a> {
         Box::pin(async move {
             let socket = UdpSocket::bind("127.0.0.1:0").await?;
-            socket.send_to(&dns_query(host), self.server).await?;
+            let query = dns_query(host);
+            socket.send_to(&query, self.server).await?;
             let mut buffer = [0u8; 512];
             let (length, _) = socket.recv_from(&mut buffer).await?;
-            let rdata: [u8; 4] = buffer[length - 4..length]
-                .try_into()
-                .map_err(io::Error::other)?;
-            Ok(vec![IpAddr::V4(Ipv4Addr::from(rdata))])
+            // The answer follows the echoed question: a name pointer, then
+            // type, class, TTL, length, and the address bytes.
+            let answer = buffer
+                .get(query.len()..length)
+                .ok_or_else(|| io::Error::other("short dns reply"))?;
+            let rdata = answer.get(12..).unwrap_or_default();
+            let address = match answer.get(2..4) {
+                Some([0, 1]) => <[u8; 4]>::try_from(rdata).map(IpAddr::from),
+                Some([0, 28]) => <[u8; 16]>::try_from(rdata).map(IpAddr::from),
+                _ => return Err(io::Error::other("unexpected dns answer type")),
+            }
+            .map_err(io::Error::other)?;
+            Ok(vec![address])
         })
     }
 }
 
 /// Answers one query per entry of `answers`, in order, counting each query.
-async fn serve_dns(socket: &UdpSocket, answers: &[Ipv4Addr], queries: &AtomicUsize) {
+async fn serve_dns(socket: &UdpSocket, answers: &[IpAddr], queries: &AtomicUsize) {
     for answer in answers {
         let mut buffer = [0u8; 512];
         let (length, peer) = socket.recv_from(&mut buffer).await.expect("dns query");
@@ -353,13 +368,14 @@ async fn connection_arrives(listener: &TcpListener, window: Duration) -> bool {
         .is_ok()
 }
 
-/// Binds one port on both `127.0.0.2` (the public stand-in) and `127.0.0.1`
-/// (the internal service the rebinding answer points at).
+/// Binds one port on both `127.0.0.1` (the public stand-in) and `::1` (the
+/// internal service the rebinding answer points at). Every supported OS has
+/// both loopback addresses; a second IPv4 loopback address is Linux-only.
 async fn paired_listeners() -> (TcpListener, TcpListener, u16) {
     for _ in 0..64 {
-        let public = TcpListener::bind("127.0.0.2:0").await.expect("bind public");
+        let public = TcpListener::bind("127.0.0.1:0").await.expect("bind public");
         let port = public.local_addr().expect("public port").port();
-        if let Ok(internal) = TcpListener::bind(("127.0.0.1", port)).await {
+        if let Ok(internal) = TcpListener::bind(("::1", port)).await {
             return (public, internal, port);
         }
     }
@@ -368,8 +384,8 @@ async fn paired_listeners() -> (TcpListener, TcpListener, u16) {
 
 #[tokio::test]
 async fn a_rebinding_name_connects_only_to_the_validated_address() {
-    // `rebind.test` answers 127.0.0.2 once, then 127.0.0.1: the first answer
-    // is the "public" origin (the test trusts 127.0.0.2), the second is the
+    // `rebind.test` answers 127.0.0.1 once, then ::1: the first answer is
+    // the "public" origin (the test trusts 127.0.0.1), the second is the
     // internal service an attacker wants the fetch to reach.
     let (public, internal, port) = paired_listeners().await;
     let dns = UdpSocket::bind("127.0.0.1:0").await.expect("bind dns");
@@ -377,7 +393,7 @@ async fn a_rebinding_name_connects_only_to_the_validated_address() {
     let queries = AtomicUsize::new(0);
     let guard = Guard {
         lookup: Arc::new(UdpLookup { server }),
-        public: |address| address == ip("127.0.0.2") || is_global(address),
+        public: |address| address == ip("127.0.0.1") || is_global(address),
     };
     let target = url(&format!("http://rebind.test:{port}/secret"));
 
@@ -386,7 +402,7 @@ async fn a_rebinding_name_connects_only_to_the_validated_address() {
             .pin(&target)
             .await
             .expect("the first answer validates");
-        assert_eq!(pinned.url.host_str(), Some("127.0.0.2"));
+        assert_eq!(pinned.url.host_str(), Some("127.0.0.1"));
         let host_header = pinned.host_header.clone().expect("the original authority");
         assert_eq!(host_header, format!("rebind.test:{port}"));
 
@@ -412,7 +428,10 @@ async fn a_rebinding_name_connects_only_to_the_validated_address() {
         (body, lookups_after_fetch, rebound)
     };
 
-    let answers = [Ipv4Addr::new(127, 0, 0, 2), Ipv4Addr::LOCALHOST];
+    let answers = [
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(Ipv6Addr::LOCALHOST),
+    ];
     let ((), head, internal_reached, (body, lookups_after_fetch, rebound)) = tokio::join!(
         serve_dns(&dns, &answers, &queries),
         serve_one(&public),
