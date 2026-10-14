@@ -6,8 +6,8 @@ use std::time::Duration;
 use dal_agent::{Env, Host, Product};
 use dal_core::{
     Answer, AssistantRoute, AssistantStop, Block, CallGrant, CallId, Choice, Config, ConfigProduct,
-    EntryId, EntryKind, EntryView, ExecApproval, Family, JobEnd, JobId, JournalPart, Owner, Preview, Question,
-    RawJson, Request, RequestId, SessionId, SessionInfo, Stop, StreamChannel, Timestamp,
+    EntryId, EntryKind, EntryView, ExecApproval, Family, JobEnd, JobId, JournalPart, Owner, Preview,
+    Question, RawJson, Request, RequestId, SessionId, SessionInfo, Stop, StreamChannel, Timestamp,
     ToolOutcomeView, TreeDelta, TurnId, UpdateKind, Usage, Workspace,
 };
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
@@ -337,6 +337,7 @@ fn approval_grant_text_carries_call_scope() {
     assert_eq!(params["command"].as_str(), Some("git push origin main"));
     assert_eq!(params["cwd"].as_str(), Some("/w/sub"));
 }
+
 #[test]
 fn codex_refuses_exec_approval_without_bound_execution_context() {
     let request = request(Question::Approval {
