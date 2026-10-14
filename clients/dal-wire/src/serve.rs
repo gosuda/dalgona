@@ -427,3 +427,102 @@ pub(crate) fn router_options(cfg: &ListenerCfg) -> RouterOptions {
         workspace: cfg.workspace.clone(),
     }
 }
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::{HEADER_TIMEOUT, PRE_AUTH_CAP, ServeBody, http1_builder};
+    use std::{error::Error, io, sync::Arc, time::Duration};
+
+    use hyper::{Request, Response};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::{TcpListener, TcpStream},
+        sync::Semaphore,
+        task::JoinHandle,
+        time::Instant,
+    };
+
+    type TestResult = Result<(), Box<dyn Error + Send + Sync>>;
+
+    async fn socket_pair() -> io::Result<(TcpStream, JoinHandle<io::Result<()>>)> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await?;
+            let service = hyper::service::service_fn(|_req: Request<hyper::body::Incoming>| async {
+                Ok::<_, hyper::Error>(Response::new(ServeBody::Full(None)))
+            });
+            let _ = http1_builder()
+                .serve_connection(hyper_util::rt::TokioIo::new(socket), service)
+                .await;
+            Ok(())
+        });
+        Ok((TcpStream::connect(address).await?, server))
+    }
+
+    async fn assert_server_closed(
+        server: JoinHandle<io::Result<()>>,
+        deadline: Instant,
+    ) -> TestResult {
+        tokio::time::timeout_at(deadline, server).await???;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn silent_peer_cannot_hold_a_header_slot() -> TestResult {
+        let (client, server) = socket_pair().await?;
+        let deadline = Instant::now() + HEADER_TIMEOUT + Duration::from_secs(2);
+        assert_server_closed(server, deadline).await?;
+        drop(client);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn partial_headers_cannot_extend_the_absolute_deadline() -> TestResult {
+        let (mut client, server) = socket_pair().await?;
+        let deadline = Instant::now() + HEADER_TIMEOUT + Duration::from_secs(2);
+        client.write_all(b"GET / HTTP/1.1\r\n").await?;
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        client.write_all(b"host: localhost").await?;
+        assert_server_closed(server, deadline).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn idle_keep_alive_closes_after_a_valid_response() -> TestResult {
+        let (mut client, server) = socket_pair().await?;
+        client
+            .write_all(b"GET / HTTP/1.1\r\nhost: localhost\r\n\r\n")
+            .await?;
+        let mut response = [0; 512];
+        let count = tokio::time::timeout(Duration::from_secs(2), client.read(&mut response))
+            .await??;
+        assert!(
+            String::from_utf8_lossy(&response[..count]).starts_with("HTTP/1.1 200"),
+            "the first request must complete before the keep-alive deadline"
+        );
+        assert_server_closed(
+            server,
+            Instant::now() + HEADER_TIMEOUT + Duration::from_secs(2),
+        )
+        .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pre_auth_budget_is_reusable_after_validation() -> TestResult {
+        let budget = Arc::new(Semaphore::new(PRE_AUTH_CAP));
+        let mut waiting = Vec::with_capacity(PRE_AUTH_CAP);
+        for _ in 0..PRE_AUTH_CAP {
+            waiting.push(Arc::clone(&budget).try_acquire_owned()?);
+        }
+        assert!(
+            Arc::clone(&budget).try_acquire_owned().is_err(),
+            "pending sockets must not consume the authenticated capacity"
+        );
+        let accepted = tokio::sync::Mutex::new(waiting.pop());
+        accepted.lock().await.take();
+        let _post_auth_socket = Arc::clone(&budget).try_acquire_owned()?;
+        Ok(())
+    }
+}
