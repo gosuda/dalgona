@@ -343,7 +343,10 @@ pub(crate) async fn run(
     let (files, reason) = narrow(search, &plan, scope, call.workspace, universe.files).await;
     let keep_all = search.reranks(call);
     let limit = args.limit;
-    let scanned = tokio::task::spawn_blocking(move || scan(files, &matcher, keep_all, limit))
+    let workspace = call.workspace.to_path_buf();
+    let scanned = tokio::task::spawn_blocking(move || {
+        scan(&workspace, files, &matcher, keep_all, limit)
+    })
         .await
         .map_err(|error| SearchError::msg(format!("search: {error}")))??;
     let mut order: Vec<usize> = (0..scanned.hits.len()).collect();
@@ -534,6 +537,7 @@ impl Sink for Lines {
 
 /// Verifies every candidate against the bytes read now, in path order.
 fn scan(
+    workspace: &Path,
     files: Vec<Target>,
     matcher: &RegexMatcher,
     keep_all: bool,
@@ -549,12 +553,9 @@ fn scan(
         total: 0,
     };
     for target in files {
-        let fits = std::fs::metadata(&target.abs)
-            .is_ok_and(|meta| meta.len() <= find::MAX_INDEXABLE_BYTES);
-        if !fits {
-            continue;
-        }
-        let Ok(bytes) = std::fs::read(&target.abs) else {
+        let Ok(bytes) =
+            crate::scoped::read_limited(workspace, &target.abs, find::MAX_INDEXABLE_BYTES)
+        else {
             continue;
         };
         let fits = u64::try_from(bytes.len()).is_ok_and(|len| len <= find::MAX_INDEXABLE_BYTES);

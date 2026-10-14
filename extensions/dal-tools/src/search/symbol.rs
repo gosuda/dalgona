@@ -221,7 +221,7 @@ pub(crate) async fn run(
         cut,
         queue_full,
         failures,
-    } = funnel(targets, pattern).await;
+    } = funnel(targets, pattern, call.workspace).await;
     let complete = !cut && !queue_full && failures.is_empty();
     let mut seen_rows = Vec::new();
     let mut rerank_note = None;
@@ -383,16 +383,19 @@ struct Funnel {
 }
 
 /// Reads a candidate when it is a text file of at most 16 MiB; the size is checked first.
-async fn read_parsable(abs: &Path) -> Option<Vec<u8>> {
-    let meta = tokio::fs::metadata(abs).await.ok()?;
-    if meta.len() > find::MAX_INDEXABLE_BYTES {
-        return None;
-    }
-    let bytes = tokio::fs::read(abs).await.ok()?;
+async fn read_parsable(workspace: &Path, abs: &Path) -> Option<Vec<u8>> {
+    let workspace = workspace.to_path_buf();
+    let abs = abs.to_path_buf();
+    let bytes = tokio::task::spawn_blocking(move || {
+        crate::scoped::read_limited(&workspace, &abs, find::MAX_INDEXABLE_BYTES)
+    })
+    .await
+    .ok()?
+    .ok()?;
     parsable(&bytes).then_some(bytes)
 }
 
-async fn funnel(targets: Vec<Target>, pattern: &Pattern) -> Funnel {
+async fn funnel(targets: Vec<Target>, pattern: &Pattern, workspace: &Path) -> Funnel {
     let mut out = Funnel::default();
     let mut parsed = 0;
     for target in targets {
@@ -400,7 +403,7 @@ async fn funnel(targets: Vec<Target>, pattern: &Pattern) -> Funnel {
             out.cut = true;
             break;
         }
-        let Some(bytes) = read_parsable(&target.abs).await else {
+        let Some(bytes) = read_parsable(workspace, &target.abs).await else {
             continue;
         };
         parsed += 1;
@@ -501,12 +504,9 @@ async fn outline(args: &SearchArgs, call: &Call<'_>) -> Result<(String, SymbolPa
             "search: {raw} is larger than 16 MiB; symbol outline is skipped."
         )));
     }
-    let bytes = tokio::fs::read(&scope.abs)
-        .await
-        .map_err(|_| SearchError::msg(format!("search: {raw} does not exist")))?;
-    if !parsable(&bytes) {
+    let Some(bytes) = read_parsable(call.workspace, &scope.abs).await else {
         return Err(no_support());
-    }
+    };
     let shown = scope.self_target().shown;
     match parse::definitions(&scope.abs, &bytes).await {
         Ok(defs) => {
