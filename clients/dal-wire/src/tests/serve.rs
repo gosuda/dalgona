@@ -266,7 +266,10 @@ async fn public_non_loopback_bind_is_refused_before_token_load() {
         let Err(error) = attempted else {
             panic!("public plaintext listener started on {bind}");
         };
-        assert!(matches!(&error, ServeError::NotLoopback { .. }), "{error:?}");
+        assert!(
+            matches!(&error, ServeError::NotLoopback { .. }),
+            "{error:?}"
+        );
     }
 }
 

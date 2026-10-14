@@ -16,7 +16,7 @@ Prebuilt binaries for Linux, macOS, and Windows on x86_64 and aarch64 must attac
 
 In process, the host-agent seam must provide five operations over one snapshot: read, change stream, command path, request-response, and blob read.
 Across processes, dal must serve a JSON-RPC protocol over standard input/output and local sockets matching the in-process seam.
-dal serve must bind to loopback by default without authentication, while public endpoints must bind all interfaces and require a token.
+dal serve must bind only to loopback, unauthenticated by default, while public mode must require a token for remote clients arriving through a trusted HTTPS/WSS reverse proxy.
 Headless JSON mode must emit one prompt result on success or one JSON-RPC error object on failure, without streaming handshakes.
 dal must support inline terminal, fullscreen terminal user interface, headless print, headless JSON, ACP, RPC, router, and A2A interfaces.
 The ACP server must support protocolVersion 1 and protocolVersion 2.
