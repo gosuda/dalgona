@@ -70,7 +70,11 @@ impl ConfiguredPlugin {
     ///
     /// # Errors
     /// Returns the backing store's typed error when the grant cannot be read.
-    pub async fn status(&self, grants: &GrantStore, workspace: &Path) -> Result<GrantStatus, GrantStoreError> {
+    pub async fn status(
+        &self,
+        grants: &GrantStore,
+        workspace: &Path,
+    ) -> Result<GrantStatus, GrantStoreError> {
         if self.capabilities.is_empty() {
             return Ok(GrantStatus::NotRequired);
         }
@@ -125,7 +129,9 @@ pub async fn run(
     plugins.sort_by(|left, right| left.name.as_str().cmp(right.name.as_str()));
 
     match command {
-        PluginCommand::Grant { name } => grant_plugin(&name, &plugins, grants, workspace, by, stdout).await,
+        PluginCommand::Grant { name } => {
+            grant_plugin(&name, &plugins, grants, workspace, by, stdout).await
+        }
         PluginCommand::Revoke { name } => revoke_plugin(&name, grants, stdout).await,
         PluginCommand::List => list_plugins(&plugins, grants, workspace, stdout).await,
     }
