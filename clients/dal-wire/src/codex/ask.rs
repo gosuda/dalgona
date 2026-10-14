@@ -8,7 +8,7 @@
 
 use std::path::Path;
 
-use dal_core::{Answer, CallGrant, Choice, Preview, Question, RawJson, Request, TurnId};
+use dal_core::{Answer, CallGrant, Choice, ExecPreview, Preview, Question, RawJson, Request, TurnId};
 use sonic_rs::{JsonContainerTrait, JsonValueMutTrait, JsonValueTrait, Value};
 
 use super::items::now_ms;
@@ -42,7 +42,21 @@ pub(crate) fn server_request(
             grant,
             ..
         } => {
+            // Exec previews carry the effective per-call cwd, not the session
+            // workspace. A missing or altered context must not be approved.
+            let execution = if tool.as_ref() == "exec" {
+                Some(ExecPreview::from_preview(preview)?)
+            } else {
+                None
+            };
             let mut reason = approval_title(tool, preview);
+            if let Some(execution) = &execution {
+                reason.push_str(&format!(
+                    " (cwd: {}; shell: {})",
+                    execution.cwd.display(),
+                    execution.shell.display()
+                ));
+            }
             if let Some(grant) = grant {
                 reason.push_str(&grant_clause(grant));
             }
@@ -51,13 +65,18 @@ pub(crate) fn server_request(
             if tool.as_ref() == "patch" {
                 "item/fileChange/requestApproval"
             } else {
-                let command = if preview.body.is_empty() {
-                    tool.as_ref()
+                let (command, command_cwd) = if let Some(execution) = &execution {
+                    (execution.command.as_ref(), execution.cwd.to_str()?)
                 } else {
-                    preview.body.as_ref()
+                    let command = if preview.body.is_empty() {
+                        tool.as_ref()
+                    } else {
+                        preview.body.as_ref()
+                    };
+                    (command, cwd.as_str())
                 };
                 object.insert("command", command);
-                object.insert("cwd", cwd.as_str());
+                object.insert("cwd", command_cwd);
                 "item/commandExecution/requestApproval"
             }
         }
