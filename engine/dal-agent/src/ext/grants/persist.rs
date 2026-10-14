@@ -147,7 +147,7 @@ fn build_row(
         origin,
         services,
         digest: fields.get("digest").cloned().unwrap_or_default(),
-        workspace: fields.get("workspace").map(|value| PathBuf::from(value.as_ref())).unwrap_or_default(),
+        workspace: fields.get("workspace").map(|value| PathBuf::from(value.to_string())).unwrap_or_default(),
         mcp_set: fields.get("mcp_set").cloned(),
         by,
         approved_at,
