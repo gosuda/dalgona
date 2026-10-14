@@ -62,8 +62,9 @@ the Starlark error line.
 
 Each run builds one ephemeral session whose workspace is a fresh temporary
 directory seeded with the case files, runs the prompt, applies the check, and
-removes the directory. Calls that need approval are refused: a run has no
-controller to answer them.
+removes the directory. Edits to the case workspace proceed. Every other call
+that needs approval, such as `exec`, is refused: a run has no controller to
+answer it.
 The wall clock of a run is 300 s; a run that exceeds it fails with
 `case <id> timed out after 300 s` and the run continues.
 
