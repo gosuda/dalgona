@@ -32,6 +32,7 @@ use crate::{
     provider::AuthStyle,
     sse::SseEvent,
     stream::{ReplayPayload, StopReason, StreamEvent, ToolArgs, ToolCall},
+    stream_budget::StreamBudget,
     thinking::WireThinking,
     tool_names::{WIRE_NAME_MAX, wire_name},
 };
@@ -596,6 +597,7 @@ pub(crate) struct Decoder {
     family: Family,
     model: Box<str>,
     sequence: Option<u64>,
+    budget: StreamBudget,
     calls: Vec<Call>,
     /// Ids of completed reasoning items still missing `encrypted_content`.
     backfill: Vec<String>,
@@ -611,6 +613,7 @@ impl Decoder {
             family,
             model: model.into(),
             sequence: None,
+            budget: StreamBudget::default(),
             calls: Vec::new(),
             backfill: Vec::new(),
             finished: false,
@@ -635,6 +638,7 @@ impl Decoder {
         if self.finished || data == DONE {
             return Ok(self.finished);
         }
+        self.budget.admit_event(data.len())?;
         let head: Head = self.parse(data, "event")?;
         if let Some(sequence) = head.sequence_number {
             if self.sequence.is_some_and(|last| sequence < last) {
@@ -660,7 +664,7 @@ impl Decoder {
                 let event: ItemEvent = self.parse(data, kind)?;
                 if self.item_kind(&event.item)? == "function_call" {
                     let item = self.decode_item(&event.item)?;
-                    self.open(item, out);
+                    self.open(item, out)?;
                 }
             }
             "response.function_call_arguments.delta" => {
@@ -758,11 +762,16 @@ impl Decoder {
 
     /// Opens a call once per item id; a repeated `added` is ignored. Returns
     /// the index of the item's call.
-    fn open(&mut self, item: FunctionItem, out: &mut Vec<StreamEvent>) -> usize {
+    fn open(
+        &mut self,
+        item: FunctionItem,
+        out: &mut Vec<StreamEvent>,
+    ) -> Result<usize, ProviderError> {
         let item_id = item.id.unwrap_or_else(|| item.call_id.clone());
         if let Some(index) = self.calls.iter().position(|call| call.item_id == item_id) {
-            return index;
+            return Ok(index);
         }
+        self.budget.admit_item()?;
         out.push(StreamEvent::ToolCallStarted {
             id: item.call_id.clone(),
             name: item.name.clone(),
@@ -775,7 +784,7 @@ impl Decoder {
             done_args: None,
             item_args: None,
         });
-        self.calls.len() - 1
+        Ok(self.calls.len() - 1)
     }
 
     fn item_done(
@@ -787,7 +796,7 @@ impl Decoder {
             "function_call" => {
                 let mut function: FunctionItem = self.decode_item(&item)?;
                 let arguments = function.arguments.take();
-                let index = self.open(function, out);
+                let index = self.open(function, out)?;
                 self.calls[index].item_args = arguments;
             }
             "reasoning" => {
@@ -795,6 +804,7 @@ impl Decoder {
                 if reasoning.encrypted_content.is_some() {
                     out.push(self.replay(item));
                 } else if let Some(id) = reasoning.id {
+                    self.budget.admit_item()?;
                     self.backfill.push(id);
                 }
             }
