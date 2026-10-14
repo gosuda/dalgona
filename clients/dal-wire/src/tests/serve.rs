@@ -135,8 +135,8 @@ async fn slow_request_headers_have_an_absolute_deadline() {
             .await
             .expect("drip another header fragment");
         tokio::time::advance(Duration::from_secs(2)).await;
-        let response = read_until_closed(&mut stream).await;
         tokio::time::resume();
+        let response = read_until_closed(&mut stream).await;
         assert!(
             !response.starts_with(b"HTTP/1.1 200"),
             "incomplete headers must never reach the route"
@@ -162,8 +162,8 @@ async fn idle_keep_alive_connection_expires() {
         tokio::task::yield_now().await;
         tokio::time::pause();
         tokio::time::advance(crate::serve::HEADER_TIMEOUT + Duration::from_secs(1)).await;
-        let response = read_until_closed(&mut stream).await;
         tokio::time::resume();
+        let response = read_until_closed(&mut stream).await;
         assert_eq!(parse_reply(&response).status, 200);
     })
     .await;
@@ -183,6 +183,7 @@ async fn idle_sockets_expire_and_free_all_listener_slots() {
         tokio::task::yield_now().await;
         tokio::time::pause();
         tokio::time::advance(crate::serve::HEADER_TIMEOUT + Duration::from_secs(1)).await;
+        tokio::time::resume();
         for stream in &mut stalled {
             let response = read_until_closed(stream).await;
             assert!(
@@ -190,7 +191,6 @@ async fn idle_sockets_expire_and_free_all_listener_slots() {
                 "idle sockets must not reach a route"
             );
         }
-        tokio::time::resume();
         assert_eq!(get(addr, "/v1/models").await.status, 200);
     })
     .await;
@@ -229,6 +229,7 @@ async fn public_listener_sheds_per_ip_excess_and_recovers() {
 
         tokio::time::pause();
         tokio::time::advance(crate::serve::HEADER_TIMEOUT + Duration::from_secs(1)).await;
+        tokio::time::resume();
         for stream in &mut stalled {
             let response = read_until_closed(stream).await;
             assert!(
@@ -236,7 +237,6 @@ async fn public_listener_sheds_per_ip_excess_and_recovers() {
                 "idle sockets must not reach a route"
             );
         }
-        tokio::time::resume();
 
         let reply = http(
             addr,
