@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use dal_core::{SessionEnd, SessionId};
 
@@ -18,10 +19,11 @@ use super::rounds::{
 };
 use super::{
     DIFF_TRUNCATION_MARKER, FOCUS_TRUNCATION_MARKER, GIT_STDOUT_PREFIX_LIMIT, MAX_DIFF_BYTES,
-    MAX_ERROR_BYTES, MAX_FINDINGS, MAX_FOCUS_BYTES, MAX_STORED_DETAIL_BYTES, REVIEW_REPLY_FORMAT,
+    MAX_ERROR_BYTES, MAX_FINDINGS, MAX_FOCUS_BYTES, MAX_REVIEW_REPLY_BYTES,
+    MAX_REVIEW_STREAM_BYTES, MAX_REVIEW_STREAM_EVENTS, MAX_STORED_DETAIL_BYTES, REVIEW_REPLY_FORMAT,
     REVIEWER_DEADLINE, ReviewError, TRUNCATION_MARKER, cap_with_marker,
 };
-use super::{ReviewStatus, ReviewTool};
+use super::{Completion, ReviewStatus, ReviewTool};
 use crate::review::review_round;
 use crate::text::byte_prefix;
 use dal_agent::ext::{HookCx, ObserveHook, ToolCx};
@@ -35,7 +37,7 @@ enum Provider {
     /// The route has no usable credentials.
     NoCredentials,
     /// The route is ready and the request streams these events.
-    Replies(Vec<dal_core::StreamEvent>),
+    Replies(Vec<dal_provider::StreamEvent>),
     /// The route is ready and the request fails with this text.
     Fails(String),
     /// The route is ready and the request never answers.
@@ -260,15 +262,26 @@ impl dal_agent::ext::Services for FakeReviewServices {
     fn infer(
         &self,
         _who: &dal_agent::ext::Caller,
-        req: dal_core::ModelRequest,
+        _req: dal_core::ModelRequest,
     ) -> dal_agent::ext::services::ServiceFuture<'_, dal_core::Inference> {
+        unavailable()
+    }
+
+    fn infer_stream(
+        &self,
+        _who: &dal_agent::ext::Caller,
+        req: dal_core::ModelRequest,
+    ) -> dal_agent::ext::services::ServiceFuture<'_, dal_agent::ext::EventStream> {
         locked(&self.requests).push(req);
         match &*locked(&self.provider) {
             Provider::Replies(events) => {
-                let inference = dal_core::Inference {
-                    events: events.clone(),
-                };
-                Box::pin(async move { Ok(inference) })
+                let events = events.clone();
+                Box::pin(async move {
+                    Ok(dal_agent::ext::EventStream::new(
+                        futures::stream::iter(events.into_iter().map(Ok)),
+                        || {},
+                    ))
+                })
             }
             Provider::Fails(text) => {
                 let text = text.clone();
@@ -277,14 +290,6 @@ impl dal_agent::ext::Services for FakeReviewServices {
             Provider::Hangs => Box::pin(std::future::pending()),
             Provider::Unavailable | Provider::NoCredentials => unavailable(),
         }
-    }
-
-    fn infer_stream(
-        &self,
-        _who: &dal_agent::ext::Caller,
-        _req: dal_core::ModelRequest,
-    ) -> dal_agent::ext::services::ServiceFuture<'_, dal_agent::ext::EventStream> {
-        unavailable()
     }
 
     fn call_tool(
@@ -1020,23 +1025,89 @@ fn a_cap_marks_the_cut_inside_the_cap_and_leaves_fitting_text_whole() {
 
 const CLEAN_REPLY: &str = r#"{"verdict":"clean","findings":[],"summary":"ok"}"#;
 
-fn text_events(text: &str, usage: Option<(u64, u64)>) -> Vec<dal_core::StreamEvent> {
-    let mut events = vec![dal_core::StreamEvent::Delta {
-        channel: dal_core::StreamChannel::Text,
-        text: text.into(),
-    }];
+fn text_events(text: &str, usage: Option<(u64, u64)>) -> Vec<dal_provider::StreamEvent> {
+    let mut events = vec![dal_provider::StreamEvent::TextDelta { text: text.into() }];
     if let Some((input_tokens, output_tokens)) = usage {
-        events.push(dal_core::StreamEvent::Usage(dal_core::Usage {
-            input_tokens,
-            cached_input_tokens: 0,
-            output_tokens,
-            reasoning_tokens: None,
-            cache_write_tokens: 0,
-            cost_usd: None,
-        }));
+        events.push(dal_provider::StreamEvent::Usage {
+            usage: dal_core::Usage {
+                input_tokens,
+                cached_input_tokens: 0,
+                output_tokens,
+                reasoning_tokens: None,
+                cache_write_tokens: 0,
+                cost_usd: None,
+            },
+        });
     }
-    events.push(dal_core::StreamEvent::Stop(dal_core::Stop::EndTurn));
+    events.push(dal_provider::StreamEvent::Stop {
+        reason: dal_provider::StopReason::EndTurn,
+    });
     events
+}
+
+#[tokio::test]
+async fn reviewer_text_boundary_is_inclusive_and_oversize_cancels() {
+    let exact = "x".repeat(MAX_REVIEW_REPLY_BYTES);
+    let stream = dal_agent::ext::EventStream::new(
+        futures::stream::iter(text_events(&exact, None).into_iter().map(Ok)),
+        || {},
+    );
+    assert!(matches!(
+        Completion::from_stream(stream).await,
+        Ok(Completion { text, .. }) if text.len() == MAX_REVIEW_REPLY_BYTES
+    ));
+
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let signal = Arc::clone(&cancelled);
+    let oversized = format!("{exact}y");
+    let stream = dal_agent::ext::EventStream::new(
+        futures::stream::iter(text_events(&oversized, None).into_iter().map(Ok)),
+        move || signal.store(true, Ordering::SeqCst),
+    );
+    let result = Completion::from_stream(stream).await;
+    assert!(result.is_err());
+    assert!(cancelled.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn many_small_reviewer_events_are_cut_off_and_cancelled() {
+    let seen = Arc::new(AtomicUsize::new(0));
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let source = futures::stream::unfold(Arc::clone(&seen), |seen| async move {
+        seen.fetch_add(1, Ordering::SeqCst);
+        Some((
+            Ok(dal_provider::StreamEvent::TextDelta { text: "x".into() }),
+            seen,
+        ))
+    });
+    let signal = Arc::clone(&cancelled);
+    let stream = dal_agent::ext::EventStream::new(source, move || {
+        signal.store(true, Ordering::SeqCst);
+    });
+    assert!(Completion::from_stream(stream).await.is_err());
+    assert_eq!(seen.load(Ordering::SeqCst), MAX_REVIEW_STREAM_EVENTS + 1);
+    assert!(cancelled.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn reasoning_bytes_are_limited_even_without_reply_text() {
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let source = futures::stream::unfold((), |()| async move {
+        Some((
+            Ok(dal_provider::StreamEvent::ReasoningDelta {
+                text: "r".repeat(4096),
+            }),
+            (),
+        ))
+    });
+    let signal = Arc::clone(&cancelled);
+    let stream = dal_agent::ext::EventStream::new(source, move || {
+        signal.store(true, Ordering::SeqCst);
+    });
+    let result = Completion::from_stream(stream).await;
+    assert!(result.is_err(), "non-text output cannot bypass the total cap");
+    assert!(cancelled.load(Ordering::SeqCst));
+    assert_eq!(MAX_REVIEW_STREAM_BYTES % 4096, 0);
 }
 
 /// A tool context whose host answers one changed-file `git diff` and `git status`.
