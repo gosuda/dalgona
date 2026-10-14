@@ -152,7 +152,7 @@ async fn stalled(addr: SocketAddr) -> HttpReply {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn token_file_auth_cases() {
+async fn public_serve_rejects_an_unsafe_token_file() {
     let rig = rig(&[]).await;
     let path = rig.data().join("serve.token");
     let public = || {
@@ -195,7 +195,19 @@ async fn token_file_auth_cases() {
         "{:?}",
         empty.err()
     );
-    std::fs::remove_file(&path).expect("remove empty token");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn token_file_auth_cases() {
+    let rig = rig(&[]).await;
+    let path = rig.data().join("serve.token");
+    let public = || {
+        let mut options = router_options(&rig);
+        options.public = true;
+        options.a2a = true;
+        options
+    };
     let token = crate::token::create(&path, false).expect("token created");
     with_serve(&rig, public(), async |addr| {
         let base = format!("GET /v1/models HTTP/1.1\r\nhost: 127.0.0.1:{}", addr.port());
@@ -223,6 +235,35 @@ async fn token_file_auth_cases() {
         )
         .await;
         assert_eq!(card.status, 200, "{card:?}");
+        let proxied = http(
+            addr,
+            "GET /.well-known/agent-card.json HTTP/1.1\r\nhost: agent.example\r\nx-forwarded-proto: https",
+            "",
+        )
+        .await;
+        assert_eq!(proxied.status, 200, "{proxied:?}");
+        let interfaces = &proxied.json()["supportedInterfaces"];
+        assert_eq!(
+            interfaces[0]["url"].as_str(),
+            Some("https://agent.example/a2a"),
+            "{proxied:?}"
+        );
+        assert_eq!(
+            interfaces[1]["url"].as_str(),
+            Some("https://agent.example/a2a/v1"),
+            "{proxied:?}"
+        );
+        let proxied_http = http(
+            addr,
+            "GET /.well-known/agent-card.json HTTP/1.1\r\nhost: agent.example\r\nx-forwarded-proto: http",
+            "",
+        )
+        .await;
+        assert_eq!(
+            proxied_http.json()["supportedInterfaces"][0]["url"].as_str(),
+            Some("http://agent.example/a2a"),
+            "{proxied_http:?}"
+        );
     })
     .await;
 }
@@ -250,7 +291,10 @@ async fn bind_refusals() {
         let Err(error) = rejected else {
             panic!("public plaintext listener started on {address}");
         };
-        assert!(matches!(error, ServeError::InsecurePublicBind { .. }), "{error:?}");
+        assert!(
+            matches!(error, ServeError::InsecurePublicBind { .. }),
+            "{error:?}"
+        );
         assert!(error.to_string().contains("HTTPS/WSS"), "{error}");
     }
 

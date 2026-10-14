@@ -37,8 +37,8 @@ const UNSUPPORTED: [&str; 8] = [
 ];
 
 /// Serves `GET /.well-known/agent-card.json`.
-pub(crate) fn card(ctx: &Arc<ServeCtx>, host: Option<&str>) -> Resp {
-    let base = card_base(host, ctx.cfg.bind, ctx.cfg.port);
+pub(crate) fn card(ctx: &Arc<ServeCtx>, host: Option<&str>, proto: Option<&str>) -> Resp {
+    let base = card_base(host, proto, ctx.cfg.bind, ctx.cfg.port);
     let mut document = sonic_rs::json!({
         "name": "dal",
         "description": "dal, a coding agent. It runs in the directory where dalgon serve started.",
@@ -75,11 +75,33 @@ pub(crate) fn card(ctx: &Arc<ServeCtx>, host: Option<&str>) -> Resp {
 }
 
 /// Returns the card base URL: the Host header, else the bind, plus the port.
-pub(crate) fn card_base(host: Option<&str>, bind: std::net::IpAddr, port: u16) -> String {
+/// A recognized `X-Forwarded-Proto` first hop (`http` or `https`) marks the
+/// request as delivered by a same-host reverse proxy — non-loopback binds are
+/// refused, so every peer is a same-machine hop and the signal is trustworthy.
+/// A proxied request keeps the Host as sent: the proxy owns the default port
+/// and terminates TLS for `https`. Any other or absent value falls back to
+/// the direct-request shape of `http` plus the bound port.
+pub(crate) fn card_base(
+    host: Option<&str>,
+    proto: Option<&str>,
+    bind: std::net::IpAddr,
+    port: u16,
+) -> String {
+    let first = proto
+        .and_then(|value| value.split(',').next())
+        .map(str::trim);
+    let proxied = first.is_some_and(|proto| {
+        proto.eq_ignore_ascii_case("https") || proto.eq_ignore_ascii_case("http")
+    });
+    let scheme = if first.is_some_and(|proto| proto.eq_ignore_ascii_case("https")) {
+        "https"
+    } else {
+        "http"
+    };
     match host.map(str::trim).filter(|host| !host.is_empty()) {
-        Some(host) if has_port(host) => format!("http://{host}"),
-        Some(host) => format!("http://{host}:{port}"),
-        None => format!("http://{}", std::net::SocketAddr::new(bind, port)),
+        Some(host) if has_port(host) || proxied => format!("{scheme}://{host}"),
+        Some(host) => format!("{scheme}://{host}:{port}"),
+        None => format!("{scheme}://{}", std::net::SocketAddr::new(bind, port)),
     }
 }
 
