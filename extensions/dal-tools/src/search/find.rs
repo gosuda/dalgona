@@ -180,7 +180,11 @@ pub(crate) fn select<'a>(
 
 /// Classify one file from its size and first 8192 bytes.
 pub(crate) fn content_class(path: &Path) -> io::Result<ContentClass> {
-    let file = File::open(path)?;
+    content_class_open(File::open(path)?)
+}
+
+/// Classifies a file already opened through the workspace boundary.
+pub(crate) fn content_class_open(file: File) -> io::Result<ContentClass> {
     if file.metadata()?.len() > MAX_INDEXABLE_BYTES {
         return Ok(ContentClass::Oversize);
     }
