@@ -698,3 +698,118 @@ async fn windows_wait_terminates_grandchild_holding_pipe_before_capture_join() {
         .expect("wait for leader");
     assert_eq!(result.status, ProcStatus::Exited { code: 0 });
 }
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn macos_denies_session_and_process_group_escape_in_both_launch_modes() {
+    let temp = tempfile::tempdir().expect("temp workspace");
+    // Each probe is a child of the shell, not a process-group leader. Without
+    // Seatbelt, both operations would succeed and the probe would exit 1.
+    let probes = [
+        (
+            "setsid",
+            "/usr/bin/perl -MPOSIX -e 'exit 92 if $$ == getpgrp(); my $id = POSIX::setsid(); exit defined($id) && $id >= 0 ? 1 : 0' & wait",
+        ),
+        (
+            "setpgid",
+            "/usr/bin/perl -MPOSIX -e 'exit 92 if $$ == getpgrp(); my $id = POSIX::setpgid(0, 0); exit defined($id) && $id >= 0 ? 1 : 0' & wait",
+        ),
+    ];
+    for (operation, command) in probes {
+        for (mode, sandboxed) in [("direct", false), ("sandbox", true)] {
+            let call = CallId::new(format!("test-macos-{mode}-{operation}"));
+            let digest = Some([5_u8; 32]);
+            let roots = vec![temp.path().to_path_buf()];
+            let approved = approved_for(&call, digest, roots.clone());
+            let launcher = if sandboxed {
+                Launcher::Sandbox {
+                    helper: None,
+                    roots: roots.into_boxed_slice(),
+                }
+            } else {
+                Launcher::Direct
+            };
+            let opts = SpawnOpts {
+                cwd: temp.path().to_path_buf(),
+                timeout: None,
+                env: Vec::new(),
+                stdout_prefix_limit: 0,
+            };
+            let mut proc = spawn_process(
+                &shell_argv(command),
+                call,
+                opts,
+                &approved,
+                digest,
+                &temp.path().join("jobs"),
+                &[],
+                &launcher,
+                test_permit().await,
+                None,
+            )
+            .expect("spawn guarded macOS probe");
+            let result = proc
+                .wait(&CancellationToken::new())
+                .await
+                .expect("wait for guarded probe");
+            assert_eq!(
+                result.status,
+                ProcStatus::Exited { code: 0 },
+                "{mode} allowed {operation} or failed its probe",
+            );
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn macos_failed_detachment_cannot_hold_capture_pipes_open() {
+    let temp = tempfile::tempdir().expect("temp workspace");
+    let cases = [
+        (
+            "cancel",
+            "/usr/bin/perl -MPOSIX -e 'POSIX::setsid(); sleep 30' & wait",
+            Some(StopReason::Cancelled),
+            None,
+            ProcStatus::Cancelled,
+        ),
+        (
+            "timeout",
+            "/usr/bin/perl -MPOSIX -e 'POSIX::setsid(); sleep 30' & wait",
+            None,
+            Some(Duration::from_millis(300)),
+            ProcStatus::TimedOut,
+        ),
+        (
+            "leader-exit",
+            "/usr/bin/perl -MPOSIX -e 'POSIX::setsid(); sleep 30' & exit 0",
+            None,
+            None,
+            ProcStatus::Exited { code: 0 },
+        ),
+    ];
+    for (name, command, stop, timeout, expected) in cases {
+        let mut proc = spawn_approved(
+            &temp,
+            &format!("test-macos-{name}-pipe"),
+            &shell_argv(command),
+            timeout,
+            0,
+        )
+        .await
+        .expect("spawn guarded pipe holder");
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            match stop {
+                Some(reason) => {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    proc.stop(reason).await
+                }
+                None => proc.wait(&CancellationToken::new()).await,
+            }
+        })
+        .await
+        .expect("guarded command must release inherited pipes")
+        .expect("command finalization");
+        assert_eq!(result.status, expected, "{name} final status");
+    }
+}

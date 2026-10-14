@@ -273,8 +273,8 @@ impl Proc {
     /// Records live descendants for the post-exit `setsid` sweep.
     #[cfg(not(target_os = "linux"))]
     fn recorded_descendants(&mut self) -> std::future::Ready<Vec<u32>> {
-        // Non-Linux platforms have no /proc descendant source; the leader
-        // pid stays read so the field contract matches the Linux arm.
+        // macOS prevents setsid/setpgid escapes with a mandatory inherited
+        // Seatbelt guard; Windows uses a job object instead of PID lineage.
         let _ = self.leader_pid;
         std::future::ready(Vec::new())
     }
@@ -448,9 +448,14 @@ pub(crate) fn spawn_process(
     }
     #[cfg(windows)]
     windows::wrap(&mut command);
-    let mut child = command.spawn().map_err(|source| ToolError::Spawn {
-        path: PathBuf::from(&program),
-        source,
+    let mut child = command.spawn().map_err(|source| {
+        if let Some(profile) = &launcher_profile {
+            let _ = fs::remove_file(profile);
+        }
+        ToolError::Spawn {
+            path: PathBuf::from(&program),
+            source,
+        }
     })?;
     let leader_pid = child.id();
     let stdout = child.stdout().take().ok_or_else(|| {
@@ -514,7 +519,16 @@ fn launcher_argv(
     let target = argv[0].clone();
     let target_args = &argv[1..];
     match launcher {
-        Launcher::Direct => Ok((target, target_args.to_vec(), None)),
+        Launcher::Direct => {
+            #[cfg(target_os = "macos")]
+            {
+                sandbox::direct_argv(&target, target_args, job)
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                Ok((target, target_args.to_vec(), None))
+            }
+        },
         Launcher::Sandbox { helper, roots } => {
             sandbox::sandbox_argv(&target, target_args, job, helper.as_deref(), roots)
         }
