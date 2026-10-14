@@ -253,6 +253,29 @@ async fn public_card_path_requires_auth_when_a2a_is_disabled() {
     .await;
 }
 
+/// A GET declaring only an empty body — every decimal zero spelling —
+/// is not a framed body and keeps its route.
+#[tokio::test]
+async fn get_routes_accept_all_zero_content_length() {
+    let rig = rig(&[]).await;
+    with_serve(&rig, router_options(&rig), async |addr| {
+        for (declared, expect) in [("0", 200), ("00", 200), ("000", 200), ("01", 400)] {
+            let mut stream = tokio::net::TcpStream::connect(addr)
+                .await
+                .expect("connect");
+            let head = format!(
+                "GET /v1/models HTTP/1.1\r\n{}\r\ncontent-length: {declared}\r\nconnection: close\r\n\r\n",
+                host_header(addr)
+            );
+            stream.write_all(head.as_bytes()).await.expect("request");
+            let mut bytes = Vec::new();
+            stream.read_to_end(&mut bytes).await.expect("reply");
+            assert_eq!(parse_reply(&bytes).status, expect, "{declared}");
+        }
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn get_routes_reject_body_headers_before_reading() {
     let rig = rig(&[]).await;

@@ -282,7 +282,7 @@ async fn handle_request(
             || req
                 .headers()
                 .get(hyper::header::CONTENT_LENGTH)
-                .is_some_and(|value| value.as_bytes() != b"0"))
+                .is_some_and(|value| value.as_bytes().iter().any(|byte| *byte != b'0')))
     {
         return drain_response(
             &mut req,
