@@ -1,0 +1,70 @@
+[package]
+name = "dalgon"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+description = "The dal command-line and process edge"
+publish = true
+
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/dalgon-v{ version }/{ name }-{ target }.tar.xz"
+pkg-fmt = "txz"
+bin-dir = "{ name }-{ target }/{ bin }"
+
+[package.metadata.binstall.overrides.'cfg(windows)']
+pkg-url = "{ repo }/releases/download/dalgon-v{ version }/{ name }-{ target }.zip"
+pkg-fmt = "zip"
+bin-dir = "{ bin }{ binary-ext }"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = ["tui"]
+tui = ["dep:dal-tui"]
+# Enables the loopback sign-in endpoint override for binary-boundary tests;
+# never enable it in a released binary.
+test-support = ["dal-agent/test-support"]
+
+[dependencies]
+clap = { version = "=4.6.7", features = ["derive", "string"] }
+clap_complete = "=4.6.11"
+dal-agent.workspace = true
+dal-core.workspace = true
+dal-ext.workspace = true
+dal-provider.workspace = true
+dal-star.workspace = true
+dal-store.workspace = true
+dal-tools = { workspace = true, features = ["symbols"] }
+dal-wire.workspace = true
+thiserror.workspace = true
+jiff.workspace = true
+serde.workspace = true
+sonic-rs.workspace = true
+toml.workspace = true
+tokio = { workspace = true, features = ["fs", "io-std", "io-util", "macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util.workspace = true
+url.workspace = true
+crossterm = "=0.29.0"
+dal-tui = { workspace = true, optional = true }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["stdio"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
+[dev-dependencies]
+clap_mangen = "=0.3.3"
+dal-agent = { workspace = true, features = ["test-support"] }
+tempfile.workspace = true
+
+[lints]
+workspace = true
+
+[package.metadata.dist]
+include = ["../../README.md", "../../LICENSE.md", "../../CHANGELOG.md", "man"]

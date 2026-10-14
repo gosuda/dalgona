@@ -18,7 +18,10 @@ load("@dal/v1", "dal")
 def find_todos(ctx, args):
     page = ctx.tools.search("TODO", path = args.path)
     return {
-        "matches": page.matches[:args.limit],
+        "matches": [
+            {"path": hit.path, "line": hit.line, "text": hit.text}
+            for hit in page.matches[:args.limit]
+        ],
         "truncated": page.truncated or len(page.matches) > args.limit,
     }
 
@@ -73,7 +76,7 @@ Four things carry the whole design:
 | `skills` | a map from a name to a `dal.skill` | empty |
 | `rules` | a map from a name to a `dal.rule` | empty |
 | `prompt` | one static prompt section, or `None` | `None` |
-| `models` | not available in this release; see the end of this page | empty |
+| `models` | a map from a local key to a `dal.model` | empty |
 
 A tool key `todos` in plugin `quality` has the identity `quality.todos`. One `dal.tool` can sit under at most one key. A tool with no key still serves a command. Saved state is kept apart for each plugin and each `state_version`; changing the version does not migrate old state.
 
@@ -90,7 +93,7 @@ A tool key `todos` in plugin `quality` has the identity `quality.todos`. One `da
 | `output` | a `dal.schema` the returned value must satisfy | none |
 | `visibility` | `"model"`, `"deferred"`, or `"eval_only"` | `"model"` |
 
-`"model"` puts the tool in the model's ordinary tool list. `"deferred"` makes it available only when requested. `"eval_only"` reaches it only through `eval`.
+`"model"` puts the tool in the model's ordinary tool list. `"deferred"` keeps it out of the list until the model first calls it by name; the call runs at once and the tool joins the list from the next request on. A request offers exactly one way to find deferred tools. On first-party Anthropic models from Opus, Sonnet, Fable, and Mythos 4.5 on, Anthropic's own tool search finds them, and each rides the request marked `defer_loading`. Every other model gets the `tool_search` tool, which lists matches and changes nothing. A plugin tool named `tool_search` replaces both. `"eval_only"` reaches the tool only through `eval`.
 
 ### Describe arguments with a schema
 
@@ -124,7 +127,7 @@ Return plain data and it is the result. Three helpers say more:
 
 - `dal.ok(value)` returns a success explicitly.
 - `dal.err(code, message, details)` returns a failure the model can read. `details` is optional. The codes `failed`, `exit_nonzero`, `unavailable`, `conflict`, `busy`, `cancelled`, `observation_unavailable`, `invocation_mismatch`, and `indeterminate` belong to dal; `dal.err` refuses them.
-- `dal.output(value = ..., view = ...)` keeps the data and its display apart. A view is `{"type": "text", "text": "..."}` or `{"type": "table", "columns": [...], "rows": [[...]]}`. Table rows hold scalar values. A view changes what people see, never the status of the call.
+- `dal.output(value = ..., view = ...)` keeps the data and its display apart. A view is `{"type": "text", "text": "..."}`, `{"type": "table", "columns": [...], "rows": [[...]]}`, an intact view from `tools.read`, or a list of views. Table rows hold scalar values. A view changes what people see, never the status of the call.
 
 ```starlark
 load("@dal/v1", "dal")
@@ -178,8 +181,10 @@ A plain dictionary that happens to contain `ok = False` is still data. Only `dal
 `ctx.config` holds the validated settings. Every other field of `ctx` is a group of operations, and each call returns its value directly:
 
 ```starlark
-text = ctx.tools.read("src/lib.rs")
+view = ctx.tools.read("src/lib.rs")
 ```
+
+`tools.read` returns a view with `path`, `header`, `truncated`, and `rows`; each row has `line`, `text`, and `complete`. `tools.search` returns a page with `matches` and `truncated`; each match has `path`, `line`, `text`, and a `source` read view. A handler cannot return a view itself: return plain data, and pass the view as the `view` of `dal.output` to display it.
 
 An operation that fails stops the handler with the error. To handle an expected failure yourself, pass the operation, not its result, to `ctx.try_call`. You get back a result with `ok`, `value`, and `error`; `unwrap()` returns the value or raises the failure again. Denial, cancellation, and hard limits still stop the handler; `try_call` cannot catch them and never retries.
 
@@ -200,6 +205,8 @@ These are the operations. A handler may call only those in its `uses`.
 
 Write the id as `group.operation`, for example `"state.write"`. Ids are exact: no wildcards, no duplicates, at most 64 per declaration. `tools.read` takes `path` as its positional argument, `tools.search` takes `pattern`, and `tools.exec` takes `command`. Every other argument is named. Call `ctx.describe("tools.exec")` to see the keywords of one operation.
 
+`agents.start` does not accept a per-call `tools` list; passing one fails with an argument error. Omitting `name` defaults the child session name to the plugin name; because session names are unique per workspace, concurrent child sessions require distinct explicit names. It answers `refused` with a typed `reason` when policy or input stops a child: `max_depth` (`child sessions cannot start children here: agents.max_depth = <n>.`), `workspace_unresolved`, `workspace_outside_root`, or `model_unroutable`. Show the reason text to the user; a `cancelled` reply still means the child was cancelled.
+
 `uses` asks; it does not grant. Each effect still needs a live grant and passes the approval ladder, so `tools.patch` and `tools.exec` ask before they run. `ask` operations need to be in `uses` but need no grant. `turn.wake` refuses after 20 turns in a row that wake started with no user prompt. `models.forward` exists only for model handlers, so plugins cannot use it.
 
 State is explicit and session-scoped. A read returns a record with `present`, `value` (when present), and `revision`. A write or delete must pass the `revision` from a read as `expected`. A stale revision fails with `conflict`, and `ctx.try_call` can catch that. Keys match `[a-z][a-z0-9_.-]{0,63}`. An ephemeral session returns `unavailable` for state. The `todo` example keeps a list this way; read it at `dal://examples/todo`.
@@ -208,7 +215,7 @@ A handler cannot call another plugin's tool. One plugin can share code between i
 
 ## Add a command
 
-`dal.command(tool = ..., positional = [...], description = ...)` binds a slash command to a tool. The command runs that tool once, with the same schema and defaults a model call gets. Without `description`, the tool's description is the command's summary. The command name is `/<plugin>:<key>`; the key uses lowercase letters, digits, and hyphens, starts with a letter, and has at most 32 characters. A name that clashes with a built-in command is an error that names both claimants.
+`dal.command(tool = ..., positional = [...], description = ...)` binds a slash command to a tool. The command runs that tool once, with the same schema and defaults a model call gets. Without `description`, the tool's description is the command's summary. The command name is `/<plugin>:<key>`; the key uses lowercase letters, digits, `_`, and `-`, starts with a letter, and has at most 64 characters. A name that clashes with a built-in command is an error that names both claimants.
 
 `positional` lists scalar fields in order. A required field cannot follow an optional one. The rest take `--field=value`, or `--field value` for strings. Booleans take `--field` and `--no-field`. Lists and records take one JSON value: `--field=JSON`. `--` ends option parsing. Single and double quotes group a token, and a backslash escapes the next character outside single quotes. Assigning one field twice is an error. Nothing expands: no globs, variables, or shell.
 
@@ -232,7 +239,7 @@ The four hooks that decide something (`input`, `before_turn`, `before_request`, 
 
 A verdict is valid only for the event that made it. Returning `None`, a dictionary, or another event's verdict from a deciding hook is a failure, not an implicit allow. A failed `tool_call` hook blocks the call; a failed `input`, `before_turn`, or `before_request` hook changes nothing. A failed observer is recorded and leaves the result unchanged.
 
-Hooks run in one fixed order: built-ins, then product extensions, then bundled plugins by name, then your plugins by name; inside one plugin, in list order. A `rewrite` feeds the next hook. The first `block` or `handled` ends the chain. `before_turn` texts join with a blank line.
+Hooks run in one fixed order: built-ins, then bundled plugins by name, then your plugins by name; inside one plugin, in list order. A `rewrite` feeds the next hook. The first `block` or `handled` ends the chain, except that on `input` a built-in `handled` still lets later origins run. `before_turn` texts join with a blank line.
 
 ```starlark
 load("@dal/v1", "dal")
@@ -334,6 +341,6 @@ Load has no compile step. A broken plugin stops startup and names `path:line:col
 
 Plugins come from the data root only, never from the workspace. A plugin that loads in dalgon loads in dalgona; see `dalgona://batteries` for the batteries product.
 
-## Know the limit on models
+## Declare scripted models
 
-A plugin cannot declare `models` in this release. dal rejects the plugin with ``plugin declares `models`, but this host gives model handlers no script context; remove `models` from the plugin``. To call a model from a tool, request `models.infer`.
+A plugin can declare `models` with `dal.model(id = ..., caps = ..., run = ..., uses = [...])`. A scripted model that runs where no script context exists fails with `script context is unavailable for this model`. To call a model from a tool, request `models.infer`.

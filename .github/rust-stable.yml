@@ -1,0 +1,3 @@
+- name: Update Rust
+  shell: bash
+  run: rustup update stable --no-self-update

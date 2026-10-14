@@ -1,0 +1,12 @@
+data: {"id":"chatcmpl-parallel","object":"chat.completion.chunk","created":1694268190,"model":"gpt-6-astra","system_fingerprint":"fp_44709d6fcb","service_tier":"priority","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":1,"id":"call_b","type":"function","function":{"name":"b","arguments":""}}]},"logprobs":null,"finish_reason":null}],"obfuscation":"q1","usage":null}
+
+data: {"id":"chatcmpl-parallel","object":"chat.completion.chunk","created":1694268190,"model":"gpt-6-astra","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"a","arguments":"{\"x\":"}}]},"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-parallel","object":"chat.completion.chunk","created":1694268190,"model":"gpt-6-astra","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_WRONG","function":{"name":"WRONG","arguments":"{\"y\":2}"}}]},"finish_reason":null}],"prompt_filter_results":[{}],"usage":null}
+
+data: {"id":"chatcmpl-parallel","object":"chat.completion.chunk","created":1694268190,"model":"gpt-6-astra","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"1}"}}]},"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-parallel","object":"chat.completion.chunk","created":1694268190,"model":"gpt-6-astra","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":null}
+
+data: [DONE]
+

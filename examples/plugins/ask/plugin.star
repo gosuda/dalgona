@@ -5,7 +5,7 @@ def questionnaire(ctx, args):
     for question in args.questions:
         qid = question.id
         prompt = question.prompt
-        options = question.options
+        options = getattr(question, "options", dal.MISSING)
         if options == dal.MISSING:
             options = []
         if options:

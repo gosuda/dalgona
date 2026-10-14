@@ -4,13 +4,13 @@
     clippy::disallowed_methods,
     reason = "gate runs the real product binaries"
 )]
-use gates::support;
+use dalgona_gates::support;
 
 use std::process::Command;
 
 #[test]
 fn tag_version_mismatch_fails_the_dist_plan() -> support::TestResult<()> {
-    let workspace = support::repo_root().join("dalgona");
+    let workspace = support::repo_root();
     let output = support::run_command(
         Command::new("dist")
             .args(["plan", "--tag=dalgona-v9.9.9"])

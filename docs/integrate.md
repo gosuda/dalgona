@@ -1,6 +1,6 @@
 # Build a client on the dal protocol
 
-Choose a way in. GUI client, step by step: spawn `dalgon rpc`, send `initialize`, call `session/list`, `session/open`, `session/subscribe`, render updates, answer requests exactly once, cancel when needed, read blobs with `blob/read`, reconnect with `gen` and `seq`. Generate types from `protocol/schema`. Editors connect through ACP.
+Choose a way in. GUI client, step by step: spawn `dalgon rpc`, send `initialize`, call `session/list`, `session/open`, `session/subscribe`, render updates, answer requests exactly once, cancel when needed, read blobs with `blob/read`, reconnect with `gen` and `after`. Generate types from `protocol/schema`. Editors connect through ACP.
 
 Rules for clients:
 

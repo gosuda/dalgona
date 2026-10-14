@@ -1,0 +1,3 @@
+data: {"type":"response.output_text.delta","sequence_number":1,"delta":"Partial"}
+
+data: {"type":"response.output_text.delta"

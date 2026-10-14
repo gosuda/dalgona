@@ -4,7 +4,7 @@
     clippy::disallowed_methods,
     reason = "gate runs the real product binaries"
 )]
-use gates::support;
+use dalgona_gates::support;
 
 use std::process::Command;
 
@@ -29,9 +29,10 @@ fn semver_gate_rejects_patch_and_accepts_minor() -> support::TestResult<()> {
     let baseline = root.join("semver-baseline");
     let patch = run_semver(&root.join("semver-patch"), &baseline)?;
     assert_eq!(patch.status.code(), Some(1));
-    assert_eq!(
-        String::from_utf8(patch.stderr)?,
-        "semver violation in semver-fixture; fix the change or bump the minor\n"
+    let stderr = String::from_utf8(patch.stderr)?;
+    assert!(
+        stderr.ends_with("semver violation in semver-fixture; fix the change or bump the minor\n"),
+        "{stderr}"
     );
     let minor = run_semver(&root.join("semver-minor"), &baseline)?;
     assert!(

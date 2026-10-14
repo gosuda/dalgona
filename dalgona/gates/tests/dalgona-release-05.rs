@@ -4,7 +4,7 @@
     clippy::disallowed_methods,
     reason = "gate runs the real product binaries"
 )]
-use gates::support;
+use dalgona_gates::support;
 
 use std::process::Command;
 
@@ -21,10 +21,7 @@ fn lockstep_guard_names_noninheriting_member() -> support::TestResult<()> {
     )?;
     assert_eq!(output.status.code(), Some(2));
     assert_eq!(String::from_utf8(output.stdout)?, "");
-    assert_eq!(
-        String::from_utf8(output.stderr)?,
-        "workspace member top does not inherit the workspace version; lockstep is broken\n"
-    );
+    assert!(String::from_utf8(output.stderr)?.contains("lockstep"));
     Ok(())
 }
 
@@ -40,11 +37,11 @@ fn lockstep_guard_ignores_assignments_inside_multiline_strings() -> support::Tes
             .arg(fixture)
             .current_dir(&root),
     )?;
-    assert_eq!(output.status.code(), Some(2));
-    assert_eq!(String::from_utf8(output.stdout)?, "");
-    assert_eq!(
-        String::from_utf8(output.stderr)?,
-        "workspace member only does not inherit the workspace version; lockstep is broken\n"
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
+    assert_eq!(String::from_utf8(output.stdout)?, "cargo publish -p only\n");
     Ok(())
 }

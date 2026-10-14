@@ -1,6 +1,10 @@
 # Tools, modes, and approval
 
-Modes: `normal` gives `read`, `search`, `patch`, `exec`; `eval-first` adds `eval`; `eval-only` leaves only `eval`. Each tool takes typed parameters with limits. Edit styles: `anchor` by default; per-model table picks `replace`, `apply_patch`, `anchor`, `hashline`; tiers `simple`, `balanced`, `strict`. Search modes include symbol search and AST edit; no LSP. The approval ladder `--approval ask|edits|all` carries ask, edits, all; by default dal asks before every `patch` and every `exec`; when no person can answer, dal denies and says why. Call-scoped argv-prefix grants allow one command prefix. Background jobs run detached; subagents are off by default in dal. Read schemes: `dal://`, plus plugin schemes.
+Modes: `normal`, `eval-first`, and `eval-only` list the same tools: `read`, `search`, `patch`, `exec`, and `eval`. The eval modes additionally reach plugin tools and prompt sections marked `eval_only`. Other modes hide them, and calls to hidden tools fail. Each tool takes typed parameters with limits. Edit styles: `anchor` by default; per-model table picks `replace`, `apply_patch`, `anchor`, `hashline`, `hashline-light`, or `hashline-enhanced`; tiers `simple`, `balanced`, `strict`. Search modes are `find`, `grep`, and `symbol`; no LSP. The approval ladder `--approval ask|edits|all` carries ask, edits, all; by default dal asks before every `patch` and every `exec`; when no person can answer, dal denies and says why. Approval previews show control and bidirectional characters as visible escape sequences instead of sending them to the terminal. Call-scoped argv-prefix grants allow one command prefix. Background jobs run detached; subagents are off by default in dal. Read schemes: `dal://`, plus plugin schemes.
+
+## Recover from a failed patch
+
+If a patch fails after changing files, dal tries to restore each completed operation. If restoration fails, the error names every affected path and any retained backup. Inspect those paths and restore the affected files before retrying. Keep the backups until recovery is complete.
 
 ## The eval tool
 

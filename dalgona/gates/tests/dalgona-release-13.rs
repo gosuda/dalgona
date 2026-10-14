@@ -4,7 +4,7 @@
     clippy::disallowed_methods,
     reason = "gate runs the real product binaries"
 )]
-use gates::support;
+use dalgona_gates::support;
 use std::fmt::Write as _;
 
 use proptest::{

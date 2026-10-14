@@ -29,6 +29,8 @@ budget; a pure log streamer cannot host dialogs, pickers, or approvals.
 The live block stacks bottom-anchored in fixed order: notices, activity, composer, hint,
 status. Status always paints; the composer prompt row never drops. Overlays (dialogs,
 pickers) take the composer and hint rows; activity yields first; one dialog at a time.
+A request dialog is locked for 500 ms after its first frame, so type-ahead cannot answer it;
+see Keys in `DESIGN.md`.
 
 ## Data flow
 

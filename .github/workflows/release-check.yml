@@ -2,36 +2,75 @@ name: release-check
 on:
   pull_request:
     paths:
-      - "dal/**"
+      - "core/**"
+      - "engine/**"
+      - "extensions/**"
+      - "clients/**"
+      - "cli/**"
+      - "gates/**"
       - "dalgona/**"
+      - "prices/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "dist-workspace.toml"
+      - "clippy.toml"
+      - "rustfmt.toml"
+      - "deny.toml"
       - "scripts/**"
-      - ".github/workflows/dalgon-release.yml"
-      - ".github/workflows/dalgona-release.yml"
-      - ".github/workflows/release-check.yml"
+      - ".github/workflows/**"
+      - ".github/rust-stable.yml"
+      - "rust-toolchain.toml"
+      - "LICENSE.md"
+      - "AGENTS.md"
+      - "README.md"
+permissions:
+  contents: read
 jobs:
   dist-plan:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
-      - run: cargo install cargo-dist --version 0.32.0 --locked
-      - working-directory: dal
-        run: dist plan
-      - id: dalgona-released
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - run: rustup update stable --no-self-update
+      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2
+        with:
+          tool: cargo-dist@latest
+      - id: versions
         shell: bash
         run: |
-          if curl -fsSL "https://index.crates.io/da/l-/dal-agent" | grep -q '"vers":"0.1.0"'; then
-            echo "released=true" >> "$GITHUB_ENV"
-          else
-            echo "released=false" >> "$GITHUB_ENV"
-            echo "::notice::dal-* 0.1.0 is not on crates.io yet; skipping the dalgona dist plan leg"
-          fi
-      - working-directory: dalgona
-        if: env.released == 'true'
-        run: dist plan
+          set -euo pipefail
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import subprocess
+
+          metadata = json.loads(
+              subprocess.check_output(
+                  ["cargo", "metadata", "--no-deps", "--format-version", "1"],
+                  text=True,
+              )
+          )
+          packages = {package["name"]: package["version"] for package in metadata["packages"]}
+          for name in ("dalgon", "dalgona"):
+              if name not in packages:
+                  raise SystemExit(f"missing release package {name}")
+              print(f"{name}={packages[name]}")
+          PY
+      - name: Plan dal release
+        run: dist plan --tag="dalgon-v${{ steps.versions.outputs.dalgon }}"
+      - name: Plan Dalgona release
+        run: dist plan --tag="dalgona-v${{ steps.versions.outputs.dalgona }}"
   semver-gate:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
-      - run: cargo install cargo-semver-checks --version 0.50.0 --locked
-      - run: bash scripts/semver-gate.sh dal
-      - run: bash scripts/semver-gate.sh dalgona
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - run: rustup update stable --no-self-update
+      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2
+        with:
+          tool: cargo-semver-checks@latest
+      - run: bash scripts/semver-gate.sh --product dal .
+      - run: bash scripts/semver-gate.sh --product dalgona .
