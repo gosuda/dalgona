@@ -14,6 +14,7 @@ mod retry;
 mod scripted;
 mod sse;
 mod stream;
+mod stream_budget;
 mod thinking;
 mod tool_names;
 mod usage;

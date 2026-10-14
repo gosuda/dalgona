@@ -14,7 +14,7 @@ use dal_core::SessionId;
 
 use crate::{
     error::StoreError,
-    util::{self, MODE_FILE},
+    util::{self, FileMode},
 };
 
 const PID_WAIT: Duration = Duration::from_millis(100);
@@ -170,11 +170,11 @@ impl LockGuard {
         // `LockFileEx` makes the held file unreadable to every other
         // handle on Windows, so a contended acquirer reads the pid
         // from the sidecar that the lock never seals.
-        fs::write(
-            owner_path(path),
+        util::write_atomic(
+            &owner_path(path),
             format!("{}\n", std::process::id()).as_bytes(),
-        )
-        .map_err(|source| util::io_err(path, source))?;
+            FileMode::Mode0600,
+        )?;
         // Registered last, as transient: the sidecar precedes it so a
         // contender reading our pid always finds the holder entry instead of
         // taking a needless retry pass; a journal flips it to live only once
@@ -216,12 +216,7 @@ impl LockGuard {
 }
 
 fn open_lock_file(path: &Path) -> Result<File, StoreError> {
-    let mut options = util::open_options();
-    options.read(true).write(true).create(true);
-    util::with_mode(&mut options, MODE_FILE);
-    options
-        .open(path)
-        .map_err(|source| util::io_err(path, source))
+    crate::private::open_private_lock(path).map_err(|source| util::io_err(path, source))
 }
 
 /// Whether `path` still names the file `file` holds open.
