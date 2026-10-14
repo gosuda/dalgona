@@ -27,6 +27,7 @@ use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _};
 
 use crate::evidence::Binding;
 use crate::patch::snapshot::SnapshotStore;
+use crate::workspace_path::{self, ResolveError};
 use crate::{Rerank, RerankCall, RerankCandidate, Seen};
 use find::{ContentClass, Entry, FindGlob, FindResult};
 use grep::SeenRow;
@@ -34,10 +35,10 @@ use index::Index;
 use page::Page;
 
 /// Schema published while symbol mode is off, exact bytes.
-const SCHEMA_OFF: &str = r#"{"type":"object","properties":{"mode":{"type":"string","enum":["find","grep"]},"pattern":{"type":"string","description":"find: a glob. grep: a regular expression, or plain text when literal is true."},"path":{"type":"string","description":"Directory or file to search. Default: the workspace root."},"glob":{"type":"string","description":"grep only: search only files whose path matches this glob."},"literal":{"type":"boolean","description":"grep only: treat pattern as plain text. Default false."},"ignore_case":{"type":"boolean","description":"Default false."},"limit":{"type":"integer","minimum":1,"maximum":1000,"description":"find: paths. grep: matches. Default 200."}},"required":["mode","pattern"],"additionalProperties":false}"#;
+const SCHEMA_OFF: &str = r#"{"type":"object","properties":{"mode":{"type":"string","enum":["find","grep"]},"pattern":{"type":"string","description":"find: a glob. grep: a regular expression, or plain text when literal is true."},"path":{"type":"string","description":"Workspace-relative directory or file to search. Absolute paths and '..' are refused. Default: the workspace root."},"glob":{"type":"string","description":"grep only: search only files whose path matches this glob."},"literal":{"type":"boolean","description":"grep only: treat pattern as plain text. Default false."},"ignore_case":{"type":"boolean","description":"Default false."},"limit":{"type":"integer","minimum":1,"maximum":1000,"description":"find: paths. grep: matches. Default 200."}},"required":["mode","pattern"],"additionalProperties":false}"#;
 
 /// Schema published while symbol mode is on, exact bytes.
-const SCHEMA_ON: &str = r#"{"type":"object","properties":{"mode":{"type":"string","enum":["find","grep","symbol"]},"pattern":{"type":"string","description":"find: a glob. grep: a regular expression, or plain text when literal is true. symbol: a name or an A::b path, [2] for the second of equal names, or * with path set to one file."},"path":{"type":"string","description":"Directory or file to search. Default: the workspace root."},"glob":{"type":"string","description":"grep only: search only files whose path matches this glob."},"literal":{"type":"boolean","description":"grep only: treat pattern as plain text. Default false."},"ignore_case":{"type":"boolean","description":"Default false."},"limit":{"type":"integer","minimum":1,"maximum":1000,"description":"find: paths. grep: matches. Default 200."}},"required":["mode","pattern"],"additionalProperties":false}"#;
+const SCHEMA_ON: &str = r#"{"type":"object","properties":{"mode":{"type":"string","enum":["find","grep","symbol"]},"pattern":{"type":"string","description":"find: a glob. grep: a regular expression, or plain text when literal is true. symbol: a name or an A::b path, [2] for the second of equal names, or * with path set to one file."},"path":{"type":"string","description":"Workspace-relative directory or file to search. Absolute paths and '..' are refused. Default: the workspace root."},"glob":{"type":"string","description":"grep only: search only files whose path matches this glob."},"literal":{"type":"boolean","description":"grep only: treat pattern as plain text. Default false."},"ignore_case":{"type":"boolean","description":"Default false."},"limit":{"type":"integer","minimum":1,"maximum":1000,"description":"find: paths. grep: matches. Default 200."}},"required":["mode","pattern"],"additionalProperties":false}"#;
 
 /// Description published while symbol mode is off, exact bytes.
 const DESCRIPTION_OFF: &str = "Search the workspace. mode \"find\" lists files whose path matches the glob in pattern. A glob without / matches the file name at any depth. mode \"grep\" lists lines that match pattern, a regular expression in Rust regex syntax without backreferences or lookaround, or plain text when literal is true. Search skips .git and every path that .gitignore or .git/info/exclude excludes. It does not follow symbolic links. It skips binary files and files over 16 MiB. find returns at most limit paths, sorted. grep returns at most limit matches as path:line:text and cuts lines at 500 characters. When results were cut, the last line starts with [Truncated:.";
@@ -207,7 +208,7 @@ fn integer_arg(key: &str, item: &sonic_rs::Value) -> Result<Option<u64>, SearchE
 pub(crate) struct Scope {
     /// The scope as an absolute path.
     pub(crate) abs: PathBuf,
-    /// The scope relative to the canonical workspace root, when it lies inside it.
+    /// The canonical workspace-relative path; all accepted scopes have one.
     pub(crate) ws_rel: Option<PathBuf>,
     /// Whether the scope names one regular file.
     pub(crate) is_file: bool,
@@ -223,7 +224,7 @@ impl Scope {
         }
     }
 
-    /// The index scope argument: `None` outside the workspace.
+    /// The index scope for a workspace-relative path.
     pub(crate) fn index_scope(&self) -> Option<IndexScope<'_>> {
         let rel = self.ws_rel.as_deref()?;
         Some(if rel.as_os_str().is_empty() {
@@ -278,24 +279,23 @@ pub(crate) async fn resolve_scope(
     let Some(raw) = path.filter(|raw| !raw.is_empty()) else {
         return Ok(Scope::workspace(workspace));
     };
-    let abs = if Path::new(raw).is_absolute() {
-        PathBuf::from(raw)
-    } else {
-        workspace.join(raw)
-    };
-    let meta = tokio::fs::metadata(&abs)
+    let workspace = workspace.to_path_buf();
+    let path = PathBuf::from(raw);
+    let resolved = tokio::task::spawn_blocking(move || workspace_path::resolve(&workspace, &path))
+        .await
+        .map_err(|error| SearchError::msg(format!("search: cannot resolve path: {error}")))?
+        .map_err(|error| match error {
+            ResolveError::OutsideWorkspace => {
+                SearchError::msg("search: path must stay within the workspace")
+            }
+            ResolveError::Io(_) => SearchError::msg(format!("search: {raw} does not exist")),
+        })?;
+    let meta = tokio::fs::metadata(&resolved.absolute)
         .await
         .map_err(|_| SearchError::msg(format!("search: {raw} does not exist")))?;
-    let ws_rel = match (
-        tokio::fs::canonicalize(workspace).await,
-        tokio::fs::canonicalize(&abs).await,
-    ) {
-        (Ok(root), Ok(full)) => full.strip_prefix(&root).ok().map(Path::to_path_buf),
-        _ => None,
-    };
     Ok(Scope {
-        abs,
-        ws_rel,
+        abs: resolved.absolute,
+        ws_rel: Some(resolved.relative),
         is_file: meta.is_file(),
     })
 }
@@ -834,6 +834,84 @@ pub(crate) mod tests {
                 Err(expected.to_owned()),
                 "{raw}"
             );
+        }
+    }
+
+
+    #[tokio::test]
+    async fn search_refuses_paths_outside_workspace() {
+        let parent = tempfile::tempdir().unwrap();
+        let workspace = parent.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        write(&workspace, "inside.txt", b"inside marker\n");
+        write(parent.path(), "secret.txt", b"secret marker\n");
+        let search = engine(false, None);
+
+        let escaped = [
+            workspace.join("inside.txt").to_string_lossy().into_owned(),
+            parent.path().join("secret.txt").to_string_lossy().into_owned(),
+            "../secret.txt".to_owned(),
+            "nested/../inside.txt".to_owned(),
+        ];
+        for mode in ["find", "grep"] {
+            let pattern = if mode == "find" { "*.txt" } else { "marker" };
+            for path in &escaped {
+                let raw = sonic_rs::to_string(&sonic_rs::json!({
+                    "mode": mode,
+                    "pattern": pattern,
+                    "path": path
+                }))
+                .unwrap();
+                assert_eq!(
+                    run(&search, &workspace, &raw).await,
+                    Err("search: path must stay within the workspace".to_owned()),
+                    "mode: {mode}, path: {path}"
+                );
+            }
+        }
+
+        let inside = run(
+            &search,
+            &workspace,
+            r#"{"mode":"grep","pattern":"marker","path":"inside.txt"}"#,
+        )
+        .await
+        .unwrap();
+        assert!(inside.contains("inside marker"), "{inside}");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            symlink(parent.path().join("secret.txt"), workspace.join("outside-file")).unwrap();
+            symlink(parent.path(), workspace.join("outside-dir")).unwrap();
+            symlink(workspace.join("inside.txt"), workspace.join("inside-link")).unwrap();
+
+            for mode in ["find", "grep"] {
+                let pattern = if mode == "find" { "*.txt" } else { "marker" };
+                for path in ["outside-file", "outside-dir"] {
+                    let raw = sonic_rs::to_string(&sonic_rs::json!({
+                        "mode": mode,
+                        "pattern": pattern,
+                        "path": path
+                    }))
+                    .unwrap();
+                    assert_eq!(
+                        run(&search, &workspace, &raw).await,
+                        Err("search: path must stay within the workspace".to_owned()),
+                        "mode: {mode}, path: {path}"
+                    );
+                }
+            }
+
+            let linked = run(
+                &search,
+                &workspace,
+                r#"{"mode":"grep","pattern":"marker","path":"inside-link"}"#,
+            )
+            .await
+            .unwrap();
+            assert!(linked.contains("inside marker"), "{linked}");
         }
     }
 
