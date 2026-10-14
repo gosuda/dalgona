@@ -25,6 +25,7 @@ use std::{
 
 use sonic_rs::JsonValueTrait;
 use support::{TestDir, dalgon_binary};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 struct ServeHandle {
@@ -193,5 +194,95 @@ async fn websocket_auth_never_logs_token_values() -> Result<(), Box<dyn Error + 
         !logged.contains("Bearer"),
         "logs must never contain header values"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn idle_public_connections_cannot_exhaust_authenticated_service()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let dir = TestDir::new()?;
+    let home = dir.path().join("home");
+    let workspace = dir.path().join("workspace");
+    let data_home = home.join(".local/share");
+    fs::create_dir_all(home.join(".config/dal"))?;
+    fs::create_dir_all(&workspace)?;
+    fs::write(
+        home.join(".config/dal/dal.toml"),
+        "model = \"openai-responses/gpt-6\"\n",
+    )?;
+
+    let binary = dalgon_binary()?;
+    let created = Command::new(binary)
+        .current_dir(&workspace)
+        .env_clear()
+        .envs(support::captured_shell_vars())
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_DATA_HOME", &data_home)
+        .args(["serve", "token"])
+        .output()?;
+    assert!(created.status.success(), "serve token creation must succeed");
+    let token = String::from_utf8(created.stdout)?.trim().to_owned();
+    let serve = spawn_serve(binary, &workspace, &home, &data_home).await?;
+    let addr: std::net::SocketAddr = serve
+        .websocket_url
+        .strip_prefix("ws://")
+        .and_then(|url| url.split('/').next())
+        .ok_or_else(|| io::Error::other("invalid advertised WebSocket endpoint"))?
+        .parse()?;
+
+    let mut established =
+        dal_wire::WebSocketTransport::connect_with_auth(&serve.websocket_url, &token).await?;
+
+    let mut peers = Vec::with_capacity(256);
+    for index in 0..256 {
+        let mut peer = tokio::time::timeout(
+            Duration::from_secs(3),
+            tokio::net::TcpStream::connect(addr),
+        )
+        .await??;
+        if index == 0 {
+            peer.write_all(b"GET /v1/models HTTP/1.1\r\nHost: localhost")
+                .await?;
+        }
+        peers.push(peer);
+    }
+
+    established
+        .write_frame(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#)
+        .await?;
+    let reply = tokio::time::timeout(Duration::from_secs(3), established.read_frame()).await??;
+    let reply: sonic_rs::Value = sonic_rs::from_str(&reply)?;
+    assert!(
+        reply.get("result").is_some(),
+        "a connected authenticated client remains operational under socket saturation"
+    );
+
+    // The first socket holds incomplete headers. Old listeners never evict it.
+    tokio::time::sleep(Duration::from_secs(7)).await;
+    let mut byte = [0u8; 1];
+    tokio::time::timeout(Duration::from_secs(2), peers[0].read(&mut byte))
+        .await
+        .expect("the incomplete request is evicted");
+
+    let mut new_client = tokio::time::timeout(
+        Duration::from_secs(4),
+        dal_wire::WebSocketTransport::connect_with_auth(&serve.websocket_url, &token),
+    )
+    .await??;
+    new_client
+        .write_frame(r#"{"jsonrpc":"2.0","id":2,"method":"initialize","params":{}}"#)
+        .await?;
+    let reply = tokio::time::timeout(Duration::from_secs(3), new_client.read_frame()).await??;
+    let reply: sonic_rs::Value = sonic_rs::from_str(&reply)?;
+    assert!(
+        reply.get("result").is_some(),
+        "new authenticated connections must work after idle peer eviction"
+    );
+
+    drop(peers);
+    drop(new_client);
+    drop(established);
+    drop(serve);
     Ok(())
 }
