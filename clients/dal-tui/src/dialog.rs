@@ -987,6 +987,42 @@ mod tests {
     }
 
     #[test]
+    fn exec_approval_dialog_displays_the_per_call_directory() {
+        use dal_core::{Answer, ExecApproval, Owner, Question, Request, RequestId};
+        use std::{path::PathBuf, time::Duration};
+
+        let preview = ExecApproval::new(
+            "cargo test",
+            PathBuf::from("/workspace/subproject"),
+            PathBuf::from("/bin/bash"),
+        )
+        .preview()
+        .expect("exec preview");
+        let mut dialog = super::DialogUi::default();
+        dialog.opened(Request {
+            id: RequestId::new_v7(),
+            turn: None,
+            owner: Owner::Core,
+            question: Question::Approval {
+                tool: "exec".into(),
+                preview,
+                grant: None,
+                call: None,
+            },
+            timeout: Duration::from_secs(30),
+            default: Answer::Decline,
+        });
+        let rows = dialog.rows(80, 20, crate::WidthMode::Narrow);
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("Working directory: \"/workspace/subproject\"")),
+            "{rows:?}"
+        );
+        assert!(rows.iter().any(|row| row.contains("Shell: \"/bin/bash\"")));
+        assert!(rows.iter().any(|row| row.contains("cargo test")));
+    }
+
+    #[test]
     fn diagram_approval_preview_renders_art_only_when_enabled() {
         use dal_core::{Answer, Owner, Preview, Question, Request, RequestId};
         use std::time::Duration;
