@@ -359,7 +359,7 @@ async fn dispatch(
         super::router::ServeRoute::A2aCard => a2a::card(&ctx, host),
         super::router::ServeRoute::A2aJsonRpc => a2a::json_rpc(&ctx, body, query, version).await,
         super::router::ServeRoute::A2aRest(kind, id) => {
-            a2a::rest(&ctx, kind, id, &body, query, version).await
+            a2a::rest(&ctx, kind, id, body, query, version).await
         }
         super::router::ServeRoute::WebSocket | super::router::ServeRoute::CodexWs => {
             Resp::text(426, "upgrade required")
