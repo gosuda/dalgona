@@ -22,7 +22,7 @@ pub(crate) const COLOR_HELP: &str = "Select terminal color behavior.";
 pub(crate) const CD_HELP: &str =
     "Use DIR as the workspace without changing the process working directory.";
 pub(crate) const CONNECT_HELP: &str = "Connect to a remote dalgon host and run the interactive terminal UI. Without this option, dalgon uses a host in this process.";
-pub(crate) const CONNECT_TOKEN_FILE_HELP: &str = "Read the bearer token from FILE; it is sent only to non-loopback WebSocket endpoints. No token file is inferred.";
+pub(crate) const CONNECT_TOKEN_FILE_HELP: &str = "Read the bearer token from FILE; it is sent to WebSocket endpoints. No token file is inferred.";
 pub(crate) const PROMPTS_HELP: &str =
     "Attach text, image, or piped standard-input content to the first user message.";
 pub(crate) const LOGIN_HELP: &str = "Sign in to a provider or inspect sign-in state.";
