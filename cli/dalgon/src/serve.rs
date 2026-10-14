@@ -20,7 +20,7 @@ use tokio_util::sync::CancellationToken;
 /// Options supplied directly to `dalgon serve`.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ServeArgs {
-    /// Whether the listener is exposed beyond loopback and requires a token.
+    /// Whether a loopback listener requires a token for TLS-proxied access.
     pub public: bool,
     /// Whether to mount the A2A protocol surface.
     pub a2a: bool,
@@ -192,21 +192,19 @@ fn refuse_unsafe_serve_start(
         return write_failure(stderr, &crate::cli::texts::serve_alias_shadows_mode(alias))
             .map(Some);
     }
-    if !public {
-        match all_resolved_addresses_are_loopback(bind, port) {
-            Ok(true) => {}
-            Ok(false) => {
-                return write_failure(stderr, &crate::cli::texts::serve_non_loopback_bind(bind))
-                    .map(Some);
-            }
-            Err(error) => {
-                let address = format!("{bind}:{port}");
-                return write_failure(
-                    stderr,
-                    &crate::cli::texts::serve_bind_failed(&address, &error.to_string()),
-                )
+    match all_resolved_addresses_are_loopback(bind, port) {
+        Ok(true) => {}
+        Ok(false) => {
+            return write_failure(stderr, &crate::cli::texts::serve_non_loopback_bind(bind))
                 .map(Some);
-            }
+        }
+        Err(error) => {
+            let address = format!("{bind}:{port}");
+            return write_failure(
+                stderr,
+                &crate::cli::texts::serve_bind_failed(&address, &error.to_string()),
+            )
+            .map(Some);
         }
     }
     if public && let Err(error) = validate_public_token(token_file) {
@@ -298,7 +296,7 @@ pub async fn run(
         )?;
     }
     let url = format!("http://{local_addr}");
-    let details = listen_details(args.public, &token_file, local_addr);
+    let details = listen_details(args.public, &token_file);
     let listen_line = crate::cli::texts::serve_listen_line(&url, &details, args.a2a);
     if let Err(error) = writeln!(stdout, "{listen_line}") {
         stop.cancel();
@@ -408,6 +406,12 @@ fn publish_advertisement(
     data_root: &Path,
     local_addr: SocketAddr,
 ) -> Result<ServingLease, io::Error> {
+    if !local_addr.ip().is_loopback() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "refusing to advertise a non-loopback plaintext endpoint",
+        ));
+    }
     let pid = std::process::id();
     let directory = data_root.join("run/serve");
     fs::create_dir_all(&directory)?;
@@ -488,9 +492,6 @@ fn resolve_bind(args: &ServeArgs, config: &ServeConfig) -> String {
     if config.bind_was_explicit {
         return config.bind.clone();
     }
-    if args.public {
-        return "0.0.0.0".to_owned();
-    }
     "127.0.0.1".to_owned()
 }
 
@@ -512,18 +513,11 @@ fn all_resolved_addresses_are_loopback(bind: &str, port: u16) -> io::Result<bool
     Ok(true)
 }
 
-fn listen_details(public: bool, token_file: &Path, local_addr: SocketAddr) -> String {
+fn listen_details(public: bool, token_file: &Path) -> String {
     if !public {
         return "loopback, no token".to_owned();
     }
-    let scope = if local_addr.ip().is_unspecified() {
-        "all interfaces"
-    } else if local_addr.ip().is_loopback() {
-        "loopback"
-    } else {
-        "token required"
-    };
-    format!("{scope}, token from {}", token_file.display())
+    format!("loopback, token from {}", token_file.display())
 }
 
 fn write_failure(
@@ -561,7 +555,7 @@ mod tests {
             public: true,
             ..ServeArgs::default()
         };
-        assert_eq!(resolve_bind(&public_default, &defaults), "0.0.0.0");
+        assert_eq!(resolve_bind(&public_default, &defaults), "127.0.0.1");
 
         let cli_bind = ServeArgs {
             public: true,
@@ -589,6 +583,25 @@ mod tests {
             validate_public_token(&dir.path().join("missing-token")),
             Err(TokenFileError::Missing)
         ));
+    }
+
+    #[test]
+    fn public_non_loopback_is_refused_before_token_validation() {
+        let mut stderr = Vec::new();
+        let refused = refuse_unsafe_serve_start(
+            &BTreeMap::new(),
+            true,
+            "0.0.0.0",
+            7437,
+            Path::new("missing-token"),
+            &mut stderr,
+        )
+        .unwrap();
+        assert_eq!(refused, Some(ExitCode::FAILURE));
+        let diagnostic = String::from_utf8(stderr).unwrap();
+        assert!(diagnostic.contains("plaintext HTTP is loopback-only"));
+        assert!(diagnostic.contains("HTTPS/WSS reverse proxy"));
+        assert!(!diagnostic.contains("missing-token"));
     }
 
     fn write_private_token(dir: &tempfile::TempDir, contents: &[u8]) -> PathBuf {
@@ -723,6 +736,15 @@ mod tests {
                 .windows(64)
                 .any(|window| window == payload.as_bytes())
         );
+    }
+
+    #[test]
+    fn advertisement_rejects_non_loopback_plaintext_addresses() {
+        let dir = tempfile::tempdir().unwrap();
+        let remote: SocketAddr = "0.0.0.0:7437".parse().unwrap();
+        let error = publish_advertisement(dir.path(), remote).err().unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(!advertisement_path(dir.path(), std::process::id()).exists());
     }
 
     #[test]

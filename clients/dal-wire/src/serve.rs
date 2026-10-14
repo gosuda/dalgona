@@ -4,8 +4,8 @@
 //! cap. The pipeline is route, browser guard, authentication, content type,
 //! bounded body, then the route handler. OpenAI routes run through the
 //! router, A2A routes through `a2a`, and `/v1/ws` plus `/codex/ws` upgrade
-//! to WebSockets. Loopback binds need no token; public binds require the
-//! BLAKE3-checked serve token. Stopping ceases accepts, cancels handler
+//! to WebSockets. Normal loopback mode needs no token; public mode remains
+//! loopback-only and requires the BLAKE3-checked serve token. Stopping ceases accepts, cancels handler
 //! turns, and drains connections within two seconds.
 
 use std::collections::BTreeMap;

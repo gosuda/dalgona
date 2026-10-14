@@ -55,8 +55,8 @@ pub enum ServeError {
         #[source]
         source: io::Error,
     },
-    /// A non-loopback bind was requested without public mode.
-    #[error("serve --bind {addr} is not a loopback address: it needs a token")]
+    /// A non-loopback bind was requested for the plaintext HTTP listener.
+    #[error("serve --bind {addr} is not loopback: plaintext HTTP is loopback-only")]
     NotLoopback {
         /// The requested bind address.
         addr: IpAddr,
