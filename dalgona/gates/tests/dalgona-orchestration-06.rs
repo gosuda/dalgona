@@ -263,7 +263,7 @@ fn review_refuses_a_round_while_a_run_is_live() -> support::TestResult<()> {
         let product = support::build_product(data.clone(), Some(&user))?;
         for extension in &product.extensions {
             let services = extension.inject().capabilities();
-            if services.is_empty() {
+            if services.is_empty() || extension.origin() == dal_core::Origin::Builtin {
                 continue;
             }
             dal_agent::ext::grants::GrantStore::new(data.clone())
