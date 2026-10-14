@@ -13,6 +13,7 @@
 //! content buffering, so a value payload keeps its exact interior bytes,
 //! member order, and number spelling.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::de::{self, Deserializer};
@@ -31,6 +32,69 @@ pub struct Preview {
     pub body: Box<str>,
     /// The digest of the previewed content, when supplied.
     pub digest: Option<[u8; 32]>,
+}
+
+/// The execution context that must be visible before an exec call is approved.
+///
+/// The preview encodes paths as JSON strings to preserve whitespace and
+/// control characters without allowing a path to impersonate another field.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecApproval {
+    /// The exact command passed to the shell.
+    pub command: Box<str>,
+    /// The canonical working directory used for the spawned process.
+    pub cwd: PathBuf,
+    /// The shell executable passed to the process launcher.
+    pub shell: PathBuf,
+}
+
+impl ExecApproval {
+    /// Creates the context for one exec approval.
+    #[must_use]
+    pub fn new(command: impl Into<Box<str>>, cwd: PathBuf, shell: PathBuf) -> Self {
+        Self {
+            command: command.into(),
+            cwd,
+            shell,
+        }
+    }
+
+    /// Encodes an approval preview, or returns None if a path cannot be
+    /// displayed without losing bytes.
+    #[must_use]
+    pub fn preview(&self) -> Option<Preview> {
+        let cwd = sonic_rs::to_string(self.cwd.to_str()?).ok()?;
+        let shell = sonic_rs::to_string(self.shell.to_str()?).ok()?;
+        let body = format!(
+            "Working directory: {cwd}\nShell: {shell}\nCommand:\n{}",
+            self.command
+        );
+        let digest = *blake3::hash(body.as_bytes()).as_bytes();
+        Some(Preview {
+            title: "exec".into(),
+            body: body.into(),
+            digest: Some(digest),
+        })
+    }
+
+    /// Decodes a digest-bound exec preview; rejects malformed or changed
+    /// contents rather than guessing a working directory.
+    #[must_use]
+    pub fn from_preview(preview: &Preview) -> Option<Self> {
+        if preview.title.as_ref() != "exec"
+            || preview.digest != Some(*blake3::hash(preview.body.as_bytes()).as_bytes())
+        {
+            return None;
+        }
+        let rest = preview.body.strip_prefix("Working directory: ")?;
+        let (cwd, rest) = rest.split_once("\nShell: ")?;
+        let (shell, command) = rest.split_once("\nCommand:\n")?;
+        Some(Self {
+            command: command.into(),
+            cwd: sonic_rs::from_str::<String>(cwd).ok()?.into(),
+            shell: sonic_rs::from_str::<String>(shell).ok()?.into(),
+        })
+    }
 }
 
 /// One choice offered by a selection question.

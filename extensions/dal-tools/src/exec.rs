@@ -20,7 +20,7 @@ use dal_agent::{
     ext::{ArgError, BoxFuture, RawValue, Tool, ToolCall, ToolCx, ToolOutcome, ToolOutput},
 };
 use dal_core::{
-    CallId, ModelInfo, Name, Preview, RawJson, RegistrationError, ToolClass, ToolSpec, Workspace,
+    CallId, ExecApproval, ModelInfo, Name, RawJson, RegistrationError, ToolClass, ToolSpec, Workspace,
 };
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _};
 
@@ -95,6 +95,9 @@ pub(crate) enum ExecError {
         /// The configured shell path.
         path: String,
     },
+    /// The approval cannot faithfully display the actual execution paths.
+    #[error("exec: cwd or shell path cannot be displayed exactly for approval")]
+    ApprovalPathEncoding,
     /// No Windows Git Bash executable was found.
     #[cfg(windows)]
     #[error(
@@ -213,18 +216,17 @@ pub(crate) fn validate(args: ExecArgs, root: &Path) -> Result<ValidatedCall, Exe
     let timeout_seconds = args.timeout_seconds.map(timeout_secs).transpose()?;
     let timeout = timeout_seconds.map(Duration::from_secs);
     let foreground = args.foreground_s.map(foreground_window).transpose()?;
+    let canonical_root = std::fs::canonicalize(root).map_err(|_| ExecError::CwdNotRelative)?;
     let cwd = match args.cwd.as_deref() {
-        None | Some("") => root.to_path_buf(),
+        None | Some("") => canonical_root.clone(),
         Some(path) => {
             let relative = Path::new(path);
             if relative.is_absolute() {
                 return Err(ExecError::CwdNotRelative);
             }
-            let joined = root.join(relative);
+            let joined = canonical_root.join(relative);
             let canonical = std::fs::canonicalize(&joined)
                 .map_err(|_| ExecError::CwdMissing(path.to_owned()))?;
-            let canonical_root =
-                std::fs::canonicalize(root).map_err(|_| ExecError::CwdNotRelative)?;
             if !canonical.starts_with(&canonical_root) {
                 return Err(ExecError::CwdNotRelative);
             }
@@ -495,23 +497,28 @@ impl ExecTool {
                 )));
             }
         };
-        let preview = Preview {
-            title: "exec".into(),
-            body: validated.command.clone().into(),
-            digest: None,
+        let execution = ExecApproval::new(
+            validated.command.clone(),
+            validated.cwd.clone(),
+            shell.program.clone(),
+        );
+        let Some(preview) = execution.preview() else {
+            return ToolOutcome::Err(ToolError::message(
+                ExecError::ApprovalPathEncoding.to_string(),
+            ));
         };
         let approved = match cx.authorize(preview).await {
             Ok(approved) => approved,
             Err(reason) => return ToolOutcome::Err(ToolError::Denied(reason)),
         };
         let spawn_argv = [
-            OsString::from(shell.program.as_os_str()),
+            OsString::from(execution.shell.as_os_str()),
             OsString::from("-c"),
-            OsString::from(&validated.command),
+            OsString::from(execution.command.as_ref()),
         ];
         let thread_id = cx.session().to_string();
         let opts = SpawnOpts {
-            cwd: validated.cwd.clone(),
+            cwd: execution.cwd.clone(),
             timeout: validated.timeout,
             env: shell::provenance_environment(&thread_id, call.id.as_str()),
             stdout_prefix_limit: 0,
@@ -521,7 +528,7 @@ impl ExecTool {
             Err(ToolError::Spawn { source, .. }) => {
                 return ToolOutcome::Err(ToolError::message(format!(
                     "exec: cannot start {}: {source}",
-                    shell.program.display()
+                    execution.shell.display()
                 )));
             }
             Err(error) => return ToolOutcome::Err(error),

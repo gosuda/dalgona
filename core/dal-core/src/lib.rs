@@ -77,7 +77,7 @@ pub use model::{
 };
 pub use raw::{RawJson, RawJsonError};
 pub use request::{
-    Answer, AnswerValue, CallGrant, Choice, JobEnd, Owner, Preview, Question, Request,
+    Answer, AnswerValue, CallGrant, Choice, ExecApproval, JobEnd, Owner, Preview, Question, Request,
 };
 pub use tokens::{estimate_text_tokens, estimate_tokens};
 pub use update::{ExtState, ExtStatus, Notice, ToolOutcomeView, TurnCause, Update, UpdateKind};
