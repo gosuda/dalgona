@@ -906,6 +906,83 @@ async fn rust_infer_is_trusted_and_script_infer_is_gated() {
     assert_eq!(inference.events, []);
 }
 
+#[tokio::test]
+async fn scripted_forward_requires_the_callers_exact_infer_grant() {
+    let fx = fixture(Duration::from_secs(30));
+    let cancel = CancellationToken::new();
+    let missing = caller("focus", &[], Some(turn()));
+    assert!(matches!(
+        fx.services
+            .authorize_script_infer(&missing, cancel.clone())
+            .await,
+        Err(ServiceError::Denied(DenyReason::NotInjected))
+    ));
+    assert_eq!(open_count(&fx.broker), 0, "no grant read without injection");
+
+    let authorized = caller("focus", &["infer"], Some(turn()));
+    fx.backend
+        .headless
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(matches!(
+        fx.services
+            .authorize_script_infer(&authorized, cancel.clone())
+            .await,
+        Err(ServiceError::Denied(DenyReason::ServiceNotGranted {
+            service: Service::Infer,
+            ..
+        }))
+    ));
+    assert_eq!(open_count(&fx.broker), 0, "headless access fails closed");
+
+    fx.backend
+        .headless
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let services = Arc::clone(&fx.services);
+    let who = authorized.clone();
+    let approved =
+        spawn(async move { services.authorize_script_infer(&who, CancellationToken::new()).await });
+    await_open(&fx.broker).await;
+    let open = fx.broker.open_requests();
+    assert!(
+        matches!(&open[0].question, Question::Grant { ext, capabilities, .. }
+            if &**ext == "focus" && capabilities.iter().map(|c| &**c).eq(["infer"])),
+        "the grant must name the exact extension and service: {:?}",
+        open[0].question
+    );
+    answer_next(&fx.broker, Answer::ApproveForSession);
+    approved.join().await.expect("the live controller approved Infer");
+    fx.services
+        .authorize_script_infer(&authorized, cancel.clone())
+        .await
+        .expect("the exact grant is reusable");
+    assert_eq!(open_count(&fx.broker), 0, "reuse asks nothing");
+
+    fx.backend
+        .headless
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let different_origin = Caller::new(
+        Name::parse("focus").expect("name"),
+        Origin::Bundled,
+        ServiceSet::from_names(["infer"]).expect("inject"),
+        std::num::NonZeroU32::MIN,
+        CallerKind::Handler,
+        Some(turn()),
+    );
+    let expanded_services = caller("focus", &["infer", "net"], Some(turn()));
+    for changed in [&different_origin, &expanded_services] {
+        assert!(matches!(
+            fx.services
+                .authorize_script_infer(changed, cancel.clone())
+                .await,
+            Err(ServiceError::Denied(DenyReason::ServiceNotGranted {
+                service: Service::Infer,
+                ..
+            }))
+        ), "an origin or service-set change must invalidate grant reuse");
+    }
+    assert_eq!(open_count(&fx.broker), 0, "changed identities remain denied");
+}
+
 fn run_request(argv: &[&str], cwd: PathBuf) -> dal_core::RunRequest {
     dal_core::RunRequest {
         argv: argv.iter().map(OsString::from).collect(),
