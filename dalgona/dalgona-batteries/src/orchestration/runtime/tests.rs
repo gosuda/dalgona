@@ -1627,16 +1627,17 @@ async fn cancelled_owner_message_does_not_start_a_run() -> TestResult {
 }
 
 #[tokio::test]
-async fn caller_cancellation_stops_a_running_workflow_child() -> TestResult {
+async fn turn_stop_cancellation_leaves_an_accepted_run_alive() -> TestResult {
     let fixture = Fixture::open().await?;
-    fixture.script().hold = Some(CancellationToken::new());
+    let hold = CancellationToken::new();
+    fixture.script().hold = Some(hold.clone());
     let cancel = CancellationToken::new();
     fixture
         .runtime
         .tool(
             fixture.session,
             fixture.caller(),
-            CallId::new("cancel-after-start"),
+            CallId::new("turn-end"),
             "agents",
             RawJson::parse(
                 r#"{"action":"run","steps":[{"name":"task","prompt":"inspect","tools":["read"],"isolation":"shared"}]}"#,
@@ -1646,10 +1647,24 @@ async fn caller_cancellation_stops_a_running_workflow_child() -> TestResult {
         .await?;
     wait_for_starts(&fixture, 1).await?;
     let child = fixture.script().starts[0].0;
+    // The driver cancels the caller's token at every turn stop, a normal
+    // end included; the accepted run is session-owned and must not settle.
     cancel.cancel();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(1), fixture.ended_run())
+            .await
+            .is_err(),
+        "a turn stop cancelled the accepted run"
+    );
+    assert!(
+        !fixture.host.cancels().contains(&child),
+        "the turn stop reached the run's held child"
+    );
+    // Releasing the held child lets it report and the run finish; the
+    // release close then lands on the finished child, not on a live one.
+    hold.cancel();
     let report = fixture.ended_run().await?;
-    assert!(report.contains("cancelled"), "{report}");
-    assert!(fixture.host.cancels().contains(&child));
+    assert!(report.contains("done"), "{report}");
     Ok(())
 }
 

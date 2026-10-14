@@ -2343,8 +2343,11 @@ impl SessionState {
             })
             .collect::<Vec<_>>();
         let (control, control_receiver) = mpsc::channel(16);
-        // Cancellation of the caller cascades through the accepted workflow.
-        let cancel = caller_cancel.child_token();
+        // The run token is session-owned, not a child of the caller's turn
+        // token: the turn token dies at every turn stop, while an accepted
+        // run is a background job that only explicit cancel, /abort, or
+        // session close may cancel.
+        let cancel = CancellationToken::new();
         let coordinator = Coordinator {
             services: Arc::clone(&self.services),
             caller: caller.clone(),
