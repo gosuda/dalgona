@@ -93,6 +93,7 @@ pub struct Caller {
     origin: Origin,
     inject: ServiceSet,
     state_version: NonZeroU32,
+    source_digest: Option<Box<str>>,
     kind: CallerKind,
     turn: Option<TurnId>,
     invocation: Option<CallInvocation>,
@@ -128,10 +129,20 @@ impl Caller {
             origin,
             inject,
             state_version,
+            source_digest: None,
             kind,
             turn,
             invocation: None,
         }
+    }
+
+    /// Captures the admitted extension's immutable code identity at mint time.
+    /// A caller without one cannot obtain a persistent user-plugin grant.
+    pub(crate) fn with_extension(mut self, extension: &Extension) -> Self {
+        debug_assert_eq!(self.ext.as_str(), extension.name());
+        debug_assert_eq!(self.origin, extension.origin());
+        self.source_digest = extension.source_digest().map(Into::into);
+        self
     }
 
     /// Names the dispatched tool call this caller was minted for.
