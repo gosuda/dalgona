@@ -204,6 +204,22 @@ mod platform {
             Ok(dir)
         }
 
+        /// A descriptor follows its directory when another actor moves it,
+        /// even mid-publication. Prove the approved path still names the
+        /// staged directory after the rename; when it does not, remove the
+        /// published name wherever the moved directory landed so an escape
+        /// never persists outside the workspace.
+        fn confirm_landed(&self) -> io::Result<()> {
+            match self.verified_parent() {
+                Ok(_) => Ok(()),
+                Err(error) => {
+                    let _ =
+                        rustix::fs::unlinkat(&self.parent, self.name.as_os_str(), AtFlags::empty());
+                    Err(error)
+                }
+            }
+        }
+
         /// The parent descriptor prevents symlink substitution after staging.
         /// Publication is atomic and refuses even dangling symlink destinations.
         pub(crate) fn publish(&self) -> io::Result<()> {
@@ -217,7 +233,8 @@ mod platform {
                     self.name.as_os_str(),
                     rustix::fs::RenameFlags::NOREPLACE,
                 )
-                .map_err(io::Error::from)
+                .map_err(io::Error::from)?;
+                self.confirm_landed()
             }
             #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             {
@@ -235,7 +252,7 @@ mod platform {
                     let _ = rustix::fs::unlinkat(&dir, self.name.as_os_str(), AtFlags::empty());
                     return Err(io::Error::from(error));
                 }
-                Ok(())
+                self.confirm_landed()
             }
         }
 
