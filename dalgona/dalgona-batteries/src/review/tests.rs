@@ -1325,6 +1325,118 @@ async fn the_record_keeps_a_marked_prefix_while_the_report_keeps_the_whole_detai
     Ok(())
 }
 
+#[tokio::test]
+async fn reviewer_stream_accepts_exact_byte_and_event_limits() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let on_cancel = Arc::clone(&cancelled);
+    let events = [
+        Ok(dal_provider::StreamEvent::TextDelta {
+            text: "hello".into(),
+        }),
+        Ok(dal_provider::StreamEvent::TextDelta {
+            text: "world".into(),
+        }),
+        Ok(dal_provider::StreamEvent::Stop {
+            reason: dal_provider::StopReason::EndTurn,
+        }),
+    ];
+    let stream = dal_agent::ext::EventStream::new(
+        futures::stream::iter(events),
+        move || on_cancel.store(true, Ordering::SeqCst),
+    );
+    let result = super::Completion::from_stream(stream, 10, 3).await;
+    assert!(matches!(result, Ok(super::Completion { text, usage: None }) if text == "helloworld"));
+    assert!(!cancelled.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn reviewer_stream_cancels_as_soon_as_total_utf8_bytes_exceed_limit() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let emitted = Arc::new(AtomicUsize::new(0));
+    let producer = Arc::clone(&emitted);
+    let on_cancel = Arc::clone(&cancelled);
+    let stream = dal_agent::ext::EventStream::new(
+        futures::stream::repeat_with(move || {
+            producer.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, dal_provider::ProviderError>(dal_provider::StreamEvent::TextDelta {
+                text: "é".into(),
+            })
+        }),
+        move || on_cancel.store(true, Ordering::SeqCst),
+    );
+    assert!(super::Completion::from_stream(stream, 4, 10).await.is_err());
+    assert_eq!(emitted.load(Ordering::SeqCst), 3);
+    assert!(cancelled.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn reviewer_stream_cancels_after_event_cap_even_without_text() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let emitted = Arc::new(AtomicUsize::new(0));
+    let producer = Arc::clone(&emitted);
+    let on_cancel = Arc::clone(&cancelled);
+    let stream = dal_agent::ext::EventStream::new(
+        futures::stream::repeat_with(move || {
+            producer.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, dal_provider::ProviderError>(dal_provider::StreamEvent::ReasoningDelta {
+                text: String::new(),
+            })
+        }),
+        move || on_cancel.store(true, Ordering::SeqCst),
+    );
+    assert!(super::Completion::from_stream(stream, 1024, 5).await.is_err());
+    assert_eq!(emitted.load(Ordering::SeqCst), 6);
+    assert!(cancelled.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn oversized_reviewer_reply_does_not_append_a_record() {
+    let cfg = named_route_config();
+    let status = Arc::new(ReviewStatus::new(cfg.max_rounds));
+    let fake = Arc::new(FakeReviewServices::default());
+    *locked(&fake.provider) = Provider::Replies(vec![
+        dal_provider::StreamEvent::TextDelta {
+            text: "x".repeat(super::MAX_REVIEW_REPLY_BYTES),
+        },
+        dal_provider::StreamEvent::TextDelta { text: "y".into() },
+        dal_provider::StreamEvent::Stop {
+            reason: dal_provider::StopReason::EndTurn,
+        },
+    ]);
+    let cx = staged_cx(&fake);
+
+    let text = round(&cfg, &status, &cx, None).await;
+
+    assert_eq!(
+        text,
+        format!(
+            "reviewer call failed: reviewer response exceeds {} text bytes",
+            super::MAX_REVIEW_REPLY_BYTES
+        )
+    );
+    assert!(locked(&fake.appended).is_empty());
+}
+
+#[tokio::test]
+async fn malformed_reviewer_reply_does_not_append_a_record() {
+    let cfg = named_route_config();
+    let status = Arc::new(ReviewStatus::new(cfg.max_rounds));
+    let fake = Arc::new(FakeReviewServices::default());
+    *locked(&fake.provider) = Provider::Replies(text_events("not json", None));
+    let cx = staged_cx(&fake);
+
+    let text = round(&cfg, &status, &cx, None).await;
+
+    assert!(text.starts_with("reviewer reply did not parse at round 1:"));
+    assert!(locked(&fake.appended).is_empty());
+}
+
 /// The one test that drives the real git executable.
 #[expect(
     clippy::disallowed_methods,
