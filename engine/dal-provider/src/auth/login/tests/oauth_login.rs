@@ -117,15 +117,17 @@ impl Fixture {
 }
 
 struct Authorization {
+    url: String,
     redirect_uri: String,
     state: String,
     challenge: String,
 }
 
-fn authorization(url: &str) -> Authorization {
-    let url = Url::parse(url).expect("authorization url");
+fn authorization(raw_url: &str) -> Authorization {
+    let url = Url::parse(raw_url).expect("authorization url");
     let pairs: HashMap<String, String> = url.query_pairs().into_owned().collect();
     Authorization {
+        url: raw_url.to_owned(),
         redirect_uri: pairs["redirect_uri"].clone(),
         state: pairs["state"].clone(),
         challenge: pairs["code_challenge"].clone(),
@@ -540,7 +542,13 @@ fn assert_claude_exchange(fixture: &Fixture, auth: &Authorization, code: &str) {
     assert_eq!(body["code"], code);
     assert_eq!(body["state"], auth.state);
     assert_eq!(body["redirect_uri"], auth.redirect_uri);
-    assert_eq!(pkce_challenge(&body["code_verifier"]), auth.challenge);
+    let verifier = &body["code_verifier"];
+    assert_ne!(body["state"].as_str(), verifier.as_str());
+    assert!(
+        !auth.url.contains(verifier.as_str()),
+        "authorization progress must not expose the PKCE verifier"
+    );
+    assert_eq!(pkce_challenge(verifier), auth.challenge);
     let credential = fixture.stored("anthropic").expect("stored credential");
     let oauth = oauth_of(&credential);
     assert_eq!(oauth.access_token.expose(), "claude-access");
@@ -607,6 +615,28 @@ async fn a_dropped_paste_sender_leaves_the_browser_callback_able_to_finish_the_l
     let credential = result.expect("the callback completes the login");
     assert_eq!(fixture.stored("anthropic"), Some(credential));
     assert_claude_exchange(&fixture, &auth, "callback-code");
+}
+
+#[tokio::test]
+async fn a_claude_callback_with_wrong_state_does_not_exchange_tokens() {
+    let fixture = Fixture::new(claude_server()).await;
+    let site = fixture.site();
+    let (_paste, receiver) = oneshot::channel::<String>();
+    let (io, mut events) = LoginIo::channel(Some(receiver), CancellationToken::new());
+    let driver = async {
+        let auth = authorization_event(&mut events).await;
+        assert!(matches!(
+            next_event(&mut events).await,
+            LoginProgress::AskPaste { .. }
+        ));
+        let reply = visit(&auth.redirect_uri, "code=callback-code&state=wrong-state").await;
+        assert!(reply.starts_with("HTTP/1.1 400"), "callback reply: {reply}");
+    };
+    let (result, ()) = drive("anthropic", Method::Browser, io, &site, driver).await;
+
+    assert!(matches!(result, Err(ProviderError::StateMismatch)));
+    assert!(fixture.server.requests_to(CLAUDE_TOKEN_PATH).is_empty());
+    fixture.assert_untouched();
 }
 
 #[tokio::test]

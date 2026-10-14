@@ -503,7 +503,7 @@ impl<'a> LoginFlow<'a> {
         if self.device_auth {
             return self.authorize_device(row, progress, cancel, deadline).await;
         }
-        let state = flow_state(row.oauth.hook, verifier);
+        let state = new_state();
         let listener = bind_callback(row.callback_port).await;
         if let Ok((listener, port)) = listener {
             let redirect = redirect_uri(row.oauth.redirect, port);
@@ -526,7 +526,14 @@ impl<'a> LoginFlow<'a> {
                 callback_code(listener, row.oauth.redirect.path, &state, row.def.family).await?;
             report_progress(progress, LoginProgress::Exchanging, cancel)?;
             return self
-                .exchange(row, &code, verifier, &redirect, &[&state, &code, verifier])
+                .exchange(
+                    row,
+                    &code,
+                    verifier,
+                    Some(&state),
+                    &redirect,
+                    &[&state, &code, verifier],
+                )
                 .await;
         }
         self.authorize_device(row, progress, cancel, deadline).await
@@ -563,6 +570,7 @@ impl<'a> LoginFlow<'a> {
             row,
             &grant.authorization_code,
             &grant.code_verifier,
+            None,
             device.redirect_uri,
             &[&grant.authorization_code, &grant.code_verifier],
         )
@@ -578,7 +586,7 @@ impl<'a> LoginFlow<'a> {
         verifier: &str,
         challenge: &str,
     ) -> Result<OAuthCredential, ProviderError> {
-        let state = flow_state(row.oauth.hook, verifier);
+        let state = new_state();
         let listener = bind_callback_with_fallback(row.callback_port).await;
         let (listener, redirect) =
             Self::paste_listener_redirect(row, listener, challenge, &state, progress, cancel)?;
@@ -598,8 +606,15 @@ impl<'a> LoginFlow<'a> {
             parse_pasted_code(&value, &state)?
         };
         report_progress(progress, LoginProgress::Exchanging, cancel)?;
-        self.exchange(row, &code, verifier, &redirect, &[&code, &state])
-            .await
+        self.exchange(
+            row,
+            &code,
+            verifier,
+            Some(&state),
+            &redirect,
+            &[&code, &state, verifier],
+        )
+        .await
     }
 
     fn paste_listener_redirect(
@@ -658,6 +673,7 @@ impl<'a> LoginFlow<'a> {
         row: &RowEndpoints,
         code: &str,
         verifier: &str,
+        state: Option<&str>,
         redirect: &str,
         secrets: &[&str],
     ) -> Result<OAuthCredential, ProviderError> {
@@ -689,11 +705,16 @@ impl<'a> LoginFlow<'a> {
                 })
             }
             Hook::ClaudeCode => {
+                let Some(state) = state else {
+                    return Err(ProviderError::AuthWrite {
+                        reason: String::from("Claude OAuth state is missing"),
+                    });
+                };
                 let request = ClaudeTokenRequest {
                     grant_type: "authorization_code",
                     client_id: row.oauth.client_id,
                     code,
-                    state: verifier,
+                    state,
                     redirect_uri: redirect,
                     code_verifier: verifier,
                 };
@@ -1236,14 +1257,6 @@ const fn query_encoding(hook: Hook) -> QueryEncoding {
     }
 }
 
-/// The `state` of one attempt: Claude reuses the PKCE verifier, the others
-/// draw a fresh value.
-fn flow_state(hook: Hook, verifier: &str) -> String {
-    match hook {
-        Hook::ClaudeCode => verifier.to_owned(),
-        Hook::CodexAccount => new_state(),
-    }
-}
 #[derive(Clone, Copy)]
 enum QueryEncoding {
     Form,

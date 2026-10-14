@@ -126,8 +126,8 @@ pub enum Hook {
     /// spaces as `%20`. After sign-in the model list is fetched with the
     /// account headers.
     CodexAccount,
-    /// Claude sign-in: the code exchange is JSON and echoes the PKCE verifier
-    /// as `state`. The authorize query encodes spaces as `+`.
+    /// Claude sign-in: the code exchange is JSON and echoes the authorization
+    /// state. The authorize query encodes spaces as `+`.
     ClaudeCode,
 }
 
