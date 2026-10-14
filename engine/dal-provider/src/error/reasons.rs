@@ -27,6 +27,24 @@ pub enum LimitError {
     StreamDuration,
 }
 
+impl LimitError {
+    /// The one next-action sentence for this failure.
+    ///
+    /// Every cap applies to one reply, so a fresh request resets it. A limit
+    /// that keeps firing names a reply no provider response budget can carry.
+    #[must_use]
+    pub fn fix(&self) -> String {
+        match self {
+            Self::SseLine | Self::SseEvent | Self::WsMessage | Self::Body => {
+                String::from("Retry the request, or ask for a smaller reply.")
+            }
+            Self::StreamBytes | Self::StreamEvents | Self::StreamItems | Self::StreamDuration => {
+                String::from("Retry the request, or split the task into smaller steps.")
+            }
+        }
+    }
+}
+
 impl fmt::Display for LimitError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

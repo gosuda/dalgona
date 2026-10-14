@@ -108,22 +108,42 @@ fn error_display_texts() {
         (
             ProviderError::Limit(LimitError::SseLine),
             "SSE line exceeds 1 MiB.",
-            None,
+            Some("Retry the request, or ask for a smaller reply."),
         ),
         (
             ProviderError::Limit(LimitError::SseEvent),
             "SSE event exceeds 8 MiB.",
-            None,
+            Some("Retry the request, or ask for a smaller reply."),
         ),
         (
             ProviderError::Limit(LimitError::WsMessage),
             "WebSocket message exceeds 16 MiB.",
-            None,
+            Some("Retry the request, or ask for a smaller reply."),
         ),
         (
             ProviderError::Limit(LimitError::Body),
             "response body exceeds 16 MiB.",
-            None,
+            Some("Retry the request, or ask for a smaller reply."),
+        ),
+        (
+            ProviderError::Limit(LimitError::StreamBytes),
+            "provider stream exceeds 32 MiB of event data.",
+            Some("Retry the request, or split the task into smaller steps."),
+        ),
+        (
+            ProviderError::Limit(LimitError::StreamEvents),
+            "provider stream exceeds 8192 events.",
+            Some("Retry the request, or split the task into smaller steps."),
+        ),
+        (
+            ProviderError::Limit(LimitError::StreamItems),
+            "provider stream exceeds 4096 retained items.",
+            Some("Retry the request, or split the task into smaller steps."),
+        ),
+        (
+            ProviderError::Limit(LimitError::StreamDuration),
+            "provider stream exceeds 10 min total duration.",
+            Some("Retry the request, or split the task into smaller steps."),
         ),
         (
             ProviderError::PlainHttp {
