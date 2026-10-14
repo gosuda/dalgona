@@ -365,7 +365,12 @@ impl GrantStore {
         Ok(store)
     }
 
-    fn empty(data_dir: PathBuf, workspace: PathBuf, ask_timeout: Duration, broker: Option<Arc<Broker>>) -> Self {
+    fn empty(
+        data_dir: PathBuf,
+        workspace: PathBuf,
+        ask_timeout: Duration,
+        broker: Option<Arc<Broker>>,
+    ) -> Self {
         Self {
             data_dir,
             workspace,
