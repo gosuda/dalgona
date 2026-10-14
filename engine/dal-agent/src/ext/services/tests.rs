@@ -31,6 +31,7 @@ use crate::Broker;
 use crate::broker::Resolution;
 use crate::error::ServiceError;
 use crate::ext::Doc;
+use crate::ext::McpClient;
 use crate::ext::generation::{Generation, ValidatedExtensions};
 use crate::ext::grants::GrantStore;
 use crate::ext::tool::{Approved, ToolCxRuntime};
@@ -400,6 +401,18 @@ fn ephemeral_fixture(ask_timeout: Duration) -> Fixture {
 }
 
 fn assemble(ask_timeout: Duration, ephemeral: bool) -> Fixture {
+    assemble_with_mcp(ask_timeout, ephemeral, None)
+}
+
+fn fixture_with_mcp(ask_timeout: Duration, mcp_client: Arc<dyn McpClient>) -> Fixture {
+    assemble_with_mcp(ask_timeout, false, Some(mcp_client))
+}
+
+fn assemble_with_mcp(
+    ask_timeout: Duration,
+    ephemeral: bool,
+    mcp_client: Option<Arc<dyn McpClient>>,
+) -> Fixture {
     let temp = tempfile::tempdir().unwrap();
     let broker = Arc::new(Broker::new());
     let grants = Arc::new(
@@ -431,7 +444,7 @@ fn assemble(ask_timeout: Duration, ephemeral: bool) -> Fixture {
         broker: Arc::clone(&broker),
         backend: Arc::<FakeBackend>::clone(&backend),
         rt: Arc::<FakeRt>::clone(&rt),
-        mcp_client: None,
+        mcp_client,
         generation: generation_rx,
         overlay: Arc::clone(&overlay),
         history: Arc::from(["first".to_owned(), "second".to_owned()]),
@@ -1230,12 +1243,37 @@ async fn an_open_ask_survives_a_generation_swap() {
     );
 }
 
+#[derive(Default)]
+struct FakeMcpClient {
+    calls: Mutex<Vec<dal_core::ext::McpRequest>>,
+}
+
+impl McpClient for FakeMcpClient {
+    fn call<'a>(
+        &'a self,
+        _who: &'a Caller,
+        req: dal_core::ext::McpRequest,
+    ) -> crate::ext::BoxFuture<'a, Result<dal_core::ext::McpResponse, ServiceError>> {
+        self.calls.lock().unwrap().push(req);
+        Box::pin(async {
+            Ok(dal_core::ext::McpResponse {
+                text: "ok".into(),
+                is_error: false,
+            })
+        })
+    }
+}
+
 /// Builds the unavailable-client request; the field shape follows the core
 /// extension values part and collapses to one place if it lands wider.
 fn mcp_request() -> dal_core::ext::McpRequest {
+    mcp_request_for("files")
+}
+
+fn mcp_request_for(server: &str) -> dal_core::ext::McpRequest {
     dal_core::ext::McpRequest {
         session: SessionId::new_v7(),
-        server: "files".into(),
+        server: server.into(),
         tool: "read".into(),
         arguments: RawJson::parse("{}").unwrap(),
     }
@@ -1336,6 +1374,142 @@ async fn mcp_declarations_list_declared_blocks_and_follow_reload() {
         vec![skill_declaring("plain", None)],
     )]));
     assert_eq!(fx.services.mcp_declarations(&who).await.unwrap(), vec![]);
+}
+
+#[tokio::test]
+async fn scripted_mcp_rejects_generic_grant_without_exact_set_approval() {
+    let client = Arc::new(FakeMcpClient::default());
+    let fx = fixture_with_mcp(Duration::from_secs(30), client.clone());
+    fx.generation.send_replace(generation_of(vec![plugin_with(
+        "focus",
+        vec![skill_declaring(
+            "docs",
+            Some(block_of("web", http_decl("https://first.example/mcp"))),
+        )],
+    )]));
+    let who = caller("focus", &["mcp"], Some(turn()));
+    let services = Arc::clone(&fx.services);
+    let pending = spawn(async move { services.mcp(&who, mcp_request_for("docs.web")).await });
+
+    await_open(&fx.broker).await;
+    answer_next(&fx.broker, Answer::Approve);
+    await_open(&fx.broker).await;
+    let requests = fx.broker.open_requests();
+    assert!(matches!(
+        &requests[0].question,
+        Question::Grant { detail: Some(detail), .. }
+            if detail.contains("docs.web: URL https://first.example/mcp")
+    ));
+    assert!(client.calls.lock().unwrap().is_empty());
+    answer_next(&fx.broker, Answer::Decline);
+    assert!(matches!(pending.join().await, Err(ServiceError::Declined)));
+    assert!(client.calls.lock().unwrap().is_empty());
+
+    fx.backend
+        .headless
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let who = caller("focus", &["mcp"], Some(turn()));
+    assert!(matches!(
+        fx.services.mcp(&who, mcp_request_for("docs.web")).await,
+        Err(ServiceError::Denied(DenyReason::NotGranted))
+    ));
+    assert!(client.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn scripted_mcp_requires_reapproval_after_declaration_change() {
+    let client = Arc::new(FakeMcpClient::default());
+    let fx = fixture_with_mcp(Duration::from_secs(30), client.clone());
+    let declared = |url| {
+        generation_of(vec![plugin_with(
+            "focus",
+            vec![skill_declaring("docs", Some(block_of("web", http_decl(url))))],
+        )])
+    };
+    fx.generation.send_replace(declared("https://first.example/mcp"));
+    let who = caller("focus", &["mcp"], Some(turn()));
+    let services = Arc::clone(&fx.services);
+    let first = spawn(async move { services.mcp(&who, mcp_request_for("docs.web")).await });
+    for _ in 0..2 {
+        await_open(&fx.broker).await;
+        answer_next(&fx.broker, Answer::Approve);
+    }
+    assert_eq!(first.join().await.unwrap().text.as_ref(), "ok");
+    assert_eq!(client.calls.lock().unwrap().len(), 1);
+
+    fx.generation.send_replace(declared("https://second.example/mcp"));
+    let who = caller("focus", &["mcp"], Some(turn()));
+    let services = Arc::clone(&fx.services);
+    let second = spawn(async move { services.mcp(&who, mcp_request_for("docs.web")).await });
+    await_open(&fx.broker).await;
+    let requests = fx.broker.open_requests();
+    assert!(matches!(
+        &requests[0].question,
+        Question::Grant { detail: Some(detail), .. }
+            if detail.contains("https://second.example/mcp")
+    ));
+    assert_eq!(client.calls.lock().unwrap().len(), 1);
+    answer_next(&fx.broker, Answer::ApproveForSession);
+    assert_eq!(second.join().await.unwrap().text.as_ref(), "ok");
+    assert_eq!(client.calls.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn mapped_mcp_authorizes_declaring_extension_not_battery_declarations() {
+    let client = Arc::new(FakeMcpClient::default());
+    let fx = fixture_with_mcp(Duration::from_secs(30), client.clone());
+    fx.generation.send_replace(generation_of(vec![
+        plugin_with("mcp", vec![]),
+        plugin_with(
+            "docs",
+            vec![skill_declaring(
+                "reference",
+                Some(block_of("web", http_decl("https://docs.example/mcp"))),
+            )],
+        ),
+    ]));
+    let who = caller("mcp", &["mcp"], Some(turn()));
+    let services = Arc::clone(&fx.services);
+    let pending = spawn(async move { services.mcp(&who, mcp_request_for("reference.web")).await });
+    await_open(&fx.broker).await;
+    answer_next(&fx.broker, Answer::Approve);
+    await_open(&fx.broker).await;
+    let requests = fx.broker.open_requests();
+    assert!(matches!(
+        &requests[0].question,
+        Question::Grant { detail: Some(detail), .. }
+            if detail.contains("reference.web: URL https://docs.example/mcp")
+    ));
+    assert!(client.calls.lock().unwrap().is_empty());
+    answer_next(&fx.broker, Answer::ApproveForSession);
+    assert_eq!(pending.join().await.unwrap().text.as_ref(), "ok");
+    assert_eq!(client.calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn scripted_mcp_rejects_generation_change_while_approval_is_open() {
+    let client = Arc::new(FakeMcpClient::default());
+    let fx = fixture_with_mcp(Duration::from_secs(30), client.clone());
+    let declared = |url| {
+        generation_of(vec![plugin_with(
+            "focus",
+            vec![skill_declaring("docs", Some(block_of("web", http_decl(url))))],
+        )])
+    };
+    fx.generation.send_replace(declared("https://first.example/mcp"));
+    let who = caller("focus", &["mcp"], Some(turn()));
+    let services = Arc::clone(&fx.services);
+    let pending = spawn(async move { services.mcp(&who, mcp_request_for("docs.web")).await });
+    await_open(&fx.broker).await;
+    answer_next(&fx.broker, Answer::Approve);
+    await_open(&fx.broker).await;
+    fx.generation.send_replace(declared("https://second.example/mcp"));
+    answer_next(&fx.broker, Answer::Approve);
+    assert!(matches!(
+        pending.join().await,
+        Err(ServiceError::Denied(DenyReason::NotGranted))
+    ));
+    assert!(client.calls.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
