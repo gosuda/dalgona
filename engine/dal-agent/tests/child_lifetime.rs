@@ -236,7 +236,7 @@ fn tool_spec(name: &Name) -> Arc<ToolSpec> {
 fn start_args(child_name: &'static str, child_model: &'static str) -> AgentStart {
     AgentStart {
         call: CallId::new("c-lifetime-spawn"),
-        name: child_name.into(),
+        name: Some(child_name.into()),
         prompt: "work".into(),
         model: Some(child_model.into()),
         role: None,

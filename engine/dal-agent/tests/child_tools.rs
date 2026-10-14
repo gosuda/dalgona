@@ -213,7 +213,7 @@ impl CommandHandler for Spawn {
             });
             let start = AgentStart {
                 call: CallId::new("spawn-call"),
-                name,
+                name: Some(name),
                 prompt: "work".into(),
                 model: Some(PROBE_MODEL.into()),
                 role: None,

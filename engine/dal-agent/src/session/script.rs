@@ -307,6 +307,7 @@ impl SessionScriptHost {
             CallerKind::Handler,
             turn,
         )
+        .with_optional_extension(extension)
     }
 
     /// The catalog declaration of one export, denied when unknown.

@@ -350,6 +350,7 @@ pub(crate) async fn open(
             kind,
             turn,
         )
+        .with_extension(extension)
     };
     let token = cancel.child_token();
     let guard = token.clone().drop_guard();

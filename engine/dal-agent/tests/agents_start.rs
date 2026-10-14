@@ -45,7 +45,7 @@ fn fixture_env(tmp: &std::path::Path, cwd: std::path::PathBuf) -> Env {
 fn start_args(name: &str, workspace: Option<&Workspace>) -> AgentStart {
     AgentStart {
         call: CallId::new("c-spawn"),
-        name: name.into(),
+        name: Some(name.into()),
         prompt: "say done".into(),
         model: None,
         role: None,
