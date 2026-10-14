@@ -218,7 +218,9 @@ mod tests {
             .expect_err("existing log must not be overwritten");
         assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(
-            std::fs::read(&log_path).expect("read existing log"),
+            std::fs::read(&log_path)
+                .expect("read existing log")
+                .as_slice(),
             b"original"
         );
     }
@@ -237,7 +239,10 @@ mod tests {
             .await
             .expect_err("symlink must not be followed");
         assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
-        assert_eq!(std::fs::read(&target).expect("read target"), b"unchanged");
+        assert_eq!(
+            std::fs::read(&target).expect("read target").as_slice(),
+            b"unchanged"
+        );
     }
 
     #[test]
