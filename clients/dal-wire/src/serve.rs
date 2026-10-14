@@ -22,7 +22,7 @@ use dal_core::ApprovalMode;
 use futures::{StreamExt, stream::FuturesUnordered};
 use hyper::{Request, Response};
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::error::WireError;
@@ -64,6 +64,10 @@ impl ServeHandle {
 
 /// Maximum concurrent HTTP connections.
 const CONN_CAP: usize = 256;
+/// Maximum connections waiting to pass their first request guards.
+const PRE_AUTH_CAP: usize = 32;
+/// Absolute deadline for each HTTP request header, including idle keep-alive.
+const HEADER_TIMEOUT: Duration = Duration::from_secs(5);
 /// Maximum request header buffer size in bytes.
 const HEADER_LIMIT: usize = 1_048_576;
 /// Stop drain grace.
@@ -137,6 +141,7 @@ pub(crate) fn listen(
         shutdown: stop.child_token(),
     });
     let shutdown = ctx.shutdown.clone();
+    let pre_auth = Arc::new(Semaphore::new(PRE_AUTH_CAP));
     let done = async move {
         let mut conns: FuturesUnordered<Driver> = FuturesUnordered::new();
         let mut drivers: FuturesUnordered<Driver> = FuturesUnordered::new();
@@ -147,9 +152,13 @@ pub(crate) fn listen(
                 accepted = listener.accept(), if conns.len() < CONN_CAP => {
                     match accepted {
                         Ok((stream, _)) => {
+                            let Ok(permit) = Arc::clone(&pre_auth).try_acquire_owned() else {
+                                tracing::debug!("pre-auth connection capacity exhausted");
+                                continue;
+                            };
                             let ctx = Arc::clone(&ctx);
                             conns.push(Box::pin(async move {
-                                serve_conn(ctx, stream).await;
+                                serve_conn(ctx, stream, permit).await;
                             }));
                         }
                         Err(error) => {
@@ -207,18 +216,33 @@ fn libc_enfile() -> i32 {
     23
 }
 
+/// Builds an HTTP/1.1 parser with bounded time to finish every request header.
+fn http1_builder() -> hyper::server::conn::http1::Builder {
+    let mut builder = hyper::server::conn::http1::Builder::new();
+    builder
+        .max_buf_size(HEADER_LIMIT)
+        .timer(hyper_util::rt::TokioTimer::new())
+        .header_read_timeout(HEADER_TIMEOUT);
+    builder
+}
+
 /// Serves one HTTP/1.1 connection to completion.
-async fn serve_conn(ctx: Arc<ServeCtx>, stream: tokio::net::TcpStream) {
+async fn serve_conn(
+    ctx: Arc<ServeCtx>,
+    stream: tokio::net::TcpStream,
+    permit: OwnedSemaphorePermit,
+) {
     let io = hyper_util::rt::TokioIo::new(stream);
     let shutdown = ctx.shutdown.clone();
+    // A validated request releases the small pre-auth budget. The Hyper
+    // connection remains under CONN_CAP, even for long-running responses.
+    let pre_auth = Arc::new(Mutex::new(Some(permit)));
     let service = hyper::service::service_fn(move |req: Request<hyper::body::Incoming>| {
         let ctx = Arc::clone(&ctx);
-        async move { Ok::<_, hyper::Error>(handle_request(ctx, req).await) }
+        let pre_auth = Arc::clone(&pre_auth);
+        async move { Ok::<_, hyper::Error>(handle_request(ctx, req, &pre_auth).await) }
     });
-    let conn = hyper::server::conn::http1::Builder::new()
-        .max_buf_size(HEADER_LIMIT)
-        .serve_connection(io, service)
-        .with_upgrades();
+    let conn = http1_builder().serve_connection(io, service).with_upgrades();
     let mut conn = std::pin::pin!(conn);
     let result = tokio::select! {
         result = conn.as_mut() => result,
@@ -232,10 +256,20 @@ async fn serve_conn(ctx: Arc<ServeCtx>, stream: tokio::net::TcpStream) {
     }
 }
 
+/// Closes rejected or anonymous HTTP connections after the response.
+fn close_untrusted(mut response: Response<ServeBody>) -> Response<ServeBody> {
+    response.headers_mut().insert(
+        hyper::header::CONNECTION,
+        hyper::header::HeaderValue::from_static("close"),
+    );
+    response
+}
+
 /// Handles one HTTP request through guards to its route handler.
 async fn handle_request(
     ctx: Arc<ServeCtx>,
     req: Request<hyper::body::Incoming>,
+    pre_auth: &Mutex<Option<OwnedSemaphorePermit>>,
 ) -> Response<ServeBody> {
     let method = req.method().to_string();
     let path = req.uri().path().to_owned();
@@ -246,23 +280,40 @@ async fn handle_request(
         super::router::ServeRoute::WebSocket | super::router::ServeRoute::CodexWs
     );
     if req.headers().contains_key("origin") && !is_upgrade(&req) {
-        return into_response(Resp::text(403, "browser requests are not allowed"));
+        return close_untrusted(into_response(Resp::text(
+            403,
+            "browser requests are not allowed",
+        )));
     }
     if !ctx.cfg.public
         && let Err(resp) = host_guard(&ctx, &req)
     {
-        return into_response(resp);
+        return close_untrusted(into_response(resp));
     }
     if ctx.cfg.public
         && !is_card(&method, &path)
         && !upgrade_route
         && let Err(resp) = auth_guard(&ctx, &req)
     {
-        return into_response(resp);
+        return close_untrusted(into_response(resp));
     }
     if upgrade_route {
-        return upgrade_response(ctx, req, route).await;
+        let response = upgrade_response(ctx, req, route).await;
+        if response.status() == hyper::StatusCode::SWITCHING_PROTOCOLS {
+            pre_auth.lock().await.take();
+            return response;
+        }
+        return close_untrusted(response);
     }
+    if ctx.cfg.public && is_card(&method, &path) {
+        // The public card needs no token. Do not let its body or keep-alive
+        // occupy an unauthenticated slot after the response.
+        let host = req.headers().get("host").and_then(|value| value.to_str().ok());
+        return close_untrusted(into_response(a2a::card(&ctx, host)));
+    }
+    // Request guards passed. Later body reads, handlers, and streams belong
+    // to the normal connection pool rather than the pre-auth budget.
+    pre_auth.lock().await.take();
     if requires_json(&route)
         && let Err(resp) = content_guard(&req, &route)
     {
