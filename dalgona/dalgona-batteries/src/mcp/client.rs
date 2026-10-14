@@ -32,8 +32,8 @@ use super::{
     },
     stdio::{ProcessEnvironment, StdioTransport},
     tools::{
-        HeaderAnnotation, Key, MappedTool, RemoteTool, ServerEntryTool, ToolListCache, cache_ttl,
-        decode_tool_page, fold_tool_name, shape_result, tool_spec,
+        HeaderAnnotation, Key, MappedTool, RemoteTool, ServerEntryTool, ToolListBudget,
+        ToolListCache, cache_ttl, decode_tool_page, fold_tool_name, shape_result, tool_spec,
     },
 };
 
@@ -735,6 +735,7 @@ impl Client {
     ) -> Result<ToolListCache, McpError> {
         let deadline = Instant::now() + self.budgets.list;
         let mut tools = Vec::new();
+        let mut budget = ToolListBudget::default();
         let mut cursor: Option<String> = None;
         let mut ttl = None;
         for page_no in 0..LIST_PAGE_MAX {
@@ -761,10 +762,12 @@ impl Client {
                     n: self.budgets.list.as_secs(),
                 })?
                 .map_err(map_transport)?;
+            budget.receive(&reply)?;
             let result = response_result(&reply)?;
             let page = decode_tool_page(
                 &sonic_rs::to_string(&result).map_err(|error| protocol_error(error.to_string()))?,
             )?;
+            budget.retain(&page)?;
             for excluded in page.excluded {
                 session.services.notify(
                     &session.caller,
@@ -781,7 +784,7 @@ impl Client {
             if cursor.is_none() {
                 return Ok(ToolListCache {
                     until: Instant::now() + cache_ttl(ttl),
-                    tools,
+                    tools: tools.into(),
                 });
             }
             if page_no + 1 == LIST_PAGE_MAX {
@@ -1155,7 +1158,7 @@ fn claim_name(
 async fn ready_snapshot(
     declared: &[Key],
     instances: &HashMap<Key, Arc<Instance>>,
-) -> BTreeMap<Key, Vec<RemoteTool>> {
+) -> BTreeMap<Key, Arc<[RemoteTool]>> {
     let mut ready = BTreeMap::new();
     for key in declared {
         let Some(instance) = instances.get(key) else {
@@ -1166,7 +1169,7 @@ async fn ready_snapshot(
             continue;
         };
         let cache = ready_phase.cache.lock().await;
-        ready.insert(key.clone(), cache.tools.clone());
+        ready.insert(key.clone(), Arc::clone(&cache.tools));
     }
     ready
 }
@@ -1182,7 +1185,7 @@ fn build_tools(
     session: &Session,
     declared: &[Key],
     declarations: &HashMap<Key, DeclaredServer>,
-    ready: &BTreeMap<Key, Vec<RemoteTool>>,
+    ready: &BTreeMap<Key, Arc<[RemoteTool]>>,
 ) -> Result<Vec<StagedTool>, ServiceError> {
     let mut tools: Vec<StagedTool> = Vec::new();
     for key in declared {
@@ -1196,7 +1199,7 @@ fn build_tools(
         )
         .map_err(|error| ServiceError::failed(Some(Service::Mcp), error.to_string()))?;
         tools.push((Arc::new(entry), Visibility::Deferred));
-        for remote in ready.get(key).into_iter().flatten() {
+        for remote in ready.get(key).into_iter().flat_map(|tools| tools.iter()) {
             match map_remote_tool(key, declaration, remote) {
                 Ok(tool) => tools.push((tool, Visibility::Deferred)),
                 Err(warning) => notify_mcp(session, warning),

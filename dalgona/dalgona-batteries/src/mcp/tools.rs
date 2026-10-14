@@ -19,7 +19,10 @@ use serde::Deserialize;
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
 
 use crate::mcp::{
-    McpError, RESULT_TEXT_CAP, RESULT_TRUNCATED_MARKER, TOOL_CACHE_CAP, TOOL_CACHE_DEFAULT,
+    LIST_CURSOR_BYTES_MAX, LIST_METADATA_BYTES_MAX, LIST_RESPONSE_BYTES_MAX,
+    LIST_TOOL_DESCRIPTION_BYTES_MAX, LIST_TOOL_NAME_BYTES_MAX, LIST_TOOL_SCHEMA_BYTES_MAX,
+    LIST_TOOLS_MAX, McpError, RESULT_TEXT_CAP, RESULT_TRUNCATED_MARKER, TOOL_CACHE_CAP,
+    TOOL_CACHE_DEFAULT,
 };
 
 pub(crate) use dal_core::ext::McpServerDecl as ServerDecl;
@@ -306,6 +309,16 @@ pub(crate) fn decode_tool_page(body: &str) -> Result<RemoteToolPage, McpError> {
             code: -32600,
             message: format!("invalid tools/list response: {error}"),
         })?;
+    if wire.tools.len() > LIST_TOOLS_MAX {
+        return Err(list_budget_error("tool count"));
+    }
+    if wire
+        .next_cursor
+        .as_ref()
+        .is_some_and(|cursor| cursor.len() > LIST_CURSOR_BYTES_MAX)
+    {
+        return Err(list_budget_error("cursor bytes"));
+    }
     let mut tools = Vec::with_capacity(wire.tools.len());
     let mut excluded = Vec::new();
     let mut seen = BTreeMap::new();
@@ -340,6 +353,23 @@ pub(crate) fn decode_tool_page(body: &str) -> Result<RemoteToolPage, McpError> {
 }
 
 fn decode_tool(wire: RemoteToolWire) -> Result<Result<RemoteTool, ExcludedTool>, McpError> {
+    if wire.name.len() > LIST_TOOL_NAME_BYTES_MAX {
+        return Err(list_budget_error("tool name bytes"));
+    }
+    if wire
+        .description
+        .as_ref()
+        .is_some_and(|description| description.len() > LIST_TOOL_DESCRIPTION_BYTES_MAX)
+    {
+        return Err(list_budget_error("tool description bytes"));
+    }
+    if wire
+        .input_schema
+        .as_ref()
+        .is_some_and(|schema| schema.as_str().len() > LIST_TOOL_SCHEMA_BYTES_MAX)
+    {
+        return Err(list_budget_error("tool schema bytes"));
+    }
     if wire.name.is_empty() {
         return Err(McpError::Protocol {
             code: -32600,
@@ -384,11 +414,74 @@ fn decode_tool(wire: RemoteToolWire) -> Result<Result<RemoteTool, ExcludedTool>,
     }))
 }
 
-/// A per-server tools/list cache entry.
+fn list_budget_error(resource: &'static str) -> McpError {
+    McpError::ListBudget { resource }
+}
+
+/// Cumulative resource ledger for one paginated tools/list operation.
+///
+/// A page is accounted before its metadata can enter the cache. Field limits
+/// are checked during decoding, before schema validation and annotation work.
+#[derive(Default)]
+pub(crate) struct ToolListBudget {
+    response_bytes: usize,
+    metadata_bytes: usize,
+    tool_count: usize,
+}
+
+impl ToolListBudget {
+    /// Charges the raw JSON-RPC response before decoding the result.
+    pub(crate) fn receive(&mut self, reply: &RawJson) -> Result<(), McpError> {
+        self.response_bytes = self
+            .response_bytes
+            .checked_add(reply.as_str().len())
+            .filter(|&bytes| bytes <= LIST_RESPONSE_BYTES_MAX)
+            .ok_or_else(|| list_budget_error("response bytes"))?;
+        Ok(())
+    }
+
+    /// Charges decoded fields and annotations before retaining a page.
+    pub(crate) fn retain(&mut self, page: &RemoteToolPage) -> Result<(), McpError> {
+        let page_count = page
+            .tools
+            .len()
+            .checked_add(page.excluded.len())
+            .ok_or_else(|| list_budget_error("tool count"))?;
+        let tool_count = self
+            .tool_count
+            .checked_add(page_count)
+            .filter(|&count| count <= LIST_TOOLS_MAX)
+            .ok_or_else(|| list_budget_error("tool count"))?;
+        let metadata_bytes = page
+            .tools
+            .iter()
+            .try_fold(self.metadata_bytes, |total, tool| {
+                let mut bytes = tool
+                    .name
+                    .len()
+                    .checked_add(tool.description.len())?
+                    .checked_add(tool.schema.as_str().len())?;
+                for header in &tool.headers {
+                    bytes = bytes.checked_add(header.header.len())?;
+                    for component in &header.path {
+                        bytes = bytes.checked_add(component.len())?;
+                    }
+                }
+                total.checked_add(bytes)
+            })
+            .filter(|&bytes| bytes <= LIST_METADATA_BYTES_MAX)
+            .ok_or_else(|| list_budget_error("metadata bytes"))?;
+        self.tool_count = tool_count;
+        self.metadata_bytes = metadata_bytes;
+        Ok(())
+    }
+}
+
+/// A per-server tools/list cache entry. Snapshots share the immutable metadata.
 #[derive(Clone, Debug)]
 pub(crate) struct ToolListCache {
     pub(crate) until: Instant,
-    pub(crate) tools: Vec<RemoteTool>,
+    pub(crate) tools: Arc<[RemoteTool]>,
 }
 
 pub(crate) fn cache_ttl(ttl_ms: Option<u64>) -> Duration {
