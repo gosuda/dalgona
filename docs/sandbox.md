@@ -20,3 +20,7 @@ control. If the helper is missing
 or the kernel cannot enforce the sandbox, dal refuses the command with the
 setup error instead of running it unsandboxed. It does not cover plugins
 running with your permissions.
+
+On macOS a process-group Seatbelt guard applies to every command even with
+`sandbox = "off"`: descendants cannot create new sessions or process
+groups, so cancellation can stop the whole command tree.
