@@ -24,8 +24,8 @@ use std::{
 };
 
 use sonic_rs::JsonValueTrait;
-use tokio::io::AsyncReadExt;
 use support::{TestDir, dalgon_binary};
+use tokio::io::AsyncReadExt;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 struct ServeHandle {
@@ -200,6 +200,8 @@ async fn websocket_auth_never_logs_token_values() -> Result<(), Box<dyn Error + 
 #[tokio::test]
 async fn silent_sockets_do_not_exhaust_authenticated_admission()
 -> Result<(), Box<dyn Error + Send + Sync>> {
+    // The pending budget retains at most this many unverified sockets.
+    const PENDING_BUDGET: usize = 32;
     let dir = TestDir::new()?;
     let home = dir.path().join("home");
     let workspace = dir.path().join("workspace");
@@ -220,7 +222,10 @@ async fn silent_sockets_do_not_exhaust_authenticated_admission()
         .env("XDG_DATA_HOME", &data_home)
         .args(["serve", "token"])
         .output()?;
-    assert!(created.status.success(), "serve token creation must succeed");
+    assert!(
+        created.status.success(),
+        "serve token creation must succeed"
+    );
     let token = String::from_utf8(created.stdout)?.trim().to_owned();
 
     let serve = spawn_serve(binary, &workspace, &home, &data_home).await?;
@@ -231,12 +236,51 @@ async fn silent_sockets_do_not_exhaust_authenticated_admission()
         .ok_or_else(|| io::Error::other("serve WebSocket URL has no authority"))?
         .parse()?;
 
-    // An attacker without a token can hold sockets without sending headers.
-    // New authenticated connections must still get a chance to finish.
+    // An attacker without a token can hold sockets without sending
+    // headers. A TCP connect alone does not prove the listener accepted
+    // the socket (the backlog parks unaccepted peers), so establish
+    // saturation first: the pending budget retains at most 32 unverified
+    // sockets and evicts the stale end FIFO, which means the first 224
+    // peers must be closed by the server while the newest stay open.
     let mut peers = Vec::with_capacity(256);
     for _ in 0..256 {
         peers.push(tokio::net::TcpStream::connect(address).await?);
     }
+    tokio::time::timeout(Duration::from_secs(3), async {
+        for peer in &mut peers[..256 - PENDING_BUDGET] {
+            let mut probe = [0_u8; 1];
+            match peer.read(&mut probe).await {
+                Ok(0) => {}
+                Ok(read) => {
+                    return Err(io::Error::other(format!(
+                        "evicted silent peer sent {read} bytes"
+                    )));
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
+                    ) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok::<(), io::Error>(())
+    })
+    .await
+    .map_err(|_| {
+        io::Error::other("stale silent peers were not evicted before the header deadline")
+    })??;
+    let mut probe = [0_u8; 1];
+    assert!(
+        matches!(
+            peers[255].try_read(&mut probe),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock
+        ),
+        "the newest silent peer must still be pending inside the budget"
+    );
+
+    // With the listener saturated and stale peers culled, an authenticated
+    // WebSocket must still initialize.
     let mut valid = tokio::time::timeout(
         Duration::from_secs(5),
         dal_wire::WebSocketTransport::connect_with_auth(&serve.websocket_url, &token),
@@ -250,8 +294,10 @@ async fn silent_sockets_do_not_exhaust_authenticated_admission()
     assert_eq!(reply.get("id").and_then(sonic_rs::Value::as_u64), Some(1));
     assert!(reply.get("result").is_some(), "authenticated RPC is served");
 
+    // The retained pending peers still die at the header deadline; they
+    // must not hold a slot past it.
     tokio::time::timeout(Duration::from_secs(12), async {
-        for mut peer in peers {
+        for peer in &mut peers[256 - PENDING_BUDGET..] {
             let mut discarded = Vec::new();
             match peer.read_to_end(&mut discarded).await {
                 Ok(_) => {}
