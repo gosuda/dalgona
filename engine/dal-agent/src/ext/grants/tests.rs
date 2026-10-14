@@ -1,6 +1,6 @@
 //! Grant key, broker, coalescing, and persistence tests.
 
-use dal_core::{Name, Origin, Service};
+use dal_core::{Name, Origin, Service, Workspace};
 
 fn key(ext: &str, origin: Origin, services: &[Service]) -> GrantKey {
     GrantKey {
@@ -8,6 +8,10 @@ fn key(ext: &str, origin: Origin, services: &[Service]) -> GrantKey {
         origin,
         services: ServiceSet::from_names(services.iter().map(|service| service.as_str()))
             .expect("valid set"),
+        scope: Some(GrantScope::for_workspace(
+            &"a".repeat(64),
+            &Workspace::new(std::env::current_dir().expect("cwd")).expect("workspace"),
+        )),
     }
 }
 
@@ -46,11 +50,26 @@ use tokio_util::sync::CancellationToken;
 
 use crate::Broker;
 use crate::error::ServiceError;
-use crate::ext::{Caller, CallerKind};
+use crate::ext::{Caller, CallerKind, ExtensionBuilder};
 
-use super::{GrantKey, GrantStore, GrantStoreError};
+use super::{GrantKey, GrantScope, GrantStore, GrantStoreError};
 
-fn test_caller(inject: ServiceSet) -> Caller {
+fn test_extension(
+    ext: &str,
+    origin: Origin,
+    inject: ServiceSet,
+    source: &str,
+) -> crate::ext::Extension {
+    ExtensionBuilder::new(ext, "1.0.0", inject)
+        .expect("builder")
+        .with_origin(origin, None)
+        .with_source_digest(source.into())
+        .build()
+        .expect("extension")
+}
+
+fn test_caller_with_source(inject: ServiceSet, source: &str) -> Caller {
+    let extension = test_extension("focus", Origin::User, inject, source);
     Caller::new(
         "focus".parse::<Name>().expect("name"),
         Origin::User,
@@ -59,8 +78,15 @@ fn test_caller(inject: ServiceSet) -> Caller {
         CallerKind::Hook,
         Some(TurnId::new(std::num::NonZeroU64::MIN)),
     )
+    .with_extension(&extension)
 }
+
+fn test_caller(inject: ServiceSet) -> Caller {
+    test_caller_with_source(inject, &"a".repeat(64))
+}
+
 fn test_mcp_caller(inject: ServiceSet) -> Caller {
+    let extension = test_extension("focus", Origin::User, inject, &"a".repeat(64));
     Caller::new(
         "focus".parse::<Name>().expect("name"),
         Origin::User,
@@ -69,12 +95,19 @@ fn test_mcp_caller(inject: ServiceSet) -> Caller {
         CallerKind::Tool,
         Some(TurnId::new(std::num::NonZeroU64::MIN)),
     )
+    .with_extension(&extension)
 }
 
 fn open_store(dir: &tempfile::TempDir, timeout: Duration) -> (Arc<GrantStore>, Arc<Broker>) {
     let broker = Arc::new(Broker::new());
     let store = Arc::new(
-        GrantStore::with_runtime(dir.path().to_path_buf(), timeout, broker.clone()).expect("store"),
+        GrantStore::with_runtime(
+            dir.path().to_path_buf(),
+            Workspace::new(dir.path().to_path_buf()).expect("workspace"),
+            timeout,
+            broker.clone(),
+        )
+        .expect("store"),
     );
     (store, broker)
 }
@@ -141,7 +174,7 @@ async fn grant_approve_persists_exact_row_and_session_approve_does_not() {
     assert!(grant.persistent());
     let text = std::fs::read_to_string(dir.path().join("grants.toml")).expect("row");
     assert!(text.starts_with(
-        "[[grant]]\next = \"focus\"\norigin = \"user\"\nservices = [\"fs.read\", \"run\"]\nby = \"tui\"\napproved_at = \""
+        "[[grant]]\next = \"focus\"\norigin = \"user\"\nservices = [\"fs.read\", \"run\"]\nsource = \""
     ));
     assert!(text.ends_with("Z\"\n"));
     #[cfg(unix)]
@@ -157,6 +190,7 @@ async fn grant_approve_persists_exact_row_and_session_approve_does_not() {
     let store2 = Arc::new(
         GrantStore::with_runtime(
             dir.path().to_path_buf(),
+            Workspace::new(dir.path().to_path_buf()).expect("workspace"),
             Duration::from_secs(30),
             broker.clone(),
         )
@@ -168,14 +202,7 @@ async fn grant_approve_persists_exact_row_and_session_approve_does_not() {
         .expect("cached");
     assert!(grant2.persistent());
     assert_eq!(broker.open_requests(), []);
-    let net_caller = Caller::new(
-        "focus".parse::<Name>().expect("name"),
-        Origin::User,
-        ServiceSet::from_names(["net"]).expect("net"),
-        std::num::NonZeroU32::MIN,
-        CallerKind::Hook,
-        Some(TurnId::new(std::num::NonZeroU64::MIN)),
-    );
+    let net_caller = test_caller(ServiceSet::from_names(["net"]).expect("net"));
     let (session_grant, ()) =
         futures::join!(store2.ensure(&net_caller, Service::Net, &cancel), async {
             let id = loop {
@@ -193,6 +220,7 @@ async fn grant_approve_persists_exact_row_and_session_approve_does_not() {
     let fresh_dir = tempfile::tempdir().expect("fresh");
     let fresh = GrantStore::with_runtime(
         fresh_dir.path().to_path_buf(),
+        Workspace::new(fresh_dir.path().to_path_buf()).expect("workspace"),
         Duration::from_secs(30),
         broker.clone(),
     )
@@ -255,6 +283,7 @@ async fn facade_grant_contains_list_revoke_round_trip() {
         extension: name.clone(),
         origin: Origin::User,
         services: ServiceSet::from_names(["fs.read", "run"]).expect("set"),
+        scope: key("focus", Origin::User, &[Service::Run]).scope,
     };
     assert!(!store.contains(&key).await.expect("contains"));
     assert_eq!(store.list().await.expect("list"), []);
@@ -270,6 +299,7 @@ async fn facade_grant_contains_list_revoke_round_trip() {
         extension: name.clone(),
         origin: Origin::User,
         services: ServiceSet::EMPTY,
+        scope: key.scope.clone(),
     };
     assert!(matches!(
         store.grant(empty, tui(), at).await,
@@ -300,6 +330,7 @@ async fn facade_malformed_file_fails_without_writing() {
         extension: "focus".parse().expect("name"),
         origin: Origin::User,
         services: ServiceSet::from_names(["run"]).expect("set"),
+        scope: key("focus", Origin::User, &[Service::Run]).scope,
     };
     assert!(matches!(
         store.contains(&key).await,
@@ -457,6 +488,7 @@ async fn mcp_grant_misses_coalesce_and_publish_request_updates() {
 }
 
 fn command_caller(ext: &str, inject: ServiceSet) -> Caller {
+    let extension = test_extension(ext, Origin::Bundled, inject, &"b".repeat(64));
     Caller::new(
         ext.parse::<Name>().expect("name"),
         Origin::Bundled,
@@ -465,6 +497,7 @@ fn command_caller(ext: &str, inject: ServiceSet) -> Caller {
         CallerKind::Handler,
         None,
     )
+    .with_extension(&extension)
 }
 
 #[tokio::test]
@@ -591,7 +624,12 @@ async fn an_approval_before_the_data_root_exists_is_stored() {
     let data = dir.path().join("fresh").join("data");
     let broker = Arc::new(Broker::new());
     let store = Arc::new(
-        GrantStore::with_runtime(data.clone(), Duration::from_secs(30), broker.clone())
+        GrantStore::with_runtime(
+            data.clone(),
+            Workspace::new(dir.path().to_path_buf()).expect("workspace"),
+            Duration::from_secs(30),
+            broker.clone(),
+        )
             .expect("a missing grants file loads empty"),
     );
     let inject = ServiceSet::from_names(["sidecar"]).expect("inject");
