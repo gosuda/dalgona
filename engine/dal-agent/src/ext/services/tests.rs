@@ -13,7 +13,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use dal_core::SkillRecord;
-use dal_core::ext::{McpBlock, McpDeclaration, McpEndpoint, McpLaunch, McpServerDecl};
+use dal_core::ext::{
+    McpBlock, McpDeclaration, McpEndpoint, McpLaunch, McpRequest, McpResponse, McpServerDecl,
+};
 use dal_core::{
     AgentsOp, AgentsReply, Answer, Budget, CallId, ClientId, DenyReason, EntryId, Inference, JobId,
     JobsOp, JobsReply, ModelRequest, ModelRoute, Name, OnError, Origin, Purpose, Question, RawJson,
@@ -392,14 +394,22 @@ fn generation_of(extensions: Vec<Extension>) -> Arc<Generation> {
 }
 
 fn fixture(ask_timeout: Duration) -> Fixture {
-    assemble(ask_timeout, false)
+    assemble(ask_timeout, false, None)
 }
 
 fn ephemeral_fixture(ask_timeout: Duration) -> Fixture {
-    assemble(ask_timeout, true)
+    assemble(ask_timeout, true, None)
 }
 
-fn assemble(ask_timeout: Duration, ephemeral: bool) -> Fixture {
+fn mcp_fixture(client: Arc<dyn crate::ext::McpClient>) -> Fixture {
+    assemble(Duration::from_secs(30), false, Some(client))
+}
+
+fn assemble(
+    ask_timeout: Duration,
+    ephemeral: bool,
+    mcp_client: Option<Arc<dyn crate::ext::McpClient>>,
+) -> Fixture {
     let temp = tempfile::tempdir().unwrap();
     let broker = Arc::new(Broker::new());
     let grants = Arc::new(
@@ -431,7 +441,7 @@ fn assemble(ask_timeout: Duration, ephemeral: bool) -> Fixture {
         broker: Arc::clone(&broker),
         backend: Arc::<FakeBackend>::clone(&backend),
         rt: Arc::<FakeRt>::clone(&rt),
-        mcp_client: None,
+        mcp_client,
         generation: generation_rx,
         overlay: Arc::clone(&overlay),
         history: Arc::from(["first".to_owned(), "second".to_owned()]),
@@ -1290,6 +1300,231 @@ fn plugin_with(name: &str, skills: Vec<SkillRecord>) -> Extension {
         builder = builder.skill(skill);
     }
     builder.build().unwrap()
+}
+
+#[derive(Default)]
+struct RecordingMcp {
+    callers: Mutex<Vec<Name>>,
+}
+
+impl crate::ext::McpClient for RecordingMcp {
+    fn call<'a>(
+        &'a self,
+        who: &'a Caller,
+        req: McpRequest,
+    ) -> crate::ext::BoxFuture<'a, Result<McpResponse, ServiceError>> {
+        Box::pin(async move {
+            self.callers.lock().unwrap().push(who.ext().clone());
+            Ok(McpResponse {
+                text: format!("called {}", req.server).into(),
+                is_error: false,
+            })
+        })
+    }
+}
+
+fn declared_plugin(url: &str) -> Extension {
+    plugin_with(
+        "focus",
+        vec![skill_declaring(
+            "docs",
+            Some(block_of("files", http_decl(url))),
+        )],
+    )
+}
+
+#[tokio::test]
+async fn scripted_mcp_does_not_accept_only_a_generic_capability_grant() {
+    let client = Arc::new(RecordingMcp::default());
+    let fx = mcp_fixture(client.clone());
+    fx.generation.send_replace(generation_of(vec![declared_plugin(
+        "https://docs.example/mcp",
+    )]));
+    let who = caller("focus", &["mcp"], Some(turn()));
+    let services = Arc::clone(&fx.services);
+    let call = spawn(async move { services.mcp(&who, mcp_request()).await });
+
+    await_open(&fx.broker).await;
+    let request = fx.broker.open_requests().into_iter().next().unwrap();
+    assert!(matches!(
+        &request.question,
+        Question::Grant { detail: None, .. }
+    ));
+    answer_next(&fx.broker, Answer::Approve);
+
+    await_open(&fx.broker).await;
+    let request = fx.broker.open_requests().into_iter().next().unwrap();
+    let Question::Grant { ext, detail, .. } = &request.question else {
+        panic!("the exact declared-server set requires a grant");
+    };
+    assert_eq!(ext.as_ref(), "focus");
+    assert_eq!(detail.as_deref(), Some("docs.files: https://docs.example"));
+    answer_next(&fx.broker, Answer::Decline);
+
+    assert!(matches!(call.join().await, Err(ServiceError::Declined)));
+    assert!(client.callers.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn scripted_mcp_reasks_after_the_declared_server_changes() {
+    let client = Arc::new(RecordingMcp::default());
+    let fx = mcp_fixture(client.clone());
+    fx.generation.send_replace(generation_of(vec![declared_plugin(
+        "https://docs.example/mcp",
+    )]));
+    let who = caller("focus", &["mcp"], Some(turn()));
+    let services = Arc::clone(&fx.services);
+    let first = spawn(async move { services.mcp(&who, mcp_request()).await });
+
+    await_open(&fx.broker).await;
+    answer_next(&fx.broker, Answer::Approve);
+    await_open(&fx.broker).await;
+    answer_next(&fx.broker, Answer::Approve);
+    assert_eq!(first.join().await.unwrap().text.as_ref(), "called files");
+
+    let who = caller("focus", &["mcp"], Some(turn()));
+    assert!(fx.services.mcp(&who, mcp_request()).await.is_ok());
+    assert_eq!(client.callers.lock().unwrap().len(), 2);
+    assert_eq!(open_count(&fx.broker), 0);
+
+    fx.generation.send_replace(generation_of(vec![declared_plugin(
+        "https://changed.example/mcp",
+    )]));
+    let services = Arc::clone(&fx.services);
+    let changed = spawn(async move { services.mcp(&who, mcp_request()).await });
+    await_open(&fx.broker).await;
+    let request = fx.broker.open_requests().into_iter().next().unwrap();
+    let Question::Grant { detail, .. } = &request.question else {
+        panic!("changed declarations require new approval");
+    };
+    assert_eq!(detail.as_deref(), Some("docs.files: https://changed.example"));
+    answer_next(&fx.broker, Answer::Decline);
+
+    assert!(matches!(changed.join().await, Err(ServiceError::Declined)));
+    assert_eq!(client.callers.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn mapped_mcp_calls_authorize_the_declaring_extension() {
+    let client = Arc::new(RecordingMcp::default());
+    let fx = mcp_fixture(client.clone());
+    let mcp_inject = ServiceSet::from_names(["mcp"]).unwrap();
+    let registrar = ExtensionBuilder::new("mcp", "1.0.0", mcp_inject)
+        .unwrap()
+        .with_origin(Origin::Bundled, None)
+        .mcp_client(client.clone())
+        .build()
+        .unwrap();
+    fx.generation.send_replace(generation_of(vec![
+        registrar,
+        declared_plugin("https://docs.example/mcp"),
+    ]));
+    let who = Caller::new(
+        "mcp".parse().unwrap(),
+        Origin::Bundled,
+        mcp_inject,
+        std::num::NonZeroU32::MIN,
+        CallerKind::Tool,
+        Some(turn()),
+    );
+    let services = Arc::clone(&fx.services);
+    let call = spawn(async move { services.mcp(&who, mcp_request()).await });
+
+    await_open(&fx.broker).await;
+    let request = fx.broker.open_requests().into_iter().next().unwrap();
+    let Question::Grant { ext, detail, .. } = &request.question else {
+        panic!("the MCP registrar needs its capability");
+    };
+    assert_eq!(ext.as_ref(), "mcp");
+    assert!(detail.is_none());
+    answer_next(&fx.broker, Answer::Approve);
+
+    await_open(&fx.broker).await;
+    let request = fx.broker.open_requests().into_iter().next().unwrap();
+    let Question::Grant { ext, origin, detail, .. } = &request.question else {
+        panic!("the declaring plugin needs its exact server-set grant");
+    };
+    assert_eq!(ext.as_ref(), "focus");
+    assert_eq!(origin.as_ref(), "user");
+    assert_eq!(detail.as_deref(), Some("docs.files: https://docs.example"));
+    answer_next(&fx.broker, Answer::Approve);
+
+    assert!(call.join().await.is_ok());
+    assert_eq!(
+        *client.callers.lock().unwrap(),
+        vec!["mcp".parse::<Name>().unwrap()]
+    );
+}
+
+#[tokio::test]
+async fn ambiguous_mcp_server_names_are_denied_before_dispatch() {
+    let client = Arc::new(RecordingMcp::default());
+    let fx = mcp_fixture(client.clone());
+    let registrar = ExtensionBuilder::new(
+        "mcp",
+        "1.0.0",
+        ServiceSet::from_names(["mcp"]).unwrap(),
+    )
+    .unwrap()
+    .with_origin(Origin::Bundled, None)
+    .mcp_client(client.clone())
+    .build()
+    .unwrap();
+    let second = plugin_with(
+        "other",
+        vec![skill_declaring(
+            "docs",
+            Some(block_of("files", http_decl("https://other.example/mcp"))),
+        )],
+    );
+    fx.generation.send_replace(generation_of(vec![
+        registrar,
+        declared_plugin("https://docs.example/mcp"),
+        second,
+    ]));
+    let who = Caller::new(
+        "mcp".parse().unwrap(),
+        Origin::Bundled,
+        ServiceSet::from_names(["mcp"]).unwrap(),
+        std::num::NonZeroU32::MIN,
+        CallerKind::Tool,
+        Some(turn()),
+    );
+    let services = Arc::clone(&fx.services);
+    let call = spawn(async move { services.mcp(&who, mcp_request()).await });
+    await_open(&fx.broker).await;
+    answer_next(&fx.broker, Answer::Approve);
+    assert!(matches!(
+        call.join().await,
+        Err(ServiceError::Denied(DenyReason::NotGranted))
+    ));
+    assert!(client.callers.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn mcp_reload_during_approval_does_not_dispatch_the_stale_target() {
+    let client = Arc::new(RecordingMcp::default());
+    let fx = mcp_fixture(client.clone());
+    fx.generation.send_replace(generation_of(vec![declared_plugin(
+        "https://docs.example/mcp",
+    )]));
+    let who = caller("focus", &["mcp"], Some(turn()));
+    let services = Arc::clone(&fx.services);
+    let call = spawn(async move { services.mcp(&who, mcp_request()).await });
+
+    await_open(&fx.broker).await;
+    answer_next(&fx.broker, Answer::Approve);
+    await_open(&fx.broker).await;
+    fx.generation.send_replace(generation_of(vec![declared_plugin(
+        "https://changed.example/mcp",
+    )]));
+    answer_next(&fx.broker, Answer::Approve);
+
+    assert!(matches!(
+        call.join().await,
+        Err(ServiceError::Denied(DenyReason::NotGranted))
+    ));
+    assert!(client.callers.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

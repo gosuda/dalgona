@@ -18,7 +18,8 @@
 //!   live in that authorizing layer, never here.
 //! - `ask` has no grant: answers resolve through the session [`Broker`].
 //! - `env` reads one key through the backend; the signature cannot enumerate.
-//! - `mcp` fails closed with `Denied(Unavailable)` when no client is set.
+//! - `mcp` checks the caller's capability and the exact current declared
+//!   server set before client dispatch; it fails closed without a client.
 //! - `infer` and `infer_stream` are the trusted Rust surface: no inject check
 //!   and no grant. Scripts never reach them; the Starlark `infer` slot calls
 //!   [`SessionServices::script_infer`], which gates `Service::Infer` first.
@@ -39,7 +40,7 @@ use std::time::Duration;
 
 use super::generation::Generation;
 use super::grants::GrantStore;
-use super::mcp::McpClient;
+use super::mcp::{McpClient, declared_call_grant};
 use super::overlay::Overlay;
 use super::tool::{RawValue, Tool, ToolCxRuntime, ToolOutcome};
 use super::{Caller, CallerKind};
@@ -739,12 +740,28 @@ impl Services for SessionServices {
         let client = self.mcp_client.clone();
         Box::pin(async move {
             Self::check_inject(&who, Service::Mcp)?;
-            self.gated(&who, Service::Mcp).await?;
+            let cancel = self.call_cancel(&who)?;
+            self.gated_with(&who, Service::Mcp, cancel.clone()).await?;
             let Some(client) = client else {
                 return Err(ServiceError::Denied(DenyReason::Unavailable {
                     what: "MCP client".into(),
                 }));
             };
+            let generation = Arc::clone(&self.generation.borrow());
+            let (declaring, set, detail) = declared_call_grant(&generation, &who, &req.server)?;
+            self.grants
+                .ensure_declared_mcp(&declaring, set, detail, &cancel)
+                .await
+                .map_err(|error| error.naming_grant(Service::Mcp, declaring.ext().as_str()))?;
+            if cancel.is_cancelled() || self.cancel.is_cancelled() {
+                return Err(ServiceError::Cancelled);
+            }
+            // An approval for an earlier generation cannot launch a server
+            // from a declaration that changed while the question was open.
+            let current = Arc::clone(&self.generation.borrow());
+            if !Arc::ptr_eq(&generation, &current) {
+                return Err(ServiceError::Denied(DenyReason::NotGranted));
+            }
             client.call(&who, req).await
         })
     }
