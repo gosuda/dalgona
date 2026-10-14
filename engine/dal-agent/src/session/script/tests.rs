@@ -336,6 +336,7 @@ async fn fixture_kind(delay: Duration, durable: bool) -> Fixture {
     let grants = Arc::new(
         crate::ext::grants::GrantStore::with_runtime(
             data_root.clone(),
+            workspace.clone(),
             Duration::from_secs(30),
             Arc::clone(&broker),
         )
