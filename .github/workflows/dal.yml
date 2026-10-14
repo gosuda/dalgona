@@ -108,6 +108,9 @@ jobs:
       - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2
         with:
           tool: cargo-dist@latest
+      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2
+        with:
+          tool: cargo-auditable@latest
       - run: cargo test --workspace --exclude dalgona --exclude dalgona-batteries --exclude dalgona-gates --all-features --locked
 
   deny:

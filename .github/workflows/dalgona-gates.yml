@@ -38,6 +38,9 @@ jobs:
       - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2
         with:
           tool: cargo-dist@latest
+      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2
+        with:
+          tool: cargo-semver-checks@latest
       - run: cargo test --locked -p dalgona-gates --test dalgona-release-01 --test dalgona-release-02 --test dalgona-release-03 --test dalgona-release-04 --test dalgona-release-05 --test dalgona-release-06 --test dalgona-release-07 --test dalgona-release-08 --test dalgona-release-09 --test dalgona-release-13 --test dalgona-release-14 --test dalgona-release-15 --test dalgona-release-16 --test dalgona-release-17 --test dalgona-release-18 --test dalgona-release-19 --test dalgona-release-20
       - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2
         with:
