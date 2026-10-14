@@ -374,6 +374,11 @@ impl TurnTools {
             CallerKind::Tool,
             Some(turn),
         );
+        let caller = if let Some(extension) = registrar {
+            caller.with_extension(extension)
+        } else {
+            caller
+        };
         runtime
             .grants
             .ensure_declared_mcp(&caller, set, detail, &runtime.cancel)

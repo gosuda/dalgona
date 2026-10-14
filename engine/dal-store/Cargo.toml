@@ -22,6 +22,9 @@ tracing.workspace = true
 unicode-segmentation.workspace = true
 uuid = { workspace = true, features = ["v4"] }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
 [features]
 # Test support: the armed journal-fault seam, nothing in normal operation.
 test-support = []

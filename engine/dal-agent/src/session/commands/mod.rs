@@ -121,7 +121,8 @@ async fn run_handler(
         owner.state_version(),
         CallerKind::Handler,
         None,
-    );
+    )
+    .with_extension(owner);
     let host = Arc::new(driver_host(deps, scoped, route).await);
     let cx = CommandCx::new(caller, deps.session, None, Arc::clone(&deps.services), host);
     // One script host per command run, against the current generation; its

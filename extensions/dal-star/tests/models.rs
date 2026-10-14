@@ -80,7 +80,11 @@ async fn host_for(run: &str) -> (tempfile::TempDir, Host) {
     (data, host)
 }
 
-async fn prompt(host: &Host, data: &tempfile::TempDir) -> (Stop, String, Vec<String>) {
+async fn prompt_with_answer(
+    host: &Host,
+    data: &tempfile::TempDir,
+    answer: Answer,
+) -> (Stop, String, Vec<String>) {
     let workspace = Workspace::new(data.path().join("workspace")).expect("workspace");
     let agent = host
         .open(
@@ -116,7 +120,7 @@ async fn prompt(host: &Host, data: &tempfile::TempDir) -> (Stop, String, Vec<Str
         seen.push(format!("{:?}", update.kind));
         if let UpdateKind::RequestOpened(request) = &update.kind {
             agent
-                .answer(request.id, Answer::ApproveForSession)
+                .answer(request.id, answer.clone())
                 .await
                 .expect("grant answer lands");
             continue;
@@ -132,9 +136,11 @@ async fn prompt(host: &Host, data: &tempfile::TempDir) -> (Stop, String, Vec<Str
     (stop, view, seen)
 }
 
-#[tokio::test]
-async fn scripted_model_forwards_through_its_invocation_context() {
-    let run = r#"return ctx.models.forward(
+async fn prompt(host: &Host, data: &tempfile::TempDir) -> (Stop, String, Vec<String>) {
+    prompt_with_answer(host, data, Answer::ApproveForSession).await
+}
+
+const FORWARD_REQUEST: &str = r#"return ctx.models.forward(
     purpose = request.purpose,
     model = {"kind": "api", "family": "openai_chat", "model": "gpt-6-luna"},
     system = request.system,
@@ -143,10 +149,32 @@ async fn scripted_model_forwards_through_its_invocation_context() {
     params = request.params,
     cache_key = request.cache_key,
 )"#;
-    let (data, host) = host_for(run).await;
+
+#[tokio::test]
+async fn scripted_model_forwards_through_its_invocation_context() {
+    let (data, host) = host_for(FORWARD_REQUEST).await;
     let (stop, view, seen) = prompt(&host, &data).await;
     assert_eq!(stop, Stop::EndTurn, "{seen:?} {view}");
+    assert!(
+        seen.iter().any(|kind| kind.contains("Grant")),
+        "forward must request the Infer capability: {seen:?}"
+    );
     assert!(view.contains("forwarded"), "{view}");
+}
+
+#[tokio::test]
+async fn scripted_forward_declined_infer_grant_never_reaches_the_provider() {
+    let (data, host) = host_for(FORWARD_REQUEST).await;
+    let (stop, view, seen) = prompt_with_answer(&host, &data, Answer::Decline).await;
+    assert_eq!(stop, Stop::Failed, "{seen:?} {view}");
+    assert!(
+        seen.iter().any(|kind| kind.contains("Grant")),
+        "forward must open an Infer grant request: {seen:?}"
+    );
+    assert!(
+        !view.contains("forwarded"),
+        "denied forward must not return provider output: {view}"
+    );
 }
 
 /// The scripted model schedules its inner inference through a USD-budgeted

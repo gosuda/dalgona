@@ -301,11 +301,21 @@ impl SessionServices {
     ) -> ServiceFuture<'_, Inference> {
         let who = who.clone();
         Box::pin(async move {
-            Self::check_inject(&who, Service::Infer)?;
-            self.gated_with(&who, Service::Infer, cancel.clone())
-                .await?;
+            self.authorize_script_infer(&who, cancel.clone()).await?;
             self.backend.infer_with_script(req, script, cancel).await
         })
+    }
+
+    /// Authorizes either scripted model operation before any provider request.
+    /// Both `models.infer` and `models.forward` require the caller's exact
+    /// injected capability set and the corresponding live Infer grant.
+    pub(crate) async fn authorize_script_infer(
+        &self,
+        who: &Caller,
+        cancel: CancellationToken,
+    ) -> Result<(), ServiceError> {
+        Self::check_inject(who, Service::Infer)?;
+        self.gated_with(who, Service::Infer, cancel).await
     }
 
     /// Rejects callers that did not inject `service`, before any grant read.

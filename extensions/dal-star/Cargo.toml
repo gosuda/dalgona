@@ -8,6 +8,7 @@ description = "Starlark extension adapter for dal"
 
 [dependencies]
 allocative.workspace = true
+blake3.workspace = true
 dal-agent.workspace = true
 dal-core.workspace = true
 dal-provider.workspace = true
