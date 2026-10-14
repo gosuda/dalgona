@@ -50,7 +50,7 @@ impl ModelHandler for Fusion {
             let scope = cx.scope(spec).expect("scope opens");
             let start = AgentStart {
                 call: CallId::new("member"),
-                name: "member".into(),
+                name: Some("member".into()),
                 prompt: "work".into(),
                 model: None,
                 role: None,
