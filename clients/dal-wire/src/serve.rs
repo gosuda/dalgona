@@ -513,3 +513,35 @@ pub(crate) fn router_options(cfg: &ListenerCfg) -> RouterOptions {
         workspace: cfg.workspace.clone(),
     }
 }
+
+
+#[cfg(test)]
+mod admission_tests {
+    use super::{CONN_CAP, ConnectionBudget, SOURCE_CONN_CAP};
+    use std::net::{IpAddr, Ipv4Addr};
+
+    #[test]
+    fn admission_budgets_hold_until_release() {
+        let mut budget = ConnectionBudget::default();
+        let sources: Vec<IpAddr> = (1..=4)
+            .map(|last| IpAddr::V4(Ipv4Addr::new(192, 0, 2, last)))
+            .collect();
+
+        for source in &sources {
+            for _ in 0..SOURCE_CONN_CAP {
+                assert!(budget.admit(*source));
+            }
+            assert!(!budget.admit(*source), "per-source admission is bounded");
+        }
+
+        assert_eq!(budget.total, CONN_CAP);
+        let fifth = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 5));
+        assert!(!budget.admit(fifth), "global admission is bounded");
+
+        budget.release(sources[0]);
+        assert!(budget.admit(fifth), "a closed socket frees a global slot");
+        assert_eq!(budget.total, CONN_CAP);
+        budget.release(fifth);
+        assert!(budget.admit(sources[0]), "a closed socket frees its source slot");
+    }
+}
