@@ -365,8 +365,7 @@ pub(crate) fn platform_cache(vars: &BTreeMap<OsString, OsString>, home: &Path) -
 /// Every macOS tool child inherits this restriction, including unsandboxed
 /// commands. It prevents a descendant from leaving the owned process group.
 #[cfg(target_os = "macos")]
-const PROCESS_GROUP_GUARD: &str =
-    "(deny syscall-unix (syscall-number SYS_setsid SYS_setpgid))\n";
+const PROCESS_GROUP_GUARD: &str = "(deny syscall-unix (syscall-number SYS_setsid SYS_setpgid))\n";
 
 /// The process lifetime policy for macOS commands with filesystem sandboxing off.
 #[cfg(target_os = "macos")]

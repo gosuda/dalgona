@@ -528,7 +528,7 @@ fn launcher_argv(
             {
                 Ok((target, target_args.to_vec(), None))
             }
-        },
+        }
         Launcher::Sandbox { helper, roots } => {
             sandbox::sandbox_argv(&target, target_args, job, helper.as_deref(), roots)
         }
