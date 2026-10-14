@@ -332,7 +332,7 @@ fn approval_grant_text_carries_call_scope() {
         .expect("approval maps");
     assert_eq!(
         params["reason"].as_str(),
-        Some("exec exec (also allows git in /w until the job ends)\nShell: /bin/bash")
+        Some("exec (also allows git in /w until the job ends)\nWorking directory: \"/w/sub\"\nShell: \"/bin/bash\"")
     );
     assert_eq!(params["command"].as_str(), Some("git push origin main"));
     assert_eq!(params["cwd"].as_str(), Some("/w/sub"));
