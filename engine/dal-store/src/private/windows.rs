@@ -32,8 +32,7 @@ use windows_sys::Win32::{
     Storage::FileSystem::{
         CREATE_NEW, CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_NORMAL,
         FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_ALWAYS, OPEN_EXISTING,
-        WRITE_DAC,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_ALWAYS, WRITE_DAC,
     },
     System::Threading::{GetCurrentProcess, OpenProcessToken},
 };
@@ -178,13 +177,38 @@ fn reject_reparse_ancestors(path: &Path) -> io::Result<()> {
 }
 
 /// Ends third-party access to a rejected file without trusting its contents.
-/// The owner of a file can always reopen it for `WRITE_DAC`, so a legacy file
-/// left world-readable by an inherited ACL is tightened to the private policy
-/// before the caller sees the rejection. This is a restriction, never a silent
-/// repair: the open still fails closed and a later open treats the now-private
-/// file as migrated.
-fn harden(path: &Path) {
-    let Ok(descriptor) = descriptor(false) else {
+/// The ACL is tightened on the inspected handle itself — never through a
+/// pathname reopen, which could land the edit on a replaced file — and only
+/// when the handle's owner is the caller, SYSTEM, or Administrators, so a
+/// delegated `WRITE_DAC` grant can never strip a third-party owner's access.
+/// This is a restriction, never a silent repair: the open still fails closed
+/// and a later open treats the now-private file as migrated.
+fn harden(file: &File, directory: bool) {
+    let mut owner: PSID = ptr::null_mut();
+    let mut actual: PSECURITY_DESCRIPTOR = ptr::null_mut();
+    let status = unsafe {
+        GetSecurityInfo(
+            file.as_raw_handle(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &raw mut owner,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &raw mut actual,
+        )
+    };
+    if status != 0 || owner.is_null() {
+        return;
+    }
+    let _actual = LocalMemory(actual);
+    let (Ok(owner_text), Ok(current_user)) = (sid_text(owner), user_sid()) else {
+        return;
+    };
+    if owner_text != current_user && owner_text != "S-1-5-18" && owner_text != "S-1-5-32-544" {
+        return;
+    }
+    let Ok(descriptor) = descriptor(directory) else {
         return;
     };
     let mut dacl: *mut ACL = ptr::null_mut();
@@ -203,24 +227,9 @@ fn harden(path: &Path) {
     {
         return;
     }
-    let raw = unsafe {
-        CreateFileW(
-            wide(path).as_ptr(),
-            WRITE_DAC,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            ptr::null_mut(),
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
-            ptr::null_mut(),
-        )
-    };
-    if raw == INVALID_HANDLE_VALUE {
-        return;
-    }
-    let handle = OwnedHandle(raw);
     unsafe {
         SetSecurityInfo(
-            handle.0,
+            file.as_raw_handle(),
             SE_FILE_OBJECT,
             DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
             ptr::null_mut(),
@@ -260,7 +269,7 @@ pub(super) fn open_lock(path: &Path) -> io::Result<File> {
     let raw = unsafe {
         CreateFileW(
             wide(path).as_ptr(),
-            GENERIC_READ | GENERIC_WRITE,
+            GENERIC_READ | GENERIC_WRITE | WRITE_DAC,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             &raw const attributes,
             OPEN_ALWAYS,
@@ -273,8 +282,7 @@ pub(super) fn open_lock(path: &Path) -> io::Result<File> {
     }
     let file = unsafe { File::from_raw_handle(raw) };
     if let Err(error) = super::require_private(&file) {
-        drop(file);
-        harden(path);
+        harden(&file, false);
         return Err(error);
     }
     Ok(file)
@@ -283,14 +291,17 @@ pub(super) fn open_lock(path: &Path) -> io::Result<File> {
 pub(super) fn open(path: &Path, write: bool) -> io::Result<File> {
     reject_reparse_ancestors(path)?;
     let mut options = OpenOptions::new();
-    options.read(true).write(write);
+    // `WRITE_DAC` is requested up front so a rejection can be tightened on the
+    // same inspected handle. Every file that can pass the private check grants
+    // it implicitly (owner) or through Administrators, so the accept set is
+    // unchanged; a file that would fail the check simply fails the open early.
+    options.access_mode(GENERIC_READ | WRITE_DAC | if write { GENERIC_WRITE } else { 0 });
     options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
     let file = options.open(path)?;
     match super::require_private(&file) {
         Ok(()) => Ok(file),
         Err(error) => {
-            drop(file);
-            harden(path);
+            harden(&file, false);
             Err(error)
         }
     }
@@ -371,10 +382,14 @@ pub(super) fn file_is_private(file: &File) -> io::Result<bool> {
 
 fn directory_is_private(path: &Path) -> io::Result<bool> {
     let mut options = OpenOptions::new();
-    options.read(true);
+    options.access_mode(GENERIC_READ | WRITE_DAC);
     options.custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
     let directory = options.open(path)?;
-    check_dacl(&directory, true)
+    let private = check_dacl(&directory, true)?;
+    if !private {
+        harden(&directory, true);
+    }
+    Ok(private)
 }
 
 fn create_directory(path: &Path) -> io::Result<()> {
