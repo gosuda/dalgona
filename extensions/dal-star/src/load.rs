@@ -334,7 +334,8 @@ fn load_one(
 /// Length-delimited paths and contents prevent concatenation ambiguities.
 fn source_digest(files: &BTreeMap<PathBuf, Vec<u8>>, config: Option<&str>) -> Box<str> {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"dal-plugin-source-v1");
+    hasher.update(b"dal-plugin-source-v2");
+    hasher.update(&(files.len() as u64).to_le_bytes());
     for (path, bytes) in files {
         let name = path.as_os_str().as_encoded_bytes();
         hasher.update(&(name.len() as u64).to_le_bytes());
