@@ -1,6 +1,6 @@
 //! HTTP response values, the Hyper body, and bounded request body reads.
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use hyper::body::{Body, Frame};
 use hyper::{Request, Response, StatusCode};
 use sonic_rs::Value;
@@ -118,9 +118,8 @@ pub(super) async fn read_body(
     budget: &BodyBudget,
 ) -> Result<BufferedBody, Resp> {
     let (_parts, mut body) = req.into_parts();
-    let mut collected = 0usize;
+    let mut buffer = BytesMut::new();
     let mut reserved: Option<OwnedSemaphorePermit> = None;
-    let mut chunks = Vec::new();
     let read = async {
         while let Some(frame) =
             futures::future::poll_fn(|cx| std::pin::Pin::new(&mut body).poll_frame(cx)).await
@@ -130,8 +129,7 @@ pub(super) async fn read_body(
                 return Err(Resp::text(400, "request body is not valid"));
             };
             if let Some(data) = frame.data_ref() {
-                collected = collected.saturating_add(data.len());
-                if collected > BODY_LIMIT {
+                if buffer.len().saturating_add(data.len()) > BODY_LIMIT {
                     drain_body(&mut body).await;
                     return Err(Resp::text(
                         413,
@@ -153,26 +151,19 @@ pub(super) async fn read_body(
                 } else {
                     reserved = Some(permit);
                 }
-                chunks.push(data.clone());
+                buffer.extend_from_slice(data);
             }
         }
-        Ok(chunks)
+        Ok(())
     };
-    let chunks: Vec<Bytes> = match tokio::time::timeout(BODY_TIMEOUT, read).await {
-        Ok(Ok(chunks)) => chunks,
-        Ok(Err(resp)) => return Err(resp),
-        Err(_) => {
-            return Err(Resp::text(408, "request body was not received within 60 s"));
-        }
-    };
-    let mut out = Vec::with_capacity(collected);
-    for chunk in chunks {
-        out.extend_from_slice(&chunk);
+    match tokio::time::timeout(BODY_TIMEOUT, read).await {
+        Ok(Ok(())) => Ok(BufferedBody {
+            bytes: buffer.freeze(),
+            _permit: reserved,
+        }),
+        Ok(Err(resp)) => Err(resp),
+        Err(_) => Err(Resp::text(408, "request body was not received within 60 s")),
     }
-    Ok(BufferedBody {
-        bytes: Bytes::from(out),
-        _permit: reserved,
-    })
 }
 
 /// Empties a rejected request body so the socket closes with no unread
