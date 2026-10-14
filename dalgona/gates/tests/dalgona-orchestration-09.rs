@@ -334,7 +334,7 @@ async fn grant_bundled_extensions(data: &Path, workspace: &Path, user: &str) -> 
     let product = support::build_product(data.to_path_buf(), Some(user))?;
     for extension in &product.extensions {
         let services = extension.inject().capabilities();
-        if services.is_empty() {
+        if services.is_empty() || extension.origin() == dal_core::Origin::Builtin {
             continue;
         }
         dal_agent::ext::grants::GrantStore::new(data.to_path_buf())
