@@ -214,15 +214,6 @@ pub(crate) struct Scope {
 }
 
 impl Scope {
-    /// The whole workspace.
-    pub(crate) fn workspace(workspace: &Path) -> Self {
-        Self {
-            abs: workspace.to_path_buf(),
-            ws_rel: Some(PathBuf::new()),
-            is_file: false,
-        }
-    }
-
     /// The index scope argument: `None` outside the workspace.
     pub(crate) fn index_scope(&self) -> Option<IndexScope<'_>> {
         let rel = self.ws_rel.as_deref()?;
@@ -275,27 +266,31 @@ pub(crate) async fn resolve_scope(
     workspace: &Path,
     path: Option<&str>,
 ) -> Result<Scope, SearchError> {
-    let Some(raw) = path.filter(|raw| !raw.is_empty()) else {
-        return Ok(Scope::workspace(workspace));
-    };
-    let abs = if Path::new(raw).is_absolute() {
-        PathBuf::from(raw)
-    } else {
-        workspace.join(raw)
-    };
-    let meta = tokio::fs::metadata(&abs)
+    let raw = path.unwrap_or("");
+    let root = workspace.to_path_buf();
+    let requested = PathBuf::from(raw);
+    let resolved = tokio::task::spawn_blocking(move || {
+        crate::workspace_path::resolve(&root, &requested)
+    })
+    .await
+    .map_err(|error| SearchError::msg(format!("search: {error}")))?
+    .map_err(|error| match error {
+        crate::workspace_path::ResolveError::Workspace(error) => {
+            SearchError::msg(format!("search: cannot resolve workspace root: {error}"))
+        }
+        crate::workspace_path::ResolveError::Target(_) => {
+            SearchError::msg(format!("search: {raw} does not exist"))
+        }
+        crate::workspace_path::ResolveError::Outside => {
+            SearchError::msg(format!("search: path is outside the workspace: {raw}"))
+        }
+    })?;
+    let meta = tokio::fs::metadata(&resolved.absolute)
         .await
         .map_err(|_| SearchError::msg(format!("search: {raw} does not exist")))?;
-    let ws_rel = match (
-        tokio::fs::canonicalize(workspace).await,
-        tokio::fs::canonicalize(&abs).await,
-    ) {
-        (Ok(root), Ok(full)) => full.strip_prefix(&root).ok().map(Path::to_path_buf),
-        _ => None,
-    };
     Ok(Scope {
-        abs,
-        ws_rel,
+        abs: resolved.absolute,
+        ws_rel: Some(resolved.relative),
         is_file: meta.is_file(),
     })
 }
@@ -965,6 +960,71 @@ pub(crate) mod tests {
         assert!(on_text.starts_with(off_text), "{on_text}");
         assert!(on_text.contains("symbol"), "{on_text}");
         assert!(DESCRIPTION_ON.starts_with(DESCRIPTION_OFF));
+    }
+
+    #[tokio::test]
+    async fn search_scopes_cannot_escape_the_workspace() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        write(workspace.path(), "allowed.rs", b"fn allowed() {}\n");
+        write(outside.path(), "secret.rs", b"fn secret() {}\n");
+        let engine = engine(true, None);
+
+        let mut modes = vec![("find", "*.rs"), ("grep", "secret")];
+        if cfg!(feature = "symbols") {
+            modes.push(("symbol", "secret"));
+        }
+
+        let absolute_inside = sonic_rs::to_string(&sonic_rs::json!({
+            "mode": "find",
+            "pattern": "*.rs",
+            "path": workspace.path().join("allowed.rs").to_string_lossy()
+        }))
+        .unwrap();
+        assert_eq!(
+            run(&engine, workspace.path(), &absolute_inside).await.unwrap(),
+            "allowed.rs"
+        );
+
+        for (mode, pattern) in modes {
+            for path in [
+                outside.path().to_string_lossy().into_owned(),
+                outside.path().join("secret.rs").to_string_lossy().into_owned(),
+                "../allowed.rs".to_owned(),
+            ] {
+                let raw = sonic_rs::to_string(&sonic_rs::json!({
+                    "mode": mode,
+                    "pattern": pattern,
+                    "path": path
+                }))
+                .unwrap();
+                let result = run(&engine, workspace.path(), &raw).await;
+                assert!(
+                    result.as_ref().is_err_and(|error| error.contains("outside the workspace")),
+                    "{mode}: {path}: {result:?}"
+                );
+            }
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            symlink(outside.path(), workspace.path().join("outside-link")).unwrap();
+            symlink(outside.path().join("secret.rs"), workspace.path().join("secret-link")).unwrap();
+            for path in ["outside-link", "secret-link", "outside-link/secret.rs"] {
+                let raw = sonic_rs::to_string(&sonic_rs::json!({
+                    "mode": "grep",
+                    "pattern": "secret",
+                    "path": path
+                }))
+                .unwrap();
+                let result = run(&engine, workspace.path(), &raw).await;
+                assert!(
+                    result.as_ref().is_err_and(|error| error.contains("outside the workspace")),
+                    "{path}: {result:?}"
+                );
+            }
+        }
     }
 
     #[test]
