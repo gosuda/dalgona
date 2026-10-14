@@ -1,4 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
+                        scope: Some(dal_agent::GrantScope::for_workspace(
+                            extension.source_digest().expect("bundled code digest"),
+                            &dal_core::Workspace::new(workspace.clone())?,
+                        )),
 //! dalgona success-criterion gate: the review battery refuses a round while
 //! orchestration work is live in the session, and runs once the work ends.
 //! One `agents` run starts, a `review` call in the same turn is refused with
