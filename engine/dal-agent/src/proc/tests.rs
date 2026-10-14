@@ -106,6 +106,8 @@ async fn provider_call_ids_cannot_select_log_paths() {
     let ids = [
         "../escaped".to_owned(),
         temp.path().join("absolute").to_string_lossy().into_owned(),
+        r"C:\Windows\Temp\outside".to_owned(),
+        r"\\server\share\outside".to_owned(),
         "secret-call-token".to_owned(),
     ];
     for id in ids {
@@ -124,6 +126,27 @@ async fn provider_call_ids_cannot_select_log_paths() {
     }
     assert!(!temp.path().join("escaped.log").exists());
     assert!(!temp.path().join("absolute.log").exists());
+
+    // Two invocations with the same provider ID must never reuse a log.
+    let mut first = spawn_approved(&temp, "reused-call", &echo_argv("first"), None, 0)
+        .await
+        .expect("first invocation");
+    let mut second = spawn_approved(&temp, "reused-call", &echo_argv("second"), None, 0)
+        .await
+        .expect("second invocation");
+    assert_ne!(first.log_path(), second.log_path());
+    let first_log = first
+        .wait(&CancellationToken::new())
+        .await
+        .expect("first output")
+        .log_path;
+    let second_log = second
+        .wait(&CancellationToken::new())
+        .await
+        .expect("second output")
+        .log_path;
+    assert!(first_log.is_file());
+    assert!(second_log.is_file());
 }
 
 // The lifecycle tests below spawn real processes through a POSIX shell and
