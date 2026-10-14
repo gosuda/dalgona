@@ -633,7 +633,12 @@ async fn optional_confirm(
         }) => answer,
     };
     match answer {
+        // The ask service wraps a declined Confirm as Value(false); an
+        // unwrapped Decline answers the same way.
         Ok(Some(Answer::Decline)) => Ok(false),
+        Ok(Some(Answer::Value(value))) if value.decode_as::<bool>().ok() == Some(false) => {
+            Ok(false)
+        }
         other => confirm_answer(other).map(|()| true),
     }
 }
@@ -1265,6 +1270,13 @@ mod tests {
         (services, who)
     }
 
+    /// The real ask service answers a declined Confirm with `Value(false)`.
+    fn declined() -> Scripted {
+        Scripted::Answer(Answer::Value(
+            dal_core::RawJson::parse("false").expect("decline answer"),
+        ))
+    }
+
     /// Serves exactly `expected` token requests, then returns.
     async fn token_server(listener: TcpListener, expected: usize, count: Arc<AtomicUsize>) {
         for _ in 0..expected {
@@ -1738,7 +1750,7 @@ mod tests {
             ..Challenge::default()
         };
         let (services, who) = consent_context();
-        services.script([Scripted::Answer(Answer::Decline)]);
+        services.script([declined()]);
         let result = discover(
             &oauth,
             &target,
@@ -1917,7 +1929,7 @@ mod tests {
             client_version: "test",
         };
         let (services, who) = consent_context();
-        services.script([Scripted::Answer(Answer::Decline)]);
+        services.script([declined()]);
         let mut policy = discovery.policy.clone();
         let client_id = registered_or_stored_client_id(
             &client,
@@ -1975,10 +1987,7 @@ mod tests {
             client_version: "test",
         };
         let (services, who) = consent_context();
-        services.script([
-            Scripted::Answer(Answer::Decline),
-            Scripted::Label("manual-client"),
-        ]);
+        services.script([declined(), Scripted::Label("manual-client")]);
         let mut policy = discovery.policy.clone();
         let client_id = registered_or_stored_client_id(
             &client,
@@ -2080,7 +2089,7 @@ mod tests {
             policy: NetworkPolicy::for_target(&target),
         };
         let (services, who) = consent_context();
-        services.script([Scripted::Answer(Answer::Decline)]);
+        services.script([declined()]);
         let cancel = CancellationToken::new();
         let granted = discovery
             .approve_token_endpoint(services.as_ref(), &who, &cancel)
