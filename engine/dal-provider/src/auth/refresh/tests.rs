@@ -274,7 +274,8 @@ async fn external_writer_before_the_lock_prevents_any_request() {
     let (listener, base) = listen().await;
     let refresher = refresher(&dir.auth(), &base);
     // Another process holds the lock while it writes a fresh token.
-    let external = open_lock_file(&lock_path(&dir.auth()).expect("lock path")).expect("open lock");
+    let external = dal_store::open_private_lock(&lock_path(&dir.auth()).expect("lock path"))
+        .expect("open lock");
     external.try_lock().expect("external lock");
     let client = async {
         let expiring = refresher.refresh(codex_def(), &held, RefreshReason::Expiring);
@@ -465,7 +466,8 @@ async fn cancelled_refresh_persists_rotated_credential() {
     let on_disk = stored(&dir.auth());
     assert_eq!(on_disk.access_token.expose(), NEW_ACCESS);
     assert_eq!(on_disk.refresh_token.expose(), NEW_REFRESH);
-    let probe = open_lock_file(&lock_path(&dir.auth()).expect("lock path")).expect("open lock");
+    let probe = dal_store::open_private_lock(&lock_path(&dir.auth()).expect("lock path"))
+        .expect("open lock");
     probe.try_lock().expect("the file lock was released");
 }
 
@@ -545,7 +547,8 @@ async fn failed_in_flight_refresh_gives_a_later_caller_a_fresh_attempt() {
         release.notify_one();
         // The failed task holds the auth file lock until its future ends,
         // through the exhausted retry; wait for that before the next caller.
-        let probe = open_lock_file(&lock_path(&dir.auth()).expect("lock path")).expect("open lock");
+        let probe = dal_store::open_private_lock(&lock_path(&dir.auth()).expect("lock path"))
+            .expect("open lock");
         loop {
             match probe.try_lock() {
                 Ok(()) => break,

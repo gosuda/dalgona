@@ -376,7 +376,7 @@ fn start_operation_uses_parent_call_and_default_tools() {
         panic!("expected start");
     };
     assert_eq!(start.call.as_str(), "call-17");
-    assert_eq!(start.name.as_ref(), "worker");
+    assert_eq!(start.name.as_deref(), Some("worker"));
     let tools = start.tools.expect("default tools");
     assert_eq!(
         tools.iter().map(Name::as_str).collect::<Vec<_>>(),
