@@ -12,6 +12,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, ready};
+use std::time::Duration;
 
 use futures::StreamExt;
 use hyper::header::HeaderValue;
@@ -29,6 +30,8 @@ use crate::transport::{FrameWriter, ReadFrameError};
 
 /// Maximum WebSocket message size in bytes (16 MiB).
 const WS_FRAME_CAP: usize = 16_777_216;
+/// Maximum time an accepted WebSocket can go without receiving a frame.
+const WS_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// One WebSocket protocol transport.
 pub struct WebSocketTransport {
@@ -38,6 +41,8 @@ pub struct WebSocketTransport {
     writer: FrameWriter,
     /// Shared close state.
     flags: Arc<WsFlags>,
+    /// Inbound inactivity deadline for server connections only.
+    idle_timeout: Option<Duration>,
 }
 
 type WsStream = Pin<Box<dyn futures::Stream<Item = Result<Message, WsError>> + Send>>;
@@ -57,7 +62,7 @@ struct WsFlags {
 
 impl WebSocketTransport {
     /// Builds a transport from boxed stream and sink halves.
-    fn halves(stream: WsStream, sink: WsSink) -> Self {
+    fn halves(stream: WsStream, sink: WsSink, idle_timeout: Option<Duration>) -> Self {
         let flags = Arc::new(WsFlags::default());
         let writer = FrameWriter::from_box(
             Box::new(WsWrite {
@@ -71,6 +76,7 @@ impl WebSocketTransport {
             reader: Arc::new(Mutex::new(stream)),
             writer,
             flags,
+            idle_timeout,
         }
     }
 
@@ -91,7 +97,7 @@ impl WebSocketTransport {
             tokio_tungstenite::WebSocketStream::from_raw_socket(io, Role::Server, Some(config))
                 .await;
         let (sink, stream) = socket.split();
-        Self::halves(Box::pin(stream), Box::pin(sink))
+        Self::halves(Box::pin(stream), Box::pin(sink), Some(WS_IDLE_TIMEOUT))
     }
 
     /// Connects one client transport to a WebSocket URL.
@@ -136,7 +142,7 @@ impl WebSocketTransport {
             .await
             .map_err(|error| WireError::Transport(format!("websocket connect failed: {error}")))?;
         let (sink, stream) = socket.split();
-        Ok(Self::halves(Box::pin(stream), Box::pin(sink)))
+        Ok(Self::halves(Box::pin(stream), Box::pin(sink), None))
     }
 
     /// Returns the shared writer for protocol replies.
@@ -150,14 +156,25 @@ impl WebSocketTransport {
     /// # Errors
     ///
     /// Returns [`ReadFrameError`] when the peer closes, sends binary data
-    /// (closed with code 1003), exceeds the frame cap, or the stream fails.
+    /// (closed with code 1003), exceeds the frame cap, times out on an
+    /// accepted connection, or the stream fails.
     pub async fn read_frame(&mut self) -> Result<String, ReadFrameError> {
         let mut reader = self.reader.lock().await;
         loop {
             if self.flags.closed.load(Ordering::Acquire) {
                 return Err(ReadFrameError::Closed);
             }
-            match reader.next().await {
+            let frame = match self.idle_timeout {
+                Some(timeout) => match tokio::time::timeout(timeout, reader.next()).await {
+                    Ok(frame) => frame,
+                    Err(_) => {
+                        self.flags.closed.store(true, Ordering::Release);
+                        return Err(ReadFrameError::Closed);
+                    }
+                },
+                None => reader.next().await,
+            };
+            match frame {
                 None | Some(Ok(Message::Close(_))) => {
                     self.flags.closed.store(true, Ordering::Release);
                     return Err(ReadFrameError::EndOfInput);
