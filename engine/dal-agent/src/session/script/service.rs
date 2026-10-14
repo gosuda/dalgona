@@ -175,6 +175,7 @@ pub(super) async fn call(
                 role: args.role,
                 system: args.system,
                 tools: args.tools.map(Vec::into_boxed_slice),
+                max_steps: None,
                 workspace: args.workspace,
             };
             start

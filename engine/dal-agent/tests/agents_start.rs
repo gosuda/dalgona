@@ -51,6 +51,7 @@ fn start_args(name: &str, workspace: Option<&Workspace>) -> AgentStart {
         role: None,
         system: None,
         tools: None,
+        max_steps: None,
         workspace: workspace.cloned(),
     }
 }

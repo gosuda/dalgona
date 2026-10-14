@@ -243,6 +243,7 @@ impl ModelHandler for ChildLoadModel {
                     role: None,
                     system: None,
                     tools: Some(Box::default()),
+                    max_steps: None,
                     workspace: None,
                 };
                 if scope.agent(child).is_err() {
@@ -401,6 +402,7 @@ impl ModelHandler for ShuttleRootModel {
                 role: None,
                 system: None,
                 tools: Some(Box::default()),
+                max_steps: None,
                 workspace: None,
             };
             let Ok(handle) = scope.agent(child) else {

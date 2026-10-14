@@ -1247,6 +1247,7 @@ impl Backend {
             let _ = host.close(child_id).await;
             return Err(child_start_error(error));
         }
+        child.inner.shared.set_next_turn_step_cap(start.max_steps);
         if let Err(error) = child
             .submit(dal_core::Command::Prompt {
                 expect: dal_core::Expect::Idle,
@@ -1256,6 +1257,7 @@ impl Backend {
             })
             .await
         {
+            child.inner.shared.set_next_turn_step_cap(None);
             let _ = host.close(child_id).await;
             return Err(child_start_error(error));
         }

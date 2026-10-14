@@ -1435,6 +1435,7 @@ async fn scope_over_uses_the_supplied_service_caller() {
             role: None,
             system: None,
             tools: None,
+            max_steps: None,
             workspace: None,
         })
         .expect("handle admitted");
