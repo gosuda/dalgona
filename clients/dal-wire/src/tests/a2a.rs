@@ -188,14 +188,50 @@ fn version_needs_one_point_zero() {
 fn card_base_prefers_host_header() {
     let bind = "127.0.0.1".parse().expect("ip");
     assert_eq!(
-        card_base(Some("localhost:7437"), bind, 9),
+        card_base(Some("localhost:7437"), None, bind, 9),
         "http://localhost:7437"
     );
-    assert_eq!(card_base(Some("[::1]:7437"), bind, 9), "http://[::1]:7437");
-    assert_eq!(card_base(Some("[::1]"), bind, 9), "http://[::1]:9");
-    assert_eq!(card_base(None, bind, 7437), "http://127.0.0.1:7437");
+    assert_eq!(
+        card_base(Some("[::1]:7437"), None, bind, 9),
+        "http://[::1]:7437"
+    );
+    assert_eq!(card_base(Some("[::1]"), None, bind, 9), "http://[::1]:9");
+    assert_eq!(card_base(None, None, bind, 7437), "http://127.0.0.1:7437");
     let v6 = "::1".parse().expect("ip");
-    assert_eq!(card_base(None, v6, 7437), "http://[::1]:7437");
+    assert_eq!(card_base(None, None, v6, 7437), "http://[::1]:7437");
+}
+
+#[test]
+fn card_base_follows_validated_forwarded_proto() {
+    let bind = "127.0.0.1".parse().expect("ip");
+    // A TLS-terminating proxy on the same machine names the public scheme.
+    assert_eq!(
+        card_base(Some("agent.example"), Some("https"), bind, 7437),
+        "https://agent.example"
+    );
+    assert_eq!(
+        card_base(Some("agent.example:8443"), Some("https"), bind, 7437),
+        "https://agent.example:8443"
+    );
+    assert_eq!(
+        card_base(None, Some("HTTPS"), bind, 7437),
+        "https://127.0.0.1:7437"
+    );
+    // A plaintext proxy keeps the Host as sent: the proxy owns port 80.
+    assert_eq!(
+        card_base(Some("agent.example"), Some("http,https"), bind, 7437),
+        "http://agent.example"
+    );
+    // An unrecognized proto is no proxy signal: the bound port survives.
+    assert_eq!(
+        card_base(Some("agent.example"), Some("gopher"), bind, 7437),
+        "http://agent.example:7437"
+    );
+    // The first hop in a forwarded list names the client-facing scheme.
+    assert_eq!(
+        card_base(Some("agent.example"), Some("https, http"), bind, 7437),
+        "https://agent.example"
+    );
 }
 
 #[test]

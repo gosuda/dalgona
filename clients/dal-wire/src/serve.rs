@@ -4,9 +4,9 @@
 //! cap. The pipeline is route, browser guard, authentication, content type,
 //! bounded body, then the route handler. OpenAI routes run through the
 //! router, A2A routes through `a2a`, and `/v1/ws` plus `/codex/ws` upgrade
-//! to WebSockets. Loopback binds need no token; public binds require the
-//! BLAKE3-checked serve token. Stopping ceases accepts, cancels handler
-//! turns, and drains connections within two seconds.
+//! to WebSockets. Plain loopback mode needs no token; public mode requires
+//! the BLAKE3-checked serve token on loopback. Stopping ceases accepts,
+//! cancels handler turns, and drains connections within two seconds.
 
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
@@ -279,6 +279,11 @@ async fn handle_request(
         .get("host")
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
+    let forwarded_proto = req
+        .headers()
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
     let session = req
         .headers()
         .get("x-dal-session")
@@ -293,6 +298,7 @@ async fn handle_request(
         query: &query,
         version: version.as_deref(),
         host: host_header.as_deref(),
+        proto: forwarded_proto.as_deref(),
         anthropic,
     };
     dispatch(ctx, &request, route, body).await
@@ -304,6 +310,7 @@ struct RouteRequest<'a> {
     query: &'a str,
     version: Option<&'a str>,
     host: Option<&'a str>,
+    proto: Option<&'a str>,
     anthropic: bool,
 }
 
@@ -319,6 +326,7 @@ async fn dispatch(
         query,
         version,
         host,
+        proto,
         anthropic,
     } = *request;
     let http = || super::router::harness::HttpParts {
@@ -336,7 +344,7 @@ async fn dispatch(
         super::router::ServeRoute::Messages => {
             super::router::handlers::messages(&ctx, &body, http()).await
         }
-        super::router::ServeRoute::A2aCard => a2a::card(&ctx, host),
+        super::router::ServeRoute::A2aCard => a2a::card(&ctx, host, proto),
         super::router::ServeRoute::A2aJsonRpc => a2a::json_rpc(&ctx, &body, query, version).await,
         super::router::ServeRoute::A2aRest(kind, id) => {
             a2a::rest(&ctx, kind, id, &body, query, version).await

@@ -132,6 +132,63 @@ fn remote_tui_reattaches_after_dropped_websocket() -> Result<(), Box<dyn Error +
     Ok(())
 }
 
+/// A public loopback listener requires the serve token: `dalgon --connect
+/// --token-file` must send it even though the endpoint is loopback.
+#[test]
+fn remote_tui_authenticates_to_a_public_loopback_listener()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let server_home = TestDir::new()?;
+    let client_home = TestDir::new()?;
+
+    let created = dalgon_command(server_home.path(), &["unused reply"])?
+        .args(["serve", "token"])
+        .output()?;
+    assert!(
+        created.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&created.stdout),
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let token_file = server_home.path().join(".local/share/dal/serve.token");
+
+    let mut server_command = dalgon_command(server_home.path(), &["unused reply"])?;
+    let serve_log = server_home.path().join("serve.stderr");
+    let serve_stdout = server_home.path().join("serve.stdout");
+    server_command
+        .args(["serve", "--public", "--bind", "127.0.0.1", "--port", "0"])
+        .stdout(Stdio::from(std::fs::File::create(&serve_stdout)?))
+        .stderr(Stdio::from(std::fs::File::create(&serve_log)?));
+    let mut server = ServeChild::spawn(server_command.spawn()?);
+    let port = wait_for_listen_port(&mut server, &serve_stdout, Duration::from_secs(10))?;
+
+    let mut client_command = dalgon_command(client_home.path(), &["client provider is bypassed"])?;
+    client_command.args([
+        "--screen",
+        "inline",
+        "--connect",
+        &format!("ws://127.0.0.1:{port}/v1/ws"),
+        "--token-file",
+        token_file.to_str().expect("utf8 token path"),
+    ]);
+    let mut terminal = PtyProcess::spawn(&mut client_command, 100, 30)?;
+    if let Err(error) = terminal.wait_for(
+        dal_tui::copy::ids::COMPOSER_PLACEHOLDER.as_bytes(),
+        Duration::from_secs(15),
+    ) {
+        let log = std::fs::read_to_string(&serve_log).unwrap_or_default();
+        return Err(format!("{error}\nserve stderr:\n{log}").into());
+    }
+    terminal.write(b"\x04")?;
+    let status = terminal.wait_for_exit(Duration::from_secs(10))?;
+    assert!(status.success(), "remote TUI exited with {status}");
+    assert!(
+        server
+            .is_running()
+            .expect("serve process status is observable")
+    );
+    Ok(())
+}
+
 fn exec_then_reply_fixture(
     command: &str,
     response: &str,

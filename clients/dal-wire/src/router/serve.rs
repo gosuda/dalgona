@@ -1,8 +1,8 @@
 //! Router-driven listener for the HTTP router.
 //!
-//! `serve_router` serves the routes in [`RouterOptions`] on a loopback or
-//! public listener: non-loopback binds need `public`, public binds require
-//! the serve token, and A2A mounts only when enabled.
+//! `serve_router` serves the routes in [`RouterOptions`] on loopback.
+//! Public mode requires the serve token but still binds only to loopback;
+//! remote access requires an HTTPS/WSS reverse proxy.
 
 use std::net::{IpAddr, SocketAddr};
 
@@ -14,21 +14,25 @@ use crate::error::ServeError;
 
 /// Serves the configured routes with the listener guards.
 ///
-/// Public binds load and require the serve token from
-/// `options.token_file`; non-loopback binds without `public` fail.
+/// Public mode loads and requires the serve token from
+/// `options.token_file`. Every non-loopback bind is refused.
 ///
 /// # Errors
 ///
 /// Returns [`ServeError`] when the address cannot be bound, the bind is not
-/// loopback without `public`, or the public token cannot be loaded.
+/// loopback, or the public token cannot be loaded.
 pub async fn serve_router(
     host: dal_agent::Host,
     options: RouterOptions,
     stop: CancellationToken,
 ) -> Result<crate::serve::ServeHandle, ServeError> {
     let bind = resolve_bind(&options.bind, options.port).await?;
-    if !options.public && !is_loopback(bind) {
-        return Err(ServeError::NotLoopback { addr: bind });
+    if !is_loopback(bind) {
+        return Err(if options.public {
+            ServeError::InsecurePublicBind { addr: bind }
+        } else {
+            ServeError::NotLoopback { addr: bind }
+        });
     }
     if let Some(alias) = options
         .aliases
