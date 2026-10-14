@@ -260,6 +260,11 @@ struct RenderCacheState {
     entries: HashMap<RenderKey, DiagramOutcome>,
     order: VecDeque<RenderKey>,
     pending: HashSet<RenderKey>,
+    /// Spawned render workers, joined when the cache drops so no render
+    /// outlives its session. Workers are bounded by the renderer timeout.
+    workers: Vec<std::thread::JoinHandle<()>>,
+    /// Set when the cache drops: no new work is scheduled.
+    closed: bool,
     renders: usize,
     generation: u64,
 }
@@ -345,6 +350,9 @@ impl RenderCache {
             if let Some(outcome) = state.cached(&key) {
                 return Some(outcome);
             }
+            if state.closed {
+                return Some(fallback("renderer closed"));
+            }
             if state.pending.contains(&key) || state.pending.len() >= MAX_RENDER_WORKERS {
                 return None;
             }
@@ -355,7 +363,7 @@ impl RenderCache {
         let path = self.path.clone();
         let fonts = self.fonts.clone();
         let source = source.to_vec();
-        if std::thread::Builder::new()
+        if let Ok(worker) = std::thread::Builder::new()
             .name("dal-tui-diagram".to_owned())
             .spawn(move || {
                 let outcome = render_diagram(kind, &source, width_cells, path.as_deref(), &fonts);
@@ -366,8 +374,13 @@ impl RenderCache {
                 state.insert(key, outcome);
                 state.generation = state.generation.saturating_add(1);
             })
-            .is_err()
         {
+            self.state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .workers
+                .push(worker);
+        } else {
             let mut state = self
                 .state
                 .lock()
@@ -395,6 +408,24 @@ impl RenderCache {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .generation
+    }
+}
+
+impl Drop for RenderCache {
+    /// Stops new scheduling and joins every render worker; each render is
+    /// bounded by the renderer timeout, so the join cannot hang the drop.
+    fn drop(&mut self) {
+        let workers = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.closed = true;
+            std::mem::take(&mut state.workers)
+        };
+        for worker in workers {
+            let _ = worker.join();
+        }
     }
 }
 
@@ -626,6 +657,40 @@ mod tests {
         assert!(matches!(
             super::limit_art_cells(DiagramOutcome::Art(art(257, 256))),
             DiagramOutcome::Fallback { reason } if reason.as_ref() == "too large"
+        ));
+    }
+
+    #[test]
+    fn scheduled_background_renders_are_owned_by_the_cache() {
+        let cache = RenderCache::default();
+        assert!(
+            cache
+                .get_or_schedule(DiagramKind::D2, b"a -> b", 40)
+                .is_none()
+        );
+        assert_eq!(
+            cache
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .workers
+                .len(),
+            1,
+            "the worker handle is tracked so drop can join it"
+        );
+    }
+
+    #[test]
+    fn a_closed_cache_schedules_nothing_new() {
+        let cache = RenderCache::default();
+        cache
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .closed = true;
+        assert!(matches!(
+            cache.get_or_schedule(DiagramKind::D2, b"a -> b", 40),
+            Some(DiagramOutcome::Fallback { reason }) if reason.as_ref() == "renderer closed"
         ));
     }
 }
