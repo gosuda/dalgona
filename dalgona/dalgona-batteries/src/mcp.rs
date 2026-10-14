@@ -41,7 +41,9 @@ pub const LIST_METADATA_BYTES_MAX: usize = 2 * 1024 * 1024;
 pub const LIST_TOOL_MAX: usize = 256;
 /// Maximum byte lengths of each tool's name, description, and JSON schema.
 pub const TOOL_NAME_BYTES_MAX: usize = 256;
+/// Maximum UTF-8 bytes in a single remote tool description.
 pub const TOOL_DESCRIPTION_BYTES_MAX: usize = 16 * 1024;
+/// Maximum raw JSON bytes in a single remote tool schema.
 pub const TOOL_SCHEMA_BYTES_MAX: usize = 64 * 1024;
 /// Maximum amount of child stderr retained for crash diagnostics.
 pub const STDERR_RING: usize = 65_536;
