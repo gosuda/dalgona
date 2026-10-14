@@ -8,10 +8,10 @@
 //! BLAKE3-checked serve token. Stopping ceases accepts, cancels handler
 //! turns, and drains connections within two seconds.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use crate::router::{DigestTable, RouterOptions};
@@ -32,7 +32,7 @@ mod guard;
 mod http;
 mod upgrade;
 
-use guard::{auth_guard, content_guard, host_guard, is_card, is_upgrade, requires_json};
+use guard::{auth_guard, content_guard, host_guard, is_upgrade, requires_json};
 pub(crate) use http::{Resp, RespBody, ServeBody};
 use http::{into_response, read_body};
 use upgrade::upgrade_response;
@@ -64,6 +64,10 @@ impl ServeHandle {
 
 /// Maximum concurrent HTTP connections.
 const CONN_CAP: usize = 256;
+/// Maximum retained connections waiting to pass their first request guards.
+const PRE_AUTH_CAP: usize = 32;
+/// Absolute deadline for each HTTP request header, including idle keep-alive.
+const HEADER_TIMEOUT: Duration = Duration::from_secs(5);
 /// Maximum request header buffer size in bytes.
 const HEADER_LIMIT: usize = 1_048_576;
 /// Stop drain grace.
@@ -117,6 +121,34 @@ impl ServeCtx {
     }
 }
 
+/// One unverified connection, which can be evicted to admit a new peer.
+struct PendingConnection {
+    cancel: CancellationToken,
+}
+
+/// Single-owner admission queue. Validated connections leave this queue
+/// through their weak reference without reducing the normal connection cap.
+#[derive(Default)]
+struct PreAuthBudget {
+    slots: VecDeque<Weak<PendingConnection>>,
+}
+
+impl PreAuthBudget {
+    fn admit(&mut self) -> Arc<PendingConnection> {
+        self.slots.retain(|slot| slot.strong_count() > 0);
+        if self.slots.len() >= PRE_AUTH_CAP
+            && let Some(oldest) = self.slots.pop_front().and_then(|slot| slot.upgrade())
+        {
+            oldest.cancel.cancel();
+        }
+        let pending = Arc::new(PendingConnection {
+            cancel: CancellationToken::new(),
+        });
+        self.slots.push_back(Arc::downgrade(&pending));
+        pending
+    }
+}
+
 /// One live stream or upgrade future owned by the accept loop.
 pub(crate) type Driver = futures::future::BoxFuture<'static, ()>;
 /// Binds the accept loop for one listener and returns its handle.
@@ -137,6 +169,7 @@ pub(crate) fn listen(
         shutdown: stop.child_token(),
     });
     let shutdown = ctx.shutdown.clone();
+    let mut pre_auth = PreAuthBudget::default();
     let done = async move {
         let mut conns: FuturesUnordered<Driver> = FuturesUnordered::new();
         let mut drivers: FuturesUnordered<Driver> = FuturesUnordered::new();
@@ -144,12 +177,17 @@ pub(crate) fn listen(
             tokio::select! {
                 biased;
                 () = stop.cancelled() => break,
+                // Prioritize reaping cancelled or completed drivers over new accepts.
+                _ = conns.next(), if !conns.is_empty() => {}
+                _ = drivers.next(), if !drivers.is_empty() => {}
+                Some(driver) = driver_rx.recv() => drivers.push(driver),
                 accepted = listener.accept(), if conns.len() < CONN_CAP => {
                     match accepted {
                         Ok((stream, _)) => {
+                            let pending = pre_auth.admit();
                             let ctx = Arc::clone(&ctx);
                             conns.push(Box::pin(async move {
-                                serve_conn(ctx, stream).await;
+                                serve_conn(ctx, stream, pending).await;
                             }));
                         }
                         Err(error) => {
@@ -163,9 +201,6 @@ pub(crate) fn listen(
                         }
                     }
                 }
-                _ = conns.next(), if !conns.is_empty() => {}
-                _ = drivers.next(), if !drivers.is_empty() => {}
-                Some(driver) = driver_rx.recv() => drivers.push(driver),
             }
         }
         shutdown.cancel();
@@ -207,21 +242,43 @@ fn libc_enfile() -> i32 {
     23
 }
 
+/// Builds an HTTP/1.1 parser with bounded time to finish every request header.
+fn http1_builder() -> hyper::server::conn::http1::Builder {
+    let mut builder = hyper::server::conn::http1::Builder::new();
+    builder
+        .max_buf_size(HEADER_LIMIT)
+        .timer(hyper_util::rt::TokioTimer::new())
+        .header_read_timeout(HEADER_TIMEOUT);
+    builder
+}
+
 /// Serves one HTTP/1.1 connection to completion.
-async fn serve_conn(ctx: Arc<ServeCtx>, stream: tokio::net::TcpStream) {
+async fn serve_conn(
+    ctx: Arc<ServeCtx>,
+    stream: tokio::net::TcpStream,
+    pending: Arc<PendingConnection>,
+) {
     let io = hyper_util::rt::TokioIo::new(stream);
     let shutdown = ctx.shutdown.clone();
+    let evict = pending.cancel.clone();
+    // A validated request drops the last strong reference in the pending
+    // queue. Its HTTP connection can still run under the normal cap.
+    let pre_auth = Arc::new(Mutex::new(Some(pending)));
     let service = hyper::service::service_fn(move |req: Request<hyper::body::Incoming>| {
         let ctx = Arc::clone(&ctx);
-        async move { Ok::<_, hyper::Error>(handle_request(ctx, req).await) }
+        let pre_auth = Arc::clone(&pre_auth);
+        async move { Ok::<_, hyper::Error>(handle_request(ctx, req, &pre_auth).await) }
     });
-    let conn = hyper::server::conn::http1::Builder::new()
-        .max_buf_size(HEADER_LIMIT)
+    let conn = http1_builder()
         .serve_connection(io, service)
         .with_upgrades();
     let mut conn = std::pin::pin!(conn);
     let result = tokio::select! {
         result = conn.as_mut() => result,
+        () = evict.cancelled() => {
+            tracing::debug!("evicted unverified HTTP connection");
+            return;
+        }
         () = shutdown.cancelled() => {
             conn.as_mut().graceful_shutdown();
             conn.await
@@ -232,10 +289,20 @@ async fn serve_conn(ctx: Arc<ServeCtx>, stream: tokio::net::TcpStream) {
     }
 }
 
+/// Closes rejected or anonymous HTTP connections after the response.
+fn close_untrusted(mut response: Response<ServeBody>) -> Response<ServeBody> {
+    response.headers_mut().insert(
+        hyper::header::CONNECTION,
+        hyper::header::HeaderValue::from_static("close"),
+    );
+    response
+}
+
 /// Handles one HTTP request through guards to its route handler.
 async fn handle_request(
     ctx: Arc<ServeCtx>,
     req: Request<hyper::body::Incoming>,
+    pre_auth: &Mutex<Option<Arc<PendingConnection>>>,
 ) -> Response<ServeBody> {
     let method = req.method().to_string();
     let path = req.uri().path().to_owned();
@@ -245,24 +312,47 @@ async fn handle_request(
         route,
         super::router::ServeRoute::WebSocket | super::router::ServeRoute::CodexWs
     );
+    // The unauthenticated card exists only when the router mounted it:
+    // with A2A off, the same path is an ordinary guarded 404.
+    let card_route = matches!(route, super::router::ServeRoute::A2aCard);
     if req.headers().contains_key("origin") && !is_upgrade(&req) {
-        return into_response(Resp::text(403, "browser requests are not allowed"));
+        return close_untrusted(into_response(Resp::text(
+            403,
+            "browser requests are not allowed",
+        )));
     }
     if !ctx.cfg.public
         && let Err(resp) = host_guard(&ctx, &req)
     {
-        return into_response(resp);
+        return close_untrusted(into_response(resp));
     }
     if ctx.cfg.public
-        && !is_card(&method, &path)
+        && !card_route
         && !upgrade_route
         && let Err(resp) = auth_guard(&ctx, &req)
     {
-        return into_response(resp);
+        return close_untrusted(into_response(resp));
     }
     if upgrade_route {
-        return upgrade_response(ctx, req, route).await;
+        let response = upgrade_response(ctx, req, route).await;
+        if response.status() == hyper::StatusCode::SWITCHING_PROTOCOLS {
+            drop(pre_auth.lock().await.take());
+            return response;
+        }
+        return close_untrusted(response);
     }
+    if ctx.cfg.public && card_route {
+        // The public card needs no token. Do not let its body or keep-alive
+        // occupy an unauthenticated slot after the response.
+        let host = req
+            .headers()
+            .get("host")
+            .and_then(|value| value.to_str().ok());
+        return close_untrusted(into_response(a2a::card(&ctx, host)));
+    }
+    // Request guards passed. Later body reads, handlers, and streams belong
+    // to the normal connection pool rather than the pre-auth budget.
+    drop(pre_auth.lock().await.take());
     if requires_json(&route)
         && let Err(resp) = content_guard(&req, &route)
     {
@@ -374,5 +464,120 @@ pub(crate) fn router_options(cfg: &ListenerCfg) -> RouterOptions {
         origins: cfg.origins.clone(),
         aliases: cfg.aliases.clone(),
         workspace: cfg.workspace.clone(),
+    }
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::{HEADER_TIMEOUT, PRE_AUTH_CAP, PreAuthBudget, ServeBody, http1_builder};
+    use std::{error::Error, io, time::Duration};
+
+    use hyper::{Request, Response};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::{TcpListener, TcpStream},
+        task::JoinSet,
+        time::Instant,
+    };
+
+    type TestResult = Result<(), Box<dyn Error + Send + Sync>>;
+
+    async fn socket_pair() -> io::Result<(TcpStream, JoinSet<io::Result<()>>)> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        // `tokio::spawn` is workspace-banned; JoinSet is the tracked spawn.
+        let mut server = JoinSet::new();
+        server.spawn(async move {
+            let (socket, _) = listener.accept().await?;
+            let service =
+                hyper::service::service_fn(|_req: Request<hyper::body::Incoming>| async {
+                    Ok::<_, hyper::Error>(Response::new(ServeBody::Full(None)))
+                });
+            let _ = http1_builder()
+                .serve_connection(hyper_util::rt::TokioIo::new(socket), service)
+                .await;
+            Ok(())
+        });
+        Ok((TcpStream::connect(address).await?, server))
+    }
+
+    async fn assert_server_closed(
+        server: &mut JoinSet<io::Result<()>>,
+        deadline: Instant,
+    ) -> TestResult {
+        tokio::time::timeout_at(deadline, server.join_next())
+            .await?
+            .expect("server task joined")??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn silent_peer_cannot_hold_a_header_slot() -> TestResult {
+        let (client, mut server) = socket_pair().await?;
+        let deadline = Instant::now() + HEADER_TIMEOUT + Duration::from_secs(2);
+        assert_server_closed(&mut server, deadline).await?;
+        drop(client);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn partial_headers_cannot_extend_the_absolute_deadline() -> TestResult {
+        let (mut client, mut server) = socket_pair().await?;
+        let deadline = Instant::now() + HEADER_TIMEOUT + Duration::from_secs(2);
+        client.write_all(b"GET / HTTP/1.1\r\n").await?;
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        client.write_all(b"host: localhost").await?;
+        assert_server_closed(&mut server, deadline).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn idle_keep_alive_closes_after_a_valid_response() -> TestResult {
+        let (mut client, mut server) = socket_pair().await?;
+        client
+            .write_all(b"GET / HTTP/1.1\r\nhost: localhost\r\n\r\n")
+            .await?;
+        let mut response = [0; 512];
+        let count =
+            tokio::time::timeout(Duration::from_secs(2), client.read(&mut response)).await??;
+        assert!(
+            String::from_utf8_lossy(&response[..count]).starts_with("HTTP/1.1 200"),
+            "the first request must complete before the keep-alive deadline"
+        );
+        assert_server_closed(
+            &mut server,
+            Instant::now() + HEADER_TIMEOUT + Duration::from_secs(2),
+        )
+        .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pre_auth_admission_evicts_the_oldest_unverified_peer() -> TestResult {
+        let mut budget = PreAuthBudget::default();
+        let first = budget.admit();
+        let mut waiting = Vec::with_capacity(PRE_AUTH_CAP - 1);
+        for _ in 1..PRE_AUTH_CAP {
+            waiting.push(budget.admit());
+        }
+        let fresh = budget.admit();
+        assert!(
+            first.cancel.is_cancelled(),
+            "new peers must evict old unverified sockets at capacity"
+        );
+        assert!(!fresh.cancel.is_cancelled());
+        assert_eq!(budget.slots.len(), PRE_AUTH_CAP);
+
+        let validated = tokio::sync::Mutex::new(waiting.pop());
+        drop(validated.lock().await.take());
+        let next = budget.admit();
+        assert!(!next.cancel.is_cancelled());
+        assert!(!fresh.cancel.is_cancelled());
+        assert_eq!(
+            budget.slots.len(),
+            PRE_AUTH_CAP,
+            "validated connections must free pre-auth capacity"
+        );
+        Ok(())
     }
 }
