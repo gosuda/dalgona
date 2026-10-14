@@ -644,7 +644,13 @@ fn read_cache(
     workspace: &Workspace,
     journal_bytes: u64,
 ) -> Option<InfoFile> {
-    let bytes = fs::read(path).ok()?;
+    let bytes = crate::private::open_private_file(path)
+        .and_then(|mut file| {
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(&mut file, &mut bytes)?;
+            Ok(bytes)
+        })
+        .ok()?;
     let info: InfoFile = sonic_rs::from_slice(&bytes).ok()?;
     let expected_workspace = workspace.as_path().display().to_string();
     (info.v == CACHE_VERSION
@@ -751,7 +757,7 @@ fn user_preview(path: &Path, parts: &[JournalPart]) -> String {
                     break;
                 };
                 let blob_path = session_dir.join("blobs").join(blob_id.to_string());
-                let Ok(file) = File::open(blob_path) else {
+                let Ok(file) = crate::private::open_private_file(&blob_path) else {
                     break;
                 };
                 let remaining = MAX_PREVIEW_BYTES.saturating_sub(preview.len());
