@@ -1182,7 +1182,7 @@ impl Backend {
                     workspace,
                     // Queued for the first durable record: a start cancelled
                     // before it records leaves no named session behind.
-                    name: Some(start.name.clone()),
+                    name: start.name.clone(),
                 },
                 dal_core::ClientId::new("core"),
             )
@@ -1946,7 +1946,7 @@ mod tests {
     fn start_in(workspace: Option<Workspace>, model: Option<&str>) -> dal_core::AgentStart {
         dal_core::AgentStart {
             call: CallId::new("refused-start"),
-            name: "member".into(),
+            name: Some("member".into()),
             prompt: "work".into(),
             model: model.map(Into::into),
             role: None,
