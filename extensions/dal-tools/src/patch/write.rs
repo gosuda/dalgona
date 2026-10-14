@@ -2,7 +2,7 @@
 
 use std::{
     collections::HashMap,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::Arc,
 };
 
@@ -12,7 +12,7 @@ use dal_core::{CallId, GenerationId, SessionId, TurnId};
 use super::ir::StagedFileOwned;
 use super::{
     ir::{
-        Diff, Edit, EngineError, ErrorClass, FindingSeverity, Output, Plan, StagedBatch, StagedFile,
+        Diff, Edit, EngineError, ErrorClass, FindingSeverity, Output, Plan, RenameTarget, StagedBatch, StagedFile,
     },
     resolve::{check_overlap, resolve_path},
     snapshot::SnapshotStore,
@@ -325,6 +325,31 @@ async fn cached_parse(
     }
 }
 
+/// Resolve the exact rename destination before approval. Parent traversal is
+/// refused even when it would normalize back inside the workspace.
+fn resolve_rename_destination(workspace: &Path, raw: &Path) -> Result<RenameTarget, EngineError> {
+    let (path, absolute_path) = resolve_path(workspace, raw)?;
+    if raw
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(EngineError::new(
+            ErrorClass::File,
+            format!(
+                "patch: rename destination {} contains parent traversal.",
+                raw.display()
+            ),
+        ));
+    }
+    if path.file_name().is_none() {
+        return Err(EngineError::new(
+            ErrorClass::File,
+            "patch: rename destination must name a file.".to_owned(),
+        ));
+    }
+    Ok(RenameTarget { path, absolute_path })
+}
+
 fn edit_path(edit: &Edit) -> &Path {
     match edit {
         Edit::Change { path, .. } | Edit::Create { path, .. } | Edit::Delete { path, .. } => path,
@@ -335,3 +360,5 @@ fn edit_path(edit: &Edit) -> &Path {
 pub mod commit;
 
 pub mod stage;
+
+mod rename_temp;
