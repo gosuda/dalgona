@@ -1152,7 +1152,9 @@ impl GrantStore {
 }
 
 fn mcp_row_matches(row: &GrantRow, key: &McpGrantKey) -> bool {
-    row_active(row) && row.mcp_set.as_deref() == Some(key.set.as_ref()) && row_key(row) == key.key
+    row_active(row)
+        && row.mcp_set.as_deref() == Some(key.set.as_ref())
+        && row_key(row) == key.key
 }
 
 /// Durable approvals expire after 90 days even when code and root do not change.
