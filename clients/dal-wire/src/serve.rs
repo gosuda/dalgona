@@ -1,7 +1,8 @@
 //! HTTP/1.1 serve listener: lifecycle, guards, and route dispatch.
 //!
-//! Hyper serves HTTP/1.1 only on a Tokio `TcpListener` with a 256-connection
-//! cap. The pipeline is route, browser guard, authentication, content type,
+//! Hyper serves HTTP/1.1 only on a Tokio `TcpListener` with a 256-socket
+//! cap, a per-source limit, and a request-header deadline. The pipeline is
+//! route, browser guard, authentication, content type,
 //! bounded body, then the route handler. OpenAI routes run through the
 //! router, A2A routes through `a2a`, and `/v1/ws` plus `/codex/ws` upgrade
 //! to WebSockets. Loopback binds need no token; public binds require the
@@ -11,7 +12,9 @@
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex as StdMutex};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use crate::router::{DigestTable, RouterOptions};
@@ -21,7 +24,8 @@ use dal_agent::Host;
 use dal_core::ApprovalMode;
 use futures::{StreamExt, stream::FuturesUnordered};
 use hyper::{Request, Response};
-use tokio::net::TcpListener;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 
@@ -62,12 +66,132 @@ impl ServeHandle {
     }
 }
 
-/// Maximum concurrent HTTP connections.
-const CONN_CAP: usize = 256;
+/// Maximum concurrent TCP sockets, including WebSocket upgrades.
+pub(crate) const CONN_CAP: usize = 256;
+/// Maximum concurrent TCP sockets from one source IP.
+pub(crate) const SOURCE_CONN_CAP: usize = 64;
+/// Maximum time to receive a complete request header, including keep-alive.
+pub(crate) const HEADER_TIMEOUT: Duration = Duration::from_secs(5);
 /// Maximum request header buffer size in bytes.
 const HEADER_LIMIT: usize = 1_048_576;
 /// Stop drain grace.
 const STOP_GRACE: Duration = Duration::from_secs(2);
+
+/// Connection admission state, bounded by the number of live TCP sockets.
+#[derive(Default)]
+struct ConnectionBudget {
+    total: usize,
+    sources: BTreeMap<IpAddr, usize>,
+}
+
+impl ConnectionBudget {
+    /// Reserves a global and source slot atomically.
+    fn admit(&mut self, source: IpAddr) -> bool {
+        if self.total >= CONN_CAP
+            || self
+                .sources
+                .get(&source)
+                .is_some_and(|&count| count >= SOURCE_CONN_CAP)
+        {
+            return false;
+        }
+        self.total += 1;
+        *self.sources.entry(source).or_default() += 1;
+        true
+    }
+
+    /// Releases both slots when the socket, including an upgrade, is dropped.
+    fn release(&mut self, source: IpAddr) {
+        let Some(count) = self.sources.get_mut(&source) else {
+            unreachable!("every admitted socket has a source entry");
+        };
+        assert!(
+            self.total > 0 && *count > 0,
+            "live admission counters remain positive"
+        );
+        *count -= 1;
+        if *count == 0 {
+            self.sources.remove(&source);
+        }
+        self.total -= 1;
+    }
+}
+
+/// An admission permit that remains owned by the underlying TCP socket.
+struct ConnectionPermit {
+    budget: Arc<StdMutex<ConnectionBudget>>,
+    source: IpAddr,
+}
+
+impl ConnectionPermit {
+    fn acquire(budget: &Arc<StdMutex<ConnectionBudget>>, source: IpAddr) -> Option<Self> {
+        let Ok(mut state) = budget.lock() else {
+            unreachable!("connection admission state is not poisoned");
+        };
+        if !state.admit(source) {
+            return None;
+        }
+        Some(Self {
+            budget: Arc::clone(budget),
+            source,
+        })
+    }
+}
+
+impl Drop for ConnectionPermit {
+    fn drop(&mut self) {
+        let Ok(mut state) = self.budget.lock() else {
+            unreachable!("connection admission state is not poisoned");
+        };
+        state.release(self.source);
+    }
+}
+
+/// A socket that retains its admission permit across HTTP and WebSocket use.
+struct AdmittedStream {
+    inner: TcpStream,
+    _permit: ConnectionPermit,
+}
+
+impl AsyncRead for AdmittedStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for AdmittedStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
+}
 
 /// The resolved listener configuration for one bound socket.
 #[derive(Clone)]
@@ -138,15 +262,29 @@ pub(crate) fn listen(
     });
     let shutdown = ctx.shutdown.clone();
     let done = async move {
+        let budget = Arc::new(StdMutex::new(ConnectionBudget::default()));
         let mut conns: FuturesUnordered<Driver> = FuturesUnordered::new();
         let mut drivers: FuturesUnordered<Driver> = FuturesUnordered::new();
         loop {
             tokio::select! {
                 biased;
                 () = stop.cancelled() => break,
-                accepted = listener.accept(), if conns.len() < CONN_CAP => {
+                // Poll completed sockets before accepting more, even under a flood.
+                _ = conns.next(), if !conns.is_empty() => {}
+                _ = drivers.next(), if !drivers.is_empty() => {}
+                Some(driver) = driver_rx.recv() => drivers.push(driver),
+                accepted = listener.accept() => {
                     match accepted {
-                        Ok((stream, _)) => {
+                        Ok((stream, peer)) => {
+                            let Some(permit) = ConnectionPermit::acquire(&budget, peer.ip()) else {
+                                // Shed overload instead of suspending all accepts.
+                                drop(stream);
+                                continue;
+                            };
+                            let stream = AdmittedStream {
+                                inner: stream,
+                                _permit: permit,
+                            };
                             let ctx = Arc::clone(&ctx);
                             conns.push(Box::pin(async move {
                                 serve_conn(ctx, stream).await;
@@ -163,9 +301,6 @@ pub(crate) fn listen(
                         }
                     }
                 }
-                _ = conns.next(), if !conns.is_empty() => {}
-                _ = drivers.next(), if !drivers.is_empty() => {}
-                Some(driver) = driver_rx.recv() => drivers.push(driver),
             }
         }
         shutdown.cancel();
@@ -208,7 +343,7 @@ fn libc_enfile() -> i32 {
 }
 
 /// Serves one HTTP/1.1 connection to completion.
-async fn serve_conn(ctx: Arc<ServeCtx>, stream: tokio::net::TcpStream) {
+async fn serve_conn(ctx: Arc<ServeCtx>, stream: AdmittedStream) {
     let io = hyper_util::rt::TokioIo::new(stream);
     let shutdown = ctx.shutdown.clone();
     let service = hyper::service::service_fn(move |req: Request<hyper::body::Incoming>| {
@@ -216,6 +351,8 @@ async fn serve_conn(ctx: Arc<ServeCtx>, stream: tokio::net::TcpStream) {
         async move { Ok::<_, hyper::Error>(handle_request(ctx, req).await) }
     });
     let conn = hyper::server::conn::http1::Builder::new()
+        .timer(hyper_util::rt::TokioTimer::new())
+        .header_read_timeout(HEADER_TIMEOUT)
         .max_buf_size(HEADER_LIMIT)
         .serve_connection(io, service)
         .with_upgrades();
