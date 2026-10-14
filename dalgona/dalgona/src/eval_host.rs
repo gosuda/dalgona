@@ -85,8 +85,9 @@ fn layered(inputs: &ArmInputs<'_>) -> Result<Option<String>, ExecError> {
 }
 
 /// Loads the configuration one arm runs under: the product defaults, the
-/// layered user files, the model override, and approval `ask` (a run has no
-/// controller to answer, so every call needing approval fails closed).
+/// layered user files, the model override, and approval `edits`: edits to
+/// the run's own temporary workspace proceed, and every call that still needs
+/// approval fails closed because a run has no controller to answer it.
 ///
 /// # Errors
 /// Returns [`ExecError::Arm`] with the config error text.
@@ -102,7 +103,7 @@ pub(crate) fn load_config(inputs: &ArmInputs<'_>) -> Result<Config, ExecError> {
     .map_err(arm_error)?;
     Ok(config.with_overrides(&ConfigOverrides {
         model: inputs.model.map(Into::into),
-        approval: Some(ApprovalMode::Ask),
+        approval: Some(ApprovalMode::Edits),
         ..ConfigOverrides::default()
     }))
 }
