@@ -1,7 +1,6 @@
 //! Interactive terminal dispatch over the local or remote host contract.
 
 use std::ffi::OsStr;
-use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -356,23 +355,14 @@ fn endpoint(addr: &str) -> Result<RemoteEndpoint, TuiError> {
     Ok(RemoteEndpoint::WebSocket(url))
 }
 
-fn is_loopback_websocket(url: &url::Url) -> bool {
-    url.host_str().is_some_and(|host| {
-        let host = host.strip_prefix('[').unwrap_or(host);
-        let host = host.strip_suffix(']').unwrap_or(host);
-        host.eq_ignore_ascii_case("localhost")
-            || host
-                .parse::<IpAddr>()
-                .is_ok_and(|address| address.is_loopback())
-    })
-}
-
+/// An explicit `--connect-token-file` authenticates any WebSocket endpoint,
+/// loopback included: `serve --public` requires a token on loopback too.
 fn connect_auth_path<'a>(
     endpoint: &RemoteEndpoint,
     path: Option<&'a std::path::Path>,
 ) -> Option<&'a std::path::Path> {
     match (endpoint, path) {
-        (RemoteEndpoint::WebSocket(url), Some(path)) if !is_loopback_websocket(url) => Some(path),
+        (RemoteEndpoint::WebSocket(_), Some(path)) => Some(path),
         _ => None,
     }
 }
@@ -403,7 +393,7 @@ fn owned(vars: &crate::VarsMap, name: &str) -> Option<String> {
 mod tests {
     use std::path::Path;
 
-    use super::{connect_auth_path, connect_token, is_loopback_websocket};
+    use super::{connect_auth_path, connect_token};
     use dal_wire::RemoteEndpoint;
 
     fn websocket(address: &str) -> RemoteEndpoint {
@@ -411,19 +401,19 @@ mod tests {
     }
 
     #[test]
-    fn connect_auth_requires_an_explicit_token_for_non_loopback_websockets() {
+    fn connect_auth_honors_an_explicit_token_on_every_websocket() {
         let token = Path::new("connect.token");
         assert_eq!(
             connect_auth_path(&websocket("ws://localhost:1234"), Some(token)),
-            None
+            Some(token),
         );
         assert_eq!(
             connect_auth_path(&websocket("ws://127.0.0.1:1234"), Some(token)),
-            None
+            Some(token),
         );
         assert_eq!(
             connect_auth_path(&websocket("ws://[::1]:1234"), Some(token)),
-            None
+            Some(token),
         );
         assert_eq!(
             connect_auth_path(&websocket("ws://example.com:1234"), None),
@@ -440,9 +430,6 @@ mod tests {
             ),
             None,
         );
-        assert!(is_loopback_websocket(
-            &url::Url::parse("ws://127.8.9.10").expect("valid URL")
-        ));
     }
 
     #[test]
