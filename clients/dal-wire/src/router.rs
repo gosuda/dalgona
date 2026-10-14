@@ -80,11 +80,11 @@ impl HarnessMode {
 /// Options for the HTTP router mounted on the serve listener.
 #[derive(Clone, Debug)]
 pub struct RouterOptions {
-    /// The loopback or public bind address text.
+    /// The loopback bind address text; plaintext non-loopback binds are refused.
     pub bind: String,
     /// The bound port.
     pub port: u16,
-    /// Whether public token authentication is required.
+    /// Whether token authentication is required behind a trusted TLS proxy.
     pub public: bool,
     /// Whether A2A routes are mounted.
     pub a2a: bool,

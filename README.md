@@ -47,7 +47,7 @@ You can type while dal works. A steer reaches the model at the next safe point. 
 | Router | `dalgon serve` |
 | A2A | `dalgon serve --a2a` |
 
-`dalgon serve` listens on your machine only unless you add `--public`, which requires a token. No desktop, web, or mobile app ships; any such app is a client of the protocol, not a fork.
+`dalgon serve` listens only on loopback. `--public` requires a bearer token but remains loopback-only: expose it to remote clients only through a trusted HTTPS/WSS reverse proxy running on the same host and forwarding to the loopback listener. Direct non-loopback HTTP binds are refused, even with `--public`. Do not expose the backend's `http://` or `ws://` endpoints to remote clients. No desktop, web, or mobile app ships; any such app is a client of the protocol, not a fork.
 
 ## Built for large runs
 

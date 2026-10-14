@@ -198,6 +198,7 @@ async fn token_file_auth_cases() {
     std::fs::remove_file(&path).expect("remove empty token");
     let token = crate::token::create(&path, false).expect("token created");
     with_serve(&rig, public(), async |addr| {
+        assert!(addr.ip().is_loopback(), "public listener must stay on loopback");
         let base = format!("GET /v1/models HTTP/1.1\r\nhost: 127.0.0.1:{}", addr.port());
         let none = http(addr, &base, "").await;
         assert_eq!(none.status, 401);
@@ -240,7 +241,7 @@ async fn bind_refusals() {
     assert!(matches!(error, ServeError::NotLoopback { .. }), "{error:?}");
     assert_eq!(
         error.to_string(),
-        "serve --bind 0.0.0.0 is not a loopback address: it needs a token"
+        "serve --bind 0.0.0.0 is not loopback: plaintext HTTP is loopback-only"
     );
     let taken = std::net::TcpListener::bind("127.0.0.1:0").expect("occupy a port");
     let mut busy = router_options(&rig);
@@ -251,6 +252,22 @@ async fn bind_refusals() {
         "{:?}",
         occupied.err()
     );
+}
+
+#[tokio::test]
+async fn public_non_loopback_bind_is_refused_before_token_load() {
+    let rig = rig(&[]).await;
+    let stop = tokio_util::sync::CancellationToken::new();
+    for bind in ["0.0.0.0", "::", "192.0.2.10"] {
+        let mut options = router_options(&rig);
+        options.public = true;
+        options.bind = bind.to_owned();
+        let attempted = crate::serve_router(rig.host.clone(), options, stop.clone()).await;
+        let Err(error) = attempted else {
+            panic!("public plaintext listener started on {bind}");
+        };
+        assert!(matches!(&error, ServeError::NotLoopback { .. }), "{error:?}");
+    }
 }
 
 #[tokio::test]
