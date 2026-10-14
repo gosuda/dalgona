@@ -941,3 +941,120 @@ fn family_of(route: &ModelRoute) -> dal_core::Family {
         ModelRoute::Synthetic { .. } | ModelRoute::Harness { .. } => dal_core::Family::Chat,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use dal_provider::{EventStream, ProviderError, StopReason, StreamEvent as ProviderEvent};
+    use futures::stream;
+
+    use super::{InferFailure, Inference, collect_with_limits};
+
+    #[tokio::test]
+    async fn collector_accepts_exact_event_and_content_limits() {
+        let items = [
+            Ok(ProviderEvent::TextDelta { text: "ab".into() }),
+            Ok(ProviderEvent::TextDelta { text: "cde".into() }),
+            Ok(ProviderEvent::Stop {
+                reason: StopReason::EndTurn,
+            }),
+        ];
+        let stream = EventStream::new(stream::iter(items), || {});
+        let result = collect_with_limits(stream, 3, 5).await;
+
+        assert!(matches!(result, Ok(Inference { events }) if events.len() == 3));
+    }
+
+    #[tokio::test]
+    async fn collector_cancels_many_small_events_at_the_total_byte_limit() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let emitted = Arc::new(AtomicUsize::new(0));
+        let producer = Arc::clone(&emitted);
+        let on_cancel = Arc::clone(&cancelled);
+        let stream = EventStream::new(
+            stream::repeat_with(move || {
+                producer.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, ProviderError>(ProviderEvent::TextDelta { text: "a".into() })
+            }),
+            move || on_cancel.store(true, Ordering::SeqCst),
+        );
+
+        let result = collect_with_limits(stream, 32, 8).await;
+
+        assert!(matches!(result, Err(InferFailure::Fatal { .. })));
+        assert_eq!(emitted.load(Ordering::SeqCst), 9);
+        assert!(cancelled.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn collector_counts_zero_byte_provider_events() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let emitted = Arc::new(AtomicUsize::new(0));
+        let producer = Arc::clone(&emitted);
+        let on_cancel = Arc::clone(&cancelled);
+        let stream = EventStream::new(
+            stream::repeat_with(move || {
+                producer.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, ProviderError>(ProviderEvent::ReasoningDelta {
+                    text: String::new(),
+                })
+            }),
+            move || on_cancel.store(true, Ordering::SeqCst),
+        );
+
+        let result = collect_with_limits(stream, 4, 10).await;
+
+        assert!(matches!(result, Err(InferFailure::Fatal { .. })));
+        assert_eq!(emitted.load(Ordering::SeqCst), 5);
+        assert!(cancelled.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn collector_charges_tool_arguments_before_conversion() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let on_cancel = Arc::clone(&cancelled);
+        let items = [
+            Ok(ProviderEvent::ToolCallStarted {
+                id: "a".into(),
+                name: "call".into(),
+            }),
+            Ok(ProviderEvent::ToolArgsDelta {
+                id: "a".into(),
+                fragment: b"x".to_vec(),
+            }),
+        ];
+        let stream = EventStream::new(
+            stream::iter(items),
+            move || on_cancel.store(true, Ordering::SeqCst),
+        );
+
+        let result = collect_with_limits(stream, 8, 5).await;
+
+        assert!(matches!(result, Err(InferFailure::Fatal { .. })));
+        assert!(cancelled.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn collector_rejects_a_single_event_with_too_many_tool_calls() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let on_cancel = Arc::clone(&cancelled);
+        let call = dal_provider::ToolCall {
+            id: "a".into(),
+            name: "tool".into(),
+            args: dal_provider::ToolArgs::Parsed(dal_core::RawJson::null()),
+        };
+        let stream = EventStream::new(
+            stream::iter([Ok(ProviderEvent::ToolCallsDone {
+                calls: vec![call.clone(), call.clone(), call],
+            })]),
+            move || on_cancel.store(true, Ordering::SeqCst),
+        );
+
+        let result = collect_with_limits(stream, 2, 100).await;
+
+        assert!(matches!(result, Err(InferFailure::Fatal { .. })));
+        assert!(cancelled.load(Ordering::SeqCst));
+    }
+}
