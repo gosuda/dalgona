@@ -515,7 +515,16 @@ fn launcher_argv(
     let target = argv[0].clone();
     let target_args = &argv[1..];
     match launcher {
-        Launcher::Direct => Ok((target, target_args.to_vec(), None)),
+        Launcher::Direct => {
+            #[cfg(target_os = "macos")]
+            {
+                Ok(sandbox::lifetime_argv(&target, target_args))
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                Ok((target, target_args.to_vec(), None))
+            }
+        }
         Launcher::Sandbox { helper, roots } => {
             sandbox::sandbox_argv(&target, target_args, job, helper.as_deref(), roots)
         }

@@ -46,6 +46,7 @@ use crate::{
     error::ProviderError,
     sse::SseEvent,
     stream::{ReplayPayload, StopReason, StreamEvent, ToolArgs, ToolCall},
+    stream_budget::StreamBudget,
     thinking::{AnthropicThinking, Effort},
     tool_names::{ANTHROPIC_OAUTH_NAME_MAX, WIRE_NAME_MAX, wire_name},
 };
@@ -1126,6 +1127,7 @@ struct Decoder {
     /// a binding (scripted or synthetic streams).
     prefix: Option<Box<str>>,
     usage: UsageState,
+    budget: StreamBudget,
     stop: Option<StopReason>,
     open: BTreeMap<u64, OpenBlock>,
     calls: BTreeMap<u64, CallState>,
@@ -1297,6 +1299,7 @@ impl Decoder {
             oauth,
             prefix,
             usage: UsageState::default(),
+            budget: StreamBudget::default(),
             stop: None,
             open: BTreeMap::new(),
             calls: BTreeMap::new(),
@@ -1306,6 +1309,7 @@ impl Decoder {
 
     /// Consumes the data of one SSE event.
     fn feed(&mut self, data: &str) -> Result<Fed, ProviderError> {
+        self.budget.admit_event(data.len())?;
         let mut events = Vec::new();
         if data.trim() == "[DONE]" {
             return Ok(Fed {
@@ -1377,6 +1381,7 @@ impl Decoder {
         if self.open.contains_key(&index) || self.calls.contains_key(&index) {
             return Err(protocol(format!("content block {index} started twice")));
         }
+        self.budget.admit_item()?;
         let raw = start.content_block.as_raw_str();
         let fields: StartFields<'_> = parse(raw, "content_block_start")?;
         let block = match fields.kind.as_deref() {
