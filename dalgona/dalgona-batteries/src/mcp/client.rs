@@ -24,7 +24,8 @@ use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    Budgets, LIST_PAGE_MAX, MRTR_MAX, McpConfig, McpError, RESTART_BUDGET, TransportError,
+    Budgets, LIST_METADATA_BYTES_MAX, LIST_PAGE_MAX, LIST_RESPONSE_BYTES_MAX, LIST_TOOL_MAX,
+    MRTR_MAX, McpConfig, McpError, RESTART_BUDGET, TransportError,
     http::{
         HttpTransport,
         auth::RefreshCoordinator,
@@ -32,7 +33,8 @@ use super::{
     },
     stdio::{ProcessEnvironment, StdioTransport},
     tools::{
-        HeaderAnnotation, Key, MappedTool, RemoteTool, ServerEntryTool, ToolListCache, cache_ttl,
+        HeaderAnnotation, Key, MappedTool, RemoteTool, RemoteToolPage, ServerEntryTool,
+        ToolListCache, cache_ttl,
         decode_tool_page, fold_tool_name, shape_result, tool_spec,
     },
 };
@@ -150,6 +152,58 @@ impl Instance {
             Phase::Stopped => ("stopped", 0),
             Phase::Ready(ready) => ("ready", ready.cache.lock().await.tools.len()),
         }
+    }
+}
+
+/// One logical tools/list transaction, independent of page and frame boundaries.
+#[derive(Default)]
+struct ListBudget {
+    response_bytes: usize,
+    metadata_bytes: usize,
+    tool_count: usize,
+}
+
+impl ListBudget {
+    fn charge_reply(&mut self, bytes: usize) -> Result<(), McpError> {
+        Self::charge(
+            &mut self.response_bytes,
+            bytes,
+            LIST_RESPONSE_BYTES_MAX,
+            "response bytes",
+        )
+    }
+
+    fn charge_page(&mut self, page: &RemoteToolPage) -> Result<(), McpError> {
+        Self::charge(
+            &mut self.tool_count,
+            page.tools.len() + page.excluded.len(),
+            LIST_TOOL_MAX,
+            "tool count",
+        )?;
+        let metadata_bytes = page
+            .tools
+            .iter()
+            .map(|tool| tool.name.len() + tool.description.len() + tool.schema.as_str().len())
+            .sum();
+        Self::charge(
+            &mut self.metadata_bytes,
+            metadata_bytes,
+            LIST_METADATA_BYTES_MAX,
+            "metadata bytes",
+        )
+    }
+
+    fn charge(
+        total: &mut usize,
+        increment: usize,
+        maximum: usize,
+        resource: &'static str,
+    ) -> Result<(), McpError> {
+        *total = total
+            .checked_add(increment)
+            .filter(|value| *value <= maximum)
+            .ok_or(McpError::ListBudget { resource })?;
+        Ok(())
     }
 }
 
@@ -735,6 +789,7 @@ impl Client {
     ) -> Result<ToolListCache, McpError> {
         let deadline = Instant::now() + self.budgets.list;
         let mut tools = Vec::new();
+        let mut budget = ListBudget::default();
         let mut cursor: Option<String> = None;
         let mut ttl = None;
         for page_no in 0..LIST_PAGE_MAX {
@@ -761,10 +816,12 @@ impl Client {
                     n: self.budgets.list.as_secs(),
                 })?
                 .map_err(map_transport)?;
+            budget.charge_reply(reply.as_str().len())?;
             let result = response_result(&reply)?;
             let page = decode_tool_page(
                 &sonic_rs::to_string(&result).map_err(|error| protocol_error(error.to_string()))?,
             )?;
+            budget.charge_page(&page)?;
             for excluded in page.excluded {
                 session.services.notify(
                     &session.caller,
@@ -781,7 +838,7 @@ impl Client {
             if cursor.is_none() {
                 return Ok(ToolListCache {
                     until: Instant::now() + cache_ttl(ttl),
-                    tools,
+                    tools: tools.into(),
                 });
             }
             if page_no + 1 == LIST_PAGE_MAX {
@@ -1155,7 +1212,7 @@ fn claim_name(
 async fn ready_snapshot(
     declared: &[Key],
     instances: &HashMap<Key, Arc<Instance>>,
-) -> BTreeMap<Key, Vec<RemoteTool>> {
+) -> BTreeMap<Key, Arc<[RemoteTool]>> {
     let mut ready = BTreeMap::new();
     for key in declared {
         let Some(instance) = instances.get(key) else {
@@ -1182,7 +1239,7 @@ fn build_tools(
     session: &Session,
     declared: &[Key],
     declarations: &HashMap<Key, DeclaredServer>,
-    ready: &BTreeMap<Key, Vec<RemoteTool>>,
+    ready: &BTreeMap<Key, Arc<[RemoteTool]>>,
 ) -> Result<Vec<StagedTool>, ServiceError> {
     let mut tools: Vec<StagedTool> = Vec::new();
     for key in declared {
@@ -1196,7 +1253,7 @@ fn build_tools(
         )
         .map_err(|error| ServiceError::failed(Some(Service::Mcp), error.to_string()))?;
         tools.push((Arc::new(entry), Visibility::Deferred));
-        for remote in ready.get(key).into_iter().flatten() {
+        for remote in ready.get(key).into_iter().flat_map(|tools| tools.iter()) {
             match map_remote_tool(key, declaration, remote) {
                 Ok(tool) => tools.push((tool, Visibility::Deferred)),
                 Err(warning) => notify_mcp(session, warning),

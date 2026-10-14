@@ -33,6 +33,16 @@ pub const MRTR_MAX: u32 = 4;
 pub const STEPUP_MAX: u32 = 2;
 /// Maximum number of tools/list pages accepted from one server.
 pub const LIST_PAGE_MAX: usize = 50;
+/// Maximum combined size of protocol replies in one tools/list operation.
+pub const LIST_RESPONSE_BYTES_MAX: usize = 4 * 1024 * 1024;
+/// Maximum combined size of retained remote tool metadata.
+pub const LIST_METADATA_BYTES_MAX: usize = 2 * 1024 * 1024;
+/// Maximum number of advertised tools across all tools/list pages.
+pub const LIST_TOOL_MAX: usize = 256;
+/// Maximum byte lengths of each tool's name, description, and JSON schema.
+pub const TOOL_NAME_BYTES_MAX: usize = 256;
+pub const TOOL_DESCRIPTION_BYTES_MAX: usize = 16 * 1024;
+pub const TOOL_SCHEMA_BYTES_MAX: usize = 64 * 1024;
 /// Maximum amount of child stderr retained for crash diagnostics.
 pub const STDERR_RING: usize = 65_536;
 /// Default time-to-live for a tools/list response.
@@ -138,6 +148,12 @@ pub enum McpError {
     /// The server exceeded the tools/list page limit.
     #[error("mcp list exceeded 50 pages")]
     ListPages,
+    /// The remote server exceeded a cumulative or per-tool listing budget.
+    #[error("mcp list exceeded {resource} budget")]
+    ListBudget {
+        /// The resource whose budget was exceeded.
+        resource: &'static str,
+    },
     /// Elicitation needs a front end that can answer questions.
     #[error("mcp elicitation needs an ask front end")]
     NoAskFrontEnd,
@@ -342,5 +358,7 @@ pub const MCP_DOC: &str = concat!(
     "protocol subset; there is no HTTP+SSE-only transport.\n\n",
     "Limits: discovery 5 s, start 10 s, list 15 s, call 60 s (600 s with\n",
     "progress), one restart per session and isolation key, 50 list pages,\n",
+    "4 MiB aggregate response bytes, 2 MiB aggregate metadata bytes, 256 tools,\n",
+    "256-byte tool names, 16384-byte descriptions, 65536-byte schemas;\n",
     "result text capped at 524288 bytes. Token files are stored at mode 0600.\n",
 );
