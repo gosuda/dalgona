@@ -35,7 +35,7 @@ enum Provider {
     /// The route has no usable credentials.
     NoCredentials,
     /// The route is ready and the request streams these events.
-    Replies(Vec<dal_core::StreamEvent>),
+    Replies(Vec<dal_provider::StreamEvent>),
     /// The route is ready and the request fails with this text.
     Fails(String),
     /// The route is ready and the request never answers.
@@ -260,15 +260,26 @@ impl dal_agent::ext::Services for FakeReviewServices {
     fn infer(
         &self,
         _who: &dal_agent::ext::Caller,
-        req: dal_core::ModelRequest,
+        _req: dal_core::ModelRequest,
     ) -> dal_agent::ext::services::ServiceFuture<'_, dal_core::Inference> {
+        unavailable()
+    }
+
+    fn infer_stream(
+        &self,
+        _who: &dal_agent::ext::Caller,
+        req: dal_core::ModelRequest,
+    ) -> dal_agent::ext::services::ServiceFuture<'_, dal_agent::ext::EventStream> {
         locked(&self.requests).push(req);
         match &*locked(&self.provider) {
             Provider::Replies(events) => {
-                let inference = dal_core::Inference {
-                    events: events.clone(),
-                };
-                Box::pin(async move { Ok(inference) })
+                let events = events.clone();
+                Box::pin(async move {
+                    Ok(dal_agent::ext::EventStream::new(
+                        futures::stream::iter(events.into_iter().map(Ok)),
+                        || {},
+                    ))
+                })
             }
             Provider::Fails(text) => {
                 let text = text.clone();
@@ -277,14 +288,6 @@ impl dal_agent::ext::Services for FakeReviewServices {
             Provider::Hangs => Box::pin(std::future::pending()),
             Provider::Unavailable | Provider::NoCredentials => unavailable(),
         }
-    }
-
-    fn infer_stream(
-        &self,
-        _who: &dal_agent::ext::Caller,
-        _req: dal_core::ModelRequest,
-    ) -> dal_agent::ext::services::ServiceFuture<'_, dal_agent::ext::EventStream> {
-        unavailable()
     }
 
     fn call_tool(
@@ -1020,22 +1023,26 @@ fn a_cap_marks_the_cut_inside_the_cap_and_leaves_fitting_text_whole() {
 
 const CLEAN_REPLY: &str = r#"{"verdict":"clean","findings":[],"summary":"ok"}"#;
 
-fn text_events(text: &str, usage: Option<(u64, u64)>) -> Vec<dal_core::StreamEvent> {
-    let mut events = vec![dal_core::StreamEvent::Delta {
-        channel: dal_core::StreamChannel::Text,
+fn text_events(text: &str, usage: Option<(u64, u64)>) -> Vec<dal_provider::StreamEvent> {
+    let mut events = vec![dal_provider::StreamEvent::TextDelta {
         text: text.into(),
     }];
+    events.push(dal_provider::StreamEvent::ToolCallsDone { calls: Vec::new() });
     if let Some((input_tokens, output_tokens)) = usage {
-        events.push(dal_core::StreamEvent::Usage(dal_core::Usage {
-            input_tokens,
-            cached_input_tokens: 0,
-            output_tokens,
-            reasoning_tokens: None,
-            cache_write_tokens: 0,
-            cost_usd: None,
-        }));
+        events.push(dal_provider::StreamEvent::Usage {
+            usage: dal_core::Usage {
+                input_tokens,
+                cached_input_tokens: 0,
+                output_tokens,
+                reasoning_tokens: None,
+                cache_write_tokens: 0,
+                cost_usd: None,
+            },
+        });
     }
-    events.push(dal_core::StreamEvent::Stop(dal_core::Stop::EndTurn));
+    events.push(dal_provider::StreamEvent::Stop {
+        reason: dal_provider::StopReason::EndTurn,
+    });
     events
 }
 
