@@ -591,7 +591,7 @@ impl Tool for ServerEntryTool {
 
     fn run<'a>(&'a self, call: ToolCall, mut cx: ToolCx<'a>) -> BoxFuture<'a, ToolOutcome> {
         Box::pin(async move {
-            let preview = server_preview(&self.key, &self.declaration, "", &call.args);
+            let preview = server_preview(&self.key, &self.declaration, "", call.args.as_str().len());
             if let Err(reason) = cx.authorize(preview).await {
                 return ToolOutcome::Err(ToolError::Denied(reason));
             }
@@ -622,7 +622,12 @@ impl Tool for MappedTool {
 
     fn run<'a>(&'a self, call: ToolCall, mut cx: ToolCx<'a>) -> BoxFuture<'a, ToolOutcome> {
         Box::pin(async move {
-            let preview = server_preview(&self.key, &self.declaration, &self.remote, &call.args);
+            let preview = server_preview(
+                &self.key,
+                &self.declaration,
+                &self.remote,
+                call.args.as_str().len(),
+            );
             if let Err(reason) = cx.authorize(preview).await {
                 return ToolOutcome::Err(ToolError::Denied(reason));
             }
@@ -633,15 +638,21 @@ impl Tool for MappedTool {
 
 /// Builds the per-tool approval preview. The target text is the
 /// declaration's own single renderer, and the remote argument JSON never
-/// enters the approval surface: only its size is shown.
-fn server_preview(key: &Key, declaration: &ServerDecl, tool: &str, arguments: &RawJson) -> Preview {
+/// enters the approval surface: only its size is shown. Accept a byte count,
+/// never the credential-bearing arguments themselves.
+fn server_preview(
+    key: &Key,
+    declaration: &ServerDecl,
+    tool: &str,
+    argument_bytes: usize,
+) -> Preview {
     Preview {
         title: format!("MCP {}.{}", key.server, tool).into(),
         body: format!(
             "server: {}\ntarget: {}\ntool: {tool}\narguments: <redacted> ({} bytes)",
             key.display(),
             declaration.redacted_target(),
-            arguments.as_str().len(),
+            argument_bytes,
         )
         .into(),
         digest: None,
@@ -668,5 +679,140 @@ async fn call_mcp(key: &Key, remote: &str, arguments: RawJson, cx: ToolCx<'_>) -
         )),
         Err(ServiceError::Denied(reason)) => ToolOutcome::Err(ToolError::Denied(reason)),
         Err(error) => ToolOutcome::Err(ToolError::message(error.to_string())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::BTreeMap, error::Error, time::Duration};
+
+    use dal_core::{
+        Answer, Owner, Preview, Question, RawJson, Request, RequestId, SessionId, UpdateKind,
+        ext::{McpEndpoint, McpLaunch},
+    };
+    use sonic_rs::Value;
+
+    use super::{Key, ServerDecl, header_annotations, parameter_headers, server_preview};
+
+    type TestResult = Result<(), Box<dyn Error>>;
+
+    fn key() -> Key {
+        Key {
+            session: SessionId::new_v7(),
+            skill: "weather".to_owned(),
+            server: "fixture".to_owned(),
+        }
+    }
+
+    fn encoded_approval(preview: Preview) -> Result<String, Box<dyn Error>> {
+        let question = Question::Approval {
+            tool: "weather.fixture.lookup".into(),
+            preview,
+            grant: None,
+            call: None,
+        };
+        let request = Request {
+            id: RequestId::new_v7(),
+            turn: None,
+            owner: Owner::Core,
+            question,
+            timeout: Duration::from_secs(30),
+            default: Answer::Decline,
+        };
+        Ok(sonic_rs::to_string(&UpdateKind::RequestOpened(request))?)
+    }
+
+    #[test]
+    fn approval_updates_hide_stdio_argv_env_and_arguments() -> TestResult {
+        let launches = [
+            McpLaunch::command(vec![
+                "mcp-server".into(),
+                "--token=STDIO_ARG_SECRET".into(),
+            ])?,
+            McpLaunch::npx(
+                "demo-mcp".into(),
+                None,
+                vec!["--token=STDIO_ARG_SECRET".into()],
+            )?,
+            McpLaunch::uvx(
+                "demo-mcp".into(),
+                None,
+                "server".into(),
+                vec!["--token=STDIO_ARG_SECRET".into()],
+            )?,
+        ];
+        let arguments = RawJson::parse(r#"{"auth":{"token":"RAW_ARGUMENT_SECRET"}}"#)?;
+
+        for launch in launches {
+            let declaration = ServerDecl::Stdio {
+                launch,
+                env: BTreeMap::from([("API_KEY".into(), "STDIO_ENV_SECRET".into())]),
+            };
+            let preview = server_preview(
+                &key(),
+                &declaration,
+                "lookup",
+                arguments.as_str().len(),
+            );
+            let encoded = encoded_approval(preview)?;
+
+            assert!(encoded.contains(r#""type":"request_opened""#));
+            assert!(encoded.contains("target: stdio:"));
+            assert!(encoded.contains("arguments: <redacted>"));
+            for secret in ["STDIO_ARG_SECRET", "STDIO_ENV_SECRET", "RAW_ARGUMENT_SECRET"] {
+                assert!(!encoded.contains(secret), "approval update exposed {secret}");
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn approval_updates_hide_http_url_path_and_query() -> TestResult {
+        let endpoint = McpEndpoint::parse(
+            "https://mcp.example.invalid/PRIVATE_PATH_SECRET?token=URL_QUERY_SECRET",
+        )?;
+        let declaration = ServerDecl::Http { endpoint };
+        let arguments = RawJson::parse(r#"{"bearer":"HTTP_ARGUMENT_SECRET"}"#)?;
+        let preview = server_preview(&key(), &declaration, "lookup", arguments.as_str().len());
+        let encoded = encoded_approval(preview)?;
+
+        assert!(encoded.contains("target: https://mcp.example.invalid"));
+        for secret in ["PRIVATE_PATH_SECRET", "URL_QUERY_SECRET", "HTTP_ARGUMENT_SECRET"] {
+            assert!(!encoded.contains(secret), "approval update exposed {secret}");
+        }
+        for unsafe_url in [
+            "https://user:password@mcp.example.invalid/mcp",
+            "https://mcp.example.invalid/mcp#fragment-secret",
+        ] {
+            assert!(McpEndpoint::parse(unsafe_url).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn approval_updates_hide_nested_header_bound_arguments() -> TestResult {
+        let schema: Value = sonic_rs::from_str(
+            r#"{"type":"object","properties":{"auth":{"type":"object","properties":{"token":{"type":"string","x-mcp-header":"Authorization"}}}}}"#,
+        )?;
+        let annotations = header_annotations(&schema)?;
+        let arguments = RawJson::parse(
+            r#"{"auth":{"token":"NESTED_HEADER_SECRET"},"payload":"OTHER_ARGUMENT_SECRET"}"#,
+        )?;
+        let headers = parameter_headers(&annotations, &arguments)?;
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0].1.to_str()?, "NESTED_HEADER_SECRET");
+
+        let declaration = ServerDecl::Http {
+            endpoint: McpEndpoint::parse("https://mcp.example.invalid/lookup")?,
+        };
+        let preview = server_preview(&key(), &declaration, "lookup", arguments.as_str().len());
+        let encoded = encoded_approval(preview)?;
+
+        assert!(encoded.contains(r#""type":"request_opened""#));
+        assert!(encoded.contains("arguments: <redacted>"));
+        for secret in ["NESTED_HEADER_SECRET", "OTHER_ARGUMENT_SECRET"] {
+            assert!(!encoded.contains(secret), "approval update exposed {secret}");
+        }
+        Ok(())
     }
 }
