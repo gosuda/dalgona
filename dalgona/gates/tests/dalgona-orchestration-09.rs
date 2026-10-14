@@ -236,7 +236,7 @@ fn stress_500_pool_items_finish_within_the_process_contract() -> support::TestRe
         .build()?;
     runtime.block_on(async move {
         let started = Instant::now();
-        grant_bundled_extensions(&data, &user).await?;
+        grant_bundled_extensions(&data, &workspace, &user).await?;
         let product = support::build_product(data.clone(), Some(&user))?;
         let mut product = product;
         product.extensions.push(pool_extension()?);
@@ -330,7 +330,7 @@ fn drained_lifecycle(subscription: &mut dal_agent::HostSubscription) -> (usize, 
 
 /// Grants every bundled extension the services it declares, as a person
 /// would on first use, so no grant question interrupts the run.
-async fn grant_bundled_extensions(data: &Path, user: &str) -> support::TestResult<()> {
+async fn grant_bundled_extensions(data: &Path, workspace: &Path, user: &str) -> support::TestResult<()> {
     let product = support::build_product(data.to_path_buf(), Some(user))?;
     for extension in &product.extensions {
         let services = extension.inject().capabilities();
@@ -339,11 +339,8 @@ async fn grant_bundled_extensions(data: &Path, user: &str) -> support::TestResul
         }
         dal_agent::ext::grants::GrantStore::new(data.to_path_buf())
             .grant(
-                dal_agent::ext::grants::GrantKey {
-                    extension: dal_core::Name::parse(extension.name())?,
-                    origin: dal_core::Origin::Bundled,
-                    services,
-                },
+                dal_agent::ext::grants::GrantKey::for_extension(extension, workspace)
+                        .expect("registered extension has a code identity"),
                 dal_core::ClientId::new("stress-gate"),
                 dal_core::Timestamp::now(),
             )
