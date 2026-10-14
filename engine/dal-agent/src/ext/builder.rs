@@ -471,6 +471,7 @@ impl ExtensionBuilder {
             hash_part(&mut hasher, &(exports.len() as u64).to_le_bytes());
             for (export, _) in &exports {
                 hash_part(&mut hasher, OpId::Export(export.id.clone()).to_string().as_bytes());
+                hash_part(&mut hasher, &(export.uses.iter().count() as u64).to_le_bytes());
                 for operation in export.uses.iter() {
                     hash_part(&mut hasher, operation.to_string().as_bytes());
                 }
