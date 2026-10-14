@@ -43,6 +43,7 @@ pub struct ExtensionBuilder {
     version: Box<str>,
     inject: ServiceSet,
     state_version: NonZeroU32,
+    source_digest: Option<Box<str>>,
     origin: Origin,
     site: Option<Site>,
     tools: Vec<(Arc<dyn Tool>, Visibility)>,
@@ -100,6 +101,7 @@ impl ExtensionBuilder {
             version: version.into(),
             inject,
             state_version: NonZeroU32::MIN,
+            source_digest: None,
             origin: Origin::Builtin,
             site: None,
             tools: Vec::new(),
@@ -148,6 +150,12 @@ impl ExtensionBuilder {
     #[must_use]
     pub fn with_state_version(mut self, state_version: NonZeroU32) -> Self {
         self.state_version = state_version;
+        self
+    }
+    /// Binds grants to a digest computed by the trusted source loader.
+    #[must_use]
+    pub fn with_source_digest(mut self, digest: Box<str>) -> Self {
+        self.source_digest = Some(digest);
         self
     }
     /// Registers one model-callable tool with its visibility.
@@ -430,6 +438,7 @@ impl ExtensionBuilder {
             version: self.version,
             inject: self.inject,
             state_version,
+            source_digest: self.source_digest,
             origin: self.origin,
             site: self.site,
             tools: self.tools,
@@ -570,6 +579,7 @@ pub struct Extension {
     pub(super) version: Box<str>,
     pub(super) inject: ServiceSet,
     pub(super) state_version: NonZeroU32,
+    pub(super) source_digest: Option<Box<str>>,
     pub(super) origin: Origin,
     pub(super) site: Option<Site>,
     pub(super) tools: Vec<(Arc<dyn Tool>, Visibility)>,
@@ -627,6 +637,11 @@ impl Extension {
     #[must_use]
     pub fn state_version(&self) -> NonZeroU32 {
         self.state_version
+    }
+    /// Returns the loader-computed source fingerprint for scoped grants.
+    #[must_use]
+    pub fn source_digest(&self) -> Option<&str> {
+        self.source_digest.as_deref()
     }
     /// Returns where the extension came from.
     #[must_use]
