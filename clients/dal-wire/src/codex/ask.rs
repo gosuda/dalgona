@@ -326,3 +326,89 @@ fn grant_clause(grant: &CallGrant) -> String {
         roots.join(", ")
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{num::NonZeroU64, path::PathBuf, time::Duration};
+
+    use dal_core::{Answer, ExecPreview, Owner, Question, Request, RequestId, TurnId};
+    use sonic_rs::JsonValueTrait as _;
+
+    use super::server_request;
+
+    #[test]
+    fn exec_approval_uses_the_actual_cwd_and_shell() {
+        let workspace = std::env::current_dir().expect("read workspace");
+        let cwd = workspace.join("child");
+        let shell = workspace.join("bin/bash");
+        let request = Request {
+            id: RequestId::new_v7(),
+            turn: None,
+            owner: Owner::Core,
+            question: Question::Approval {
+                tool: "exec".into(),
+                preview: ExecPreview {
+                    command: "echo approved".into(),
+                    cwd: cwd.clone(),
+                    shell: shell.clone(),
+                }
+                .to_preview()
+                .expect("encode exec approval"),
+                grant: None,
+                call: None,
+            },
+            timeout: Duration::from_secs(30),
+            default: Answer::Decline,
+        };
+        let turn = TurnId::new(NonZeroU64::MIN);
+        let (method, params) =
+            server_request("thread-1", turn, &workspace, &request).expect("approval request");
+        assert_eq!(method, "item/commandExecution/requestApproval");
+        assert_eq!(
+            params.get("cwd").and_then(sonic_rs::JsonValueTrait::as_str),
+            cwd.to_str()
+        );
+        assert_eq!(
+            params.get("command").and_then(sonic_rs::JsonValueTrait::as_str),
+            Some("echo approved")
+        );
+        let reason = params
+            .get("reason")
+            .and_then(sonic_rs::JsonValueTrait::as_str)
+            .expect("approval reason");
+        assert!(reason.contains(&format!("cwd: {}", cwd.display())));
+        assert!(reason.contains(&format!("shell: {}", shell.display())));
+
+        let mut modified = request.clone();
+        if let Question::Approval { preview, .. } = &mut modified.question {
+            preview.digest = None;
+        }
+        assert!(
+            server_request("thread-1", turn, &workspace, &modified).is_none(),
+            "invalid exec contexts must not become approvable"
+        );
+
+        let other_cwd = PathBuf::from(&workspace).join("other");
+        let changed = Request {
+            question: Question::Approval {
+                tool: "exec".into(),
+                preview: ExecPreview {
+                    command: "echo approved".into(),
+                    cwd: other_cwd.clone(),
+                    shell,
+                }
+                .to_preview()
+                .expect("encode changed exec approval"),
+                grant: None,
+                call: None,
+            },
+            ..request
+        };
+        let (_, new_params) = server_request("thread-1", turn, &workspace, &changed)
+            .expect("changed approval request");
+        assert_eq!(
+            new_params.get("cwd").and_then(sonic_rs::JsonValueTrait::as_str),
+            other_cwd.to_str()
+        );
+    }
+}
