@@ -88,7 +88,7 @@ pub(crate) async fn stage_replacement(
         )
     })?;
     let hunks = diff_hunks(&before, &after);
-    Ok(StagedFileOwned {
+    Ok(with_identity(StagedFileOwned {
         path: display.to_path_buf(),
         absolute_path: canonical.to_path_buf(),
         before: Some(before.into_boxed_slice()),
@@ -96,7 +96,27 @@ pub(crate) async fn stage_replacement(
         op: Operation::Update,
         renamed_to: None,
         hunks,
-    })
+        dir_id: None,
+        file_id: None,
+    }))
+}
+
+/// Records the identities the commit verifies: the staged file itself,
+/// its parent directory, and a rename destination's parent directory.
+/// `None` marks an object that did not exist at stage time.
+fn with_identity(mut staged: StagedFileOwned) -> StagedFileOwned {
+    staged.file_id = super::super::resolve::file_id(&staged.absolute_path);
+    staged.dir_id = staged
+        .absolute_path
+        .parent()
+        .and_then(super::super::resolve::file_id);
+    if let Some(target) = staged.renamed_to.as_mut() {
+        target.dir_id = target
+            .absolute_path
+            .parent()
+            .and_then(super::super::resolve::file_id);
+    }
+    staged
 }
 
 /// Inputs shared by every change-locator planner: the session's proof
@@ -130,7 +150,7 @@ pub(crate) async fn stage_file(
 ) -> Result<StagedFileOwned, EngineError> {
     let (content_edits, rename_to) =
         match classify_edits(session, style, display, canonical, edits).await? {
-            StagePlan::Ready(staged) => return Ok(staged),
+            StagePlan::Ready(staged) => return Ok(with_identity(staged)),
             StagePlan::Changes {
                 content_edits,
                 rename_to,
@@ -178,7 +198,7 @@ pub(crate) async fn stage_file(
     } else {
         Vec::new()
     };
-    Ok(StagedFileOwned {
+    Ok(with_identity(StagedFileOwned {
         path: display.to_path_buf(),
         absolute_path: canonical.to_path_buf(),
         before: Some(before.into_boxed_slice()),
@@ -186,7 +206,9 @@ pub(crate) async fn stage_file(
         op,
         renamed_to: rename_to,
         hunks,
-    })
+        dir_id: None,
+        file_id: None,
+    }))
 }
 
 /// Classifies the edit list: exactly one rename, last, with optional prior
@@ -225,6 +247,7 @@ async fn classify_edits(
                 rename_to = Some(RenameTarget {
                     path: dest_display,
                     absolute_path: dest_canonical,
+                    dir_id: None,
                 });
             }
             Edit::Create { path, body, .. } => {
@@ -246,6 +269,8 @@ async fn classify_edits(
                     op: Operation::Create,
                     renamed_to: None,
                     hunks: Vec::new(),
+                    dir_id: None,
+                    file_id: None,
                 }));
             }
             Edit::Delete { reference, .. } => {
@@ -270,6 +295,8 @@ async fn classify_edits(
                     op: Operation::Delete,
                     renamed_to: rename_to.clone(),
                     hunks: Vec::new(),
+                    dir_id: None,
+                    file_id: None,
                 }));
             }
             Edit::Change { .. } => content_edits.push(edit),

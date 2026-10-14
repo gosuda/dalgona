@@ -2,7 +2,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use super::ir::{Edit, EngineError, ErrorClass};
+use super::ir::{Edit, EngineError, ErrorClass, FileId};
 use dal_agent::canonicalize_existing_prefix;
 
 /// Decoded text with BOM, EOL, and final-newline metadata.
@@ -168,6 +168,18 @@ pub fn resolve_path(workspace: &Path, raw: &Path) -> Result<(PathBuf, PathBuf), 
     }
     // Preserve in-workspace symlinks: write through the link itself.
     Ok((normalized.clone(), canonical_target))
+}
+
+/// Device and inode identity of a filesystem object, or `None` when it
+/// does not exist or the filesystem cannot report a stable identity.
+///
+/// Plans record identities so the commit can compare pinned directory
+/// handles against the exact objects that were approved.
+#[must_use]
+pub fn file_id(path: &Path) -> Option<FileId> {
+    std::fs::metadata(path)
+        .ok()
+        .and_then(|metadata| FileId::of(&metadata))
 }
 
 /// Re-resolves a staged path and proves it still names the same contained

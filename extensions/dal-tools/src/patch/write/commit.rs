@@ -3,7 +3,7 @@
 use std::{path::PathBuf, sync::Arc};
 
 use super::super::ir::{
-    Diff, DiffFile, EngineError, ErrorClass, FileChange, FindingSeverity, Output, Plan,
+    Diff, DiffFile, EngineError, ErrorClass, FileChange, FileId, FindingSeverity, Output, Plan,
     StagedFileOwned,
 };
 
@@ -19,10 +19,10 @@ fn lock_table()
 }
 
 /// Acquires the canonical write set in ascending byte order — sources and
-/// rename destinations together. The caller verifies the before-image under
-/// these guards using pinned directory handles, so approval cannot go stale.
+/// rename destinations together. The caller verifies identities and
+/// before-images under these guards using pinned directory handles, so
+/// approval cannot go stale.
 async fn prepare_write_set(
-    session: &PatchSession,
     plan: &Plan,
 ) -> Result<Vec<tokio::sync::OwnedMutexGuard<()>>, EngineError> {
     let mut ordered: Vec<&StagedFileOwned> = plan.files.iter().collect();
@@ -61,12 +61,6 @@ async fn prepare_write_set(
         };
         guards.push(guard.lock_owned().await);
     }
-    for file in &ordered {
-        revalidate_path(&session.workspace, &file.path, &file.absolute_path)?;
-        if let Some(dest) = file.renamed_to.as_ref() {
-            revalidate_path(&session.workspace, &dest.path, &dest.absolute_path)?;
-        }
-    }
     Ok(guards)
 }
 
@@ -79,12 +73,13 @@ struct LocatedPath {
 }
 
 impl LocatedPath {
-    fn bind(
-        workspace_dir: &cap_std::fs::Dir,
+    /// Splits an approved canonical path into its workspace-relative parent
+    /// and final name. Pure path math: it performs no filesystem access and
+    /// creates nothing.
+    fn locate(
         workspace: &std::path::Path,
         absolute: &std::path::Path,
-        create_parent: bool,
-    ) -> std::io::Result<Self> {
+    ) -> std::io::Result<(PathBuf, std::ffi::OsString)> {
         let relative = absolute.strip_prefix(workspace).map_err(|_| {
             std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
@@ -97,20 +92,41 @@ impl LocatedPath {
                 "patch target has no file name",
             )
         })?;
-        let parent_path = relative.parent().unwrap_or(std::path::Path::new(""));
-        if create_parent && !parent_path.as_os_str().is_empty() {
-            workspace_dir.create_dir_all(parent_path)?;
-        }
-        let parent = if parent_path.as_os_str().is_empty() {
-            workspace_dir.try_clone()?
-        } else {
-            workspace_dir.open_dir(parent_path)?
-        };
+        Ok((
+            relative
+                .parent()
+                .unwrap_or(std::path::Path::new(""))
+                .to_path_buf(),
+            name.to_os_string(),
+        ))
+    }
+
+    /// Opens the parent's directory handle for a located path.
+    fn open(
+        root: &cap_std::fs::Dir,
+        parent: &std::path::Path,
+        name: std::ffi::OsString,
+        absolute: &std::path::Path,
+    ) -> std::io::Result<Self> {
         Ok(Self {
-            parent: Arc::new(parent),
-            name: name.to_os_string(),
+            parent: Arc::new(open_parent(root, parent)?),
+            name,
             absolute: absolute.to_path_buf(),
         })
+    }
+
+    /// Locate and open in one step, creating the parent when asked.
+    fn bind(
+        workspace_dir: &cap_std::fs::Dir,
+        workspace: &std::path::Path,
+        absolute: &std::path::Path,
+        create_parent: bool,
+    ) -> std::io::Result<Self> {
+        let (parent_path, name) = Self::locate(workspace, absolute)?;
+        if create_parent && !parent_path.as_os_str().is_empty() {
+            workspace_dir.create_dir_all(&parent_path)?;
+        }
+        Self::open(workspace_dir, &parent_path, name, absolute)
     }
 
     fn sibling(&self, name: std::ffi::OsString) -> Self {
@@ -134,13 +150,38 @@ impl LocatedPath {
     }
 }
 
+/// Opens a located parent directory through the pinned root.
+fn open_parent(
+    root: &cap_std::fs::Dir,
+    parent: &std::path::Path,
+) -> std::io::Result<cap_std::fs::Dir> {
+    if parent.as_os_str().is_empty() {
+        root.try_clone()
+    } else {
+        root.open_dir(parent)
+    }
+}
+
+/// One resolved create/rename destination.
+enum Target {
+    /// Parent was already open and the destination proved absent.
+    Bound(LocatedPath),
+    /// The parent was missing at validation; it is created only after
+    /// every destination has passed its checks.
+    Pending {
+        parent: PathBuf,
+        name: std::ffi::OsString,
+        absolute: PathBuf,
+    },
+}
+
 struct StagedTemp<'a> {
     file: &'a StagedFileOwned,
     temp: LocatedPath,
     target: LocatedPath,
 }
 
-fn file_error(path: &std::path::Path, error: std::io::Error) -> EngineError {
+fn file_error(path: &std::path::Path, error: &std::io::Error) -> EngineError {
     EngineError::new(
         ErrorClass::Io,
         format!(
@@ -150,18 +191,199 @@ fn file_error(path: &std::path::Path, error: std::io::Error) -> EngineError {
     )
 }
 
-pub(crate) async fn apply_files(
+/// A source or its parent vanished or moved after approval: the staged
+/// before-image no longer describes this call, which is a stale plan.
+fn source_error(file: &StagedFileOwned, error: &std::io::Error) -> EngineError {
+    if error.kind() == std::io::ErrorKind::NotFound && file.before.is_some() {
+        stale_changed(&file.path)
+    } else {
+        file_error(&file.path, error)
+    }
+}
+
+fn stale_changed(display: &std::path::Path) -> EngineError {
+    EngineError::new(
+        ErrorClass::Stale,
+        format!(
+            "patch: {} changed while you were approving. Nothing was written. Try again.",
+            display.display()
+        ),
+    )
+}
+
+fn stale_moved(display: &std::path::Path) -> EngineError {
+    EngineError::new(
+        ErrorClass::Stale,
+        format!(
+            "patch: {} resolves to a different file than when it was staged. Nothing was written. Try again.",
+            display.display()
+        ),
+    )
+}
+
+/// Identity of a capability metadata result, matching [`FileId::of`].
+#[cfg(unix)]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "cap-std unix metadata always reports device and inode"
+)]
+fn cap_file_id(metadata: &cap_std::fs::Metadata) -> Option<FileId> {
+    use cap_std::fs::MetadataExt as _;
+    Some(FileId {
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+    })
+}
+
+/// Identity of a capability metadata result, matching [`FileId::of`].
+#[cfg(windows)]
+fn cap_file_id(metadata: &cap_std::fs::Metadata) -> Option<FileId> {
+    use cap_std::fs::MetadataExt as _;
+    Some(FileId {
+        dev: u64::from(metadata.volume_serial_number()?),
+        ino: metadata.file_index()?,
+    })
+}
+
+/// Identity of a capability metadata result, matching [`FileId::of`].
+#[cfg(not(any(unix, windows)))]
+fn cap_file_id(_metadata: &cap_std::fs::Metadata) -> Option<FileId> {
+    None
+}
+
+/// Identity of an open directory handle.
+fn cap_dir_id(dir: &cap_std::fs::Dir) -> Option<FileId> {
+    dir.dir_metadata()
+        .ok()
+        .and_then(|metadata| cap_file_id(&metadata))
+}
+
+/// A recorded identity must still hold for the pinned object. `None`
+/// recorded means nothing was approved to compare against; `None` actual
+/// means the filesystem cannot prove the object, which fails closed.
+fn check_identity(
+    recorded: Option<FileId>,
+    actual: Option<FileId>,
+    display: &std::path::Path,
+) -> Result<(), EngineError> {
+    let Some(recorded) = recorded else {
+        return Ok(());
+    };
+    if actual == Some(recorded) {
+        Ok(())
+    } else {
+        Err(stale_moved(display))
+    }
+}
+
+/// Display path for a create/rename destination.
+fn dest_display(file: &StagedFileOwned) -> &std::path::Path {
+    file.renamed_to
+        .as_ref()
+        .filter(|_| file.op == super::super::ir::Operation::Rename)
+        .map_or(file.path.as_path(), |destination| {
+            destination.path.as_path()
+        })
+}
+
+/// A create/rename destination must be absent at validation time.
+fn check_dest_absent(
+    file: &StagedFileOwned,
+    dir: &cap_std::fs::Dir,
+    name: &std::ffi::OsStr,
+) -> Result<(), EngineError> {
+    match dir.symlink_metadata(std::path::Path::new(name)) {
+        Ok(metadata) => {
+            let display = dest_display(file);
+            if !metadata.is_file() {
+                return Err(non_regular_target(display));
+            }
+            Err(EngineError::new(
+                ErrorClass::File,
+                format!("patch: {} already exists.", display.display()),
+            ))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(file_error(&file.path, &error)),
+    }
+}
+
+/// Atomically installs the staged file without replacing an existing
+/// destination: a hard link of the synced temp is atomic and fails with
+/// `AlreadyExists` when a concurrent writer claimed the name first.
+fn install_new(temp: &LocatedPath, target: &LocatedPath) -> std::io::Result<()> {
+    temp.parent.hard_link(
+        std::path::Path::new(&temp.name),
+        &target.parent,
+        std::path::Path::new(&target.name),
+    )?;
+    let _ = temp.remove();
+    Ok(())
+}
+
+/// Removes directories the commit created for pending targets, deepest
+/// first. `remove_dir` only deletes empty directories, so anything another
+/// writer reused or populated is left alone, and directories that already
+/// existed are never touched.
+fn cleanup_dirs(root: &cap_std::fs::Dir, created: &[PathBuf]) {
+    for dir in created.iter().rev() {
+        let _ = root.remove_dir(dir);
+    }
+}
+
+pub(crate) async fn apply_files(session: &PatchSession, plan: Plan) -> Result<Output, EngineError> {
+    let guards = prepare_write_set(&plan).await?;
+    let session = session.clone();
+    // Every pinned-handle filesystem operation is synchronous and can read
+    // up to the staged 64 MiB bound; keep all of it off the async executor.
+    tokio::task::spawn_blocking(move || apply_files_inner(&session, &plan, guards))
+        .await
+        .map_err(|error| {
+            EngineError::new(
+                ErrorClass::Io,
+                format!("patch: the commit worker failed to run: {error}. Nothing was written."),
+            )
+        })?
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the commit walks one ordered sequence of guarded phases"
+)]
+fn apply_files_inner(
     session: &PatchSession,
     plan: &Plan,
+    _guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
 ) -> Result<Output, EngineError> {
-    let _guards = prepare_write_set(session, plan).await?;
+    for file in &plan.files {
+        revalidate_path(&session.workspace, &file.path, &file.absolute_path)?;
+        if let Some(dest) = file.renamed_to.as_ref() {
+            revalidate_path(&session.workspace, &dest.path, &dest.absolute_path)?;
+        }
+    }
     let workspace = std::fs::canonicalize(&session.workspace)
-        .map_err(|error| file_error(&session.workspace, error))?;
+        .map_err(|error| file_error(&session.workspace, &error))?;
     let root = cap_std::fs::Dir::open_ambient_dir(&workspace, cap_std::ambient_authority())
-        .map_err(|error| file_error(&workspace, error))?;
+        .map_err(|error| file_error(&workspace, &error))?;
+    // The pinned root must be the directory the plan was staged on. A
+    // swapped or over-mounted workspace root cannot satisfy the recorded
+    // identity no matter what the pathnames currently resolve to.
+    check_identity(
+        Some(plan.workspace_id.ok_or_else(|| {
+            EngineError::new(
+                ErrorClass::Resolve,
+                "patch: this plan carries no workspace identity. Re-stage and try again."
+                    .to_owned(),
+            )
+        })?),
+        cap_dir_id(&root),
+        &session.workspace,
+    )?;
 
-    // Pin each source before staging writes, and check its before-image
-    // through that handle. An external directory swap cannot redirect reads.
+    // Pin each source before staging writes, prove the parent handle is the
+    // approved directory and the file is the approved object, and check the
+    // before-image through that handle. An external directory swap cannot
+    // redirect reads, and a same-content replacement still fails identity.
     let mut sources = Vec::with_capacity(plan.files.len());
     for file in &plan.files {
         if file.op == super::super::ir::Operation::Create {
@@ -169,87 +391,121 @@ pub(crate) async fn apply_files(
             continue;
         }
         let source = LocatedPath::bind(&root, &workspace, &file.absolute_path, false)
-            .map_err(|error| file_error(&file.path, error))?;
+            .map_err(|error| source_error(file, &error))?;
+        check_identity(file.dir_id, cap_dir_id(&source.parent), &file.path)?;
+        let metadata = source
+            .parent
+            .metadata(std::path::Path::new(&source.name))
+            .map_err(|error| source_error(file, &error))?;
+        if !metadata.is_file() {
+            return Err(non_regular_target(&file.path));
+        }
+        check_identity(file.file_id, cap_file_id(&metadata), &file.path)?;
         if let Some(before) = file.before.as_deref() {
-            let metadata = source
-                .parent
-                .metadata(std::path::Path::new(&source.name))
-                .map_err(|error| file_error(&file.path, error))?;
-            if !metadata.is_file() {
-                return Err(non_regular_target(&file.path));
-            }
             let current = source
                 .parent
                 .read(std::path::Path::new(&source.name))
-                .map_err(|error| file_error(&file.path, error))?;
+                .map_err(|error| source_error(file, &error))?;
             if current != before {
-                return Err(EngineError::new(
-                    ErrorClass::Stale,
-                    format!(
-                        "patch: {} changed while you were approving. Nothing was written. Try again.",
-                        file.path.display()
-                    ),
-                ));
+                return Err(stale_changed(&file.path));
             }
         }
         sources.push(Some(source));
     }
 
-    // Pin destinations as well. Never return to their ambient pathnames.
-    let mut targets = Vec::with_capacity(plan.files.len());
+    // Pass 1 is pure validation: locate every create/rename destination and
+    // prove it absent. A missing parent validates as absent without being
+    // created, so a failing target leaves nothing written behind.
+    let mut targets: Vec<Option<Target>> = Vec::with_capacity(plan.files.len());
     for (file, source) in plan.files.iter().zip(&sources) {
-        if file.op == super::super::ir::Operation::Delete {
-            targets.push(None);
-            continue;
-        }
-        let target = match (file.op, source) {
-            (super::super::ir::Operation::Create | super::super::ir::Operation::Rename, _) => {
-                LocatedPath::bind(&root, &workspace, write_target(file), true)
-                    .map_err(|error| file_error(&file.path, error))?
-            }
-            (_, Some(source)) => source.clone(),
-            (_, None) => {
-                return Err(EngineError::new(
-                    ErrorClass::Resolve,
-                    format!("patch: {} has no pinned source.", file.path.display()),
-                ));
-            }
-        };
-        if matches!(
-            file.op,
-            super::super::ir::Operation::Create | super::super::ir::Operation::Rename
-        ) {
-            match target
-                .parent
-                .symlink_metadata(std::path::Path::new(&target.name))
-            {
-                Ok(metadata) => {
-                    let display = file
-                        .renamed_to
-                        .as_ref()
-                        .filter(|_| file.op == super::super::ir::Operation::Rename)
-                        .map_or(file.path.as_path(), |destination| destination.path.as_path());
-                    if !metadata.is_file() {
-                        return Err(non_regular_target(display));
+        targets.push(match file.op {
+            super::super::ir::Operation::Delete => None,
+            super::super::ir::Operation::Create | super::super::ir::Operation::Rename => {
+                let absolute = write_target(file);
+                let (parent, name) = LocatedPath::locate(&workspace, absolute)
+                    .map_err(|error| file_error(&file.path, &error))?;
+                let recorded = if file.op == super::super::ir::Operation::Create {
+                    file.dir_id
+                } else {
+                    file.renamed_to.as_ref().and_then(|dest| dest.dir_id)
+                };
+                match open_parent(&root, &parent) {
+                    Ok(dir) => {
+                        check_dest_absent(file, &dir, &name)?;
+                        check_identity(recorded, cap_dir_id(&dir), dest_display(file))?;
+                        Some(Target::Bound(LocatedPath {
+                            parent: Arc::new(dir),
+                            name,
+                            absolute: absolute.to_path_buf(),
+                        }))
                     }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        // The parent existed at stage time but is gone now:
+                        // recreating it would write through a different
+                        // directory than the one that was approved.
+                        if recorded.is_some() {
+                            return Err(stale_moved(dest_display(file)));
+                        }
+                        Some(Target::Pending {
+                            parent,
+                            name,
+                            absolute: absolute.to_path_buf(),
+                        })
+                    }
+                    Err(error) => return Err(file_error(&file.path, &error)),
+                }
+            }
+            super::super::ir::Operation::Update => match source {
+                Some(source) => Some(Target::Bound(source.clone())),
+                None => {
                     return Err(EngineError::new(
-                        ErrorClass::File,
-                        format!("patch: {} already exists.", display.display()),
+                        ErrorClass::Resolve,
+                        format!("patch: {} has no pinned source.", file.path.display()),
                     ));
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(file_error(&file.path, error)),
+            },
+        });
+    }
+
+    // Pass 2 is the first mutation: create exactly the parents that were
+    // absent during validation, tracking each so a later failure can remove
+    // them again.
+    let mut created = Vec::new();
+    for target in &mut targets {
+        let Some(Target::Pending {
+            parent,
+            name,
+            absolute,
+        }) = target
+        else {
+            continue;
+        };
+        if let Err(error) = create_parent_dirs(&root, parent, &mut created) {
+            cleanup_dirs(&root, &created);
+            return Err(file_error(absolute, &error));
+        }
+        match open_parent(&root, parent) {
+            Ok(dir) => {
+                *target = Some(Target::Bound(LocatedPath {
+                    parent: Arc::new(dir),
+                    name: name.clone(),
+                    absolute: absolute.clone(),
+                }));
+            }
+            Err(error) => {
+                cleanup_dirs(&root, &created);
+                return Err(file_error(absolute, &error));
             }
         }
-        targets.push(Some(target));
     }
 
     let mut temps = Vec::new();
     for (file, target) in plan.files.iter().zip(&targets) {
-        if let Some(target) = target
-            && let Err(error) = stage_temp(file, target, &mut temps).await
+        if let Some(Target::Bound(target)) = target
+            && let Err(error) = stage_temp(file, target, &mut temps)
         {
             cleanup_temps(&temps);
+            cleanup_dirs(&root, &created);
             return Err(error);
         }
     }
@@ -265,12 +521,37 @@ pub(crate) async fn apply_files(
         if file.op == super::super::ir::Operation::Delete
             && let Some(source) = source
         {
-            trash_source(&file.path, source, &temps, &mut undo)?;
+            trash_source(&file.path, source, &temps, &mut undo, &root, &created)?;
         }
     }
     for staged in &temps {
-        if let Err(error) = staged.temp.rename_to(&staged.target) {
-            return Err(rollback_error(&staged.target.absolute, error, &temps, &undo));
+        let installed = match staged.file.op {
+            super::super::ir::Operation::Create | super::super::ir::Operation::Rename => {
+                install_new(&staged.temp, &staged.target)
+            }
+            _ => staged.temp.rename_to(&staged.target),
+        };
+        if let Err(error) = installed {
+            let (class, summary) = if error.kind() == std::io::ErrorKind::AlreadyExists {
+                (
+                    ErrorClass::File,
+                    format!(
+                        "patch: {} already exists.",
+                        dest_display(staged.file).display()
+                    ),
+                )
+            } else {
+                (
+                    ErrorClass::Io,
+                    format!(
+                        "patch: cannot write {}: {error}.",
+                        staged.target.absolute.display()
+                    ),
+                )
+            };
+            return Err(rollback_error(
+                class, summary, &temps, &undo, &root, &created,
+            ));
         }
         undo.push(match (staged.file.op, staged.file.before.as_deref()) {
             (super::super::ir::Operation::Rename, _) | (_, None) => {
@@ -283,14 +564,20 @@ pub(crate) async fn apply_files(
         if file.op == super::super::ir::Operation::Rename
             && let Some(source) = source
         {
-            trash_source(&file.path, source, &temps, &mut undo)?;
+            trash_source(&file.path, source, &temps, &mut undo, &root, &created)?;
         }
     }
 
     #[cfg(unix)]
-    for target in targets.iter().flatten().chain(sources.iter().flatten()) {
+    for target in targets
+        .iter()
+        .filter_map(|target| match target {
+            Some(Target::Bound(target)) => Some(&target.parent),
+            _ => None,
+        })
+        .chain(sources.iter().flatten().map(|source| &source.parent))
+    {
         let _ = target
-            .parent
             .try_clone()
             .and_then(|dir| dir.into_std_file().sync_all());
     }
@@ -303,6 +590,38 @@ pub(crate) async fn apply_files(
     Ok(report_output(session, plan))
 }
 
+/// Creates a missing target parent component by component, recording
+/// exactly the directories this call created so they can be removed on
+/// failure. Components another writer made first are reused, not claimed.
+fn create_parent_dirs(
+    root: &cap_std::fs::Dir,
+    parent: &std::path::Path,
+    created: &mut Vec<PathBuf>,
+) -> std::io::Result<()> {
+    let mut missing = Vec::new();
+    let mut probe = parent;
+    while !probe.as_os_str().is_empty() {
+        match root.symlink_metadata(probe) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                missing.push(probe.to_path_buf());
+            }
+            _ => break,
+        }
+        match probe.parent() {
+            Some(next) => probe = next,
+            None => break,
+        }
+    }
+    for dir in missing.iter().rev() {
+        match root.create_dir(dir) {
+            Ok(()) => created.push(dir.clone()),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
 fn write_target(file: &StagedFileOwned) -> &std::path::Path {
     file.renamed_to
         .as_ref()
@@ -313,7 +632,7 @@ fn write_target(file: &StagedFileOwned) -> &std::path::Path {
 }
 
 /// Phase A: create and sync a temp through the pinned parent directory.
-async fn stage_temp<'a>(
+fn stage_temp<'a>(
     file: &'a StagedFileOwned,
     target: &LocatedPath,
     temps: &mut Vec<StagedTemp<'a>>,
@@ -329,21 +648,20 @@ async fn stage_temp<'a>(
         )
         .into(),
     );
-    let write = async {
-        use tokio::io::AsyncWriteExt as _;
+    let write = (|| {
+        use std::io::Write as _;
         let mut options = cap_std::fs::OpenOptions::new();
         options.write(true).create_new(true);
-        let file = temp
+        let mut handle = temp
             .parent
-            .open_with(std::path::Path::new(&temp.name), &options)?;
-        let mut handle = tokio::fs::File::from_std(file.into_std());
-        handle.write_all(after).await?;
-        handle.sync_all().await
-    }
-    .await;
+            .open_with(std::path::Path::new(&temp.name), &options)?
+            .into_std();
+        handle.write_all(after)?;
+        handle.sync_all()
+    })();
     if let Err(error) = write {
         let _ = temp.remove();
-        return Err(file_error(&file.path, error));
+        return Err(file_error(&file.path, &error));
     }
     temps.push(StagedTemp {
         file,
@@ -378,10 +696,12 @@ impl Undo<'_> {
 }
 
 fn rollback_error(
-    path: &std::path::Path,
-    error: std::io::Error,
+    class: ErrorClass,
+    summary: String,
     temps: &[StagedTemp<'_>],
     undo: &[Undo<'_>],
+    root: &cap_std::fs::Dir,
+    created: &[PathBuf],
 ) -> EngineError {
     use std::fmt::Write as _;
 
@@ -392,7 +712,8 @@ fn rollback_error(
         }
     }
     cleanup_temps(temps);
-    let mut message = format!("patch: cannot write {}: {error}.", path.display());
+    cleanup_dirs(root, created);
+    let mut message = summary;
     if failures.is_empty() {
         message.push_str(" Nothing was written.");
     } else {
@@ -413,14 +734,16 @@ fn rollback_error(
             }
         }
     }
-    EngineError::new(ErrorClass::Io, message)
+    EngineError::new(class, message)
 }
 
-fn trash_source<'a>(
+fn trash_source(
     display: &std::path::Path,
     source: &LocatedPath,
     temps: &[StagedTemp<'_>],
-    undo: &mut Vec<Undo<'a>>,
+    undo: &mut Vec<Undo<'_>>,
+    root: &cap_std::fs::Dir,
+    created: &[PathBuf],
 ) -> Result<(), EngineError> {
     let backup = source.sibling(
         format!(
@@ -431,7 +754,21 @@ fn trash_source<'a>(
         .into(),
     );
     if let Err(error) = source.rename_to(&backup) {
-        return Err(rollback_error(display, error, temps, undo));
+        let (class, summary) = if error.kind() == std::io::ErrorKind::NotFound {
+            (
+                ErrorClass::Stale,
+                format!(
+                    "patch: {} changed while you were approving.",
+                    display.display()
+                ),
+            )
+        } else {
+            (
+                ErrorClass::Io,
+                format!("patch: cannot write {}: {error}.", display.display()),
+            )
+        };
+        return Err(rollback_error(class, summary, temps, undo, root, created));
     }
     undo.push(Undo::RestoreMoved {
         source: source.clone(),
@@ -587,7 +924,7 @@ mod tests {
             .expect("seed rename source");
 
         let session = PatchSession {
-            workspace,
+            workspace: workspace.clone(),
             session: SessionId::new_v7(),
             generation: GenerationId::new(NonZeroU64::MIN),
             turn: TurnId::new(NonZeroU64::MIN),
@@ -610,6 +947,8 @@ mod tests {
                     op: Operation::Create,
                     renamed_to: None,
                     hunks: Vec::new(),
+                    dir_id: super::super::super::resolve::file_id(&workspace),
+                    file_id: None,
                 },
                 StagedFileOwned {
                     path: PathBuf::from("source.txt"),
@@ -623,21 +962,30 @@ mod tests {
                         } else {
                             PathBuf::from("blocked/dest")
                         },
-                        absolute_path: destination,
+                        absolute_path: destination.clone(),
+                        dir_id: destination
+                            .parent()
+                            .and_then(super::super::super::resolve::file_id),
                     }),
                     hunks: Vec::new(),
+                    dir_id: super::super::super::resolve::file_id(&workspace),
+                    file_id: super::super::super::resolve::file_id(&source),
                 },
             ],
             findings: Vec::new(),
+            workspace_id: super::super::workspace_file_id(&workspace),
         };
 
-        let error = apply_files(&session, &plan)
+        let error = apply_files(&session, plan)
             .await
             .expect_err("later rename destination must fail");
 
         // A failed destination must not leave a created file or move the source.
         assert!(
-            matches!(error.class, ErrorClass::Io | ErrorClass::Stale | ErrorClass::File),
+            matches!(
+                error.class,
+                ErrorClass::Io | ErrorClass::Stale | ErrorClass::File
+            ),
             "{error:?}"
         );
         assert!(
@@ -685,14 +1033,10 @@ mod tests {
         tokio::fs::write(backup, b"original\n")
             .await
             .expect("backup");
-        let root = cap_std::fs::Dir::open_ambient_dir(
-            &workspace,
-            cap_std::ambient_authority(),
-        )
-        .expect("workspace handle");
+        let root = cap_std::fs::Dir::open_ambient_dir(&workspace, cap_std::ambient_authority())
+            .expect("workspace handle");
         let location = |path: &std::path::Path| {
-            super::LocatedPath::bind(&root, &workspace, path, false)
-                .expect("pinned path")
+            super::LocatedPath::bind(&root, &workspace, path, false).expect("pinned path")
         };
         let missing = location(&workspace.join("missing-source"));
         let mut undo = vec![
@@ -705,9 +1049,16 @@ mod tests {
                 backup: location(backup),
             },
         ];
-        let error = super::trash_source(&PathBuf::from("failed-source"), &missing, &[], &mut undo)
-            .expect_err("missing source cannot move");
-        assert_eq!(error.class, ErrorClass::Io);
+        let error = super::trash_source(
+            &PathBuf::from("failed-source"),
+            &missing,
+            &[],
+            &mut undo,
+            &root,
+            &[],
+        )
+        .expect_err("missing source cannot move");
+        assert_eq!(error.class, ErrorClass::Stale);
         assert!(error.message.contains("failed-source"), "{error}");
         assert!(!error.message.contains("Nothing was written"), "{error}");
         for path in [update, create, destination, earlier, backup] {
@@ -745,11 +1096,9 @@ mod tests {
         std::fs::create_dir(&parent).expect("parent");
         std::fs::write(parent.join("source.txt"), b"original\n").expect("source");
 
-        let root = cap_std::fs::Dir::open_ambient_dir(
-            workspace.path(),
-            cap_std::ambient_authority(),
-        )
-        .expect("workspace handle");
+        let root =
+            cap_std::fs::Dir::open_ambient_dir(workspace.path(), cap_std::ambient_authority())
+                .expect("workspace handle");
         let installed = super::LocatedPath::bind(
             &root,
             workspace.path(),
@@ -757,13 +1106,9 @@ mod tests {
             false,
         )
         .expect("pinned install target");
-        let source = super::LocatedPath::bind(
-            &root,
-            workspace.path(),
-            &parent.join("source.txt"),
-            false,
-        )
-        .expect("pinned source");
+        let source =
+            super::LocatedPath::bind(&root, workspace.path(), &parent.join("source.txt"), false)
+                .expect("pinned source");
         std::fs::rename(&parent, workspace.path().join("moved")).expect("swap directory");
         std::os::unix::fs::symlink(outside.path(), &parent)
             .expect("point workspace parent outside");
@@ -780,7 +1125,8 @@ mod tests {
         file.sync_all().expect("sync bytes");
         drop(file);
 
-        temp.rename_to(&installed).expect("install under pinned parent");
+        temp.rename_to(&installed)
+            .expect("install under pinned parent");
         assert_eq!(
             std::fs::read(workspace.path().join("moved/installed.txt")).expect("installed"),
             b"after\n"
@@ -789,8 +1135,15 @@ mod tests {
         assert!(!outside.path().join(".dalgon-patch-test.tmp").exists());
 
         let mut undo = Vec::new();
-        super::trash_source(&PathBuf::from("parent/source.txt"), &source, &[], &mut undo)
-            .expect("delete under pinned parent");
+        super::trash_source(
+            &PathBuf::from("parent/source.txt"),
+            &source,
+            &[],
+            &mut undo,
+            &root,
+            &[],
+        )
+        .expect("delete under pinned parent");
         assert!(!workspace.path().join("moved/source.txt").exists());
         assert!(!outside.path().join("source.txt").exists());
         for action in undo.iter().rev() {
@@ -805,5 +1158,240 @@ mod tests {
             .expect("remove installed file under pinned parent");
         assert!(!workspace.path().join("moved/installed.txt").exists());
         assert!(!outside.path().join("installed.txt").exists());
+    }
+
+    use super::super::super::resolve::file_id;
+
+    fn test_session(workspace: &std::path::Path) -> PatchSession {
+        PatchSession {
+            workspace: workspace.to_path_buf(),
+            session: SessionId::new_v7(),
+            generation: GenerationId::new(NonZeroU64::MIN),
+            turn: TurnId::new(NonZeroU64::MIN),
+            call: CallId::new("commit-test"),
+            consumer: dal_core::Consumer::Model,
+            symbols: false,
+            seen: crate::Seen::new(),
+            index: Index::new(None),
+            snapshots: Arc::new(SnapshotStore::new([7; 16])),
+            cutoff: Some(u64::MAX),
+        }
+    }
+
+    /// A modify plan over `relative`, staged the way `stage_file` records it.
+    fn modify_plan(
+        workspace: &std::path::Path,
+        relative: &str,
+        before: &[u8],
+        after: &[u8],
+    ) -> super::super::super::ir::Plan {
+        let absolute = workspace.join(relative);
+        super::super::super::ir::Plan {
+            style: DialectId::Replace,
+            files: vec![super::super::super::ir::StagedFileOwned {
+                path: PathBuf::from(relative),
+                absolute_path: absolute.clone(),
+                before: Some(before.to_vec().into_boxed_slice()),
+                after: Some(after.to_vec().into_boxed_slice()),
+                op: Operation::Update,
+                renamed_to: None,
+                hunks: Vec::new(),
+                dir_id: absolute.parent().and_then(file_id),
+                file_id: file_id(&absolute),
+            }],
+            findings: Vec::new(),
+            workspace_id: super::super::workspace_file_id(workspace),
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_source_is_stale_not_io() {
+        let directory = tempfile::tempdir().expect("workspace");
+        let workspace = std::fs::canonicalize(directory.path()).expect("canonical");
+        tokio::fs::write(workspace.join("gone.txt"), b"before\n")
+            .await
+            .expect("source");
+        let session = test_session(&workspace);
+        let plan = modify_plan(&workspace, "gone.txt", b"before\n", b"after\n");
+        tokio::fs::remove_file(workspace.join("gone.txt"))
+            .await
+            .expect("delete source");
+
+        let error = super::apply_files(&session, plan)
+            .await
+            .expect_err("missing source must fail");
+        assert!(
+            matches!(error.class, ErrorClass::Stale),
+            "deleted source must classify Stale for replanning, got {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn validation_failure_creates_no_directories() {
+        let directory = tempfile::tempdir().expect("workspace");
+        let workspace = std::fs::canonicalize(directory.path()).expect("canonical");
+        tokio::fs::write(workspace.join("source.txt"), b"source\n")
+            .await
+            .expect("rename source");
+        tokio::fs::create_dir(workspace.join("blocked"))
+            .await
+            .expect("blocked destination");
+        let session = test_session(&workspace);
+        let pending_target = workspace.join("pending/created.txt");
+        let blocked_target = workspace.join("blocked");
+        let plan = super::super::super::ir::Plan {
+            style: DialectId::Replace,
+            files: vec![
+                super::super::super::ir::StagedFileOwned {
+                    path: PathBuf::from("pending/created.txt"),
+                    absolute_path: pending_target.clone(),
+                    before: None,
+                    after: Some(b"created\n".to_vec().into_boxed_slice()),
+                    op: Operation::Create,
+                    renamed_to: None,
+                    hunks: Vec::new(),
+                    dir_id: None,
+                    file_id: None,
+                },
+                super::super::super::ir::StagedFileOwned {
+                    path: PathBuf::from("source.txt"),
+                    absolute_path: workspace.join("source.txt"),
+                    before: Some(b"source\n".to_vec().into_boxed_slice()),
+                    after: Some(b"renamed\n".to_vec().into_boxed_slice()),
+                    op: Operation::Rename,
+                    renamed_to: Some(RenameTarget {
+                        path: PathBuf::from("blocked"),
+                        absolute_path: blocked_target.clone(),
+                        dir_id: blocked_target.parent().and_then(file_id),
+                    }),
+                    hunks: Vec::new(),
+                    dir_id: file_id(&workspace),
+                    file_id: file_id(&workspace.join("source.txt")),
+                },
+            ],
+            findings: Vec::new(),
+            workspace_id: super::super::workspace_file_id(&workspace),
+        };
+
+        let error = super::apply_files(&session, plan)
+            .await
+            .expect_err("blocked destination must fail validation");
+        assert!(matches!(error.class, ErrorClass::File | ErrorClass::Stale));
+        assert!(
+            !workspace.join("pending").exists(),
+            "validation must not create directories before every target passes"
+        );
+        assert!(!pending_target.exists());
+        assert_eq!(
+            tokio::fs::read(workspace.join("source.txt"))
+                .await
+                .expect("source intact"),
+            b"source\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn swapped_workspace_root_is_stale() {
+        let directory = tempfile::tempdir().expect("workspace");
+        let workspace = std::fs::canonicalize(directory.path()).expect("canonical");
+        tokio::fs::write(workspace.join("kept.txt"), b"before\n")
+            .await
+            .expect("source");
+        let session = test_session(&workspace);
+        let plan = modify_plan(&workspace, "kept.txt", b"before\n", b"after\n");
+
+        // Replace the workspace directory itself: the canonical pathname
+        // still resolves, but it is no longer the directory the plan was
+        // staged on.
+        let moved = workspace.with_file_name(format!(
+            "{}-moved",
+            workspace
+                .file_name()
+                .expect("workspace name")
+                .to_string_lossy()
+        ));
+        std::fs::rename(&workspace, &moved).expect("move workspace aside");
+        std::fs::create_dir(&workspace).expect("replacement workspace");
+        std::fs::write(workspace.join("kept.txt"), b"before\n").expect("identical bait");
+
+        let error = super::apply_files(&session, plan)
+            .await
+            .expect_err("swapped workspace root must fail");
+        assert!(
+            matches!(error.class, ErrorClass::Stale),
+            "workspace identity mismatch must be Stale, got {error:?}"
+        );
+        std::fs::remove_dir_all(&workspace).expect("remove bait workspace");
+        std::fs::rename(&moved, &workspace).expect("restore workspace");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn swapped_source_parent_is_stale() {
+        let directory = tempfile::tempdir().expect("workspace");
+        let workspace = std::fs::canonicalize(directory.path()).expect("canonical");
+        let parent = workspace.join("parent");
+        std::fs::create_dir(&parent).expect("parent");
+        std::fs::write(parent.join("edit.txt"), b"before\n").expect("source");
+        let session = test_session(&workspace);
+        let plan = modify_plan(&workspace, "parent/edit.txt", b"before\n", b"after\n");
+
+        // Same pathname, different directory object: canonicalization still
+        // yields `parent/edit.txt`, so only the recorded identity notices.
+        // Identical bytes at the bait path close the before-image check too.
+        std::fs::rename(&parent, workspace.join("moved")).expect("swap parent");
+        std::fs::create_dir(&parent).expect("bait parent");
+        std::fs::write(parent.join("edit.txt"), b"before\n").expect("bait");
+
+        let error = super::apply_files(&session, plan)
+            .await
+            .expect_err("swapped parent must fail");
+        assert!(
+            matches!(error.class, ErrorClass::Stale),
+            "parent identity mismatch must be Stale, got {error:?}"
+        );
+        assert_eq!(
+            std::fs::read(workspace.join("parent/edit.txt")).expect("bait unread"),
+            b"before\n"
+        );
+        assert_eq!(
+            std::fs::read(workspace.join("moved/edit.txt")).expect("real unread"),
+            b"before\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn install_new_refuses_to_replace() {
+        let directory = tempfile::tempdir().expect("workspace");
+        let workspace = std::fs::canonicalize(directory.path()).expect("canonical");
+        std::fs::write(workspace.join("claimed.txt"), b"winner\n").expect("claimed");
+        let root = cap_std::fs::Dir::open_ambient_dir(&workspace, cap_std::ambient_authority())
+            .expect("root");
+        let target =
+            super::LocatedPath::bind(&root, &workspace, &workspace.join("claimed.txt"), false)
+                .expect("target");
+        let temp = target.sibling(".dalgon-patch-race.tmp".into());
+        let mut options = cap_std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        {
+            use std::io::Write as _;
+            let mut file = temp
+                .parent
+                .open_with(std::path::Path::new(&temp.name), &options)
+                .expect("temp")
+                .into_std();
+            file.write_all(b"challenger\n").expect("bytes");
+            file.sync_all().expect("sync");
+        }
+
+        let error = super::install_new(&temp, &target)
+            .expect_err("an occupied destination must not be replaced");
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read(workspace.join("claimed.txt")).expect("claimed read"),
+            b"winner\n"
+        );
+        let _ = temp.remove();
     }
 }

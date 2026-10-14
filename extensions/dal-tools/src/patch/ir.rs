@@ -396,6 +396,51 @@ pub trait EditObserver: Send + Sync + 'static {
     fn inspect(&self, batch: &StagedBatch<'_>) -> Vec<EditFinding>;
 }
 
+/// Device and inode identity of a filesystem object. Staged plans record
+/// identities at approval time so the commit can prove each pinned
+/// directory handle still names the object that was reviewed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FileId {
+    /// Device number or volume serial number.
+    pub dev: u64,
+    /// Inode number or file index.
+    pub ino: u64,
+}
+
+impl FileId {
+    /// Identity carried by a metadata result, or `None` when the
+    /// filesystem cannot report a stable identity.
+    #[cfg(unix)]
+    #[must_use]
+    pub fn of(metadata: &std::fs::Metadata) -> Option<Self> {
+        use std::os::unix::fs::MetadataExt as _;
+        Some(Self {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+        })
+    }
+
+    /// Identity carried by a metadata result, or `None` when the
+    /// filesystem cannot report a stable identity.
+    #[cfg(windows)]
+    #[must_use]
+    pub fn of(metadata: &std::fs::Metadata) -> Option<Self> {
+        use std::os::windows::fs::MetadataExt as _;
+        Some(Self {
+            dev: u64::from(metadata.volume_serial_number()?),
+            ino: metadata.file_index()?,
+        })
+    }
+
+    /// Identity carried by a metadata result, or `None` when the
+    /// filesystem cannot report a stable identity.
+    #[cfg(not(any(unix, windows)))]
+    #[must_use]
+    pub fn of(_metadata: &std::fs::Metadata) -> Option<Self> {
+        None
+    }
+}
+
 /// A rename destination resolved through the workspace containment rules.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RenameTarget {
@@ -403,6 +448,9 @@ pub struct RenameTarget {
     pub path: PathBuf,
     /// Canonical absolute path used for the write.
     pub absolute_path: PathBuf,
+    /// Identity of the destination's parent directory at stage time, when
+    /// it existed.
+    pub dir_id: Option<FileId>,
 }
 
 /// A staged file owned by a complete plan.
@@ -422,6 +470,11 @@ pub struct StagedFileOwned {
     pub renamed_to: Option<RenameTarget>,
     /// Display hunks computed from the immutable images.
     pub hunks: Vec<DiffHunk>,
+    /// Identity of `absolute_path`'s parent directory at stage time, when
+    /// it existed.
+    pub dir_id: Option<FileId>,
+    /// Identity of `absolute_path` itself at stage time, when it existed.
+    pub file_id: Option<FileId>,
 }
 
 /// A complete staged patch plan before authorization.
@@ -433,6 +486,8 @@ pub struct Plan {
     pub files: Vec<StagedFileOwned>,
     /// Observer findings in registration and return order.
     pub findings: Vec<EditFinding>,
+    /// Identity of the canonical workspace at stage time.
+    pub workspace_id: Option<FileId>,
 }
 
 /// The severity of a pure staged-edit finding.

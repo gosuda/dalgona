@@ -172,7 +172,16 @@ pub async fn plan(
         style,
         files,
         findings: Vec::new(),
+        workspace_id: workspace_file_id(&session.workspace),
     })
+}
+
+/// Identity of the canonical workspace directory the plan was staged
+/// against; the commit refuses to write when the pinned root differs.
+pub(super) fn workspace_file_id(workspace: &Path) -> Option<super::ir::FileId> {
+    std::fs::canonicalize(workspace)
+        .ok()
+        .and_then(|path| super::resolve::file_id(&path))
 }
 
 pub(crate) async fn plan_replacement(
@@ -194,6 +203,7 @@ pub(crate) async fn plan_replacement(
         style: super::ir::DialectId::Replace,
         files: vec![staged],
         findings: Vec::new(),
+        workspace_id: workspace_file_id(&session.workspace),
     })
 }
 
@@ -224,7 +234,7 @@ pub async fn commit(
             },
         };
     }
-    match commit::apply_files(session, &plan).await {
+    match commit::apply_files(session, plan).await {
         Ok(output) => output,
         Err(error) => Output {
             text: error.message.clone(),
