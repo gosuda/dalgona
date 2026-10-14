@@ -181,7 +181,8 @@ async fn grant_approve_persists_exact_row_and_session_approve_does_not() {
         std::num::NonZeroU32::MIN,
         CallerKind::Hook,
         Some(TurnId::new(std::num::NonZeroU64::MIN)),
-    ).with_test_digest();
+    )
+    .with_test_digest();
     let (session_grant, ()) =
         futures::join!(store2.ensure(&net_caller, Service::Net, &cancel), async {
             let id = loop {
