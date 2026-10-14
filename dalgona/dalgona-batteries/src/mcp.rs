@@ -33,6 +33,20 @@ pub const MRTR_MAX: u32 = 4;
 pub const STEPUP_MAX: u32 = 2;
 /// Maximum number of tools/list pages accepted from one server.
 pub const LIST_PAGE_MAX: usize = 50;
+/// Maximum total JSON-RPC response bytes for one tools/list operation.
+pub const LIST_RESPONSE_BYTES_MAX: usize = 8 * 1024 * 1024;
+/// Maximum retained decoded metadata bytes for one tools/list operation.
+pub const LIST_METADATA_BYTES_MAX: usize = 4 * 1024 * 1024;
+/// Maximum tool declarations, including excluded tools, across all list pages.
+pub const LIST_TOOLS_MAX: usize = 512;
+/// Maximum UTF-8 byte length of one remote tool name.
+pub const LIST_TOOL_NAME_BYTES_MAX: usize = 256;
+/// Maximum UTF-8 byte length of one remote tool description.
+pub const LIST_TOOL_DESCRIPTION_BYTES_MAX: usize = 8 * 1024;
+/// Maximum byte length of one remote tool's raw input schema.
+pub const LIST_TOOL_SCHEMA_BYTES_MAX: usize = 64 * 1024;
+/// Maximum UTF-8 byte length of one tools/list continuation cursor.
+pub const LIST_CURSOR_BYTES_MAX: usize = 4096;
 /// Maximum amount of child stderr retained for crash diagnostics.
 pub const STDERR_RING: usize = 65_536;
 /// Default time-to-live for a tools/list response.
@@ -138,6 +152,12 @@ pub enum McpError {
     /// The server exceeded the tools/list page limit.
     #[error("mcp list exceeded 50 pages")]
     ListPages,
+    /// The server exceeded an aggregate or per-field tools/list resource limit.
+    #[error("mcp list exceeded {resource} limit")]
+    ListBudget {
+        /// The resource whose configured limit was exceeded.
+        resource: &'static str,
+    },
     /// Elicitation needs a front end that can answer questions.
     #[error("mcp elicitation needs an ask front end")]
     NoAskFrontEnd,
@@ -342,5 +362,8 @@ pub const MCP_DOC: &str = concat!(
     "protocol subset; there is no HTTP+SSE-only transport.\n\n",
     "Limits: discovery 5 s, start 10 s, list 15 s, call 60 s (600 s with\n",
     "progress), one restart per session and isolation key, 50 list pages,\n",
-    "result text capped at 524288 bytes. Token files are stored at mode 0600.\n",
+    "8 MiB aggregate list response, 4 MiB decoded metadata, 512 tools,\n",
+    "256-byte names, 8192-byte descriptions, 65536-byte input schemas,\n",
+    "4096-byte continuation cursors, result text capped at 524288 bytes.\n",
+    "Token files are stored at mode 0600.\n",
 );

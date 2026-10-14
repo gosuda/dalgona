@@ -7,7 +7,8 @@ use std::{collections::BTreeMap, fs, path::PathBuf, sync::Arc, time::Duration};
 use std::path::Path;
 
 use crate::mcp::{
-    Budgets, LIST_PAGE_MAX, McpConfig, STDERR_RING,
+    Budgets, LIST_PAGE_MAX, LIST_RESPONSE_BYTES_MAX, LIST_TOOL_DESCRIPTION_BYTES_MAX,
+    LIST_TOOL_NAME_BYTES_MAX, LIST_TOOL_SCHEMA_BYTES_MAX, LIST_TOOLS_MAX, McpConfig, STDERR_RING,
     client::{Client, McpCommand, SessionEndHook, SessionStartHook},
     http::auth::{self as token_auth, TokenRecord},
     tools::{decode_tool_page, fold_tool_name},
@@ -782,6 +783,9 @@ done
 enum HttpScenario {
     PaginatedCache,
     PageCap,
+    AggregateBytes,
+    AggregateMetadata,
+    AggregateTools,
 }
 
 struct HttpRequest {
@@ -868,7 +872,7 @@ fn http_reply(scenario: HttpScenario, request: &HttpRequest) -> String {
     match request.method.as_str() {
         "server/discover" => match scenario {
             HttpScenario::PaginatedCache => rpc_error(id, -32601, "unsupported method"),
-            HttpScenario::PageCap => rpc_result(id, "{}"),
+            _ => rpc_result(id, "{}"),
         },
         "initialize" | "notifications/initialized" => rpc_result(id, "{}"),
         "tools/list" => match scenario {
@@ -893,6 +897,54 @@ fn http_reply(scenario: HttpScenario, request: &HttpRequest) -> String {
                 id,
                 r#"{"tools":[{"name":"partial","description":"partial","inputSchema":{"type":"object","properties":{}}}],"nextCursor":"again","ttlMs":0}"#,
             ),
+            HttpScenario::AggregateBytes => {
+                let padding = "x".repeat(LIST_RESPONSE_BYTES_MAX / 8);
+                rpc_result(
+                    id,
+                    &format!(
+                        r#"{{"tools":[{{"name":"partial"}}],"nextCursor":"again","padding":"{padding}"}}"#,
+                    ),
+                )
+            }
+            HttpScenario::AggregateMetadata => {
+                let page = value
+                    .get("params")
+                    .and_then(|params| params.get("cursor"))
+                    .and_then(JsonValueTrait::as_str)
+                    .unwrap_or("0")
+                    .parse::<usize>()
+                    .expect("fixture cursor is numeric");
+                let description = "d".repeat(LIST_TOOL_DESCRIPTION_BYTES_MAX);
+                let tools = (0..64)
+                    .map(|index| {
+                        format!(r#"{{"name":"metadata{page}_{index}","description":"{description}"}}"#)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                rpc_result(
+                    id,
+                    &format!(
+                        r#"{{"tools":[{tools}],"nextCursor":"{}"}}"#,
+                        page + 1
+                    ),
+                )
+            }
+            HttpScenario::AggregateTools => {
+                let page = if value
+                    .get("params")
+                    .and_then(|params| params.get("cursor"))
+                    .is_some()
+                {
+                    "second"
+                } else {
+                    "first"
+                };
+                let tools = (0..=LIST_TOOLS_MAX / 2)
+                    .map(|index| format!(r#"{{"name":"{page}{index}"}}"#))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                rpc_result(id, &format!(r#"{{"tools":[{tools}],"nextCursor":"again"}}"#))
+            }
         },
         "tools/call" => {
             let tool = value
@@ -1103,6 +1155,95 @@ async fn loopback_http_list_page_limit_stops_publishing_partial_tools() {
         "incomplete pages stay unpublished in the real host: {status}"
     );
     fixture.shutdown().await;
+}
+
+/// Many individually valid pages must not exhaust the process or publish partial tools.
+#[tokio::test]
+async fn loopback_http_aggregate_list_budgets_reject_before_publication() {
+    for (scenario, expected_requests, error_fragment) in [
+        (HttpScenario::AggregateBytes, 9, "response bytes limit"),
+        (HttpScenario::AggregateMetadata, 9, "metadata bytes limit"),
+        (HttpScenario::AggregateTools, 3, "tool count limit"),
+    ] {
+        let (declaration, url, server) = start_http_fixture(expected_requests, scenario).await;
+        let entry = fold_tool_name(SKILL, SERVER, "");
+        let partial = fold_tool_name(SKILL, SERVER, "partial");
+        let mut fixture = HostedFixture::with_transport(
+            declaration,
+            vec![
+                scripted_tool_step("entry-list-budget", &entry, "{}"),
+                scripted_final_step(),
+                scripted_tool_step("partial-list-budget", &partial, "{}"),
+                scripted_final_step(),
+            ],
+            Answer::ApproveForSession,
+            Some(url),
+        )
+        .await;
+        fixture.prompt().await;
+        fixture.turn_ended().await;
+        let failed = fixture.tool_results(&entry);
+        assert_eq!(failed.len(), 1);
+        assert!(failed[0].0, "{failed:?}");
+        assert!(
+            failed[0].1.contains(error_fragment),
+            "expected {error_fragment}, got {failed:?}"
+        );
+        let requests = finish_http_fixture(server).await;
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.method == "tools/list")
+                .count(),
+            expected_requests - 1,
+        );
+        fixture.prompt().await;
+        fixture.turn_ended().await;
+        let unmapped = fixture.tool_results(&partial);
+        assert_eq!(unmapped.len(), 1);
+        assert!(unmapped[0].0);
+        assert!(unmapped[0].1.contains("unknown tool"), "{unmapped:?}");
+        let status = fixture.status().await;
+        assert!(
+            status.contains("failed") && status.contains("0 tools"),
+            "partial listing was incorrectly published: {status}"
+        );
+        fixture.shutdown().await;
+    }
+}
+
+#[test]
+fn tool_page_rejects_oversized_metadata_fields() {
+    let cases = [
+        (
+            format!(
+                r#"{{"tools":[{{"name":"{}"}}]}}"#,
+                "n".repeat(LIST_TOOL_NAME_BYTES_MAX + 1)
+            ),
+            "tool name bytes",
+        ),
+        (
+            format!(
+                r#"{{"tools":[{{"name":"desc","description":"{}"}}]}}"#,
+                "d".repeat(LIST_TOOL_DESCRIPTION_BYTES_MAX + 1)
+            ),
+            "tool description bytes",
+        ),
+        (
+            format!(
+                r#"{{"tools":[{{"name":"schema","inputSchema":{{"type":"object","description":"{}"}}}}]}}"#,
+                "s".repeat(LIST_TOOL_SCHEMA_BYTES_MAX)
+            ),
+            "tool schema bytes",
+        ),
+    ];
+    for (body, resource) in cases {
+        let error = decode_tool_page(&body).expect_err("oversized metadata must be rejected");
+        assert!(
+            error.to_string().contains(resource),
+            "expected {resource}, got {error}"
+        );
+    }
 }
 
 /// This proves public HTTPS authority/port handoff and a TLS attempt only.
