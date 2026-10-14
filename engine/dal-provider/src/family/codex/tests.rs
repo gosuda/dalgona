@@ -9,7 +9,9 @@ use tokio::{
     time::timeout,
 };
 
-use super::{CODEX_ORIGINATOR, CodexRequest, build, https, https_with_idle_timeout, websocket_frame};
+use super::{
+    CODEX_ORIGINATOR, CodexRequest, build, https, https_with_idle_timeout, websocket_frame,
+};
 use crate::{
     auth::credential::{OAuthCredential, SecretString},
     error::ProviderError,
