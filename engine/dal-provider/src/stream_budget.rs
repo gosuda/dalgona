@@ -2,7 +2,7 @@
 //!
 //! Each decoder charges event bytes before parsing or extending retained
 //! state and counts new calls, blocks, and pending backfill identifiers.
-//! HTTPS/SSE and Responses/Codex WebSockets share these controls.
+//! HTTPS/SSE and Responses/Codex `WebSockets` share these controls.
 
 use std::{pin::Pin, time::Duration};
 
@@ -66,25 +66,25 @@ pub(crate) fn timeboxed<S>(
 where
     S: Stream<Item = Result<StreamEvent, ProviderError>> + Send + 'static,
 {
-    stream::unfold(Some(Box::pin(source)), move |source: Option<Pin<Box<S>>>| async move {
-        let mut source = source?;
-        match timeout_at(deadline, source.next()).await {
-            Ok(Some(Ok(event))) => {
-                let next = if matches!(&event, StreamEvent::Stop { .. }) {
-                    None
-                } else {
-                    Some(source)
-                };
-                Some((Ok(event), next))
+    stream::unfold(
+        Some(Box::pin(source)),
+        move |source: Option<Pin<Box<S>>>| async move {
+            let mut source = source?;
+            match timeout_at(deadline, source.next()).await {
+                Ok(Some(Ok(event))) => {
+                    let next = if matches!(&event, StreamEvent::Stop { .. }) {
+                        None
+                    } else {
+                        Some(source)
+                    };
+                    Some((Ok(event), next))
+                }
+                Ok(Some(Err(error))) => Some((Err(error), None)),
+                Ok(None) => None,
+                Err(_) => Some((Err(ProviderError::Limit(LimitError::StreamDuration)), None)),
             }
-            Ok(Some(Err(error))) => Some((Err(error), None)),
-            Ok(None) => None,
-            Err(_) => Some((
-                Err(ProviderError::Limit(LimitError::StreamDuration)),
-                None,
-            )),
-        }
-    })
+        },
+    )
 }
 
 #[cfg(test)]
