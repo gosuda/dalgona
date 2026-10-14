@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use sonic_rs::JsonValueTrait;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -25,6 +26,83 @@ async fn get(addr: SocketAddr, path: &str) -> HttpReply {
         "",
     )
     .await
+}
+
+
+/// A refused or expired socket may close normally or send a TCP reset.
+async fn read_closed(stream: &mut tokio::net::TcpStream) {
+    let mut bytes = Vec::new();
+    match stream.read_to_end(&mut bytes).await {
+        Ok(_) => {}
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+            ) => {}
+        Err(error) => panic!("unexpected TCP read error: {error}"),
+    }
+}
+
+#[tokio::test]
+async fn incomplete_headers_expire_and_allow_new_connections() {
+    let rig = rig(&[]).await;
+    with_serve(&rig, router_options(&rig), async |addr| {
+        let mut sockets = Vec::with_capacity(crate::serve::CONN_CAP);
+        for _ in 0..crate::serve::CONN_CAP {
+            sockets.push(
+                tokio::net::TcpStream::connect(addr)
+                    .await
+                    .expect("open incomplete-header socket"),
+            );
+        }
+        // Expire every admitted socket. Excess sockets must already be shed.
+        tokio::time::pause();
+        tokio::time::timeout(
+            crate::serve::HEADER_TIMEOUT + Duration::from_secs(3),
+            futures::future::join_all(sockets.iter_mut().map(read_closed)),
+        )
+        .await
+        .expect("all incomplete-header sockets close by the deadline");
+
+        assert_eq!(get(addr, "/v1/nope").await.status, 404);
+        tokio::time::resume();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn idle_keep_alive_sockets_expire_between_requests() {
+    let rig = rig(&[]).await;
+    with_serve(&rig, router_options(&rig), async |addr| {
+        let mut stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("connect");
+        stream
+            .write_all(
+                format!("GET /v1/nope HTTP/1.1\r\n{}\r\n\r\n", host_header(addr)).as_bytes(),
+            )
+            .await
+            .expect("write complete request");
+        let mut head = [0_u8; 256];
+        let count = tokio::time::timeout(super::support::WAIT, stream.read(&mut head))
+            .await
+            .expect("receive response")
+            .expect("read response");
+        assert!(
+            head[..count].starts_with(b"HTTP/1.1 404"),
+            "request was not served"
+        );
+
+        tokio::time::pause();
+        tokio::time::timeout(
+            crate::serve::HEADER_TIMEOUT + Duration::from_secs(3),
+            read_closed(&mut stream),
+        )
+        .await
+        .expect("idle keep-alive socket closes by the header deadline");
+        tokio::time::resume();
+    })
+    .await;
 }
 
 #[tokio::test]
