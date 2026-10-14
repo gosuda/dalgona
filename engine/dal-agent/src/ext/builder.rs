@@ -462,22 +462,26 @@ impl ExtensionBuilder {
                 docs::check_path(record)?;
             }
         }
-        let grant_digest = self.source_digest.or_else(binary_source_digest).map(|source| {
-            let mut hasher = blake3::Hasher::new();
-            hash_part(&mut hasher, b"dal-grant-code-v2");
-            hash_part(&mut hasher, source.as_bytes());
-            hash_part(&mut hasher, self.version.as_bytes());
-            hash_part(&mut hasher, &state_version.get().to_le_bytes());
-            hash_part(&mut hasher, &(exports.len() as u64).to_le_bytes());
-            for (export, _) in &exports {
-                hash_part(&mut hasher, OpId::Export(export.id.clone()).to_string().as_bytes());
-                hash_part(&mut hasher, &(export.uses.iter().count() as u64).to_le_bytes());
-                for operation in export.uses.iter() {
-                    hash_part(&mut hasher, operation.to_string().as_bytes());
+        let grant_digest = self
+            .source_digest
+            .or_else(binary_source_digest)
+            .map(|source| {
+                let mut hasher = blake3::Hasher::new();
+                hash_part(&mut hasher, b"dal-grant-code-v2");
+                hash_part(&mut hasher, source.as_bytes());
+                hash_part(&mut hasher, self.version.as_bytes());
+                hash_part(&mut hasher, &state_version.get().to_le_bytes());
+                hash_part(&mut hasher, &(exports.len() as u64).to_le_bytes());
+                for (export, _) in &exports {
+                    let id = OpId::Export(export.id.clone()).to_string();
+                    hash_part(&mut hasher, id.as_bytes());
+                    hash_part(&mut hasher, &(export.uses.iter().count() as u64).to_le_bytes());
+                    for operation in export.uses.iter() {
+                        hash_part(&mut hasher, operation.to_string().as_bytes());
+                    }
                 }
-            }
-            hasher.finalize().to_hex().to_string().into_boxed_str()
-        });
+                hasher.finalize().to_hex().to_string().into_boxed_str()
+            });
         Ok(Extension {
             name: self.name,
             version: self.version,
