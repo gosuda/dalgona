@@ -19,17 +19,21 @@ use windows_sys::Win32::{
         CloseHandle, FALSE, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
     },
     Security::{
+        ACL,
         Authorization::{
             ConvertSecurityDescriptorToStringSecurityDescriptorW, ConvertSidToStringSidW,
             ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SE_FILE_OBJECT,
+            SetSecurityInfo,
         },
-        DACL_SECURITY_INFORMATION, GetTokenInformation, OWNER_SECURITY_INFORMATION,
-        PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
+        DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, GetTokenInformation,
+        OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+        PSID, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
     },
     Storage::FileSystem::{
         CREATE_NEW, CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_NORMAL,
         FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_ALWAYS,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_ALWAYS, OPEN_EXISTING,
+        WRITE_DAC,
     },
     System::Threading::{GetCurrentProcess, OpenProcessToken},
 };
@@ -71,7 +75,12 @@ fn user_sid() -> io::Result<String> {
     }
     // The returned TOKEN_USER contains a pointer into this allocation. Keep
     // the storage live until the SID is converted into owned text.
-    let mut buffer = vec![0usize; usize::from(needed).div_ceil(size_of::<usize>())];
+    let mut buffer = vec![
+        0usize;
+        usize::try_from(needed)
+            .unwrap_or(usize::MAX)
+            .div_ceil(size_of::<usize>())
+    ];
     if unsafe {
         GetTokenInformation(
             token.0,
@@ -110,7 +119,10 @@ fn descriptor(directory: bool) -> io::Result<LocalMemory> {
     // No inherited ACEs. A protected DACL allows only the user, SYSTEM, and
     // Administrators, matching the existing serve-token Windows policy.
     let sddl = format!("D:P(A;{inherit};FA;;;{user})(A;{inherit};FA;;;SY)(A;{inherit};FA;;;BA)");
-    let string = sddl.encode_utf16().chain(std::iter::once(0)).collect::<Vec<_>>();
+    let string = sddl
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
     let mut raw: PSECURITY_DESCRIPTOR = ptr::null_mut();
     if unsafe {
         ConvertStringSecurityDescriptorToSecurityDescriptorW(
@@ -134,7 +146,93 @@ fn security_attributes(descriptor: &LocalMemory) -> SECURITY_ATTRIBUTES {
     }
 }
 
+/// Rejects a path whose ancestors include a reparse point or a non-directory.
+/// `FILE_FLAG_OPEN_REPARSE_POINT` guards only the final component; an ancestor
+/// junction would still redirect the name outside the private root. Every
+/// existing directory the path traverses is checked here instead.
+fn reject_reparse_ancestors(path: &Path) -> io::Result<()> {
+    let mut current = path.parent();
+    while let Some(directory) = current {
+        if directory.as_os_str().is_empty() {
+            break;
+        }
+        match fs::symlink_metadata(directory) {
+            Ok(metadata) => {
+                if !metadata.is_dir()
+                    || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "private path crosses a reparse point or non-directory",
+                    ));
+                }
+            }
+            // A missing ancestor is not itself a reparse point; the walk still
+            // reaches the existing ancestors above it.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        current = directory.parent();
+    }
+    Ok(())
+}
+
+/// Ends third-party access to a rejected file without trusting its contents.
+/// The owner of a file can always reopen it for `WRITE_DAC`, so a legacy file
+/// left world-readable by an inherited ACL is tightened to the private policy
+/// before the caller sees the rejection. This is a restriction, never a silent
+/// repair: the open still fails closed and a later open treats the now-private
+/// file as migrated.
+fn harden(path: &Path) {
+    let Ok(descriptor) = descriptor(false) else {
+        return;
+    };
+    let mut dacl: *mut ACL = ptr::null_mut();
+    let mut present = FALSE;
+    let mut defaulted = FALSE;
+    if unsafe {
+        GetSecurityDescriptorDacl(
+            descriptor.0,
+            &raw mut present,
+            &raw mut dacl,
+            &raw mut defaulted,
+        )
+    } == FALSE
+        || present == FALSE
+        || dacl.is_null()
+    {
+        return;
+    }
+    let raw = unsafe {
+        CreateFileW(
+            wide(path).as_ptr(),
+            WRITE_DAC,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            ptr::null_mut(),
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+            ptr::null_mut(),
+        )
+    };
+    if raw == INVALID_HANDLE_VALUE {
+        return;
+    }
+    let handle = OwnedHandle(raw);
+    unsafe {
+        SetSecurityInfo(
+            handle.0,
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            dacl,
+            ptr::null_mut(),
+        )
+    };
+}
+
 pub(super) fn create_new(path: &Path) -> io::Result<File> {
+    reject_reparse_ancestors(path)?;
     let descriptor = descriptor(false)?;
     let attributes = security_attributes(&descriptor);
     let raw = unsafe {
@@ -156,6 +254,7 @@ pub(super) fn create_new(path: &Path) -> io::Result<File> {
 
 /// Creates the lock file securely, or validates its existing ACL before reuse.
 pub(super) fn open_lock(path: &Path) -> io::Result<File> {
+    reject_reparse_ancestors(path)?;
     let descriptor = descriptor(false)?;
     let attributes = security_attributes(&descriptor);
     let raw = unsafe {
@@ -173,17 +272,28 @@ pub(super) fn open_lock(path: &Path) -> io::Result<File> {
         return Err(io::Error::last_os_error());
     }
     let file = unsafe { File::from_raw_handle(raw) };
-    super::require_private(&file)?;
+    if let Err(error) = super::require_private(&file) {
+        drop(file);
+        harden(path);
+        return Err(error);
+    }
     Ok(file)
 }
 
 pub(super) fn open(path: &Path, write: bool) -> io::Result<File> {
+    reject_reparse_ancestors(path)?;
     let mut options = OpenOptions::new();
     options.read(true).write(write);
     options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
     let file = options.open(path)?;
-    super::require_private(&file)?;
-    Ok(file)
+    match super::require_private(&file) {
+        Ok(()) => Ok(file),
+        Err(error) => {
+            drop(file);
+            harden(path);
+            Err(error)
+        }
+    }
 }
 
 fn dacl_sddl(descriptor: PSECURITY_DESCRIPTOR) -> io::Result<String> {
@@ -236,7 +346,9 @@ fn check_dacl(file: &File, directory: bool) -> io::Result<bool> {
         )
     };
     if status != 0 {
-        return Err(io::Error::from_raw_os_error(i32::try_from(status).unwrap_or(i32::MAX)));
+        return Err(io::Error::from_raw_os_error(
+            i32::try_from(status).unwrap_or(i32::MAX),
+        ));
     }
     let actual_guard = LocalMemory(actual);
     // DACL ownership matters: a third-party owner could change a currently
@@ -246,10 +358,7 @@ fn check_dacl(file: &File, directory: bool) -> io::Result<bool> {
     }
     let owner_text = sid_text(owner)?;
     let current_user = user_sid()?;
-    if owner_text != current_user
-        && owner_text != "S-1-5-18"
-        && owner_text != "S-1-5-32-544"
-    {
+    if owner_text != current_user && owner_text != "S-1-5-18" && owner_text != "S-1-5-32-544" {
         return Ok(false);
     }
     let same = dacl_sddl(expected.0)? == dacl_sddl(actual_guard.0)?;
@@ -278,6 +387,7 @@ fn create_directory(path: &Path) -> io::Result<()> {
 }
 
 pub(super) fn create_private_dir_all(path: &Path) -> io::Result<()> {
+    reject_reparse_ancestors(path)?;
     let mut missing = Vec::<PathBuf>::new();
     let mut current = path;
     loop {

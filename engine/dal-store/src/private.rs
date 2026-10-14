@@ -46,7 +46,10 @@ pub fn create_private_file_new(path: &Path) -> io::Result<File> {
 /// Opens a regular private file without following a Windows reparse point.
 ///
 /// The security policy is checked against the opened handle, not a path.
-/// Existing files with unsafe permissions are rejected, never repaired silently.
+/// Existing files with unsafe permissions are rejected; on Windows a rejected
+/// file's DACL is also tightened to the private policy best-effort, so stored
+/// secrets stop being shared while the open still fails closed. A later open
+/// then treats the file as migrated.
 ///
 /// # Errors
 /// Fails for missing files, symlinks/reparse points, non-files, or unsafe permissions.
@@ -80,7 +83,10 @@ pub fn open_private_file_read_write(path: &Path) -> io::Result<File> {
     }
     #[cfg(unix)]
     {
-        std::fs::OpenOptions::new().read(true).write(true).open(path)
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -93,6 +99,8 @@ pub fn open_private_file_read_write(path: &Path) -> io::Result<File> {
 }
 
 /// Opens an existing private lock file or creates one atomically as private.
+/// An existing file with an unsafe Windows DACL is rejected after the DACL is
+/// tightened best-effort, so the next call opens it as private.
 ///
 /// # Errors
 /// Fails when the file cannot be opened, created, or validated.
@@ -103,9 +111,9 @@ pub fn open_private_lock(path: &Path) -> io::Result<File> {
     }
     #[cfg(unix)]
     {
+        use std::os::unix::fs::OpenOptionsExt;
         let mut options = std::fs::OpenOptions::new();
         options.read(true).write(true).create(true);
-        use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
         options.open(path)
     }
@@ -199,9 +207,28 @@ mod tests {
             std::fs::write(&target, b"secret").expect("create with inherited ACL");
             assert!(!file_is_private(&File::open(&target).expect("open")).expect("check"));
             assert_eq!(
-                open_private_file(&target).expect_err("reject unprotected ACL").kind(),
+                open_private_file(&target)
+                    .expect_err("reject unprotected ACL")
+                    .kind(),
                 io::ErrorKind::PermissionDenied,
             );
+        }
+
+        #[test]
+        fn a_rejected_file_is_tightened_then_migrates() {
+            let dir = tempfile::tempdir().expect("temp");
+            let target = dir.path().join("legacy.json");
+            std::fs::write(&target, b"secret").expect("create with inherited ACL");
+            assert_eq!(
+                open_private_file(&target)
+                    .expect_err("reject unprotected ACL")
+                    .kind(),
+                io::ErrorKind::PermissionDenied,
+            );
+            // The rejection hardened the file to the private DACL rather than
+            // leaving the stored secret shared; the next open migrates it.
+            assert!(file_is_private(&File::open(&target).expect("open")).expect("check"));
+            assert!(open_private_file(&target).is_ok());
         }
 
         #[test]
