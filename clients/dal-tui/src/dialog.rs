@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use dal_core::{Answer, CallGrant, Question, RawJson, Request};
+use dal_core::{Answer, CallGrant, ExecPreview, Question, RawJson, Request};
 
 use crate::diagram::{DiagramSettings, RenderCache};
 use crate::render::{Prose, RenderRow, prose_rows, text_rows};
@@ -719,7 +719,19 @@ impl DialogUi {
                 if let Some(grant) = grant {
                     rows.push(RenderRow::new(grant_clause(grant), Role::Text));
                 }
-                rows.extend(rows_of(&preview.body, Prose::Verbatim));
+                if let Some(exec) = ExecPreview::from_preview(preview) {
+                    rows.push(RenderRow::new(
+                        format!("cwd: {}", exec.cwd.display()),
+                        Role::Text,
+                    ));
+                    rows.push(RenderRow::new(
+                        format!("shell: {}", exec.shell.display()),
+                        Role::Text,
+                    ));
+                    rows.extend(rows_of(&exec.command, Prose::Verbatim));
+                } else {
+                    rows.extend(rows_of(&preview.body, Prose::Verbatim));
+                }
                 rows
             }
             Question::Grant {
