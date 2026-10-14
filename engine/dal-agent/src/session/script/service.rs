@@ -11,9 +11,9 @@ use std::time::Duration;
 
 use dal_core::ext::NativeOp;
 use dal_core::{
-    AgentStart, AgentsOp, Answer, CallId, Choice, DenyReason, FetchRequest, JobId, JobsOp,
-    McpRequest, Name, Preview, Question, RawJson, Revision, SessionId, StateError, StateKey,
-    StateNs, StateOp, StateRecord, TurnOp, Workspace,
+    AgentStart, AgentsOp, Answer, CallId, Choice, FetchRequest, JobId, JobsOp, McpRequest, Name,
+    Preview, Question, RawJson, Revision, SessionId, StateError, StateKey, StateNs, StateOp,
+    StateRecord, TurnOp, Workspace,
 };
 use serde::Deserialize;
 
@@ -169,7 +169,7 @@ pub(super) async fn call(
             }
             let start = AgentStart {
                 call: call.clone(),
-                name: args.name.unwrap_or_else(|| who.ext().as_str().into()),
+                name: args.name,
                 prompt: args.prompt,
                 model: args.model,
                 role: args.role,
@@ -464,11 +464,12 @@ fn state_reply(
             code: FailureCode::Conflict,
             message: StateError::Conflict.to_string().into(),
         }),
-        Ok(Err(StateError::Unavailable)) => Err(CallError::Service(ServiceError::Denied(
-            DenyReason::Unavailable {
-                what: "state".into(),
-            },
-        ))),
+        // An ephemeral session has no state store; the typed `unavailable`
+        // code lets a script degrade instead of failing its whole handler.
+        Ok(Err(StateError::Unavailable)) => Err(CallError::Failed {
+            code: FailureCode::Unavailable,
+            message: StateError::Unavailable.to_string().into(),
+        }),
         Ok(Ok(record)) => Ok(CallOutput::State(record)),
     }
 }

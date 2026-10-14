@@ -2291,7 +2291,7 @@ impl SessionState {
                 .map_err(|error| error.to_string())?;
             dal_core::AgentStart {
                 call: call.clone(),
-                name: step.name.clone().into(),
+                name: Some(step.name.clone().into()),
                 prompt: step.prompt.clone().into(),
                 model: step.model.clone().map(String::into_boxed_str),
                 role: step.role.clone().map(String::into_boxed_str),
@@ -3601,7 +3601,7 @@ impl Coordinator {
             .map_err(|error| error.to_string())?;
         Ok(dal_core::AgentStart {
             call: CallId::new(format!("{}-{}-{index}", self.call, step.name)),
-            name: label.to_owned().into_boxed_str(),
+            name: Some(label.to_owned().into_boxed_str()),
             prompt: preamble.into_boxed_str(),
             model: step.model.clone().map(String::into_boxed_str),
             role: step.role.clone().map(String::into_boxed_str),
