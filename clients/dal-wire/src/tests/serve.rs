@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use sonic_rs::JsonValueTrait;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -101,6 +102,152 @@ async fn http_guard_limits() {
         tokio::time::resume();
         assert_eq!(paused.status, 408);
         assert_eq!(paused.body, "request body was not received within 60 s");
+    })
+    .await;
+}
+
+/// Reads until the server closes the TCP connection.
+async fn read_until_closed(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
+    let mut response = Vec::new();
+    tokio::time::timeout(super::support::WAIT, stream.read_to_end(&mut response))
+        .await
+        .expect("connection closed within test deadline")
+        .expect("read closed connection");
+    response
+}
+
+#[tokio::test]
+async fn slow_request_headers_have_an_absolute_deadline() {
+    let rig = rig(&[]).await;
+    with_serve(&rig, router_options(&rig), async |addr| {
+        let mut stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("connect slow client");
+        stream
+            .write_all(b"GET /v1/models HTTP/1.1\r\nhost:")
+            .await
+            .expect("send partial headers");
+        tokio::task::yield_now().await;
+        tokio::time::pause();
+        tokio::time::advance(crate::serve::HEADER_TIMEOUT - Duration::from_secs(1)).await;
+        stream
+            .write_all(b" 127.0.0.1")
+            .await
+            .expect("drip another header fragment");
+        tokio::time::advance(Duration::from_secs(2)).await;
+        tokio::time::resume();
+        let response = read_until_closed(&mut stream).await;
+        assert!(
+            !response.starts_with(b"HTTP/1.1 200"),
+            "incomplete headers must never reach the route"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn idle_keep_alive_connection_expires() {
+    let rig = rig(&[]).await;
+    with_serve(&rig, router_options(&rig), async |addr| {
+        let mut stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("connect keep-alive client");
+        stream
+            .write_all(
+                format!("GET /v1/models HTTP/1.1\r\n{}\r\n\r\n", host_header(addr))
+                    .as_bytes(),
+            )
+            .await
+            .expect("send complete request");
+        tokio::task::yield_now().await;
+        tokio::time::pause();
+        tokio::time::advance(crate::serve::HEADER_TIMEOUT + Duration::from_secs(1)).await;
+        tokio::time::resume();
+        let response = read_until_closed(&mut stream).await;
+        assert_eq!(parse_reply(&response).status, 200);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn idle_sockets_expire_and_free_all_listener_slots() {
+    let rig = rig(&[]).await;
+    with_serve(&rig, router_options(&rig), async |addr| {
+        let mut stalled = Vec::new();
+        for _ in 0..crate::serve::CONN_CAP {
+            let stream = tokio::net::TcpStream::connect(addr)
+                .await
+                .expect("connect idle client");
+            stalled.push(stream);
+        }
+        tokio::task::yield_now().await;
+        tokio::time::pause();
+        tokio::time::advance(crate::serve::HEADER_TIMEOUT + Duration::from_secs(1)).await;
+        tokio::time::resume();
+        for stream in &mut stalled {
+            let response = read_until_closed(stream).await;
+            assert!(
+                !response.starts_with(b"HTTP/1.1 200"),
+                "idle sockets must not reach a route"
+            );
+        }
+        assert_eq!(get(addr, "/v1/models").await.status, 200);
+    })
+    .await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn public_listener_sheds_per_ip_excess_and_recovers() {
+    let rig = rig(&[]).await;
+    let token = crate::token::create(&rig.data().join("serve.token"), false)
+        .expect("create public listener token");
+    let mut options = router_options(&rig);
+    options.public = true;
+    with_serve(&rig, options, async |addr| {
+        let mut stalled = Vec::new();
+        for _ in 0..crate::serve::CONN_PER_IP_CAP {
+            let mut stream = tokio::net::TcpStream::connect(addr)
+                .await
+                .expect("connect stalled public client");
+            stream
+                .write_all(b"GET /v1/models HTTP/1.1\r\nhost:")
+                .await
+                .expect("send incomplete headers");
+            tokio::task::yield_now().await;
+            stalled.push(stream);
+        }
+        let mut excess = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("connect excess client");
+        let mut response = Vec::new();
+        tokio::time::timeout(Duration::from_secs(1), excess.read_to_end(&mut response))
+            .await
+            .expect("excess connection is shed immediately")
+            .expect("read excess connection");
+        assert!(response.is_empty(), "excess socket must not be served");
+
+        tokio::time::pause();
+        tokio::time::advance(crate::serve::HEADER_TIMEOUT + Duration::from_secs(1)).await;
+        tokio::time::resume();
+        for stream in &mut stalled {
+            let response = read_until_closed(stream).await;
+            assert!(
+                !response.starts_with(b"HTTP/1.1 200"),
+                "idle sockets must not reach a route"
+            );
+        }
+
+        let reply = http(
+            addr,
+            &format!(
+                "GET /v1/models HTTP/1.1\r\n{}\r\nauthorization: Bearer {token}",
+                host_header(addr)
+            ),
+            "",
+        )
+        .await;
+        assert_eq!(reply.status, 200);
     })
     .await;
 }

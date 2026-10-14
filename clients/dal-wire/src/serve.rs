@@ -1,7 +1,8 @@
 //! HTTP/1.1 serve listener: lifecycle, guards, and route dispatch.
 //!
 //! Hyper serves HTTP/1.1 only on a Tokio `TcpListener` with a 256-connection
-//! cap. The pipeline is route, browser guard, authentication, content type,
+//! cap, per-source admission limits, and request-header deadlines. The
+//! pipeline is route, browser guard, authentication, content type,
 //! bounded body, then the route handler. OpenAI routes run through the
 //! router, A2A routes through `a2a`, and `/v1/ws` plus `/codex/ws` upgrade
 //! to WebSockets. Loopback binds need no token; public binds require the
@@ -63,7 +64,11 @@ impl ServeHandle {
 }
 
 /// Maximum concurrent HTTP connections.
-const CONN_CAP: usize = 256;
+pub(crate) const CONN_CAP: usize = 256;
+/// Maximum concurrent connections from one IP on public listeners.
+pub(crate) const CONN_PER_IP_CAP: usize = 32;
+/// Maximum time to receive each HTTP request head, including after keep-alive.
+pub(crate) const HEADER_TIMEOUT: Duration = Duration::from_secs(5);
 /// Maximum request header buffer size in bytes.
 const HEADER_LIMIT: usize = 1_048_576;
 /// Stop drain grace.
@@ -138,18 +143,44 @@ pub(crate) fn listen(
     });
     let shutdown = ctx.shutdown.clone();
     let done = async move {
-        let mut conns: FuturesUnordered<Driver> = FuturesUnordered::new();
+        let mut conns: FuturesUnordered<futures::future::BoxFuture<'static, IpAddr>> =
+            FuturesUnordered::new();
+        let mut per_ip = BTreeMap::<IpAddr, usize>::new();
         let mut drivers: FuturesUnordered<Driver> = FuturesUnordered::new();
         loop {
             tokio::select! {
                 biased;
                 () = stop.cancelled() => break,
-                accepted = listener.accept(), if conns.len() < CONN_CAP => {
+                Some(ip) = conns.next(), if !conns.is_empty() => {
+                    let Some(count) = per_ip.get_mut(&ip) else {
+                        unreachable!("completed connection must have an admission slot");
+                    };
+                    *count -= 1;
+                    if *count == 0 {
+                        per_ip.remove(&ip);
+                    }
+                }
+                _ = drivers.next(), if !drivers.is_empty() => {}
+                Some(driver) = driver_rx.recv() => drivers.push(driver),
+                accepted = listener.accept() => {
                     match accepted {
-                        Ok((stream, _)) => {
+                        Ok((stream, peer)) => {
+                            let ip = peer.ip();
+                            if conns.len() >= CONN_CAP
+                                || (ctx.cfg.public
+                                    && per_ip
+                                        .get(&ip)
+                                        .is_some_and(|&count| count >= CONN_PER_IP_CAP))
+                            {
+                                // Always accept, then shed excess sockets rather than
+                                // blocking the listener behind occupied slots.
+                                continue;
+                            }
+                            *per_ip.entry(ip).or_default() += 1;
                             let ctx = Arc::clone(&ctx);
                             conns.push(Box::pin(async move {
                                 serve_conn(ctx, stream).await;
+                                ip
                             }));
                         }
                         Err(error) => {
@@ -163,9 +194,6 @@ pub(crate) fn listen(
                         }
                     }
                 }
-                _ = conns.next(), if !conns.is_empty() => {}
-                _ = drivers.next(), if !drivers.is_empty() => {}
-                Some(driver) = driver_rx.recv() => drivers.push(driver),
             }
         }
         shutdown.cancel();
@@ -174,7 +202,7 @@ pub(crate) fn listen(
             loop {
                 tokio::select! {
                     Some(driver) = driver_rx.recv() => drivers.push(driver),
-                    Some(()) = conns.next() => {}
+                    Some(_) = conns.next() => {}
                     Some(()) = drivers.next() => {}
                     else => break,
                 }
@@ -216,6 +244,8 @@ async fn serve_conn(ctx: Arc<ServeCtx>, stream: tokio::net::TcpStream) {
         async move { Ok::<_, hyper::Error>(handle_request(ctx, req).await) }
     });
     let conn = hyper::server::conn::http1::Builder::new()
+        .timer(hyper_util::rt::TokioTimer::new())
+        .header_read_timeout(HEADER_TIMEOUT)
         .max_buf_size(HEADER_LIMIT)
         .serve_connection(io, service)
         .with_upgrades();
