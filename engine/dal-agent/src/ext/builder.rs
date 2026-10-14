@@ -1,7 +1,8 @@
 //! Extension registration: the builder and the sealed extension it produces.
 
+use std::io::Read as _;
 use std::num::NonZeroU32;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use dal_core::ext::{BeforeRequest, BeforeTurn, ExportId, ExportKind, OpId, RuleFile, TurnEnd};
 use dal_core::{
@@ -35,6 +36,29 @@ fn valid_name(name: &str) -> bool {
         && bytes
             .iter()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-' || *b == b'_')
+}
+
+/// Identifies native bundled code by the executable bytes that registered it.
+/// The Starlark loader supplies a finer-grained source snapshot instead.
+/// Failed executable reads leave native grants unavailable, not unscoped.
+fn executable_digest() -> Option<Box<str>> {
+    static DIGEST: OnceLock<Option<Box<str>>> = OnceLock::new();
+    DIGEST
+        .get_or_init(|| {
+            let mut file = std::fs::File::open(std::env::current_exe().ok()?).ok()?;
+            let mut hash = blake3::Hasher::new();
+            hash.update(b"dal-native-bundled-v1");
+            let mut buffer = [0u8; 8192];
+            loop {
+                let length = file.read(&mut buffer).ok()?;
+                if length == 0 {
+                    break;
+                }
+                hash.update(&buffer[..length]);
+            }
+            Some(hash.finalize().to_hex().to_string().into_boxed_str())
+        })
+        .clone()
 }
 
 /// Collects one extension's registrations before validation.
@@ -422,6 +446,11 @@ impl ExtensionBuilder {
             });
         }
         let state_version = self.state_version;
+        let source_digest = if self.origin == Origin::Bundled && self.source_digest.is_none() {
+            executable_digest()
+        } else {
+            self.source_digest.clone()
+        };
         let owner: Name = self.name.parse()?;
         self.check_duplicates(&owner)?;
         let exports =
@@ -438,7 +467,7 @@ impl ExtensionBuilder {
             version: self.version,
             inject: self.inject,
             state_version,
-            source_digest: self.source_digest,
+            source_digest,
             origin: self.origin,
             site: self.site,
             tools: self.tools,
