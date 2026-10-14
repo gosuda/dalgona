@@ -18,7 +18,10 @@ load("@dal/v1", "dal")
 def find_todos(ctx, args):
     page = ctx.tools.search("TODO", path = args.path)
     return {
-        "matches": page.matches[:args.limit],
+        "matches": [
+            {"path": hit.path, "line": hit.line, "text": hit.text}
+            for hit in page.matches[:args.limit]
+        ],
         "truncated": page.truncated or len(page.matches) > args.limit,
     }
 
@@ -124,7 +127,7 @@ Return plain data and it is the result. Three helpers say more:
 
 - `dal.ok(value)` returns a success explicitly.
 - `dal.err(code, message, details)` returns a failure the model can read. `details` is optional. The codes `failed`, `exit_nonzero`, `unavailable`, `conflict`, `busy`, `cancelled`, `observation_unavailable`, `invocation_mismatch`, and `indeterminate` belong to dal; `dal.err` refuses them.
-- `dal.output(value = ..., view = ...)` keeps the data and its display apart. A view is `{"type": "text", "text": "..."}` or `{"type": "table", "columns": [...], "rows": [[...]]}`. Table rows hold scalar values. A view changes what people see, never the status of the call.
+- `dal.output(value = ..., view = ...)` keeps the data and its display apart. A view is `{"type": "text", "text": "..."}`, `{"type": "table", "columns": [...], "rows": [[...]]}`, an intact view from `tools.read`, or a list of views. Table rows hold scalar values. A view changes what people see, never the status of the call.
 
 ```starlark
 load("@dal/v1", "dal")
@@ -178,8 +181,10 @@ A plain dictionary that happens to contain `ok = False` is still data. Only `dal
 `ctx.config` holds the validated settings. Every other field of `ctx` is a group of operations, and each call returns its value directly:
 
 ```starlark
-text = ctx.tools.read("src/lib.rs")
+view = ctx.tools.read("src/lib.rs")
 ```
+
+`tools.read` returns a view with `path`, `header`, `truncated`, and `rows`; each row has `line`, `text`, and `complete`. `tools.search` returns a page with `matches` and `truncated`; each match has `path`, `line`, `text`, and a `source` read view. A handler cannot return a view itself: return plain data, and pass the view as the `view` of `dal.output` to display it.
 
 An operation that fails stops the handler with the error. To handle an expected failure yourself, pass the operation, not its result, to `ctx.try_call`. You get back a result with `ok`, `value`, and `error`; `unwrap()` returns the value or raises the failure again. Denial, cancellation, and hard limits still stop the handler; `try_call` cannot catch them and never retries.
 
