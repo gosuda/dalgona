@@ -1687,3 +1687,22 @@ fn only_first_party_models_from_four_five_take_native_search() {
     assert!(!supports_tool_search("openrouter", "claude-opus-5-5"));
     assert!(!supports_tool_search("", "claude-opus-5-5"));
 }
+
+#[test]
+fn cumulative_tool_input_stops_at_the_stream_event_budget() {
+    let mut decoder = Decoder::new("model".into(), false, None);
+    let start = r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call","name":"run","input":{}}}"#;
+    let delta = r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"x"}}"#;
+    assert!(decoder.feed(start).is_ok());
+    for _ in 1..crate::stream_budget::STREAM_EVENTS_LIMIT {
+        assert!(decoder.feed(delta).is_ok());
+    }
+    assert!(matches!(
+        decoder.feed(delta),
+        Err(ProviderError::Limit(crate::error::LimitError::StreamEvents))
+    ));
+    assert_eq!(
+        decoder.calls.get(&0).map(|call| call.args.len()),
+        Some(crate::stream_budget::STREAM_EVENTS_LIMIT - 1)
+    );
+}

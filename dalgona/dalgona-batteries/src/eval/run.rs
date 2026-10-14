@@ -2,7 +2,8 @@
 //! The eval runner: ephemeral cases over an [`Executor`], with a hard case
 //! timeout, interrupt handling, and judge gating.
 //!
-//! The runner owns the case workspace, the clock, and the scoring. An
+//! The runner owns the clock and scoring, and shares workspace ownership
+//! with its executor until cleanup finishes. An
 //! [`Executor`] owns one arm's configuration and runs one prompt in one
 //! ephemeral session; the dalgona binary supplies the host-backed executor.
 
@@ -22,9 +23,8 @@ use super::report::{
 /// The wall-clock limit of one run of one case.
 pub const CASE_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// How long a cancelled executor may wind its session down before the runner
-/// stops waiting for it.
-const GRACE: Duration = Duration::from_secs(5);
+/// The bounded grace for a cancelled executor to finish before reporting.
+const CLEANUP_GRACE: Duration = Duration::from_secs(5);
 
 /// The skip reason of a run that an interrupt cut short.
 pub const INTERRUPTED: &str = "skipped: interrupted";
@@ -33,12 +33,12 @@ pub const INTERRUPTED: &str = "skipped: interrupted";
 pub type ExecFuture<'a> = Pin<Box<dyn Future<Output = Result<Outcome, ExecError>> + Send + 'a>>;
 
 /// What an executor needs to run one prompt.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct RunRequest<'a> {
     /// The prompt to run.
     pub prompt: &'a str,
     /// The case workspace, already seeded with the case files.
-    pub workspace: &'a Path,
+    pub workspace: RunWorkspace,
     /// The tool names the run may use; `None` means the product default set.
     pub tools: Option<&'a [String]>,
     /// The judge question, when a judge scores the case.
@@ -109,7 +109,10 @@ pub enum ExecError {
 pub trait Executor: Send + Sync {
     /// Runs one prompt in one ephemeral session and winds the session down.
     ///
-    /// The executor must stop and return when `cancel` fires.
+    /// The executor must stop when `cancel` fires. The runner waits up to five
+    /// seconds for cleanup before dropping the future. Any task that outlives
+    /// the future must remain executor-owned and retain the workspace until
+    /// it has stopped using it.
     fn run<'a>(&'a self, request: RunRequest<'a>, cancel: CancellationToken) -> ExecFuture<'a>;
 }
 
@@ -172,10 +175,21 @@ impl Options {
     }
 }
 
-/// A case workspace: a fresh temporary directory seeded with the case files.
-struct TempWorkspace(PathBuf);
+/// The directory removed when its final runner or executor lease ends.
+#[derive(Debug)]
+struct WorkspaceDir(PathBuf);
 
-impl TempWorkspace {
+impl Drop for WorkspaceDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A seeded case workspace retained until the runner and executor release it.
+#[derive(Clone, Debug)]
+pub struct RunWorkspace(Arc<WorkspaceDir>);
+
+impl RunWorkspace {
     async fn create(files: Vec<(String, String)>) -> io::Result<Self> {
         let dir =
             std::env::temp_dir().join(format!("dalgona-eval-{}", uuid::Uuid::new_v4().simple()));
@@ -193,17 +207,13 @@ impl TempWorkspace {
         })
         .await
         .map_err(io::Error::other)?
-        .map(Self)
+        .map(|path| Self(Arc::new(WorkspaceDir(path))))
     }
 
-    fn path(&self) -> &Path {
-        &self.0
-    }
-
-    async fn remove(self) {
-        let dir = self.0;
-        // A leftover temp directory is harmless, so a failed cleanup is dropped.
-        let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(dir)).await;
+    /// Returns the workspace path while this lease keeps the directory alive.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.0.0
     }
 }
 
@@ -255,15 +265,16 @@ async fn timed(
 ) -> Result<Outcome, Ended> {
     let run_cancel = cancel.child_token();
     let mut future = executor.run(request, run_cancel.clone());
-    tokio::select! {
-        outcome = &mut future => outcome.map_err(Ended::Executor),
-        () = tokio::time::sleep(CASE_TIMEOUT) => {
-            run_cancel.cancel();
-            // The executor gets a short grace to wind its session down.
-            let _ = tokio::time::timeout(GRACE, &mut future).await;
-            Err(Ended::TimedOut)
-        }
-    }
+    let ended = tokio::select! {
+        outcome = &mut future => return outcome.map_err(Ended::Executor),
+        () = cancel.cancelled() => Ended::Executor(ExecError::Interrupted),
+        () = tokio::time::sleep(CASE_TIMEOUT) => Ended::TimedOut,
+    };
+    run_cancel.cancel();
+    // The executor owns its session's wind-down; the run grants it a bounded
+    // grace, then drops the future so a stuck cleanup cannot block the pack.
+    let _ = tokio::time::timeout(CLEANUP_GRACE, future).await;
+    Err(ended)
 }
 
 fn judge_gate(skip: JudgeSkip) -> (JudgeGate, &'static str) {
@@ -381,7 +392,7 @@ async fn run_once(
         Err(error) => return (slot.failed(error.to_string()), false),
     };
     let case = slot.case;
-    let workspace = match TempWorkspace::create(case.files.clone()).await {
+    let workspace = match RunWorkspace::create(case.files.clone()).await {
         Ok(workspace) => workspace,
         Err(error) => {
             let reason = format!("case {}: setup failed: {error}", case.id);
@@ -394,11 +405,11 @@ async fn run_once(
     };
     let request = RunRequest {
         prompt: &case.prompt,
-        workspace: workspace.path(),
+        workspace: workspace.clone(),
         tools: case.tools.as_deref(),
         judge,
     };
-    let result = match timed(executor.as_ref(), request, cancel).await {
+    match timed(executor.as_ref(), request, cancel).await {
         Ok(Outcome::Ran(output)) => (
             score(pack, index, slot, output, workspace.path()).await,
             false,
@@ -422,9 +433,7 @@ async fn run_once(
         ),
         Err(Ended::Executor(ExecError::Interrupted)) => (slot.skipped(INTERRUPTED), true),
         Err(Ended::Executor(error)) => (slot.failed(error.to_string()), false),
-    };
-    workspace.remove().await;
-    result
+    }
 }
 
 /// Runs the pack and returns its report.

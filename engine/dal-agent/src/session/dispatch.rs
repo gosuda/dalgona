@@ -505,6 +505,7 @@ fn tool_caller(ctx: &DispatchCtx, ready: &ReadyCall, invocation: Invocation) -> 
         CallerKind::Tool,
         Some(ctx.turn),
     )
+    .with_optional_extension(owner)
     .with_invocation(invocation)
 }
 
