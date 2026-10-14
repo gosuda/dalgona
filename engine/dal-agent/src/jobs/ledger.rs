@@ -22,6 +22,11 @@ pub(super) enum Line {
         label: Box<str>,
         outcome: JobOutcome,
         text: Box<str>,
+        /// The job's log file name under the jobs directory, recorded at
+        /// settlement so recovery never guesses a naming convention. Absent
+        /// on lines written before the field existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        log: Option<Box<str>>,
     },
     Hold {
         id: JobId,
@@ -53,11 +58,20 @@ pub(crate) enum LedgerError {
     },
 }
 
+/// One recovered end line: the report plus its recorded log file name.
+#[derive(Debug)]
+pub(super) struct EndedReport {
+    /// The ended job's report.
+    pub(super) report: JobReport,
+    /// The log file name the job recorded at settlement.
+    pub(super) log: Option<Box<str>>,
+}
+
 /// What a reopened ledger recovered.
 #[derive(Debug, Default)]
 pub(super) struct Recovered {
     /// Every ended report, oldest first.
-    pub(super) ended: Vec<JobReport>,
+    pub(super) ended: Vec<EndedReport>,
     /// Ended reports no journaled wake delivered, oldest first.
     pub(super) pending: Vec<JobReport>,
     /// The held-job set.
@@ -93,12 +107,16 @@ impl Ledger {
     }
 
     /// Builds the end line of one top-level report.
-    pub(super) fn end(report: &JobReport) -> Line {
+    ///
+    /// `log` is the bare file name of the job's log under the jobs
+    /// directory; recovery joins it back onto the directory.
+    pub(super) fn end(report: &JobReport, log: Option<Box<str>>) -> Line {
         Line::End {
             id: report.id,
             label: report.label.clone(),
             outcome: report.outcome.clone(),
             text: report.text.clone(),
+            log,
         }
     }
 
@@ -162,6 +180,7 @@ fn replay(text: &str) -> Result<Recovered, usize> {
                 label,
                 outcome,
                 text,
+                log,
             } => {
                 let report = JobReport {
                     id,
@@ -170,7 +189,7 @@ fn replay(text: &str) -> Result<Recovered, usize> {
                     text,
                 };
                 recovered.pending.push(report.clone());
-                recovered.ended.push(report);
+                recovered.ended.push(EndedReport { report, log });
             }
             Line::Hold { id } => {
                 recovered.held.insert(id);

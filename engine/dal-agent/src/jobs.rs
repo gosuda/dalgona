@@ -126,6 +126,15 @@ pub(crate) struct FinishedJob {
     pub(crate) started: bool,
 }
 
+/// Names the durable log file of one job under the session jobs directory.
+///
+/// The canonical job ID text names the file; provider call IDs are opaque
+/// and never reach the filesystem. Every writer and the recovery fallback
+/// share this one convention.
+pub(crate) fn job_log_path(dir: &std::path::Path, id: JobId) -> PathBuf {
+    dir.join(format!("{id}.log"))
+}
+
 /// The queue is bounded independently from the active-child limit.
 const JOB_QUEUE_LIMIT: usize = SESSION_CHILD_LIMIT;
 /// The most job-end events the log keeps for slow readers.
@@ -195,19 +204,20 @@ impl JobTable {
         delivered: &HashSet<JobId>,
     ) -> Result<Self, LedgerError> {
         let (ledger, recovered) = Ledger::open(dir.clone(), delivered).await?;
-        let job_log = |id: &JobId| dir.join(format!("{id}.log"));
         let mut table = Self {
             ledger,
             held: recovered.held,
             ..Self::default()
         };
-        for report in recovered.ended {
+        for ended in recovered.ended {
+            let report = ended.report;
             let activity = Timestamp::now();
             let tail: Box<[u8]> = report.text.as_bytes().into();
+            let log_path = recover_log_path(&dir, report.id, ended.log.as_deref()).await;
             let mut record = JobRecord::new(
                 report.id,
                 report.label.clone(),
-                job_log(&report.id),
+                log_path.clone(),
                 CancellationToken::new(),
             );
             record.state = JobState::Done;
@@ -220,7 +230,7 @@ impl JobTable {
             table.finished.push(FinishedJob {
                 id: report.id,
                 label: report.label.clone(),
-                log_path: job_log(&report.id),
+                log_path,
                 outcome: report.outcome.clone(),
                 tail,
                 activity,
@@ -488,7 +498,12 @@ impl JobTable {
                     .into_owned()
                     .into_boxed_str(),
             };
-            self.outbox.push(Ledger::end(&report));
+            let log = finished
+                .log_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(Box::from);
+            self.outbox.push(Ledger::end(&report, log));
             self.reports.push_back(PendingReport {
                 report,
                 taken: false,
@@ -826,6 +841,33 @@ impl JobTable {
     }
 }
 
+/// Resolves one recovered job's log path. A name the job recorded at
+/// settlement wins; an older line falls back to the canonical file, then
+/// the debug-form name writers used before the single convention.
+async fn recover_log_path(dir: &std::path::Path, id: JobId, recorded: Option<&str>) -> PathBuf {
+    if let Some(name) = recorded.filter(|name| is_bare_file_name(name)) {
+        return dir.join(name);
+    }
+    let canonical = job_log_path(dir, id);
+    if tokio::fs::try_exists(&canonical).await.unwrap_or(false) {
+        return canonical;
+    }
+    // Logs named before the single convention used the JobId debug form.
+    let legacy = dir.join(format!("JobId({id}).log"));
+    if tokio::fs::try_exists(&legacy).await.unwrap_or(false) {
+        return legacy;
+    }
+    canonical
+}
+
+/// Returns whether `name` is a single file name with no path parts.
+fn is_bare_file_name(name: &str) -> bool {
+    std::path::Path::new(name)
+        .file_name()
+        .and_then(|name| name.to_str())
+        == Some(name)
+}
+
 fn invalid_transition() -> ToolError {
     ToolError::Failed(Box::new(io::Error::other("invalid job state transition")))
 }
@@ -1104,5 +1146,113 @@ mod tests {
             Err(JobsError::AlreadyEnded { id: ended }) if ended == id
         ));
         assert_eq!(jobs.ends_after(None).events.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn open_recovers_the_log_name_a_job_recorded() {
+        let root = tempfile::tempdir().expect("temporary job report ledger");
+        let mut jobs = JobTable::open(root.path().to_path_buf(), &HashSet::new())
+            .await
+            .expect("open ledger");
+        let id = JobId::new_v7();
+        let owner = Name::test();
+        // A job spawned before the canonical convention settles with a
+        // debug-named log; the End line records its real file name.
+        let legacy_name = format!("JobId({id}).log");
+        std::fs::write(root.path().join(&legacy_name), b"old output").expect("write legacy log");
+        jobs.spawn_owned(
+            JobRecord::new(
+                id,
+                "run",
+                root.path().join(&legacy_name),
+                CancellationToken::new(),
+            )
+            .owned_by(owner.clone()),
+        )
+        .expect("reserve owner job");
+        jobs.settle_owned(&owner, id, JobOutcome::Exited { code: 0 }, "report")
+            .expect("settle owner job");
+        jobs.flush().await.expect("persist ended report");
+        drop(jobs);
+
+        let jobs = JobTable::open(root.path().to_path_buf(), &HashSet::new())
+            .await
+            .expect("reopen ledger");
+        let listed = jobs.list();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            listed[0].log.as_deref(),
+            Some(root.path().join(&legacy_name).as_path()),
+            "the recorded file name must be recovered, not a guessed convention"
+        );
+    }
+
+    #[tokio::test]
+    async fn open_probes_historical_log_names_when_the_line_records_none() {
+        let root = tempfile::tempdir().expect("temporary job report ledger");
+        let legacy_id = JobId::new_v7();
+        let canonical_id = JobId::new_v7();
+        // Lines written before log names were recorded, replaying a debug-named
+        // log and a canonical-named log side by side.
+        let legacy = root.path().join(format!("JobId({legacy_id}).log"));
+        let canonical = job_log_path(root.path(), canonical_id);
+        std::fs::write(&legacy, b"old output").expect("write legacy log");
+        std::fs::write(&canonical, b"new output").expect("write canonical log");
+        let end = |id: JobId| {
+            sonic_rs::to_string(&Line::End {
+                id,
+                label: "run".into(),
+                outcome: JobOutcome::Exited { code: 0 },
+                text: "done".into(),
+                log: None,
+            })
+            .expect("serialize legacy end line")
+        };
+        std::fs::write(
+            root.path().join("reports.jsonl"),
+            format!("{}\n{}\n", end(legacy_id), end(canonical_id)),
+        )
+        .expect("write legacy ledger");
+
+        let jobs = JobTable::open(root.path().to_path_buf(), &HashSet::new())
+            .await
+            .expect("reopen legacy ledger");
+        let listed = jobs.list();
+        assert_eq!(listed.len(), 2);
+        let path_of = |id: JobId| {
+            listed
+                .iter()
+                .find(|row| row.id == id)
+                .and_then(|row| row.log.clone())
+        };
+        assert_eq!(path_of(legacy_id).as_deref(), Some(legacy.as_path()));
+        assert_eq!(path_of(canonical_id).as_deref(), Some(canonical.as_path()));
+    }
+
+    #[tokio::test]
+    async fn open_rejects_a_recorded_log_name_with_path_parts() {
+        let root = tempfile::tempdir().expect("temporary job report ledger");
+        let id = JobId::new_v7();
+        let line = sonic_rs::to_string(&Line::End {
+            id,
+            label: "run".into(),
+            outcome: JobOutcome::Exited { code: 0 },
+            text: "done".into(),
+            log: Some("../outside.log".into()),
+        })
+        .expect("serialize end line");
+        std::fs::write(root.path().join("reports.jsonl"), format!("{line}\n"))
+            .expect("write ledger");
+
+        let jobs = JobTable::open(root.path().to_path_buf(), &HashSet::new())
+            .await
+            .expect("reopen ledger");
+        let listed = jobs.list();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            listed[0].log.as_deref(),
+            Some(job_log_path(root.path(), id).as_path()),
+            "a recorded name with path parts must fall back to the job's file"
+        );
     }
 }

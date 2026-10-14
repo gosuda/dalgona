@@ -280,8 +280,10 @@ impl CommandHost for DriverHost {
         let jobs = Arc::clone(&self.jobs);
         let by = ClientId::new(caller.ext().as_str());
         let label = command_label(&command);
-        let log_path =
-            session_jobs_dir(&self.host, &self.workspace, self.session).join(format!("{id:?}.log"));
+        let log_path = crate::jobs::job_log_path(
+            &session_jobs_dir(&self.host, &self.workspace, self.session),
+            id,
+        );
         let record = JobRecord::new(
             id,
             label.clone(),
