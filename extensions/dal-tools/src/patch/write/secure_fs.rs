@@ -177,7 +177,12 @@ fn open_child_dir(parent: &File, _path: &Path, name: &OsStr) -> io::Result<File>
 
 #[cfg(unix)]
 fn create_child_dir(parent: &File, _path: &Path, name: &OsStr) -> io::Result<()> {
-    rustix::fs::mkdirat(parent, name, rustix::fs::Mode::RWXU).map_err(Into::into)
+    rustix::fs::mkdirat(
+        parent,
+        name,
+        rustix::fs::Mode::RWXU | rustix::fs::Mode::RWXG | rustix::fs::Mode::RWXO,
+    )
+    .map_err(Into::into)
 }
 
 #[cfg(unix)]
@@ -205,7 +210,7 @@ fn create_exclusive(parent: &File, _path: &Path, name: &OsStr) -> io::Result<Fil
         parent,
         name,
         OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::RUSR | Mode::WUSR,
+        Mode::RUSR | Mode::WUSR | Mode::RGRP | Mode::WGRP | Mode::ROTH | Mode::WOTH,
     )
     .map(File::from)
     .map_err(Into::into)
