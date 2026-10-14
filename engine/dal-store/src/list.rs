@@ -3,7 +3,7 @@
 use std::{
     collections::HashMap,
     fmt,
-    fs::{self, File},
+    fs,
     io::{self, Read},
     path::{Path, PathBuf},
     sync::{Mutex, PoisonError},
@@ -14,6 +14,9 @@ use dal_core::{
     BlobId, Entry, EntryKind, JournalPart, ListQuery, Page, Record, Seq, SessionId, SessionInfo,
     Workspace,
 };
+#[cfg(test)]
+use std::fs::File;
+
 use serde::{Deserialize, Serialize};
 
 use crate::{

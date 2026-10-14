@@ -171,6 +171,46 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn windows_atomic_replacement_keeps_a_protected_dacl() {
+        let dir = tempfile::tempdir().expect("scratch dir");
+        let path = dir.path().join("secret");
+        crate::util::write_atomic(&path, b"first", FileMode::Mode0600)
+            .expect("write private temp and publish");
+        let file = open_private_file(&path).expect("check first DACL");
+        assert!(file_is_private(&file).expect("inspect first DACL"));
+        drop(file);
+        crate::util::write_atomic(&path, b"second", FileMode::Mode0600)
+            .expect("replace private temp");
+        let file = open_private_file(&path).expect("check replacement DACL");
+        assert!(file_is_private(&file).expect("inspect replaced DACL"));
+        assert_eq!(std::fs::read(&path).expect("read replacement"), b"second");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn reparse_points_cannot_be_opened_as_private_files() {
+        let dir = tempfile::tempdir().expect("scratch dir");
+        let path = dir.path().join("secret");
+        create_new(&path, FileMode::Mode0600).expect("private file");
+        let link = dir.path().join("linked");
+        if std::os::windows::fs::symlink_file(&path, &link).is_err() {
+            // Creating symlinks needs Developer Mode or SeCreateSymbolicLinkPrivilege.
+            return;
+        }
+        assert!(open_private_file(&link).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn private_directory_is_created_with_a_protected_dacl() {
+        let dir = tempfile::tempdir().expect("scratch dir");
+        let path = dir.path().join("session").join("nested");
+        create_private_dir_all_windows(&path).expect("create private tree");
+        assert!(windows::dir_is_private(&path).expect("inspect directory"));
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn a_widened_windows_dacl_is_refused() {
         use std::process::Command;
 

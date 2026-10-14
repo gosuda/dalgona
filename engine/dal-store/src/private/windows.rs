@@ -17,16 +17,18 @@ use std::{
 };
 
 use windows_sys::Win32::{
-    Foundation::{CloseHandle, FALSE, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, LocalFree},
+    Foundation::{
+        CloseHandle, FALSE, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
+    },
     Security::{
         Authorization::{
             ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
             GetSecurityInfo, SE_FILE_OBJECT,
         },
-        ACCESS_ALLOWED_ACE, ACCESS_ALLOWED_ACE_TYPE, ACL, DACL_SECURITY_INFORMATION,
-        GetAce, GetSecurityDescriptorControl, GetTokenInformation, OWNER_SECURITY_INFORMATION,
-        PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED, SECURITY_ATTRIBUTES, TOKEN_QUERY,
-        TOKEN_USER, TokenUser,
+        ACCESS_ALLOWED_ACE, ACCESS_ALLOWED_ACE_TYPE, ACE_HEADER, ACL,
+        DACL_SECURITY_INFORMATION, GetAce, GetSecurityDescriptorControl, GetTokenInformation,
+        OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED,
+        SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
     },
     Storage::FileSystem::{
         CREATE_NEW, CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_NORMAL,
@@ -74,7 +76,7 @@ impl Descriptor {
 
     fn attributes(&self) -> SECURITY_ATTRIBUTES {
         SECURITY_ATTRIBUTES {
-            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+            nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>()).expect("small ABI struct"),
             lpSecurityDescriptor: self.0,
             bInheritHandle: FALSE,
         }
@@ -234,7 +236,9 @@ pub(super) fn is_private(file: &File) -> io::Result<bool> {
         )
     };
     if status != 0 {
-        return Err(io::Error::from_raw_os_error(status as i32));
+        return Err(io::Error::from_raw_os_error(
+            i32::try_from(status).unwrap_or(i32::MAX),
+        ));
     }
     let descriptor = Descriptor(raw_descriptor);
     if owner.is_null() || dacl.is_null() {
@@ -263,13 +267,14 @@ pub(super) fn is_private(file: &File) -> io::Result<bool> {
         if unsafe { GetAce(dacl, index, &raw mut ace) } == FALSE {
             return Err(io::Error::last_os_error());
         }
-        let entry = unsafe { &*ace.cast::<ACCESS_ALLOWED_ACE>() };
-        if entry.Header.AceType != ACCESS_ALLOWED_ACE_TYPE
-            || entry.Header.AceFlags != 0
-            || usize::from(entry.Header.AceSize) < size_of::<ACCESS_ALLOWED_ACE>()
+        let header = unsafe { &*ace.cast::<ACE_HEADER>() };
+        if header.AceType != ACCESS_ALLOWED_ACE_TYPE
+            || header.AceFlags != 0
+            || usize::from(header.AceSize) < size_of::<ACCESS_ALLOWED_ACE>()
         {
             return Ok(false);
         }
+        let entry = unsafe { &*ace.cast::<ACCESS_ALLOWED_ACE>() };
         let sid = ptr::addr_of!(entry.SidStart).cast_mut().cast();
         let trustee = sid_text(sid)?;
         if trustee != user && trustee != "S-1-5-18" && trustee != "S-1-5-32-544" {

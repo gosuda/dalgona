@@ -6,7 +6,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
@@ -1935,7 +1935,7 @@ mod tests {
         let path = directory.journal(&prefix);
         let prefix_len = u64::try_from(prefix.len()).expect("test offset");
         let expected_len = prefix_len + MAX_RECORD;
-        let file = OpenOptions::new()
+        let file = fs::OpenOptions::new()
             .write(true)
             .open(&path)
             .expect("open sparse journal fixture");
