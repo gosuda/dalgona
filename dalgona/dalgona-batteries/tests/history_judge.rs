@@ -219,6 +219,10 @@ async fn history_consolidation_uses_session_judge_identity() -> TestResult {
                 extension: Name::parse("history")?,
                 origin: Origin::Bundled,
                 services: extension.inject().capabilities(),
+                        scope: Some(dal_agent::GrantScope::for_workspace(
+                            extension.source_digest().expect("bundled code digest"),
+                            &workspace,
+                        )),
             },
             ClientId::new("history-judge"),
             Timestamp::now(),
