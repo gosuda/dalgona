@@ -20,7 +20,7 @@ pub(crate) mod session;
 pub use agent::{Agent, AnswerScope, Delivery, Subscription};
 pub use broker::Broker;
 pub use error::{AgentError, DenyReason, HostError, ServiceError, ToolError, ValidationError};
-pub use ext::grants::{GrantKey, GrantStore, GrantStoreError, PersistentGrant};
+pub use ext::grants::{GrantKey, GrantScope, GrantStore, GrantStoreError, PersistentGrant};
 pub use host::{
     DocEntry, Env, Host, HostSubscription, HostUpdate, Product, SessionRef, ShutdownReport,
 };
