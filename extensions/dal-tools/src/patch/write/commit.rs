@@ -223,8 +223,8 @@ fn stage_temp<'a>(
             .renamed_to
             .as_ref()
             .map_or(file.path.as_path(), |dest| dest.path.as_path());
-        match checked_read(fs, target_abs, dest) {
-            Ok(Some(_)) => {
+        match fs.exists_regular(target_abs) {
+            Ok(true) => {
                 cleanup_temps(fs, temps);
                 return Err(EngineError::new(
                     ErrorClass::File,
@@ -236,10 +236,19 @@ fn stage_temp<'a>(
                     ),
                 ));
             }
-            Ok(None) => {}
+            Ok(false) => {}
             Err(error) => {
                 cleanup_temps(fs, temps);
-                return Err(error);
+                if error.kind() == std::io::ErrorKind::InvalidData {
+                    return Err(non_regular_target(dest));
+                }
+                return Err(EngineError::new(
+                    ErrorClass::Io,
+                    format!(
+                        "patch: cannot check {}: {error}. Nothing was written.",
+                        dest.display()
+                    ),
+                ));
             }
         }
     }
@@ -671,6 +680,7 @@ mod tests {
             b"before\n"
         );
     }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn swapped_parent_at_commit_cannot_redirect_write_outside_workspace() {
@@ -699,7 +709,7 @@ mod tests {
                 path: PathBuf::from("parent/file.txt"),
                 absolute_path: target,
                 before: None,
-                after: Some(b"inside\\n".to_vec().into_boxed_slice()),
+                after: Some(b"inside\n".to_vec().into_boxed_slice()),
                 op: Operation::Create,
                 renamed_to: None,
                 hunks: Vec::new(),
@@ -714,12 +724,11 @@ mod tests {
         .expect("commit through pinned parent");
         assert_eq!(
             std::fs::read(workspace.join("moved/file.txt")).expect("pinned target"),
-            b"inside\\n"
+            b"inside\n"
         );
         assert!(
             !outside.path().join("file.txt").exists(),
             "commit must not create an outside file"
         );
     }
-
 }
