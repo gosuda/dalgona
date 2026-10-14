@@ -44,7 +44,7 @@ pub use family::anthropic::supports_tool_search;
 pub use http::{
     BODY_LIMIT, COMPACT_TIMEOUT, CONNECT_TIMEOUT, Exchange, LOGIN_WAIT, NON_STREAM_TOTAL_TIMEOUT,
     OAUTH_TIMEOUT, RESPONSE_HEADER_TIMEOUT, STREAM_IDLE_TIMEOUT, USAGE_TIMEOUT, WS_MESSAGE_LIMIT,
-    build_client, check_base_url, endpoint, read_body, send, user_agent,
+    build_client, build_client_no_redirect, check_base_url, endpoint, read_body, send, user_agent,
 };
 pub use provider::{
     AuthStyle, Completion, Device, Hook, Http, KeySpec, OAuthSpec, PROVIDERS, Provider,

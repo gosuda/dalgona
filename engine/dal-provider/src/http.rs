@@ -117,6 +117,30 @@ pub fn build_client() -> reqwest::Client {
         .expect("the reqwest TLS backend initializes")
 }
 
+/// A [`build_client`] client that returns every redirect to the caller
+/// instead of following it. A caller that validates each hop (the guarded
+/// web fetch loop) uses this so no hop escapes its checks.
+///
+/// # Panics
+///
+/// Panics when reqwest cannot initialize its TLS backend, which only a broken
+/// build configuration causes.
+#[must_use]
+#[expect(
+    clippy::expect_used,
+    reason = "the builder fails only when the compiled TLS backend cannot initialize"
+)]
+pub fn build_client_no_redirect() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .read_timeout(STREAM_IDLE_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .referer(false)
+        .retry(reqwest::retry::never())
+        .build()
+        .expect("the reqwest TLS backend initializes")
+}
+
 /// A [`build_client`] client built on first use.
 ///
 /// Building a client parses the platform trust roots, which costs tens of

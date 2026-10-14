@@ -205,6 +205,7 @@ fn fetch_request(pinned: &Pinned) -> dal_core::ext::FetchRequest {
         url: pinned.url.as_str().into(),
         headers,
         body: Vec::new(),
+        redirects: dal_core::ext::RedirectPolicy::Refuse,
     }
 }
 

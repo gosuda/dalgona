@@ -439,3 +439,53 @@ async fn a_cross_origin_redirect_never_carries_provider_credentials() {
     let seen = tokio::time::timeout(Duration::from_millis(300), leaked).await;
     assert!(seen.is_err(), "the redirect target received {seen:?}");
 }
+
+#[tokio::test]
+async fn the_no_redirect_client_surfaces_each_hop_to_its_caller() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let server = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = server.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        // Three connections: the no-redirect request, then the default
+        // client's initial request and its same-origin follow.
+        for _ in 0..3 {
+            let Ok((mut socket, _)) = server.accept().await else {
+                return;
+            };
+            let mut buffer = vec![0; 8192];
+            let Ok(length) = socket.read(&mut buffer).await else {
+                return;
+            };
+            let request = String::from_utf8_lossy(&buffer[..length]).into_owned();
+            let reply = if request.starts_with("GET /b") {
+                "HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok"
+            } else {
+                "HTTP/1.1 307 Temporary Redirect\r\nlocation: /b\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+            };
+            if socket.write_all(reply.as_bytes()).await.is_err() {
+                return;
+            }
+        }
+    });
+
+    let hop = build_client_no_redirect()
+        .get(format!("http://127.0.0.1:{port}/a"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        hop.status(),
+        reqwest::StatusCode::TEMPORARY_REDIRECT,
+        "the hop is returned for the caller to validate"
+    );
+
+    let followed = build_client()
+        .get(format!("http://127.0.0.1:{port}/a"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(followed.status(), reqwest::StatusCode::OK);
+    assert_eq!(followed.text().await.unwrap(), "ok");
+}

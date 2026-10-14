@@ -145,6 +145,7 @@ fn search_request(url: &reqwest::Url, api_key: &str) -> dal_core::ext::FetchRequ
             ("User-Agent".into(), super::USER_AGENT.into()),
         ],
         body: Vec::new(),
+        redirects: dal_core::ext::RedirectPolicy::Follow,
     }
 }
 
@@ -186,6 +187,7 @@ fn tavily_request(
             ("User-Agent".into(), super::USER_AGENT.into()),
         ],
         body: bytes,
+        redirects: dal_core::ext::RedirectPolicy::Follow,
     })
 }
 

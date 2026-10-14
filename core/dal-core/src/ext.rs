@@ -43,8 +43,8 @@ pub use ops::{
 pub use protocol::{
     AgentRefusal, AgentsReply, ExitStatusKind, FetchMethod, FetchRequest, FetchResponse, JobCounts,
     JobEndEvent, JobEnds, JobLine, JobLines, JobReport, JobStateView, JobStatus, JobsError,
-    JobsReply, McpRequest, McpResponse, RunOutput, RunRequest, RunRequestError, TurnOpReply,
-    WakeError,
+    JobsReply, McpRequest, McpResponse, RedirectPolicy, RunOutput, RunRequest, RunRequestError,
+    TurnOpReply, WakeError,
 };
 pub use scope::{Budget, OnError, ScopeSpec, ScopeSpecError, ScopeUsage};
 pub use scopes::{

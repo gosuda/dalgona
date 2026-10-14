@@ -2,10 +2,10 @@ use super::{
     AgentInfo, AgentRefusal, AgentReport, AgentStart, AgentState, AgentsOp, AgentsReply, CallId,
     Channel, CommandName, EntryId, FetchMethod, FetchRequest, FetchResponse, HookEvent,
     HookMismatch, HookOutcome, HookVerdict, InputVerdict, JobId, Mail, MailMode, McpRequest,
-    McpResponse, Name, Part, RUST_STREAM_EVENT, RawJson, RegistrationError, RepeatMode, RuleRecord,
-    RunRequest, RunRequestError, STAR_EVENTS, Service, ServiceSet, SessionId, SidecarName, Stop,
-    StreamVerdict, ToolCallEvent, ToolCallVerdict, ToolClass, TurnId, valid_tool_parameters,
-    valid_version,
+    McpResponse, Name, Part, RUST_STREAM_EVENT, RawJson, RedirectPolicy, RegistrationError,
+    RepeatMode, RuleRecord, RunRequest, RunRequestError, STAR_EVENTS, Service, ServiceSet,
+    SessionId, SidecarName, Stop, StreamVerdict, ToolCallEvent, ToolCallVerdict, ToolClass, TurnId,
+    valid_tool_parameters, valid_version,
 };
 
 use std::num::NonZeroU64;
@@ -475,6 +475,7 @@ fn fetch_request_and_response_round_trip_with_bounded_read() -> TestResult {
         url: "https://example.com/x".into(),
         headers: vec![("User-Agent".into(), "dalgon".into())],
         body: Vec::new(),
+        redirects: RedirectPolicy::Follow,
     };
     let encoded = sonic_rs::to_string(&request)?;
     assert!(encoded.contains("\"GET\""));

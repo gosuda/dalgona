@@ -88,6 +88,21 @@ pub struct FetchRequest {
     /// The request body bytes.
     #[serde(default)]
     pub body: Vec<u8>,
+    /// How the host resolves redirects for this request.
+    #[serde(default)]
+    pub redirects: RedirectPolicy,
+}
+
+/// How the host `net` service resolves HTTP redirects for a request.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum RedirectPolicy {
+    /// Follow redirects under the shared client policy.
+    #[default]
+    Follow,
+    /// Return the redirect response so the caller validates each hop itself.
+    Refuse,
 }
 
 /// An incoming HTTP response returned by the host `net` service.

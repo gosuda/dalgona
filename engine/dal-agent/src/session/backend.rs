@@ -12,8 +12,8 @@ use dal_core::ext::{Mail as ExtMail, Service, SidecarName};
 use dal_core::{
     AgentInfo, AgentRefusal, AgentReport, AgentState, AgentsOp, AgentsReply, ApprovalMode, BlobId,
     Command, EntryId, Expect, FetchMethod, FetchRequest, FetchResponse, Inference, JobsOp,
-    JobsReply, MailMode, ModelRequest, ModelRoute, Name, Notice, Part, RawJson, Reply, Request,
-    SessionId, StateError, StateOp, StateRecord, TurnOp, TurnOpReply, Workspace,
+    JobsReply, MailMode, ModelRequest, ModelRoute, Name, Notice, Part, RawJson, RedirectPolicy,
+    Reply, Request, SessionId, StateError, StateOp, StateRecord, TurnOp, TurnOpReply, Workspace,
 };
 use dal_provider::EventStream;
 use tokio::sync::oneshot;
@@ -653,7 +653,10 @@ impl SessionBackend for Backend {
                 FetchMethod::Patch => reqwest::Method::PATCH,
                 _ => reqwest::Method::GET,
             };
-            let client = dal_provider::build_client();
+            let client = match req.redirects {
+                RedirectPolicy::Follow => dal_provider::build_client(),
+                RedirectPolicy::Refuse => dal_provider::build_client_no_redirect(),
+            };
             let mut outgoing = client.request(method, req.url.as_ref()).body(req.body);
             for (name, value) in req.headers {
                 if let (Ok(name), Ok(value)) = (
