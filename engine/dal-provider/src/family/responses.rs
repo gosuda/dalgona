@@ -635,10 +635,13 @@ impl Decoder {
         data: &str,
         out: &mut Vec<StreamEvent>,
     ) -> Result<bool, ProviderError> {
-        if self.finished || data == DONE {
-            return Ok(self.finished);
+        if self.finished {
+            return Ok(true);
         }
         self.budget.admit_event(data.len())?;
+        if data == DONE {
+            return Ok(false);
+        }
         let head: Head = self.parse(data, "event")?;
         if let Some(sequence) = head.sequence_number {
             if self.sequence.is_some_and(|last| sequence < last) {

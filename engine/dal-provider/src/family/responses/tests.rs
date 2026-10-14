@@ -641,6 +641,20 @@ fn before_turn_text_follows_its_user_message_in_the_body() -> TestResult {
 }
 
 #[test]
+fn done_markers_stay_ignored_but_still_charge_the_event_budget() {
+    let mut decoder = Decoder::new(Family::Responses, "model");
+    let mut out = Vec::new();
+    for _ in 0..crate::stream_budget::STREAM_EVENTS_LIMIT {
+        assert!(matches!(decoder.feed("[DONE]", &mut out), Ok(false)));
+    }
+    assert!(matches!(
+        decoder.feed("[DONE]", &mut out),
+        Err(ProviderError::Limit(crate::error::LimitError::StreamEvents))
+    ));
+    assert!(out.is_empty());
+}
+
+#[test]
 fn cumulative_websocket_and_sse_arguments_share_the_event_budget() {
     let mut decoder = Decoder::new(Family::Responses, "model");
     let start = r#"{"type":"response.output_item.added","item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"run"}}"#;
