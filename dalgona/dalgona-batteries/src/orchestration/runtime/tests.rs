@@ -3388,10 +3388,6 @@ mod step_tests {
         services.agent_start_names()
     }
 
-    /// The session store refuses names made only of session-id characters;
-    /// a Task step keeps its counter in the child name so a hex-only step
-    /// name still admits. A regression here returns `Cancelled` from the
-    /// real backend and the step never runs.
     #[test]
     fn worktree_child_refuses_missing_isolation_context() {
         let services = Arc::new(FakeServices::default());
@@ -3425,6 +3421,10 @@ mod step_tests {
         assert!(shared.workspace.is_none());
     }
 
+    /// The session store refuses names made only of session-id characters;
+    /// a Task step keeps its counter in the child name so a hex-only step
+    /// name still admits. A regression here returns `Cancelled` from the
+    /// real backend and the step never runs.
     #[tokio::test]
     async fn a_task_step_mints_a_numbered_child_name() {
         let services = Arc::new(FakeServices::default());
