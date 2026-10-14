@@ -76,8 +76,6 @@ impl FrameCredit {
 
 #[cfg(test)]
 mod tests {
-    use std::future::Future;
-
     use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
     use tokio::sync::oneshot;
 
