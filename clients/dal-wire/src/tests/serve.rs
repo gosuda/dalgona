@@ -269,7 +269,12 @@ async fn token_file_auth_cases() {
         );
         let missing = http(addr, &base, "").await;
         assert_eq!(missing.status, 401, "{missing:?}");
-        let authorized = http(addr, &format!("{base}\r\nauthorization: Bearer {token}"), "").await;
+        let authorized = http(
+            addr,
+            &format!("{base}\r\nauthorization: Bearer {token}"),
+            "",
+        )
+        .await;
         assert_eq!(authorized.status, 404, "{authorized:?}");
     })
     .await;
