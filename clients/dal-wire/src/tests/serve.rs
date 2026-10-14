@@ -18,6 +18,21 @@ fn chat_body() -> &'static str {
     r#"{"model":"dalgon/normal","messages":[{"role":"user","content":"hi"}]}"#
 }
 
+/// Sends headers without the advertised body to prove early rejection.
+async fn headers_only(addr: SocketAddr, head: &str) -> HttpReply {
+    let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    stream
+        .write_all(format!("{head}\r\nconnection: close\r\n\r\n").as_bytes())
+        .await
+        .expect("write headers");
+    let mut bytes = Vec::new();
+    tokio::time::timeout(super::support::WAIT, stream.read_to_end(&mut bytes))
+        .await
+        .expect("early rejection in time")
+        .expect("read rejection");
+    parse_reply(&bytes)
+}
+
 async fn get(addr: SocketAddr, path: &str) -> HttpReply {
     http(
         addr,
@@ -223,6 +238,39 @@ async fn token_file_auth_cases() {
         )
         .await;
         assert_eq!(card.status, 200, "{card:?}");
+        let body = headers_only(
+            addr,
+            &format!(
+                "GET /.well-known/agent-card.json HTTP/1.1\r\n{}\r\ncontent-length: 33554432",
+                host_header(addr)
+            ),
+        )
+        .await;
+        assert_eq!(body.status, 400, "{body:?}");
+        assert_eq!(body.body, "GET requests must not have a body");
+        let chunked = headers_only(
+            addr,
+            &format!(
+                "GET /.well-known/agent-card.json HTTP/1.1\r\n{}\r\ntransfer-encoding: chunked",
+                host_header(addr)
+            ),
+        )
+        .await;
+        assert_eq!(chunked.status, 400, "{chunked:?}");
+    })
+    .await;
+
+    let mut without_a2a = public();
+    without_a2a.a2a = false;
+    with_serve(&rig, without_a2a, async |addr| {
+        let base = format!(
+            "GET /.well-known/agent-card.json HTTP/1.1\r\n{}",
+            host_header(addr)
+        );
+        let missing = http(addr, &base, "").await;
+        assert_eq!(missing.status, 401, "{missing:?}");
+        let authorized = http(addr, &format!("{base}\r\nauthorization: Bearer {token}"), "").await;
+        assert_eq!(authorized.status, 404, "{authorized:?}");
     })
     .await;
 }

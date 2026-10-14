@@ -4,11 +4,21 @@ use bytes::Bytes;
 use hyper::body::{Body, Frame};
 use hyper::{Request, Response, StatusCode};
 use sonic_rs::Value;
+use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 
 /// Maximum request body size in bytes.
 pub(super) const BODY_LIMIT: usize = 33_554_432;
+
+/// Maximum total retained body bytes across a listener.
+pub(super) const BODY_BUDGET: usize = 64 * 1024 * 1024;
+
+/// A buffered body retains its byte reservation until dispatch finishes.
+pub(super) struct BufferedBody {
+    pub bytes: Bytes,
+    _permit: Option<OwnedSemaphorePermit>,
+}
 
 /// Request body timeout.
 pub(super) const BODY_TIMEOUT: Duration = Duration::from_secs(60);
@@ -80,45 +90,64 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 /// writing after this point and the close resets instead — best effort.
 const DRAIN_LIMIT: usize = BODY_LIMIT;
 
-/// Reads one bounded request body with its timeout.
-pub(super) async fn read_body(req: Request<hyper::body::Incoming>) -> Result<Bytes, Resp> {
+/// Reserves the bytes of one frame before copying them into the body buffer.
+fn reserve_bytes(budget: &Arc<Semaphore>, size: usize) -> Result<OwnedSemaphorePermit, Resp> {
+    let permits = u32::try_from(size).expect("frame fits within BODY_LIMIT");
+    Arc::clone(budget)
+        .try_acquire_many_owned(permits)
+        .map_err(|_| Resp::text(503, "serve request body budget exhausted"))
+}
+
+/// Reads one bounded request body into a single buffer with its timeout.
+pub(super) async fn read_body(
+    req: Request<hyper::body::Incoming>,
+    budget: &Arc<Semaphore>,
+) -> Result<BufferedBody, Resp> {
     let (_parts, mut body) = req.into_parts();
-    let mut collected = 0usize;
-    let mut chunks = Vec::new();
     let read = async {
+        let mut out = Vec::new();
+        let mut held: Option<OwnedSemaphorePermit> = None;
         while let Some(frame) =
             futures::future::poll_fn(|cx| std::pin::Pin::new(&mut body).poll_frame(cx)).await
         {
             let Ok(frame) = frame else {
-                drain_body(&mut body).await;
                 return Err(Resp::text(400, "request body is not valid"));
             };
             if let Some(data) = frame.data_ref() {
-                collected += data.len();
-                if collected > BODY_LIMIT {
+                if data.len() > BODY_LIMIT - out.len() {
+                    // Release already-buffered bytes before draining the invalid body.
+                    drop(out);
+                    drop(held);
                     drain_body(&mut body).await;
                     return Err(Resp::text(
                         413,
                         &format!("request body exceeds {BODY_LIMIT} bytes"),
                     ));
                 }
-                chunks.push(data.clone());
+                if data.is_empty() {
+                    continue;
+                }
+                let permit = reserve_bytes(budget, data.len())?;
+                if out.try_reserve(data.len()).is_err() {
+                    return Err(Resp::text(503, "request body allocation failed"));
+                }
+                out.extend_from_slice(data);
+                if let Some(previous) = &mut held {
+                    previous.merge(permit);
+                } else {
+                    held = Some(permit);
+                }
             }
         }
-        Ok(chunks)
+        Ok(BufferedBody {
+            bytes: Bytes::from(out),
+            _permit: held,
+        })
     };
-    let chunks: Vec<Bytes> = match tokio::time::timeout(BODY_TIMEOUT, read).await {
-        Ok(Ok(chunks)) => chunks,
-        Ok(Err(resp)) => return Err(resp),
-        Err(_) => {
-            return Err(Resp::text(408, "request body was not received within 60 s"));
-        }
-    };
-    let mut out = Vec::with_capacity(collected);
-    for chunk in chunks {
-        out.extend_from_slice(&chunk);
+    match tokio::time::timeout(BODY_TIMEOUT, read).await {
+        Ok(result) => result,
+        Err(_) => Err(Resp::text(408, "request body was not received within 60 s")),
     }
-    Ok(Bytes::from(out))
 }
 
 /// Empties a rejected request body so the socket closes with no unread
@@ -191,5 +220,47 @@ impl Body for ServeBody {
                 std::task::Poll::Pending => std::task::Poll::Pending,
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use tokio::sync::{Barrier, Semaphore};
+
+    use super::reserve_bytes;
+
+    #[tokio::test]
+    async fn concurrent_body_admission_has_a_fixed_aggregate_ceiling() {
+        const CLIENTS: usize = 256;
+        const PER_REQUEST: usize = 1024;
+        const BUDGET: usize = 32 * PER_REQUEST;
+        let budget = Arc::new(Semaphore::new(BUDGET));
+        let start = Arc::new(Barrier::new(CLIENTS + 1));
+        let finish = Arc::new(Barrier::new(CLIENTS + 1));
+        let mut tasks = Vec::with_capacity(CLIENTS);
+        for _ in 0..CLIENTS {
+            let budget = Arc::clone(&budget);
+            let start = Arc::clone(&start);
+            let finish = Arc::clone(&finish);
+            tasks.push(tokio::spawn(async move {
+                start.wait().await;
+                let held = reserve_bytes(&budget, PER_REQUEST).ok();
+                finish.wait().await;
+                held
+            }));
+        }
+        start.wait().await;
+        finish.wait().await;
+
+        let mut admitted = Vec::new();
+        for task in tasks {
+            admitted.push(task.await.expect("admission task finished"));
+        }
+        assert_eq!(admitted.iter().filter(|permit| permit.is_some()).count(), 32);
+        assert_eq!(budget.available_permits(), 0);
+        drop(admitted);
+        assert_eq!(budget.available_permits(), BUDGET);
     }
 }
