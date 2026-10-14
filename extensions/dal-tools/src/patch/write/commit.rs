@@ -224,6 +224,33 @@ fn trash_path(session: &PatchSession, source: &std::path::Path) -> PathBuf {
         ))
 }
 
+/// Open the rename destination beneath the workspace without following
+/// symlinked parents.
+fn stage_rename_temp(
+    session: &PatchSession,
+    file: &StagedFileOwned,
+) -> Result<(PendingTemp, tokio::fs::File), EngineError> {
+    let dest = file.renamed_to.as_ref().ok_or_else(|| {
+        EngineError::new(
+            ErrorClass::Resolve,
+            "patch: rename is missing its validated destination.",
+        )
+    })?;
+    let (rename, handle) = RenameTemp::create(&session.workspace, &dest.path).map_err(|error| {
+        EngineError::new(
+            ErrorClass::Io,
+            format!(
+                "patch: cannot stage rename destination {}: {error}. Nothing was written.",
+                dest.path.display()
+            ),
+        )
+    })?;
+    Ok((
+        PendingTemp::Rename(rename),
+        tokio::fs::File::from_std(handle),
+    ))
+}
+
 /// Phase A: stage after-images for publication. Rename destinations are
 /// opened under the workspace without following symlinked parents.
 async fn stage_temp(
@@ -264,23 +291,7 @@ async fn stage_temp(
     }
 
     let (pending, mut handle) = if file.op == super::super::ir::Operation::Rename {
-        let dest = file.renamed_to.as_ref().ok_or_else(|| {
-            EngineError::new(
-                ErrorClass::Resolve,
-                "patch: rename is missing its validated destination.",
-            )
-        })?;
-        let (rename, handle) =
-            RenameTemp::create(&session.workspace, &dest.path).map_err(|error| {
-                EngineError::new(
-                    ErrorClass::Io,
-                    format!(
-                        "patch: cannot stage rename destination {}: {error}. Nothing was written.",
-                        dest.path.display()
-                    ),
-                )
-            })?;
-        (PendingTemp::Rename(rename), tokio::fs::File::from_std(handle))
+        stage_rename_temp(session, file)?
     } else {
         let parent = target_abs.parent().unwrap_or(session.workspace.as_path());
         tokio::fs::create_dir_all(parent).await.map_err(|error| {

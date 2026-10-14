@@ -348,7 +348,10 @@ fn resolve_rename_destination(workspace: &Path, raw: &Path) -> Result<RenameTarg
             "patch: rename destination must name a file.".to_owned(),
         ));
     }
-    Ok(RenameTarget { path, absolute_path })
+    Ok(RenameTarget {
+        path,
+        absolute_path,
+    })
 }
 
 fn edit_path(edit: &Edit) -> &Path {
