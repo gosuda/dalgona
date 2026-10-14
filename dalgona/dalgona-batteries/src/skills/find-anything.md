@@ -18,12 +18,6 @@ Use `search` with mode `symbol` when you need a definition by name, a qualified 
 
 Example: `search(mode = "symbol", pattern = "Engine::run")`.
 
-## procs
-
-Use `procs` when the answer is in the retained output of a background job in this session. List jobs first when you need an id; grep job output when you know the text.
-
-Example: `procs(op = "grep", query = "panic")`.
-
 ## monitor
 
 Use `monitor` when a background exec job in this session should wake you on matching output as it streams. Watch one job id with a regex filter; the matching lines arrive as messages without polling.
