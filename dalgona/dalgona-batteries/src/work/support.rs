@@ -131,7 +131,7 @@ impl FakeServices {
     pub(crate) fn agent_start_names(&self) -> Vec<String> {
         locked(&self.agent_starts)
             .iter()
-            .map(|start| start.name.to_string())
+            .map(|start| start.name.as_deref().unwrap_or_default().to_owned())
             .collect()
     }
 
@@ -250,7 +250,7 @@ impl Services for FakeServices {
                 locked(&self.agent_starts).push(start);
                 // Mirror the store's session-name admission rule so a child
                 // name that the real host would refuse fails here too.
-                if !name_admitted(&name) {
+                if name.as_deref().is_some_and(|name| !name_admitted(name)) {
                     return Box::pin(async {
                         Err(ServiceError::failed(
                             Some(Service::Agents),

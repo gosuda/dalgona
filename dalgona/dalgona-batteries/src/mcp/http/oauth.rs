@@ -624,7 +624,13 @@ async fn fetch_resource_metadata(
 fn resource_metadata_urls(target: &Url, explicit: Option<&str>) -> Result<Vec<Url>, McpError> {
     let mut candidates = Vec::new();
     if let Some(explicit) = explicit {
-        candidates.push(parse_endpoint(explicit)?);
+        let metadata_url = parse_endpoint(explicit)?;
+        if metadata_url.origin() != target.origin() {
+            return Err(auth_error(
+                "protected-resource metadata URL must share the MCP server origin",
+            ));
+        }
+        candidates.push(metadata_url);
     }
     let origin = target.origin().ascii_serialization();
     let path = target.path().trim_matches('/');
@@ -1183,6 +1189,65 @@ mod tests {
         )
     }
 
+    #[test]
+    fn resource_metadata_requires_same_origin() {
+        let target = Url::parse("https://mcp.example.test/mcp").expect("target URL");
+        for explicit in [
+            "https://attacker.example.test/metadata",
+            "https://mcp.example.test:8443/metadata",
+            "http://mcp.example.test/metadata",
+            "https://127.0.0.1/metadata",
+            "http://localhost:9000/metadata",
+            "https://10.0.0.7/metadata",
+            "https://169.254.169.254/metadata",
+        ] {
+            assert!(
+                resource_metadata_urls(&target, Some(explicit)).is_err(),
+                "accepted cross-origin metadata: {explicit}"
+            );
+        }
+
+        let same_origin = "https://MCP.EXAMPLE.TEST:443/custom/metadata";
+        let accepted =
+            resource_metadata_urls(&target, Some(same_origin)).expect("same-origin metadata");
+        assert_eq!(
+            accepted.first().expect("explicit metadata").as_str(),
+            "https://mcp.example.test/custom/metadata"
+        );
+    }
+
+    #[tokio::test]
+    async fn cross_origin_challenge_never_connects_to_its_metadata_url() {
+        let (target, _target_listener) = discovery_fixture().await;
+        let unauthorized_listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("unauthorized listener");
+        let unauthorized_address = unauthorized_listener
+            .local_addr()
+            .expect("unauthorized address");
+        let challenge = Challenge {
+            resource_metadata: Some(format!("http://{unauthorized_address}/metadata")),
+            ..Challenge::default()
+        };
+        let oauth = OAuthClient {
+            client: Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .no_proxy()
+                .build()
+                .expect("metadata client"),
+            policy: NetworkPolicy::for_target(&target),
+        };
+        let cancel = CancellationToken::new();
+        let result =
+            discover(&oauth, &target, &challenge, Duration::from_millis(200), &cancel).await;
+
+        assert!(matches!(result, Err(McpError::Auth { .. })));
+        assert!(
+            unauthorized_listener.try_accept().is_err(),
+            "a cross-origin metadata URL received an HTTP connection"
+        );
+    }
+
     #[tokio::test]
     async fn discovery_rejects_authorization_server_issuer_mismatch() {
         let (target, listener) = discovery_fixture().await;
@@ -1234,16 +1299,21 @@ mod tests {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("metadata client");
-        let challenge = Challenge::default();
+        let metadata_url = format!("{}/custom/metadata", target.origin().ascii_serialization());
+        let challenge = Challenge {
+            resource_metadata: Some(metadata_url),
+            ..Challenge::default()
+        };
         let oauth = OAuthClient {
             client,
             policy: NetworkPolicy::for_target(&target),
         };
         let cancel = CancellationToken::new();
-        let (result, _) = tokio::join!(
+        let (result, paths) = tokio::join!(
             discover(&oauth, &target, &challenge, Duration::from_secs(3), &cancel,),
             server,
         );
+        assert!(paths[0].contains("/custom/metadata"));
         let discovered = result.expect("bound metadata");
         assert_eq!(discovered.issuer, issuer);
         assert_eq!(discovered.resource, auth::canonical_resource(&target));

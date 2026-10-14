@@ -30,7 +30,7 @@
 //! [`AuthStore::store`]: crate::auth::credential::AuthStore::store
 
 use std::{
-    fs::{File, OpenOptions, TryLockError},
+    fs::{File, TryLockError},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -76,7 +76,7 @@ pub(crate) async fn lock_auth_file(auth_path: &Path) -> Result<File, ProviderErr
     let lock_path = lock_path(auth_path)?;
     let open_path = lock_path.clone();
     let file = blocking(move || {
-        open_lock_file(&open_path).map_err(|error| ProviderError::AuthWrite {
+        dal_store::open_private_lock(&open_path).map_err(|error| ProviderError::AuthWrite {
             reason: format!("could not open {}: {error}", open_path.display()),
         })
     })
@@ -129,17 +129,6 @@ fn lock_path(auth_path: &Path) -> Result<PathBuf, ProviderError> {
     let mut lock_name = name.to_os_string();
     lock_name.push(".lock");
     Ok(auth_path.with_file_name(lock_name))
-}
-
-fn open_lock_file(path: &Path) -> std::io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.read(true).write(true).create(true).truncate(false);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    options.open(path)
 }
 
 #[cfg(test)]

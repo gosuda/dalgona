@@ -350,6 +350,7 @@ pub(crate) async fn open(
             kind,
             turn,
         )
+        .with_extension(extension)
     };
     let token = cancel.child_token();
     let guard = token.clone().drop_guard();
@@ -493,6 +494,27 @@ impl ModelCxRuntime for Run {
             services
                 .script_infer_with(who, request, Some(script), cancel)
                 .await
+        })
+    }
+
+    fn script_forward<'a>(
+        &'a self,
+        who: &'a Caller,
+        request: ModelRequest,
+        private: &'a [PrivateTool],
+        cancel: CancellationToken,
+    ) -> BoxFuture<'a, Result<EventStream, crate::error::ServiceError>> {
+        Box::pin(async move {
+            let Some(services) = &self.script_services else {
+                return Err(crate::error::ServiceError::failed(
+                    None,
+                    "models.forward is unavailable outside a session",
+                ));
+            };
+            services.authorize_script_infer(who, cancel).await?;
+            self.forward(request, private)
+                .await
+                .map_err(|error| crate::error::ServiceError::failed(None, error.to_string()))
         })
     }
 

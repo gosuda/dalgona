@@ -17,6 +17,30 @@ pub enum LimitError {
     WsMessage,
     /// One non-streaming response body grew past 16 MiB.
     Body,
+    /// One response carried more than 128 MiB of cumulative event data.
+    StreamBytes,
+    /// One response contained more than 65536 events.
+    StreamEvents,
+    /// One response retained more than 16384 persistent items.
+    StreamItems,
+}
+
+impl LimitError {
+    /// The one next-action sentence for this failure.
+    ///
+    /// Every cap applies to one reply, so a fresh request resets it. A limit
+    /// that keeps firing names a reply no provider response budget can carry.
+    #[must_use]
+    pub fn fix(&self) -> String {
+        match self {
+            Self::SseLine | Self::SseEvent | Self::WsMessage | Self::Body => {
+                String::from("Retry the request, or ask for a smaller reply.")
+            }
+            Self::StreamBytes | Self::StreamEvents | Self::StreamItems => {
+                String::from("Retry the request, or split the task into smaller steps.")
+            }
+        }
+    }
 }
 
 impl fmt::Display for LimitError {
@@ -26,6 +50,9 @@ impl fmt::Display for LimitError {
             Self::SseEvent => f.write_str("SSE event exceeds 8 MiB."),
             Self::WsMessage => f.write_str("WebSocket message exceeds 16 MiB."),
             Self::Body => f.write_str("response body exceeds 16 MiB."),
+            Self::StreamBytes => f.write_str("provider stream exceeds 128 MiB of event data."),
+            Self::StreamEvents => f.write_str("provider stream exceeds 65536 events."),
+            Self::StreamItems => f.write_str("provider stream exceeds 16384 retained items."),
         }
     }
 }

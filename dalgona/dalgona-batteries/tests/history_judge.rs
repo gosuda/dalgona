@@ -215,11 +215,8 @@ async fn history_consolidation_uses_session_judge_identity() -> TestResult {
     let extension = history(HistoryConfig::Enabled { share: 0.4 })?;
     GrantStore::new(data.clone())
         .grant(
-            GrantKey {
-                extension: Name::parse("history")?,
-                origin: Origin::Bundled,
-                services: extension.inject().capabilities(),
-            },
+            GrantKey::for_extension(&extension, workspace.as_path())
+                .expect("history has a code identity"),
             ClientId::new("history-judge"),
             Timestamp::now(),
         )
