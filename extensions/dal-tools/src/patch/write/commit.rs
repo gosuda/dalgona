@@ -8,7 +8,7 @@ use super::super::ir::{
 };
 
 use super::super::resolve::revalidate_path;
-use super::{PatchSession, ensure_regular_target, non_regular_target};
+use super::{PatchSession, non_regular_target};
 
 fn lock_table()
 -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>> {
@@ -19,9 +19,8 @@ fn lock_table()
 }
 
 /// Acquires the canonical write set in ascending byte order — sources and
-/// rename destinations together — and re-checks every `before` digest under
-/// those guards. Two applies cannot interleave differently, and approval
-/// cannot go stale undetected.
+/// rename destinations together. The caller verifies the before-image under
+/// these guards using pinned directory handles, so approval cannot go stale.
 async fn prepare_write_set(
     session: &PatchSession,
     plan: &Plan,
@@ -66,33 +65,6 @@ async fn prepare_write_set(
         revalidate_path(&session.workspace, &file.path, &file.absolute_path)?;
         if let Some(dest) = file.renamed_to.as_ref() {
             revalidate_path(&session.workspace, &dest.path, &dest.absolute_path)?;
-        }
-    }
-    for file in &ordered {
-        if let Some(expected) = file.before.as_deref() {
-            ensure_regular_target(&file.absolute_path, &file.path).await?;
-            let current = tokio::fs::read(&file.absolute_path)
-                .await
-                .unwrap_or_default();
-            if current != expected {
-                drop(guards);
-                return Err(EngineError::new(
-                    ErrorClass::Stale,
-                    format!(
-                        "patch: {} changed while you were approving. Nothing was written. Try again.",
-                        file.path.display()
-                    ),
-                ));
-            }
-        } else if let Ok(metadata) = tokio::fs::metadata(&file.absolute_path).await {
-            if !metadata.is_file() {
-                return Err(non_regular_target(&file.path));
-            }
-            drop(guards);
-            return Err(EngineError::new(
-                ErrorClass::File,
-                format!("patch: {} already exists.", file.path.display()),
-            ));
         }
     }
     Ok(guards)
