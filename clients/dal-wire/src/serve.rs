@@ -1,7 +1,7 @@
 //! HTTP/1.1 serve listener: lifecycle, guards, and route dispatch.
 //!
-//! Hyper serves HTTP/1.1 only on a Tokio `TcpListener` with a 256-connection
-//! cap. The pipeline is route, browser guard, authentication, content type,
+//! Hyper serves HTTP/1.1 only on a Tokio `TcpListener` with a shared
+//! 256-connection cap across HTTP and upgraded stream drivers. The pipeline is route, browser guard, authentication, content type,
 //! bounded body, then the route handler. OpenAI routes run through the
 //! router, A2A routes through `a2a`, and `/v1/ws` plus `/codex/ws` upgrade
 //! to WebSockets. Loopback binds need no token; public binds require the
@@ -62,7 +62,7 @@ impl ServeHandle {
     }
 }
 
-/// Maximum concurrent HTTP connections.
+/// Maximum concurrent HTTP connections and upgraded stream drivers.
 const CONN_CAP: usize = 256;
 /// Maximum request header buffer size in bytes.
 const HEADER_LIMIT: usize = 1_048_576;
@@ -127,7 +127,22 @@ pub(crate) fn listen(
     local_addr: SocketAddr,
     stop: CancellationToken,
 ) -> ServeHandle {
-    let (driver_tx, mut driver_rx) = mpsc::channel::<Driver>(CONN_CAP);
+    listen_bounded(host, cfg, listener, local_addr, stop, CONN_CAP)
+}
+
+/// Binds a listener with one connection budget across HTTP and stream drivers.
+///
+/// `cap` must be nonzero.
+pub(crate) fn listen_bounded(
+    host: Host,
+    cfg: ListenerCfg,
+    listener: TcpListener,
+    local_addr: SocketAddr,
+    stop: CancellationToken,
+    cap: usize,
+) -> ServeHandle {
+    assert!(cap > 0, "connection cap must be nonzero");
+    let (driver_tx, mut driver_rx) = mpsc::channel::<Driver>(cap);
     let ctx = Arc::new(ServeCtx {
         host,
         cfg,
@@ -140,11 +155,14 @@ pub(crate) fn listen(
     let done = async move {
         let mut conns: FuturesUnordered<Driver> = FuturesUnordered::new();
         let mut drivers: FuturesUnordered<Driver> = FuturesUnordered::new();
+        // HTTP connections stay in `conns` until they finish. Upgraded
+        // streams transfer through `driver_rx` into `drivers`. A handoff
+        // can briefly be counted twice, which only makes the cap stricter.
         loop {
             tokio::select! {
                 biased;
                 () = stop.cancelled() => break,
-                accepted = listener.accept(), if conns.len() < CONN_CAP => {
+                accepted = listener.accept(), if conns.len() + driver_rx.len() + drivers.len() < cap => {
                     match accepted {
                         Ok((stream, _)) => {
                             let ctx = Arc::clone(&ctx);
