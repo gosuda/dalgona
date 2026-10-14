@@ -43,6 +43,7 @@ use crate::{
     http::{self, STREAM_IDLE_TIMEOUT, WS_MESSAGE_LIMIT},
     retry::{self, RequestState, RetryDecision},
     stream::{EventStream, NoticeSink, StreamEvent},
+    stream_budget::{self, STREAM_TOTAL_TIMEOUT},
 };
 
 /// The exact fallback notice prefix. The final error text follows one space.
@@ -374,19 +375,28 @@ impl WsSessions {
                 }
                 continue;
             }
-            let pending = match first_frame(&mut socket, drive.wire, drive.cancel).await {
-                Ok(frame) => frame,
-                Err(failure) if failure.status == Some(401) => {
+            let pending = match timeout(
+                STREAM_TOTAL_TIMEOUT,
+                first_frame(&mut socket, drive.wire, drive.cancel),
+            )
+            .await
+            {
+                Ok(Ok(frame)) => frame,
+                Ok(Err(failure)) if failure.status == Some(401) => {
                     close_socket(&mut socket).await;
                     lock(&drive.session.state).idle = None;
                     return Ok(WsTurn::HttpsFallback);
                 }
-                Err(failure) => {
+                Ok(Err(failure)) => {
                     if let Some(error) = self.retry_failure(failure, retry).await? {
                         last_failure = Some(error);
                         break;
                     }
                     continue;
+                }
+                Err(_) => {
+                    close_socket(&mut socket).await;
+                    return Err(ProviderError::Limit(LimitError::StreamDuration));
                 }
             };
             return Ok(self.emit_stream(&mut drive, socket, pending, born));
@@ -420,9 +430,15 @@ impl WsSessions {
         let events = stream::unfold(source, |mut source| async move {
             source.next().await.map(|item| (item, source))
         });
-        WsTurn::Stream(EventStream::new(events, move || {
-            lock(&session_on_cancel.state).idle = None;
-        }))
+        WsTurn::Stream(EventStream::new(
+            stream_budget::timeboxed(
+                events,
+                tokio::time::Instant::now() + STREAM_TOTAL_TIMEOUT,
+            ),
+            move || {
+                lock(&session_on_cancel.state).idle = None;
+            },
+        ))
     }
 
     fn latch_fallback(drive: &TurnDrive<'_>, last_failure: Option<ProviderError>) -> WsTurn {
