@@ -699,7 +699,6 @@ mod tests {
         );
     }
 
-
     fn assert_overlap_rejected(setup: &SandboxInputs<'_>, writable: &Path, guarded: &Path) {
         let error = resolve_launcher(setup).expect_err("overlapping root must block launch");
         let writable = std::fs::canonicalize(writable).expect("canonical writable");
