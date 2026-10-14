@@ -5,7 +5,7 @@ use std::sync::Arc;
 use hyper::{Request, Response, StatusCode};
 
 use super::guard::ws_upgrade_denial;
-use super::{Driver, Resp, ServeBody, ServeCtx, into_response};
+use super::{ConnectionPermit, Driver, Resp, ServeBody, ServeCtx, into_response};
 use crate::token::SecretToken;
 
 /// Serves a WebSocket upgrade: validates, answers 101, and drives the
@@ -14,6 +14,7 @@ pub(super) async fn upgrade_response(
     ctx: Arc<ServeCtx>,
     req: Request<hyper::body::Incoming>,
     route: crate::router::ServeRoute,
+    permit: ConnectionPermit,
 ) -> Response<ServeBody> {
     let header = |name: &str| {
         req.headers()
@@ -69,7 +70,12 @@ pub(super) async fn upgrade_response(
             offered,
         )),
     };
-    ctx.drive(driver).await;
+    // Retain the HTTP connection's permit until the upgraded driver ends.
+    ctx.drive(Box::pin(async move {
+        driver.await;
+        drop(permit);
+    }))
+    .await;
     let mut builder = Response::builder()
         .status(StatusCode::SWITCHING_PROTOCOLS)
         .header("upgrade", "websocket")

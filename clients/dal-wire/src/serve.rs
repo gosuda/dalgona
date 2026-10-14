@@ -1,7 +1,8 @@
 //! HTTP/1.1 serve listener: lifecycle, guards, and route dispatch.
 //!
-//! Hyper serves HTTP/1.1 only on a Tokio `TcpListener` with a 256-connection
-//! cap. The pipeline is route, browser guard, authentication, content type,
+//! Hyper serves HTTP/1.1 on a Tokio `TcpListener` with a 256-connection
+//! lifetime cap shared with upgraded WebSockets. The pipeline is route,
+//! browser guard, authentication, content type,
 //! bounded body, then the route handler. OpenAI routes run through the
 //! router, A2A routes through `a2a`, and `/v1/ws` plus `/codex/ws` upgrade
 //! to WebSockets. Loopback binds need no token; public binds require the
@@ -22,7 +23,7 @@ use dal_core::ApprovalMode;
 use futures::{StreamExt, stream::FuturesUnordered};
 use hyper::{Request, Response};
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::error::WireError;
@@ -62,8 +63,8 @@ impl ServeHandle {
     }
 }
 
-/// Maximum concurrent HTTP connections.
-const CONN_CAP: usize = 256;
+/// Maximum concurrent HTTP and upgraded WebSocket connections.
+pub(crate) const CONN_CAP: usize = 256;
 /// Maximum request header buffer size in bytes.
 const HEADER_LIMIT: usize = 1_048_576;
 /// Stop drain grace.
@@ -119,6 +120,9 @@ impl ServeCtx {
 
 /// One live stream or upgrade future owned by the accept loop.
 pub(crate) type Driver = futures::future::BoxFuture<'static, ()>;
+/// One listener slot shared between an HTTP connection and its upgrade driver.
+type ConnectionPermit = Arc<OwnedSemaphorePermit>;
+
 /// Binds the accept loop for one listener and returns its handle.
 pub(crate) fn listen(
     host: Host,
@@ -127,6 +131,7 @@ pub(crate) fn listen(
     local_addr: SocketAddr,
     stop: CancellationToken,
 ) -> ServeHandle {
+    let permits = Arc::new(Semaphore::new(CONN_CAP));
     let (driver_tx, mut driver_rx) = mpsc::channel::<Driver>(CONN_CAP);
     let ctx = Arc::new(ServeCtx {
         host,
@@ -144,12 +149,17 @@ pub(crate) fn listen(
             tokio::select! {
                 biased;
                 () = stop.cancelled() => break,
-                accepted = listener.accept(), if conns.len() < CONN_CAP => {
+                accepted = listener.accept(), if permits.available_permits() > 0 => {
                     match accepted {
                         Ok((stream, _)) => {
+                            // Only the accept loop acquires permits. The guard above
+                            // proves that one is available.
+                            let permit = Arc::new(Arc::clone(&permits)
+                                .try_acquire_owned()
+                                .expect("connection permit available"));
                             let ctx = Arc::clone(&ctx);
                             conns.push(Box::pin(async move {
-                                serve_conn(ctx, stream).await;
+                                serve_conn(ctx, stream, permit).await;
                             }));
                         }
                         Err(error) => {
@@ -208,12 +218,13 @@ fn libc_enfile() -> i32 {
 }
 
 /// Serves one HTTP/1.1 connection to completion.
-async fn serve_conn(ctx: Arc<ServeCtx>, stream: tokio::net::TcpStream) {
+async fn serve_conn(ctx: Arc<ServeCtx>, stream: tokio::net::TcpStream, permit: ConnectionPermit) {
     let io = hyper_util::rt::TokioIo::new(stream);
     let shutdown = ctx.shutdown.clone();
     let service = hyper::service::service_fn(move |req: Request<hyper::body::Incoming>| {
         let ctx = Arc::clone(&ctx);
-        async move { Ok::<_, hyper::Error>(handle_request(ctx, req).await) }
+        let permit = Arc::clone(&permit);
+        async move { Ok::<_, hyper::Error>(handle_request(ctx, req, permit).await) }
     });
     let conn = hyper::server::conn::http1::Builder::new()
         .max_buf_size(HEADER_LIMIT)
@@ -236,6 +247,7 @@ async fn serve_conn(ctx: Arc<ServeCtx>, stream: tokio::net::TcpStream) {
 async fn handle_request(
     ctx: Arc<ServeCtx>,
     req: Request<hyper::body::Incoming>,
+    permit: ConnectionPermit,
 ) -> Response<ServeBody> {
     let method = req.method().to_string();
     let path = req.uri().path().to_owned();
@@ -261,7 +273,7 @@ async fn handle_request(
         return into_response(resp);
     }
     if upgrade_route {
-        return upgrade_response(ctx, req, route).await;
+        return upgrade_response(ctx, req, route, permit).await;
     }
     if requires_json(&route)
         && let Err(resp) = content_guard(&req, &route)

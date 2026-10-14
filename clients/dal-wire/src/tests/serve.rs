@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use sonic_rs::JsonValueTrait;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -342,6 +343,49 @@ async fn an_a2a_session_defaults_an_extension_question_at_once() {
             result_text(&rig, context, "probe_ask", false).await,
             "default"
         );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn upgraded_websockets_share_the_http_connection_cap() {
+    let rig = rig(&[]).await;
+    with_serve(&rig, router_options(&rig), async |addr| {
+        let mut peers = Vec::with_capacity(crate::serve::CONN_CAP);
+        for index in 0..crate::serve::CONN_CAP {
+            let route = if index % 2 == 0 {
+                "/v1/ws"
+            } else {
+                "/codex/ws"
+            };
+            let url = format!("ws://{addr}{route}");
+            let (peer, _) = tokio::time::timeout(
+                Duration::from_secs(10),
+                tokio_tungstenite::connect_async(url.as_str()),
+            )
+            .await
+            .expect("upgrade completes before cap")
+            .expect("upgrade succeeds");
+            peers.push(peer);
+        }
+
+        let url = format!("ws://{addr}/v1/ws");
+        let extra = tokio::time::timeout(
+            Duration::from_secs(1),
+            tokio_tungstenite::connect_async(url.as_str()),
+        )
+        .await;
+        assert!(extra.is_err(), "an upgraded connection bypassed the listener cap");
+
+        drop(peers.pop().expect("one upgraded connection"));
+        let (replacement, _) = tokio::time::timeout(
+            Duration::from_secs(10),
+            tokio_tungstenite::connect_async(url.as_str()),
+        )
+        .await
+        .expect("a released permit admits a new connection")
+        .expect("replacement upgrade succeeds");
+        peers.push(replacement);
     })
     .await;
 }
