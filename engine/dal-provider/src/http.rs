@@ -13,6 +13,8 @@
 //!   also caps the wait for response headers.
 //! - [`RESPONSE_HEADER_TIMEOUT`]: reqwest has no header-only deadline, so
 //!   [`send`] races the response head against a caller-supplied timer.
+//! - Stream total ([`crate::stream_budget::STREAM_TOTAL_TIMEOUT`]): the
+//!   decoder and WebSocket adapter bound the complete streaming reply.
 //! - Totals ([`NON_STREAM_TOTAL_TIMEOUT`], [`COMPACT_TIMEOUT`],
 //!   [`USAGE_TIMEOUT`], [`OAUTH_TIMEOUT`]): the per-request deadline of
 //!   [`Exchange::Json`], covering connect through the last body byte.
@@ -70,8 +72,9 @@ const MAX_REDIRECTS: usize = 10;
 /// total deadline.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Exchange {
-    /// An SSE response: `accept: text/event-stream` and no total deadline; the
-    /// stream is bounded by [`STREAM_IDLE_TIMEOUT`] between reads.
+    /// An SSE response: `accept: text/event-stream` and no reqwest total
+    /// deadline; the decoding layer bounds the stream's total duration,
+    /// alongside [`STREAM_IDLE_TIMEOUT`] between reads.
     Stream,
     /// One JSON response: `accept: application/json`, bounded end to end by
     /// `total`, one of the total timeout constants of this module.
