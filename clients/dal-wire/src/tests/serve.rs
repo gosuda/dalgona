@@ -6,8 +6,8 @@ use sonic_rs::JsonValueTrait;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::support::{
-    HttpReply, ask_probe_extension, host_header, http, parse_reply, result_text, rig,
-    rig_with_extensions, router_options, text_step, tool_step, with_serve, WAIT,
+    HttpReply, WAIT, ask_probe_extension, host_header, http, parse_reply, result_text, rig,
+    rig_with_extensions, router_options, text_step, tool_step, with_serve,
 };
 use crate::error::ServeError;
 #[cfg(unix)]
