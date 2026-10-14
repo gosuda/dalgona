@@ -98,13 +98,9 @@ async fn rename_destinations_reject_parent_traversal_and_absolute_paths() {
         outside.path().join("escape.txt").display().to_string(),
     ];
     for destination in destinations {
-        let error = plan(
-            &session,
-            DialectId::ApplyPatch,
-            &rename_patch(&destination),
-        )
-        .await
-        .expect_err("rename must stay within the workspace");
+        let error = plan(&session, DialectId::ApplyPatch, &rename_patch(&destination))
+            .await
+            .expect_err("rename must stay within the workspace");
         assert_eq!(
             error.class,
             super::ir::ErrorClass::File,
@@ -125,7 +121,9 @@ async fn rename_destinations_reject_parent_traversal_and_absolute_paths() {
 async fn rename_into_new_workspace_directory_commits() {
     let workspace = tempfile::tempdir().expect("workspace");
     let source = workspace.path().join("a.txt");
-    tokio::fs::write(&source, b"old\n").await.expect("seed source");
+    tokio::fs::write(&source, b"old\n")
+        .await
+        .expect("seed source");
     let session = test_session(workspace.path(), false);
     let staged = plan(
         &session,
@@ -154,7 +152,9 @@ async fn rename_destination_created_after_approval_is_not_replaced() {
     let workspace = tempfile::tempdir().expect("workspace");
     let source = workspace.path().join("a.txt");
     let destination = workspace.path().join("destination.txt");
-    tokio::fs::write(&source, b"old\n").await.expect("seed source");
+    tokio::fs::write(&source, b"old\n")
+        .await
+        .expect("seed source");
     let session = test_session(workspace.path(), false);
     let staged = plan(
         &session,
@@ -181,7 +181,9 @@ async fn rename_destination_symlink_parent_cannot_escape() {
     let workspace = tempfile::tempdir().expect("workspace");
     let outside = tempfile::tempdir().expect("outside");
     let source = workspace.path().join("a.txt");
-    tokio::fs::write(&source, b"old\n").await.expect("seed source");
+    tokio::fs::write(&source, b"old\n")
+        .await
+        .expect("seed source");
     std::os::unix::fs::symlink(outside.path(), workspace.path().join("link"))
         .expect("create parent symlink");
     let session = test_session(workspace.path(), false);
@@ -208,7 +210,9 @@ async fn rename_parent_swapped_after_approval_is_rejected() {
     let outside = tempfile::tempdir().expect("outside");
     let source = workspace.path().join("a.txt");
     let parent = workspace.path().join("parent");
-    tokio::fs::write(&source, b"old\n").await.expect("seed source");
+    tokio::fs::write(&source, b"old\n")
+        .await
+        .expect("seed source");
     tokio::fs::create_dir(&parent).await.expect("seed parent");
     let session = test_session(workspace.path(), false);
     let staged = plan(

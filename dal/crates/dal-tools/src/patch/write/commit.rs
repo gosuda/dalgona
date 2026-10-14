@@ -264,6 +264,7 @@ async fn stage_temp(
     file: &StagedFileOwned,
     seen_dirs: &mut std::collections::HashSet<PathBuf>,
 ) -> Result<Option<PendingTemp>, EngineError> {
+    use tokio::io::AsyncWriteExt as _;
     if file.op == super::super::ir::Operation::Delete {
         return Ok(None);
     }
@@ -331,7 +332,6 @@ async fn stage_temp(
             handle,
         )
     };
-    use tokio::io::AsyncWriteExt as _;
     let result = async {
         handle.write_all(after).await?;
         handle.sync_all().await

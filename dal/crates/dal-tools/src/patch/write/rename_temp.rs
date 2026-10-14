@@ -79,12 +79,8 @@ mod platform {
                     | OFlags::NOFOLLOW
                     | OFlags::CLOEXEC;
                 // Match the existing patch writer's default mode (0666 & umask).
-                let mode = Mode::RUSR
-                    | Mode::WUSR
-                    | Mode::RGRP
-                    | Mode::WGRP
-                    | Mode::ROTH
-                    | Mode::WOTH;
+                let mode =
+                    Mode::RUSR | Mode::WUSR | Mode::RGRP | Mode::WGRP | Mode::ROTH | Mode::WOTH;
                 match rustix::fs::openat(&parent, temp.as_os_str(), flags, mode) {
                     Ok(handle) => {
                         return Ok((
@@ -199,10 +195,7 @@ mod platform {
     }
 
     impl RenameTemp {
-        pub(crate) fn create(
-            workspace: &Path,
-            relative: &Path,
-        ) -> io::Result<(Self, File)> {
+        pub(crate) fn create(workspace: &Path, relative: &Path) -> io::Result<(Self, File)> {
             if !relative
                 .components()
                 .all(|component| matches!(component, Component::Normal(_)))
@@ -296,10 +289,7 @@ mod platform {
     }
 
     impl RenameTemp {
-        pub(crate) fn create(
-            workspace: &Path,
-            relative: &Path,
-        ) -> io::Result<(Self, File)> {
+        pub(crate) fn create(workspace: &Path, relative: &Path) -> io::Result<(Self, File)> {
             let _ = (workspace, relative);
             Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -344,7 +334,9 @@ mod tests {
 
         let target = workspace.path().join(destination);
         std::fs::write(&target, b"competitor").expect("create destination after staging");
-        let error = pending.publish().expect_err("no-replace publication must fail");
+        let error = pending
+            .publish()
+            .expect_err("no-replace publication must fail");
         assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
         assert_eq!(std::fs::read(target).expect("read"), b"competitor");
         pending.cleanup();
@@ -355,11 +347,8 @@ mod tests {
     fn rename_parent_symlink_is_not_followed() {
         let workspace = tempfile::tempdir().expect("workspace");
         let outside = tempfile::tempdir().expect("outside");
-        std::os::unix::fs::symlink(outside.path(), workspace.path().join("link"))
-            .expect("symlink");
-        assert!(
-            RenameTemp::create(workspace.path(), Path::new("link/target.txt")).is_err()
-        );
+        std::os::unix::fs::symlink(outside.path(), workspace.path().join("link")).expect("symlink");
+        assert!(RenameTemp::create(workspace.path(), Path::new("link/target.txt")).is_err());
         assert!(!outside.path().join("target.txt").exists());
     }
 }
