@@ -7,7 +7,7 @@
 //! or shell execution; every literal stays a literal.
 
 use crate::{
-    schema::{Field, Schema, SchemaError},
+    schema::{Field, Presence, Schema, SchemaError},
     value::Value,
 };
 
@@ -159,15 +159,29 @@ pub(crate) fn bind(
         }
     }
 
-    if positionals_used < positional.len() {
-        let missing = positional[positionals_used..].join(", ");
-        return Err(CommandError::usage(format!(
-            "missing positional arguments: {missing}"
-        )));
-    }
+    require_positionals(fields, &positional[positionals_used..])?;
     schema
         .validate(&Value::Object(given.into_boxed_slice()), "")
         .map_err(CommandError::Schema)
+}
+
+/// Rejects the unbound positionals that have no default and cannot be
+/// omitted; omittable ones take their schema default.
+fn require_positionals(fields: &[Field], unbound: &[Box<str>]) -> Result<(), CommandError> {
+    let required = |name: &&str| {
+        fields
+            .iter()
+            .find(|field| field.name.as_ref() == *name)
+            .is_some_and(|field| matches!(field.presence, Presence::Required | Presence::Nullable))
+    };
+    let missing: Vec<&str> = unbound.iter().map(AsRef::as_ref).filter(required).collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(CommandError::usage(format!(
+        "missing positional arguments: {}",
+        missing.join(", ")
+    )))
 }
 
 fn field_of<'a>(fields: &'a [Field], name: &str) -> Result<&'a Field, CommandError> {

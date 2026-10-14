@@ -155,6 +155,18 @@ fn command_binding_rejects_each_malformed_tail_with_a_named_reason() {
 }
 
 #[test]
+fn omitted_positionals_take_defaults_and_only_required_ones_are_missing() {
+    let plugin = loaded_plugin();
+    let positional = ["path".into(), "count".into()];
+    let args = bind_command("a", &positional, command_schema(&plugin))
+        .expect("a trailing positional with a default may be omitted");
+    assert!(args.to_json().contains("\"count\":2"), "{}", args.to_json());
+    let error = bind_command("", &positional, command_schema(&plugin))
+        .expect_err("the required positional is still missing");
+    assert_eq!(error.to_string(), "missing positional arguments: path");
+}
+
+#[test]
 fn double_dash_ends_option_parsing_for_positional_values() {
     let plugin = loaded_plugin();
     let args = bind_command("-- --dashed", &["path".into()], command_schema(&plugin))
