@@ -1,5 +1,6 @@
 //! Headless prompt streaming for text and JSON clients.
 
+use std::borrow::Cow;
 use std::ffi::{OsStr, OsString};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -149,6 +150,7 @@ pub(crate) struct PrintOptions {
     pub json: bool,
     pub output_last_message: Option<PathBuf>,
     pub prompt: Vec<dal_core::Part>,
+    pub stdout_is_tty: bool,
     pub stderr_is_tty: bool,
     /// Approval mode `ask` with no terminal: the run emits the once-per-run
     /// headless notice before the first denial note.
@@ -260,11 +262,12 @@ pub(crate) async fn run_print(
     stderr: &mut (impl AsyncWrite + Unpin),
 ) -> Result<PrintOutcome, PrintError> {
     let json = opts.json;
+    let stderr_is_tty = opts.stderr_is_tty;
     match run_print_inner(agent, opts, stdout, stderr).await {
         Ok(outcome) => Ok(outcome),
         Err(error) => {
             if !error.is_broken_pipe() {
-                write_failure(&error, json, stdout, stderr).await?;
+                write_failure(&error, json, stderr_is_tty, stdout, stderr).await?;
             }
             Err(error)
         }
@@ -338,38 +341,26 @@ async fn run_print_inner(
             } => {
                 assistant.push_str(text);
                 if !opts.json {
-                    stdout
-                        .write_all(text.as_bytes())
-                        .await
-                        .map_err(PrintError::Io)?;
+                    write_terminal_text(stdout, text, opts.stdout_is_tty).await?;
                 }
             }
             UpdateKind::ToolStarted { tool, .. } if opts.stderr_is_tty && !opts.json => {
                 let progress = format!("Running {tool}.\n");
-                stderr
-                    .write_all(progress.as_bytes())
-                    .await
-                    .map_err(PrintError::Io)?;
+                write_terminal_text(stderr, &progress, opts.stderr_is_tty).await?;
             }
             UpdateKind::ToolSettled { outcome, .. } if !opts.json => {
                 let Some((tool, rung)) = parse_headless_denial(&outcome.text) else {
                     continue;
                 };
                 let note = dal_texts::approval_denied_note(tool, rung.as_str());
-                stderr
-                    .write_all(note.as_bytes())
-                    .await
-                    .map_err(PrintError::Io)?;
+                write_terminal_text(stderr, &note, opts.stderr_is_tty).await?;
                 stderr.write_all(b"\n").await.map_err(PrintError::Io)?;
                 denial_count += 1;
             }
             UpdateKind::Notice(notice) => {
                 last_notice = Some(notice.text.clone());
                 if !opts.json {
-                    stderr
-                        .write_all(notice.text.as_bytes())
-                        .await
-                        .map_err(PrintError::Io)?;
+                    write_terminal_text(stderr, &notice.text, opts.stderr_is_tty).await?;
                     stderr.write_all(b"\n").await.map_err(PrintError::Io)?;
                 }
             }
@@ -509,6 +500,7 @@ async fn await_quiet(
 async fn write_failure(
     error: &PrintError,
     json: bool,
+    stderr_is_tty: bool,
     stdout: &mut (impl AsyncWrite + Unpin),
     stderr: &mut (impl AsyncWrite + Unpin),
 ) -> Result<(), PrintError> {
@@ -522,17 +514,28 @@ async fn write_failure(
         stdout.flush().await.map_err(PrintError::Io)?;
         return Ok(());
     }
-    stderr
-        .write_all(what.as_bytes())
-        .await
-        .map_err(PrintError::Io)?;
+    write_terminal_text(stderr, &what, stderr_is_tty).await?;
     stderr.write_all(b"\n").await.map_err(PrintError::Io)?;
-    stderr
-        .write_all(hint.as_bytes())
-        .await
-        .map_err(PrintError::Io)?;
+    write_terminal_text(stderr, &hint, stderr_is_tty).await?;
     stderr.write_all(b"\n").await.map_err(PrintError::Io)?;
     Ok(())
+}
+
+/// Escapes untrusted text only for an interactive terminal.
+async fn write_terminal_text(
+    output: &mut (impl AsyncWrite + Unpin),
+    text: &str,
+    is_tty: bool,
+) -> Result<(), PrintError> {
+    let displayed = if is_tty {
+        dal_core::terminal::escape_preserving_newlines(text)
+    } else {
+        Cow::Borrowed(text)
+    };
+    output
+        .write_all(displayed.as_bytes())
+        .await
+        .map_err(PrintError::Io)
 }
 
 use crate::cli::texts as dal_texts;
@@ -549,7 +552,13 @@ mod tests {
     use dal_core::{ClientId, Config, ConfigProduct, Part, ServiceSet, Workspace};
     use tokio_util::sync::CancellationToken;
 
-    use super::{PrintError, PrintOptions, PrintOutcome, run_print};
+    use super::{PrintError, PrintOptions, PrintOutcome, run_print, write_failure};
+
+    const CONTROL_FIXTURE: &str = concat!(
+        r#"{"kind":"events","events":[{"type":"text_delta","text":"Hello\n\u001b]52;c;SGV"},{"type":"text_delta","text":"sbG8=\u0007\u009b2J\u007f\u202e\rafter\n"},{"type":"tool_calls_done","calls":[]},{"type":"usage","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1,"reasoning_tokens":null,"cache_write_tokens":0,"cost_usd":null}},{"type":"stop","reason":"end_turn"}]}"#,
+        "\n",
+    );
+    const CONTROL_TEXT: &str = "Hello\n\x1b]52;c;SGVsbG8=\x07\u{9b}2J\u{7f}\u{202e}\rafter\n";
 
     const FIXTURE: &str = "{\"kind\":\"events\",\"events\":[{\"type\":\"text_delta\",\"text\":\"Hello\"},{\"type\":\"tool_calls_done\",\"calls\":[]},{\"type\":\"usage\",\"usage\":{\"input_tokens\":1,\"cached_input_tokens\":0,\"output_tokens\":1,\"reasoning_tokens\":null,\"cache_write_tokens\":0,\"cost_usd\":null}},{\"type\":\"stop\",\"reason\":\"end_turn\"}]}\n";
 
@@ -575,13 +584,20 @@ mod tests {
     }
 
     async fn session(switch: &Arc<Switch>) -> (tempfile::TempDir, Host, Agent) {
+        session_with_fixture(switch, FIXTURE).await
+    }
+
+    async fn session_with_fixture(
+        switch: &Arc<Switch>,
+        content: &str,
+    ) -> (tempfile::TempDir, Host, Agent) {
         let tmp = tempfile::tempdir().expect("tempdir");
         let data = tmp.path().join("data");
         let workspace_dir = tmp.path().join("w");
         std::fs::create_dir_all(&data).expect("data dir");
         std::fs::create_dir_all(&workspace_dir).expect("workspace dir");
         let fixture = data.join("script.jsonl");
-        std::fs::write(&fixture, FIXTURE).expect("fixture");
+        std::fs::write(&fixture, content).expect("fixture");
         let user = format!(
             "model = \"openai/gpt-6-luna\"\n\n[providers.scripted]\nfixture = \"{}\"\n",
             fixture.to_string_lossy().replace('\\', "\\\\")
@@ -623,11 +639,64 @@ mod tests {
             json,
             output_last_message: None,
             prompt: vec![Part::Text { text: "hi".into() }],
+            stdout_is_tty: false,
             stderr_is_tty: false,
             stop: stop.clone(),
             quiet_wait,
             headless_approval: false,
         }
+    }
+
+    #[tokio::test]
+    async fn tty_print_escapes_split_terminal_sequences_and_preserves_last_message() {
+        let switch = Arc::new(Switch(Mutex::new(true)));
+        let (tmp, host, agent) = session_with_fixture(&switch, CONTROL_FIXTURE).await;
+        let stop = CancellationToken::new();
+        let output_path = tmp.path().join("last-message.txt");
+        let mut opts = options(false, None, &stop);
+        opts.stdout_is_tty = true;
+        opts.output_last_message = Some(output_path.clone());
+        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        let outcome = run_print(agent, opts, &mut stdout, &mut stderr)
+            .await
+            .expect("run");
+        assert_eq!(outcome, PrintOutcome::Completed);
+        assert_eq!(
+            String::from_utf8(stdout).expect("utf8"),
+            "Hello\n\\u{1b}]52;c;SGVsbG8=\\a\\u{9b}2J\\u{7f}\\u{202e}\\rafter\n\n"
+        );
+        assert_eq!(std::fs::read(output_path).expect("saved message"), CONTROL_TEXT.as_bytes());
+        assert!(stderr.is_empty());
+        host.shutdown(Duration::from_secs(1)).await;
+    }
+
+    #[tokio::test]
+    async fn redirected_print_keeps_provider_bytes_unchanged() {
+        let switch = Arc::new(Switch(Mutex::new(true)));
+        let (_tmp, host, agent) = session_with_fixture(&switch, CONTROL_FIXTURE).await;
+        let stop = CancellationToken::new();
+        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        let outcome = run_print(agent, options(false, None, &stop), &mut stdout, &mut stderr)
+            .await
+            .expect("run");
+        assert_eq!(outcome, PrintOutcome::Completed);
+        assert_eq!(stdout, [CONTROL_TEXT.as_bytes(), b"\n"].concat());
+        assert!(stderr.is_empty());
+        host.shutdown(Duration::from_secs(1)).await;
+    }
+
+    #[tokio::test]
+    async fn terminal_diagnostics_escape_untrusted_controls() {
+        let error = PrintError::TurnFailed("\x1b]2;spoof\x07".into());
+        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        write_failure(&error, false, true, &mut stdout, &mut stderr)
+            .await
+            .expect("write");
+        assert!(stdout.is_empty());
+        assert_eq!(
+            String::from_utf8(stderr).expect("utf8"),
+            "\\u{1b}]2;spoof\\a\nCheck the provider response and try the prompt again.\n"
+        );
     }
 
     #[tokio::test]

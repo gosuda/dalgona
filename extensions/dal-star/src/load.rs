@@ -326,7 +326,33 @@ fn load_one(
         &files.files,
         cfg.configs.get(name).map(String::as_str),
         handler_limits(&cfg.limits),
+        source_digest(&files.files, cfg.configs.get(name).map(String::as_str)),
     )
+}
+
+/// Fingerprint the frozen source bytes, including imported modules and assets.
+/// Length-delimited paths and contents prevent concatenation ambiguities.
+fn source_digest(files: &BTreeMap<PathBuf, Vec<u8>>, config: Option<&str>) -> Box<str> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"dal-plugin-source-v2");
+    hasher.update(&(files.len() as u64).to_le_bytes());
+    for (path, bytes) in files {
+        let name = path.as_os_str().as_encoded_bytes();
+        hasher.update(&(name.len() as u64).to_le_bytes());
+        hasher.update(name);
+        hasher.update(&(bytes.len() as u64).to_le_bytes());
+        hasher.update(bytes);
+    }
+    hasher.update(b"config-v1");
+    // Host-resolved configuration can change a plugin's behavior without
+    // changing its installed source files.
+    if let Some(config) = config {
+        hasher.update(&(config.len() as u64).to_le_bytes());
+        hasher.update(config.as_bytes());
+    } else {
+        hasher.update(&0_u64.to_le_bytes());
+    }
+    hasher.finalize().to_hex().to_string().into_boxed_str()
 }
 
 /// Rejects an entry module that binds `plugin` more than once.
@@ -586,4 +612,28 @@ fn resolve_load<'f>(want: &str, files: &'f FileSet) -> Result<(PathBuf, &'f [u8]
         });
     };
     Ok((candidate, bytes.as_slice()))
+}
+
+#[cfg(test)]
+mod source_identity_tests {
+    use super::source_digest;
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    #[test]
+    fn admitted_file_snapshot_changes_fingerprint_even_when_name_is_unchanged() {
+        let mut files = BTreeMap::from([
+            (PathBuf::from("plugin.star"), b"plugin = old".to_vec()),
+            (PathBuf::from("lib.star"), b"helper = old".to_vec()),
+        ]);
+        let original = source_digest(&files, None);
+        assert_eq!(source_digest(&files, None), original);
+        files.insert(PathBuf::from("lib.star"), b"helper = new".to_vec());
+        assert_ne!(source_digest(&files, None), original);
+        files.insert(PathBuf::from("lib.star"), b"helper = old".to_vec());
+        files.insert(PathBuf::from("assets/skill.md"), b"changed asset".to_vec());
+        assert_ne!(source_digest(&files, None), original);
+        files.remove(&PathBuf::from("assets/skill.md"));
+        assert_ne!(source_digest(&files, Some(r#"{"target":1}"#)), original);
+    }
 }

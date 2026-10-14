@@ -149,14 +149,17 @@ pub struct DispatchCx<'a> {
 #[must_use]
 pub(crate) fn hook_caller(extension: &Extension, turn: Option<TurnId>) -> Option<Caller> {
     let name = extension.name().parse::<Name>().ok()?;
-    Some(Caller::new(
-        name,
-        extension.origin(),
-        extension.inject(),
-        extension.state_version(),
-        CallerKind::Hook,
-        turn,
-    ))
+    Some(
+        Caller::new(
+            name,
+            extension.origin(),
+            extension.inject(),
+            extension.state_version(),
+            CallerKind::Hook,
+            turn,
+        )
+        .with_extension(extension),
+    )
 }
 
 /// The fields one hook fan-out shares: everything [`DispatchCx`] carries

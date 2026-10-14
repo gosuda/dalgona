@@ -50,7 +50,7 @@ pub(crate) fn start_child(
 ) -> Result<AgentsOp, AgentInputError> {
     let start = AgentStart {
         call,
-        name: name.into(),
+        name: Some(name.into()),
         prompt: prompt.into_boxed_str(),
         model: model.map(String::into_boxed_str),
         role: role.map(String::into_boxed_str),

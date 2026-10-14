@@ -1000,21 +1000,23 @@ fn child_start_error(error: impl std::fmt::Display) -> ServiceError {
     )
 }
 
-/// One outstanding child await owned by a parent invocation.
+/// One child session owned by the parent invocation that is starting or
+/// awaiting it.
 ///
-/// Armed while the invocation waits on its child, the guard owns the
-/// caller-side lifetime of that wait. It disarms on every completed
-/// outcome — a report, a deadline, or a refused wait — and fires only
-/// when the awaiting future is dropped mid-await: the caller's turn was
-/// cancelled or the invocation aborted. Firing removes the child from
-/// the live table at once, so the parent-scoped list and child
-/// admission observe the reclaim synchronously, then parks the subtree
-/// teardown tail — the child's own started-but-unawaited descendants
-/// swept first, every child before its parent — on the awaiting
-/// session's task owner, which its own close and the host shutdown
-/// always drain. An entry already reclaimed elsewhere — an explicit
-/// `agents.cancel` or a close sweep — leaves the guard nothing to do.
-struct OutstandingAwait {
+/// Armed after a start opens the child, or while an invocation waits on
+/// its child, the guard owns the caller-side lifetime of that child. It
+/// disarms on every completed outcome: a started child, a report, a
+/// deadline, or a refused wait. It fires only when the owning future is
+/// dropped mid-flight: the caller's turn was cancelled or the invocation
+/// aborted. Firing removes the child from the live table at once, so the
+/// parent-scoped list and child admission observe the reclaim
+/// synchronously, then parks the subtree teardown tail, the child's own
+/// started-but-unawaited descendants swept first and every child before
+/// its parent, on the owning session's task owner, which its own close
+/// and the host shutdown always drain. An entry already reclaimed
+/// elsewhere, by an explicit `agents.cancel`, a failed start's close, or a
+/// close sweep, leaves the guard nothing to do.
+struct OwnedChild {
     tasks: SessionTasks,
     host: Arc<HostState>,
     id: SessionId,
@@ -1024,7 +1026,7 @@ struct OutstandingAwait {
     armed: bool,
 }
 
-impl OutstandingAwait {
+impl OwnedChild {
     fn arm(tasks: SessionTasks, host: Arc<HostState>, id: SessionId) -> Self {
         Self {
             tasks,
@@ -1035,14 +1037,15 @@ impl OutstandingAwait {
         }
     }
 
-    /// Ends this invocation's ownership: the wait completed, timed out,
-    /// or was refused, so the child outlives the invocation on purpose.
+    /// Ends this invocation's ownership: the start returned the child, or
+    /// the wait completed, timed out, or was refused, so the child outlives
+    /// the invocation on purpose.
     fn disarm(&mut self) {
         self.armed = false;
     }
 }
 
-impl Drop for OutstandingAwait {
+impl Drop for OwnedChild {
     fn drop(&mut self) {
         if !self.armed {
             return;
@@ -1179,13 +1182,16 @@ impl Backend {
                     workspace,
                     // Queued for the first durable record: a start cancelled
                     // before it records leaves no named session behind.
-                    name: Some(start.name.clone()),
+                    name: start.name.clone(),
                 },
                 dal_core::ClientId::new("core"),
             )
             .await
             .map_err(child_start_error)?;
         let child_id = child.inner.session;
+        // Until the start returns, this invocation owns the child: a start
+        // dropped mid-flight parks its teardown on this session's tasks.
+        let mut owned = OwnedChild::arm(self.tasks.clone(), Arc::clone(&self.host), child_id);
         // The child is restricted before its first turn: a start that sets
         // `tools` runs with exactly those tools, on every turn and across
         // reloads, and an absent list leaves the child unrestricted.
@@ -1259,6 +1265,7 @@ impl Backend {
             let _ = host.close(child_id).await;
             return Err(child_start_error(error));
         }
+        owned.disarm();
         Ok(AgentsReply::Started { id: child_id })
     }
 
@@ -1410,7 +1417,7 @@ impl Backend {
         // The guard owns this invocation's link to the child from here on:
         // every completed outcome below disarms it, and only a future
         // dropped mid-await fires it, reclaiming the outstanding child.
-        let mut owned = OutstandingAwait::arm(self.tasks.clone(), Arc::clone(&self.host), id);
+        let mut owned = OwnedChild::arm(self.tasks.clone(), Arc::clone(&self.host), id);
         let deadline = timeout.map(|duration| tokio::time::Instant::now() + duration);
         loop {
             if self.cancel.is_cancelled() {
@@ -1939,7 +1946,7 @@ mod tests {
     fn start_in(workspace: Option<Workspace>, model: Option<&str>) -> dal_core::AgentStart {
         dal_core::AgentStart {
             call: CallId::new("refused-start"),
-            name: "member".into(),
+            name: Some("member".into()),
             prompt: "work".into(),
             model: model.map(Into::into),
             role: None,
@@ -1947,6 +1954,36 @@ mod tests {
             tools: None,
             workspace,
         }
+    }
+
+    #[tokio::test]
+    async fn a_start_dropped_after_opening_its_child_reclaims_the_child() {
+        let (host, root, _child, _temp) = host_with_child().await;
+        let backend = backend_of(&host, root);
+        let live = || {
+            host.state
+                .sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len()
+        };
+        let before = live();
+        let mut start = Box::pin(backend.agents_op(AgentsOp::Start(start_in(None, None))));
+        loop {
+            let polled =
+                std::future::poll_fn(|cx| std::task::Poll::Ready(start.as_mut().poll(cx))).await;
+            assert!(
+                polled.is_pending(),
+                "the start finished before it was dropped"
+            );
+            if live() > before {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        drop(start);
+        assert_eq!(live(), before, "the dropped start left its child live");
+        host.close(root).await.expect("close session");
     }
 
     #[tokio::test]

@@ -8,6 +8,8 @@ fn key(ext: &str, origin: Origin, services: &[Service]) -> GrantKey {
         origin,
         services: ServiceSet::from_names(services.iter().map(|service| service.as_str()))
             .expect("valid set"),
+        digest: "a".repeat(64).into_boxed_str(),
+        workspace: std::env::temp_dir(),
     }
 }
 
@@ -59,6 +61,7 @@ fn test_caller(inject: ServiceSet) -> Caller {
         CallerKind::Hook,
         Some(TurnId::new(std::num::NonZeroU64::MIN)),
     )
+    .with_test_digest()
 }
 fn test_mcp_caller(inject: ServiceSet) -> Caller {
     Caller::new(
@@ -69,6 +72,7 @@ fn test_mcp_caller(inject: ServiceSet) -> Caller {
         CallerKind::Tool,
         Some(TurnId::new(std::num::NonZeroU64::MIN)),
     )
+    .with_test_digest()
 }
 
 fn open_store(dir: &tempfile::TempDir, timeout: Duration) -> (Arc<GrantStore>, Arc<Broker>) {
@@ -141,8 +145,10 @@ async fn grant_approve_persists_exact_row_and_session_approve_does_not() {
     assert!(grant.persistent());
     let text = std::fs::read_to_string(dir.path().join("grants.toml")).expect("row");
     assert!(text.starts_with(
-        "[[grant]]\next = \"focus\"\norigin = \"user\"\nservices = [\"fs.read\", \"run\"]\nby = \"tui\"\napproved_at = \""
+        "[[grant]]\next = \"focus\"\norigin = \"user\"\nservices = [\"fs.read\", \"run\"]\ndigest = \""
     ));
+    assert!(text.contains(&format!("workspace = \"{}\"", dir.path().display())));
+    assert!(text.contains("by = \"tui\""));
     assert!(text.ends_with("Z\"\n"));
     #[cfg(unix)]
     {
@@ -175,7 +181,8 @@ async fn grant_approve_persists_exact_row_and_session_approve_does_not() {
         std::num::NonZeroU32::MIN,
         CallerKind::Hook,
         Some(TurnId::new(std::num::NonZeroU64::MIN)),
-    );
+    )
+    .with_test_digest();
     let (session_grant, ()) =
         futures::join!(store2.ensure(&net_caller, Service::Net, &cancel), async {
             let id = loop {
@@ -255,6 +262,8 @@ async fn facade_grant_contains_list_revoke_round_trip() {
         extension: name.clone(),
         origin: Origin::User,
         services: ServiceSet::from_names(["fs.read", "run"]).expect("set"),
+        digest: "a".repeat(64).into_boxed_str(),
+        workspace: dir.path().to_path_buf(),
     };
     assert!(!store.contains(&key).await.expect("contains"));
     assert_eq!(store.list().await.expect("list"), []);
@@ -270,6 +279,8 @@ async fn facade_grant_contains_list_revoke_round_trip() {
         extension: name.clone(),
         origin: Origin::User,
         services: ServiceSet::EMPTY,
+        digest: "a".repeat(64).into_boxed_str(),
+        workspace: dir.path().to_path_buf(),
     };
     assert!(matches!(
         store.grant(empty, tui(), at).await,
@@ -300,6 +311,8 @@ async fn facade_malformed_file_fails_without_writing() {
         extension: "focus".parse().expect("name"),
         origin: Origin::User,
         services: ServiceSet::from_names(["run"]).expect("set"),
+        digest: "a".repeat(64).into_boxed_str(),
+        workspace: dir.path().to_path_buf(),
     };
     assert!(matches!(
         store.contains(&key).await,
@@ -341,10 +354,11 @@ async fn mcp_grants_persist_for_exact_declared_set_and_reask_after_change() {
             let dal_core::Question::Grant { detail, .. } = &request.question else {
                 panic!("MCP grant must ask a grant question");
             };
-            assert_eq!(
-                detail.as_deref(),
-                Some("search: URL https://mcp.example/search")
-            );
+            assert!(detail.as_deref().is_some_and(|text| {
+                text.starts_with("search: URL https://mcp.example/search")
+                    && text.contains("Code identity:")
+                    && text.contains("Workspace:")
+            }));
             answer_and_release(&broker, request.id, Answer::Approve, tui());
         }
     );
@@ -465,6 +479,7 @@ fn command_caller(ext: &str, inject: ServiceSet) -> Caller {
         CallerKind::Handler,
         None,
     )
+    .with_test_digest()
 }
 
 #[tokio::test]
@@ -624,4 +639,71 @@ async fn an_approval_before_the_data_root_exists_is_stored() {
         assert_eq!(mode(&path), 0o600);
         assert_eq!(mode(&data), 0o700);
     }
+}
+
+#[tokio::test]
+async fn a_code_change_or_workspace_change_cannot_reuse_a_persistent_grant() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (store, broker) = open_store(&dir, Duration::from_secs(30));
+    let inject = ServiceSet::from_names(["net"]).expect("inject");
+    let caller = test_caller(inject);
+    let cancel = CancellationToken::new();
+    let (granted, ()) = futures::join!(store.ensure(&caller, Service::Net, &cancel), async {
+        let request = loop {
+            if let Some(req) = broker.open_requests().into_iter().next() {
+                break req.id;
+            }
+            tokio::task::yield_now().await;
+        };
+        answer_and_release(&broker, request, Answer::Approve, tui());
+    });
+    assert!(granted.expect("first approval").persistent());
+    assert!(store.ensure(&caller, Service::Net, &cancel).await.is_ok());
+
+    store.set_answerer(Arc::new(|| false));
+    let mut replaced_code = caller.clone();
+    replaced_code.grant_digest = Some("b".repeat(64).into_boxed_str());
+    assert!(matches!(
+        store.ensure(&replaced_code, Service::Net, &cancel).await,
+        Err(ServiceError::Denied(DenyReason::NotGranted))
+    ));
+
+    let moved_workspace = GrantStore::with_runtime_scoped(
+        dir.path().to_path_buf(),
+        dir.path().join("different-workspace"),
+        Duration::from_secs(30),
+        broker,
+    ).expect("second workspace");
+    moved_workspace.set_answerer(Arc::new(|| false));
+    assert!(matches!(
+        moved_workspace.ensure(&caller, Service::Net, &cancel).await,
+        Err(ServiceError::Denied(DenyReason::NotGranted))
+    ));
+}
+
+#[tokio::test]
+async fn legacy_and_expired_rows_do_not_authorize_calls() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let grants = GrantStore::new(dir.path().to_path_buf());
+    let key = GrantKey {
+        extension: "focus".parse().expect("name"),
+        origin: Origin::User,
+        services: ServiceSet::from_names(["net"]).expect("services"),
+        digest: "a".repeat(64).into_boxed_str(),
+        workspace: dir.path().to_path_buf(),
+    };
+    grants.grant(key.clone(), tui(), Timestamp::UNIX_EPOCH).await.expect("expired record");
+    assert!(!grants.contains(&key).await.expect("expired record never matches"));
+
+    let legacy = "[[grant]]\next = \"focus\"\norigin = \"user\"\nservices = [\"net\"]\nby = \"tui\"\napproved_at = \"2026-01-01T00:00:00Z\"\n";
+    std::fs::write(dir.path().join("grants.toml"), legacy).expect("legacy file");
+    let (store, _) = open_store(&dir, Duration::from_secs(30));
+    store.set_answerer(Arc::new(|| false));
+    let denied = store.ensure(
+        &test_caller(key.services),
+        Service::Net,
+        &CancellationToken::new()
+    ).await;
+    assert!(matches!(denied, Err(ServiceError::Denied(DenyReason::NotGranted))));
+    assert_eq!(std::fs::read_to_string(dir.path().join("grants.toml")).expect("unchanged"), legacy);
 }
