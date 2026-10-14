@@ -120,19 +120,33 @@ pub enum ToolArgs {
 impl ToolArgs {
     /// Validates the concatenated argument fragments of a completed call.
     ///
-    /// The bytes are never re-encoded: a valid value keeps its number
-    /// spellings, member order, and interior whitespace. Only whitespace
-    /// around the value is dropped. Empty input, invalid UTF-8, and anything
-    /// other than exactly one JSON value give [`ToolArgs::Invalid`]; the
-    /// decoder chooses [`ToolArgs::Truncated`] itself when the response was
-    /// cut, since truncation is a property of the stream, not of the bytes.
+    /// Strict-valid bytes keep their spelling, member order, and interior
+    /// whitespace verbatim; only whitespace around the value is dropped.
+    /// When strict validation fails, the tolerant codec
+    /// ([`dal_core::mend::canonicalize`]) gets one recovery pass and a
+    /// successful repair is logged — providers emit sloppy arguments and
+    /// a recoverable payload should not be dropped as [`ToolArgs::Invalid`].
+    /// Invalid UTF-8, unrecoverable input, and anything but exactly one
+    /// value still give [`ToolArgs::Invalid`]; the decoder chooses
+    /// [`ToolArgs::Truncated`] itself when the response was cut, since
+    /// truncation is a property of the stream, not of the bytes.
     #[must_use]
     pub fn from_bytes(bytes: &[u8]) -> Self {
         match std::str::from_utf8(bytes) {
             Ok(text) => match RawJson::parse(text) {
                 Ok(raw) => Self::Parsed(raw),
-                Err(error) => Self::Invalid {
-                    message: error.to_string(),
+                Err(error) => match dal_core::mend::canonicalize(text) {
+                    Some((raw, repairs)) => {
+                        tracing::debug!(
+                            repairs = repairs.len(),
+                            strict = %error,
+                            "tool arguments recovered by tolerant JSON parse"
+                        );
+                        Self::Parsed(raw)
+                    }
+                    None => Self::Invalid {
+                        message: error.to_string(),
+                    },
                 },
             },
             Err(error) => Self::Invalid {
