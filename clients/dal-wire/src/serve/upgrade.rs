@@ -5,7 +5,7 @@ use std::sync::Arc;
 use hyper::{Request, Response, StatusCode};
 
 use super::guard::ws_upgrade_denial;
-use super::{Driver, Resp, ServeBody, ServeCtx, into_response};
+use super::{Driver, PreauthGuard, Resp, ServeBody, ServeCtx, into_response};
 use crate::token::SecretToken;
 
 /// Serves a WebSocket upgrade: validates, answers 101, and drives the
@@ -14,6 +14,7 @@ pub(super) async fn upgrade_response(
     ctx: Arc<ServeCtx>,
     req: Request<hyper::body::Incoming>,
     route: crate::router::ServeRoute,
+    preauth: Arc<PreauthGuard>,
 ) -> Response<ServeBody> {
     let header = |name: &str| {
         req.headers()
@@ -43,6 +44,7 @@ pub(super) async fn upgrade_response(
     {
         return into_response(denial);
     }
+    preauth.admit().await;
     let subprotocol = offered
         .iter()
         .find(|protocol| protocol.as_str() == "dal.v1")
