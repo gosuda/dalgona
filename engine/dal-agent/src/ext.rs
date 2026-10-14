@@ -144,6 +144,14 @@ impl Caller {
         self
     }
 
+    #[must_use]
+    pub(crate) fn with_optional_extension(self, extension: Option<&Extension>) -> Self {
+        match extension {
+            Some(extension) => self.with_extension(extension),
+            None => self,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn with_test_digest(mut self) -> Self {
         self.grant_digest = Some("a".repeat(64).into_boxed_str());
