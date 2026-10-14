@@ -496,6 +496,27 @@ impl ModelCxRuntime for Run {
         })
     }
 
+    fn script_forward<'a>(
+        &'a self,
+        who: &'a Caller,
+        request: ModelRequest,
+        private: &'a [PrivateTool],
+        cancel: CancellationToken,
+    ) -> BoxFuture<'a, Result<EventStream, crate::error::ServiceError>> {
+        Box::pin(async move {
+            let Some(services) = &self.script_services else {
+                return Err(crate::error::ServiceError::failed(
+                    None,
+                    "models.forward is unavailable outside a session",
+                ));
+            };
+            services.authorize_script_infer(who, cancel).await?;
+            self.forward(request, private)
+                .await
+                .map_err(|error| crate::error::ServiceError::failed(None, error.to_string()))
+        })
+    }
+
     fn forward<'a>(
         &'a self,
         request: ModelRequest,
