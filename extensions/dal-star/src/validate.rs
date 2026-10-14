@@ -39,6 +39,8 @@ pub(crate) struct LoadedPlugin {
     pub(crate) name: Name,
     /// The declared `SemVer` version.
     pub(crate) version: Box<str>,
+    /// Digest of the admitted source snapshot, config, and declared version.
+    pub(crate) approval_digest: Box<str>,
     /// Bundled or user-supplied.
     pub(crate) origin: Origin,
     /// The host services explicitly requested by the plugin.
@@ -282,6 +284,7 @@ pub(crate) fn validate(
     Ok(LoadedPlugin {
         name: declared,
         version: descriptor.version.clone().into_boxed_str(),
+        approval_digest: approval_digest(files, &descriptor.version, config_json),
         origin,
         inject,
         state_version,
@@ -298,6 +301,38 @@ pub(crate) fn validate(
         plugin: plugin_value.clone(),
         limits,
     })
+}
+
+/// Hash exactly the bytes admitted by the loader, including declarations,
+/// imported modules, assets, and the host-resolved configuration. Length
+/// framing prevents ambiguity between adjacent paths and file bodies.
+fn approval_digest(
+    files: &std::collections::BTreeMap<PathBuf, Vec<u8>>,
+    version: &str,
+    config_json: Option<&str>,
+) -> Box<str> {
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"dal-plugin-approval-v1");
+    hash.update(&(version.len() as u64).to_le_bytes());
+    hash.update(version.as_bytes());
+    for (path, bytes) in files {
+        let path = path.as_os_str().as_encoded_bytes();
+        hash.update(&(path.len() as u64).to_le_bytes());
+        hash.update(path);
+        hash.update(&(bytes.len() as u64).to_le_bytes());
+        hash.update(bytes);
+    }
+    match config_json {
+        Some(config) => {
+            hash.update(&[1]);
+            hash.update(&(config.len() as u64).to_le_bytes());
+            hash.update(config.as_bytes());
+        }
+        None => {
+            hash.update(&[0]);
+        }
+    }
+    hash.finalize().to_hex().to_string().into_boxed_str()
 }
 
 fn validate_tools(
