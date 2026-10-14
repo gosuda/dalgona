@@ -179,6 +179,8 @@ enum NativeError {
     CaseId,
     #[error("workspace.read: {0}")]
     Read(String),
+    #[error("check returned {0}, not a boolean")]
+    CheckVerdict(String),
 }
 
 /// One validated case before its check is frozen.
@@ -663,7 +665,9 @@ impl Check {
             let workspace = heap.alloc(AllocStruct([("read", read.to_value())]));
             let verdict =
                 evaluator.eval_function(function.to_value(), &[result, workspace], &[])?;
-            Ok(verdict.to_bool())
+            verdict
+                .unpack_bool()
+                .ok_or_else(|| native(NativeError::CheckVerdict(verdict.get_type().to_owned())))
         })
     }
 }

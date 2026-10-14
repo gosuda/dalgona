@@ -309,3 +309,20 @@ fn load_leaves_no_state_behind_for_the_next_load() {
     assert!(load("p.eval.star", "evalpack.pack(name = \"p\", cases = [])\n").is_ok());
     let _ = LoadError::PackCalls(0);
 }
+
+#[test]
+fn a_check_that_returns_a_non_bool_is_an_error_not_a_coercion() {
+    for value in ["\"truthy\"", "0", "None"] {
+        let check = only_check(&format!(
+            "def c(r, w):\n    return {value}\nevalpack.pack(name = \"p\", cases = [evalpack.case(id = \"a\", prompt = \"x\", check = c)])\n"
+        ));
+        let error = check
+            .run(&input(Exit::Ok, "done", &[]), &std::env::temp_dir())
+            .unwrap_err();
+        assert!(
+            error.message.contains("not a boolean"),
+            "{value}: {}",
+            error.message
+        );
+    }
+}
