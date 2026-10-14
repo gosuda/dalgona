@@ -335,3 +335,4 @@ fn edit_path(edit: &Edit) -> &Path {
 pub mod commit;
 
 pub mod stage;
+mod rename_temp;
