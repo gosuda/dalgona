@@ -6,8 +6,10 @@ use std::{collections::BTreeMap, fs, path::PathBuf, sync::Arc, time::Duration};
 #[cfg(unix)]
 use std::path::Path;
 
+#[cfg(unix)]
+use crate::mcp::STDERR_RING;
 use crate::mcp::{
-    Budgets, LIST_PAGE_MAX, McpConfig, STDERR_RING,
+    Budgets, LIST_PAGE_MAX, McpConfig,
     client::{Client, McpCommand, SessionEndHook, SessionStartHook},
     http::auth::{self as token_auth, TokenRecord},
     tools::{decode_tool_page, fold_tool_name},
@@ -18,10 +20,12 @@ use dal_agent::{
     Agent, Delivery, Env, Host, Product, SessionRef,
     ext::{BoxFuture, ExtensionBuilder, HookCx, HookError, ObserveHook},
 };
+#[cfg(unix)]
+use dal_core::ext::McpLaunch;
 use dal_core::{
     Answer, ClientId, Command, Config, ConfigProduct, Expect, JournalPart, Output, PageReq, Part,
     Question, Reply, ServiceSet, SessionId, UpdateKind, Workspace,
-    ext::{McpBlock, McpEndpoint, McpLaunch, McpServerDecl, Name, SkillRecord},
+    ext::{McpBlock, McpEndpoint, McpServerDecl, Name, SkillRecord},
 };
 #[cfg(unix)]
 use dal_core::{McpRequest, ModelInfo, RawJson, ToolClass, ToolSpec, Visibility};
