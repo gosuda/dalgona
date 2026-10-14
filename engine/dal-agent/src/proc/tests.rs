@@ -114,7 +114,10 @@ async fn provider_call_ids_cannot_select_log_paths() {
         let mut proc = spawn_approved(&temp, &id, &echo_argv("ok"), None, 0)
             .await
             .expect("spawn with an opaque call ID");
-        let log_path = temp.path().join("jobs").join(format!("{}.log", proc.job_id()));
+        let log_path = temp
+            .path()
+            .join("jobs")
+            .join(format!("{}.log", proc.job_id()));
         assert_eq!(proc.log_path(), log_path.as_path());
         let result = proc
             .wait(&CancellationToken::new())
@@ -166,7 +169,10 @@ async fn proc_spawns_captures_output_and_reports_bounded_env() {
     )
     .await
     .expect("spawn test shell");
-    let log_path = temp.path().join("jobs").join(format!("{}.log", proc.job_id()));
+    let log_path = temp
+        .path()
+        .join("jobs")
+        .join(format!("{}.log", proc.job_id()));
     let cancel = CancellationToken::new();
     let result = proc.wait(&cancel).await.expect("wait test shell");
     assert_eq!(result.status, ProcStatus::Exited { code: 0 });
@@ -310,7 +316,9 @@ async fn approved_scope_allows_matching_call_digest_and_roots() {
     assert_eq!(result.status, ProcStatus::Exited { code: 0 });
     assert_eq!(
         result.log_path,
-        temp.path().join("jobs").join(format!("{}.log", proc.job_id()))
+        temp.path()
+            .join("jobs")
+            .join(format!("{}.log", proc.job_id()))
     );
 }
 

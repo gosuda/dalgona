@@ -1,4 +1,8 @@
-use std::{collections::VecDeque, io, path::{Path, PathBuf}};
+use std::{
+    collections::VecDeque,
+    io,
+    path::{Path, PathBuf},
+};
 
 use tokio::io::AsyncReadExt;
 
