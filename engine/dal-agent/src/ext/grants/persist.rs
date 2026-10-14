@@ -97,7 +97,7 @@ pub(crate) fn parse_rows(text: &str) -> Result<Vec<GrantRow>, GrantStoreError> {
                 .collect::<Result<Vec<_>, _>>()?;
         } else if matches!(
             k.trim(),
-            "ext" | "origin" | "by" | "approved_at" | "mcp_set"
+            "ext" | "origin" | "by" | "approved_at" | "mcp_set" | "digest" | "workspace"
         ) {
             let unquoted = unquote(v.trim()).ok_or_else(|| GrantStoreError::Malformed {
                 detail: format!("line {no}: value must be quoted").into(),
@@ -146,6 +146,8 @@ fn build_row(
         ext,
         origin,
         services,
+        digest: fields.get("digest").cloned().unwrap_or_default(),
+        workspace: fields.get("workspace").map(|value| PathBuf::from(value.to_string())).unwrap_or_default(),
         mcp_set: fields.get("mcp_set").cloned(),
         by,
         approved_at,
@@ -171,8 +173,10 @@ pub(crate) fn encode_row(row: &GrantRow) -> String {
         .map(|digest| format!("mcp_set = \"{}\"\n", escape(digest)))
         .unwrap_or_default();
     format!(
-        "[[grant]]\next = \"{}\"\norigin = \"{origin}\"\nservices = [{services}]\n{mcp_set}by = \"{}\"\napproved_at = \"{}\"\n",
+        "[[grant]]\next = \"{}\"\norigin = \"{origin}\"\nservices = [{services}]\ndigest = \"{}\"\nworkspace = \"{}\"\n{mcp_set}by = \"{}\"\napproved_at = \"{}\"\n",
         escape(row.ext.as_str()),
+        escape(&row.digest),
+        escape(row.workspace.to_str().unwrap_or("")),
         escape(row.by.as_str()),
         row.approved_at,
     )

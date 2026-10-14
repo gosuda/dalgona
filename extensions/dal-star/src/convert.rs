@@ -32,7 +32,8 @@ fn convert(plugin: &Arc<LoadedPlugin>) -> Result<Extension, LoadError> {
     let mut builder = ExtensionBuilder::new(plugin.name.as_str(), &plugin.version, plugin.inject)
         .map_err(|error| rejected(site, &error.to_string()))?
         .with_origin(plugin.origin, Some(site.clone()))
-        .with_state_version(plugin.state_version);
+        .with_state_version(plugin.state_version)
+        .with_source_digest(plugin.source_digest.clone());
     for (index, export) in plugin.exports.iter().enumerate() {
         let ExportBody::Tool {
             input_json,

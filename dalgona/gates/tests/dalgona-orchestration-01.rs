@@ -24,16 +24,16 @@ fn close_ends_the_battery_within_5s_and_holds_the_last_mode() -> support::TestRe
         let product = support::build_product(scratch.path().to_path_buf(), Some(&user))?;
         for extension in &product.extensions {
             let services = extension.inject().capabilities();
-            if services.is_empty() {
+            if services.is_empty() || extension.origin() == dal_core::Origin::Builtin {
                 continue;
             }
             dal_agent::ext::grants::GrantStore::new(scratch.path().to_path_buf())
                 .grant(
-                    dal_agent::ext::grants::GrantKey {
-                        extension: dal_core::Name::parse(extension.name())?,
-                        origin: dal_core::Origin::Bundled,
-                        services,
-                    },
+                    dal_agent::ext::grants::GrantKey::for_extension(
+                        extension,
+                        &scratch.path().join("ws"),
+                    )
+                        .expect("registered extension has a code identity"),
                     dal_core::ClientId::new("shutdown-gate"),
                     dal_core::Timestamp::now(),
                 )

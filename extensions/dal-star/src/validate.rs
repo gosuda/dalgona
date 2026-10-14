@@ -45,6 +45,8 @@ pub(crate) struct LoadedPlugin {
     pub(crate) inject: ServiceSet,
     /// The state schema version; nonzero by constructor.
     pub(crate) state_version: NonZeroU32,
+    /// Digest of the entire host-admitted source snapshot.
+    pub(crate) source_digest: Box<str>,
     /// The normalized config value, decoded from the host-supplied config
     /// object and validated against `config`; `Null` when absent.
     pub(crate) config_value: crate::value::Value,
@@ -188,6 +190,7 @@ pub(crate) fn validate(
     files: &std::collections::BTreeMap<PathBuf, Vec<u8>>,
     config_json: Option<&str>,
     limits: Limits,
+    source_digest: Box<str>,
 ) -> Result<LoadedPlugin, LoadError> {
     let default_site = Site {
         path: PathBuf::from(dir).join("plugin.star"),
@@ -285,6 +288,7 @@ pub(crate) fn validate(
         origin,
         inject,
         state_version,
+        source_digest,
         config_value,
         site,
         exports: exports.into_boxed_slice(),
