@@ -1382,7 +1382,6 @@ mod tests {
         assert_eq!(discovered.scopes, vec!["files:read"]);
     }
 
-
     #[tokio::test]
     async fn unrelated_loopback_registration_port_is_rejected_before_send() {
         let mcp = TcpListener::bind("127.0.0.1:0")
