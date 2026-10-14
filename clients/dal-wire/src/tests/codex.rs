@@ -6,7 +6,7 @@ use std::time::Duration;
 use dal_agent::{Env, Host, Product};
 use dal_core::{
     Answer, AssistantRoute, AssistantStop, Block, CallGrant, CallId, Choice, Config, ConfigProduct,
-    EntryId, EntryKind, EntryView, Family, JobEnd, JobId, JournalPart, Owner, Preview, Question,
+    EntryId, EntryKind, EntryView, ExecApproval, Family, JobEnd, JobId, JournalPart, Owner, Preview, Question,
     RawJson, Request, RequestId, SessionId, SessionInfo, Stop, StreamChannel, Timestamp,
     ToolOutcomeView, TreeDelta, TurnId, UpdateKind, Usage, Workspace,
 };
@@ -94,7 +94,13 @@ fn questions() -> Vec<Question> {
     vec![
         Question::Approval {
             tool: "exec".into(),
-            preview: preview("git push", "git push origin main"),
+            preview: ExecApproval::new(
+                "git push origin main",
+                Path::new("/w/sub").to_path_buf(),
+                Path::new("/bin/bash").to_path_buf(),
+            )
+            .preview()
+            .expect("exec approval preview"),
             grant: Some(CallGrant {
                 argv_prefix: "git".into(),
                 roots: vec!["/w".into()],
@@ -326,10 +332,24 @@ fn approval_grant_text_carries_call_scope() {
         .expect("approval maps");
     assert_eq!(
         params["reason"].as_str(),
-        Some("exec git push (also allows git in /w until the job ends)")
+        Some("exec exec (also allows git in /w until the job ends)\nShell: /bin/bash")
     );
     assert_eq!(params["command"].as_str(), Some("git push origin main"));
+    assert_eq!(params["cwd"].as_str(), Some("/w/sub"));
 }
+#[test]
+fn codex_refuses_exec_approval_without_bound_execution_context() {
+    let request = request(Question::Approval {
+        tool: "exec".into(),
+        preview: preview("exec", "git push origin main"),
+        grant: None,
+        call: None,
+    });
+    assert!(
+        server_request("t", TurnId::new(nonzero(1)), Path::new("/w"), &request).is_none()
+    );
+}
+
 #[test]
 fn mcp_grant_text_includes_declared_server_details() {
     let request = request(Question::Grant {
