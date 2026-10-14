@@ -10,7 +10,7 @@ use crate::{
     auth::credential::{Credential, OAuthCredential},
     catalog::{CatalogEntry, ResolvedModel},
     compact::{CompactOutcome, CompactedHistory},
-    error::ProviderError,
+    error::{LimitError, ProviderError},
     stream::{EventStream, NoticeSink, StreamEvent},
     thinking::ThinkingSupport,
 };
@@ -736,6 +736,59 @@ async fn stalled_server() -> io::Result<(
         Ok(closed)
     });
     Ok((format!("http://{address}/v1"), headers_received, task))
+}
+
+#[tokio::test]
+async fn anthropic_catalog_page_limit_releases_provider_permit() -> TestResult {
+    let dir = TestDir::new()?;
+    let replies = (0..32)
+        .map(|index| Reply {
+            status: 200,
+            content_type: "application/json",
+            body: format!(
+                r#"{{"data":[{{"id":"claude-{index}"}}],"has_more":true,"last_id":"claude-{index}"}}"#
+            ),
+        })
+        .collect();
+    let (base, mut server_task) = server("", replies).await?;
+    let set = ProviderSet::new(
+        &config(
+            vec![entry(
+                "anthropic-test",
+                Family::Anthropic,
+                base,
+                Some("ANTHROPIC_TEST_KEY"),
+                1,
+                Transport::Https,
+            )],
+            0,
+        ),
+        identity(),
+        EnvSnapshot::test(&[("ANTHROPIC_TEST_KEY", "test-secret")]),
+        dir.path(),
+        dir.path(),
+    )?;
+
+    let fetched = set.load_models("anthropic-test").await?;
+    assert!(matches!(
+        fetched.live_error,
+        Some(ProviderError::Limit(LimitError::CatalogPages))
+    ));
+    assert_eq!(fetched.source, crate::catalog::CatalogSource::Typed);
+    assert_eq!(
+        set.inner
+            .providers
+            .get("anthropic-test")
+            .map(|slot| slot.permits.available_permits()),
+        Some(1)
+    );
+
+    let requests = server_task
+        .join_next()
+        .await
+        .expect("all 32 model pages were served")??;
+    assert_eq!(requests.len(), 32);
+    Ok(())
 }
 
 #[tokio::test]
