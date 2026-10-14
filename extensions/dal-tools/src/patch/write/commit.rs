@@ -563,10 +563,8 @@ mod tests {
         let workspace = std::fs::canonicalize(directory.path()).expect("workspace");
         let source = workspace.join("source.txt");
         let created = workspace.join("created");
-        // The rename destination must fail. unix refuses a file target
-        // under a missing directory at Phase-B rename; Windows accepts
-        // that spelling, so on Windows the destination sits under a
-        // regular file and prepare refuses it instead.
+        // A directory blocks the rename on Unix. Windows refuses the
+        // destination because its parent is a regular file.
         #[cfg(unix)]
         let destination = {
             let blocker = workspace.join("other");
@@ -637,16 +635,14 @@ mod tests {
             .await
             .expect_err("later rename destination must fail");
 
-        // The refused destination can surface as a Phase-B rename error
-        // (Io) or an earlier prepare refusal (Stale) depending on which
-        // validator reaches it first on each platform.
+        // A failed destination must not leave a created file or move the source.
         assert!(
             matches!(error.class, ErrorClass::Io | ErrorClass::Stale | ErrorClass::File),
             "{error:?}"
         );
         assert!(
             tokio::fs::metadata(created).await.is_err(),
-            "completed create must be removed during restore"
+            "invalid destination must prevent the earlier create"
         );
         assert_eq!(
             tokio::fs::read(source).await.expect("read source"),
@@ -658,19 +654,6 @@ mod tests {
     async fn failed_rollback_reports_every_stranded_path_and_preserves_backups() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let workspace = std::fs::canonicalize(directory.path()).expect("workspace");
-        let session = PatchSession {
-            workspace: workspace.clone(),
-            session: SessionId::new_v7(),
-            generation: GenerationId::new(NonZeroU64::MIN),
-            turn: TurnId::new(NonZeroU64::MIN),
-            call: CallId::new("failed-rollback"),
-            consumer: dal_core::Consumer::Model,
-            symbols: false,
-            seen: crate::Seen::new(),
-            index: Index::new(None),
-            snapshots: Arc::new(SnapshotStore::new([7; 16])),
-            cutoff: Some(64),
-        };
         let names = [
             "blocked-update",
             "blocked-create",
@@ -797,7 +780,6 @@ mod tests {
         file.sync_all().expect("sync bytes");
         drop(file);
 
-
         temp.rename_to(&installed).expect("install under pinned parent");
         assert_eq!(
             std::fs::read(workspace.path().join("moved/installed.txt")).expect("installed"),
@@ -824,5 +806,4 @@ mod tests {
         assert!(!workspace.path().join("moved/installed.txt").exists());
         assert!(!outside.path().join("installed.txt").exists());
     }
-
 }
