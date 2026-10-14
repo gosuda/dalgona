@@ -72,8 +72,31 @@ impl Display for SandboxSetupError {
 
 impl std::error::Error for SandboxSetupError {}
 
+/// Fails closed when the macOS Seatbelt utility is absent.
+///
+/// Every launch path wraps commands in process-lifetime restrictions, so
+/// `sandbox = "off"` cannot substitute for the missing system utility.
+#[cfg(target_os = "macos")]
+fn require_seatbelt() -> Result<(), SandboxSetupError> {
+    require_seatbelt_at(Path::new("/usr/bin/sandbox-exec"))
+}
+
+/// The existence check behind [`require_seatbelt`], kept separate so tests
+/// can exercise the contract against a path the host controls.
+#[cfg(target_os = "macos")]
+fn require_seatbelt_at(seatbelt: &Path) -> Result<(), SandboxSetupError> {
+    if !seatbelt.exists() {
+        return Err(SandboxSetupError::new(
+            "sandbox: command launches need /usr/bin/sandbox-exec, and it is missing.",
+        ));
+    }
+    Ok(())
+}
+
 /// Resolves the session launcher, failing closed before any child starts.
 pub(crate) fn resolve_launcher(inputs: &SandboxInputs<'_>) -> Result<Launcher, SandboxSetupError> {
+    #[cfg(target_os = "macos")]
+    require_seatbelt()?;
     if !inputs.sandbox_on {
         return Ok(Launcher::Direct);
     }
@@ -94,11 +117,6 @@ pub(crate) fn resolve_launcher(inputs: &SandboxInputs<'_>) -> Result<Launcher, S
     {
         #[cfg(target_os = "macos")]
         {
-            if !Path::new("/usr/bin/sandbox-exec").exists() {
-                return Err(SandboxSetupError::new(
-                    "sandbox = \"on\" needs /usr/bin/sandbox-exec, and it is missing. Set sandbox = \"off\" in dal.toml.",
-                ));
-            }
             Ok(Launcher::Sandbox {
                 helper: None,
                 roots: roots.into_boxed_slice(),
@@ -134,6 +152,10 @@ pub(crate) fn session_launcher(
     helper: Option<&Path>,
 ) -> Result<Launcher, SandboxSetupError> {
     if !config.sandbox() {
+        // Direct launches stay under the mandatory lifetime policy on
+        // macOS, so the Seatbelt utility is required here as well.
+        #[cfg(target_os = "macos")]
+        require_seatbelt()?;
         return Ok(Launcher::Direct);
     }
     let home = platform_home(vars).ok_or_else(|| {
@@ -438,7 +460,9 @@ pub(crate) fn lifetime_argv(
 ) -> (OsString, Vec<OsString>, Option<PathBuf>) {
     let mut args = vec![
         OsString::from("-p"),
-        OsString::from(format!("(version 1)\n(allow default)\n{MACOS_LIFETIME_RULES}")),
+        OsString::from(format!(
+            "(version 1)\n(allow default)\n{MACOS_LIFETIME_RULES}"
+        )),
         OsString::from("--"),
         target.clone(),
     ];
@@ -669,6 +693,18 @@ mod tests {
             error.to_string().contains("overlaps"),
             "unexpected: {error}"
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn missing_seatbelt_fails_closed_for_both_launch_modes() {
+        let error = require_seatbelt_at(Path::new("/dal-probe/missing-seatbelt"))
+            .expect_err("a missing utility is rejected");
+        assert_eq!(
+            error.to_string(),
+            "sandbox: command launches need /usr/bin/sandbox-exec, and it is missing.",
+        );
+        require_seatbelt_at(Path::new("/")).expect("an existing path resolves");
     }
 
     #[cfg(target_os = "macos")]
