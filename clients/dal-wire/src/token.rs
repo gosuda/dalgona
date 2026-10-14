@@ -785,10 +785,7 @@ fn sync_parent(path: &Path) -> Result<(), TokenError> {
 
 #[cfg(all(test, windows))]
 mod windows_tests {
-    use std::{
-        fs::{self, File},
-        process::Command,
-    };
+    use std::{fs, process::Command};
 
     use super::{TokenError, create, load, read_connect_token, win};
 
