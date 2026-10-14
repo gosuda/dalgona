@@ -16,12 +16,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use dal_core::ext::{McpBlock, McpDeclaration};
+use dal_core::ext::McpBlock;
 use dal_core::{Name, Origin, Service, ServiceSet, Visibility};
 use tokio_util::sync::CancellationToken;
 
 use super::generation::Generation;
 use super::grants::GrantStore;
+use super::mcp::mcp_grant_request;
 use super::tool::Tool;
 use super::{Caller, CallerKind};
 use crate::error::ServiceError;
@@ -248,52 +249,6 @@ fn declaration_is_live(generation: &Generation, entry: &Entry) -> bool {
                 skill.name == declaration.skill && skill.mcp.as_ref() == Some(&declaration.block)
             })
     })
-}
-
-fn mcp_grant_request(
-    generation: &Generation,
-    plugin: &Name,
-) -> Result<(Box<str>, Box<str>), ServiceError> {
-    let mut declarations: Vec<McpDeclaration> = generation
-        .mcp_declarations()
-        .into_iter()
-        .filter(|declaration| declaration.plugin == *plugin)
-        .collect();
-    declarations.sort_by(|left, right| left.skill.cmp(&right.skill));
-    if declarations.is_empty() {
-        return Err(ServiceError::failed(
-            Some(Service::Mcp),
-            format!("extension \"{plugin}\" has no declared MCP servers"),
-        ));
-    }
-    let canonical = sonic_rs::to_string(&declarations)
-        .map_err(|error| ServiceError::failed(Some(Service::Mcp), error.to_string()))?;
-    let digest = blake3::hash(canonical.as_bytes()).to_hex().to_string();
-    let mut detail = Vec::new();
-    for declaration in &declarations {
-        detail.extend(grant_target_lines(declaration));
-    }
-    detail.sort();
-    Ok((digest.into(), detail.join("\n").into()))
-}
-
-/// One redacted `<skill>.<server>: <target>` line per declared server. The
-/// target text comes from the declaration's own single renderer, so the grant
-/// prompt can never disagree with the approval surface about what is public.
-fn grant_target_lines(declaration: &McpDeclaration) -> Vec<String> {
-    declaration
-        .block
-        .servers
-        .iter()
-        .map(|(server, server_decl)| {
-            format!(
-                "{}.{}: {}",
-                declaration.skill,
-                server,
-                server_decl.redacted_target()
-            )
-        })
-        .collect()
 }
 
 fn generation_owner(generation: &Generation, ext: usize) -> Box<str> {

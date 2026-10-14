@@ -342,14 +342,17 @@ async fn run_tool(
     let outcome = settled.ok_or("the scripted MCP call did not settle")?;
     let _ = host.shutdown(Duration::from_secs(1)).await;
     if let Some(server) = server_task {
-        let result = tokio::time::timeout(Duration::from_secs(2), server).await??;
-        result?;
+        assert!(
+            !server.is_finished(),
+            "an undeclared MCP server must not receive a request"
+        );
+        server.abort();
     }
     Ok(outcome)
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn mcp_port_lists_server_and_tool_from_local_fixture() -> TestResult<()> {
+async fn mcp_port_denies_undeclared_server_list_even_with_client() -> TestResult<()> {
     let outcome = run_tool(
         FixtureReply::List,
         "mcp__mcp_list",
@@ -357,17 +360,13 @@ async fn mcp_port_lists_server_and_tool_from_local_fixture() -> TestResult<()> {
         true,
     )
     .await?;
-    assert!(!outcome.is_error, "{outcome:?}");
-    assert!(
-        outcome.text.contains("local  http://127.0.0.1:"),
-        "{outcome:?}"
-    );
-    assert!(outcome.text.contains("echo: Echo"), "{outcome:?}");
+    assert!(outcome.is_error, "{outcome:?}");
+    assert!(outcome.text.contains("not granted"), "{outcome:?}");
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn mcp_port_calls_local_fixture_with_tolerant_reply_fields() -> TestResult<()> {
+async fn mcp_port_denies_undeclared_server_call_even_with_client() -> TestResult<()> {
     let outcome = run_tool(
         FixtureReply::Success,
         "mcp__mcp_call",
@@ -375,13 +374,13 @@ async fn mcp_port_calls_local_fixture_with_tolerant_reply_fields() -> TestResult
         true,
     )
     .await?;
-    assert!(!outcome.is_error, "{outcome:?}");
-    assert!(outcome.text.contains("fixture reply"), "{outcome:?}");
+    assert!(outcome.is_error, "{outcome:?}");
+    assert!(outcome.text.contains("not granted"), "{outcome:?}");
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn mcp_port_propagates_mcp_error_result() -> TestResult<()> {
+async fn mcp_port_denies_undeclared_server_before_remote_errors() -> TestResult<()> {
     let outcome = run_tool(
         FixtureReply::Error,
         "mcp__mcp_call",
@@ -390,8 +389,7 @@ async fn mcp_port_propagates_mcp_error_result() -> TestResult<()> {
     )
     .await?;
     assert!(outcome.is_error, "{outcome:?}");
-    assert!(outcome.text.contains("mcp_error"), "{outcome:?}");
-    assert!(outcome.text.contains("fixture failure"), "{outcome:?}");
+    assert!(outcome.text.contains("not granted"), "{outcome:?}");
     Ok(())
 }
 
