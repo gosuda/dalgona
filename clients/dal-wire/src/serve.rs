@@ -269,7 +269,9 @@ async fn serve_conn(
         let pre_auth = Arc::clone(&pre_auth);
         async move { Ok::<_, hyper::Error>(handle_request(ctx, req, &pre_auth).await) }
     });
-    let conn = http1_builder().serve_connection(io, service).with_upgrades();
+    let conn = http1_builder()
+        .serve_connection(io, service)
+        .with_upgrades();
     let mut conn = std::pin::pin!(conn);
     let result = tokio::select! {
         result = conn.as_mut() => result,
@@ -339,7 +341,10 @@ async fn handle_request(
     if ctx.cfg.public && is_card(&method, &path) {
         // The public card needs no token. Do not let its body or keep-alive
         // occupy an unauthenticated slot after the response.
-        let host = req.headers().get("host").and_then(|value| value.to_str().ok());
+        let host = req
+            .headers()
+            .get("host")
+            .and_then(|value| value.to_str().ok());
         return close_untrusted(into_response(a2a::card(&ctx, host)));
     }
     // Request guards passed. Later body reads, handlers, and streams belong
@@ -468,20 +473,23 @@ mod timeout_tests {
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::{TcpListener, TcpStream},
-        task::JoinHandle,
+        task::JoinSet,
         time::Instant,
     };
 
     type TestResult = Result<(), Box<dyn Error + Send + Sync>>;
 
-    async fn socket_pair() -> io::Result<(TcpStream, JoinHandle<io::Result<()>>)> {
+    async fn socket_pair() -> io::Result<(TcpStream, JoinSet<io::Result<()>>)> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
-        let server = tokio::spawn(async move {
+        // `tokio::spawn` is workspace-banned; JoinSet is the tracked spawn.
+        let mut server = JoinSet::new();
+        server.spawn(async move {
             let (socket, _) = listener.accept().await?;
-            let service = hyper::service::service_fn(|_req: Request<hyper::body::Incoming>| async {
-                Ok::<_, hyper::Error>(Response::new(ServeBody::Full(None)))
-            });
+            let service =
+                hyper::service::service_fn(|_req: Request<hyper::body::Incoming>| async {
+                    Ok::<_, hyper::Error>(Response::new(ServeBody::Full(None)))
+                });
             let _ = http1_builder()
                 .serve_connection(hyper_util::rt::TokioIo::new(socket), service)
                 .await;
@@ -491,48 +499,50 @@ mod timeout_tests {
     }
 
     async fn assert_server_closed(
-        server: JoinHandle<io::Result<()>>,
+        server: &mut JoinSet<io::Result<()>>,
         deadline: Instant,
     ) -> TestResult {
-        tokio::time::timeout_at(deadline, server).await???;
+        tokio::time::timeout_at(deadline, server.join_next())
+            .await?
+            .expect("server task joined")??;
         Ok(())
     }
 
     #[tokio::test]
     async fn silent_peer_cannot_hold_a_header_slot() -> TestResult {
-        let (client, server) = socket_pair().await?;
+        let (client, mut server) = socket_pair().await?;
         let deadline = Instant::now() + HEADER_TIMEOUT + Duration::from_secs(2);
-        assert_server_closed(server, deadline).await?;
+        assert_server_closed(&mut server, deadline).await?;
         drop(client);
         Ok(())
     }
 
     #[tokio::test]
     async fn partial_headers_cannot_extend_the_absolute_deadline() -> TestResult {
-        let (mut client, server) = socket_pair().await?;
+        let (mut client, mut server) = socket_pair().await?;
         let deadline = Instant::now() + HEADER_TIMEOUT + Duration::from_secs(2);
         client.write_all(b"GET / HTTP/1.1\r\n").await?;
         tokio::time::sleep(Duration::from_secs(3)).await;
         client.write_all(b"host: localhost").await?;
-        assert_server_closed(server, deadline).await?;
+        assert_server_closed(&mut server, deadline).await?;
         Ok(())
     }
 
     #[tokio::test]
     async fn idle_keep_alive_closes_after_a_valid_response() -> TestResult {
-        let (mut client, server) = socket_pair().await?;
+        let (mut client, mut server) = socket_pair().await?;
         client
             .write_all(b"GET / HTTP/1.1\r\nhost: localhost\r\n\r\n")
             .await?;
         let mut response = [0; 512];
-        let count = tokio::time::timeout(Duration::from_secs(2), client.read(&mut response))
-            .await??;
+        let count =
+            tokio::time::timeout(Duration::from_secs(2), client.read(&mut response)).await??;
         assert!(
             String::from_utf8_lossy(&response[..count]).starts_with("HTTP/1.1 200"),
             "the first request must complete before the keep-alive deadline"
         );
         assert_server_closed(
-            server,
+            &mut server,
             Instant::now() + HEADER_TIMEOUT + Duration::from_secs(2),
         )
         .await?;
