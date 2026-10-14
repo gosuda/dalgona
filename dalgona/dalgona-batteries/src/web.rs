@@ -32,13 +32,12 @@ unique-local, unspecified, and the other non-public ranges refuse with
 `web_fetch: <host> is a private address; fetch public URLs only.` The check
 runs on every hop, redirects included, against the address the name
 resolves to, not the name: a host name with any private address in its
-answer refuses, and so does a literal such as `http://2130706433/`. A name
-resolves once. An `http` hop connects to the first address the resolver
-lists, which is the one that passed the check, and sends the original `Host`
-header, so the answer cannot change between the check and the connection
-(DNS rebinding). An `https` hop keeps the host name, so the certificate
-check binds the connection to the name that was checked; that hop pins no
-address. To fetch a private URL, use `exec` with `curl`.
+answer refuses, and so does a literal such as `http://2130706433/`. The web tool checks a name before sending the request. The host Net service
+independently checks its destination again, pins the approved DNS addresses
+for both http and https, and disables proxies and automatic redirects.
+TLS keeps the original hostname for certificate validation. Each redirect
+is submitted as a new request and checked again. To fetch a private URL,
+use `exec` with `curl`.
 
 `web_search` queries one provider, Brave Web Search or Tavily Search. The
 query is 1 to 400 characters; `count` is 1 to 20 and defaults to 5. Results
