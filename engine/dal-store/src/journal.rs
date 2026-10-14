@@ -1,6 +1,11 @@
 //! The journal file: one write and one sync per batch, torn-tail repair,
 //! structure validation, and rollback on failure.
 //!
+//! A partial batch write whose truncate-back also fails leaves complete lines
+//! of a batch that never committed. The journal then records the batch start
+//! in a durable rollback marker, and the next open quarantines everything from
+//! that offset as a torn tail, so no part of the failed batch is replayed.
+//!
 //! The journal speaks bytes; its caller encodes records and publishes blobs
 //! before the first byte of a batch is written.
 
@@ -140,15 +145,7 @@ impl Journal {
     /// Returns [`JournalError::Io`] when creation or syncing fails, and
     /// [`JournalError::Damaged`] when a failed create cannot be removed durably.
     pub(crate) fn create(path: &Path, lines: &[u8], faults: &Faults) -> Result<Self, JournalError> {
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let file = options
-            .open(path)
+        let file = crate::private::create_new(path, crate::util::FileMode::Mode0600)
             .map_err(|source| jio("create", path, source))?;
         let mut journal = Self {
             file,
@@ -176,10 +173,7 @@ impl Journal {
     /// structure check (as [`crate::error::StoreError::Damaged`] via the caller),
     /// or an unsupported version (as [`crate::error::StoreError::UnknownVersion`]).
     pub(crate) fn open(path: &Path, faults: &Faults) -> Result<Opened, OpenFailure> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path)
+        let file = crate::private::open_private_file_read_write(path)
             .map_err(|source| OpenFailure::Journal(jio("open", path, source)))?;
         let mut journal = Self {
             file,
@@ -197,14 +191,31 @@ impl Journal {
             .unwrap_or(usize::MAX)
             .min(SCAN_BUFFER);
         let mut stream_buffer = vec![0_u8; buffer_len];
+        let rollback = read_rollback_marker(path)?;
+        let scan_end = match rollback {
+            Some(offset) if offset <= file_len => offset,
+            Some(offset) => {
+                return Err(OpenFailure::Damaged {
+                    offset,
+                    reason: "the rollback marker points past the end of the journal".into(),
+                });
+            }
+            None => file_len,
+        };
         let mut records = Vec::new();
         let (complete_end, validator) = scan_complete_prefix(
             &mut journal.file,
             path,
-            file_len,
+            scan_end,
             &mut stream_buffer,
             |offset, record| records.push((offset, record)),
         )?;
+        if rollback.is_some() && complete_end != scan_end {
+            return Err(OpenFailure::Damaged {
+                offset: scan_end,
+                reason: "the rollback marker does not point to a record boundary".into(),
+            });
+        }
         let header = header_of(&records)?;
         let next_gen = validator
             .last_boot_gen
@@ -227,6 +238,9 @@ impl Journal {
             &mut stream_buffer,
         )
         .map_err(OpenFailure::Journal)?;
+        if rollback.is_some() {
+            remove_rollback_marker(path).map_err(OpenFailure::Journal)?;
+        }
         journal.end = complete_end;
         Ok(Opened {
             header,
@@ -293,9 +307,17 @@ impl Journal {
             Err(error) => {
                 if self.faults.truncate_error || self.truncate_back(offset).is_err() {
                     self.health = Health::Damaged;
+                    let cause = match write_rollback_marker(&self.path, offset) {
+                        Ok(()) => format!(
+                            "{error}; truncate-back also failed; reopen discards the batch at offset {offset}"
+                        ),
+                        Err(marker) => format!(
+                            "{error}; truncate-back also failed; recording the rollback also failed: {marker}"
+                        ),
+                    };
                     return Err(JournalError::Damaged {
                         path: self.path.clone(),
-                        cause: format!("{error}; truncate-back also failed").into(),
+                        cause: cause.into(),
                     });
                 }
                 Err(error)
@@ -511,16 +533,32 @@ fn write_side_file(
 ) -> Result<(), JournalError> {
     #[cfg(windows)]
     let _ = faults;
-    let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut kept_file = options
-        .open(kept_at)
+    #[cfg(windows)]
+    let mut kept_file =
+        match crate::private::create_new(kept_at, crate::util::FileMode::Mode0600) {
+            Ok(file) => Ok(file),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                crate::private::open_private_file_read_write(kept_at).and_then(|file| {
+                    file.set_len(0)?;
+                    Ok(file)
+                })
+            }
+            Err(error) => Err(error),
+        }
         .map_err(|source| jio("quarantine", journal_path, source))?;
+    #[cfg(not(windows))]
+    let mut kept_file = {
+        let mut options = OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options
+            .open(kept_at)
+            .map_err(|source| jio("quarantine", journal_path, source))?
+    };
     journal_file
         .seek(SeekFrom::Start(tail_start))
         .map_err(|source| jio("read", journal_path, source))?;
@@ -562,6 +600,62 @@ fn write_side_file(
         other => other,
     })?;
     Ok(())
+}
+
+fn rollback_marker(path: &Path) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".rollback");
+    path.with_file_name(name)
+}
+
+/// Durably records where a failed batch began: `<offset>\n`.
+fn write_rollback_marker(path: &Path, offset: u64) -> Result<(), JournalError> {
+    let marker = rollback_marker(path);
+    let mut file = crate::private::create_new(&marker, crate::util::FileMode::Mode0600)
+        .map_err(|source| jio("rollback", &marker, source))?;
+    // An interrupted write leaves a marker that refuses reopen, never an
+    // absent marker that could let complete lines of the failed batch replay.
+    sync_parent_directory(&marker, "rollback")?;
+    file.write_all(format!("{offset}\n").as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(|source| jio("rollback", &marker, source))
+}
+
+/// Reads at most one decimal u64 and its newline. An unreadable or malformed
+/// marker must never allow the failed batch to replay.
+fn read_rollback_marker(path: &Path) -> Result<Option<u64>, OpenFailure> {
+    let marker = rollback_marker(path);
+    let file = match File::open(&marker) {
+        Ok(file) => file,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => return Err(OpenFailure::Journal(jio("rollback", &marker, source))),
+    };
+    // A marker that exists but is unreadable or malformed fails closed: it
+    // marks a failed batch, so discarding it would replay committed-looking
+    // lines that the writer meant to roll back.
+    let mut bytes = Vec::new();
+    file.take(22)
+        .read_to_end(&mut bytes)
+        .map_err(|source| OpenFailure::Journal(jio("rollback", &marker, source)))?;
+    bytes
+        .strip_suffix(b"\n")
+        .filter(|digits| !digits.is_empty() && digits.iter().all(u8::is_ascii_digit))
+        .and_then(|digits| core::str::from_utf8(digits).ok())
+        .and_then(|digits| digits.parse::<u64>().ok())
+        .map(Some)
+        .ok_or_else(|| OpenFailure::Damaged {
+            offset: 0,
+            reason: "the rollback marker does not hold a byte offset".into(),
+        })
+}
+
+fn remove_rollback_marker(path: &Path) -> Result<(), JournalError> {
+    let marker = rollback_marker(path);
+    match fs::remove_file(&marker) {
+        Ok(()) => sync_parent_directory(&marker, "rollback"),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(jio("rollback", &marker, source)),
+    }
 }
 
 /// Windows has no directory-sync door; the `Result` is load-bearing on POSIX.
@@ -1118,9 +1212,7 @@ pub(crate) fn scan_prefix(
     path: &Path,
     visit: impl FnMut(u64, Record),
 ) -> Result<PrefixSummary, OpenFailure> {
-    let mut file = OpenOptions::new()
-        .read(true)
-        .open(path)
+    let mut file = crate::private::open_private_file(path)
         .map_err(|source| OpenFailure::Journal(jio("open", path, source)))?;
     let file_len = file
         .metadata()
@@ -1888,6 +1980,108 @@ mod tests {
 
         assert!(matches!(failure, JournalError::Io { op: "write", .. }));
         assert!(!path.exists());
+    }
+
+    fn journal_with_uncommitted_line(directory: &TestDirectory) -> (PathBuf, Vec<u8>) {
+        let committed = encode_records(&[session_record(), boot_record(1), user_record(1, None)]);
+        let path = directory.0.join("journal.jsonl");
+        drop(Journal::create(&path, &committed, &Faults::default()).expect("create journal"));
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("open journal for the uncommitted line");
+        file.write_all(&encode_records(&[user_record(2, Some(entry_id(1)))]))
+            .expect("write the complete line of an uncommitted batch");
+        (path, committed)
+    }
+
+    #[test]
+    fn rollback_marker_quarantines_the_complete_lines_of_its_batch() {
+        let directory = TestDirectory::new();
+        let (path, committed) = journal_with_uncommitted_line(&directory);
+        fs::write(rollback_marker(&path), format!("{}\n", committed.len()))
+            .expect("write rollback marker");
+
+        let opened = Journal::open(&path, &Faults::default()).expect("reopen journal");
+        assert_eq!(opened.records.len(), 3, "only the committed prefix replays");
+        assert!(opened.report.torn.is_some(), "the batch is kept aside");
+        assert!(!rollback_marker(&path).exists(), "the marker is consumed");
+        assert_eq!(fs::read(&path).expect("read journal"), committed);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rollback_markers_are_private_and_never_follow_existing_paths() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let directory = TestDirectory::new();
+        let (path, committed) = journal_with_uncommitted_line(&directory);
+        write_rollback_marker(&path, u64::try_from(committed.len()).expect("offset"))
+            .expect("write marker");
+        let marker = rollback_marker(&path);
+        assert_eq!(
+            fs::metadata(&marker).expect("marker").permissions().mode() & 0o777,
+            0o600
+        );
+        fs::remove_file(&marker).expect("remove marker");
+        let victim = directory.0.join("untouched");
+        fs::write(&victim, b"preserve").expect("write target");
+        symlink(&victim, &marker).expect("link marker");
+        assert!(write_rollback_marker(&path, 1).is_err());
+        assert_eq!(fs::read(&victim).expect("read target"), b"preserve");
+    }
+
+    #[test]
+    fn malformed_rollback_markers_refuse_open_without_changing_evidence() {
+        for bytes in [
+            b"".as_slice(),
+            b"123",
+            b"+123\n",
+            b"bad\n",
+            b"18446744073709551616\n",
+            b"123456789012345678901234567890\n",
+        ] {
+            let directory = TestDirectory::new();
+            let (path, _) = journal_with_uncommitted_line(&directory);
+            let original = fs::read(&path).expect("read journal");
+            fs::write(rollback_marker(&path), bytes).expect("write malformed marker");
+            assert!(matches!(
+                Journal::open(&path, &Faults::default()),
+                Err(OpenFailure::Damaged { .. })
+            ));
+            assert_eq!(fs::read(&path).expect("read journal"), original);
+            assert_eq!(
+                fs::read(rollback_marker(&path)).expect("read marker"),
+                bytes
+            );
+        }
+    }
+
+    #[test]
+    fn rollback_marker_between_records_refuses_open_without_truncating() {
+        let directory = TestDirectory::new();
+        let (path, committed) = journal_with_uncommitted_line(&directory);
+        let original = fs::read(&path).expect("read journal");
+        let offset = committed.len() - 1;
+        fs::write(rollback_marker(&path), format!("{offset}\n")).expect("write marker");
+        assert!(matches!(
+            Journal::open(&path, &Faults::default()),
+            Err(OpenFailure::Damaged { .. })
+        ));
+        assert_eq!(fs::read(&path).expect("read journal"), original);
+    }
+
+    #[test]
+    fn rollback_marker_past_the_end_refuses_the_open() {
+        let directory = TestDirectory::new();
+        let (path, _) = journal_with_uncommitted_line(&directory);
+        fs::write(rollback_marker(&path), "1000000\n").expect("write marker");
+        assert!(matches!(
+            Journal::open(&path, &Faults::default()),
+            Err(OpenFailure::Damaged {
+                offset: 1_000_000,
+                ..
+            })
+        ));
     }
 
     #[test]

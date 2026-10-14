@@ -1,7 +1,8 @@
 //! Extension registration: the builder and the sealed extension it produces.
 
+use std::io::Read as _;
 use std::num::NonZeroU32;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use dal_core::ext::{BeforeRequest, BeforeTurn, ExportId, ExportKind, OpId, RuleFile, TurnEnd};
 use dal_core::{
@@ -37,12 +38,40 @@ fn valid_name(name: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-' || *b == b'_')
 }
 
+/// Length-prefix each domain part so separate declarations cannot hash alike.
+fn hash_part(hasher: &mut blake3::Hasher, part: &[u8]) {
+    hasher.update(&(part.len() as u64).to_le_bytes());
+    hasher.update(part);
+}
+
+/// Native extension code is linked into the executable. Cache the digest of
+/// the actual running image once; failure leaves capabilities ungrantable.
+fn binary_source_digest() -> Option<Box<str>> {
+    static SOURCE: OnceLock<Option<Box<str>>> = OnceLock::new();
+    SOURCE
+        .get_or_init(|| {
+            let mut executable = std::fs::File::open(std::env::current_exe().ok()?).ok()?;
+            let mut hasher = blake3::Hasher::new();
+            let mut buf = [0_u8; 8192];
+            loop {
+                let read = executable.read(&mut buf).ok()?;
+                if read == 0 {
+                    break;
+                }
+                hasher.update(&buf[..read]);
+            }
+            Some(hasher.finalize().to_hex().to_string().into_boxed_str())
+        })
+        .clone()
+}
+
 /// Collects one extension's registrations before validation.
 pub struct ExtensionBuilder {
     name: Box<str>,
     version: Box<str>,
     inject: ServiceSet,
     state_version: NonZeroU32,
+    source_digest: Option<Box<str>>,
     origin: Origin,
     site: Option<Site>,
     tools: Vec<(Arc<dyn Tool>, Visibility)>,
@@ -100,6 +129,7 @@ impl ExtensionBuilder {
             version: version.into(),
             inject,
             state_version: NonZeroU32::MIN,
+            source_digest: None,
             origin: Origin::Builtin,
             site: None,
             tools: Vec::new(),
@@ -148,6 +178,13 @@ impl ExtensionBuilder {
     #[must_use]
     pub fn with_state_version(mut self, state_version: NonZeroU32) -> Self {
         self.state_version = state_version;
+        self
+    }
+    /// Binds scripted code to the host's immutable, admitted source snapshot.
+    /// Native extensions use a digest of the running executable instead.
+    #[must_use]
+    pub fn with_source_digest(mut self, digest: Box<str>) -> Self {
+        self.source_digest = Some(digest);
         self
     }
     /// Registers one model-callable tool with its visibility.
@@ -425,11 +462,32 @@ impl ExtensionBuilder {
                 docs::check_path(record)?;
             }
         }
+        let grant_digest = self
+            .source_digest
+            .or_else(binary_source_digest)
+            .map(|source| {
+                let mut hasher = blake3::Hasher::new();
+                hash_part(&mut hasher, b"dal-grant-code-v2");
+                hash_part(&mut hasher, source.as_bytes());
+                hash_part(&mut hasher, self.version.as_bytes());
+                hash_part(&mut hasher, &state_version.get().to_le_bytes());
+                hash_part(&mut hasher, &(exports.len() as u64).to_le_bytes());
+                for (export, _) in &exports {
+                    let id = OpId::Export(export.id.clone()).to_string();
+                    hash_part(&mut hasher, id.as_bytes());
+                    hash_part(&mut hasher, &(export.uses.iter().count() as u64).to_le_bytes());
+                    for operation in export.uses.iter() {
+                        hash_part(&mut hasher, operation.to_string().as_bytes());
+                    }
+                }
+                hasher.finalize().to_hex().to_string().into_boxed_str()
+            });
         Ok(Extension {
             name: self.name,
             version: self.version,
             inject: self.inject,
             state_version,
+            grant_digest,
             origin: self.origin,
             site: self.site,
             tools: self.tools,
@@ -570,6 +628,7 @@ pub struct Extension {
     pub(super) version: Box<str>,
     pub(super) inject: ServiceSet,
     pub(super) state_version: NonZeroU32,
+    pub(super) grant_digest: Option<Box<str>>,
     pub(super) origin: Origin,
     pub(super) site: Option<Site>,
     pub(super) tools: Vec<(Arc<dyn Tool>, Visibility)>,
@@ -627,6 +686,11 @@ impl Extension {
     #[must_use]
     pub fn state_version(&self) -> NonZeroU32 {
         self.state_version
+    }
+    /// Returns the host-computed identity of the admitted code, version, and operations.
+    #[must_use]
+    pub fn grant_digest(&self) -> Option<&str> {
+        self.grant_digest.as_deref()
     }
     /// Returns where the extension came from.
     #[must_use]
@@ -748,5 +812,29 @@ impl std::fmt::Debug for Extension {
             .field("statuses", &self.statuses.len())
             .field("models", &self.models.len())
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod grant_identity_tests {
+    use super::ExtensionBuilder;
+    use std::num::NonZeroU32;
+
+    #[test]
+    fn code_version_and_state_declaration_change_approval_identity() {
+        let build = |source: &str, version: &str, state: u32| {
+            ExtensionBuilder::new("focus", version, dal_core::ServiceSet::EMPTY)
+                .expect("extension")
+                .with_origin(dal_core::Origin::User, None)
+                .with_source_digest(source.into())
+                .with_state_version(NonZeroU32::new(state).expect("nonzero"))
+                .build()
+                .expect("registered")
+        };
+        let original = build("a", "1.0.0", 1);
+        assert_eq!(original.grant_digest(), build("a", "1.0.0", 1).grant_digest());
+        assert_ne!(original.grant_digest(), build("b", "1.0.0", 1).grant_digest());
+        assert_ne!(original.grant_digest(), build("a", "1.0.1", 1).grant_digest());
+        assert_ne!(original.grant_digest(), build("a", "1.0.0", 2).grant_digest());
     }
 }

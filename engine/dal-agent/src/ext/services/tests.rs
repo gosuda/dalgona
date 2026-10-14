@@ -467,6 +467,7 @@ fn caller(ext: &str, inject: &[&str], turn: Option<TurnId>) -> Caller {
         CallerKind::Handler,
         turn,
     )
+    .with_test_digest()
 }
 
 fn turn() -> TurnId {
@@ -1429,7 +1430,7 @@ async fn scope_over_uses_the_supplied_service_caller() {
     let handle = scope
         .agent(dal_core::AgentStart {
             call: CallId::new("member"),
-            name: "member".into(),
+            name: Some("member".into()),
             prompt: "work".into(),
             model: None,
             role: None,
