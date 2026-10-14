@@ -159,7 +159,7 @@ fn contains(haystack: &str, needle: &str) {
 }
 
 #[test]
-fn a_pack_reports_one_pass_and_one_fail_with_the_report_shape() {
+fn an_exec_call_is_refused_and_the_case_reports_failure() {
     let write = tool_step(
         "write-1",
         "exec",
@@ -170,6 +170,31 @@ fn a_pack_reports_one_pass_and_one_fail_with_the_report_shape() {
     let run = rig.run(&["edit-anchor-smoke", "--repeats", "2"]);
     assert_eq!(run.code, Some(0), "stderr: {}", run.stderr);
 
+    // The run has no controller to approve the exec call, so it is refused
+    // and `scripts/run.sh` is never written: both repeats fail the check.
+    let report = rig.report("edit-anchor-smoke");
+    contains(
+        &report,
+        r#""cases":[{"id":"shebang","repeats":2,"passed":0,"failed":2,"skipped":0,"pass_rate":0.0,"#,
+    );
+}
+
+#[test]
+fn a_pack_reports_one_pass_and_one_fail_with_the_report_shape() {
+    let rig = Rig::new(&[text_step("pass"), text_step("fail")], "");
+    rig.pack(
+        "edit-anchor-smoke",
+        r#"def ok(result, workspace):
+    return result["text"] == "pass"
+
+evalpack.pack(name = "edit-anchor-smoke", cases = [
+    evalpack.case(id = "shebang", prompt = "p", check = ok),
+])
+"#,
+    );
+    let run = rig.run(&["edit-anchor-smoke", "--repeats", "2"]);
+    assert_eq!(run.code, Some(0), "stderr: {}", run.stderr);
+
     let report = rig.report("edit-anchor-smoke");
     contains(
         &report,
@@ -177,7 +202,7 @@ fn a_pack_reports_one_pass_and_one_fail_with_the_report_shape() {
     );
     contains(
         &report,
-        r#""cases":[{"id":"shebang","repeats":2,"passed":1,"failed":1,"skipped":0,"pass_rate":0.5,"tokens_in_mean":18.0,"tokens_out_mean":7.5,"latency_ms_mean":"#,
+        r#""cases":[{"id":"shebang","repeats":2,"passed":1,"failed":1,"skipped":0,"pass_rate":0.5,"tokens_in_mean":12.0,"tokens_out_mean":5.0,"latency_ms_mean":"#,
     );
     contains(&report, r#""cost_usd_mean":null,"judge":null}]}"#);
     assert!(!report.contains("interrupted"), "{report}");
@@ -186,7 +211,7 @@ fn a_pack_reports_one_pass_and_one_fail_with_the_report_shape() {
     assert_eq!(lines.len(), 2, "one runs.jsonl line per run: {lines:?}");
     contains(
         &lines[0],
-        r#""case":"shebang","arm":"defaults","repeat":1,"status":"passed","reason":null,"tokens_in":24,"tokens_out":10"#,
+        r#""case":"shebang","arm":"defaults","repeat":1,"status":"passed","reason":null,"tokens_in":12,"tokens_out":5"#,
     );
     contains(
         &lines[1],
@@ -409,17 +434,18 @@ fn wait_for(what: &str, ready: impl Fn() -> bool) {
 #[cfg(unix)]
 #[test]
 fn sigint_writes_the_partial_report_marks_it_and_exits_130() {
-    let started =
-        std::env::temp_dir().join(format!("dalgona-eval-gate-started-{}", std::process::id()));
-    let hang = tool_step(
-        "hang-1",
-        "exec",
-        &format!(
-            r#"{{"command":"touch {} && sleep 600","foreground_s":86400}}"#,
-            started.display()
-        ),
-    );
-    let rig = Rig::new(&[text_step("first"), hang, text_step("never")], "");
+    // Case two's turn loops on refused exec calls: each denial consumes one
+    // scripted step, so the turn stays open long enough to signal inside it.
+    let mut steps = vec![text_step("first")];
+    for index in 0..400 {
+        steps.push(tool_step(
+            &format!("hang-{index}"),
+            "exec",
+            r#"{"command":"sleep 600","foreground_s":86400}"#,
+        ));
+    }
+    steps.push(text_step("never"));
+    let rig = Rig::new(&steps, "");
     rig.pack(
         "three",
         r#"def ok(result, workspace):
@@ -439,7 +465,15 @@ evalpack.pack(name = "three", cases = [
             .spawn()
             .expect("spawn dalgona eval"),
     );
-    wait_for("the second case to start", || started.exists());
+    wait_for("the second case to start", || {
+        let Ok(entries) = fs::read_dir(rig.data().join("evals/runs/three")) else {
+            return false;
+        };
+        entries.flatten().any(|entry| {
+            fs::read_to_string(entry.path().join("runs.jsonl"))
+                .is_ok_and(|text| text.contains(r#""case":"one""#))
+        })
+    });
     let signalled = Command::new("kill")
         .args(["-INT", &child.0.id().to_string()])
         .status()
@@ -455,7 +489,6 @@ evalpack.pack(name = "three", cases = [
             std::thread::sleep(Duration::from_millis(50));
         }
     };
-    let _ = fs::remove_file(&started);
     assert_eq!(finished.code(), Some(130));
 
     let report = rig.report("three");

@@ -89,10 +89,10 @@ fn no_file_means_the_product_defaults_and_no_model() {
 }
 
 #[test]
-fn a_run_never_asks_whatever_the_files_say() {
-    for user in ["approval = \"ask\"\n", "approval = \"edits\"\n", ""] {
-        let loaded = config(Some(user), Some("approval = \"ask\"\n"), None);
-        assert_eq!(loaded.approval(), ApprovalMode::All, "{user:?}");
+fn a_run_refuses_approvals_whatever_the_files_say() {
+    for user in ["approval = \"all\"\n", "approval = \"edits\"\n", ""] {
+        let loaded = config(Some(user), Some("approval = \"all\"\n"), None);
+        assert_eq!(loaded.approval(), ApprovalMode::Ask, "{user:?}");
     }
 }
 
