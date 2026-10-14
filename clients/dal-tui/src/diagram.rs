@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::{OsStr, OsString};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub mod cli;
@@ -199,6 +200,24 @@ pub fn render_diagram(
     path: Option<&OsStr>,
     fonts: &FontSnapshot,
 ) -> DiagramOutcome {
+    render_until(
+        kind,
+        source,
+        width_cells,
+        path,
+        fonts,
+        &AtomicBool::new(false),
+    )
+}
+
+fn render_until(
+    kind: DiagramKind,
+    source: &[u8],
+    width_cells: usize,
+    path: Option<&OsStr>,
+    fonts: &FontSnapshot,
+    stop: &AtomicBool,
+) -> DiagramOutcome {
     let source = strip_one_bom(source);
     if source.len() > SOURCE_CAP {
         return fallback("too large");
@@ -209,7 +228,7 @@ pub fn render_diagram(
     let outcome = match kind {
         DiagramKind::Mermaid => mermaid::render(source, width_cells),
         DiagramKind::Dot => dot::render(source, width_cells),
-        DiagramKind::D2 | DiagramKind::Nomnoml => cli::render(kind, source, path, fonts),
+        DiagramKind::D2 | DiagramKind::Nomnoml => cli::render(kind, source, path, fonts, stop),
     };
     limit_art_cells(outcome)
 }
@@ -246,11 +265,15 @@ pub fn fallback_card(kind: DiagramKind, reason: &str) -> String {
 }
 
 /// In-process LRU over kind, blake3 digest, and width bucket.
+///
+/// The cache owns its background render workers. Dropping it stops every
+/// running renderer and joins its worker, so no render outlives the cache.
 #[derive(Debug, Default)]
 pub struct RenderCache {
     path: Option<OsString>,
     fonts: FontSnapshot,
     state: Arc<Mutex<RenderCacheState>>,
+    stop: Arc<AtomicBool>,
 }
 
 type RenderKey = (DiagramKind, [u8; 32], usize);
@@ -261,7 +284,7 @@ struct RenderCacheState {
     order: VecDeque<RenderKey>,
     pending: HashSet<RenderKey>,
     /// Spawned render workers, joined when the cache drops so no render
-    /// outlives its session. Workers are bounded by the renderer timeout.
+    /// outlives its session. Finished workers are reaped on each spawn.
     workers: Vec<std::thread::JoinHandle<()>>,
     /// Set when the cache drops: no new work is scheduled.
     closed: bool,
@@ -298,6 +321,7 @@ impl RenderCache {
             path,
             fonts,
             state: Arc::default(),
+            stop: Arc::default(),
         }
     }
 
@@ -363,23 +387,36 @@ impl RenderCache {
         let path = self.path.clone();
         let fonts = self.fonts.clone();
         let source = source.to_vec();
+        let stop = Arc::clone(&self.stop);
         if let Ok(worker) = std::thread::Builder::new()
             .name("dal-tui-diagram".to_owned())
             .spawn(move || {
-                let outcome = render_diagram(kind, &source, width_cells, path.as_deref(), &fonts);
+                let outcome =
+                    render_until(kind, &source, width_cells, path.as_deref(), &fonts, &stop);
                 let mut state = shared
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 state.pending.remove(&key);
+                if state.closed {
+                    return;
+                }
                 state.insert(key, outcome);
                 state.generation = state.generation.saturating_add(1);
             })
         {
-            self.state
+            let mut state = self
+                .state
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .workers
-                .push(worker);
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut index = 0;
+            while index < state.workers.len() {
+                if state.workers[index].is_finished() {
+                    let _ = state.workers.swap_remove(index).join();
+                } else {
+                    index += 1;
+                }
+            }
+            state.workers.push(worker);
         } else {
             let mut state = self
                 .state
@@ -412,9 +449,11 @@ impl RenderCache {
 }
 
 impl Drop for RenderCache {
-    /// Stops new scheduling and joins every render worker; each render is
-    /// bounded by the renderer timeout, so the join cannot hang the drop.
+    /// Stops new scheduling, signals every running renderer to stop, and
+    /// joins every render worker, so the drop waits only for the renderer
+    /// processes to be killed.
     fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
         let workers = {
             let mut state = self
                 .state
@@ -658,6 +697,48 @@ mod tests {
             super::limit_art_cells(DiagramOutcome::Art(art(257, 256))),
             DiagramOutcome::Fallback { reason } if reason.as_ref() == "too large"
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dropping_the_cache_stops_its_running_renderer() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{Duration, Instant};
+
+        let tools = tempfile::tempdir().expect("temporary tool directory");
+        let d2 = tools.path().join("d2");
+        std::fs::write(
+            &d2,
+            b"#!/bin/sh\n: > \"${0%/*}/started\"\n/bin/sleep 1\n: > \"${0%/*}/finished\"\n",
+        )
+        .expect("fake d2 tool");
+        let mut permissions = std::fs::metadata(&d2)
+            .expect("fake tool metadata")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&d2, permissions).expect("executable fake tool");
+        let cache = RenderCache::with_fonts(
+            Some(tools.path().as_os_str().to_owned()),
+            super::FontSnapshot::default(),
+        );
+        assert!(
+            cache
+                .get_or_schedule(DiagramKind::D2, b"a -> b", 80)
+                .is_none()
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !tools.path().join("started").exists() {
+            assert!(Instant::now() < deadline, "the renderer never started");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let dropped = Instant::now();
+        drop(cache);
+        assert!(dropped.elapsed() < Duration::from_millis(900));
+        std::thread::sleep(Duration::from_millis(1_500));
+        assert!(
+            !tools.path().join("finished").exists(),
+            "the renderer outlived its cache"
+        );
     }
 
     #[test]

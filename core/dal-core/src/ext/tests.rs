@@ -195,7 +195,7 @@ fn mapped_names_deserialize_in_hook_scope_and_child_tool_values() -> TestResult 
     assert_eq!(scope.named_tools[0].as_str(), "deploy.web-x.list");
     let child = AgentStart {
         call,
-        name: "child".into(),
+        name: Some("child".into()),
         prompt: "run mapped tool".into(),
         model: None,
         role: None,
@@ -386,7 +386,7 @@ fn rule_declaration_keeps_bad_pattern_until_set_build() -> TestResult {
 fn agent_start_validates_before_effects() -> TestResult {
     let invalid_start = AgentStart {
         call: CallId::new("parent-call"),
-        name: "reviewer".into(),
+        name: Some("reviewer".into()),
         prompt: "child prompt".into(),
         model: None,
         role: Some("reviewer".into()),

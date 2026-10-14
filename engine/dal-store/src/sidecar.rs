@@ -84,7 +84,11 @@ impl<'session> Sidecar<'session> {
     /// [`StoreError::Io`] for another read failure.
     pub fn read(&self, name: &str) -> Result<Vec<u8>, StoreError> {
         let path = self.path(name)?;
-        match fs::read(&path) {
+        match crate::private::open_private_file(&path).and_then(|mut file| {
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(&mut file, &mut bytes)?;
+            Ok(bytes)
+        }) {
             Ok(bytes) => Ok(bytes),
             Err(source) if source.kind() == io::ErrorKind::NotFound => {
                 Err(StoreError::NotFound { path })
@@ -176,7 +180,8 @@ impl ExtensionSidecar<'_> {
                 bytes: metadata.len(),
             });
         }
-        let file = fs::File::open(&path).map_err(|source| util::io_err(&path, source))?;
+        let file = crate::private::open_private_file(&path)
+            .map_err(|source| util::io_err(&path, source))?;
         // One byte over the cap turns a value grown between the stat and the
         // read into an error instead of a silently truncated value.
         let mut value = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));

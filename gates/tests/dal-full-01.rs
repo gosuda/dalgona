@@ -237,7 +237,7 @@ impl ModelHandler for ChildLoadModel {
             for index in 0..CHILD_SESSIONS {
                 let child = AgentStart {
                     call: CallId::new(format!("child-call-{index}")),
-                    name: format!("member-{index}").into(),
+                    name: Some(format!("member-{index}").into()),
                     prompt: format!("report from member {index}").into(),
                     model: Some(MEMBER_MODEL.into()),
                     role: None,
@@ -395,7 +395,7 @@ impl ModelHandler for ShuttleRootModel {
             };
             let child = AgentStart {
                 call: CallId::new("shuttle-child-call"),
-                name: "shuttle-child".into(),
+                name: Some("shuttle-child".into()),
                 prompt: "hold a member turn while mail arrives".into(),
                 model: Some(SHUTTLE_SLOW_MODEL.into()),
                 role: None,

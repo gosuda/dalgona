@@ -211,8 +211,8 @@ pub(crate) fn redact_provider_error(error: &mut ProviderError, secrets: &[Box<st
 /// Sends and decodes one Codex HTTPS streaming request.
 ///
 /// Non-success status bodies are read through the shared size-limited reader.
-/// Dropping the returned `EventStream` drops the response body and cancels the
-/// HTTP transfer.
+/// A stalled read ends after the idle timeout. Dropping the returned
+/// `EventStream` drops the response body and cancels the HTTP transfer.
 pub(crate) async fn https(
     client: &reqwest::Client,
     base_url: &str,

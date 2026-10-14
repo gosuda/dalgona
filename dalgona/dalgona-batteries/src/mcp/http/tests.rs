@@ -1072,10 +1072,11 @@ async fn notify_fixture(
     let issuer = format!("http://{}", listener.local_addr().expect("address"));
     let url = Url::parse(&format!("{issuer}/mcp")).expect("fixture URL");
     let resource = token_auth::canonical_resource(&url);
-    let tokens_path = std::env::temp_dir().join(format!(
-        "dalgona-mcp-notify-tokens-{}.json",
+    let token_dir = std::env::temp_dir().join(format!(
+        "dalgona-mcp-notify-tokens-{}",
         uuid::Uuid::new_v4()
     ));
+    let tokens_path = token_dir.join("tokens.json");
     token_auth::persist_token(&tokens_path, &issuer, &resource, record).expect("seed tokens");
     let server = auth_server(listener, issuer.clone(), resource, mcp_replies);
     (
@@ -1135,7 +1136,9 @@ async fn notify_retries_once_with_the_stored_token() {
             .line
             .starts_with("GET /.well-known/oauth-authorization-server")
     }));
-    let _ = std::fs::remove_file(tokens_path);
+    if let Some(directory) = tokens_path.parent() {
+        let _ = std::fs::remove_dir_all(directory);
+    }
 }
 
 #[tokio::test]
@@ -1192,7 +1195,9 @@ async fn notify_refreshes_a_rejected_token_and_persists() {
     .expect("persisted record");
     assert_eq!(stored.access_token, "fresh-token");
     assert_eq!(stored.refresh_token.as_deref(), Some("rt-2"));
-    let _ = std::fs::remove_file(tokens_path);
+    if let Some(directory) = tokens_path.parent() {
+        let _ = std::fs::remove_dir_all(directory);
+    }
 }
 
 #[tokio::test]
@@ -1227,5 +1232,7 @@ async fn notify_fails_closed_on_a_plain_forbidden() {
             .iter()
             .any(|request| request.line.starts_with("POST /token"))
     );
-    let _ = std::fs::remove_file(tokens_path);
+    if let Some(directory) = tokens_path.parent() {
+        let _ = std::fs::remove_dir_all(directory);
+    }
 }
