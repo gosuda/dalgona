@@ -38,10 +38,9 @@ pub fn push_escaped(output: &mut String, character: char) {
 }
 
 fn escape_impl(text: &str, preserve_newlines: bool) -> Cow<'_, str> {
-    let Some((first, _)) = text
-        .char_indices()
-        .find(|(_, character)| needs_escape(*character) && (!preserve_newlines || *character != '\n'))
-    else {
+    let Some((first, _)) = text.char_indices().find(|(_, character)| {
+        needs_escape(*character) && (!preserve_newlines || *character != '\n')
+    }) else {
         return Cow::Borrowed(text);
     };
     let mut output = String::with_capacity(text.len());
