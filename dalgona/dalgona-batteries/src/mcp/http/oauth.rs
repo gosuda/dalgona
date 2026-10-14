@@ -1218,6 +1218,17 @@ mod tests {
         net::TcpListener,
     };
 
+    fn consent_context() -> (Arc<crate::work::support::FakeServices>, Caller) {
+        let services = Arc::new(crate::work::support::FakeServices::default());
+        let who = dal_agent::ext::HookCx::for_test(
+            services.clone(),
+            dal_core::SessionId::new_v7(),
+            None,
+        )
+        .caller;
+        (services, who)
+    }
+
     /// Serves exactly `expected` token requests, then returns.
     async fn token_server(listener: TcpListener, expected: usize, count: Arc<AtomicUsize>) {
         for _ in 0..expected {
@@ -1311,8 +1322,17 @@ mod tests {
             policy: NetworkPolicy::for_target(&target),
         };
         let cancel = CancellationToken::new();
+        let (services, who) = consent_context();
         let (result, paths) = tokio::join!(
-            discover(&oauth, &target, &challenge, Duration::from_secs(3), &cancel,),
+            discover(
+                &oauth,
+                &target,
+                &challenge,
+                services.as_ref(),
+                &who,
+                Duration::from_secs(3),
+                &cancel,
+            ),
             server,
         );
         assert!(matches!(result, Err(McpError::IssuerMismatch)));
@@ -1342,8 +1362,17 @@ mod tests {
             policy: NetworkPolicy::for_target(&target),
         };
         let cancel = CancellationToken::new();
+        let (services, who) = consent_context();
         let (result, _) = tokio::join!(
-            discover(&oauth, &target, &challenge, Duration::from_secs(3), &cancel,),
+            discover(
+                &oauth,
+                &target,
+                &challenge,
+                services.as_ref(),
+                &who,
+                Duration::from_secs(3),
+                &cancel,
+            ),
             server,
         );
         let discovered = result.expect("bound metadata");
@@ -1393,6 +1422,9 @@ mod tests {
             registration_endpoint: None,
             scopes: Vec::new(),
             require_issuer_parameter: false,
+            policy: NetworkPolicy::for_target(
+                &Url::parse(&format!("http://{address}/mcp")).expect("policy target"),
+            ),
         };
         let record = TokenRecord {
             client_id: "client".to_owned(),
@@ -1558,18 +1590,49 @@ mod tests {
     }
 
     #[test]
-    fn network_policy_preserves_local_boundary_and_rejects_public_to_local() {
+    fn network_policy_requires_exact_origin_even_within_address_class() {
         let public = NetworkPolicy::for_target(
             &Url::parse("https://mcp.example.test/mcp").expect("public target"),
         );
-        let local = NetworkPolicy::for_target(
+        let mut local = NetworkPolicy::for_target(
             &Url::parse("http://127.0.0.1:9000/mcp").expect("local target"),
         );
-        let loopback = Url::parse("http://127.0.0.1:9001/.well-known").expect("loopback URL");
-        assert!(public.check_url(&loopback).is_err());
-        assert!(local.check_url(&loopback).is_ok());
+        let same_origin = Url::parse("http://127.0.0.1:9000/meta").expect("same origin");
+        let other_port = Url::parse("http://127.0.0.1:9001/.well-known").expect("other port");
+        assert!(local.check_url(&same_origin).is_ok());
+        assert!(local.check_url(&other_port).is_err());
+        assert!(
+            local
+                .check_url(&Url::parse("http://localhost:9000/meta").expect("other host"))
+                .is_err()
+        );
+        assert!(
+            local
+                .check_url(&Url::parse("https://127.0.0.1:9000/meta").expect("other scheme"))
+                .is_err()
+        );
+        assert!(public.check_url(&other_port).is_err());
+        assert!(
+            public
+                .check_url(&Url::parse("https://mcp.example.test:444/meta").expect("other port"))
+                .is_err()
+        );
         let private = Url::parse("https://10.0.0.7/.well-known").expect("private URL");
         assert!(public.check_url(&private).is_err());
+        let private_policy = NetworkPolicy::for_target(
+            &Url::parse("https://10.0.0.6/mcp").expect("private target"),
+        );
+        assert!(private_policy.check_url(&private).is_err());
+
+        // A grant is scoped to this origin, not to its entire address class.
+        local.approve_origin(&other_port);
+        assert!(local.check_url(&other_port).is_ok());
+        assert!(
+            local
+                .check_url(&Url::parse("http://127.0.0.1:9002/meta").expect("third port"))
+                .is_err()
+        );
+
         let local_v6 =
             NetworkPolicy::for_target(&Url::parse("https://[::1]/mcp").expect("IPv6 target"));
         assert!(
@@ -1586,6 +1649,131 @@ mod tests {
             public
                 .check_url(&Url::parse("https://[::ffff:127.0.0.1]/meta").expect("mapped URL"))
                 .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn different_loopback_port_is_rejected_before_network_send() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("unapproved listener");
+        let address = listener.local_addr().expect("unapproved address");
+        let target = Url::parse("http://127.0.0.1:9000/mcp").expect("approved target");
+        let endpoint = Url::parse(&format!("http://{address}/register")).expect("registration URL");
+        let policy = NetworkPolicy::for_target(&target);
+        let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .build()
+            .expect("registration client");
+
+        let response = send(
+            client.post(endpoint),
+            &policy,
+            &CancellationToken::new(),
+            Duration::from_secs(1),
+        )
+        .await;
+        assert!(response.is_err());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), listener.accept())
+                .await
+                .is_err(),
+            "an unapproved origin must not receive a request",
+        );
+    }
+
+    #[tokio::test]
+    async fn challenge_cannot_fetch_metadata_from_an_unapproved_origin() {
+        let (target, _target_listener) = discovery_fixture().await;
+        let (foreign, foreign_listener) = discovery_fixture().await;
+        let policy = NetworkPolicy::for_target(&target);
+        let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .dns_resolver(policy.resolver())
+            .build()
+            .expect("discovery client");
+        let oauth = OAuthClient { client, policy };
+        let challenge = Challenge {
+            resource_metadata: Some(format!(
+                "{}/metadata",
+                foreign.origin().ascii_serialization(),
+            )),
+            ..Challenge::default()
+        };
+        let (services, who) = consent_context();
+        let result = discover(
+            &oauth,
+            &target,
+            &challenge,
+            services.as_ref(),
+            &who,
+            Duration::from_secs(2),
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(matches!(result, Err(McpError::NoAskFrontEnd)));
+        assert_eq!(services.asked_count(), 1);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), foreign_listener.accept())
+                .await
+                .is_err(),
+            "unapproved challenge metadata must not be fetched",
+        );
+    }
+
+    #[tokio::test]
+    async fn client_registration_requires_affirmative_consent_before_post() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("registration listener");
+        let address = listener.local_addr().expect("registration address");
+        let target = Url::parse(&format!("http://{address}/mcp")).expect("MCP target");
+        let endpoint = Url::parse(&format!("http://{address}/register"))
+            .expect("registration endpoint");
+        let discovery = Discovery {
+            issuer: format!("http://{address}/issuer"),
+            resource: auth::canonical_resource(&target),
+            authorization_endpoint: Url::parse(&format!("http://{address}/authorize"))
+                .expect("authorization endpoint"),
+            token_endpoint: Url::parse(&format!("http://{address}/token"))
+                .expect("token endpoint"),
+            registration_endpoint: Some(endpoint),
+            scopes: Vec::new(),
+            require_issuer_parameter: false,
+            policy: NetworkPolicy::for_target(&target),
+        };
+        let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .build()
+            .expect("registration client");
+        let plan = AuthorizePlan {
+            target: &target,
+            discovery: &discovery,
+            existing: None,
+            requested_scope: None,
+            client_version: "test",
+        };
+        let (services, who) = consent_context();
+        let result = registered_or_stored_client_id(
+            &client,
+            &discovery.policy,
+            &plan,
+            "http://127.0.0.1:12345/callback",
+            services.as_ref(),
+            &who,
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(matches!(result, Err(McpError::NoAskFrontEnd)));
+        assert_eq!(services.asked_count(), 1);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), listener.accept())
+                .await
+                .is_err(),
+            "registration must not POST without consent",
         );
     }
 
@@ -1665,6 +1853,9 @@ mod tests {
             registration_endpoint: None,
             scopes: Vec::new(),
             require_issuer_parameter: false,
+            policy: NetworkPolicy::for_target(
+                &Url::parse(&format!("http://{address}/mcp")).expect("policy target"),
+            ),
         };
         let oauth = OAuthClient {
             client,
@@ -1781,6 +1972,9 @@ mod tests {
             registration_endpoint: None,
             scopes: Vec::new(),
             require_issuer_parameter: false,
+            policy: NetworkPolicy::for_target(
+                &Url::parse(&format!("http://{address}/mcp")).expect("policy target"),
+            ),
         };
         let client = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
