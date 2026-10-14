@@ -20,6 +20,7 @@ use dal_core::{
 };
 
 const REFUSAL: &str = "sandbox: no sandbox helper. SDK embedders must pass a helper path; the dalgon binary provides dalgon __sandbox.";
+const OVERLAP: &str = "sandbox: the writable path";
 
 const STEP_CALL: &str = "{\"kind\":\"events\",\"events\":[{\"type\":\"tool_call_started\",\"id\":\"probe-call\",\"name\":\"fixture__probe\"},{\"type\":\"tool_calls_done\",\"calls\":[{\"id\":\"probe-call\",\"name\":\"fixture__probe\",\"args\":{\"kind\":\"parsed\",\"value\":{}}}]},{\"type\":\"usage\",\"usage\":{\"input_tokens\":10,\"cached_input_tokens\":0,\"output_tokens\":5,\"reasoning_tokens\":null,\"cache_write_tokens\":0,\"cost_usd\":null}},{\"type\":\"stop\",\"reason\":\"tool_use\"}]}\n";
 
@@ -226,17 +227,16 @@ async fn sandbox_off_turn()
     run_probe_turn(false).await
 }
 
-/// The helper-less refusal is the Linux contract: macOS enforces through
-/// Seatbelt (always present on a macOS host) and Windows refuses every
-/// sandboxed spawn with its own setup text.
+/// The temporary data directory is under the automatic temp grant, so
+/// every sandbox-on platform must reject the overlapping writable roots.
 #[cfg(all(not(windows), not(target_os = "macos")))]
 #[tokio::test]
-async fn sandbox_on_without_helper_refuses_and_never_spawns() {
+async fn sandbox_on_with_protected_data_under_temp_refuses_and_never_spawns() {
     let (view, workspace_dir, _guard) = sandbox_on_turn().await.expect("sandbox-on turn");
     let dump = format!("{view:?}");
     assert!(
-        dump.contains(REFUSAL),
-        "the refusal text reaches the journal: {dump}"
+        dump.contains(OVERLAP),
+        "protected data under an automatic root must be refused: {dump}"
     );
     assert!(
         !workspace_dir.join("probe.txt").exists(),
