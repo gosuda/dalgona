@@ -45,7 +45,12 @@ fn write_file(path: &Path, text: &str, mode: u32) {
     fs::set_permissions(path, fs::Permissions::from_mode(mode)).expect("set mode");
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn write_file(path: &Path, text: &str, _mode: u32) {
+    write_atomic(path, text.as_bytes(), FileMode::Mode0600).expect("write private auth fixture");
+}
+
+#[cfg(not(any(unix, windows)))]
 fn write_file(path: &Path, text: &str, _mode: u32) {
     fs::write(path, text).expect("write auth file");
 }
@@ -163,7 +168,6 @@ fn group_readable_file_is_refused_with_the_chmod_fix() {
 
 #[cfg(windows)]
 #[test]
-#[ignore = "file_is_private is informational-only off unix until a Windows DACL probe lands"]
 fn stored_file_is_owner_only_and_a_broadly_readable_file_is_refused() {
     let dir = TestDir::new("windows-acl");
     let mut store = AuthStore::empty(dir.auth());

@@ -332,7 +332,7 @@ impl AuthStore {
     ///
     /// # Errors
     /// is swapped while opening), [`ProviderError::AuthFilePerms`] when a
-    /// group or other permission bit is set on POSIX, and
+    /// group or other permission bit is set on POSIX or a Windows ACL is unsafe, and
     /// [`ProviderError::AuthFileInvalid`] when the file cannot be read or is
     /// not the strict JSON shape. Error texts never carry a secret value.
     pub fn load(path: impl Into<PathBuf>) -> Result<Self, ProviderError> {
