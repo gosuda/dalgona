@@ -7,10 +7,12 @@ use std::{collections::BTreeMap, fs, path::PathBuf, sync::Arc, time::Duration};
 use std::path::Path;
 
 use crate::mcp::{
-    Budgets, LIST_PAGE_MAX, McpConfig, STDERR_RING,
+    Budgets, LIST_METADATA_BYTES_MAX, LIST_PAGE_MAX, LIST_RESPONSE_BYTES_MAX, LIST_TOOL_MAX,
+    McpConfig, McpError, STDERR_RING, TOOL_DESCRIPTION_BYTES_MAX, TOOL_NAME_BYTES_MAX,
+    TOOL_SCHEMA_BYTES_MAX,
     client::{Client, McpCommand, SessionEndHook, SessionStartHook},
     http::auth::{self as token_auth, TokenRecord},
-    tools::{decode_tool_page, fold_tool_name},
+    tools::{ToolListCache, decode_tool_page, fold_tool_name},
 };
 #[cfg(unix)]
 use dal_agent::ext::{ArgError, Tool, ToolCall, ToolCx, ToolOutcome, ToolOutput};
@@ -36,6 +38,51 @@ use tokio::{
 
 const SKILL: &str = "weather";
 const SERVER: &str = "fixture";
+
+#[test]
+fn tool_metadata_rejects_oversized_individual_fields() {
+    let name = "x".repeat(TOOL_NAME_BYTES_MAX + 1);
+    let body = format!(r#"{{"tools":[{{"name":"{name}"}}]}}"#);
+    assert!(matches!(
+        decode_tool_page(&body),
+        Err(McpError::ListBudget {
+            resource: "tool name bytes"
+        })
+    ));
+
+    let description = "x".repeat(TOOL_DESCRIPTION_BYTES_MAX + 1);
+    let body = format!(r#"{{"tools":[{{"name":"safe","description":"{description}"}}]}}"#);
+    assert!(matches!(
+        decode_tool_page(&body),
+        Err(McpError::ListBudget {
+            resource: "tool description bytes"
+        })
+    ));
+
+    let schema = format!(
+        r#"{{"type":"object","properties":{{}},"description":"{}"}}"#,
+        "x".repeat(TOOL_SCHEMA_BYTES_MAX)
+    );
+    let body = format!(r#"{{"tools":[{{"name":"safe","inputSchema":{schema}}}]}}"#);
+    assert!(matches!(
+        decode_tool_page(&body),
+        Err(McpError::ListBudget {
+            resource: "tool schema bytes"
+        })
+    ));
+}
+
+#[test]
+fn tool_list_cache_snapshot_shares_metadata() {
+    let page = decode_tool_page(r#"{"tools":[{"name":"cached"}]}"#)
+        .expect("valid cached metadata");
+    let cache = ToolListCache {
+        until: tokio::time::Instant::now(),
+        tools: Arc::from(page.tools),
+    };
+    let snapshot = cache.clone();
+    assert!(Arc::ptr_eq(&cache.tools, &snapshot.tools));
+}
 
 fn temp_path(label: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
@@ -782,6 +829,9 @@ done
 enum HttpScenario {
     PaginatedCache,
     PageCap,
+    ResponseBudget,
+    MetadataBudget,
+    ToolCountBudget,
 }
 
 struct HttpRequest {
@@ -868,7 +918,10 @@ fn http_reply(scenario: HttpScenario, request: &HttpRequest) -> String {
     match request.method.as_str() {
         "server/discover" => match scenario {
             HttpScenario::PaginatedCache => rpc_error(id, -32601, "unsupported method"),
-            HttpScenario::PageCap => rpc_result(id, "{}"),
+            HttpScenario::PageCap
+            | HttpScenario::ResponseBudget
+            | HttpScenario::MetadataBudget
+            | HttpScenario::ToolCountBudget => rpc_result(id, "{}"),
         },
         "initialize" | "notifications/initialized" => rpc_result(id, "{}"),
         "tools/list" => match scenario {
@@ -893,6 +946,42 @@ fn http_reply(scenario: HttpScenario, request: &HttpRequest) -> String {
                 id,
                 r#"{"tools":[{"name":"partial","description":"partial","inputSchema":{"type":"object","properties":{}}}],"nextCursor":"again","ttlMs":0}"#,
             ),
+            HttpScenario::ResponseBudget => {
+                let padding = "x".repeat(LIST_RESPONSE_BYTES_MAX / 4 + 512);
+                rpc_result(
+                    id,
+                    &format!(r#"{{"tools":[],"padding":"{padding}","nextCursor":"again"}}"#),
+                )
+            }
+            HttpScenario::MetadataBudget => {
+                let description = "x".repeat(TOOL_DESCRIPTION_BYTES_MAX);
+                let tools = (0..=LIST_METADATA_BYTES_MAX / TOOL_DESCRIPTION_BYTES_MAX)
+                    .map(|index| {
+                        format!(r#"{{"name":"entry{index}","description":"{description}"}}"#)
+                    })
+                    .collect::<Vec<_>>();
+                rpc_result(id, &format!(r#"{{"tools":[{}]}}"#, tools.join(",")))
+            }
+            HttpScenario::ToolCountBudget => {
+                let page = value
+                    .get("params")
+                    .and_then(|params| params.get("cursor"))
+                    .and_then(JsonValueTrait::as_str)
+                    .and_then(|cursor| cursor.parse::<usize>().ok())
+                    .unwrap_or(0);
+                let width = LIST_TOOL_MAX / 4;
+                let tools = (page * width..(page + 1) * width)
+                    .map(|index| format!(r#"{{"name":"entry{index}"}}"#))
+                    .collect::<Vec<_>>();
+                rpc_result(
+                    id,
+                    &format!(
+                        r#"{{"tools":[{}],"nextCursor":"{}"}}"#,
+                        tools.join(","),
+                        page + 1
+                    ),
+                )
+            }
         },
         "tools/call" => {
             let tool = value
@@ -1103,6 +1192,58 @@ async fn loopback_http_list_page_limit_stops_publishing_partial_tools() {
         "incomplete pages stay unpublished in the real host: {status}"
     );
     fixture.shutdown().await;
+}
+
+/// Several individually acceptable pages must not evade a logical list budget.
+/// The real client must fail before publishing any of their tools.
+#[tokio::test]
+async fn loopback_http_list_budgets_reject_partial_publication() {
+    let scenarios = [
+        (HttpScenario::ResponseBudget, 4, "response bytes"),
+        (HttpScenario::MetadataBudget, 1, "metadata bytes"),
+        (HttpScenario::ToolCountBudget, LIST_TOOL_MAX / (LIST_TOOL_MAX / 4) + 1, "tool count"),
+    ];
+    for (scenario, pages, resource) in scenarios {
+        let (declaration, url, server) = start_http_fixture(1 + pages, scenario).await;
+        let entry = fold_tool_name(SKILL, SERVER, "");
+        let partial_name = fold_tool_name(SKILL, SERVER, "entry0");
+        let mut fixture = HostedFixture::with_transport(
+            declaration,
+            vec![
+                scripted_tool_step("entry-list-budget", &entry, "{}"),
+                scripted_final_step(),
+                scripted_tool_step("partial-list-budget", &partial_name, "{}"),
+                scripted_final_step(),
+            ],
+            Answer::ApproveForSession,
+            Some(url),
+        )
+        .await;
+        fixture.prompt().await;
+        fixture.turn_ended().await;
+        let failed = fixture.tool_results(&entry);
+        assert_eq!(failed.len(), 1);
+        assert!(failed[0].0, "{failed:?}");
+        assert!(failed[0].1.contains(resource), "{failed:?}");
+
+        let requests = finish_http_fixture(server).await;
+        assert_eq!(
+            requests.iter().filter(|req| req.method == "tools/list").count(),
+            pages,
+            "the client must stop when {resource} is exhausted"
+        );
+        fixture.prompt().await;
+        fixture.turn_ended().await;
+        let partial = fixture.tool_results(&partial_name);
+        assert_eq!(partial.len(), 1);
+        assert!(partial[0].0 && partial[0].1.contains("unknown tool"), "{partial:?}");
+        let status = fixture.status().await;
+        assert!(
+            status.contains("failed") && status.contains("0 tools"),
+            "{resource} must not publish partial tools: {status}"
+        );
+        fixture.shutdown().await;
+    }
 }
 
 /// This proves public HTTPS authority/port handoff and a TLS attempt only.

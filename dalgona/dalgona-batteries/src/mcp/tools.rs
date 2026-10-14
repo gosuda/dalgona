@@ -19,7 +19,8 @@ use serde::Deserialize;
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
 
 use crate::mcp::{
-    McpError, RESULT_TEXT_CAP, RESULT_TRUNCATED_MARKER, TOOL_CACHE_CAP, TOOL_CACHE_DEFAULT,
+    LIST_TOOL_MAX, McpError, RESULT_TEXT_CAP, RESULT_TRUNCATED_MARKER, TOOL_CACHE_CAP,
+    TOOL_CACHE_DEFAULT, TOOL_DESCRIPTION_BYTES_MAX, TOOL_NAME_BYTES_MAX, TOOL_SCHEMA_BYTES_MAX,
 };
 
 pub(crate) use dal_core::ext::McpServerDecl as ServerDecl;
@@ -306,6 +307,11 @@ pub(crate) fn decode_tool_page(body: &str) -> Result<RemoteToolPage, McpError> {
             code: -32600,
             message: format!("invalid tools/list response: {error}"),
         })?;
+    if wire.tools.len() > LIST_TOOL_MAX {
+        return Err(McpError::ListBudget {
+            resource: "tool count",
+        });
+    }
     let mut tools = Vec::with_capacity(wire.tools.len());
     let mut excluded = Vec::new();
     let mut seen = BTreeMap::new();
@@ -340,6 +346,29 @@ pub(crate) fn decode_tool_page(body: &str) -> Result<RemoteToolPage, McpError> {
 }
 
 fn decode_tool(wire: RemoteToolWire) -> Result<Result<RemoteTool, ExcludedTool>, McpError> {
+    if wire.name.len() > TOOL_NAME_BYTES_MAX {
+        return Err(McpError::ListBudget {
+            resource: "tool name bytes",
+        });
+    }
+    if wire
+        .description
+        .as_ref()
+        .is_some_and(|description| description.len() > TOOL_DESCRIPTION_BYTES_MAX)
+    {
+        return Err(McpError::ListBudget {
+            resource: "tool description bytes",
+        });
+    }
+    if wire
+        .input_schema
+        .as_ref()
+        .is_some_and(|schema| schema.as_str().len() > TOOL_SCHEMA_BYTES_MAX)
+    {
+        return Err(McpError::ListBudget {
+            resource: "tool schema bytes",
+        });
+    }
     if wire.name.is_empty() {
         return Err(McpError::Protocol {
             code: -32600,
@@ -388,7 +417,7 @@ fn decode_tool(wire: RemoteToolWire) -> Result<Result<RemoteTool, ExcludedTool>,
 #[derive(Clone, Debug)]
 pub(crate) struct ToolListCache {
     pub(crate) until: Instant,
-    pub(crate) tools: Vec<RemoteTool>,
+    pub(crate) tools: Arc<[RemoteTool]>,
 }
 
 pub(crate) fn cache_ttl(ttl_ms: Option<u64>) -> Duration {
