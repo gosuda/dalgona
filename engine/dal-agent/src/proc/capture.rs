@@ -1,4 +1,8 @@
-use std::{collections::VecDeque, io, path::PathBuf};
+use std::{
+    collections::VecDeque,
+    io,
+    path::{Path, PathBuf},
+};
 
 use tokio::io::AsyncReadExt;
 
@@ -17,6 +21,20 @@ pub(super) struct CaptureResult {
     pub(super) denial_seen: bool,
 }
 
+/// Creates a fresh log without replacing an existing file or following a leaf symlink.
+async fn open_new_log(path: &Path) -> Result<tokio::fs::File, io::Error> {
+    use tokio::fs::{self, OpenOptions};
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).await?;
+    }
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .await
+}
+
 /// Drains both pipes in arrival order into one durable log.
 pub(super) async fn run_capture(
     mut stdout: tokio::process::ChildStdout,
@@ -25,17 +43,7 @@ pub(super) async fn run_capture(
     stdout_prefix_limit: usize,
     live_tail: tokio::sync::watch::Sender<VecDeque<u8>>,
 ) -> Result<CaptureResult, io::Error> {
-    use tokio::fs::{self, OpenOptions};
-
-    if let Some(parent) = log_path.parent() {
-        fs::create_dir_all(parent).await?;
-    }
-    let mut file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(&log_path)
-        .await?;
+    let mut file = open_new_log(&log_path).await?;
     let marker = TRUNCATION_MARKER.as_bytes();
     let payload_cap = OUTPUT_FILE_CAP_BYTES.saturating_sub(marker.len() as u64);
     let mut kept = 0_u64;
@@ -201,6 +209,45 @@ pub(super) fn contains_denial_phrase(scan_tail: &mut Vec<u8>, bytes: &[u8]) -> b
 mod tests {
     use super::*;
     use std::collections::VecDeque;
+
+    #[tokio::test]
+    async fn new_log_refuses_existing_file() {
+        let temp = tempfile::tempdir().expect("temp directory");
+        let log_path = temp.path().join("jobs").join("job.log");
+        std::fs::create_dir_all(log_path.parent().expect("log parent")).expect("create jobs");
+        std::fs::write(&log_path, b"original").expect("write existing log");
+
+        let error = open_new_log(&log_path)
+            .await
+            .expect_err("existing log must not be overwritten");
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read(&log_path)
+                .expect("read existing log")
+                .as_slice(),
+            b"original"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn new_log_refuses_symlink_to_another_file() {
+        let temp = tempfile::tempdir().expect("temp directory");
+        let target = temp.path().join("target.log");
+        std::fs::write(&target, b"unchanged").expect("create target");
+        let log_path = temp.path().join("jobs").join("job.log");
+        std::fs::create_dir_all(log_path.parent().expect("log parent")).expect("create jobs");
+        std::os::unix::fs::symlink(&target, &log_path).expect("plant symlink");
+
+        let error = open_new_log(&log_path)
+            .await
+            .expect_err("symlink must not be followed");
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read(&target).expect("read target").as_slice(),
+            b"unchanged"
+        );
+    }
 
     #[test]
     fn denial_marker_detection_spans_chunks() {

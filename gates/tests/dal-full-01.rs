@@ -868,11 +868,25 @@ fn session_dir(data_root: &Path, id: SessionId) -> Option<PathBuf> {
 
 /// Returns the tail of the detached exec job's captured log, when the job
 /// produced output. The log names what the spawned chain actually did.
-fn job_log_tail(data_root: &Path, id: SessionId, call: &str) -> String {
-    let Some(log) =
-        session_dir(data_root, id).map(|dir| dir.join("jobs").join(format!("{call}.log")))
-    else {
+/// Durable logs are named by host-minted job IDs, not the provider call ID,
+/// so the newest `.log` in the session jobs directory is the job's capture.
+fn job_log_tail(data_root: &Path, id: SessionId) -> String {
+    let Some(jobs_dir) = session_dir(data_root, id).map(|dir| dir.join("jobs")) else {
         return "no session dir".to_string();
+    };
+    let log = fs::read_dir(&jobs_dir).ok().and_then(|entries| {
+        entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "log"))
+            .max_by_key(|path| {
+                fs::metadata(path)
+                    .and_then(|meta| meta.modified())
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+            })
+    });
+    let Some(log) = log else {
+        return "no job logs".to_string();
     };
     match fs::read(&log) {
         Ok(bytes) => {
@@ -920,22 +934,8 @@ fn job_state_digest(job: &ProcessJob, data_root: &Path) -> String {
                 text.push_str(" res=");
                 text.push_str(&first_result);
             }
-            if let Some(index) = job
-                .pid_path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .and_then(|name| {
-                    name.strip_prefix("child-")
-                        .and_then(|name| name.strip_suffix(".pid"))
-                })
-            {
-                text.push_str(" log=");
-                text.push_str(&job_log_tail(
-                    data_root,
-                    view.session.id,
-                    &format!("process-{index}"),
-                ));
-            }
+            text.push_str(" log=");
+            text.push_str(&job_log_tail(data_root, view.session.id));
             text
         },
     )

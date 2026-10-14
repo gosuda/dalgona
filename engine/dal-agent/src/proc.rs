@@ -421,8 +421,9 @@ pub(crate) fn spawn_process(
         ))));
     }
     let stdout_prefix_limit = opts.stdout_prefix_limit;
-    let log_path = jobs_dir.join(format!("{}.log", call.as_str()));
     let job = JobId::new_v7();
+    // Provider call IDs are opaque; only host-minted job IDs name log files.
+    let log_path = crate::jobs::job_log_path(jobs_dir, job);
     let (program, command_args, launcher_profile) = launcher_argv(argv, &job, launcher)?;
     let cwd = opts.cwd;
     let timeout = opts.timeout;

@@ -100,6 +100,58 @@ async fn spawn_approved(
     )
 }
 
+#[tokio::test]
+async fn provider_call_ids_cannot_select_log_paths() {
+    let temp = tempfile::tempdir().expect("temp workspace");
+    let ids = [
+        "../escaped".to_owned(),
+        temp.path().join("absolute").to_string_lossy().into_owned(),
+        r"C:\Windows\Temp\outside".to_owned(),
+        r"\\server\share\outside".to_owned(),
+        "secret-call-token".to_owned(),
+    ];
+    for id in ids {
+        let mut proc = spawn_approved(&temp, &id, &echo_argv("ok"), None, 0)
+            .await
+            .expect("spawn with an opaque call ID");
+        let log_path = temp
+            .path()
+            .join("jobs")
+            .join(format!("{}.log", proc.job_id()));
+        assert_eq!(proc.log_path(), log_path.as_path());
+        let result = proc
+            .wait(&CancellationToken::new())
+            .await
+            .expect("capture output");
+        assert_eq!(result.log_path, log_path);
+        assert!(log_path.is_file());
+        assert!(!log_path.to_string_lossy().contains(&id));
+    }
+    assert!(!temp.path().join("escaped.log").exists());
+    assert!(!temp.path().join("absolute.log").exists());
+
+    // Two invocations with the same provider ID must never reuse a log.
+    let mut first = spawn_approved(&temp, "reused-call", &echo_argv("first"), None, 0)
+        .await
+        .expect("first invocation");
+    let mut second = spawn_approved(&temp, "reused-call", &echo_argv("second"), None, 0)
+        .await
+        .expect("second invocation");
+    assert_ne!(first.log_path(), second.log_path());
+    let first_log = first
+        .wait(&CancellationToken::new())
+        .await
+        .expect("first output")
+        .log_path;
+    let second_log = second
+        .wait(&CancellationToken::new())
+        .await
+        .expect("second output")
+        .log_path;
+    assert!(first_log.is_file());
+    assert!(second_log.is_file());
+}
+
 // The lifecycle tests below spawn real processes through a POSIX shell and
 // rely on Unix process-group semantics (stop-ladder signals, grandchild
 // sweeps). The Windows job-object launcher is covered by the
@@ -108,7 +160,6 @@ async fn spawn_approved(
 #[tokio::test]
 async fn proc_spawns_captures_output_and_reports_bounded_env() {
     let temp = tempfile::tempdir().expect("temp workspace");
-    let log_path = temp.path().join("jobs").join("test-call-lifetime.log");
     let mut proc = spawn_approved(
         &temp,
         "test-call-lifetime",
@@ -118,6 +169,10 @@ async fn proc_spawns_captures_output_and_reports_bounded_env() {
     )
     .await
     .expect("spawn test shell");
+    let log_path = temp
+        .path()
+        .join("jobs")
+        .join(format!("{}.log", proc.job_id()));
     let cancel = CancellationToken::new();
     let result = proc.wait(&cancel).await.expect("wait test shell");
     assert_eq!(result.status, ProcStatus::Exited { code: 0 });
@@ -399,7 +454,9 @@ async fn approved_scope_allows_matching_call_digest_and_roots() {
     assert_eq!(result.status, ProcStatus::Exited { code: 0 });
     assert_eq!(
         result.log_path,
-        temp.path().join("jobs").join("test-approved-allow.log")
+        temp.path()
+            .join("jobs")
+            .join(format!("{}.log", proc.job_id()))
     );
 }
 

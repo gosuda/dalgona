@@ -70,7 +70,7 @@ async fn spawn(
     let record = JobRecord::new(
         id,
         name.as_str(),
-        ctx.jobs_dir.join(format!("{id:?}.log")),
+        super::job_log_path(&ctx.jobs_dir, id),
         CancellationToken::new(),
     )
     .with_parent(parent)
