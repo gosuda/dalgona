@@ -2333,10 +2333,11 @@ impl SessionState {
             .map_err(|error| error.to_string())
         })
         .map_err(|error| ServiceError::failed(None, error.to_string()))?;
-        let base = self.worktree_base(caller, &workflow).await?;
-        if cancel.is_cancelled() {
-            return Err(ServiceError::Cancelled);
-        }
+        let base = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(ServiceError::Cancelled),
+            base = self.worktree_base(caller, &workflow) => base?,
+        };
         let run = self
             .spawn_job(caller, RUN_JOB_NAME, label)
             .await

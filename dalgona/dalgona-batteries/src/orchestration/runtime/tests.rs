@@ -857,6 +857,14 @@ impl Fixture {
     }
 
     async fn tool(&self, args: &str) -> Result<String, ServiceError> {
+        self.tool_with_cancel(args, CancellationToken::new()).await
+    }
+
+    async fn tool_with_cancel(
+        &self,
+        args: &str,
+        cancel: CancellationToken,
+    ) -> Result<String, ServiceError> {
         self.runtime
             .tool(
                 self.session,
@@ -865,7 +873,7 @@ impl Fixture {
                 "agents",
                 RawJson::parse(args)
                     .map_err(|error| ServiceError::failed(None, error.to_string()))?,
-                CancellationToken::new(),
+                cancel,
             )
             .await
     }
@@ -1617,16 +1625,17 @@ async fn cancelled_call_does_not_start_a_workflow() -> TestResult {
     let fixture = Fixture::open().await?;
     let cancel = CancellationToken::new();
     cancel.cancel();
-    let result = fixture.runtime.tool(
-        fixture.session,
-        fixture.caller(),
-        CallId::new("cancelled-run"),
-        "agents",
-        RawJson::parse(r#"{"action":"run","steps":[{"name":"task","prompt":"inspect","tools":["read"],"isolation":"shared"}]}"#)?,
-        cancel,
-    ).await;
+    let result = fixture
+        .tool_with_cancel(
+            r#"{"action":"run","steps":[{"name":"task","prompt":"inspect","tools":["read"],"isolation":"shared"}]}"#,
+            cancel,
+        )
+        .await;
     assert!(matches!(result, Err(ServiceError::Cancelled)), "{result:?}");
-    assert!(fixture.script().jobs.is_empty(), "no job should have started");
+    assert!(
+        fixture.script().jobs.is_empty(),
+        "no job should have started"
+    );
     Ok(())
 }
 
@@ -1635,14 +1644,12 @@ async fn cancelling_original_call_cascades_to_active_children() -> TestResult {
     let fixture = Fixture::open().await?;
     fixture.script().hold = Some(CancellationToken::new());
     let cancel = CancellationToken::new();
-    let reply = fixture.runtime.tool(
-        fixture.session,
-        fixture.caller(),
-        CallId::new("cancel-run"),
-        "agents",
-        RawJson::parse(r#"{"action":"run","steps":[{"name":"task","prompt":"inspect","tools":["read"],"isolation":"shared"}]}"#)?,
-        cancel.clone(),
-    ).await?;
+    let reply = fixture
+        .tool_with_cancel(
+            r#"{"action":"run","steps":[{"name":"task","prompt":"inspect","tools":["read"],"isolation":"shared"}]}"#,
+            cancel.clone(),
+        )
+        .await?;
     assert!(reply.starts_with("started run "), "{reply}");
     wait_for_starts(&fixture, 1).await?;
     cancel.cancel();
@@ -1658,9 +1665,11 @@ async fn workflow_wall_budget_cancels_stalled_children() -> TestResult {
     config.agents.child_max_minutes = 1;
     let fixture = Fixture::open_config(config).await?;
     fixture.script().hold = Some(CancellationToken::new());
-    fixture.tool(
-        r#"{"action":"run","steps":[{"name":"task","prompt":"inspect","tools":["read"],"isolation":"shared"}]}"#,
-    ).await?;
+    fixture
+        .tool(
+            r#"{"action":"run","steps":[{"name":"task","prompt":"inspect","tools":["read"],"isolation":"shared"}]}"#,
+        )
+        .await?;
     wait_for_starts(&fixture, 1).await?;
     tokio::time::advance(std::time::Duration::from_secs(61)).await;
     let report = fixture.ended_run().await?;
