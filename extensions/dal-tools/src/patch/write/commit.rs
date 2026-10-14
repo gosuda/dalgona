@@ -122,8 +122,17 @@ pub(crate) async fn apply_files(
     session: &PatchSession,
     plan: &Plan,
 ) -> Result<Output, EngineError> {
+    apply_files_with(session, plan, || {}).await
+}
+
+async fn apply_files_with<F: FnOnce()>(
+    session: &PatchSession,
+    plan: &Plan,
+    after_prepare: F,
+) -> Result<Output, EngineError> {
     let mut seen_dirs = std::collections::HashSet::new();
     let (_guards, mut fs) = prepare_write_set(session, plan).await?;
+    after_prepare();
     let mut temps = Vec::new();
     for file in &plan.files {
         stage_temp(&mut fs, session, file, &mut temps, &mut seen_dirs)?;
@@ -241,7 +250,6 @@ fn stage_temp<'a>(
         nonce_u128()
     ));
     if let Err(error) = fs.write_new(&temp, after) {
-        let _ = fs.remove_file(&temp);
         cleanup_temps(fs, temps);
         return Err(EngineError::new(
             ErrorClass::Io,
@@ -663,4 +671,55 @@ mod tests {
             b"before\n"
         );
     }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn swapped_parent_at_commit_cannot_redirect_write_outside_workspace() {
+        let directory = tempfile::tempdir().expect("workspace");
+        let outside = tempfile::tempdir().expect("outside");
+        let workspace = std::fs::canonicalize(directory.path()).expect("workspace path");
+        let parent = workspace.join("parent");
+        std::fs::create_dir(&parent).expect("parent");
+        let target = parent.join("file.txt");
+        let session = PatchSession {
+            workspace: workspace.clone(),
+            session: SessionId::new_v7(),
+            generation: GenerationId::new(NonZeroU64::MIN),
+            turn: TurnId::new(NonZeroU64::MIN),
+            call: CallId::new("parent-swap"),
+            consumer: dal_core::Consumer::Model,
+            symbols: false,
+            seen: crate::Seen::new(),
+            index: Index::new(None),
+            snapshots: Arc::new(SnapshotStore::new([7; 16])),
+            cutoff: Some(u64::MAX),
+        };
+        let plan = Plan {
+            style: DialectId::Replace,
+            files: vec![StagedFileOwned {
+                path: PathBuf::from("parent/file.txt"),
+                absolute_path: target,
+                before: None,
+                after: Some(b"inside\\n".to_vec().into_boxed_slice()),
+                op: Operation::Create,
+                renamed_to: None,
+                hunks: Vec::new(),
+            }],
+            findings: Vec::new(),
+        };
+        super::apply_files_with(&session, &plan, || {
+            std::fs::rename(&parent, workspace.join("moved")).expect("swap original parent");
+            std::os::unix::fs::symlink(outside.path(), &parent).expect("outside symlink");
+        })
+        .await
+        .expect("commit through pinned parent");
+        assert_eq!(
+            std::fs::read(workspace.join("moved/file.txt")).expect("pinned target"),
+            b"inside\\n"
+        );
+        assert!(
+            !outside.path().join("file.txt").exists(),
+            "commit must not create an outside file"
+        );
+    }
+
 }
