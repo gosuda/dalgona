@@ -500,16 +500,32 @@ fn write_side_file(
 ) -> Result<(), JournalError> {
     #[cfg(windows)]
     let _ = faults;
-    let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
+    #[cfg(windows)]
+    let mut kept_file = match crate::private::create_new(
+        kept_at,
+        crate::util::FileMode::Mode0600,
+    ) {
+        Ok(file) => Ok(file),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            let file = crate::private::open_private_file_read_write(kept_at)?;
+            file.set_len(0)?;
+            Ok(file)
+        }
+        Err(error) => Err(error),
     }
-    let mut kept_file = options
-        .open(kept_at)
-        .map_err(|source| jio("quarantine", journal_path, source))?;
+    .map_err(|source| jio("quarantine", journal_path, source))?;
+    #[cfg(not(windows))]
+    let mut kept_file = {
+        let mut options = OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options.open(kept_at)
+            .map_err(|source| jio("quarantine", journal_path, source))?
+    };
     journal_file
         .seek(SeekFrom::Start(tail_start))
         .map_err(|source| jio("read", journal_path, source))?;
@@ -1107,9 +1123,7 @@ pub(crate) fn scan_prefix(
     path: &Path,
     visit: impl FnMut(u64, Record),
 ) -> Result<PrefixSummary, OpenFailure> {
-    let mut file = OpenOptions::new()
-        .read(true)
-        .open(path)
+    let mut file = crate::private::open_private_file(path)
         .map_err(|source| OpenFailure::Journal(jio("open", path, source)))?;
     let file_len = file
         .metadata()
