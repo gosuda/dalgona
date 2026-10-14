@@ -7,7 +7,7 @@ use std::{collections::BTreeMap, fs, path::PathBuf, sync::Arc, time::Duration};
 use std::path::Path;
 
 use crate::mcp::{
-    Budgets, LIST_PAGE_MAX, McpConfig, STDERR_RING,
+    Budgets, LIST_PAGE_MAX, McpConfig,
     client::{Client, McpCommand, SessionEndHook, SessionStartHook},
     http::auth::{self as token_auth, TokenRecord},
     tools::{decode_tool_page, fold_tool_name},
@@ -698,32 +698,36 @@ async fn crashed_echo_result(decl: McpServerDecl) -> (bool, String) {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn stdio_call_crash_reports_bounded_stderr() {
-    let result = crashed_echo_result(stderr_crash_stdio_decl(
-        r"
+async fn stdio_call_crash_never_exposes_child_stderr_in_the_journal() {
+    let mut declaration = stderr_crash_stdio_decl(
+        r#"
       head -c 70000 /dev/zero | tr '\0' x >&2
-      printf '\ncrash stderr line one\ncrash stderr line two\n' >&2
+      printf '%s\n' "$MCP_PRIVATE_TOKEN" >&2
+      printf '%s\n' "$MCP_PRIVATE_TOKEN" | tr '[:lower:]' '[:upper:]' >&2
       exit 1
-",
-    ))
-    .await;
-    assert!(result.0);
-    assert!(result.1.contains("status 1"), "{result:?}");
-    assert!(
-        result.1.contains("crash stderr line one") && result.1.contains("crash stderr line two"),
-        "{result:?}"
+"#,
     );
-    assert!(
-        result.1.len() <= STDERR_RING + 1024,
-        "stderr excerpt exceeded the ring bound: {}",
-        result.1.len()
-    );
+    let McpServerDecl::Stdio { env, .. } = &mut declaration else {
+        unreachable!("the crash fixture declares a stdio server");
+    };
+    let _ = env.insert("MCP_PRIVATE_TOKEN".into(), "credential-opaque-p45A".into());
+
+    let (is_error, journal_error) = crashed_echo_result(declaration).await;
+    assert!(is_error);
+    assert!(journal_error.contains("status 1"), "{journal_error}");
+    for forbidden in ["credential-opaque-p45A", "CREDENTIAL-OPAQUE-P45A", "stderr"] {
+        assert!(
+            !journal_error.contains(forbidden),
+            "child stderr reached the model-visible tool result and journal"
+        );
+    }
+    assert!(journal_error.len() < 256, "{journal_error}");
 }
 
 #[cfg(unix)]
 #[tokio::test]
-async fn stdio_crash_diagnostic_waits_for_stderr_held_by_grandchild() {
-    let result = crashed_echo_result(stderr_crash_stdio_decl(
+async fn stdio_crash_does_not_expose_stderr_from_descendants() {
+    let (is_error, journal_error) = crashed_echo_result(stderr_crash_stdio_decl(
         r#"
       fifo="$TMPDIR/dalgona-stderr-sync-$$"
       mkfifo "$fifo"
@@ -738,17 +742,10 @@ async fn stdio_crash_diagnostic_waits_for_stderr_held_by_grandchild() {
 "#,
     ))
     .await;
-    assert!(result.0);
-    assert!(result.1.contains("status 1"), "{result:?}");
-    assert!(
-        result.1.contains("grandchild final marker"),
-        "diagnostic omitted stderr written after the server exited: {result:?}"
-    );
-    assert!(
-        result.1.len() <= STDERR_RING + 1024,
-        "stderr excerpt exceeded the ring bound: {}",
-        result.1.len()
-    );
+    assert!(is_error);
+    assert!(journal_error.contains("status 1"), "{journal_error}");
+    assert!(!journal_error.contains("grandchild final marker"), "{journal_error}");
+    assert!(!journal_error.contains("stderr"), "{journal_error}");
 }
 
 #[cfg(unix)]
