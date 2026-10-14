@@ -32,7 +32,7 @@ mod guard;
 mod http;
 mod upgrade;
 
-use guard::{auth_guard, content_guard, host_guard, is_card, is_upgrade, requires_json};
+use guard::{auth_guard, content_guard, host_guard, is_upgrade, requires_json};
 pub(crate) use http::{Resp, RespBody, ServeBody};
 use http::{into_response, read_body};
 use upgrade::upgrade_response;
@@ -102,6 +102,8 @@ pub(crate) struct ServeCtx {
     pub digests: Arc<Mutex<DigestTable>>,
     /// The A2A context and task tables.
     pub a2a: Arc<Mutex<a2a::A2aState>>,
+    /// In-flight request body bytes shared by all connections on this listener.
+    pub body_budget: http::BodyBudget,
     /// Live stream drivers polled by the accept loop (no spawned tasks).
     pub drivers: mpsc::Sender<Driver>,
     /// Fires when handlers must cancel their turns.
@@ -133,6 +135,7 @@ pub(crate) fn listen(
         cfg,
         digests: Arc::new(Mutex::new(DigestTable::new(4096))),
         a2a: Arc::new(Mutex::new(a2a::A2aState::new())),
+        body_budget: http::BodyBudget::new(),
         drivers: driver_tx,
         shutdown: stop.child_token(),
     });
@@ -245,6 +248,7 @@ async fn handle_request(
         route,
         super::router::ServeRoute::WebSocket | super::router::ServeRoute::CodexWs
     );
+    let card_route = matches!(&route, super::router::ServeRoute::A2aCard);
     if req.headers().contains_key("origin") && !is_upgrade(&req) {
         return into_response(Resp::text(403, "browser requests are not allowed"));
     }
@@ -254,7 +258,7 @@ async fn handle_request(
         return into_response(resp);
     }
     if ctx.cfg.public
-        && !is_card(&method, &path)
+        && !card_route
         && !upgrade_route
         && let Err(resp) = auth_guard(&ctx, &req)
     {
@@ -279,12 +283,30 @@ async fn handle_request(
         .get("host")
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
+    if card_route {
+        // A GET card is static. Never await or accumulate its request body.
+        let has_body = req.headers().contains_key(hyper::header::TRANSFER_ENCODING)
+            || req
+                .headers()
+                .get(hyper::header::CONTENT_LENGTH)
+                .is_some_and(|value| {
+                    value
+                        .to_str()
+                        .ok()
+                        .and_then(|length| length.parse::<u64>().ok())
+                        != Some(0)
+                });
+        if has_body {
+            return into_response(Resp::text(413, "agent card requests must not have a body"));
+        }
+        return into_response(a2a::card(&ctx, host_header.as_deref()));
+    }
     let session = req
         .headers()
         .get("x-dal-session")
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
-    let body = match read_body(req).await {
+    let body = match read_body(req, &ctx.body_budget).await {
         Ok(body) => body,
         Err(resp) => return into_response(resp),
     };
@@ -295,7 +317,7 @@ async fn handle_request(
         host: host_header.as_deref(),
         anthropic,
     };
-    dispatch(ctx, &request, route, body).await
+    dispatch(ctx, &request, route, &body.bytes).await
 }
 
 /// The request header facts a route handler needs after the body is read.
@@ -312,7 +334,7 @@ async fn dispatch(
     ctx: Arc<ServeCtx>,
     request: &RouteRequest<'_>,
     route: super::router::ServeRoute,
-    body: Bytes,
+    body: &[u8],
 ) -> Response<ServeBody> {
     let RouteRequest {
         session,
@@ -329,17 +351,17 @@ async fn dispatch(
             super::router::handlers::anthropic_models(&ctx).await
         }
         super::router::ServeRoute::Models => super::router::handlers::models(&ctx).await,
-        super::router::ServeRoute::Chat => super::router::handlers::chat(&ctx, &body, http()).await,
+        super::router::ServeRoute::Chat => super::router::handlers::chat(&ctx, body, http()).await,
         super::router::ServeRoute::Responses => {
-            super::router::handlers::responses(&ctx, &body, http()).await
+            super::router::handlers::responses(&ctx, body, http()).await
         }
         super::router::ServeRoute::Messages => {
-            super::router::handlers::messages(&ctx, &body, http()).await
+            super::router::handlers::messages(&ctx, body, http()).await
         }
         super::router::ServeRoute::A2aCard => a2a::card(&ctx, host),
-        super::router::ServeRoute::A2aJsonRpc => a2a::json_rpc(&ctx, &body, query, version).await,
+        super::router::ServeRoute::A2aJsonRpc => a2a::json_rpc(&ctx, body, query, version).await,
         super::router::ServeRoute::A2aRest(kind, id) => {
-            a2a::rest(&ctx, kind, id, &body, query, version).await
+            a2a::rest(&ctx, kind, id, body, query, version).await
         }
         super::router::ServeRoute::WebSocket | super::router::ServeRoute::CodexWs => {
             Resp::text(426, "upgrade required")

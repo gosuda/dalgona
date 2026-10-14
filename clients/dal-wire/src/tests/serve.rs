@@ -27,6 +27,42 @@ async fn get(addr: SocketAddr, path: &str) -> HttpReply {
     .await
 }
 
+/// Sends only a card request's framing headers, never the declared body.
+async fn card_without_body(addr: SocketAddr, framing: &str) -> HttpReply {
+    let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    let headers = format!(
+        "GET /.well-known/agent-card.json HTTP/1.1\r\n{}\r\nconnection: close\r\n{framing}\r\n\r\n",
+        host_header(addr)
+    );
+    stream.write_all(headers.as_bytes()).await.expect("card headers");
+    let mut bytes = Vec::new();
+    tokio::time::timeout(super::support::WAIT, stream.read_to_end(&mut bytes))
+        .await
+        .expect("card response without sending a body")
+        .expect("card reply read");
+    parse_reply(&bytes)
+}
+
+#[tokio::test]
+async fn agent_card_rejects_body_without_buffering() {
+    let rig = rig(&[]).await;
+    let mut options = router_options(&rig);
+    options.a2a = true;
+    with_serve(&rig, options, async |addr| {
+        let card = get(addr, "/.well-known/agent-card.json").await;
+        assert_eq!(card.status, 200, "{card:?}");
+
+        let declared = card_without_body(addr, "content-length: 33554432").await;
+        assert_eq!(declared.status, 413, "{declared:?}");
+        assert_eq!(declared.body, "agent card requests must not have a body");
+
+        let chunked = card_without_body(addr, "transfer-encoding: chunked").await;
+        assert_eq!(chunked.status, 413, "{chunked:?}");
+        assert_eq!(chunked.body, "agent card requests must not have a body");
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn route_404_405() {
     let rig = rig(&[]).await;
@@ -223,6 +259,13 @@ async fn token_file_auth_cases() {
         )
         .await;
         assert_eq!(card.status, 200, "{card:?}");
+    })
+    .await;
+    let mut disabled = public();
+    disabled.a2a = false;
+    with_serve(&rig, disabled, async |addr| {
+        let unmounted = get(addr, "/.well-known/agent-card.json").await;
+        assert_eq!(unmounted.status, 401, "{unmounted:?}");
     })
     .await;
 }
