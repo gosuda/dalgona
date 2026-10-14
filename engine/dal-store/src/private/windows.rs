@@ -15,16 +15,16 @@ use std::{
 };
 
 use windows_sys::Win32::{
-    Foundation::{CloseHandle, FALSE, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, LocalFree},
+    Foundation::{
+        CloseHandle, FALSE, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
+    },
     Security::{
         Authorization::{
             ConvertSecurityDescriptorToStringSecurityDescriptorW, ConvertSidToStringSidW,
-            ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo,
-            SE_FILE_OBJECT,
+            ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SE_FILE_OBJECT,
         },
         DACL_SECURITY_INFORMATION, GetTokenInformation, OWNER_SECURITY_INFORMATION,
-        PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
-        TokenUser,
+        PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
     },
     Storage::FileSystem::{
         CREATE_NEW, CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_NORMAL,
@@ -71,7 +71,7 @@ fn user_sid() -> io::Result<String> {
     }
     // The returned TOKEN_USER contains a pointer into this allocation. Keep
     // the storage live until the SID is converted into owned text.
-    let mut buffer = vec![0usize; (usize::from(needed)).div_ceil(size_of::<usize>())];
+    let mut buffer = vec![0usize; usize::from(needed).div_ceil(size_of::<usize>())];
     if unsafe {
         GetTokenInformation(
             token.0,
@@ -109,9 +109,7 @@ fn descriptor(directory: bool) -> io::Result<LocalMemory> {
     let inherit = if directory { "OICI" } else { "" };
     // No inherited ACEs. A protected DACL allows only the user, SYSTEM, and
     // Administrators, matching the existing serve-token Windows policy.
-    let sddl = format!(
-        "D:P(A;{inherit};FA;;;{user})(A;{inherit};FA;;;SY)(A;{inherit};FA;;;BA)"
-    );
+    let sddl = format!("D:P(A;{inherit};FA;;;{user})(A;{inherit};FA;;;SY)(A;{inherit};FA;;;BA)");
     let string = sddl.encode_utf16().chain(std::iter::once(0)).collect::<Vec<_>>();
     let mut raw: PSECURITY_DESCRIPTOR = ptr::null_mut();
     if unsafe {
