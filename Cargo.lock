@@ -1012,6 +1012,7 @@ name = "dal-star"
 version = "0.1.0"
 dependencies = [
  "allocative",
+ "blake3",
  "dal-agent",
  "dal-core",
  "dal-provider",
