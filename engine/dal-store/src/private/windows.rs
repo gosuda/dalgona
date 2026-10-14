@@ -71,7 +71,7 @@ fn user_sid() -> io::Result<String> {
     }
     // The returned TOKEN_USER contains a pointer into this allocation. Keep
     // the storage live until the SID is converted into owned text.
-    let mut buffer = vec![0usize; (needed as usize).div_ceil(size_of::<usize>())];
+    let mut buffer = vec![0usize; (usize::from(needed)).div_ceil(size_of::<usize>())];
     if unsafe {
         GetTokenInformation(
             token.0,
@@ -130,7 +130,7 @@ fn descriptor(directory: bool) -> io::Result<LocalMemory> {
 
 fn security_attributes(descriptor: &LocalMemory) -> SECURITY_ATTRIBUTES {
     SECURITY_ATTRIBUTES {
-        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>()).unwrap_or(u32::MAX),
         lpSecurityDescriptor: descriptor.0,
         bInheritHandle: FALSE,
     }
@@ -205,7 +205,7 @@ fn dacl_sddl(descriptor: PSECURITY_DESCRIPTOR) -> io::Result<String> {
     }
     let text_guard = LocalMemory(text.cast());
     let output = String::from_utf16(unsafe {
-        std::slice::from_raw_parts(text, length as usize)
+        std::slice::from_raw_parts(text, usize::try_from(length).unwrap_or(usize::MAX))
     })
     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error));
     drop(text_guard);
@@ -238,7 +238,7 @@ fn check_dacl(file: &File, directory: bool) -> io::Result<bool> {
         )
     };
     if status != 0 {
-        return Err(io::Error::from_raw_os_error(status as i32));
+        return Err(io::Error::from_raw_os_error(i32::try_from(status).unwrap_or(i32::MAX)));
     }
     let actual_guard = LocalMemory(actual);
     // DACL ownership matters: a third-party owner could change a currently
