@@ -488,8 +488,12 @@ mod tests {
 
         std::fs::create_dir_all(paths.sidecar_dir().join("ext"))
             .expect("create extension sidecar directory");
-        std::fs::write(paths.sidecar_dir().join("ext").join("big"), &oversized)
-            .expect("write oversized sidecar");
+        util::write_atomic(
+            &paths.sidecar_dir().join("ext").join("big"),
+            &oversized,
+            FileMode::Mode0600,
+        )
+        .expect("write oversized sidecar");
 
         let error = Sidecar::new(&paths)
             .for_extension(&extension)
@@ -514,8 +518,12 @@ mod tests {
 
         std::fs::create_dir_all(paths.sidecar_dir().join("ext"))
             .expect("create extension sidecar directory");
-        std::fs::write(paths.sidecar_dir().join("ext").join("full"), &value)
-            .expect("write capped sidecar");
+        util::write_atomic(
+            &paths.sidecar_dir().join("ext").join("full"),
+            &value,
+            FileMode::Mode0600,
+        )
+        .expect("write capped sidecar");
 
         let read = Sidecar::new(&paths)
             .for_extension(&extension)

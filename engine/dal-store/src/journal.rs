@@ -1523,7 +1523,8 @@ mod tests {
 
         fn journal(&self, contents: &[u8]) -> PathBuf {
             let path = self.0.join("journal.jsonl");
-            fs::write(&path, contents).expect("write journal fixture");
+            crate::util::write_atomic(&path, contents, crate::util::FileMode::Mode0600)
+                .expect("write journal fixture");
             path
         }
     }
@@ -1684,7 +1685,12 @@ mod tests {
             "torn-{}.jsonl",
             u64::try_from(prefix.len()).expect("test offset")
         ));
-        fs::write(&kept_at, b"preserve this sidefile").expect("write sidefile sentinel");
+        crate::util::write_atomic(
+            &kept_at,
+            b"preserve this sidefile",
+            crate::util::FileMode::Mode0600,
+        )
+        .expect("write sidefile sentinel");
 
         assert!(matches!(
             Journal::open(&path, &Faults::default()),
@@ -1715,7 +1721,12 @@ mod tests {
             "torn-{}.jsonl",
             u64::try_from(prefix.len()).expect("test offset")
         ));
-        fs::write(&kept_at, b"preserve this sidefile").expect("write sidefile sentinel");
+        crate::util::write_atomic(
+            &kept_at,
+            b"preserve this sidefile",
+            crate::util::FileMode::Mode0600,
+        )
+        .expect("write sidefile sentinel");
 
         assert!(matches!(
             Journal::open(&path, &Faults::default()),
@@ -1761,7 +1772,12 @@ mod tests {
         let path = directory.journal(&original);
         let offset = u64::try_from(prefix.len()).expect("test offset");
         let kept_at = path.with_file_name(format!("torn-{offset}.jsonl"));
-        fs::write(&kept_at, b"replace this sidefile").expect("write old sidefile");
+        crate::util::write_atomic(
+            &kept_at,
+            b"replace this sidefile",
+            crate::util::FileMode::Mode0600,
+        )
+        .expect("write old sidefile");
 
         let opened = Journal::open(&path, &Faults::default()).expect("repair valid tail");
         let torn = opened.report.torn.expect("report repaired tail");

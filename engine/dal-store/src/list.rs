@@ -14,9 +14,6 @@ use dal_core::{
     BlobId, Entry, EntryKind, JournalPart, ListQuery, Page, Record, Seq, SessionId, SessionInfo,
     Workspace,
 };
-#[cfg(test)]
-use std::fs::File;
-
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -926,7 +923,8 @@ mod tests {
             }));
         }
         let journal = dir.join("journal.jsonl");
-        let mut file = File::create(&journal).expect("create journal");
+        let mut file = private::create_new(&journal, FileMode::Mode0600)
+            .expect("create journal");
         for record in records {
             file.write_all(&encode(&record).expect("encode record"))
                 .expect("write record");
@@ -1081,7 +1079,8 @@ mod tests {
         fs::create_dir_all(&blobs).expect("create blobs directory");
         let text = "fix the parser ".repeat(400);
         let blob = BlobId::from_bytes(text.as_bytes());
-        fs::write(blobs.join(blob.to_string()), &text).expect("write text blob");
+        util::write_atomic(&blobs.join(blob.to_string()), text.as_bytes(), FileMode::Mode0600)
+            .expect("write text blob");
         let records = [
             Record::Session(Header {
                 id,
@@ -1108,7 +1107,8 @@ mod tests {
             }),
         ];
         let journal = dir.join("journal.jsonl");
-        let mut file = File::create(&journal).expect("create journal");
+        let mut file = private::create_new(&journal, FileMode::Mode0600)
+            .expect("create journal");
         for record in records {
             file.write_all(&encode(&record).expect("encode record"))
                 .expect("write record");

@@ -531,7 +531,8 @@ mod tests {
     fn read_pid_until_reads_a_present_sidecar() {
         let dir = TestDir::new();
         let path = dir.0.join("session.lock.owner");
-        fs::write(&path, b"4242\n").expect("write the owner sidecar");
+        crate::util::write_atomic(&path, b"4242\n", FileMode::Mode0600)
+            .expect("write the owner sidecar");
         assert_eq!(
             read_pid_until(&path).expect("poll reads the sidecar"),
             Some(4242),

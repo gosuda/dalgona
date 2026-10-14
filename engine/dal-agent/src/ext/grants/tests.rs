@@ -289,7 +289,12 @@ async fn facade_grant_contains_list_revoke_round_trip() {
 #[tokio::test]
 async fn facade_malformed_file_fails_without_writing() {
     let dir = tempfile::tempdir().expect("tempdir");
-    std::fs::write(dir.path().join("grants.toml"), "[[grant]]\next = oops\n").expect("write");
+    dal_store::write_atomic(
+        &dir.path().join("grants.toml"),
+        b"[[grant]]\next = oops\n",
+        dal_store::FileMode::Mode0600,
+    )
+    .expect("write");
     let before = std::fs::read_to_string(dir.path().join("grants.toml")).expect("snapshot");
     let store = GrantStore::new(dir.path().to_path_buf());
     assert!(matches!(

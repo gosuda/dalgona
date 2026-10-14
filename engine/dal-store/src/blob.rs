@@ -801,7 +801,8 @@ mod tests {
         let bytes = b"intended bytes";
         let id = BlobId::from_bytes(bytes);
         let published = b"already-published bytes";
-        fs::write(blobs.join(id.to_string()), published).expect("seed existing digest");
+        util::write_atomic(&blobs.join(id.to_string()), published, FileMode::Mode0600)
+            .expect("seed existing digest");
 
         assert_eq!(put(&blobs, bytes).expect("put existing digest"), id);
         assert_eq!(
@@ -848,7 +849,8 @@ mod tests {
         let id = BlobId::from_bytes(b"copied bytes");
         let dest = blobs.join(id.to_string());
         let winner = b"racing writer's bytes";
-        fs::write(&dest, winner).expect("seed racing winner");
+        util::write_atomic(&dest, winner, FileMode::Mode0600)
+            .expect("seed racing winner");
         let (staged_file, mut file) = create_temp(&blobs).expect("create copy temp");
         file.write_all(b"copied bytes").expect("write copy temp");
         file.sync_all().expect("sync copy temp");
