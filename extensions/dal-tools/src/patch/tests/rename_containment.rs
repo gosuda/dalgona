@@ -171,6 +171,47 @@ async fn parent_walk_rename_destination_is_refused() {
     assert_refused_everywhere(&fixture, "sub/../../escaped.txt").await;
 }
 
+#[tokio::test]
+async fn parent_components_are_rejected_even_when_they_normalize_inside() {
+    let fixture = fixture();
+    for dialect in RENAME_DIALECTS {
+        let input = payload(&fixture, dialect, "sub/../result.txt");
+        let error = plan(&fixture.session, dialect, &input)
+            .await
+            .expect_err("rename destinations must not contain parent components");
+        assert!(
+            error.message.contains("parent traversal"),
+            "{dialect:?}: {}",
+            error.message
+        );
+        assert!(!fixture.workspace.join("result.txt").exists());
+    }
+    assert_eq!(
+        std::fs::read(fixture.workspace.join("a.txt")).expect("source intact"),
+        b"alpha\n"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn symlinked_inside_destination_parent_is_refused_at_commit() {
+    let fixture = fixture();
+    std::fs::create_dir(fixture.workspace.join("real")).expect("actual parent");
+    std::os::unix::fs::symlink("real", fixture.workspace.join("alias"))
+        .expect("inside parent symlink");
+    let input = payload(&fixture, DialectId::Replace, "alias/result.txt");
+    let staged = plan(&fixture.session, DialectId::Replace, &input)
+        .await
+        .expect("planning resolves in-workspace target");
+    let output = commit(&fixture.session, staged, &[]).await;
+    assert!(output.error_class.is_some(), "{}", output.text);
+    assert!(!fixture.workspace.join("real/result.txt").exists());
+    assert_eq!(
+        std::fs::read(fixture.workspace.join("a.txt")).expect("source intact"),
+        b"alpha\n"
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn symlink_escape_rename_destination_is_refused() {
