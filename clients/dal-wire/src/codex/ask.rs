@@ -329,10 +329,9 @@ fn grant_clause(grant: &CallGrant) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{num::NonZeroU64, path::PathBuf, time::Duration};
+    use std::{num::NonZeroU64, time::Duration};
 
     use dal_core::{Answer, ExecPreview, Owner, Question, Request, RequestId, TurnId};
-    use sonic_rs::JsonValueTrait as _;
 
     use super::server_request;
 
@@ -388,7 +387,7 @@ mod tests {
             "invalid exec contexts must not become approvable"
         );
 
-        let other_cwd = PathBuf::from(&workspace).join("other");
+        let other_cwd = workspace.join("other");
         let changed = Request {
             question: Question::Approval {
                 tool: "exec".into(),
