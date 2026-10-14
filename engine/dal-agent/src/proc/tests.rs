@@ -213,6 +213,72 @@ async fn proc_wait_sweeps_grandchild_holding_pipe_before_capture_join() {
     assert_eq!(result.status, ProcStatus::Exited { code: 0 });
 }
 
+// macOS uses a mandatory lifetime-only Seatbelt policy even when the
+// filesystem sandbox is off. Forking remains allowed, but a forked process
+// must not be able to escape the group owned by the host.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn macos_forked_process_cannot_escape_with_setsid_or_setpgid() {
+    let temp = tempfile::tempdir().expect("temp workspace");
+    for (name, syscall) in [
+        ("setsid", "os.setsid()"),
+        ("setpgid", "os.setpgid(0, 0)"),
+    ] {
+        let script = format!(
+            "import os, sys\npid = os.fork()\nif pid == 0:\n    try:\n        {syscall}\n    except OSError:\n        os._exit(0)\n    os._exit(61)\n_, status = os.waitpid(pid, 0)\nsys.exit(os.waitstatus_to_exitcode(status))\n"
+        );
+        let argv = [
+            OsString::from("/usr/bin/python3"),
+            OsString::from("-c"),
+            OsString::from(script),
+        ];
+        let mut proc = spawn_approved(&temp, &format!("test-macos-{name}"), &argv, None, 0)
+            .await
+            .expect("spawn test child");
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            proc.wait(&CancellationToken::new()),
+        )
+        .await
+        .expect("blocked process escape settles capture")
+        .expect("wait test child");
+        assert_eq!(
+            result.status,
+            ProcStatus::Exited { code: 0 },
+            "{name} must be denied while fork stays permitted"
+        );
+    }
+}
+
+// A spawn attribute can change the process group without an explicit
+// setpgid() call in the initiating program. Reject that bypass as well.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn macos_posix_spawn_cannot_create_an_unowned_process_group() {
+    let temp = tempfile::tempdir().expect("temp workspace");
+    let script = "import os, sys\ntry:\n    pid = os.posix_spawn('/bin/sleep', ['sleep', '30'], os.environ, setpgroup=0)\nexcept OSError:\n    sys.exit(0)\nos.kill(pid, 9)\nos.waitpid(pid, 0)\nsys.exit(62)\n";
+    let argv = [
+        OsString::from("/usr/bin/python3"),
+        OsString::from("-c"),
+        OsString::from(script),
+    ];
+    let mut proc = spawn_approved(&temp, "test-macos-spawn-pgroup", &argv, None, 0)
+        .await
+        .expect("spawn test child");
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        proc.wait(&CancellationToken::new()),
+    )
+    .await
+    .expect("spawn-group escape test settles")
+    .expect("wait test child");
+    assert_eq!(
+        result.status,
+        ProcStatus::Exited { code: 0 },
+        "posix_spawn setpgroup must not bypass the mandatory lifetime policy"
+    );
+}
+
 fn approved_for(call: &CallId, digest: Option<[u8; 32]>, roots: Vec<PathBuf>) -> Approved {
     Approved::new(
         call.clone(),
