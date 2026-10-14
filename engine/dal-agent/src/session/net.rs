@@ -291,7 +291,12 @@ mod tests {
 
     #[test]
     fn admits_public_unicast_addresses() {
-        for raw in ["1.1.1.1", "8.8.8.8", "2001:4860:4860::8888", "2606:4700:4700::1111"] {
+        for raw in [
+            "1.1.1.1",
+            "8.8.8.8",
+            "2001:4860:4860::8888",
+            "2606:4700:4700::1111",
+        ] {
             assert!(public_ip(addr(raw)), "{raw} must be admitted");
         }
     }
@@ -303,7 +308,10 @@ mod tests {
         assert!(checked_addresses(vec![]).is_err());
         assert!(checked_addresses(vec![private]).is_err());
         assert!(checked_addresses(vec![public, private]).is_err());
-        assert_eq!(checked_addresses(vec![public]).expect("public DNS"), vec![public]);
+        assert_eq!(
+            checked_addresses(vec![public]).expect("public DNS"),
+            vec![public]
+        );
         // A rebinding response is rejected even if an earlier answer was public.
         assert!(checked_addresses(vec![private]).is_err());
     }
@@ -315,7 +323,10 @@ mod tests {
             assert!(target(&url).is_err(), "{raw} must be denied");
         }
         let url = reqwest::Url::parse("http://2130706433/").expect("numeric loopback");
-        assert!(url.host_str().is_some_and(|host| host.parse::<std::net::Ipv4Addr>().is_ok()));
+        assert!(
+            url.host_str()
+                .is_some_and(|host| host.parse::<std::net::Ipv4Addr>().is_ok())
+        );
         assert!(!public_ip(addr(url.host_str().expect("literal host"))));
     }
 
@@ -356,17 +367,36 @@ mod tests {
         tokio::join!(server, fetch);
     }
 
+    #[tokio::test]
+    async fn rejects_private_net_requests_before_connecting() {
+        for url in [
+            "http://127.0.0.1/",
+            "https://169.254.169.254/latest/meta-data/",
+            "http://2130706433/",
+            "https://[::1]/",
+            "http://[::ffff:10.0.0.1]/",
+        ] {
+            let request = dal_core::FetchRequest {
+                method: dal_core::FetchMethod::Get,
+                url: url.into(),
+                headers: Vec::new(),
+                body: Vec::new(),
+                redirects: dal_core::RedirectPolicy::Refuse,
+            };
+            assert!(
+                super::send(request).await.is_err(),
+                "internal destination {url} must be refused"
+            );
+        }
+    }
+
     #[test]
     fn redirect_target_rejects_cross_origin_and_accepts_relative_hops() {
         let current = reqwest::Url::parse("https://example.test/start").expect("test URL");
         let same = reqwest::header::HeaderValue::from_static("/next");
-        let next = super::redirect_target(
-            &current,
-            reqwest::StatusCode::FOUND,
-            Some(&same),
-        )
-        .expect("relative redirect allowed")
-        .expect("redirect destination");
+        let next = super::redirect_target(&current, reqwest::StatusCode::FOUND, Some(&same))
+            .expect("relative redirect allowed")
+            .expect("redirect destination");
         assert_eq!(next.as_str(), "https://example.test/next");
 
         for unsafe_target in [
@@ -409,5 +439,4 @@ mod tests {
         assert_eq!(method, reqwest::Method::POST);
         assert_eq!(body.as_slice(), b"secret");
     }
-
 }
