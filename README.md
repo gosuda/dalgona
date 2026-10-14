@@ -47,7 +47,7 @@ You can type while dal works. A steer reaches the model at the next safe point. 
 | Router | `dalgon serve` |
 | A2A | `dalgon serve --a2a` |
 
-`dalgon serve` binds to loopback only. `--public` requires a bearer token but still binds to loopback. For remote access, put an HTTPS/WSS reverse proxy on the same machine in front of the server; set `X-Forwarded-Proto` so the A2A agent card advertises the public scheme. Non-loopback `--bind` values are rejected. No desktop, web, or mobile app ships; any such app is a client of the protocol, not a fork.
+`dalgon serve` binds to loopback only. `--public` requires a bearer token but still binds to loopback. For remote access, put an HTTPS/WSS reverse proxy on the same machine in front of the server; set `X-Forwarded-Proto: https` so the A2A agent card advertises the public scheme — any other declared proto refuses the card. Non-loopback `--bind` values are rejected. No desktop, web, or mobile app ships; any such app is a client of the protocol, not a fork.
 
 ## Built for large runs
 
