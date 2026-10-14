@@ -1,6 +1,10 @@
 //! Atomic commit: locks, temps, ordered operations, and truthful outcomes.
 
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    io,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use super::super::ir::{
     Diff, DiffFile, EngineError, ErrorClass, FileChange, FindingSeverity, Output, Plan,
@@ -8,7 +12,51 @@ use super::super::ir::{
 };
 
 use super::super::resolve::revalidate_path;
-use super::{PatchSession, ensure_regular_target, non_regular_target};
+use super::{PatchSession, ensure_regular_target, non_regular_target, rename_temp::RenameTemp};
+
+/// One staged after-image and its publication authority.
+struct PendingTemp<'a> {
+    file: &'a StagedFileOwned,
+    destination: PendingDestination,
+}
+
+enum PendingDestination {
+    Ordinary { target: PathBuf, temp: PathBuf },
+    Rename(Arc<RenameTemp>),
+}
+
+impl PendingTemp<'_> {
+    fn target(&self) -> &Path {
+        match &self.destination {
+            PendingDestination::Ordinary { target, .. } => target,
+            PendingDestination::Rename(rename) => rename.target(),
+        }
+    }
+
+    async fn publish(&self) -> io::Result<()> {
+        match &self.destination {
+            PendingDestination::Ordinary { target, temp } => {
+                tokio::fs::rename(temp, target).await
+            }
+            PendingDestination::Rename(rename) => rename.publish(),
+        }
+    }
+
+    async fn cleanup(&self) {
+        match &self.destination {
+            PendingDestination::Ordinary { temp, .. } => {
+                let _ = tokio::fs::remove_file(temp).await;
+            }
+            PendingDestination::Rename(rename) => rename.cleanup(),
+        }
+    }
+
+    fn sync_rename_parent(&self) {
+        if let PendingDestination::Rename(rename) = &self.destination {
+            rename.sync_dir();
+        }
+    }
+}
 
 fn lock_table()
 -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>> {
@@ -106,7 +154,10 @@ pub(crate) async fn apply_files(
     let _guards = prepare_write_set(session, plan).await?;
     let mut temps = Vec::new();
     for file in &plan.files {
-        stage_temp(session, file, &mut temps, &mut seen_dirs).await?;
+        if let Err(error) = stage_temp(session, file, &mut temps, &mut seen_dirs).await {
+            cleanup_temps(&temps).await;
+            return Err(error);
+        }
     }
     for file in &plan.files {
         session.index.dirty(&session.workspace, &file.path);
@@ -120,20 +171,28 @@ pub(crate) async fn apply_files(
             trash_source(session, file, &temps, &mut undo).await?;
         }
     }
-    for (file, temp) in &temps {
-        let target = write_target(file);
-        if let Err(error) = tokio::fs::rename(temp, target).await {
+    for pending in &temps {
+        let target = pending.target();
+        if let Err(error) = pending.publish().await {
             return Err(rollback_error(target, error, &temps, &undo).await);
         }
-        undo.push(match (file.op, file.before.as_deref()) {
-            (super::super::ir::Operation::Rename, _) | (_, None) => Undo::RemoveInstalled(target),
-            (_, Some(before)) => Undo::RestoreBytes(target, before),
+        undo.push(match (&pending.destination, pending.file.before.as_deref()) {
+            (PendingDestination::Rename(rename), _) => Undo::RemoveRenamed(Arc::clone(rename)),
+            (PendingDestination::Ordinary { target, .. }, None) => {
+                Undo::RemoveInstalled(target.clone())
+            }
+            (PendingDestination::Ordinary { target, .. }, Some(before)) => {
+                Undo::RestoreBytes(target.clone(), before)
+            }
         });
     }
     for file in &plan.files {
         if file.op == super::super::ir::Operation::Rename {
             trash_source(session, file, &temps, &mut undo).await?;
         }
+    }
+    for pending in &temps {
+        pending.sync_rename_parent();
     }
     #[cfg(unix)]
     for dir in seen_dirs {
@@ -175,7 +234,7 @@ fn trash_path(session: &PatchSession, source: &std::path::Path) -> PathBuf {
 async fn stage_temp<'a>(
     session: &PatchSession,
     file: &'a StagedFileOwned,
-    temps: &mut Vec<(&'a StagedFileOwned, PathBuf)>,
+    temps: &mut Vec<PendingTemp<'a>>,
     seen_dirs: &mut std::collections::HashSet<PathBuf>,
 ) -> Result<(), EngineError> {
     if file.op == super::super::ir::Operation::Delete {
@@ -190,27 +249,63 @@ async fn stage_temp<'a>(
         return Ok(());
     };
     let target_abs = write_target(file);
-    // No-replace: rename destinations must be absent at prepare and commit.
-    if file.op == super::super::ir::Operation::Rename
-        && let Ok(metadata) = tokio::fs::metadata(target_abs).await
-    {
-        cleanup_temps(temps).await;
-        let dest = file
-            .renamed_to
-            .as_ref()
-            .map_or(file.path.as_path(), |dest| dest.path.as_path());
-        if !metadata.is_file() {
-            return Err(non_regular_target(dest));
+    if file.op == super::super::ir::Operation::Rename {
+        let dest = file.renamed_to.as_ref().ok_or_else(|| {
+            EngineError::new(ErrorClass::Resolve, "patch: rename has no destination.")
+        })?;
+        if let Ok(metadata) = tokio::fs::symlink_metadata(target_abs).await {
+            if !metadata.is_file() {
+                return Err(non_regular_target(&dest.path));
+            }
+            return Err(EngineError::new(
+                ErrorClass::File,
+                format!(
+                    "patch: cannot rename {} to {}: {} exists.",
+                    file.path.display(),
+                    dest.path.display(),
+                    dest.path.display()
+                ),
+            ));
         }
-        return Err(EngineError::new(
-            ErrorClass::File,
-            format!(
-                "patch: cannot rename {} to {}: {} exists.",
-                file.path.display(),
-                dest.display(),
-                dest.display()
-            ),
-        ));
+        // Stage through pinned directory handles, never through a pathname
+        // that can be redirected between validation and publication.
+        let (rename, handle) =
+            RenameTemp::create(&session.workspace, &dest.path).map_err(|error| {
+                EngineError::new(
+                    ErrorClass::Io,
+                    format!(
+                        "patch: cannot write {}: {error}. Nothing was written.",
+                        dest.path.display()
+                    ),
+                )
+            })?;
+        let write = async {
+            use tokio::io::AsyncWriteExt as _;
+            let mut handle = tokio::fs::File::from_std(handle);
+            handle.write_all(after).await?;
+            handle.sync_all().await
+        }
+        .await;
+        if let Err(error) = write {
+            rename.cleanup();
+            return Err(EngineError::new(
+                ErrorClass::Io,
+                format!(
+                    "patch: cannot write {}: {error}. Nothing was written.",
+                    dest.path.display()
+                ),
+            ));
+        }
+        temps.push(PendingTemp {
+            file,
+            destination: PendingDestination::Rename(Arc::new(rename)),
+        });
+        let source_parent = file
+            .absolute_path
+            .parent()
+            .unwrap_or(session.workspace.as_path());
+        seen_dirs.insert(source_parent.to_path_buf());
+        return Ok(());
     }
     let parent = target_abs.parent().unwrap_or(session.workspace.as_path());
     tokio::fs::create_dir_all(parent).await.map_err(|error| {
@@ -240,7 +335,6 @@ async fn stage_temp<'a>(
     .await;
     if let Err(error) = write {
         let _ = tokio::fs::remove_file(&temp).await;
-        cleanup_temps(temps).await;
         return Err(EngineError::new(
             ErrorClass::Io,
             format!(
@@ -249,23 +343,23 @@ async fn stage_temp<'a>(
             ),
         ));
     }
-    temps.push((file, temp));
+    temps.push(PendingTemp {
+        file,
+        destination: PendingDestination::Ordinary {
+            target: target_abs.to_path_buf(),
+            temp,
+        },
+    });
     seen_dirs.insert(parent.to_path_buf());
-    if file.op == super::super::ir::Operation::Rename {
-        let source_parent = file
-            .absolute_path
-            .parent()
-            .unwrap_or(session.workspace.as_path());
-        seen_dirs.insert(source_parent.to_path_buf());
-    }
     Ok(())
 }
 
 enum Undo<'a> {
-    RestoreBytes(&'a std::path::Path, &'a [u8]),
-    RemoveInstalled(&'a std::path::Path),
+    RestoreBytes(PathBuf, &'a [u8]),
+    RemoveInstalled(PathBuf),
+    RemoveRenamed(Arc<RenameTemp>),
     RestoreMoved {
-        source: &'a std::path::Path,
+        source: PathBuf,
         backup: PathBuf,
     },
 }
@@ -278,6 +372,7 @@ impl Undo<'_> {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
                 result => result,
             },
+            Self::RemoveRenamed(rename) => rename.rollback(),
             Self::RestoreMoved { source, backup } => tokio::fs::rename(backup, source).await,
         }
     }
@@ -286,7 +381,7 @@ impl Undo<'_> {
 async fn rollback_error(
     path: &std::path::Path,
     error: std::io::Error,
-    temps: &[(&StagedFileOwned, PathBuf)],
+    temps: &[PendingTemp<'_>],
     undo: &[Undo<'_>],
 ) -> EngineError {
     use std::fmt::Write as _;
@@ -308,6 +403,9 @@ async fn rollback_error(
                 Undo::RestoreBytes(path, _) | Undo::RemoveInstalled(path) => {
                     let _ = write!(message, "\n{}: {error}.", path.display());
                 }
+                Undo::RemoveRenamed(rename) => {
+                    let _ = write!(message, "\n{}: {error}.", rename.target().display());
+                }
                 Undo::RestoreMoved { source, backup } => {
                     let _ = write!(
                         message,
@@ -325,7 +423,7 @@ async fn rollback_error(
 async fn trash_source<'a>(
     session: &PatchSession,
     file: &'a StagedFileOwned,
-    temps: &[(&StagedFileOwned, PathBuf)],
+    temps: &[PendingTemp<'_>],
     undo: &mut Vec<Undo<'a>>,
 ) -> Result<(), EngineError> {
     let backup = trash_path(session, &file.absolute_path);
@@ -333,7 +431,7 @@ async fn trash_source<'a>(
         return Err(rollback_error(&file.path, error, temps, undo).await);
     }
     undo.push(Undo::RestoreMoved {
-        source: &file.absolute_path,
+        source: file.absolute_path.clone(),
         backup,
     });
     Ok(())
@@ -401,9 +499,9 @@ fn report_output(session: &PatchSession, plan: &Plan) -> Output {
     }
 }
 
-async fn cleanup_temps(temps: &[(&StagedFileOwned, PathBuf)]) {
-    for (_, temp) in temps {
-        let _ = tokio::fs::remove_file(temp).await;
+async fn cleanup_temps(temps: &[PendingTemp<'_>]) {
+    for temp in temps {
+        temp.cleanup().await;
     }
 }
 
@@ -429,7 +527,7 @@ fn count_lines(before: Option<&[u8]>, after: Option<&[u8]>) -> (u64, u64) {
     }
 }
 
-fn nonce_u128() -> u128 {
+pub(super) fn nonce_u128() -> u128 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0x9E37_79B9_7F4A_7C15);
     let first = COUNTER.fetch_add(0x9E37_79B9_7F4A_7C15, Ordering::Relaxed);
@@ -457,25 +555,18 @@ mod tests {
     use super::apply_files;
 
     #[tokio::test]
-    async fn restore_completed_removes_create_after_later_temp_install_failure() {
+    async fn failed_rename_staging_removes_preceding_create_temp() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let workspace = std::fs::canonicalize(directory.path()).expect("workspace");
         let source = workspace.join("source.txt");
         let created = workspace.join("created");
-        // The rename destination must fail. unix refuses a file target
-        // under a missing directory at Phase-B rename; Windows accepts
-        // that spelling, so on Windows the destination sits under a
-        // regular file and prepare refuses it instead.
-        #[cfg(unix)]
-        let destination = workspace.join("other/");
-        #[cfg(windows)]
-        let destination = {
-            let blocker = workspace.join("blocked");
-            tokio::fs::write(&blocker, b"file\n")
-                .await
-                .expect("seed the file that blocks the destination parent");
-            blocker.join("dest")
-        };
+        // The second rename stage must fail because its parent is a file.
+        // The earlier create must not survive a failed staging phase.
+        let blocker = workspace.join("blocked");
+        tokio::fs::write(&blocker, b"file\n")
+            .await
+            .expect("seed the file that blocks the destination parent");
+        let destination = blocker.join("dest");
 
         tokio::fs::write(&source, b"source\n")
             .await
@@ -513,11 +604,7 @@ mod tests {
                     after: Some(b"renamed\n".to_vec().into_boxed_slice()),
                     op: Operation::Rename,
                     renamed_to: Some(RenameTarget {
-                        path: if cfg!(unix) {
-                            PathBuf::from("other/")
-                        } else {
-                            PathBuf::from("blocked/dest")
-                        },
+                        path: PathBuf::from("blocked/dest"),
                         absolute_path: destination,
                     }),
                     hunks: Vec::new(),
@@ -609,12 +696,12 @@ mod tests {
             hunks: Vec::new(),
         };
         let mut undo = vec![
-            super::Undo::RestoreBytes(update, b"before\n"),
-            super::Undo::RemoveInstalled(create),
-            super::Undo::RestoreBytes(restored, b"before\n"),
-            super::Undo::RemoveInstalled(destination),
+            super::Undo::RestoreBytes(update.clone(), b"before\n"),
+            super::Undo::RemoveInstalled(create.clone()),
+            super::Undo::RestoreBytes(restored.clone(), b"before\n"),
+            super::Undo::RemoveInstalled(destination.clone()),
             super::Undo::RestoreMoved {
-                source: earlier,
+                source: earlier.clone(),
                 backup: backup.clone(),
             },
         ];
