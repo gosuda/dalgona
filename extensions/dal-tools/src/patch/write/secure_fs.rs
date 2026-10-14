@@ -106,8 +106,12 @@ impl SecureFs {
     pub(super) fn write_new(&mut self, path: &Path, bytes: &[u8]) -> io::Result<()> {
         let (parent, name) = self.parent(path, true)?;
         let mut file = create_exclusive(&parent, path, &name)?;
-        file.write_all(bytes)?;
-        file.sync_all()
+        let result = file.write_all(bytes).and_then(|()| file.sync_all());
+        drop(file);
+        if result.is_err() {
+            let _ = self.remove_file(path);
+        }
+        result
     }
 
     pub(super) fn move_file(&mut self, from: &Path, to: &Path) -> io::Result<()> {
