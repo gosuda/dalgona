@@ -13,7 +13,7 @@ use super::{
     decode::{decode_anthropic_page, decode_codex_models, decode_openai_models},
 };
 use crate::{
-    error::ProviderError,
+    error::{LimitError, ProviderError},
     http::{self, Exchange, NON_STREAM_TOTAL_TIMEOUT},
 };
 
@@ -104,7 +104,11 @@ where
             let body = get_body(fetch, url, headers, sleep).await?;
             decode_openai_models(fetch.provider, &body)
         }
-        Family::Anthropic => fetch_anthropic(fetch, sleep).await,
+        Family::Anthropic => {
+            tokio::time::timeout(ANTHROPIC_CATALOG_TIMEOUT, fetch_anthropic(fetch, sleep))
+                .await
+                .map_err(|_| ProviderError::Limit(LimitError::CatalogTimeout))?
+        }
         Family::Codex => {
             let mut url = http::endpoint(Family::Codex, &fetch.provider.base_url, "models")?;
             url.query_pairs_mut()
@@ -116,6 +120,58 @@ where
             let body = get_body(fetch, url, headers, sleep).await?;
             decode_codex_models(fetch.provider, &body)
         }
+    }
+}
+
+// Caps apply to the entire catalog refresh, not to each HTTP response.
+const ANTHROPIC_CATALOG_MAX_PAGES: usize = 32;
+const ANTHROPIC_CATALOG_MAX_ROWS: usize = 10_000;
+const ANTHROPIC_CATALOG_MAX_BYTES: usize = 32 << 20;
+const ANTHROPIC_CATALOG_MAX_CURSOR_BYTES: usize = 16 << 10;
+const ANTHROPIC_CATALOG_MAX_CURSOR_LENGTH: usize = 1 << 10;
+const ANTHROPIC_CATALOG_TIMEOUT: Duration = Duration::from_secs(180);
+
+#[derive(Default)]
+struct AnthropicCatalogBudget {
+    pages: usize,
+    rows: usize,
+    bytes: usize,
+    cursor_bytes: usize,
+}
+
+impl AnthropicCatalogBudget {
+    fn begin_page(&mut self) -> Result<(), ProviderError> {
+        if self.pages == ANTHROPIC_CATALOG_MAX_PAGES {
+            return Err(ProviderError::Limit(LimitError::CatalogPages));
+        }
+        self.pages += 1;
+        Ok(())
+    }
+
+    fn add_body(&mut self, bytes: usize) -> Result<(), ProviderError> {
+        if bytes > ANTHROPIC_CATALOG_MAX_BYTES - self.bytes {
+            return Err(ProviderError::Limit(LimitError::CatalogBytes));
+        }
+        self.bytes += bytes;
+        Ok(())
+    }
+
+    fn add_rows(&mut self, count: usize) -> Result<(), ProviderError> {
+        if count > ANTHROPIC_CATALOG_MAX_ROWS - self.rows {
+            return Err(ProviderError::Limit(LimitError::CatalogRows));
+        }
+        self.rows += count;
+        Ok(())
+    }
+
+    fn add_cursor(&mut self, bytes: usize) -> Result<(), ProviderError> {
+        if bytes > ANTHROPIC_CATALOG_MAX_CURSOR_LENGTH
+            || bytes > ANTHROPIC_CATALOG_MAX_CURSOR_BYTES - self.cursor_bytes
+        {
+            return Err(ProviderError::Limit(LimitError::CatalogCursor));
+        }
+        self.cursor_bytes += bytes;
+        Ok(())
     }
 }
 
@@ -135,8 +191,10 @@ where
     let mut seen_cursors = std::collections::HashSet::new();
     let mut rows = Vec::new();
     let mut cursor: Option<String> = None;
+    let mut budget = AnthropicCatalogBudget::default();
 
     loop {
+        budget.begin_page()?;
         let mut url = base_url.clone();
         {
             let mut query = url.query_pairs_mut();
@@ -146,7 +204,9 @@ where
             }
         }
         let body = get_body(fetch, url, headers.clone(), sleep).await?;
+        budget.add_body(body.len())?;
         let page = decode_anthropic_page(fetch.provider, &body)?;
+        budget.add_rows(page.rows.len())?;
         rows.extend(page.rows);
         if !page.has_more {
             return Ok(rows);
@@ -157,6 +217,7 @@ where
                 "model list has_more is true without last_id",
             ));
         };
+        budget.add_cursor(next_cursor.len())?;
         if !seen_cursors.insert(next_cursor.clone()) {
             return Err(super::decode::protocol(
                 Family::Anthropic,
@@ -201,4 +262,60 @@ where
         });
     }
     http::read_body(family, response).await
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn anthropic_page_budget_stops_before_an_extra_request() {
+        let mut budget = AnthropicCatalogBudget::default();
+        for _ in 0..ANTHROPIC_CATALOG_MAX_PAGES {
+            budget.begin_page().expect("page is within limit");
+        }
+        assert!(matches!(
+            budget.begin_page(),
+            Err(ProviderError::Limit(LimitError::CatalogPages))
+        ));
+    }
+
+    #[test]
+    fn anthropic_row_budget_is_cumulative() {
+        let mut budget = AnthropicCatalogBudget::default();
+        budget.add_rows(ANTHROPIC_CATALOG_MAX_ROWS - 1).expect("first rows fit");
+        budget.add_rows(1).expect("last row fits");
+        assert!(matches!(
+            budget.add_rows(1),
+            Err(ProviderError::Limit(LimitError::CatalogRows))
+        ));
+    }
+
+    #[test]
+    fn anthropic_response_byte_budget_is_cumulative() {
+        let mut budget = AnthropicCatalogBudget::default();
+        budget.add_body(ANTHROPIC_CATALOG_MAX_BYTES / 2).expect("first body fits");
+        budget.add_body(ANTHROPIC_CATALOG_MAX_BYTES / 2).expect("second body fits");
+        assert!(matches!(
+            budget.add_body(1),
+            Err(ProviderError::Limit(LimitError::CatalogBytes))
+        ));
+    }
+
+    #[test]
+    fn anthropic_cursor_budget_bounds_one_cursor_and_the_total() {
+        let mut budget = AnthropicCatalogBudget::default();
+        assert!(matches!(
+            budget.add_cursor(ANTHROPIC_CATALOG_MAX_CURSOR_LENGTH + 1),
+            Err(ProviderError::Limit(LimitError::CatalogCursor))
+        ));
+        for _ in 0..ANTHROPIC_CATALOG_MAX_CURSOR_BYTES / ANTHROPIC_CATALOG_MAX_CURSOR_LENGTH {
+            budget
+                .add_cursor(ANTHROPIC_CATALOG_MAX_CURSOR_LENGTH)
+                .expect("cursors fit the aggregate budget");
+        }
+        assert!(matches!(
+            budget.add_cursor(1),
+            Err(ProviderError::Limit(LimitError::CatalogCursor))
+        ));
+    }
 }

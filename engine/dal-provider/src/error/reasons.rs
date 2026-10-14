@@ -17,6 +17,16 @@ pub enum LimitError {
     WsMessage,
     /// One non-streaming response body grew past 16 MiB.
     Body,
+    /// One model catalog refresh requested more than 32 pages.
+    CatalogPages,
+    /// One model catalog refresh returned more than 10,000 model rows.
+    CatalogRows,
+    /// Model catalog response bodies exceeded 32 MiB in aggregate.
+    CatalogBytes,
+    /// One model catalog cursor exceeded 1 KiB or all cursors exceeded 16 KiB.
+    CatalogCursor,
+    /// One model catalog refresh ran longer than 180 seconds.
+    CatalogTimeout,
 }
 
 impl fmt::Display for LimitError {
@@ -26,6 +36,11 @@ impl fmt::Display for LimitError {
             Self::SseEvent => f.write_str("SSE event exceeds 8 MiB."),
             Self::WsMessage => f.write_str("WebSocket message exceeds 16 MiB."),
             Self::Body => f.write_str("response body exceeds 16 MiB."),
+            Self::CatalogPages => f.write_str("model catalog exceeds the page limit."),
+            Self::CatalogRows => f.write_str("model catalog exceeds the row limit."),
+            Self::CatalogBytes => f.write_str("model catalog exceeds the response byte limit."),
+            Self::CatalogCursor => f.write_str("model catalog exceeds the cursor byte limit."),
+            Self::CatalogTimeout => f.write_str("model catalog refresh exceeds its deadline."),
         }
     }
 }
