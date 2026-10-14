@@ -3589,16 +3589,20 @@ impl Coordinator {
             tool_names.push(name);
         }
         tool_names.push(Name::parse(REPORT_TOOL_NAME).map_err(|error| error.to_string())?);
-        let workspace = dir.map(|dir| {
-            self.base.as_ref().map_or_else(
-                || dir.to_path_buf(),
-                |base| dir.join(&base.relative_workspace),
-            )
-        });
-        let workspace = workspace
-            .map(dal_core::Workspace::new)
-            .transpose()
-            .map_err(|error| error.to_string())?;
+        let workspace = match step.isolation {
+            super::workflow::Isolation::Worktree => {
+                let dir = dir.ok_or("worktree isolation requires a task worktree")?;
+                let base = self
+                    .base
+                    .as_ref()
+                    .ok_or("worktree isolation requires a verified base")?;
+                Some(
+                    dal_core::Workspace::new(dir.join(&base.relative_workspace))
+                        .map_err(|error| error.to_string())?,
+                )
+            }
+            super::workflow::Isolation::Shared => None,
+        };
         Ok(dal_core::AgentStart {
             call: CallId::new(format!("{}-{}-{index}", self.call, step.name)),
             name: label.to_owned().into_boxed_str(),
