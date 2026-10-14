@@ -6,7 +6,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
@@ -140,15 +140,7 @@ impl Journal {
     /// Returns [`JournalError::Io`] when creation or syncing fails, and
     /// [`JournalError::Damaged`] when a failed create cannot be removed durably.
     pub(crate) fn create(path: &Path, lines: &[u8], faults: &Faults) -> Result<Self, JournalError> {
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let file = options
-            .open(path)
+        let file = crate::private::create_new(path, crate::util::FileMode::Mode0600)
             .map_err(|source| jio("create", path, source))?;
         let mut journal = Self {
             file,
@@ -176,10 +168,7 @@ impl Journal {
     /// structure check (as [`crate::error::StoreError::Damaged`] via the caller),
     /// or an unsupported version (as [`crate::error::StoreError::UnknownVersion`]).
     pub(crate) fn open(path: &Path, faults: &Faults) -> Result<Opened, OpenFailure> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path)
+        let file = crate::private::open_private_read_write(path)
             .map_err(|source| OpenFailure::Journal(jio("open", path, source)))?;
         let mut journal = Self {
             file,
@@ -511,16 +500,10 @@ fn write_side_file(
 ) -> Result<(), JournalError> {
     #[cfg(windows)]
     let _ = faults;
-    let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut kept_file = options
-        .open(kept_at)
+    let mut kept_file = crate::private::open_or_create_private_file(kept_at)
         .map_err(|source| jio("quarantine", journal_path, source))?;
+    kept_file.set_len(0).map_err(|source| jio("quarantine", journal_path, source))?;
+    kept_file.seek(SeekFrom::Start(0)).map_err(|source| jio("quarantine", journal_path, source))?;
     journal_file
         .seek(SeekFrom::Start(tail_start))
         .map_err(|source| jio("read", journal_path, source))?;
@@ -1118,9 +1101,7 @@ pub(crate) fn scan_prefix(
     path: &Path,
     visit: impl FnMut(u64, Record),
 ) -> Result<PrefixSummary, OpenFailure> {
-    let mut file = OpenOptions::new()
-        .read(true)
-        .open(path)
+    let mut file = crate::private::open_private_file(path)
         .map_err(|source| OpenFailure::Journal(jio("open", path, source)))?;
     let file_len = file
         .metadata()
@@ -1542,7 +1523,8 @@ mod tests {
 
         fn journal(&self, contents: &[u8]) -> PathBuf {
             let path = self.0.join("journal.jsonl");
-            fs::write(&path, contents).expect("write journal fixture");
+            crate::util::write_atomic(&path, contents, crate::util::FileMode::Mode0600)
+                .expect("write journal fixture");
             path
         }
     }
@@ -1703,7 +1685,12 @@ mod tests {
             "torn-{}.jsonl",
             u64::try_from(prefix.len()).expect("test offset")
         ));
-        fs::write(&kept_at, b"preserve this sidefile").expect("write sidefile sentinel");
+        crate::util::write_atomic(
+            &kept_at,
+            b"preserve this sidefile",
+            crate::util::FileMode::Mode0600,
+        )
+        .expect("write sidefile sentinel");
 
         assert!(matches!(
             Journal::open(&path, &Faults::default()),
@@ -1734,7 +1721,12 @@ mod tests {
             "torn-{}.jsonl",
             u64::try_from(prefix.len()).expect("test offset")
         ));
-        fs::write(&kept_at, b"preserve this sidefile").expect("write sidefile sentinel");
+        crate::util::write_atomic(
+            &kept_at,
+            b"preserve this sidefile",
+            crate::util::FileMode::Mode0600,
+        )
+        .expect("write sidefile sentinel");
 
         assert!(matches!(
             Journal::open(&path, &Faults::default()),
@@ -1780,7 +1772,12 @@ mod tests {
         let path = directory.journal(&original);
         let offset = u64::try_from(prefix.len()).expect("test offset");
         let kept_at = path.with_file_name(format!("torn-{offset}.jsonl"));
-        fs::write(&kept_at, b"replace this sidefile").expect("write old sidefile");
+        crate::util::write_atomic(
+            &kept_at,
+            b"replace this sidefile",
+            crate::util::FileMode::Mode0600,
+        )
+        .expect("write old sidefile");
 
         let opened = Journal::open(&path, &Faults::default()).expect("repair valid tail");
         let torn = opened.report.torn.expect("report repaired tail");
@@ -1954,7 +1951,7 @@ mod tests {
         let path = directory.journal(&prefix);
         let prefix_len = u64::try_from(prefix.len()).expect("test offset");
         let expected_len = prefix_len + MAX_RECORD;
-        let file = OpenOptions::new()
+        let file = fs::OpenOptions::new()
             .write(true)
             .open(&path)
             .expect("open sparse journal fixture");

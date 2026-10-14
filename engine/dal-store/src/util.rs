@@ -19,11 +19,10 @@ use crate::{error::StoreError, private};
 pub(crate) const MODE_FILE: u32 = 0o600;
 /// Permission mode used by private journal, lock, cache, and sidecar files.
 ///
-/// `Mode0600` provides owner read and write access on Unix. Other platforms use
-/// their platform defaults.
+/// `Mode0600` provides owner-only access on Unix and a protected DACL on Windows.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FileMode {
-    /// Owner read and write only on Unix; platform defaults elsewhere.
+    /// Owner read and write, with a protected ACL on Windows.
     Mode0600,
 }
 
@@ -101,32 +100,29 @@ pub(crate) fn open_options() -> OpenOptions {
     OpenOptions::new()
 }
 
-#[cfg(unix)]
-pub(crate) fn with_mode(options: &mut OpenOptions, mode: u32) {
-    use std::os::unix::fs::OpenOptionsExt;
-    let _ = options.mode(mode);
-}
-
-#[cfg(not(unix))]
-pub(crate) fn with_mode(options: &mut OpenOptions, mode: u32) {
-    let _ = (options, mode);
-}
-/// Creates `path` and its parents with owner-only permissions on Unix.
+/// Creates `path` and its parents with owner-only permissions.
 ///
-/// Existing directories are left unchanged. On other platforms, directory permissions follow
-/// the platform defaults.
+/// Existing directories are left unchanged on Unix. On Windows, existing
+/// target directories must already have a protected owner-only DACL.
 ///
 /// # Errors
 /// Returns an I/O error when a directory cannot be created.
 pub fn create_private_dir_all(path: &Path) -> io::Result<()> {
-    let mut builder = fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
+    #[cfg(windows)]
     {
-        use std::os::unix::fs::DirBuilderExt;
-        let _ = builder.mode(0o700);
+        private::create_private_dir_all_windows(path)
     }
-    builder.create(path)
+    #[cfg(not(windows))]
+    {
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            let _ = builder.mode(0o700);
+        }
+        builder.create(path)
+    }
 }
 
 /// Writes `bytes` to a temp file, syncs it, renames it over `path`, and syncs the directory.

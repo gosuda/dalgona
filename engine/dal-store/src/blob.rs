@@ -11,7 +11,8 @@ use tempfile::{PathPersistError, TempPath};
 
 use crate::{
     error::BlobError,
-    util::{self, MODE_FILE},
+    private,
+    util::{self, FileMode},
 };
 
 /// Bytes at or above this length leave the journal and become a blob.
@@ -111,10 +112,7 @@ fn check_blob_size(length: usize) -> Result<(), BlobError> {
 fn create_temp(dir: &Path) -> Result<(PathBuf, File), BlobError> {
     loop {
         let tmp = dir.join(format!(".tmp-{}", util::random_hex()));
-        let mut options = util::open_options();
-        options.write(true).create_new(true);
-        util::with_mode(&mut options, MODE_FILE);
-        match options.open(&tmp) {
+        match private::create_new(&tmp, FileMode::Mode0600) {
             Ok(file) => return Ok((tmp, file)),
             Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {}
             Err(source) => return Err(io_blob(source)),
@@ -134,7 +132,7 @@ fn existing_blob(path: &Path) -> Result<bool, BlobError> {
             "published blob is not a regular file",
         )));
     }
-    match File::open(path) {
+    match private::open_private_file(path) {
         Ok(_) => Ok(true),
         Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(source) => Err(io_blob(source)),
@@ -290,7 +288,11 @@ fn sync_dir(dir: &Path) -> Result<(), BlobError> {
 /// Returns [`BlobError::Gone`], [`BlobError::NotFound`], or [`BlobError::Io`].
 pub(crate) fn read(session_dir: &Path, id: &BlobId) -> Result<Vec<u8>, BlobError> {
     let path = session_dir.join("blobs").join(id.to_string());
-    match fs::read(&path) {
+    match private::open_private_file(&path).and_then(|mut file| {
+        let mut bytes = Vec::new();
+        io::Read::read_to_end(&mut file, &mut bytes)?;
+        Ok(bytes)
+    }) {
         Ok(bytes) if BlobId::from_bytes(&bytes) == *id => Ok(bytes),
         Ok(_) => Err(io_blob(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -324,7 +326,7 @@ pub(crate) fn share(
         let source = from.join(id.to_string());
         let dest = to.join(id.to_string());
         let mut source_file =
-            File::open(&source).map_err(|error| missing_source(from, &id, error))?;
+            private::open_private_file(&source).map_err(|error| missing_source(from, &id, error))?;
         let metadata = source_file.metadata().map_err(io_blob)?;
         if !metadata.is_file() {
             return Err(io_blob(io::Error::new(
@@ -799,7 +801,8 @@ mod tests {
         let bytes = b"intended bytes";
         let id = BlobId::from_bytes(bytes);
         let published = b"already-published bytes";
-        fs::write(blobs.join(id.to_string()), published).expect("seed existing digest");
+        util::write_atomic(&blobs.join(id.to_string()), published, FileMode::Mode0600)
+            .expect("seed existing digest");
 
         assert_eq!(put(&blobs, bytes).expect("put existing digest"), id);
         assert_eq!(
@@ -846,7 +849,8 @@ mod tests {
         let id = BlobId::from_bytes(b"copied bytes");
         let dest = blobs.join(id.to_string());
         let winner = b"racing writer's bytes";
-        fs::write(&dest, winner).expect("seed racing winner");
+        util::write_atomic(&dest, winner, FileMode::Mode0600)
+            .expect("seed racing winner");
         let (staged_file, mut file) = create_temp(&blobs).expect("create copy temp");
         file.write_all(b"copied bytes").expect("write copy temp");
         file.sync_all().expect("sync copy temp");

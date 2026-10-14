@@ -14,7 +14,8 @@ use dal_core::SessionId;
 
 use crate::{
     error::StoreError,
-    util::{self, MODE_FILE},
+    private,
+    util::{self, FileMode},
 };
 
 const PID_WAIT: Duration = Duration::from_millis(100);
@@ -170,11 +171,11 @@ impl LockGuard {
         // `LockFileEx` makes the held file unreadable to every other
         // handle on Windows, so a contended acquirer reads the pid
         // from the sidecar that the lock never seals.
-        fs::write(
-            owner_path(path),
+        util::write_atomic(
+            &owner_path(path),
             format!("{}\n", std::process::id()).as_bytes(),
-        )
-        .map_err(|source| util::io_err(path, source))?;
+            FileMode::Mode0600,
+        )?;
         // Registered last, as transient: the sidecar precedes it so a
         // contender reading our pid always finds the holder entry instead of
         // taking a needless retry pass; a journal flips it to live only once
@@ -216,12 +217,7 @@ impl LockGuard {
 }
 
 fn open_lock_file(path: &Path) -> Result<File, StoreError> {
-    let mut options = util::open_options();
-    options.read(true).write(true).create(true);
-    util::with_mode(&mut options, MODE_FILE);
-    options
-        .open(path)
-        .map_err(|source| util::io_err(path, source))
+    private::open_or_create_private_file(path).map_err(|source| util::io_err(path, source))
 }
 
 /// Whether `path` still names the file `file` holds open.
@@ -305,7 +301,11 @@ fn poll_delay(session: SessionId) -> Duration {
 fn read_pid_until(path: &Path) -> Result<Option<u32>, StoreError> {
     let deadline = Instant::now() + PID_WAIT;
     loop {
-        let current = match fs::read(path) {
+        let current = match private::open_private_file(path).and_then(|mut file| {
+            let mut bytes = Vec::new();
+            io::Read::read_to_end(&mut file, &mut bytes)?;
+            Ok(bytes)
+        }) {
             Ok(bytes) => parse_pid(&bytes),
             // A contender can read between the holder's lock acquire and its
             // owner-sidecar write; a missing sidecar is a transient state like
@@ -531,7 +531,8 @@ mod tests {
     fn read_pid_until_reads_a_present_sidecar() {
         let dir = TestDir::new();
         let path = dir.0.join("session.lock.owner");
-        fs::write(&path, b"4242\n").expect("write the owner sidecar");
+        crate::util::write_atomic(&path, b"4242\n", FileMode::Mode0600)
+            .expect("write the owner sidecar");
         assert_eq!(
             read_pid_until(&path).expect("poll reads the sidecar"),
             Some(4242),

@@ -3,7 +3,7 @@
 use std::{
     collections::HashMap,
     fmt,
-    fs::{self, File},
+    fs,
     io::{self, Read},
     path::{Path, PathBuf},
     sync::{Mutex, PoisonError},
@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     error::StoreError,
     layout::SessionPaths,
+    private,
     util::{self, FileMode},
 };
 
@@ -644,7 +645,9 @@ fn read_cache(
     workspace: &Workspace,
     journal_bytes: u64,
 ) -> Option<InfoFile> {
-    let bytes = fs::read(path).ok()?;
+    let mut file = private::open_private_file(path).ok()?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
     let info: InfoFile = sonic_rs::from_slice(&bytes).ok()?;
     let expected_workspace = workspace.as_path().display().to_string();
     (info.v == CACHE_VERSION
@@ -751,7 +754,7 @@ fn user_preview(path: &Path, parts: &[JournalPart]) -> String {
                     break;
                 };
                 let blob_path = session_dir.join("blobs").join(blob_id.to_string());
-                let Ok(file) = File::open(blob_path) else {
+                let Ok(file) = private::open_private_file(&blob_path) else {
                     break;
                 };
                 let remaining = MAX_PREVIEW_BYTES.saturating_sub(preview.len());
@@ -920,7 +923,8 @@ mod tests {
             }));
         }
         let journal = dir.join("journal.jsonl");
-        let mut file = File::create(&journal).expect("create journal");
+        let mut file = private::create_new(&journal, FileMode::Mode0600)
+            .expect("create journal");
         for record in records {
             file.write_all(&encode(&record).expect("encode record"))
                 .expect("write record");
@@ -943,7 +947,7 @@ mod tests {
     }
 
     fn set_mtime(path: &Path, millis: u64) {
-        let file = File::options()
+        let file = fs::File::options()
             .write(true)
             .open(path)
             .expect("open journal to set mtime");
@@ -1075,7 +1079,8 @@ mod tests {
         fs::create_dir_all(&blobs).expect("create blobs directory");
         let text = "fix the parser ".repeat(400);
         let blob = BlobId::from_bytes(text.as_bytes());
-        fs::write(blobs.join(blob.to_string()), &text).expect("write text blob");
+        util::write_atomic(&blobs.join(blob.to_string()), text.as_bytes(), FileMode::Mode0600)
+            .expect("write text blob");
         let records = [
             Record::Session(Header {
                 id,
@@ -1102,7 +1107,8 @@ mod tests {
             }),
         ];
         let journal = dir.join("journal.jsonl");
-        let mut file = File::create(&journal).expect("create journal");
+        let mut file = private::create_new(&journal, FileMode::Mode0600)
+            .expect("create journal");
         for record in records {
             file.write_all(&encode(&record).expect("encode record"))
                 .expect("write record");

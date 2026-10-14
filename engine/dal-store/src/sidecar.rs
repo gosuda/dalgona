@@ -11,6 +11,7 @@ use dal_core::{Name, SidecarName};
 use crate::{
     error::StoreError,
     layout::SessionPaths,
+    private,
     util::{self, FileMode},
 };
 
@@ -84,7 +85,11 @@ impl<'session> Sidecar<'session> {
     /// [`StoreError::Io`] for another read failure.
     pub fn read(&self, name: &str) -> Result<Vec<u8>, StoreError> {
         let path = self.path(name)?;
-        match fs::read(&path) {
+        match private::open_private_file(&path).and_then(|mut file| {
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)?;
+            Ok(bytes)
+        }) {
             Ok(bytes) => Ok(bytes),
             Err(source) if source.kind() == io::ErrorKind::NotFound => {
                 Err(StoreError::NotFound { path })
@@ -176,7 +181,7 @@ impl ExtensionSidecar<'_> {
                 bytes: metadata.len(),
             });
         }
-        let file = fs::File::open(&path).map_err(|source| util::io_err(&path, source))?;
+        let file = private::open_private_file(&path).map_err(|source| util::io_err(&path, source))?;
         // One byte over the cap turns a value grown between the stat and the
         // read into an error instead of a silently truncated value.
         let mut value = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
@@ -483,8 +488,12 @@ mod tests {
 
         std::fs::create_dir_all(paths.sidecar_dir().join("ext"))
             .expect("create extension sidecar directory");
-        std::fs::write(paths.sidecar_dir().join("ext").join("big"), &oversized)
-            .expect("write oversized sidecar");
+        util::write_atomic(
+            &paths.sidecar_dir().join("ext").join("big"),
+            &oversized,
+            FileMode::Mode0600,
+        )
+        .expect("write oversized sidecar");
 
         let error = Sidecar::new(&paths)
             .for_extension(&extension)
@@ -509,8 +518,12 @@ mod tests {
 
         std::fs::create_dir_all(paths.sidecar_dir().join("ext"))
             .expect("create extension sidecar directory");
-        std::fs::write(paths.sidecar_dir().join("ext").join("full"), &value)
-            .expect("write capped sidecar");
+        util::write_atomic(
+            &paths.sidecar_dir().join("ext").join("full"),
+            &value,
+            FileMode::Mode0600,
+        )
+        .expect("write capped sidecar");
 
         let read = Sidecar::new(&paths)
             .for_extension(&extension)

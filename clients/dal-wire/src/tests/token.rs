@@ -39,11 +39,11 @@ fn load_uses_first_line_and_validates_the_token_shape() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let path = directory.path().join("serve.token");
     let token = "dal_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-    std::fs::write(&path, format!("{token}\r\nignored second line\n")).expect("write token file");
+    write_fixture(&path, format!("{token}\r\nignored second line\n").as_bytes());
     set_private_mode(&path);
 
     assert!(load(&path).expect("load first token line").matches(token));
-    std::fs::write(&path, "not-a-token\n").expect("replace with invalid content");
+    write_fixture(&path, b"not-a-token\n");
     set_private_mode(&path);
     assert!(matches!(load(&path), Err(TokenError::Invalid { .. })));
 }
@@ -52,7 +52,7 @@ fn load_uses_first_line_and_validates_the_token_shape() {
 fn empty_and_relative_token_paths_are_rejected() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let path = directory.path().join("serve.token");
-    std::fs::write(&path, "\n").expect("write empty token file");
+    write_fixture(&path, b"\n");
     set_private_mode(&path);
     assert!(matches!(load(&path), Err(TokenError::Empty { .. })));
     assert!(matches!(
@@ -70,8 +70,7 @@ fn connect_token_returns_the_trimmed_first_line() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let path = directory.path().join("connect.token");
     let token = "dal_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-    std::fs::write(&path, format!(" {token} \r\nignored second line\n"))
-        .expect("write connect token file");
+    write_fixture(&path, format!(" {token} \r\nignored second line\n").as_bytes());
     set_private_mode(&path);
 
     assert!(matches!(load(&path), Err(TokenError::Invalid { .. })));
@@ -150,6 +149,14 @@ fn group_or_other_read_permission_is_rejected() {
         read_connect_token(&path),
         Err(TokenError::OpenToOtherUsers { mode: observed, .. }) if observed == mode
     ));
+}
+
+fn write_fixture(path: &std::path::Path, bytes: &[u8]) {
+    #[cfg(windows)]
+    dal_store::write_atomic(path, bytes, dal_store::FileMode::Mode0600)
+        .expect("write private token fixture");
+    #[cfg(not(windows))]
+    std::fs::write(path, bytes).expect("write token fixture");
 }
 
 fn is_token(token: &str) -> bool {
