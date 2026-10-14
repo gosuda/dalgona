@@ -280,7 +280,9 @@ mod platform {
         }
 
         pub(crate) fn sync_dir(&self) {
-            let _ = &self._directories;
+            for directory in &self._directories {
+                let _ = directory.sync_all();
+            }
         }
     }
 }
