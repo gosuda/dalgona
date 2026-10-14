@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use sonic_rs::JsonValueTrait;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -13,6 +14,74 @@ use crate::error::ServeError;
 use crate::token::TokenError;
 
 const CHAT: &str = "POST /v1/chat/completions HTTP/1.1";
+
+/// An upgraded WebSocket must occupy the same listener budget as an HTTP
+/// connection until its driver exits, including across both upgrade routes.
+#[tokio::test]
+async fn upgraded_websockets_hold_the_connection_cap_until_disconnect() {
+    const CAP: usize = 4;
+
+    let rig = rig(&[]).await;
+    let options = router_options(&rig);
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("bind listener");
+    let addr = listener.local_addr().expect("bound address");
+    let cfg = crate::serve::ListenerCfg {
+        bind: addr.ip(),
+        port: addr.port(),
+        public: false,
+        token: None,
+        a2a: false,
+        origins: options.origins,
+        approval: options.approval,
+        aliases: options.aliases,
+        workspace: options.workspace,
+    };
+    let stop = tokio_util::sync::CancellationToken::new();
+    let handle =
+        crate::serve::listen_bounded(rig.host.clone(), cfg, listener, addr, stop.clone(), CAP);
+
+    let clients = async {
+        let mut sockets = Vec::with_capacity(CAP);
+        for index in 0..CAP {
+            let path = if index.is_multiple_of(2) {
+                "/v1/ws"
+            } else {
+                "/codex/ws"
+            };
+            let url = format!("ws://{addr}{path}");
+            let (socket, _) = tokio::time::timeout(
+                super::support::WAIT,
+                tokio_tungstenite::connect_async(url.as_str()),
+            )
+            .await
+            .expect("upgrade completes within capacity")
+            .expect("WebSocket handshake accepted");
+            sockets.push(socket);
+        }
+
+        let extra_url = format!("ws://{addr}/v1/ws");
+        let mut extra = Box::pin(tokio_tungstenite::connect_async(extra_url.as_str()));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), extra.as_mut())
+                .await
+                .is_err(),
+            "an extra upgrade completed while all upgraded drivers were still live"
+        );
+
+        drop(sockets.pop().expect("one driver to release"));
+        let (replacement, _) = tokio::time::timeout(super::support::WAIT, extra)
+            .await
+            .expect("admission resumes after driver exit")
+            .expect("replacement WebSocket handshake accepted");
+        drop(replacement);
+        drop(sockets);
+        stop.cancel();
+    };
+    let (waited, ()) = tokio::join!(handle.wait(), clients);
+    waited.expect("listener drained");
+}
 
 fn chat_body() -> &'static str {
     r#"{"model":"dalgon/normal","messages":[{"role":"user","content":"hi"}]}"#
