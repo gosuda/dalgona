@@ -17,14 +17,12 @@ pub enum LimitError {
     WsMessage,
     /// One non-streaming response body grew past 16 MiB.
     Body,
-    /// One response carried more than 32 MiB of cumulative event data.
+    /// One response carried more than 128 MiB of cumulative event data.
     StreamBytes,
-    /// One response contained more than 8192 events.
+    /// One response contained more than 65536 events.
     StreamEvents,
-    /// One response retained more than 4096 persistent items.
+    /// One response retained more than 16384 persistent items.
     StreamItems,
-    /// One response exceeded 10 minutes of wall-clock time.
-    StreamDuration,
 }
 
 impl LimitError {
@@ -38,7 +36,7 @@ impl LimitError {
             Self::SseLine | Self::SseEvent | Self::WsMessage | Self::Body => {
                 String::from("Retry the request, or ask for a smaller reply.")
             }
-            Self::StreamBytes | Self::StreamEvents | Self::StreamItems | Self::StreamDuration => {
+            Self::StreamBytes | Self::StreamEvents | Self::StreamItems => {
                 String::from("Retry the request, or split the task into smaller steps.")
             }
         }
@@ -52,10 +50,9 @@ impl fmt::Display for LimitError {
             Self::SseEvent => f.write_str("SSE event exceeds 8 MiB."),
             Self::WsMessage => f.write_str("WebSocket message exceeds 16 MiB."),
             Self::Body => f.write_str("response body exceeds 16 MiB."),
-            Self::StreamBytes => f.write_str("provider stream exceeds 32 MiB of event data."),
-            Self::StreamEvents => f.write_str("provider stream exceeds 8192 events."),
-            Self::StreamItems => f.write_str("provider stream exceeds 4096 retained items."),
-            Self::StreamDuration => f.write_str("provider stream exceeds 10 min total duration."),
+            Self::StreamBytes => f.write_str("provider stream exceeds 128 MiB of event data."),
+            Self::StreamEvents => f.write_str("provider stream exceeds 65536 events."),
+            Self::StreamItems => f.write_str("provider stream exceeds 16384 retained items."),
         }
     }
 }

@@ -20,7 +20,6 @@ use crate::{
     family,
     provider::{ProviderDef, ProviderEntry},
     stream::{EventStream, StreamEvent},
-    stream_budget::{self, STREAM_TOTAL_TIMEOUT},
 };
 
 #[derive(Default, Deserialize)]
@@ -123,13 +122,7 @@ pub(crate) fn decode_response(
             redact_provider_error(failure.unwrap_or(error), &secrets)
         })
     });
-    EventStream::new(
-        stream_budget::timeboxed(
-            safe_errors,
-            tokio::time::Instant::now() + STREAM_TOTAL_TIMEOUT,
-        ),
-        || {},
-    )
+    EventStream::new(safe_errors, || {})
 }
 
 pub(crate) fn redact_provider_error(error: ProviderError, secrets: &[Box<str>]) -> ProviderError {

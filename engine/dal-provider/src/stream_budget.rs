@@ -4,27 +4,16 @@
 //! state and counts new calls, blocks, and pending backfill identifiers.
 //! HTTPS/SSE and Responses/Codex `WebSockets` share these controls.
 
-use std::{pin::Pin, time::Duration};
-
-use futures::{Stream, StreamExt, stream};
-use tokio::time::{Instant, timeout_at};
-
-use crate::{
-    error::{LimitError, ProviderError},
-    stream::StreamEvent,
-};
+use crate::error::{LimitError, ProviderError};
 
 /// Cumulative original JSON bytes admitted to one provider decoder.
-pub(crate) const STREAM_BYTES_LIMIT: usize = 32 << 20;
+pub(crate) const STREAM_BYTES_LIMIT: usize = 128 << 20;
 
 /// Maximum dispatched events per provider reply, including ignored events.
-pub(crate) const STREAM_EVENTS_LIMIT: usize = 8192;
+pub(crate) const STREAM_EVENTS_LIMIT: usize = 65_536;
 
 /// Maximum retained calls, blocks, and pending backfill identifiers per reply.
-pub(crate) const STREAM_ITEMS_LIMIT: usize = 4096;
-
-/// Maximum wall-clock lifetime of one streaming reply.
-pub(crate) const STREAM_TOTAL_TIMEOUT: Duration = Duration::from_secs(600);
+pub(crate) const STREAM_ITEMS_LIMIT: usize = 16_384;
 
 #[derive(Debug, Default)]
 pub(crate) struct StreamBudget {
@@ -55,36 +44,6 @@ impl StreamBudget {
         self.items += 1;
         Ok(())
     }
-}
-
-/// Bound the response lifetime even when the peer sends keepalives.
-/// An error drops the source, releasing its socket and admission guard.
-pub(crate) fn timeboxed<S>(
-    source: S,
-    deadline: Instant,
-) -> impl Stream<Item = Result<StreamEvent, ProviderError>> + Send + 'static
-where
-    S: Stream<Item = Result<StreamEvent, ProviderError>> + Send + 'static,
-{
-    stream::unfold(
-        Some(Box::pin(source)),
-        move |source: Option<Pin<Box<S>>>| async move {
-            let mut source = source?;
-            match timeout_at(deadline, source.next()).await {
-                Ok(Some(Ok(event))) => {
-                    let next = if matches!(&event, StreamEvent::Stop { .. }) {
-                        None
-                    } else {
-                        Some(source)
-                    };
-                    Some((Ok(event), next))
-                }
-                Ok(Some(Err(error))) => Some((Err(error), None)),
-                Ok(None) => None,
-                Err(_) => Some((Err(ProviderError::Limit(LimitError::StreamDuration)), None)),
-            }
-        },
-    )
 }
 
 #[cfg(test)]
@@ -121,16 +80,5 @@ mod tests {
             budget.admit_item(),
             Err(ProviderError::Limit(LimitError::StreamItems))
         ));
-    }
-
-    #[tokio::test]
-    async fn deadline_interrupts_a_stalled_stream() {
-        let stalled = stream::pending::<Result<StreamEvent, ProviderError>>();
-        let mut source = Box::pin(timeboxed(stalled, Instant::now()));
-        assert!(matches!(
-            source.next().await,
-            Some(Err(ProviderError::Limit(LimitError::StreamDuration)))
-        ));
-        assert!(source.next().await.is_none());
     }
 }
