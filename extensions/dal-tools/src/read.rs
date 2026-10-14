@@ -8,7 +8,7 @@ use std::{
     fs::{self, File},
     future::Future,
     io::{self, Read, Seek, SeekFrom},
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     sync::Arc,
 };
 
@@ -36,7 +36,7 @@ use crate::{
 
 const READ_SCHEMA: &str = r#"{"type":"object","properties":{"path":{"type":"string","description":"File, directory, or page to read. Relative paths start at the workspace root. A suffix :<a>-<b>[,<c>[-<d>]] selects lines."},"offset":{"type":"integer","minimum":1,"description":"First line to show, 1-indexed. Default 1."},"limit":{"type":"integer","minimum":1,"maximum":2000,"description":"Maximum number of lines to show. Default 1000."}},"required":["path"],"additionalProperties":false}"#;
 
-const READ_DESCRIPTION: &str = "Read a file, a directory, or a documentation page. A text file shows numbered lines: each line starts with its number and a tab; do not copy the number into patch text. Output stops at limit lines (default 1000, maximum 2000) or 50 KiB, whichever comes first, and the last line gives the offset to continue. Text files larger than 16 MiB are refused; use search to locate content in bigger files. A complete read of a text file ends with [<path>#<tag>]; copy that tag when a patch asks for the file tag. An image (PNG, JPEG, GIF, WebP, at most 5 MiB) returns as an image. A directory lists its entries. Paths may be relative to the workspace root or absolute. Pages: letter://<id> is the source text of an image letter; dal:// is the dal manual; rule://<name> is a rule. Read <scheme>:// alone for its index.";
+const READ_DESCRIPTION: &str = "Read a file, a directory, or a documentation page. A text file shows numbered lines: each line starts with its number and a tab; do not copy the number into patch text. Output stops at limit lines (default 1000, maximum 2000) or 50 KiB, whichever comes first, and the last line gives the offset to continue. Text files larger than 16 MiB are refused; use search to locate content in bigger files. A complete read of a text file ends with [<path>#<tag>]; copy that tag when a patch asks for the file tag. An image (PNG, JPEG, GIF, WebP, at most 5 MiB) returns as an image. A directory lists its entries. Paths must resolve inside the workspace root (relative paths start there; absolute paths inside it are permitted). Pages: letter://<id> is the source text of an image letter; dal:// is the dal manual; rule://<name> is a rule. Read <scheme>:// alone for its index.";
 
 const DEFAULT_OFFSET: u64 = 1;
 const DEFAULT_LIMIT: u64 = 1000;
@@ -68,6 +68,10 @@ enum ReadError {
     EmptyPath,
     #[error("read: path contains a NUL byte")]
     NulPath,
+    #[error("read: path is outside the workspace: {0}")]
+    OutsideWorkspace(Box<str>),
+    #[error("read: cannot resolve workspace root: {0}")]
+    Workspace(io::Error),
     #[error("read: offset must be at least 1")]
     Offset,
     #[error("read: limit must be between 1 and 2000")]
@@ -390,8 +394,15 @@ fn parse_selector(path: &str) -> Result<Selection, ReadError> {
 
 /// Reads one filesystem path and renders the result.
 fn read_path(root: &Path, path: &Path, lines: &Lines) -> Result<Reading, ReadError> {
-    let target = root.join(path);
     let shown = path.to_string_lossy();
+    let resolved = crate::workspace_path::resolve(root, path).map_err(|error| match error {
+        crate::workspace_path::ResolveError::Workspace(error) => ReadError::Workspace(error),
+        crate::workspace_path::ResolveError::Target(error) => io_error(&shown, error),
+        crate::workspace_path::ResolveError::Outside => {
+            ReadError::OutsideWorkspace(shown.to_string().into())
+        }
+    })?;
+    let target = resolved.absolute;
     let metadata = fs::metadata(&target).map_err(|error| io_error(&shown, error))?;
     if metadata.is_dir() {
         let text = read_directory(&target, &shown)?;
@@ -404,7 +415,7 @@ fn read_path(root: &Path, path: &Path, lines: &Lines) -> Result<Reading, ReadErr
     if !metadata.is_file() {
         return Err(ReadError::NotFileOrDirectory(shown.into()));
     }
-    let tag_path = display_path(root, &target, &shown);
+    let tag_path = display_path(&resolved.relative, &shown);
     match read_file(&target, &shown, lines, footer_reserve(&tag_path))? {
         FileContent::Image { kind, bytes } => Ok(Reading {
             parts: vec![
@@ -431,10 +442,8 @@ fn read_path(root: &Path, path: &Path, lines: &Lines) -> Result<Reading, ReadErr
             let shown = if intervals.is_empty() {
                 None
             } else {
-                let canonical =
-                    fs::canonicalize(&target).map_err(|error| io_error(&shown, error))?;
                 Some(Shown {
-                    canonical: canonical.to_string_lossy().into_owned(),
+                    canonical: target.to_string_lossy().into_owned(),
                     digest: digest32(&bytes),
                     intervals,
                 })
@@ -466,19 +475,15 @@ fn io_error(shown: &str, error: io::Error) -> ReadError {
 
 /// The tag-line path: workspace-relative with `/` separators when the file
 /// is under `root`, otherwise the path as given.
-fn display_path(root: &Path, target: &Path, shown: &str) -> String {
-    match target.strip_prefix(root) {
-        Ok(relative) if !relative.as_os_str().is_empty() => relative
-            .components()
-            .filter_map(|component| match component {
-                Component::Normal(part) => Some(part.to_string_lossy()),
-                Component::ParentDir => Some("..".into()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("/"),
-        _ => shown.to_owned(),
+fn display_path(relative: &Path, shown: &str) -> String {
+    if relative.as_os_str().is_empty() {
+        return shown.to_owned();
     }
+    relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// Lists a directory: directories first with a trailing `/`, each group
@@ -1030,6 +1035,46 @@ mod tests {
         }
         assert_eq!(fs::read(dir.path().join("a.txt")).unwrap(), b"one\ntwo\n");
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn filesystem_reads_cannot_escape_the_workspace() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(workspace.path().join("allowed.txt"), b"workspace contents").unwrap();
+        let secret = outside.path().join("secret.txt");
+        fs::write(&secret, b"outside contents").unwrap();
+
+        let inside_absolute = args(&workspace.path().join("allowed.txt").to_string_lossy());
+        assert!(text(&read(workspace.path(), &inside_absolute).await.unwrap())
+            .contains("workspace contents"));
+
+        for path in [
+            secret.to_string_lossy().into_owned(),
+            outside.path().to_string_lossy().into_owned(),
+            "../allowed.txt".to_owned(),
+            "dir/../allowed.txt".to_owned(),
+        ] {
+            let error = read(workspace.path(), &args(&path)).await.unwrap_err();
+            assert!(
+                error.to_string().contains("outside the workspace"),
+                "{path}: {error}"
+            );
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            symlink(&secret, workspace.path().join("secret-link")).unwrap();
+            symlink(outside.path(), workspace.path().join("outside-link")).unwrap();
+            for path in ["secret-link", "outside-link", "outside-link/secret.txt"] {
+                let error = read(workspace.path(), &args(path)).await.unwrap_err();
+                assert!(
+                    error.to_string().contains("outside the workspace"),
+                    "{path}: {error}"
+                );
+            }
+        }
     }
 
     #[tokio::test]
