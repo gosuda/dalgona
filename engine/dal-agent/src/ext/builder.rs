@@ -447,7 +447,16 @@ impl ExtensionBuilder {
         }
         let state_version = self.state_version;
         let source_digest = if self.origin == Origin::Bundled && self.source_digest.is_none() {
-            executable_digest()
+            executable_digest().map(|binary| {
+                let mut digest = blake3::Hasher::new();
+                digest.update(b"dal-native-extension-v1");
+                digest.update(binary.as_bytes());
+                digest.update(&(self.name.len() as u64).to_le_bytes());
+                digest.update(self.name.as_bytes());
+                digest.update(&(self.version.len() as u64).to_le_bytes());
+                digest.update(self.version.as_bytes());
+                digest.finalize().to_hex().to_string().into_boxed_str()
+            })
         } else {
             self.source_digest.clone()
         };
