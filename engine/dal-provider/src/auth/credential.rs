@@ -342,9 +342,12 @@ impl AuthStore {
         if link.file_type().is_symlink() {
             return Err(ProviderError::AuthFileSymlink { path });
         }
-        let mut file = match File::open(&path) {
+        let mut file = match dal_store::open_private_file(&path) {
             Ok(file) => file,
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Self::empty(path)),
+            Err(error) if error.kind() == ErrorKind::PermissionDenied => {
+                return Err(ProviderError::AuthFilePerms { path });
+            }
             Err(error) => return Err(invalid(&path, error.to_string())),
         };
         let opened = file
