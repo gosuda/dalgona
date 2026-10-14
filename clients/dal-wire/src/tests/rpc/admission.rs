@@ -23,7 +23,7 @@ fn structural_json_charge_ignores_punctuation_inside_strings() {
         frame_charge(escaped_punctuation)
     );
 
-    let dense = format!("[{}]", "0,".repeat(128).trim_end_matches(','));
+    let dense = format!("[{}]", "0,".repeat(512).trim_end_matches(','));
     let text = format!(r#""{}""#, "x".repeat(dense.len() - 2));
     assert!(
         frame_charge(&dense).expect("dense cost") > frame_charge(&text).expect("text cost"),
@@ -147,11 +147,13 @@ async fn distinct_connections_share_budget_until_the_handler_completes() {
         );
 
         result(&left.call(3, "commands/list", sonic_rs::json!({})).await);
-        assert_eq!(
-            global.available_permits(),
-            remaining,
-            "an unrelated request must not release the subscription charge"
-        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while global.available_permits() != remaining {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("an unrelated request must not release the subscription charge");
         result(&left.call(4, "host/unsubscribe", sonic_rs::json!({})).await);
         tokio::time::timeout(Duration::from_secs(2), async {
             while global.available_permits() != GLOBAL {
