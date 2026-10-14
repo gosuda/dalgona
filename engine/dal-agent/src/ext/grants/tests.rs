@@ -8,6 +8,8 @@ fn key(ext: &str, origin: Origin, services: &[Service]) -> GrantKey {
         origin,
         services: ServiceSet::from_names(services.iter().map(|service| service.as_str()))
             .expect("valid set"),
+        digest: "a".repeat(64).into_boxed_str(),
+        workspace: std::env::temp_dir(),
     }
 }
 
@@ -59,6 +61,7 @@ fn test_caller(inject: ServiceSet) -> Caller {
         CallerKind::Hook,
         Some(TurnId::new(std::num::NonZeroU64::MIN)),
     )
+    .with_test_digest()
 }
 fn test_mcp_caller(inject: ServiceSet) -> Caller {
     Caller::new(
@@ -69,6 +72,7 @@ fn test_mcp_caller(inject: ServiceSet) -> Caller {
         CallerKind::Tool,
         Some(TurnId::new(std::num::NonZeroU64::MIN)),
     )
+    .with_test_digest()
 }
 
 fn open_store(dir: &tempfile::TempDir, timeout: Duration) -> (Arc<GrantStore>, Arc<Broker>) {
@@ -141,8 +145,10 @@ async fn grant_approve_persists_exact_row_and_session_approve_does_not() {
     assert!(grant.persistent());
     let text = std::fs::read_to_string(dir.path().join("grants.toml")).expect("row");
     assert!(text.starts_with(
-        "[[grant]]\next = \"focus\"\norigin = \"user\"\nservices = [\"fs.read\", \"run\"]\nby = \"tui\"\napproved_at = \""
+        "[[grant]]\next = \"focus\"\norigin = \"user\"\nservices = [\"fs.read\", \"run\"]\ndigest = \""
     ));
+    assert!(text.contains(&format!("workspace = \"{}\"", dir.path().display())));
+    assert!(text.contains("by = \"tui\""));
     assert!(text.ends_with("Z\"\n"));
     #[cfg(unix)]
     {
@@ -175,7 +181,7 @@ async fn grant_approve_persists_exact_row_and_session_approve_does_not() {
         std::num::NonZeroU32::MIN,
         CallerKind::Hook,
         Some(TurnId::new(std::num::NonZeroU64::MIN)),
-    );
+    ).with_test_digest();
     let (session_grant, ()) =
         futures::join!(store2.ensure(&net_caller, Service::Net, &cancel), async {
             let id = loop {
@@ -255,6 +261,8 @@ async fn facade_grant_contains_list_revoke_round_trip() {
         extension: name.clone(),
         origin: Origin::User,
         services: ServiceSet::from_names(["fs.read", "run"]).expect("set"),
+        digest: "a".repeat(64).into_boxed_str(),
+        workspace: dir.path().to_path_buf(),
     };
     assert!(!store.contains(&key).await.expect("contains"));
     assert_eq!(store.list().await.expect("list"), []);
@@ -270,6 +278,8 @@ async fn facade_grant_contains_list_revoke_round_trip() {
         extension: name.clone(),
         origin: Origin::User,
         services: ServiceSet::EMPTY,
+        digest: "a".repeat(64).into_boxed_str(),
+        workspace: dir.path().to_path_buf(),
     };
     assert!(matches!(
         store.grant(empty, tui(), at).await,
@@ -300,6 +310,8 @@ async fn facade_malformed_file_fails_without_writing() {
         extension: "focus".parse().expect("name"),
         origin: Origin::User,
         services: ServiceSet::from_names(["run"]).expect("set"),
+        digest: "a".repeat(64).into_boxed_str(),
+        workspace: dir.path().to_path_buf(),
     };
     assert!(matches!(
         store.contains(&key).await,
@@ -343,7 +355,13 @@ async fn mcp_grants_persist_for_exact_declared_set_and_reask_after_change() {
             };
             assert_eq!(
                 detail.as_deref(),
-                Some("search: URL https://mcp.example/search")
+                Some(format!("search: URL https://mcp.example/search\n{}", super::grant_scope_text(&super::GrantKey {
+                    extension: "focus".parse().expect("name"),
+                    origin: Origin::User,
+                    services: ServiceSet::from_names(["mcp"]).expect("set"),
+                    digest: "a".repeat(64).into_boxed_str(),
+                    workspace: dir.path().to_path_buf(),
+                })).as_str())
             );
             answer_and_release(&broker, request.id, Answer::Approve, tui());
         }
@@ -465,6 +483,7 @@ fn command_caller(ext: &str, inject: ServiceSet) -> Caller {
         CallerKind::Handler,
         None,
     )
+    .with_test_digest()
 }
 
 #[tokio::test]
