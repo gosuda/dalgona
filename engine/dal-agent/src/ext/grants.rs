@@ -1096,9 +1096,14 @@ impl GrantStore {
     ) -> Result<bool, GrantStoreError> {
         // An empty set grants nothing yet writes a row no later load
         // accepts; reject it here so one bad call cannot brick the file.
-        if key.services.is_empty() || key.scope.as_ref().is_none_or(|scope| !scope.valid()) {
+        if key.services.is_empty() {
             return Err(GrantStoreError::Malformed {
                 detail: "grant needs at least one service".into(),
+            });
+        }
+        if key.scope.as_ref().is_none_or(|scope| !scope.valid()) {
+            return Err(GrantStoreError::Malformed {
+                detail: "grant needs an approved source and workspace scope".into(),
             });
         }
         let _writer = self.persist_lock.lock().await;
