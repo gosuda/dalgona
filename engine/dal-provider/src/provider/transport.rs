@@ -116,7 +116,7 @@ pub(crate) fn decode_response(
     // A body read failure ends the byte source, so the decoder would report
     // it as a cut (or as a protocol error for a half-read frame); the transport
     // failure is the retryable truth.
-    let safe_errors = decoded.map(move |result| {
+    let safe_errors = crate::stream_budget::with_deadline(decoded).map(move |result| {
         result.map_err(|error| {
             let failure = read_failure.lock().ok().and_then(|mut slot| slot.take());
             redact_provider_error(failure.unwrap_or(error), &secrets)
@@ -272,6 +272,10 @@ pub(crate) fn hold_permit(stream: EventStream, permit: OwnedSemaphorePermit) -> 
                     drop(permit.take());
                     Some((Ok(event), (stream, permit)))
                 }
+                Some(Err(error)) => {
+                    drop(permit.take());
+                    Some((Err(error), (stream, permit)))
+                }
                 Some(item) => Some((item, (stream, permit))),
                 None => None,
             }
@@ -313,4 +317,29 @@ pub(crate) async fn refresh_credential(
         });
     };
     refresher.refresh(def, &held, RefreshReason::Rejected).await
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::sync::Semaphore;
+
+    use super::*;
+    use crate::error::LimitError;
+
+    #[tokio::test]
+    async fn a_stream_limit_releases_the_admission_permit_on_the_error_poll() {
+        let semaphore = Arc::new(Semaphore::new(1));
+        let permit = Arc::clone(&semaphore).try_acquire_owned().unwrap();
+        let failure: Result<StreamEvent, ProviderError> =
+            Err(ProviderError::Limit(LimitError::StreamBytes));
+        let source = EventStream::new(futures::stream::iter([failure]), || {});
+        let mut held = hold_permit(source, permit);
+
+        assert_eq!(semaphore.available_permits(), 0);
+        assert!(matches!(
+            held.next().await,
+            Some(Err(ProviderError::Limit(LimitError::StreamBytes)))
+        ));
+        assert_eq!(semaphore.available_permits(), 1);
+    }
 }

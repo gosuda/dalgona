@@ -46,6 +46,7 @@ use crate::{
     error::ProviderError,
     sse::SseEvent,
     stream::{ReplayPayload, StopReason, StreamEvent, ToolArgs, ToolCall},
+    stream_budget::StreamBudget,
     thinking::{AnthropicThinking, Effort},
     tool_names::{ANTHROPIC_OAUTH_NAME_MAX, WIRE_NAME_MAX, wire_name},
 };
@@ -1132,6 +1133,7 @@ struct Decoder {
     /// Replay items of closed blocks, held until a non-reasoning event so the
     /// blocks that sit next to each other reach the journal as one payload.
     replays: Vec<RawJson>,
+    budget: StreamBudget,
 }
 
 #[derive(Deserialize)]
@@ -1301,11 +1303,13 @@ impl Decoder {
             open: BTreeMap::new(),
             calls: BTreeMap::new(),
             replays: Vec::new(),
+            budget: StreamBudget::default(),
         }
     }
 
     /// Consumes the data of one SSE event.
     fn feed(&mut self, data: &str) -> Result<Fed, ProviderError> {
+        self.budget.event(data.len())?;
         let mut events = Vec::new();
         if data.trim() == "[DONE]" {
             return Ok(Fed {
@@ -1377,6 +1381,7 @@ impl Decoder {
         if self.open.contains_key(&index) || self.calls.contains_key(&index) {
             return Err(protocol(format!("content block {index} started twice")));
         }
+        self.budget.items(1)?;
         let raw = start.content_block.as_raw_str();
         let fields: StartFields<'_> = parse(raw, "content_block_start")?;
         let block = match fields.kind.as_deref() {

@@ -639,3 +639,52 @@ fn before_turn_text_follows_its_user_message_in_the_body() -> TestResult {
     );
     Ok(())
 }
+
+#[test]
+fn cumulative_responses_arguments_stop_before_the_next_append() {
+    let added = r#"{"type":"response.output_item.added","item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"f"}}"#;
+    let delta =
+        r#"{"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"abc"}"#;
+    let mut decoder = Decoder::new(Family::Responses, "model");
+    decoder.budget = StreamBudget::with_limits(added.len() + delta.len() * 3, 100, 2);
+    let mut out = Vec::new();
+
+    decoder.feed(added, &mut out).unwrap();
+    out.clear();
+    for _ in 0..3 {
+        assert!(!decoder.feed(delta, &mut out).unwrap());
+        out.clear();
+    }
+    assert_eq!(decoder.calls[0].deltas, "abcabcabc");
+    assert!(matches!(
+        decoder.feed(delta, &mut out),
+        Err(ProviderError::Limit(crate::LimitError::StreamBytes))
+    ));
+    assert_eq!(decoder.calls[0].deltas, "abcabcabc");
+}
+
+#[test]
+fn responses_backfill_and_terminal_items_obey_the_item_budget() {
+    let reasoning =
+        r#"{"type":"response.output_item.done","item":{"id":"rs_1","type":"reasoning"}}"#;
+    let second = reasoning.replace("rs_1", "rs_2");
+    let mut decoder = Decoder::new(Family::Responses, "model");
+    decoder.budget = StreamBudget::with_limits(4096, 100, 1);
+    let mut out = Vec::new();
+    decoder.feed(reasoning, &mut out).unwrap();
+    assert!(matches!(
+        decoder.feed(&second, &mut out),
+        Err(ProviderError::Limit(crate::LimitError::StreamItems))
+    ));
+    assert_eq!(decoder.backfill.len(), 1);
+    assert_eq!(decoder.backfill[0], "rs_1");
+
+    let mut decoder = Decoder::new(Family::Responses, "model");
+    decoder.budget = StreamBudget::with_limits(4096, 100, 1);
+    let completed =
+        r#"{"type":"response.completed","response":{"output":[{"type":"message"},{"type":"message"}]}}"#;
+    assert!(matches!(
+        decoder.feed(completed, &mut out),
+        Err(ProviderError::Limit(crate::LimitError::StreamItems))
+    ));
+}
