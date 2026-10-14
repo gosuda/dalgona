@@ -604,3 +604,25 @@ fn resolve_load<'f>(want: &str, files: &'f FileSet) -> Result<(PathBuf, &'f [u8]
     };
     Ok((candidate, bytes.as_slice()))
 }
+
+#[cfg(test)]
+mod source_identity_tests {
+    use super::source_digest;
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    #[test]
+    fn admitted_file_snapshot_changes_fingerprint_even_when_name_is_unchanged() {
+        let mut files = BTreeMap::from([
+            (PathBuf::from("plugin.star"), b"plugin = old".to_vec()),
+            (PathBuf::from("lib.star"), b"helper = old".to_vec()),
+        ]);
+        let original = source_digest(&files);
+        assert_eq!(source_digest(&files), original);
+        files.insert(PathBuf::from("lib.star"), b"helper = new".to_vec());
+        assert_ne!(source_digest(&files), original);
+        files.insert(PathBuf::from("lib.star"), b"helper = old".to_vec());
+        files.insert(PathBuf::from("assets/skill.md"), b"changed asset".to_vec());
+        assert_ne!(source_digest(&files), original);
+    }
+}
