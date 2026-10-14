@@ -240,8 +240,20 @@ async fn bind_refusals() {
     assert!(matches!(error, ServeError::NotLoopback { .. }), "{error:?}");
     assert_eq!(
         error.to_string(),
-        "serve --bind 0.0.0.0 is not a loopback address: it needs a token"
+        "serve --bind 0.0.0.0 is not a loopback address: plaintext listeners must bind loopback"
     );
+    for address in ["0.0.0.0", "::", "192.0.2.10"] {
+        let mut public = router_options(&rig);
+        public.public = true;
+        public.bind = address.to_owned();
+        let rejected = crate::serve_router(rig.host.clone(), public, stop.clone()).await;
+        let Err(error) = rejected else {
+            panic!("public plaintext listener started on {address}");
+        };
+        assert!(matches!(error, ServeError::InsecurePublicBind { .. }), "{error:?}");
+        assert!(error.to_string().contains("HTTPS/WSS"), "{error}");
+    }
+
     let taken = std::net::TcpListener::bind("127.0.0.1:0").expect("occupy a port");
     let mut busy = router_options(&rig);
     busy.port = taken.local_addr().expect("occupied addr").port();

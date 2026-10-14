@@ -80,7 +80,7 @@ impl HarnessMode {
 /// Options for the HTTP router mounted on the serve listener.
 #[derive(Clone, Debug)]
 pub struct RouterOptions {
-    /// The loopback or public bind address text.
+    /// The loopback bind address text.
     pub bind: String,
     /// The bound port.
     pub port: u16,

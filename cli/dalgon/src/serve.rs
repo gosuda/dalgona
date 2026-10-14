@@ -20,7 +20,7 @@ use tokio_util::sync::CancellationToken;
 /// Options supplied directly to `dalgon serve`.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ServeArgs {
-    /// Whether the listener is exposed beyond loopback and requires a token.
+    /// Whether the loopback listener requires a token for proxied access.
     pub public: bool,
     /// Whether to mount the A2A protocol surface.
     pub a2a: bool,
@@ -192,21 +192,23 @@ fn refuse_unsafe_serve_start(
         return write_failure(stderr, &crate::cli::texts::serve_alias_shadows_mode(alias))
             .map(Some);
     }
-    if !public {
-        match all_resolved_addresses_are_loopback(bind, port) {
-            Ok(true) => {}
-            Ok(false) => {
-                return write_failure(stderr, &crate::cli::texts::serve_non_loopback_bind(bind))
-                    .map(Some);
-            }
-            Err(error) => {
-                let address = format!("{bind}:{port}");
-                return write_failure(
-                    stderr,
-                    &crate::cli::texts::serve_bind_failed(&address, &error.to_string()),
-                )
-                .map(Some);
-            }
+    match all_resolved_addresses_are_loopback(bind, port) {
+        Ok(true) => {}
+        Ok(false) => {
+            let diagnostic = if public {
+                crate::cli::texts::serve_public_non_loopback_bind(bind)
+            } else {
+                crate::cli::texts::serve_non_loopback_bind(bind)
+            };
+            return write_failure(stderr, &diagnostic).map(Some);
+        }
+        Err(error) => {
+            let address = format!("{bind}:{port}");
+            return write_failure(
+                stderr,
+                &crate::cli::texts::serve_bind_failed(&address, &error.to_string()),
+            )
+            .map(Some);
         }
     }
     if public && let Err(error) = validate_public_token(token_file) {
@@ -294,11 +296,11 @@ pub async fn run(
         writeln!(
             stderr,
             "{}",
-            crate::cli::texts::serve_public_warning(local_addr)
+            crate::cli::texts::serve_public_proxy_notice(local_addr)
         )?;
     }
     let url = format!("http://{local_addr}");
-    let details = listen_details(args.public, &token_file, local_addr);
+    let details = listen_details(args.public, &token_file);
     let listen_line = crate::cli::texts::serve_listen_line(&url, &details, args.a2a);
     if let Err(error) = writeln!(stdout, "{listen_line}") {
         stop.cancel();
@@ -488,9 +490,6 @@ fn resolve_bind(args: &ServeArgs, config: &ServeConfig) -> String {
     if config.bind_was_explicit {
         return config.bind.clone();
     }
-    if args.public {
-        return "0.0.0.0".to_owned();
-    }
     "127.0.0.1".to_owned()
 }
 
@@ -512,18 +511,12 @@ fn all_resolved_addresses_are_loopback(bind: &str, port: u16) -> io::Result<bool
     Ok(true)
 }
 
-fn listen_details(public: bool, token_file: &Path, local_addr: SocketAddr) -> String {
-    if !public {
-        return "loopback, no token".to_owned();
-    }
-    let scope = if local_addr.ip().is_unspecified() {
-        "all interfaces"
-    } else if local_addr.ip().is_loopback() {
-        "loopback"
+fn listen_details(public: bool, token_file: &Path) -> String {
+    if public {
+        format!("loopback, token from {}", token_file.display())
     } else {
-        "token required"
-    };
-    format!("{scope}, token from {}", token_file.display())
+        "loopback, no token".to_owned()
+    }
 }
 
 fn write_failure(
@@ -561,7 +554,7 @@ mod tests {
             public: true,
             ..ServeArgs::default()
         };
-        assert_eq!(resolve_bind(&public_default, &defaults), "0.0.0.0");
+        assert_eq!(resolve_bind(&public_default, &defaults), "127.0.0.1");
 
         let cli_bind = ServeArgs {
             public: true,
@@ -589,6 +582,24 @@ mod tests {
             validate_public_token(&dir.path().join("missing-token")),
             Err(TokenFileError::Missing)
         ));
+    }
+
+    #[test]
+    fn public_non_loopback_bind_is_refused_before_token_lookup() {
+        let mut stderr = Vec::new();
+        let outcome = refuse_unsafe_serve_start(
+            &BTreeMap::new(),
+            true,
+            "0.0.0.0",
+            7437,
+            Path::new("missing-token"),
+            &mut stderr,
+        )
+        .unwrap();
+        assert_eq!(outcome, Some(ExitCode::FAILURE));
+        let diagnostic = String::from_utf8(stderr).unwrap();
+        assert!(diagnostic.contains("tokens over plaintext HTTP"), "{diagnostic}");
+        assert!(diagnostic.contains("HTTPS/WSS"), "{diagnostic}");
     }
 
     fn write_private_token(dir: &tempfile::TempDir, contents: &[u8]) -> PathBuf {
@@ -620,31 +631,13 @@ mod tests {
         );
     }
     #[test]
-    fn public_warning_carries_the_bound_address() {
-        let bound: SocketAddr = "0.0.0.0:7437".parse().unwrap();
-        let warning = crate::cli::texts::serve_public_warning(bound);
-        assert!(
-            warning.contains(&bound.to_string()),
-            "warning names the bound address: {warning}"
-        );
-        assert!(
-            warning.contains("plain HTTP"),
-            "warning names the cleartext risk: {warning}"
-        );
-        assert!(
-            !warning.contains("dal_secrettoken123"),
-            "warning must not leak a serve token: {warning}"
-        );
-        let loopback: SocketAddr = "127.0.0.1:7437".parse().unwrap();
-        let loopback_warning = crate::cli::texts::serve_public_warning(loopback);
-        assert!(
-            loopback_warning.contains("127.0.0.1:7437"),
-            "warning follows the bound address: {loopback_warning}"
-        );
-        assert!(
-            !loopback_warning.contains("0.0.0.0:7437"),
-            "warning must not freeze the wildcard address: {loopback_warning}"
-        );
+    fn public_proxy_notice_names_the_bound_address_and_tls_boundary() {
+        let bound: SocketAddr = "127.0.0.1:7437".parse().unwrap();
+        let notice = crate::cli::texts::serve_public_proxy_notice(bound);
+        assert!(notice.contains(&bound.to_string()), "{notice}");
+        assert!(notice.contains("HTTPS/WSS"), "{notice}");
+        assert!(!notice.contains("dal_secrettoken123"), "{notice}");
+        assert!(!notice.contains("0.0.0.0:7437"), "{notice}");
     }
 
     #[test]

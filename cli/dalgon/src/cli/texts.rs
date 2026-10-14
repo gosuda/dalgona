@@ -99,7 +99,7 @@ pub(crate) const MODELS_JSON_HELP: &str = "Print model data as JSON.";
 pub(crate) const SERVE_BIND_HELP: &str = "Bind to ADDR instead of the configured address.";
 pub(crate) const SERVE_PORT_HELP: &str = "Listen on PORT instead of the configured port.";
 pub(crate) const SERVE_PUBLIC_HELP: &str =
-    "Expose the listener beyond loopback; clients must use the token.";
+    "Require a token on loopback; use an HTTPS/WSS reverse proxy for remote access.";
 pub(crate) const SERVE_TOKEN_FILE_HELP: &str = "Read the serve token from FILE.";
 pub(crate) const SERVE_A2A_HELP: &str = "Enable the A2A surface.";
 pub(crate) const SERVE_TOKEN_HELP: &str = "Create or replace the serve bearer token.";
@@ -122,9 +122,9 @@ pub(crate) const DEV_JOURNAL_TORN_HELP: &str = "Copy a journal with its tail cut
 pub(crate) const DEV_JOURNAL_SIDECAR_HELP: &str =
     "List or dump the sidecar files in a session directory.";
 pub(crate) const DEV_FOLD_HELP: &str = "Print which folded fields each journal record changes.";
-pub(crate) fn serve_public_warning(addr: SocketAddr) -> String {
+pub(crate) fn serve_public_proxy_notice(addr: SocketAddr) -> String {
     format!(
-        "dalgon: warning: --public serves {addr} over plain HTTP; the serve token crosses the network in plain text."
+        "dalgon: --public serves {addr} on loopback; use an HTTPS/WSS reverse proxy for remote access."
     )
 }
 pub(crate) const SERVE_STOPPED: &str = "dalgon serve stopped.";
@@ -197,8 +197,17 @@ pub(crate) fn serve_public_token_invalid(path: &Path) -> [String; 2] {
 
 pub(crate) fn serve_non_loopback_bind(address: &str) -> [String; 2] {
     [
-        format!("dalgon: serve --bind {address} is not a loopback address: it needs a token"),
-        "Pass --public to require the token from serve.token, or bind 127.0.0.1.".into(),
+        format!(
+            "dalgon: serve --bind {address} is not a loopback address: plaintext listeners must bind loopback"
+        ),
+        "Bind 127.0.0.1, and use an HTTPS/WSS reverse proxy for remote access.".into(),
+    ]
+}
+
+pub(crate) fn serve_public_non_loopback_bind(address: &str) -> [String; 2] {
+    [
+        format!("dalgon: serve --public --bind {address} would expose tokens over plaintext HTTP"),
+        "Bind 127.0.0.1 behind an HTTPS/WSS reverse proxy.".into(),
     ]
 }
 
@@ -227,6 +236,9 @@ pub(crate) fn serve_router_refusal(error: &dal_wire::ServeError) -> Option<[Stri
         }
         dal_wire::ServeError::NotLoopback { addr } => {
             Some(serve_non_loopback_bind(&addr.to_string()))
+        }
+        dal_wire::ServeError::InsecurePublicBind { addr } => {
+            Some(serve_public_non_loopback_bind(&addr.to_string()))
         }
         dal_wire::ServeError::AliasShadowsMode { alias } => Some(serve_alias_shadows_mode(alias)),
         dal_wire::ServeError::Token(error) => serve_token_refusal(error),
