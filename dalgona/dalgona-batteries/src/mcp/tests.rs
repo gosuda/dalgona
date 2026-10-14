@@ -7,7 +7,7 @@ use std::{collections::BTreeMap, fs, path::PathBuf, sync::Arc, time::Duration};
 use std::path::Path;
 
 use crate::mcp::{
-    Budgets, LIST_PAGE_MAX, McpConfig, STDERR_RING,
+    Budgets, LIST_PAGE_MAX, McpConfig,
     client::{Client, McpCommand, SessionEndHook, SessionStartHook},
     http::auth::{self as token_auth, TokenRecord},
     tools::{decode_tool_page, fold_tool_name},
@@ -698,31 +698,39 @@ async fn crashed_echo_result(decl: McpServerDecl) -> (bool, String) {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn stdio_call_crash_reports_bounded_stderr() {
+async fn stdio_call_crash_does_not_expose_child_stderr_in_tool_journal() {
+    let secret = "SENSITIVE_MCP_CREDENTIAL_42";
     let result = crashed_echo_result(stderr_crash_stdio_decl(
         r"
       head -c 70000 /dev/zero | tr '\0' x >&2
-      printf '\ncrash stderr line one\ncrash stderr line two\n' >&2
+      printf '\nprivate crash diagnostics\n%s\n' "$MCP_TEST_SECRET" >&2
+      printf '%s' "$MCP_TEST_SECRET" | tr 'A-Za-z' 'N-ZA-Mn-za-m' >&2
       exit 1
 ",
+        BTreeMap::from([("MCP_TEST_SECRET".into(), secret.into())]),
     ))
     .await;
     assert!(result.0);
     assert!(result.1.contains("status 1"), "{result:?}");
+    for forbidden in [
+        secret,
+        "FRAFVGVIR_ZPC_PERQRAGVNY_42",
+        "private crash diagnostics",
+    ] {
+        assert!(
+            !result.1.contains(forbidden),
+            "child stderr escaped into the tool journal: {result:?}"
+        );
+    }
     assert!(
-        result.1.contains("crash stderr line one") && result.1.contains("crash stderr line two"),
-        "{result:?}"
-    );
-    assert!(
-        result.1.len() <= STDERR_RING + 1024,
-        "stderr excerpt exceeded the ring bound: {}",
-        result.1.len()
+        result.1.len() < 256,
+        "the public error must contain only server identity and exit status: {result:?}"
     );
 }
 
 #[cfg(unix)]
 #[tokio::test]
-async fn stdio_crash_diagnostic_waits_for_stderr_held_by_grandchild() {
+async fn stdio_call_crash_does_not_expose_grandchild_stderr() {
     let result = crashed_echo_result(stderr_crash_stdio_decl(
         r#"
       fifo="$TMPDIR/dalgona-stderr-sync-$$"
@@ -736,23 +744,23 @@ async fn stdio_crash_diagnostic_waits_for_stderr_held_by_grandchild() {
       exec 3>"$fifo"
       exit 1
 "#,
+        BTreeMap::new(),
     ))
     .await;
     assert!(result.0);
     assert!(result.1.contains("status 1"), "{result:?}");
     assert!(
-        result.1.contains("grandchild final marker"),
-        "diagnostic omitted stderr written after the server exited: {result:?}"
+        !result.1.contains("grandchild final marker"),
+        "grandchild stderr escaped into the tool journal: {result:?}"
     );
     assert!(
-        result.1.len() <= STDERR_RING + 1024,
-        "stderr excerpt exceeded the ring bound: {}",
-        result.1.len()
+        result.1.len() < 256,
+        "the public error must contain only server identity and exit status: {result:?}"
     );
 }
 
 #[cfg(unix)]
-fn stderr_crash_stdio_decl(on_call: &str) -> McpServerDecl {
+fn stderr_crash_stdio_decl(on_call: &str, env: BTreeMap<Box<str>, Box<str>>) -> McpServerDecl {
     let script = r#"
 while IFS= read -r line; do
   id=${line#*\"id\":}
@@ -774,7 +782,7 @@ done
     McpServerDecl::Stdio {
         launch: McpLaunch::command(vec!["/bin/sh".into(), "-c".into(), script.into()])
             .expect("fixture launch"),
-        env: BTreeMap::new(),
+        env,
     }
 }
 
