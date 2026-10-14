@@ -627,7 +627,7 @@ async fn cancelling_while_the_start_is_blocked_settles_first_and_rolls_the_child
 }
 
 #[tokio::test]
-async fn dropping_the_scope_while_the_start_is_blocked_leaves_no_running_start() {
+async fn dropping_the_scope_while_the_start_is_blocked_still_rolls_its_child_back() {
     let rig = rig();
     let (hold_tx, hold_rx) = oneshot::channel::<()>();
     locked(&rig.held.hold_start).replace(hold_rx);
@@ -642,6 +642,11 @@ async fn dropping_the_scope_while_the_start_is_blocked_leaves_no_running_start()
     drop(scope);
     assert_eq!(handle.status(), HandleStatus::Cancelled);
     quiesced(&shared).await;
-    assert!(hold_tx.send(()).is_err());
-    assert!(locked(&held.closed).is_empty());
+    // The start the drive was awaiting survives the scope in the cleanup set:
+    // it resolves, and the child it produced is closed rather than stranded.
+    hold_tx.send(()).expect("the gate opens");
+    until(|| !locked(&held.closed).is_empty()).await;
+    let started = locked(&held.started).clone();
+    assert_eq!(started.len(), 1);
+    assert_eq!(*locked(&held.closed), vec![started[0]]);
 }

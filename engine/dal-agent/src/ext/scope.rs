@@ -19,6 +19,7 @@ use dal_core::{
 use tokio::sync::{oneshot, watch};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 use super::synthetic::{self, Lineage};
 use super::{BoxFuture, Caller, Services};
@@ -89,6 +90,9 @@ struct Runtime {
     caller: Caller,
     lineage: Lineage,
     price: Option<PriceFn>,
+    /// In-flight member starts that outlive their handle's wait: closing
+    /// the tracker seals the set; spawned starts still run to completion.
+    cleanup: TaskTracker,
 }
 
 fn service_error(error: ServiceError) -> ScopeError {
@@ -120,18 +124,17 @@ async fn close_after_failure(
 }
 
 /// Closes the child a cancelled start may have created, so no member
-/// session outlives its cancelled handle. A start that never opened a
-/// child leaves nothing to close.
+/// session outlives its cancelled handle. The start task records the id
+/// in `child` before handing the outcome over, so closing by slot covers
+/// every started child, including one the handle never saw.
 async fn close_cancelled_start(
     services: &Arc<dyn Services>,
     caller: &Caller,
     child: &Arc<Mutex<Option<SessionId>>>,
-    started: Result<AgentsReply, ServiceError>,
 ) {
-    let Ok(AgentsReply::Started { id }) = started else {
+    let Some(id) = *locked(child) else {
         return;
     };
-    *locked(child) = Some(id);
     let _ = services.agents(caller, AgentsOp::Cancel { id }).await;
 }
 
@@ -181,15 +184,53 @@ impl Runtime {
     ) -> BoxFuture<'static, Result<AgentReport, ScopeError>> {
         let services = Arc::clone(&self.services);
         let caller = self.caller.clone();
+        // The start itself runs in the scope's tracked cleanup set, not in
+        // this handle future. A cancelled or dropped handle stops waiting
+        // at once; the tracked task still drains the start outcome and
+        // closes the child it produced, so a start abandoned mid-flight
+        // cannot strand a half-created member.
+        let (started_tx, started_rx) =
+            oneshot::channel::<(Result<AgentsReply, ServiceError>, oneshot::Sender<()>)>();
+        {
+            let services = Arc::clone(&services);
+            let caller = caller.clone();
+            let child = Arc::clone(&child);
+            let cancel = cancel.clone();
+            self.cleanup.spawn(async move {
+                let started = services.agents(&caller, AgentsOp::Start(start)).await;
+                if let Ok(AgentsReply::Started { id }) = &started {
+                    *locked(&child) = Some(*id);
+                }
+                if cancel.is_cancelled() {
+                    close_cancelled_start(&services, &caller, &child).await;
+                    return;
+                }
+                let (ack, acked) = oneshot::channel();
+                match started_tx.send((started, ack)) {
+                    // The handle holds the outcome now; if it died before
+                    // acking receipt, the child still closes here.
+                    Ok(()) if acked.await.is_err() => {
+                        close_cancelled_start(&services, &caller, &child).await;
+                    }
+                    Ok(()) => {}
+                    Err(_) => {
+                        close_cancelled_start(&services, &caller, &child).await;
+                    }
+                }
+            });
+        }
         Box::pin(async move {
-            // The start is drained even when the scope is cancelled: the
-            // backend may already have opened the child, and dropping the
-            // call would strand that half-created child. A child the
-            // cancelled start produced is closed, so no member outlives
-            // its cancelled handle.
-            let started = services.agents(&caller, AgentsOp::Start(start)).await;
+            let (started, ack) = tokio::select! {
+                biased;
+                started = started_rx => match started {
+                    Ok(pair) => pair,
+                    Err(_) => return Err(ScopeError::Cancelled),
+                },
+                () = cancel.cancelled() => return Err(ScopeError::Cancelled),
+            };
+            let _ = ack.send(());
             if cancel.is_cancelled() {
-                close_cancelled_start(&services, &caller, &child, started).await;
+                close_cancelled_start(&services, &caller, &child).await;
                 return Err(ScopeError::Cancelled);
             }
             let id = match started.map_err(service_error)? {
@@ -203,7 +244,6 @@ impl Runtime {
                     ));
                 }
             };
-            *locked(&child) = Some(id);
             let awaited = tokio::select! {
                 reply = services.agents(&caller, AgentsOp::Await { id, timeout: None }) => reply,
                 () = cancel.cancelled() => {
@@ -516,6 +556,7 @@ impl Drop for Inner {
             });
         }
         self.shared.ledger.cancel.cancel();
+        self.shared.rt.cleanup.close();
         self.tasks
             .get_mut()
             .unwrap_or_else(PoisonError::into_inner)
@@ -581,6 +622,7 @@ impl Scope {
             caller,
             lineage,
             price,
+            cleanup: TaskTracker::new(),
         });
         let mut tasks = JoinSet::new();
         if let Some(parent_cancel) = parent_cancel {
