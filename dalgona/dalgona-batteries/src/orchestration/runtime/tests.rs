@@ -1680,6 +1680,61 @@ async fn failed_stash_preflight_cannot_silently_drop_tracked_changes() -> TestRe
 }
 
 #[tokio::test]
+async fn implicit_and_explicit_worktree_steps_start_in_distinct_workspaces() -> TestResult {
+    let fixture = Fixture::open_config(isolation_config()?).await?;
+    {
+        let mut script = fixture.script();
+        script.run_outputs.extend([
+            Ok(output("git version 2.47.0")),
+            Ok(output(&temp_toplevel())),
+            Ok(output("head")),
+            Ok(output("snapshot")),
+        ]);
+        script.run_outputs.extend((0..24).map(|_| Ok(output(""))));
+    }
+    fixture
+        .tool(
+            r#"{"action":"run","steps":[{"name":"default","prompt":"edit {{item}}","items":["one","two"],"workers":2,"tools":["patch"]},{"name":"explicit","prompt":"edit","after":["default"],"tools":["exec"],"isolation":"worktree"}]}"#,
+        )
+        .await?;
+    fixture.ended_run().await?;
+    let script = fixture.script();
+    assert_eq!(script.starts.len(), 3);
+    let root = std::env::temp_dir()
+        .join("orchestration-script-data")
+        .join("worktrees")
+        .join(fixture.session.to_string());
+    let mut workspaces = HashSet::new();
+    for (_, start) in &script.starts {
+        let workspace = start
+            .workspace
+            .as_ref()
+            .ok_or("write-capable child inherited the shared checkout")?;
+        assert!(
+            workspace.as_path().starts_with(&root),
+            "unexpected workspace: {}",
+            workspace.as_path().display()
+        );
+        assert!(
+            workspaces.insert(workspace.as_path().to_path_buf()),
+            "two write-capable children share one worktree"
+        );
+    }
+    let added = script
+        .run_requests
+        .iter()
+        .filter(|request| {
+            request.argv.iter().any(|word| word == "worktree")
+                && request.argv.iter().any(|word| word == "add")
+        })
+        .map(|request| request.argv.get(6).cloned().map(std::path::PathBuf::from))
+        .collect::<Option<HashSet<_>>>()
+        .ok_or("malformed git worktree add call")?;
+    assert_eq!(workspaces, added, "child workspaces must match created worktrees");
+    Ok(())
+}
+
+#[tokio::test]
 async fn isolated_tasks_save_patch_and_merge_from_the_parent_workspace() -> TestResult {
     let fixture = Fixture::open_config(isolation_config()?).await?;
     fixture.script().run_outputs.extend([
@@ -3334,6 +3389,39 @@ mod step_tests {
             tokio::task::yield_now().await;
         }
         services.agent_start_names()
+    }
+
+    #[test]
+    fn worktree_child_refuses_missing_isolation_context() {
+        let services = Arc::new(FakeServices::default());
+        let coordinator = coordinator(services);
+        let mut step = task_step("write");
+        step.isolation = Isolation::Worktree;
+        assert_eq!(
+            coordinator
+                .child_start(&step, None, &[], 0, "write 1", None)
+                .err()
+                .as_deref(),
+            Some("worktree isolation requires a task worktree")
+        );
+        assert_eq!(
+            coordinator
+                .child_start(
+                    &step,
+                    None,
+                    &[],
+                    0,
+                    "write 1",
+                    Some(std::env::temp_dir().as_path()),
+                )
+                .err()
+                .as_deref(),
+            Some("worktree isolation requires a verified base")
+        );
+        let shared = coordinator
+            .child_start(&task_step("read"), None, &[], 0, "read 1", None)
+            .expect("shared steps may inherit the parent checkout");
+        assert!(shared.workspace.is_none());
     }
 
     /// The session store refuses names made only of session-id characters;
