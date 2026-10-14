@@ -1513,7 +1513,9 @@ mod tests {
             journal_bytes: fs::metadata(&journal).expect("stat journal").len(),
             // Candidate discovery validates ordinary mtimes; this deliberately exercises
             // the later read error policy in the search loop.
-            journal_mtime: UNIX_EPOCH + Duration::from_secs(1_000_000_000_000),
+            // A far-future mtime; year 9999 stays inside every platform's
+            // SystemTime range (Windows FILETIME arithmetic cannot hold 1e12s).
+            journal_mtime: UNIX_EPOCH + Duration::new(253_402_300_800, 0),
             mtime_ms: 0,
             id_text: id.to_string().into_boxed_str(),
         }];

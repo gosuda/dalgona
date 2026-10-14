@@ -43,19 +43,29 @@ pub(crate) const QUEUE_OVERHEAD: u64 = 512;
 
 /// Monitor coalesce default and clamp.
 pub(crate) const DEFAULT_COALESCE_MS: u64 = 2_000;
+
 pub(crate) const COALESCE_CLAMP_HIGH: u64 = 60_000;
+
 /// Monitor rate-limit default and clamp.
 pub(crate) const DEFAULT_RATE_LIMIT_MS: u64 = 5_000;
+
 pub(crate) const RATE_LIMIT_CLAMP_HIGH: u64 = 3_600_000;
+
 /// Monitor lines per injection: default and clamp.
 pub(crate) const DEFAULT_MAX_LINES: usize = 50;
+
 pub(crate) const MAX_LINES_CLAMP_HIGH: u64 = 200;
+
 /// Monitor characters per injection: default and clamp.
 pub(crate) const DEFAULT_MAX_CHARS: usize = 4_096;
+
 pub(crate) const MAX_CHARS_CLAMP_LOW: u64 = 512;
+
 pub(crate) const MAX_CHARS_CLAMP_HIGH: u64 = 16_384;
+
 /// Monitor-only wakes between user turns: default and clamp.
 pub(crate) const DEFAULT_WAKE_BUDGET: u16 = 5;
+
 pub(crate) const WAKE_BUDGET_CLAMP_HIGH: u64 = 100;
 
 /// Monitor delivery state owned by the orchestration core's one task.

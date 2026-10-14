@@ -445,13 +445,12 @@ fn front_matter_launch_decodes_and_the_command_alias_stays_rejected() {
         }
     );
 
-    // The old `command` wire form is not a compatibility alias.
     let alias = b"---\nmcp:\n  servers:\n    files:\n      command: [npx, files-server]\n---\n";
     let err = register("p", "s", "d", "SKILL.md", BodyInput::Bytes(alias)).unwrap_err();
     let diagnostic = err.to_string();
     assert!(
-        diagnostic.contains("unknown key \"command\""),
-        "the old command alias must be rejected: {diagnostic}"
+        diagnostic.contains("\"command\" was renamed to \"launch\""),
+        "the old command form must name its replacement: {diagnostic}"
     );
     assert!(
         diagnostic.starts_with(&format!("{}:5:7:", dir("p").join("SKILL.md").display())),

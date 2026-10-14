@@ -24,6 +24,8 @@ use dal_core::{
 use dal_ext::Font;
 use tokio::sync::Semaphore;
 
+use tokio_util::task::AbortOnDropHandle;
+
 use super::CARRIED_PREFIX;
 use super::compact::{BlobStore, HistoryCompactor, ImageHost, PartsSink};
 use super::pipeline::{
@@ -1644,4 +1646,288 @@ async fn corrupt_reused_blob_redraws_the_same_source() {
         replacement.png, target.png,
         "the redrawn bytes match the exact source text"
     );
+}
+/// A gated [`SourceReader`] holding one render worker at a real pipeline
+/// boundary: the first read counts itself, announces on `entered`, then
+/// blocks on `recv` until the test drops the paired sender. After release
+/// the read falls through to the real fixture bytes, so the pipeline keeps
+/// running and later span reads are observable. `panic_on_read` turns the
+/// released read into a worker panic instead. A blocked worker parks its
+/// blocking-pool thread, which also stops paused-clock auto-advance, so
+/// tests advance time explicitly.
+struct GatedSource {
+    entered: tokio::sync::mpsc::UnboundedSender<()>,
+    /// Receiver parked inside the worker's first read.
+    hold: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    /// Real fixture bytes served by every read, gated or not.
+    inner: FixtureSource,
+    /// Whether the released read panics instead of returning bytes.
+    panic_on_read: bool,
+    reads: AtomicUsize,
+}
+
+impl GatedSource {
+    /// Reads executed by the worker so far.
+    fn reads(&self) -> usize {
+        self.reads.load(Ordering::SeqCst)
+    }
+}
+
+/// Releases the gate exactly once when dropped, so a failed assertion
+/// unblocks the worker and the blocking pool cannot hang shutdown.
+struct ReleaseGuard {
+    _sender: std::sync::mpsc::Sender<()>,
+}
+
+impl SourceReader for GatedSource {
+    fn read(&self, span: Span) -> Result<Vec<u8>, SourceError> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        let _ = self.entered.send(());
+        let hold = self.hold.lock().expect("hold lock").take();
+        if let Some(receiver) = hold {
+            if receiver.recv().is_ok() {
+                return Err(SourceError {
+                    message: "gated fixture released by a real send".to_string(),
+                });
+            }
+            assert!(
+                !self.panic_on_read,
+                "gated render worker released into panic mode"
+            );
+        }
+        self.inner.read(span)
+    }
+}
+
+/// Builds the gated run: a private one-permit pool, the gate, the entered
+/// channel the test waits on, and the release guard.
+fn gated_run_setup(
+    panic_on_read: bool,
+) -> (
+    Arc<GatedSource>,
+    tokio::sync::mpsc::UnboundedReceiver<()>,
+    ReleaseGuard,
+    Arc<Semaphore>,
+) {
+    let permits = Arc::new(Semaphore::new(1));
+    let (entered_tx, entered_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let entries = vec![
+        user(1, true, &"a".repeat(300)),
+        user(2, true, &"b".repeat(300)),
+        user(3, true, &"c".repeat(300)),
+    ];
+    let (_, source) = pieces(&entries);
+    let gate = Arc::new(GatedSource {
+        entered: entered_tx,
+        hold: std::sync::Mutex::new(Some(release_rx)),
+        inner: source,
+        panic_on_read,
+        reads: AtomicUsize::new(0),
+    });
+    let guard = ReleaseGuard {
+        _sender: release_tx,
+    };
+    (gate, entered_rx, guard, permits)
+}
+
+/// Builds a gated request over three user-turn text entries, so the first
+/// gated read is followed by observable post-release reads.
+fn gated_request(gate: Arc<GatedSource>) -> Request {
+    let entries = vec![
+        user(1, true, &"a".repeat(300)),
+        user(2, true, &"b".repeat(300)),
+        user(3, true, &"c".repeat(300)),
+    ];
+    let (pieces, _) = pieces(&entries);
+    Request::new(
+        SessionId::new_v7(),
+        &entries,
+        (entry(1), entry(3)),
+        1,
+        budget(u64::MAX / 4, 0.7),
+        pieces,
+        gate,
+    )
+}
+
+/// Runs one compaction against a private permit pool and returns the result
+/// with the free-permit count sampled the moment `Engine::run` returned.
+async fn gated_run(
+    limits: Limits,
+    gate: Arc<GatedSource>,
+    permits: Arc<Semaphore>,
+) -> (
+    Result<Option<Compaction>, CompactError>,
+    Option<Drawn>,
+    usize,
+) {
+    let sink = Arc::new(Recorder::default());
+    let result = Engine::new(Arc::new(Font::embedded()), Arc::clone(&permits), limits)
+        .run(
+            gated_request(gate),
+            profile(1000),
+            Arc::clone(&sink) as Arc<dyn Commit>,
+        )
+        .await;
+    let free_at_return = permits.available_permits();
+    let drawn = sink.drawn.lock().expect("recorder lock").take();
+    (result, drawn, free_at_return)
+}
+
+/// Deterministic scheduler bound: bounded yield passes, never wall time.
+async fn settle() {
+    for _ in 0..64 {
+        tokio::task::yield_now().await;
+    }
+}
+
+/// Exact refusal text, so a text-only pin cannot hide a `CompactError::Fail`
+/// erasure of a typed decline.
+fn refusal_text(result: &Result<Option<Compaction>, CompactError>) -> String {
+    match result {
+        Err(CompactError::Fail(text)) => text.to_string(),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+/// The timed-out render reports only after the blocked worker returned: the
+/// permit count sampled at return proves the gate was restored, so no
+/// timed-out draw can stall later histories behind detached work.
+#[tokio::test(start_paused = true)]
+async fn render_timeout_reports_after_worker_joined() {
+    let (gate, mut entered, guard, permits) = gated_run_setup(false);
+    let mut render = limits();
+    render.render = Duration::from_millis(50);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test owns the spawned run and awaits or aborts its handle"
+    )]
+    let task = AbortOnDropHandle::new(tokio::spawn({
+        let gate = Arc::clone(&gate);
+        let permits = Arc::clone(&permits);
+        async move { gated_run(render, gate, permits).await }
+    }));
+    settle().await;
+    entered.recv().await.expect("the worker reaches the gate");
+    tokio::time::advance(Duration::from_millis(51)).await;
+    settle().await;
+    assert_eq!(
+        permits.available_permits(),
+        0,
+        "the gated worker still holds the gate"
+    );
+    drop(guard);
+    let (result, drawn, free_at_return) = task.await.expect("run resolves");
+    assert_eq!(
+        refusal_text(&result),
+        "history: drawing history images timed out after 50 ms."
+    );
+    assert!(drawn.is_none());
+    assert_eq!(
+        free_at_return, 1,
+        "the permit is back the moment run returns"
+    );
+}
+
+/// The whole-chain timeout behaves the same: the outer deadline may fire
+/// while a draw runs, and the report waits for that draw before returning.
+#[tokio::test(start_paused = true)]
+async fn chain_timeout_reports_after_worker_joined() {
+    let (gate, mut entered, guard, permits) = gated_run_setup(false);
+    let mut chain = limits();
+    chain.chain = Duration::from_millis(50);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test owns the spawned run and awaits its handle"
+    )]
+    let task = AbortOnDropHandle::new(tokio::spawn({
+        let gate = Arc::clone(&gate);
+        let permits = Arc::clone(&permits);
+        async move { gated_run(chain, gate, permits).await }
+    }));
+    settle().await;
+    entered.recv().await.expect("the worker reaches the gate");
+    tokio::time::advance(Duration::from_millis(51)).await;
+    settle().await;
+    assert_eq!(
+        permits.available_permits(),
+        0,
+        "the gated worker still holds the gate"
+    );
+    drop(guard);
+    let (result, drawn, free_at_return) = task.await.expect("run resolves");
+    assert_eq!(
+        refusal_text(&result),
+        "history: compaction timed out after 0 s; falling back to text summary."
+    );
+    assert!(drawn.is_none());
+    assert_eq!(
+        free_at_return, 1,
+        "the permit is back the moment run returns"
+    );
+}
+
+/// A worker that panics after release resolves to the worker-decline, and
+/// the gate returns without hanging: no completion token can deadlock a
+/// panicked closure.
+#[tokio::test(start_paused = true)]
+async fn timed_out_worker_panic_reports_worker_without_hang() {
+    let (gate, mut entered, guard, permits) = gated_run_setup(true);
+    let mut render = limits();
+    render.render = Duration::from_millis(50);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test owns the spawned run and awaits its handle"
+    )]
+    let task = AbortOnDropHandle::new(tokio::spawn({
+        let gate = Arc::clone(&gate);
+        let permits = Arc::clone(&permits);
+        async move { gated_run(render, gate, permits).await }
+    }));
+    settle().await;
+    entered.recv().await.expect("the worker reaches the gate");
+    tokio::time::advance(Duration::from_millis(51)).await;
+    settle().await;
+    drop(guard);
+    let (result, drawn, free_at_return) = task.await.expect("run resolves after the panic");
+    assert_eq!(refusal_text(&result), "history: the render worker failed.");
+    assert!(drawn.is_none());
+    assert_eq!(free_at_return, 1, "the permit survives a worker panic");
+}
+
+/// Dropping the run stops the worker at its next boundary: after release the
+/// worker takes no further span reads. The honest external-drop guarantee is
+/// cooperative — the worker may still hold the gate until it exits, and
+/// nothing joins it at teardown.
+#[tokio::test]
+async fn dropped_run_stops_worker_at_next_boundary() {
+    let (gate, mut entered, guard, permits) = gated_run_setup(false);
+    let render = limits();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test owns the spawned run and aborts its handle"
+    )]
+    let task = AbortOnDropHandle::new(tokio::spawn({
+        let gate = Arc::clone(&gate);
+        let permits = Arc::clone(&permits);
+        async move { gated_run(render, gate, permits).await }
+    }));
+    settle().await;
+    entered.recv().await.expect("the worker reaches the gate");
+    task.abort();
+    let _ = task.await;
+    let reads_at_abort = gate.reads();
+    drop(guard);
+    let permit = permits
+        .clone()
+        .acquire_owned()
+        .await
+        .expect("the gate returns after the worker exits");
+    assert_eq!(
+        gate.reads(),
+        reads_at_abort,
+        "the dropped run reads no further spans after its checkpoint"
+    );
+    drop(permit);
 }

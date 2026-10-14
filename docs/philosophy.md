@@ -2,9 +2,9 @@
 
 # dal
 
-dal is a small coding agent with one door. Everything that extends it comes in through that door: plugins, other programs, every way in, and dalgona's batteries. The command is `dal`; `dal` and `dl` mean the same.
+dal is a small coding agent with one door. Everything that extends it comes in through that door: plugins, other programs, every way in, and dalgona's batteries. The primary binary is `dalgon`, with `dal` and `dl` as aliases.
 
-## Why dalgon
+## Why dal
 
 No private inside; its own batteries register through the plugin interface. dal alone is a complete agent; dalgona adds opinions; both load the same plugins.
 
@@ -70,5 +70,3 @@ dalgona is dal with batteries, and every built-in battery is enabled by default 
 ## What we did not build
 
 No MCP client in dal (dalgona ships one; a plugin can reach HTTP services with the `net.fetch` operation). No plugins from the workspace. No sandbox by default and no network restriction. No plan or todo in dal (dalgona ships both). No subagents in dal by default (the `agents` operations are one door away). No LSP, ever, in either product (search plus AST edit is the surface). No upload (`/export` writes a file you can share yourself). No self-rebuild (`/reload` reloads plugins). Nothing but Starlark in `eval`. No second store (the journal is the only store). No browser front end in the binary.
-
-<!-- grounding (maintainers, not shipped) -->

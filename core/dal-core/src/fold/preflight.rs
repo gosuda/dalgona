@@ -402,7 +402,15 @@ impl Session {
         }
     }
 
-    pub(super) fn preflight_steer(&self, turn: TurnId) -> Result<(), Rejection> {
+    /// Checks that `turn` is running and its steer queue has capacity.
+    ///
+    /// This operation does not change the session. The result remains valid
+    /// only while the caller holds exclusive access to the session.
+    ///
+    /// # Errors
+    ///
+    /// Returns a rejection if `turn` is not running or its steer queue is full.
+    pub fn preflight_steer(&self, turn: TurnId) -> Result<(), Rejection> {
         match &self.phase {
             Phase::Running { turn: active, .. } if *active == turn => {
                 if self.steers_queued() == MAX_STEERS {

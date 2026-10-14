@@ -18,7 +18,8 @@ use dal_core::{EntryId, SessionId};
 use dal_ext::Font;
 use thiserror::Error;
 use tokio::sync::Semaphore;
-use tokio::time::timeout;
+use tokio::time::{Instant, timeout_at};
+use tokio_util::sync::CancellationToken;
 
 use super::WHOLE_CHAIN_TIMEOUT_S;
 use super::draw::{DrawError, Grid, draw, paginate};
@@ -424,6 +425,12 @@ impl Engine {
 
     /// Draws and commits one history compaction.
     ///
+    /// The run owns one stop token held by a drop guard, so any drop of the
+    /// run future cancels it and the render worker exits at its next
+    /// checkpoint. The chain deadline is threaded to every await, and every
+    /// worker is joined before a timeout is reported, so a timed-out draw
+    /// never keeps the process-wide render gate after this returns.
+    ///
     /// # Errors
     /// Returns the exact refusal text of the first unmet contract, the chain
     /// deadline, or the sink's own failure.
@@ -433,16 +440,11 @@ impl Engine {
         profile: ImageProfile,
         sink: Arc<dyn Commit>,
     ) -> Result<Option<Compaction>, CompactError> {
-        let secs = self.limits.chain.as_secs();
-        match timeout(
-            self.limits.chain,
-            self.draw_and_commit(request, profile, sink),
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(_) => Err(Decline::ChainTimeout { secs }.into()),
-        }
+        let deadline = Instant::now() + self.limits.chain;
+        let stop = CancellationToken::new();
+        let _stop_on_drop = stop.clone().drop_guard();
+        self.draw_and_commit(request, profile, sink, &stop, deadline)
+            .await
     }
 
     async fn draw_and_commit(
@@ -450,32 +452,78 @@ impl Engine {
         request: Request,
         profile: ImageProfile,
         sink: Arc<dyn Commit>,
+        stop: &CancellationToken,
+        deadline: Instant,
     ) -> Result<Option<Compaction>, CompactError> {
+        let secs = self.limits.chain.as_secs();
         let permit = Arc::new(
-            Arc::clone(&self.permits)
-                .acquire_owned()
+            timeout_at(deadline, Arc::clone(&self.permits).acquire_owned())
                 .await
+                .map_err(|_| Decline::ChainTimeout { secs })?
                 .map_err(|_| Decline::GateClosed)?,
         );
         if request.user_turns < MIN_DRAWABLE_USER_TURNS || request.pieces.is_empty() {
             return Err(Decline::NothingToDraw.into());
         }
         let window = request.budget.window_tokens.ok_or(Decline::UnknownWindow)?;
-        let mut candidates = self.render(&request, &profile, &permit).await?;
+        let mut candidates = self
+            .render(&request, &profile, &permit, stop, deadline)
+            .await?;
         let pool = drawable(&candidates);
         if pool.is_empty() {
             return Err(Decline::NothingToDraw.into());
         }
         let selected = self.select(&request, &profile, window, &candidates, &pool)?;
-        self.load_selected(&request, &mut candidates, &selected)
-            .await?;
+        timeout_at(
+            deadline,
+            self.load_selected(&request, &mut candidates, &selected),
+        )
+        .await
+        .map_err(|_| Decline::ChainTimeout { secs })??;
         candidates = self
-            .render_missing(candidates, &profile, Arc::clone(&permit))
+            .render_missing(candidates, &profile, Arc::clone(&permit), stop, deadline)
             .await?;
         let unmatched = unmatched_known(&request, &candidates);
         let drawn = assemble(&request, &profile, &mut candidates, &selected, &unmatched)?;
         drawn.verify()?;
-        sink.commit(request.span, drawn).await
+        timeout_at(deadline, sink.commit(request.span, drawn))
+            .await
+            .map_err(|_| Decline::ChainTimeout { secs })?
+    }
+
+    /// Waits for one render worker, then reports. Whichever deadline fires
+    /// first (the chain deadline or the render limit), the elapsed arm
+    /// cancels the worker and then joins its actual `JoinHandle` so the
+    /// permit and buffers are released before the timeout is reported. A
+    /// worker that finishes first wins the biased select and its result is
+    /// returned unchanged — its own `Decline`s included; a worker panic
+    /// resolves the handle to `Err` and maps to [`Decline::Worker`].
+    async fn join_worker(
+        &self,
+        mut worker: tokio::task::JoinHandle<Result<Vec<Candidate>, Decline>>,
+        stop: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<Vec<Candidate>, Decline> {
+        let render_deadline = Instant::now() + self.limits.render;
+        tokio::select! {
+            biased;
+            finished = &mut worker => return finished.map_err(|_| Decline::Worker)?,
+            () = tokio::time::sleep_until(deadline.min(render_deadline)) => {
+                stop.cancel();
+            }
+        }
+        match worker.await {
+            Err(_) => Err(Decline::Worker),
+            Ok(_) => Err(if deadline <= render_deadline {
+                Decline::ChainTimeout {
+                    secs: self.limits.chain.as_secs(),
+                }
+            } else {
+                Decline::RenderTimeout {
+                    millis: self.limits.render.as_millis(),
+                }
+            }),
+        }
     }
 
     /// Fetches stored PNGs for the selected reusable candidates only; an
@@ -516,6 +564,8 @@ impl Engine {
         request: &Request,
         profile: &ImageProfile,
         permit: &Arc<tokio::sync::OwnedSemaphorePermit>,
+        stop: &CancellationToken,
+        deadline: Instant,
     ) -> Result<Vec<Candidate>, Decline> {
         let font = Arc::clone(&self.font);
         let source = Arc::clone(&request.source);
@@ -523,17 +573,19 @@ impl Engine {
         let known = Arc::clone(&request.known);
         let profile = *profile;
         let permit = Arc::clone(permit);
+        let worker_stop = stop.clone();
         let worker = tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            render_pages(&font, &profile, &pieces, source.as_ref(), &known)
+            render_pages(
+                &font,
+                &profile,
+                &pieces,
+                source.as_ref(),
+                &known,
+                &worker_stop,
+            )
         });
-        match timeout(self.limits.render, worker).await {
-            Err(_) => Err(Decline::RenderTimeout {
-                millis: self.limits.render.as_millis(),
-            }),
-            Ok(Err(_)) => Err(Decline::Worker),
-            Ok(Ok(rendered)) => rendered,
-        }
+        self.join_worker(worker, stop, deadline).await
     }
 
     async fn render_missing(
@@ -541,20 +593,17 @@ impl Engine {
         candidates: Vec<Candidate>,
         profile: &ImageProfile,
         permit: Arc<tokio::sync::OwnedSemaphorePermit>,
+        stop: &CancellationToken,
+        deadline: Instant,
     ) -> Result<Vec<Candidate>, Decline> {
         let font = Arc::clone(&self.font);
         let profile = *profile;
+        let worker_stop = stop.clone();
         let worker = tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            draw_missing(&font, &profile, candidates)
+            draw_missing(&font, &profile, candidates, &worker_stop)
         });
-        match timeout(self.limits.render, worker).await {
-            Err(_) => Err(Decline::RenderTimeout {
-                millis: self.limits.render.as_millis(),
-            }),
-            Ok(Err(_)) => Err(Decline::Worker),
-            Ok(Ok(rendered)) => rendered,
-        }
+        self.join_worker(worker, stop, deadline).await
     }
 
     fn select(
@@ -735,10 +784,21 @@ fn render_pages(
     pieces: &[CompactPiece],
     source: &dyn SourceReader,
     known: &[KnownLetter],
+    stop: &CancellationToken,
 ) -> Result<Vec<Candidate>, Decline> {
+    if stop.is_cancelled() {
+        return Err(Decline::Worker);
+    }
     let grid = profile_grid(profile);
     let glyphs = font.glyphs().map_err(|_| Decline::Font)?;
-    let built = items(pieces, |span| source.read(span))?;
+    let built = items(pieces, |span| {
+        if stop.is_cancelled() {
+            return Err(SourceError {
+                message: "history render was cancelled".to_string(),
+            });
+        }
+        source.read(span)
+    })?;
     let mut known_index = HashMap::with_capacity(known.len());
     for (index, known) in known.iter().enumerate() {
         if matches!(known.record, LetterRecord::Compaction { .. }) {
@@ -749,6 +809,9 @@ fn render_pages(
     }
     let mut out = Vec::new();
     for page in paginate(glyphs, grid, &built) {
+        if stop.is_cancelled() {
+            return Err(Decline::Worker);
+        }
         let spans = page_spans(&page.items);
         if spans.is_empty() {
             continue;
@@ -780,10 +843,14 @@ fn draw_missing(
     font: &Font,
     profile: &ImageProfile,
     mut candidates: Vec<Candidate>,
+    stop: &CancellationToken,
 ) -> Result<Vec<Candidate>, Decline> {
     let grid = profile_grid(profile);
     let glyphs = font.glyphs().map_err(|_| Decline::Font)?;
     for candidate in &mut candidates {
+        if stop.is_cancelled() {
+            return Err(Decline::Worker);
+        }
         // Reused pages keep their stored PNG or, when not selected, stay
         // hidden; only fresh drawable pages render here.
         if candidate.png.is_some() || !candidate.drawable || candidate.reused.is_some() {

@@ -19,6 +19,27 @@ use crate::transport::serve_local;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The test user's Windows SID via `whoami /user`, the same source the
+/// product edge uses.
+#[cfg(windows)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "R4 edge: the test resolves its own SID from the OS"
+)]
+fn current_user_sid() -> Option<String> {
+    let output = std::process::Command::new("whoami.exe")
+        .args(["/user", "/fo", "csv", "/nh"])
+        .output()
+        .ok()?;
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    // "DOMAIN\user","S-1-..." — the second CSV field is the SID.
+    let line = stdout.lines().next()?.trim();
+    let mut fields = line.split("\",\"");
+    fields.next()?;
+    let sid = fields.next()?.trim_end_matches('"');
+    sid.starts_with("S-1-").then(|| sid.to_owned())
+}
+
 /// One real `Host` served on a local socket plus the data root it writes into.
 struct WireFixture {
     _dir: TempDir,
@@ -59,12 +80,17 @@ impl WireFixture {
                 .expect("private socket dir");
         }
         let socket = socket_dir.join("dal.sock");
+        // The Windows named-pipe listener demands the test user's SID.
+        #[cfg(windows)]
+        let sid = Some(current_user_sid().expect("whoami returns the test-user SID"));
+        #[cfg(not(windows))]
+        let sid: Option<String> = None;
         // `tokio::spawn` is workspace-banned; JoinSet is the tracked spawn.
         let mut server = tokio::task::JoinSet::new();
         {
             let socket = socket.clone();
             server.spawn(async move {
-                serve_local(&socket, None, None, move |transport| {
+                serve_local(&socket, None, sid.as_deref(), move |transport| {
                     let host = host.clone();
                     Box::pin(async move { serve_rpc(host, transport).await })
                 })

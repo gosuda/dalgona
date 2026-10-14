@@ -16,8 +16,10 @@ use crate::{
 
 /// Bytes at or above this length leave the journal and become a blob.
 pub(crate) const INLINE_LIMIT: usize = 16_384;
+
 /// A blob larger than this is rejected.
 pub(crate) const MAX_BLOB: u64 = 67_108_864;
+
 /// A validated blob awaiting durable file publication or in-memory storage.
 ///
 /// The fields stay private so the digest always matches the owned bytes.
@@ -634,6 +636,7 @@ fn replace_with_blob(part: &mut dal_core::JournalPart, id: BlobId, length: usize
     let old = std::mem::replace(part, empty_text_part());
     *part = blob_part(old, id, length);
 }
+
 fn empty_text_part() -> dal_core::JournalPart {
     dal_core::JournalPart::Text {
         text: String::new().into(),
@@ -658,6 +661,7 @@ fn invalid_base64() -> BlobError {
         "invalid base64 image data",
     ))
 }
+
 #[cfg(test)]
 mod tests {
     use std::{io::Write, process};

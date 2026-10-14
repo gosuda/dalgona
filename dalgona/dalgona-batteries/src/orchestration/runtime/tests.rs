@@ -289,6 +289,10 @@ impl Host {
     }
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test seam runs the real git the battery under test drives"
+)]
 async fn real_git(req: RunRequest) -> Result<RunOutput, ServiceError> {
     let (argv, cwd, stdin, env, limit) = (
         req.argv,
@@ -1658,7 +1662,7 @@ async fn failed_stash_preflight_cannot_silently_drop_tracked_changes() -> TestRe
     let fixture = Fixture::open_config(isolation_config()?).await?;
     fixture.script().run_outputs.extend([
         Ok(output("git version 2.47.0")),
-        Ok(output("/tmp")),
+        Ok(output(&temp_toplevel())),
         Ok(output("head")),
         Err("stash could not read tracked files"),
     ]);
@@ -1680,7 +1684,7 @@ async fn isolated_tasks_save_patch_and_merge_from_the_parent_workspace() -> Test
     let fixture = Fixture::open_config(isolation_config()?).await?;
     fixture.script().run_outputs.extend([
         Ok(output("git version 2.47.0")),
-        Ok(output("/tmp")),
+        Ok(output(&temp_toplevel())),
         Ok(output("head")),
         Ok(output("snapshot")),
         Ok(output("")),
@@ -2838,15 +2842,28 @@ type GitAnswer = Result<RunOutput, &'static str>;
 /// The git answers of one isolated task up to its saved patch: preflight,
 /// the worktree, the staged diff, and the changed names.
 fn isolated_prefix() -> Vec<GitAnswer> {
+    isolated_prefix_for("code\n", "diff --git a/code b/code\n")
+}
+
+/// The scripted repository top level: the platform temp dir the test
+/// workspaces live under, so the fixtures hold under any TMPDIR.
+fn temp_toplevel() -> String {
+    std::env::temp_dir().display().to_string()
+}
+
+/// One isolated task's scripted git answers with its own in-scope changed
+/// names and diff, for the sessions that share one checkout merge lock.
+fn isolated_prefix_for(changed: &str, diff: &str) -> Vec<GitAnswer> {
+    let top = temp_toplevel();
     vec![
         Ok(output("git version 2.47.0")),
-        Ok(output("/tmp")),
+        Ok(output(&top)),
         Ok(output("head")),
         Ok(output("snapshot")),
         Ok(output("")),
         Ok(output("")),
-        Ok(output("diff --git a/code b/code\n")),
-        Ok(output("code\n")),
+        Ok(output(diff)),
+        Ok(output(changed)),
     ]
 }
 
@@ -3403,6 +3420,23 @@ fn symlinked_workspace_mismatch_refuses_instead_of_widening() {
         "a workspace outside the top must refuse, never empty to the root"
     );
 }
+#[test]
+fn raw_non_utf8_names_never_match_the_replacement_character_workspace() {
+    let replacement = char::from_u32(0xFFFD).expect("the replacement character exists");
+    let relative = std::path::PathBuf::from(replacement.to_string());
+    if let Some(changed) = super::parse_nul_names(b"\xff/outside.txt\0") {
+        assert!(
+            !super::changed_within_workspace(&changed, &relative),
+            "raw 0xFF must not read as the workspace U+FFFD: {changed:?}"
+        );
+    }
+    assert!(
+        super::parse_nul_names(b"sub/good.txt\0").is_some_and(|changed| {
+            super::changed_within_workspace(&changed, std::path::Path::new("sub"))
+        }),
+        "valid nested names must stay in scope"
+    );
+}
 
 #[test]
 fn kept_capture_failure_reports_its_recovery_path() {
@@ -3460,15 +3494,27 @@ async fn sessions_on_different_subdirectories_of_one_checkout_apply_one_at_a_tim
     config.goal.enabled = false;
     let runtime = Runtime::new(config)?;
     let gate = Arc::new(ApplyGate::new());
-    let one =
-        dal_core::Workspace::new(std::path::PathBuf::from("/tmp/one")).expect("absolute workspace");
-    let two =
-        dal_core::Workspace::new(std::path::PathBuf::from("/tmp/two")).expect("absolute workspace");
+    let root = std::env::temp_dir();
+    tokio::fs::create_dir_all(root.join("one")).await?;
+    tokio::fs::create_dir_all(root.join("two")).await?;
+    let one = dal_core::Workspace::new(root.join("one")).expect("absolute workspace");
+    let two = dal_core::Workspace::new(root.join("two")).expect("absolute workspace");
     let first = Fixture::open_at(runtime.clone(), Some(Arc::clone(&gate)), one).await?;
     let second = Fixture::open_at(runtime.clone(), Some(Arc::clone(&gate)), two).await?;
-    for fixture in [&first, &second] {
-        let mut script = fixture.script();
-        script.run_outputs.extend(isolated_prefix());
+    {
+        let mut script = first.script();
+        script.run_outputs.extend(isolated_prefix_for(
+            "one/code\n",
+            "diff --git a/one/code b/one/code\n",
+        ));
+        script.run_outputs.extend((0..4).map(|_| Ok(output(""))));
+    }
+    {
+        let mut script = second.script();
+        script.run_outputs.extend(isolated_prefix_for(
+            "two/code\n",
+            "diff --git a/two/code b/two/code\n",
+        ));
         script.run_outputs.extend((0..4).map(|_| Ok(output(""))));
     }
     first.tool(ISOLATED_WRITE).await?;
@@ -3507,99 +3553,123 @@ async fn sessions_on_different_subdirectories_of_one_checkout_apply_one_at_a_tim
         ]
     );
     assert_eq!(runtime.merge_locks.len(), 0);
+    let _ = tokio::fs::remove_dir_all(root.join("one")).await;
+    let _ = tokio::fs::remove_dir_all(root.join("two")).await;
     Ok(())
+}
+
+/// Builds a unique temp root for real-git boundary fixtures.
+fn unique_temp_root(prefix: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "{prefix}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or_default()
+    ))
+}
+
+/// Runs one git argv in `dir` with a hermetic config, asserting success.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the boundary test intentionally runs the real git executable"
+)]
+fn run_git(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .output()
+        .expect("git runs");
+    assert!(output.status.success(), "git {args:?} failed");
+    output
+}
+
+/// Runs one computed git argv with a hermetic config, asserting success.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the boundary test intentionally runs the real git executable"
+)]
+fn run_git_argv(argv: &[String]) -> std::process::Output {
+    let output = std::process::Command::new(&argv[0])
+        .args(&argv[1..])
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .output()
+        .expect("git runs");
+    assert!(output.status.success(), "git {argv:?} failed");
+    output
+}
+
+/// Inits `root` with a seed commit and returns its HEAD.
+fn seed_new_repo(root: &std::path::Path) -> String {
+    run_git(root, &["init"]);
+    run_git(root, &["config", "user.email", "test@example.com"]);
+    run_git(root, &["config", "user.name", "test"]);
+    std::fs::write(root.join("seed.txt"), b"seed").expect("seed");
+    run_git(root, &["add", "-A"]);
+    run_git(
+        root,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "seed"],
+    );
+    let base = run_git(root, &["rev-parse", "HEAD"]);
+    let base = String::from_utf8(base.stdout).expect("head utf-8");
+    base.trim().to_owned()
+}
+
+/// Returns the saved diff and NUL-names texts of `base` in `root`.
+fn cached_texts(root_text: &str, base: &str) -> (String, String) {
+    let diff_argv = super::super::worktree::argv_cached_diff(root_text, base);
+    let names_argv = super::super::worktree::argv_cached_names(root_text, base);
+    let diff_out = run_git_argv(&diff_argv);
+    let names_out = run_git_argv(&names_argv);
+    let diff_text = String::from_utf8(diff_out.stdout).expect("diff utf-8");
+    let names_text = String::from_utf8(names_out.stdout).expect("names utf-8");
+    (diff_text, names_text)
+}
+
+/// The twelve scripted git answers of one merged isolated task.
+fn merged_script_outputs(
+    root_text: &str,
+    base: &str,
+    diff_text: &str,
+    names_text: &str,
+) -> Vec<GitAnswer> {
+    vec![
+        Ok(output("git version 2.47.0")),
+        Ok(output(root_text)),
+        Ok(output(base)),
+        Ok(output("")),
+        Ok(output("")),
+        Ok(output("")),
+        Ok(output(diff_text)),
+        Ok(output(names_text)),
+        Ok(output("")),
+        Ok(output("")),
+        Ok(output("")),
+        Ok(output("")),
+    ]
 }
 
 #[tokio::test]
 async fn newline_tab_and_quote_names_survive_the_saved_changed_list() -> TestResult {
-    let setup = tokio::task::spawn_blocking(|| {
-        let root = std::env::temp_dir().join(format!(
-            "dalgona-names-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|elapsed| elapsed.as_nanos())
-                .unwrap_or_default()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).expect("temp repo root");
-        let run = |args: &[&str]| {
-            let output = std::process::Command::new("git")
-                .args(args)
-                .current_dir(&root)
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_SYSTEM", "/dev/null")
-                .output()
-                .expect("git runs");
-            assert!(output.status.success(), "git {args:?} failed");
-            output
-        };
-        run(&["init"]);
-        run(&["config", "user.email", "test@example.com"]);
-        run(&["config", "user.name", "test"]);
-        std::fs::write(root.join("seed.txt"), b"seed").expect("seed");
-        run(&["add", "-A"]);
-        run(&["-c", "commit.gpgsign=false", "commit", "-m", "seed"]);
-        let base = run(&["rev-parse", "HEAD"]);
-        let base = String::from_utf8(base.stdout).expect("head utf-8");
-        let base = base.trim().to_owned();
-        let expected = [
-            "normal.txt",
-            "with\nnewline.txt",
-            "with\ttab.txt",
-            "with\"quote.txt",
-        ];
-        for name in expected {
-            std::fs::write(root.join(name), b"data").expect("tricky");
-        }
-        run(&["add", "-A"]);
-        let root_text = root.display().to_string();
-        let diff_argv = super::super::worktree::argv_cached_diff(&root_text, &base);
-        let names_argv = super::super::worktree::argv_cached_names(&root_text, &base);
-        let diff_out = std::process::Command::new(&diff_argv[0])
-            .args(&diff_argv[1..])
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_SYSTEM", "/dev/null")
-            .output()
-            .expect("diff runs");
-        assert!(diff_out.status.success(), "diff failed");
-        let names_out = std::process::Command::new(&names_argv[0])
-            .args(&names_argv[1..])
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_SYSTEM", "/dev/null")
-            .output()
-            .expect("names runs");
-        assert!(names_out.status.success(), "names failed");
-        let diff_text = String::from_utf8(diff_out.stdout).expect("diff utf-8");
-        let names_text = String::from_utf8(names_out.stdout).expect("names utf-8");
-        let wanted = expected
-            .iter()
-            .map(|name| name.to_string())
-            .collect::<Vec<_>>();
-        (root_text, base, diff_text, names_text, wanted)
-    })
-    .await
-    .expect("setup joins");
+    let setup = tokio::task::spawn_blocking(newline_setup)
+        .await
+        .expect("setup joins");
     let (root_text, base, diff_text, names_text, wanted) = setup;
     let workspace = dal_core::Workspace::new(std::path::PathBuf::from(root_text.as_str()))
         .expect("absolute workspace");
     let fixture = Fixture::open_at(Runtime::new(isolation_config()?)?, None, workspace).await?;
     {
         let mut script = fixture.script();
-        script.run_outputs.extend([
-            Ok(output("git version 2.47.0")),
-            Ok(output(root_text.as_str())),
-            Ok(output(base.as_str())),
-            Ok(output("")),
-            Ok(output("")),
-            Ok(output("")),
-            Ok(output(diff_text.as_str())),
-            Ok(output(names_text.as_str())),
-            Ok(output("")),
-            Ok(output("")),
-            Ok(output("")),
-            Ok(output("")),
-        ]);
+        script.run_outputs.extend(merged_script_outputs(
+            &root_text,
+            &base,
+            &diff_text,
+            &names_text,
+        ));
     }
     fixture.tool(ISOLATED_WRITE).await?;
     let report = fixture.ended_run().await?;
@@ -3618,88 +3688,72 @@ async fn newline_tab_and_quote_names_survive_the_saved_changed_list() -> TestRes
     Ok(())
 }
 
+/// Builds the tricky-names repo and returns its saved diff texts.
+fn newline_setup() -> (String, String, String, String, Vec<String>) {
+    let root = unique_temp_root("dalgona-names");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("temp repo root");
+    let base = seed_new_repo(&root);
+    let expected = [
+        "normal.txt",
+        "with\nnewline.txt",
+        "with\ttab.txt",
+        "with\"quote.txt",
+    ];
+    for name in expected {
+        std::fs::write(root.join(name), b"data").expect("tricky");
+    }
+    run_git(&root, &["add", "-A"]);
+    let root_text = root.display().to_string();
+    let (diff_text, names_text) = cached_texts(&root_text, &base);
+    let wanted = expected.iter().map(ToString::to_string).collect::<Vec<_>>();
+    (root_text, base, diff_text, names_text, wanted)
+}
+
 #[tokio::test]
 async fn a_sibling_change_outside_the_nested_workspace_is_retained_not_merged() -> TestResult {
-    let setup = tokio::task::spawn_blocking(|| {
-        let root = std::env::temp_dir().join(format!(
-            "dalgona-nested-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|elapsed| elapsed.as_nanos())
-                .unwrap_or_default()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join("subdir")).expect("subdir");
-        let run = |args: &[&str]| {
-            let output = std::process::Command::new("git")
-                .args(args)
-                .current_dir(&root)
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_SYSTEM", "/dev/null")
-                .output()
-                .expect("git runs");
-            assert!(output.status.success(), "git {args:?} failed");
-            output
-        };
-        run(&["init"]);
-        run(&["config", "user.email", "test@example.com"]);
-        run(&["config", "user.name", "test"]);
-        std::fs::write(root.join("seed.txt"), b"seed").expect("seed");
-        run(&["add", "-A"]);
-        run(&["-c", "commit.gpgsign=false", "commit", "-m", "seed"]);
-        let base = run(&["rev-parse", "HEAD"]);
-        let base = String::from_utf8(base.stdout).expect("head utf-8");
-        let base = base.trim().to_owned();
-        std::fs::write(root.join("subdir/good.txt"), b"good").expect("good");
-        std::fs::write(root.join("sibling-bad.txt"), b"bad").expect("bad");
-        std::fs::create_dir_all(root.join("sibling")).expect("sibling dir");
-        std::fs::write(root.join("sibling/bad.txt"), b"bad").expect("sibling bad");
-        run(&["add", "-A"]);
-        let root_text = root.display().to_string();
-        let diff_argv = super::super::worktree::argv_cached_diff(&root_text, &base);
-        let names_argv = super::super::worktree::argv_cached_names(&root_text, &base);
-        let diff_out = std::process::Command::new(&diff_argv[0])
-            .args(&diff_argv[1..])
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_SYSTEM", "/dev/null")
-            .output()
-            .expect("diff runs");
-        assert!(diff_out.status.success(), "diff failed");
-        let names_out = std::process::Command::new(&names_argv[0])
-            .args(&names_argv[1..])
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_SYSTEM", "/dev/null")
-            .output()
-            .expect("names runs");
-        assert!(names_out.status.success(), "names failed");
-        let diff_text = String::from_utf8(diff_out.stdout).expect("diff utf-8");
-        let names_text = String::from_utf8(names_out.stdout).expect("names utf-8");
-        (root_text, base, diff_text, names_text)
-    })
-    .await
-    .expect("setup joins");
+    let setup = tokio::task::spawn_blocking(sibling_setup)
+        .await
+        .expect("setup joins");
     let (root_text, base, diff_text, names_text) = setup;
+    check_sibling_escape(&root_text, &base, &diff_text, &names_text).await?;
+    check_valid_subdir_merge(&root_text, &base).await?;
+    let _ = tokio::fs::remove_dir_all(std::path::Path::new(&root_text)).await;
+    Ok(())
+}
+
+/// Builds the nested repo with one in-scope and two escaping changes.
+fn sibling_setup() -> (String, String, String, String) {
+    let root = unique_temp_root("dalgona-nested");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("subdir")).expect("subdir");
+    let base = seed_new_repo(&root);
+    std::fs::write(root.join("subdir/good.txt"), b"good").expect("good");
+    std::fs::write(root.join("sibling-bad.txt"), b"bad").expect("bad");
+    std::fs::create_dir_all(root.join("sibling")).expect("sibling dir");
+    std::fs::write(root.join("sibling/bad.txt"), b"bad").expect("sibling bad");
+    run_git(&root, &["add", "-A"]);
+    let root_text = root.display().to_string();
+    let (diff_text, names_text) = cached_texts(&root_text, &base);
+    (root_text, base, diff_text, names_text)
+}
+
+/// Runs the escaping change and proves the worktree is retained, not merged.
+async fn check_sibling_escape(
+    root_text: &str,
+    base: &str,
+    diff_text: &str,
+    names_text: &str,
+) -> TestResult {
     let mixed_workspace =
         dal_core::Workspace::new(std::path::PathBuf::from(format!("{root_text}/subdir")))
             .expect("absolute workspace");
     let mixed = Fixture::open_at(Runtime::new(isolation_config()?)?, None, mixed_workspace).await?;
     {
         let mut script = mixed.script();
-        script.run_outputs.extend([
-            Ok(output("git version 2.47.0")),
-            Ok(output(root_text.as_str())),
-            Ok(output(base.as_str())),
-            Ok(output("")),
-            Ok(output("")),
-            Ok(output("")),
-            Ok(output(diff_text.as_str())),
-            Ok(output(names_text.as_str())),
-            Ok(output("")),
-            Ok(output("")),
-            Ok(output("")),
-            Ok(output("")),
-        ]);
+        script.run_outputs.extend(merged_script_outputs(
+            root_text, base, diff_text, names_text,
+        ));
     }
     mixed.tool(ISOLATED_WRITE).await?;
     let mixed_report = mixed.ended_run().await?;
@@ -3711,26 +3765,23 @@ async fn a_sibling_change_outside_the_nested_workspace_is_retained_not_merged() 
         mixed.task_artifact(ArtifactFile::RetainedJson).is_ok(),
         "sibling escape must retain the worktree with its recovery path: {mixed_report}"
     );
+    Ok(())
+}
+
+/// Runs the in-scope subdir change and proves it still merges.
+async fn check_valid_subdir_merge(root_text: &str, base: &str) -> TestResult {
     let valid_workspace =
         dal_core::Workspace::new(std::path::PathBuf::from(format!("{root_text}/subdir")))
             .expect("absolute workspace");
     let valid = Fixture::open_at(Runtime::new(isolation_config()?)?, None, valid_workspace).await?;
     {
         let mut script = valid.script();
-        script.run_outputs.extend([
-            Ok(output("git version 2.47.0")),
-            Ok(output(root_text.as_str())),
-            Ok(output(base.as_str())),
-            Ok(output("")),
-            Ok(output("")),
-            Ok(output("")),
-            Ok(output("diff --git a/subdir/good.txt b/subdir/good.txt\n")),
-            Ok(output("subdir/good.txt\n")),
-            Ok(output("")),
-            Ok(output("")),
-            Ok(output("")),
-            Ok(output("")),
-        ]);
+        script.run_outputs.extend(merged_script_outputs(
+            root_text,
+            base,
+            "diff --git a/subdir/good.txt b/subdir/good.txt\n",
+            "subdir/good.txt\n",
+        ));
     }
     valid.tool(ISOLATED_WRITE).await?;
     let valid_report = valid.ended_run().await?;
@@ -3738,58 +3789,49 @@ async fn a_sibling_change_outside_the_nested_workspace_is_retained_not_merged() 
         valid_report.contains("isolation: merged"),
         "a valid subdir change must still merge: {valid_report}"
     );
-    let _ = tokio::fs::remove_dir_all(std::path::Path::new(&root_text)).await;
     Ok(())
+}
+
+/// Builds the top and data roots of the timeout fixture with a seed commit.
+fn timeout_dirs() -> (String, String) {
+    let tag = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or_default()
+    );
+    let top = std::env::temp_dir().join(format!("dalgona-timeout-top-{tag}"));
+    let data = std::env::temp_dir().join(format!("dalgona-timeout-data-{tag}"));
+    let _ = std::fs::remove_dir_all(&top);
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&top).expect("top root");
+    std::fs::create_dir_all(&data).expect("data root");
+    run_git(&top, &["init"]);
+    run_git(&top, &["config", "user.email", "test@example.com"]);
+    run_git(&top, &["config", "user.name", "test"]);
+    run_git(
+        &top,
+        &[
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "seed",
+        ],
+    );
+    let top_text = top.display().to_string();
+    let data_text = data.display().to_string();
+    (top_text, data_text)
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_timeout_abort_retains_the_dirty_worktree() -> TestResult {
-    let setup = tokio::task::spawn_blocking(|| {
-        let tag = format!(
-            "{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|elapsed| elapsed.as_nanos())
-                .unwrap_or_default()
-        );
-        let top = std::env::temp_dir().join(format!("dalgona-timeout-top-{tag}"));
-        let data = std::env::temp_dir().join(format!("dalgona-timeout-data-{tag}"));
-        let _ = std::fs::remove_dir_all(&top);
-        let _ = std::fs::remove_dir_all(&data);
-        std::fs::create_dir_all(&top).expect("top root");
-        std::fs::create_dir_all(&data).expect("data root");
-        let run = |dir: &std::path::Path, args: &[&str]| {
-            let output = std::process::Command::new("git")
-                .args(args)
-                .current_dir(dir)
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_SYSTEM", "/dev/null")
-                .output()
-                .expect("git runs");
-            assert!(output.status.success(), "git {args:?} failed");
-            output
-        };
-        run(&top, &["init"]);
-        run(&top, &["config", "user.email", "test@example.com"]);
-        run(&top, &["config", "user.name", "test"]);
-        run(
-            &top,
-            &[
-                "-c",
-                "commit.gpgsign=false",
-                "commit",
-                "--allow-empty",
-                "-m",
-                "seed",
-            ],
-        );
-        let top_text = top.display().to_string();
-        let data_text = data.display().to_string();
-        (top_text, data_text)
-    })
-    .await
-    .expect("setup joins");
+    let setup = tokio::task::spawn_blocking(timeout_dirs)
+        .await
+        .expect("setup joins");
     let (top_text, data_text) = setup;
     let mut config = isolation_config()?;
     config.data_root = Some(std::path::PathBuf::from(data_text.as_str()));
@@ -3873,5 +3915,194 @@ async fn a_timeout_abort_retains_the_dirty_worktree() -> TestResult {
     assert!(kept, "a timed-out run must never delete its dirty worktree");
     let _ = tokio::fs::remove_dir_all(std::path::Path::new(&top_text)).await;
     let _ = tokio::fs::remove_dir_all(std::path::Path::new(&data_text)).await;
+    Ok(())
+}
+/// Builds the real-git symlink-scope fixture: a physical repository top, a
+/// physical `subdir` inside it, and a symlink spelling of that subdirectory
+/// outside the repository. Returns the physical texts and both spellings.
+#[cfg(unix)]
+fn symlink_scope_dirs() -> (String, String, String) {
+    let root = unique_temp_root("dalgona-symlink");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("subdir")).expect("subdir");
+    seed_new_repo(&root);
+    std::fs::write(root.join("subdir/nested.txt"), b"nested").expect("nested file");
+    run_git(&root, &["add", "-A"]);
+    let link = unique_temp_root("dalgona-symlink-link");
+    let _ = std::fs::remove_file(&link);
+    std::os::unix::fs::symlink(root.join("subdir"), &link).expect("subdir symlink");
+    let top_text = root.display().to_string();
+    let physical_text = root.join("subdir").display().to_string();
+    let link_text = link.display().to_string();
+    (top_text, physical_text, link_text)
+}
+
+/// The passthrough host of the timeout fixture: every `git` call the owner
+/// makes runs the real git, so preflight and capture cross the real
+/// filesystem instead of a scripted answer. The optional stage gate parks
+/// the real `git add -A` of the capture until the test releases it.
+#[cfg(unix)]
+async fn passthrough_fixture(
+    config: crate::orchestration::OrchestrationConfig,
+    workspace: dal_core::Workspace,
+    stage_gate: Option<Arc<ApplyGate>>,
+) -> Result<Fixture, Box<dyn std::error::Error>> {
+    let runtime = Runtime::new(config)?;
+    let host = Arc::new_cyclic(|this| Host {
+        this: this.clone(),
+        stage_gate,
+        passthrough_git: true,
+        ..Host::default()
+    });
+    let session = SessionId::new_v7();
+    *locked(&host.runtime) = Some((runtime.clone(), session));
+    let services: Arc<dyn Services> = host.clone();
+    runtime
+        .open(
+            dal_core::ext::SessionStart {
+                session,
+                workspace,
+                resumed: false,
+            },
+            HookCx::for_test(services, session, None),
+        )
+        .await?;
+    let fixture = Fixture {
+        runtime,
+        host,
+        session,
+    };
+    fixture.user_input().await?;
+    Ok(fixture)
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_symlinked_subdir_workspace_keeps_the_child_in_its_subdirectory() -> TestResult {
+    let setup = tokio::task::spawn_blocking(symlink_scope_dirs)
+        .await
+        .expect("setup joins");
+    let (top_text, _physical_text, link_text) = setup;
+    let data = unique_temp_root("dalgona-scope");
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&data).expect("data root");
+    let mut config = isolation_config()?;
+    config.data_root = Some(data.clone());
+    let workspace = dal_core::Workspace::new(std::path::PathBuf::from(link_text.as_str()))
+        .expect("absolute workspace");
+    let fixture = passthrough_fixture(config, workspace, None).await?;
+    fixture.tool(ISOLATED_WRITE).await?;
+    let report = fixture.ended_run().await?;
+    let (task, child_workspace) = {
+        let script = fixture.script();
+        let task = script
+            .jobs
+            .iter()
+            .find(|(_, parent, _)| parent.is_some())
+            .ok_or("task absent")?
+            .0
+            .id;
+        let started = script
+            .starts
+            .first()
+            .map(|(_, start)| start.clone())
+            .ok_or("the isolated child never started")?;
+        (task, started.workspace)
+    };
+    let child_workspace = child_workspace.ok_or("the child was given no workspace")?;
+    // The isolated worktree root plus the derived relative workspace must be
+    // the assigned subdirectory: the child never receives the whole checkout,
+    // which is exactly the pre-repair widening when the session's symlink
+    // spelling failed to strip from the physical top.
+    let worktree_root = data
+        .join("worktrees")
+        .join(fixture.session.to_string())
+        .join(task.to_string());
+    let expected = worktree_root.join("subdir");
+    assert_eq!(
+        child_workspace.as_path(),
+        expected.as_path(),
+        "the child workspace must stay the task subdirectory: {child_workspace:?} ({report})"
+    );
+    assert_ne!(
+        child_workspace.as_path(),
+        worktree_root.as_path(),
+        "the child must never receive the worktree root: {child_workspace:?}"
+    );
+    let _ = tokio::fs::remove_dir_all(std::path::Path::new(&top_text)).await;
+    let _ = tokio::fs::remove_dir_all(&data).await;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_capture_failure_settles_the_task_job_with_the_kept_recovery_path() -> TestResult {
+    let setup = tokio::task::spawn_blocking(symlink_scope_dirs)
+        .await
+        .expect("setup joins");
+    let (top_text, _physical_text, _link_text) = setup;
+    let data = unique_temp_root("dalgona-kept");
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&data).expect("data root");
+    let mut config = isolation_config()?;
+    config.data_root = Some(data.clone());
+    let workspace = dal_core::Workspace::new(std::path::PathBuf::from(top_text.as_str()))
+        .expect("absolute workspace");
+    let stage = Arc::new(ApplyGate::new());
+    let fixture = passthrough_fixture(config, workspace, Some(Arc::clone(&stage))).await?;
+    fixture.tool(ISOLATED_WRITE).await?;
+    // Causal schedule: wait until the real capture `git add -A` is parked in
+    // the stage gate. The task job and its worktree exist by then, so the id
+    // is readable without racing the spawn.
+    tokio::time::timeout(std::time::Duration::from_secs(5), stage.entered(1)).await?;
+    let task = {
+        let script = fixture.script();
+        script
+            .jobs
+            .iter()
+            .find(|(_, parent, _)| parent.is_some())
+            .ok_or("task absent")?
+            .0
+            .id
+    };
+    let worktree = data
+        .join("worktrees")
+        .join(fixture.session.to_string())
+        .join(task.to_string());
+    // Detach the worktree from its repository so the parked, released
+    // capture call fails: the tree must stay on disk.
+    tokio::task::spawn_blocking({
+        let admin = worktree.join(".git");
+        move || std::fs::remove_file(&admin).expect("detach worktree admin")
+    })
+    .await
+    .expect("detach joins");
+    stage.release.add_permits(1);
+    let report = fixture.ended_run().await?;
+    let task_text = fixture.task_text()?;
+    assert!(
+        !report.contains("isolation: merged"),
+        "a detached worktree cannot merge: {report}"
+    );
+    assert!(
+        worktree.is_dir(),
+        "a capture failure must keep the worktree on disk: {}",
+        worktree.display()
+    );
+    let kept_text = worktree.display().to_string();
+    assert!(
+        task_text.contains(kept_text.as_str()),
+        "the settled task job text must name the kept recovery directory: {task_text}"
+    );
+    assert!(
+        task_text.contains("the changes could not be staged"),
+        "the settled task job text must carry the capture reason: {task_text}"
+    );
+    assert!(
+        task_text.contains("Recover the tree at that path"),
+        "the settled task job text must tell the user how to recover: {task_text}"
+    );
+    let _ = tokio::fs::remove_dir_all(std::path::Path::new(&top_text)).await;
+    let _ = tokio::fs::remove_dir_all(&data).await;
     Ok(())
 }

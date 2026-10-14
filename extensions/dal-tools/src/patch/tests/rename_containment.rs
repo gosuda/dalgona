@@ -138,7 +138,12 @@ async fn in_workspace_rename_plans_and_commits_in_every_dialect() {
         let file = &staged.files[0];
         let dest = file.renamed_to.as_ref().expect("rename destination");
         assert_eq!(dest.path, Path::new("sub/b.txt"));
-        assert_eq!(dest.absolute_path, fixture.workspace.join("sub/b.txt"));
+        assert_eq!(
+            dest.absolute_path,
+            std::fs::canonicalize(&fixture.workspace)
+                .expect("workspace canonicalizes")
+                .join("sub/b.txt")
+        );
         let output = commit(&fixture.session, staged, &[]).await;
         assert!(output.error_class.is_none(), "{dialect:?}: {}", output.text);
         assert_eq!(

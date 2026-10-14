@@ -653,3 +653,155 @@ async fn acp_new_session_never_inherits_another_threads_history() {
     .await;
     rig.host.shutdown(Duration::from_secs(1)).await;
 }
+
+#[tokio::test]
+async fn acp_inflight_int_and_string_ids_stay_distinct() {
+    let rig = rig(&[
+        gate_step("c1"),
+        gate_step("c2"),
+        text_step(&["a"], 1, 1),
+        text_step(&["b"], 1, 1),
+    ])
+    .await;
+    let ws = rig.ws();
+    with_acp(&rig, async |mut acp| {
+        init(&mut acp, 2).await;
+        let s1 = new_session(&mut acp, 2, &ws).await;
+        let s2 = new_session(&mut acp, 3, &ws).await;
+        let p1 = sonic_rs::to_string(&prompt_params(&s1, "first")).expect("params");
+        let p2 = sonic_rs::to_string(&prompt_params(&s2, "second")).expect("params");
+        acp.send_raw(&format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{p1}}}"#
+        ))
+        .await;
+        loop {
+            let frame = acp.next().await;
+            if frame["params"]["update"]["toolCallId"].as_str() == Some("c1") {
+                break;
+            }
+        }
+        acp.send_raw(&format!(
+            r#"{{"jsonrpc":"2.0","id":"1","method":"session/prompt","params":{p2}}}"#
+        ))
+        .await;
+        loop {
+            let frame = acp.next().await;
+            if frame["params"]["update"]["toolCallId"].as_str() == Some("c2") {
+                break;
+            }
+        }
+        acp.send_raw(r#"{"jsonrpc":"2.0","method":"$/cancel_request","params":{"requestId":1}}"#)
+            .await;
+        let (ended_session, ended_reason) = loop {
+            let frame = acp.next().await;
+            if frame["params"]["update"]["state"].as_str() != Some("idle") {
+                continue;
+            }
+            let Some(session) = frame["params"]["sessionId"].as_str() else {
+                continue;
+            };
+            if session != s1.as_str() && session != s2.as_str() {
+                continue;
+            }
+            let reason = frame["params"]["update"]["stopReason"]
+                .as_str()
+                .unwrap_or("")
+                .to_owned();
+            break (session.to_owned(), reason);
+        };
+        assert_eq!(ended_session, s1);
+        assert_eq!(ended_reason, "cancelled");
+        rig.gate.add_permits(1);
+        let survivor_reason = loop {
+            let frame = acp.next().await;
+            if frame["params"]["sessionId"].as_str() != Some(s2.as_str()) {
+                continue;
+            }
+            if frame["params"]["update"]["state"].as_str() != Some("idle") {
+                continue;
+            }
+            break frame["params"]["update"]["stopReason"]
+                .as_str()
+                .unwrap_or("")
+                .to_owned();
+        };
+        assert_eq!(survivor_reason, "end_turn");
+    })
+    .await;
+    rig.host.shutdown(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn acp_completed_request_keeps_successor_slot() {
+    let rig = rig(&[
+        gate_step("c1"),
+        gate_step("c2"),
+        text_step(&["a"], 1, 1),
+        text_step(&["b"], 1, 1),
+    ])
+    .await;
+    let ws = rig.ws();
+    with_acp(&rig, async |mut acp| {
+        init(&mut acp, 2).await;
+        let s1 = new_session(&mut acp, 2, &ws).await;
+        let s2 = new_session(&mut acp, 3, &ws).await;
+        let p1 = sonic_rs::to_string(&prompt_params(&s1, "first")).expect("params");
+        let p2 = sonic_rs::to_string(&prompt_params(&s2, "second")).expect("params");
+        acp.send_raw(&format!(
+            r#"{{"jsonrpc":"2.0","id":7,"method":"session/prompt","params":{p1}}}"#
+        ))
+        .await;
+        loop {
+            let frame = acp.next().await;
+            if frame["params"]["update"]["toolCallId"].as_str() == Some("c1") {
+                break;
+            }
+        }
+        acp.send_raw(&format!(
+            r#"{{"jsonrpc":"2.0","id":7,"method":"session/prompt","params":{p2}}}"#
+        ))
+        .await;
+        loop {
+            let frame = acp.next().await;
+            if frame["params"]["update"]["toolCallId"].as_str() == Some("c2") {
+                break;
+            }
+        }
+        rig.gate.add_permits(1);
+        let first_done = loop {
+            let frame = acp.next().await;
+            if frame["params"]["update"]["state"].as_str() != Some("idle") {
+                continue;
+            }
+            if frame["params"]["update"]["stopReason"].as_str() != Some("end_turn") {
+                continue;
+            }
+            let Some(session) = frame["params"]["sessionId"].as_str() else {
+                continue;
+            };
+            if session != s1.as_str() && session != s2.as_str() {
+                continue;
+            }
+            break session.to_owned();
+        };
+        let survivor = if first_done == s1 { s2 } else { s1 };
+        acp.send_raw(r#"{"jsonrpc":"2.0","method":"$/cancel_request","params":{"requestId":7}}"#)
+            .await;
+        let survivor_reason = loop {
+            let frame = acp.next().await;
+            if frame["params"]["sessionId"].as_str() != Some(survivor.as_str()) {
+                continue;
+            }
+            if frame["params"]["update"]["state"].as_str() != Some("idle") {
+                continue;
+            }
+            break frame["params"]["update"]["stopReason"]
+                .as_str()
+                .unwrap_or("")
+                .to_owned();
+        };
+        assert_eq!(survivor_reason, "cancelled");
+    })
+    .await;
+    rig.host.shutdown(Duration::from_secs(1)).await;
+}

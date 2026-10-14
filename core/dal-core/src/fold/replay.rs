@@ -1,8 +1,8 @@
 use super::types::{MAX_WAKE_RUN, PRODUCT_VERSION, Step, Tree, TurnStage};
 use super::{
     BTreeMap, Block, CallId, Effect, Emit, Entry, EntryId, EntryKind, EntryView, JobEvent, JobId,
-    JobKind, JournalPart, Name, NonZeroU64, Phase, Record, ReplayError, Session, TurnEndStop,
-    TurnId,
+    JobKind, JobOutcome, JournalPart, Name, NonZeroU64, Phase, Record, ReplayError, Session,
+    TurnEndStop, TurnId,
 };
 use crate::journal::TurnSequence;
 
@@ -57,6 +57,22 @@ pub(super) const TOOL_LOST: &str =
 /// the turn, so the model continues on best judgment instead of asking again.
 pub(super) const ASK_LOST: &str =
     "The question did not survive the restart. Continue on best judgment.";
+
+/// The [`JobOutcome`] a terminal `JobEvent` declares. `Settled` carries
+/// its outcome when the writer recorded one; the rest name their cause.
+fn job_outcome(event: &JobEvent) -> JobOutcome {
+    match event {
+        JobEvent::Settled { outcome } => outcome.clone().unwrap_or(JobOutcome::Lost),
+        JobEvent::Cancelled { .. } => JobOutcome::Cancelled,
+        JobEvent::Killed => JobOutcome::Failed {
+            message: "killed".into(),
+        },
+        JobEvent::TimedOut => JobOutcome::Failed {
+            message: "timed out".into(),
+        },
+        JobEvent::Orphaned | JobEvent::Started { .. } => JobOutcome::Lost,
+    }
+}
 
 pub(super) fn contradiction(detail: impl Into<Box<str>>) -> ReplayError {
     ReplayError::Contradiction {
@@ -140,6 +156,16 @@ impl Replay {
                 self.session.delivered_jobs.extend(jobs.iter().copied());
             }
             Record::Job { job, event, .. } => self.job(*job, event)?,
+            Record::Reminder(Entry {
+                kind: EntryKind::Reminder { source, .. },
+                ..
+            }) if source.as_ref() == "jobs.finished" => {
+                // The live path writes this reminder and then drains
+                // `ended_jobs`; replaying the record consumes the pending
+                // entries the same way, so a reopened session does not
+                // re-emit reminders the journal already delivered.
+                self.session.ended_jobs.clear();
+            }
             _ => {}
         }
         Ok(())
@@ -310,6 +336,21 @@ impl Replay {
                     return Err(contradiction("job started more than once"));
                 }
                 self.started_jobs.push((job, kind));
+                // Journal job records are a declared source too: mirror
+                // them into the session so live/ended jobs inspect the
+                // written history, not just update records.
+                match kind {
+                    Some(kind) => {
+                        // Declared replay projects ledgers, not client
+                        // updates: the emitted job updates are scratch.
+                        let mut emit = Emit {
+                            records: Vec::new(),
+                            updates: Vec::new(),
+                        };
+                        self.session.job_started(job, kind, &mut emit);
+                    }
+                    None => self.session.live_jobs.push((job, None)),
+                }
             }
             JobEvent::Settled { .. }
             | JobEvent::Cancelled { .. }
@@ -320,6 +361,11 @@ impl Replay {
                     return Err(contradiction("job ended without a start"));
                 }
                 self.started_jobs.retain(|(started, _)| *started != job);
+                let mut emit = Emit {
+                    records: Vec::new(),
+                    updates: Vec::new(),
+                };
+                self.session.job_settled(job, job_outcome(event), &mut emit);
             }
         }
         Ok(())
@@ -413,6 +459,17 @@ impl Replay {
             job: *job,
             event: JobEvent::Orphaned,
         }));
+        // The synthesized orphans are the jobs' terminal records: settle them
+        // through the session too, or a reopened session lists them as live.
+        // They stay in `ended_jobs` so the next turn's `jobs.finished`
+        // reminder reports the loss once.
+        for (job, _) in std::mem::take(&mut self.started_jobs) {
+            let mut emit = Emit {
+                records: Vec::new(),
+                updates: Vec::new(),
+            };
+            self.session.job_settled(job, JobOutcome::Lost, &mut emit);
+        }
         let mut session = self.session;
         session.restore_branch_state(session.tree.leaf)?;
         let generation = session.next_generation()?;

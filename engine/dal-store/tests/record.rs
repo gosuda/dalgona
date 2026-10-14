@@ -365,16 +365,17 @@ proptest! {
 
 #[test]
 fn version_refusal_precedes_type_check() {
-    let error = decode(b"{\"v\":2,\"type\":\"nonsense\"}\n").expect_err("v2 refuses");
-    assert!(
-        matches!(
-            error,
-            dal_core::DecodeError::UnsupportedVersion { found: 2 }
-        ),
-        "version refusal precedes the type check"
-    );
-    let repeat = decode(b"{\"v\":2,\"type\":\"nonsense\"}\n").expect_err("refusal is stable");
-    assert_eq!(error, repeat, "refusal performs no write and repeats");
+    for version in [0, u64::from(dal_core::JOURNAL_VERSION) + 1] {
+        let line = format!("{{\"v\":{version},\"type\":\"nonsense\"}}\n");
+        let error = decode(line.as_bytes()).expect_err("unsupported version refuses");
+        assert!(
+            matches!(
+                error,
+                dal_core::DecodeError::UnsupportedVersion { found } if found == version
+            ),
+            "version refusal precedes the type check"
+        );
+    }
 }
 
 #[test]

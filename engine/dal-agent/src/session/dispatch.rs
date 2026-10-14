@@ -279,6 +279,52 @@ fn tool_search_outcome(ctx: &DispatchCtx, ready: &ReadyCall) -> SettledOutcome {
     }
 }
 
+/// Settles hook-rewritten arguments that fail re-resolution or escape a
+/// read-only classification; `None` lets the call run.
+///
+/// Re-resolution reuses the streamed-argument checks, so a rewrite meets the
+/// same gates. The caller keeps hook, authorization, report, elapsed-time,
+/// and error ordering: this runs after `run_hooks` and authorization, before
+/// execution, with no report or clock side effects.
+fn hook_rewrite_outcome(
+    ctx: &DispatchCtx,
+    ready: &ReadyCall,
+    args: &RawJson,
+) -> Option<SettledOutcome> {
+    if args.as_str() == ready.args.as_str() {
+        return None;
+    }
+    let (promoted, result) = resolve_named(
+        &ctx.generation,
+        &ctx.tools,
+        &ready.name,
+        args,
+        ctx.mode,
+        &ctx.workspace,
+    );
+    if result.is_err() {
+        return Some(failed_outcome(&ResolvedCall {
+            call: ready.call.clone(),
+            name: ready.name.clone(),
+            promoted,
+            result,
+        }));
+    }
+    if let Ok(new_class) = &result
+        && matches!(ready.class, ToolClass::Read)
+        && !matches!(new_class, ToolClass::Read)
+    {
+        return Some(SettledOutcome::Err {
+            text: format!(
+                "hook rewrote arguments for {} changing its classification from read to {new_class:?}; parallel read calls cannot change classification. Update the hook to keep the rewrite read-only or make the mutating call separately.",
+                ready.name.as_str()
+            )
+            .into(),
+        });
+    }
+    None
+}
+
 /// Runs one call body, buffering its journal reports. `elapsed_ms` is set
 /// only when a tool ran: calls blocked before execution leave it unset.
 async fn run_one_inner(
@@ -329,23 +375,8 @@ async fn run_one_inner(
         }
         HookArgs::Args(args) => args,
     };
-    if args.as_str() != ready.args.as_str() {
-        let (promoted, result) = resolve_named(
-            &ctx.generation,
-            &ctx.tools,
-            &ready.name,
-            &args,
-            ctx.mode,
-            &ctx.workspace,
-        );
-        if result.is_err() {
-            return failed_outcome(&ResolvedCall {
-                call: ready.call.clone(),
-                name: ready.name.clone(),
-                promoted,
-                result,
-            });
-        }
+    if let Some(outcome) = hook_rewrite_outcome(ctx, ready, &args) {
+        return outcome;
     }
     let invocation = Invocation::next();
     let caller = tool_caller(ctx, ready, invocation);
@@ -1667,8 +1698,9 @@ enum GitSubcommandPath {
 /// installed git: `init`/`clone` `--separate-git-dir` and `--template`,
 /// `clone`/`submodule` `--reference` and `--reference-if-able`, `archive`
 /// `--output`, `archive` `--remote` and `--add-file`, and `clone`
-/// `--upload-pack`. `--exec` is intentionally excluded: it names a remote
-/// program, not a local write.
+/// `--upload-pack`. That list drives operand indexing for separate operands;
+/// every attached `=value` is confined by the fall-through below regardless of
+/// the name, `--exec` included.
 fn git_generic_long_in_roots(
     text: &str,
     args: &[std::ffi::OsString],
@@ -1694,15 +1726,42 @@ fn git_generic_long_in_roots(
         };
         return GitSubcommandPath::Confined(next);
     }
+    // An unlisted long option with an attached `=value` may still select a
+    // filesystem location Git reads or writes (`format-patch
+    // --output-directory=<dir>` writes there). The value is confined exactly
+    // like an operand: relative values resolve inside, absolute values must
+    // stay in the grant roots. An empty value selects nothing, and Git accepts
+    // it for optional-argument options (`log --pretty=`), so it stays inert;
+    // known path options above still fail closed on empty operands. A bare
+    // `--name` without `=` carries no value and stays inert.
+    if let Some((name, value)) = text
+        .strip_prefix("--")
+        .and_then(|body| body.split_once('='))
+        && !name.starts_with("no-")
+        && !name.is_empty()
+        && !value.is_empty()
+    {
+        if checked_git_path(base, std::ffi::OsStr::new(value), roots).is_none() {
+            return GitSubcommandPath::Escapes;
+        }
+        return GitSubcommandPath::Confined(index + 1);
+    }
     GitSubcommandPath::NotPath
 }
 
 /// Checks one short output selector (`-o`/`-u`), if the token is one.
 ///
-/// `-o` writes `archive --output`; `-u` runs `clone --upload-pack`. Other
-/// shorts (`-b` branch, `-o` origin for `clone`, `-c` count for `grep`) carry
-/// branch names or counts, which as relative paths stay inside and pass, so
-/// treating an absolute-looking operand as a path fails closed safely.
+/// `-o` writes `archive --output`; `-u` runs `clone --upload-pack`. Letters
+/// glued ahead of a trailing `o`/`u` attach the operand the same way
+/// (`format-patch -qo<dir>`), so the first `o`/`u` after the dash letters is
+/// treated as the selector and its remainder confined. A leading value-taking
+/// short (`-S`, `-G`, `-L`) owns its whole remainder as a string argument, so
+/// its token stays inert and the next argument is the ordinary non-dash
+/// position the scanner already checks; an empty remainder likewise carries no
+/// operand. Other shorts (`-b`
+/// branch, `-o` origin for `clone`, `-c` count for `grep`) carry branch names
+/// or counts, which as relative paths stay inside and pass, so treating an
+/// absolute-looking operand as a path fails closed safely.
 fn git_generic_short_in_roots(
     text: &str,
     args: &[std::ffi::OsString],
@@ -1741,6 +1800,30 @@ fn git_generic_short_in_roots(
         }
         return GitSubcommandPath::Confined(index + 1);
     }
+    // Cluster tail: letters glued ahead of `o`/`u` attach the operand, so
+    // `-qo<value>` confines `<value>` like `-o <value>`. A leading value-taking
+    // short (`-S`, `-G`, `-L`) parses its whole remainder as its string
+    // argument, so any `o`/`u` inside belongs to that argument, not to an
+    // option cluster: such a token stays inert and its next argument is the
+    // ordinary non-dash position the scanner already checks. Without such a
+    // letter, the first `o`/`u` is the selector and its remainder is confined;
+    // an empty remainder carries no operand and also stays inert.
+    if let Some(letters) = text.strip_prefix('-')
+        && let Some(position) = letters.find(['o', 'u'])
+        && !letters[..position].contains(['S', 'G', 'L'])
+    {
+        let rest = &letters[position + 1..];
+        if !rest.is_empty() {
+            let rest = rest.strip_prefix('=').unwrap_or(rest);
+            if rest.is_empty() {
+                return GitSubcommandPath::Escapes;
+            }
+            if checked_git_path(base, std::ffi::OsStr::new(rest), roots).is_none() {
+                return GitSubcommandPath::Escapes;
+            }
+            return GitSubcommandPath::Confined(index + 1);
+        }
+    }
     GitSubcommandPath::NotPath
 }
 
@@ -1767,7 +1850,10 @@ fn git_subcommand_positionals_in_roots(
 /// Confines every subcommand filesystem token to the grant roots.
 ///
 /// Long output selectors confine their operands; `-o`/`-u` shorts do the same.
-/// Every other dash-led token is an inert flag. Every non-dash token is either
+/// Every other dash-led token is inert unless it carries an attached value:
+/// an unlisted `--name=value` confines the value, and a short cluster's first
+/// `o`/`u` confines its remainder, because either can select a filesystem
+/// location Git reads or writes. Every non-dash token is either
 /// a filesystem position (target dirs, worktree paths, bundle files) or a
 /// branch, revision, or URL, which as a relative path stays inside and passes.
 /// `--` ends option parsing; the remainder are all positions. This one gate
@@ -2353,8 +2439,15 @@ pub(crate) fn git_spawn_in_roots(
 }
 
 fn checked_git_path(base: &Path, path: &std::ffi::OsStr, roots: &[PathBuf]) -> Option<PathBuf> {
-    let resolved = resolve_git_path(base, path)?;
-    crate::proc::cwd_in_roots(&resolved, roots).then_some(resolved)
+    let joined = resolve_git_path(base, path)?;
+    let resolved = crate::session::backend::canonicalize_existing_prefix(&joined)?;
+    roots
+        .iter()
+        .any(|root| {
+            std::fs::canonicalize(root)
+                .is_ok_and(|canonical_root| resolved.starts_with(canonical_root))
+        })
+        .then_some(resolved)
 }
 
 fn resolve_git_path(base: &Path, path: &std::ffi::OsStr) -> Option<PathBuf> {
@@ -3703,6 +3796,195 @@ mod tests {
         ));
     }
 
+    fn git_subcommand_init_outputs_stay_inside_roots(
+        approved: &Approved,
+        workspace: &Path,
+        outside: &str,
+        inside_arg: &str,
+    ) {
+        assert!(!grant_covers(
+            approved,
+            &[
+                "git".into(),
+                "init".into(),
+                format!("--separate-git-dir={outside}").into(),
+                "repo".into(),
+            ],
+            workspace
+        ));
+        assert!(grant_covers(
+            approved,
+            &[
+                "git".into(),
+                "init".into(),
+                format!("--separate-git-dir={inside_arg}").into(),
+                "repo".into(),
+            ],
+            workspace
+        ));
+        assert!(!grant_covers(
+            approved,
+            &[
+                "git".into(),
+                "init".into(),
+                format!("--separate-git-d={outside}").into(),
+                "repo".into(),
+            ],
+            workspace
+        ));
+        assert!(!grant_covers(
+            approved,
+            &["git".into(), "init".into(), outside.into()],
+            workspace
+        ));
+        assert!(grant_covers(
+            approved,
+            &["git".into(), "init".into(), inside_arg.into()],
+            workspace
+        ));
+    }
+
+    fn git_subcommand_clone_outputs_stay_inside_roots(
+        approved: &Approved,
+        workspace: &Path,
+        outside: &str,
+        inside_arg: &str,
+    ) {
+        assert!(!grant_covers(
+            approved,
+            &[
+                "git".into(),
+                "clone".into(),
+                "https://example.invalid/repo".into(),
+                outside.into(),
+            ],
+            workspace
+        ));
+        assert!(grant_covers(
+            approved,
+            &[
+                "git".into(),
+                "clone".into(),
+                "https://example.invalid/repo".into(),
+                inside_arg.into(),
+            ],
+            workspace
+        ));
+        assert!(!grant_covers(
+            approved,
+            &[
+                "git".into(),
+                "clone".into(),
+                format!("--separate-git-dir={outside}").into(),
+                "src".into(),
+                "dest".into(),
+            ],
+            workspace
+        ));
+    }
+
+    fn git_subcommand_worktree_outputs_stay_inside_roots(
+        approved: &Approved,
+        workspace: &Path,
+        outside: &str,
+        inside_arg: &str,
+    ) {
+        assert!(!grant_covers(
+            approved,
+            &[
+                "git".into(),
+                "worktree".into(),
+                "add".into(),
+                outside.into(),
+            ],
+            workspace
+        ));
+        assert!(grant_covers(
+            approved,
+            &[
+                "git".into(),
+                "worktree".into(),
+                "add".into(),
+                inside_arg.into(),
+            ],
+            workspace
+        ));
+    }
+
+    fn git_subcommand_archive_and_bundle_outputs_stay_inside_roots(
+        approved: &Approved,
+        workspace: &Path,
+        outside: &str,
+        inside_arg: &str,
+    ) {
+        assert!(!grant_covers(
+            approved,
+            &[
+                "git".into(),
+                "archive".into(),
+                "-o".into(),
+                outside.into(),
+                "HEAD".into(),
+            ],
+            workspace
+        ));
+        assert!(grant_covers(
+            approved,
+            &[
+                "git".into(),
+                "archive".into(),
+                "-o".into(),
+                inside_arg.into(),
+                "HEAD".into(),
+            ],
+            workspace
+        ));
+        assert!(!grant_covers(
+            approved,
+            &[
+                "git".into(),
+                "bundle".into(),
+                "create".into(),
+                outside.into(),
+                "HEAD".into(),
+            ],
+            workspace
+        ));
+    }
+
+    fn git_subcommand_config_output_and_status_stay_inside_roots(
+        approved: &Approved,
+        workspace: &Path,
+        outside: &str,
+        inside_arg: &str,
+    ) {
+        assert!(!grant_covers(
+            approved,
+            &[
+                "git".into(),
+                "config".into(),
+                "core.worktree".into(),
+                outside.into(),
+            ],
+            workspace
+        ));
+        assert!(grant_covers(
+            approved,
+            &[
+                "git".into(),
+                "config".into(),
+                "core.worktree".into(),
+                inside_arg.into(),
+            ],
+            workspace
+        ));
+        assert!(grant_covers(
+            approved,
+            &["git".into(), "status".into()],
+            workspace
+        ));
+    }
+
     #[test]
     fn git_subcommand_outputs_stay_inside_roots() {
         let temp = tempfile::tempdir().expect("temporary grant roots");
@@ -3719,115 +4001,54 @@ mod tests {
         );
         let outside = outer.to_string_lossy().into_owned();
         let inside_arg = inside.to_string_lossy().into_owned();
-        assert!(!grant_covers(
+        git_subcommand_init_outputs_stay_inside_roots(&approved, &workspace, &outside, &inside_arg);
+        git_subcommand_clone_outputs_stay_inside_roots(
             &approved,
-            &[
-                "git".into(),
-                "init".into(),
-                format!("--separate-git-dir={outside}").into(),
-                "repo".into(),
-            ],
-            &workspace
-        ));
+            &workspace,
+            &outside,
+            &inside_arg,
+        );
+        git_subcommand_worktree_outputs_stay_inside_roots(
+            &approved,
+            &workspace,
+            &outside,
+            &inside_arg,
+        );
+        git_subcommand_archive_and_bundle_outputs_stay_inside_roots(
+            &approved,
+            &workspace,
+            &outside,
+            &inside_arg,
+        );
+        git_subcommand_config_output_and_status_stay_inside_roots(
+            &approved,
+            &workspace,
+            &outside,
+            &inside_arg,
+        );
+    }
+
+    #[test]
+    fn git_subcommand_attached_long_value_stays_inside_roots() {
+        let temp = tempfile::tempdir().expect("temporary grant roots");
+        let outer = temp.path().join("outer-repo");
+        let workspace = outer.join("agent-workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let approved = Approved::new(
+            CallId::new("attached-long-grant"),
+            None,
+            Box::new([std::ffi::OsString::from("git")]),
+            Box::new([workspace.clone()]),
+            None,
+        );
+        let outside = outer.to_string_lossy().into_owned();
+        let inside_arg = workspace.to_string_lossy().into_owned();
         assert!(grant_covers(
             &approved,
             &[
                 "git".into(),
-                "init".into(),
-                format!("--separate-git-dir={inside_arg}").into(),
-                "repo".into(),
-            ],
-            &workspace
-        ));
-        assert!(!grant_covers(
-            &approved,
-            &[
-                "git".into(),
-                "init".into(),
-                format!("--separate-git-d={outside}").into(),
-                "repo".into(),
-            ],
-            &workspace
-        ));
-        assert!(!grant_covers(
-            &approved,
-            &["git".into(), "init".into(), outside.clone().into()],
-            &workspace
-        ));
-        assert!(grant_covers(
-            &approved,
-            &["git".into(), "init".into(), inside_arg.clone().into()],
-            &workspace
-        ));
-        assert!(!grant_covers(
-            &approved,
-            &[
-                "git".into(),
-                "clone".into(),
-                "https://example.invalid/repo".into(),
-                outside.clone().into(),
-            ],
-            &workspace
-        ));
-        assert!(grant_covers(
-            &approved,
-            &[
-                "git".into(),
-                "clone".into(),
-                "https://example.invalid/repo".into(),
-                inside_arg.clone().into(),
-            ],
-            &workspace
-        ));
-        assert!(!grant_covers(
-            &approved,
-            &[
-                "git".into(),
-                "clone".into(),
-                format!("--separate-git-dir={outside}").into(),
-                "src".into(),
-                "dest".into(),
-            ],
-            &workspace
-        ));
-        assert!(!grant_covers(
-            &approved,
-            &[
-                "git".into(),
-                "worktree".into(),
-                "add".into(),
-                outside.clone().into(),
-            ],
-            &workspace
-        ));
-        assert!(grant_covers(
-            &approved,
-            &[
-                "git".into(),
-                "worktree".into(),
-                "add".into(),
-                inside_arg.clone().into(),
-            ],
-            &workspace
-        ));
-        assert!(!grant_covers(
-            &approved,
-            &[
-                "git".into(),
-                "archive".into(),
-                "-o".into(),
-                outside.clone().into(),
-                "HEAD".into(),
-            ],
-            &workspace
-        ));
-        assert!(grant_covers(
-            &approved,
-            &[
-                "git".into(),
-                "archive".into(),
-                "-o".into(),
-                inside_arg.clone().into(),
+                "format-patch".into(),
+                format!("--output-directory={inside_arg}").into(),
                 "HEAD".into(),
             ],
             &workspace
@@ -3836,9 +4057,70 @@ mod tests {
             &approved,
             &[
                 "git".into(),
-                "bundle".into(),
-                "create".into(),
-                outside.clone().into(),
+                "format-patch".into(),
+                format!("--output-directory={outside}").into(),
+                "HEAD".into(),
+            ],
+            &workspace
+        ));
+        // An unlisted option whose value is a plain string stays allowed, and
+        // a negated form carries no operand: neither confuses the attached
+        // value confinement with git's real option grammar. An empty attached
+        // value selects nothing and Git accepts it for optional-argument
+        // options (`log --pretty=`), so it stays allowed too.
+        assert!(grant_covers(
+            &approved,
+            &[
+                "git".into(),
+                "format-patch".into(),
+                "--cover-from-description=subject".into(),
+                "HEAD".into(),
+            ],
+            &workspace
+        ));
+        assert!(grant_covers(
+            &approved,
+            &[
+                "git".into(),
+                "log".into(),
+                "--pretty=".into(),
+                "HEAD".into()
+            ],
+            &workspace
+        ));
+        assert!(grant_covers(
+            &approved,
+            &[
+                "git".into(),
+                "format-patch".into(),
+                "--no-attach".into(),
+                "HEAD".into(),
+            ],
+            &workspace
+        ));
+    }
+
+    #[test]
+    fn git_subcommand_short_cluster_value_stays_inside_roots() {
+        let temp = tempfile::tempdir().expect("temporary grant roots");
+        let outer = temp.path().join("outer-repo");
+        let workspace = outer.join("agent-workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let approved = Approved::new(
+            CallId::new("short-cluster-grant"),
+            None,
+            Box::new([std::ffi::OsString::from("git")]),
+            Box::new([workspace.clone()]),
+            None,
+        );
+        let outside = outer.to_string_lossy().into_owned();
+        let inside_arg = workspace.to_string_lossy().into_owned();
+        assert!(grant_covers(
+            &approved,
+            &[
+                "git".into(),
+                "format-patch".into(),
+                format!("-qo{inside_arg}").into(),
                 "HEAD".into(),
             ],
             &workspace
@@ -3847,25 +4129,47 @@ mod tests {
             &approved,
             &[
                 "git".into(),
-                "config".into(),
-                "core.worktree".into(),
-                outside.clone().into(),
+                "format-patch".into(),
+                format!("-qo{outside}").into(),
+                "HEAD".into(),
             ],
+            &workspace
+        ));
+        // A leading value-taking short owns its whole remainder as a string
+        // argument, so an `o`/`u` inside it is not a selector: `-Sdo/bar`
+        // and `-Gdo/bar` stay allowed even though a naive first-`o`/`u` read
+        // would parse `/bar` as an outside path. A no-selector cluster and a
+        // selector-tail cluster carry no glued operand, so `-Sxyz` and bare
+        // `-qo` stay inert and the next argument remains the ordinary
+        // position the non-dash check already confines.
+        assert!(grant_covers(
+            &approved,
+            &["git".into(), "log".into(), "-Sfoo".into(), "HEAD".into()],
+            &workspace
+        ));
+        assert!(grant_covers(
+            &approved,
+            &["git".into(), "log".into(), "-Sdo/bar".into(), "HEAD".into(),],
+            &workspace
+        ));
+        assert!(grant_covers(
+            &approved,
+            &["git".into(), "log".into(), "-Gdo/bar".into(), "HEAD".into(),],
+            &workspace
+        ));
+        assert!(grant_covers(
+            &approved,
+            &["git".into(), "log".into(), "-Sxyz".into(), "HEAD".into()],
             &workspace
         ));
         assert!(grant_covers(
             &approved,
             &[
                 "git".into(),
-                "config".into(),
-                "core.worktree".into(),
+                "format-patch".into(),
+                "-qo".into(),
                 inside_arg.clone().into(),
             ],
-            &workspace
-        ));
-        assert!(grant_covers(
-            &approved,
-            &["git".into(), "status".into()],
             &workspace
         ));
     }

@@ -1,12 +1,13 @@
 //! Shared connection state, the resumable reader, and reconnection.
 
-use std::collections::{HashMap, VecDeque};
-use std::pin::Pin;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-
 use dal_core::{Gen, Seq, SessionId, Update};
 use sonic_rs::{JsonValueMutTrait, JsonValueTrait, Value};
-use tokio::sync::Notify;
+use std::collections::{HashMap, VecDeque};
+use std::ops::Deref;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use tokio::sync::{Notify, watch};
+use tokio::task::JoinSet;
 
 use super::decode::{cursor, host_update, protocol_error, session_update};
 use super::{RemoteEndpoint, RemoteHostUpdate, backoff};
@@ -19,15 +20,40 @@ use crate::transport::{FrameWriter, ReadFrameError, Transport};
 /// One subscription to renew after a reconnect: session, fence, and cursor.
 type Resubscribe = (SessionId, u64, Option<(Gen, Seq)>);
 
-/// The in-progress reader step, kept across cancelled callers.
+/// One in-progress reader future.
 type Slot = Pin<Box<dyn Future<Output = Event> + Send>>;
+
+/// The resumable reader step, kept across cancelled callers.
+enum Reader {
+    /// Reading the next frame of one transport.
+    Reading {
+        /// The epoch of the transport being read.
+        epoch: u64,
+        /// The pending read.
+        frame: Slot,
+    },
+    /// Opening and initializing a replacement transport.
+    Connecting(Slot),
+}
 
 /// The outcome of one reader step.
 enum Event {
     /// One frame read, with the transport to keep reading.
-    Frame(Transport, Result<String, ReadFrameError>),
-    /// A new connection is initialized and resubscribed.
-    Connected(Transport),
+    Frame {
+        /// The epoch of the transport the frame was read from.
+        epoch: u64,
+        /// The transport to keep reading.
+        transport: Transport,
+        /// The frame or the read failure.
+        frame: Result<String, ReadFrameError>,
+    },
+    /// A new connection is initialized, resubscribed, and published.
+    Connected {
+        /// The epoch the connection was published at.
+        epoch: u64,
+        /// The transport to read.
+        transport: Transport,
+    },
     /// Reconnection stopped on a non-transport error.
     Failed {
         /// The error to report to the driving caller.
@@ -38,7 +64,22 @@ enum Event {
 }
 
 /// One connection shared by a host and its agents.
+///
+/// Owns the connection plus the cleanup tasks released by dropped
+/// subscriptions. Tasks hold `Connection`, never `Shared`, so dropping the
+/// last handle aborts them through `unsub_tasks` even mid-send.
 pub(super) struct Shared {
+    /// The connection and its serials.
+    conn: Arc<Connection>,
+    /// Tracked unsubscribe tasks spawned from subscription drops.
+    unsub_tasks: Mutex<JoinSet<()>>,
+    /// Runtime captured at connect; lets drops on plain threads schedule
+    /// cleanup without depending on thread-local runtime context.
+    handle: tokio::runtime::Handle,
+}
+
+/// The endpoint, reader, and subscription state one connection serves.
+pub(super) struct Connection {
     /// The endpoint to reconnect to.
     endpoint: RemoteEndpoint,
     /// The bearer token retained for authenticated reconnects.
@@ -46,7 +87,17 @@ pub(super) struct Shared {
     /// Request, subscription, and writer state.
     pub(super) core: Arc<Core>,
     /// The resumable reader step.
-    slot: tokio::sync::Mutex<Slot>,
+    reader: tokio::sync::Mutex<Reader>,
+    /// Serializes session subscribe and unsubscribe sends. Unrelated RPCs
+    /// never take it; only subscription lifecycle ops do.
+    pub(super) sub_serial: tokio::sync::Mutex<()>,
+}
+
+impl Deref for Shared {
+    type Target = Connection;
+    fn deref(&self) -> &Self::Target {
+        &self.conn
+    }
 }
 
 /// State reachable from the reader and from reconnection.
@@ -55,14 +106,53 @@ pub(super) struct Core {
     state: Mutex<State>,
     /// Woken after every state change.
     changed: Notify,
+    /// Mirrors the epoch of [`State::link`]. Sent only while the state lock
+    /// is held, so a reader parked on a retired transport wakes without
+    /// anyone taking the reader.
+    epoch: watch::Sender<u64>,
+}
+
+/// The transport requests are written on.
+enum Link {
+    /// One transport is open.
+    Live {
+        /// The epoch of this transport.
+        epoch: u64,
+        /// Its writer.
+        writer: FrameWriter,
+    },
+    /// No transport is open.
+    Down {
+        /// The epoch of this disconnected state.
+        epoch: u64,
+    },
+}
+
+impl Link {
+    /// Returns the epoch of this state; every transition advances it by one.
+    fn epoch(&self) -> u64 {
+        match self {
+            Self::Live { epoch, .. } | Self::Down { epoch } => *epoch,
+        }
+    }
+}
+
+/// A request id reserved on one live transport.
+struct Grant<'a> {
+    /// The epoch of the transport the request rides on.
+    epoch: u64,
+    /// That transport's writer.
+    writer: FrameWriter,
+    /// Removes the reserved request once its caller is done.
+    pending: PendingGuard<'a>,
 }
 
 /// Mutable connection state.
 pub(super) struct State {
     /// The next request id.
     next_id: i64,
-    /// The live writer; `None` while disconnected.
-    writer: Option<FrameWriter>,
+    /// The transport requests are written on.
+    link: Link,
     /// Outstanding requests and their replies once received.
     pending: HashMap<i64, Option<Result<Value, WireError>>>,
     /// Session subscriptions.
@@ -91,29 +181,104 @@ impl Shared {
         endpoint: RemoteEndpoint,
         auth_token: Option<Arc<str>>,
     ) -> Result<Arc<Self>, WireError> {
+        Ok(Arc::new(Self {
+            conn: Connection::connect(endpoint, auth_token).await?,
+            unsub_tasks: Mutex::new(JoinSet::new()),
+            handle: tokio::runtime::Handle::current(),
+        }))
+    }
+
+    /// Spawns a tracked release for a dropped current subscription.
+    ///
+    /// The task holds `Connection`, never `Shared`: dropping the last
+    /// handle drops `unsub_tasks`, aborting the task even mid-send.
+    /// Scheduling uses the handle retained at connect, so drops on plain
+    /// threads (`spawn_blocking`, std threads) still release the server pump.
+    pub(super) fn spawn_unsubscribe(self: &Arc<Self>, session: SessionId) {
+        let conn = Arc::clone(&self.conn);
+        let mut tasks = self
+            .unsub_tasks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        while tasks.try_join_next().is_some() {}
+        tasks.spawn_on(unsubscribe_task(conn, session), &self.handle);
+    }
+}
+
+impl Connection {
+    /// Connects once, without retrying, and initializes the connection.
+    pub(super) async fn connect(
+        endpoint: RemoteEndpoint,
+        auth_token: Option<Arc<str>>,
+    ) -> Result<Arc<Self>, WireError> {
+        let (epoch, _) = watch::channel(0);
         let core = Arc::new(Core {
             state: Mutex::new(State {
                 next_id: 1,
-                writer: None,
+                link: Link::Down { epoch: 0 },
                 pending: HashMap::new(),
                 subs: HashMap::new(),
                 host_sub: None,
                 next_fence: 1,
             }),
             changed: Notify::new(),
+            epoch,
         });
-        let transport = establish(&core, &endpoint, auth_token.as_deref()).await?;
+        let (epoch, transport) = establish(&core, &endpoint, auth_token.as_deref()).await?;
         Ok(Arc::new(Self {
             endpoint,
             auth_token,
             core,
-            slot: tokio::sync::Mutex::new(read(transport)),
+            reader: tokio::sync::Mutex::new(read(epoch, transport)),
+            sub_serial: tokio::sync::Mutex::new(()),
         }))
+    }
+
+    /// Removes the subscription slot only when `fence` still owns it.
+    ///
+    /// Returns true when the caller takes over server-side release. The
+    /// guard never crosses an await: the check and removal are one critical
+    /// section on the state mutex.
+    pub(super) fn release(&self, session: SessionId, fence: u64) -> bool {
+        let mut state = self.core.state();
+        if state
+            .subs
+            .get(&session)
+            .is_some_and(|sub| sub.fence == fence)
+        {
+            state.subs.remove(&session);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Closes transport `epoch` after a refused release, unless it is
+    /// already gone.
+    ///
+    /// The server keeps answering a session until it sees the transport
+    /// close, so a refusal leaves the pump state unknown and the transport is
+    /// torn down; `establish` then resubscribes the still-live sessions from
+    /// their cursors. Retiring is a no-op once `epoch` is no longer live, so
+    /// a cleanup that lost a race to a replacement never touches it.
+    ///
+    /// Never waits for the reader: a step parked on `epoch` observes the
+    /// retirement through the epoch watch and drops the transport itself;
+    /// an idle reader is replaced here.
+    fn invalidate(&self, epoch: u64) {
+        if !self.core.retire(epoch) {
+            return;
+        }
+        if let Ok(mut reader) = self.reader.try_lock()
+            && matches!(*reader, Reader::Reading { epoch: reading, .. } if reading == epoch)
+        {
+            *reader = self.reconnecting(0);
+        }
     }
 
     /// Waits until `ready` yields, driving the shared reader meanwhile.
     ///
-    /// Cancel safe: an interrupted read or reconnect stays in the slot and
+    /// Cancel safe: an interrupted read or reconnect stays in the reader and
     /// the next waiter resumes it.
     pub(super) async fn wait<T>(
         &self,
@@ -127,7 +292,7 @@ impl Shared {
             tokio::select! {
                 biased;
                 () = notified => {}
-                mut slot = self.slot.lock() => self.step(&mut slot).await?,
+                mut reader = self.reader.lock() => self.step(&mut reader).await?,
             }
         }
     }
@@ -138,24 +303,52 @@ impl Shared {
     /// [`WireError::Transport`]; it is never re-sent, so server work is
     /// neither duplicated nor cancelled.
     pub(super) async fn call(&self, method: &str, params: Value) -> Result<Value, WireError> {
-        let (id, writer) = self
+        let grant = self.grant().await?;
+        self.send(grant, method, params).await
+    }
+
+    /// Reserves a request id on the live transport, waiting for one while
+    /// disconnected.
+    async fn grant(&self) -> Result<Grant<'_>, WireError> {
+        let (epoch, writer, id) = self
             .wait(|state| {
-                let writer = state.writer.clone()?;
+                let Link::Live { epoch, writer } = &state.link else {
+                    return None;
+                };
+                let (epoch, writer) = (*epoch, writer.clone());
                 let id = state.next_id();
                 state.pending.insert(id, None);
-                Some(Ok((id, writer)))
+                Some(Ok((epoch, writer, id)))
             })
             .await?;
-        let pending = PendingGuard {
-            core: &self.core,
-            id,
-        };
+        Ok(Grant {
+            epoch,
+            writer,
+            pending: PendingGuard {
+                core: &self.core,
+                id,
+            },
+        })
+    }
+
+    /// Sends one request on its granted transport and waits for the reply.
+    async fn send(
+        &self,
+        grant: Grant<'_>,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let Grant {
+            writer, pending, ..
+        } = grant;
+        let id = pending.id;
         let frame = encode_jsonrpc(&Message::Request {
             id: Id::Integer(id),
             method: method.to_owned(),
             params,
         })?;
         writer.write_frame(&frame).await?;
+        drop(writer);
         let reply = self
             .wait(|state| state.pending.get_mut(&id).and_then(Option::take))
             .await;
@@ -163,46 +356,127 @@ impl Shared {
         reply
     }
 
-    /// Runs one reader step: a frame, a lost connection, or a reconnect.
-    async fn step(&self, slot: &mut Slot) -> Result<(), WireError> {
-        match slot.as_mut().await {
-            Event::Frame(transport, Ok(line)) => {
-                *slot = read(transport);
+    /// Runs one reader step: a frame, a reconnect, or the retirement of the
+    /// transport being read.
+    ///
+    /// Cancel safe: an unfinished future stays in `reader`, and a finished
+    /// one is always replaced before this returns.
+    async fn step(&self, reader: &mut Reader) -> Result<(), WireError> {
+        let event = match reader {
+            Reader::Reading { epoch, frame } => {
+                let epoch = *epoch;
+                let mut live = self.core.epoch.subscribe();
+                tokio::select! {
+                    biased;
+                    _ = live.wait_for(|current| *current != epoch) => None,
+                    event = frame.as_mut() => Some(event),
+                }
+            }
+            Reader::Connecting(connect) => Some(connect.as_mut().await),
+        };
+        if let Some(event) = event {
+            self.advance(reader, event)
+        } else {
+            *reader = self.reconnecting(0);
+            Ok(())
+        }
+    }
+
+    /// Applies one finished reader future, replacing it in every case.
+    ///
+    /// Outcomes of a retired epoch are dropped unread: their transport is
+    /// gone and `establish` resumes from the surviving cursors.
+    fn advance(&self, reader: &mut Reader, event: Event) -> Result<(), WireError> {
+        match event {
+            Event::Frame {
+                epoch,
+                transport,
+                frame: Ok(line),
+            } if self.core.is_live(epoch) => {
+                *reader = read(epoch, transport);
                 self.core.dispatch(&line)
             }
-            Event::Frame(transport, Err(ReadFrameError::InvalidUtf8)) => {
-                *slot = read(transport);
+            Event::Frame {
+                epoch,
+                transport,
+                frame: Err(ReadFrameError::InvalidUtf8),
+            } if self.core.is_live(epoch) => {
+                *reader = read(epoch, transport);
                 Err(WireError::Protocol {
                     code: -32700,
                     message: "frame is not valid UTF-8".to_owned(),
                 })
             }
-            Event::Frame(transport, Err(error)) => {
-                *slot = reconnect(
-                    Arc::clone(&self.core),
-                    self.endpoint.clone(),
-                    self.auth_token.clone(),
-                    0,
-                );
+            Event::Frame {
+                epoch,
+                transport,
+                frame,
+            } => {
                 drop(transport);
-                tracing::debug!(%error, "remote connection lost; reconnecting");
-                self.core.lost();
+                if let Err(error) = frame {
+                    tracing::debug!(%error, "remote connection lost; reconnecting");
+                }
+                self.core.retire(epoch);
+                *reader = self.reconnecting(0);
                 Ok(())
             }
-            Event::Connected(transport) => {
-                *slot = read(transport);
+            Event::Connected { epoch, transport } => {
+                *reader = if self.core.is_live(epoch) {
+                    read(epoch, transport)
+                } else {
+                    self.reconnecting(0)
+                };
                 Ok(())
             }
             Event::Failed { error, attempt } => {
-                *slot = reconnect(
-                    Arc::clone(&self.core),
-                    self.endpoint.clone(),
-                    self.auth_token.clone(),
-                    attempt,
-                );
+                *reader = self.reconnecting(attempt);
                 Err(error)
             }
         }
+    }
+
+    /// Starts reconnecting from retry index `attempt`.
+    fn reconnecting(&self, attempt: u32) -> Reader {
+        Reader::Connecting(reconnect(
+            Arc::clone(&self.core),
+            self.endpoint.clone(),
+            self.auth_token.clone(),
+            attempt,
+        ))
+    }
+}
+
+/// Releases the server pump for a dropped handle unless a successor arrived.
+///
+/// Holds `Connection`, never `Shared`, so dropping the connection aborts
+/// this task through its owning `JoinSet` even mid-send: no owner cycle.
+/// The serial mutually excludes the check+send pairs of subscribe,
+/// unsubscribe, and repaint, so a stale send can never land after a
+/// successor's subscribe. Any slot entry means a live successor, since
+/// fences are never reused.
+async fn unsubscribe_task(conn: Arc<Connection>, session: SessionId) {
+    let _serial = conn.sub_serial.lock().await;
+    if conn.core.state().subs.contains_key(&session) {
+        return;
+    }
+    let grant = match conn.grant().await {
+        Ok(grant) => grant,
+        Err(error) => {
+            tracing::debug!(%error, "dropped subscription release could not reserve a request");
+            return;
+        }
+    };
+    // A refusal describes only the transport the request rode.
+    let epoch = grant.epoch;
+    let params = sonic_rs::json!({"sessionId": session.to_string()});
+    // The server answers Ok({}) even for unknown sessions (rpc/session.rs
+    // removes and cancels when present, no-ops otherwise), so no error code
+    // means already-absent: every error leaves the pump state unknown and
+    // invalidates through the existing loss path instead of silently keeping
+    // a dead server subscription.
+    if let Err(error) = conn.send(grant, "session/unsubscribe", params).await {
+        tracing::debug!(%error, "dropped subscription release failed; invalidating connection");
+        conn.invalidate(epoch);
     }
 }
 
@@ -245,10 +519,22 @@ impl Core {
         self.changed.notify_waiters();
     }
 
-    /// Fails outstanding requests and clears the writer.
-    fn lost(&self) {
+    /// Returns whether transport `epoch` is the live one.
+    fn is_live(&self, epoch: u64) -> bool {
+        matches!(self.state().link, Link::Live { epoch: live, .. } if live == epoch)
+    }
+
+    /// Retires live transport `epoch` in one critical section: drops its
+    /// writer, fails its outstanding requests, and advances the epoch watch
+    /// so a step parked on it wakes.
+    ///
+    /// Returns false, touching nothing, when `epoch` is not live.
+    fn retire(&self, epoch: u64) -> bool {
         let mut state = self.state();
-        state.writer = None;
+        if !matches!(state.link, Link::Live { epoch: live, .. } if live == epoch) {
+            return false;
+        }
+        self.relink(&mut state, Link::Down { epoch: epoch + 1 });
         for reply in state.pending.values_mut() {
             if reply.is_none() {
                 *reply = Some(Err(WireError::Transport(
@@ -258,6 +544,15 @@ impl Core {
         }
         drop(state);
         self.wake();
+        true
+    }
+
+    /// Replaces the link and publishes its epoch under the held state lock,
+    /// so the watch never disagrees with the state it mirrors.
+    fn relink(&self, state: &mut State, link: Link) {
+        let epoch = link.epoch();
+        state.link = link;
+        self.epoch.send_replace(epoch);
     }
 
     /// Decodes and applies one server frame.
@@ -389,12 +684,19 @@ pub(super) fn subscribe_params(session: SessionId, after: Option<(Gen, Seq)>) ->
     params
 }
 
-/// Starts reading the next frame.
-fn read(mut transport: Transport) -> Slot {
-    Box::pin(async move {
-        let frame = transport.read_frame().await;
-        Event::Frame(transport, frame)
-    })
+/// Starts reading the next frame of transport `epoch`.
+fn read(epoch: u64, mut transport: Transport) -> Reader {
+    Reader::Reading {
+        epoch,
+        frame: Box::pin(async move {
+            let frame = transport.read_frame().await;
+            Event::Frame {
+                epoch,
+                transport,
+                frame,
+            }
+        }),
+    }
 }
 
 /// Reconnects with backoff until connected or a non-transport failure.
@@ -410,7 +712,7 @@ fn reconnect(
             tokio::time::sleep(backoff(attempt)).await;
             attempt = attempt.saturating_add(1);
             match establish(&core, &endpoint, auth_token.as_deref()).await {
-                Ok(transport) => return Event::Connected(transport),
+                Ok((epoch, transport)) => return Event::Connected { epoch, transport },
                 Err(WireError::Transport(message)) => {
                     tracing::debug!(%message, attempt, "remote reconnect failed");
                 }
@@ -420,12 +722,13 @@ fn reconnect(
     })
 }
 
-/// Opens, initializes, and resubscribes one connection, then publishes its writer.
+/// Opens, initializes, and resubscribes one connection, then publishes it
+/// at the next epoch.
 async fn establish(
     core: &Core,
     endpoint: &RemoteEndpoint,
     auth_token: Option<&str>,
-) -> Result<Transport, WireError> {
+) -> Result<(u64, Transport), WireError> {
     let mut transport = open_endpoint(endpoint, auth_token).await?;
     let capabilities: Vec<Value> = crate::protocol::CAPABILITIES
         .iter()
@@ -479,9 +782,18 @@ async fn establish(
             queue.push_back(RemoteHostUpdate::Reconnected);
         }
     }
-    core.state().writer = Some(transport.writer());
+    let mut state = core.state();
+    let epoch = state.link.epoch() + 1;
+    core.relink(
+        &mut state,
+        Link::Live {
+            epoch,
+            writer: transport.writer(),
+        },
+    );
+    drop(state);
     core.wake();
-    Ok(transport)
+    Ok((epoch, transport))
 }
 
 /// Sends one request on a connection being established and reads its reply,
@@ -571,4 +883,295 @@ fn open_local(path: &std::path::Path) -> std::future::Ready<Result<Transport, Wi
         "local socket clients are not supported on this platform: {}",
         path.display()
     ))))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::collections::VecDeque;
+    use std::future::poll_fn;
+    use std::num::NonZeroU64;
+    use std::pin::pin;
+    use std::sync::Arc;
+    use std::task::Poll;
+    use std::time::Duration;
+
+    use dal_core::{Gen, Seq, SessionId, Update};
+    use sonic_rs::{JsonValueTrait, Value};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+    use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
+
+    use super::{Connection, SubState, unsubscribe_task};
+    use crate::remote::RemoteEndpoint;
+
+    const DROPPED: &str = "018f0f62-3b00-7000-8000-0000000000d1";
+    const WAITING: &str = "018f0f62-3b00-7000-8000-0000000000d2";
+
+    /// The scripted server end of one client connection.
+    struct Peer {
+        reader: BufReader<OwnedReadHalf>,
+        writer: OwnedWriteHalf,
+    }
+
+    impl Peer {
+        /// Accepts one client and answers its `initialize`.
+        async fn initialized(listener: &UnixListener) -> std::io::Result<Self> {
+            let (stream, _) = listener.accept().await?;
+            let (reader, writer) = stream.into_split();
+            let mut peer = Self {
+                reader: BufReader::new(reader),
+                writer,
+            };
+            let (id, _) = peer.expect("initialize").await?;
+            peer.reply(
+                id,
+                sonic_rs::json!({
+                    "protocolVersion": 1,
+                    "serverInfo": {"name": "dal", "version": "0"},
+                    "capabilities": [],
+                    "clientId": "conn-test#1",
+                }),
+            )
+            .await?;
+            Ok(peer)
+        }
+
+        /// Reads the next client frame; `None` once the client closed.
+        async fn frame(&mut self) -> std::io::Result<Option<Value>> {
+            let mut line = String::new();
+            let read = self.reader.read_line(&mut line).await?;
+            if read == 0 {
+                return Ok(None);
+            }
+            sonic_rs::from_str(&line)
+                .map(Some)
+                .map_err(std::io::Error::other)
+        }
+
+        async fn expect(&mut self, method: &str) -> std::io::Result<(Value, Value)> {
+            let frame = self
+                .frame()
+                .await?
+                .ok_or_else(|| std::io::Error::other("client closed the connection"))?;
+            assert_eq!(
+                frame.get("method").and_then(|m| m.as_str()),
+                Some(method),
+                "unexpected frame: {frame}"
+            );
+            let id = frame
+                .get("id")
+                .cloned()
+                .ok_or_else(|| std::io::Error::other("request has an id"))?;
+            let params = frame.get("params").cloned().unwrap_or_default();
+            Ok((id, params))
+        }
+
+        async fn send(&mut self, frame: &Value) -> std::io::Result<()> {
+            let mut text = sonic_rs::to_string(frame).map_err(std::io::Error::other)?;
+            text.push('\n');
+            self.writer.write_all(text.as_bytes()).await?;
+            Ok(())
+        }
+
+        async fn reply(&mut self, id: Value, result: Value) -> std::io::Result<()> {
+            self.send(&sonic_rs::json!({"jsonrpc": "2.0", "id": id, "result": result}))
+                .await?;
+            Ok(())
+        }
+
+        /// Confirms the resubscribe of `session` after `(1, after)`.
+        async fn resubscribed(&mut self, session: &str, after: u64) -> std::io::Result<()> {
+            let (id, params) = self.expect("session/subscribe").await?;
+            assert_eq!(
+                params.get("sessionId").and_then(|s| s.as_str()),
+                Some(session)
+            );
+            assert_eq!(
+                params.get("after").and_then(JsonValueTrait::as_u64),
+                Some(after)
+            );
+            self.reply(id, sonic_rs::json!({"gen": 1, "seq": after}))
+                .await?;
+            Ok(())
+        }
+
+        async fn update(&mut self, session: &str, seq: u64) -> std::io::Result<()> {
+            self.send(&sonic_rs::json!({
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": session,
+                    "gen": 1,
+                    "seq": seq,
+                    "update": {"type": "remote_test_marker"},
+                },
+            }))
+            .await?;
+            Ok(())
+        }
+    }
+
+    fn bind(dir: &std::path::Path) -> std::io::Result<(UnixListener, RemoteEndpoint)> {
+        let path = dir.join("rpc.sock");
+        let listener = UnixListener::bind(&path)?;
+        Ok((listener, RemoteEndpoint::LocalSocket(path)))
+    }
+
+    fn session(id: &str) -> Result<SessionId, dal_core::IdError> {
+        SessionId::parse(id)
+    }
+
+    /// Registers a live local subscription to `id` resuming after `(1, seq)`.
+    fn subscribe(conn: &Connection, id: SessionId, seq: NonZeroU64) {
+        let mut state = conn.core.state();
+        let fence = state.next_fence();
+        let last = (Gen::new(NonZeroU64::MIN), Seq::new(seq));
+        state.subs.insert(
+            id,
+            SubState {
+                fence,
+                last: Some(last),
+                queue: VecDeque::new(),
+                resync: false,
+            },
+        );
+    }
+
+    /// Waits for the next update queued for `id`, driving the shared reader.
+    async fn next(
+        conn: &Connection,
+        id: SessionId,
+    ) -> Result<Arc<Update>, crate::error::WireError> {
+        conn.wait(|state| {
+            state
+                .subs
+                .get_mut(&id)
+                .and_then(|sub| sub.queue.pop_front())
+                .map(Ok)
+        })
+        .await
+    }
+
+    fn position(update: &Update) -> (u64, u64) {
+        (update.r#gen.get(), update.seq.get())
+    }
+
+    /// A refused release closes the transport it rode even while another
+    /// waiter holds the reader parked on that quiet transport.
+    ///
+    /// Every wake polls the waiter before the cleanup, so the reader is
+    /// handed back to the waiter between the refusal and the teardown and the
+    /// teardown cannot take it. Both futures are polled on every wake.
+    #[tokio::test]
+    async fn refused_release_closes_the_transport_under_a_parked_reader() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (listener, endpoint) = bind(dir.path()).expect("bind socket");
+        let server = async {
+            let mut first = Peer::initialized(&listener).await.expect("accept client");
+            let (id, params) = first
+                .expect("session/unsubscribe")
+                .await
+                .expect("unsubscribe request");
+            assert_eq!(
+                params.get("sessionId").and_then(|s| s.as_str()),
+                Some(DROPPED)
+            );
+            first
+                .send(&sonic_rs::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": {"code": -32601, "message": "method not found"},
+                }))
+                .await
+                .expect("write frame");
+            assert!(
+                first.frame().await.expect("read frame").is_none(),
+                "the refused transport must close"
+            );
+            let mut second = Peer::initialized(&listener).await.expect("accept client");
+            second.resubscribed(WAITING, 5).await.expect("resubscribe");
+            second.update(WAITING, 6).await.expect("update");
+            second
+        };
+        let client = async {
+            let conn = Connection::connect(endpoint, None).await.expect("connect");
+            let waiting = session(WAITING).expect("session id");
+            subscribe(&conn, waiting, NonZeroU64::new(5).expect("nonzero seq"));
+            let mut waiter = pin!(next(&conn, waiting));
+            let mut cleanup = pin!(unsubscribe_task(
+                Arc::clone(&conn),
+                session(DROPPED).expect("session id")
+            ));
+            let mut released = false;
+            let update = poll_fn(|cx| {
+                if let Poll::Ready(update) = waiter.as_mut().poll(cx) {
+                    return Poll::Ready(update);
+                }
+                if !released {
+                    released = cleanup.as_mut().poll(cx).is_ready();
+                }
+                Poll::Pending
+            })
+            .await
+            .expect("update");
+            assert!(released, "the refused release finishes");
+            assert_eq!(position(&update), (1, 6));
+        };
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            Box::pin(async { tokio::join!(server, client) }),
+        )
+        .await
+        .expect("the refused release repair finishes");
+    }
+
+    /// A cleanup whose transport was already replaced leaves the successor
+    /// alone: its outstanding request is answered and its later updates
+    /// arrive on the same transport.
+    #[tokio::test]
+    async fn stale_invalidation_spares_the_successor_transport() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (listener, endpoint) = bind(dir.path()).expect("bind socket");
+        let server = async {
+            drop(Peer::initialized(&listener).await.expect("accept client"));
+            let mut second = Peer::initialized(&listener).await.expect("accept client");
+            second.resubscribed(WAITING, 5).await.expect("resubscribe");
+            second.update(WAITING, 6).await.expect("update");
+            let (id, _) = second.expect("session/list").await.expect("list request");
+            second
+                .reply(id, sonic_rs::json!({"sessions": []}))
+                .await
+                .expect("reply");
+            second.update(WAITING, 7).await.expect("update");
+            second
+        };
+        let client = async {
+            let conn = Connection::connect(endpoint, None).await.expect("connect");
+            let waiting = session(WAITING).expect("session id");
+            subscribe(&conn, waiting, NonZeroU64::new(5).expect("nonzero seq"));
+            // Captured from a real grant on the first transport, before any
+            // reader step can observe its close.
+            let stale = conn.grant().await.expect("grant").epoch;
+            assert_eq!(
+                position(next(&conn, waiting).await.expect("update").as_ref()),
+                (1, 6)
+            );
+            let mut call = pin!(conn.call("session/list", sonic_rs::json!({})));
+            let parked = poll_fn(|cx| Poll::Ready(call.as_mut().poll(cx).is_pending())).await;
+            assert!(parked, "the successor request awaits its reply");
+            conn.invalidate(stale);
+            let reply = call.await.expect("the successor reply survives");
+            assert!(reply.get("sessions").is_some());
+            assert_eq!(
+                position(next(&conn, waiting).await.expect("update").as_ref()),
+                (1, 7)
+            );
+        };
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            Box::pin(async { tokio::join!(server, client) }),
+        )
+        .await
+        .expect("the stale cleanup finishes");
+    }
 }

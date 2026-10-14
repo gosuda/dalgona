@@ -880,26 +880,32 @@ impl Validator {
                     ));
                 }
             }
-            Record::Boot { r#gen, .. } => {
-                let Some(count) = delta.boot_count.checked_add(1) else {
-                    return Err(damaged(offset, "boot count is exhausted"));
-                };
-                if r#gen.get() <= delta.last_boot_gen {
-                    return Err(damaged(
-                        offset,
-                        format!(
-                            "boot generation {} does not follow generation {}",
-                            r#gen.get(),
-                            delta.last_boot_gen
-                        ),
-                    ));
-                }
-                delta.boot_count = count;
-                delta.last_boot_gen = r#gen.get();
-                delta.turns.expire_pending();
-            }
+            Record::Boot { r#gen, .. } => Self::stage_boot(delta, r#gen.get(), offset)?,
             _ => {}
         }
+        Ok(())
+    }
+
+    fn stage_boot(
+        delta: &mut ValidationDelta,
+        generation: u64,
+        offset: u64,
+    ) -> Result<(), OpenFailure> {
+        let Some(count) = delta.boot_count.checked_add(1) else {
+            return Err(damaged(offset, "boot count is exhausted"));
+        };
+        if generation <= delta.last_boot_gen {
+            return Err(damaged(
+                offset,
+                format!(
+                    "boot generation {generation} does not follow generation {}",
+                    delta.last_boot_gen
+                ),
+            ));
+        }
+        delta.boot_count = count;
+        delta.last_boot_gen = generation;
+        delta.turns.expire_pending();
         Ok(())
     }
 

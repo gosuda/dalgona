@@ -1,6 +1,31 @@
 # Changelog
 
 ## Unreleased
+- Report mailbox delivery only after its journal write succeeds. Failed
+  writes return a service error and leave the live steer queue unchanged.
+  Full queues refuse messages without writing them to the journal.
+- Respect OAuth cancellation while waiting for the auth lock and recheck it
+  immediately before the atomic store. Cancellation observed at either check
+  leaves stored credentials unchanged.
+- Sync the parent directory on POSIX systems when deleting the last stored
+  credential, making the removal of the credentials file durable.
+- Fix Git path confinement for attached long options and short `-qo` selectors
+  without rejecting valid `-S` or `-G` string operands or empty options like
+  `--pretty=`.
+- Keep remote updates flowing when the server refuses an unsubscribe after
+  a subscription is dropped. Surviving sessions reconnect from their last
+  accepted cursor. Cleanup from an older connection leaves its replacement
+  and pending replies intact.
+- Fix the `steer` example waking a new turn while a turn is running.
+  It now reads the Boolean value from the `turn.is_idle` reply.
+- Keep ACP cancellation separate for numeric and string request identifiers.
+  A completed request no longer removes a newer request's cancellation slot.
+- Allow Git targets that do not yet exist when their resolved paths stay
+  inside approved roots. Symlink escapes remain denied.
+- Reject hook rewrites that turn parallel read calls into mutating calls.
+- Reject oversized extension sidecar writes before changing the stored value.
+- Settle cancelled scope handles while child startup is still pending.
+  Dropping the scope aborts its owned startup tasks.
 - Fix remote API-key sign-in reporting cancellation after the key was stored.
   Submitted sign-ins now await the server’s result.
 - Persist turn-ID reservations before acknowledging prompts, follow-ups, and wake

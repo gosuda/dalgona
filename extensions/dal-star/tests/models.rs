@@ -289,6 +289,21 @@ async fn mutated_scripted_model_fields_reach_the_turn() {
     }
 }
 
+/// The control for the table above: the same scaffolding returning the
+/// forwarded record untouched ends the turn normally.
+#[tokio::test]
+async fn unmodified_scripted_model_record_ends_the_turn() {
+    for tail in [
+        "return r",
+        "return {\"model\": r.model, \"events\": ev}",
+        "return {\"model\": r.model, \"events\": ev[:-1] + [ev[-1]]}",
+    ] {
+        let (data, host) = host_for(&format!("{FORWARD_THEN}{tail}")).await;
+        let (stop, view, seen) = prompt(&host, &data).await;
+        assert_eq!(stop, Stop::EndTurn, "{tail}: {seen:?} {view}");
+    }
+}
+
 #[tokio::test]
 async fn scripted_model_runtime_error_fails_the_turn_not_the_host() {
     let (data, host) = host_for("fail(\"model script exploded\")").await;

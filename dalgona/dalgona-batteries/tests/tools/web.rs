@@ -634,3 +634,60 @@ async fn a_rate_limited_search_keeps_its_exact_status_form() -> TestResult {
     );
     Ok(())
 }
+
+// --- search count boundaries -------------------------------------------
+
+const INVALID_COUNT: &str = "web_search: count must be 1 to 20.";
+
+#[tokio::test]
+async fn a_search_count_outside_one_to_twenty_is_invalid_before_env_and_net() -> TestResult {
+    for count in [0, 21] {
+        // Missing credentials: the count check must win over the
+        // not-configured path, and nothing may reach the net service.
+        let host = Host::answering([]);
+        let extension = web(config(30))?;
+        let args = format!(r#"{{"query":"parse rust","count":{count}}}"#);
+        let text = run_tool(&extension, &host, "web_search", &args).await?;
+        assert_eq!(text, INVALID_COUNT, "count {count} without credentials");
+        assert!(
+            requested_urls(&host).is_empty(),
+            "count {count} reached the net service"
+        );
+
+        // Present credentials with a scripted success waiting: the request
+        // must still be refused before the network.
+        let host = scripted([reply(200, "application/json", br#"{"web":{"results":[]}}"#)]);
+        locked(&host.env_vars).insert("BRAVE_API_KEY".to_owned(), BRAVE_KEY.to_owned());
+        let extension = web(config(30))?;
+        let text = run_tool(&extension, &host, "web_search", &args).await?;
+        assert_eq!(text, INVALID_COUNT, "count {count} with credentials");
+        assert!(
+            requested_urls(&host).is_empty(),
+            "count {count} reached the net service"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_search_count_of_one_twenty_or_absent_is_forwarded() -> TestResult {
+    let cases = [
+        (r#"{"query":"parse rust","count":1}"#, "count=1"),
+        (r#"{"query":"parse rust","count":20}"#, "count=20"),
+        (r#"{"query":"parse rust"}"#, "count=5"),
+    ];
+    for (args, expected) in cases {
+        let host = scripted([reply(200, "application/json", br#"{"web":{"results":[]}}"#)]);
+        locked(&host.env_vars).insert("BRAVE_API_KEY".to_owned(), BRAVE_KEY.to_owned());
+        let extension = web(config(30))?;
+        run_tool(&extension, &host, "web_search", args).await?;
+        assert_eq!(
+            requested_urls(&host),
+            [format!(
+                "https://api.search.brave.com/res/v1/web/search?q=parse+rust&{expected}"
+            )],
+            "{args} must forward {expected}"
+        );
+    }
+    Ok(())
+}

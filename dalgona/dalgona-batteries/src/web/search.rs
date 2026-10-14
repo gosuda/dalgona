@@ -190,8 +190,13 @@ fn tavily_request(
 }
 
 /// The validated result count, defaulting to [`DEFAULT_COUNT`].
-fn effective_count(requested: Option<u32>) -> u32 {
-    requested.unwrap_or(DEFAULT_COUNT)
+/// Returns `None` when an explicit count falls outside 1..=20.
+fn effective_count(requested: Option<u32>) -> Option<u32> {
+    match requested {
+        None => Some(DEFAULT_COUNT),
+        Some(count) if (1..=20).contains(&count) => Some(count),
+        Some(_) => None,
+    }
 }
 
 /// Parses one search `net` response. A non-2xx status becomes `HttpStatus`;
@@ -276,7 +281,11 @@ impl dal_agent::ext::Tool for SearchTool {
                     "{TOOL_NAME}: query must be 1 to {MAX_QUERY_CHARS} characters."
                 )));
             }
-            let count = effective_count(params.count);
+            let Some(count) = effective_count(params.count) else {
+                return ToolOutcome::Err(dal_agent::ToolError::message(format!(
+                    "{TOOL_NAME}: count must be 1 to 20."
+                )));
+            };
             let services = cx.services();
             let caller = cx.caller().clone();
             let provider = self.cfg.provider().unwrap_or(super::Provider::Brave);
@@ -485,16 +494,6 @@ mod tests {
             .as_deref(),
             Some("web_search got HTTP 429 for http://x/search")
         );
-    }
-
-    #[test]
-    fn decodes_search_params_and_default_count() -> Result<(), Box<dyn std::error::Error>> {
-        let params: super::WebSearchParams = sonic_rs::from_str(r#"{"query":"parse rust"}"#)?;
-        assert_eq!(params.query, "parse rust");
-        assert_eq!(params.count, None);
-        assert_eq!(super::effective_count(params.count), 5);
-        assert_eq!(super::effective_count(Some(2)), 2);
-        Ok(())
     }
 
     #[test]

@@ -53,7 +53,7 @@ const SENTINEL: &[u8] = b"opening-lifecycle-sentinel";
 struct LifecycleHost {
     host: Host,
     workspace: Workspace,
-    _tmp: tempfile::TempDir,
+    tmp: tempfile::TempDir,
 }
 
 async fn configured_host(
@@ -95,7 +95,7 @@ async fn configured_host(
     LifecycleHost {
         host,
         workspace,
-        _tmp: tmp,
+        tmp,
     }
 }
 
@@ -1196,7 +1196,7 @@ async fn failed_reservation_sync_never_acknowledges_a_queued_turn() {
     let held = held_session().await;
     let session = held.agent.session();
     let store = dal_store::Store::new(
-        held.live._tmp.path().join("data"),
+        held.live.tmp.path().join("data"),
         held.live.workspace.clone(),
         dal_core::Product::Dal,
     );

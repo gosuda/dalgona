@@ -143,6 +143,10 @@ class RenderTest(unittest.TestCase):
         self.assertIn('    ("p", "m"),', text)
         self.assertTrue(text.endswith("];\n"))
 
+    def test_render_is_deterministic(self) -> None:
+        rows = [up.PriceRow("m", 1.0, None, None, None, (up.PriceTier(5, 1.0, None, None, None, None),))]
+        self.assertEqual(up.render("2026-01-02", rows, []), up.render("2026-01-02", rows, []))
+
 
 class LoadCatalogTest(unittest.TestCase):
     def load(self, catalog: object) -> tuple[list[up.PriceRow], list[tuple[str, str]]]:

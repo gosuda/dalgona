@@ -2210,51 +2210,63 @@ impl Actor {
         let running = self.control().running();
         let receipt = match mail.mode {
             MailMode::Steer => match running {
-                // The fold owns the text once the steer lands in the
-                // running turn; a full steer queue refuses the message.
-                Some(turn) => {
-                    let mut effects = Vec::new();
-                    let stepped = self.fold.step(
-                        Event::Steer {
-                            turn,
-                            text: mail.text.clone(),
-                        },
-                        Timestamp::now(),
-                        &mut effects,
-                    );
-                    match stepped {
-                        Ok(()) => {
-                            self.execute(effects, None).await;
-                            Receipt::Delivered
-                        }
-                        Err(Rejection::SteerFull) => Receipt::Full,
-                        Err(_) => Receipt::Buffered,
-                    }
-                }
+                Some(turn) => match self.fold.preflight_steer(turn) {
+                    Ok(()) => Receipt::Delivered,
+                    Err(Rejection::SteerFull) => Receipt::Full,
+                    Err(_) => Receipt::Buffered,
+                },
                 None => self.buffered_mail_receipt(),
             },
             MailMode::Aside => Receipt::Delivered,
             MailMode::NextTurn => self.buffered_mail_receipt(),
-            // `MailMode` is `#[non_exhaustive]`; every known variant has
-            // an explicit arm above. An unknown future mode stores like
-            // a deferred message until it gains an explicit arm.
             _ => {
                 debug_assert!(false, "unmapped mail mode; add an explicit arm");
                 self.buffered_mail_receipt()
             }
         };
-        if receipt != Receipt::Full {
-            let record = Record::Mail(dal_core::Mail {
-                at: jiff::Timestamp::now(),
-                from: mail.from,
-                to: mail.to,
-                mode: mail.mode,
-                text: mail.text.clone(),
-                reply_to: mail.reply_to.map(|entry| entry.get().to_string().into()),
-            });
-            let _ = self.journal.append(vec![record]).await;
+        if receipt == Receipt::Full {
+            let _ = reply.send(Ok(Some(receipt)));
+            return;
         }
-        let _ = reply.send(Some(receipt));
+        let record = Record::Mail(dal_core::Mail {
+            at: jiff::Timestamp::now(),
+            from: mail.from,
+            to: mail.to,
+            mode: mail.mode,
+            text: mail.text.clone(),
+            reply_to: mail.reply_to.map(|entry| entry.get().to_string().into()),
+        });
+        if let Err(error) = self.journal.append(vec![record]).await {
+            let message: Box<str> = format!("journal write failed: {error}").into();
+            if breaks_session(&error) {
+                self.broken = Some(message.clone());
+            }
+            let _ = reply.send(Err(ServiceError::failed(
+                Some(dal_core::Service::Agents),
+                message,
+            )));
+            return;
+        }
+        if mail.mode == MailMode::Steer
+            && receipt == Receipt::Delivered
+            && let Some(turn) = running
+        {
+            let mut effects = Vec::new();
+            let stepped = self.fold.step(
+                Event::Steer {
+                    turn,
+                    text: mail.text,
+                },
+                Timestamp::now(),
+                &mut effects,
+            );
+            assert!(
+                stepped.is_ok(),
+                "exclusive steer preflight must remain valid"
+            );
+            self.execute(effects, None).await;
+        }
+        let _ = reply.send(Ok(Some(receipt)));
     }
 
     /// Receipt for a message that waits in the journal; a full mailbox

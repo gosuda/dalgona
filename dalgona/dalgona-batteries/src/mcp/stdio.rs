@@ -25,8 +25,11 @@ use crate::mcp::{
 };
 
 const LINE_MAX: usize = 1_048_576;
+
 const PENDING_MAX: usize = 64;
+
 const EVENT_CAPACITY: usize = 8;
+
 const POST_KILL_WAIT: Duration = Duration::from_secs(1);
 
 /// The process environment allowlist captured through the host's env service.
@@ -317,6 +320,7 @@ async fn wait_child(child: &Arc<Mutex<Box<dyn ChildWrapper>>>, cancel: &Cancella
         },
     }
 }
+
 async fn read_stderr_excerpt(tail: &Arc<Mutex<VecDeque<u8>>>) -> String {
     let mut tail = tail.lock().await;
     String::from_utf8_lossy(tail.make_contiguous()).into_owned()

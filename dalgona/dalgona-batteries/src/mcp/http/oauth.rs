@@ -1630,8 +1630,21 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn cancelled_refresh_still_persists_the_rotated_token() {
+    struct CancelledRefreshFixture {
+        listener: TcpListener,
+        issuer: String,
+        resource: String,
+        tokens_path: std::path::PathBuf,
+        scratch: std::path::PathBuf,
+        discovery: Discovery,
+        oauth: OAuthClient,
+        record: TokenRecord,
+        coordinator: Arc<auth::RefreshCoordinator>,
+        key: String,
+        cancel: CancellationToken,
+    }
+
+    async fn cancelled_refresh_fixture() -> CancelledRefreshFixture {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("token listener");
@@ -1640,11 +1653,11 @@ mod tests {
         let resource = format!("http://{address}/mcp");
         let token_endpoint =
             Url::parse(&format!("http://{address}/token")).expect("token endpoint");
-        let dir = std::env::temp_dir().join(format!(
+        let scratch = std::env::temp_dir().join(format!(
             "dalgona-mcp-refresh-cancel-{}",
             uuid::Uuid::new_v4()
         ));
-        let tokens_path = dir.join("tokens.json");
+        let tokens_path = scratch.join("tokens.json");
         auth::persist_token(
             &tokens_path,
             &issuer,
@@ -1684,31 +1697,69 @@ mod tests {
         let coordinator = Arc::new(auth::RefreshCoordinator::new());
         let key = auth::refresh_key(&discovery.issuer, &discovery.resource);
         let cancel = CancellationToken::new();
+        CancelledRefreshFixture {
+            listener,
+            issuer,
+            resource,
+            tokens_path,
+            scratch,
+            discovery,
+            oauth,
+            record,
+            coordinator,
+            key,
+            cancel,
+        }
+    }
+
+    async fn gated_rotation_server(
+        listener: TcpListener,
+        admitted: tokio::sync::oneshot::Sender<()>,
+        gate: tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let (stream, _) = listener.accept().await.expect("token request");
+        let mut reader = BufReader::new(stream);
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.expect("token headers");
+            if line == "\r\n" {
+                break;
+            }
+        }
+        admitted.send(()).expect("admit the refresh request");
+        gate.await.expect("release the flight");
+        let body = r#"{"access_token":"rotated-access","refresh_token":"rotated-refresh","token_type":"Bearer"}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        reader
+            .get_mut()
+            .write_all(response.as_bytes())
+            .await
+            .expect("token response");
+    }
+
+    #[tokio::test]
+    async fn cancelled_refresh_still_persists_the_rotated_token() {
+        let fixture = cancelled_refresh_fixture().await;
+        let CancelledRefreshFixture {
+            listener,
+            issuer,
+            resource,
+            tokens_path,
+            scratch,
+            discovery,
+            oauth,
+            record,
+            coordinator,
+            key,
+            cancel,
+        } = fixture;
         let (admitted_tx, admitted_rx) = tokio::sync::oneshot::channel::<()>();
         let (gate_tx, gate_rx) = tokio::sync::oneshot::channel::<()>();
-        let server_task = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.expect("token request");
-            let mut reader = BufReader::new(stream);
-            loop {
-                let mut line = String::new();
-                reader.read_line(&mut line).await.expect("token headers");
-                if line == "\r\n" {
-                    break;
-                }
-            }
-            admitted_tx.send(()).expect("admit the refresh request");
-            gate_rx.await.expect("release the flight");
-            let body = r#"{"access_token":"rotated-access","refresh_token":"rotated-refresh","token_type":"Bearer"}"#;
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            reader
-                .get_mut()
-                .write_all(response.as_bytes())
-                .await
-                .expect("token response");
-        });
+        let mut servers = tokio::task::JoinSet::new();
+        servers.spawn(gated_rotation_server(listener, admitted_tx, gate_rx));
         let persist_path = tokens_path.clone();
         let persist_issuer = issuer.clone();
         let persist_resource = resource.clone();
@@ -1747,7 +1798,11 @@ mod tests {
             "the admitted caller reports cancellation, not the rotation: {updated:?}"
         );
         gate_tx.send(()).expect("release the flight");
-        server_task.await.expect("token server responded");
+        servers
+            .join_next()
+            .await
+            .expect("token server task")
+            .expect("token server responded");
         let settled = coordinator
             .run(
                 &key,
@@ -1763,7 +1818,7 @@ mod tests {
         let stored = auth::record_for(&file, &issuer, &resource).expect("persisted record");
         assert_eq!(stored.access_token, "rotated-access");
         assert_eq!(stored.refresh_token.as_deref(), Some("rotated-refresh"));
-        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
     }
 
     #[test]

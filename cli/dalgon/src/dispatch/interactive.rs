@@ -62,7 +62,13 @@ fn build_opts(
         stdin_tty: snapshot.stdin_tty,
         path: vars.get(OsStr::new("PATH")).cloned(),
         fonts: dal_tui::diagram::FontSnapshot::capture(),
-        home: owned(vars, "HOME").or_else(|| owned(vars, "USERPROFILE")),
+        home: owned(vars, "HOME")
+            .or_else(|| owned(vars, "USERPROFILE"))
+            .map(|home| {
+                std::fs::canonicalize(&home)
+                    .map(|resolved| resolved.display().to_string())
+                    .unwrap_or(home)
+            }),
         term: owned(vars, "TERM"),
         term_program: owned(vars, "TERM_PROGRAM"),
         colorterm: owned(vars, "COLORTERM"),

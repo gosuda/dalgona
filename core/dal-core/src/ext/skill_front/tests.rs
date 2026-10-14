@@ -287,3 +287,29 @@ fn validate_block_reports_secret_safe_value_errors() {
     );
     assert_eq!(validate_block(&McpBlock::default()), Ok(()));
 }
+
+#[test]
+fn old_command_field_is_rejected_with_migration_hint() {
+    let source = "---\nmcp:\n  servers:\n    a:\n      command: [x]\n---\n";
+    let message = err(source);
+    assert!(
+        message.contains("\"command\"")
+            && message.contains("launch")
+            && message.contains("renamed"),
+        "{message}"
+    );
+}
+
+#[test]
+fn url_userinfo_and_fragment_are_value_errors() {
+    for url in [
+        "https://user@example.com/mcp",
+        "https://user:pass@example.com/mcp",
+        "https://example.com/mcp#fragment",
+    ] {
+        let source = format!("---\nmcp:\n  servers:\n    a:\n      url: {url}\n---\n");
+        let message = err(&source);
+        assert!(message.contains("absolute https URL"), "{url} -> {message}");
+        assert!(!message.contains("example.com"), "{url} -> {message}");
+    }
+}

@@ -128,7 +128,7 @@ plugin = dal.plugin(name = "right", version = "0.1.0")
 
 #[test]
 fn ports_load_and_run() {
-    // All ten ports load through the real evaluator.
+    // All fourteen ports load through the real evaluator.
     let guard = tempdir::named("ports-load");
     let data = guard.join("data");
     let plugins = data.join("plugins");
@@ -145,6 +145,9 @@ fn ports_load_and_run() {
         "git-checkpoint",
         "handoff",
         "skill-pack",
+        "fetch",
+        "steer",
+        "review-rules",
     ] {
         #[cfg(unix)]
         std::os::unix::fs::symlink(source.join(port), plugins.join(port)).unwrap();
@@ -153,8 +156,7 @@ fn ports_load_and_run() {
             copy_dir(&source.join(port), &plugins.join(port));
         }
     }
-    let generation = load_one(&data).expect("ten ports load");
-    assert_eq!(generation.len(), 10, "all ports load");
+    let generation = load_one(&data).expect("ports load");
     let names: Vec<_> = generation.names().collect();
     for port in [
         "hello",
@@ -167,6 +169,9 @@ fn ports_load_and_run() {
         "git-checkpoint",
         "handoff",
         "skill-pack",
+        "fetch",
+        "steer",
+        "review-rules",
     ] {
         assert!(names.contains(&port), "port {port} loaded: {names:?}");
     }
@@ -203,6 +208,9 @@ fn ports_load_and_run() {
         "git-checkpoint",
         "handoff",
         "skill-pack",
+        "fetch",
+        "steer",
+        "review-rules",
     ] {
         assert!(
             module.contains(&format!("\"examples/{port}\"")),

@@ -605,3 +605,43 @@ async fn a_cancelled_start_closes_the_child_it_created() {
         "the cancelled start rolled its child back"
     );
 }
+
+#[tokio::test]
+async fn cancelling_while_the_start_is_blocked_settles_first_and_rolls_the_child_back() {
+    let rig = rig();
+    let (hold_tx, hold_rx) = oneshot::channel::<()>();
+    locked(&rig.held.hold_start).replace(hold_rx);
+    let handle = rig.scope.agent(start()).expect("admitted");
+    until(|| locked(&rig.held.hold_start).is_none()).await;
+    rig.scope.cancel();
+    timed(handle.result())
+        .await
+        .expect_err("the handle cancels while the start stays blocked");
+    assert_eq!(handle.status(), HandleStatus::Cancelled);
+    assert_eq!(timed(rig.scope.all()).await.len(), 1);
+    hold_tx.send(()).expect("the gate opens");
+    until(|| !locked(&rig.held.closed).is_empty()).await;
+    let started = locked(&rig.held.started).clone();
+    assert_eq!(started.len(), 1);
+    assert_eq!(*locked(&rig.held.closed), vec![started[0]]);
+}
+
+#[tokio::test]
+async fn dropping_the_scope_while_the_start_is_blocked_leaves_no_running_start() {
+    let rig = rig();
+    let (hold_tx, hold_rx) = oneshot::channel::<()>();
+    locked(&rig.held.hold_start).replace(hold_rx);
+    let handle = rig.scope.agent(start()).expect("admitted");
+    until(|| locked(&rig.held.hold_start).is_none()).await;
+    let Rig {
+        scope,
+        shared,
+        held,
+        ..
+    } = rig;
+    drop(scope);
+    assert_eq!(handle.status(), HandleStatus::Cancelled);
+    quiesced(&shared).await;
+    assert!(hold_tx.send(()).is_err());
+    assert!(locked(&held.closed).is_empty());
+}

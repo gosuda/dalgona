@@ -14,6 +14,9 @@ examples/plan-mode author,model docs 400
 examples/git-checkpoint author,model docs 400
 examples/handoff author,model docs 400
 examples/skill-pack author,model docs 400
+examples/fetch author,model docs 400
+examples/steer author,model docs 400
+examples/review-rules author,model docs 400
 guard user,model guard-extension 150
 install user,author platform-paths 120
 integrate integrator,model wire-adapters 300

@@ -693,10 +693,12 @@ async fn start_sleep_turn() -> Result<(Session, TurnId), Box<dyn std::error::Err
 
 /// Best-effort reaper for the probe child: a failed run must not leave an
 /// hour-long sleeper behind, especially on red runs where the kill is absent.
+#[cfg(unix)]
 struct KillGuard {
     pid: Option<u32>,
 }
 
+#[cfg(unix)]
 impl Drop for KillGuard {
     fn drop(&mut self) {
         if let Some(pid) = self.pid {
@@ -708,6 +710,7 @@ impl Drop for KillGuard {
 }
 
 /// Waits for the probe child to record its pid.
+#[cfg(unix)]
 async fn wait_sleep_pid(workspace: &std::path::Path) -> Result<u32, Box<dyn std::error::Error>> {
     let pidfile = workspace.join("sleep.pid");
     for _ in 0..100 {
@@ -729,6 +732,7 @@ fn pid_is_dead(pid: u32) -> bool {
 /// Cancelling a turn kills its held run: `sleep 3600` can only end by a
 /// kill, so the dead pid proves the cancellation ladder fired, and the
 /// approval waiter settles exactly once.
+#[cfg(unix)]
 #[tokio::test]
 async fn cancelling_a_turn_kills_its_held_run() -> TestResult {
     let (mut session, turn) = start_sleep_turn().await?;

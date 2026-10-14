@@ -23,7 +23,8 @@ pub struct RemoteAgent {
 
 /// One remote session subscription.
 ///
-/// Dropping it stops local delivery only; the server keeps running every turn.
+/// Dropping the current handle releases the server subscription; dropping a
+/// replaced handle leaves its successor delivering.
 pub struct RemoteSubscription {
     /// The shared connection.
     shared: Arc<Shared>,
@@ -71,6 +72,7 @@ impl RemoteAgent {
         &self,
         after: Option<(Gen, Seq)>,
     ) -> Result<RemoteSubscription, WireError> {
+        let _serial = self.shared.sub_serial.lock().await;
         let core = &self.shared.core;
         let fence = {
             let mut state = core.state();
@@ -209,12 +211,17 @@ impl RemoteSubscription {
 
     /// Stops server-side delivery through `session/unsubscribe`.
     ///
-    /// This cancels no turn.
+    /// This cancels no turn. A replaced handle releases nothing.
     ///
     /// # Errors
     ///
     /// Returns [`WireError`] when the call fails.
     pub async fn unsubscribe(self) -> Result<(), WireError> {
+        let _serial = self.shared.sub_serial.lock().await;
+        if !self.shared.release(self.session, self.fence) {
+            return Ok(());
+        }
+        self.shared.core.wake();
         self.shared
             .call(
                 "session/unsubscribe",
@@ -227,14 +234,11 @@ impl RemoteSubscription {
 
 impl Drop for RemoteSubscription {
     fn drop(&mut self) {
-        let mut state = self.shared.core.state();
-        if state
-            .subs
-            .get(&self.session)
-            .is_some_and(|sub| sub.fence == self.fence)
-        {
-            state.subs.remove(&self.session);
+        if !self.shared.release(self.session, self.fence) {
+            return;
         }
+        self.shared.core.wake();
+        self.shared.spawn_unsubscribe(self.session);
     }
 }
 
@@ -254,6 +258,20 @@ impl RepaintGuard<'_> {
         };
         let view = agent.view(PageReq::default()).await?;
         let head = (view.r#gen, view.seq);
+        let _serial = subscription.shared.sub_serial.lock().await;
+        let current = subscription
+            .shared
+            .core
+            .state()
+            .subs
+            .get(&subscription.session)
+            .is_some_and(|sub| sub.fence == subscription.fence);
+        if !current {
+            return Err(WireError::Transport(format!(
+                "subscription to session {} was replaced",
+                subscription.session
+            )));
+        }
         subscription
             .shared
             .call(

@@ -191,6 +191,7 @@ pub struct Binding {
 }
 
 mod bindings;
+
 mod decoder;
 
 pub use bindings::BINDINGS;

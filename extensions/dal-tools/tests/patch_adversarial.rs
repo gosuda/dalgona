@@ -16,6 +16,7 @@ use dal_tools::patch::resolve::resolve_path;
 
 /// Creates a directory strictly outside `workspace`: a sibling under the same
 /// temp parent. A link from the workspace into it truly escapes.
+#[cfg(unix)]
 fn outside_dir(workspace: &tempfile::TempDir) -> tempfile::TempDir {
     let parent = workspace
         .path()
@@ -25,6 +26,7 @@ fn outside_dir(workspace: &tempfile::TempDir) -> tempfile::TempDir {
     tempfile::tempdir_in(parent).expect("outside sibling root")
 }
 
+#[cfg(unix)]
 #[test]
 fn symlinked_source_path_resolving_outside_the_workspace_is_denied() {
     let workspace = tempfile::tempdir().expect("workspace root");
@@ -47,6 +49,7 @@ fn symlinked_source_path_resolving_outside_the_workspace_is_denied() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn workspace_root_symlink_alias_for_the_target_is_denied() {
     let workspace = tempfile::tempdir().expect("workspace root");
@@ -67,6 +70,7 @@ fn workspace_root_symlink_alias_for_the_target_is_denied() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn parent_link_escape_after_canonicalization_is_denied() {
     let workspace = tempfile::tempdir().expect("workspace root");
@@ -116,6 +120,7 @@ fn bare_dot_dot_walk_past_the_root_is_denied() {
     assert!(root.exists());
 }
 
+#[cfg(unix)]
 #[test]
 fn in_workspace_symlink_resolves_to_its_target() {
     let workspace = tempfile::tempdir().expect("workspace root");
@@ -142,7 +147,13 @@ fn missing_target_under_an_inside_parent_is_accepted_for_creation() {
     let (display, canonical) = resolve_path(workspace.path(), Path::new("new/made.txt"))
         .expect("a not-yet-existing file under an inside parent plans");
     assert_eq!(display, std::path::PathBuf::from("new/made.txt"));
-    assert_eq!(canonical, workspace.path().join("new").join("made.txt"));
+    assert_eq!(
+        canonical,
+        std::fs::canonicalize(workspace.path())
+            .expect("workspace canonicalizes")
+            .join("new")
+            .join("made.txt")
+    );
 }
 
 #[test]
@@ -165,6 +176,7 @@ fn empty_path_is_denied() {
     assert!(error.message.contains("must not be empty"));
 }
 
+#[cfg(unix)]
 #[test]
 fn resolve_path_rejects_an_outside_alias_through_a_created_link() {
     let workspace = tempfile::tempdir().expect("workspace root");
@@ -188,6 +200,7 @@ fn resolve_path_rejects_an_outside_alias_through_a_created_link() {
     assert!(error.message.contains("outside the workspace"));
 }
 
+#[cfg(unix)]
 #[test]
 fn missing_directories_below_an_escaping_link_are_denied() {
     let workspace = tempfile::tempdir().expect("workspace root");

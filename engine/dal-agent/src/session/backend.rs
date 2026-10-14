@@ -283,7 +283,8 @@ pub(crate) fn confine(root: &Path, raw: &Path) -> Result<Confined, ConfineError>
 }
 
 /// Canonicalizes the deepest existing ancestor and re-appends the missing
-/// tail. Returns `None` when a component exists but cannot be resolved.
+/// tail. Returns `None` when a component exists but cannot be resolved, or
+/// when the tail would live under a non-directory ancestor.
 ///
 /// This resolves the path at the time of the call. It does not prevent
 /// concurrent directory replacement before a later filesystem operation.
@@ -294,6 +295,9 @@ pub fn canonicalize_existing_prefix(path: &Path) -> Option<PathBuf> {
     loop {
         match std::fs::canonicalize(current) {
             Ok(mut resolved) => {
+                if !tail.is_empty() && !resolved.is_dir() {
+                    return None;
+                }
                 resolved.extend(tail.iter().rev());
                 return Some(resolved);
             }
@@ -1094,7 +1098,7 @@ impl Backend {
                 text,
                 mode,
                 reply_to,
-            } => Ok(self.agent_send(to, text, mode, reply_to).await),
+            } => self.agent_send(to, text, mode, reply_to).await,
             AgentsOp::Recv { after, timeout } => Ok(self.agent_recv(after, timeout).await),
             _ => Ok(AgentsReply::Cancelled { id: self.session }),
         }
@@ -1586,7 +1590,7 @@ impl Backend {
         text: Box<str>,
         mode: MailMode,
         reply_to: Option<EntryId>,
-    ) -> AgentsReply {
+    ) -> Result<AgentsReply, ServiceError> {
         let mail = ExtMail {
             from: self.session,
             to,
@@ -1603,7 +1607,7 @@ impl Backend {
             let sender_root = session_root(&sessions, self.session);
             let recipient_root = session_root(&sessions, to);
             if sender_root.is_none() || sender_root != recipient_root {
-                return AgentsReply::Delivered(dal_core::ext::Receipt::Gone);
+                return Ok(AgentsReply::Delivered(dal_core::ext::Receipt::Gone));
             }
             sessions
                 .get(&to)
@@ -1611,15 +1615,17 @@ impl Backend {
                 .map(|entry| entry.handle.clone())
         };
         let Some(handle) = handle else {
-            return AgentsReply::Delivered(dal_core::ext::Receipt::Gone);
+            return Ok(AgentsReply::Delivered(dal_core::ext::Receipt::Gone));
         };
         let (tx, rx) = oneshot::channel();
         let outcome = handle
             .mail(crate::session::MailRequest::Send { mail, reply: tx })
             .await;
         match (outcome, rx.await) {
-            (Ok(()), Ok(Some(receipt))) => AgentsReply::Delivered(receipt),
-            _ => AgentsReply::Delivered(dal_core::ext::Receipt::Gone),
+            (Ok(()), Ok(result)) => result.map(|receipt| {
+                AgentsReply::Delivered(receipt.unwrap_or(dal_core::ext::Receipt::Gone))
+            }),
+            _ => Ok(AgentsReply::Delivered(dal_core::ext::Receipt::Gone)),
         }
     }
 

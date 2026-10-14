@@ -105,6 +105,11 @@ pub enum Kind {
         /// The accepted shape.
         want: &'static str,
     },
+    /// The removed `command` field; it was renamed to `launch`.
+    #[error(
+        "\"command\" was renamed to \"launch\"; move the argv list to \"launch\" with \"kind: command\" and \"argv\""
+    )]
+    RenamedCommand,
     /// A server object names no transport, both, or `env` with `url`.
     #[error("mcp server \"{server}\": {shape}")]
     Shape {
@@ -359,6 +364,7 @@ fn server_wire(fields: &[Entry]) -> Res<ServerWire> {
             "launch" => wire.launch = Some(launch_of(field)?),
             "env" => wire.env = Some(env_of(field)?),
             "url" => wire.url = Some(url_of(field)?),
+            "command" => return Err(at(field.key_at, Kind::RenamedCommand)),
             _ => {
                 return Err(at(
                     field.key_at,

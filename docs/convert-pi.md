@@ -62,17 +62,17 @@ The tool name moves from `name` to its key in `tools`. The schema moves from `pa
 | TypeBox `Type.Object`, string enums | `dal.schema(...)` with `dal.string`, `dal.integer`, `dal.enum([...])`, `dal.list`; `dal.optional` for a field a caller may omit | todo, ask |
 | `execute(id, params, signal, onUpdate, ctx)` | `run(ctx, args)`; dal cancels the call and discards the result; progress text is not ported | subagent |
 | result `{content, details}` | the returned value; `dal.output(value = ..., view = ...)` when people should see a table or text apart from the data; `details` has no counterpart | todo (the returned value) |
-| `throw` inside `execute` | `return dal.err(code, message)` for a failure the model should read; a failed operation stops the handler by itself | none yet |
+| `throw` inside `execute` | `return dal.err(code, message)` for a failure the model should read; a failed operation stops the handler by itself | fetch |
 | `renderCall`, `renderResult` | the result and its `view`; plugin UI is data | todo |
 | `pi.registerCommand(name, {handler})` | `dal.command(tool = tool, positional = [...])` under `commands`; the command runs a tool and is typed as `/<plugin>:<key>` | todo, git-checkpoint |
 | `ctx.ui.select`, `confirm`, `input` | `ctx.ask.select`, `ctx.ask.confirm`, `ctx.ask.text`, with the `ask.*` ids in `uses` | ask |
 | `pi.exec(cmd, args, {cwd, timeout})` | `ctx.tools.exec("cmd args")` with `tools.exec` in `uses`; the approval ladder applies; a non-zero exit stops the handler unless you call `ctx.try_call(ctx.tools.exec, "...")`; `ctx.describe("tools.exec")` lists the other keywords | git-checkpoint |
-| `fetch`, npm HTTP clients | `ctx.net.fetch(...)` with `net.fetch` in `uses` | none yet |
-| `pi.sendUserMessage(text)` | `ctx.turn.steer(...)` with `turn.steer` in `uses`; `ctx.turn.wake` starts a turn when dal is idle | none yet |
+| `fetch`, npm HTTP clients | `ctx.net.fetch(...)` with `net.fetch` in `uses` | fetch |
+| `pi.sendUserMessage(text)` | `ctx.turn.steer(...)` with `turn.steer` in `uses`; `ctx.turn.wake` starts a turn when dal is idle | steer |
 | state in `details`, `pi.appendEntry` | `ctx.state.read(key = ...)` and `ctx.state.write(key = ..., value = ..., expected = revision)`, with `state.read` and `state.write` in `uses` | todo, plan-mode, handoff |
 | `before_agent_start` adds to `systemPrompt` | `prompt = "..."` on the plugin for fixed text; a `before_turn` hook that returns `event.append(text)` for per-turn text; the hook cannot read state | hello (`prompt`) |
 | `pi.on("tool_call")` | `dal.on("tool_call", handler)`; the handler returns `event.allow()`, `event.block(reason)`, or `event.rewrite(args)` | permission-gate |
-| other `pi.on` events | `dal.on` with `input`, `before_turn`, `before_request`, `tool_result`, `turn_end`, `session_start`, `session_end`, or `settled`; each event fixes its verdict methods and the operations it may request | none yet |
+| other `pi.on` events | `dal.on` with `input`, `before_turn`, `before_request`, `tool_result`, `turn_end`, `session_start`, `session_end`, or `settled`; each event fixes its verdict methods and the operations it may request | none |
 | `pi.on("user_bash")`, whole-operation swap | does not port; no hook can hand over execution | (not-port table) |
 | `pi.registerProvider` | does not port; providers are dal core and aliases live in config | (not-port table) |
 | `ctx.ui.custom`, widgets, status, editor | does not port; plugin UI is data | (not-port table) |
@@ -110,7 +110,7 @@ On Windows the data root follows the `install` page.
 
 ## Start from the nearest example
 
-A tool with state, `todo`; child sessions, `subagent`; questions to the user, `ask`; an MCP call, `mcp`; a hook, `permission-gate`; skills only, `skill-pack`; the smallest shape, `hello`. The page `dal://examples/<name>` holds every file; from the repository root of a source checkout, run `cp -r examples/plugins/<name>/. "$d/"`. Then set `name` and rename the tools and commands.
+A tool with state, `todo`; child sessions, `subagent`; questions to the user, `ask`; an MCP call, `mcp`; a hook, `permission-gate`; skills only, `skill-pack`; the smallest shape, `hello`; an HTTP fetch, `fetch`; turn steering, `steer`; review rules, `review-rules`. The page `dal://examples/<name>` holds every file; from the repository root of a source checkout, run `cp -r examples/plugins/<name>/. "$d/"`. Then set `name` and rename the tools and commands.
 
 ## Translate
 

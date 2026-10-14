@@ -123,8 +123,16 @@ impl ExtensionSidecar<'_> {
     /// Atomically replaces the named extension sidecar with `bytes`, using mode 0600.
     ///
     /// # Errors
-    /// Returns [`StoreError::Io`] when atomic publication fails.
+    /// Returns [`StoreError::SidecarTooLarge`] when `bytes` exceeds
+    /// [`MAX_SIDECAR_VALUE`], or [`StoreError::Io`] when atomic publication fails.
     pub fn write(&self, name: &SidecarName, bytes: &[u8]) -> Result<(), StoreError> {
+        let length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        if length > MAX_SIDECAR_VALUE {
+            return Err(StoreError::SidecarTooLarge {
+                name: name.as_str().into(),
+                bytes: length,
+            });
+        }
         let directory = self.directory();
         util::create_private_dir_all(&directory)
             .map_err(|source| util::io_err(&directory, source))?;
@@ -509,6 +517,34 @@ mod tests {
             .read(&name)
             .expect("capped sidecar reads");
         assert_eq!(read, value);
+    }
+    #[test]
+    fn extension_write_refuses_value_over_cap_and_keeps_previous() {
+        let (_root, paths) = sidecar();
+        let extension = Name::parse("ext").expect("valid extension name");
+        let name = SidecarName::parse("state").expect("valid sidecar name");
+        let sidecar = Sidecar::new(&paths);
+        let handle = sidecar.for_extension(&extension);
+        handle
+            .write(&name, b"previous")
+            .expect("write previous value");
+        let oversized = vec![0_u8; usize::try_from(MAX_SIDECAR_VALUE).expect("cap fits") + 1];
+        let expected = u64::try_from(oversized.len()).expect("length fits");
+        let error = handle
+            .write(&name, &oversized)
+            .expect_err("oversized write refused");
+        assert!(matches!(
+            error,
+            StoreError::SidecarTooLarge { ref name, bytes }
+            if name.as_ref() == "state" && bytes == expected
+        ));
+        assert_eq!(
+            handle.read(&name).expect("previous value kept"),
+            b"previous"
+        );
+        let capped = vec![b'x'; usize::try_from(MAX_SIDECAR_VALUE).expect("cap fits")];
+        handle.write(&name, &capped).expect("capped write succeeds");
+        assert_eq!(handle.read(&name).expect("capped value reads"), capped);
     }
 
     #[cfg(unix)]

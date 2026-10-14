@@ -364,6 +364,10 @@ pub(crate) struct ServerWire {
         deserialize_with = "non_null"
     )]
     pub url: Option<Box<str>>,
+    /// The removed legacy selector; any presence fails with a migration error.
+    #[serde(default, deserialize_with = "reject_command", skip_serializing)]
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    pub command: (),
 }
 
 fn non_null<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
@@ -379,6 +383,15 @@ where
 {
     Option::<Vec<Box<str>>>::deserialize(deserializer)?
         .ok_or_else(|| serde::de::Error::custom("null is not allowed"))
+}
+fn reject_command<'de, D>(deserializer: D) -> Result<(), D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde::de::IgnoredAny::deserialize(deserializer)?;
+    Err(serde::de::Error::custom(
+        "\"command\" was renamed to \"launch\"; move the argv list to \"launch\" with \"kind: command\" and \"argv\"",
+    ))
 }
 
 /// A server object that names no transport, both, or `env` without `launch`.
@@ -404,6 +417,7 @@ impl TryFrom<ServerWire> for McpServerDecl {
                 launch: Some(launch),
                 env,
                 url: None,
+                ..
             } => {
                 let env = env.unwrap_or_default();
                 if env.values().any(|value| value.contains('\0')) {
@@ -418,6 +432,7 @@ impl TryFrom<ServerWire> for McpServerDecl {
                 launch: None,
                 env: None,
                 url: Some(url),
+                ..
             } => Ok(Self::Http {
                 endpoint: McpEndpoint::parse(&url)?,
             }),
@@ -425,6 +440,7 @@ impl TryFrom<ServerWire> for McpServerDecl {
                 launch: None,
                 env: Some(_),
                 url: Some(_),
+                ..
             } => Err(McpTargetError::Shape(ServerShapeError::EnvWithUrl)),
             ServerWire {
                 launch: Some(_),
@@ -831,6 +847,38 @@ mod tests {
     }
 
     #[test]
+    fn old_command_shape_is_rejected_with_launch_migration() {
+        for raw in [
+            r#"{"command":["x"]}"#,
+            r#"{"launch":{"kind":"command","argv":["x"]},"command":["x"]}"#,
+        ] {
+            let error = sonic_rs::from_str::<McpServerDecl>(raw)
+                .expect_err("the old command shape must stay rejected");
+            let message = error.to_string();
+            assert!(
+                message.contains("renamed")
+                    && message.contains("launch")
+                    && message.contains("command"),
+                "the rejection must name launch as the replacement: {raw} -> {message}"
+            );
+        }
+        for raw in [
+            r#"{"servers":{"a":{"command":["x"]}}}"#,
+            r#"{"servers":{"a":{"launch":{"kind":"command","argv":["x"]},"command":["x"]}}}"#,
+        ] {
+            let error = sonic_rs::from_str::<McpBlock>(raw)
+                .expect_err("the old command shape must stay rejected");
+            let message = error.to_string();
+            assert!(
+                message.contains("renamed")
+                    && message.contains("launch")
+                    && message.contains("command"),
+                "the rejection must name launch as the replacement: {raw} -> {message}"
+            );
+        }
+    }
+
+    #[test]
     fn unpinned_package_declarations_survive_serialization() {
         for launch in [
             McpLaunch::npx("server".into(), None, vec!["private-argument".into()]).unwrap(),
@@ -849,7 +897,11 @@ mod tests {
 
     #[test]
     fn endpoint_rejects_userinfo_even_when_empty() {
-        for raw in ["https://@example.com/mcp", "https://:@example.com/mcp"] {
+        for raw in [
+            "https://@example.com/mcp",
+            "https://:@example.com/mcp",
+            "https://user:pass@example.com/mcp",
+        ] {
             assert!(
                 McpEndpoint::parse(raw).is_err(),
                 "userinfo must be rejected before URL normalization: {raw}"

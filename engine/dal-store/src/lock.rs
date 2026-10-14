@@ -18,6 +18,7 @@ use crate::{
 };
 
 const PID_WAIT: Duration = Duration::from_millis(100);
+
 const PID_POLL: Duration = Duration::from_millis(5);
 
 /// One process-held lock path: every guard taken on it plus whether a

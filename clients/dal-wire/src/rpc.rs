@@ -31,7 +31,7 @@ pub(crate) mod subs;
 
 pub(crate) use fail::{
     agent_error, decode_params, hint_value, host_error, id_key, invalid_params,
-    normalize_invalid_params, request_target, scheme_error, server_draining, to_value,
+    normalize_invalid_params, scheme_error, server_draining, to_value,
 };
 pub(crate) use subs::{host_notifier, send_resync, session_pump};
 
@@ -47,7 +47,7 @@ pub(crate) const DRAIN_GRACE: Duration = Duration::from_secs(1);
 /// One in-flight request slot key. It preserves the JSON-RPC id type so a
 /// string `"1"` and an integer `1` never share a cancel slot. `Id::Null`
 /// requests remain legal and share the single `Null` slot; `$/cancel_request`
-/// with a null `requestId` still names no request, matching `request_target`.
+/// with a null `requestId` still names no request.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum InflightKey {
     /// An integer wire id.
@@ -70,8 +70,8 @@ pub(crate) fn inflight_key(id: &Id) -> InflightKey {
 /// Extracts the type-preserving cancel-table key from a `$/cancel_request`
 /// notification's `requestId`: a non-empty string keeps its string type and
 /// an integer keeps its integer type. Null, objects, arrays, floats, and
-/// empty strings name no request and map to `None`, matching `request_target`.
-fn cancel_target(params: &Value) -> Option<InflightKey> {
+/// empty strings name no request and map to `None`.
+pub(crate) fn cancel_target(params: &Value) -> Option<InflightKey> {
     let value = params.get("requestId")?;
     if let Some(text) = value.as_str() {
         if text.is_empty() {
@@ -79,24 +79,27 @@ fn cancel_target(params: &Value) -> Option<InflightKey> {
         } else {
             Some(InflightKey::Str(text.to_owned()))
         }
-    } else if let Some(number) = value.as_i64() {
-        Some(InflightKey::Int(number))
     } else {
-        None
+        value.as_i64().map(InflightKey::Int)
+    }
+}
+
+/// Retires one in-flight slot only while it still holds `generation`. A stale
+/// handler that reused the same wire id never removes its successor.
+pub(crate) fn retire_slot(
+    map: &mut HashMap<InflightKey, (u64, CancellationToken)>,
+    key: &InflightKey,
+    generation: u64,
+) {
+    if map.get(key).is_some_and(|(live, _)| *live == generation) {
+        map.remove(key);
     }
 }
 
 /// Retires one in-flight slot only while it still holds `generation`. A stale
 /// handler that reused the same wire id never removes its successor.
 pub(crate) async fn retire_inflight(state: &Arc<Mutex<Conn>>, key: &InflightKey, generation: u64) {
-    let mut locked = state.lock().await;
-    if locked
-        .inflight
-        .get(key)
-        .is_some_and(|(live, _)| *live == generation)
-    {
-        locked.inflight.remove(key);
-    }
+    retire_slot(&mut state.lock().await.inflight, key, generation);
 }
 
 /// Mutable per-connection state shared by handlers in this task.

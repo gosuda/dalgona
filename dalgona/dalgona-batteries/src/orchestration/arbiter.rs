@@ -16,14 +16,17 @@ mod tests;
 
 /// Maximum bytes of one injected reminder.
 pub(crate) const INJECTION_BUDGET: usize = 16_384;
+
 /// Waiting job reports that wake the session on their own.
 pub(crate) const WAITING_REPORTS: usize = 16;
+
 /// Age in seconds of the oldest waiting report that wakes the session.
 pub(crate) const OLDEST_REPORT_S: u64 = 60;
 
 const fn oldest_report_age() -> Duration {
     Duration::from_secs(OLDEST_REPORT_S)
 }
+
 pub(crate) const QUIET_AFTER: Duration = Duration::from_secs(2);
 
 /// One ended top-level job report awaiting delivery.

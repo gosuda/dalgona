@@ -1076,3 +1076,129 @@ fn login_run_future_is_send_for_rpc_handlers() {
     let progress = |_: LoginProgress| {};
     assert_send(flow.run(&progress, &CancellationToken::new()));
 }
+
+#[tokio::test]
+async fn cancelling_after_the_commit_signal_while_the_auth_lock_is_held_writes_nothing() {
+    let (base, mut server) = mock_once(
+        200,
+        r#"{"access_token":"access","refresh_token":"refresh","expires_in":3600}"#,
+    )
+    .await
+    .expect("token server starts");
+    let endpoints = loopback_endpoints(base.as_str(), 0, 0).expect("loopback endpoints");
+    let dir = TestDir::new();
+    let path = dir.auth_path();
+    let mut store = AuthStore::empty(&path);
+    store
+        .set(
+            "openai",
+            Credential::ApiKey {
+                key: SecretString::from("seed"),
+            },
+        )
+        .expect("seed credential");
+    store.store().expect("save seed");
+    let before = fs::read(&path).expect("seed bytes");
+    let mut flow = configured_flow("anthropic", &mut store, &dir, endpoints).expect("flow builds");
+    let paste = Mutex::new(flow.take_paste_sender());
+    let progress = |event| {
+        if let LoginProgress::OpenUrl { .. } = event
+            && let Some(sender) = paste.lock().expect("paste lock").take()
+        {
+            sender.send(String::from("code123")).expect("deliver code");
+        }
+    };
+    let (commit_ready, commit_signal) = tokio::sync::oneshot::channel();
+    flow.commit_ready = Some(commit_ready);
+    let cancel = CancellationToken::new();
+    let lock = crate::auth::refresh::lock_auth_file(&path)
+        .await
+        .expect("hold the auth lock");
+    let result = tokio::time::timeout(Duration::from_secs(5), async {
+        let (result, ()) = tokio::join!(flow.run(&progress, &cancel), async {
+            commit_signal.await.expect("exchange reaches commit");
+            cancel.cancel();
+            drop(lock);
+        });
+        result
+    })
+    .await
+    .expect("login settles without a leaked lock");
+    drop(flow);
+    assert!(matches!(server.join_next().await, Some(Ok(Some(_)))));
+    assert!(
+        matches!(result, Err(ProviderError::LoginCancelled)),
+        "cancelled commit must fail: {result:?}"
+    );
+    assert_eq!(fs::read(&path).expect("auth bytes"), before);
+    assert!(store.credential("anthropic").is_none());
+}
+
+#[cfg(unix)]
+static DIR_SYNC_FAULTS: std::sync::LazyLock<Mutex<Vec<PathBuf>>> =
+    std::sync::LazyLock::new(|| Mutex::new(Vec::new()));
+
+#[cfg(unix)]
+pub(super) fn take_dir_sync_fault(path: &std::path::Path) -> bool {
+    let mut faults = DIR_SYNC_FAULTS.lock().expect("fault lock");
+    let Some(index) = faults.iter().position(|fault| fault == path) else {
+        return false;
+    };
+    faults.swap_remove(index);
+    true
+}
+
+#[cfg(unix)]
+struct DirSyncFault(PathBuf);
+
+#[cfg(unix)]
+impl DirSyncFault {
+    fn arm(path: PathBuf) -> Self {
+        DIR_SYNC_FAULTS
+            .lock()
+            .expect("fault lock")
+            .push(path.clone());
+        Self(path)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for DirSyncFault {
+    fn drop(&mut self) {
+        DIR_SYNC_FAULTS
+            .lock()
+            .expect("fault lock")
+            .retain(|path| path != &self.0);
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn logout_of_the_last_credential_reports_a_failed_directory_sync() {
+    let dir = TestDir::new();
+    let path = dir.auth_path();
+    let mut store = AuthStore::empty(&path);
+    store
+        .set(
+            "openai",
+            Credential::ApiKey {
+                key: SecretString::from("seed"),
+            },
+        )
+        .expect("seed credential");
+    store.store().expect("save seed");
+    let _fault = DirSyncFault::arm(path.clone());
+    let result = super::logout("openai", &mut store).await;
+    assert!(
+        matches!(result, Err(ProviderError::AuthWrite { .. })),
+        "directory sync failure must not report successful logout: {result:?}"
+    );
+    assert!(!path.exists(), "unlink precedes the failed sync");
+    assert!(store.credential("openai").is_some());
+    assert!(
+        AuthStore::load(&path)
+            .expect("reload store")
+            .credential("openai")
+            .is_none()
+    );
+}

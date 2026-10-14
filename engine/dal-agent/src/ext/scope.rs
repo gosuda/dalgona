@@ -519,7 +519,7 @@ impl Drop for Inner {
         self.tasks
             .get_mut()
             .unwrap_or_else(PoisonError::into_inner)
-            .detach_all();
+            .abort_all();
     }
 }
 
@@ -827,12 +827,19 @@ async fn drive(shared: Arc<Shared>, handle: ScopeHandle, gate: oneshot::Receiver
     } else {
         false
     };
-    let outcome = if started {
-        work(state.cancel.clone()).await
-    } else {
-        Err(ScopeError::Cancelled)
-    };
-    finish(&shared, &handle, granted, outcome);
+    if !started {
+        finish(&shared, &handle, granted, Err(ScopeError::Cancelled));
+        return;
+    }
+    let pending = work(state.cancel.clone());
+    tokio::pin!(pending);
+    tokio::select! {
+        outcome = &mut pending => finish(&shared, &handle, granted, outcome),
+        () = state.cancel.cancelled() => {
+            finish(&shared, &handle, granted, Err(ScopeError::Cancelled));
+            let _ = pending.await;
+        }
+    }
 }
 
 fn finish(

@@ -278,8 +278,8 @@ pub(crate) enum MailRequest {
     Send {
         /// The message to store.
         mail: ExtMail,
-        /// The delivery receipt.
-        reply: oneshot::Sender<Option<Receipt>>,
+        /// The durable delivery receipt, or the journal append failure.
+        reply: oneshot::Sender<Result<Option<Receipt>, crate::error::ServiceError>>,
     },
     /// Reads the non-destructive mailbox page after one cursor.
     Recv {

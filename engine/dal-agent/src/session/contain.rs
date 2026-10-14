@@ -114,6 +114,12 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn keeps_a_short_panic_whole() {
+        let result = contained::<u8>(async { panic!("small") }).await;
+        assert_eq!(result, Err("small".into()));
+    }
+
     #[test]
     fn crashed_tool_names_the_tool_and_carries_the_panic() {
         assert_eq!(

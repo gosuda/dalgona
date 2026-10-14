@@ -68,8 +68,14 @@ pub(crate) struct AcpConn {
     pub pending: HashMap<String, (SessionId, oneshot::Sender<ServerAnswer>)>,
     /// Core request ids awaiting a client answer: core id to client id.
     pub outstanding: HashMap<dal_core::RequestId, String>,
-    /// Cancel token per in-flight client request id.
-    pub inflight: HashMap<String, CancellationToken>,
+    /// Cancel slot per in-flight client request.
+    ///
+    /// The key preserves the JSON-RPC id type so `"1"` and `1` never share
+    /// a slot; the generation fences a stale handler against removing a
+    /// newer request that reused the same wire id.
+    pub inflight: HashMap<crate::rpc::InflightKey, (u64, CancellationToken)>,
+    /// Next inflight generation value.
+    pub next_inflight: u64,
 }
 
 /// A client answer to one server-initiated request.
@@ -152,6 +158,7 @@ impl AcpConn {
             pending: HashMap::new(),
             outstanding: HashMap::new(),
             inflight: HashMap::new(),
+            next_inflight: 0,
         }
     }
 }
@@ -204,12 +211,16 @@ async fn on_frame(
                 return None;
             }
             let child = stop.child_token();
-            let key = crate::rpc::id_key(&id);
-            state
-                .lock()
-                .await
-                .inflight
-                .insert(key.clone(), child.clone());
+            let key = crate::rpc::inflight_key(&id);
+            let generation = {
+                let mut locked = state.lock().await;
+                let generation = locked.next_inflight;
+                locked.next_inflight = locked.next_inflight.wrapping_add(1);
+                locked
+                    .inflight
+                    .insert(key.clone(), (generation, child.clone()));
+                generation
+            };
             let host = host.clone();
             let writer = writer.clone();
             Some(
@@ -219,21 +230,27 @@ async fn on_frame(
                     } else {
                         tokio::select! {
                             biased;
-                            () = child.cancelled() => Some(Message::Error {
-                                id,
-                                error: ErrorObject {
-                                    code: -32800,
-                                    message: format!("request {key} was cancelled"),
-                                    data: None,
-                                },
-                            }),
+                            () = child.cancelled() => {
+                                let message = format!(
+                                    "request {} was cancelled",
+                                    crate::rpc::id_key(&id)
+                                );
+                                Some(Message::Error {
+                                    id,
+                                    error: ErrorObject {
+                                        code: -32800,
+                                        message,
+                                        data: None,
+                                    },
+                                })
+                            },
                             reply = dispatch(&host, &state, &writer, &id, &method, &params, &child) => reply,
                         }
                     };
                     if let Some(reply) = reply {
                         crate::rpc::send(&writer, &reply).await;
                     }
-                    state.lock().await.inflight.remove(&key);
+                    crate::rpc::retire_slot(&mut state.lock().await.inflight, &key, generation);
                 }
                 .boxed(),
             )
@@ -410,11 +427,14 @@ async fn on_notification(
     match method {
         "session/cancel" => cancel_session(host, state, writer, params).await,
         "$/cancel_request" => {
-            if let Some(target) = crate::rpc::request_target(params) {
-                fail_pending_by_client(state, &target).await;
-                if let Some(token) = state.lock().await.inflight.get(&target) {
-                    token.cancel();
-                }
+            let Some(target) = crate::rpc::cancel_target(params) else {
+                return;
+            };
+            if let crate::rpc::InflightKey::Str(text) = &target {
+                fail_pending_by_client(state, text).await;
+            }
+            if let Some((_, token)) = state.lock().await.inflight.get(&target) {
+                token.cancel();
             }
         }
         _ => tracing::debug!(method = %method, "dropping client notification"),

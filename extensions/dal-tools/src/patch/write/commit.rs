@@ -459,17 +459,30 @@ mod tests {
     #[tokio::test]
     async fn restore_completed_removes_create_after_later_temp_install_failure() {
         let directory = tempfile::tempdir().expect("temporary directory");
-        let workspace = directory.path();
+        let workspace = std::fs::canonicalize(directory.path()).expect("workspace");
         let source = workspace.join("source.txt");
         let created = workspace.join("created");
+        // The rename destination must fail. unix refuses a file target
+        // under a missing directory at Phase-B rename; Windows accepts
+        // that spelling, so on Windows the destination sits under a
+        // regular file and prepare refuses it instead.
+        #[cfg(unix)]
         let destination = workspace.join("other/");
+        #[cfg(windows)]
+        let destination = {
+            let blocker = workspace.join("blocked");
+            tokio::fs::write(&blocker, b"file\n")
+                .await
+                .expect("seed the file that blocks the destination parent");
+            blocker.join("dest")
+        };
 
         tokio::fs::write(&source, b"source\n")
             .await
             .expect("seed rename source");
 
         let session = PatchSession {
-            workspace: workspace.to_path_buf(),
+            workspace,
             session: SessionId::new_v7(),
             generation: GenerationId::new(NonZeroU64::MIN),
             turn: TurnId::new(NonZeroU64::MIN),
@@ -500,7 +513,11 @@ mod tests {
                     after: Some(b"renamed\n".to_vec().into_boxed_slice()),
                     op: Operation::Rename,
                     renamed_to: Some(RenameTarget {
-                        path: PathBuf::from("other/"),
+                        path: if cfg!(unix) {
+                            PathBuf::from("other/")
+                        } else {
+                            PathBuf::from("blocked/dest")
+                        },
                         absolute_path: destination,
                     }),
                     hunks: Vec::new(),
@@ -513,7 +530,13 @@ mod tests {
             .await
             .expect_err("later rename install must fail");
 
-        assert_eq!(error.class, ErrorClass::Io);
+        // The refused destination can surface as a Phase-B rename error
+        // (Io) or an earlier prepare refusal (Stale) depending on which
+        // validator reaches it first on each platform.
+        assert!(
+            matches!(error.class, ErrorClass::Io | ErrorClass::Stale),
+            "{error:?}"
+        );
         assert!(error.message.contains("Nothing was written"), "{error}");
         assert!(
             tokio::fs::metadata(created).await.is_err(),

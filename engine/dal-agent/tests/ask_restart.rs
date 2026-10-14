@@ -73,6 +73,9 @@ fn dangling_journal(workspace: Workspace) -> Vec<Record> {
             product: Product::Dal,
             from: None,
         }),
+        Record::TurnReserved { at, turn: turn(1) },
+        Record::TurnReserved { at, turn: turn(2) },
+        Record::TurnReserved { at, turn: turn(3) },
         Record::TurnStart { at, turn: turn(3) },
         Record::Assistant(assistant),
         Record::ToolStart {

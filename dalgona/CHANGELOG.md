@@ -1,6 +1,12 @@
 # Changelog
 
 ## Unreleased
+- Cancel and join the blocking render worker when history compaction times
+  out before reporting the timeout.
+- Cooperatively cancel dropped history runs at checkpoints so workers stop
+  further work, without hard preemption or teardown joins.
+- Reject `web_search` `count` arguments outside 1 to 20 before verifying
+  credentials or initiating network requests.
 - Preserve isolated worktrees when a workflow exceeds its shutdown grace period.
   Save each recovery path before completing session close instead of aborting
   the recovery writer with a competing timeout.

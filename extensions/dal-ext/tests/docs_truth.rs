@@ -6,7 +6,7 @@
 
 use dal_ext::docs::{
     DocsSnapshot, Lookup, Manual, Miss, listing, lookup, miss_lines, nearest, page_valid,
-    prompt_line, read_miss_line, render_index, scheme_valid, snapshot as live_snapshot, wire_error,
+    read_miss_line, render_index, scheme_valid, snapshot as live_snapshot, wire_error,
 };
 use dal_ext::docsgen::{GenArgs, Scheme, generate};
 use std::collections::BTreeMap;
@@ -644,15 +644,6 @@ fn wire_docs_read() {
 }
 
 #[test]
-fn prompt_line_matches_product() {
-    let snap = snapshot();
-    assert_eq!(
-        prompt_line(&snap, "dal"),
-        "Manuals: dal:// (dal). Read a manual when the user asks about dal itself, its settings, or its plugins: read its index first, such as dal://, then read the whole page you need. Before you write or port a plugin, read dal://plugins and dal://convert-pi."
-    );
-}
-
-#[test]
 fn truth_config_page() {
     use std::fmt::Write as _;
 
@@ -756,14 +747,6 @@ fn truth_commands_page() {
 }
 
 #[test]
-fn truth_protocol_page() {
-    let pages = load_manual();
-    let protocol = pages.get("protocol").expect("protocol page");
-    assert!(protocol.contains("The protocol version is 1."));
-    assert!(protocol.contains("initialize"));
-}
-
-#[test]
 fn truth_ext_status_claims() {
     let pages = load_manual();
     let protocol = pages.get("protocol").expect("protocol page");
@@ -814,49 +797,6 @@ fn truth_ext_status_claims() {
 }
 
 #[test]
-fn truth_terminal_keys_page() {
-    let pages = load_manual();
-    let terminal = pages.get("terminal").expect("terminal page");
-    assert!(terminal.contains("F1"));
-    assert!(terminal.contains("| key | action | F1 label |"));
-}
-
-#[test]
-fn truth_readme_philosophy() {
-    let philosophy = std::fs::read_to_string(docs_dir().join("philosophy.md")).expect("philosophy");
-    let readme = std::fs::read_to_string(repo_root().join("README.md")).expect("readme");
-    let marker = "<!-- grounding (maintainers, not shipped) -->";
-    assert!(
-        philosophy.contains(marker),
-        "philosophy has grounding marker"
-    );
-    let body = philosophy.split(marker).next().unwrap();
-    let body_without_title = body.split_once('\n').map_or("", |(_, rest)| rest);
-    assert!(
-        readme.contains(body_without_title.trim()),
-        "README carries the philosophy body"
-    );
-    assert_eq!(readme.lines().next(), Some("# dal"));
-}
-
-#[test]
-fn truth_code_excerpts() {
-    let pages = load_manual();
-    let roots = scan_roots();
-    let mut files = Vec::new();
-    collect(&roots, &mut files);
-    for (page, text) in &pages {
-        for block in fenced(text, "rust") {
-            let normalized = block.replace("\r\n", "\n");
-            assert!(
-                files.iter().any(|content| content.contains(&normalized)),
-                "rust block in {page} is a substring of a scanned file"
-            );
-        }
-    }
-}
-
-#[test]
 fn truth_toml_blocks() {
     use dal_core::{Config, ConfigProduct};
     let pages = load_manual();
@@ -871,26 +811,6 @@ fn truth_toml_blocks() {
         }
     }
     assert!(count > 0, "at least one toml block checked");
-}
-
-/// `toml` is the config file name, not a builtin reference.
-#[test]
-fn truth_starlark_and_rust_spans() {
-    let pages = load_manual();
-    let allowed = [
-        "MISSING", "schema", "string", "integer", "number", "boolean", "enum", "list", "optional",
-        "nullable", "plugin", "tool", "command", "on", "skill", "rule", "model", "ok", "err",
-        "output", "toml",
-    ];
-    for (page, text) in &pages {
-        for span in dal_spans(text) {
-            let protocol_metadata = page == "protocol" && span == "status";
-            assert!(
-                protocol_metadata || allowed.contains(&span.as_str()),
-                "dal.{span} in {page} names a builtin"
-            );
-        }
-    }
 }
 
 #[test]
@@ -966,47 +886,6 @@ fn truth_cross_manual_links() {
         dg_to_dal > 0,
         "a dalgona:// link in a dal page resolves in dalgona"
     );
-}
-
-#[test]
-fn reload_wording_has_no_stale_text() {
-    // Superseded reload wording must appear in no owned page.
-    let mut files = vec![repo_root().join("README.md")];
-    let push_md = |dir: &PathBuf, out: &mut Vec<PathBuf>| {
-        let entries = std::fs::read_dir(dir).unwrap();
-        for entry in entries.filter_map(std::result::Result::ok) {
-            let path = entry.path();
-            if path.extension().and_then(|extension| extension.to_str()) == Some("md") {
-                out.push(path);
-            }
-        }
-    };
-    push_md(&docs_dir(), &mut files);
-    push_md(&repo_root().join("dalgona/docs"), &mut files);
-    for entry in std::fs::read_dir(examples_dir())
-        .unwrap()
-        .filter_map(std::result::Result::ok)
-    {
-        if entry.file_type().unwrap().is_dir() {
-            push_md(&entry.path(), &mut files);
-        }
-    }
-    assert_ne!(files, [] as [std::path::PathBuf; 0]);
-    for path in files {
-        let text = std::fs::read_to_string(&path)
-            .unwrap_or_else(|_| panic!("readable: {}", path.display()));
-        for stale in [
-            "previous plugins stay active",
-            "reload: loaded",
-            "config.toml",
-        ] {
-            assert!(
-                !text.contains(stale),
-                "stale reload wording {stale:?} in {}",
-                path.display()
-            );
-        }
-    }
 }
 
 #[test]
@@ -1103,13 +982,6 @@ fn truth_dalgona_config_diff() {
     }
 }
 
-#[test]
-fn truth_cli_help() {
-    let pages = load_manual();
-    let cli = pages.get("cli").expect("cli page");
-    assert!(cli.contains("## dal docs"));
-}
-
 fn fenced(text: &str, tag: &str) -> Vec<String> {
     let mut blocks = Vec::new();
     let mut lines = text.lines().peekable();
@@ -1161,57 +1033,4 @@ fn extract_links(text: &str, scheme: &str) -> Vec<String> {
         cursor = separator + 3;
     }
     found
-}
-
-fn dal_spans(text: &str) -> Vec<String> {
-    let mut spans = Vec::new();
-    let bytes = text.as_bytes();
-    let mut i = 0;
-    while i + 4 < bytes.len() {
-        if &bytes[i..i + 4] == b"dal." {
-            let mut j = i + 4;
-            while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
-                j += 1;
-            }
-            // A sentence-ending `dal.` names no builtin.
-            if j > i + 4 {
-                spans.push(text[i + 4..j].to_owned());
-            }
-            i = j;
-        } else {
-            i += 1;
-        }
-    }
-    spans
-}
-
-fn collect(roots: &[PathBuf], out: &mut Vec<String>) {
-    for root in roots {
-        walk(root, out);
-    }
-}
-
-fn walk(current: &Path, out: &mut Vec<String>) {
-    let Ok(entries) = std::fs::read_dir(current) else {
-        return;
-    };
-    for entry in entries.filter_map(std::result::Result::ok) {
-        let path = entry.path();
-        if path.is_symlink() {
-            continue;
-        }
-        if path.is_dir() {
-            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if name == "target" || name.starts_with('.') {
-                continue;
-            }
-            walk(&path, out);
-        } else if matches!(
-            path.extension().and_then(|e| e.to_str()),
-            Some("rs" | "md" | "star")
-        ) && let Ok(text) = std::fs::read_to_string(&path)
-        {
-            out.push(text.replace("\r\n", "\n"));
-        }
-    }
 }

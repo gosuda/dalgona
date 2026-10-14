@@ -2421,6 +2421,30 @@ impl SessionState {
         if self.config.data_root.is_none() {
             return Err(refuse(IsolationRefusal::NoDataRoot));
         }
+        self.check_git_version(caller, &refuse).await?;
+        let top = self.resolve_toplevel(caller, &refuse).await?;
+        let head = self.resolve_head(caller, &top, &refuse).await?;
+        let stash = self.resolve_stash(caller, &top, &refuse).await?;
+        let canonical_top = tokio::fs::canonicalize(&top)
+            .await
+            .unwrap_or_else(|_| top.clone());
+        let canonical_workspace = tokio::fs::canonicalize(&self.workspace)
+            .await
+            .unwrap_or_else(|_| self.workspace.clone());
+        let relative_workspace = workspace_relative(&canonical_workspace, &canonical_top)
+            .ok_or_else(|| refuse(super::worktree::IsolationRefusal::NotARepository))?;
+        Ok(Some(Base {
+            top,
+            commit: if stash.is_empty() { head } else { stash },
+            relative_workspace,
+        }))
+    }
+
+    async fn check_git_version(
+        &self,
+        caller: &Caller,
+        refuse: &impl Fn(IsolationRefusal) -> ServiceError,
+    ) -> Result<(), ServiceError> {
         let version = git(
             self.services.as_ref(),
             caller,
@@ -2443,7 +2467,15 @@ impl SessionState {
                 version: text.trim().to_owned(),
             }));
         }
-        let top = match git(
+        Ok(())
+    }
+
+    async fn resolve_toplevel(
+        &self,
+        caller: &Caller,
+        refuse: &impl Fn(IsolationRefusal) -> ServiceError,
+    ) -> Result<PathBuf, ServiceError> {
+        match git(
             self.services.as_ref(),
             caller,
             &self.workspace,
@@ -2451,15 +2483,21 @@ impl SessionState {
         )
         .await
         {
-            Ok(output) if output.status == ExitStatusKind::Exited(0) => {
-                PathBuf::from(String::from_utf8_lossy(&output.stdout_prefix).trim())
-            }
-            Ok(_) => {
-                return Err(refuse(super::worktree::IsolationRefusal::NotARepository));
-            }
-            Err(error) => return Err(refuse(denied_refusal(&error))),
-        };
-        let head = match git(
+            Ok(output) if output.status == ExitStatusKind::Exited(0) => Ok(PathBuf::from(
+                String::from_utf8_lossy(&output.stdout_prefix).trim(),
+            )),
+            Ok(_) => Err(refuse(super::worktree::IsolationRefusal::NotARepository)),
+            Err(error) => Err(refuse(denied_refusal(&error))),
+        }
+    }
+
+    async fn resolve_head(
+        &self,
+        caller: &Caller,
+        top: &Path,
+        refuse: &impl Fn(IsolationRefusal) -> ServiceError,
+    ) -> Result<String, ServiceError> {
+        match git(
             self.services.as_ref(),
             caller,
             &self.workspace,
@@ -2468,14 +2506,22 @@ impl SessionState {
         .await
         {
             Ok(output) if output.status == ExitStatusKind::Exited(0) => {
-                String::from_utf8_lossy(&output.stdout_prefix)
+                Ok(String::from_utf8_lossy(&output.stdout_prefix)
                     .trim()
-                    .to_owned()
+                    .to_owned())
             }
-            Ok(_) => return Err(refuse(super::worktree::IsolationRefusal::NoHead)),
-            Err(error) => return Err(refuse(denied_refusal(&error))),
-        };
-        let stash = match git(
+            Ok(_) => Err(refuse(super::worktree::IsolationRefusal::NoHead)),
+            Err(error) => Err(refuse(denied_refusal(&error))),
+        }
+    }
+
+    async fn resolve_stash(
+        &self,
+        caller: &Caller,
+        top: &Path,
+        refuse: &impl Fn(IsolationRefusal) -> ServiceError,
+    ) -> Result<String, ServiceError> {
+        match git(
             self.services.as_ref(),
             caller,
             &self.workspace,
@@ -2484,30 +2530,15 @@ impl SessionState {
         .await
         {
             Ok(output) if output.status == ExitStatusKind::Exited(0) => {
-                String::from_utf8_lossy(&output.stdout_prefix)
+                Ok(String::from_utf8_lossy(&output.stdout_prefix)
                     .trim()
-                    .to_owned()
+                    .to_owned())
             }
-            Ok(output) => {
-                return Err(refuse(super::worktree::IsolationRefusal::NoBase {
-                    reason: stderr_line(&output),
-                }));
-            }
-            Err(error) => return Err(refuse(denied_refusal(&error))),
-        };
-        let canonical_top = tokio::fs::canonicalize(&top)
-            .await
-            .unwrap_or_else(|_| top.clone());
-        let canonical_workspace = tokio::fs::canonicalize(&self.workspace)
-            .await
-            .unwrap_or_else(|_| self.workspace.clone());
-        let relative_workspace = workspace_relative(&canonical_workspace, &canonical_top)
-            .ok_or_else(|| refuse(super::worktree::IsolationRefusal::NotARepository))?;
-        Ok(Some(Base {
-            top,
-            commit: if stash.is_empty() { head } else { stash },
-            relative_workspace,
-        }))
+            Ok(output) => Err(refuse(super::worktree::IsolationRefusal::NoBase {
+                reason: stderr_line(&output),
+            })),
+            Err(error) => Err(refuse(denied_refusal(&error))),
+        }
     }
 
     async fn tool_call(&mut self, event: ToolCallEvent) -> ToolCallVerdict {
@@ -2853,24 +2884,61 @@ fn workspace_relative(workspace: &Path, top: &Path) -> Option<PathBuf> {
     }
     Some(relative)
 }
+#[cfg_attr(
+    unix,
+    expect(
+        clippy::unnecessary_wraps,
+        reason = "non-Unix refuses invalid UTF-8, so the Option is required portably"
+    )
+)]
 /// Splits `git diff --name-only -z` output on NUL only, never on lines.
 /// A trailing NUL terminator and empty output both yield no empty entry;
 /// any interior empty entry survives so `changed_paths_valid` still refuses it.
-fn parse_nul_names(bytes: &[u8]) -> Vec<PathBuf> {
+/// Raw bytes survive untouched: on Unix each entry keeps its exact bytes so
+/// a non-UTF-8 name can never decode to the replacement character and
+/// collide with a workspace that literally names it; elsewhere invalid
+/// UTF-8 refuses the whole list and the caller keeps the worktree unapplied.
+fn parse_nul_names(bytes: &[u8]) -> Option<Vec<PathBuf>> {
     if bytes.is_empty() {
-        return Vec::new();
+        return Some(Vec::new());
     }
     let mut trimmed = bytes;
     if trimmed.last() == Some(&0) {
         trimmed = &trimmed[..trimmed.len() - 1];
     }
     if trimmed.is_empty() {
-        return Vec::new();
+        return Some(Vec::new());
     }
-    trimmed
-        .split(|byte| *byte == 0)
-        .map(|chunk| PathBuf::from(String::from_utf8_lossy(chunk).into_owned()))
-        .collect()
+    #[cfg(unix)]
+    {
+        Some(
+            trimmed
+                .split(|byte| *byte == 0)
+                .map(path_from_raw)
+                .collect(),
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        trimmed
+            .split(|byte| *byte == 0)
+            .map(path_from_raw)
+            .collect()
+    }
+}
+
+/// Builds one changed path from its raw NUL-separated bytes, keeping the
+/// exact bytes so a non-UTF-8 name never decodes to the replacement character.
+#[cfg(unix)]
+fn path_from_raw(chunk: &[u8]) -> PathBuf {
+    PathBuf::from(<std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(chunk))
+}
+
+/// Builds one changed path from its raw NUL-separated bytes, refusing
+/// names the platform cannot represent without lossy decoding.
+#[cfg(not(unix))]
+fn path_from_raw(chunk: &[u8]) -> Option<PathBuf> {
+    std::str::from_utf8(chunk).ok().map(PathBuf::from)
 }
 
 /// Whether every changed path stays inside the run's nested workspace.
@@ -3831,7 +3899,9 @@ impl Coordinator {
             }
             _ => return kept_without_patch("the changes could not be computed", dir),
         };
-        let changed = parse_nul_names(&names.stdout_prefix);
+        let Some(changed) = parse_nul_names(&names.stdout_prefix) else {
+            return kept_without_patch("the changed paths were not valid names", dir);
+        };
         if !super::delivery::changed_paths_valid(&changed) {
             return kept_without_patch("the changed paths were not relative", dir);
         }

@@ -188,12 +188,22 @@ impl Default for ShutdownReport {
 /// A stream of host lifecycle updates. Dropping it unregisters the subscriber.
 pub struct HostSubscription {
     pub(crate) receiver: mpsc::UnboundedReceiver<HostUpdate>,
+    /// Sessions with a `SessionChanged` queued but not yet delivered here.
+    pub(crate) pending_changed:
+        std::sync::Arc<std::sync::Mutex<std::collections::HashSet<SessionId>>>,
 }
 
 impl HostSubscription {
     /// Returns the next host update, or `None` after host shutdown.
     pub async fn next(&mut self) -> Option<HostUpdate> {
-        self.receiver.recv().await
+        let update = self.receiver.recv().await?;
+        if let HostUpdate::SessionChanged { session } = &update {
+            self.pending_changed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(session);
+        }
+        Some(update)
     }
 }
 
@@ -207,7 +217,7 @@ pub(crate) struct HostState {
     pub(crate) sessions: Mutex<HashMap<SessionId, SessionEntry>>,
     /// Names reserved while a new session is being opened.
     pub(crate) name_claims: Mutex<HashMap<(Workspace, Box<str>), SessionId>>,
-    pub(crate) subscribers: Mutex<Vec<mpsc::UnboundedSender<HostUpdate>>>,
+    pub(crate) subscribers: Mutex<Vec<Subscriber>>,
     /// Pending OAuth logins by cancel id; `auth/cancel` fires them. Entries
     /// leave on completion or cancel, so an id never outlives its attempt.
     pub(crate) logins: Mutex<HashMap<LoginId, CancellationToken>>,
@@ -219,13 +229,37 @@ pub(crate) struct HostState {
     /// Host-owned cleanup tails for sessions cancelled before registry activation.
     pub(crate) opening_tasks: SessionTasks,
 }
+
+/// One live subscriber channel plus its coalescing state.
+pub(crate) struct Subscriber {
+    /// The update channel.
+    pub(crate) sender: mpsc::UnboundedSender<HostUpdate>,
+    /// Sessions whose `SessionChanged` is queued but not yet delivered.
+    /// `SessionChanged` says "re-read this session": a repeated rename is
+    /// idempotent, so per-session coalescing bounds the queue by the live
+    /// session count instead of the rename rate.
+    pub(crate) pending_changed:
+        std::sync::Arc<std::sync::Mutex<std::collections::HashSet<SessionId>>>,
+}
+
 impl HostState {
     /// Publishes one host-level update to every live subscriber.
     pub(crate) fn publish(&self, update: &HostUpdate) {
         self.subscribers
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .retain(|sender| sender.send((*update).clone()).is_ok());
+            .retain(|subscriber| {
+                if let HostUpdate::SessionChanged { session } = update {
+                    let mut pending = subscriber
+                        .pending_changed
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if !pending.insert(*session) {
+                        return true;
+                    }
+                }
+                subscriber.sender.send((*update).clone()).is_ok()
+            });
     }
 }
 

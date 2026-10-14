@@ -927,7 +927,9 @@ fn valid_link_url(url: &str) -> bool {
     !has_terminal_control(url)
         && url
             .strip_prefix("file://")
-            .is_some_and(|path| std::path::Path::new(path).is_absolute())
+            // A file URL carries an absolute path by definition; checking
+            // Path::is_absolute would reject unix-style paths on Windows.
+            .is_some_and(|path| path.starts_with('/'))
 }
 
 /// Reports whether `url` is an absolute http(s) URL safe to open in the

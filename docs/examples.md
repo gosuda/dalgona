@@ -1,6 +1,6 @@
-# Example plugins ported from pi
+# Example plugins for dal
 
-Ports of pi extensions as dal Starlark plugins. Each port keeps its behavior; pi-specific UI becomes data.
+Ports of pi extensions as dal Starlark plugins, plus original dal plugins with no pi counterpart. Each port keeps its behavior; pi-specific UI becomes data.
 
 | port | pi origin | what it shows |
 |---|---|---|
@@ -14,6 +14,9 @@ Ports of pi extensions as dal Starlark plugins. Each port keeps its behavior; pi
 | git-checkpoint | pi `git-checkpoint.ts` | listing and restoring checkpoints through `tools.exec` |
 | handoff | pi `handoff.ts` | child session notes saved to state |
 | skill-pack | pi `dynamic-resources` | skills only |
+| fetch | original to dal | HTTP fetch through `net.fetch`, with `dal.err` failures |
+| steer | original to dal | steering or waking the turn through `turn.steer` and `turn.wake` |
+| review-rules | original to dal | stream and always-apply rules through `dal.rule` |
 
 ## pi's license
 

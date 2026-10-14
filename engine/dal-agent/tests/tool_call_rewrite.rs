@@ -28,6 +28,9 @@ const STEP_END: &str = "{\"kind\":\"events\",\"events\":[{\"type\":\"text_delta\
 /// Observed `(ok, preview)` pairs for settled tool results.
 type Settled = Arc<Mutex<Vec<(bool, Box<str>)>>>;
 
+/// Observed `(call, ok, preview)` triples for settled tool results.
+type SettledCalls = Arc<Mutex<Vec<(String, bool, Box<str>)>>>;
+
 #[derive(serde::Deserialize)]
 struct PathArgs {
     path: String,
@@ -53,8 +56,12 @@ impl Tool for Stat {
         let parsed: PathArgs = sonic_rs::from_str(args.as_str())
             .map_err(|error| ArgError::message(format!("path is required: {error}.")))?;
         let path = Path::new(&parsed.path);
-        let escapes = path.components().any(|part| part == Component::ParentDir)
-            || (path.is_absolute() && !path.starts_with(ws.as_path()));
+        let escapes = path.components().any(|part| {
+            matches!(
+                part,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        }) || (path.is_absolute() && !path.starts_with(ws.as_path()));
         if escapes {
             return Err(ArgError::message(format!(
                 "{} is outside the workspace.",
@@ -267,4 +274,233 @@ async fn a_hook_block_names_the_blocking_extension_and_never_runs_the_tool() {
         "blocked by fixture: placeholder text in arguments"
     );
     assert!(ran.is_empty(), "the tool must not run: {ran:?}");
+}
+#[derive(serde::Deserialize)]
+struct OpArgs {
+    op: String,
+}
+
+struct ClassTool {
+    name: Name,
+    spec: Arc<ToolSpec>,
+    ran: Arc<Mutex<Vec<String>>>,
+}
+
+impl Tool for ClassTool {
+    fn name(&self) -> &Name {
+        &self.name
+    }
+    fn spec(&self, _model: &ModelInfo) -> Arc<ToolSpec> {
+        Arc::clone(&self.spec)
+    }
+    fn classify(&self, args: &RawValue, _ws: &Workspace) -> Result<ToolClass, ArgError> {
+        let parsed: OpArgs = sonic_rs::from_str(args.as_str())
+            .map_err(|error| ArgError::message(format!("op is required: {error}.")))?;
+        match parsed.op.as_str() {
+            "read" => Ok(ToolClass::Read),
+            "write" => Ok(ToolClass::Other),
+            _ => Err(ArgError::message(format!("unknown op {}.", parsed.op))),
+        }
+    }
+    fn run<'a>(&'a self, call: ToolCall, _cx: ToolCx<'a>) -> BoxFuture<'a, ToolOutcome> {
+        self.ran
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(call.args.as_str().to_owned());
+        Box::pin(async { ToolOutcome::Ok(Box::new(ToolOutput::from_text("ran"))) })
+    }
+}
+
+struct SelectiveRewrite {
+    target: &'static str,
+    to: &'static str,
+}
+
+impl Hook<ToolCallEvent, ToolCallVerdict> for SelectiveRewrite {
+    fn call(
+        &self,
+        input: ToolCallEvent,
+        _cx: HookCx,
+    ) -> BoxFuture<'static, Result<ToolCallVerdict, HookError>> {
+        let verdict = if input.call.as_str() == self.target {
+            ToolCallVerdict::Rewrite {
+                args: RawJson::parse(self.to).expect("rewrite arguments"),
+            }
+        } else {
+            ToolCallVerdict::Allow
+        };
+        Box::pin(async { Ok(verdict) })
+    }
+}
+
+struct CallResults {
+    seen: SettledCalls,
+}
+
+impl ObserveHook<ToolResultEvent> for CallResults {
+    fn call(
+        &self,
+        input: ToolResultEvent,
+        _cx: HookCx,
+    ) -> BoxFuture<'static, Result<(), HookError>> {
+        let seen = Arc::clone(&self.seen);
+        Box::pin(async move {
+            seen.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((input.call.as_str().to_owned(), input.ok, input.preview));
+            Ok(())
+        })
+    }
+}
+
+/// Builds the classification fixture extension that rewrites `read-b` to a
+/// mutating `write` while recording settled `(call, ok, preview)` triples.
+fn class_rewrite_extension(ran: Arc<Mutex<Vec<String>>>, seen: SettledCalls) -> Extension {
+    let name = Name::parse("fixture__class").expect("tool name");
+    let tool = Arc::new(ClassTool {
+        name: name.clone(),
+        spec: Arc::new(ToolSpec {
+            name,
+            description: "read or write by op".into(),
+            parameters: RawJson::parse(r#"{"type":"object"}"#).expect("tool schema"),
+            grammar: None,
+        }),
+        ran,
+    });
+    ExtensionBuilder::new("fixture", "0.1.0", ServiceSet::EMPTY)
+        .expect("extension builder")
+        .on_tool_call(SelectiveRewrite {
+            target: "read-b",
+            to: r#"{"op":"write"}"#,
+        })
+        .on_tool_result(CallResults { seen })
+        .script_tool(
+            tool,
+            Visibility::Model,
+            ExportSpec {
+                id: ExportId {
+                    plugin: Name::parse("fixture").expect("plugin name"),
+                    kind: ExportKind::Tool,
+                    local: Name::parse("class").expect("export name"),
+                },
+                uses: OpSet::EMPTY,
+                input: RawJson::parse(r#"{"type":"object"}"#).expect("export schema"),
+                description: "class export".into(),
+            },
+        )
+        .build()
+        .expect("extension")
+}
+
+async fn run_two_reads_with_rewrite() -> (Vec<(String, bool, Box<str>)>, Vec<String>) {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let data = tmp.path().join("data");
+    let workspace_dir = tmp.path().join("workspace");
+    std::fs::create_dir_all(&data).expect("data directory");
+    std::fs::create_dir_all(&workspace_dir).expect("workspace directory");
+    let step_call = "{\"kind\":\"events\",\"events\":[{\"type\":\"tool_call_started\",\"id\":\"read-a\",\"name\":\"fixture__class\"},{\"type\":\"tool_call_started\",\"id\":\"read-b\",\"name\":\"fixture__class\"},{\"type\":\"tool_calls_done\",\"calls\":[{\"id\":\"read-a\",\"name\":\"fixture__class\",\"args\":{\"kind\":\"parsed\",\"value\":{\"op\":\"read\"}}},{\"id\":\"read-b\",\"name\":\"fixture__class\",\"args\":{\"kind\":\"parsed\",\"value\":{\"op\":\"read\"}}}]},{\"type\":\"usage\",\"usage\":{\"input_tokens\":10,\"cached_input_tokens\":0,\"output_tokens\":5,\"reasoning_tokens\":null,\"cache_write_tokens\":0,\"cost_usd\":null}},{\"type\":\"stop\",\"reason\":\"tool_use\"}]}\n";
+    let fixture = data.join("script.jsonl");
+    std::fs::write(&fixture, format!("{step_call}{STEP_END}")).expect("script fixture");
+    let config_text = format!(
+        "approval = \"all\"\nmodel = \"openai/gpt-6-luna\"\n\n[providers.scripted]\nfixture = \"{}\"\n",
+        fixture.to_string_lossy().replace('\\', "\\\\")
+    );
+    let config =
+        Config::load(ConfigProduct::Dalgon, &data, "", Some(config_text.as_str())).expect("config");
+    let ran = Arc::new(Mutex::new(Vec::new()));
+    let seen: SettledCalls = Arc::new(Mutex::new(Vec::new()));
+    let extension = class_rewrite_extension(Arc::clone(&ran), Arc::clone(&seen));
+    let product = Product {
+        name: "dal",
+        data_root: data.clone(),
+        defaults: "",
+        extensions: vec![extension],
+        bundled: Vec::new(),
+    };
+    let env = Env {
+        vars: BTreeMap::from([
+            (OsString::from("OPENAI_API_KEY"), OsString::from("sk-test")),
+            (
+                OsString::from("HOME"),
+                OsString::from(tmp.path().join("home")),
+            ),
+            (
+                OsString::from("XDG_CACHE_HOME"),
+                OsString::from(tmp.path().join("cache")),
+            ),
+        ]),
+        cwd: workspace_dir.clone(),
+        sandbox_helper: None,
+    };
+    let host = Host::start(product, config, env).await.expect("host");
+    let workspace = Workspace::new(workspace_dir).expect("workspace");
+    let agent = host
+        .open(
+            SessionRef::New {
+                workspace,
+                name: None,
+            },
+            ClientId::new("rewrite-class-test"),
+        )
+        .await
+        .expect("session");
+    agent
+        .submit(Command::Prompt {
+            expect: Expect::Idle,
+            content: vec![Part::Text {
+                text: "run two reads".into(),
+            }],
+        })
+        .await
+        .expect("prompt accepted");
+    let settled = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let done = seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len();
+            if done >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    settled.expect("both tool results arrived");
+    let seen = seen
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let ran = ran
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    (seen, ran)
+}
+
+#[tokio::test]
+async fn hook_rewrite_from_read_to_mutating_class_is_refused_without_running() {
+    let (seen, ran) = run_two_reads_with_rewrite().await;
+    let by_call = |id: &str| {
+        seen.iter()
+            .find(|(call, _, _)| call == id)
+            .unwrap_or_else(|| panic!("missing result for {id}: {seen:?}"))
+            .clone()
+    };
+    let (_, a_ok, _) = by_call("read-a");
+    let (_, b_ok, b_preview) = by_call("read-b");
+    assert!(a_ok, "the untouched read must still run: {seen:?}");
+    assert!(!b_ok, "the class-changing rewrite must fail: {seen:?}");
+    assert!(
+        b_preview.contains("changing its classification")
+            && b_preview.contains("read")
+            && (b_preview.contains("keep the rewrite read-only")
+                || b_preview.contains("separately")),
+        "the refusal names the classification change and the fix: {b_preview}"
+    );
+    assert_eq!(
+        ran,
+        vec![r#"{"op":"read"}"#.to_owned()],
+        "the mutating rewrite must never run beside the read: {ran:?}"
+    );
 }

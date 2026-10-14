@@ -207,6 +207,10 @@ fn wire_transport() -> std::io::Result<StdioTransport> {
 
 /// Builds the stdio transport on the process standard streams.
 #[cfg(not(unix))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the unix variant can fail isolating wire streams; the signature is shared"
+)]
 fn wire_transport() -> std::io::Result<StdioTransport> {
     #[expect(
         clippy::disallowed_methods,

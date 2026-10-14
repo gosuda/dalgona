@@ -3,7 +3,7 @@
 use dal_agent::error::SchemeError;
 use dal_agent::{AgentError, HostError};
 use dal_store::{BlobError, StoreError};
-use sonic_rs::{JsonValueTrait, Value};
+use sonic_rs::Value;
 
 use crate::jsonrpc::{ErrorObject, Id};
 
@@ -46,21 +46,6 @@ pub(crate) fn id_key(id: &Id) -> String {
         Id::String(text) => text.clone(),
         Id::Null => "null".to_owned(),
     }
-}
-
-/// Extracts the cancel-table key from a `$/cancel_request` notification's
-/// `requestId`: a non-empty string or an integer. Null, objects, and empty
-/// strings name no request and map to `None`.
-pub(crate) fn request_target(params: &Value) -> Option<String> {
-    params
-        .get("requestId")
-        .and_then(|value| {
-            value
-                .as_str()
-                .map(str::to_owned)
-                .or_else(|| value.as_i64().map(|number| number.to_string()))
-        })
-        .filter(|name| !name.is_empty())
 }
 
 /// Decodes method params through a JSON round trip with a JSON-path error.

@@ -269,6 +269,8 @@ pub struct LoginFlow<'a> {
     wait: Duration,
     device_auth: bool,
     started: bool,
+    #[cfg(test)]
+    commit_ready: Option<oneshot::Sender<()>>,
 }
 
 impl fmt::Debug for LoginFlow<'_> {
@@ -329,6 +331,8 @@ impl<'a> LoginFlow<'a> {
             wait: LOGIN_WAIT,
             device_auth: false,
             started: false,
+            #[cfg(test)]
+            commit_ready: None,
         })
     }
 
@@ -388,10 +392,11 @@ impl<'a> LoginFlow<'a> {
     ///
     /// The progress callback runs on the host task and can render the same
     /// events for a CLI, TUI, or GUI. Cancellation and the 15-minute deadline
-    /// apply through callback/device authorization and token exchange; once a
-    /// successful exchange is ready to commit, the durable write completes as
-    /// one locked atomic transaction. After commit, cancellation only stops the
-    /// best-effort model fetch and the committed credential is returned.
+    /// apply through callback/device authorization and token exchange. Cancellation
+    /// also applies while the auth-file lock is contended and is checked again
+    /// under the lock before the write. After this commit point, the durable write
+    /// completes as one locked atomic transaction. After commit, cancellation only
+    /// stops the best-effort model fetch and the committed credential is returned.
     ///
     /// # Errors
     /// Returns a typed login, transport, token-exchange, ID-token, or auth-store
@@ -434,7 +439,11 @@ impl<'a> LoginFlow<'a> {
             return Err(ProviderError::LoginCancelled);
         }
         let credential = Credential::OAuth(oauth);
-        if let Err(error) = self.persist(&credential).await {
+        #[cfg(test)]
+        if let Some(commit_ready) = self.commit_ready.take() {
+            let _ = commit_ready.send(());
+        }
+        if let Err(error) = self.persist(&credential, cancel).await {
             drop(self.paste_sender.take());
             drop(self.paste_receiver.take());
             return Err(error);
@@ -702,15 +711,27 @@ impl<'a> LoginFlow<'a> {
         }
     }
 
-    async fn persist(&mut self, credential: &Credential) -> Result<(), ProviderError> {
+    async fn persist(
+        &mut self,
+        credential: &Credential,
+        cancel: &CancellationToken,
+    ) -> Result<(), ProviderError> {
         let path = self.store.path().to_path_buf();
         let provider = self.def.id;
         let credential = credential.clone();
-        let lock = crate::auth::refresh::lock_auth_file(&path).await?;
+        let lock = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(ProviderError::LoginCancelled),
+            lock = crate::auth::refresh::lock_auth_file(&path) => lock?,
+        };
+        let cancel = cancel.clone();
         let updated = crate::auth::refresh::blocking(move || {
             let _lock = lock;
             let mut latest = AuthStore::load(&path)?;
             latest.set(provider, credential)?;
+            if cancel.is_cancelled() {
+                return Err(ProviderError::LoginCancelled);
+            }
             latest.store()?;
             Ok(latest)
         })
@@ -902,7 +923,7 @@ pub async fn logout_with(
         latest.remove(&provider_owned);
         if latest.status().is_empty() {
             match std::fs::remove_file(&remove_path) {
-                Ok(()) => {}
+                Ok(()) => sync_auth_directory(&remove_path)?,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => {
                     return Err(ProviderError::AuthWrite {
@@ -917,6 +938,39 @@ pub async fn logout_with(
     })
     .await?;
     *store = updated;
+    Ok(())
+}
+
+#[cfg_attr(
+    windows,
+    expect(
+        clippy::unnecessary_wraps,
+        reason = "directory sync fails only on POSIX"
+    )
+)]
+fn sync_auth_directory(path: &Path) -> Result<(), ProviderError> {
+    #[cfg(not(windows))]
+    {
+        let parent = path.parent().ok_or_else(|| ProviderError::AuthWrite {
+            reason: format!("{} names no parent directory", path.display()),
+        })?;
+        #[cfg(all(test, unix))]
+        if tests::take_dir_sync_fault(path) {
+            return Err(ProviderError::AuthWrite {
+                reason: format!(
+                    "could not sync {}: injected directory sync failure",
+                    parent.display()
+                ),
+            });
+        }
+        std::fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| ProviderError::AuthWrite {
+                reason: format!("could not sync {}: {error}", parent.display()),
+            })?;
+    }
+    #[cfg(windows)]
+    let _ = path;
     Ok(())
 }
 
