@@ -6,7 +6,7 @@ use std::sync::Arc;
 use dal_agent::ext::{ArgError, BoxFuture, ToolCall, ToolCx, ToolOutcome, ToolOutput};
 use dal_core::{Name, RegistrationError, ToolClass, ToolSpec, Workspace};
 
-use super::guard::{Guard, Pinned};
+use super::guard::Guard;
 use super::{ToolLabel, WebConfig, WebError};
 
 pub(crate) const TOOL_NAME: &str = "web_fetch";
@@ -118,14 +118,13 @@ impl dal_agent::ext::Tool for FetchTool {
             let services = cx.services();
             let caller = cx.caller().clone();
             for _ in 0..=self.cfg.max_redirects {
-                let pinned = match self.guard.pin_within(&url, self.cfg.timeout_secs).await {
-                    Ok(pinned) => pinned,
-                    Err(error) => return outcome(error),
-                };
+                if let Err(error) = self.guard.pin_within(&url, self.cfg.timeout_secs).await {
+                    return outcome(error);
+                }
                 let response = match super::timed_net(
                     services.as_ref(),
                     &caller,
-                    fetch_request(&pinned),
+                    fetch_request(&url),
                     ToolLabel::Fetch,
                     self.cfg.timeout_secs,
                     url.as_str(),
@@ -193,17 +192,13 @@ fn outcome(error: WebError) -> ToolOutcome {
     super::tool_outcome(error)
 }
 
-/// Builds the single-hop `net` request for one gated fetch target. A target
-/// pinned to an address carries the original authority as its `Host` header.
-fn fetch_request(pinned: &Pinned) -> dal_core::ext::FetchRequest {
-    let mut headers = vec![("User-Agent".into(), super::USER_AGENT.into())];
-    if let Some(host) = &pinned.host_header {
-        headers.push(("Host".into(), host.as_str().into()));
-    }
+/// Builds a single-hop request using the original authority. The host Net
+/// backend checks DNS and pins the actual socket address for HTTP and HTTPS.
+fn fetch_request(url: &reqwest::Url) -> dal_core::ext::FetchRequest {
     dal_core::ext::FetchRequest {
         method: dal_core::ext::FetchMethod::Get,
-        url: pinned.url.as_str().into(),
-        headers,
+        url: url.as_str().into(),
+        headers: vec![("User-Agent".into(), super::USER_AGENT.into())],
         body: Vec::new(),
         redirects: dal_core::ext::RedirectPolicy::Refuse,
     }
@@ -342,42 +337,32 @@ mod tests {
     }
 
     #[test]
-    fn builds_a_single_hop_get_request() {
-        let url = validate_url("http://example.test/page").expect("valid fixture url");
-        let pinned = super::Pinned {
-            url,
-            host_header: None,
-        };
-        let request = super::fetch_request(&pinned);
-
-        assert!(matches!(request.method, dal_core::ext::FetchMethod::Get));
-        assert_eq!(request.url.as_ref(), "http://example.test/page");
-        assert_eq!(request.body.len(), 0);
-        assert!(request.headers.iter().any(|(name, value)| {
-            name.eq_ignore_ascii_case("User-Agent") && value.as_ref().starts_with("dalgona-web/")
-        }));
-        assert!(
-            !request
-                .headers
-                .iter()
-                .any(|(name, _)| name.eq_ignore_ascii_case("Host")),
-            "an unpinned hop lets the client derive the host"
-        );
-    }
-
-    #[test]
-    fn a_pinned_hop_keeps_the_original_authority_as_its_host_header() {
-        let url = validate_url("http://93.184.216.34:8080/page").expect("valid fixture url");
-        let pinned = super::Pinned {
-            url,
-            host_header: Some("example.test:8080".to_owned()),
-        };
-        let request = super::fetch_request(&pinned);
-
-        assert_eq!(request.url.as_ref(), "http://93.184.216.34:8080/page");
-        assert!(request.headers.iter().any(|(name, value)| {
-            name.eq_ignore_ascii_case("Host") && value.as_ref() == "example.test:8080"
-        }));
+    fn builds_single_hop_requests_with_the_original_authority() {
+        for address in [
+            "http://example.test:8080/page",
+            "https://example.test:8443/page",
+        ] {
+            let url = validate_url(address).expect("valid test URL");
+            let request = super::fetch_request(&url);
+            assert!(matches!(request.method, dal_core::ext::FetchMethod::Get));
+            assert_eq!(request.url.as_ref(), address);
+            assert!(request.body.is_empty());
+            assert_eq!(
+                request.redirects,
+                dal_core::ext::RedirectPolicy::Refuse
+            );
+            assert!(request.headers.iter().any(|(name, value)| {
+                name.eq_ignore_ascii_case("User-Agent")
+                    && value.as_ref().starts_with("dalgona-web/")
+            }));
+            assert!(
+                !request
+                    .headers
+                    .iter()
+                    .any(|(name, _)| name.eq_ignore_ascii_case("Host")),
+                "the host transport must own HTTP authority"
+            );
+        }
     }
 
     #[test]

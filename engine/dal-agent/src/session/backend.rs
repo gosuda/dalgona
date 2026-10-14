@@ -11,8 +11,8 @@ use std::sync::Arc;
 use dal_core::ext::{Mail as ExtMail, Service, SidecarName};
 use dal_core::{
     AgentInfo, AgentRefusal, AgentReport, AgentState, AgentsOp, AgentsReply, ApprovalMode, BlobId,
-    Command, EntryId, Expect, FetchMethod, FetchRequest, FetchResponse, Inference, JobsOp,
-    JobsReply, MailMode, ModelRequest, ModelRoute, Name, Notice, Part, RawJson, RedirectPolicy,
+    Command, EntryId, Expect, FetchRequest, FetchResponse, Inference, JobsOp,
+    JobsReply, MailMode, ModelRequest, ModelRoute, Name, Notice, Part, RawJson,
     Reply, Request, SessionId, StateError, StateOp, StateRecord, TurnOp, TurnOpReply, Workspace,
 };
 use dal_provider::EventStream;
@@ -643,56 +643,7 @@ impl SessionBackend for Backend {
     }
 
     fn net(&self, req: FetchRequest) -> ServiceFuture<'_, FetchResponse> {
-        Box::pin(async move {
-            let method = match req.method {
-                FetchMethod::Post => reqwest::Method::POST,
-                FetchMethod::Put => reqwest::Method::PUT,
-                FetchMethod::Delete => reqwest::Method::DELETE,
-                FetchMethod::Head => reqwest::Method::HEAD,
-                FetchMethod::Options => reqwest::Method::OPTIONS,
-                FetchMethod::Patch => reqwest::Method::PATCH,
-                _ => reqwest::Method::GET,
-            };
-            let client = match req.redirects {
-                RedirectPolicy::Follow => dal_provider::build_client(),
-                RedirectPolicy::Refuse => dal_provider::build_client_no_redirect(),
-            };
-            let mut outgoing = client.request(method, req.url.as_ref()).body(req.body);
-            for (name, value) in req.headers {
-                if let (Ok(name), Ok(value)) = (
-                    reqwest::header::HeaderName::from_bytes(name.as_bytes()),
-                    reqwest::header::HeaderValue::from_str(&value),
-                ) {
-                    outgoing = outgoing.header(name, value);
-                }
-            }
-            let failure = FetchResponse {
-                status: 0,
-                headers: Vec::new(),
-                body: Vec::new(),
-            };
-            let Ok(mut response) = outgoing.send().await else {
-                return Ok(failure);
-            };
-            let status = response.status().as_u16();
-            let headers = response
-                .headers()
-                .iter()
-                .map(|(name, value)| (name.as_str().into(), value.to_str().unwrap_or("").into()))
-                .collect();
-            let mut body = Vec::new();
-            while body.len() < dal_provider::BODY_LIMIT
-                && let Ok(Some(chunk)) = response.chunk().await
-            {
-                let room = dal_provider::BODY_LIMIT - body.len();
-                body.extend_from_slice(&chunk[..chunk.len().min(room)]);
-            }
-            Ok(FetchResponse {
-                status,
-                headers,
-                body,
-            })
-        })
+        Box::pin(super::net::send(req))
     }
 
     fn agents(&self, op: AgentsOp) -> ServiceFuture<'_, AgentsReply> {
