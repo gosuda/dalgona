@@ -211,6 +211,10 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the ACL regression test uses the Windows icacls utility"
+    )]
     fn a_widened_windows_dacl_is_refused() {
         use std::process::Command;
 
