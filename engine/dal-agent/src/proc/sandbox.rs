@@ -362,8 +362,16 @@ pub(crate) fn platform_cache(vars: &BTreeMap<OsString, OsString>, home: &Path) -
     }
 }
 
-/// Renders the Seatbelt profile with exactly the four plan forms in order,
-/// one escaped root rule per canonical root.
+/// Kernel-enforced restrictions inherited by every macOS child, including
+/// processes launched when the filesystem sandbox is disabled.
+/// A process may not leave the process group that the host owns.
+#[cfg(target_os = "macos")]
+const MACOS_LIFETIME_RULES: &str = concat!(
+    "(deny syscall-unix (syscall-number SYS_setsid))\n",
+    "(deny syscall-unix (syscall-number SYS_setpgid))\n",
+);
+
+/// Renders the Seatbelt filesystem profile and mandatory lifetime rules.
 #[cfg(target_os = "macos")]
 pub(crate) fn seatbelt_profile(roots: &[PathBuf]) -> String {
     use std::fmt::Write as _;
@@ -375,6 +383,7 @@ pub(crate) fn seatbelt_profile(roots: &[PathBuf]) -> String {
             escape_sbpl(root),
         );
     }
+    profile.push_str(MACOS_LIFETIME_RULES);
     profile
 }
 
@@ -416,6 +425,25 @@ pub(crate) fn write_seatbelt_profile(job: &JobId, roots: &[PathBuf]) -> Result<P
     file.write_all(seatbelt_profile(roots).as_bytes())
         .map_err(|source| seatbelt_write_error(&path, &source))?;
     Ok(path)
+}
+
+/// Wraps a macOS command in lifetime-only Seatbelt restrictions.
+///
+/// The normal filesystem sandbox remains disabled for direct launches, but
+/// detaching from the host-owned process group is never permitted.
+#[cfg(target_os = "macos")]
+pub(crate) fn lifetime_argv(
+    target: &OsString,
+    target_args: &[OsString],
+) -> (OsString, Vec<OsString>, Option<PathBuf>) {
+    let mut args = vec![
+        OsString::from("-p"),
+        OsString::from(format!("(version 1)\n(allow default)\n{MACOS_LIFETIME_RULES}")),
+        OsString::from("--"),
+        target.clone(),
+    ];
+    args.extend(target_args.iter().cloned());
+    (OsString::from("/usr/bin/sandbox-exec"), args, None)
 }
 
 /// Builds the sandboxed argv for one platform; macOS returns the profile
@@ -652,7 +680,7 @@ mod tests {
         ]);
         assert_eq!(
             profile,
-            "(version 1)\n(allow default)\n(deny file-write*)\n(allow file-write* (subpath \"/work/project\"))\n(allow file-write* (subpath \"/tmp/we\\\"ird\\\\path\"))\n",
+            "(version 1)\n(allow default)\n(deny file-write*)\n(allow file-write* (subpath \"/work/project\"))\n(allow file-write* (subpath \"/tmp/we\\\"ird\\\\path\"))\n(deny syscall-unix (syscall-number SYS_setsid))\n(deny syscall-unix (syscall-number SYS_setpgid))\n",
         );
     }
 
