@@ -1286,7 +1286,8 @@ impl Host {
                 extension.state_version(),
                 crate::ext::CallerKind::Hook,
                 None,
-            ).with_extension(extension);
+            )
+            .with_extension(extension);
             let cx = crate::ext::SessionCx {
                 session: resolved.id,
                 workspace: resolved.workspace.clone(),
