@@ -6,12 +6,14 @@
 //! close the transport without a close frame, per the pinned
 //! `tokio-tungstenite` limit semantics. Token-bearing headers and
 //! subprotocols never enter logs. Disconnection leaves sessions and turns
-//! running.
+//! running. Server-side connections expire after five minutes without an
+//! inbound frame; outbound client transports have no idle timeout.
 
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, ready};
+use std::time::Duration;
 
 use futures::StreamExt;
 use hyper::header::HeaderValue;
@@ -29,6 +31,8 @@ use crate::transport::{FrameWriter, ReadFrameError};
 
 /// Maximum WebSocket message size in bytes (16 MiB).
 const WS_FRAME_CAP: usize = 16_777_216;
+/// Maximum time a server WebSocket may remain silent between inbound frames.
+const WS_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// One WebSocket protocol transport.
 pub struct WebSocketTransport {
@@ -38,6 +42,8 @@ pub struct WebSocketTransport {
     writer: FrameWriter,
     /// Shared close state.
     flags: Arc<WsFlags>,
+    /// Server-side receive timeout; client transports have none.
+    idle_timeout: Option<Duration>,
 }
 
 type WsStream = Pin<Box<dyn futures::Stream<Item = Result<Message, WsError>> + Send>>;
@@ -57,7 +63,7 @@ struct WsFlags {
 
 impl WebSocketTransport {
     /// Builds a transport from boxed stream and sink halves.
-    fn halves(stream: WsStream, sink: WsSink) -> Self {
+    fn halves(stream: WsStream, sink: WsSink, idle_timeout: Option<Duration>) -> Self {
         let flags = Arc::new(WsFlags::default());
         let writer = FrameWriter::from_box(
             Box::new(WsWrite {
@@ -71,6 +77,7 @@ impl WebSocketTransport {
             reader: Arc::new(Mutex::new(stream)),
             writer,
             flags,
+            idle_timeout,
         }
     }
 
@@ -91,7 +98,7 @@ impl WebSocketTransport {
             tokio_tungstenite::WebSocketStream::from_raw_socket(io, Role::Server, Some(config))
                 .await;
         let (sink, stream) = socket.split();
-        Self::halves(Box::pin(stream), Box::pin(sink))
+        Self::halves(Box::pin(stream), Box::pin(sink), Some(WS_IDLE_TIMEOUT))
     }
 
     /// Connects one client transport to a WebSocket URL.
@@ -136,7 +143,7 @@ impl WebSocketTransport {
             .await
             .map_err(|error| WireError::Transport(format!("websocket connect failed: {error}")))?;
         let (sink, stream) = socket.split();
-        Ok(Self::halves(Box::pin(stream), Box::pin(sink)))
+        Ok(Self::halves(Box::pin(stream), Box::pin(sink), None))
     }
 
     /// Returns the shared writer for protocol replies.
@@ -150,14 +157,25 @@ impl WebSocketTransport {
     /// # Errors
     ///
     /// Returns [`ReadFrameError`] when the peer closes, sends binary data
-    /// (closed with code 1003), exceeds the frame cap, or the stream fails.
+    /// (closed with code 1003), exceeds the frame cap, stays idle for too long,
+    /// or the stream fails.
     pub async fn read_frame(&mut self) -> Result<String, ReadFrameError> {
         let mut reader = self.reader.lock().await;
         loop {
             if self.flags.closed.load(Ordering::Acquire) {
                 return Err(ReadFrameError::Closed);
             }
-            match reader.next().await {
+            let next = match self.idle_timeout {
+                Some(timeout) => match tokio::time::timeout(timeout, reader.next()).await {
+                    Ok(next) => next,
+                    Err(_) => {
+                        self.flags.closed.store(true, Ordering::Release);
+                        return Err(ReadFrameError::Closed);
+                    }
+                },
+                None => reader.next().await,
+            };
+            match next {
                 None | Some(Ok(Message::Close(_))) => {
                     self.flags.closed.store(true, Ordering::Release);
                     return Err(ReadFrameError::EndOfInput);
@@ -329,4 +347,55 @@ pub async fn serve_websocket(
         drain,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use futures::SinkExt;
+    use tokio_tungstenite::{
+        WebSocketStream,
+        tungstenite::{Message, protocol::Role},
+    };
+
+    use super::{WS_IDLE_TIMEOUT, WebSocketTransport};
+    use crate::transport::ReadFrameError;
+
+    #[tokio::test(start_paused = true)]
+    async fn silent_server_websocket_expires_after_idle_timeout() {
+        let (server_io, silent_peer) = tokio::io::duplex(1024);
+        let mut server = WebSocketTransport::server(server_io).await;
+        let _silent_peer = silent_peer;
+        let read = tokio::spawn(async move { server.read_frame().await });
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(WS_IDLE_TIMEOUT).await;
+
+        assert_eq!(read.await.expect("read task"), Err(ReadFrameError::Closed));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn inbound_websocket_activity_resets_idle_timeout() {
+        let (server_io, client_io) = tokio::io::duplex(1024);
+        let mut server = WebSocketTransport::server(server_io).await;
+        let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+        let read = tokio::spawn(async move {
+            assert_eq!(server.read_frame().await, Ok("alive".to_owned()));
+            server.read_frame().await
+        });
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(WS_IDLE_TIMEOUT - Duration::from_secs(1)).await;
+        client
+            .send(Message::Text("alive".into()))
+            .await
+            .expect("send activity");
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(2)).await;
+        assert!(!read.is_finished(), "activity must reset the idle deadline");
+
+        tokio::time::advance(WS_IDLE_TIMEOUT).await;
+        assert_eq!(read.await.expect("read task"), Err(ReadFrameError::Closed));
+    }
 }
