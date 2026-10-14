@@ -2,8 +2,8 @@
 //!
 //! Hyper serves HTTP/1.1 on a Tokio `TcpListener` with a 256-connection
 //! lifetime cap shared with upgraded WebSockets. The pipeline is route,
-//! browser guard, authentication, content type,
-//! bounded body, then the route handler. OpenAI routes run through the
+//! browser guard, authentication, content type, bounded body, then the
+//! route handler. OpenAI routes run through the
 //! router, A2A routes through `a2a`, and `/v1/ws` plus `/codex/ws` upgrade
 //! to WebSockets. Loopback binds need no token; public binds require the
 //! BLAKE3-checked serve token. Stopping ceases accepts, cancels handler
@@ -154,9 +154,11 @@ pub(crate) fn listen(
                         Ok((stream, _)) => {
                             // Only the accept loop acquires permits. The guard above
                             // proves that one is available.
-                            let permit = Arc::new(Arc::clone(&permits)
-                                .try_acquire_owned()
-                                .expect("connection permit available"));
+                            let permit = Arc::new(
+                                Arc::clone(&permits)
+                                    .try_acquire_owned()
+                                    .expect("connection permit available"),
+                            );
                             let ctx = Arc::clone(&ctx);
                             conns.push(Box::pin(async move {
                                 serve_conn(ctx, stream, permit).await;

@@ -10,10 +10,10 @@
 //! inbound frame; outbound client transports have no idle timeout.
 
 use std::pin::Pin;
-use std::time::Duration;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, ready};
+use std::time::Duration;
 
 use futures::StreamExt;
 use hyper::header::HeaderValue;
