@@ -408,7 +408,14 @@ impl RenderCache {
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            state.workers.retain(|worker| !worker.is_finished());
+            let mut index = 0;
+            while index < state.workers.len() {
+                if state.workers[index].is_finished() {
+                    let _ = state.workers.swap_remove(index).join();
+                } else {
+                    index += 1;
+                }
+            }
             state.workers.push(worker);
         } else {
             let mut state = self
