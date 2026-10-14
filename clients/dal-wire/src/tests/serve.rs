@@ -70,6 +70,34 @@ async fn incomplete_headers_expire_and_allow_new_connections() {
 }
 
 #[tokio::test]
+async fn partial_header_bytes_do_not_extend_the_deadline() {
+    let rig = rig(&[]).await;
+    with_serve(&rig, router_options(&rig), async |addr| {
+        let mut stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("connect");
+        stream
+            .write_all(b"GET /v1/nope HTTP/1.1\r\nHost:")
+            .await
+            .expect("send initial partial header");
+        tokio::task::yield_now().await;
+
+        tokio::time::pause();
+        let halfway = crate::serve::HEADER_TIMEOUT / 2;
+        tokio::time::sleep(halfway).await;
+        stream
+            .write_all(b" 127.0.0.1")
+            .await
+            .expect("drip another incomplete header fragment");
+        tokio::time::timeout(halfway + Duration::from_secs(1), read_closed(&mut stream))
+            .await
+            .expect("header timeout must not restart on each byte");
+        tokio::time::resume();
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn idle_keep_alive_sockets_expire_between_requests() {
     let rig = rig(&[]).await;
     with_serve(&rig, router_options(&rig), async |addr| {
