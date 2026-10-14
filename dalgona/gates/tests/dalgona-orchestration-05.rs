@@ -41,11 +41,8 @@ fn goal_commands_answer_with_exact_texts() -> support::TestResult<()> {
             }
             dal_agent::ext::grants::GrantStore::new(data.clone())
                 .grant(
-                    dal_agent::ext::grants::GrantKey {
-                        extension: dal_core::Name::parse(extension.name())?,
-                        origin: dal_core::Origin::Bundled,
-                        services,
-                    },
+                    dal_agent::ext::grants::GrantKey::for_extension(extension, &workspace)
+                        .expect("registered extension has a code identity"),
                     dal_core::ClientId::new("goal-cmd-gate"),
                     dal_core::Timestamp::now(),
                 )
