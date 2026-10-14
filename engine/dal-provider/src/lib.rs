@@ -58,7 +58,8 @@ pub use retry::{
 pub use scripted::{Operation, Script, ScriptError, ScriptStep, StepKind};
 pub use sse::{SSE_EVENT_LIMIT, SSE_LINE_LIMIT, SseEvent, decode_stream, encode};
 pub use stream::{
-    EventStream, NoticeSink, ReplayPayload, StopReason, StreamEvent, ToolArgs, ToolCall,
+    EventStream, NoticeSink, ReplayPayload, StopReason, StreamBudget, StreamBudgetError,
+    StreamEvent, ToolArgs, ToolCall,
 };
 pub use thinking::{
     AnthropicThinking, BeforeRequest, BeforeRequestInput, BeforeRequestPatch, CLAMP_NOTICE,
