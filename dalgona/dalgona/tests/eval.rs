@@ -15,8 +15,13 @@
 
 use std::fs;
 use std::path::PathBuf;
-use std::process::{Child, Command, Output, Stdio};
+#[cfg(unix)]
+use std::process::Child;
+#[cfg(unix)]
+use std::process::Stdio;
+use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
 const MODEL: &str = "openai-responses/gpt-6";
@@ -176,6 +181,36 @@ fn an_exec_call_is_refused_and_the_case_reports_failure() {
     contains(
         &report,
         r#""cases":[{"id":"shebang","repeats":2,"passed":0,"failed":2,"skipped":0,"pass_rate":0.0,"#,
+    );
+}
+
+#[test]
+fn a_patch_to_the_case_workspace_proceeds_without_a_controller() {
+    let create = tool_step(
+        "create-1",
+        "patch",
+        r#"{"input":"[scripts/new.sh#NEW]\nPUT >$:\n+#!/bin/sh\n+echo ok"}"#,
+    );
+    let rig = Rig::new(&[create, text_step("done")], "");
+    rig.pack(
+        "edit-anchor-smoke",
+        r##"def created(result, workspace):
+    return workspace.read("scripts/new.sh").startswith("#!/bin/sh")
+
+evalpack.pack(name = "edit-anchor-smoke", cases = [
+    evalpack.case(id = "create", prompt = "p", files = {"scripts/run.sh": "echo ok\n"}, check = created),
+])
+"##,
+    );
+    let run = rig.run(&["edit-anchor-smoke", "--repeats", "1"]);
+    assert_eq!(run.code, Some(0), "stderr: {}", run.stderr);
+
+    // Edits to the run's own workspace need no controller, so the patch
+    // lands and the check sees the new file.
+    let report = rig.report("edit-anchor-smoke");
+    contains(
+        &report,
+        r#""cases":[{"id":"create","repeats":1,"passed":1,"failed":0,"skipped":0,"pass_rate":1.0,"#,
     );
 }
 
@@ -414,8 +449,10 @@ fn no_model_anywhere_is_a_usage_error() {
 }
 
 /// Kills the child when the gate fails before it reaps it.
+#[cfg(unix)]
 struct Reap(Child);
 
+#[cfg(unix)]
 impl Drop for Reap {
     fn drop(&mut self) {
         let _ = self.0.kill();
@@ -423,6 +460,7 @@ impl Drop for Reap {
     }
 }
 
+#[cfg(unix)]
 fn wait_for(what: &str, ready: impl Fn() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(60);
     while !ready() {

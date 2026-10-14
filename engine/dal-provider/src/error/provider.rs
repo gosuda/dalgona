@@ -295,6 +295,7 @@ impl ProviderError {
                 "Fix or delete {}, then run dalgon login.",
                 path.display()
             )),
+            Self::Limit(reason) => Some(reason.fix()),
             _ => None,
         }
     }
