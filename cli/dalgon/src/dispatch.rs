@@ -233,7 +233,7 @@ pub(crate) async fn plugin(args: cli::PluginArgs, startup: Startup, product: Pro
     let plugins: Vec<ConfiguredPlugin> = product
         .extensions
         .iter()
-        .filter_map(ConfiguredPlugin::from_extension)
+        .filter_map(|extension| ConfiguredPlugin::from_extension(extension, &startup.workspace))
         .collect();
     let grants = GrantStore::new(data_root);
     let by = ClientId::new("cli");
