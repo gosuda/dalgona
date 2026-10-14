@@ -299,14 +299,18 @@ impl SessionScriptHost {
             std::num::NonZeroU32::MIN,
             crate::ext::Extension::state_version,
         );
-        Caller::new(
+        let caller = Caller::new(
             id.plugin.clone(),
             origin,
             inject,
             state_version,
             CallerKind::Handler,
             turn,
-        )
+        );
+        match extension {
+            Some(extension) => caller.with_extension(extension),
+            None => caller,
+        }
     }
 
     /// The catalog declaration of one export, denied when unknown.

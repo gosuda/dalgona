@@ -156,7 +156,7 @@ pub(crate) fn hook_caller(extension: &Extension, turn: Option<TurnId>) -> Option
         extension.state_version(),
         CallerKind::Hook,
         turn,
-    ))
+    ).with_extension(extension))
 }
 
 /// The fields one hook fan-out shares: everything [`DispatchCx`] carries

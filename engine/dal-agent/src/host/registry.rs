@@ -953,7 +953,7 @@ impl Host {
             jobs,
         } = replayed;
         let broker = Arc::new(Broker::new());
-        let extensions = self.grants_and_overlay(&broker, cancel)?;
+        let extensions = self.grants_and_overlay(&resolved.workspace, &broker, cancel)?;
         // The actor receives the data-plane through a cell: `Backend::new`
         // needs the actor handle `spawn` returns, and hook chains mint their
         // script hosts only once a request arrives, after the fill below.
@@ -1049,12 +1049,14 @@ impl Host {
     /// session being wired.
     fn grants_and_overlay(
         &self,
+        workspace: &dal_core::Workspace,
         broker: &Arc<Broker>,
         cancel: &CancellationToken,
     ) -> Result<WiredExtensions, HostError> {
         let grants = Arc::new(
             GrantStore::with_runtime(
                 self.state.shared.data_root.clone(),
+                workspace.clone(),
                 ask_timeout(&self.state.shared.config),
                 Arc::clone(broker),
             )
@@ -1284,7 +1286,8 @@ impl Host {
                 extension.state_version(),
                 crate::ext::CallerKind::Hook,
                 None,
-            );
+            )
+            .with_extension(extension);
             let cx = crate::ext::SessionCx {
                 session: resolved.id,
                 workspace: resolved.workspace.clone(),

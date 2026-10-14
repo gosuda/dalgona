@@ -1,4 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
+                        scope: Some(dal_agent::GrantScope::for_workspace(
+                            extension.source_digest().expect("bundled code digest"),
+                            &dal_core::Workspace::new(scratch.path().join("ws"))?,
+                        )),
 //! dalgona success-criterion gate: the orchestration battery task ends
 //! within 5 s of a close, no timer fires after it, and the goal sidecar
 //! holds the last controller mode.

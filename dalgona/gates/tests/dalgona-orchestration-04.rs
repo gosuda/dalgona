@@ -1,4 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
+                        scope: Some(dal_agent::GrantScope::for_workspace(
+                            extension.source_digest().expect("bundled code digest"),
+                            &dal_core::Workspace::new(workspace.clone())?,
+                        )),
 //! dalgona success-criterion gate: the goal sidecar is durable and private.
 //! A created goal is written atomically beside the session with mode 0600,
 //! carries the owning session id, and survives a reopen with its counters.

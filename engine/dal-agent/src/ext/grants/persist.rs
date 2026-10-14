@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use dal_core::{ClientId, Name, Origin, Service, ServiceSet, Timestamp};
 use dal_store::{FileMode, create_private_dir_all, write_atomic};
 
-use super::{GrantRow, GrantStoreError};
+use super::{GrantRow, GrantScope, GrantStoreError};
 
 pub(crate) fn grants_path(data_dir: &Path) -> PathBuf {
     data_dir.join("grants.toml")
@@ -97,7 +97,7 @@ pub(crate) fn parse_rows(text: &str) -> Result<Vec<GrantRow>, GrantStoreError> {
                 .collect::<Result<Vec<_>, _>>()?;
         } else if matches!(
             k.trim(),
-            "ext" | "origin" | "by" | "approved_at" | "mcp_set"
+            "ext" | "origin" | "by" | "approved_at" | "mcp_set" | "source" | "workspace"
         ) {
             let unquoted = unquote(v.trim()).ok_or_else(|| GrantStoreError::Malformed {
                 detail: format!("line {no}: value must be quoted").into(),
@@ -142,10 +142,27 @@ fn build_row(
         .get("approved_at")
         .ok_or_else(|| malformed("approved_at"))
         .and_then(|v| v.as_ref().parse().map_err(|_| malformed("approved_at")))?;
+    // Legacy unscoped approvals remain readable for migration and revocation,
+    // but cannot match a grant key minted from the current plugin generation.
+    let scope = match (fields.get("source"), fields.get("workspace")) {
+        (None, None) => None,
+        (Some(source), Some(workspace)) => {
+            let scope = GrantScope {
+                source: source.clone(),
+                workspace: workspace.clone(),
+            };
+            if !scope.valid() {
+                return Err(malformed("scope"));
+            }
+            Some(scope)
+        }
+        _ => return Err(malformed("scope")),
+    };
     Ok(GrantRow {
         ext,
         origin,
         services,
+        scope,
         mcp_set: fields.get("mcp_set").cloned(),
         by,
         approved_at,
@@ -165,13 +182,20 @@ pub(crate) fn encode_row(row: &GrantRow) -> String {
         .map(|s| format!("\"{}\"", escape(s.as_str())))
         .collect::<Vec<_>>()
         .join(", ");
+    let scope = row.scope.as_ref().map_or_else(String::new, |scope| {
+        format!(
+            "source = \"{}\"\nworkspace = \"{}\"\n",
+            escape(&scope.source),
+            escape(&scope.workspace),
+        )
+    });
     let mcp_set = row
         .mcp_set
         .as_deref()
         .map(|digest| format!("mcp_set = \"{}\"\n", escape(digest)))
         .unwrap_or_default();
     format!(
-        "[[grant]]\next = \"{}\"\norigin = \"{origin}\"\nservices = [{services}]\n{mcp_set}by = \"{}\"\napproved_at = \"{}\"\n",
+        "[[grant]]\next = \"{}\"\norigin = \"{origin}\"\nservices = [{services}]\n{scope}{mcp_set}by = \"{}\"\napproved_at = \"{}\"\n",
         escape(row.ext.as_str()),
         escape(row.by.as_str()),
         row.approved_at,

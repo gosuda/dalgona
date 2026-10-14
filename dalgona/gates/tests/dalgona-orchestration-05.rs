@@ -1,4 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
+                        scope: Some(dal_agent::GrantScope::for_workspace(
+                            extension.source_digest().expect("bundled code digest"),
+                            &dal_core::Workspace::new(workspace.clone())?,
+                        )),
 //! dalgona success-criterion gate: the goal and continuation commands
 //! answer through the real host with their exact refusal texts, so a
 //! wording change fails here instead of drifting on users.

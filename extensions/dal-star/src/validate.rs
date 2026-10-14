@@ -39,6 +39,8 @@ pub(crate) struct LoadedPlugin {
     pub(crate) name: Name,
     /// The declared `SemVer` version.
     pub(crate) version: Box<str>,
+    /// Digest of the admitted source snapshot, config, and declared version.
+    pub(crate) approval_digest: Box<str>,
     /// Bundled or user-supplied.
     pub(crate) origin: Origin,
     /// The host services explicitly requested by the plugin.
@@ -282,6 +284,7 @@ pub(crate) fn validate(
     Ok(LoadedPlugin {
         name: declared,
         version: descriptor.version.clone().into_boxed_str(),
+        approval_digest: approval_digest(files, &descriptor.version, config_json),
         origin,
         inject,
         state_version,
@@ -298,6 +301,38 @@ pub(crate) fn validate(
         plugin: plugin_value.clone(),
         limits,
     })
+}
+
+/// Hash exactly the bytes admitted by the loader, including declarations,
+/// imported modules, assets, and the host-resolved configuration. Length
+/// framing prevents ambiguity between adjacent paths and file bodies.
+fn approval_digest(
+    files: &std::collections::BTreeMap<PathBuf, Vec<u8>>,
+    version: &str,
+    config_json: Option<&str>,
+) -> Box<str> {
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"dal-plugin-approval-v1");
+    hash.update(&(version.len() as u64).to_le_bytes());
+    hash.update(version.as_bytes());
+    for (path, bytes) in files {
+        let path = path.as_os_str().as_encoded_bytes();
+        hash.update(&(path.len() as u64).to_le_bytes());
+        hash.update(path);
+        hash.update(&(bytes.len() as u64).to_le_bytes());
+        hash.update(bytes);
+    }
+    match config_json {
+        Some(config) => {
+            hash.update(&[1]);
+            hash.update(&(config.len() as u64).to_le_bytes());
+            hash.update(config.as_bytes());
+        }
+        None => {
+            hash.update(&[0]);
+        }
+    }
+    hash.finalize().to_hex().to_string().into_boxed_str()
 }
 
 fn validate_tools(
@@ -972,4 +1007,42 @@ fn judge_text(site: &Site, local: &str, judge: Value<'_>) -> Result<Option<Box<s
         )
         .into(),
     })
+}
+
+#[cfg(test)]
+mod digest_tests {
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    use super::approval_digest;
+
+    #[test]
+    fn admitted_source_version_and_configuration_are_part_of_approval_identity() {
+        let mut source = BTreeMap::from([
+            (PathBuf::from("plugin.star"), b"old plugin code".to_vec()),
+            (PathBuf::from("lib/module.star"), b"imported code".to_vec()),
+        ]);
+        let original = approval_digest(&source, "1.0.0", Some(r#"{"flag":true}"#));
+        assert_eq!(
+            original,
+            approval_digest(&source, "1.0.0", Some(r#"{"flag":true}"#))
+        );
+
+        source.insert(PathBuf::from("plugin.star"), b"new plugin code".to_vec());
+        assert_ne!(
+            original,
+            approval_digest(&source, "1.0.0", Some(r#"{"flag":true}"#))
+        );
+        source.insert(PathBuf::from("plugin.star"), b"old plugin code".to_vec());
+
+        assert_ne!(original, approval_digest(&source, "1.0.1", Some(r#"{"flag":true}"#)));
+        assert_ne!(original, approval_digest(&source, "1.0.0", Some(r#"{"flag":false}"#)));
+        assert_ne!(original, approval_digest(&source, "1.0.0", None));
+
+        source.insert(PathBuf::from("lib/module.star"), b"modified import".to_vec());
+        assert_ne!(
+            original,
+            approval_digest(&source, "1.0.0", Some(r#"{"flag":true}"#))
+        );
+    }
 }

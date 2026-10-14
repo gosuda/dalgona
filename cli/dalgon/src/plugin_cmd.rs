@@ -3,8 +3,8 @@
 use std::{io::Write, process::ExitCode};
 
 use dal_agent::ext::Extension;
-use dal_agent::{GrantKey, GrantStore, GrantStoreError};
-use dal_core::{ClientId, Name, Origin, ServiceSet};
+use dal_agent::{GrantKey, GrantScope, GrantStore, GrantStoreError};
+use dal_core::{ClientId, Name, Origin, ServiceSet, Workspace};
 use thiserror::Error as ThisError;
 
 /// A request to inspect or update configured plugin grants.
@@ -44,6 +44,8 @@ pub struct ConfiguredPlugin {
     pub origin: Origin,
     /// The services declared by the plugin, with `ask` removed.
     pub capabilities: ServiceSet,
+    /// Loaded source and current workspace; unbound extensions cannot be pre-approved.
+    pub scope: Option<GrantScope>,
 }
 
 impl ConfiguredPlugin {
@@ -51,13 +53,14 @@ impl ConfiguredPlugin {
     ///
     /// Built-in extensions are not grantable and have no declared services here.
     #[must_use]
-    pub fn from_extension(extension: &Extension) -> Option<Self> {
+    pub fn from_extension(extension: &Extension, workspace: &Workspace) -> Option<Self> {
         // Builtins carry no grantable declaration, so only User/Bundled yield a snapshot.
         match extension.origin() {
             Origin::User | Origin::Bundled => Some(Self {
                 name: extension.name().parse().ok()?,
                 origin: extension.origin(),
                 capabilities: extension.inject().capabilities(),
+                scope: extension.source_digest().map(|source| GrantScope::for_workspace(source, workspace)),
             }),
             _ => None,
         }
@@ -75,6 +78,7 @@ impl ConfiguredPlugin {
             extension: self.name.clone(),
             origin: self.origin,
             services: self.capabilities,
+            scope: self.scope.clone(),
         };
         grants.contains(&key).await.map(|granted| {
             if granted {
@@ -158,6 +162,7 @@ async fn grant_plugin(
         extension: plugin.name.clone(),
         origin: plugin.origin,
         services: plugin.capabilities,
+        scope: plugin.scope.clone(),
     };
     let inserted = grants.grant(key, by, jiff::Timestamp::now()).await?;
     let services = display_services(plugin.capabilities);
@@ -259,14 +264,18 @@ fn display_services(services: ServiceSet) -> String {
 #[cfg(test)]
 mod tests {
     use super::{ConfiguredPlugin, PluginCommand};
-    use dal_agent::{GrantKey, GrantStore};
-    use dal_core::{ClientId, Name, Origin, ServiceSet};
+    use dal_agent::{GrantKey, GrantScope, GrantStore};
+    use dal_core::{ClientId, Name, Origin, ServiceSet, Workspace};
 
     fn configured(name: &str, origin: Origin, services: &[&str]) -> ConfiguredPlugin {
         ConfiguredPlugin {
             name: name.parse::<Name>().unwrap(),
             origin,
             capabilities: ServiceSet::from_names(services.iter().copied()).unwrap(),
+            scope: Some(GrantScope::for_workspace(
+                &"a".repeat(64),
+                &Workspace::new(std::env::current_dir().unwrap()).unwrap(),
+            )),
         }
     }
 
@@ -327,6 +336,7 @@ mod tests {
                     extension: "focus".parse::<Name>().unwrap(),
                     origin: Origin::User,
                     services: ServiceSet::from_names(["net"]).unwrap(),
+                    scope: plugins[0].scope.clone(),
                 },
                 ClientId::new("test"),
                 jiff::Timestamp::now(),

@@ -77,6 +77,10 @@ async fn fixture_with(
                 extension: Name::parse("orchestration")?,
                 origin: Origin::Bundled,
                 services: built.extension.inject().capabilities(),
+                        scope: Some(dal_agent::GrantScope::for_workspace(
+                            built.extension.source_digest().expect("bundled code digest"),
+                            &Workspace::new(workspace.clone())?,
+                        )),
             },
             ClientId::new("goal-test"),
             Timestamp::now(),
