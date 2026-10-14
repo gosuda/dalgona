@@ -17,7 +17,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     ffi::OsString,
     fmt,
-    fs::{File, Metadata},
+    fs::Metadata,
     io::{ErrorKind, Read},
     path::{Path, PathBuf},
 };

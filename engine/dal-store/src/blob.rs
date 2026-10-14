@@ -9,10 +9,7 @@ use std::{
 use dal_core::BlobId;
 use tempfile::{PathPersistError, TempPath};
 
-use crate::{
-    error::BlobError,
-    util,
-};
+use crate::{error::BlobError, util};
 
 /// Bytes at or above this length leave the journal and become a blob.
 pub(crate) const INLINE_LIMIT: usize = 16_384;

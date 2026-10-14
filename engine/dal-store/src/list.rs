@@ -2,8 +2,7 @@
 
 use std::{
     collections::HashMap,
-    fmt,
-    fs::{self, File},
+    fmt, fs,
     io::{self, Read},
     path::{Path, PathBuf},
     sync::{Mutex, PoisonError},

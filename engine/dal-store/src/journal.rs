@@ -501,20 +501,18 @@ fn write_side_file(
     #[cfg(windows)]
     let _ = faults;
     #[cfg(windows)]
-    let mut kept_file = match crate::private::create_new(
-        kept_at,
-        crate::util::FileMode::Mode0600,
-    ) {
-        Ok(file) => Ok(file),
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            crate::private::open_private_file_read_write(kept_at).and_then(|file| {
-                file.set_len(0)?;
-                Ok(file)
-            })
+    let mut kept_file =
+        match crate::private::create_new(kept_at, crate::util::FileMode::Mode0600) {
+            Ok(file) => Ok(file),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                crate::private::open_private_file_read_write(kept_at).and_then(|file| {
+                    file.set_len(0)?;
+                    Ok(file)
+                })
+            }
+            Err(error) => Err(error),
         }
-        Err(error) => Err(error),
-    }
-    .map_err(|source| jio("quarantine", journal_path, source))?;
+        .map_err(|source| jio("quarantine", journal_path, source))?;
     #[cfg(not(windows))]
     let mut kept_file = {
         let mut options = OpenOptions::new();
@@ -524,7 +522,8 @@ fn write_side_file(
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        options.open(kept_at)
+        options
+            .open(kept_at)
             .map_err(|source| jio("quarantine", journal_path, source))?
     };
     journal_file
