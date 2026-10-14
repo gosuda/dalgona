@@ -19,6 +19,9 @@ packages = ["dalgon", "dalgona"]
 precise-builds = true
 # PR plans are disabled; product versions and tag families are independent.
 pr-run-mode = "skip"
+# The generated release workflow restricts its tag trigger to the two
+# product namespaces; regeneration must keep that hand edit.
+allow-dirty = ["ci"]
 # Whether to embed dependency information using cargo-auditable.
 cargo-auditable = true
 # Each app declares its package-local manual and product documentation; the
