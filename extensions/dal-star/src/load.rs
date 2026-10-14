@@ -326,8 +326,25 @@ fn load_one(
         &files.files,
         cfg.configs.get(name).map(String::as_str),
         handler_limits(&cfg.limits),
+        source_digest(&files.files),
     )
 }
+
+/// Fingerprint the frozen source bytes, including imported modules and assets.
+/// Length-delimited paths and contents prevent concatenation ambiguities.
+fn source_digest(files: &BTreeMap<PathBuf, Vec<u8>>) -> Box<str> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"dal-plugin-source-v1");
+    for (path, bytes) in files {
+        let name = path.as_os_str().as_encoded_bytes();
+        hasher.update(&(name.len() as u64).to_le_bytes());
+        hasher.update(name);
+        hasher.update(&(bytes.len() as u64).to_le_bytes());
+        hasher.update(bytes);
+    }
+    hasher.finalize().to_hex().to_string().into_boxed_str()
+}
+
 
 /// Rejects an entry module that binds `plugin` more than once.
 ///
