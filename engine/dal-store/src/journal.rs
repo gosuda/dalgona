@@ -140,15 +140,7 @@ impl Journal {
     /// Returns [`JournalError::Io`] when creation or syncing fails, and
     /// [`JournalError::Damaged`] when a failed create cannot be removed durably.
     pub(crate) fn create(path: &Path, lines: &[u8], faults: &Faults) -> Result<Self, JournalError> {
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let file = options
-            .open(path)
+        let file = crate::private::create_new(path, crate::util::FileMode::Mode0600)
             .map_err(|source| jio("create", path, source))?;
         let mut journal = Self {
             file,
@@ -176,10 +168,7 @@ impl Journal {
     /// structure check (as [`crate::error::StoreError::Damaged`] via the caller),
     /// or an unsupported version (as [`crate::error::StoreError::UnknownVersion`]).
     pub(crate) fn open(path: &Path, faults: &Faults) -> Result<Opened, OpenFailure> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path)
+        let file = crate::private::open_private_file_read_write(path)
             .map_err(|source| OpenFailure::Journal(jio("open", path, source)))?;
         let mut journal = Self {
             file,
