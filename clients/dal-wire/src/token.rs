@@ -338,11 +338,18 @@ fn open_token_file(path: &Path) -> Result<File, TokenError> {
         path: path.to_owned(),
         source,
     })?;
-    if !same_file(&link, &opened) || !opened.is_file() {
+    #[cfg(unix)]
+    if !same_file(&link, &opened) {
         return Err(TokenError::Symlink {
             path: path.to_owned(),
         });
     }
+    if !opened.is_file() {
+        return Err(TokenError::NotRegularFile {
+            path: path.to_owned(),
+        });
+    }
+    #[cfg(unix)]
     check_connect_file_mode(path, &opened)?;
     Ok(file)
 }
@@ -352,12 +359,6 @@ fn same_file(link: &fs::Metadata, opened: &fs::Metadata) -> bool {
     use std::os::unix::fs::MetadataExt;
 
     link.dev() == opened.dev() && link.ino() == opened.ino()
-}
-
-#[cfg(not(unix))]
-fn same_file(_link: &fs::Metadata, _opened: &fs::Metadata) -> bool {
-    // The Windows opened-handle check in dal-store rejects reparse points.
-    true
 }
 
 #[cfg(unix)]
@@ -377,15 +378,6 @@ fn check_connect_file_mode(path: &Path, metadata: &fs::Metadata) -> Result<(), T
             mode,
         });
     }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "the opened-handle check runs before this common mode-check stage"
-)]
-fn check_connect_file_mode(_path: &Path, _metadata: &fs::Metadata) -> Result<(), TokenError> {
     Ok(())
 }
 

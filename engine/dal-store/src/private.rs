@@ -224,7 +224,11 @@ mod tests {
             .arg("*S-1-1-0:R")
             .output()
             .expect("run icacls");
-        assert!(result.status.success(), "icacls: {}", String::from_utf8_lossy(&result.stderr));
+        assert!(
+            result.status.success(),
+            "icacls: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
         assert!(open_private_file(&path).is_err());
     }
 }

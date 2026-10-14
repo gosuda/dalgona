@@ -17,10 +17,13 @@ use std::{
     collections::{BTreeMap, HashMap},
     ffi::OsString,
     fmt,
-    fs::Metadata,
+
     io::{ErrorKind, Read},
     path::{Path, PathBuf},
 };
+
+#[cfg(unix)]
+use std::fs::Metadata;
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use dal_store::{FileMode, write_atomic};
@@ -345,11 +348,15 @@ impl AuthStore {
         let mut file = match dal_store::open_private_file(&path) {
             Ok(file) => file,
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Self::empty(path)),
+            Err(error) if cfg!(windows) && error.kind() == ErrorKind::PermissionDenied => {
+                return Err(ProviderError::AuthFilePerms { path });
+            }
             Err(error) => return Err(invalid(&path, error.to_string())),
         };
         let opened = file
             .metadata()
             .map_err(|error| invalid(&path, error.to_string()))?;
+        #[cfg(unix)]
         if !same_file(&link, &opened) {
             return Err(ProviderError::AuthFileSymlink { path });
         }
@@ -703,11 +710,7 @@ fn same_file(link: &Metadata, opened: &Metadata) -> bool {
     link.dev() == opened.dev() && link.ino() == opened.ino()
 }
 
-#[cfg(not(unix))]
-fn same_file(link: &Metadata, opened: &Metadata) -> bool {
-    let _ = (link, opened);
-    true
-}
+
 
 #[cfg(test)]
 mod tests;
