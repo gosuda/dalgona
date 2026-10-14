@@ -331,7 +331,7 @@ async fn handle_request(
     if upgrade_route {
         let response = upgrade_response(ctx, req, route).await;
         if response.status() == hyper::StatusCode::SWITCHING_PROTOCOLS {
-            pre_auth.lock().await.take();
+            drop(pre_auth.lock().await.take());
             return response;
         }
         return close_untrusted(response);
@@ -344,7 +344,7 @@ async fn handle_request(
     }
     // Request guards passed. Later body reads, handlers, and streams belong
     // to the normal connection pool rather than the pre-auth budget.
-    pre_auth.lock().await.take();
+    drop(pre_auth.lock().await.take());
     if requires_json(&route)
         && let Err(resp) = content_guard(&req, &route)
     {
@@ -556,7 +556,7 @@ mod timeout_tests {
         assert_eq!(budget.slots.len(), PRE_AUTH_CAP);
 
         let validated = tokio::sync::Mutex::new(waiting.pop());
-        validated.lock().await.take();
+        drop(validated.lock().await.take());
         let next = budget.admit();
         assert!(!next.cancel.is_cancelled());
         assert!(!fresh.cancel.is_cancelled());
