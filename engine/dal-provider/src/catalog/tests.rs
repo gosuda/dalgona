@@ -16,7 +16,7 @@ use super::{
 };
 use crate::{
     auth::credential::{OAuthCredential, SecretString},
-    error::ResolveError,
+    error::{LimitError, ResolveError},
     provider::{AuthStyle, Transport},
     thinking::Effort,
 };
@@ -608,7 +608,8 @@ async fn anthropic_fetch_paginates_and_atomically_caches_rows() {
         [
             r#"{"data":[{"id":"claude-one","max_input_tokens":200000,"max_tokens":8192}],"has_more":true,"last_id":"claude-one"}"#,
             r#"{"data":[{"id":"claude-two","max_input_tokens":300000,"max_tokens":8192}],"has_more":false,"last_id":"claude-two"}"#,
-        ],
+        ]
+        .map(str::to_owned),
     );
     let mut provider = provider(
         "anthropic",
@@ -646,6 +647,107 @@ async fn anthropic_fetch_paginates_and_atomically_caches_rows() {
         ["claude-one", "claude-two"]
     );
 }
+#[tokio::test]
+async fn anthropic_catalog_rejects_excess_model_rows() {
+    let rows = (0..=10_000)
+        .map(|row| format!(r#"{{"id":"model-{row}"}}"#))
+        .collect::<Vec<_>>()
+        .join(",");
+    let page = format!(r#"{{"data":[{rows}],"has_more":false}}"#);
+    let fetched = fetch_one_anthropic_page(page).await;
+    assert_eq!(fetched.source, CatalogSource::Typed);
+    assert!(matches!(
+        fetched.live_error,
+        Some(ProviderError::Limit(LimitError::CatalogRows))
+    ));
+}
+
+#[tokio::test]
+async fn anthropic_catalog_rejects_excess_cursor_bytes() {
+    let cursor = "x".repeat((64 << 10) + 1);
+    let page = format!(r#"{{"data":[],"has_more":true,"last_id":"{cursor}"}}"#);
+    let fetched = fetch_one_anthropic_page(page).await;
+    assert_eq!(fetched.source, CatalogSource::Typed);
+    assert!(matches!(
+        fetched.live_error,
+        Some(ProviderError::Limit(LimitError::CatalogCursorBytes))
+    ));
+}
+
+async fn fetch_one_anthropic_page(page: String) -> CatalogFetch {
+    let directory = TestDir::new();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind catalog test listener");
+    listener
+        .set_nonblocking(true)
+        .expect("make catalog test listener nonblocking");
+    let port = listener.local_addr().expect("read listener port").port();
+    let server = serve_anthropic_pages(listener, [page]);
+    let mut provider = provider(
+        "anthropic",
+        Family::Anthropic,
+        &format!("http://127.0.0.1:{port}"),
+    );
+    provider.auth = AuthStyle::XApiKey;
+    let credential = Credential::ApiKey {
+        key: SecretString::from(String::from("test-key")),
+    };
+    let client = reqwest::Client::new();
+    let fetch = ModelFetch {
+        client: &client,
+        provider: &provider,
+        credential: &credential,
+        cache_dir: directory.path(),
+        user_agent: "dalgon/test",
+        version: "test",
+    };
+    let fetched = load_models(&fetch, |_| std::future::pending::<()>()).await;
+    assert_eq!(server.join().expect("serve one model page").len(), 1);
+    fetched
+}
+
+#[tokio::test]
+async fn anthropic_catalog_deadline_covers_the_entire_refresh() {
+    let directory = TestDir::new();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind stalled catalog listener");
+    let port = listener.local_addr().expect("read listener port").port();
+    let mut provider = provider(
+        "anthropic",
+        Family::Anthropic,
+        &format!("http://127.0.0.1:{port}"),
+    );
+    provider.auth = AuthStyle::XApiKey;
+    let credential = Credential::ApiKey {
+        key: SecretString::from(String::from("test-key")),
+    };
+    let client = reqwest::Client::new();
+    let fetch = ModelFetch {
+        client: &client,
+        provider: &provider,
+        credential: &credential,
+        cache_dir: directory.path(),
+        user_agent: "dalgon/test",
+        version: "test",
+    };
+
+    // The injected aggregate timer fires while per-request timers never do.
+    let fetched = tokio::time::timeout(
+        Duration::from_secs(2),
+        load_models(&fetch, |duration| async move {
+            if duration != Duration::from_secs(120) {
+                std::future::pending::<()>().await;
+            }
+        }),
+    )
+    .await
+    .expect("the aggregate deadline finishes the refresh");
+    assert_eq!(fetched.source, CatalogSource::Typed);
+    assert!(matches!(
+        fetched.live_error,
+        Some(ProviderError::Limit(LimitError::CatalogTimeout))
+    ));
+    drop(listener);
+}
+
 #[tokio::test]
 async fn failed_live_fetch_uses_atomic_cache_then_typed_default_has_unknown_window() {
     let directory = TestDir::new();
@@ -782,9 +884,9 @@ async fn cached_capability_flags_survive_resolution() {
     assert!(resolved.entry.temperature_allowed && resolved.entry.display_supported);
 }
 
-fn serve_anthropic_pages(
+fn serve_anthropic_pages<const N: usize>(
     listener: TcpListener,
-    pages: [&'static str; 2],
+    pages: [String; N],
 ) -> std::thread::JoinHandle<Vec<String>> {
     std::thread::spawn(move || {
         let mut request_lines = Vec::with_capacity(pages.len());

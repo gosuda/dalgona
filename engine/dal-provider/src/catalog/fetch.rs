@@ -3,7 +3,9 @@
 //! One `ModelFetch` carries the client, credential, and cache directory for a
 //! single provider refresh; failures degrade to cache then typed ids.
 
-use std::{future::Future, time::Duration};
+use std::{future::Future, pin::pin, time::Duration};
+
+use futures::future::{Either, select};
 
 use dal_core::Family;
 
@@ -13,7 +15,7 @@ use super::{
     decode::{decode_anthropic_page, decode_codex_models, decode_openai_models},
 };
 use crate::{
-    error::ProviderError,
+    error::{LimitError, ProviderError},
     http::{self, Exchange, NON_STREAM_TOTAL_TIMEOUT},
 };
 
@@ -119,6 +121,13 @@ where
     }
 }
 
+// All limits apply to one logical refresh, not to individual HTTP requests.
+const ANTHROPIC_CATALOG_MAX_PAGES: usize = 32;
+const ANTHROPIC_CATALOG_MAX_ROWS: usize = 10_000;
+const ANTHROPIC_CATALOG_MAX_BYTES: usize = 32 << 20;
+const ANTHROPIC_CATALOG_MAX_CURSOR_BYTES: usize = 64 << 10;
+const ANTHROPIC_CATALOG_TOTAL_TIMEOUT: Duration = Duration::from_secs(120);
+
 async fn fetch_anthropic<S, D>(
     fetch: &ModelFetch<'_>,
     sleep: &S,
@@ -132,11 +141,42 @@ where
         .provider
         .shape()
         .headers(fetch.provider, fetch.credential)?;
+    // A single timer also covers response reads and JSON decoding. Dropping
+    // the losing future cancels the in-flight HTTP request and its page state.
+    let deadline = pin!(sleep(ANTHROPIC_CATALOG_TOTAL_TIMEOUT));
+    let pages = pin!(fetch_anthropic_pages(fetch, sleep, base_url, headers));
+    match select(deadline, pages).await {
+        Either::Left(((), _)) => Err(ProviderError::Limit(LimitError::CatalogTimeout)),
+        Either::Right((result, _)) => result,
+    }
+}
+
+async fn fetch_anthropic_pages<S, D>(
+    fetch: &ModelFetch<'_>,
+    sleep: &S,
+    base_url: url::Url,
+    headers: Vec<(String, String)>,
+) -> Result<Vec<CatalogEntry>, ProviderError>
+where
+    S: Fn(Duration) -> D,
+    D: Future<Output = ()>,
+{
     let mut seen_cursors = std::collections::HashSet::new();
     let mut rows = Vec::new();
     let mut cursor: Option<String> = None;
+    let mut pages = 0;
+    let mut row_count = 0;
+    let mut bytes = 0;
+    let mut cursor_bytes = 0;
 
     loop {
+        // Refuse the next request before issuing it if the page budget is spent.
+        charge_catalog_budget(
+            &mut pages,
+            1,
+            ANTHROPIC_CATALOG_MAX_PAGES,
+            LimitError::CatalogPages,
+        )?;
         let mut url = base_url.clone();
         {
             let mut query = url.query_pairs_mut();
@@ -146,7 +186,19 @@ where
             }
         }
         let body = get_body(fetch, url, headers.clone(), sleep).await?;
+        charge_catalog_budget(
+            &mut bytes,
+            body.len(),
+            ANTHROPIC_CATALOG_MAX_BYTES,
+            LimitError::CatalogBytes,
+        )?;
         let page = decode_anthropic_page(fetch.provider, &body)?;
+        charge_catalog_budget(
+            &mut row_count,
+            page.rows.len(),
+            ANTHROPIC_CATALOG_MAX_ROWS,
+            LimitError::CatalogRows,
+        )?;
         rows.extend(page.rows);
         if !page.has_more {
             return Ok(rows);
@@ -157,6 +209,12 @@ where
                 "model list has_more is true without last_id",
             ));
         };
+        charge_catalog_budget(
+            &mut cursor_bytes,
+            next_cursor.len(),
+            ANTHROPIC_CATALOG_MAX_CURSOR_BYTES,
+            LimitError::CatalogCursorBytes,
+        )?;
         if !seen_cursors.insert(next_cursor.clone()) {
             return Err(super::decode::protocol(
                 Family::Anthropic,
@@ -165,6 +223,20 @@ where
         }
         cursor = Some(next_cursor);
     }
+}
+
+// The counter changes only when its new total is representable and in budget.
+fn charge_catalog_budget(
+    used: &mut usize,
+    additional: usize,
+    maximum: usize,
+    error: LimitError,
+) -> Result<(), ProviderError> {
+    let Some(total) = used.checked_add(additional).filter(|total| *total <= maximum) else {
+        return Err(ProviderError::Limit(error));
+    };
+    *used = total;
+    Ok(())
 }
 
 async fn get_body<S, D>(
@@ -201,4 +273,42 @@ where
         });
     }
     http::read_body(family, response).await
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+
+    #[test]
+    fn anthropic_budgets_accept_the_boundary_and_reject_additional_usage() {
+        for (maximum, reason) in [
+            (ANTHROPIC_CATALOG_MAX_PAGES, LimitError::CatalogPages),
+            (ANTHROPIC_CATALOG_MAX_ROWS, LimitError::CatalogRows),
+            (ANTHROPIC_CATALOG_MAX_BYTES, LimitError::CatalogBytes),
+            (
+                ANTHROPIC_CATALOG_MAX_CURSOR_BYTES,
+                LimitError::CatalogCursorBytes,
+            ),
+        ] {
+            let mut used = 0;
+            charge_catalog_budget(&mut used, maximum, maximum, reason)
+                .expect("the exact budget is admitted");
+            assert_eq!(used, maximum);
+            assert!(matches!(
+                charge_catalog_budget(&mut used, 1, maximum, reason),
+                Err(ProviderError::Limit(actual)) if actual == reason
+            ));
+            assert_eq!(used, maximum);
+        }
+    }
+
+    #[test]
+    fn anthropic_budget_rejects_integer_overflow_without_mutation() {
+        let mut used = 1;
+        assert!(matches!(
+            charge_catalog_budget(&mut used, usize::MAX, usize::MAX, LimitError::CatalogBytes),
+            Err(ProviderError::Limit(LimitError::CatalogBytes))
+        ));
+        assert_eq!(used, 1);
+    }
 }

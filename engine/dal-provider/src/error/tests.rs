@@ -126,6 +126,31 @@ fn error_display_texts() {
             None,
         ),
         (
+            ProviderError::Limit(LimitError::CatalogPages),
+            "Anthropic model catalog exceeds 32 pages.",
+            None,
+        ),
+        (
+            ProviderError::Limit(LimitError::CatalogRows),
+            "Anthropic model catalog exceeds 10,000 rows.",
+            None,
+        ),
+        (
+            ProviderError::Limit(LimitError::CatalogBytes),
+            "Anthropic model catalog exceeds 32 MiB of JSON.",
+            None,
+        ),
+        (
+            ProviderError::Limit(LimitError::CatalogCursorBytes),
+            "Anthropic model catalog exceeds 64 KiB of cursors.",
+            None,
+        ),
+        (
+            ProviderError::Limit(LimitError::CatalogTimeout),
+            "Anthropic model catalog exceeds 120 s.",
+            None,
+        ),
+        (
             ProviderError::PlainHttp {
                 host: String::from("example.com"),
             },

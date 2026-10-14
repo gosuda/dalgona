@@ -10,7 +10,7 @@ use crate::{
     auth::credential::{Credential, OAuthCredential},
     catalog::{CatalogEntry, ResolvedModel},
     compact::{CompactOutcome, CompactedHistory},
-    error::ProviderError,
+    error::{LimitError, ProviderError},
     stream::{EventStream, NoticeSink, StreamEvent},
     thinking::ThinkingSupport,
 };
@@ -819,6 +819,58 @@ async fn provider_semaphore_bounds_concurrent_local_requests() -> TestResult {
             .any(|event| matches!(event, StreamEvent::Stop { .. }))
     );
     let _requests = gated.task.join_next().await.expect("server completes")??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn overlong_anthropic_catalog_releases_its_admission_permit() -> TestResult {
+    let dir = TestDir::new()?;
+    let replies = (0..32)
+        .map(|page| Reply {
+            status: 200,
+            content_type: "application/json",
+            body: format!(r#"{{"data":[],"has_more":true,"last_id":"cursor-{page}"}}"#),
+        })
+        .collect();
+    let (base, mut server_task) = server("", replies).await?;
+    let set = ProviderSet::new(
+        &config(
+            vec![entry(
+                "anthropic-test",
+                Family::Anthropic,
+                base,
+                Some("ANTHROPIC_TEST_KEY"),
+                1,
+                Transport::Https,
+            )],
+            0,
+        ),
+        identity(),
+        EnvSnapshot::test(&[("ANTHROPIC_TEST_KEY", "test-secret")]),
+        dir.path(),
+        dir.path(),
+    )?;
+
+    let loaded = tokio::time::timeout(
+        Duration::from_secs(10),
+        set.load_models("anthropic-test"),
+    )
+    .await??;
+    assert!(matches!(
+        loaded.live_error,
+        Some(ProviderError::Limit(LimitError::CatalogPages))
+    ));
+    assert_eq!(loaded.source, crate::catalog::CatalogSource::Typed);
+    assert_eq!(
+        set.inner
+            .providers
+            .get("anthropic-test")
+            .map(|slot| slot.permits.available_permits()),
+        Some(1),
+        "a rejected catalog must not retain its admission permit"
+    );
+    let requests = server_task.join_next().await.expect("server completes")??;
+    assert_eq!(requests.len(), 32, "must reject before a 33rd request");
     Ok(())
 }
 
