@@ -475,8 +475,8 @@ fn provider_event_bytes(event: &ProviderEvent) -> usize {
             reason: dal_provider::StopReason::Other(reason),
         } => reason.len(),
         ProviderEvent::Usage { .. } | ProviderEvent::Stop { .. } => 0,
-        // Non-exhaustive provider variants must be reviewed when added.
-        _ => 0,
+        // Fail closed until new provider variants have explicit byte accounting.
+        _ => usize::MAX,
     }
 }
 
