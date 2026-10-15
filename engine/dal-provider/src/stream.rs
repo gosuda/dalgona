@@ -92,6 +92,119 @@ impl StreamEvent {
     }
 }
 
+/// Why the aggregate size of a provider stream was rejected.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StreamBudgetError {
+    /// Too many events, including the calls in a completed tool-call batch.
+    Events {
+        /// The maximum number of events.
+        limit: usize,
+    },
+    /// Too many bytes across all event payloads.
+    Bytes {
+        /// The maximum number of bytes.
+        limit: usize,
+    },
+}
+
+impl fmt::Display for StreamBudgetError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Events { limit } => write!(f, "provider stream exceeds {limit} events"),
+            Self::Bytes { limit } => write!(f, "provider stream exceeds {limit} bytes"),
+        }
+    }
+}
+
+impl std::error::Error for StreamBudgetError {}
+
+/// Aggregate payload and event limits for an untrusted provider stream.
+///
+/// Call [`Self::accept`] before converting, storing, or copying each event.
+/// The caller must drop its [`EventStream`] on an error, which cancels the
+/// underlying provider. A rejected event does not change either counter.
+#[derive(Debug)]
+pub struct StreamBudget {
+    max_events: usize,
+    max_bytes: usize,
+    events: usize,
+    bytes: usize,
+}
+
+impl StreamBudget {
+    /// Creates one budget. Both limits are inclusive.
+    #[must_use]
+    pub const fn new(max_events: usize, max_bytes: usize) -> Self {
+        Self {
+            max_events,
+            max_bytes,
+            events: 0,
+            bytes: 0,
+        }
+    }
+
+    /// Accounts for one event without retaining any of its contents.
+    ///
+    /// A completed tool-call batch counts at least one event, or the number
+    /// of calls in the batch if greater. Every variable-length payload is
+    /// counted before the consumer can accumulate it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the exceeded limit.
+    pub fn accept(&mut self, event: &StreamEvent) -> Result<(), StreamBudgetError> {
+        let count = match event {
+            StreamEvent::ToolCallsDone { calls } => calls.len().max(1),
+            _ => 1,
+        };
+        if count > self.max_events.saturating_sub(self.events) {
+            return Err(StreamBudgetError::Events {
+                limit: self.max_events,
+            });
+        }
+
+        let bytes = match event {
+            StreamEvent::TextDelta { text } | StreamEvent::ReasoningDelta { text } => text.len(),
+            StreamEvent::ToolCallStarted { id, name } => id.len().saturating_add(name.len()),
+            StreamEvent::ToolArgsDelta { id, fragment } => {
+                id.len().saturating_add(fragment.len())
+            }
+            StreamEvent::Replay { payload } => payload
+                .model
+                .len()
+                .saturating_add(payload.item.as_str().len()),
+            StreamEvent::ToolCallsDone { calls } => calls.iter().fold(0usize, |total, call| {
+                let args = match &call.args {
+                    ToolArgs::Parsed(value) => value.as_str().len(),
+                    ToolArgs::Invalid { message } => message.len(),
+                    ToolArgs::Truncated => 0,
+                };
+                total
+                    .saturating_add(call.id.len())
+                    .saturating_add(call.name.len())
+                    .saturating_add(args)
+            }),
+            StreamEvent::Usage { .. } => 0,
+            StreamEvent::Stop { reason } => match reason {
+                StopReason::Other(text) => text.len(),
+                StopReason::EndTurn
+                | StopReason::ToolUse
+                | StopReason::MaxTokens
+                | StopReason::Refusal
+                | StopReason::Paused => 0,
+            },
+        };
+        if bytes > self.max_bytes.saturating_sub(self.bytes) {
+            return Err(StreamBudgetError::Bytes {
+                limit: self.max_bytes,
+            });
+        }
+        self.events += count;
+        self.bytes += bytes;
+        Ok(())
+    }
+}
+
 /// One complete tool call.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ToolCall {

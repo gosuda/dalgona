@@ -32,6 +32,12 @@ const REVIEW_COMMAND_SUMMARY: &str = "Review the current changes.";
 pub(crate) const REVIEW_SYSTEM: &str = "You are a code reviewer. You review the diff of one coding session. You report defects only: bugs, broken behavior, security problems, and missed requirements. You do not report style preferences. You answer with one JSON object and no other text.";
 pub(crate) const MAX_DIFF_BYTES: usize = 262_144;
 pub(crate) const MAX_FINDINGS: usize = 50;
+/// The maximum concatenated JSON reply text; checked before appending deltas.
+pub(crate) const MAX_REVIEW_REPLY_BYTES: usize = 262_144;
+/// Maximum aggregate provider payload size, including non-text events.
+pub(crate) const MAX_REVIEW_STREAM_BYTES: usize = 1 << 20;
+/// Maximum number of provider events before the reviewer is cancelled.
+pub(crate) const MAX_REVIEW_STREAM_EVENTS: usize = 4096;
 pub(crate) const DIFF_TRUNCATION_MARKER: &str = "\n[... diff truncated at 262144 bytes ...]";
 pub(crate) const FOCUS_TRUNCATION_MARKER: &str = "[... focus truncated]";
 pub(crate) const MAX_ERROR_BYTES: usize = 200;
@@ -90,6 +96,9 @@ pub const REVIEW_DOC: &str = concat!(
     "not truncate status. A diff larger than 262,144 bytes is truncated, and\n",
     "review proceeds with the prefix and a truncation notice. More than 50\n",
     "reviewer findings fail the round; resolve the reported findings first.\n\n",
+    "A reviewer response is limited to 262,144 text bytes, 1,048,576\n",
+    "total stream bytes, and 4,096 events. Exceeding a limit cancels the\n",
+    "provider stream and fails the round without writing a record.\n\n",
     "Each round appends one durable review record. A round converges when the\n",
     "verdict is clean or no finding is new; otherwise the report lists every\n",
     "finding marked new or repeat and asks for the new findings. After\n",
@@ -556,22 +565,32 @@ struct Completion {
 }
 
 impl Completion {
-    /// Concatenates the text deltas in order. The last usage measurement wins;
-    /// a stream without one leaves the usage unknown, never invented.
-    fn from_inference(inference: dal_core::Inference) -> Self {
+    /// Reads only a bounded stream. The last usage measurement wins;
+    /// a stream without one leaves usage unknown, never invented.
+    async fn from_stream(mut stream: dal_agent::ext::EventStream) -> Result<Self, Box<ToolOutcome>> {
+        let mut budget =
+            dal_provider::StreamBudget::new(MAX_REVIEW_STREAM_EVENTS, MAX_REVIEW_STREAM_BYTES);
         let mut text = String::new();
         let mut usage = None;
-        for event in inference.events {
+        while let Some(item) = stream.next().await {
+            let event = item.map_err(|error| Box::new(provider_failure(&error.to_string())))?;
+            budget
+                .accept(&event)
+                .map_err(|error| Box::new(provider_failure(&error.to_string())))?;
             match event {
-                dal_core::StreamEvent::Delta {
-                    channel: dal_core::StreamChannel::Text,
-                    text: delta,
-                } => text.push_str(&delta),
-                dal_core::StreamEvent::Usage(measured) => usage = Some(measured),
+                dal_provider::StreamEvent::TextDelta { text: delta } => {
+                    if delta.len() > MAX_REVIEW_REPLY_BYTES.saturating_sub(text.len()) {
+                        return Err(Box::new(provider_failure(&format!(
+                            "reviewer reply exceeds {MAX_REVIEW_REPLY_BYTES} bytes"
+                        ))));
+                    }
+                    text.push_str(&delta);
+                }
+                dal_provider::StreamEvent::Usage { usage: measured } => usage = Some(measured),
                 _ => {}
             }
         }
-        Self { text, usage }
+        Ok(Self { text, usage })
     }
 }
 
@@ -637,11 +656,11 @@ async fn probe_and_infer(
         params: dal_core::RequestParams::default(),
         cache_key: None,
     };
-    services
-        .infer(caller, request)
+    let stream = services
+        .infer_stream(caller, request)
         .await
-        .map(Completion::from_inference)
-        .map_err(|error| Box::new(provider_outcome(error)))
+        .map_err(|error| Box::new(provider_outcome(error)))?;
+    Completion::from_stream(stream).await
 }
 
 fn usage_notice(

@@ -18,7 +18,7 @@ use dal_core::{
     Workspace, check_synthetic_chain,
 };
 use dal_provider::{
-    CatalogEntry, EventStream, Listing, ProviderError, StreamEvent as ProviderEvent,
+    CatalogEntry, EventStream, Listing, ProviderError, StreamBudget, StreamEvent as ProviderEvent,
     ThinkingSupport, ToolArgs, ToolSupport,
 };
 use futures::stream;
@@ -41,6 +41,9 @@ mod relay;
 
 /// Private tool rounds one forward may run.
 const PRIVATE_ROUNDS: u32 = 8;
+/// Aggregate output limits for trusted collection of untrusted provider streams.
+const MAX_INFERENCE_STREAM_EVENTS: usize = 16_384;
+const MAX_INFERENCE_STREAM_BYTES: usize = 16 << 20;
 
 tokio::task_local! {
     static LINEAGE: Lineage;
@@ -449,9 +452,17 @@ pub(crate) fn price_of(shared: &HostShared, route: &ModelRoute) -> Option<ModelP
 
 pub(crate) async fn collect(mut stream: EventStream) -> Result<Inference, InferFailure> {
     let mut converter = StreamConverter::new();
+    let mut budget = StreamBudget::new(MAX_INFERENCE_STREAM_EVENTS, MAX_INFERENCE_STREAM_BYTES);
     let mut events = Vec::new();
     while let Some(item) = stream.next().await {
-        events.extend(converter.convert(item.map_err(InferFailure::from)?));
+        let event = item.map_err(InferFailure::from)?;
+        // Check the event before conversion can copy any part of it into
+        // the shared Vec or the converter's pending tool arguments.
+        budget.accept(&event).map_err(|error| InferFailure::Fatal {
+            message: error.to_string().into(),
+            fix: None,
+        })?;
+        events.extend(converter.convert(event));
     }
     events.extend(converter.flush());
     Ok(Inference { events })
@@ -877,5 +888,48 @@ fn family_of(route: &ModelRoute) -> dal_core::Family {
     match route {
         ModelRoute::Api { family, .. } => *family,
         ModelRoute::Synthetic { .. } | ModelRoute::Harness { .. } => dal_core::Family::Chat,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn collection_cancels_after_too_many_small_events() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let seen = Arc::new(AtomicUsize::new(0));
+        let source = futures::stream::unfold(Arc::clone(&seen), |seen| async move {
+            seen.fetch_add(1, Ordering::SeqCst);
+            Some((Ok(ProviderEvent::TextDelta { text: "x".into() }), seen))
+        });
+        let cancel = Arc::clone(&cancelled);
+        let stream = EventStream::new(source, move || {
+            cancel.store(true, Ordering::SeqCst);
+        });
+
+        let outcome = collect(stream).await;
+        assert!(matches!(outcome, Err(InferFailure::Fatal { .. })));
+        assert_eq!(seen.load(Ordering::SeqCst), MAX_INFERENCE_STREAM_EVENTS + 1);
+        assert!(cancelled.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn collection_accepts_the_exact_event_limit() {
+        let source = futures::stream::iter(
+            std::iter::repeat_with(|| Ok(ProviderEvent::TextDelta { text: String::new() }))
+                .take(MAX_INFERENCE_STREAM_EVENTS - 1)
+                .chain(std::iter::once(Ok(ProviderEvent::Stop {
+                    reason: dal_provider::StopReason::EndTurn,
+                }))),
+        );
+        let stream = EventStream::new(source, || {});
+        let inference = collect(stream).await;
+        assert!(matches!(
+            inference,
+            Ok(Inference { events }) if events.len() == MAX_INFERENCE_STREAM_EVENTS
+        ));
     }
 }
