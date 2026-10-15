@@ -32,6 +32,8 @@ pub(crate) struct SandboxInputs<'a> {
     pub home: &'a Path,
     /// The platform cache directory.
     pub cache: &'a Path,
+    /// The process temporary directory captured for this launch.
+    pub temp: PathBuf,
     /// `sandbox_writable` entries in config order.
     pub sandbox_writable: &'a [Box<str>],
     /// dal/dalgona config and data roots a writable path must not overlap.
@@ -169,6 +171,7 @@ pub(crate) fn session_launcher(
         workspace_root,
         home: &home,
         cache: &cache,
+        temp: std::env::temp_dir(),
         sandbox_writable: config.sandbox_writable(),
         protected_roots,
         helper,
@@ -196,6 +199,7 @@ pub fn sandbox_notice(
         workspace_root,
         home: &home,
         cache: &cache,
+        temp: std::env::temp_dir(),
         sandbox_writable: writable,
         protected_roots,
         helper: None,
@@ -228,7 +232,7 @@ pub(crate) fn resolve_roots(inputs: &SandboxInputs<'_>) -> Result<Vec<PathBuf>, 
     // Automatic roots that do not exist are skipped: a missing path is
     // never created, and omitting it denies it like a raw path would while
     // the Linux helper can still open every root it is handed.
-    if let Ok(temp) = std::fs::canonicalize(std::env::temp_dir()) {
+    if let Ok(temp) = std::fs::canonicalize(&inputs.temp) {
         push_unique(temp, &mut roots);
     }
     if let Ok(cache) = std::fs::canonicalize(inputs.cache) {
@@ -246,21 +250,69 @@ pub(crate) fn resolve_roots(inputs: &SandboxInputs<'_>) -> Result<Vec<PathBuf>, 
                 home.display(),
             )));
         }
-        for protected in inputs.protected_roots {
-            if canonical == *protected
-                || canonical.starts_with(protected)
-                || protected.starts_with(&canonical)
-            {
+        push_unique(canonical, &mut roots);
+    }
+    // No launcher may receive an automatic or configured writable root
+    // that contains protected state, or that lies inside protected state.
+    let protected = inputs
+        .protected_roots
+        .iter()
+        .map(|root| canonicalize_protected_root(root))
+        .collect::<Result<Vec<_>, _>>()?;
+    for root in &roots {
+        for guarded in &protected {
+            if root == guarded || root.starts_with(guarded) || guarded.starts_with(root) {
                 return Err(SandboxSetupError::new(format!(
-                    "sandbox: the writable path {} overlaps {}, where dalgon and dalgona keep their config and plugins. A sandboxed command could change them and escape the sandbox at the next start. Remove the path, start dalgon elsewhere, or set sandbox = \"off\" in dal.toml.",
-                    canonical.display(),
-                    protected.display(),
+                    "sandbox: the writable path {} overlaps {}, where dalgon and dalgona keep their config and plugins. A sandboxed command could change them and escape the sandbox at the next start. Change the workspace, temporary directory, cache, or sandbox_writable entry, or set sandbox = \"off\" in dal.toml.",
+                    root.display(),
+                    guarded.display(),
                 )));
             }
         }
-        push_unique(canonical, &mut roots);
     }
     Ok(roots)
+}
+
+/// Resolves an existing protected root or its deepest existing ancestor.
+/// A missing tail is preserved, so a not-yet-created data directory cannot
+/// escape overlap validation through a symlinked parent.
+fn canonicalize_protected_root(root: &Path) -> Result<PathBuf, SandboxSetupError> {
+    if !root.is_absolute() {
+        return Err(SandboxSetupError::new(format!(
+            "sandbox: protected root {} must be absolute",
+            root.display(),
+        )));
+    }
+    let mut current = root;
+    let mut missing: Vec<&OsStr> = Vec::new();
+    loop {
+        match std::fs::canonicalize(current) {
+            Ok(mut canonical) => {
+                if !missing.is_empty() && !canonical.is_dir() {
+                    return Err(SandboxSetupError::new(format!(
+                        "sandbox: protected root {} has a non-directory parent",
+                        root.display(),
+                    )));
+                }
+                canonical.extend(missing.into_iter().rev());
+                return Ok(canonical);
+            }
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                if std::fs::symlink_metadata(current).is_ok() {
+                    return Err(cannot_open(&root.to_string_lossy(), &source));
+                }
+                let Some(name) = current.file_name() else {
+                    return Err(cannot_open(&root.to_string_lossy(), &source));
+                };
+                let Some(parent) = current.parent() else {
+                    return Err(cannot_open(&root.to_string_lossy(), &source));
+                };
+                missing.push(name);
+                current = parent;
+            }
+            Err(source) => return Err(cannot_open(&root.to_string_lossy(), &source)),
+        }
+    }
 }
 
 /// Expands one writable entry: absolute stays, a leading `~/` resolves
@@ -526,6 +578,7 @@ mod tests {
             workspace_root: workspace,
             home,
             cache,
+            temp: home.join("temp"),
             sandbox_writable: writable,
             protected_roots: protected,
             helper,
@@ -539,6 +592,7 @@ mod tests {
             workspace_root: Path::new("/nonexistent-workspace"),
             home: Path::new("/nonexistent-home"),
             cache: Path::new("/nonexistent-cache"),
+            temp: PathBuf::from("/nonexistent-temp"),
             sandbox_writable: &[],
             protected_roots: &[],
             helper: None,
@@ -552,6 +606,8 @@ mod tests {
         let home = tempfile::tempdir().expect("home");
         let cache = home.path().join("cache");
         std::fs::create_dir(&cache).expect("cache dir");
+        let temp = home.path().join("temp");
+        std::fs::create_dir(&temp).expect("temp dir");
         let extra = tempfile::tempdir().expect("extra writable");
         let writable: Vec<Box<str>> = vec![
             "~/extra".into(),
@@ -562,7 +618,7 @@ mod tests {
         let inputs = inputs(workspace.path(), home.path(), &cache, &writable, &[], None);
         let roots = resolve_roots(&inputs).expect("roots resolve");
         let workspace_root = std::fs::canonicalize(workspace.path()).expect("canonical");
-        let temp = canonical_or_raw(&std::env::temp_dir());
+        let temp = std::fs::canonicalize(&temp).expect("canonical temp");
         let cache_root = std::fs::canonicalize(&cache).expect("canonical cache");
         let extra_root = std::fs::canonicalize(extra.path()).expect("canonical extra");
         assert_eq!(roots[0], workspace_root);
@@ -692,6 +748,81 @@ mod tests {
         assert!(
             error.to_string().contains("overlaps"),
             "unexpected: {error}"
+        );
+    }
+
+    fn assert_overlap_rejected(setup: &SandboxInputs<'_>, writable: &Path, guarded: &Path) {
+        let error = resolve_launcher(setup).expect_err("overlapping root must block launch");
+        let writable = std::fs::canonicalize(writable).expect("canonical writable");
+        let guarded = std::fs::canonicalize(guarded).expect("canonical protected");
+        assert!(
+            error.to_string().starts_with(&format!(
+                "sandbox: the writable path {} overlaps {}",
+                writable.display(),
+                guarded.display(),
+            )),
+            "unexpected: {error}",
+        );
+    }
+
+    #[test]
+    fn automatic_workspace_equal_parent_and_child_of_protected_are_rejected() {
+        let tree = tempfile::tempdir().expect("tree");
+        let home = tempfile::tempdir().expect("home");
+        let protected = tree.path().join("data");
+        let child = protected.join("plugins");
+        std::fs::create_dir_all(&child).expect("protected tree");
+        let guarded = [protected.clone()];
+
+        for workspace in [protected.as_path(), tree.path(), child.as_path()] {
+            let setup = inputs(workspace, home.path(), home.path(), &[], &guarded, None);
+            assert_overlap_rejected(&setup, workspace, &protected);
+        }
+    }
+
+    #[test]
+    fn automatic_temp_and_cache_containing_protected_are_rejected() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let home = tempfile::tempdir().expect("home");
+        let temp = tempfile::tempdir().expect("temp");
+        let cache = tempfile::tempdir().expect("cache");
+
+        for automatic in [temp.path(), cache.path()] {
+            let protected = automatic.join("credentials");
+            std::fs::create_dir(&protected).expect("protected directory");
+            let guarded = [protected.clone()];
+            let mut setup = inputs(
+                workspace.path(),
+                home.path(),
+                cache.path(),
+                &[],
+                &guarded,
+                None,
+            );
+            setup.temp = temp.path().to_path_buf();
+            assert_overlap_rejected(&setup, automatic, &protected);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_protected_tail_beneath_symlink_is_still_guarded() {
+        let tree = tempfile::tempdir().expect("tree");
+        let home = tempfile::tempdir().expect("home");
+        let actual = tree.path().join("real");
+        let alias = tree.path().join("alias");
+        std::fs::create_dir(&actual).expect("actual dir");
+        std::os::unix::fs::symlink(&actual, &alias).expect("alias");
+        let guarded = [alias.join("missing/data")];
+        let setup = inputs(&actual, home.path(), home.path(), &[], &guarded, None);
+        let error = resolve_roots(&setup).expect_err("symlinked protected root must block");
+        let canonical = std::fs::canonicalize(&actual).expect("canonical actual");
+        assert!(
+            error.to_string().contains(&format!(
+                "overlaps {}",
+                canonical.join("missing/data").display(),
+            )),
+            "unexpected: {error}",
         );
     }
 

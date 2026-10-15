@@ -4,8 +4,10 @@ With `sandbox = true` in dal.toml (or `--sandbox`), every `exec` child runs
 through the platform sandbox helper: Landlock on Linux through the
 `dalgon __sandbox` helper, Seatbelt on macOS, and an AppContainer on Windows.
 The allowed roots are the workspace, the system temp directory, the platform
-cache directory, and the `sandbox_writable` entries; nothing else under the
-home directory is writable, and there is no network restriction. The Windows
+cache directory, and the `sandbox_writable` entries. Every root is checked
+against protected product data, including paths that are not yet created.
+An overlap refuses the launch rather than granting write access. Nothing else
+under the home directory is writable, and there is no network restriction. The Windows
 backend matches the read-open model as far as DACL editing safely reaches:
 the per-run `dalgon.sandbox.<guid>` container reads and executes wherever
 system ACLs already permit application containers (`ALL APPLICATION
