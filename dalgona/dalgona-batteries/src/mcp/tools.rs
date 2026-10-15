@@ -591,7 +591,7 @@ impl Tool for ServerEntryTool {
 
     fn run<'a>(&'a self, call: ToolCall, mut cx: ToolCx<'a>) -> BoxFuture<'a, ToolOutcome> {
         Box::pin(async move {
-            let preview = server_preview(&self.key, &self.declaration, "", &call.args);
+            let preview = server_preview(&self.key, &self.declaration, "");
             if let Err(reason) = cx.authorize(preview).await {
                 return ToolOutcome::Err(ToolError::Denied(reason));
             }
@@ -622,7 +622,7 @@ impl Tool for MappedTool {
 
     fn run<'a>(&'a self, call: ToolCall, mut cx: ToolCx<'a>) -> BoxFuture<'a, ToolOutcome> {
         Box::pin(async move {
-            let preview = server_preview(&self.key, &self.declaration, &self.remote, &call.args);
+            let preview = server_preview(&self.key, &self.declaration, &self.remote);
             if let Err(reason) = cx.authorize(preview).await {
                 return ToolOutcome::Err(ToolError::Denied(reason));
             }
@@ -631,17 +631,15 @@ impl Tool for MappedTool {
     }
 }
 
-/// Builds the per-tool approval preview. The target text is the
-/// declaration's own single renderer, and the remote argument JSON never
-/// enters the approval surface: only its size is shown.
-fn server_preview(key: &Key, declaration: &ServerDecl, tool: &str, arguments: &RawJson) -> Preview {
+/// Builds a per-tool approval preview from public identity only.
+/// Raw arguments are deliberately unavailable to this function.
+fn server_preview(key: &Key, declaration: &ServerDecl, tool: &str) -> Preview {
     Preview {
         title: format!("MCP {}.{}", key.server, tool).into(),
         body: format!(
-            "server: {}\ntarget: {}\ntool: {tool}\narguments: <redacted> ({} bytes)",
+            "server: {}\ntarget: {}\ntool: {tool}\narguments: <redacted>",
             key.display(),
             declaration.redacted_target(),
-            arguments.as_str().len(),
         )
         .into(),
         digest: None,
@@ -668,5 +666,88 @@ async fn call_mcp(key: &Key, remote: &str, arguments: RawJson, cx: ToolCx<'_>) -
         )),
         Err(ServiceError::Denied(reason)) => ToolOutcome::Err(ToolError::Denied(reason)),
         Err(error) => ToolOutcome::Err(ToolError::message(error.to_string())),
+    }
+}
+
+#[cfg(test)]
+mod approval_preview_tests {
+    use super::*;
+    use dal_core::{
+        Answer, Owner, Question, Request, RequestId, UpdateKind,
+        ext::{McpEndpoint, McpLaunch},
+    };
+
+    #[test]
+    fn request_opened_omits_header_arguments_and_server_credentials() {
+        let key = Key {
+            session: SessionId::new_v7(),
+            skill: "weather".into(),
+            server: "fixture".into(),
+        };
+        let schema: Value = sonic_rs::from_str(
+            r#"{"type":"object","properties":{"auth":{"type":"object","properties":{"token":{"type":"string","x-mcp-header":"Authorization"}}}}}"#,
+        )
+        .expect("valid nested header annotation");
+        let annotations = header_annotations(&schema).expect("valid header schema");
+        assert_eq!(annotations.len(), 1);
+        assert_eq!(annotations[0].path, ["auth", "token"]);
+
+        let args = RawJson::parse(
+            r#"{"auth":{"token":"HEADER_SENTINEL"},"request":{"value":"BODY_SENTINEL"}}"#,
+        )
+        .expect("valid MCP arguments");
+        let headers = parameter_headers(&annotations, &args).expect("header conversion");
+        assert_eq!(headers.len(), 1);
+        assert_eq!(
+            headers[0].1.to_str().expect("ASCII header value"),
+            "HEADER_SENTINEL"
+        );
+
+        let declarations = [
+            ServerDecl::Stdio {
+                launch: McpLaunch::command(vec![
+                    "mcp".into(),
+                    "--authorization=ARGV_SENTINEL".into(),
+                ])
+                .expect("valid command"),
+                env: [("API_KEY".into(), "ENV_SENTINEL".into())].into(),
+            },
+            ServerDecl::Http {
+                endpoint: McpEndpoint::parse(
+                    "https://api.example.test/PATH_SENTINEL?auth=QUERY_SENTINEL",
+                )
+                .expect("valid HTTPS endpoint"),
+            },
+        ];
+        for declaration in declarations {
+            let preview = server_preview(&key, &declaration, "lookup");
+            assert!(preview.body.contains("arguments: <redacted>"));
+            let request = Request {
+                id: RequestId::new_v7(),
+                turn: None,
+                owner: Owner::Core,
+                question: Question::Approval {
+                    tool: "weather.fixture.lookup".into(),
+                    preview,
+                    grant: None,
+                    call: None,
+                },
+                timeout: Duration::from_secs(30),
+                default: Answer::Decline,
+            };
+            let update = sonic_rs::to_string(&UpdateKind::RequestOpened(request))
+                .expect("serialize approval update");
+            assert!(update.contains("request_opened"));
+            for secret in [
+                "HEADER_SENTINEL",
+                "BODY_SENTINEL",
+                "ARGV_SENTINEL",
+                "ENV_SENTINEL",
+                "PATH_SENTINEL",
+                "QUERY_SENTINEL",
+            ] {
+                assert!(!update.contains(secret), "approval update exposed {secret}");
+            }
+        }
     }
 }
