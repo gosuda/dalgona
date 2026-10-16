@@ -1,5 +1,11 @@
 // SPDX-License-Identifier: LicenseRef-Sustainable-Use-1.0
-//! Report cell and approval-class tests.
+//! Report cell, schema, and approval-class tests.
+//!
+//! The child-receipt / reject-before-launch regression lives in
+//! `runtime/tests.rs` (the scripted `Host` records every `AgentsOp::Start`);
+//! this file holds the schema-constant and decoder-level checks. The schema
+//! tests read `AGENTS_SCHEMA` itself; they do not go through tool
+//! registration, approval classification, or the provider wire.
 
 use std::path::{Path, PathBuf};
 
@@ -10,6 +16,58 @@ use dal_core::RawJson;
 fn workflow(json: &str) -> Workflow {
     let raw = RawJson::parse(json).expect("test workflow is valid JSON");
     super::super::workflow::decode_steps(&raw, None, "test").expect("test workflow validates")
+}
+
+/// Decodes one `agents` call, returning the run's workflow when the call is
+/// a run; the assertion failure carries the rejection text.
+fn run_workflow(json: &str) -> Result<Workflow, ActionError> {
+    match decode_action(&args(json), None)? {
+        AgentAction::Run { workflow, .. } => Ok(workflow),
+        other => panic!("expected a run, got {other:?}"),
+    }
+}
+
+/// Asserts one call rejects with exactly `expected`.
+fn reject(json: &str, expected: &str) {
+    let error = decode_action(&args(json), None)
+        .err()
+        .unwrap_or_else(|| panic!("expected rejection, decoded: {json}"));
+    assert_eq!(error.to_string(), expected, "call: {json}");
+}
+
+/// Parses the `AGENTS_SCHEMA` constant; a parse failure fails the test.
+fn schema_constant() -> sonic_rs::Value {
+    sonic_rs::from_str(AGENTS_SCHEMA).expect("AGENTS_SCHEMA is valid JSON")
+}
+
+/// The schema object of one inline step (`steps.items`).
+///
+/// `Value::as_object` yields a `sonic_rs::Object`, whose inherent
+/// `get<Q: AsRef<str>>(&self, key: &Q)` takes a reference to the key, so
+/// the keys below are passed as `&"…"`. `Value::get` (the `JsonValueTrait`
+/// method) takes the index by value instead.
+fn step_schema(schema: &sonic_rs::Value) -> &sonic_rs::Object {
+    let object = schema.as_object().expect("AGENTS_SCHEMA is an object");
+    let top_level = object
+        .get(&"properties")
+        .and_then(|properties| properties.as_object())
+        .expect("AGENTS_SCHEMA declares its top-level properties");
+    let steps = top_level
+        .get(&"steps")
+        .and_then(|steps| steps.as_object())
+        .expect("AGENTS_SCHEMA declares steps");
+    steps
+        .get(&"items")
+        .and_then(|items| items.as_object())
+        .expect("steps declares its items schema")
+}
+
+/// The `properties` object of one inline step.
+fn step_properties(schema: &sonic_rs::Value) -> &sonic_rs::Object {
+    step_schema(schema)
+        .get(&"properties")
+        .and_then(|properties| properties.as_object())
+        .expect("the step schema declares its properties")
 }
 
 #[test]
@@ -222,4 +280,126 @@ fn agents_error_texts_are_exact() {
         "agents: subagents are off (agents = false in dal.toml)."
     );
     assert_eq!(NO_NESTED_RUNS, "agents: a subagent cannot start subagents.");
+}
+
+/// The decoder accepts a string `role` or `system`, so the schema constant
+/// must declare both as plain strings (a missing member or a narrower type
+/// would hide a decodable field from the model). Member order and
+/// description text are not part of that contract.
+#[test]
+fn agents_schema_declares_role_and_system_as_strings() {
+    let schema = schema_constant();
+    let properties = step_properties(&schema);
+    for member in ["role", "system"] {
+        let declared = properties
+            .get(&member)
+            .unwrap_or_else(|| panic!("AGENTS_SCHEMA step has no {member} property"));
+        assert_eq!(
+            declared.get("type").and_then(JsonValueTrait::as_str),
+            Some("string"),
+            "{member} is declared as a string"
+        );
+    }
+}
+
+/// Every member the step schema declares must be a field the decoder knows:
+/// the decoder refuses an unknown field before it reads any value, so a null
+/// probes only the name. The control proves the probe can tell the two apart.
+/// This covers the schema-to-decoder direction only; the decoder's accepted
+/// set is private to the workflow module.
+#[test]
+fn agents_schema_step_members_are_fields_the_decoder_knows() {
+    let rejected_as_unknown = |member: &str| {
+        let json =
+            format!(r#"{{"action":"run","steps":[{{"name":"a","prompt":"w","{member}":null}}]}}"#);
+        decode_action(&args(&json), None)
+            .err()
+            .is_some_and(|error| {
+                error.to_string() == format!("agents: step a: unknown field \"{member}\".")
+            })
+    };
+    assert!(
+        rejected_as_unknown("no_such_member"),
+        "the probe must detect a field the decoder does not know"
+    );
+    let schema = schema_constant();
+    for (member, _) in step_properties(&schema) {
+        if member == "name" || member == "prompt" {
+            continue;
+        }
+        assert!(
+            !rejected_as_unknown(member),
+            "the schema declares {member}, which the decoder rejects as unknown"
+        );
+    }
+}
+
+/// The step schema stays closed and still requires exactly a name and a
+/// prompt, whatever order either list is written in.
+#[test]
+fn agents_schema_keeps_the_step_restrictions() {
+    let schema = schema_constant();
+    let shape = step_schema(&schema);
+    let listed = shape
+        .get(&"required")
+        .and_then(|required| required.as_array())
+        .expect("the step schema keeps its required list");
+    let mut required: Vec<&str> = listed.iter().filter_map(JsonValueTrait::as_str).collect();
+    required.sort_unstable();
+    assert_eq!(required, ["name", "prompt"]);
+    assert_eq!(
+        shape
+            .get(&"additionalProperties")
+            .and_then(JsonValueTrait::as_bool),
+        Some(false),
+        "steps stay closed to unknown members"
+    );
+}
+
+#[test]
+fn agents_decode_run_accepts_role_only() {
+    let workflow = run_workflow(
+        r#"{"action":"run","steps":[{"name":"review","prompt":"work","role":"reviewer","isolation":"shared"}]}"#,
+    )
+    .expect("a role-only run decodes");
+    assert_eq!(workflow.steps[0].role.as_deref(), Some("reviewer"));
+    assert_eq!(workflow.steps[0].system, None);
+}
+
+#[test]
+fn agents_decode_run_accepts_system_only() {
+    let workflow = run_workflow(
+        r#"{"action":"run","steps":[{"name":"audit","prompt":"work","system":"Be concise.","isolation":"shared"}]}"#,
+    )
+    .expect("a system-only run decodes");
+    assert_eq!(workflow.steps[0].system.as_deref(), Some("Be concise."));
+    assert_eq!(workflow.steps[0].role, None);
+}
+
+/// The schema declares `role` and `system` as strings, and the decoder
+/// enforces that: a value of another type is refused, not skipped.
+#[test]
+fn agents_decode_run_rejects_non_string_role_and_system() {
+    for (member, value) in [
+        ("role", "7"),
+        ("role", "null"),
+        ("system", "true"),
+        ("system", "null"),
+    ] {
+        let json = format!(
+            r#"{{"action":"run","steps":[{{"name":"step","prompt":"work","{member}":{value}}}]}}"#
+        );
+        reject(
+            &json,
+            &format!("agents: step step: {member} must be a string."),
+        );
+    }
+}
+
+#[test]
+fn agents_decode_run_rejects_role_and_system_together() {
+    reject(
+        r#"{"action":"run","steps":[{"name":"step","prompt":"work","role":"reviewer","system":"be concise"}]}"#,
+        "agents: step step: role and system cannot both be set.",
+    );
 }

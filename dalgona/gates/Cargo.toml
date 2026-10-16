@@ -24,10 +24,13 @@ dal-provider.workspace = true
 dal-tui.workspace = true
 dal-wire.workspace = true
 futures.workspace = true
-tokio = { version = "=1.53.2", features = ["macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "test-util", "time"] }
 proptest = "=1.12.0"
 sonic-rs.workspace = true
 toml.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true }
 
 [[test]]
 name = "dalgona-workspace-graph"

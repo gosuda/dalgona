@@ -4,8 +4,8 @@
 use dal_agent::ext::grants::{GrantKey, GrantStore};
 use dal_agent::{Delivery, Env, Host, Product, SessionRef};
 use dal_core::{
-    ClientId, Command, Config, ConfigProduct, Expect, Name, Origin, Output, Part, Reply, SessionId,
-    Timestamp, UpdateKind, Workspace,
+    ClientId, Command, Config, ConfigProduct, Expect, Output, Part, Reply, SessionId, Timestamp,
+    UpdateKind, Workspace,
 };
 use dalgona_batteries::orchestration::{
     BatteryConfig, OrchestrationAgentsConfig, OrchestrationConfig, OrchestrationMonitorConfig,
@@ -74,7 +74,7 @@ async fn fixture_with(
     GrantStore::new(data.clone())
         .grant(
             GrantKey::for_extension(&built.extension, &workspace)
-                .expect("orchestration has a code identity"),
+                .ok_or("orchestration extension has no code identity")?,
             ClientId::new("goal-test"),
             Timestamp::now(),
         )

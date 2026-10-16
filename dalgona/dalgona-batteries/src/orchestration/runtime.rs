@@ -3,6 +3,8 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -83,12 +85,74 @@ pub(crate) struct Runtime {
     reports: ReportCells,
     config: Arc<OrchestrationConfig>,
     sleep: Option<Arc<SleepClassifier>>,
+    /// The test parking gate the owner consults before serving a `jobs`
+    /// list. Tests arm it to hold the owner while producers flood the
+    /// mailbox; production never arms it.
+    #[cfg(test)]
+    jobs_parking: Arc<ParkingGate>,
 }
 
 struct Owner {
     sender: mpsc::Sender<Message>,
     snapshot: Arc<Mutex<StatusGate>>,
     _run: tokio_util::task::AbortOnDropHandle<()>,
+    /// The deepest this session's mailbox ever filled, sampled at the real
+    /// receive boundary. Tests read it; production never does.
+    #[cfg(test)]
+    mailbox_pressure: Arc<MailboxPressure>,
+}
+
+/// Test-only gauge of one owner mailbox: the deepest the channel ever
+/// filled while the owner drained it. The bound itself comes from the
+/// channel; this records how close a run came to it.
+#[cfg(test)]
+#[derive(Default)]
+struct MailboxPressure {
+    fill_peak: AtomicUsize,
+}
+
+/// Test-only single-shot parking gate on the owner side of the `jobs`
+/// service list. Tests arm it to park the owner mid-message so producers
+/// flood the mailbox past capacity; production never arms it. Exactly one
+/// waiter parks at a time because the owner handles one message at a time.
+#[cfg(test)]
+#[derive(Default)]
+pub(super) struct ParkingGate {
+    armed: AtomicBool,
+    parked: AtomicUsize,
+    wake: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+impl ParkingGate {
+    /// Parks the owner at the next `jobs` list it serves.
+    pub(super) fn arm(&self) {
+        self.armed.store(true, Ordering::SeqCst);
+    }
+
+    /// Serves the list, or parks until the test releases the owner. A
+    /// release that lands between the arm check and the wait leaves a
+    /// permit, so the waiter can never miss it.
+    pub(super) async fn pass(&self) {
+        if !self.armed.load(Ordering::SeqCst) {
+            return;
+        }
+        self.parked.fetch_add(1, Ordering::SeqCst);
+        self.wake.notified().await;
+    }
+
+    /// How many owners parked so far; the flood tests wait for at least one.
+    pub(super) fn parked(&self) -> usize {
+        self.parked.load(Ordering::SeqCst)
+    }
+
+    /// Lets the parked owner through once; later lists run unparked. The
+    /// single permit survives a release that lands before the waiter waits,
+    /// so one release always frees the one parked owner.
+    pub(super) fn release(&self) {
+        self.armed.store(false, Ordering::SeqCst);
+        self.wake.notify_one();
+    }
 }
 
 enum Message {
@@ -220,6 +284,16 @@ struct SessionState {
     /// Waits the owner answers without blocking its message loop; dropping
     /// the state aborts them.
     waits: tokio::task::JoinSet<()>,
+    /// The deepest this mailbox ever filled, sampled at the real receive
+    /// boundary and at the test parking gate. Tests read it; production
+    /// never does.
+    #[cfg(test)]
+    mailbox_pressure: Arc<MailboxPressure>,
+    /// The test parking gate this owner consults before serving a `jobs`
+    /// list. Tests arm it to hold the owner while producers flood the
+    /// mailbox; production never arms it.
+    #[cfg(test)]
+    jobs_parking: Arc<ParkingGate>,
 }
 
 /// A delivered job report the host has not confirmed. `omitted` records that
@@ -268,6 +342,8 @@ impl Runtime {
             reports: Arc::new(Mutex::new(HashMap::new())),
             config: Arc::new(config),
             sleep,
+            #[cfg(test)]
+            jobs_parking: Arc::new(ParkingGate::default()),
         })
     }
 
@@ -413,6 +489,8 @@ impl Runtime {
         }
         let (sender, receiver) = mpsc::channel(super::constants::BATTERY_MAILBOX);
         let snapshot = Arc::new(Mutex::new(StatusGate::new()));
+        #[cfg(test)]
+        let mailbox_pressure = Arc::new(MailboxPressure::default());
         let state = SessionState {
             session,
             parent,
@@ -456,6 +534,10 @@ impl Runtime {
             projection: self.view.open(session),
             reports: Arc::clone(&self.reports),
             waits: tokio::task::JoinSet::new(),
+            #[cfg(test)]
+            mailbox_pressure: Arc::clone(&mailbox_pressure),
+            #[cfg(test)]
+            jobs_parking: Arc::clone(&self.jobs_parking),
         };
         #[expect(
             clippy::disallowed_methods,
@@ -469,6 +551,8 @@ impl Runtime {
                     sender,
                     snapshot,
                     _run: run,
+                    #[cfg(test)]
+                    mailbox_pressure,
                 },
             );
         }
@@ -508,6 +592,31 @@ impl Runtime {
         owner.snapshot.lock().ok().map(|gate| gate.latest().clone())
     }
 
+    /// The shared parking gate of this runtime's owners, for the tests that
+    /// hold an owner while producers flood its mailbox.
+    #[cfg(test)]
+    pub(super) fn parking_gate(&self) -> Arc<ParkingGate> {
+        Arc::clone(&self.jobs_parking)
+    }
+
+    /// How full one session's mailbox is right now: capacity minus remaining
+    /// permits. The flood tests watch this reach zero while the owner parks.
+    #[cfg(test)]
+    pub(super) fn mailbox_fill_now(&self, session: SessionId) -> Option<usize> {
+        self.sender(session)
+            .map(|sender| super::constants::BATTERY_MAILBOX.saturating_sub(sender.capacity()))
+    }
+
+    /// The deepest one session's mailbox ever filled while its owner drained
+    /// it. The stress tests bound this by the channel capacity after proving
+    /// every queued delivery still landed exactly once.
+    #[cfg(test)]
+    pub(super) fn mailbox_fill_peak(&self, session: SessionId) -> Option<usize> {
+        let owners = self.owners.lock().ok()?;
+        let owner = owners.get(&session)?;
+        Some(owner.mailbox_pressure.fill_peak.load(Ordering::SeqCst))
+    }
+
     fn poll(&self, session: SessionId) -> Option<StatusSnapshot> {
         let owners = self.owners.lock().ok()?;
         let owner = owners.get(&session)?;
@@ -528,6 +637,8 @@ impl SessionState {
                     let Some(message) = message else {
                         return;
                     };
+                    #[cfg(test)]
+                    self.note_fill();
                     if self.handle_message(message).await {
                         return;
                     }
@@ -1595,7 +1706,23 @@ impl SessionState {
         }
     }
 
+    /// Records how full the mailbox is right now against the test peak. The
+    /// owner drains one message at a time, so a sample at each receive plus
+    /// one at each test park brackets the true high-water mark of the run.
+    #[cfg(test)]
+    fn note_fill(&self) {
+        let fill = super::constants::BATTERY_MAILBOX.saturating_sub(self.sender.capacity());
+        self.mailbox_pressure
+            .fill_peak
+            .fetch_max(fill, Ordering::SeqCst);
+    }
+
     async fn jobs_list(&mut self) -> Result<Vec<dal_core::JobStatus>, ServiceError> {
+        #[cfg(test)]
+        {
+            self.note_fill();
+            self.jobs_parking.pass().await;
+        }
         let jobs = match self.services.jobs(&self.caller, JobsOp::List).await? {
             JobsReply::Listed(jobs) => jobs,
             JobsReply::Unavailable { reason } => return Err(ServiceError::failed(None, reason)),
